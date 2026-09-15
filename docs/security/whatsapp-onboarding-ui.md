@@ -52,6 +52,10 @@ envía una única configuración con UUID/plazo. Resultado/cancelación/error de
 conservar nonce/UUID y campos exactos. No se usan destinos * ni almacenamiento
 de códigos, estados OAuth, JWT adicionales o tokens de proveedor.
 
+`redirectUri` identifica la página de inicio aprobada del SDK. No se pasa como
+retorno manual a `FB.login`: el SDK de Meta construye su propio canal. El broker
+canjea esos códigos con URI vacía; véase [transporte](whatsapp-oauth-transport.md).
+
 El SDK solo se inicia tras ese intercambio y FB.login requiere pulsación del
 usuario. Solicita respuesta code y rechaza respuestas que contengan un bearer.
 El código solo se acepta en el callback SDK de esa ventana. Los eventos

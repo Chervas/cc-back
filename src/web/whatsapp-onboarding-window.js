@@ -82,7 +82,8 @@
         if (code && code !== value) { send('cc.wa.error', { reason: 'authorization_incomplete' }); return; }
         code = value; complete();
       }, { config_id: input.authorization.configId, response_type: 'code', override_default_response_type: true,
-        redirect_uri: input.authorization.redirectUri,
+        // FB.login creates its own return channel. The pinned launch-page URI
+        // is not a manual OAuth callback and must not override that channel.
         extras: { setup: {}, ...(input.mode === 'coexistence' ? { featureType: 'whatsapp_business_app_onboarding' } : {}) } });
     } catch { send('cc.wa.error', { reason: 'authorization_incomplete' }); }
   });

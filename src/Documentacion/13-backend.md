@@ -122,8 +122,10 @@ Contrato, QA, costes y rollback: `back-dev/docs/security/whatsapp-onboarding-bro
 
 ## 13/09/2026 — Transporte privado de canje WhatsApp
 
-`whatsapp-oauth-http` fija app/redirect y endpoint TLS de canje, con límites,
-sin reintentos/URI alternativas. Solo el callback interno recibe el token;
+`whatsapp-oauth-http` fija app/página SDK y endpoint TLS de canje, con límites,
+sin reintentos/URI alternativas. Para códigos de `FB.login`, la página fijada no
+se envía como redirect manual: el SDK gestiona el retorno y el canje usa URI
+vacía. Solo el callback interno recibe el token;
 la salida admite solo metadata y rechaza credenciales/campos adicionales. El
 consumidor debe obtener esa metadata del inspector/verificador del proveedor.
 `whatsapp-phone-verifier` comprueba que el número pertenezca al WABA consultado,

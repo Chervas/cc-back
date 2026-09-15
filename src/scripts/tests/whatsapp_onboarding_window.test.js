@@ -28,6 +28,7 @@ test('Sandbox handshake accepts only the bound parent origin, nonce and exact un
     { authorization: { ...f.input.authorization, accessToken: 'FICTITIOUS_SECRET' } }, { authorization: { ...f.input.authorization, redirectUri: 'https://app.clinicaclick.com/?token=FICTITIOUS' } }]) f.receive({ ...f.input, ...change });
   assert.equal(f.script.length, 0); f.start(); assert.equal(f.script.length, 1);
   assert.equal(f.options().response_type, 'code'); assert.equal(f.options().config_id, '201');
+  assert.equal(Object.hasOwn(f.options(), 'redirect_uri'), false);
   assert.equal(f.options().extras.sessionInfoVersion, undefined); assert.equal(f.win.init.cookie, false);
   f.receive(f.input); assert.equal(f.script.length, 1); assert.equal(f.messages[0].origin, 'https://crm.clinicaclick.com');
 });

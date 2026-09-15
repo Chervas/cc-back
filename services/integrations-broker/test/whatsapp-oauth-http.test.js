@@ -22,7 +22,7 @@ function wire({ status = 200, response = { access_token: TOKEN, token_type: 'bea
 }
 const input = () => ({ code: Buffer.from(CODE), appSecret: Buffer.from(APP) });
 const transport = (f, extra = {}) => createWhatsappOAuthHttp({ appId: '101', redirectUri: 'https://app.example.invalid/whatsapp/callback', request: f.request, now: () => AT, ...extra });
-test('Code exchange fixes app/URI/Meta TLS endpoint; token is borrowed only inside callback and wiped on return', async () => {
+test('SDK code exchange fixes app and empty return URI; token is borrowed only inside callback and wiped on return', async () => {
   const f = wire(); const supplied = input(); let borrowed;
   const work = transport(f).withExchangedToken(supplied, async (token, info) => { borrowed = token; assert.equal(token.toString(), TOKEN); assert.equal(info.expiresAt, AT + 3600000); return metadata(); });
   supplied.code.fill(0); supplied.appSecret.fill(0);
@@ -31,7 +31,7 @@ test('Code exchange fixes app/URI/Meta TLS endpoint; token is borrowed only insi
   assert.equal(options.hostname, 'graph.facebook.com'); assert.equal(options.port, 443); assert.equal(options.protocol, 'https:');
   assert.equal(options.method, 'GET'); assert.equal(options.rejectUnauthorized, true); assert.equal(options.minVersion, 'TLSv1.2'); assert.equal(options.agent, false);
   assert.equal(options.headers.authorization, undefined); assert.equal(body, undefined); assert.equal(url.pathname, '/v24.0/oauth/access_token');
-  assert.deepEqual(Object.fromEntries(url.searchParams), { client_id: '101', client_secret: APP, code: CODE, redirect_uri: 'https://app.example.invalid/whatsapp/callback' });
+  assert.deepEqual(Object.fromEntries(url.searchParams), { client_id: '101', client_secret: APP, code: CODE, redirect_uri: '' });
 });
 test('Exchanged candidate passes real grant and paginated phone verifiers without returning credentials', async () => {
   const f = wire(); const calls = []; const values = [];

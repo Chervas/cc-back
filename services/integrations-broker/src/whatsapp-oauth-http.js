@@ -22,12 +22,14 @@ function createWhatsappOAuthHttp({ appId, redirectUri, request = https.request, 
   if (!id(appId) || typeof redirectUri !== 'string' || redirectUri.length > 2048 || redirect.href !== redirectUri
     || redirect.protocol !== 'https:' || redirect.username || redirect.password || redirect.hash || redirect.search || redirect.port
     || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000) fail('invalid_request');
-  // Configuration is pinned when constructing this instance. A callback cannot
-  // choose a different app, URI, endpoint, method or alternate credential.
+  // redirectUri pins the configured launch page. This transport accepts codes
+  // from FB.login only: the JavaScript SDK owns the OAuth return channel, so its
+  // code exchange uses the empty redirect URI (Facebook's JS helper contract).
+  // Never retry with the launch page, a browser-supplied URI or another flow.
   async function exchange({ code, appSecret, signal }) {
     if (signal?.aborted) fail('provider_timeout');
     const query = new URLSearchParams({ client_id: appId, client_secret: appSecret.toString('ascii'),
-      code: code.toString('ascii'), redirect_uri: redirectUri });
+      code: code.toString('ascii'), redirect_uri: '' });
     return new Promise((resolve, reject) => {
       let req; let response; let timer; let settled = false; const chunks = []; let bytes = 0;
       const finish = (error, result) => {

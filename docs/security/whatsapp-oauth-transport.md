@@ -1,14 +1,21 @@
 # Transporte privado de canje y prueba de pertenencia WhatsApp
 
-13/09/2026. Implementación interna del broker, probada con proveedor ficticio.
-Integrada posteriormente en el [broker durable del alta](whatsapp-onboarding-broker.md)
-con operaciones privadas firmadas y candidata Secrets Manager. Sigue sin
-gateway, rutas OAuth o consumidores conectados; no completa un alta real.
+> **Tipo:** contrato técnico y procedimiento de canje.
+> **Fuente de verdad:** transporte de códigos del SDK, límites y pruebas; madurez en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
+> **Última revisión del canje SDK:** 2026-09-15.
+
+Integrado en el [broker durable del alta](whatsapp-onboarding-broker.md).
+La instalación y una prueba ficticia no acreditan autorización real de Meta.
 
 ## Canje con configuración fijada
 
 `createWhatsappOAuthHttp({appId,redirectUri,...})` fija al construir el transporte
-una aplicación y URI HTTPS sin usuario, puerto, query o fragmento. La configuración
+una aplicación y la URI HTTPS de la página que inicia el SDK, sin usuario,
+puerto, query o fragmento. El nombre `redirectUri` se conserva por compatibilidad
+del binding/DTO: **no es el retorno OAuth manual**. `FB.login` construye su propio
+canal de retorno. No enviar `redirect_uri` en sus opciones; el canje de ese código
+usa `redirect_uri` vacío, como el helper JavaScript oficial. No ofrecer variantes
+ni reintentar con la URI de ClinicaClick. La configuración
 procederá del lote aprobado, nunca del cuerpo del callback. Se ejecuta un único
 GET a `graph.facebook.com/v24.0/oauth/access_token`, sin redirección, reintento,
 variantes de URI o credenciales alternativas. TLS verificado, mínimo TLS 1.2,
@@ -58,32 +65,18 @@ No devuelve nombres, teléfonos visibles, calidad o perfiles. Esto prueba la
 relación WABA/número, no su asignación a una clínica en ClinicaClick: ese control
 corresponde al registro de alta y al conjunto de clínicas ya autorizado.
 
-## Integración que sigue pendiente
+## Activación y rollback
 
-Conectar el [estado durable con MFA](whatsapp-authorization-state.md) a las
-operaciones del broker de alta, que ya registran el intento **antes** del canje,
-fijan aplicación/configuración/URI y WABA/número, preservan cancelación y bloquean
-repetición tras respuesta perdida o reinicio. El helper de transporte no aporta
-idempotencia durable por sí solo; no invocarlo desde rutas independientes.
+Ejecutar desde las operaciones del broker con [estado durable y MFA](whatsapp-authorization-state.md),
+que registran el intento antes del canje. El helper no aporta idempotencia por sí
+solo ni debe exponerse en otra ruta. No registra números, suscribe WABAs ni envía.
+La candidata queda separada de las credenciales operativas. Ante un resultado
+incierto consultar el mismo intento; no reutilizar el código ni probar otra URI.
 
-El broker de alta guarda la candidata en Secrets Manager, con estado de
-preparación, versión e identidad/ámbito verificados y conciliación tras fallo.
-Verifica la identidad Meta nueva sin exigir MetaConnection general; gateway/UI
-todavía mantienen el flujo anterior en cuarentena.
-Una credencial de alta con varios permisos WhatsApp no se puede copiar en los
-dos roles operativos de envío/gestión del motor y presentarlos como separados.
-La compatibilidad de ese aprovisionamiento con Meta sigue por acreditar.
-
-El cierre incluye sustituir el alta general en frontend/gateway, su correlación
-documentada con Embedded Signup, la configuración real de productos/grants,
-coexistencia/registro/suscripción cuando procedan y recepción durable en staging.
-No registrar números, suscribir WABAs, crear plantillas o activar envíos como
-efecto de este helper. La independencia frente a Ads/leads se comprobará en Meta.
-
-Sin nueva DDL, UI, runtime o clave instalados. La DDL 20260913150000 sigue pendiente
-para el estado en gateway; ninguna migración compartida ejecutada. Sin interrupción
-actual. El futuro rollback debe conservar intentos/resultados y cerrar altas,
-sin reactivar el canje general ni borrar evidencia de códigos consumidos.
+La revisión con el titular contrasta configuración/permisos Meta, dominios SDK,
+página de inicio y credencial nueva. El estado de despliegue y DDL está en 19/99;
+no lanzar migraciones como parte de este canje. Revertir detiene el alta y conserva
+intentos, candidata, bloqueos y recibos. No restaurar OAuth general o tokens de BD.
 
 ## Evidencia y fuentes
 
@@ -94,7 +87,7 @@ afectados, todos correctos. AWS/Meta ficticios, guard de red, sin BD clínica.
 Hotfix intacto. Evidencia privada `whatsapp-oauth-transport-*.log`.
 
 - [SDK oficial archivado de Facebook: OAuth2Client](https://raw.githubusercontent.com/facebookarchive/php-graph-sdk/5.x/src/Facebook/Authentication/OAuth2Client.php)
-  fundamenta GET de canje con client_id/client_secret/code/redirect_uri. Es una
+  fundamenta GET de canje y el valor vacío por defecto de redirect_uri. Es una
   referencia histórica, no prueba de la configuración Embedded Signup actual.
 - [Colección oficial Meta: Embedded Signup](https://www.postman.com/meta/whatsapp-business-platform/documentation/du6gzjv/embedded-signup)
   documenta diagnóstico del token y WABA compartido; sus ejemplos no acreditan
@@ -106,3 +99,10 @@ La documentación web actual de implementación y el anuncio de Embedded Signup
 v4 devolvieron 429 en esta revisión. Se detuvieron esos intentos; no se sustituye
 su validación por ejemplos de terceros. Graph v24.0 es la versión de compatibilidad
 del código existente, no una afirmación de que sea la última disponible.
+
+La inspección del [SDK JavaScript servido por Meta](https://connect.facebook.net/es_ES/sdk.js)
+el 15/09/2026 confirma que el transformador OAuth sustituye el redirect por su
+propio canal. El [helper de signed request](https://raw.githubusercontent.com/facebookarchive/php-graph-sdk/5.x/src/Facebook/Helpers/FacebookSignedRequestFromInputHelper.php)
+invoca el canje del código sin URI manual. Esta evidencia fundamenta la corrección
+del transporte; el SDK archivado no acredita por sí solo aceptación de ESU actual.
+La prueba de proveedor sigue siendo necesaria y no se amplían permisos para forzarla.
