@@ -10,6 +10,25 @@ function context(g) {
     clinicSetDigest: C.hash('[71,72]'), state: randomBytes(32).toString('base64url') };
 }
 const finish = row => ({ state: row.state, code: 'FICTITIOUS_GATEWAY_CODE_' + row.requestId, wabaId: '301', phoneId: '401' });
+test('Overlapping begin reports busy; the refused UUID can start after the older attempt is cancelled', async t => {
+  const g = brokerForGateway(t); const older = context(g); const next = context(g);
+  await g.client.begin(older);
+  await assert.rejects(g.client.begin(next), { code: 'whatsapp_authorization_busy', outcomeUnknown: false });
+  assert.deepEqual(require('../../services/whatsappOnboardingGateway.service').safe({ code: 'whatsapp_authorization_busy' }),
+    { code: 'whatsapp_authorization_busy', status: 409, outcomeUnknown: false });
+  await g.client.abort(older);
+  assert.equal((await g.client.begin(next)).status, 'awaiting');
+  assert.equal(g.f.state.codes, 0); assert.equal(g.f.state.puts, 0);
+});
+test('Known begin refusals are safe while finish errors remain uncertain and are never retried', async t => {
+  const g = brokerForGateway(t); const row = context(g);
+  for (const [code, mapped] of [['rate_limited', 'whatsapp_authorization_limit'], ['oauth_flow_busy', 'whatsapp_authorization_busy']]) {
+    g.state.before = () => { throw Object.assign(Error('FICTITIOUS_SECRET'), { code }); };
+    await assert.rejects(g.client.begin(row), e => e.code === mapped && !e.outcomeUnknown && !e.message.includes('FICTITIOUS'));
+    await assert.rejects(g.client.finish(row, finish(row)), { code: 'whatsapp_onboarding_result_unknown', outcomeUnknown: true });
+  }
+  assert.equal(g.state.calls.length, 4); assert.equal(g.f.state.codes, 0); assert.equal(g.f.state.puts, 0);
+});
 test('Typed gateway client completes signed candidate flow, recovers after restart and cancels without enabling messages', async t => {
   const g = brokerForGateway(t); const row = context(g); const begin = await g.client.begin(row);
   assert.equal(begin.authorization.appId, '101'); const result = await g.client.finish(row, finish(row));

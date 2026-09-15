@@ -97,7 +97,13 @@ function createWhatsappOnboardingBrokerClient({ client, loadBinding, guard = ass
       guard(); const latest = binding(await loadBinding(row.scope), row);
       if (JSON.stringify(latest) !== JSON.stringify(selected)) throw Error();
       return response(result, name, row, selected, requestId, name === 'finish' ? payload : null);
-    } catch { fail('whatsapp_onboarding_result_unknown', true); }
+    } catch (error) {
+      // Only begin can report a definite, retryable refusal. A finish error
+      // never proves that its one-use provider code was not consumed.
+      if (name === 'begin' && error?.code === 'oauth_flow_busy') fail('whatsapp_authorization_busy');
+      if (name === 'begin' && error?.code === 'rate_limited') fail('whatsapp_authorization_limit');
+      fail('whatsapp_onboarding_result_unknown', true);
+    }
   }
   return Object.freeze({ begin: row => call('begin', row), finish: (row, input) => call('finish', row, input),
     status: row => call('status', row), abort: row => call('abort', row) });
@@ -133,7 +139,8 @@ function configuredClient({ environment = () => process.env } = {}) {
       } });
       return await api[name](row, input);
     } catch (error) {
-      if (['whatsapp_onboarding_result_unknown','whatsapp_onboarding_binding_invalid'].includes(error?.code)) throw error;
+      if (['whatsapp_onboarding_result_unknown','whatsapp_onboarding_binding_invalid',
+        'whatsapp_authorization_busy','whatsapp_authorization_limit'].includes(error?.code)) throw error;
       fail('whatsapp_onboarding_configuration_invalid');
     } finally { key?.fill(0); ca?.fill(0); }
   }

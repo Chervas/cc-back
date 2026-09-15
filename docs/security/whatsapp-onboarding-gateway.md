@@ -144,6 +144,12 @@ El cliente usa TLS verificado, plazo de 30 s y no reintenta transporte. Vuelve a
 leer configuración/binding después de la respuesta y comprueba campos exactos,
 App/config/URI de begin, alcance, expiración y candidata/versión/selección. Un
 cambio o respuesta incongruente produce incertidumbre sin exponer su contenido.
+Solo en begin, las negativas tipadas del broker `oauth_flow_busy` y `rate_limited`
+se traducen a `whatsapp_authorization_busy` (409) y
+`whatsapp_authorization_limit` (429), sin resultado incierto. Se conserva el UUID
+para un nuevo begin explícito cuando desaparezca el bloqueo; no cancela otros
+intentos ni reinicia límites. Los errores de finish mantienen incertidumbre y
+exigen consultar el estado, incluso cuando su código sea busy o rate_limited.
 
 Pendientes antes del corte: verificar configuración Meta de WhatsApp exclusiva,
 identidades/IAM/OS/SQL/Redis, proxy/APM, correo MFA efectivo y migraciones previas.

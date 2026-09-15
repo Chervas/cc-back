@@ -92,9 +92,15 @@ la autorización sigue siendo del servidor. Un cambio de usuario/sesión no
 recupera el marcador anterior. Al reabrir se consulta el mismo UUID, sin canjear
 automáticamente un código ni generar un intento alternativo ante incertidumbre.
 
-El indicador de código enviado se guarda antes del POST finish. Su respuesta
-perdida requiere status. Begin se puede recuperar explícitamente con el mismo
-UUID. Cerrar conserva el intento y elimina estado OAuth/listeners/iframe; no
+El indicador de código enviado se guarda antes del POST finish. Si falla su
+respuesta, la interfaz borra su copia del código y consulta status una sola vez
+con el mismo UUID y sesión. Si tampoco puede confirmar esa lectura, muestra
+resultado pendiente y permite Consultar estado; nunca reenvía finish ni crea
+otro intento automáticamente. Begin se puede recuperar explícitamente con el
+mismo UUID. Un begin rechazado por otra autorización abierta conserva ese UUID,
+explica que debe terminarse/cancelarse desde su pestaña original o caducar, y no
+arrastra el texto de cancelación del intento anterior. Cerrar conserva el
+intento y elimina estado OAuth/listeners/iframe; no
 equivale a cancelar. Cancelar conserva el mismo UUID y no afirma confirmación
 hasta que el DTO acredite ambos registros. Solo la cancelación confirmada deja
 preparar un nuevo UUID desde el diálogo. No se promete cancelación previa a la
