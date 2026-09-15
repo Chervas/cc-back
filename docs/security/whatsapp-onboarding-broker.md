@@ -243,3 +243,14 @@ recursos/ARNs/permisos, versiones, DDL exacta, procesos/colas, respaldo, ventana
 canary y rollback. Conservar SQLite, recibos, candidatos y bloqueos; ante fallo
 cerrar la cohorte y usar un artefacto seguro compatible, sin restaurar estado
 antiguo, reutilizar códigos ni recuperar tokens revocados o el alta general.
+
+## Recibo después del plazo OAuth
+
+`status` conserva la candidata `staged` después de `expiresAt` del formulario.
+El campo `expired` sigue describiendo ese plazo; el gateway da precedencia al
+recibo guardado para mostrar `awaiting_activation`. Esta excepción se aplica
+solo a la proyección de un resultado completado: `begin`, `finish` y la
+confirmación de canje mantienen el límite original. Bloqueos, cambio del
+fingerprint, reservas y expiraciones reales de la credencial siguen mandando.
+Cerrar el diálogo de éxito conserva el recibo; una cancelación expresa mantiene
+su efecto revocador. No cambiar a `AWSCURRENT` ni reusar un código OAuth.

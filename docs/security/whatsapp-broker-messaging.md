@@ -4,6 +4,59 @@
 cero despliegues**. Cuarentena Meta y pausas conservadas. Este corte no acredita
 [las condiciones de reapertura](whatsapp-reconnection-readiness.md).
 
+## Envío con autorización de Embedded Signup
+
+El runtime `src/whatsapp-authorized-main.js` usa la cohorte
+`whatsapp-authorized-v1`. Es una alternativa explícita al contrato separado
+sender/template-reader descrito después: acepta la candidata de Embedded Signup
+ya verificada, con su conjunto WhatsApp declarado y sus propietarios contrastados.
+No copia el mismo token a dos roles ni presenta eso como separación de permisos.
+La madurez instalada vive en el documento central 19.
+
+La configuración privada fija `authorizationId`, digest y versión inmutable,
+WABA/número, ámbito, caducidad local y plantillas permitidas. El ledger de alta se
+abre en solo lectura; otro SQLite conserva idempotencia y auditoría de operaciones.
+Una autorización empieza con `enabled:false`; autorizar no concede permiso de envío.
+No mover la candidata a `AWSCURRENT`: una versión posterior del slot no sustituye
+silenciosamente la versión revisada.
+
+La operación `meta.whatsapp.authorized.send.v1` recibe únicamente
+`{authorizationId,phoneId,message}`. `message` admite las formas de Graph que usa
+la aplicación: texto, plantilla y botón CTA URL. La plantilla se fija por ID,
+nombre, idioma y digest de componentes; se contrasta su estado `APPROVED`, cuerpo,
+cabecera y botones antes del POST. No se permite un endpoint o una operación
+arbitrarios. La gestión/creación de plantillas requiere operaciones propias; este
+contrato de envío no las habilita.
+
+Cada uso revalida la candidata, app, sujeto, scopes, propietarios de todas las
+cuentas concedidas y pertenencia del número, con prueba de clave de aplicación.
+Cambios de ámbito, reserva o caducidad impiden el uso. El control
+`meta.whatsapp.authorized.phone.revoke.v1` conserva la baja por clínica incluso
+si el teléfono se comparte. No revocar el teléfono completo para desconectar una
+clínica sin comprobar las demás.
+
+El adaptador de staging conserva los constructores de mensajes, opt-out, salud
+del canal y elección primary/secondary. Su archivo
+`/etc/clinicaclick-whatsapp-authorized/staging/config.json` contiene referencias,
+clave de firma y CA locales; nunca tokens Meta ni secretos AWS. Cada binding
+incluye `connectionRef,authorizationId,clinicId,assetId,phoneId,wabaId,revision,sendEnabled`.
+`sendEnabled:false` bloquea antes de HTTP y prevalece sobre cualquier credencial
+legacy residual. Un activo inactivo solo participa si coincide exactamente con
+ese binding; no se reactivan los flags de la BD.
+
+El UUID de operación deriva de `Message.id` y se conserva al reintentar o
+reiniciar. El worker resuelve de nuevo el remitente desde la conversación y el
+snapshot guardado, sin usar credenciales de jobs antiguos. La respuesta conserva
+`messages[].id` y `message_status`, incluido `held_for_quality_assessment`.
+Un error que podría haberse producido después del POST queda como entrega
+incierta; no se interpreta como permiso para reenviar con otra identidad.
+
+Para preparar un corte, mantener ambos permisos de envío apagados, fijar el
+catálogo revisado, verificar recepción y elaborar el lote de mensajes autorizado
+por el titular según [reconexión](whatsapp-reconnection-readiness.md). El runtime
+arrancado o un test offline correcto no acreditan entrega real ni permiten
+reanudar automáticamente las colas históricas.
+
 ## Contrato y autoridad
 
 Runtime `services/integrations-broker/src/whatsapp-main.js`, Node 24, cohorte
