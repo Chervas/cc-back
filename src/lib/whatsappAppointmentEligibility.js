@@ -17,10 +17,12 @@ function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, 
     || patientId && Number(a.paciente_id) !== Number(patientId)) fail('whatsapp_appointment_scope_changed');
   if (a.source_system || a.source_reference || importHeld(a.import_metadata)) fail('whatsapp_appointment_import_held');
   const reminder = /^clinicaclick_recordatorio_(dia_antes|mismo_dia)(?:_|$)/.exec(templateName || '');
-  if (!reminder) return true; // Cancellation acknowledgements retain their existing flow.
+  const appointmentData = /^clinicaclick_confirmacion_datos_cita_(?:reprogramada_)?(?:hoy|24|48)(?:_|$)/.test(templateName || '');
+  if (!reminder && !appointmentData) return true; // Cancellation acknowledgements retain their existing flow.
   const start = date(a.inicio), previous = date(e.context?.appointment?.inicio);
   if (!Number.isFinite(start) || !Number.isFinite(previous) || start !== previous) fail('whatsapp_appointment_rescheduled');
   if (start <= now || a.es_provisional || !['pendiente','info_enviada','info_confirmada','recordatorio_enviado','recordatorio_confirmado','reprogramada'].includes(a.estado)) fail('whatsapp_appointment_ineligible');
+  if (appointmentData) return true; // The current future appointment, without a reminder-day constraint.
   const before = reminder[1] === 'dia_antes';
   // info_confirmada only confirms appointment details. Attendance is a separate state.
   if (before && a.estado === 'recordatorio_confirmado') fail('whatsapp_appointment_already_confirmed');

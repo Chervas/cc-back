@@ -30,3 +30,13 @@ test('manual replies and appointment cancellation acknowledgements retain their 
   assert.equal(await dispatch({message:{metadata:{}},conversation:{}}),true);
   const v=base();v.appointment.estado='cancelada';v.templateName=null;assert.equal(check(v),true);
 });
+
+test('appointment details also reject cancelled, past or rescheduled instances',()=>{
+ for(const suffix of ['24_v16','reprogramada_48_v2','hoy_sin_respuesta_v1']) {
+  const v=base();v.templateName='clinicaclick_confirmacion_datos_cita_'+suffix;assert.equal(check(v),true);
+  for(const change of [{estado:'cancelada'},{estado:'completada'},{estado:'cambio_solicitado'},{inicio:'2026-09-17T09:00:00Z'}]) {
+   const input=structuredClone(v);Object.assign(input.appointment,change);assert.throws(()=>check(input));
+  }
+  v.now=Date.parse('2026-09-16T10:00Z');assert.throws(()=>check(v));
+ }
+});
