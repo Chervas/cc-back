@@ -20,7 +20,7 @@ test('Onboarding runtime rejects DEV/staging keys, mixed operations/scopes/slots
     c => { c.policy.connections[0].whatsappOnboarding.redirectUri = 'https://example.invalid/?code=x'; },
     c => { c.policy.grants[0].operations.push('meta.whatsapp.text.send.v1'); },
     c => { c.policy.grants[1].operations.push(C.OPERATIONS.finish); }, c => { c.policy.grants[1].tenantRef = 'clinic:999'; },
-    c => { c.policy.connections[0].expiresAt = null; }, c => { c.stateFile = 'relative.sqlite'; },
+    c => { c.policy.connections[0].expiresAt = 0; }, c => { delete c.policy.connections[0].expiresAt; }, c => { c.stateFile = 'relative.sqlite'; },
   ];
   const file = path.join(f.dir, 'bad-config.json'); let aws = 0;
   for (const mutate of mutations) { const c = structuredClone(base); mutate(c); fs.writeFileSync(file, JSON.stringify(c), { mode: 0o600 });
@@ -30,6 +30,7 @@ test('Onboarding runtime rejects DEV/staging keys, mixed operations/scopes/slots
 for (const customer of [undefined, { businessId: '501', wabaIds: ['301','302'] }, { selectionOnly: true }])
 test('Actual TLS broker exposes authenticated candidate flow only, survives restart and preserves cancellation/audit: ' + (customer?.selectionOnly ? 'selected phone' : customer ? 'business' : 'single WABA'), async t => {
   const f = fixture(t, { customer, ...(customer?.selectionOnly ? { scopes: ['public_profile','whatsapp_business_manage_events','whatsapp_business_management','whatsapp_business_messaging'] } : {}) }); const c = config(f);
+  if (customer?.selectionOnly) c.policy.connections[0].expiresAt = null;
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', c.tlsKeyFile, '-out', c.tlsCertFile,
     '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
   fs.chmodSync(c.tlsKeyFile, 0o600); fs.chmodSync(c.tlsCertFile, 0o600);

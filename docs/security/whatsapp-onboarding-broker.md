@@ -253,6 +253,32 @@ antiguo, reutilizar códigos ni recuperar tokens revocados o el alta general.
 
 ## Recibo después del plazo OAuth
 
+### Vigencia de conexiones operativas
+
+El plazo del formulario OAuth (30 minutos) no es la duración de una conexión
+ya autorizada. `expiresAt: null` en el binding de incorporación y en la
+autorización operativa expresa continuidad hasta desconexión o revocación.
+También se admite una fecha positiva para cortes temporales explícitos; omitir
+el campo o usar cero no equivale a una autorización permanente. Una autorización
+operativa sin fecha requiere un binding de incorporación sin fecha.
+
+El ledger conserva su estado y revisión al reiniciar: modificar solo el JSON
+no renueva una conexión ya registrada. Para retirar un plazo del piloto, validar
+los hashes de configuración, respaldar configuración y SQLite y cambiar solo
+`expires_at` de las conexiones activas incluidas en el lote. No modificar estados,
+revisiones, recibos, candidatos ni bloqueos. Revertir solo las fechas y el código,
+nunca sustituir el ledger por un respaldo que pierda actividad posterior.
+
+Se mantienen los vencimientos reales de Meta (`expiresAt` y
+`dataAccessExpiresAt` de la credencial), identidad, clínica, número, reserva,
+versión inmutable y revocaciones. El cambio no añade consultas periódicas ni
+consultas al token o plantilla por mensaje. Una caída temporal no elimina la
+autorización. Los resultados de envío inciertos siguen sin reintentarse a ciegas.
+
+Pruebas: `whatsapp-authorized*.test.js` y `whatsapp-onboarding*.test.js` con el
+runtime Node 24 y `test/offline-guard.cjs`; cubren continuidad tras el plazo y
+reinicio, revocación posterior y vencimientos reales del proveedor.
+
 `status` conserva la candidata `staged` después de `expiresAt` del formulario.
 El campo `expired` sigue describiendo ese plazo; el gateway da precedencia al
 recibo guardado para mostrar `awaiting_activation`. Esta excepción se aplica

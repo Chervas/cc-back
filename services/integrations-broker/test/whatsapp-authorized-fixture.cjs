@@ -17,11 +17,15 @@ const templateMessage = () => ({ messaging_product: 'whatsapp', to: '34000000123
   { type: 'button', sub_type: 'quick_reply', index: '0', parameters: [{ type: 'payload', payload: 'FICTITIOUS_CONFIRM' }] },
   { type: 'button', sub_type: 'url', index: '1', parameters: [{ type: 'text', text: 'qa' }] },
 ] } });
-async function fixture(t, { enabled = true } = {}) {
+async function fixture(t, { enabled = true, ongoing = false } = {}) {
   const f = onboardingFixture(t, { customer: { selectionOnly: true }, scopes: ['whatsapp_business_management','whatsapp_business_messaging','public_profile','whatsapp_business_manage_events'] });
   const flow = await f.begin(); await f.finish(flow); const row = f.current.store.db.prepare('SELECT * FROM whatsapp_onboarding_flows WHERE id=?').get(flow.flowId);
+  if (ongoing) {
+    f.binding.expiresAt = null;
+    f.current.store.db.prepare('UPDATE connections SET expires_at=NULL WHERE ref=?').run(f.binding.connectionRef);
+  }
   const definition = { connectionRef: 'connection:authorized-qa', authorizationId: flow.flowId, enabled, enrollmentBinding: f.binding,
-    phoneId: '401', wabaId: '301', candidateDigest: row.secret_digest, expiresAt: f.now()+86400000,
+    phoneId: '401', wabaId: '301', candidateDigest: row.secret_digest, expiresAt: ongoing ? null : f.now()+86400000,
     templates: [{ id: '901', name: 'appointment_qa', language: 'es', contentDigest: C.templateDigest(template()) }] };
   const binding = { connectionRef: definition.connectionRef, provider: C.PROVIDER, initialState: 'active', expiresAt: definition.expiresAt };
   const registry = createWhatsappAuthorizedRegistry({ filename: f.filename, authorizations: [definition], loadEnrollmentBinding: () => f.binding, now: f.now });

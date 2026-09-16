@@ -40,7 +40,8 @@ function validateConfig(config) {
       || binding.expiresAt !== a.expiresAt) fail('invalid_request');
     const enrollment = a.enrollmentBinding; const b = E.bindingFor(enrollment);
     if (!C.keys(enrollment, ['clientSecretArn','connectionRef','expiresAt','initialState','provider','secretArn','whatsappOnboarding'])
-      || !Number.isSafeInteger(enrollment.expiresAt) || enrollment.expiresAt < a.expiresAt
+      || enrollment.expiresAt !== null && (!Number.isSafeInteger(enrollment.expiresAt) || enrollment.expiresAt <= 0
+        || a.expiresAt === null || enrollment.expiresAt < a.expiresAt)
       || !['active','blocked','revoked','expired'].includes(enrollment.initialState)
       || slots.has(enrollment.secretArn) && slots.get(enrollment.secretArn) !== enrollment.connectionRef
       || scopes.has(b.scopeKey) && scopes.get(b.scopeKey) !== enrollment.connectionRef

@@ -19,7 +19,7 @@ function validateConfig(config) {
   const prefix = `arn:aws:secretsmanager:eu-west-3:${ACCOUNT}:secret:/clinicaclick/integrations/prod/`;
   for (const binding of policy.connections) {
     if (Object.keys(binding).sort().join(',') !== 'clientSecretArn,connectionRef,expiresAt,initialState,provider,secretArn,whatsappOnboarding'
-      || !Number.isSafeInteger(binding.expiresAt) || binding.expiresAt <= 0) fail('invalid_request');
+      || binding.expiresAt !== null && (!Number.isSafeInteger(binding.expiresAt) || binding.expiresAt <= 0)) fail('invalid_request');
     const b = C.bindingFor(binding);
     if (slots.has(binding.secretArn) || scopes.has(b.scopeKey)) fail('invalid_request');
     slots.add(binding.secretArn); apps.add(binding.clientSecretArn); scopes.add(b.scopeKey);

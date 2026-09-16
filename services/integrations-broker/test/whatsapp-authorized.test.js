@@ -17,6 +17,20 @@ test('Staged credential survives the completed OAuth window but not operational 
   const a=await fixture(t);a.f.state.clock+=660000;await a.execute();a.f.state.clock=a.definition.expiresAt;
   await assert.rejects(a.execute(),{code:'connection_blocked'});assert.equal(a.sends().length,1);
 });
+test('Ongoing grants survive the pilot deadline and restart while keeping scope revocation effective',async t=>{
+ const a=await fixture(t,{ongoing:true});a.f.state.clock+=366*86400000;
+ await a.execute();a.restart();await a.execute();assert.equal(a.sends().length,2);
+ assert.deepEqual(a.state.calls.map(c=>c.action),['send','send']);
+ a.blockScope();a.restart();await assert.rejects(a.execute(),{code:'asset_revoked'});
+ assert.equal(a.sends().length,2);
+});
+for(const field of ['expiresAt','dataAccessExpiresAt'])test('Ongoing local grant still respects provider '+field,async t=>{
+ const a=await fixture(t,{ongoing:true});const db=a.f.current.store.db;
+ const meta=JSON.parse(db.prepare('SELECT credential_metadata FROM whatsapp_onboarding_flows WHERE id=?').get(a.definition.authorizationId).credential_metadata);
+ meta[field]=a.f.now()+1000;db.prepare('UPDATE whatsapp_onboarding_flows SET credential_metadata=? WHERE id=?').run(JSON.stringify(meta),a.definition.authorizationId);
+ a.f.state.clock+=1001;
+ await assert.rejects(a.execute(),{code:'credential_revoked'});assert.equal(a.sends().length,0);
+});
 test('Foreign clinic, phone, authorization or principal cannot reach secrets',async t=>{
   const a=await fixture(t);const base=a.request();const before=a.f.state.awsCalls.length;
   for(const value of [{...base,tenantRef:'clinic:73'},{...base,assetRef:'wa-phone:999'},{...base,payload:{...base.payload,phoneId:'999'}},

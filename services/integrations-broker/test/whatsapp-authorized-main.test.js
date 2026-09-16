@@ -49,6 +49,17 @@ test('Authorized runtime rejects mixed identities, grants, enrollment slots and 
   }
   assert.equal(aws, 0); assert.equal(fs.existsSync(base.stateFile), false);
 });
+test('An ongoing grant requires an ongoing enrollment; missing and invalid dates stay rejected',async t=>{
+ const f=await fixture(t);const c=config(f);
+ c.authorizations[0].expiresAt=null;c.policy.connections[0].expiresAt=null;
+ assert.throws(()=>runtime.validateConfig(c),{code:'invalid_request'});
+ c.authorizations[0].enrollmentBinding.expiresAt=null;
+ runtime.validateConfig(c);
+ for(const value of [undefined,0,-1,'never',false]){
+  const bad=structuredClone(c);bad.authorizations[0].expiresAt=value;bad.policy.connections[0].expiresAt=value;
+  assert.throws(()=>runtime.validateConfig(bad),{code:'invalid_request'});
+ }
+});
 test('Private enrollment configuration, ledger identity and TLS are checked before AWS or writable store creation', async t => {
   const f = await fixture(t, { enabled: false }); const c = config(f); const { filename, enrollment } = writeConfig(f, c); tlsFiles(c);
   let aws = 0; const start = () => runtime.main(filename, { awsFactory: async () => { aws++; throw Error('FORBIDDEN_AWS'); } });

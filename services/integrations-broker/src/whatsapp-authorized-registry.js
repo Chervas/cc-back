@@ -6,7 +6,7 @@ function validateAuthorization(value) {
   if (!C.keys(value, ['connectionRef','authorizationId','enrollmentBinding','phoneId','wabaId','candidateDigest','expiresAt'], ['enabled','templates'])
     || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(value.connectionRef) || !E.uuid(value.authorizationId)
     || !E.id(value.phoneId) || !E.id(value.wabaId) || !/^[a-f0-9]{64}$/.test(value.candidateDigest)
-    || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0 || value.enabled !== undefined && typeof value.enabled !== 'boolean'
+    || value.expiresAt !== null && (!Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0) || value.enabled !== undefined && typeof value.enabled !== 'boolean'
     || value.templates !== undefined && (!Array.isArray(value.templates) || value.templates.length > 1000)) fail('invalid_request');
   const enrollment = E.bindingFor(value.enrollmentBinding);
   if (!enrollment.customer) fail('invalid_request');
@@ -27,7 +27,7 @@ function createWhatsappAuthorizedRegistry({ filename, authorizations, loadEnroll
   function inspect(binding, review = false) {
     if (closed || binding?.provider !== C.PROVIDER) fail('scope_denied');
     const definition = entries.find(v => v.connectionRef === binding.connectionRef);
-    if (!definition || !review && !definition.enabled || definition.expiresAt <= now()) fail('connection_blocked');
+    if (!definition || !review && !definition.enabled || definition.expiresAt !== null && definition.expiresAt <= now()) fail('connection_blocked');
     const enrollmentBinding = definition.enrollmentBinding; const b = E.bindingFor(enrollmentBinding);
     const current = loadEnrollmentBinding(enrollmentBinding.connectionRef);
     if (!current || E.fingerprint(current) !== E.fingerprint(enrollmentBinding)) fail('connection_blocked');
@@ -54,7 +54,8 @@ function createWhatsappAuthorizedRegistry({ filename, authorizations, loadEnroll
       if (reservation ? !matches(reservation) : !b.customer.selectionOnly) fail('scope_denied');
     }
     // The OAuth exchange deadline is deliberately historical after staged;
-    // operational expiry and provider credential expiries remain mandatory.
+    // an optional operator deadline and real provider credential expiries still
+    // apply. Null is an ongoing local grant, never a bypass for revocation.
     return { definition: structuredClone(definition), enrollmentBinding: structuredClone(enrollmentBinding), row: { ...row }, metadata };
   }
   function read(binding, review = false) {
