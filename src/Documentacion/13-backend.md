@@ -1,4 +1,35 @@
 > **Módulo:** Arquitectura del Backend
+
+## Plantillas por AWS, monitor de seguridad y tarifas IA
+
+El transporte operativo `whatsapp-authorized-v1` conserva el ámbito de clínica,
+WABA y número y la credencial inmutable en AWS. Las operaciones cerradas
+`templates.list/create/delete/header` se añaden al envío existente. No compara
+una segunda lista de plantillas ni consulta su aprobación antes de cada mensaje.
+El editor y la sincronización siguen el estado normal de Meta, sin importar
+plantillas externas desconocidas. El motor sender/template-reader de preparación
+descrito más abajo no es el runtime operativo. Contrato vigente en
+[14.2](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.2-whatsapp-plantillas.md#operación-a-través-de-aws)
+y runbook `docs/security/whatsapp-broker-messaging.md`.
+
+Rutas autenticadas para administración técnica:
+
+| Método y ruta bajo `/api/metasync/jobs` | Contrato |
+| --- | --- |
+| `GET /security` | Activadores, avisos, medidas e historial sin datos de pacientes. |
+| `GET /security/targets?q=` | Búsqueda acotada de plantillas y funciones de IA observadas. |
+| `PUT /security/rules` | Umbrales globales y activación de avisos; nunca pausa automática. |
+| `POST /security/measures` | `entity_type`, `entity_id`, `paused`, `reason`; pausa/reanudación manual auditada. |
+| `POST /security/alerts/:id/acknowledge` | Marca la revisión del aviso. |
+| `GET/PUT /usage/ai-runtime/prices` | Tarifas por proveedor/modelo; edición auditada para consumo nuevo. |
+
+Migración aditiva `20260916103000-security-monitoring-and-ai-prices.js`:
+cuatro tablas de monitor, `AiModelPrices` y métricas adicionales en `AiUsageDaily`.
+El job existente `system_notification_check` ejecuta el detector; no instala otro
+scheduler ni consumidor DEV. No modifica mensajes, citas o aprobaciones históricas.
+Contratos funcionales en [39](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#monitor-de-seguridad-y-medidas-manuales)
+y [14.6](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/14.6-ia-bedrock-orquestacion-monitorizacion.md#costes-de-proveedores-y-tarifas-editables).
+
 > **Última actualización:** 2026-09-03
 > **Relacionado con:** `cc-front/src/Documentacion/20.1-motor-flujos-v2.md` | documento operativo `cc-front/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md`
 > **Fuente canónica:** este archivo del repositorio backend. `cc-front/src/Documentacion/13-backend.md` es un espejo completo para conservar los enlaces internos del manual frontend; cualquier cambio se hace aquí primero y después se sincroniza el espejo.
