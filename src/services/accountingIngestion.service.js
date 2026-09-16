@@ -275,6 +275,7 @@ async function extractWithOpenAi(asset, buffer, documentKind = 'expense') {
   if (clean(process.env.OPENAI_PROJECT_ID, 200)) {
     headers['OpenAI-Project'] = clean(process.env.OPENAI_PROJECT_ID, 200);
   }
+  await require('./securityMonitoring.service').assertAiAllowed('accounting_ocr');
   const response = await axios.post('https://api.openai.com/v1/responses', {
     model: MODEL,
     store: false,
@@ -292,7 +293,11 @@ async function extractWithOpenAi(asset, buffer, documentKind = 'expense') {
   }, {
     headers,
     timeout: 120000,
+  }).catch(async error => {
+    await require('./aiUsageTelemetry.service').recordProviderFailure({provider:'openai',model:MODEL,useCase:'accounting_ocr',error});
+    throw error;
   });
+  await require('./aiUsageTelemetry.service').recordProviderResponse({provider:'openai',model:MODEL,useCase:'accounting_ocr',response:response.data});
   const text = responseText(response.data);
   if (!text) throw domainError(502, 'accounting_ocr_empty', 'La lectura automática no devolvió datos.');
   let parsed;

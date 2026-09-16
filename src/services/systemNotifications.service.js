@@ -28,6 +28,12 @@ const WHATSAPP_PROVIDER_STATUSES = new Set(['sent', 'delivered', 'read', 'failed
 
 const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
   {
+    key: 'security.activity_detected', category: 'security', severity: 'warning',
+    label: 'Seguridad: actividad que requiere revisión',
+    description: 'Umbrales de actividad, envíos, creación de plantillas o consumo de IA. El aviso no detiene la clínica.',
+    defaults: { panel: true, email: false, whatsapp: false },
+  },
+  {
     key: 'system.notification_test',
     category: 'system',
     severity: 'info',
@@ -1383,6 +1389,9 @@ async function runDispatchJob(payload = {}) {
 }
 
 async function runActiveChecks({ force = false } = {}) {
+  await require('./securityMonitoring.service').scan().catch(() => {
+    console.warn('[security-monitoring] Scan unavailable; other operational checks continue');
+  });
   const emailMonitoring = require('./emailMonitoring.service');
   const setting = await ensureSettings();
   const overview = await emailMonitoring.getOverview();

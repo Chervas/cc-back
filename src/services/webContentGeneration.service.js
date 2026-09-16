@@ -655,6 +655,7 @@ function assertCompletedProviderResponse(payload = {}) {
 }
 
 async function runOpenAiGeneration(generation, dependencies = {}) {
+  await require('./securityMonitoring.service').assertAiAllowed('web_content');
   const http = dependencies.axios || axios;
   const response = await http.post('https://api.openai.com/v1/responses', {
     model: OPENAI_MODEL,
@@ -673,7 +674,12 @@ async function runOpenAiGeneration(generation, dependencies = {}) {
   }, {
     headers: openAiHeaders(),
     timeout: PROVIDER_TIMEOUT_MS,
+  }).catch(async error => {
+    await require('./aiUsageTelemetry.service').recordProviderFailure({provider:'openai',model:OPENAI_MODEL,useCase:'web_content',clinicId:generation.clinicaId||generation.clinica_id||null,error});
+    throw error;
   });
+  await require('./aiUsageTelemetry.service').recordProviderResponse({provider:'openai',model:OPENAI_MODEL,useCase:'web_content',response:response.data,
+    clinicId:generation.clinicaId||generation.clinica_id||null,groupId:generation.grupoClinicaId||generation.grupo_clinica_id||null});
   assertCompletedProviderResponse(response.data || {});
   return {
     output: parseProviderOutput(response.data || {}),

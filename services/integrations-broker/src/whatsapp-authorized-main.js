@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('node:fs'); const path = require('node:path'); const net = require('node:net'); const tls = require('node:tls');
 const { createPublicKey } = require('node:crypto'); const { fail } = require('./errors'); const { validatePolicy } = require('./policy');
+const M = require('./whatsapp-template-management');
 const C = require('./whatsapp-authorized-contract'); const E = require('./whatsapp-onboarding-contract');
 const { privateFile, connectAws, ACCOUNT, SECRET_KEY } = require('./google-main');
 const { validateConfig: validateEnrollmentConfig } = require('./whatsapp-onboarding-main');
@@ -57,7 +58,7 @@ function validateConfig(config) {
       const expected = grant.principalId === 'staging:whatsapp' ? C.SEND : C.REVOKE;
       const key = JSON.stringify([grant.principalId,grant.tenantRef]);
       if (!b.clinicIds.some(id => grant.tenantRef === 'clinic:' + id) || grant.assetRef !== 'wa-phone:' + a.phoneId
-        || grant.operations.length !== 1 || grant.operations[0] !== expected || seen.has(key)) fail('invalid_request');
+        || !grant.operations.includes(expected) || grant.operations.some(op => ![expected,...(expected === C.SEND ? M.OPERATIONS : [])].includes(op)) || new Set(grant.operations).size !== grant.operations.length || seen.has(key)) fail('invalid_request');
       seen.add(key);
     }
   }

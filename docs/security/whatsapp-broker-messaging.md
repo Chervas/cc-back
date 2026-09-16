@@ -17,7 +17,8 @@ No copia el mismo token a dos roles ni presenta eso como separación de permisos
 La madurez instalada vive en el documento central 19.
 
 La configuración privada fija `authorizationId`, digest y versión inmutable,
-WABA/número, ámbito, caducidad local y plantillas permitidas. El ledger de alta se
+WABA/número, ámbito y caducidad local. `templates` queda como metadata legacy
+opcional sin efecto de autorización para el runtime `whatsapp-authorized-v1`. El ledger de alta se
 abre en solo lectura; otro SQLite conserva idempotencia y auditoría de operaciones.
 Una autorización empieza con `enabled:false`; autorizar no concede permiso de envío.
 No mover la candidata a `AWSCURRENT`: una versión posterior del slot no sustituye
@@ -25,24 +26,32 @@ silenciosamente la versión revisada.
 
 La operación `meta.whatsapp.authorized.send.v1` recibe únicamente
 `{authorizationId,phoneId,message}`. `message` admite las formas de Graph que usa
-la aplicación: texto, plantilla y botón CTA URL. La plantilla se fija por ID,
-nombre, idioma y digest de componentes; se contrasta su estado `APPROVED`, cuerpo,
-cabecera y botones antes del POST. No se permite un endpoint o una operación
-arbitrarios. La gestión/creación de plantillas requiere operaciones propias; este
-contrato de envío no las habilita.
+la aplicación: texto, plantilla y botón CTA URL. No compara huellas ni consulta
+el estado de una plantilla antes de enviar. Conserva la validación cerrada del
+payload, ámbito y operación; no permite un endpoint arbitrario.
 
-El registro admite hasta 1.000 plantillas por conexión, incluidas versiones
-activas del catálogo y plantillas personalizadas creadas por las clínicas.
-La ampliación de capacidad no cambia permisos de número, credenciales,
-automatizaciones ni mensajes pendientes. La selección temporal de plantillas
-de recuperación no debe confundirse con el catálogo completo de ClinicaClick.
+Operaciones adicionales `meta.whatsapp.authorized.templates.{list,create,delete,header}.v1`:
+WABA explícito contrastado con el binding y el mismo grant de clínica/número.
+`list` pagina hasta 100 resultados y devuelve solo el catálogo y cursor, nunca
+la URL de Graph. `create` acepta definición normal de Meta; `delete` exige
+nombre e ID; `header` descarga imagen pública por HTTPS sin credenciales y la
+sube a Graph. DNS fijado, destinos privados/redirecciones rechazados y máximo 5 MB.
+Las escrituras conservan recibos e idempotencia. La preparación de imagen tiene
+identidad propia; crear/retirar se deduplican por autorización y payload.
 
-Cada uso revalida la candidata, app, sujeto, scopes, propietarios de todas las
-cuentas concedidas y pertenencia del número, con prueba de clave de aplicación.
-Cambios de ámbito, reserva o caducidad impiden el uso. El control
-`meta.whatsapp.authorized.phone.revoke.v1` conserva la baja por clínica incluso
-si el teléfono se comparte. No revocar el teléfono completo para desconectar una
-clínica sin comprobar las demás.
+Cada uso valida la versión inmutable/digest del secreto, su vinculación local,
+revocación y expiración, con prueba de clave de aplicación. No ejecuta un
+`debug_token` ni consultas de propiedad por mensaje. Esas consultas se conservan
+en la revisión administrativa (`verifyProvider:true`) y al incorporar una
+credencial. El control `meta.whatsapp.authorized.phone.revoke.v1` mantiene la
+baja por clínica incluso si el número se comparte.
+
+Para desplegar: ampliar exclusivamente los grants existentes de `staging:whatsapp`
+con las cuatro operaciones de plantillas; los grants de control siguen solo con
+revocación. No crear conexiones ni ampliar clínicas en este cambio. Conservar
+configuración y release anteriores para rollback; no borrar SQLite, recibos ni
+bloqueos. La migración SQL aditiva se aplica antes de reiniciar la API. Restaurar
+la release y grants anteriores revierte código, conservando evidencia y DDL.
 
 El adaptador de staging conserva los constructores de mensajes, opt-out, salud
 del canal y elección primary/secondary. Su archivo
@@ -107,7 +116,7 @@ La revocación es local al grant: no revoca el token en Meta ni desconecta otras
 clínicas que usen el número. La baja funcional debe conservar su comprobación
 transaccional de usos compartidos y activos primarios.
 
-## Plantillas y secretos
+## Plantillas y secretos del motor separado de preparación (no runtime vigente)
 
 Cada conexión fija App ID, sujetos de envío/consulta distintos, WABA, emisor,
 caducidad local y versiones concretas de tres secretos distintos: envío,

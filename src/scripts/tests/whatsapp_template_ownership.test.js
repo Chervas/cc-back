@@ -728,7 +728,8 @@ test('el envío directo no permite una plantilla personal de otro autor', async 
   }
 });
 
-test('QuickChat solo resuelve plantillas APPROVED al enviar fuera de ventana', async () => {
+test('QuickChat solo resuelve plantillas APPROVED al enviar fuera de ventana', async (t) => {
+  t.mock.method(require('../../services/patientDirection.service'),'resolveOutboundPolicy',async()=>({mode:'clinic_default',clinicConfig:await require('../../services/whatsapp.service').getClinicConfig(19),assignment:null,requiresTakeConfirmation:false}));
   const conversationController = require('../../controllers/conversation.controller');
   const whatsappService = require('../../services/whatsapp.service');
   const originals = {
@@ -809,7 +810,8 @@ test('QuickChat solo resuelve plantillas APPROVED al enviar fuera de ventana', a
   }
 });
 
-test('QuickChat bloquea una plantilla que requiere iniciar el flujo de resenas', async () => {
+test('QuickChat bloquea una plantilla que requiere iniciar el flujo de resenas', async (t) => {
+  t.mock.method(require('../../services/patientDirection.service'),'resolveOutboundPolicy',async()=>({mode:'clinic_default',clinicConfig:await require('../../services/whatsapp.service').getClinicConfig(19),assignment:null,requiresTakeConfirmation:false}));
   const conversationController = require('../../controllers/conversation.controller');
   const whatsappService = require('../../services/whatsapp.service');
   const originals = {

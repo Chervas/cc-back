@@ -731,15 +731,18 @@ async function downloadTemplateHeaderImage(sampleUrl) {
   };
 }
 
-async function uploadTemplateHeaderImageHandleToMeta({ accessToken, sampleUrl, logger = console }) {
+async function uploadTemplateHeaderImageHandleToMeta({ accessToken, wabaId, sampleUrl, logger = console }) {
+  if (await brokerTemplateBinding(wabaId)) {
+    // AWS downloads the public image without credentials and uploads it to Meta.
+    // The CRM neither reads a token nor makes a legacy Meta request.
+    const result = await require('../lib/whatsappAuthorizedBrokerClient').templates(wabaId,
+      require('../../services/integrations-broker/src/whatsapp-template-management').HEADER,
+      { source: sampleUrl });
+    return result.handle;
+  }
   const safeAccessToken = cleanString(accessToken);
-  if (!safeAccessToken) {
-    throw new Error('whatsapp_template_header_upload_missing_access_token');
-  }
-  if (!META_APP_ID) {
-    throw new Error('whatsapp_template_header_upload_missing_meta_app_id');
-  }
-
+  if (!safeAccessToken) throw new Error('whatsapp_template_header_upload_missing_access_token');
+  if (!META_APP_ID) throw new Error('whatsapp_template_header_upload_missing_meta_app_id');
   const image = await downloadTemplateHeaderImage(sampleUrl);
   const uploadSession = await axios.post(
     graphUrl(`${META_APP_ID}/uploads`),
@@ -808,7 +811,7 @@ function replaceImageHeaderHandleInComponents(components, mediaHandle) {
   });
 }
 
-async function prepareTemplateImageHeaderForMeta({ template, accessToken, logger = console }) {
+async function prepareTemplateImageHeaderForMeta({ template, accessToken, wabaId, logger = console }) {
   const components = normalizeTemplateComponentsForMeta(template?.components);
   if (!findImageHeaderComponent(components)) {
     return { template: { ...template, components }, issue: null };
@@ -837,7 +840,7 @@ async function prepareTemplateImageHeaderForMeta({ template, accessToken, logger
 
   try {
     const mediaHandle = await uploadTemplateHeaderImageHandleToMeta({
-      accessToken,
+      accessToken, wabaId,
       sampleUrl: currentSample,
       logger,
     });
@@ -1133,7 +1136,18 @@ async function resolveDisciplines({ clinicId, groupId }) {
   return [];
 }
 
+async function brokerTemplateBinding(wabaId, clinicId = null) {
+  return require('../lib/whatsappAuthorizedBrokerClient').templateBinding(String(wabaId), clinicId);
+}
+async function templateConnectionAvailable(wabaId, accessToken, clinicId = null) {
+  return !!(await brokerTemplateBinding(wabaId,clinicId)) || !!accessToken;
+}
 async function resolveWabaAssetById(wabaId) {
+  const binding = await brokerTemplateBinding(wabaId);
+  if (binding) {
+    const asset = await ClinicMetaAsset.findByPk(binding.assetId);
+    if (asset) { asset.whatsappAuthorizedBinding = binding; return asset; }
+  }
   return ClinicMetaAsset.findOne({
     where: {
       isActive: true,
@@ -1165,6 +1179,7 @@ async function createTemplateInMeta({ wabaId, accessToken, template, language })
     components: components || [],
   };
 
+  if (await brokerTemplateBinding(wabaId)) return require('../lib/whatsappAuthorizedBrokerClient').templates(wabaId, require('../../services/integrations-broker/src/whatsapp-template-management').CREATE, { template: payload });
   const response = await axios.post(
     graphUrl(`${wabaId}/message_templates`),
     payload,
@@ -1174,6 +1189,19 @@ async function createTemplateInMeta({ wabaId, accessToken, template, language })
 }
 
 async function fetchTemplatesFromMeta({ wabaId, accessToken }) {
+  if (await brokerTemplateBinding(wabaId)) {
+    const broker = require('../lib/whatsappAuthorizedBrokerClient');
+    const operation = require('../../services/integrations-broker/src/whatsapp-template-management').LIST;
+    const all=[], seen=new Set(); let after;
+    for(let page=0;page<50;page++) {
+      const result=await broker.templates(wabaId,operation,after?{after}:{});
+      all.push(...result.data);
+      if(!result.after)return all;
+      if(seen.has(result.after))throw new Error('whatsapp_template_pagination_loop');
+      seen.add(result.after);after=result.after;
+    }
+    throw new Error('whatsapp_template_pagination_limit');
+  }
   const items = [];
   const seenCursors = new Set();
   let after = null;
@@ -1217,6 +1245,7 @@ function findRemoteTemplate(items, { name, metaTemplateId, language = null } = {
 }
 
 async function deleteTemplateInMeta({ wabaId, accessToken, name, metaTemplateId }) {
+  if (await brokerTemplateBinding(wabaId)) return require('../lib/whatsappAuthorizedBrokerClient').templates(wabaId, require('../../services/integrations-broker/src/whatsapp-template-management').REMOVE, { name, templateId: String(metaTemplateId) });
   if (!wabaId || !accessToken || !name || !metaTemplateId) {
     throw new Error('missing_meta_template_delete_identity');
   }
@@ -1231,6 +1260,7 @@ async function deleteTemplateInMeta({ wabaId, accessToken, name, metaTemplateId 
 }
 
 async function deleteTemplateInMetaWithAssetCredentials({ asset, wabaId, name, metaTemplateId }) {
+  if (asset?.whatsappAuthorizedBinding || await brokerTemplateBinding(wabaId)) return deleteTemplateInMeta({wabaId,name,metaTemplateId});
   const tokens = Array.from(new Set([
     cleanString(asset?.metaConnection?.accessToken),
     cleanString(asset?.waAccessToken),
@@ -1721,7 +1751,7 @@ async function runStalePendingTemplateResubmission(payload = {}) {
   if (!AUTO_RESUBMIT_ENABLED) {
     let cancellation = {};
     let canReleaseClaim = false;
-    if (asset?.waAccessToken) {
+    if (asset?.waAccessToken || asset?.whatsappAuthorizedBinding) {
       cancellation = await cancelPlannedReplacement({
         source,
         replacementTemplateId: plannedReplacementTemplateId,
@@ -1766,7 +1796,7 @@ async function runStalePendingTemplateResubmission(payload = {}) {
     };
   }
 
-  if (!asset?.waAccessToken) {
+  if (!asset?.waAccessToken && !asset?.whatsappAuthorizedBinding) {
     throw new Error('stale_pending_resubmit_missing_active_waba_credentials');
   }
 
@@ -1906,7 +1936,7 @@ async function runStalePendingTemplateResubmission(payload = {}) {
   if (!remoteReplacement) {
     preparedTemplate = await prepareTemplateImageHeaderForMeta({
       template: buildTemplateForTechnicalName(catalog, replacementName),
-      accessToken: asset.waAccessToken,
+      wabaId: expectedWabaId, accessToken: asset.waAccessToken,
       logger: console,
     });
     const imageIssue = preparedTemplate.issue || getImageHeaderSampleIssue(preparedTemplate.template);
@@ -2240,7 +2270,7 @@ async function createCustomTemplateForClinic({
   const safeHeaderImageUrl = cleanString(headerImageUrl);
   const safeCategory = String(category || '').trim().toUpperCase() === 'MARKETING' ? 'MARKETING' : 'UTILITY';
   const safeTemplateUsage = cleanString(templateUsage).toLowerCase();
-  if (!safeWabaId || !safeAccessToken) {
+  if (!safeWabaId || !await templateConnectionAvailable(safeWabaId,safeAccessToken,safeClinicId)) {
     throw new Error('missing_waba_credentials');
   }
   if (!safeBodyText) {
@@ -2314,7 +2344,7 @@ async function createCustomTemplateForClinic({
   };
   const preparedTemplate = await prepareTemplateImageHeaderForMeta({
     template: draftTemplate,
-    accessToken: safeAccessToken,
+    wabaId: safeWabaId, accessToken: safeAccessToken,
   });
   if (preparedTemplate.issue) {
     const error = new Error(buildImageHeaderSamplePendingReason(preparedTemplate.issue));
@@ -2412,7 +2442,7 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
   if (!wabaId) return;
 
   const asset = await resolveWabaAssetById(wabaId);
-  if (!asset?.waAccessToken) {
+  if (!asset?.waAccessToken && !asset?.whatsappAuthorizedBinding) {
     throw new Error('missing_wa_access_token');
   }
 
@@ -2508,7 +2538,7 @@ async function createTemplatesFromCatalogWithLease({
       : familyName;
     const preparedTemplate = await prepareTemplateImageHeaderForMeta({
       template: buildTemplateForTechnicalName(template, technicalName),
-      accessToken: asset.waAccessToken,
+      wabaId, accessToken: asset.waAccessToken,
       logger: console,
     });
     const metaTemplate = preparedTemplate.template;
@@ -2690,12 +2720,12 @@ async function propagateCatalogTemplateToAllClinics({
           continue;
         }
 
-        if (!syncedWabas.has(wabaId) && clinicConfig.accessToken) {
+        if (!syncedWabas.has(wabaId) && (clinicConfig.accessToken || clinicConfig.authorizedBroker)) {
           await syncTemplatesForWaba({ wabaId, accessToken: clinicConfig.accessToken });
           syncedWabas.add(wabaId);
         }
 
-        if (template.is_active && wabaId && clinicConfig.accessToken) {
+        if (template.is_active && wabaId && (clinicConfig.accessToken || clinicConfig.authorizedBroker)) {
           followupSyncs.set(wabaId, clinicConfig.accessToken);
         }
 
@@ -2739,7 +2769,7 @@ async function propagateCatalogTemplateToAllClinics({
         pendingTechnicalName = cleanString(technicalName) || pendingTechnicalName;
         const preparedTemplate = await prepareTemplateImageHeaderForMeta({
           template: buildTemplateForTechnicalName(template, technicalName),
-          accessToken: clinicConfig.accessToken,
+          wabaId, accessToken: clinicConfig.accessToken,
           logger,
         });
         const metaTemplate = preparedTemplate.template;
@@ -2962,7 +2992,7 @@ async function propagateCatalogTemplateToAllClinics({
 }
 
 async function syncTemplatesForWaba({ wabaId, accessToken }) {
-  if (!wabaId || !accessToken) {
+  if (!wabaId || !await templateConnectionAvailable(wabaId,accessToken)) {
     throw new Error('missing_waba_or_token');
   }
 
@@ -3009,6 +3039,9 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     const existing = await WhatsappTemplate.findOne({
       where: { waba_id: wabaId, name: payload.name, language: payload.language },
     });
+    // Refresh CRM-managed templates only. Remote discovery is not an import.
+    if (!existing) continue;
+    payload.origin = existing.origin;
     const remoteStatus = cleanString(tpl.status).toUpperCase();
     if (remoteQuality) {
       payload.quality_score = remoteQuality;
@@ -3063,6 +3096,9 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
 
   const clinicIds = new Set();
   const groupIds = new Set();
+  for (const b of require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings || []) {
+    if (b.wabaId === String(wabaId) && await brokerTemplateBinding(wabaId,b.clinicId)) clinicIds.add(b.clinicId);
+  }
   linkedAssets.forEach((asset) => {
     const assignmentScope = String(asset.assignmentScope || '').trim().toLowerCase();
     const clinicId = Number(asset.clinicaId || 0);
@@ -3183,6 +3219,12 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
 }
 
 async function enqueueCreateTemplatesJob(data) {
+  if (await brokerTemplateBinding(data?.wabaId)) {
+    const {job}=await jobRequestsService.enqueueUniqueJobRequest({type:'whatsapp_template_create',priority:'normal',origin:'whatsapp_template_create',maxAttempts:3,
+      dedupeScope:'create:'+require('node:crypto').createHash('sha256').update(JSON.stringify(data)).digest('hex')+':'+Math.floor(Date.now()/60000),
+      payload:{wabaId:data.wabaId,clinicId:data.clinicId,groupId:data.groupId,assignmentScope:data.assignmentScope}});
+    return job;
+  }
   return queues.whatsappTemplateCreate.add('create', data, {
     attempts: 5,
     backoff: { type: 'exponential', delay: 60000 },
@@ -3192,6 +3234,12 @@ async function enqueueCreateTemplatesJob(data) {
 }
 
 async function enqueuePropagateCatalogTemplateJob(data) {
+  if (require('../lib/whatsappAuthorizedBrokerClient').configuration()) {
+    const {job}=await jobRequestsService.enqueueUniqueJobRequest({type:'whatsapp_template_create',priority:'normal',origin:'whatsapp_catalog_propagation',maxAttempts:3,
+      dedupeScope:'propagate:'+require('node:crypto').createHash('sha256').update(JSON.stringify(data)).digest('hex')+':'+Math.floor(Date.now()/60000),
+      payload:{...data,mode:'propagate_catalog_item'}});
+    return job;
+  }
   return queues.whatsappTemplateCreate.add('propagate_catalog_item', data, {
     attempts: 5,
     backoff: { type: 'exponential', delay: 60000 },
@@ -3220,7 +3268,7 @@ async function enqueueSyncTemplatesJob(data, options = {}) {
     dedupeWindowMs: options.dedupeWindowMs,
   });
 
-  if (delayMs > 0) {
+  if (delayMs > 0 || await brokerTemplateBinding(data?.wabaId || data?.waba_id)) {
     const wabaId = String(data?.wabaId || data?.waba_id || '').trim();
     if (!wabaId) {
       throw new Error('whatsapp_template_sync_delayed requires data.wabaId');
@@ -3233,7 +3281,7 @@ async function enqueueSyncTemplatesJob(data, options = {}) {
       origin: 'whatsapp_template_followup',
       maxAttempts: 5,
       nextRunAt,
-      dedupeScope: jobId || `waba:${wabaId}:${nextRunAt.toISOString()}`,
+      dedupeScope: jobId || `waba:${wabaId}:sync:${Math.floor(nextRunAt.getTime()/60000)}`,
       // Nunca persistir accessToken en JobRequests: el handler resuelve el
       // asset activo y sus credenciales justo antes de consultar Meta.
       payload: {
@@ -3269,7 +3317,7 @@ async function runDelayedSyncTemplatesJob(payload = {}) {
   }
 
   const asset = await resolveWabaAssetById(wabaId);
-  if (!asset?.waAccessToken) {
+  if (!asset?.waAccessToken && !asset?.whatsappAuthorizedBinding) {
     throw new Error('whatsapp_template_sync_delayed missing active WABA credentials');
   }
 
@@ -3353,6 +3401,14 @@ async function enqueueSyncForAllWabas(options = {}) {
 
   let queued = 0;
   const seenWabas = new Set();
+  // Authorized connections have intentionally inactive legacy rows and no token.
+  // Queue only fresh metadata-only jobs; never resume the quarantined Bull backlog.
+  for (const candidate of require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings || []) {
+    if (!candidate.sendEnabled || targetWabaIds && !targetWabaIds.includes(candidate.wabaId) || seenWabas.has(candidate.wabaId)) continue;
+    if (!await brokerTemplateBinding(candidate.wabaId,candidate.clinicId)) continue;
+    await enqueueSyncTemplatesJob({wabaId:candidate.wabaId});
+    seenWabas.add(candidate.wabaId); queued++;
+  }
   for (const asset of assets) {
     if (!asset.wabaId || !asset.waAccessToken) continue;
     if (seenWabas.has(asset.wabaId)) continue;

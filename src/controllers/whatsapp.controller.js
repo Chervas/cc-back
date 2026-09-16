@@ -1277,6 +1277,17 @@ async function resolveWabaFromContext({ clinicId, phoneNumberId, wabaId, userId 
     where[Op.or] = clinicScope;
   }
 
+  const broker = require('../lib/whatsappAuthorizedBrokerClient');
+  const configured = broker.configuration();
+  const selected = configured?.bindings.filter(b =>
+    (!clinicId || b.clinicId === Number(clinicId)) && (!phoneNumberId || b.phoneId === String(phoneNumberId)) && (!wabaId || b.wabaId === String(wabaId))
+    && (isGlobalAdmin || clinicIds.map(Number).includes(b.clinicId)));
+  for (const candidate of selected || []) {
+    const authorized = await broker.binding(candidate.clinicId,candidate.assetId);
+    if (!authorized?.sendEnabled) continue;
+    const asset = await ClinicMetaAsset.findByPk(candidate.assetId);
+    if (asset) { asset.whatsappAuthorizedBinding=authorized; return asset; }
+  }
   const asset = await ClinicMetaAsset.findOne({
     where,
     include: [{ model: MetaConnection, as: 'metaConnection', attributes: ['userId'] }],
@@ -1595,7 +1606,7 @@ exports.syncTemplates = async (req, res) => {
     }
 
     const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
-    if (!asset || !asset.wabaId || !asset.waAccessToken) {
+    if (!asset || !asset.wabaId || (!asset.waAccessToken && !asset.whatsappAuthorizedBinding)) {
       return res.status(404).json({ error: 'waba_not_found' });
     }
 
@@ -1757,7 +1768,7 @@ exports.createCustomTemplate = async (req, res) => {
     }
 
     const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
-    if (!asset || !asset.wabaId || !asset.waAccessToken) {
+    if (!asset || !asset.wabaId || (!asset.waAccessToken && !asset.whatsappAuthorizedBinding)) {
       return res.status(404).json({ error: 'waba_not_found' });
     }
 

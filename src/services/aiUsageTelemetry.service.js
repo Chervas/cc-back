@@ -77,6 +77,10 @@ async function recordAiUsage({
   status = 'success',
   inputTokens = 0,
   outputTokens = 0,
+  cachedInputTokens = 0,
+  audioSeconds = 0,
+  searchRequests = 0,
+  usageKnown = true,
   latencyMs = 0,
   fallbackUsed = false,
   error = null,
@@ -94,11 +98,16 @@ async function recordAiUsage({
   const safeOutputTokens = nonNegativeInteger(outputTokens);
   const safeLatency = nonNegativeInteger(latencyMs);
   const succeeded = status === 'success';
-  const cost = estimateCostUsd(normalizedModel, safeInputTokens, safeOutputTokens);
   const now = new Date();
   const tenant = normalizeTenantScope({ clinicId, groupId });
 
   try {
+    const pricing = require('./aiPricing.service');
+    const price = await pricing.effective(normalizedProvider, normalizedModel);
+    const measured = { inputTokens: safeInputTokens, outputTokens: safeOutputTokens,
+      cachedInputTokens: Math.min(safeInputTokens, nonNegativeInteger(cachedInputTokens)),
+      audioSeconds: Math.max(0, Number(audioSeconds) || 0), searchRequests: nonNegativeInteger(searchRequests), usageKnown };
+    const estimate = pricing.estimate(price, measured);
     const row = await findOrCreateUsage({
       usageDate: now.toISOString().slice(0, 10),
       provider: normalizedProvider,
@@ -125,13 +134,18 @@ async function recordAiUsage({
       inputTokens: safeInputTokens,
       outputTokens: safeOutputTokens,
       latencyMsTotal: safeLatency,
-      estimatedCostUsd: cost,
+      estimatedCostUsd: estimate.cost,
+      cachedInputTokens: measured.cachedInputTokens,
+      audioSeconds: measured.audioSeconds,
+      searchRequests: measured.searchRequests,
+      unpricedRequests: estimate.complete ? 0 : 1,
     });
     await row.update({
       lastStatus: succeeded ? 'success' : 'error',
       lastErrorCode: succeeded ? null : publicErrorCode(error),
       lastUsedAt: now,
-      metadata: metadata && typeof metadata === 'object' ? metadata : row.metadata,
+      metadata: { ...(metadata && typeof metadata === 'object' ? metadata : {}), price: estimate.snapshot,
+        price_complete: estimate.complete },
     });
     return row;
   } catch (telemetryError) {
@@ -145,9 +159,28 @@ async function recordAiUsage({
   }
 }
 
+// Count the provider response once, before parsing business output. Only usage
+// metrics enter telemetry; never prompts, audio, identifiers or response text.
+async function recordProviderResponse({provider,model,useCase,response,clinicId=null,groupId=null,audioSeconds=null,searchRequests=0,status='success',error=null}) {
+  const raw=response?.usage || response?.usageMetadata || {};
+  const input=raw.input_tokens ?? raw.prompt_tokens ?? raw.total_input_tokens ?? raw.promptTokenCount;
+  const outputBase=raw.output_tokens ?? raw.completion_tokens ?? raw.total_output_tokens ?? raw.candidatesTokenCount;
+  const output=outputBase==null?undefined:Number(outputBase)+(provider==='gemini'?Number(raw.total_thought_tokens??raw.thoughtsTokenCount??0):0);
+  const cached=raw.input_tokens_details?.cached_tokens ?? raw.prompt_tokens_details?.cached_tokens ?? raw.total_cached_tokens ?? raw.cachedContentTokenCount ?? 0;
+  return recordAiUsage({provider,model:response?.model||model,useCase,inputTokens:input,outputTokens:output,
+    cachedInputTokens:cached,audioSeconds:audioSeconds??response?.duration??0,searchRequests,clinicId,groupId,status,error,
+    usageKnown:provider==='groq'?Number.isFinite(Number(audioSeconds??response?.duration)):input!=null&&output!=null});
+}
+
+async function recordProviderFailure({error,...context}) {
+  return recordProviderResponse({...context,response:{usage:error?.response?.data?.usage},status:'error',error:{code:publicErrorCode(error)}});
+}
+
 module.exports = {
   PRICE_PER_MILLION_USD,
   estimateCostUsd,
   recordAiUsage,
+  recordProviderResponse,
+  recordProviderFailure,
   __testing: { publicErrorCode, nonNegativeInteger, normalizeTenantScope },
 };

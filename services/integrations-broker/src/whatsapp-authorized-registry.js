@@ -1,19 +1,20 @@
 'use strict';
 const path = require('node:path'); const { DatabaseSync } = require('node:sqlite');
 const E = require('./whatsapp-onboarding-contract'); const C = require('./whatsapp-authorized-contract'); const { BrokerError, fail } = require('./errors');
+const M = require('./whatsapp-template-management');
 function validateAuthorization(value) {
-  if (!C.keys(value, ['connectionRef','authorizationId','enrollmentBinding','phoneId','wabaId','candidateDigest','expiresAt','templates'], ['enabled'])
+  if (!C.keys(value, ['connectionRef','authorizationId','enrollmentBinding','phoneId','wabaId','candidateDigest','expiresAt'], ['enabled','templates'])
     || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(value.connectionRef) || !E.uuid(value.authorizationId)
     || !E.id(value.phoneId) || !E.id(value.wabaId) || !/^[a-f0-9]{64}$/.test(value.candidateDigest)
     || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0 || value.enabled !== undefined && typeof value.enabled !== 'boolean'
-    || !Array.isArray(value.templates) || value.templates.length > 1000) fail('invalid_request');
+    || value.templates !== undefined && (!Array.isArray(value.templates) || value.templates.length > 1000)) fail('invalid_request');
   const enrollment = E.bindingFor(value.enrollmentBinding);
   if (!enrollment.customer) fail('invalid_request');
-  for (const t of value.templates) if (!C.keys(t, ['id','name','language','contentDigest']) || !E.id(t.id)
+  for (const t of value.templates || []) if (!C.keys(t, ['id','name','language','contentDigest']) || !E.id(t.id)
     || !/^[a-z0-9_]{1,512}$/.test(t.name) || !/^[a-z]{2,3}(?:_[A-Z]{2})?$/.test(t.language)
     || !/^[a-f0-9]{64}$/.test(t.contentDigest)) fail('invalid_request');
-  if (new Set(value.templates.map(t => t.id)).size !== value.templates.length
-    || new Set(value.templates.map(t => t.name + ':' + t.language)).size !== value.templates.length) fail('invalid_request');
+  if (new Set((value.templates || []).map(t => t.id)).size !== (value.templates || []).length
+    || new Set((value.templates || []).map(t => t.name + ':' + t.language)).size !== (value.templates || []).length) fail('invalid_request');
   return { ...structuredClone(value), enabled: value.enabled === true };
 }
 function createWhatsappAuthorizedRegistry({ filename, authorizations, loadEnrollmentBinding, now = () => Date.now() }) {
@@ -69,10 +70,10 @@ function createWhatsappAuthorizedRegistry({ filename, authorizations, loadEnroll
     authorize({ request, binding, principal }) {
       const value = this.assert(binding); const b = E.bindingFor(value.enrollmentBinding);
       if (request.assetRef !== 'wa-phone:' + value.definition.phoneId || !b.clinicIds.some(id => request.tenantRef === 'clinic:' + id)
-        || request.operation === C.SEND && (principal.id !== 'staging:whatsapp' || request.payload.authorizationId !== value.definition.authorizationId
+        || (request.operation === C.SEND || M.OPERATIONS.includes(request.operation)) && (principal.id !== 'staging:whatsapp' || request.payload.authorizationId !== value.definition.authorizationId
           || request.payload.phoneId !== value.definition.phoneId)
         || request.operation === C.REVOKE && principal.id !== 'control:whatsapp') fail('scope_denied');
-      if (![C.SEND,C.REVOKE].includes(request.operation)) fail('operation_denied'); return value;
+      if (![C.SEND,C.REVOKE,...M.OPERATIONS].includes(request.operation)) fail('operation_denied'); return value;
     },
     close() { if (!closed) { closed = true; db.close(); } },
   });

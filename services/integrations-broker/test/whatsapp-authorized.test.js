@@ -11,7 +11,7 @@ test('Same verified BISU candidate sends selected phone, preserving held status 
   const result=await a.execute();assert.deepEqual(result.data,{messages:[{id:'wamid.FICTITIOUS_QA',message_status:'held_for_quality_assessment'}]});
   assert.equal(a.f.state.puts,puts);assert.equal(a.f.snapshot(),before);assert.equal(a.sends().length,1);assert.equal(a.sends()[0].id,'401');
   for(const token of a.f.state.heldTokens)assert(token.every(v=>v===0));
-  assert(a.state.calls.some(c=>c.action==='inspect'));assert(a.state.calls.some(c=>c.action==='waba_owner'));assert(a.state.calls.some(c=>c.action==='phones'));
+  assert.deepEqual(a.state.calls.map(c=>c.action), ['send']);
 });
 test('Staged credential survives the completed OAuth window but not operational expiry',async t=>{
   const a=await fixture(t);a.f.state.clock+=660000;await a.execute();a.f.state.clock=a.definition.expiresAt;
@@ -43,47 +43,15 @@ for(const mutation of ['digest','AWSCURRENT','AWSPREVIOUS'])test('Candidate '+mu
 test('Immutable version may lose AWSPENDING label without becoming another candidate',async t=>{
   const a=await fixture(t);a.f.records.get(a.f.binding.secretArn).get(a.definition.authorizationId).stages=[];await a.execute();assert.equal(a.sends().length,1);
 });
-test('Another enrollment may expand a selection-only grant without expanding the sender',async t=>{
-  const a=await fixture(t);a.state.after=(request,result)=>{
-    if(request.action==='inspect')for(const grant of result.data.granular_scopes)grant.target_ids.push('399');
-    return result;
-  };
-  await a.execute();assert.equal(a.sends().length,1);assert.equal(a.sends()[0].id,'401');
-  assert.ok(a.state.calls.some(c=>c.action==='waba_owner'&&c.id==='399'));
-  const request=a.request();request.assetRef='wa-phone:499';request.payload.phoneId='499';
-  await assert.rejects(a.execute(request),{code:'scope_denied'});assert.equal(a.sends().length,1);
-});
-for(const mutation of ['lost_selected','foreign_new_owner'])test('Expanded grant still rejects '+mutation,async t=>{
-  const a=await fixture(t);a.state.after=(request,result)=>{
-    if(request.action==='inspect')for(const grant of result.data.granular_scopes){
-      if(mutation==='lost_selected')grant.target_ids=['399'];else grant.target_ids.push('399');
-    }
-    if(mutation==='foreign_new_owner'&&request.action==='waba_owner'&&request.id==='399')result.owner_business_info.id='999';
-    return result;
-  };
-  await assert.rejects(a.execute(),{code:'scope_denied'});assert.equal(a.sends().length,0);
-});
-for(const mutation of ['foreign_owner','subject','scope','phone','revoked'])test('Fresh Meta '+mutation+' proof prevents POST',async t=>{
-  const a=await fixture(t);a.state.after=(request,result)=>{
-    if(mutation==='foreign_owner'&&request.action==='waba_owner')result.owner_business_info.id='999';
-    if(request.action==='inspect'){if(mutation==='subject')result.data.user_id='999';if(mutation==='scope')result.data.scopes.push('ads_management');if(mutation==='revoked')result.data.is_valid=false;}
-    if(mutation==='phone'&&request.action==='phones')result.data=[{id:'999'}];return result;
-  };await assert.rejects(a.execute());assert.equal(a.sends().length,0);
-});
 test('Image header, BODY values, QUICK_REPLY and dynamic URL buttons preserve their real Graph message',async t=>{
   const a=await fixture(t);const message=templateMessage();await a.execute(a.request(message));assert.deepEqual(a.sends()[0].json,message);
-  assert.equal(a.state.calls.filter(c=>c.action==='template').length,1);
+  assert.deepEqual(a.state.calls.map(c=>c.action), ['send']);
 });
-test('Changed button text or template status denies sending despite same template name',async t=>{
-  const a=await fixture(t);a.state.remoteTemplate.components[2].buttons[0].text='FRAUDULENT';await assert.rejects(a.execute(a.request(templateMessage())),{code:'operation_denied'});assert.equal(a.sends().length,0);
-});
-test('Template parameters must match the pinned components including dynamic URL positions',async t=>{
-  const a=await fixture(t);const message=templateMessage();message.template.components=message.template.components.filter(c=>c.type!=='button');
-  await assert.rejects(a.execute(a.request(message)),{code:'operation_denied'});assert.equal(a.sends().length,0);
-});
-test('A block during template lookup is rechecked immediately before POST',async t=>{
-  const a=await fixture(t);a.state.after=(request,result)=>{if(request.action==='template')a.blockScope();return result;};
-  await assert.rejects(a.execute(a.request(templateMessage())),{code:'asset_revoked'});assert.equal(a.sends().length,0);
+test('Template status and parameter interpretation remain the responsibility of Meta',async t=>{
+  const a=await fixture(t);a.state.remoteTemplate.status='PENDING';
+  const message=templateMessage();message.template.components=message.template.components.filter(c=>c.type!=='button');
+  await a.execute(a.request(message));assert.equal(a.sends().length,1);
+  assert.deepEqual(a.state.calls.map(c=>c.action), ['send']);
 });
 test('Typed interactive CTA remains supported with fixed sender',async t=>{
   const a=await fixture(t);const message={messaging_product:'whatsapp',to:'34000000123',type:'interactive',interactive:{type:'cta_url',body:{text:'QA'},action:{name:'cta_url',parameters:{display_text:'Abrir',url:'https://clinic.example.invalid/qa'}}}};
@@ -107,31 +75,25 @@ test('Control revocation is durable and scoped to the selected clinic even for a
   await a.execute(revoke,true);a.restart();await assert.rejects(a.execute(),{code:'asset_revoked'});
   await a.execute(a.request(textMessage(),{tenantRef:'clinic:72'}));assert.equal(a.sends().length,1);
 });
-test('A scope block during grant ownership verification stops before another Meta operation',async t=>{
-  const a=await fixture(t);a.state.after=(r,v)=>{if(r.action==='waba_owner')a.blockScope();return v;};
-  await assert.rejects(a.execute(),{code:'asset_revoked'});assert.equal(a.state.calls.some(c=>c.action==='phones'),false);assert.equal(a.sends().length,0);
-});
 test('Secret callbacks cannot return bearer values; all borrowed buffers are wiped',async t=>{
   const a=await fixture(t);let borrowed;
   await assert.rejects(a.secrets.withSecret(a.binding,token=>{borrowed=token;return {leak:token.toString('utf8')};}),{code:'provider_failed'});
   assert(borrowed.every(v=>v===0));assert.equal(a.sends().length,0);
 });
-test('Provider expiry during template lookup rejects the send after fresh inspection',async t=>{
-  const a=await fixture(t);const at=a.f.now();a.state.after=(r,v)=>{
-    if(r.action==='inspect')v.data.expires_at=Math.ceil(at/1000)+1;
-    if(r.action==='template')a.f.state.clock=at+3000;return v;
-  };
-  await assert.rejects(a.execute(a.request(templateMessage())),{code:'credential_revoked'});assert.equal(a.sends().length,0);
+test('A local revocation during the secret callback invalidates the borrowed proof',async t=>{
+ const a=await fixture(t);
+ await assert.rejects(a.secrets.withSecret(a.binding,token=>{a.blockScope();return a.secrets.proof(token,a.binding.connectionRef);}),{code:'asset_revoked'});
+ assert.equal(a.sends().length,0);
 });
 test('Template digest includes static buttons and image format while ignoring provider examples',()=>{
   const v=template();const digest=C.templateDigest(v);v.components[0].example.header_handle=['CHANGED_EXAMPLE'];assert.equal(C.templateDigest(v),digest);
   v.components[2].buttons[0].text='Otra acción';assert.notEqual(C.templateDigest(v),digest);
 });
 
-test('An unpinned template is explicitly rejected before any template read or send', async t => {
+test('A newly created template can send without a second local approval', async t => {
   const a = await fixture(t); const message = templateMessage(); message.template.name = 'not_authorized_v1';
-  await assert.rejects(a.execute(a.request(message)), { code: 'whatsapp_template_not_authorized' });
-  assert.equal(a.sends().length, 0);
+  await a.execute(a.request(message));
+  assert.equal(a.sends().length, 1);
   assert.equal(a.state.calls.filter(c => c.action === 'template').length, 0);
 });
 

@@ -140,8 +140,8 @@ async function main(filename, connectionRef, { awsFactory = connectAws, http = c
     };
     // Only this CLI injects the paused-review view; runtime assert stays strict.
     secrets = createWhatsappAuthorizedSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/',
-      kmsKeyArn: SECRET_KEY, registry: { assert: value => registry.review(value) }, http: readOnlyHttp, now });
-    return await reviewAuthorization({ binding, registry, secrets, http: readOnlyHttp, now });
+      kmsKeyArn: SECRET_KEY, registry: { assert: value => registry.review(value) }, http: readOnlyHttp, verifyProvider: true, now });
+    return await reviewAuthorization({ binding, registry, secrets, http: readOnlyHttp, verifyProvider: true, now });
   } finally { raw?.fill(0); secrets?.close(); registry?.close(); aws?.close(); }
 }
 if (require.main === module) main(process.argv[2], process.argv[3]).then(value => {

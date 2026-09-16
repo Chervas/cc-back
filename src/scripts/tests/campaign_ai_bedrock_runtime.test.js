@@ -36,6 +36,8 @@ function response(input, modelRequestId = 'request-test') {
 
 async function withRuntime(mockClient, callback) {
   const previous = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  const security = require('../../services/securityMonitoring.service');
+  const originalPause = security.assertAiAllowed; security.assertAiAllowed = async () => {};
   const originalTelemetry = telemetry.recordAiUsage;
   const usage = [];
   process.env.BEDROCK_ENABLED = 'true';
@@ -52,7 +54,7 @@ async function withRuntime(mockClient, callback) {
     await callback(usage);
   } finally {
     bedrock.__testing.setClientForTests(null);
-    telemetry.recordAiUsage = originalTelemetry;
+    telemetry.recordAiUsage = originalTelemetry; security.assertAiAllowed = originalPause;
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -200,6 +202,7 @@ test('agrega costes y solicitudes del monitor sin depender del scope de UI', () 
     latency_ms_total: 300,
     average_latency_ms: 60,
     estimated_cost_usd: 0.006,
+    cached_input_tokens: 0, audio_seconds: 0, search_requests: 0, unpriced_requests: 0,
   });
   const grouped = monitoring.__testing.groupUsage(rows, (row) => ({ key: row.scope_key }));
   assert.equal(grouped.length, 2);

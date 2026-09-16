@@ -6,6 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const axios = require('axios');
+const quarantinePath = require.resolve('../../lib/metaQuarantineHttp');
+require.cache[quarantinePath] = { id: quarantinePath, filename: quarantinePath, loaded: true, exports: axios }; // offline mock only
 const { Op } = require('sequelize');
 
 const db = require('../../../models');
@@ -315,6 +317,7 @@ test('el sync de Meta no reactiva plantillas retiradas ni reemplazadas', async (
         { id: 'meta-1001', name: 'retirada_manual', language: 'es', status: 'APPROVED' },
         { id: 'meta-1002', name: 'version_reemplazada', language: 'es', status: 'APPROVED' },
         { id: 'meta-1004', name: 'rechazada_remota', language: 'es', status: 'REJECTED' },
+        { id: 'meta-9999', name: 'externa_desconocida', language: 'es', status: 'APPROVED' },
       ],
     },
   });
@@ -364,4 +367,33 @@ test('la migración de retirada es aditiva y no reescribe estados históricos', 
   assert.match(migration, /addColumn\(TABLE, 'retired_at'/);
   assert.match(migration, /addColumn\(TABLE, 'retired_by_user_id'/);
   assert.doesNotMatch(migration, /\bUPDATE\s+[`\w]/i);
+});
+
+test('la creación con imagen usa AWS sin token local ni HTTP legacy', async t => {
+  const broker = require('../../lib/whatsappAuthorizedBrokerClient');
+  const M = require('../../../services/integrations-broker/src/whatsapp-template-management');
+  const operations=[];
+  t.mock.method(broker,'templateBinding',async()=>({clinicId:57,wabaId:'301'}));
+  t.mock.method(broker,'templates',async(waba,operation,input)=>{
+    assert.equal(waba,'301');assert(!JSON.stringify(input).includes('access_token'));operations.push(operation);
+    if(operation===M.HEADER)return {handle:'synthetic-header'};
+    assert.equal(input.template.components[0].example.header_handle[0],'synthetic-header');
+    return {id:'999',status:'PENDING'};
+  });
+  t.mock.method(axios,'get',async()=>{throw Error('Legacy HTTP must not be reached');});
+  t.mock.method(axios,'post',async()=>{throw Error('Legacy HTTP must not be reached');});
+  t.mock.method(db.WhatsappTemplate,'create',async v=>({id:999,...v}));
+  t.mock.method(jobRequestsService,'enqueueUniqueJobRequest',async()=>({job:{id:9903}}));
+  const result=await whatsappTemplatesService.createCustomTemplateForClinic({clinicId:57,wabaId:'301',displayName:'Prueba segura',bodyText:'Texto ficticio',headerImageUrl:'https://example.invalid/image.jpg',category:'UTILITY',createdByUserId:1});
+  assert.equal(result.submitted,true);assert.deepEqual(operations,[M.HEADER,M.CREATE]);
+});
+
+test('el refresco periódico admite el binding sin token y solo encola jobs nuevos',async t=>{
+  const broker=require('../../lib/whatsappAuthorizedBrokerClient');const calls=[];
+  t.mock.method(broker,'configuration',()=>({bindings:[{clinicId:57,wabaId:'301',sendEnabled:true},{clinicId:99,wabaId:'999',sendEnabled:false}]}));
+  t.mock.method(broker,'templateBinding',async()=>({clinicId:57,wabaId:'301'}));
+  t.mock.method(db.ClinicMetaAsset,'findAll',async()=>[]);
+  t.mock.method(jobRequestsService,'enqueueUniqueJobRequest',async value=>{calls.push(value);return {job:{id:9903}};});
+  const result=await whatsappTemplatesService.enqueueSyncForAllWabas();
+  assert.equal(result.queued,1);assert.equal(calls[0].type,'whatsapp_template_sync_delayed');assert.equal(calls[0].payload.wabaId,'301');assert(!JSON.stringify(calls).includes('accessToken'));
 });

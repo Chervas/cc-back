@@ -1,9 +1,9 @@
 'use strict';
 const { GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager'); const { createHmac } = require('node:crypto');
 const E = require('./whatsapp-onboarding-contract'); const { BrokerError, fail } = require('./errors');
-const { createWhatsappOnboardingSecrets } = require('./whatsapp-onboarding-secrets');
 const { createWhatsappCustomerVerifier } = require('./whatsapp-customer-verifier'); const { createWhatsappPhoneVerifier } = require('./whatsapp-phone-verifier');
-function createWhatsappAuthorizedSecrets({ client, accountId, prefix, kmsKeyArn, registry, http, now = () => Date.now() }) {
+const { createWhatsappOnboardingSecrets } = require('./whatsapp-onboarding-secrets');
+function createWhatsappAuthorizedSecrets({ client, accountId, prefix, kmsKeyArn, registry, http, verifyProvider = false, now = () => Date.now() }) {
   if (!registry?.assert || typeof http !== 'function') fail('invalid_request');
   const enrollment = createWhatsappOnboardingSecrets({ client, accountId, prefix, kmsKeyArn });
   const active = new Map(); const proofs = new WeakMap(); const generations = new Map(); let closed = false;
@@ -28,10 +28,13 @@ function createWhatsappAuthorizedSecrets({ client, accountId, prefix, kmsKeyArn,
         try { if (!encoded.body.equals(body)) fail('secret_unavailable'); } finally { encoded.body.fill(0); body.fill(0); body = null; }
         const tokens = active.get(ref) || new Set(); tokens.add(token); active.set(ref, tokens);
         abort = () => { token.fill(0); proofs.delete(token); }; signal?.addEventListener('abort', abort, { once: true }); check();
-        const guardedHttp = async input => { check(); const value = await http(input); check(); return value; };
-        const customer = createWhatsappCustomerVerifier({ http: guardedHttp, now }); const phone = createWhatsappPhoneVerifier({ http: guardedHttp });
         return await enrollment.withApplication(original, async appSecret => {
           check(); const proof = createHmac('sha256', appSecret).update(token).digest('hex'); proofs.set(token, { ref, proof, check });
+          let grant = metadata;
+          if (verifyProvider) {
+            const guardedHttp = async input => { check(); const value = await http(input); check(); return value; };
+            const customer = createWhatsappCustomerVerifier({ http: guardedHttp, now });
+            const phone = createWhatsappPhoneVerifier({ http: guardedHttp });
           applicationToken = Buffer.concat([Buffer.from(metadata.appId + '|'), appSecret]);
           let response; try { response = await guardedHttp({ action: 'inspect', id: metadata.appId, token: applicationToken, candidate: token, signal }); }
           finally { applicationToken.fill(0); }
@@ -41,11 +44,16 @@ function createWhatsappAuthorizedSecrets({ client, accountId, prefix, kmsKeyArn,
           // selected WABA, subject, owner and WhatsApp-only permissions. Verify
           // every current owner, but do not turn the historical unselected list
           // into a permanent restriction on later authorized enrollments.
-          const grant = await customer({ response, token, proof, signal, expected: { ...b.customer, appId: b.appId, scopes: b.scopes,
+          grant = await customer({ response, token, proof, signal, expected: { ...b.customer, appId: b.appId, scopes: b.scopes,
             businessId: metadata.businessId, ...(b.customer.selectionOnly ? {} : { wabaIds: metadata.grantedWabaIds }), selectedWabaId: metadata.wabaId } }); check();
           if (grant.subjectId !== metadata.subjectId || grant.tokenType !== metadata.tokenType || grant.businessId !== metadata.businessId
             || !b.customer.selectionOnly && JSON.stringify(grant.wabaIds) !== JSON.stringify(metadata.grantedWabaIds)) fail('scope_denied');
           await phone({ wabaId: metadata.wabaId, phoneId: metadata.phoneId, token, proof, signal }); check();
+          }
+          // Provider identity, granted permissions and ownership were verified
+          // when this immutable credential version was enrolled. Runtime keeps
+          // local scope/revocation/expiry checks and secret integrity checks;
+          // a transient inspection failure must not prevent ordinary sends.
           const checkGrant = () => { check(); if ([grant.expiresAt, grant.dataAccessExpiresAt].some(v => v !== null && v <= now())) fail('credential_revoked'); };
           proofs.set(token, { ref, proof, check: checkGrant }); checkGrant();
           const value = await work(token); checkGrant();

@@ -33,7 +33,7 @@ function fixture() {
     loadConversation: async id => ({ id, clinic_id: 123 }),
     createTransport: () => ({ execute: async command => { calls.broker.push(command); return { requestId: command.requestId, replayed: false,
       data: { messages: [{ id: 'wamid.SYNTHETIC_ACCEPTED', message_status: 'accepted' }] } }; } }) });
-  const modules = { '../lib/metaQuarantineHttp': { post: async (...args) => { calls.graph.push(args); throw Object.assign(Error('meta_integration_quarantined'), { code: 'META_INTEGRATION_QUARANTINED' }); } },
+  const modules = { './securityMonitoring.service': { assertTemplateAllowed: async () => {} }, '../lib/metaQuarantineHttp': { post: async (...args) => { calls.graph.push(args); throw Object.assign(Error('meta_integration_quarantined'), { code: 'META_INTEGRATION_QUARANTINED' }); } },
     '../../models': db, '../lib/phone': require('../../lib/phone'), '../lib/whatsapp-channel-role': roles, sequelize: { Op },
     '../lib/whatsappAuthorizedBrokerClient': broker,
     './whatsappChannelBindings.service': { applyClinicBindings: async (_id, assets) => assets },

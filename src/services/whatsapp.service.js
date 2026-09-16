@@ -472,6 +472,9 @@ class WhatsAppService {
     }
 
     async dispatchMessage(payload, clinicConfig = {}, healthContext = {}) {
+        if (payload.type === 'template') {
+            await require('./securityMonitoring.service').assertTemplateAllowed(clinicConfig.wabaId, payload.template.name, payload.template.language.code);
+        }
         if (clinicConfig.authorizedBroker) {
             const binding = clinicConfig.authorizedBroker;
             const messageId = Number.isSafeInteger(healthContext.messageId) && healthContext.messageId > 0

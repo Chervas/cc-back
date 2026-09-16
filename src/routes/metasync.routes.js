@@ -68,6 +68,14 @@ router.get('/diagnostic/asset-details/:assetId', metaDiagnosticController.getAss
 // backfills clínicos ordinarios se encolan desde los endpoints OAuth que ya
 // validan destinos; esta API manual queda reservada a administración técnica.
 router.use('/jobs', requireTechnicalAdmin);
+const securityMonitoring = require('../controllers/securityMonitoring.controller');
+router.get('/jobs/security/targets', securityMonitoring.targets);
+router.get('/jobs/security', securityMonitoring.overview);
+router.put('/jobs/security/rules', securityMonitoring.rules);
+router.post('/jobs/security/measures', securityMonitoring.measure);
+router.post('/jobs/security/alerts/:id/acknowledge', securityMonitoring.acknowledge);
+router.get('/jobs/usage/ai-runtime/prices', securityMonitoring.prices);
+router.put('/jobs/usage/ai-runtime/prices', securityMonitoring.updatePrice);
 router.post('/jobs/initialize', metaJobsController.initializeJobs);
 router.get('/jobs/status', metaJobsController.getJobsStatus);
 router.post('/jobs/start', metaJobsController.startJobs);
