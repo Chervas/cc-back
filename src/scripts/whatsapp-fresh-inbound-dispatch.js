@@ -13,6 +13,8 @@ process.once('SIGINT', () => { stopping=true; });process.once('SIGTERM', () => {
   while (!stopping) {
     try { const result=await realtime();if(result.notified)log({event:'fresh_realtime_published',...result}); }
     catch { log({event:'fresh_realtime_retry'}); }
+    try { const result=await require('../services/whatsappInboundMedia.service').tick();if(result.processed)log({event:'inbound_media_processed',...result}); }
+    catch { log({event:'inbound_media_retry'}); }
     try { const result=await tick();if(result.dispatched)log({event:'fresh_inbound_dispatched',...result}); }
     catch { log({event:'fresh_inbound_retry'}); }
     if (!stopping) await new Promise(resolve=>setTimeout(resolve,5000));
