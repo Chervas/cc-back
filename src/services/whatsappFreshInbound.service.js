@@ -8,7 +8,13 @@ async function tick() {
   const bindings = config.bindings.filter(b => b.sendEnabled);
   if (!bindings.length) return { dispatched: 0 };
   const db = require('../../models');
-  const [rows] = await db.sequelize.query("SELECT m.id FROM Messages m JOIN Conversations c ON c.id=m.conversation_id JOIN WhatsappInboxMessageKeys k ON k.message_id=m.id JOIN WhatsappInboxImports i ON i.receipt=JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.inbox_receipt')) AND i.clinic_id=c.clinic_id AND i.phone_id=JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.phone_number_id')) WHERE c.clinic_id IN (:clinics) AND m.direction='inbound' AND m.message_type='text' AND m.sent_at >= :cutoff AND m.sent_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 24 HOUR) AND JSON_EXTRACT(m.metadata,'$.historical')=CAST('false' AS JSON) AND JSON_EXTRACT(m.metadata,'$.passive_recovery')=CAST('true' AS JSON) AND JSON_EXTRACT(m.metadata,'$.fresh_inbound_dispatched_at') IS NULL ORDER BY m.id LIMIT 50", { replacements: { clinics: bindings.map(b=>b.clinicId), cutoff: new Date(config.messageNotBefore) } });
+  const replacements = { cutoff: new Date(config.messageNotBefore) };
+  const scopes = bindings.map((b, i) => {
+    replacements['clinic' + i] = b.clinicId; replacements['phone' + i] = b.phoneId;
+    replacements['since' + i] = new Date(Math.max(Date.parse(config.messageNotBefore), b.messageNotBefore ? Date.parse(b.messageNotBefore) : 0));
+    return `(c.clinic_id=:clinic${i} AND i.phone_id=:phone${i} AND m.sent_at>=:since${i})`;
+  });
+  const [rows] = await db.sequelize.query("SELECT m.id FROM Messages m JOIN Conversations c ON c.id=m.conversation_id JOIN WhatsappInboxMessageKeys k ON k.message_id=m.id JOIN WhatsappInboxImports i ON i.receipt=JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.inbox_receipt')) AND i.clinic_id=c.clinic_id AND i.phone_id=JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.phone_number_id')) WHERE (" + scopes.join(' OR ') + ") AND m.direction='inbound' AND m.message_type='text' AND m.sent_at >= :cutoff AND m.sent_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 24 HOUR) AND JSON_EXTRACT(m.metadata,'$.historical')=CAST('false' AS JSON) AND JSON_EXTRACT(m.metadata,'$.passive_recovery')=CAST('true' AS JSON) AND JSON_EXTRACT(m.metadata,'$.fresh_inbound_dispatched_at') IS NULL ORDER BY m.id LIMIT 50", { replacements });
   let dispatched = 0, held = 0;
   for (const row of rows) {
     try {

@@ -12,3 +12,10 @@ test('history, pre-cutoff replies, echoes, replayed or unproven messages never d
   for(const change of [{direction:'outbound'},{sent_at:'2026-09-15T16:59Z'},{sent_at:'2026-09-15T18:10Z'},{message_type:'event'},{conversation_id:4}]){assert.equal(eligible({...message(),...change},c,b,cut,now),false);}
   assert.equal(eligible(message(),c,{...b,sendEnabled:false},cut,now),false);assert.equal(eligible(message(),{...c,clinic_id:9},b,cut,now),false);
 });
+test('a newly connected number never automates replies from before its own cutover',()=>{
+  const recent={...b,messageNotBefore:'2026-09-15T17:56:00Z'};
+  assert.equal(eligible(message(),c,recent,cut,now),false);
+  assert.equal(eligible({...message(),sent_at:'2026-09-15T17:57:00Z'},c,recent,cut,now),true);
+  assert.equal(eligible(message(),c,b,cut,now),true);
+  assert.equal(eligible({...message(),sent_at:'2026-09-15T16:59:00Z'},c,{...b,messageNotBefore:'2026-09-14T00:00:00Z'},cut,now),false);
+});

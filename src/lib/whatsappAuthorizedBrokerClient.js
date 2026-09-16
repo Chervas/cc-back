@@ -11,6 +11,7 @@ const { createIntegrationsBrokerClient } = require('./integrationsBrokerClient')
 const ROOT = '/etc/clinicaclick-whatsapp-authorized/staging';
 const CONFIG_FILE = ROOT + '/config.json';
 const BINDING_KEYS = ['connectionRef','authorizationId','clinicId','assetId','phoneId','wabaId','revision','sendEnabled'];
+const validCutoff = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value) && Number.isFinite(Date.parse(value));
 // Only denials that cannot originate from checks after Meta's message POST.
 // Scope/connection/asset revocations can race after that POST and remain unknown.
 const NO_SEND_CODES = new Set(['invalid_signature','rate_limited','whatsapp_template_not_authorized']);
@@ -25,12 +26,16 @@ function fail(code, unknown = false) {
   throw Object.assign(Error(code), { code, retryable: false, ...(unknown ? { delivery_unknown: true } : {}) });
 }
 function checkedBinding(value) {
-  if (!exact(value, BINDING_KEYS) || typeof value.connectionRef !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value.connectionRef)
+  const keys = [...BINDING_KEYS, ...(Object.hasOwn(value || {}, 'messageNotBefore') ? ['messageNotBefore'] : [])];
+  if (!exact(value, keys) || Object.hasOwn(value || {}, 'messageNotBefore') && !validCutoff(value.messageNotBefore)
+    || typeof value.connectionRef !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value.connectionRef)
     || !uuid(value.authorizationId) || !id(value.clinicId) || !id(value.assetId) || !id(value.revision)
     || !providerId(value.phoneId) || !providerId(value.wabaId) || typeof value.sendEnabled !== 'boolean') fail('whatsapp_authorized_binding_invalid');
-  return Object.freeze(Object.fromEntries(BINDING_KEYS.map(key => [key, value[key]])));
+  return Object.freeze(Object.fromEntries(keys.map(key => [key, value[key]])));
 }
-const sameBinding = (a, b) => BINDING_KEYS.every(key => a[key] === b[key]);
+const sameBinding = (a, b) => [...BINDING_KEYS, 'messageNotBefore'].every(key => a[key] === b[key]);
+const bindingCutoff = (config, binding) => new Date(Math.max(Date.parse(config.messageNotBefore),
+  binding?.messageNotBefore ? Date.parse(binding.messageNotBefore) : 0)).toISOString();
 function assertMessageEligibility(message, messageNotBefore) {
   const cutoff = Date.parse(messageNotBefore);
   const created = new Date(message?.createdAt || message?.created_at || '').getTime();
@@ -135,7 +140,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       return value;
     } catch (error) { fail(PREFLIGHT_CODES.has(error?.code) ? error.code : 'whatsapp_authorized_binding_invalid'); }
   }
-  async function eligibleIntent(intent, config) {
+  async function eligibleIntent(intent, config, selectedBinding) {
     try {
       const message = await loadMessage(intent.messageId);
       if (!message || String(message.id) !== intent.messageId || !id(Number(message.conversation_id))) fail('whatsapp_authorized_message_ineligible');
@@ -143,7 +148,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       if (!conversation || String(conversation.id) !== String(message.conversation_id) || Number(conversation.clinic_id) !== intent.clinicId) {
         fail('whatsapp_authorized_message_ineligible');
       }
-      assertMessageEligibility(message, config.messageNotBefore);
+      assertMessageEligibility(message, bindingCutoff(config, selectedBinding));
       await require('./whatsappAppointmentEligibility').assertAutomatedMessageEligibility({ message, conversation,
         payload: intent.message, loadExecution, loadAppointment, patientHeld });
     } catch { fail('whatsapp_authorized_message_ineligible'); }
@@ -213,12 +218,12 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       if (!captured || !sameBinding(captured, expected)) fail('whatsapp_authorized_binding_changed');
       if (!captured.sendEnabled) fail('whatsapp_authorized_send_paused');
       const config = read(); const transport = createTransport(config);
-      await eligibleIntent(intent, config);
+      await eligibleIntent(intent, config, captured);
       // Recheck durable scope/asset and private revision immediately before the
       // only network dispatch. There is no credential or legacy fallback.
       const beforeSend = await binding(intent.clinicId, intent.assetId);
       if (!beforeSend || !sameBinding(captured, beforeSend) || JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
-      await eligibleIntent(intent, config);
+      await eligibleIntent(intent, config, captured);
       if (await isBlocked(intent.clinicId) !== false) fail('whatsapp_authorized_scope_blocked');
       if (JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
       assertStaging(environment());

@@ -1,7 +1,8 @@
 'use strict';
 function eligible(message, conversation, binding, cutoff, now = Date.now()) {
   const m = message?.metadata;
-  const sent = new Date(message?.sent_at || '').getTime(), since = Date.parse(cutoff);
+  const sent = new Date(message?.sent_at || '').getTime(), since = Math.max(Date.parse(cutoff),
+    binding?.messageNotBefore ? Date.parse(binding.messageNotBefore) : 0);
   return !!(binding?.sendEnabled === true && message?.direction === 'inbound' && message.message_type === 'text'
     && conversation?.channel === 'whatsapp' && Number(conversation.clinic_id) === binding.clinicId
     && Number(message.conversation_id) === Number(conversation.id) && m?.passive_recovery === true
