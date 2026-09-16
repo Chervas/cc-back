@@ -32,7 +32,8 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
           minVersion: 'TLSv1.2', agent: false, headers: { 'content-type': 'application/json', 'content-length': body.length,
             'x-broker-key-id': keyId, 'x-broker-signature': sign(null, message, key).toString('base64url') } }, res => {
           const chunks = []; let size = 0;
-          res.on('data', chunk => { size += chunk.length; if (size > 1048576) req.destroy(error('broker_response_invalid')); else chunks.push(chunk); });
+          const maxResponse=command.operation==='meta.whatsapp.authorized.media.read.v1'?Math.ceil(32*1024*1024/3)*4+4096:1048576;
+          res.on('data', chunk => { size += chunk.length; if (size > maxResponse) req.destroy(error('broker_response_invalid')); else chunks.push(chunk); });
           res.on('error', () => finish(error('broker_unavailable')));
           res.on('aborted', () => finish(error('broker_unavailable')));
           res.on('end', () => {

@@ -163,6 +163,25 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       return read()?.bindings.filter(b => b.clinicId === clinicId).map(b => ({ ...b })) || [];
     },
     binding,
+    async media(messageId) {
+      assertStaging(environment());
+      const message=await loadMessage(Number(messageId));
+      const conversation=message&&await loadConversation(message.conversation_id), m=message?.metadata;
+      const config=read();
+      const candidate=config?.bindings.find(b=>b.clinicId===Number(conversation?.clinic_id)&&b.phoneId===m?.phone_number_id&&b.wabaId===m?.waba_id);
+      if(!candidate||!providerId(m?.media?.id)||conversation?.id!==message.conversation_id)fail('whatsapp_authorized_binding_invalid');
+      const captured=await binding(candidate.clinicId,candidate.assetId);
+      if(!captured)fail('whatsapp_authorized_binding_invalid');
+      const R=require('../../services/integrations-broker/src/whatsapp-inbound-media');
+      const requestId=randomUUID();
+      const result=await createTransport(config).execute({requestId,tenantRef:'clinic:'+captured.clinicId,connectionRef:captured.connectionRef,
+        assetRef:'wa-phone:'+captured.phoneId,operation:R.READ,payload:{authorizationId:captured.authorizationId,phoneId:captured.phoneId,mediaId:m.media.id}});
+      const latest=await binding(captured.clinicId,captured.assetId);
+      if(!latest||!sameBinding(captured,latest)||JSON.stringify(read())!==JSON.stringify(config)||result?.requestId!==requestId)fail('whatsapp_authorized_binding_changed');
+      const data=R.project(result.data);const buffer=Buffer.from(data.base64,'base64');
+      if(data.id!==m.media.id||buffer.length!==data.size||createHash('sha256').update(buffer).digest('hex')!==data.sha256)fail('whatsapp_authorized_request_invalid');
+      return {buffer,contentType:data.mimeType,mediaInfo:{id:data.id,mime_type:data.mimeType,sha256:data.sha256,file_size:data.size}};
+    },
     async annotate(clinicId, assets = []) {
       const result = [];
       const config = read();

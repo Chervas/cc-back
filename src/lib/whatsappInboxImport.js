@@ -1,5 +1,6 @@
 'use strict';
 const { createHash, randomUUID } = require('node:crypto');
+const D = require('./whatsappInboundDetails');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
 function held() { throw Error('whatsapp_inbox_review_required'); }
@@ -21,13 +22,13 @@ function normalize(raw, scope, now = Date.now()) {
     else if (m.type === 'button') content = m.button?.text;
     else if (m.type === 'interactive') content = m.interactive?.button_reply?.title || m.interactive?.list_reply?.title;
     else if (['image','video','audio','document','sticker','location','contacts','reaction','unsupported','system'].includes(m.type)) {
-      type = 'event'; content = '[' + m.type + ']';
+      type = D.messageType(m.type); content = '[' + m.type + ']';
       if (['image','video','document'].includes(m.type) && m[m.type]?.caption) content += ' ' + m[m.type].caption;
     } else held();
     if (typeof content !== 'string' || Buffer.byteLength(content) > 50000) held();
     const key = hash(JSON.stringify([scope.wabaId,scope.phoneId,m.id]));
     const digest = hash(JSON.stringify([peer,direction,m.type,content,at]));
-    messages.push({ key,digest,peer,direction,at,content,type,wamid:m.id,providerType:m.type,historical });
+    messages.push({ key,digest,peer,direction,at,content,type,wamid:m.id,providerType:m.type,historical,details:D.details(m) });
     if (messages.length > 2000) held();
   };
   for (const entry of body.entry) {
@@ -41,7 +42,7 @@ function normalize(raw, scope, now = Date.now()) {
         for (const s of value.statuses || []) {
           if (typeof s?.id !== 'string' || !/^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(s.id)
             || !['sent','delivered','read','failed'].includes(s.status)) held();
-          statuses.push({ wamid:s.id,status:s.status }); if (statuses.length > 2000) held();
+          statuses.push({ wamid:s.id,status:s.status,errors:D.errors(s) }); if (statuses.length > 2000) held();
         }
       } else if (change.field === 'smb_message_echoes') {
         if (!Array.isArray(value.message_echoes)) held();
@@ -116,7 +117,7 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
       let messageId=legacy[0]?.id;
       if (!messageId) {
         const metadata=JSON.stringify({ wamid:m.wamid,phone_number_id:scope.phoneId,waba_id:scope.wabaId,passive_recovery:true,
-          historical:m.historical,provider_type:m.providerType,automatic_actions_allowed:false,inbox_receipt:lease.receipt });
+          historical:m.historical,provider_type:m.providerType,automatic_actions_allowed:false,inbox_receipt:lease.receipt,...m.details });
         const row=await query("INSERT INTO Messages(conversation_id,direction,content,message_type,status,metadata,sent_at,createdAt,updatedAt) VALUES(?,?,?,?,'sent',?,?,?,NOW(3))",[conversationId,m.direction,m.content,m.type,metadata,new Date(m.at),new Date(m.at)]);
         messageId=row.insertId; inserted++;
         await query('UPDATE Conversations SET unread_count=unread_count+?,last_message_at=IF(last_message_at IS NULL OR last_message_at<?,?,last_message_at),last_inbound_at=IF(? AND (last_inbound_at IS NULL OR last_inbound_at<?),?,last_inbound_at),updatedAt=NOW(3) WHERE id=?',
@@ -128,8 +129,10 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
       const rows=await query("SELECT m.id,m.status FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE c.clinic_id=? AND c.channel='whatsapp' AND m.direction='outbound' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wamid'))=? LIMIT 2 FOR UPDATE",[scope.clinicId,s.wamid]);
       if (rows.length !== 1) held();
       const rank={pending:0,sending:0,failed:0,sent:1,delivered:2,read:3}; const old=rows[0];
-      if (s.status==='failed' ? rank[old.status]<2 : rank[s.status]>rank[old.status])
-        await query('UPDATE Messages SET status=?,updatedAt=NOW(3) WHERE id=?',[s.status,old.id]);
+      if (s.status==='failed' ? rank[old.status]<2 : rank[s.status]>rank[old.status]) {
+        const extra=s.status==='failed'?{wa_error:s.errors,wa_status:{status:s.status,errors:s.errors},error_code:s.errors[0]?.code||null,delivery_failed:true}:{};
+        await query('UPDATE Messages SET status=?,metadata=JSON_MERGE_PATCH(COALESCE(metadata,JSON_OBJECT()),CAST(? AS JSON)),updatedAt=NOW(3) WHERE id=?',[s.status,JSON.stringify(extra),old.id]);
+      }
     }
     const importReceipt=randomUUID();
     await query('INSERT INTO WhatsappInboxImports VALUES(?,?,?,?,?,?,NOW(3))',[lease.receipt,digest,importReceipt,scope.clinicId,scope.phoneId,inserted]);

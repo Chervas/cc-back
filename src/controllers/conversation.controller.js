@@ -1706,13 +1706,16 @@ exports.streamMessageMedia = async (req, res) => {
       return res.status(410).json({ error: unavailableMediaError(kind) });
     }
 
-    const clinicConfig = await whatsappService.getClinicConfig(conversation.clinic_id);
-    if (!clinicConfig?.accessToken) {
+    const brokerMedia = metadata.passive_recovery === true && !!require('../lib/whatsappAuthorizedBrokerClient').configuration();
+    const clinicConfig = brokerMedia ? null : await whatsappService.getClinicConfig(conversation.clinic_id);
+    if (!brokerMedia && !clinicConfig?.accessToken) {
       return res.status(410).json({ error: unavailableMediaError(kind) });
     }
 
     try {
-      const { buffer, contentType, mediaInfo } = await whatsappService.downloadMediaBuffer({
+      const { buffer, contentType, mediaInfo } = brokerMedia
+        ? await require('../lib/whatsappAuthorizedBrokerClient').media(messageId)
+        : await whatsappService.downloadMediaBuffer({
         mediaId,
         accessToken: clinicConfig.accessToken,
       });

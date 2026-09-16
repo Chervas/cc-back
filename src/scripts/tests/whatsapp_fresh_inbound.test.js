@@ -4,6 +4,12 @@ const {eligible}=require('../../lib/whatsappFreshInboundEligibility');
 const now=Date.parse('2026-09-15T18:00Z'),cut='2026-09-15T17:00:00Z';
 const b={clinicId:2,phoneId:'123',wabaId:'456',sendEnabled:true},c={id:3,clinic_id:2,channel:'whatsapp'};
 const message=()=>({direction:'inbound',message_type:'text',conversation_id:3,sent_at:'2026-09-15T17:55Z',metadata:{passive_recovery:true,historical:false,provider_type:'text',phone_number_id:'123',waba_id:'456',wamid:'wamid.SYNTHETIC',inbox_receipt:'a1234567-1234-4234-8234-123456789abc'}});
+test('audio waits for transcription; historical recovery never replays automations',()=>{
+ const m=message();m.message_type='event';Object.assign(m.metadata,{provider_type:'audio',media:{kind:'audio',id:'999'}});
+ assert.equal(eligible(m,c,b,cut,now),false);m.metadata.audio_transcription={status:'success'};assert.equal(eligible(m,c,b,cut,now),true);
+ m.metadata.media_recovered_without_automation=true;assert.equal(eligible(m,c,b,cut,now),false);
+ delete m.metadata.media_recovered_without_automation;m.metadata.historical=true;assert.equal(eligible(m,c,b,cut,now),false);
+});
 test('fresh text and button replies from exact active scopes can resume existing automations',()=>{
   for(const type of ['text','button','interactive']){const m=message();m.metadata.provider_type=type;assert.equal(eligible(m,c,b,cut,now),true);}
 });

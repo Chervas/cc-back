@@ -31,6 +31,14 @@ test('passive importer commits complete batches once, preserves contacts, rolls 
    await sql.query('DELETE FROM Messages WHERE id=1'); await importLease(c,lease([m('one','19995550101')]),scope);
    assert.equal((await sql.query('SELECT COUNT(*) n FROM Messages'))[0][0].n,2);
    report.checks.push('batch two contacts','receipt replay','WAMID replay across batches/history','atomic conflict rollback','clinic/phone isolation','monotonic statuses','deleted message tombstone');
+   await importLease(c,lease([{...m('audio','19995550101'),type:'audio',audio:{id:'501',mime_type:'audio/ogg',voice:true}}]),scope);
+   const [[audio]]=await sql.query("SELECT metadata FROM Messages WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.provider_type'))='audio'");
+   assert.equal(audio.metadata.media.id,'501');assert.equal(audio.metadata.media.playable,true);
+   await importLease(c,lease(null,[{field:'messages',value:{messaging_product:'whatsapp',metadata:{phone_number_id:'201'},statuses:[{id:'wamid.out',status:'failed',errors:[{code:131026,title:'Message undeliverable'}]}]}}]),scope);
+   assert.equal((await sql.query("SELECT status FROM Messages WHERE direction='outbound'"))[0][0].status,'read');
+   await sql.query("UPDATE Messages SET status='sent' WHERE direction='outbound'");
+   await importLease(c,lease(null,[{field:'messages',value:{messaging_product:'whatsapp',metadata:{phone_number_id:'201'},statuses:[{id:'wamid.out',status:'failed',errors:[{code:131026,title:'Message undeliverable'}]}]}}]),scope);
+   const [[failed]]=await sql.query("SELECT status,metadata FROM Messages WHERE direction='outbound'");assert.equal(failed.status,'failed');assert.equal(failed.metadata.wa_error[0].code,131026);
   }finally{await sql.connectionManager.releaseConnection(rawConnection);}
  });
 });
