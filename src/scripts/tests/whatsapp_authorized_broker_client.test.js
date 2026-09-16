@@ -52,6 +52,19 @@ test('every paused binding fails before constructing an HTTP transport', async (
   await assert.rejects(f.client.send({ ...input(), expectedBinding: { ...binding(), sendEnabled: false } }), { code: 'whatsapp_authorized_send_paused' });
   assert.equal(f.counters.transports, 0); assert.equal(f.calls.length, 0);
 });
+test('reconnecting one number holds its previous messages without changing other bindings', async () => {
+  const f = fixture();
+  f.state.config.bindings[0].messageNotBefore = '2026-09-16T10:00:00Z';
+  validateConfiguration(f.state.config);
+  await assert.rejects(f.client.send({ ...input(), expectedBinding: f.state.config.bindings[0] }), { code: 'whatsapp_authorized_message_ineligible' });
+  assert.equal(f.calls.length, 0);
+  const current = fixture({ loadMessage: async id => ({ id, conversation_id: 71, direction: 'outbound', status: 'pending', createdAt: '2026-09-16T10:01:00Z', metadata: {} }) });
+  current.state.config.bindings[0].messageNotBefore = '2026-09-16T10:00:00Z';
+  await current.client.send({ ...input(), expectedBinding: current.state.config.bindings[0] });
+  assert.equal(current.calls.length, 1);
+  const unchanged = fixture(); await unchanged.client.send(input()); assert.equal(unchanged.calls.length, 1);
+  for (const value of [null, '', 'invalid', 1]) assert.throws(() => validateConfiguration({ ...config(), bindings: [{ ...binding(), messageNotBefore: value }] }));
+});
 test('durable Message identity and server metadata determine exactly one compatible Graph operation', async () => {
   const f = fixture(); const result = await f.client.send(input());
   assert.deepEqual(result, { messages: [{ id: 'wamid.SYNTHETIC_ACCEPTED', message_status: 'accepted' }] });
