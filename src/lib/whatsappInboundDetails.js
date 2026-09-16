@@ -20,5 +20,7 @@ function errors(status) {
     ...(e.error_data?.details?{error_data:{details:clean(e.error_data.details,1024)}}:{})
   }));
 }
-function messageType(providerType) { return providerType==='image'?'image':providerType==='reaction'?'reaction':'event'; }
+// QuickChat renders media controls inside ordinary bubbles. "event" is reserved
+// for timeline activity, so audio/documents must retain the legacy text carrier.
+function messageType(providerType) { return providerType==='image'?'image':providerType==='reaction'?'reaction':MEDIA.has(providerType)?'text':'event'; }
 module.exports={MEDIA,details,errors,messageType};
