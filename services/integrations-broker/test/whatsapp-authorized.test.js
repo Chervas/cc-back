@@ -134,3 +134,16 @@ test('An unpinned template is explicitly rejected before any template read or se
   assert.equal(a.sends().length, 0);
   assert.equal(a.state.calls.filter(c => c.action === 'template').length, 0);
 });
+
+test('A large clinic catalog includes custom templates and still rejects duplicate identities', async t => {
+  const a = await fixture(t);
+  const definition = structuredClone(a.definition);
+  definition.templates = Array.from({ length: 671 }, (_, i) => ({ ...a.definition.templates[0],
+    id: String(10000 + i), name: 'catalog_version_' + i }));
+  definition.templates.push({ ...a.definition.templates[0], id: '20000', name: 'cc_custom_clinic_greeting' });
+  const accepted = validateAuthorization(definition);
+  assert.equal(accepted.templates.length, 672);
+  assert.equal(accepted.templates.at(-1).name, 'cc_custom_clinic_greeting');
+  definition.templates.push({ ...definition.templates[0], id: '20001' });
+  assert.throws(() => validateAuthorization(definition), { code: 'invalid_request' });
+});

@@ -6,7 +6,7 @@ function validateAuthorization(value) {
     || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(value.connectionRef) || !E.uuid(value.authorizationId)
     || !E.id(value.phoneId) || !E.id(value.wabaId) || !/^[a-f0-9]{64}$/.test(value.candidateDigest)
     || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0 || value.enabled !== undefined && typeof value.enabled !== 'boolean'
-    || !Array.isArray(value.templates) || value.templates.length > 100) fail('invalid_request');
+    || !Array.isArray(value.templates) || value.templates.length > 1000) fail('invalid_request');
   const enrollment = E.bindingFor(value.enrollmentBinding);
   if (!enrollment.customer) fail('invalid_request');
   for (const t of value.templates) if (!C.keys(t, ['id','name','language','contentDigest']) || !E.id(t.id)

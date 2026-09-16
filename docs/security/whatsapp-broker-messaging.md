@@ -31,6 +31,12 @@ cabecera y botones antes del POST. No se permite un endpoint o una operación
 arbitrarios. La gestión/creación de plantillas requiere operaciones propias; este
 contrato de envío no las habilita.
 
+El registro admite hasta 1.000 plantillas por conexión, incluidas versiones
+activas del catálogo y plantillas personalizadas creadas por las clínicas.
+La ampliación de capacidad no cambia permisos de número, credenciales,
+automatizaciones ni mensajes pendientes. La selección temporal de plantillas
+de recuperación no debe confundirse con el catálogo completo de ClinicaClick.
+
 Cada uso revalida la candidata, app, sujeto, scopes, propietarios de todas las
 cuentas concedidas y pertenencia del número, con prueba de clave de aplicación.
 Cambios de ámbito, reserva o caducidad impiden el uso. El control
