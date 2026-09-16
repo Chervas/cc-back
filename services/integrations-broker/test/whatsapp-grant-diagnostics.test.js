@@ -11,7 +11,7 @@ test('Rejected grant diagnostics distinguish simultaneous compatibility and scop
   assert(d.includes('wa_grant_scope_profile_present')); assert(d.includes('wa_grant_data_expiry_missing'));
   assert(d.includes('wa_grant_granular_management_exact')); assert(d.includes('wa_grant_granular_messaging_exact'));
   assert(d.includes('wa_grant_scope_other_absent')); assert(d.includes('wa_grant_expiry_zero'));
-  assert.equal(d.length, 20); assert(!JSON.stringify(d).includes(sensitive));
+  assert.equal(d.length, 23); assert(!JSON.stringify(d).includes(sensitive));
   for (const key of Object.keys(data)) {
     const result = grantDiagnostics({ data: { ...data, [key]: sensitive } }, { appId: '101', wabaId: '301' }, Date.now());
     assert(result.length <= 40); assert(!JSON.stringify(result).includes(sensitive));
@@ -26,6 +26,21 @@ test('Rejected grant diagnostics distinguish simultaneous compatibility and scop
   assert(grantDiagnostics({ data: finite }, { appId: '101', wabaId: '301', exchangeExpiresAt: now + 60000 }, now).includes('wa_grant_exchange_expiry_consistent'));
   assert(grantDiagnostics({ data }, { appId: '101', wabaId: '301', exchangeExpiresAt: now + 60000 }, now).includes('wa_grant_exchange_expiry_conflict'));
   assert(grantDiagnostics({ data, error: sensitive }, { appId: '101', wabaId: '301' }, now).includes('wa_grant_provider_error_present'));
+});
+test('Optional event grant failures and unexpected granular permissions are classified without provider values', () => {
+  for (const [targets, classification] of [[undefined, 'invalid'], [[], 'empty'], [['301','301'], 'duplicate'],
+    [Array.from({length: 65}, (_, i) => String(301+i)), 'oversized'], [['301'], 'exact']]) {
+    const data = { scopes: ['whatsapp_business_management','whatsapp_business_messaging','whatsapp_business_manage_events'],
+      granular_scopes: [{scope:'whatsapp_business_management',target_ids:['301']},
+        {scope:'whatsapp_business_messaging',target_ids:['301']},
+        {scope:'whatsapp_business_manage_events',target_ids:targets}] };
+    const result = grantDiagnostics({data}, {appId:'101',wabaId:'301'}, Date.now());
+    assert(result.includes('wa_grant_granular_events_'+classification));
+    data.granular_scopes.push({scope:'FICTITIOUS_PRIVATE_SCOPE'});
+    const unknown = grantDiagnostics({data}, {appId:'101',wabaId:'301'}, Date.now());
+    assert(unknown.includes('wa_grant_granular_unknown_present'));
+    assert(!JSON.stringify(unknown).includes('FICTITIOUS'));
+  }
 });
 test('Multi-asset grant diagnostics identify the selected WABA and known extra permission without accepting it', () => {
   const { verifyWhatsappGrant } = require('../src/whatsapp-credential-inspector');

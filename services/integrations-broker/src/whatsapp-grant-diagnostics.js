@@ -24,6 +24,7 @@ function grantDiagnostics(response, expected, now) {
     if (!entry) return 'missing';
     if (!Array.isArray(entry.target_ids) || entry.target_ids.some(v => !id(v))) return 'invalid';
     if (entry.target_ids.length === 0) return 'empty';
+    if (entry.target_ids.length > 64) return 'oversized';
     if (new Set(entry.target_ids).size !== entry.target_ids.length) return 'duplicate';
     if (entry.target_ids.length !== 1) return 'multiple';
     return entry.target_ids[0] === expected.wabaId ? 'exact' : 'foreign';
@@ -50,6 +51,9 @@ function grantDiagnostics(response, expected, now) {
     scope_other: scopeShape && scopes.some(s => ![...required, 'public_profile'].includes(s)) ? 'present' : 'absent',
     granular_shape: granularShape ? 'valid' : 'invalid',
     granular_management: target(required[0]), granular_messaging: target(required[1]),
+    granular_events: target('whatsapp_business_manage_events'),
+    granular_profile: granularShape && granular.some(r => r.scope === 'public_profile') ? 'present' : 'absent',
+    granular_unknown: granularShape && granular.some(r => ![...required, 'whatsapp_business_manage_events', 'public_profile'].includes(r.scope)) ? 'present' : 'absent',
     granular_other: granularShape && granular.some(r => !required.includes(r.scope)) ? 'present' : 'absent',
     expiry: expiry(data.expires_at), data_expiry: expiry(data.data_access_expires_at),
     exchange_expiry: expected.exchangeExpiresAt == null ? 'unspecified'
