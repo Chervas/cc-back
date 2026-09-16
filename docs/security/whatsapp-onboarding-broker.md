@@ -87,6 +87,15 @@ no crea ninguna operación HTTP nueva de eventos/publicidad; sus destinos tambi�
 se verifican. Plantillas ordinarias siguen usando `whatsapp_business_management`.
 Los modos anteriores y el motor de envío mantienen sus restricciones originales.
 
+Cuando el canje termina en `interrupted` durante `grant_inspection`, consultar
+los motivos acotados `wa_grant_*` de la auditoría antes de cambiar permisos.
+El diagnóstico distingue también los destinos de `whatsapp_business_manage_events`
+(ausentes, vacíos, repetidos o fuera del límite) y entradas granulares
+desconocidas. No registra la respuesta de Meta, identificadores de destinos ni
+credenciales. Un código ya canjeado no se vuelve a enviar: si no llegó a
+guardarse la candidata, hace falta otra autorización del usuario para observar
+la respuesta nueva. Una ventana Meta finalizada no demuestra un alta guardada.
+
 Cada ámbito necesita su binding y slot de Secrets Manager autorizados; este modo
 no convierte un slot de clínica en un almacén compartido para todos los clientes.
 Conservar el ajuste Meta existente. Fuentes:
