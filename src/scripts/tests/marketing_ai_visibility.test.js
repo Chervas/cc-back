@@ -21,6 +21,10 @@ const {
 } = service.__testing;
 
 async function main() {
+  require('../../services/securityMonitoring.service').assertAiAllowed = async () => {};
+  require('../../services/aiUsageTelemetry.service').recordProviderResponse = async () => {};
+  require('../../services/aiUsageTelemetry.service').recordProviderFailure = async () => {};
+
   const openai = parseOpenAiResponse({
     model: 'gpt-test',
     output: [

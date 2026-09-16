@@ -519,6 +519,7 @@ async function runOpenAiSearch({ query, clinic }, dependencies = {}) {
       message: 'OpenAI todavía no está configurado en el servidor.',
     };
   }
+  await require('./securityMonitoring.service').assertAiAllowed('visibility_openai');
   const http = dependencies.axios || axios;
   const headers = {
     Authorization: `Bearer ${apiKey}`,
@@ -552,7 +553,12 @@ async function runOpenAiSearch({ query, clinic }, dependencies = {}) {
       include: ['web_search_call.action.sources'],
       max_output_tokens: 2200,
       input: buildProviderPrompt(query, clinic),
-    }, { headers, timeout: PROVIDER_TIMEOUT_MS });
+    }, { headers, timeout: PROVIDER_TIMEOUT_MS }).catch(async error => {
+      await require('./aiUsageTelemetry.service').recordProviderFailure({provider:'openai',model:OPENAI_MODEL,useCase:'visibility_openai',clinicId:clinic.id_clinica||clinic.id||null,error});
+      throw error;
+    });
+    await require('./aiUsageTelemetry.service').recordProviderResponse({provider:'openai',model:OPENAI_MODEL,useCase:'visibility_openai',response:response.data,
+      clinicId:clinic.id_clinica||clinic.id||null,searchRequests:(response.data?.output||[]).filter(v=>v.type==='web_search_call').length});
     const parsed = parseOpenAiResponse(response.data || {});
     if (!cleanString(parsed.text)) {
       return {
@@ -585,6 +591,7 @@ async function runGeminiSearch({ query, clinic }, dependencies = {}) {
       message: 'Gemini todavía no está configurado en el servidor.',
     };
   }
+  await require('./securityMonitoring.service').assertAiAllowed('visibility_gemini');
   const http = dependencies.axios || axios;
   try {
     const response = await http.post('https://generativelanguage.googleapis.com/v1beta/interactions', {
@@ -598,7 +605,12 @@ async function runGeminiSearch({ query, clinic }, dependencies = {}) {
         'Content-Type': 'application/json',
       },
       timeout: PROVIDER_TIMEOUT_MS,
+    }).catch(async error => {
+      await require('./aiUsageTelemetry.service').recordProviderFailure({provider:'gemini',model:GEMINI_MODEL,useCase:'visibility_gemini',clinicId:clinic.id_clinica||clinic.id||null,error});
+      throw error;
     });
+    await require('./aiUsageTelemetry.service').recordProviderResponse({provider:'gemini',model:GEMINI_MODEL,useCase:'visibility_gemini',response:response.data,
+      clinicId:clinic.id_clinica||clinic.id||null,searchRequests:(response.data?.steps||response.data?.outputs||[]).filter(v=>v.type==='google_search_call').reduce((n,v)=>n+Math.max(1,v.arguments?.queries?.length||0),0)});
     const parsed = parseGeminiResponse(response.data || {});
     if (!cleanString(parsed.text)) {
       return {

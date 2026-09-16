@@ -3,6 +3,8 @@
 // Staging-only adapter. The registry contains routing metadata, never Meta
 // credentials. Every send is pinned to an existing application Message ID.
 const fs = require('node:fs');
+const { createHash, randomUUID } = require('node:crypto');
+const TM = require('../../services/integrations-broker/src/whatsapp-template-management');
 const C = require('../../services/integrations-broker/src/whatsapp-authorized-contract');
 const { requestIdFor, assertStaging } = require('./whatsappBrokerClient');
 const { createIntegrationsBrokerClient } = require('./integrationsBrokerClient');
@@ -166,6 +168,36 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         else if (asset.isActive !== false && asset.isActive !== 0) result.push(asset);
       }
       return result;
+    },
+    async templateBinding(wabaId, clinicId = null) {
+      const config = read();
+      const candidate = config?.bindings.find(b => b.wabaId === String(wabaId) && (!clinicId || b.clinicId === Number(clinicId)));
+      if (!candidate) return null;
+      const checked = await binding(candidate.clinicId, candidate.assetId);
+      return checked?.sendEnabled ? checked : null;
+    },
+    async templates(wabaId, operation, input = {}, clinicId = null) {
+      assertStaging(environment());
+      if (!TM.OPERATIONS.includes(operation)) fail('whatsapp_authorized_request_invalid');
+      const captured = await this.templateBinding(wabaId, clinicId);
+      if (!captured) fail('whatsapp_authorized_binding_invalid');
+      const payload = { authorizationId: captured.authorizationId, phoneId: captured.phoneId, wabaId: captured.wabaId, ...input };
+      TM.validate(operation, payload);
+      const config = read();
+      const before = await binding(captured.clinicId,captured.assetId);
+      if (!before || !sameBinding(captured,before) || JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
+      // Stable identity for mutations: a timeout may never silently create a
+      // second template. Read-only catalog refreshes always use a new receipt.
+      const digest=createHash('sha256').update(operation+'\0'+JSON.stringify(payload)).digest().subarray(0,16);
+      digest[6]=(digest[6]&15)|64;digest[8]=(digest[8]&63)|128;
+      const h=digest.toString('hex');
+      const requestId=[TM.LIST,TM.HEADER].includes(operation)?randomUUID():`${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+      const result=await createTransport(config).execute({requestId,tenantRef:'clinic:'+captured.clinicId,
+        connectionRef:captured.connectionRef,assetRef:'wa-phone:'+captured.phoneId,operation,payload});
+      if(result?.requestId!==requestId)fail('whatsapp_authorized_request_invalid');
+      const latest=await binding(captured.clinicId,captured.assetId);
+      if(!latest||!sameBinding(captured,latest))fail('whatsapp_authorized_binding_changed');
+      return operation===TM.LIST ? TM.project(operation,{...result.data,paging:result.data?.after?{next:true,cursors:{after:result.data.after}}:null}) : TM.project(operation,result.data);
     },
     async send(input) {
       assertStaging(environment());

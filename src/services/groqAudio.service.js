@@ -39,6 +39,7 @@ class GroqAudioService {
   }
 
   async transcribeAudioBuffer({ buffer, mimeType, fileName } = {}) {
+    await require('./securityMonitoring.service').assertAiAllowed('whatsapp_audio');
     const apiKey = cleanString(process.env.GROQ_API_KEY);
     if (!apiKey) {
       throw new Error('groq_api_key_missing');
@@ -63,7 +64,7 @@ class GroqAudioService {
     const form = new FormData();
     form.append('file', new Blob([buffer], { type: normalizedMimeType }), normalizedFileName);
     form.append('model', model);
-    form.append('response_format', 'json');
+    form.append('response_format', 'verbose_json');
 
     const response = await axios.post(`${baseUrl}/audio/transcriptions`, form, {
       headers: {
@@ -72,9 +73,13 @@ class GroqAudioService {
       timeout,
       maxBodyLength: Infinity,
       maxContentLength: Infinity,
-    });
+    }).catch(async error => {
+    await require('./aiUsageTelemetry.service').recordProviderFailure({provider:'groq',model,useCase:'whatsapp_audio',error});
+    throw error;
+  });
 
     const data = response?.data || {};
+    await require('./aiUsageTelemetry.service').recordProviderResponse({provider:'groq',model, useCase:'whatsapp_audio',response:data});
     const text = cleanString(data.text || data.transcription || data.output_text);
     if (!text) {
       throw new Error('groq_audio_transcription_empty');

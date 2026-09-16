@@ -272,6 +272,9 @@ async function runAutomationFlowV2Job(payload = {}) {
 }
 
 async function runWhatsappTemplateCreateJob(payload = {}) {
+  if (payload.mode === 'propagate_catalog_item') {
+    return {status:'completed',result:await whatsappTemplatesService.propagateCatalogTemplateToAllClinics(payload)};
+  }
   const wabaId = String(payload.wabaId || payload.waba_id || '').trim();
   if (!wabaId) {
     throw new Error('whatsapp_template_create requires payload.wabaId');

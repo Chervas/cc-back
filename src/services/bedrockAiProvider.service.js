@@ -167,6 +167,7 @@ async function analyzeStructured({
     const error = new Error('bedrock_invalid_structured_response');
     error.code = 'bedrock_invalid_structured_response';
     error.model = modelId;
+    error.usage = { input_tokens: Number(response?.usage?.inputTokens || 0), output_tokens: Number(response?.usage?.outputTokens || 0) };
     throw error;
   }
   return {
@@ -198,6 +199,8 @@ async function checkModel(model) {
       maxTokens: 24,
     });
     const ok = response?.value?.ok === true;
+    await require('./aiUsageTelemetry.service').recordAiUsage({provider:'bedrock',model:modelId,useCase:'health_check',
+      inputTokens:response.usage?.input_tokens,outputTokens:response.usage?.output_tokens,latencyMs:response.latency_ms});
     return {
       ok,
       model: modelId,
@@ -206,6 +209,7 @@ async function checkModel(model) {
       detail: ok ? 'Responde con salida estructurada correcta.' : 'Respondió, pero no cumplió el contrato estructurado.',
     };
   } catch (error) {
+    await require('./aiUsageTelemetry.service').recordAiUsage({provider:'bedrock',model:modelId,useCase:'health_check',status:'error',inputTokens:error.usage?.input_tokens,outputTokens:error.usage?.output_tokens,usageKnown:!!error.usage,error:{code:providerErrorCode(error)}});
     return {
       ok: false,
       model: modelId,
