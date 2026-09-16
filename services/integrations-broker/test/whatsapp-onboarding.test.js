@@ -2,6 +2,19 @@
 const test = require('node:test'); const assert = require('node:assert/strict'); const { randomUUID } = require('node:crypto');
 const { fixture, TOKEN, APP } = require('./whatsapp-onboarding-fixture.cjs'); const C = require('../src/whatsapp-onboarding-contract');
 const row = (f, flow) => f.current.store.db.prepare('SELECT * FROM whatsapp_onboarding_flows WHERE id=?').get(flow.flowId);
+test('a thirty-minute form survives a slow signup but cannot exceed or renew its one-use deadline', async t => {
+  const f = fixture(t);
+  await assert.rejects(f.begin({ expiresAt: f.now() + 1800001 }), { code: 'invalid_request' });
+  const flow = await f.begin({ expiresAt: f.now() + 1800000 });
+  f.state.clock += 25 * 60000;
+  assert.equal((await f.finish(flow)).data.status, 'staged');
+  assert.equal(f.state.codes, 1);
+  await f.finish(flow); assert.equal(f.state.codes, 1);
+  const second = await f.begin({ expiresAt: f.now() + 1800000 });
+  f.state.clock += 1800000;
+  await assert.rejects(f.finish(second), { code: 'oauth_flow_interrupted' });
+  assert.equal(f.state.codes, 1);
+});
 test('Minimal Embedded Signup response still requires independent app, grant and phone verification', async t => {
   const f = fixture(t); f.state.codeResponse = { access_token: TOKEN };
   const flow = await f.begin(); const result = await f.finish(flow);

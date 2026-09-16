@@ -160,7 +160,7 @@ error; si cancelar falla, conserva el error de recuperación de ese intento.
 
 El plazo visual se limita a diez minutos y usa un deadline local en el iframe:
 un reloj de navegador ligeramente atrasado no rechaza una emisión válida por
-superar aparentemente los 600000 ms. El `expiresAt` recibido se conserva intacto;
+superar aparentemente el máximo de 30 minutos. El `expiresAt` recibido se conserva intacto;
 la expiración firmada y comprobada en servidor sigue siendo autoritativa.
 
 Una vez enviado finish, cerrar el diálogo conserva el resultado para consulta:

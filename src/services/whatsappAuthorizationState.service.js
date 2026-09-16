@@ -6,7 +6,7 @@ const { Op, Transaction } = require('sequelize');
 const C = require('./whatsappAuthorizationState.contract');
 const { MARKETING_WRITE_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
 const scopeBlocks = require('./metaScopeBlock.service');
-const TTL = 600000;
+const TTL = 30 * 60 * 1000;
 const known = new Set(['whatsapp_authorization_invalid', 'whatsapp_authorization_unavailable',
   'whatsapp_authorization_forbidden', 'whatsapp_authorization_conflict', 'whatsapp_authorization_expired',
   'whatsapp_authorization_consumed', 'whatsapp_authorization_cancelled', 'whatsapp_authorization_limit',

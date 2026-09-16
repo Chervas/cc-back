@@ -53,7 +53,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const claim = (who, flow, api = service) => api.claim({ ...inputFor(who, flow), state: flow.state, code: codeFor(flow) });
   const codeIs = code => e => e.code === code && e.message === code;
   const who = await actor(); const flow = await issue(who);
-  assert.deepEqual(flow.clinicIds, [71, 72]); assert.equal(new Date(flow.expiresAt) - at, 600000);
+  assert.deepEqual(flow.clinicIds, [71, 72]); assert.equal(new Date(flow.expiresAt) - at, 1800000);
   service = make(); assert.equal((await issue(who, flow.scope, service, flow.requestId)).state, flow.state);
   assert.equal(await A.count(), 1); assert.equal(await R.count(), 1);
   report.checks.push('Empty migration up/down/up; state and original scope survive service restart; idempotent issue adds no row or audit');
@@ -134,12 +134,12 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal((await R.findByPk(refreshFlow.requestId)).session_expires_at.getTime(), originalJwt.sessionExpiresAt * 1000);
   report.checks.push('Verified JWT refresh in the same durable MFA session preserves original state and deadline; older JWT, another session and expiry beyond durable bounds are denied');
   const shortWho = await actor({ ttl: 120000 }); const shortFlow = await issue(shortWho); assert.equal(new Date(shortFlow.expiresAt) - at, 120000);
-  const expiryWho = await actor(); const expiryFlow = await issue(expiryWho); advance(600000);
+  const expiryWho = await actor(); const expiryFlow = await issue(expiryWho); advance(1800000);
   await assert.rejects(service.assertClaimActive(inputFor(refreshWho, refreshFlow)), codeIs('whatsapp_authorization_expired'));
   await assert.rejects(claim(expiryWho, expiryFlow), codeIs('whatsapp_authorization_expired'));
   assert.equal((await service.status(inputFor(expiryWho, expiryFlow))).status, 'expired');
   await assert.rejects(claim(shortWho, shortFlow), codeIs('auth_invalid'));
-  report.checks.push('State lifetime is capped by original JWT expiry and ten minutes; status projects expiration without reissuing');
+  report.checks.push('State lifetime is capped by original JWT expiry and thirty minutes; status projects expiration without reissuing');
   const limitWho = await actor(); const limits = await Promise.allSettled(Array.from({ length: 6 }, () => issue(limitWho)));
   assert.equal(limits.filter(r => r.status === 'fulfilled').length, 5); assert.equal(limits.find(r => r.status === 'rejected').reason.code, 'whatsapp_authorization_limit');
   for (const result of limits.filter(r => r.status === 'fulfilled')) await service.cancel(inputFor(limitWho, result.value));

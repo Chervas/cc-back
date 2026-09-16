@@ -31,7 +31,7 @@ baja, traslado de grupo, pérdida de permiso o `MetaScopeBlocks` impide continua
 No se libera ningún bloqueo para permitir el alta. Máximo 1000 clínicas por grupo.
 
 Estados persistentes: `awaiting → claimed → cancelled`, también
-`awaiting → cancelled`. Caducidad derivada, máximo 10 minutos y limitada por el
+`awaiting → cancelled`. Caducidad derivada, máximo 30 minutos y limitada por el
 JWT original. Cinco intentos activos y diez emitidos por usuario/hora. Transacción
 MySQL REPEATABLE READ; orden usuario/sesión, clínicas/permisos/bloqueos y solicitud.
 Los límites y la reclamación se serializan por usuario entre procesos.

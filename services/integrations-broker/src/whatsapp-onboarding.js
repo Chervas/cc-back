@@ -100,7 +100,7 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
         if (row.state !== 'awaiting') fail('oauth_flow_interrupted');
         return { requestId: request.requestId, data: { ...projection(row, binding), authorization: { appId: b.appId, configId: b.configId, redirectUri: b.redirectUri } }, replayed: true };
       }
-      if (request.payload.expiresAt <= now() || request.payload.expiresAt > now() + 600000 || request.payload.clinicSetDigest !== C.clinicDigest(b)) fail('invalid_request');
+      if (request.payload.expiresAt <= now() || request.payload.expiresAt > now() + 30 * 60 * 1000 || request.payload.clinicSetDigest !== C.clinicDigest(b)) fail('invalid_request');
       const row = { id, principal: principal.id, tenant: request.tenantRef, connection: request.connectionRef, asset: request.assetRef,
         state: 'awaiting', expires_at: request.payload.expiresAt };
       active(row, signal);
