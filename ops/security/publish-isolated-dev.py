@@ -47,6 +47,8 @@ def main():
  run(['/usr/bin/node',str(target/'src/scripts/security-schema-release.js'),'check','--runtime','dev',
       '--source',str(target),'--out',str(target/'schema-preflight.json')])
  temporary=ROOT/'next';assert not temporary.exists();temporary.symlink_to(target)
+ security_active=subprocess.run(['systemctl','is-active','--quiet','clinicaclick-dev-security.service']).returncode==0
+ if security_active:run(['systemctl','stop','clinicaclick-dev-security.service'])
  run(['systemctl','stop','clinicaclick-back-dev.service'])
  os.replace(temporary,ROOT/'current')
  try:
@@ -59,10 +61,16 @@ def main():
    except OSError:pass
    if time.monotonic()>deadline:raise RuntimeError('dev_publish_readiness_failed')
    time.sleep(.25)
+  if security_active:
+   run(['systemctl','start','clinicaclick-dev-security.service'])
+   time.sleep(1)
+   assert run(['systemctl','is-active','clinicaclick-dev-security.service']).strip()==b'active'
  except Exception:
+  if security_active:run(['systemctl','stop','clinicaclick-dev-security.service'])
   run(['systemctl','stop','clinicaclick-back-dev.service'])
   temporary.symlink_to(previous);os.replace(temporary,ROOT/'current')
   run(['systemctl','start','clinicaclick-back-dev.service'])
+  if security_active:run(['systemctl','start','clinicaclick-dev-security.service'])
   raise
  print(json.dumps({'status':'isolated_dev_published','commit':sha,'release':str(target),'publicRuntimeChanged':False}))
 if __name__=='__main__':

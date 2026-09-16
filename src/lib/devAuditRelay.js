@@ -10,7 +10,9 @@ async function authorize(command, { findEvent, verifySession }) {
     || command.mode !== 'confirmed' || !['1', '44'].includes(command.actorId)
     || !UUID.test(command.requestId) || !UUID.test(command.sessionRef)
     || !Array.isArray(command.refs) || !command.refs.length || command.refs.length > 25) denied();
-  await verifySession({ userId: Number(command.actorId), sessionRef: command.sessionRef, expiresAt: new Date(Date.now() + 1) });
+  // A 1 ms probe could expire during module loading before verification began.
+  // The verifier still checks the actual stored session expiry and revocation.
+  await verifySession({ userId: Number(command.actorId), sessionRef: command.sessionRef, expiresAt: new Date(Date.now() + 1000) });
   for (const ref of command.refs) {
     if (!ref || typeof ref.digest !== 'string' || !/^[a-f0-9]{64}$/.test(ref.digest)) denied();
     const row = await findEvent(ref.digest);
