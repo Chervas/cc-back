@@ -19,6 +19,10 @@ test('fresh view notifications survive bus failure, isolate phones and never rep
   fail=false;assert.equal((await dispatch()).notified,2);assert.deepEqual(events.map(e=>e[1].id),[1,7]);
   assert(events.every(e=>e[0]==='message:created'&&e[2][0]==='clinic:71'&&!Object.hasOwn(e[1],'content')&&!Object.hasOwn(e[1],'resume_text')));
   assert.equal((await dispatch()).notified,0);
+  await sql.query("UPDATE Messages SET metadata=JSON_SET(metadata,'$.fresh_realtime_status','media_updated') WHERE id=1");
+  assert.equal((await dispatch()).notified,1);
+  assert.equal(events.at(-1)[0],'message:updated');
+  assert.equal((await dispatch()).notified,0);
   await sql.query("UPDATE Messages SET status='read' WHERE id=1");await dispatch();assert.equal(events.at(-1)[0],'message:updated');assert.equal(events.at(-1)[1].status,'read');
   assert.equal((await sql.query("SELECT updatedAt FROM Messages WHERE id=1"))[0][0].updatedAt.toISOString(),'2026-09-15T18:00:00.000Z');
   // Delivery races preserve a newer database status for another notification.
