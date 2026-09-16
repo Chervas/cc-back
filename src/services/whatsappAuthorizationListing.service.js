@@ -53,7 +53,7 @@ function createService({ models, sessions, broker = configuredClient(), config =
       if (ids.some(id=>!allowed.has(id))) S.fail('whatsapp_authorization_forbidden',403);
     }
     const blocked = await isBlocked(scope.type === 'clinic' ? {assignmentScope:'clinic',clinicId:scope.id}
-      : {assignmentScope:'group',groupId:scope.id}, {models:db()});
+      : {assignmentScope:'group',groupId:scope.id}, {models:db(),purpose:'whatsapp'});
     return {ids,blocked,digest:S.digest(JSON.stringify({scope,clinics:clinics.map(c=>({id:c.id_clinica,groupId:c.grupoClinicaId}))}))};
   }
   async function list(raw) {

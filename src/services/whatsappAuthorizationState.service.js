@@ -48,7 +48,7 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
       if (ids.some(id => !allowed.has(id))) C.fail('whatsapp_authorization_forbidden', 403);
     }
     if (await scopeBlocks.blocked(scope.type === 'clinic' ? { assignmentScope: 'clinic', clinicId: scope.id }
-      : { assignmentScope: 'group', groupId: scope.id }, { models: db(), transaction })) C.fail('whatsapp_authorization_forbidden', 403);
+      : { assignmentScope: 'group', groupId: scope.id }, { models: db(), transaction, purpose: 'whatsapp' })) C.fail('whatsapp_authorization_forbidden', 403);
     return { ids, digest: C.digest(JSON.stringify({ scope, clinics: clinics.map(c => ({ id: c.id_clinica, groupId: c.grupoClinicaId })) })) };
   }
   async function record(row, reason, transaction) {
