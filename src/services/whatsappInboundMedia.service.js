@@ -5,11 +5,11 @@ async function tick(){
  const db=require('../../models'),broker=require('../lib/whatsappAuthorizedBrokerClient');
  if(!broker.configuration())return {processed:0};
  const [rows]=await db.sequelize.query(`SELECT m.id FROM Messages m JOIN Conversations c ON c.id=m.conversation_id
- WHERE c.channel='whatsapp' AND m.direction='inbound' AND JSON_EXTRACT(m.metadata,'$.passive_recovery')=CAST('true' AS JSON)
+ WHERE c.channel='whatsapp' AND m.direction IN ('inbound','outbound') AND JSON_EXTRACT(m.metadata,'$.passive_recovery')=CAST('true' AS JSON)
  AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.media.kind'))='audio' AND JSON_CONTAINS_PATH(m.metadata,'one','$.media.id')
  AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.audio_transcription.status')),'') NOT IN ('success','unavailable')
  AND (JSON_EXTRACT(m.metadata,'$.media_retry_at') IS NULL OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.media_retry_at'))<=:now)
- ORDER BY m.id DESC LIMIT 3`,{replacements:{now:new Date().toISOString()}});
+ ORDER BY (m.direction='inbound') DESC,m.id DESC LIMIT 3`,{replacements:{now:new Date().toISOString()}});
  let processed=0;
  for(const row of rows){let download;
   try{
@@ -19,7 +19,7 @@ async function tick(){
     const m=await db.Message.findByPk(row.id,{transaction,lock:transaction.LOCK.UPDATE});
     const metadata={...m.metadata,audio_transcribed:true,resume_text:result.text,media_retry_at:null,
      audio_transcription:{status:'success',provider:result.provider,model:result.model,text:result.text,transcribed_at:new Date().toISOString()}};
-    delete metadata.fresh_realtime_status;
+    metadata.fresh_realtime_status='media_updated';
     await m.update({content:result.text,metadata},{transaction});
    });processed++;
   }catch{
@@ -28,7 +28,7 @@ async function tick(){
     const attempts=Number(m.metadata?.media_attempts||0)+1;
     const metadata={...m.metadata,media_attempts:attempts,media_retry_at:new Date(Date.now()+Math.min(3600000,60000*2**Math.min(attempts,6))).toISOString(),
       audio_transcription:{status:attempts>=5?'unavailable':'pending',reason:'audio_processing_unavailable'}};
-    delete metadata.fresh_realtime_status;
+    metadata.fresh_realtime_status='media_updated';
     await m.update({metadata},{transaction});
    });
   }finally{download?.buffer.fill(0);}
