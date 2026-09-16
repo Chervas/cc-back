@@ -385,7 +385,7 @@ reinicio y recuperación del outbox. Solo entonces ejecutar el corte MFA del
 ### D. Migracion Aprobada Por Cohortes
 
 1. Presentar lista de conexiones/consumidores, referencias objetivo, respaldo restringido, cambios de esquema, tiempos, corte de writers y rollback. No incluir Meta bloqueado como candidato activo. No llevar tokens bajo investigacion al almacen operativo; preservar evidencia aparte si corresponde.
-2. Compatibilizar todos los runtimes con BD compartida: DEV, staging, gateway, cron, colas y scripts autorizados. No retirar campos antiguos mientras un consumidor dependa de ellos.
+2. Compatibilizar los consumidores de la BD pública: staging, gateway, cron, colas y scripts autorizados. DEV ensaya el mismo esquema en su BD aislada; no volver a compartir usuarios SQL. No retirar campos antiguos mientras un consumidor dependa de ellos.
 3. Copiar solo secretos expresamente autorizados mediante proceso protegido y trazable, sin stdout/argumentos visibles; no renombrar el fichero ficticio para usarlo con tokens reales. Validar integridad local y mapeos sin exponer valores.
 4. Migrar lectura primero y sin mutaciones del proveedor; documentar las consultas reales permitidas. Activaciones, escrituras, recepcion y renovacion tienen su propia aprobacion y tests. Un GET que revoca o cambia estado sigue siendo mutacion.
 5. Cambiar una fuente activa por cohorte; no doble publicacion, dobles conversiones ni fallback a valores de DB. Gestionar comandos en vuelo y reintentos con idempotencia y receipt del proveedor cuando exista.
@@ -440,12 +440,12 @@ Si no existe un candidato aislable o falta permiso de push, entregar commits/pat
 
 Push a DEV no es despliegue ni permiso para promover todo a staging. Antes de desplegar, acordar commits exactos, migraciones concretas, respaldo, canary, flags y servicios a reiniciar. No copiar recetas generales de `merge origin/dev`, `npm install` o `db:migrate` que ejecuten todos los cambios pendientes.
 
-- DEV backend: `/home/ubuntu/wt/back-dev`, `pm2-back-dev`, puerto `3004`.
+- DEV backend: fuente `/home/ubuntu/wt/back-dev`, release `/opt/clinicaclick-dev/current`, `clinicaclick-back-dev.service`, puerto local `3004`. Publicar con `sudo python3 ops/security/publish-isolated-dev.py`, Git limpio y dependencias aisladas; no arrancar el PM2 antiguo.
 - Staging backend: `/home/ubuntu/wt/back-staging`, `pm2-back-staging`, puerto `3001`.
 - Gateway: `/home/ubuntu/wt/gateway`, `pm2-gateway`, puerto `3000`; entradas externas OAuth/webhooks y sin jobs de negocio propios.
 - Preview frontend: `cc-front-preview-4203` sirve `/home/ubuntu/www/front-dev-preview`; fuente `/home/ubuntu/wt/front-dev`. Seguir `30` para build y `/home/ubuntu/scripts/cc-front-preview-sync.sh`, no arrancar otro ng serve que sustituya el preview.
 
-Los overrides PM2 de DEV mantienen JobRequests, cron, resume y gates de campañas pausados. Staging conserva sus workers autorizados; gateway mantiene worker/cron apagados. El propietario reportó revocación de credenciales y parada de WhatsApp; el corte de acceso no lo reactiva. Leer y preservar los flags actuales sin confundir la pausa DEV con el aislamiento de credenciales. No repetir reparaciones o rotaciones ya realizadas.
+El perfil aislado DEV mantiene JobRequests de negocio, cron, resume y gates de campañas pausados. `clinicaclick-dev-security.service` entrega solo correo de autenticación y auditoría; no habilita proveedores clínicos. Su lector usa el certificado CA del reader, distinto del writer cuando son autofirmados. Staging conserva sus workers autorizados; gateway mantiene worker/cron apagados. El propietario reportó revocación de credenciales y parada de WhatsApp; el corte de acceso no lo reactiva. Leer y preservar los flags actuales sin confundir la pausa DEV con el aislamiento de credenciales. No repetir reparaciones o rotaciones ya realizadas.
 
 Hotfix `socialstats.controller.js` de 12/09/2026 ya aplicado localmente a DEV/staging/gateway. Preservarlo e integrarlo en el corte aprobado; una promocion que lo pierda reabre la brecha. Su SHA historico esta en el acta de seguridad, no usarlo para deshacer mejoras posteriores legitimas.
 
