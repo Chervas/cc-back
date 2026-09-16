@@ -77,7 +77,9 @@ async function assertAiAllowed(useCase){
   if(await db.SecurityMonitoringMeasure.findOne({where:{entity_type:'ai_use_case',entity_id:useCase,paused:true},attributes:['id']}))fail('ai_function_manually_paused',409);
 }
 async function assertTemplateAllowed(wabaId,name,language){
-  const [rows]=await db.sequelize.query('SELECT m.id FROM SecurityMonitoringMeasures m JOIN WhatsappTemplates t ON CAST(t.id AS CHAR)=m.entity_id WHERE m.entity_type=\'whatsapp_template\' AND m.paused=1 AND t.waba_id=:waba AND t.name=:name AND t.language=:language LIMIT 1',{replacements:{waba:String(wabaId),name:String(name),language:String(language)}});
+  // IDs are canonical decimal strings. Compare their bytes so the connection
+  // collation cannot conflict with the newer monitoring table's collation.
+  const [rows]=await db.sequelize.query('SELECT m.id FROM SecurityMonitoringMeasures m JOIN WhatsappTemplates t ON BINARY CAST(t.id AS CHAR)=BINARY m.entity_id WHERE m.entity_type=\'whatsapp_template\' AND m.paused=1 AND t.waba_id=:waba AND t.name=:name AND t.language=:language LIMIT 1',{replacements:{waba:String(wabaId),name:String(name),language:String(language)}});
   if(rows.length)fail('whatsapp_template_manually_paused',409);
 }
 async function candidates(rule,from){
