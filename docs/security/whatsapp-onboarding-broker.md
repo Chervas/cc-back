@@ -221,6 +221,18 @@ gateway, incluida baja compartida/activos primarios. Una reconexión aprobada
 necesitará autorización específica sin borrar bloqueos de credenciales antiguas
 ni habilitar Ads. No hay API de desbloqueo automática.
 
+La BD clínica distingue bloqueos universales (`clinic:N`/`group:N`) de un
+bloqueo revisado solo de Meta no WhatsApp (`meta:clinic:N`/`meta:group:N`).
+El resolver Meta consulta ambos; alta, listado y transporte WhatsApp consultan
+los universales. La recepción duradera también consulta las claves universales.
+Acotar una baja histórica requiere autorización explícita de reconexión,
+revisión de todos los miembros del grupo y evidencia antes/después; no lo hace
+OAuth ni el cambio de configuración. Una nueva baja vuelve a insertar la clave
+universal y prevalece incluso sobre una autorización WhatsApp ya obtenida.
+Antes de acotar el registro deben estar desplegados todos los lectores Meta;
+un rollback de código exige restaurar primero la clave universal. El token
+antiguo permanece revocado y hace falta una autorización nueva del titular.
+
 La auditoría técnica usa el outbox del broker y el UUID del alta como correlación:
 intención, canje solicitado, interrupción, candidata confirmada y cancelación,
 más denegaciones del broker. La correlación con usuario/sesión MFA y auditoría

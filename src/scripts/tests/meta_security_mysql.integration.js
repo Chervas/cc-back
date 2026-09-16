@@ -72,4 +72,24 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   finally { models.MetaScopeBlock = previousTable; }
   await assert.rejects(migration.down(qi), /Preserve Meta scope blocks/);
   report.checks.push('Unavailable security storage fails closed and populated rollback cannot remove historical blocks');
+
+  // A reviewed WhatsApp-only recovery must not reopen advertising/pages or
+  // silently override a subsequent full disconnection.
+  await models.MetaScopeBlock.update({ scope_key: 'meta:clinic:1' }, { where: { scope_key: 'clinic:1' } });
+  const clinic = { assignmentScope: 'clinic', clinicId: 1 };
+  const group = { assignmentScope: 'group', groupId: 10 };
+  for (const scope of [clinic, group]) {
+    assert.equal(await blocks.blocked(scope), true);
+    assert.equal(await blocks.blocked(scope, { purpose: 'whatsapp' }), false);
+  }
+  const stillBlocked = await resolver.resolveMetaConnectionForScope({ userId: 123, clinicIdRaw: 1, allowLegacyUserFallback: true });
+  assert.equal(stillBlocked.source, 'security_scope_blocked');
+  await assert.rejects(blocks.blocked(clinic, { purpose: 'unsupported' }), { code: 'meta_security_state_unavailable' });
+  await models.MetaScopeBlock.create({ scope_key: 'group:10', reason: 'scope_disconnected', created_at: new Date() });
+  for (const scope of [clinic, group]) assert.equal(await blocks.blocked(scope, { purpose: 'whatsapp' }), true);
+  await models.MetaScopeBlock.destroy({ where: { scope_key: 'group:10' } });
+  await sql.transaction(transaction => blocks.preserve({ scope: clinic, connectionId: 9, actorId: 123, clinicIds: [1], models, transaction }));
+  assert.equal(await blocks.blocked(group, { purpose: 'whatsapp' }), true);
+  assert(await models.MetaScopeBlock.findByPk('meta:clinic:1'));
+  report.checks.push('Reviewed Meta-only tombstones still block Meta clinic/group resolution; WhatsApp may reauthorize, but a later group or clinic disconnect overrides that permission');
 }).catch(error => { console.error(JSON.stringify({ success: false, error: error.message, stack: error.stack })); process.exitCode = 1; });

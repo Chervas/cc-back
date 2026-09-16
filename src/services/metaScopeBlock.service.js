@@ -2,8 +2,9 @@
 const { Op } = require('sequelize');
 const id = value => /^[1-9][0-9]{0,9}$/.test(String(value)) && Number(value) <= 2147483647 ? Number(value) : null;
 function unavailable() { throw Object.assign(Error('meta_security_state_unavailable'), { code: 'meta_security_state_unavailable', httpStatus: 503 }); }
-async function blocked(scope, { models = require('../../models'), transaction } = {}) {
+async function blocked(scope, { models = require('../../models'), transaction, purpose = 'meta' } = {}) {
   try {
+    if (!['meta', 'whatsapp'].includes(purpose)) unavailable();
     const keys = [];
     const options = { raw: true, ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {}) };
     if (scope?.assignmentScope === 'clinic' && id(scope.clinicId)) {
@@ -16,6 +17,11 @@ async function blocked(scope, { models = require('../../models'), transaction } 
       const clinics = await models.Clinica.findAll({ ...options, where: { grupoClinicaId: id(scope.groupId) }, attributes: ['id_clinica'] });
       for (const clinic of clinics) { if (!id(clinic.id_clinica)) unavailable(); keys.push('clinic:' + id(clinic.id_clinica)); }
     } else unavailable();
+    // Unprefixed tombstones always block every Meta integration, including WA.
+    // An explicitly reviewed `meta:` tombstone preserves the non-WA block
+    // when a customer reauthorizes WhatsApp independently. OAuth itself never
+    // removes or narrows a tombstone; new disconnections remain universal.
+    if (purpose === 'meta') keys.push(...keys.map(key => 'meta:' + key));
     return !!await models.MetaScopeBlock.findOne({ ...options, attributes: ['scope_key'], where: { scope_key: { [Op.in]: keys } } });
   } catch { unavailable(); }
 }

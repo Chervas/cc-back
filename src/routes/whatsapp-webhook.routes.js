@@ -143,7 +143,7 @@ async function permittedClinicIds(asset) {
   for (const setting of settings) { if (!positiveId(setting.clinic_id)) scopeDenied(); ids.add(positiveId(setting.clinic_id)); }
   if (!ids.size) scopeDenied();
   for (const clinicId of ids) {
-    if (await metaScopeBlock.blocked({ assignmentScope: 'clinic', clinicId })) scopeDenied();
+    if (await metaScopeBlock.blocked({ assignmentScope: 'clinic', clinicId }, { purpose: 'whatsapp' })) scopeDenied();
   }
   return ids;
 }

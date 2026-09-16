@@ -100,6 +100,16 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await models.MetaScopeBlock.destroy({ where: { scope_key: 'clinic:71' } });
   await assert.rejects(issue(who, flow.scope, service, flow.requestId), codeIs('whatsapp_authorization_cancelled'));
   report.checks.push('Durable clinic block prevents claimed-state revalidation; cancellation is durable and idempotent, and original request cannot be reused');
+  await models.MetaScopeBlock.create({ scope_key: 'meta:clinic:71', reason: 'legacy_disconnected', created_at: now() });
+  const separateWho = await actor(); const separateFlow = await issue(separateWho);
+  assert.deepEqual(separateFlow.clinicIds, [71, 72]);
+  await claim(separateWho, separateFlow);
+  assert.equal((await service.assertClaimActive(inputFor(separateWho, separateFlow))).status, 'claimed');
+  assert(await models.MetaScopeBlock.findByPk('meta:clinic:71'));
+  await models.MetaScopeBlock.create({ scope_key: 'clinic:71', reason: 'scope_disconnected', created_at: now() });
+  await assert.rejects(service.assertClaimActive(inputFor(separateWho, separateFlow)), codeIs('whatsapp_authorization_forbidden'));
+  await models.MetaScopeBlock.destroy({ where: { scope_key: 'clinic:71' } });
+  report.checks.push('Independent WhatsApp group issue/claim preserves a Meta-only member block; a later universal block rejects the already claimed authorization');
   for (const change of ['logout', 'password', 'email', 'suspended']) {
     const authWho = await actor(); const authFlow = await issue(authWho);
     if (change === 'logout') await models.AuthSession.update({ state: 'revoked' }, { where: { session_id: authWho.sessionRef } });
