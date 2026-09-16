@@ -109,7 +109,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
   loadExecution = executionId => models().FlowExecutionV2.findByPk(executionId, { attributes: ['id','clinic_id','trigger_entity_type','trigger_entity_id','context'], raw: true }),
   loadAppointment = appointmentId => models().CitaPaciente.findByPk(appointmentId, { raw: true }),
   patientHeld = patientId => require('./whatsappAppointmentEligibility').patientImportHeld(patientId),
-  isBlocked = clinicId => require('../services/metaScopeBlock.service').blocked({ assignmentScope: 'clinic', clinicId }),
+  isBlocked = clinicId => require('../services/metaScopeBlock.service').blocked({ assignmentScope: 'clinic', clinicId }, { purpose: 'whatsapp' }),
   createTransport = configuredTransport } = {}) {
   function read() {
     const value = loadConfiguration();
