@@ -3,6 +3,7 @@ const C = require('./whatsapp-authorized-contract'); const { fail } = require('.
 function createWhatsappAuthorizedOperations({ http, secrets, registry }) {
   if (typeof http !== 'function' || typeof secrets?.proof !== 'function' || typeof registry?.assert !== 'function') fail('invalid_request');
   return Object.freeze({
+    [require('./whatsapp-inbound-media').READ]: require('./whatsapp-inbound-media').operation({secrets,registry}),
     ...require('./whatsapp-template-management').operations({ http, secrets, registry }),
     [C.SEND]: Object.freeze({
       provider: C.PROVIDER, effect: 'write', persistResult: true, validate: C.validateSend,

@@ -2,6 +2,7 @@
 const path = require('node:path'); const { DatabaseSync } = require('node:sqlite');
 const E = require('./whatsapp-onboarding-contract'); const C = require('./whatsapp-authorized-contract'); const { BrokerError, fail } = require('./errors');
 const M = require('./whatsapp-template-management');
+const R = require('./whatsapp-inbound-media');
 function validateAuthorization(value) {
   if (!C.keys(value, ['connectionRef','authorizationId','enrollmentBinding','phoneId','wabaId','candidateDigest','expiresAt'], ['enabled','templates'])
     || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(value.connectionRef) || !E.uuid(value.authorizationId)
@@ -71,10 +72,10 @@ function createWhatsappAuthorizedRegistry({ filename, authorizations, loadEnroll
     authorize({ request, binding, principal }) {
       const value = this.assert(binding); const b = E.bindingFor(value.enrollmentBinding);
       if (request.assetRef !== 'wa-phone:' + value.definition.phoneId || !b.clinicIds.some(id => request.tenantRef === 'clinic:' + id)
-        || (request.operation === C.SEND || M.OPERATIONS.includes(request.operation)) && (principal.id !== 'staging:whatsapp' || request.payload.authorizationId !== value.definition.authorizationId
+        || (request.operation === C.SEND || request.operation === R.READ || M.OPERATIONS.includes(request.operation)) && (principal.id !== 'staging:whatsapp' || request.payload.authorizationId !== value.definition.authorizationId
           || request.payload.phoneId !== value.definition.phoneId)
         || request.operation === C.REVOKE && principal.id !== 'control:whatsapp') fail('scope_denied');
-      if (![C.SEND,C.REVOKE,...M.OPERATIONS].includes(request.operation)) fail('operation_denied'); return value;
+      if (![C.SEND,C.REVOKE,R.READ,...M.OPERATIONS].includes(request.operation)) fail('operation_denied'); return value;
     },
     close() { if (!closed) { closed = true; db.close(); } },
   });

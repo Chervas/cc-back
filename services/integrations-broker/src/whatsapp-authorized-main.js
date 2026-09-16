@@ -59,7 +59,7 @@ function validateConfig(config) {
       const expected = grant.principalId === 'staging:whatsapp' ? C.SEND : C.REVOKE;
       const key = JSON.stringify([grant.principalId,grant.tenantRef]);
       if (!b.clinicIds.some(id => grant.tenantRef === 'clinic:' + id) || grant.assetRef !== 'wa-phone:' + a.phoneId
-        || !grant.operations.includes(expected) || grant.operations.some(op => ![expected,...(expected === C.SEND ? M.OPERATIONS : [])].includes(op)) || new Set(grant.operations).size !== grant.operations.length || seen.has(key)) fail('invalid_request');
+        || !grant.operations.includes(expected) || grant.operations.some(op => ![expected,...(expected === C.SEND ? [...M.OPERATIONS,require('./whatsapp-inbound-media').READ] : [])].includes(op)) || new Set(grant.operations).size !== grant.operations.length || seen.has(key)) fail('invalid_request');
       seen.add(key);
     }
   }
