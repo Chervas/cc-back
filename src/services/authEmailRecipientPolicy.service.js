@@ -84,7 +84,8 @@ async function maySend(delivery, { env = process.env, models, now = () => new Da
       const base = String(env.EMAIL_PUBLIC_APP_URL || env.FRONTEND_PUBLIC_URL || '').replace(/\/+$/, '');
       const url = new URL(context.reset_url);
       const raw = url.searchParams.get('token');
-      const localDev = devWorker && base === 'http://localhost:4200' && url.origin === base;
+      const localDev = devWorker && ['http://localhost:4200', 'http://localhost:4203'].includes(base)
+        && url.origin === base;
       if ((!localDev && url.protocol !== 'https:') || !C.challengeToken(raw)
         || context.reset_url !== base + '/reset-password?token=' + encodeURIComponent(raw)
         || !C.equalHash(hash(raw), token.token_hash)) return false;

@@ -115,6 +115,26 @@ test('used, expired, replaced or redirected password recovery is not an authoriz
   assert.equal(await policy.maySend(f.message, { env, models: db }), false);
 });
 
+test('DEV recovery uses its configured local preview without allowing public HTTP or another origin', async t => {
+  const f = fixture(t, 'reset');
+  const dev = { ...env, DEV_SECURITY_WORKER: 'true', RUNTIME_NAMESPACE: 'dev', JOB_RUNTIME_NAMESPACE: 'dev',
+    QUEUE_PREFIX: 'dev', DB_NAME: 'clinicaclick_dev_isolated', JOBS_WORKER_ENABLED: 'false' };
+  for (const base of ['http://localhost:4200', 'http://localhost:4203', 'http://localhost:4999', 'http://example.invalid']) {
+    const token = new URL(f.context.reset_url).searchParams.get('token');
+    f.context.reset_url = base + '/reset-password?token=' + encodeURIComponent(token);
+    f.row.template_context = delivery.sealSensitiveTemplateContext(f.context, {
+      publicId: f.row.public_id, recipientHash: f.row.recipient_hash, templateKey: f.row.template_key,
+    });
+    Object.assign(f.message, templates.renderTemplate(f.row.template_key, {
+      ...f.context, email_message_id: f.row.id, recipient_domain: f.row.recipient_domain,
+    }));
+    assert.equal(await policy.maySend(f.message, { env: { ...dev, EMAIL_PUBLIC_APP_URL: base }, models: db }),
+      ['http://localhost:4200', 'http://localhost:4203'].includes(base));
+    assert.equal(await policy.maySend(f.message, { env: { ...env, EMAIL_PUBLIC_APP_URL: base }, models: db }), false);
+    assert.equal(await policy.maySend(f.message, { env: { ...dev, EMAIL_PUBLIC_APP_URL: 'http://localhost:4998' }, models: db }), false);
+  }
+});
+
 test('suppressed or inactive recipients remain blocked', async t => {
   const f = fixture(t);
   for (const change of [{ estado_cuenta: 'suspendido' }, { es_provisional: true }, { email_usuario: 'changed@example.invalid' }]) {
