@@ -67,6 +67,8 @@ async function evaluatePendingLeadContact({ leadId, triggeredAt, models = db }) 
         where: {
           conversation_id: { [Op.in]: conversationIds },
           direction: 'outbound',
+          // Internal timeline events record an attempt, not patient contact.
+          message_type: { [Op.ne]: 'event' },
           status: { [Op.ne]: 'failed' },
         },
         order: [['createdAt', 'ASC']],
