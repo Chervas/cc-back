@@ -17,4 +17,6 @@ function client(mode) {
   }
   return clients.get(mode);
 }
-module.exports = { privateFile, read: command => client(command.mode).read(command) };
+module.exports = { privateFile, read: command => process.env.PLATFORM_AUDIT_READER_TRANSPORT === 'unix-dev'
+  ? require('../lib/devAuditRelay').read(command, process.env)
+  : client(command.mode).read(command) };

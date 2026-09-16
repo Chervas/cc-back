@@ -9,15 +9,23 @@ function assertDevRuntimeIsolation(env = process.env, identity = { uid: process.
   const deny = () => { throw Error('DEV_RUNTIME_ISOLATION_REQUIRED'); };
   // Configuration checks prevent accidentally restarting the former PM2 setup.
   // OS ownership, SQL grants and firewall rules remain the actual boundaries.
+  const security = env.DEV_SECURITY_PROFILE === 'isolated-security-v2';
   if (identity.uid === 0 || identity.uid === 1000 || identity.username !== 'clinicaclick-dev'
-    || env.DEV_SECURITY_PROFILE !== 'isolated-v1' || env.DB_NAME !== 'clinicaclick_dev_isolated'
+    || !['isolated-v1', 'isolated-security-v2'].includes(env.DEV_SECURITY_PROFILE) || env.DB_NAME !== 'clinicaclick_dev_isolated'
     || env.DB_USERNAME !== 'cc_dev_api' || env.DB_HOST !== '127.0.0.1'
     || !/^[a-f0-9]{64}aA1!$/.test(env.DB_PASSWORD || '') || !/^[a-f0-9]{64}$/.test(env.JWT_SECRET || '')
     || env.API_LISTEN_ADDRESS !== '127.0.0.1'
     || !/^redis:\/\/:[a-f0-9]{64}@127\.0\.0\.1:6384\/0$/.test(env.REDIS_URL || '')) deny();
   for (const key of ['RUNTIME_NAMESPACE', 'JOB_RUNTIME_NAMESPACE', 'QUEUE_PREFIX']) if (env[key] !== 'dev') deny();
   for (const key of ['JOBS_WORKER_ENABLED', 'JOBS_CRON_LEADER', 'JOBS_AUTO_START', 'SYSTEM_NOTIFICATIONS_CRON_LEADER',
-    'RESUME_AUTOMATIONS_FROM_SOCKET_BUS', 'AUTOMATIONS_V2_RESUME_FROM_SOCKET_BUS', 'BEDROCK_ENABLED', 'EMAIL_ENABLED']) if (env[key] !== 'false') deny();
+    'RESUME_AUTOMATIONS_FROM_SOCKET_BUS', 'AUTOMATIONS_V2_RESUME_FROM_SOCKET_BUS', 'BEDROCK_ENABLED']) if (env[key] !== 'false') deny();
+  if (security) {
+    if (env.EMAIL_ENABLED !== 'true' || env.EMAIL_PROVIDER !== 'ses' || env.AUTH_EMAIL_MFA_MODE !== 'enforce'
+      || env.AUTH_SESSION_MODE !== 'enforce' || env.PLATFORM_AUDIT_DELIVERY_ENABLED !== 'false'
+      || env.PLATFORM_AUDIT_READER_TRANSPORT !== 'unix-dev'
+      || env.PLATFORM_AUDIT_READER_SOCKET !== '/var/lib/clinicaclick-dev-security/audit.sock'
+      || env.DEV_SECURITY_WORKER) deny();
+  } else if (env.EMAIL_ENABLED !== 'false') deny();
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
     if (/^(META|FACEBOOK|GOOGLE|GROQ|BEDROCK|EMAIL_AWS|AWS).*(TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY_ID)$/.test(key)

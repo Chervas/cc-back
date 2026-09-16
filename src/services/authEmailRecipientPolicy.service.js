@@ -27,8 +27,12 @@ function jobPayload(templateKey, emailMessageId, env = process.env) {
 }
 
 async function maySend(delivery, { env = process.env, models, now = () => new Date() } = {}) {
-  if (!enabled(env) || env.RUNTIME_ROLE !== 'api' || env.JOB_RUNTIME_NAMESPACE !== 'staging'
-    || env.QUEUE_PREFIX !== 'staging' || env.JOBS_WORKER_ENABLED !== 'true'
+  const devWorker = env.DEV_SECURITY_WORKER === 'true' && env.RUNTIME_NAMESPACE === 'dev'
+    && env.JOB_RUNTIME_NAMESPACE === 'dev' && env.QUEUE_PREFIX === 'dev'
+    && env.DB_NAME === 'clinicaclick_dev_isolated' && env.JOBS_WORKER_ENABLED === 'false';
+  const publicWorker = env.JOB_RUNTIME_NAMESPACE === 'staging' && env.QUEUE_PREFIX === 'staging'
+    && env.JOBS_WORKER_ENABLED === 'true';
+  if (!enabled(env) || env.RUNTIME_ROLE !== 'api' || (!devWorker && !publicWorker)
     || !TEMPLATES.has(delivery?.templateKey) || delivery.stream !== 'transactional'
     || typeof delivery.outboxId !== 'string' || !/^em_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(delivery.outboxId)
     || typeof delivery.to !== 'string' || delivery.to !== delivery.to.trim().toLowerCase()) return false;
@@ -80,7 +84,8 @@ async function maySend(delivery, { env = process.env, models, now = () => new Da
       const base = String(env.EMAIL_PUBLIC_APP_URL || env.FRONTEND_PUBLIC_URL || '').replace(/\/+$/, '');
       const url = new URL(context.reset_url);
       const raw = url.searchParams.get('token');
-      if (url.protocol !== 'https:' || !C.challengeToken(raw)
+      const localDev = devWorker && base === 'http://localhost:4200' && url.origin === base;
+      if ((!localDev && url.protocol !== 'https:') || !C.challengeToken(raw)
         || context.reset_url !== base + '/reset-password?token=' + encodeURIComponent(raw)
         || !C.equalHash(hash(raw), token.token_hash)) return false;
     } catch { return false; }

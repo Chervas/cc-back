@@ -1,0 +1,31 @@
+[Unit]
+Description=ClinicaClick DEV authentication email and audit delivery
+After=network.target mysql.service clinicaclick-dev-redis.service
+Requires=clinicaclick-dev-redis.service
+[Service]
+User=clinicaclick-dev-security
+Group=clinicaclick-dev
+WorkingDirectory=/opt/clinicaclick-dev/current
+EnvironmentFile=/etc/clinicaclick-dev-security/runtime.env
+ExecStart=/usr/bin/flock -n /var/lib/clinicaclick-dev-security/worker.lock /usr/bin/node src/scripts/dev-security-worker.js
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/run/mysqld -/run/redis -/etc/clinicaclick-security-mfa-20260914
+ReadWritePaths=/var/lib/clinicaclick-dev-security
+UMask=0077
+LimitCORE=0
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+[Install]
+WantedBy=multi-user.target

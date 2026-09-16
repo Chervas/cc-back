@@ -191,3 +191,36 @@ con transporte simulado. El acta final conserva fallos previos de harness,
 correcciones y ejecuciones finales, sin sumarlas como verificaciones reales.
 No se ha iniciado la aplicación contra la BD compartida, enviado correo real,
 usado Meta/AWS, reiniciado PM2 ni desplegado. Push a DEV no equivale a activación.
+
+## DEV aislado: correo de acceso y auditoría
+
+`isolated-security-v2` conserva BD, Redis, JWT y UID propios. La API usa los
+mismos controladores de sesiones/MFA que staging, pero solo encola correo. No
+recibe claves SES ni claves del writer/reader AWS. `clinicaclick-dev-security`
+consume únicamente `email_send` del namespace DEV para códigos y recuperación
+de usuarios registrados y entrega su outbox de auditoría con claves distintas.
+No importa el scheduler ni arranca recordatorios, Meta, Google o colas de negocio.
+
+El visor usa `/var/lib/clinicaclick-dev-security/audit.sock`: el proceso separado
+verifica sesión DEV y cada recibo contra la BD DEV antes de consultar AWS. No
+admite referencias conocidas únicamente en staging. El archivo S3 es compartido;
+el índice de cada entorno y la identidad firmante de entrega son independientes.
+No copiar el índice/recibos público a DEV. La captura cubre acceso, sesiones,
+permisos y las consultas sensibles ya instrumentadas; no supone cobertura de
+cualquier edición/exportación del producto.
+
+Procedimiento: comprobar el contrato SQL, generar claves DEV, añadir solo sus
+claves públicas a writer/reader conservando las públicas, instalar la unidad
+`ops/security/systemd/clinicaclick-dev-security.service`, publicar el código
+comprometido con `publish-isolated-dev.py`, drenar auditoría y comprobar SES antes
+de activar MFA. El consumidor usa `flock`; un resultado de envío incierto no se
+repite automáticamente. La clave SES heredada solo existe en el consumidor
+protegido: su traslado a un proveedor de credenciales temporales/vault sigue
+pendiente. El rol administrativo SSO del operador no participa en los envíos.
+
+Para desarrollo local, el retorno de recuperación puede ser exactamente
+`http://localhost:4200`; la excepción solo pertenece al consumidor DEV. Los
+dispositivos recordados mantienen el requisito de HTTPS del contrato público.
+No desactivar MFA público ni reutilizar contraseñas, cookies, JWT o tokens de
+proveedores para igualar entornos. Rollback: detener el consumidor y restaurar
+configuración/release DEV previas; conservar outbox, sesiones, pruebas y recibos.

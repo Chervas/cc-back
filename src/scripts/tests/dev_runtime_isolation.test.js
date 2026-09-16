@@ -23,3 +23,15 @@ test('public runtimes keep their existing authentication and job configuration',
     QUEUE_PREFIX: scope, AUTH_SESSION_MODE: 'enforce', AUTH_EMAIL_MFA_MODE: 'enforce' }, { uid: 1000, username: 'ubuntu' }), { isolatedDev: false });
   assert.throws(() => assertDevRuntimeIsolation({ name: 'pm2-back-dev' }, identity), /DEV_RUNTIME_ISOLATION_REQUIRED/);
 });
+
+test('DEV MFA only enables enqueue and local audit relay, without provider keys or general workers', () => {
+  const env = { ...environment(), DEV_SECURITY_PROFILE: 'isolated-security-v2', EMAIL_ENABLED: 'true', EMAIL_PROVIDER: 'ses',
+    AUTH_EMAIL_MFA_MODE: 'enforce', AUTH_SESSION_MODE: 'enforce', PLATFORM_AUDIT_DELIVERY_ENABLED: 'false',
+    PLATFORM_AUDIT_READER_TRANSPORT: 'unix-dev', PLATFORM_AUDIT_READER_SOCKET: '/var/lib/clinicaclick-dev-security/audit.sock' };
+  assert.equal(assertDevRuntimeIsolation(env, identity).isolatedDev, true);
+  for (const change of [{ EMAIL_AWS_ACCESS_KEY_ID: 'forbidden' }, { PLATFORM_AUDIT_WRITER_KEY_FILE: '/any' },
+    { JOBS_WORKER_ENABLED: 'true' }, { DEV_SECURITY_WORKER: 'true' }, { PLATFORM_AUDIT_READER_SOCKET: '/wrong' },
+    { AUTH_EMAIL_MFA_MODE: 'off' }, { EMAIL_ENABLED: 'false' }]) {
+    assert.throws(() => assertDevRuntimeIsolation({ ...env, ...change }, identity), /DEV_RUNTIME_ISOLATION_REQUIRED/);
+  }
+});

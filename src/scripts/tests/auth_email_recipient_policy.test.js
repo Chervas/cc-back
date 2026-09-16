@@ -143,6 +143,18 @@ test('only public gateway authentication emails receive the staging job namespac
   assert.deepEqual(policy.jobPayload('ops.email_test', 789, gateway), { email_message_id: 789 });
 });
 
+test('isolated DEV security consumer validates its own persisted challenges, never the public namespace', async t => {
+  const f = fixture(t);
+  const dev = { ...env, DEV_SECURITY_WORKER: 'true', RUNTIME_NAMESPACE: 'dev', JOB_RUNTIME_NAMESPACE: 'dev',
+    QUEUE_PREFIX: 'dev', DB_NAME: 'clinicaclick_dev_isolated', JOBS_WORKER_ENABLED: 'false' };
+  assert.equal(await policy.maySend(f.message, { env: dev, models: db }), true);
+  for (const change of [{ DEV_SECURITY_WORKER: undefined }, { DB_NAME: 'public' }, { QUEUE_PREFIX: 'staging' },
+    { JOB_RUNTIME_NAMESPACE: 'staging' }, { JOBS_WORKER_ENABLED: 'true' }]) {
+    assert.equal(await policy.maySend(f.message, { env: { ...dev, ...change }, models: db }), false);
+  }
+  assert.deepEqual(policy.jobPayload('auth.email_verification', 789, dev), { email_message_id: 789 });
+});
+
 test('database failure cannot cause SES send and exposes only a bounded retryable error', async t => {
   const f = fixture(t);
   t.mock.method(db.EmailMessage, 'findOne', async () => { throw Error('FICTITIOUS_DATABASE_SECRET'); });
