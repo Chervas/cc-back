@@ -21,11 +21,12 @@ function validateConfig(config) {
     || new Set([config.stateFile,config.enrollmentStateFile,config.enrollmentConfigFile,config.tlsKeyFile,config.tlsCertFile]).size !== 5
     || !Array.isArray(config.authorizations) || !config.authorizations.length || config.authorizations.length > 64) fail('invalid_request');
   const policy = validatePolicy(config.policy);
-  if (policy.principals.length !== 2 || policy.principals.some(p => p.maxPerMinute > 60)
+  if (![2,3].includes(policy.principals.length) || policy.principals.some(p => p.maxPerMinute > 60
+      || !['staging:whatsapp','control:whatsapp','dev:whatsapp'].includes(p.id))
     || !['staging:whatsapp','control:whatsapp'].every(id => policy.principals.some(p => p.id === id))
     || policy.connections.length !== config.authorizations.length) fail('invalid_request');
   const keys = policy.principals.map(p => createPublicKey(p.publicKey).export({ type: 'spki', format: 'der' }).toString('base64'));
-  if (new Set(keys).size !== 2) fail('invalid_request');
+  if (new Set(keys).size !== policy.principals.length) fail('invalid_request');
   const authorizations = config.authorizations.map(value => {
     if (!Object.hasOwn(value || {}, 'enabled') || typeof value.enabled !== 'boolean') fail('invalid_request');
     return validateAuthorization(value);
@@ -53,13 +54,17 @@ function validateConfig(config) {
     slots.set(enrollment.secretArn, enrollment.connectionRef); apps.add(enrollment.clientSecretArn);
     enrollmentRefs.set(enrollment.connectionRef, JSON.stringify(enrollment)); scopes.set(b.scopeKey, enrollment.connectionRef);
     const grants = policy.grants.filter(g => g.connectionRef === binding.connectionRef);
-    if (grants.length !== b.clinicIds.length * 2) fail('invalid_request');
+    // Public operation/control remain mandatory for every enrolled clinic.
+    // DEV is additive and receives only explicitly listed clinic/phone grants.
+    const publicGrants = grants.filter(g => g.principalId !== 'dev:whatsapp');
+    if (publicGrants.length !== b.clinicIds.length * 2) fail('invalid_request');
     const seen = new Set();
     for (const grant of grants) {
-      const expected = grant.principalId === 'staging:whatsapp' ? C.SEND : C.REVOKE;
+      const expected = ['staging:whatsapp','dev:whatsapp'].includes(grant.principalId) ? C.SEND : C.REVOKE;
       const key = JSON.stringify([grant.principalId,grant.tenantRef]);
       if (!b.clinicIds.some(id => grant.tenantRef === 'clinic:' + id) || grant.assetRef !== 'wa-phone:' + a.phoneId
-        || !grant.operations.includes(expected) || grant.operations.some(op => ![expected,...(expected === C.SEND ? [...M.OPERATIONS,require('./whatsapp-inbound-media').READ] : [])].includes(op)) || new Set(grant.operations).size !== grant.operations.length || seen.has(key)) fail('invalid_request');
+        || grant.principalId !== 'dev:whatsapp' && !grant.operations.includes(expected)
+        || grant.operations.some(op => ![expected,...(expected === C.SEND ? [...M.OPERATIONS,require('./whatsapp-inbound-media').READ] : [])].includes(op)) || new Set(grant.operations).size !== grant.operations.length || seen.has(key)) fail('invalid_request');
       seen.add(key);
     }
   }

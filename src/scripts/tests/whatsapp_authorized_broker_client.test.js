@@ -207,3 +207,29 @@ test('the cutover is mandatory private configuration and cannot be supplied by a
   const f = fixture(); await assert.rejects(f.client.send({ ...input(), messageNotBefore: '2000-01-01T00:00:00Z' }), { code: 'whatsapp_authorized_request_invalid' });
   assert.equal(f.calls.length, 0);
 });
+
+test('isolated DEV uses separate signing paths and idempotency while preserving clinic checks', async () => {
+  const f = fixture();
+  Object.assign(f.state.env, { RUNTIME_NAMESPACE: 'dev', JOB_RUNTIME_NAMESPACE: 'dev', QUEUE_PREFIX: 'dev',
+    JOBS_WORKER_ENABLED: 'false', JOBS_AUTO_START: 'false', JOBS_CRON_LEADER: 'false',
+    WHATSAPP_DEV_BROKER_ENABLED: 'true', DEV_SECURITY_PROFILE: 'isolated-security-v2',
+    DB_NAME: 'clinicaclick_dev_isolated', DB_USERNAME: 'cc_dev_api', DB_HOST: '127.0.0.1' });
+  f.state.config.keyId = 'dev-whatsapp-v1';
+  for (const k of ['privateKeyFile','caFile']) f.state.config[k] = f.state.config[k].replace('/staging/', '/dev/');
+  await f.client.send(input()); await f.client.send(input());
+  assert.notEqual(f.calls[0].requestId, requestIdFor('123'));
+  assert.equal(f.calls[0].requestId, f.calls[1].requestId);
+  f.state.blocked = true;
+  await assert.rejects(f.client.send(input()), { code: 'whatsapp_authorized_scope_blocked' });
+  assert.equal(f.calls.length, 2);
+  const baseline = structuredClone(f.state.env);
+  for (const change of [{ DB_NAME: 'clinicaclick' }, { DB_HOST: 'database.internal' }, { JOBS_WORKER_ENABLED: 'true' },
+    { JOBS_CRON_LEADER: 'true' }, { QUEUE_PREFIX: 'staging' }, { RUNTIME_ROLE: 'gateway' }, { WHATSAPP_DEV_BROKER_ENABLED: 'false' }]) {
+    f.state.env = { ...baseline, ...change };
+    await assert.rejects(f.client.send(input()), { code: 'whatsapp_broker_runtime_denied' });
+  }
+  f.state.env = baseline; f.state.blocked = false;
+  f.state.config = config();
+  await assert.rejects(f.client.send(input()), { code: 'whatsapp_authorized_configuration_invalid' });
+  assert.equal(f.calls.length, 2);
+});

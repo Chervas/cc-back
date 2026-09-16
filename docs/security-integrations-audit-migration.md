@@ -15,6 +15,33 @@ datos antes del corte: publicar código no cambia el runtime ni sus pausas.
 
 ## Elegir el siguiente corte
 
+### Preparar la identidad WhatsApp de DEV
+
+El contrato de entornos está en [31](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md#identidad-whatsapp-de-dev).
+Generar una clave Ed25519 propia en el directorio privado DEV; nunca copiar la
+clave de staging. El broker acepta el principal opcional `dev:whatsapp` con
+clave distinta y grants por clínica, conexión, teléfono y operación. Sin grants,
+la identidad no permite consultar ni enviar. No retirar grants públicos al
+incorporar DEV, ni concederle la operación de revocación de control.
+
+En el servidor de la aplicación, publicar primero el adaptador compatible y
+configurar `WHATSAPP_DEV_BROKER_ENABLED=true` y
+`WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE=/etc/clinicaclick-whatsapp-authorized/dev/config.json`.
+El arranque exige BD/colas DEV y workers/cron generales apagados. El firewall
+solo añade salida a `13.39.100.55:8447`. El registro empieza sin bindings; una
+prueba firmada contra una conexión sin grant debe devolver `scope_denied`.
+
+Antes de añadir un número: completar OAuth nuevo si su token anterior fue
+revocado, fijar clínicas y exclusiones, y conservar el control de bloqueos
+persistentes. Añadir el grant DEV y el binding de su BD aislada como un corte
+conjunto. La recepción pública conserva un único consumidor; una copia DEV no
+puede volver a disparar automatizaciones. No declarar operativo el número hasta
+probar envío manual, recepción, catálogo y adjuntos en ambos recorridos.
+
+Rollback de esta base: retirar exclusivamente el principal/grants DEV y su
+configuración, cerrar su salida de red y volver al release anterior. Conservar
+el registro público, las autorizaciones y las claves idempotentes de staging.
+
 El orden se mantiene en [16: prioridades](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/16-roadmap.md#seguridad-de-acceso-e-integraciones). Esta tabla localiza procedimientos.
 
 | Trabajo | Guía y condición de salida |

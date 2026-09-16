@@ -123,3 +123,21 @@ test('A large clinic catalog includes custom templates and still rejects duplica
   definition.templates.push({ ...definition.templates[0], id: '20001' });
   assert.throws(() => validateAuthorization(definition), { code: 'invalid_request' });
 });
+
+test('signed DEV calls cannot access another clinic and do not reuse public receipts', async t => {
+  const a = await fixture(t), { generateKeyPairSync } = require('node:crypto'), { signRequest } = require('../src/auth');
+  const key = generateKeyPairSync('ed25519');
+  a.policy.principals.push({ id: 'dev:whatsapp', keyId: 'dev-whatsapp-v1', enabled: true, maxPerMinute: 30,
+    publicKey: key.publicKey.export({ type: 'spki', format: 'pem' }) });
+  a.policy.grants.push({ ...a.policy.grants[0], principalId: 'dev:whatsapp' }); a.restart();
+  const execute = request => { const signed = signRequest(request, { keyId: 'dev-whatsapp-v1', privateKey: key.privateKey,
+    audience: a.policy.audience, now: a.f.now() }); return a.current.broker.execute(signed.raw, signed.headers); };
+  const request = a.request();
+  await a.execute(request); await execute(request); await execute(request);
+  assert.equal(a.sends().length, 2); // Same UUID is scoped to its authenticated principal.
+  const reads = a.f.state.awsCalls.length;
+  await assert.rejects(execute(a.request(textMessage(), { tenantRef: 'clinic:72' })), { code: 'scope_denied' });
+  await assert.rejects(execute(a.request(textMessage(), { operation: C.REVOKE, payload: {} })), { code: 'scope_denied' });
+  assert.equal(a.f.state.awsCalls.length, reads); assert.equal(a.sends().length, 2);
+  a.blockScope(); await assert.rejects(execute(a.request()), { code: 'asset_revoked' });
+});

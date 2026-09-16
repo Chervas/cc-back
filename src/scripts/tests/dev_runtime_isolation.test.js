@@ -35,3 +35,16 @@ test('DEV MFA only enables enqueue and local audit relay, without provider keys 
     assert.throws(() => assertDevRuntimeIsolation({ ...env, ...change }, identity), /DEV_RUNTIME_ISOLATION_REQUIRED/);
   }
 });
+
+test('the DEV WhatsApp adapter cannot load public signing files or enable public workers', () => {
+  const env = { ...environment(), RUNTIME_ROLE: 'api', DEV_SECURITY_PROFILE: 'isolated-security-v2',
+    EMAIL_ENABLED: 'true', EMAIL_PROVIDER: 'ses', AUTH_EMAIL_MFA_MODE: 'enforce', AUTH_SESSION_MODE: 'enforce',
+    PLATFORM_AUDIT_DELIVERY_ENABLED: 'false', PLATFORM_AUDIT_READER_TRANSPORT: 'unix-dev',
+    PLATFORM_AUDIT_READER_SOCKET: '/var/lib/clinicaclick-dev-security/audit.sock',
+    WHATSAPP_DEV_BROKER_ENABLED: 'true', WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE: '/etc/clinicaclick-whatsapp-authorized/dev/config.json' };
+  assert.equal(assertDevRuntimeIsolation(env, identity).isolatedDev, true);
+  for (const change of [{ WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE: '/etc/clinicaclick-whatsapp-authorized/staging/config.json' },
+    { WHATSAPP_DEV_BROKER_ENABLED: 'false' }, { RUNTIME_ROLE: 'gateway' }, { JOBS_WORKER_ENABLED: 'true' },
+    { DEV_SECURITY_PROFILE: 'isolated-v1' }])
+    assert.throws(() => assertDevRuntimeIsolation({ ...env, ...change }, identity), /DEV_RUNTIME_ISOLATION_REQUIRED/);
+});

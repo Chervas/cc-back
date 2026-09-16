@@ -26,6 +26,11 @@ function assertDevRuntimeIsolation(env = process.env, identity = { uid: process.
       || env.PLATFORM_AUDIT_READER_SOCKET !== '/var/lib/clinicaclick-dev-security/audit.sock'
       || env.DEV_SECURITY_WORKER) deny();
   } else if (env.EMAIL_ENABLED !== 'false') deny();
+  if (env.WHATSAPP_DEV_BROKER_ENABLED || env.WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE) {
+    if (!security || env.WHATSAPP_DEV_BROKER_ENABLED !== 'true'
+      || env.WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE !== '/etc/clinicaclick-whatsapp-authorized/dev/config.json') deny();
+    try { if (require('./whatsappAuthorizedRuntime').namespace(env) !== 'dev') deny(); } catch { deny(); }
+  }
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
     if (/^(META|FACEBOOK|GOOGLE|GROQ|BEDROCK|EMAIL_AWS|AWS).*(TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY_ID)$/.test(key)

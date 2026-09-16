@@ -123,3 +123,22 @@ test('Multiple phones may share exactly one immutable enrollment binding without
   }
   assert(base.authorizations.every(v=>v.enabled===false));
 });
+
+test('DEV identity is optional, distinct and granted per clinic/phone without replacing public grants', async t => {
+  const f = await fixture(t); const c = config(f);
+  const key = require('node:crypto').generateKeyPairSync('ed25519');
+  c.policy.principals.push({ id: 'dev:whatsapp', keyId: 'dev-whatsapp-v1', enabled: true, maxPerMinute: 30,
+    publicKey: key.publicKey.export({ type: 'spki', format: 'pem' }) });
+  runtime.validateConfig(c); // A key alone grants no access.
+  const grant = { ...c.policy.grants[0], principalId: 'dev:whatsapp', operations: [require('../src/whatsapp-inbound-media').READ] };
+  c.policy.grants.push(grant); runtime.validateConfig(c);
+  for (const change of [v => { v.policy.grants.at(-1).operations = [C.REVOKE]; },
+    v => { v.policy.grants.at(-1).tenantRef = 'clinic:999'; },
+    v => { v.policy.principals.at(-1).publicKey = v.policy.principals[0].publicKey; },
+    v => { v.policy.grants.push(structuredClone(v.policy.grants.at(-1))); },
+    v => { v.policy.grants.splice(0, 1); },
+    v => { v.policy.principals.at(-1).id = 'prod:whatsapp'; }]) {
+    const bad = structuredClone(c); change(bad);
+    assert.throws(() => runtime.validateConfig(bad), { code: 'invalid_request' });
+  }
+});

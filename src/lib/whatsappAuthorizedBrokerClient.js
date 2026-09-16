@@ -1,14 +1,14 @@
 'use strict';
 
-// Staging-only adapter. The registry contains routing metadata, never Meta
+// Environment-scoped adapter. The registry contains routing metadata, never Meta
 // credentials. Every send is pinned to an existing application Message ID.
 const fs = require('node:fs');
 const { createHash, randomUUID } = require('node:crypto');
 const TM = require('../../services/integrations-broker/src/whatsapp-template-management');
 const C = require('../../services/integrations-broker/src/whatsapp-authorized-contract');
-const { requestIdFor, assertStaging } = require('./whatsappBrokerClient');
+const runtime = require('./whatsappAuthorizedRuntime');
 const { createIntegrationsBrokerClient } = require('./integrationsBrokerClient');
-const ROOT = '/etc/clinicaclick-whatsapp-authorized/staging';
+const ROOT = runtime.ROOTS.staging;
 const CONFIG_FILE = ROOT + '/config.json';
 const BINDING_KEYS = ['connectionRef','authorizationId','clinicId','assetId','phoneId','wabaId','revision','sendEnabled'];
 const validCutoff = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value) && Number.isFinite(Date.parse(value));
@@ -63,13 +63,17 @@ function privateFile(file, max) {
     return fs.readFileSync(file);
   } catch { fail('whatsapp_authorized_configuration_invalid'); }
 }
-function validateConfiguration(value) {
+function validateConfiguration(value, namespace = 'staging') {
+  const root = runtime.ROOTS[namespace];
+  if (!root) fail('whatsapp_authorized_configuration_invalid');
   if (!exact(value, ['version','origin','keyId','audience','privateKeyFile','caFile','bindings','messageNotBefore']) || value.version !== 1
     || typeof value.messageNotBefore !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value.messageNotBefore)
     || !Number.isFinite(Date.parse(value.messageNotBefore))
     || typeof value.origin !== 'string' || typeof value.keyId !== 'string' || typeof value.audience !== 'string'
     || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value.keyId) || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value.audience)
-    || value.privateKeyFile !== ROOT + '/private.pem' || value.caFile !== ROOT + '/ca.pem'
+    || value.privateKeyFile !== root + '/private.pem' || value.caFile !== root + '/ca.pem'
+    || namespace === 'dev' && !/^dev-whatsapp(?:[-:.][A-Za-z0-9_.:-]+)?$/.test(value.keyId)
+    || namespace === 'staging' && /^dev-whatsapp(?:[-:.]|$)/.test(value.keyId)
     || !Array.isArray(value.bindings) || value.bindings.length > 1000) fail('whatsapp_authorized_configuration_invalid');
   try {
     const url = new URL(value.origin);
@@ -81,10 +85,10 @@ function validateConfiguration(value) {
 }
 function configuration(env = process.env) {
   if (!env.WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE) return null;
-  assertStaging(env);
-  if (env.WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE !== CONFIG_FILE) fail('whatsapp_authorized_configuration_invalid');
-  const raw = privateFile(CONFIG_FILE, 1048576);
-  try { return validateConfiguration(JSON.parse(raw.toString('utf8'))); }
+  const namespace = runtime.namespace(env), file = runtime.ROOTS[namespace] + '/config.json';
+  if (env.WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE !== file) fail('whatsapp_authorized_configuration_invalid');
+  const raw = privateFile(file, 1048576);
+  try { return validateConfiguration(JSON.parse(raw.toString('utf8')), namespace); }
   catch { fail('whatsapp_authorized_configuration_invalid'); }
   finally { raw.fill(0); }
 }
@@ -114,7 +118,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
   function read() {
     const value = loadConfiguration();
     if (value === null) return null;
-    assertStaging(environment()); return validateConfiguration(value);
+    return validateConfiguration(value, runtime.namespace(environment()));
   }
   function selected(config, clinicId, assetId) {
     if (!id(clinicId) || !id(assetId)) fail('whatsapp_authorized_binding_invalid');
@@ -134,7 +138,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       // blocked() includes both this clinic and its current group, including
       // durable tombstones surviving deletion of the former connection.
       if (await isBlocked(clinicId) !== false) fail('whatsapp_authorized_scope_blocked');
-      assertStaging(environment());
+      runtime.namespace(environment());
       const latest = read();
       if (!latest || JSON.stringify(latest) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
       return value;
@@ -164,7 +168,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
     },
     binding,
     async media(messageId) {
-      assertStaging(environment());
+      runtime.namespace(environment());
       const message=await loadMessage(Number(messageId));
       const conversation=message&&await loadConversation(message.conversation_id), m=message?.metadata;
       const config=read();
@@ -201,7 +205,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       return checked?.sendEnabled ? checked : null;
     },
     async templates(wabaId, operation, input = {}, clinicId = null) {
-      assertStaging(environment());
+      runtime.namespace(environment());
       if (!TM.OPERATIONS.includes(operation)) fail('whatsapp_authorized_request_invalid');
       const captured = await this.templateBinding(wabaId, clinicId);
       if (!captured) fail('whatsapp_authorized_binding_invalid');
@@ -224,11 +228,11 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       return operation===TM.LIST ? TM.project(operation,{...result.data,paging:result.data?.after?{next:true,cursors:{after:result.data.after}}:null}) : TM.project(operation,result.data);
     },
     async send(input) {
-      assertStaging(environment());
+      runtime.namespace(environment());
       if (!exact(input, ['messageId','clinicId','assetId','expectedBinding','message']) || !id(input.clinicId) || !id(input.assetId)) fail('whatsapp_authorized_request_invalid');
       let intent;
       try { intent = structuredClone(input); } catch { fail('whatsapp_authorized_request_invalid'); }
-      const requestId = requestIdFor(intent.messageId);
+      const requestId = runtime.requestId(intent.messageId, environment());
       const expected = checkedBinding(intent.expectedBinding);
       if (expected.clinicId !== intent.clinicId || expected.assetId !== intent.assetId) fail('whatsapp_authorized_binding_invalid');
       const payload = { authorizationId: expected.authorizationId, phoneId: expected.phoneId, message: intent.message };
@@ -245,7 +249,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       await eligibleIntent(intent, config, captured);
       if (await isBlocked(intent.clinicId) !== false) fail('whatsapp_authorized_scope_blocked');
       if (JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
-      assertStaging(environment());
+      runtime.namespace(environment());
       let result;
       try {
         result = await transport.execute({ requestId, tenantRef: 'clinic:' + intent.clinicId, connectionRef: captured.connectionRef,
@@ -256,7 +260,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         fail('whatsapp_delivery_unknown', true);
       }
       try {
-        assertStaging(environment());
+        runtime.namespace(environment());
         const latest = await binding(intent.clinicId, intent.assetId);
         if (!latest || !sameBinding(captured, latest) || !exact(result, ['requestId','data','replayed']) || result.requestId !== requestId
           || typeof result.replayed !== 'boolean' || !exact(result.data, ['messages']) || !Array.isArray(result.data.messages)
