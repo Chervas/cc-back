@@ -177,7 +177,7 @@ async function passwordWithEmail(req, res, legacy) {
             try { return res.status(200).json((await sessions.authenticated(user, { trustedDeviceToken: trusted })).body); }
             catch (error) {
                 if (error?.code !== 'auth_trusted_device_invalid') throw error;
-                trustedDevices.clearCookie(res);
+                trustedDevices.clearCookie(res, req);
             }
         }
         return res.status(202).json(await emailChallenges.begin(user));
@@ -197,7 +197,7 @@ async function emailCommand(req, res, resend) {
         if (!resend && body.trustDevice === true) {
             if (!trustedDevices.browserRequest(req)) return res.status(400).json({ error: 'auth_email_request_invalid' });
             const result = await emailChallenges.verifyAndTrust(body.challengeToken, body.code);
-            trustedDevices.setCookie(res, result.device);
+            trustedDevices.setCookie(res, result.device, req);
             return res.status(200).json(result.body);
         }
         const result = resend ? await emailChallenges.resend(body.challengeToken) : await emailChallenges.verify(body.challengeToken, body.code);

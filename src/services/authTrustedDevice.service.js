@@ -3,27 +3,44 @@ const { randomUUID, randomBytes, createHmac } = require('node:crypto');
 const C = require('./authEmailChallenge.contract');
 const DAYS = 60;
 const COOKIE = '__Host-cc_trusted_device';
+const DEV_COOKIE = 'cc_dev_trusted_device';
 const tokenValid = value => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
 const hash = (key, purpose, value = '') => createHmac('sha256', key).update('clinicaclick-trusted-device-v1\0' + purpose + '\0' + value).digest('hex');
 const grantBinding = (key, row) => hash(key, 'grant', JSON.stringify([row.device_id, Number(row.user_id), row.creation_session_id, row.credential_binding, row.email_verified_at.getTime(), row.created_at.getTime(), row.expires_at.getTime()]));
 function invalid() { throw Object.assign(Error('auth_trusted_device_invalid'), { code: 'auth_trusted_device_invalid', status: 401, name: 'JsonWebTokenError' }); }
-function browserRequest(req) {
+function localDevRequest(req, env = process.env) {
+  const base = env.EMAIL_PUBLIC_APP_URL;
+  return env.DEV_SECURITY_PROFILE === 'isolated-security-v2' && env.RUNTIME_NAMESPACE === 'dev'
+    && env.JOB_RUNTIME_NAMESPACE === 'dev' && env.QUEUE_PREFIX === 'dev'
+    && env.DB_NAME === 'clinicaclick_dev_isolated'
+    && ['http://localhost:4200', 'http://localhost:4203'].includes(base)
+    && req.secure === false && req.get('origin') === base
+    && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress)
+    && ['127.0.0.1:3004', 'localhost:3004', new URL(base).host].includes(req.get('host'))
+    && (!req.get('sec-fetch-site') || req.get('sec-fetch-site') === 'same-origin');
+}
+function browserRequest(req, env = process.env) {
   const origin = req.get('origin'); const site = req.get('sec-fetch-site');
-  return req.secure === true && (!origin || origin === 'https://' + req.get('host'))
+  return localDevRequest(req, env) || req.secure === true && (!origin || origin === 'https://' + req.get('host'))
     && (!site || site === 'same-origin' || site === 'none');
 }
-function cookie(req) {
-  if (!browserRequest(req)) return null;
-  const values = String(req.headers.cookie || '').split(';').map(v => v.trim()).filter(v => v.startsWith(COOKIE + '='));
+function cookie(req, env = process.env) {
+  if (!browserRequest(req, env)) return null;
+  const name = localDevRequest(req, env) ? DEV_COOKIE : COOKIE;
+  const values = String(req.headers.cookie || '').split(';').map(v => v.trim()).filter(v => v.startsWith(name + '='));
   if (values.length !== 1) return null;
-  const value = values[0].slice(COOKIE.length + 1);
+  const value = values[0].slice(name.length + 1);
   return tokenValid(value) ? value : null;
 }
-function setCookie(res, device) {
-  res.cookie(COOKIE, device.token, { secure: true, httpOnly: true, sameSite: 'strict', path: '/',
+function setCookie(res, device, req, env = process.env) {
+  const local = req && localDevRequest(req, env);
+  res.cookie(local ? DEV_COOKIE : COOKIE, device.token, { secure: !local, httpOnly: true, sameSite: 'strict', path: '/',
     maxAge: Math.max(0, device.expiresAt.getTime() - Date.now()), expires: device.expiresAt });
 }
-function clearCookie(res) { res.clearCookie(COOKIE, { secure: true, httpOnly: true, sameSite: 'strict', path: '/' }); }
+function clearCookie(res, req, env = process.env) {
+  const local = req && localDevRequest(req, env);
+  res.clearCookie(local ? DEV_COOKIE : COOKIE, { secure: !local, httpOnly: true, sameSite: 'strict', path: '/' });
+}
 function createService({ models, credentialBinding, config = C.settings, now = () => new Date() }) {
   const db = () => typeof models === 'function' ? models() : models;
   function settings() { const cfg = config(); if (cfg.mode !== 'enforce' || !Buffer.isBuffer(cfg.key) || cfg.key.length !== 32) C.fail('auth_email_unavailable', 503); return cfg; }
@@ -74,4 +91,4 @@ function createService({ models, credentialBinding, config = C.settings, now = (
   }
   return { grant, resolve, verifySession, revokeAll };
 }
-module.exports = { createService, DAYS, COOKIE, tokenValid, browserRequest, cookie, setCookie, clearCookie };
+module.exports = { createService, DAYS, COOKIE, DEV_COOKIE, tokenValid, browserRequest, cookie, setCookie, clearCookie };

@@ -98,6 +98,20 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   at = new Date(at.getTime()+61000);res=response();await controller.signIn(request({email:httpUser.email_usuario,password:'FICTITIOUS_PASSWORD'},'Z'.repeat(43)),res);assert.equal(res.statusCode,202);assert.equal(res.cleared,T.COOKIE);
   assert.equal(T.cookie(request({}, browserToken,{headers:{cookie:T.COOKIE+'='+browserToken+'; '+T.COOKIE+'='+browserToken}})),null);
   report.checks.push('Real HTTP controllers require the password, accept an explicit boolean opt-in only after OTP, enforce same-origin HTTPS, set a host-only Secure HttpOnly Strict cookie, and fall back to email for an invalid device');
+  const localEnv = {DEV_SECURITY_PROFILE:'isolated-security-v2',RUNTIME_NAMESPACE:'dev',JOB_RUNTIME_NAMESPACE:'dev',QUEUE_PREFIX:'dev',DB_NAME:'clinicaclick_dev_isolated',EMAIL_PUBLIC_APP_URL:'http://localhost:4203'};
+  const beforeEnv=Object.fromEntries(Object.keys(localEnv).map(k=>[k,process.env[k]]));Object.assign(process.env,localEnv);
+  try {
+    const localUser=await user();
+    const localRequest=(body,device)=>request(body,null,{secure:false,headers:{host:'127.0.0.1:3004',origin:'http://localhost:4203',...(device?{cookie:T.DEV_COOKIE+'='+device}:{})}});
+    const lr=body=>({...localRequest(body),socket:{remoteAddress:'127.0.0.1'}});
+    res=response();await controller.signIn(lr({email:localUser.email_usuario,password:'FICTITIOUS_PASSWORD'}),res);assert.equal(res.statusCode,202);
+    const lc=res.body;res=response();await controller.verifyEmailCode(lr({challengeToken:lc.challengeToken,code:code(localUser),trustDevice:true}),res);
+    assert.equal(res.statusCode,200);assert.equal(res.deviceCookie.name,T.DEV_COOKIE);assert.equal(res.deviceCookie.options.secure,false);
+    const localToken=res.deviceCookie.value;const sent=mail.length;
+    const rememberedLocal={...localRequest({email:localUser.email_usuario,password:'FICTITIOUS_PASSWORD'},localToken),socket:{remoteAddress:'127.0.0.1'}};
+    res=response();await controller.signIn(rememberedLocal,res);assert.equal(res.statusCode,200);assert.equal(mail.length,sent);await sessions.verify(res.body.token);
+    report.checks.push('Isolated DEV localhost proxy completes password/code/trust and reuses its separate browser cookie without another email; the public HTTPS policy remains intact');
+  } finally {for(const[k,v]of Object.entries(beforeEnv)){if(v===undefined)delete process.env[k];else process.env[k]=v;}}
   require.cache[require.resolve('../../services/accessSession.service')].exports=sessionExports;require.cache[require.resolve('../../services/authEmailChallenge.service')].exports=emailExports;
   await assert.rejects(require('../../../migrations/20260914220000-create-auth-trusted-devices').down(qi), /Preserve/);
   report.checks.push('Rollback preserves device revocations and authentication history');
