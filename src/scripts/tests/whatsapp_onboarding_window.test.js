@@ -24,7 +24,7 @@ function fixture(t) {
 test('Sandbox handshake accepts only the bound parent origin, nonce and exact unexpired public configuration', t => {
   const f = fixture(t);
   f.receive(f.input, 'https://other.invalid'); f.receive(f.input, 'https://crm.clinicaclick.com', {});
-  for (const change of [{ nonce: 'x'.repeat(64) }, { expiresAt: Date.now() - 1 }, { expiresAt: Date.now() + 700000 }, { mode: 'ads' },
+  for (const change of [{ nonce: 'x'.repeat(64) }, { expiresAt: Date.now() - 1 }, { expiresAt: Date.now() + 1900000 }, { mode: 'ads' },
     { authorization: { ...f.input.authorization, accessToken: 'FICTITIOUS_SECRET' } }, { authorization: { ...f.input.authorization, redirectUri: 'https://app.clinicaclick.com/?token=FICTITIOUS' } }]) f.receive({ ...f.input, ...change });
   assert.equal(f.script.length, 0); f.start(); assert.equal(f.script.length, 1);
   assert.equal(f.options().response_type, 'code'); assert.equal(f.options().config_id, '201');

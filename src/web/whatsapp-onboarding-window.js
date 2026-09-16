@@ -71,7 +71,7 @@
         win.parent.postMessage({ type: 'cc.wa.ready', nonce }, event.origin); return;
       }
       if (!exact(v, ['type','nonce','requestId','expiresAt','mode','authorization']) || v.type !== 'cc.wa.init' || v.nonce !== nonce || !uuid(v.requestId)
-        || !['cloud_api','coexistence'].includes(v.mode) || !Number.isSafeInteger(v.expiresAt) || v.expiresAt <= Date.now() || v.expiresAt > Date.now() + 600000
+        || !['cloud_api','coexistence'].includes(v.mode) || !Number.isSafeInteger(v.expiresAt) || v.expiresAt <= Date.now() || v.expiresAt > Date.now() + 30 * 60 * 1000
         || !exact(v.authorization, ['appId','configId','redirectUri','state']) || !id(v.authorization.appId) || !id(v.authorization.configId)
         || typeof v.authorization.state !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(v.authorization.state)) return;
       let uri; try { uri = new URL(v.authorization.redirectUri); } catch { return; }

@@ -22,7 +22,7 @@ function integrity(row, key) {
     || !Array.isArray(row.original_clinic_ids) || !row.original_clinic_ids.length || row.original_clinic_ids.length > 1000
     || row.original_clinic_ids.some((id,i,all)=>!S.id(id) || i > 0 && id <= all[i-1])
     || !['session_expires_at','created_at','expires_at','claimed_at'].every(k=>row[k] instanceof Date && Number.isFinite(row[k].getTime()))
-    || row.expires_at <= row.created_at || row.expires_at - row.created_at > 600000 || row.expires_at > row.session_expires_at
+    || row.expires_at <= row.created_at || row.expires_at - row.created_at > 30 * 60 * 1000 || row.expires_at > row.session_expires_at
     || row.claimed_at < row.created_at || row.claimed_at > row.expires_at || !/^[a-f0-9]{64}$/.test(row.scope_digest)) S.fail('whatsapp_authorization_unavailable',503);
   // Preserve the original actor/session in the MAC. The viewer is authorized separately.
   const context = S.contextDigest(row);
