@@ -11,6 +11,15 @@ router.use((req, res, next) => {
   // retryable containment. It must not be consumed by the legacy JWT gate.
   if (req.path.replace(/\/+$/, '').toLowerCase() === '/webhook') return next();
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  // Reviewed template consumers use the scoped AWS broker. Their existing
+  // authentication and clinic/admin authorization still run on each route.
+  const path = req.path.replace(/\/+$/, '');
+  const templateRoute = (req.method === 'POST' && ['/templates/sync','/templates/custom','/templates/create-from-catalog','/template-catalog'].includes(path))
+    || (req.method === 'DELETE' && /^\/templates\/[1-9][0-9]*$/.test(path))
+    || (['PUT','DELETE'].includes(req.method) && /^\/template-catalog\/[1-9][0-9]*$/.test(path))
+    || (req.method === 'PUT' && /^\/template-catalog\/[1-9][0-9]*\/toggle$/.test(path))
+    || (req.method === 'POST' && /^\/template-catalog\/[1-9][0-9]*\/(duplicate|translations|disciplines|propagate)$/.test(path));
+  if (templateRoute) return next();
   return authMiddleware(req, res, () => metaQuarantine.middleware(req, res));
 });
 
