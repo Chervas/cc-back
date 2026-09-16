@@ -27,7 +27,7 @@ def main():
  with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
   for m in tar.getmembers():
    p=pathlib.PurePosixPath(m.name)
-   if p.parts[0] not in ['src','models','migrations','config','services'] and m.name not in ['package.json','package-lock.json','.sequelizerc']:continue
+   if p.parts[0] not in ['src','models','migrations','config','services'] and m.name not in ['package.json','package-lock.json','.sequelizerc','ops/security/schema-contract.json']:continue
    if 'Documentacion' in p.parts:continue
    assert not p.is_absolute() and '..' not in p.parts and not m.issym() and not m.islnk()
    dest=target/m.name
@@ -42,6 +42,10 @@ def main():
   for p in (directory/'node_modules').rglob('*'):
    if p.is_symlink():assert within(p.resolve(),directory/'node_modules')
  (target/'release.json').write_text(json.dumps({'commit':sha,'source':str(SOURCE),'runtime':'dev-isolated-v1'})+'\n')
+ # Fail before stopping the old service or switching code. The checker reads
+ # only schema metadata using the protected DEV configuration; it never migrates.
+ run(['/usr/bin/node',str(target/'src/scripts/security-schema-release.js'),'check','--runtime','dev',
+      '--source',str(target),'--out',str(target/'schema-preflight.json')])
  temporary=ROOT/'next';assert not temporary.exists();temporary.symlink_to(target)
  run(['systemctl','stop','clinicaclick-back-dev.service'])
  os.replace(temporary,ROOT/'current')
