@@ -68,6 +68,13 @@ desde ese corte. Se rechazan marcadores de cuarentena, cancelación, aceptación
 resultado incierto; el adaptador vuelve a leer Message/conversación y comprueba
 su clínica antes de HTTP. No hay excepción implícita para recuperar históricos.
 
+Cada binding puede añadir `messageNotBefore` propio al reconectar un número.
+Se aplica el más reciente entre ese corte y el general, tanto antes del envío
+como al despachar automatizaciones de respuestas entrantes. Las respuestas
+anteriores pueden importarse como conversación, pero no disparan acciones
+automáticas. El filtro SQL aplica el corte de cada número antes del límite de
+resultados; una clínica recién conectada no retrasa las respuestas de las otras.
+
 La revisión administrativa se ejecuta con `src/whatsapp-authorized-review.js`
 pasando la configuración AWS y connectionRef. Solo admite GET de verificación,
 teléfono, suscripciones y plantillas. Permite revisar una autorización pausada,
