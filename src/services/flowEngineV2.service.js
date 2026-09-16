@@ -4333,6 +4333,9 @@ async function handleSendWhatsapp(node, context, runtime) {
   if (!messageMaterialization.created) {
     return reuseExistingAutomationWhatsappMessage({ existingMessage: msg, node });
   }
+  // A pending or failed attempt is still visible conversation activity. Do
+  // this before notifying clients so a list refetch cannot keep the old order.
+  await conversation.update({ last_message_at: new Date() });
   if (eventMsg) emitMessageCreatedToConversationRooms(conversation, eventMsg);
   emitMessageCreatedToConversationRooms(conversation, msg);
 
