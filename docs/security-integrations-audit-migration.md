@@ -52,6 +52,67 @@ cifrada y piloto. La prueba KMS/SQLite/S3 sintética no autoriza sustituir el
 webhook 503 por un ACK 200 ni abrir consumidores. No aplicar sus propuestas IAM
 pendientes como parte de un push de código.
 
+## Esquema de seguridad y publicación entre entornos
+
+El contrato `ops/security/schema-contract.json` fija las tablas, columnas,
+collations, índices y migraciones que necesita esta capa de código. Se actualiza
+junto a las migraciones revisadas, nunca copiando automáticamente lo que haya en
+la BD. Admite tablas y columnas adicionales de otros módulos. La validación no
+certifica todos los módulos ni sustituye QA funcional, claves, permisos o flags.
+Los hashes corresponden a los archivos revisados del candidato: `SequelizeMeta`
+histórico solo guarda nombres y no acredita el hash que se ejecutó en el pasado.
+
+Antes de publicar DEV, el publicador aislado ejecuta esta comprobación sobre la
+release candidata **antes de parar el servicio o cambiar el enlace**. Si falta
+DDL, conserva el runtime anterior y deja la release fallida para inspección.
+Para staging/gateway ejecutar el mismo preflight como paso obligatorio del corte,
+con `--source` apuntando al candidato que se va a publicar. Es de solo lectura;
+no instala automáticamente migraciones en la BD clínica. Ejecutar desde un
+checkout que ya tenga esta herramienta:
+
+```bash
+sudo /usr/bin/node src/scripts/security-schema-release.js check --runtime staging --source /ruta/absoluta/candidato --out /ruta/privada/preflight-staging.json
+sudo /usr/bin/node src/scripts/security-schema-release.js check --runtime gateway --source /ruta/absoluta/candidato --out /ruta/privada/preflight-gateway.json
+```
+
+Los candidatos necesitan el contrato y las migraciones incluidas en él. Los
+archivos de evidencia deben ser nuevos; no se sobreescriben. Código de salida
+`0` = compatible, `2` = diferencias de esquema, `1` = fallo operativo. No ignorar
+un resultado incompatible ni generar un contrato nuevo para silenciarlo.
+
+Para migrar **solo DEV**, con el checkout limpio y comprometido, crear un plan
+con las migraciones concretas, en el orden necesario. El plan guarda versión,
+hashes y metadata previa; no contiene datos clínicos ni contraseñas. Ejemplo del
+ajuste inicial: primero normalizar el default de texto, después crear la bandeja.
+
+```bash
+sudo /usr/bin/node src/scripts/security-schema-release.js plan-dev --migration 20260916120000-align-security-monitoring-collations.js --migration 20260915040000-create-whatsapp-inbox-imports.js --out /ruta/privada/dev-plan.json
+sudo systemctl stop clinicaclick-back-dev.service
+sudo /usr/bin/node src/scripts/security-schema-release.js apply-dev --plan /ruta/privada/dev-plan.json --out /ruta/privada/dev-journal.jsonl
+sudo python3 ops/security/publish-isolated-dev.py
+```
+
+El ejemplo es un corte inicial, **no una receta que repetir en cada despliegue**.
+La herramienta rechaza migraciones ya registradas, un plan caducado por cambios
+de esquema/código o un destino distinto de `clinicaclick_dev_isolated`. Usa un
+bloqueo SQL y la misma conexión para DDL y registro. No llama a `sync()` ni aplica
+todo el historial pendiente. Las migraciones se revisan antes: también pueden
+contener código JS con efectos ajenos a SQL.
+
+MySQL confirma DDL de forma implícita. Ante fallo, DEV queda detenido, la
+migración incompleta no se registra y el diario conserva el último paso. Revisar
+metadata/diario y crear un plan nuevo explícito; no reintentar a ciegas ni hacer
+`down` destructivo. Para revertir código conservar el esquema aditivo y usar una
+release compatible. Los cambios destructivos requieren una fase posterior
+cuando todos los consumidores hayan dejado de utilizar los campos antiguos.
+
+Pruebas sin BD pública ni proveedores:
+
+```bash
+node --test src/scripts/tests/security_schema_release.test.js
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node --test src/scripts/tests/security_schema_release_mysql.test.js
+```
+
 ## Fuentes del contrato y registro
 
 - **Contrato de producto:** frontend 39, 04 y documentos del dominio afectado.
