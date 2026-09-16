@@ -26,6 +26,47 @@ test('Selection scope is valid for one clinic even if the business credential in
   assert.equal(C.bindingFor(b).customer.selectionOnly, true);
   delete b.whatsappOnboarding.customer.selectionOnly; assert.throws(() => C.bindingFor(b));
 });
+test('Optional events permission without targets does not block a proven WhatsApp phone or grant other assets', async t => {
+  for (const shape of ['missing', 'untargeted', 'null', 'empty']) {
+    const f = selected(t); const original = f.state.afterGraph;
+    f.state.afterGraph = (req, response) => {
+      const r = original(req, response);
+      if (req.action === 'inspect') {
+        const event = r.data.granular_scopes.find(g => g.scope === 'whatsapp_business_manage_events');
+        if (shape === 'missing') r.data.granular_scopes = r.data.granular_scopes.filter(g => g !== event);
+        else if (shape === 'untargeted') delete event.target_ids;
+        else event.target_ids = shape === 'null' ? null : [];
+      }
+      return r;
+    };
+    const result = await f.finish(await f.begin());
+    assert.equal(result.data.status, 'staged'); assert.equal(result.data.connected, false);
+    assert.deepEqual(result.data.candidate.grantedWabaIds, ['301', '302']);
+    assert.equal(result.data.candidate.phoneId, '401'); assert.equal(f.state.puts, 1);
+    assert.deepEqual(f.state.httpCalls.filter(c => c.action === 'waba_owner').map(c => c.id), ['301','302']);
+    assert.deepEqual(f.current.store.db.prepare('SELECT phone_id FROM whatsapp_onboarding_assets').all().map(r => r.phone_id), ['401']);
+  }
+});
+test('Untargeted events never replace mandatory messaging or management proof, and malformed targets still reject', async t => {
+  const mutations = [
+    r => { delete r.data.granular_scopes.find(g => g.scope === 'whatsapp_business_management').target_ids; },
+    r => { r.data.granular_scopes.find(g => g.scope === 'whatsapp_business_messaging').target_ids = []; },
+    r => { r.data.granular_scopes.find(g => g.scope === 'whatsapp_business_messaging').target_ids = ['302']; },
+    r => { r.data.granular_scopes = r.data.granular_scopes.filter(g => g.scope !== 'whatsapp_business_messaging'); },
+    r => { r.data.granular_scopes.find(g => g.scope === 'whatsapp_business_manage_events').target_ids = [301]; },
+    r => { r.data.granular_scopes.find(g => g.scope === 'whatsapp_business_manage_events').target_ids = '301'; },
+  ];
+  for (const mutate of mutations) {
+    const f = selected(t); const original = f.state.afterGraph;
+    f.state.afterGraph = (req, response) => {
+      const r = original(req,response);
+      if (req.action === 'inspect') { delete r.data.granular_scopes.find(g => g.scope === 'whatsapp_business_manage_events').target_ids; mutate(r); }
+      return r;
+    };
+    await assert.rejects(f.finish(await f.begin()), {code:'scope_denied'});
+    assert.equal(f.state.puts,0); assert.deepEqual(f.state.httpCalls.map(c => c.action),['inspect']);
+  }
+});
 test('A sibling WABA owned by another business is rejected and neither phone nor candidate is stored', async t => {
   const f = selected(t); const original = f.state.afterGraph;
   f.state.afterGraph = (req, r) => req.action === 'waba_owner' && req.id === '302' ? { id: '302', owner_business_info: { id: '999' } } : original(req,r);

@@ -83,8 +83,11 @@ sin comprobar. La candidata conserva la evidencia de todo el grant.
 Solo este modo puede declarar explícitamente `whatsapp_business_manage_events`
 además de los dos permisos WhatsApp y `public_profile`. El conjunto devuelto
 por Meta debe coincidir exactamente con el configurado. El permiso de eventos
-no crea ninguna operación HTTP nueva de eventos/publicidad; sus destinos también
-se verifican. Plantillas ordinarias siguen usando `whatsapp_business_management`.
+no crea ninguna operación HTTP nueva de eventos/publicidad. Su entrada granular
+puede faltar o no traer destinos: eso no invalida la prueba de mensajes y gestión
+ni concede ningún activo. Si declara destinos, se validan como antes. Los dos
+permisos operativos deben seguir incluyendo expresamente el WABA seleccionado.
+Plantillas ordinarias siguen usando `whatsapp_business_management`.
 Los modos anteriores y el motor de envío mantienen sus restricciones originales.
 
 Cuando el canje termina en `interrupted` durante `grant_inspection`, consultar

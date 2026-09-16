@@ -37,14 +37,20 @@ function inspectCustomerGrant(response, expected, now) {
     || new Set(granular.map(g => g.scope)).size !== granular.length) fail('oauth_credentials_incomplete');
   const wabas = new Set();
   for (const g of granular) {
-    if (!expected.scopes.includes(g.scope) || g.scope === 'public_profile'
-      || !uniqueStrings(g.target_ids, 64, id) || expected.wabaIds && g.target_ids.some(v => !expected.wabaIds.includes(v))) fail('scope_denied');
+    if (!expected.scopes.includes(g.scope) || g.scope === 'public_profile') fail('scope_denied');
+    // The optional events permission does not authorize any broker operation.
+    // Meta may return it without asset targets. That is not evidence against
+    // the mandatory messaging/management targets checked below, and must not
+    // invent a WABA grant or require a new authorization from the customer.
+    if (selectedOnly && g.scope === 'whatsapp_business_manage_events'
+      && (g.target_ids == null || Array.isArray(g.target_ids) && g.target_ids.length === 0)) continue;
+    if (!uniqueStrings(g.target_ids, 64, id) || expected.wabaIds && g.target_ids.some(v => !expected.wabaIds.includes(v))) fail('scope_denied');
     g.target_ids.forEach(v => wabas.add(v));
   }
   if (wabas.size > 64) fail('scope_denied');
-  for (const s of expected.scopes.filter(s => s !== 'public_profile')) {
+  for (const s of required) {
     const g = granular.find(g => g.scope === s);
-    if (!g || required.includes(s) && !g.target_ids.includes(expected.selectedWabaId)) fail('scope_denied');
+    if (!g || !g.target_ids.includes(expected.selectedWabaId)) fail('scope_denied');
   }
   return { appId: data.app_id, subjectId: data.user_id, tokenType: data.type, scopes: [...data.scopes].sort(),
     expiresAt: expiry(data.expires_at, now), dataAccessExpiresAt: expiry(data.data_access_expires_at, now),

@@ -22,6 +22,7 @@ function grantDiagnostics(response, expected, now) {
     if (!granularShape) return 'invalid';
     const entry = granular.find(r => r.scope === scope);
     if (!entry) return 'missing';
+    if (entry.target_ids == null) return 'untargeted';
     if (!Array.isArray(entry.target_ids) || entry.target_ids.some(v => !id(v))) return 'invalid';
     if (entry.target_ids.length === 0) return 'empty';
     if (entry.target_ids.length > 64) return 'oversized';

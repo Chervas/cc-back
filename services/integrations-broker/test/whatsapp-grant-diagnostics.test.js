@@ -28,7 +28,7 @@ test('Rejected grant diagnostics distinguish simultaneous compatibility and scop
   assert(grantDiagnostics({ data, error: sensitive }, { appId: '101', wabaId: '301' }, now).includes('wa_grant_provider_error_present'));
 });
 test('Optional event grant failures and unexpected granular permissions are classified without provider values', () => {
-  for (const [targets, classification] of [[undefined, 'invalid'], [[], 'empty'], [['301','301'], 'duplicate'],
+  for (const [targets, classification] of [[undefined, 'untargeted'], [[], 'empty'], [['301','301'], 'duplicate'],
     [Array.from({length: 65}, (_, i) => String(301+i)), 'oversized'], [['301'], 'exact']]) {
     const data = { scopes: ['whatsapp_business_management','whatsapp_business_messaging','whatsapp_business_manage_events'],
       granular_scopes: [{scope:'whatsapp_business_management',target_ids:['301']},
