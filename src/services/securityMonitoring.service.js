@@ -3,6 +3,7 @@
 const db=require('../../models');
 const {isGlobalAdmin}=require('../lib/role-helpers');
 const DEFINITIONS=Object.freeze([
+  {key:'transport_certificates',label:'Certificados de comunicación',description:'Avisar si falla la renovación, se aproxima una caducidad o deja de comprobarse la recepción de WhatsApp.',threshold:1,unit:'incidencias'},
   {key:'whatsapp_template_sends',label:'Muchos envíos de una plantilla',description:'Avisar cuando una plantilla supera este número de envíos aceptados en una hora.',threshold:500,unit:'envíos / hora'},
   {key:'whatsapp_template_creation',label:'Muchas plantillas creadas',description:'Avisar cuando una clínica crea más plantillas de las habituales en una hora.',threshold:30,unit:'plantillas / hora'},
   {key:'ai_requests',label:'Muchas consultas de IA',description:'Avisar cuando una función acumula este número de consultas durante el día UTC.',threshold:2000,unit:'consultas / día'},
@@ -16,6 +17,7 @@ const plain=v=>v?.toJSON?v.toJSON():v;
 function rules(value={}){return DEFINITIONS.map(d=>({...d,enabled:value[d.key]?.enabled!==false,threshold:Number(value[d.key]?.threshold??d.threshold)}));}
 async function settings(){const [row]=await db.SecurityMonitoringSetting.findOrCreate({where:{scope:'global'},defaults:{scope:'global',rules:{}}});return row;}
 function link(type,id,clinicId){
+  if(type==='transport_certificate')return '/ajustes?panel=jobs-monitoring&tab=security';
   if(type==='whatsapp_template')return '/marketing/plantillas?templateId='+encodeURIComponent(id)+(clinicId?'&clinicId='+clinicId:'');
   if(type==='clinic')return '/clinicas/'+Number(id);
   return '/ajustes?panel=jobs-monitoring&tab=ai';
@@ -83,6 +85,7 @@ async function assertTemplateAllowed(wabaId,name,language){
   if(rows.length)fail('whatsapp_template_manually_paused',409);
 }
 async function candidates(rule,from){
+  if(rule.key==='transport_certificates')return require('../lib/transportCertificateHealth').readHealth().filter(c=>c.measured>=rule.threshold);
   const q=(sql,replacements={})=>db.sequelize.query(sql,{replacements}).then(([r])=>r);
   if(rule.key==='whatsapp_template_sends')return q(`SELECT 'whatsapp_template' entity_type,CAST(t.id AS CHAR) entity_id,t.clinic_id,t.waba_id,t.name label,COUNT(*) measured FROM Messages m JOIN WhatsappTemplates t ON t.waba_id=JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wabaId')) AND t.name=JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.template_name')) AND t.language=COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.template_language')),'es') WHERE m.createdAt>=:from AND m.direction='outbound' AND m.message_type='template' AND JSON_EXTRACT(m.metadata,'$.wamid') IS NOT NULL GROUP BY t.id,t.clinic_id,t.waba_id,t.name HAVING COUNT(*)>=:threshold`,{from,threshold:rule.threshold});
   if(rule.key==='whatsapp_template_creation')return q(`SELECT 'clinic' entity_type,CAST(clinic_id AS CHAR) entity_id,clinic_id,CONCAT('Clínica ',clinic_id) label,COUNT(*) measured FROM WhatsappTemplates WHERE createdAt>=:from AND clinic_id IS NOT NULL AND created_by_user_id IS NOT NULL AND origin<>'external' GROUP BY clinic_id HAVING COUNT(*)>=:threshold`,{from,threshold:rule.threshold});
@@ -93,8 +96,8 @@ async function candidates(rule,from){
 async function scan(){
   const config=await settings(),from=new Date(Date.now()-3600000),bucket=new Date().toISOString().slice(0,13);const found=[];
   for(const rule of rules(config.rules).filter(r=>r.enabled))for(const c of await candidates(rule,from)){
-    const dedupe=[rule.key,c.entity_type,c.entity_id,bucket].join(':');
-    const [row,created]=await db.SecurityMonitoringAlert.findOrCreate({where:{dedupe_key:dedupe},defaults:{dedupe_key:dedupe,rule_key:rule.key,entity_type:c.entity_type,entity_id:c.entity_id,clinic_id:c.clinic_id||(c.waba_id?require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings.find(b=>b.wabaId===c.waba_id)?.clinicId:null)||null,title:rule.label,detail:`${clean(c.label,180)}: ${Number(c.measured).toFixed(rule.key==='ai_cost'?4:0)} ${rule.unit}. Umbral de aviso: ${rule.threshold}. Revisa si corresponde a una actividad prevista.`,measured_value:Number(c.measured),threshold:rule.threshold,status:'open'}});
+    const dedupe=[rule.key,c.entity_type,c.entity_id,rule.key==='transport_certificates'?bucket.slice(0,10):bucket].join(':');
+    const [row,created]=await db.SecurityMonitoringAlert.findOrCreate({where:{dedupe_key:dedupe},defaults:{dedupe_key:dedupe,rule_key:rule.key,entity_type:c.entity_type,entity_id:c.entity_id,clinic_id:c.clinic_id||(c.waba_id?require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings.find(b=>b.wabaId===c.waba_id)?.clinicId:null)||null,title:rule.label,detail:c.detail||`${clean(c.label,180)}: ${Number(c.measured).toFixed(rule.key==='ai_cost'?4:0)} ${rule.unit}. Umbral de aviso: ${rule.threshold}. Revisa si corresponde a una actividad prevista.`,measured_value:Number(c.measured),threshold:rule.threshold,status:'open'}});
     if(created)found.push(decorate(row));
     if(!row.notification_queued_at){await require('./systemNotifications.service').queueNotification({eventKey:'security.activity_detected',payload:{severity:'warning',title:row.title,detail:row.detail,action:'Revisar Ajustes → Monitoreo del sistema → Seguridad.'},metadata:{source:'security_monitoring',alert_id:row.id,link:'/ajustes?panel=jobs-monitoring&tab=security'}});await row.update({notification_queued_at:new Date()});}
   }
