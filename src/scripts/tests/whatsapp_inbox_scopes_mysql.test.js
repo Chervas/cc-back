@@ -36,6 +36,22 @@ test('multiclinic passive importer preserves parent on partial failure, retries 
     const packet=make(undefined,'19995550117');await S.importScopedLease(restricted,packet,config);await S.importScopedLease(restricted,packet,config);
     assert.equal(await count('Messages'),2);assert.equal(await count('WhatsappInboxImports'),2);
     const legacy=make([config.scopes[0]],'19995550118');const legacyBody=JSON.parse(legacy.raw);legacyBody.entry[0].changes[0].value.messages[0].id='wamid.legacy_permission';legacy.raw=Buffer.from(JSON.stringify(legacyBody));await importLease(restricted,legacy,{clinicId:71,wabaId:'101',phoneId:'201'});assert.equal(await count('Messages'),3);
+    // Exercise the actual scoped consumer path with its restricted DB grants,
+    // including mobile echoes. Testing the single-clinic parser alone missed
+    // a deployed consumer that still discarded new attachment references.
+    const attachments=make(undefined,'19995550119');const body=JSON.parse(attachments.raw);
+    body.entry[0].changes[0].value.messages=[{...m('scoped_image','19995550119'),type:'image',image:{id:'501',mime_type:'image/jpeg'}}];
+    body.entry[1].changes=[{field:'smb_message_echoes',value:{messaging_product:'whatsapp',metadata:{phone_number_id:'202'},
+      message_echoes:[{...m('scoped_audio','19995559999'),to:'19995550119',type:'audio',audio:{id:'502',mime_type:'audio/ogg; codecs=opus',voice:true}}]}}];
+    attachments.raw=Buffer.from(JSON.stringify(body));
+    await S.importScopedLease(restricted,attachments,config);await S.importScopedLease(restricted,attachments,config);
+    const [media]=await sql.query("SELECT c.clinic_id,m.direction,m.message_type,m.metadata FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE JSON_CONTAINS_PATH(m.metadata,'one','$.media.id') ORDER BY c.clinic_id");
+    assert.equal(media.length,2);assert.equal(await count('Messages'),5);
+    assert.deepEqual(media.map(r=>[r.clinic_id,r.direction,r.message_type,r.metadata.media.kind,r.metadata.media.id]),
+      [[71,'inbound','image','image','501'],[72,'outbound','text','audio','502']]);
+    for(const r of media){assert.equal(r.metadata.automatic_actions_allowed,false);assert.equal(r.metadata.passive_recovery,true);}
+    assert.equal(media[1].metadata.audio_transcribed,false);assert.equal(media[1].metadata.media.playable,true);
+    report.checks.push('scoped image and mobile audio preserve media IDs under consumer grants without duplicate import');
    }finally{await restricted.end();}
    // The rest exercises failure/replay independently of the privilege check.
    for(const table of ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys','Messages','Conversations'])await sql.query('DELETE FROM '+table);
