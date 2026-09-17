@@ -14,9 +14,9 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 class Broker {
-  constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, now = () => Date.now(), timeoutMs = 10000 }) {
+  constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, policyResolver, now = () => Date.now(), timeoutMs = 10000 }) {
     this.store = store; this.policy = structuredClone(validatePolicy(policy)); this.secrets = secrets;
-    this.operations = operations; this.adsEnrollment = adsEnrollment; this.now = now; this.timeoutMs = Math.min(30000, Math.max(1, timeoutMs));
+    this.operations = operations; this.adsEnrollment = adsEnrollment; this.policyResolver = policyResolver; this.now = now; this.timeoutMs = Math.min(30000, Math.max(1, timeoutMs));
     this.active = new Map(); this.activeAssets = new Map();
     for (const item of policy.connections) {
       // Main program forbids real active cohorts until their adapter and approval exist.
@@ -33,7 +33,7 @@ class Broker {
     this.store.acceptNonce(principal.id, request.nonce, now, Math.min(600, Math.max(1, principal.maxPerMinute || 60)));
     let operation; let binding;
     try {
-      const resolved = this.adsEnrollment?.resolve(request, principal, this.policy) || this.policy;
+      const resolved = this.policyResolver?.resolve(request, principal, this.policy) || this.adsEnrollment?.resolve(request, principal, this.policy) || this.policy;
       authorize(principal, request, resolved);
       operation = this.operations[request.operation];
       if (!operation || !Object.hasOwn(this.operations, request.operation)) fail('operation_denied');

@@ -4,7 +4,7 @@ const { createPublicKey } = require('node:crypto'); const { fail } = require('./
 const M = require('./whatsapp-template-management');
 const C = require('./whatsapp-authorized-contract'); const E = require('./whatsapp-onboarding-contract');
 const { privateFile, connectAws, ACCOUNT, SECRET_KEY } = require('./google-main');
-const { validateConfig: validateEnrollmentConfig } = require('./whatsapp-onboarding-main');
+const { enrollmentLoader } = require('./whatsapp-enrollment-loader');
 const { BrokerStore } = require('./store'); const { Broker } = require('./broker'); const { createServer } = require('./server');
 const { drainAudit } = require('./audit');
 const { validateAuthorization, createWhatsappAuthorizedRegistry } = require('./whatsapp-authorized-registry');
@@ -70,17 +70,6 @@ function validateConfig(config) {
   }
   if ([...slots.keys()].some(arn => apps.has(arn))) fail('invalid_request');
   return config;
-}
-function enrollmentLoader(config) {
-  return ref => {
-    let body;
-    try {
-      body = privateFile(config.enrollmentConfigFile);
-      const current = validateEnrollmentConfig(JSON.parse(body.toString('utf8')));
-      if (current.stateFile !== config.enrollmentStateFile) fail('invalid_request');
-      return current.policy.connections.find(binding => binding.connectionRef === ref);
-    } finally { body?.fill(0); }
-  };
 }
 function validateFiles(config) {
   // The operational ledger may not alias the onboarding ledger, even via a

@@ -184,7 +184,10 @@ Cada conexión necesita un slot previamente aprovisionado cuyo `AWSCURRENT`
 fijado contiene solo `version`, `provider=meta-whatsapp-onboarding-slot`,
 `connectionRef`, `scopeKey` y `appId`. Un secreto vacío o con credencial legacy
 se rechaza antes de canjear. La cohorte no crea secretos, mueve `AWSCURRENT`,
-borra versiones ni activa credenciales.
+borra versiones ni activa credenciales. La extensión opcional
+[`prepare.v1`](whatsapp-automatic-preparation.md) prepara ese slot antes del
+flujo existente: no cambia las operaciones de canje ni sus controles. Su estado
+de despliegue debe consultarse en el documento central 19.
 
 La candidata se escribe una vez con `ClientRequestToken=flowId` y `AWSPENDING`.
 La identidad es la versión inmutable y su hash; `AWSPENDING` puede moverse y no

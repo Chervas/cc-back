@@ -3,6 +3,7 @@
 const fs = require('node:fs'); const path = require('node:path'); const { randomUUID } = require('node:crypto');
 const S = require('../services/whatsappAuthorizationState.contract');
 const C = require('../../services/integrations-broker/src/whatsapp-onboarding-contract');
+const P = require('../../services/integrations-broker/src/whatsapp-provisioning-contract');
 const { createIntegrationsBrokerClient } = require('./integrationsBrokerClient');
 const fail = (code = 'whatsapp_onboarding_broker_unavailable', unknown = false) => {
   throw Object.assign(Error(code), { code, status: 503, httpStatus: 503, outcomeUnknown: unknown });
@@ -91,12 +92,15 @@ function response(result, name, row, b, requestId, selection) {
     return { ...structuredClone(d), channelRole: S.channelRole(d.channelRole), phoneState: d.phoneState ?? null };
   } catch { fail('whatsapp_onboarding_result_unknown', true); }
 }
-function createWhatsappOnboardingBrokerClient({ client, loadBinding, guard = assertGateway }) {
+function createWhatsappOnboardingBrokerClient({ client, loadBinding, prepareBinding, guard = assertGateway }) {
   if (typeof client?.execute !== 'function' || typeof loadBinding !== 'function') fail('whatsapp_onboarding_configuration_invalid');
   async function call(name, value, input = {}) {
     guard(); const row = context(value); const payload = structuredClone(input); let selected;
     try { selected = binding(await loadBinding(row.scope), row); } catch { fail('whatsapp_onboarding_binding_invalid'); }
     guard();
+    if (name === 'begin' && prepareBinding) {
+      await prepareBinding(row, selected); guard();
+    }
     const body = name === 'begin' ? { state: row.state, expiresAt: Date.parse(row.expiresAt), scopeDigest: row.scopeDigest, clinicSetDigest: row.clinicSetDigest, channelRole: row.channelRole }
       : { flowId: row.requestId, ...payload };
     try { C.validators[name](body); } catch { fail('whatsapp_onboarding_binding_invalid'); }
@@ -129,8 +133,11 @@ function configuration(env) {
   let raw;
   try {
     raw = privateFile(env.WHATSAPP_ONBOARDING_BROKER_CONFIG_FILE, 131072); const v = JSON.parse(raw.toString('utf8'));
-    S.exact(v, ['version','origin','audience','keyId','privateKeyFile','caFile','bindings']);
-    if (v.version !== 1 || !Array.isArray(v.bindings) || !v.bindings.length || v.bindings.length > 64) throw Error();
+    S.exact(v, ['version','origin','audience','keyId','privateKeyFile','caFile','bindings', ...(Object.hasOwn(v,'automatic') ? ['automatic'] : []),
+      ...(Object.hasOwn(v,'automaticPreparationEnabled') ? ['automaticPreparationEnabled'] : [])]);
+    if (v.version !== 1 || !Array.isArray(v.bindings) || !v.bindings.length && !v.automatic || v.bindings.length > 64) throw Error();
+    if (Object.hasOwn(v,'automaticPreparationEnabled') && (!v.automatic || typeof v.automaticPreparationEnabled !== 'boolean')) throw Error();
+    if (v.automatic) P.validatePublicTemplate(v.automatic);
     v.bindings = v.bindings.map(b => binding(b));
     if (new Set(v.bindings.map(b => b.scopeKey)).size !== v.bindings.length
       || new Set(v.bindings.map(b => b.connectionRef)).size !== v.bindings.length) throw Error();
@@ -146,12 +153,27 @@ function configuredClient({ environment = () => process.env } = {}) {
       const api = createWhatsappOnboardingBrokerClient({ client, guard: () => assertGateway(environment()), loadBinding: async scope => {
         const current = configuration(environment());
         if (JSON.stringify(current) !== JSON.stringify(cfg)) fail('whatsapp_onboarding_binding_invalid');
-        return current.bindings.find(b => b.scopeKey === scope.type + ':' + scope.id);
-      } });
+        return current.bindings.find(b => b.scopeKey === scope.type + ':' + scope.id)
+          || current.automatic && P.publicBinding(current.automatic, scope.type + ':' + scope.id, row.clinicIds);
+      }, prepareBinding: cfg.automatic ? async (context, selected) => {
+        if (cfg.bindings.some(b => b.scopeKey === selected.scopeKey)) return;
+        if (cfg.automaticPreparationEnabled === false) fail('whatsapp_onboarding_preparation_disabled');
+        const requestId = randomUUID();
+        let result;
+        try {
+          result = await client.execute({ requestId, tenantRef: 'clinic:' + context.clinicIds[0], assetRef: 'wa-enroll:' + selected.scopeKey,
+            connectionRef: selected.connectionRef, operation: P.PREPARE, payload: { scopeKey: selected.scopeKey, clinicIds: context.clinicIds,
+              scopeDigest: context.scopeDigest, clinicSetDigest: context.clinicSetDigest, expiresAt: Date.parse(context.expiresAt) } });
+          S.exact(result, ['requestId','data','replayed']); S.exact(result.data,['status','connected','binding']);
+          if (result.requestId !== requestId || typeof result.replayed !== 'boolean' || result.data.status !== 'prepared' || result.data.connected !== false
+            || JSON.stringify(binding(result.data.binding, context)) !== JSON.stringify(selected)) throw Error();
+        } catch { fail('whatsapp_onboarding_preparation_unavailable'); }
+      } : undefined });
       return await api[name](row, input);
     } catch (error) {
       if (['whatsapp_onboarding_result_unknown','whatsapp_onboarding_binding_invalid',
-        'whatsapp_authorization_busy','whatsapp_authorization_limit'].includes(error?.code)) throw error;
+        'whatsapp_authorization_busy','whatsapp_authorization_limit','whatsapp_onboarding_preparation_unavailable',
+        'whatsapp_onboarding_preparation_disabled'].includes(error?.code)) throw error;
       fail('whatsapp_onboarding_configuration_invalid');
     } finally { key?.fill(0); ca?.fill(0); }
   }

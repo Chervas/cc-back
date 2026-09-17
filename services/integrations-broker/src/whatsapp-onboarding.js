@@ -4,8 +4,9 @@ const { BrokerError, fail } = require('./errors'); const { eventFor } = require(
 const { createWhatsappOAuthHttp } = require('./whatsapp-oauth-http');
 const { verifyWhatsappGrant } = require('./whatsapp-credential-inspector'); const { createWhatsappPhoneVerifier, inspectWhatsappPhoneState } = require('./whatsapp-phone-verifier');
 const { inspectCustomerGrant, createWhatsappCustomerVerifier } = require('./whatsapp-customer-verifier');
-function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactory = options => createWhatsappOAuthHttp(options), now = () => Date.now() }) {
+function createWhatsappOnboarding({ store, policy, secrets, http, resolveBinding, exchangeFactory = options => createWhatsappOAuthHttp(options), now = () => Date.now() }) {
   policy = structuredClone(policy);
+  const bindingForConnection = ref => policy.connections.find(b => b.connectionRef === ref) || resolveBinding?.(ref);
   const running = new Map(); let closed = false;
   const get = id => store.db.prepare('SELECT * FROM whatsapp_onboarding_flows WHERE id=?').get(id);
   const change = (id, state) => store.db.prepare('UPDATE whatsapp_onboarding_flows SET state=?,updated_at=? WHERE id=?').run(state, now(), id);
@@ -23,7 +24,7 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
       const metadata = JSON.parse(row.credential_metadata);
       if ([metadata.expiresAt, metadata.dataAccessExpiresAt].some(t => t !== null && t <= now())) fail('credential_revoked');
     }
-    const binding = policy.connections.find(b => b.connectionRef === row.connection);
+    const binding = bindingForConnection(row.connection);
     if (!binding) fail('scope_denied'); const b = C.bindingFor(binding);
     for (const key of [b.scopeKey, ...b.clinicIds.map(id => 'clinic:' + id)]) if (store.db.prepare('SELECT 1 FROM whatsapp_onboarding_scope_blocks WHERE scope_key=?').get(key)) fail('asset_revoked');
     store.connection(row.connection, now()); store.assertAssetActive({ tenantRef: row.tenant, connectionRef: row.connection, assetRef: row.asset });
@@ -54,7 +55,7 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
     return { waba, phone };
   }
   function reserveAsset(row, metadata) {
-    const selectedOnly = C.bindingFor(policy.connections.find(b => b.connectionRef === row.connection)).customer?.selectionOnly === true;
+    const selectedOnly = C.bindingFor(bindingForConnection(row.connection)).customer?.selectionOnly === true;
     // A customer token covers every granted WABA, not only the selected phone.
     // Whole-group enrollment reserves all of them; selected-phone enrollment
     // assigns only the chosen phone and never claims the other accounts.
@@ -70,7 +71,7 @@ function createWhatsappOnboarding({ store, policy, secrets, http, exchangeFactor
       .run(metadata.wabaId, metadata.phoneId, row.connection, row.tenant, row.asset, row.scope_digest, row.clinic_digest, row.id, now());
   }
   function checkReserved(row, metadata) {
-    const selectedOnly = C.bindingFor(policy.connections.find(b => b.connectionRef === row.connection)).customer?.selectionOnly === true;
+    const selectedOnly = C.bindingFor(bindingForConnection(row.connection)).customer?.selectionOnly === true;
     for (const wabaId of selectedOnly ? [] : metadata.grantedWabaIds || []) if (!knownAssets(row, { wabaId, phoneId: null }).waba) fail('scope_denied');
     const { waba, phone: a } = knownAssets(row, metadata); if (!waba && !selectedOnly) fail('scope_denied');
     if (!a || a.phone_id !== metadata.phoneId || a.connection !== row.connection || a.tenant !== row.tenant || a.asset !== row.asset

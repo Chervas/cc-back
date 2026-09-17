@@ -1,0 +1,59 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CreateAutomaticWhatsappCandidateSlots",
+      "Effect": "Allow",
+      "Action": "secretsmanager:CreateSecret",
+      "Resource": [
+        "arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/whatsapp/automatic/clinic-*/candidate-??????",
+        "arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/whatsapp/automatic/group-*/candidate-??????"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "eu-west-3",
+          "secretsmanager:KmsKeyArn": "arn:aws:kms:eu-west-3:137819318729:key/15864f4f-2db5-485b-a49f-303c57eedc59",
+          "aws:RequestTag/ManagedBy": "clinicaclick-whatsapp-onboarding",
+          "aws:RequestTag/Purpose": "candidate"
+        },
+        "StringLike": { "aws:RequestTag/ClinicaclickScope": ["clinic:*", "group:*"] },
+        "ForAllValues:StringEquals": { "aws:TagKeys": ["ManagedBy", "ClinicaclickScope", "Purpose"] },
+        "Null": { "secretsmanager:AddReplicaRegions": "true" }
+      }
+    },
+    {
+      "Sid": "TagAutomaticWhatsappCandidateSlots",
+      "Effect": "Allow",
+      "Action": "secretsmanager:TagResource",
+      "Resource": [
+        "arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/whatsapp/automatic/clinic-*/candidate-??????",
+        "arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/whatsapp/automatic/group-*/candidate-??????"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "eu-west-3",
+          "aws:RequestTag/ManagedBy": "clinicaclick-whatsapp-onboarding",
+          "aws:RequestTag/Purpose": "candidate"
+        },
+        "StringLike": { "aws:RequestTag/ClinicaclickScope": ["clinic:*", "group:*"] },
+        "ForAllValues:StringEquals": { "aws:TagKeys": ["ManagedBy", "ClinicaclickScope", "Purpose"] }
+      }
+    },
+    {
+      "Sid": "StageAutomaticWhatsappCandidates",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:ListSecretVersionIds", "secretsmanager:PutSecretValue"],
+      "Resource": [
+        "arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/whatsapp/automatic/clinic-*/candidate-??????",
+        "arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/whatsapp/automatic/group-*/candidate-??????"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "eu-west-3",
+          "aws:ResourceTag/ManagedBy": "clinicaclick-whatsapp-onboarding",
+          "aws:ResourceTag/Purpose": "candidate"
+        }
+      }
+    }
+  ]
+}

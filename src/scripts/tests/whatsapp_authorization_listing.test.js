@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),{randomUUID}=require('node:crypto');const {Op}=require('sequelize');
 const S=require('../../services/whatsappAuthorizationState.contract');const {createService}=require('../../services/whatsappAuthorizationListing.service');
-function fixture(){
+function fixture({automatic=null}={}){
  const now=new Date('2026-09-15T12:00:00.000Z'),key=Buffer.alloc(32,7),viewer={userId:501,sessionRef:randomUUID(),sessionExpiresAt:Math.floor(now.getTime()/1000)+3600};
  const state={clinics:[{id_clinica:19,grupoClinicaId:5},{id_clinica:35,grupoClinicaId:5},{id_clinica:66,grupoClinicaId:29},{id_clinica:72,grupoClinicaId:29}],
   memberships:new Set([19,35,66,72]),blocked:new Set(),sessions:[],brokerCalls:[],queries:[],keys:[],revoked:false,afterBroker:null,onSnapshot:null,snapshots:0,remoteState:'staged',clock:0,rows:[],
@@ -27,7 +27,9 @@ function fixture(){
    return state.assets.filter(a=>Object.entries(q.where).every(([k,v])=>a[k]===v)).slice(0,q.limit)
     .map(a=>Object.fromEntries(q.attributes.map(attr=>{const name=Array.isArray(attr)?attr[1]:attr;return[name,a[name]];})));}},
   UsuarioClinica:{findAll:async q=>{assert(q.where.rol_clinica[Op.in].includes('personaldeclinica'));return q.where.id_clinica[Op.in].filter(id=>state.memberships.has(id)).map(id=>({id_clinica:id}));}},
-  WhatsappAuthorizationState:{findAll:async q=>{state.queries.push(q);return structuredClone(state.rows.filter(r=>q.where[Op.or].some(s=>s.scope_type===r.scope_type&&s.scope_id===r.scope_id)).slice(0,q.limit));},
+  WhatsappAuthorizationState:{findAll:async q=>{state.queries.push(q);
+   if(q.group)return [...new Map(state.rows.map(r=>[r.scope_type+':'+r.scope_id,{scope_type:r.scope_type,scope_id:r.scope_id}])).values()];
+   return structuredClone(state.rows.filter(r=>q.where[Op.or].some(s=>s.scope_type===r.scope_type&&s.scope_id===r.scope_id)).slice(0,q.limit));},
    findByPk:async id=>structuredClone(state.rows.find(r=>r.request_id===id))}};
  const sessions={verifyReference:async(actor,options)=>{state.sessions.push({actor,options});assert.equal(options.requireEmail,false);assert.equal(actor.userId,viewer.userId);
   assert.equal(actor.sessionRef,viewer.sessionRef);if(state.revoked)throw Object.assign(Error('FICTITIOUS_SESSION_SECRET'),{code:'auth_invalid',status:401});}};
@@ -36,7 +38,7 @@ function fixture(){
   return {status:state.remoteState,accessBlocked:false,configurationChanged:false,channelRole:context.channelRole,candidate:state.remoteState==='staged'?{wabaId:'301',phoneId,FICTITIOUS_TOKEN:'NEVER_RETURN'}:null,
    phoneState:state.remoteState==='staged'?{phoneId,isOnBizApp:true,platformType:'CLOUD_API',coexistenceAvailable:true,registrationAttempted:false,observedAt:now.getTime()}:null};},
   status:()=>assert.fail('ordinary status must not run'),begin:()=>assert.fail('begin must not run'),finish:()=>assert.fail('finish must not run'),abort:()=>assert.fail('abort must not run')};
- const service=createService({models,sessions,broker,loadBindings:()=>structuredClone(bindings),config:()=>{const k=Buffer.from(key);state.keys.push(k);return {key:k};},
+ const service=createService({models,sessions,broker,loadBindings:()=>structuredClone(bindings),loadAutomatic:()=>automatic,config:()=>{const k=Buffer.from(key);state.keys.push(k);return {key:k};},
   isBlocked:async scope=>state.blocked.has(scope.assignmentScope==='clinic'?'clinic:'+scope.clinicId:'group:'+scope.groupId),now:()=>new Date(now),clock:()=>state.clock});
  return {state,bindings,row,call:(scope=null)=>service.list({...viewer,scope}),raw:input=>service.list(input),viewer,
   resign:(r,channelRole)=>{r.channel_role=channelRole;r.context_digest=S.contextDigest(r);r.state_hash=S.digest(S.stateFor(key,r));}};
@@ -66,6 +68,20 @@ test('Explicit group requires every clinic; all view silently removes unauthoriz
  await assert.rejects(f.call({type:'group',id:29}),{code:'whatsapp_authorization_forbidden',status:403});assert.equal(f.state.brokerCalls.length,0);
  const result=await f.call();assert.equal(result.authorizations.length,1);assert.equal(result.authorizations[0].scope.id,19);
  assert.equal(f.state.brokerCalls.length,1);assert.equal(result.incomplete,false);
+});
+test('Dynamically prepared clinics remain visible without static configuration, through current clinic ACL only',async()=>{
+ const automatic={appId:'101',configId:'102',redirectUri:'https://example.invalid/whatsapp/callback',scopes:['whatsapp_business_management','whatsapp_business_messaging']};
+ const f=fixture({automatic});f.bindings.splice(0);f.state.rows=[f.row({type:'clinic',id:35})];
+ let result=await f.call({type:'clinic',id:35});assert.equal(result.authorizations.length,1);assert.equal(result.incomplete,false);
+ result=await f.call();assert.equal(result.authorizations.length,1);assert.equal(result.authorizations[0].scope.id,35);
+ f.state.memberships.delete(35);result=await f.call();assert.equal(result.authorizations.length,0);
+ await assert.rejects(f.call({type:'clinic',id:35}),{code:'whatsapp_authorization_forbidden'});
+});
+test('Changing dynamic configuration during a read never yields a verified receipt',async()=>{
+ const automatic={appId:'101',configId:'102',redirectUri:'https://example.invalid/whatsapp/callback',scopes:['whatsapp_business_management','whatsapp_business_messaging']};
+ const f=fixture({automatic});f.bindings.splice(0);f.state.rows=[f.row({type:'clinic',id:35})];
+ f.state.afterBroker=()=>{automatic.configId='103';};
+ assert.deepEqual(await f.call({type:'clinic',id:35}),{authorizations:[],incomplete:true});
 });
 test('Current session revocation aborts the whole listing and does not disclose fetched metadata',async()=>{
  const f=fixture();f.state.afterBroker=()=>{f.state.revoked=true;};

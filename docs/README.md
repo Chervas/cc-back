@@ -45,6 +45,7 @@ sincroniza el espejo frontend. Este índice no mantiene otro roadmap ni diario.
 - [Estado durable para el alta específica de WhatsApp](security/whatsapp-authorization-state.md).
 - [Transporte privado de canje y prueba de pertenencia WhatsApp](security/whatsapp-oauth-transport.md).
 - [Alta WhatsApp: registro del broker y credencial candidata](security/whatsapp-onboarding-broker.md).
+- [Preparación automática: almacenes, permisos AWS y diagnóstico de nuevas conexiones](security/whatsapp-automatic-preparation.md).
 - [Puente de alta WhatsApp: gateway, MFA y broker](security/whatsapp-onboarding-gateway.md).
 - [Interfaz de autorización exclusiva de WhatsApp](security/whatsapp-onboarding-ui.md).
 

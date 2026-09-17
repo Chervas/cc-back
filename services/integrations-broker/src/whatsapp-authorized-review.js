@@ -7,7 +7,7 @@ const E = require('./whatsapp-onboarding-contract'); const { GRAPH_VERSION } = r
 const { tokenText } = require('./whatsapp-secrets'); const { createWhatsappAuthorizedHttp } = require('./whatsapp-authorized-http');
 const { createWhatsappAuthorizedSecrets } = require('./whatsapp-authorized-secrets');
 const { createWhatsappAuthorizedRegistry } = require('./whatsapp-authorized-registry');
-const { validateConfig } = require('./whatsapp-authorized-main'); const { validateConfig: validateEnrollmentConfig } = require('./whatsapp-onboarding-main');
+const { validateConfig } = require('./whatsapp-authorized-main'); const { enrollmentLoader } = require('./whatsapp-enrollment-loader');
 const { privateFile, connectAws, ACCOUNT, SECRET_KEY } = require('./google-main');
 const VERIFY_ACTIONS = new Set(['inspect','phones','phone_state','waba_owner']);
 const REVIEW_ACTIONS = new Set(['review_phone','review_subscriptions','review_templates']);
@@ -124,13 +124,7 @@ async function main(filename, connectionRef, { awsFactory = connectAws, http = c
     if (!binding) fail('scope_denied');
     const state = fs.statSync(config.enrollmentStateFile);
     if (fs.realpathSync(config.enrollmentStateFile) !== config.enrollmentStateFile || !state.isFile() || state.mode & 0o077) fail('invalid_request');
-    const loadEnrollmentBinding = ref => {
-      const body = privateFile(config.enrollmentConfigFile);
-      try { const enrollment = validateEnrollmentConfig(JSON.parse(body.toString('utf8')));
-        if (enrollment.stateFile !== config.enrollmentStateFile) fail('invalid_request');
-        return enrollment.policy.connections.find(value => value.connectionRef === ref);
-      } finally { body.fill(0); }
-    };
+    const loadEnrollmentBinding = enrollmentLoader(config);
     registry = createWhatsappAuthorizedRegistry({ filename: config.enrollmentStateFile, authorizations: config.authorizations, loadEnrollmentBinding, now });
     registry.review(binding);
     aws = await awsFactory();

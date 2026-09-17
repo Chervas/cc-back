@@ -5,12 +5,15 @@ const { privateFile, connectAws, ACCOUNT, SECRET_KEY } = require('./google-main'
 const { BrokerStore } = require('./store'); const { Broker } = require('./broker'); const { createServer } = require('./server');
 const { drainAudit } = require('./audit'); const { createWhatsappHttp } = require('./whatsapp-http');
 const { createWhatsappOnboardingSecrets } = require('./whatsapp-onboarding-secrets'); const { createWhatsappOnboarding } = require('./whatsapp-onboarding');
+const P = require('./whatsapp-provisioning-contract'); const { createWhatsappProvisioning } = require('./whatsapp-onboarding-provisioning');
 function validateConfig(config) {
-  if (!config || Object.keys(config).sort().join(',') !== 'cohort,enabled,listenAddress,policy,port,stateFile,tlsCertFile,tlsKeyFile'
+  const configKeys = ['cohort','enabled','listenAddress','policy','port','stateFile','tlsCertFile','tlsKeyFile', ...(Object.hasOwn(config || {}, 'provisioning') ? ['provisioning'] : [])];
+  if (!config || Object.keys(config).sort().join(',') !== configKeys.sort().join(',')
     || config.enabled !== true || config.cohort !== C.COHORT || !net.isIP(config.listenAddress)
     || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535 || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   const policy = validatePolicy(config.policy);
-  if (!policy.connections.length || policy.connections.length > 64 || policy.principals.length !== 2 || policy.principals.some(p => p.maxPerMinute > 60)) fail('invalid_request');
+  if (!policy.connections.length && !config.provisioning || policy.connections.length > 64 || policy.principals.length !== 2 || policy.principals.some(p => p.maxPerMinute > 60)) fail('invalid_request');
+  if (config.provisioning) P.validateSettings(config.provisioning);
   const names = new Set(policy.principals.map(p => p.id));
   if (!names.has('gateway:whatsapp-onboarding') || !names.has('control:whatsapp-onboarding')) fail('invalid_request');
   const keys = policy.principals.map(p => createPublicKey(p.publicKey).export({ type: 'spki', format: 'der' }).toString('base64'));
@@ -44,10 +47,15 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappHt
   try {
     aws = await awsFactory();
     const secrets = createWhatsappOnboardingSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY });
-    engine = createWhatsappOnboarding({ store, policy: config.policy, secrets, http, ...(exchangeFactory ? { exchangeFactory } : {}) });
-    const broker = new Broker({ store, policy: config.policy, secrets, operations: engine.operations }); let inFlight = 0;
+    const provisioner = config.provisioning ? createWhatsappProvisioning({ store, policy: config.policy, settings: config.provisioning, client: aws.secrets }) : null;
+    engine = createWhatsappOnboarding({ store, policy: config.policy, secrets, http, resolveBinding: provisioner?.resolveBinding, ...(exchangeFactory ? { exchangeFactory } : {}) });
+    const broker = new Broker({ store, policy: config.policy, secrets, operations: engine.operations, policyResolver: provisioner }); let inFlight = 0;
     server = createServer({ async execute(...args) { if (inFlight >= 12) fail('rate_limited'); inFlight++;
-      try { return await broker.execute(...args); } finally { inFlight--; } } }, { cert, key });
+      try {
+        let prepare = false;
+        try { prepare = !!provisioner && JSON.parse(args[0].toString('utf8')).operation === P.PREPARE; } catch {}
+        return await (prepare ? provisioner.prepare(...args) : broker.execute(...args));
+      } finally { inFlight--; } } }, { cert, key });
     server.maxConnections = 64; server.timeout = 35000;
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.listenAddress, resolve); });
     const tick = () => { if (!draining) draining = drainAudit(store, aws.sink, { limit: 20 }).catch(() => null).finally(() => { draining = null; }); };

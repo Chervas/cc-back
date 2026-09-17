@@ -8,6 +8,7 @@ const scopeBlocks = require('./metaScopeBlock.service');
 const { configuredClient, configuration } = require('../lib/whatsappOnboardingBrokerClient');
 const { project, safe } = require('./whatsappOnboardingGateway.service');
 const phoneMetadata = require('./whatsappAuthorizationPhoneMetadata.service');
+const P = require('../../services/integrations-broker/src/whatsapp-provisioning-contract');
 const ATTRIBUTES = ['request_id','user_id','session_ref','session_expires_at','scope_type','scope_id','original_clinic_ids',
   'scope_digest','state_hash','context_digest','state','created_at','expires_at','claimed_at','channel_role'];
 function input(value) {
@@ -30,7 +31,9 @@ function integrity(row, key) {
   return row;
 }
 function createService({ models, sessions, broker = configuredClient(), config = S.settings,
-  loadBindings = () => configuration(process.env).bindings, isBlocked = scopeBlocks.blocked, now = () => new Date(), clock = () => Date.now() } = {}) {
+  loadBindings, loadAutomatic, isBlocked = scopeBlocks.blocked, now = () => new Date(), clock = () => Date.now() } = {}) {
+  const bindingsSource = loadBindings || (() => configuration(process.env).bindings);
+  const automaticSource = loadAutomatic || (loadBindings ? () => null : () => configuration(process.env).automatic || null);
   const db = () => typeof models === 'function' ? models() : models || require('../../models');
   const sessionApi = () => sessions || require('./accessSession.service');
   const keyFor = scope => scope.type + ':' + scope.id;
@@ -62,14 +65,28 @@ function createService({ models, sessions, broker = configuredClient(), config =
       const actor = input(raw); cfg = config();
       if (!Buffer.isBuffer(cfg?.key) || cfg.key.length !== 32) S.fail('whatsapp_onboarding_configuration_invalid',503);
       await verifyActor(actor);
-      const bindings = structuredClone(loadBindings());
-      if (!Array.isArray(bindings) || !bindings.length || bindings.length > 64
+      const bindings = structuredClone(bindingsSource()); const automatic = structuredClone(automaticSource());
+      if (automatic) P.validatePublicTemplate(automatic);
+      const unchanged = () => JSON.stringify(bindingsSource()) === JSON.stringify(bindings) && JSON.stringify(automaticSource()) === JSON.stringify(automatic);
+      if (!Array.isArray(bindings) || !bindings.length && !automatic || bindings.length > 64
         || new Set(bindings.map(b=>b.scopeKey)).size !== bindings.length) S.fail('whatsapp_onboarding_configuration_invalid',503);
       const candidates = actor.scope ? [actor.scope] : bindings.map(b=>({type:b.scopeKey.split(':')[0],id:Number(b.scopeKey.split(':')[1])}));
       const allowed = new Map(); let incomplete = false;
+      if (automatic && !actor.scope) {
+        const scopes = await db().WhatsappAuthorizationState.findAll({ where:{state:'claimed'}, attributes:['scope_type','scope_id'],
+          group:['scope_type','scope_id'], order:[['scope_type','ASC'],['scope_id','ASC']], limit:1001, raw:true });
+        if (scopes.length > 1000) incomplete = true;
+        const keys = new Set(candidates.map(keyFor));
+        for (const row of scopes.slice(0,1000)) {
+          if (!['clinic','group'].includes(row.scope_type) || !S.id(row.scope_id)) { incomplete = true; continue; }
+          const scope = {type:row.scope_type,id:row.scope_id};
+          if (!keys.has(keyFor(scope))) { candidates.push(scope); keys.add(keyFor(scope)); }
+        }
+      }
       for (const scope of candidates) {
         try {
-          const snap = await snapshot(scope,actor); const binding = bindings.find(b=>b.scopeKey === keyFor(scope));
+          const snap = await snapshot(scope,actor); const binding = bindings.find(b=>b.scopeKey === keyFor(scope))
+            || automatic && P.publicBinding(automatic,keyFor(scope),snap.ids);
           if (!binding) continue;
           if (JSON.stringify(binding.clinicIds) !== JSON.stringify(snap.ids)) { incomplete = true; continue; }
           allowed.set(keyFor(scope),{scope,snap,binding});
@@ -95,14 +112,14 @@ function createService({ models, sessions, broker = configuredClient(), config =
             clinicIds:[...row.original_clinic_ids],expiresAt:row.expires_at.toISOString(),scopeDigest:row.scope_digest,
             clinicSetDigest:S.digest(JSON.stringify(row.original_clinic_ids)),channelRole:S.channelRole(row.channel_role)};
           await verifyActor(actor); const before = await snapshot(selected.scope,actor);
-          if (before.digest !== selected.snap.digest || JSON.stringify(loadBindings()) !== JSON.stringify(bindings)) { incomplete = true; continue; }
+          if (before.digest !== selected.snap.digest || !unchanged()) { incomplete = true; continue; }
           // The read-only client has a 5s timeout. Reserve its entire budget so
           // an unavailable broker cannot turn the all-scopes page into 50 waits.
           if (clock()+5000 > remoteDeadline) { incomplete = true; break; }
           const remote = await broker.statusReadOnly(local);
           await verifyActor(actor); const after = await snapshot(selected.scope,actor);
           const current = await db().WhatsappAuthorizationState.findByPk(row.request_id,{attributes:ATTRIBUTES,raw:true});
-          if (after.digest !== before.digest || JSON.stringify(loadBindings()) !== JSON.stringify(bindings)) { incomplete = true; continue; }
+          if (after.digest !== before.digest || !unchanged()) { incomplete = true; continue; }
           if (!current || current.state !== 'claimed') continue;
           integrity(current,cfg.key);
           if (JSON.stringify(current) !== JSON.stringify(row)) { incomplete = true; continue; }
@@ -147,7 +164,7 @@ function createService({ models, sessions, broker = configuredClient(), config =
       for (const dto of authorizations) {
         try {
           const latest = await snapshot(dto.scope,actor), initial = allowed.get(keyFor(dto.scope)).snap;
-          if (latest.digest !== initial.digest || JSON.stringify(loadBindings()) !== JSON.stringify(bindings)) { incomplete = true; continue; }
+          if (latest.digest !== initial.digest || !unchanged()) { incomplete = true; continue; }
           const current = await db().WhatsappAuthorizationState.findByPk(dto.requestId,{attributes:ATTRIBUTES,raw:true});
           if (!current || current.state !== 'claimed') continue;
           integrity(current,cfg.key);
