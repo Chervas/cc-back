@@ -31,7 +31,15 @@ function createWhatsappOnboarding({ store, policy, secrets, http, resolveBinding
   }
   function record(request, principal, id, action, result, reason) {
     if (store.backlog().pending >= policy.maxBacklog) fail('audit_unavailable');
-    store.appendAudit(eventFor({ ...request, requestId: id }, principal, policy, action, result, reason, now()));
+    let auditPolicy = policy;
+    if (!policy.connections.some(b => b.connectionRef === request.connectionRef)) {
+      const binding = bindingForConnection(request.connectionRef);
+      if (!binding) fail('scope_denied');
+      C.authorize({ request, principal, binding });
+      auditPolicy = { ...policy, grants: [{ principalId: principal.id, tenantRef: request.tenantRef,
+        assetRef: request.assetRef, connectionRef: binding.connectionRef, operations: [request.operation] }] };
+    }
+    store.appendAudit(eventFor({ ...request, requestId: id }, principal, auditPolicy, action, result, reason, now()));
   }
   function projection(row, binding) {
     const observedPhone = store.db.prepare('SELECT observation, observed_at FROM whatsapp_onboarding_phone_observations WHERE flow_id=?').get(row.id);

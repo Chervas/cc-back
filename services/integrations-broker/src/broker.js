@@ -33,9 +33,9 @@ class Broker {
     const now = this.now();
     const principal = authenticate(raw, headers, request, this.policy, now);
     this.store.acceptNonce(principal.id, request.nonce, now, Math.min(600, Math.max(1, principal.maxPerMinute || 60)));
-    let operation; let binding;
+    let operation; let binding; let resolved = this.policy;
     try {
-      const resolved = this.policyResolver?.resolve(request, principal, this.policy) || this.adsEnrollment?.resolve(request, principal, this.policy) || this.policy;
+      resolved = this.policyResolver?.resolve(request, principal, this.policy) || this.adsEnrollment?.resolve(request, principal, this.policy) || this.policy;
       authorize(principal, request, resolved);
       operation = this.operations[request.operation];
       if (!operation || !Object.hasOwn(this.operations, request.operation)) fail('operation_denied');
@@ -64,22 +64,22 @@ class Broker {
       try { return await operation.execute({ request, principal, binding }); }
       catch (error) {
         if (this.store.backlog().pending >= this.policy.maxBacklog) fail('audit_unavailable');
-        this.store.appendAudit(eventFor(request, principal, this.policy, 'integration.failed', 'unknown',
+        this.store.appendAudit(eventFor(request, principal, resolved, 'integration.failed', 'unknown',
           error instanceof BrokerError ? error.code : 'internal_error', this.now()));
         throw error;
       }
     }
     if (operation.control === 'revoke_asset') {
       const result = this.store.revokeAsset(principal.id, request, digest,
-        eventFor(request, principal, this.policy, 'integration.requested', 'accepted', 'authorized', now),
-        eventFor(request, principal, this.policy, 'asset.revoked', 'success', 'scope_disconnected', now), this.policy.maxBacklog, now,
+        eventFor(request, principal, resolved, 'integration.requested', 'accepted', 'authorized', now),
+        eventFor(request, principal, resolved, 'asset.revoked', 'success', 'scope_disconnected', now), this.policy.maxBacklog, now,
         () => operation.commitRevocation?.({ request, binding, now }));
       for (const controller of this.activeAssets.get(assetKey) || []) controller.abort();
       operation.onRevoked?.(request);
       return result;
     }
     const cached = this.store.reserve(principal.id, request.requestId, digest,
-      eventFor(request, principal, this.policy, 'integration.requested', 'accepted', 'authorized', now), this.policy.maxBacklog, now);
+      eventFor(request, principal, resolved, 'integration.requested', 'accepted', 'authorized', now), this.policy.maxBacklog, now);
     if (cached) return { ...cached, replayed: true };
     const metadataOnly = ['google_ads_enrollment_status','google_ads_enrollment_revoke'].includes(operation.control) && operation.secretless === true;
     const revision = metadataOnly ? null : this.store.connection(request.connectionRef, now).revision;
@@ -89,7 +89,7 @@ class Broker {
     let timer; let revoked = false;
     const onRevoked = () => {
       if (!revoked) {
-        this.block(request.connectionRef, eventFor(request, principal, this.policy, 'connection.blocked', 'success', 'credential_revoked', this.now()), 'revoked');
+        this.block(request.connectionRef, eventFor(request, principal, resolved, 'connection.blocked', 'success', 'credential_revoked', this.now()), 'revoked');
         revoked = true;
       }
     };
@@ -130,7 +130,7 @@ class Broker {
       this.adsEnrollment?.assert(request, principal, this.policy);
       const result = { requestId: request.requestId, data, replayed: false };
       this.store.complete(principal.id, request.requestId, result,
-        eventFor(request, principal, this.policy, 'integration.completed', 'success', 'completed', this.now()),
+        eventFor(request, principal, resolved, 'integration.completed', 'success', 'completed', this.now()),
         { persistResult: operation.persistResult !== false, mutate: () => {
           // The final check shares the SQLite write lock with any enrollment,
           // receipt and audit changes, including revocations by another process.
@@ -147,7 +147,7 @@ class Broker {
       if (code === 'credential_revoked') onRevoked();
       if (code === 'provider_unauthorized') this.secrets.invalidate(request.connectionRef);
       this.store.uncertain(principal.id, request.requestId,
-        eventFor(request, principal, this.policy, 'integration.failed', 'unknown', code, this.now()));
+        eventFor(request, principal, resolved, 'integration.failed', 'unknown', code, this.now()));
       fail(code);
     } finally {
       clearTimeout(timer); active.delete(controller); if (!active.size) this.active.delete(request.connectionRef);

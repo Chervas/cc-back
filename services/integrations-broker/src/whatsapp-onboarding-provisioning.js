@@ -99,6 +99,10 @@ function createWhatsappProvisioning({ store, policy, settings, client, now = () 
     if (request.connectionRef !== P.connectionRef(v.scopeKey) || request.assetRef !== 'wa-enroll:' + v.scopeKey
       || request.tenantRef !== 'clinic:' + v.clinicIds[0]
       || policy.connections.some(b => b.whatsappOnboarding.scopeKey === v.scopeKey || b.connectionRef === request.connectionRef)) fail('scope_denied');
+    // The request has passed principal, scope and template validation. Audit this
+    // exact preparation grant; it is not an operational send authorization.
+    const auditPolicy = { ...policy, grants: [{ principalId: principal.id, tenantRef: request.tenantRef,
+      assetRef: request.assetRef, connectionRef: request.connectionRef, operations: [P.PREPARE] }] };
     const digest = C.hash(canonical({ connectionRef: request.connectionRef, payload: v }));
     const row = store.transaction(() => {
       checkBlocks(v.scopeKey,v.clinicIds);
@@ -115,7 +119,7 @@ function createWhatsappProvisioning({ store, policy, settings, client, now = () 
       }
       if (!prior) {
         store.db.prepare('INSERT INTO whatsapp_preparation_requests VALUES (?,?,?,?,NULL)').run(request.requestId,digest,v.scopeKey,now());
-        store.appendAudit(eventFor(request,principal,policy,'integration.requested','accepted','whatsapp_slot_preparation_requested',now()));
+        store.appendAudit(eventFor(request,principal,auditPolicy,'integration.requested','accepted','whatsapp_slot_preparation_requested',now()));
       }
       return found;
     });
@@ -134,7 +138,7 @@ function createWhatsappProvisioning({ store, policy, settings, client, now = () 
         }
         const completed = store.db.prepare('SELECT completed_at FROM whatsapp_preparation_requests WHERE id=?').get(request.requestId);
         if (completed.completed_at === null) {
-          store.appendAudit(eventFor(request,principal,policy,'integration.completed','success','whatsapp_slot_prepared',now()));
+          store.appendAudit(eventFor(request,principal,auditPolicy,'integration.completed','success','whatsapp_slot_prepared',now()));
           store.db.prepare('UPDATE whatsapp_preparation_requests SET completed_at=? WHERE id=?').run(now(),request.requestId);
         }
         return { requestId: request.requestId, replayed: completed.completed_at !== null, data: {

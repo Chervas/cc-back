@@ -22,11 +22,34 @@ test('Automatic preparation journals one empty encrypted slot; full OAuth works 
   const completed = await p.execute(finish, restarted); assert.equal(completed.data.status, 'staged');
   assert.equal(completed.data.connected, false); assert.equal(p.f.state.codes, 1); assert.equal(p.f.state.puts, 1);
   const events = restarted.store.db.prepare('SELECT event FROM audit_outbox').all();
+  const audit = events.map(row => JSON.parse(row.event));
+  assert(audit.length >= 4);
+  for (const event of audit) {
+    assert.equal(event.connectionRef, cmd.connectionRef);
+    assert.equal(event.tenantRef, cmd.tenantRef);
+    assert.equal(event.resourceRef, cmd.assetRef);
+    assert([P.PREPARE, C.OPERATIONS.begin, C.OPERATIONS.finish].includes(event.operation));
+  }
   for (const secret of [TOKEN, APP, finish.payload.code, flow.payload.state, persisted.arn]) {
     assert(!JSON.stringify(prepared).includes(secret)); assert(!JSON.stringify(events).includes(secret));
   }
   await assert.rejects(p.execute({ ...cmd, requestId: randomUUID(), operation: 'meta.whatsapp.text.send.v1', payload: {} }, restarted));
   await p.prepare(p.command(), restarted); assert.equal(p.state.creates, 1); // AWSPENDING must not replace the pinned empty version.
+});
+test('Revocation audit identifies the resolved automatic connection while untrusted denials stay unassigned', async t => {
+  const p = provisioningFixture(t), cmd = p.command(); await p.prepare(cmd);
+  const denied = { ...cmd, requestId: randomUUID(), tenantRef: 'clinic:999', operation: C.OPERATIONS.status,
+    payload: {flowId: randomUUID(), readOnly: true} };
+  await assert.rejects(p.execute(denied), {code: 'scope_denied'});
+  const denial = JSON.parse(p.current.store.db.prepare("SELECT event FROM audit_outbox ORDER BY seq DESC LIMIT 1").get().event);
+  assert.equal(denial.tenantRef, 'unassigned');assert.equal(denial.connectionRef, 'unassigned');
+  const revoke = {...cmd,requestId:randomUUID(),operation:C.REVOKE,payload:{}};
+  assert.equal((await p.execute(revoke,p.current,true)).data.revoked,true);
+  const events = p.current.store.db.prepare('SELECT event FROM audit_outbox').all().map(row=>JSON.parse(row.event))
+    .filter(event=>event.correlationId===revoke.requestId);
+  assert.equal(events.length,2);
+  for(const event of events) {assert.equal(event.connectionRef,cmd.connectionRef);assert.equal(event.operation,C.REVOKE);}
+  await assert.rejects(p.prepare(p.command()),{code:'asset_revoked'});
 });
 test('Lost AWS create acknowledgement and two concurrent workers converge on the journaled version', async t => {
   const p = provisioningFixture(t), cmd = p.command(); p.state.loseCreate = true;
