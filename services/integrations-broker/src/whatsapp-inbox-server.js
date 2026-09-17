@@ -1,6 +1,6 @@
 'use strict';
 const https = require('node:https');
-const { createHash } = require('node:crypto');
+const { createHash, X509Certificate } = require('node:crypto');
 const { BrokerError, fail, publicError } = require('./errors');
 const { createWhatsappInboxHandler } = require('./whatsapp-inbox-http');
 const BASE = '/v1/whatsapp/inbox';
@@ -10,9 +10,12 @@ const exact = (value, keys) => value && typeof value === 'object' && !Array.isAr
 function validatePrincipals(principals) {
   if (!Array.isArray(principals) || principals.length !== 2
     || [...principals.map(p => p.id)].sort().join(',') !== EXACT_PRINCIPALS.join(',')
-    || principals.some(p => !exact(p, 'certificateSha256,id,maxPerMinute') || !/^[a-f0-9]{64}$/.test(p.certificateSha256)
+    || principals.some(p => !exact(p, Object.hasOwn(p || {}, 'publicKeySha256')
+      ? 'certificateSha256,id,maxPerMinute,publicKeySha256' : 'certificateSha256,id,maxPerMinute') || !/^[a-f0-9]{64}$/.test(p.certificateSha256)
+      || Object.hasOwn(p, 'publicKeySha256') && !/^[a-f0-9]{64}$/.test(p.publicKeySha256)
       || !Number.isInteger(p.maxPerMinute) || p.maxPerMinute < 1 || p.maxPerMinute > 600)
-    || new Set(principals.map(p => p.certificateSha256)).size !== 2) fail('invalid_request');
+    || new Set(principals.map(p => p.certificateSha256)).size !== 2
+    || new Set(principals.filter(p => p.publicKeySha256).map(p => p.publicKeySha256)).size !== principals.filter(p => p.publicKeySha256).length) fail('invalid_request');
   return structuredClone(principals);
 }
 function respond(res, status, value) {
@@ -50,8 +53,14 @@ function createInboxServer({ inbox, withApplicationSecret, principals, cert, key
       if (!req.socket.authorized || !peer?.raw || !Number.isFinite(Date.parse(peer.valid_to))
         || !Number.isFinite(Date.parse(peer.valid_from)) || Date.parse(peer.valid_to) <= now() || Date.parse(peer.valid_from) > now()) fail('invalid_signature');
       const fingerprint = createHash('sha256').update(peer.raw).digest('hex');
-      const principal = allowed.find(p => p.certificateSha256 === fingerprint);
-      if (!principal) fail('scope_denied');
+      const publicKey = new X509Certificate(peer.raw).publicKey.export({ type: 'spki', format: 'der' });
+      const publicKeySha256 = createHash('sha256').update(publicKey).digest('hex');
+      // Opt-in key pins preserve role identity when the same key receives a
+      // renewed certificate. TLS still verifies the issuing CA, client usage
+      // and validity. Unconfigured installations retain exact certificate pins.
+      const matches = allowed.filter(p => p.publicKeySha256 ? p.publicKeySha256 === publicKeySha256 : p.certificateSha256 === fingerprint);
+      if (matches.length !== 1) fail('scope_denied');
+      const principal = matches[0];
       // Authorization precedes body consumption. A gateway certificate cannot
       // list, decrypt, lease or acknowledge the consumer's clinical payloads.
       const route = req.method + ' ' + req.url;

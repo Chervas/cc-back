@@ -46,6 +46,7 @@ function main(filename) {
   const read = config.credentialMode === 'unix-scoped' ? input => require('./scoped-runtime').read(input, config) : input => awsRead(input, config);
   const server = createServer({ store, principals: config.principals, read }, {
     key: privateFile(config.tlsKeyFile), cert: privateFile(config.tlsCertFile) });
+  require('./tls-reload').install(server, config, { key: privateFile(config.tlsKeyFile), cert: privateFile(config.tlsCertFile) });
   server.listen(config.port, config.listenAddress || '127.0.0.1');
   const close = () => server.close(() => { store.close(); process.exitCode = 0; });
   process.once('SIGTERM', close); process.once('SIGINT', close); return { server, store };

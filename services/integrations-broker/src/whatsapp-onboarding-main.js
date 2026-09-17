@@ -1,4 +1,5 @@
 'use strict';
+const tlsReload = require('./tls-reload');
 const path = require('node:path'); const net = require('node:net'); const { createPublicKey } = require('node:crypto');
 const { fail } = require('./errors'); const { validatePolicy } = require('./policy'); const C = require('./whatsapp-onboarding-contract');
 const { privateFile, connectAws, ACCOUNT, SECRET_KEY } = require('./google-main');
@@ -7,7 +8,8 @@ const { drainAudit } = require('./audit'); const { createWhatsappHttp } = requir
 const { createWhatsappOnboardingSecrets } = require('./whatsapp-onboarding-secrets'); const { createWhatsappOnboarding } = require('./whatsapp-onboarding');
 const P = require('./whatsapp-provisioning-contract'); const { createWhatsappProvisioning } = require('./whatsapp-onboarding-provisioning');
 function validateConfig(config) {
-  const configKeys = ['cohort','enabled','listenAddress','policy','port','stateFile','tlsCertFile','tlsKeyFile', ...(Object.hasOwn(config || {}, 'provisioning') ? ['provisioning'] : [])];
+  if (config?.tlsRenewal) tlsReload.validateSettings(config.tlsRenewal);
+  const configKeys = [...(Object.hasOwn(config || {}, 'tlsRenewal') ? ['tlsRenewal'] : []),'cohort','enabled','listenAddress','policy','port','stateFile','tlsCertFile','tlsKeyFile', ...(Object.hasOwn(config || {}, 'provisioning') ? ['provisioning'] : [])];
   if (!config || Object.keys(config).sort().join(',') !== configKeys.sort().join(',')
     || config.enabled !== true || config.cohort !== C.COHORT || !net.isIP(config.listenAddress)
     || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535 || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
@@ -57,6 +59,7 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappHt
         return await (prepare ? provisioner.prepare(...args) : broker.execute(...args));
       } finally { inFlight--; } } }, { cert, key });
     server.maxConnections = 64; server.timeout = 35000;
+    tlsReload.install(server, config, { cert, key });
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.listenAddress, resolve); });
     const tick = () => { if (!draining) draining = drainAudit(store, aws.sink, { limit: 20 }).catch(() => null).finally(() => { draining = null; }); };
     tick(); timer = setInterval(tick, 1000); timer.unref(); let closing;

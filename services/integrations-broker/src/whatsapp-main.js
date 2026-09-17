@@ -1,4 +1,5 @@
 'use strict';
+const tlsReload = require('./tls-reload');
 const path = require('node:path'); const net = require('node:net'); const { createPublicKey } = require('node:crypto');
 const { fail } = require('./errors'); const { validatePolicy } = require('./policy'); const C = require('./whatsapp-contract');
 const { privateFile, connectAws, ACCOUNT, SECRET_KEY } = require('./google-main');
@@ -7,7 +8,10 @@ const { drainAudit } = require('./audit'); const { createWhatsappSecrets } = req
 const { createWhatsappHttp } = require('./whatsapp-http'); const { createWhatsappOperations } = require('./whatsapp-operations');
 const { createWhatsappCredentialInspector } = require('./whatsapp-credential-inspector');
 function validateConfig(config) {
-  if (!config || Object.keys(config).sort().join(',') !== 'cohort,enabled,listenAddress,policy,port,stateFile,tlsCertFile,tlsKeyFile'
+  if (config?.tlsRenewal) tlsReload.validateSettings(config.tlsRenewal);
+  const keys = 'cohort,enabled,listenAddress,policy,port,stateFile,tlsCertFile,tlsKeyFile'.split(',');
+  if (Object.hasOwn(config || {}, 'tlsRenewal')) keys.push('tlsRenewal');
+  if (!config || Object.keys(config).sort().join(',') !== keys.sort().join(',')
     || config.enabled !== true || config.cohort !== C.COHORT || !net.isIP(config.listenAddress)
     || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535
     || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
@@ -67,6 +71,7 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappHt
       try { return await broker.execute(...args); } finally { inFlight--; }
     } }, { cert, key });
     server.maxConnections = 64; server.timeout = 35000;
+    tlsReload.install(server, config, { cert, key });
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.listenAddress, resolve); });
     const tick = () => { if (!draining) draining = drainAudit(store, aws.sink, { limit: 20 }).catch(() => null).finally(() => { draining = null; }); };
     tick(); timer = setInterval(tick, 1000); timer.unref();

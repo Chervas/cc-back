@@ -1,4 +1,5 @@
 'use strict';
+const tlsReload = require('./tls-reload');
 const fs = require('node:fs'); const path = require('node:path'); const net = require('node:net');
 const { createHash } = require('node:crypto');
 const { fail } = require('./errors');
@@ -12,6 +13,7 @@ const COHORT = 'whatsapp-inbox-passive-v1';
 const scopesContract = require('./whatsapp-inbox-scopes');
 function validateConfig(c) {
   const keys = 'application,auditContext,bindings,cohort,consumerEnabled,enabled,keyManifestFile,limits,listenAddress,port,principals,stateFile,tlsCaFile,tlsCertFile,tlsKeyFile'.split(',');
+  if (c && Object.hasOwn(c, 'tlsRenewal')) { tlsReload.validateSettings(c.tlsRenewal); keys.push('tlsRenewal'); }
   if (c && Object.hasOwn(c, 'scopes')) keys.push('scopes', 'previousScopesDigest');
   if (!c || Object.keys(c).sort().join(',') !== keys.sort().join(',')
     || c.cohort !== COHORT || c.enabled !== true || typeof c.consumerEnabled !== 'boolean' || !net.isIP(c.listenAddress)
@@ -83,6 +85,7 @@ async function main(filename, { awsFactory = connectInboxAws } = {}) {
     secret = createInboxApplicationSecret(aws.secrets, config.application);
     server = createInboxServer({ inbox, withApplicationSecret: work => secret.withSecret(work), principals: config.principals,
       cert, key, ca, consumerEnabled: config.consumerEnabled });
+    tlsReload.install(server, config, { cert, key, ca, requestCert: true, rejectUnauthorized: true });
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.listenAddress, resolve); });
     const tick = () => { if (!draining) draining = drainAudit(store, aws.sink, { limit: 20 }).catch(() => null).finally(() => { draining = null; }); };
     tick(); timer = setInterval(tick, 1000); timer.unref(); let closing;

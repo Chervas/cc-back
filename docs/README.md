@@ -51,6 +51,8 @@ sincroniza el espejo frontend. Este índice no mantiene otro roadmap ni diario.
 
 ### Auditoría y cifrado
 
+- [Renovación y diagnóstico de certificados de transporte](security/transport-certificate-maintenance.md).
+
 - [Auditoría de políticas de acceso y límites de grupo](security/permission-audit-migration.md).
 - [Auditoría de lecturas de pacientes: contrato y corte](security/patient-read-audit-migration.md).
 - [Lector, visor y conciliación de auditoría](security/audit-reader-view-migration.md).

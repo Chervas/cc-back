@@ -15,6 +15,7 @@ function main(filename) {
   const write = config.credentialMode === 'unix-scoped' ? input => require('./scoped-runtime').write(input, config) : require('./writer-main').run;
   const server = createServer({ store, principals: config.principals, sourceRoleArn: config.sourceRoleArn,
     write }, { key: privateFile(config.tlsKeyFile), cert: privateFile(config.tlsCertFile) });
+  require('./tls-reload').install(server, config, { key: privateFile(config.tlsKeyFile), cert: privateFile(config.tlsCertFile) });
   server.listen(config.port, config.listenAddress || '127.0.0.1');
   const close = () => server.close(() => { store.close(); process.exitCode = 0; });
   process.once('SIGTERM', close); process.once('SIGINT', close); return { server, store };

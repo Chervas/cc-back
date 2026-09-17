@@ -10,7 +10,7 @@ const APP = '0123456789abcdef0123456789abcdef';
 function tlsFiles(dir) {
   const run = args => execFileSync('openssl', args, { stdio: 'ignore' });
   const ca = path.join(dir, 'ca.crt'); const caKey = path.join(dir, 'ca.key');
-  run(['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', caKey, '-out', ca, '-days', '1', '-subj', '/CN=FICTITIOUS_INBOX_CA']);
+  run(['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', caKey, '-out', ca, '-days', '365', '-subj', '/CN=FICTITIOUS_INBOX_CA']);
   const certs = {};
   for (const name of ['server', 'gateway', 'staging', 'unlisted']) {
     const key = path.join(dir, name + '.key'); const csr = path.join(dir, name + '.csr'); const cert = path.join(dir, name + '.crt');
@@ -23,7 +23,7 @@ function tlsFiles(dir) {
   for (const name of fs.readdirSync(dir)) fs.chmodSync(path.join(dir, name), 0o600);
   return { ...certs, ca };
 }
-async function fixture(t) {
+async function fixture(t, { keyPins = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-wa-inbox-runtime-')); fs.chmodSync(dir, 0o700);
   const tls = tlsFiles(dir); const dataKey = randomBytes(32); const awsCalls = []; const events = [];
   let appVersion = randomUUID(); let unavailable = false; let placeholder = false;
@@ -53,6 +53,10 @@ async function fixture(t) {
     auditContext: { tenantRef: 'clinic:71', connectionRef: 'connection:inbox-qa', resourceRef: 'wa-inbox:101', operation: 'whatsapp.webhook.capture', policyVersion: 'qa-v1' },
     limits: { maxRows: 100, maxBytes: 10485760, maxAuditBacklog: 100 },
     principals: ['gateway', 'staging'].map(name => ({ id: name + ':whatsapp-inbox', certificateSha256: tls[name].certificateSha256, maxPerMinute: 600 })) };
+  if (keyPins) for (const principal of config.principals) {
+    const name = principal.id.split(':')[0];
+    principal.publicKeySha256 = require('node:crypto').createHash('sha256').update(new X509Certificate(fs.readFileSync(tls[name].cert)).publicKey.export({type:'spki',format:'der'})).digest('hex');
+  }
   const manifest = await createInboxKeyProvider(kms).prepare('101'); fs.writeFileSync(config.keyManifestFile, JSON.stringify(manifest), { mode: 0o600 });
   const file = path.join(dir, 'config.json');
   const awsFactory = async () => ({ secrets, kms, sink: { async write(row) { events.push(JSON.parse(row.event)); return { versionId: 'FICTITIOUS_AUDIT', digest: row.digest }; } }, close() {} });
@@ -68,7 +72,7 @@ async function fixture(t) {
       let text = ''; res.on('data', c => { text += c; }); res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(text), cache: res.headers['cache-control'], retry: res.headers['retry-after'] }));
     }); request.once('error', reject); request.end(raw);
   });
-  return { config, file, events, awsCalls, send, application, secrets, get app() { return app; },
+  return { dir, tls, config, file, events, awsCalls, send, application, secrets, get app() { return app; },
     rotate() { appVersion = randomUUID(); }, unavailable() { unavailable = true; }, placeholder() { placeholder = true; },
     async restart() { await app.close(); app = null; await start(); }, async stop() { await app.close(); app = null; },
     raw: Buffer.from(JSON.stringify({ object: 'whatsapp_business_account', entry: [{ id: '301', changes: [{ field: 'messages',
@@ -126,4 +130,47 @@ test('application secret preserves HMAC errors and wipes the buffer borrowed for
   assert(borrowed.equals(Buffer.alloc(32))); source.close();
   await assert.rejects(source.withSecret(() => assert.fail('closed secret was used')), { code: 'secret_unavailable' });
   assert.equal((await f.send('gateway', BASE, { body: f.raw, signature: 'sha256=' + '0'.repeat(64) })).status, 401);
+});
+
+function renewClient(f, name, { changeKey = false } = {}) {
+  const run = args => execFileSync('openssl', args, { stdio: 'ignore' });
+  const before = fs.readFileSync(f.tls[name].cert);
+  if (changeKey) run(['genpkey','-algorithm','RSA','-pkeyopt','rsa_keygen_bits:2048','-out',f.tls[name].key]);
+  run(['req','-new','-key',f.tls[name].key,'-out',f.dir + '/renew.csr','-subj','/CN=FICTITIOUS_' + name]);
+  run(['x509','-req','-in',f.dir + '/renew.csr','-CA',f.tls.ca,'-CAkey',f.dir + '/ca.key',
+    '-set_serial','984','-out',f.tls[name].cert,'-days','1','-extfile',f.dir + '/' + name + '.ext']);
+  fs.chmodSync(f.tls[name].cert,0o600); fs.chmodSync(f.tls[name].key,0o600);
+  assert.notDeepEqual(before,fs.readFileSync(f.tls[name].cert));
+}
+test('opt-in key pins accept renewed client certificates and preserve gateway/consumer separation', async t => {
+  const f = await fixture(t, { keyPins: true });
+  renewClient(f,'gateway'); renewClient(f,'staging');
+  assert.equal((await f.send('gateway',BASE,packet(f.raw))).status,200);
+  assert.equal((await f.send('staging',BASE+'/pending',{method:'GET'})).status,200);
+  assert.equal((await f.send('gateway',BASE+'/pending',{method:'GET'})).status,403);
+  assert.equal((await f.send('staging',BASE,packet(f.raw))).status,403);
+  renewClient(f,'gateway',{changeKey:true});
+  assert.equal((await f.send('gateway',BASE,packet(f.raw))).status,403);
+  await f.restart();
+  assert.equal((await f.send('staging',BASE+'/pending',{method:'GET'})).status,200);
+});
+test('certificate pins remain strict unless key pin migration is explicitly configured', async t => {
+  const f = await fixture(t); renewClient(f,'gateway');
+  assert.equal((await f.send('gateway',BASE,packet(f.raw))).status,403);
+});
+
+test('long-running inbox client adopts a renewed certificate without restarting and rejects a different key',async t=>{
+  const f=await fixture(t,{keyPins:true});const events=[];
+  const {createInboxClient}=require('../../../src/lib/whatsappInboxClient');
+  const client=createInboxClient({origin:'https://127.0.0.1:'+f.config.port,ca:fs.readFileSync(f.tls.ca),
+    cert:fs.readFileSync(f.tls.staging.cert),key:fs.readFileSync(f.tls.staging.key),
+    readCertificate:()=>fs.readFileSync(f.tls.staging.cert),report:e=>events.push(e)});
+  t.after(()=>client.close());
+  assert.equal((await client.request('GET','/pending')).status,200);
+  renewClient(f,'staging');assert.equal((await client.request('GET','/pending')).status,200);
+  assert.equal(events.at(-1).status,'reloaded');
+  renewClient(f,'staging',{changeKey:true});assert.equal((await client.request('GET','/pending')).status,200);
+  assert.equal(events.at(-1).status,'reload_failed');
+  assert.equal((await client.request('POST','',f.raw)).status,403);
+  client.close();await assert.rejects(client.request('GET','/pending'),/inbox_unavailable/);
 });

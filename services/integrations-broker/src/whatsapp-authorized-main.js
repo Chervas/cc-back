@@ -1,4 +1,5 @@
 'use strict';
+const tlsReload = require('./tls-reload');
 const fs = require('node:fs'); const path = require('node:path'); const net = require('node:net'); const tls = require('node:tls');
 const { createPublicKey } = require('node:crypto'); const { fail } = require('./errors'); const { validatePolicy } = require('./policy');
 const M = require('./whatsapp-template-management');
@@ -15,7 +16,9 @@ const CONFIG_KEYS = ['cohort','enabled','listenAddress','port','stateFile','tlsC
   'enrollmentConfigFile','enrollmentStateFile','authorizations'];
 const absolute = value => typeof value === 'string' && path.isAbsolute(value) && path.normalize(value) === value;
 function validateConfig(config) {
-  if (!C.keys(config, CONFIG_KEYS) || config.enabled !== true || config.cohort !== C.COHORT || !net.isIP(config.listenAddress)
+  if (config?.tlsRenewal) tlsReload.validateSettings(config.tlsRenewal);
+  const configKeys = [...CONFIG_KEYS, ...(Object.hasOwn(config || {}, 'tlsRenewal') ? ['tlsRenewal'] : [])];
+  if (!C.keys(config, configKeys) || config.enabled !== true || config.cohort !== C.COHORT || !net.isIP(config.listenAddress)
     || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535
     || !['stateFile','tlsCertFile','tlsKeyFile','enrollmentConfigFile','enrollmentStateFile'].every(k => absolute(config[k]))
     || new Set([config.stateFile,config.enrollmentStateFile,config.enrollmentConfigFile,config.tlsKeyFile,config.tlsCertFile]).size !== 5
@@ -117,6 +120,7 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappAu
       void work.then(() => pending.delete(work), () => pending.delete(work)); return work;
     } }, { cert, key });
     server.maxConnections = 64; server.timeout = 35000;
+    tlsReload.install(server, config, { cert, key });
     await new Promise((resolve, reject) => {
       const failed = error => reject(error); server.once('error', failed);
       server.listen(config.port, config.listenAddress, () => { server.removeListener('error', failed); resolve(); });
