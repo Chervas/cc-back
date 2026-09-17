@@ -1,6 +1,6 @@
 'use strict';
 const C = require('./whatsapp-onboarding-contract');
-const { canonical } = require('./broker');
+const { canonical } = require('./canonical');
 const { fail } = require('./errors');
 const PREPARE = 'meta.whatsapp.onboarding.prepare.v1';
 const PREFIX = '/clinicaclick/integrations/prod/whatsapp/automatic/';

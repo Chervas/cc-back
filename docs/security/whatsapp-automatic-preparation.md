@@ -132,7 +132,10 @@ Para QA usar Node 24 y el guard offline del paquete. Casos focales:
 `test/whatsapp-provisioning*.test.js`, `test/whatsapp-authorized*.test.js`,
 `src/scripts/tests/whatsapp_authorization_listing.test.js`,
 `src/scripts/tests/whatsapp_onboarding_{broker_client,gateway_tls}.test.js`.
-No usar credenciales reales ni datos de pacientes en fixtures.
+No usar credenciales reales ni datos de pacientes en fixtures. El gateway publica
+el contrato de aprovisionamiento y `canonical.js` junto con sus dependencias de
+contrato existentes; estos módulos no cargan el runtime AWS ni `node:sqlite`.
+Comprobar su carga con el Node real del gateway antes de cambiar la configuración.
 
 Rollback: fijar `automaticPreparationEnabled: false` en gateway y conservar código capaz
 de leer las conexiones automáticas ya existentes. Retirar el permiso de creación
