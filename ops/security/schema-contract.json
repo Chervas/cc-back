@@ -1,0 +1,458 @@
+{
+  "version": 1,
+  "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
+  "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+  "tables": {
+    "AuthSessions": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "session_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "issued_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "absolute_expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "credential_binding","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "varchar(16)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "ended_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "authentication_method","COLUMN_TYPE": "enum('password','password_email','password_trusted_device')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "password","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "email_verified_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "email_challenge_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "trusted_device_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+        {"name": "email_challenge_id","columns": [{"INDEX_NAME": "email_challenge_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "email_challenge_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_auth_session_expiry","columns": [{"INDEX_NAME": "idx_auth_session_expiry","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_auth_session_expiry","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "expires_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_auth_session_user","columns": [{"INDEX_NAME": "idx_auth_session_user","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_auth_session_user","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "session_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "AuthEmailChallenges": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "challenge_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "challenge_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "code_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "credential_binding","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "email_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('pending','verified','used','revoked','locked','expired')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "pending","EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "absolute_expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_sent_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "attempts","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "sends","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "1","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "verified_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "consumed_session_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "email_message_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "challenge_hash","columns": [{"INDEX_NAME": "challenge_hash","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "challenge_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "consumed_session_id","columns": [{"INDEX_NAME": "consumed_session_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "consumed_session_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_auth_email_state","columns": [{"INDEX_NAME": "idx_auth_email_state","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_auth_email_state","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "expires_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_auth_email_user","columns": [{"INDEX_NAME": "idx_auth_email_user","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_auth_email_user","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "challenge_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "AuthTrustedDevices": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "device_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "token_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "key_binding","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "credential_binding","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "creation_session_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "email_verified_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "revoked_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_used_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "creation_session_id","columns": [{"INDEX_NAME": "creation_session_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "creation_session_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_auth_trusted_device_user","columns": [{"INDEX_NAME": "idx_auth_trusted_device_user","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_auth_trusted_device_user","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "revoked_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_auth_trusted_device_user","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "expires_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "device_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "token_hash","columns": [{"INDEX_NAME": "token_hash","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "token_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "PlatformAuditEvents": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "event_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "correlation_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "stage","COLUMN_TYPE": "varchar(16)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "occurred_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "body","COLUMN_TYPE": "text","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "digest","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "varchar(16)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "pending","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "attempts","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "next_attempt_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "lease_token","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "lease_until","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(48)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "receipt","COLUMN_TYPE": "json","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "delivered_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "result_part","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "idx_platform_audit_view","columns": [{"INDEX_NAME": "idx_platform_audit_view","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_platform_audit_view","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "occurred_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_platform_audit_view","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "event_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_platform_audit_delivery","columns": [{"INDEX_NAME": "idx_platform_audit_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_platform_audit_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "next_attempt_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_platform_audit_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "lease_until","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "event_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "uq_platform_audit_stage","columns": [{"INDEX_NAME": "uq_platform_audit_stage","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "correlation_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "uq_platform_audit_stage","NON_UNIQUE": 0,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "stage","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "uq_platform_audit_stage","NON_UNIQUE": 0,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "result_part","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "PlatformAuditDeliveryStates": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "state_key","COLUMN_TYPE": "varchar(48)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "lease_token","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "lease_until","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_started_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_completed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_confirmed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(48)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "summary","COLUMN_TYPE": "json","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "monitor_checked_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "alarm_episode","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "alarm_level","COLUMN_TYPE": "varchar(16)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "healthy","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "alarm_code","COLUMN_TYPE": "varchar(48)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state_key","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "MetaScopeBlocks": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "scope_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "reason","COLUMN_TYPE": "enum('scope_disconnected','legacy_disconnected')","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "actor_user_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "scope_key","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "WhatsappAuthorizationStates": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "request_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "session_ref","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "session_expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "scope_type","COLUMN_TYPE": "enum('clinic','group')","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "scope_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "original_clinic_ids","COLUMN_TYPE": "json","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "scope_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "state_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "context_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('awaiting','claimed','cancelled')","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "code_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "claimed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "cancelled_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "channel_role","COLUMN_TYPE": "enum('primary','secondary')","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
+      ],
+      "indexes": [
+        {"name": "idx_whatsapp_authorization_user_active","columns": [{"INDEX_NAME": "idx_whatsapp_authorization_user_active","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_whatsapp_authorization_user_active","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_whatsapp_authorization_user_active","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "expires_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_whatsapp_authorization_user_time","columns": [{"INDEX_NAME": "idx_whatsapp_authorization_user_time","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_whatsapp_authorization_user_time","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "request_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "uq_whatsapp_authorization_code_hash","columns": [{"INDEX_NAME": "uq_whatsapp_authorization_code_hash","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "code_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "uq_whatsapp_authorization_state_hash","columns": [{"INDEX_NAME": "uq_whatsapp_authorization_state_hash","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "WhatsappInboxImports": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "receipt","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_general_ci"},
+        {"COLUMN_NAME": "digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_general_ci"},
+        {"COLUMN_NAME": "import_receipt","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_general_ci"},
+        {"COLUMN_NAME": "clinic_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "phone_id","COLUMN_TYPE": "varchar(30)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_general_ci"},
+        {"COLUMN_NAME": "message_count","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "imported_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "receipt","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "WhatsappInboxMessageKeys": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "message_key","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_general_ci"},
+        {"COLUMN_NAME": "digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_general_ci"},
+        {"COLUMN_NAME": "message_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "message_key","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "WhatsappInboxContactKeys": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "contact_key","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_general_ci"},
+        {"COLUMN_NAME": "conversation_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "contact_key","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "SecurityMonitoringSettings": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "id","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "auto_increment","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "scope","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "rules","COLUMN_TYPE": "json","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_by","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "scope","columns": [{"INDEX_NAME": "scope","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "scope","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "SecurityMonitoringAlerts": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "id","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "auto_increment","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "dedupe_key","COLUMN_TYPE": "varchar(191)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "rule_key","COLUMN_TYPE": "varchar(80)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "entity_type","COLUMN_TYPE": "varchar(40)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "entity_id","COLUMN_TYPE": "varchar(160)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinic_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "title","COLUMN_TYPE": "varchar(255)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "detail","COLUMN_TYPE": "varchar(1000)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "measured_value","COLUMN_TYPE": "decimal(20,6)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "threshold","COLUMN_TYPE": "decimal(20,6)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "status","COLUMN_TYPE": "varchar(24)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "open","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "notification_queued_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "acknowledged_by","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "acknowledged_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "dedupe_key","columns": [{"INDEX_NAME": "dedupe_key","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "dedupe_key","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_security_alerts_state_date","columns": [{"INDEX_NAME": "idx_security_alerts_state_date","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "status","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_security_alerts_state_date","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "SecurityMonitoringChanges": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "id","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "auto_increment","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "entity_type","COLUMN_TYPE": "varchar(40)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "entity_id","COLUMN_TYPE": "varchar(160)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "action","COLUMN_TYPE": "varchar(40)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "actor_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "detail","COLUMN_TYPE": "json","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "SecurityMonitoringMeasures": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "id","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "auto_increment","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "entity_type","COLUMN_TYPE": "varchar(40)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "entity_id","COLUMN_TYPE": "varchar(160)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "label","COLUMN_TYPE": "varchar(255)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinic_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "paused","COLUMN_TYPE": "tinyint(1)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "reason","COLUMN_TYPE": "varchar(500)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "updated_by","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "uq_security_measure_entity","columns": [{"INDEX_NAME": "uq_security_measure_entity","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "entity_type","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "uq_security_measure_entity","NON_UNIQUE": 0,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "entity_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "AiModelPrices": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "id","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "auto_increment","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "provider","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "model","COLUMN_TYPE": "varchar(160)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "input_usd_million","COLUMN_TYPE": "decimal(16,6)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "cached_input_usd_million","COLUMN_TYPE": "decimal(16,6)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "output_usd_million","COLUMN_TYPE": "decimal(16,6)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "audio_usd_hour","COLUMN_TYPE": "decimal(16,6)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "search_usd_thousand","COLUMN_TYPE": "decimal(16,6)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "long_context_threshold","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "long_input_multiplier","COLUMN_TYPE": "decimal(8,3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "long_output_multiplier","COLUMN_TYPE": "decimal(8,3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "source_url","COLUMN_TYPE": "varchar(1000)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "updated_by","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "uq_ai_model_price","columns": [{"INDEX_NAME": "uq_ai_model_price","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "provider","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "uq_ai_model_price","NON_UNIQUE": 0,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "model","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "AiUsageDaily": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "id","COLUMN_TYPE": "bigint unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "auto_increment","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "usage_date","COLUMN_TYPE": "date","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "provider","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "model","COLUMN_TYPE": "varchar(160)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "use_case","COLUMN_TYPE": "varchar(80)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "scope_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "global","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinic_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "group_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "request_count","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "success_count","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "error_count","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "fallback_count","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "input_tokens","COLUMN_TYPE": "bigint unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "output_tokens","COLUMN_TYPE": "bigint unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "latency_ms_total","COLUMN_TYPE": "bigint unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "estimated_cost_usd","COLUMN_TYPE": "decimal(14,6)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0.000000","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_status","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "last_error_code","COLUMN_TYPE": "varchar(100)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "last_used_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "metadata","COLUMN_TYPE": "json","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": "CURRENT_TIMESTAMP","EXTRA": "DEFAULT_GENERATED","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": "CURRENT_TIMESTAMP","EXTRA": "DEFAULT_GENERATED","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "cached_input_tokens","COLUMN_TYPE": "bigint unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "audio_seconds","COLUMN_TYPE": "decimal(18,3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0.000","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "search_requests","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "unpriced_requests","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "idx_ai_usage_daily_clinic","columns": [{"INDEX_NAME": "idx_ai_usage_daily_clinic","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "usage_date","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_ai_usage_daily_clinic","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "clinic_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_ai_usage_daily_provider","columns": [{"INDEX_NAME": "idx_ai_usage_daily_provider","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "usage_date","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_ai_usage_daily_provider","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "provider","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "uq_ai_usage_daily_scope","columns": [{"INDEX_NAME": "uq_ai_usage_daily_scope","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "usage_date","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "uq_ai_usage_daily_scope","NON_UNIQUE": 0,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "provider","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "uq_ai_usage_daily_scope","NON_UNIQUE": 0,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "model","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "uq_ai_usage_daily_scope","NON_UNIQUE": 0,"SEQ_IN_INDEX": 4,"COLUMN_NAME": "use_case","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "uq_ai_usage_daily_scope","NON_UNIQUE": 0,"SEQ_IN_INDEX": 5,"COLUMN_NAME": "scope_key","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "EmailMessages": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "id","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "auto_increment","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "public_id","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "stream","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "transactional","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "provider","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "ses","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "provider_region","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "provider_message_id","COLUMN_TYPE": "varchar(255)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "configuration_set","COLUMN_TYPE": "varchar(120)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "status","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "queued","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "priority","COLUMN_TYPE": "varchar(16)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "normal","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "dedupe_key","COLUMN_TYPE": "varchar(191)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "template_key","COLUMN_TYPE": "varchar(120)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "template_version","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "subject_key","COLUMN_TYPE": "varchar(120)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "from_email","COLUMN_TYPE": "varchar(320)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "reply_to","COLUMN_TYPE": "varchar(320)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "recipient_email_envelope","COLUMN_TYPE": "longtext","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "recipient_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "recipient_domain","COLUMN_TYPE": "varchar(255)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "recipient_kind","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "external","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinica_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "paciente_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "usuario_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "related_type","COLUMN_TYPE": "varchar(80)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "related_id","COLUMN_TYPE": "varchar(80)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "job_request_id","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "event_count","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_event_type","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "last_error_code","COLUMN_TYPE": "varchar(120)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "last_error_message","COLUMN_TYPE": "text","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "template_context","COLUMN_TYPE": "json","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "metadata","COLUMN_TYPE": "json","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "queued_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": "CURRENT_TIMESTAMP","EXTRA": "DEFAULT_GENERATED","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "sent_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "delivered_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "rejected_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "bounced_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "complained_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "suppressed_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "completed_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": "CURRENT_TIMESTAMP","EXTRA": "DEFAULT_GENERATED","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": "CURRENT_TIMESTAMP","EXTRA": "DEFAULT_GENERATED","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "dedupe_key","columns": [{"INDEX_NAME": "dedupe_key","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "dedupe_key","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_email_messages_clinic_created","columns": [{"INDEX_NAME": "idx_email_messages_clinic_created","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "clinica_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_email_messages_clinic_created","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_email_messages_job_request","columns": [{"INDEX_NAME": "idx_email_messages_job_request","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "job_request_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_email_messages_provider_message_id","columns": [{"INDEX_NAME": "idx_email_messages_provider_message_id","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "provider_message_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_email_messages_recipient_stream_status","columns": [{"INDEX_NAME": "idx_email_messages_recipient_stream_status","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "recipient_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_email_messages_recipient_stream_status","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "stream","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_email_messages_recipient_stream_status","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "status","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_email_messages_stream_status_created","columns": [{"INDEX_NAME": "idx_email_messages_stream_status_created","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "stream","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_email_messages_stream_status_created","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "status","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_email_messages_stream_status_created","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "paciente_id","columns": [{"INDEX_NAME": "paciente_id","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "paciente_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "public_id","columns": [{"INDEX_NAME": "public_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "public_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "usuario_id","columns": [{"INDEX_NAME": "usuario_id","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "usuario_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "PasswordResetTokens": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "id","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "auto_increment","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "token_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "token_prefix","COLUMN_TYPE": "varchar(16)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "email_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "email_message_id","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "status","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "pending","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "expires_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "used_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "requested_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": "CURRENT_TIMESTAMP","EXTRA": "DEFAULT_GENERATED","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "request_ip_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "user_agent_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": "CURRENT_TIMESTAMP","EXTRA": "DEFAULT_GENERATED","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": "CURRENT_TIMESTAMP","EXTRA": "DEFAULT_GENERATED","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "idx_password_reset_tokens_email_message","columns": [{"INDEX_NAME": "idx_password_reset_tokens_email_message","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "email_message_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_password_reset_tokens_user_status_expires","columns": [{"INDEX_NAME": "idx_password_reset_tokens_user_status_expires","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_password_reset_tokens_user_status_expires","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "status","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_password_reset_tokens_user_status_expires","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "expires_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "token_hash","columns": [{"INDEX_NAME": "token_hash","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "token_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    }
+  },
+  "migrations": [
+    {"name": "20260912230000-index-platform-audit-view.js","sha256": "dbbcad72b966056df5ca098c00cee3bf620dc46516d1bd43819b8de56ea30ae2"},
+    {"name": "20260912210000-create-platform-audit-events.js", "sha256": "f70ed09874aba16b29e052e59508cd1febdf6e885d62dbf5288da08775f7b132"},
+    {"name": "20260912213000-create-platform-audit-delivery-states.js", "sha256": "43a4f3cad139610dafbf36f6d9fc6ddf4595117cf1b6a8d25053031c3614b69c"},
+    {"name": "20260912220000-create-auth-sessions.js", "sha256": "0e9b99b66a562fd027c1db47c7cfc53d959207eda77af02b1e1a1f8ecc1da1f6"},
+    {"name": "20260913003000-add-platform-audit-result-part.js", "sha256": "7d0c90f2a6a75878b91cca67435a07148ba1f72e9cc7c4309420e87a4da302fe"},
+    {"name": "20260913130000-create-auth-email-challenges.js", "sha256": "b770bdaf82aad32c5ee63f8bf89cf93e4d60eb99e9fa0bff6d5d1b19a2df8f15"},
+    {"name": "20260914220000-create-auth-trusted-devices.js", "sha256": "2c3ef4cd699a408ee2876f7bff59494f1022fc0adef71522d2720f9ba0d7e1cf"},
+    {"name": "20260913140000-create-meta-scope-blocks.js", "sha256": "1bfc270254b866f2f7eaf9daa6943b3cc4a4fb7074134be4980ecaa67e14a15e"},
+    {"name": "20260913150000-create-whatsapp-authorization-states.js", "sha256": "0516245b18fa1d7ec384c599569ff03e230382d85f3e4e372f6e60e4bf27a8a9"},
+    {"name": "20260915190000-add-whatsapp-authorization-channel-role.js", "sha256": "760f4cc3097ab25aa89d0b584674b99cb6f2932d8885a6ce2c36f34b34f46f78"},
+    {"name": "20260915040000-create-whatsapp-inbox-imports.js", "sha256": "4a35e8e039fc1a141356e8c029b9f6d7eb57e62caec5c72503ba1cd6dafbfe41"},
+    {"name": "20260916103000-security-monitoring-and-ai-prices.js", "sha256": "0ee3aaab634875e4acc19cffc5ede7cd2de4aeef6e07b7d26cea1a2ab134245e"}
+  ]
+}
