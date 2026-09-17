@@ -3,7 +3,7 @@
 const db=require('../../models');
 const {isGlobalAdmin}=require('../lib/role-helpers');
 const DEFINITIONS=Object.freeze([
-  {key:'transport_certificates',label:'Certificados de comunicación',description:'Avisar si falla la renovación, se aproxima una caducidad o deja de comprobarse la recepción de WhatsApp.',threshold:1,unit:'incidencias'},
+  {key:'transport_certificates',label:'Certificados de comunicación',description:'Avisar si falla la renovación, se aproxima una caducidad o deja de comprobarse la comunicación segura con AWS.',threshold:1,unit:'incidencias'},
   {key:'whatsapp_template_sends',label:'Muchos envíos de una plantilla',description:'Avisar cuando una plantilla supera este número de envíos aceptados en una hora.',threshold:500,unit:'envíos / hora'},
   {key:'whatsapp_template_creation',label:'Muchas plantillas creadas',description:'Avisar cuando una clínica crea más plantillas de las habituales en una hora.',threshold:30,unit:'plantillas / hora'},
   {key:'ai_requests',label:'Muchas consultas de IA',description:'Avisar cuando una función acumula este número de consultas durante el día UTC.',threshold:2000,unit:'consultas / día'},

@@ -95,3 +95,69 @@ node --test src/scripts/tests/whatsapp_inbox_client_tls.test.js
 ```
 
 La prueba Python usa únicamente una CA y claves ficticias en `/tmp`; necesita root para probar las mismas restricciones de propietario del firmante. No usa AWS, Meta ni BD. La revisión visual del panel debe comprobar que el aviso lleva a Seguridad y que nunca ofrece pausar una clínica por este motivo.
+
+## Certificados de servidores AWS
+
+`server-certificates.py` firma únicamente hojas de las identidades fijadas en
+su configuración root. La clave de cada servidor permanece en AWS; se obtiene
+su certificado público por TLS validado y se conserva sujeto, SAN, clave y usos.
+El firmante tiene un certificado mTLS propio, separado de gateway y CRM. Lo
+renueva antes del vencimiento y comprueba su aceptación antes y después del
+reemplazo local. La autoridad se comprueba por huella y correspondencia de clave
+incluso cuando todavía no toca renovar ninguna hoja.
+
+`server-certificate-publisher.py` recibe por HTTPS/mTLS exclusivamente el
+identificador de un servidor autorizado y su nueva hoja pública. No acepta
+claves privadas, rutas, comandos, nuevas identidades, certificados de otra CA,
+retrocesos de vigencia ni peticiones del certificado de gateway. Usa el puerto
+8450, restringido al host de ClinicaClick por SG y systemd. Tiene la CA pública;
+no dispone de la clave de firma. Sus escrituras se limitan al directorio de
+hojas enroladas y a respaldos de certificados públicos.
+
+El publicador espera hasta 70 segundos a que el servidor presente la hoja nueva.
+Si no ocurre, restaura la anterior. El firmante vuelve a comprobar el certificado
+servido desde el host de ClinicaClick. Una respuesta perdida o discrepancia no
+se presenta como éxito ni causa reenvíos de negocio. El propio publicador recarga
+su contexto TLS al renovar; la verificación externa del firmante acredita el
+nuevo handshake. Las claves y permisos permanecen sin cambios.
+
+### Instalación y promoción
+
+1. Preparar una identidad mTLS de mantenimiento independiente. Generar la clave
+   del publicador en AWS y firmar únicamente su CSR público en el host de la CA.
+2. Fijar por servidor su SPKI e identidad, puerto e IP. Copiar las hojas públicas
+   a `/etc/clinicaclick-server-certificates/targets/<id>/server.crt`: directorios
+   root `0711`, certificado `0600` del UID del servicio. La aplicación no debe
+   poder sustituir el directorio de publicación.
+3. Preparar cada release desde la que está realmente ejecutándose, preservando
+   contrato, políticas, grants, ledger y versión de dependencias. Añadir recarga
+   TLS y actualizar también los validadores que consumen configuraciones de otro
+   servicio: `whatsapp-authorized` lee la configuración de `whatsapp-onboarding`.
+4. Verificar `systemctl show ... -p WorkingDirectory -p ExecStart` **después** de
+   `daemon-reload` y antes de cambiar el fichero de configuración/reiniciar.
+   Un drop-in antiguo puede sobrescribir otro nuevo. Los cortes de servidor usan
+   `zz-current-release.conf`; las promociones posteriores deben actualizar esa
+   selección, con respaldo, y comprobar el valor efectivo. No acumular sufijos
+   `99-zz...` ni asumir que el nombre del fichero determina la release activa.
+5. Activar secuencialmente, comprobar TLS desde ambos hosts y probar renovación
+   real antes de habilitar el timer. Si falla, restaurar configuración y selector
+   de release; conservar el ledger, credenciales y colas.
+6. El timer `clinicaclick-server-certificates.timer` comprueba a las 00:15/12:15
+   UTC y publica `/var/lib/clinicaclick-transport-health/servers.json`. Su lista
+   `expectedIds` debe coincidir con todas las identidades enroladas. El monitor
+   con `SERVER_CERTIFICATE_MONITOR_ENABLED=true` alerta por un servidor fallido,
+   próximo a vencer, ausente o un fichero de estado inválido/caducado.
+
+No habilitar renovación sobre los certificados autofirmados de auditoría sin
+migrar primero la confianza de todos sus clientes. Los nuevos servicios Google,
+IA y correo deben enrolarse al desplegarse. La CA requiere su propio plan de
+sustitución de confianza antes de vencer; este mecanismo no cambia esa raíz.
+El estado publicado y los servidores realmente cubiertos se registran en 19;
+esta sección define el procedimiento, no acredita un despliegue por sí sola.
+
+Pruebas adicionales (CA ficticia, sin AWS ni proveedores):
+
+```sh
+sudo python3 ops/security/test-server-certificates.py
+sudo python3 ops/security/test-server-certificate-publisher.py
+```

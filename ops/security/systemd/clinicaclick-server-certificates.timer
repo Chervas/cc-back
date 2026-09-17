@@ -1,0 +1,11 @@
+[Unit]
+Description=Check ClinicaClick AWS server certificates twice daily
+
+[Timer]
+OnCalendar=*-*-* 00,12:15:00 UTC
+RandomizedDelaySec=5m
+Persistent=true
+Unit=clinicaclick-server-certificates.service
+
+[Install]
+WantedBy=timers.target

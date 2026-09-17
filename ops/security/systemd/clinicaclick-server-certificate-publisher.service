@@ -1,0 +1,32 @@
+[Unit]
+Description=ClinicaClick pinned server certificate publisher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /opt/clinicaclick-server-certificates/current/server-certificate-publisher.py /etc/clinicaclick-server-certificates/config.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+ReadWritePaths=/etc/clinicaclick-server-certificates/targets /var/lib/clinicaclick-server-certificates
+IPAddressDeny=any
+IPAddressAllow=51.44.225.192/32
+IPAddressAllow=127.0.0.1/32
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target
