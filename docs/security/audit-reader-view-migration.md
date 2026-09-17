@@ -1,36 +1,14 @@
 # Lector, visor y conciliación de auditoría
 
-## 13/09/2026 — Baja durable SC/GA conectada a la API
+> **Tipo:** runbook técnico.
+> **Fuente de verdad:** consulta verificada, proyección del visor y compatibilidad de despliegue.
+> **Última revisión:** 2026-09-17.
+> **Relacionado con:** [manual central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md), [contrato 39](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md).
 
-La [desconexión SC/GA](google-property-disconnect-migration.md) añade v9 a la
-captura/entrega/lector: integration.asset.disconnect con usuario inicial y job
-de confirmación, correlación y referencias cerradas. El visor restringido usa
-integrationDisconnect existente y valida la versión S3 concreta. Writer/reader
-compatibles antes de habilitar captura. No nueva UI ni QA visual; proyección y
-lector probados con datos ficticios. No demuestra entrega real ni auditoría
-completa de la plataforma.
-
-## Seguimiento 12/09/2026: acceso en tiempo real preparado
-
-La nueva [cohorte de sockets](realtime-access-migration.md) prepara verificación
-por paquete y captura v5. Las limitaciones de sockets citadas más abajo son el
-estado histórico de este lote; la cobertura nueva tampoco implica despliegue
-ni auditoría completa de REST/membresías. Actualizar writer/reader a v5 antes de
-habilitar su captura; mantener las puertas de aprobación de ambos contratos.
-
-## Ampliación v4 preparada (12/09/2026)
-
-El octavo bloque admite eventos de políticas de acceso bajo `app/platform/v4/`
-y cuatro filtros `permission.*`, con proyección `permission` y ámbito real
-clínica/grupo en el visor. El contrato de abajo describe el séptimo bloque;
-[la ampliación de permisos](permission-audit-migration.md) conserva sus controles
-de VersionId, índice parcial, roles, journal y gates apagados. Sin reader AWS
-instalado, nuevos permisos efectivos ni cambios de retención.
-
-12/09/2026. Séptimo bloque implementado y probado con datos ficticios. **Sin
-desplegar, activar, consultar AWS ni migrar la BD compartida.** La entrega AWS
-sigue siendo reportada. Complementa el runbook general, las sesiones
-persistentes y el README de `services/platform-audit`.
+Estado operativo y límites vigentes en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
+Este documento no sustituye la evidencia de despliegue. Los lotes históricos del
+12–13/09 se conservan en Git y en la bitácora central; no ejecutar sus instrucciones
+de aprovisionamiento como si describieran la infraestructura actual.
 
 ## Alcance y confianza
 
@@ -45,8 +23,12 @@ Esto acredita las versiones comprobadas, **no la integridad ni exhaustividad
 del índice local**: quien pueda modificar la BD puede ocultar filas. Tampoco
 prueba inmutabilidad de S3; un administrador con permisos efectivos de borrado
 de versiones puede eliminarlas. Object Lock sigue apagado según la entrega.
-El alcance es `app/platform/v1`, `v2` y `v3`; no incluye el contrato `app/v1`
-del broker, eventos aún pendientes de entrega ni acciones no instrumentadas.
+El lector admite los eventos versionados `app/platform/v1/` a `v15/`; no incluye
+el contrato `app/v1` del broker, eventos aún pendientes de entrega ni acciones
+no instrumentadas. La lista cerrada de acciones está en `src/view-contract.js`
+del paquete de auditoría. Añadir un esquema al writer requiere probar también
+`refFor`, `inputFor`, lectura, proyección y filtro: aceptar su escritura no
+garantiza que el lector reconozca la ruta de esa versión.
 No se reconstruyen seis meses anteriores ni se declara cobertura clínica,
 de permisos, exportaciones, sockets o de todas las lecturas de la plataforma.
 La lectura de `/audit/health` sigue pendiente de instrumentación semántica.
@@ -61,8 +43,9 @@ El rol de origen del lector debe ser distinto del origen del writer. Comparar
 ARNs en el programa no demuestra aislamiento de permisos efectivos: revisar
 trusts, políticas y acceso a IMDS desde cada workload. Instalar ambos como
 procesos con acceso al mismo instance profile no cumple esa separación.
-La topología/identidad del lector aún no está asignada; este bloque no crea
-otra instancia ni concede al backend permiso de asumir el reader.
+La separación real de usuarios, roles e IMDS se documenta en el contrato 39.
+Verificarla al reinstalar servicios; este runbook no concede al backend permiso
+de asumir el reader ni de consultar secretos.
 
 ## API y consultas
 
@@ -75,7 +58,7 @@ elige la identidad que autoriza la consulta.
 | Parámetro | Contrato |
 |---|---|
 | `from`, `to` | Fechas UTC inclusivas YYYY-MM-DD, máximo 31 días |
-| `action` | Opcional: auth.sign_in, auth.token_sign_in, auth.unlock, session.issued/renewed/revoked/expired, audit.records.read |
+| `action` | Opcional: catálogo cerrado `view-contract.ACTIONS`, incluidas autorizaciones WhatsApp |
 | `userId` | Opcional: ID numérico positivo, filtra actor **o** sujeto |
 | `cursor` | Opcional: continuación firmada HMAC, ligada a actor/sesión/criterios, caduca en 10 minutos |
 
@@ -100,6 +83,18 @@ Ajustes → monitorización → Auditoría hace una consulta al entrar y luego
 consultas explícitas, sin polling. Fechas de filtro UTC y resultados en Madrid.
 Anterior/siguiente conservan el snapshot; cambios de filtro/errores vacían los
 datos visibles. No incorpora exportación. El estado parcial se explica en UI.
+
+El panel muestra tarjetas con acción, ámbito, actor, fecha y resultado; los
+identificadores técnicos, motivo categorizado y correlación se despliegan a
+petición. Los contadores describen **solo los registros de la página**, no
+operaciones únicas ni totales del periodo. Denegación no equivale a ataque.
+Una autorización WhatsApp iniciada/recibida no se etiqueta como envío activo.
+No se incluyen direcciones IP, texto de pacientes, secretos ni valores de cambios.
+El enlace a Usuario solo se construye con un ID numérico válido.
+
+La proyección incluye `correlationId` y, en v15, `whatsappAuthorization.requestRef`.
+Son referencias de auditoría, no el código OAuth, el estado de retorno ni el
+identificador de acceso Meta. Mantener esa distinción al añadir detalles.
 
 ## Lectura firmada y límites
 
@@ -164,7 +159,7 @@ decidir plazo/cómputo de ambos registros; 183 días no se equiparan a seis mese
 ## Conciliación y persistencia
 
 Job `platformAuditReconciliation` / `platform_audit_reconciliation`, cada 5
-minutos Europe/Madrid, gate propio apagado. Hasta 25 filas `reconcile`, con
+minutos Europe/Madrid, con gate propio por entorno. Hasta 25 filas `reconcile`, con
 claims SKIP LOCKED y leases existentes de 120 s; ventana de adquisición 10 s.
 Verifica recibos y confirma con CAS de lease/digest. Conflictos y fallos
 conservan el evento pendiente y backoff de outbox; el job declara `failed`
@@ -173,13 +168,14 @@ Varios workers no concilian la misma fila a la vez. Esto resuelve el ACK
 perdido del writer cuando la versión externa coincide; no certifica histórico
 de versiones ni recupera objetos eliminados.
 
-Migración nueva única: `20260912230000-index-platform-audit-view.js`, añade
-índice en PlatformAuditEvents. Probada solo en MySQL propio ficticio. `down`
+Índice del visor: `20260912230000-index-platform-audit-view.js`, añade
+índice en PlatformAuditEvents. En las pruebas se aplica en MySQL propio ficticio. `down`
 retira el índice y conserva tabla, eventos, recibos y sesiones. Dependencias:
 outbox `20260912210000`, monitor `20260912213000`, sesiones `20260912220000`.
-Ninguna se ha aplicado aquí a la BD compartida. No ejecutar todas las pendientes.
+Comprobar `SequelizeMeta` del entorno antes de promover. No ejecutar todas las
+migraciones pendientes ni inferir el estado de SQL a partir del código.
 
-## Configuración preparada, sin valores reales
+## Configuración por entorno
 
 | Runtime | Ajuste |
 |---|---|
@@ -193,7 +189,7 @@ Claves Ed25519 PKCS8 PEM; cursor: archivo de **32 bytes binarios** aleatorios
 independiente, no hexadecimal ni JWT_SECRET. Archivos privados regulares de
 ruta absoluta/canónica, sin symlink y sin permisos de grupo/otros. Claves y CA
 se cargan una vez por proceso; su sustitución exige el reinicio aprobado.
-No se han generado ni movido claves reales, cambiado .env o PM2.
+No imprimir valores de claves ni copiar la configuración pública a DEV.
 
 Servicio lector: `node services/platform-audit/src/reader-main.js <config>`
 con Node 24 y dependencias de su package-lock. JSON privado con
@@ -203,31 +199,28 @@ con Node 24 y dependencias de su package-lock. JSON privado con
 Son nombres de campos, no un archivo listo para desplegar. La configuración
 debe recoger ARNs, origen TLS y rutas realmente asignados; no inventarlos.
 
-## Diferencias AWS y lote pendiente de aprobación
+## Compatibilidad antes de publicar
 
-| Comprobación | Estado y acción necesaria |
-|---|---|
-| SSO | Sin asignación temporal. Operador/usuario debe habilitar lectura mínima; después verificar identidad y metadata, sin credenciales alternativas |
-| Trust reader | Plantilla recibida confía en SSO de aprovisionamiento, no en el servicio; definir origen aislado y permiso/trust concretos |
-| S3 | Plantilla concede GetObject y GetObjectVersion para app/*; verificar política efectiva, bucket/KMS y versiones con prueba ficticia autorizada |
-| KMS | Plantilla reader contiene Decrypt/DescribeKey, sin GenerateDataKey; la referencia oficial de GetObject exige además GenerateDataKey para SSE-KMS. Revisar IAM y key policy antes del corte; no concedido por este código |
-| Hosting/red | Instancia entregada sin ingress ni canal de instalación aprobado. Aislamiento reader/writer y HTTPS deben resolverse dentro del presupuesto o aprobar su coste adicional |
-| Protección | Object Lock apagado, rotación KMS apagada, eventos de datos S3 ausentes reportados; DPD/operador deben resolver cada cambio por separado |
+1. Comprobar identidad y permisos efectivos del lector y writer con metadata;
+   no leer secretos. Confirmar red, aislamiento, KMS y retención con el contrato 39.
+2. Publicar primero codecs y lector compatibles con todas las versiones que el
+   emisor ya captura. Usar un evento ficticio y comprobar el recibo concreto.
+3. Publicar proyección API y frontend compatibles. No reiniciar trabajadores de
+   negocio ni cambiar pausas al actualizar el lector de auditoría.
+4. Preservar outbox, recibos, sesiones y SQLite del lector. Una incompatibilidad
+   no se resuelve borrando eventos ni sirviendo su cuerpo local sin verificarlo.
+5. Comprobar una consulta autorizada y el rechazo de otra no autorizada en cada
+   entorno; DEV consulta su propio índice y no el de staging.
 
-La exigencia descrita de permisos S3/versiones y KMS procede de la
-[referencia oficial GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html),
-consultada el 12/09/2026; no es una prueba de permisos efectivos. Si se aprueba
-ajustarlos, limitar a clave/prefijo/contexto/vía S3 necesarios y verificar que
-reader no recibe Put/Delete/retención ni writer lectura. Revisar esta misma
-diferencia en la conciliación preparada en fases anteriores. No modificar el
-original recibido ni usar el writer como atajo para conceder lectura.
-
-El lote de activación debe enumerar identidad origen y target, grants por
-runtime, instalación/TLS/red, migración exacta e impacto de índice, respaldo
-outbox/sesiones/journal, ventana y responsable. Desplegar primero codec/writer
-v3 y lector, validar con eventos ficticios y sin proveedores; después API/job
-y front, con gates cerrados hasta aceptar permisos/retención/cobertura. Coordinar
-el modo de sesiones en todos los runtimes y conservar las pausas efectivas.
+| Síntoma | Comprobación y acción |
+| --- | --- |
+| Una página falla al incluir autorizaciones WhatsApp | Verificar soporte v15 en `reader-protocol.js` tanto en cliente como en servicio AWS. Publicar ambos; conservar el evento. |
+| `audit_integrity_invalid` | Contrastar VersionId, digest, KMS y cuerpo canónico; no relajar comprobaciones. |
+| 403 | Sesión persistente y administrador técnico; no ampliar acceso a toda la clínica. |
+| 400 al paginar | Cursor caducado o filtros/sesión distintos: iniciar consulta nueva. |
+| Sin registros | Verificar filtros, entrega pendiente y cobertura; no equivale a ausencia de actividad. |
+| Una página mezcla inicio y resultado | Son dos eventos de la misma correlación; no sumar como acciones de negocio independientes. |
+| No hay respuesta del lector | Revisar TLS, identidad, servicio y límites; no usar un fallback sin firma. |
 
 Por página no vacía hay hasta 25 GET S3, operaciones KMS que requiera S3 y
 verificación/asunción de roles (tres operaciones STS por petición). Se añaden
@@ -244,18 +237,28 @@ falta; no borrar evidencias, ampliar permisos ni deshacer el hotfix Meta.
 
 ## QA y publicación
 
-Paquete completo con guard de red; TLS real propio y SDK dobles; firmas, claves
-separadas, roles/orden STS, versiones/digests/KMS incorrectos, nonce tras reinicio,
-cuotas, cursores y contrato v3. MySQL 8.0.42 propio por UNIX, sin TCP ni BD real:
-páginas 25/25/2, snapshot, filtros, denegaciones, fallos de auditoría, reconciliadores
-concurrentes, HTTP con sesión persistente y rollback/reaplicación del índice.
-Frontend: contratos de navegación/errores y ocho capturas Chromium ficticias
-de escritorio/móvil; build de desarrollo separado, sin publicar ese build.
+En `services/platform-audit`, con Node 24:
 
-Evidencia saneada privada en
-`/home/ubuntu/qa-evidence/security-migration-20260912/audit-view-offline-qa.json`;
-el acta `audit-view-publication.json` registra SHAs realmente comprobados tras
-push. No son evidencia AWS. Base sincronizada de este bloque: backend
-`6fd6751732ca7d8b4b837fc111db99584756cf44`, front
-`cd763cf35fd37a2894d4f80ddf596af6b988d159`. Revisar rango completo a origin/dev,
-stage explícito y push fast-forward solo propio. Push no equivale a despliegue.
+```sh
+node --require ./test/offline-guard.cjs --test test/*.test.js
+```
+
+Desde backend, la siguiente integración crea y destruye su propio MySQL por
+socket UNIX; impide TCP, bootstrap de modelos productivos y proveedores reales:
+
+```sh
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/platform_audit_view_mysql.integration.js
+```
+
+Cubre paginación con precisión de milisegundos, 25/25/2 registros sin duplicados,
+lectura v15, fallos de integridad, auditoría durable de la consulta, conciliación
+concurrente y HTTP con sesión real en SQL ficticio. El fixture debe aplicar las
+migraciones actuales de sesión/dispositivos de confianza antes del recorrido HTTP.
+
+Desde frontend: `node --test scripts/tests/platform_audit_view_contract.test.js`.
+La revisión visual usa `scripts/tests/platform_audit_view_chromium_qa.js` con un
+build actual en `AUDIT_VIEW_QA_BUILD` y salida en `AUDIT_VIEW_QA_OUTPUT`.
+Renderiza el componente Angular real con datos ficticios, bloquea APIs externas
+y comprueba escritorio/móvil, vacíos, denegación, detalles, paginación y XSS.
+No acredita sesión real ni despliegue público. Registrar la evidencia y SHAs en
+99, y la madurez en 19; no duplicarlos en este runbook.

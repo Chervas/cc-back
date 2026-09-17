@@ -66,6 +66,19 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const denials = (await models.PlatformAuditEvent.findAll({ raw: true })).map(row => JSON.parse(row.body)).filter(v => v.outcome === 'denied');
   assert.equal(denials.length, 4); assert(denials.every(v => v.criteria === null)); assert(!JSON.stringify(denials).includes('SENTINEL'));
   report.checks.push('actor/action filters and session-bound cursor; denied access and malformed queries are audited without data reads or raw input');
+  const whatsapp = await repo.append({ version: 15, eventId: randomUUID(), correlationId: randomUUID(), occurredAt: at.toISOString(),
+    action: 'integration.whatsapp.authorization_state', stage: 'completed', outcome: 'success', reason: 'state_claimed',
+    actor: { type: 'user', id: '123' }, scope: { type: 'clinic', id: '71' }, sessionRef,
+    requestRef: randomUUID(), capturePolicy: 'whatsapp-onboarding-v1' });
+  await models.PlatformAuditEvent.update({ state: 'delivered', receipt: await writer.write(whatsapp), delivered_at: at },
+    { where: { event_id: whatsapp.event.eventId } });
+  const whatsappPage = await view.read({ actorId: 1, sessionRef, query: { ...criteria, action: 'integration.whatsapp.authorization_state' } });
+  assert.equal(whatsappPage.events.length, 1);
+  assert.equal(whatsappPage.events[0].correlationId, whatsapp.event.correlationId);
+  assert.deepEqual(whatsappPage.events[0].whatsappAuthorization, { requestRef: whatsapp.event.requestRef });
+  assert.equal(whatsappPage.events[0].reason, 'state_claimed');
+  assert(!Object.hasOwn(whatsappPage.events[0], 'receipt'));
+  report.checks.push('WhatsApp authorization audit is filterable and exposes verified correlation/request references without claiming operational activation');
   const broken = await models.PlatformAuditEvent.findByPk(first.events[0].eventId); const goodReceipt = broken.receipt;
   await broken.update({ receipt: { ...goodReceipt, versionId: 'missing-version' } });
   await assert.rejects(view.read({ actorId: 1, sessionRef, query: criteria }), /audit_view_unavailable/);
@@ -90,7 +103,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.Usuario = require('../../../models/usuario')(sql, DataTypes); await models.Usuario.sync();
   await require('../../../migrations/20260912220000-create-auth-sessions').up(sql.getQueryInterface(), DataTypes);
   await require('../../../migrations/20260913130000-create-auth-email-challenges').up(sql.getQueryInterface(), DataTypes);
+  await require('../../../migrations/20260914220000-create-auth-trusted-devices').up(sql.getQueryInterface(), DataTypes);
   models.AuthSession = require('../../../models/authsession')(sql, DataTypes);
+  models.AuthTrustedDevice = require('../../../models/authtrusteddevice')(sql, DataTypes);
   const user = await models.Usuario.create({ id_usuario: 1, nombre: 'Fictitious admin', email_usuario: 'fixture@example.invalid', password_usuario: bcrypt.hashSync('FICTITIOUS_PASSWORD', 4) });
   const api = require('../../services/accessSession.service'); const sessions = api.createService({ models, audit: repo, now,
     config: () => ({ mode: 'enforce', ttl: 300, secret: 'FICTITIOUS_HTTP_KEY' }) });

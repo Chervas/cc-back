@@ -69,6 +69,8 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
       return { version: 1, status: 'available', criteria, snapshot: state.snapshot, nextCursor,
         coverage: 'confirmed_platform_index_only', events: verified.map(v => ({ eventId: v.eventId, occurredAt: v.occurredAt,
           action: v.action, stage: v.stage, outcome: v.outcome, reason: v.reason, actorType: v.actor.type, actorId: v.actor.id,
+          correlationId: v.correlationId,
+          whatsappAuthorization: v.version === 15 ? { requestRef: v.requestRef } : null,
           subjectUserId: v.subjectUserId || null, sessionRef: v.sessionRef, scopeType: v.scope.type, scopeId: v.scope.id,
           permission: v.version === 4 ? { featureKey: v.featureKey, roleCode: v.roleCode, previousEffect: v.previousEffect,
             requestedEffect: v.requestedEffect, authorizationBasis: v.authorizationBasis, scopeClinicCount: v.scopeClinicCount,
