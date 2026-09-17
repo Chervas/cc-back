@@ -25,3 +25,30 @@ test('expiring and missing certificate validity alert, preserving healthy peers'
     assert.equal(result.length,1);assert.equal(result[0].entity_id,'staging');
   }
 });
+test('certificate failure reaches configurable notifications once and never offers a pause',async()=>{
+  const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+  const rows=new Map(),notifications=[];
+  const disabled=Object.fromEntries(['whatsapp_template_sends','whatsapp_template_creation','ai_requests','ai_cost','ai_unpriced'].map(key=>[key,{enabled:false}]));
+  const failed=structuredClone(healthy);failed.certificates[0].status='failed';
+  let health=readHealth(options(failed));
+  const db={SecurityMonitoringSetting:{findOrCreate:async()=>[{rules:disabled}]},
+    SecurityMonitoringAlert:{findOrCreate:async({where,defaults})=>{
+      if(rows.has(where.dedupe_key))return [rows.get(where.dedupe_key),false];
+      const row={...defaults,id:1,update:async value=>Object.assign(row,value)};rows.set(where.dedupe_key,row);return [row,true];
+    }}};
+  const context={module:{exports:{}},Date,Number,Set,Buffer,require:key=>{
+    if(key==='../../models')return db;
+    if(key==='../lib/role-helpers')return {isGlobalAdmin:()=>true};
+    if(key==='../lib/transportCertificateHealth')return {readHealth:()=>health};
+    if(key==='./systemNotifications.service')return {queueNotification:async value=>notifications.push(value)};
+    throw Error('Unexpected dependency: '+key);
+  }};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../../services/securityMonitoring.service.js'),'utf8'),context);
+  const service=context.module.exports;
+  assert.equal((await service.scan()).alerts,1);assert.equal((await service.scan()).alerts,0);
+  assert.equal(notifications.length,1);assert.equal(notifications[0].eventKey,'security.activity_detected');
+  assert.equal(notifications[0].metadata.link,'/ajustes?panel=jobs-monitoring&tab=security');
+  assert.match(notifications[0].payload.detail,/certificado/);
+  await assert.rejects(service.setPaused({entity_type:'transport_certificate',entity_id:'gateway',paused:true,reason:'QA'},1),{code:'security_target_invalid'});
+  health=[];assert.equal((await service.scan()).alerts,0);assert.equal(notifications.length,1);
+});

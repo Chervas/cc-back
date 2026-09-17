@@ -58,6 +58,10 @@ Ejecutar primero con los certificados actuales y comprobar estado `healthy`. Par
 
 La publicación de esta herramienta no instala ni activa el temporizador. Comprobar explícitamente unidad, timer, última ejecución y fichero de salud en el host destino.
 
+Las unidades versionadas están en `ops/security/systemd/clinicaclick-transport-certificates.{service,timer}`. El enlace root `/opt/clinicaclick-transport-certificates/current` fija una release revisada; no apunta a un checkout escribible por el CRM. El timer ejecuta a las 00:00 y 12:00 UTC con hasta cinco minutos de dispersión y recupera ejecuciones perdidas. El servicio solo puede escribir los dos directorios de clientes, su estado y la metadata de salud; el filtro de red permite únicamente la IP del inbox. No lee una sesión SSO. Ejecutar una vez la unidad endurecida y verificar `Result=success` antes de habilitar el timer.
+
+Gateway sigue ejecutando Node 18 y el importador Node 22. El cliente común usa las fechas X.509 compatibles con ambos; probar solo con Node 24 del broker no acredita la recarga de gateway. El evento `whatsapp_inbox_client_certificate` debe mostrar `reloaded` después de una renovación real. `reload_failed` conserva el certificado anterior en memoria, pero exige corregir el problema antes de su caducidad.
+
 ## Avisos y diagnóstico
 
 El monitor de aplicación solo lee metadata saneada. Con `TRANSPORT_CERTIFICATE_MONITOR_ENABLED=true`, el activador **Certificados de comunicación** avisa de fallo, menos de siete días de vigencia o comprobación ausente/caducada (36 horas). Se integra con la notificación configurable `security.activity_detected`, sin pausa automática y sin ofrecer pausar una clínica.
@@ -87,6 +91,7 @@ Desde la raíz backend:
 ```sh
 sudo python3 ops/security/test-transport-certificates.py
 node --test src/scripts/tests/transport_certificate_health.test.js src/scripts/tests/security_monitoring_pricing.test.js
+node --test src/scripts/tests/whatsapp_inbox_client_tls.test.js
 ```
 
 La prueba Python usa únicamente una CA y claves ficticias en `/tmp`; necesita root para probar las mismas restricciones de propietario del firmante. No usa AWS, Meta ni BD. La revisión visual del panel debe comprobar que el aviso lleva a Seguridad y que nunca ofrece pausar una clínica por este motivo.
