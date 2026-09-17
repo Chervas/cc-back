@@ -45,8 +45,10 @@ function createInboxClient({ origin, ca, cert, key, timeout = 8000, readCertific
         const candidate = new X509Certificate(next); const now = Date.now();
         if (candidate.ca || !candidate.checkPrivateKey(privateKey) || candidate.subject !== original.subject
           || candidate.subjectAltName !== original.subjectAltName || JSON.stringify(candidate.keyUsage) !== JSON.stringify(original.keyUsage)
-          || candidate.validFromDate.getTime() > now || candidate.validToDate.getTime() <= now
-          || issuer.validFromDate.getTime() > now || issuer.validToDate.getTime() < candidate.validToDate.getTime()
+          || !Number.isFinite(Date.parse(candidate.validFrom)) || !Number.isFinite(Date.parse(candidate.validTo))
+          || Date.parse(candidate.validFrom) > now || Date.parse(candidate.validTo) <= now
+          || !Number.isFinite(Date.parse(issuer.validFrom)) || !Number.isFinite(Date.parse(issuer.validTo))
+          || Date.parse(issuer.validFrom) > now || Date.parse(issuer.validTo) < Date.parse(candidate.validTo)
           || !issuer.ca || !candidate.checkIssued(issuer) || !candidate.verify(issuer.publicKey)) throw Error('certificate_invalid');
         tls.createSecureContext({ ca, cert: next, key, minVersion: 'TLSv1.2' });
         const previous = current; current = make(next); agents.add(current); previous.retired = true; collect(previous);

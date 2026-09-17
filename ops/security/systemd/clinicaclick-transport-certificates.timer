@@ -1,0 +1,11 @@
+[Unit]
+Description=Check ClinicaClick inbox certificates twice daily
+
+[Timer]
+OnCalendar=*-*-* 00,12:00:00 UTC
+RandomizedDelaySec=5m
+Persistent=true
+Unit=clinicaclick-transport-certificates.service
+
+[Install]
+WantedBy=timers.target
