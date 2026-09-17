@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const axios = require('axios');
+const aiBroker = require('./aiBroker.service');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const jobRequestsService = require('./jobRequests.service');
@@ -503,6 +504,7 @@ function buildProviderInput(generation) {
 }
 
 function openAiHeaders() {
+  if (aiBroker.enabled('openai')) return {};
   const apiKey = cleanString(process.env.OPENAI_API_KEY);
   if (!apiKey) {
     throw new WebContentGenerationServiceError(
@@ -656,7 +658,8 @@ function assertCompletedProviderResponse(payload = {}) {
 
 async function runOpenAiGeneration(generation, dependencies = {}) {
   await require('./securityMonitoring.service').assertAiAllowed('web_content');
-  const http = dependencies.axios || axios;
+  const http = aiBroker.enabled('openai') ? { post: (_url, body, options) => aiBroker.execute('openai', 'web_content', body, { timeoutMs: options.timeout }) }
+    : dependencies.axios || axios;
   const response = await http.post('https://api.openai.com/v1/responses', {
     model: OPENAI_MODEL,
     store: false,
@@ -1431,7 +1434,7 @@ async function cleanupExpiredGenerations(now = new Date(), models = db) {
 }
 
 function providerConfiguration() {
-  const configured = Boolean(cleanString(process.env.OPENAI_API_KEY));
+  const configured = aiBroker.enabled('openai') || Boolean(cleanString(process.env.OPENAI_API_KEY));
   return {
     configured,
     provider: 'openai',

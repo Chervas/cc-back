@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const axios = require('axios');
+const aiBroker = require('./aiBroker.service');
 const db = require('../../models');
 const jobRequestsService = require('./jobRequests.service');
 
@@ -510,8 +511,9 @@ function buildProviderPrompt(query, clinic) {
 }
 
 async function runOpenAiSearch({ query, clinic }, dependencies = {}) {
-  const apiKey = cleanString(process.env.OPENAI_API_KEY);
-  if (!apiKey) {
+  const brokerEnabled = aiBroker.enabled('openai');
+  const apiKey = brokerEnabled ? '' : cleanString(process.env.OPENAI_API_KEY);
+  if (!brokerEnabled && !apiKey) {
     return {
       provider: 'openai',
       status: 'not_configured',
@@ -520,7 +522,8 @@ async function runOpenAiSearch({ query, clinic }, dependencies = {}) {
     };
   }
   await require('./securityMonitoring.service').assertAiAllowed('visibility_openai');
-  const http = dependencies.axios || axios;
+  const http = brokerEnabled ? { post: (_url, body, options) => aiBroker.execute('openai', 'visibility_openai', body, { timeoutMs: options.timeout }) }
+    : dependencies.axios || axios;
   const headers = {
     Authorization: `Bearer ${apiKey}`,
     'Content-Type': 'application/json',
@@ -582,8 +585,9 @@ async function runOpenAiSearch({ query, clinic }, dependencies = {}) {
 }
 
 async function runGeminiSearch({ query, clinic }, dependencies = {}) {
-  const apiKey = cleanString(process.env.GEMINI_API_KEY);
-  if (!apiKey) {
+  const brokerEnabled = aiBroker.enabled('gemini');
+  const apiKey = brokerEnabled ? '' : cleanString(process.env.GEMINI_API_KEY);
+  if (!brokerEnabled && !apiKey) {
     return {
       provider: 'gemini',
       status: 'not_configured',
@@ -592,7 +596,8 @@ async function runGeminiSearch({ query, clinic }, dependencies = {}) {
     };
   }
   await require('./securityMonitoring.service').assertAiAllowed('visibility_gemini');
-  const http = dependencies.axios || axios;
+  const http = brokerEnabled ? { post: (_url, body, options) => aiBroker.execute('gemini', 'visibility_gemini', body, { timeoutMs: options.timeout }) }
+    : dependencies.axios || axios;
   try {
     const response = await http.post('https://generativelanguage.googleapis.com/v1beta/interactions', {
       model: GEMINI_MODEL,
@@ -634,8 +639,8 @@ async function runGeminiSearch({ query, clinic }, dependencies = {}) {
 }
 
 function providerConfiguration() {
-  const openAiConfigured = !!cleanString(process.env.OPENAI_API_KEY);
-  const geminiConfigured = !!cleanString(process.env.GEMINI_API_KEY);
+  const openAiConfigured = aiBroker.enabled('openai') || !!cleanString(process.env.OPENAI_API_KEY);
+  const geminiConfigured = aiBroker.enabled('gemini') || !!cleanString(process.env.GEMINI_API_KEY);
   return {
     openai: {
       configured: openAiConfigured,

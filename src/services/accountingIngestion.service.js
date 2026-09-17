@@ -1,6 +1,7 @@
 'use strict';
 
 const axios = require('axios');
+const aiBroker = require('./aiBroker.service');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const db = require('../../models');
@@ -229,8 +230,9 @@ function responseText(payload) {
 }
 
 async function extractWithOpenAi(asset, buffer, documentKind = 'expense') {
-  const apiKey = clean(process.env.OPENAI_API_KEY, 1000);
-  if (!apiKey) {
+  const brokerEnabled = aiBroker.enabled('openai');
+  const apiKey = brokerEnabled ? '' : clean(process.env.OPENAI_API_KEY, 1000);
+  if (!brokerEnabled && !apiKey) {
     throw domainError(503, 'accounting_ocr_not_configured', 'La lectura automática no está configurada.');
   }
   const isPayroll = documentKind === 'payroll';
@@ -276,7 +278,8 @@ async function extractWithOpenAi(asset, buffer, documentKind = 'expense') {
     headers['OpenAI-Project'] = clean(process.env.OPENAI_PROJECT_ID, 200);
   }
   await require('./securityMonitoring.service').assertAiAllowed('accounting_ocr');
-  const response = await axios.post('https://api.openai.com/v1/responses', {
+  const http = brokerEnabled ? { post: (_url, body, options) => aiBroker.execute('openai', 'accounting_ocr', body, { timeoutMs: options.timeout }) } : axios;
+  const response = await http.post('https://api.openai.com/v1/responses', {
     model: MODEL,
     store: false,
     reasoning: { effort: 'none' },

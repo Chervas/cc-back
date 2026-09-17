@@ -18,6 +18,7 @@ const validate = new Ajv({ strict: true }).compile(object({
     templateReaderSecretArn: { type: 'string', maxLength: 2048 },
     whatsapp: require('./whatsapp-contract').bindingSchema,
     whatsappOnboarding: require('./whatsapp-onboarding-contract').bindingSchema,
+    ai: require('./ai-contract').bindingSchema,
     googleSubject: { type: 'string', pattern: '^[A-Za-z0-9._-]{1,128}$' },
     searchConsoleSites: { type: 'array', minItems: 1, maxItems: 1000,
       items: object({ assetRef: ref, siteUrl: { type: 'string', maxLength: 512 } }) },
@@ -42,6 +43,9 @@ function validatePolicy(policy) {
     if (!policy.principals.some(row => row.id === grant.principalId) || !policy.connections.some(row => row.connectionRef === grant.connectionRef)) fail('invalid_request');
   }
   for (const binding of policy.connections) {
+    if (binding.ai && !['ai_openai', 'ai_gemini', 'ai_groq'].includes(binding.provider)
+      || binding.provider.startsWith('ai_') && !binding.ai
+      || binding.ai && binding.provider !== 'ai_openai' && (binding.ai.organization || binding.ai.project)) fail('invalid_request');
     if ((binding.whatsapp || binding.templateReaderSecretArn) && binding.provider !== 'meta_whatsapp') fail('invalid_request');
     if (binding.provider === 'meta_whatsapp') require('./whatsapp-contract').bindingFor(binding);
     if (binding.whatsappOnboarding && binding.provider !== 'meta_whatsapp_onboarding') fail('invalid_request');

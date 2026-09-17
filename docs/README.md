@@ -51,6 +51,7 @@ sincroniza el espejo frontend. Este índice no mantiene otro roadmap ni diario.
 
 ### Auditoría y cifrado
 
+- [Credenciales de IA: corte y diagnóstico por consumidor](security/ai-vault-migration.md).
 - [Renovación y diagnóstico de certificados de transporte](security/transport-certificate-maintenance.md).
 
 - [Auditoría de políticas de acceso y límites de grupo](security/permission-audit-migration.md).
