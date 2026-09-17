@@ -1,0 +1,27 @@
+[Unit]
+Description=ClinicaClick inbox certificate renewal and health
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /opt/clinicaclick-transport-certificates/current/transport-certificates.py --config /etc/clinicaclick-transport-certificates/config.json
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+ReadWritePaths=/etc/clinicaclick-whatsapp-inbox/gateway /etc/clinicaclick-whatsapp-inbox/staging /var/lib/clinicaclick-transport-certificates /var/lib/clinicaclick-transport-health
+IPAddressDeny=any
+IPAddressAllow=13.39.100.55/32
+LimitCORE=0
+
