@@ -126,6 +126,63 @@ equivale al evento de actividad del usuario que inició la operación.
 
 ## Corte por proveedor
 
+### Revisión de transporte solicitada por el titular el 17/09
+
+La activación de consumidores queda pendiente de resolver el transporte de
+archivos grandes. Los límites y ensayos de memoria acreditan el comportamiento
+del prototipo, pero no deciden por sí solos la arquitectura de producción.
+El servicio AWS se ha preparado para QA; no se han habilitado sus flags en CRM
+ni gateway ni retirado las claves locales.
+
+Se propone mantener la autenticación y operaciones en el broker y entregar los
+archivos directamente al proveedor mediante referencias temporales:
+
+1. El consumidor comprueba permisos, ámbito del documento y pausa de la función.
+2. Crea una referencia de lectura limitada a ese archivo, petición y entorno.
+3. El broker valida esa referencia y llama al endpoint fijo del proveedor con
+   su clave y una URL temporal de un origen permitido.
+4. El proveedor obtiene el archivo directamente; texto/JSON de respuesta sigue
+   el circuito normal proveedor → broker → consumidor.
+
+La clave autentica la petición HTTP; no se envía por separado para que el
+proveedor redirija automáticamente su respuesta al CRM. Una entrega directa de
+resultados requiere un contrato asíncrono específico, cuando exista, y no forma
+parte de esta propuesta.
+
+Capacidad confirmada en documentación oficial: OpenAI Responses acepta
+[archivos por URL](https://developers.openai.com/api/docs/guides/file-inputs)
+y Groq admite [audio mediante `url`](https://console.groq.com/docs/speech-to-text).
+Prueba real Groq del 17/09: audio ficticio de 299592 bytes servido temporalmente
+desde CRM; petición desde AWS de 395 bytes, respuesta 200 y transcripción
+esperada. Se retiró el archivo y se verificó que ya no se servía. Esa prueba
+empleó una muestra pública temporal: demuestra la descarga directa del
+proveedor, **no** acredita el contrato privado ni cambia consumidores reales.
+
+`clinicalPrivateStorage.service` actualmente solo implementa almacenamiento
+local privado. No tiene URLs de proveedor con caducidad. El audio WhatsApp llega
+como buffer después de la descarga autenticada a Meta. Falta implementar y probar:
+
+- Emisión interna después del control funcional, vinculada a archivo, trabajo,
+  finalidad y entorno; sin API pública para emitir permisos ni claves IA en CRM.
+- Caducidad, revocación al terminar y limpieza tras timeout/reinicio. La descarga
+  puede necesitar HEAD/Range y lecturas repetidas del mismo archivo; no consumir
+  el permiso irrevocablemente con el primer HEAD.
+- Origen y ruta cerrados, sin URLs arbitrarias, redirecciones, recorridos de
+  directorios ni posibilidad de leer otro archivo cambiando un identificador.
+- Transferencia por streaming con tamaño y concurrencia limitados. Reutilizar
+  el documento privado existente; resolver por separado la vida temporal del
+  buffer de audio, sin convertir carpetas clínicas en contenido público.
+- Ausencia de referencias con acceso en logs, auditoría y navegador. El permiso
+  temporal también es una credencial de lectura, aunque no sea la clave IA.
+- Pruebas de expiración, archivo alterado, firma/ámbito ajeno, cancelación,
+  limpieza y proveedor real; después, recorridos integrados y visuales.
+
+El contrato actual rechaza URLs externas. No quitar esa validación para hacer
+pasar una prueba: sustituirla por un contrato acotado y promover juntos emisor,
+descarga y consumidor. Bedrock y el resto de integraciones conservan su fase.
+
+### Secuencia operativa
+
 1. Inventariar todos los consumidores y presencia de claves por runtime sin
    imprimir valores. Contrastar modelos, timeout y organización/proyecto.
 2. Preparar IAM y placeholders exactos; verificar metadata. No habilitar flags.
