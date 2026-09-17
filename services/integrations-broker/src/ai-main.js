@@ -11,7 +11,7 @@ const { createServer } = require('./server');
 const { createAwsSecretStore } = require('./secrets');
 const { createAiHttp } = require('./ai-http');
 const { createAiOperations } = require('./ai-operations');
-const { OPERATIONS, MAX_TIMEOUT_MS } = require('./ai-limits');
+const { OPERATIONS, MAX_TIMEOUT_MS, MAX_CONCURRENT_REQUESTS } = require('./ai-limits');
 const { USE_CASES } = require('./ai-contract');
 const { drainAudit } = require('./audit');
 const tlsReload = require('./tls-reload');
@@ -52,7 +52,7 @@ async function main(filename, { awsFactory = connectAws, http = createAiHttp() }
       transportProfile: 'ai', timeoutMs: MAX_TIMEOUT_MS - 5000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {
-      if (inFlight >= 4) fail('rate_limited');
+      if (inFlight >= MAX_CONCURRENT_REQUESTS) fail('rate_limited');
       inFlight++;
       try { return await broker.execute(...args); } finally { inFlight--; }
     } }, tls, { transportProfile: 'ai' });

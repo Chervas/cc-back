@@ -98,8 +98,21 @@ El perfil `ai` permite 32 MiB decodificados de archivos, aproximadamente
 44 MiB de petición y 8 MiB de respuesta. Es un techo de transporte, no una
 garantía de admisión del proveedor. Los límites de los demás brokers permanecen
 en 32 KiB. Tiempo de proveedor hasta 180 s y presupuesto de transporte hasta
-190 s. El runtime limita a cuatro operaciones simultáneas y ocho conexiones;
-verificar memoria y concurrencia de la instancia antes del corte.
+190 s. El runtime limita a cuatro operaciones simultáneas y ocho conexiones.
+Antes de recibir el cuerpo exige una longitud explícita y reserva un presupuesto
+total equivalente a una petición máxima. Varias peticiones pequeñas pueden
+coincidir; una subida máxima ocupa ese presupuesto completo. La reserva se
+mantiene hasta terminar el trabajo y entregar o cerrar la respuesta; desconectar
+el cliente no libera capacidad mientras el proveedor sigue trabajando. Un exceso
+devuelve `rate_limited` antes de leer el archivo y sin llamar al proveedor.
+Verificar además memoria y concurrencia de la instancia antes del corte.
+El digest de idempotencia del perfil IA se calcula de forma incremental, con
+los mismos bytes canónicos, para evitar copias del archivo en cada nivel JSON.
+En el ensayo aislado del 17/09, Node 24 con heap de 512 MiB admitió archivos de
+32 MiB y cuatro de 8 MiB simultáneos, con respuestas de unos 7,94 MiB. El pico
+RSS fue 422,4 MiB. Es evidencia local con proveedor inyectado; no sustituye la
+prueba real en AWS ni acredita capacidad ilimitada. Conservar el informe de
+capacidad y aplicar un límite de memoria al servicio antes de habilitarlo.
 
 No se reintentan llamadas al proveedor automáticamente. Repetir el mismo
 `requestId` completado produce `outcome_unknown`, no otra llamada ni una copia
@@ -137,7 +150,7 @@ equivale al evento de actividad del usuario que inició la operación.
 No promover solo `src/services`: el cliente carga `ai-limits.js` de
 `services/integrations-broker/src`. Promover todo el conjunto de dependencias.
 El publicador debe ejecutar comprobaciones con la versión Node del consumidor
-(gateway 18, staging 22) y del broker (24).
+(gateway 18, staging 18 en la comprobación del 17/09) y del broker (24).
 
 ## Diagnóstico para otra tarea
 

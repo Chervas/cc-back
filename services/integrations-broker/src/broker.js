@@ -10,6 +10,7 @@ const { validatePolicy } = require('./policy');
 const aiLimits = require('./ai-limits');
 
 const { canonical } = require('./canonical');
+const { canonicalDigest } = require('./canonical-digest');
 class Broker {
   constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, policyResolver, now = () => Date.now(), timeoutMs = 10000, transportProfile = 'default' }) {
     if (!['default', 'ai'].includes(transportProfile)
@@ -57,8 +58,10 @@ class Broker {
         'integration.denied', 'denied', error instanceof BrokerError ? error.code : 'invalid_request', now));
       throw error;
     }
-    const digest = createHash('sha256').update(canonical({ operation: request.operation, tenantRef: request.tenantRef,
-      connectionRef: request.connectionRef, assetRef: request.assetRef, payload: request.payload })).digest('hex');
+    const identity = { operation: request.operation, tenantRef: request.tenantRef,
+      connectionRef: request.connectionRef, assetRef: request.assetRef, payload: request.payload };
+    const digest = this.transportProfile === 'ai' ? canonicalDigest(identity)
+      : createHash('sha256').update(canonical(identity)).digest('hex');
     const assetKey = JSON.stringify([request.tenantRef, request.connectionRef, request.assetRef]);
     if (['google_oauth', 'whatsapp_onboarding'].includes(operation.control)) {
       try { return await operation.execute({ request, principal, binding }); }
