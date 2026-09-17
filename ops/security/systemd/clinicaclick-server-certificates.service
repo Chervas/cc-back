@@ -1,0 +1,26 @@
+[Unit]
+Description=ClinicaClick AWS server certificate renewal and health
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /opt/clinicaclick-server-certificates/current/server-certificates.py --config /etc/clinicaclick-server-certificates/config.json
+TimeoutStartSec=600
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+ReadWritePaths=/etc/clinicaclick-server-certificates/maintenance /var/lib/clinicaclick-server-certificates /var/lib/clinicaclick-transport-health
+IPAddressDeny=any
+IPAddressAllow=13.39.100.55/32
+LimitCORE=0
