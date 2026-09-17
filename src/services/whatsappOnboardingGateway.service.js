@@ -7,7 +7,9 @@ const STATUS = Object.freeze({ whatsapp_authorization_invalid: 400, whatsapp_aut
   whatsapp_authorization_cancelled: 409, whatsapp_authorization_busy: 409, whatsapp_authorization_limit: 429, auth_invalid: 401, auth_email_verification_required: 403,
   auth_configuration_invalid: 503, meta_security_state_unavailable: 503, whatsapp_onboarding_disabled: 503,
   whatsapp_onboarding_configuration_invalid: 503, whatsapp_authorization_unavailable: 503,
-  whatsapp_onboarding_binding_invalid: 503, whatsapp_onboarding_broker_unavailable: 503, whatsapp_onboarding_result_unknown: 503 });
+  whatsapp_onboarding_binding_invalid: 503, whatsapp_onboarding_broker_unavailable: 503, whatsapp_onboarding_preparation_unavailable: 503,
+  whatsapp_onboarding_preparation_disabled: 503,
+  whatsapp_onboarding_result_unknown: 503 });
 function safe(error) {
   const code = Object.hasOwn(STATUS, error?.code) ? error.code : 'whatsapp_authorization_unavailable';
   return { code, status: STATUS[code], outcomeUnknown: code === 'whatsapp_onboarding_result_unknown' };
