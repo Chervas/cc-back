@@ -20,8 +20,8 @@ function validateConfig(config) {
   const principals = new Map(policy.principals.map(p => [p.id, p]));
   if (!principals.has('staging:whatsapp') || !principals.has('control:whatsapp')
     || policy.principals.some(p => p.maxPerMinute > 60)) fail('invalid_request');
-  const keys = policy.principals.map(p => createPublicKey(p.publicKey).export({ type: 'spki', format: 'der' }).toString('base64'));
-  if (new Set(keys).size !== keys.length) fail('invalid_request');
+  const principalKeys = policy.principals.map(p => createPublicKey(p.publicKey).export({ type: 'spki', format: 'der' }).toString('base64'));
+  if (new Set(principalKeys).size !== principalKeys.length) fail('invalid_request');
   const phones = new Set(); const sendArns = new Set(); const readerArns = new Set(); const appArns = new Set();
   for (const binding of policy.connections) {
     if (Object.keys(binding).sort().join(',') !== 'clientSecretArn,connectionRef,expiresAt,initialState,provider,secretArn,templateReaderSecretArn,whatsapp'
