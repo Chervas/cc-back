@@ -419,3 +419,44 @@ Evidencia: `automation-ai/delayed-admission-{before,after,regressions}.log`,
 `delayed-admission-matrix-comparison.json`. El snapshot no sustituye actualizar
 el inventario antes del corte. Tampoco reemplaza la discrepancia semántica real
 21/22 ni el recorrido autenticado de interfaz, que siguen pendientes.
+
+
+## Persistencia de la revisión tras la discrepancia (18/09/2026)
+
+El nuevo inventario de solo lectura mantiene 1.521 versiones, 207 activas,
+4.470 nodos IA y 644 activos. Las definiciones coinciden byte a byte con la
+captura anterior (SHA256 `9d290f98bfd6b67be3e4ba00783a9b982f322e451a746c74d3cd79b04e1b2128`).
+No se consultaron mensajes de pacientes ni se modificaron definiciones.
+
+`automation_ai_manual_review_mysql.integration.js` conserva deliberadamente la
+respuesta incorrecta `confirma_asistencia=false, requiere_respuesta=false`.
+Ejecuta el nodo de decisión y recorre en simulación la ruta de notificación
+hasta su fin. Después utiliza el motor y el servicio reales de persistencia en
+un MySQL temporal propio: 476 confirmaciones activas por dos niveles de
+confianza, **952/952** casos. El estado queda `review`, con
+`manual_action_required=true` aunque `needs_response=false`. Tanto el evento de
+socket como el DTO que se consulta al recargar conservan revisión y mensaje de
+origen. Una ejecución antigua u otra clínica no puede sustituir el propietario.
+Las citas y mensajes ficticios quedan intactos; ninguna notificación se entrega.
+
+La prueba frontend `quickchat_ai_manual_review.test.js` consume además un payload
+ficticio emitido por esa persistencia real. Ejecuta el mapper, manejador de socket
+y métodos del componente reales: conserva tarjeta de revisión, indicador ámbar,
+mensaje de origen y acción pendiente en el detalle del paciente, tanto al
+recargar como al recibir un evento. Es una prueba de comportamiento del código,
+**no un navegador autenticado ni una prueba visual**. Dos casos nuevos y cuatro
+regresiones de reconciliación pasan.
+
+Esta evidencia amplía la protección acreditada más allá del siguiente nodo.
+No corrige la interpretación del modelo, no cambia prompts, modelos ni flags,
+y **no convierte 21/22 semántico en 22/22**. La aceptación visual con login/MFA
+normal y la calidad semántica siguen pendientes. No se pide al usuario aprobar
+el caso incorrecto; su dependencia concreta es el acceso a una cuenta QA.
+
+Reproducción sin red clínica/proveedores:
+
+```sh
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/automation_ai_manual_review_mysql.integration.js
+# Para todas las definiciones: aportar una captura privada revisada mediante
+# AUTOMATION_AI_DEFINITIONS_FILE; nunca conectar el test a la BD de aplicación.
+```
