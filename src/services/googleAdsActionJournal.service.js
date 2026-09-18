@@ -4,16 +4,17 @@ const { canonical } = require('../../services/integrations-broker/src/canonical'
 const { safe: brokerSafe, project } = require('./googleAdsActionManagementBrokerClient.service');
 const { assertGoogleConversionMutationAccess } = require('../lib/googleConversionMutationAccess');
 const { positive } = require('./googleAdsBrokerScope.service');
+const { Op } = require('sequelize');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const fail = code => { throw Object.assign(Error(code), { code }); };
 const LOCAL = new Set(['google_action_session_required', 'google_action_not_found', 'google_action_conflict',
-  'google_action_confirmation_required', 'google_action_broker_required', 'google_action_not_ready']);
+  'google_action_confirmation_required', 'google_action_broker_required', 'google_action_not_ready', 'conversion_paused']);
 const safe = error => LOCAL.has(error?.code) ? error.code : brokerSafe(error);
 const status = error => safe(error) === 'google_action_session_required' ? 401
   : safe(error) === 'google_action_not_found' ? 404
     : safe(error) === 'scope_denied' ? 403 : safe(error) === 'invalid_request' ? 400
       : ['google_action_conflict', 'google_action_confirmation_required', 'google_action_broker_required',
-        'google_action_not_ready', 'action_plan_expired', 'action_plan_busy', 'action_plan_conflict'].includes(safe(error)) ? 409 : 503;
+        'google_action_not_ready', 'conversion_paused', 'action_plan_expired', 'action_plan_busy', 'action_plan_conflict'].includes(safe(error)) ? 409 : 503;
 const exact = (v, keys) => v && Object.getPrototypeOf(v) === Object.prototype
   && Object.keys(v).sort().join(',') === keys.split(',').sort().join(',');
 function dto(plan, command) {
@@ -60,6 +61,14 @@ function createGoogleAdsActionJournal({ models, sessions, now = Date.now,
           throw error;
         }
         if (await authorize({ transaction }) !== true) fail('scope_denied');
+        // Pauses also cover every clinic sharing the managed account. Read-only
+        // receipt recovery remains possible while preparation/apply are paused.
+        if (family !== 'status') {
+          const clinics = await m.Clinica.findAll({ where: { id_clinica: { [Op.in]: captured.clinicIds } },
+            attributes: ['id_clinica', 'estado_clinica'], order: [['id_clinica', 'ASC']], raw: true, logging: false,
+            ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {}) });
+          if (clinics.length !== captured.clinicIds.length || clinics.some(row => ![true, 1, '1'].includes(row.estado_clinica))) fail('conversion_paused');
+        }
         await assertMutationAccess({ userId: Number(actor.userId), customerId: captured.customerId,
           runtimeAccountId: runtime.account.id, models: m, transaction });
         if (canonical(await runtime.broker.assert(runtime.account, runtime.brokerContext, { transaction })) !== canonical(captured)) fail('scope_denied');

@@ -10317,8 +10317,8 @@ También valida el grafo completo.
 
 ## Planes de acciones Google Ads por broker
 
-Contrato preparado en DEV (18/09/2026), sin DDL/despliegue operativo ni UI de
-confirmación publicada. Requiere las tres flags Ads, conversiones y gestión de
+Contrato y UI preparados en DEV (18/09/2026), sin DDL/despliegue operativo ni
+aceptación autenticada publicada. Requiere las tres flags Ads, conversiones y gestión de
 acciones; no sustituye la aceptación del corte de todos los consumidores Google.
 
 Base: `/api/marketing/google-ads/conversion-action-plans`. Todas las operaciones
@@ -10357,7 +10357,9 @@ El diario guarda usuario, sesión, ámbito y huella del registro autorizado. No
 permite adoptar un plan desde otra sesión ni reutilizar el UUID con otros targets.
 Comprueba escritura en todas las clínicas de todos los mappings activos de la
 cuenta, sesión, grupo, grants y flags antes/después de cada operación; también en
-transacciones de admisión/recibo. 401 sesión inválida, 403 ámbito denegado, 404 plan
+transacciones de admisión/recibo. Si alguna clínica de la cuenta está en pausa,
+prepare/validate/apply devuelven `409 conversion_paused`; status conserva la
+recuperación de recibos con sesión y permisos vigentes, sin levantar la pausa. 401 sesión inválida, 403 ámbito denegado, 404 plan
 no propio/inexistente, 409 conflicto/falta de confirmación/plan no listo/caducado,
 400 cuerpo inválido; los errores de infraestructura permanecen cerrados.
 
@@ -10374,3 +10376,19 @@ credenciales locales. No modifica `IntakeConfig`, no habilita Data Manager ni
 encola conciliación. Autorizar destinos y completar readiness es otra transición
 que debe verificarse antes de activar el flujo. Persistencia/recuperación en
 [contrato técnico](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-action-management-broker.md).
+
+
+El inventario `GET /api/marketing/google-ads/conversion-actions` añade
+`action_management:{mode:'broker'|'legacy',enabled:boolean}`. `mode` procede del
+runtime resuelto; `enabled` indica las flags de preparación y rol de proceso,
+no un permiso del usuario ni que el binding permita esos eventos. Una cuenta
+gestionada deshabilitada conserva `mode=broker`: el cliente no debe utilizar
+`ensure` como alternativa. La ausencia del campo solo mantiene compatibilidad
+con servidores anteriores; estos ya rechazan ensure para mappings gestionados.
+
+La UI usa revisión explícita por cuenta tanto en el workspace como en el asistente.
+Conserva referencia/selección e intento local en sessionStorage antes de enviar,
+sin tokens ni pacientes, y al reabrir/recargar consulta status del mismo plan.
+No crea una sesión ni relaja MFA; una referencia no acredita propiedad. No hay
+polling ni reintento automático. Comportamiento de pantallas en el
+[contrato funcional](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/20.17-marketing-arquitectura-experiencia-objetivos.md#revisión-de-acciones-google-gestionadas).

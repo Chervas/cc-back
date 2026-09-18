@@ -14,7 +14,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     models[name] = require('../../../models/' + file)(sql, D);
   }
   for (const [name, fields] of [
-    ['Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, grupoClinicaId: D.INTEGER }],
+    ['Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, grupoClinicaId: D.INTEGER, estado_clinica: { type: D.BOOLEAN, defaultValue: true } }],
     ['ClinicGoogleAdsAccount', { id: { type: D.INTEGER, primaryKey: true }, customerId: D.STRING, isActive: D.BOOLEAN,
       clinicaId: D.INTEGER, assignmentScope: D.STRING, grupoClinicaId: D.INTEGER }],
     ['GroupAssetClinicAssignment', { assetType: D.STRING, assetId: D.INTEGER, clinicaId: D.INTEGER }],
@@ -130,6 +130,15 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     enabled = false; await assert.rejects(run('apply', { planId: deniedPlan }), { code: 'broker_cohort_disabled' }); enabled = true;
     assert.equal(calls.length, beforeDenied);
     report.checks.push('current SQL permission of another clinic, revoked session, caller scope and disabled cohort block before broker transport');
+
+    await models.Clinica.update({ estado_clinica: false }, { where: { id_clinica: 71 } });
+    const beforePaused = calls.length;
+    await assert.rejects(run('apply', { planId: deniedPlan }), { code: 'conversion_paused' });
+    await assert.rejects(run('prepare', input('purchase')), { code: 'conversion_paused' });
+    assert.equal(calls.length, beforePaused);
+    assert.equal((await run('status', { planId })).plan.state, 'applied');
+    await models.Clinica.update({ estado_clinica: true }, { where: { id_clinica: 71 } });
+    report.checks.push('paused clinic sharing the account blocks preparation/apply, while authenticated read-only receipt recovery remains available');
 
     const missingAck = randomUUID(); afterRemote = command => { if (command.requestId === missingAck) throw Object.assign(Error('private'), { code: 'broker_timeout' }); };
     await assert.rejects(run('prepare', input('purchase'), missingAck), { code: 'broker_timeout' }); afterRemote = null;

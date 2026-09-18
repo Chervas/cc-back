@@ -1,9 +1,10 @@
 # Acciones canónicas Google Ads por broker
 
-Estado 18/09/2026: contrato, broker, cliente, diario MySQL y API CRM preparados y probados localmente.
+Estado 18/09/2026: contrato, broker, cliente, diario MySQL, API y UI CRM preparados y probados localmente.
 Sin despliegue, DDL operativa, permisos nuevos, llamadas reales a Google ni
 aceptación visual autenticada. La API de planes ya conecta el cliente con
-autorización y persistencia CRM; falta integrar su revisión/confirmación en la UI.
+autorización y persistencia CRM. Workspace y asistente comparten revisión/confirmación
+explícitas; falta su aceptación autenticada con proveedor real.
 No activar el corte parcial de la identidad Google compartida.
 
 ## Contrato y alcance
@@ -103,7 +104,8 @@ sesión gestionada vigente y revalida permisos de escritura sobre **todos los
 mappings activos de la cuenta**, mediante `assertGoogleConversionMutationAccess`,
 antes y después. Las comprobaciones dentro de transacciones bloquean también
 pertenencias y asignaciones; la pertenencia al grupo y el registro broker deben
-conservarse. Otro usuario, sesión o ámbito no puede adoptar un plan.
+conservarse. Una clínica en pausa bloquea prepare/validate/apply para toda la
+cuenta; status sigue disponible con autorización vigente para recuperar recibos. Otro usuario, sesión o ámbito no puede adoptar un plan.
 
 `apply` exige `confirm_external_mutation=true`. Solo se persiste un UUID de
 aplicación por plan. Una petición repetida devuelve el estado guardado; no vuelve
@@ -122,7 +124,9 @@ Crear una acción no la registra
 automáticamente como destino Data Manager: ese permiso exige tratamiento
 explícito antes de declarar el onboarding listo.
 
-Quedan la UI de planes y su aceptación autenticada, enriquecimiento/bootstrap, sync tipado de leads, revisión del
+Quedan la aceptación autenticada, captura general de actividad de este flujo,
+conciliación tras expirar sesión o preparación no recuperable, enriquecimiento/bootstrap,
+sync tipado de leads, revisión del
 job combinado, inventario completo de consumidores compartidos, preflight/DDL y
 despliegue, pruebas autorizadas de proveedor y recorrido visual con login/MFA.
 No reactivar históricos, campañas, leads ni jobs clínicos DEV para probar.
@@ -130,14 +134,20 @@ No reactivar históricos, campañas, leads ni jobs clínicos DEV para probar.
 ## Evidencia local
 
 Diario CRM: MySQL 8.0.42 aislado, broker firmado con SQLite y HTTP Express real
-por loopback, AWS/Google y prueba de sesión ficticios. **11 escenarios**: propiedad
+por loopback, AWS/Google y prueba de sesión ficticios. **12 escenarios**: propiedad
 usuario/sesión/ámbito y reinicio; ACK perdido; seis preparaciones y seis aplicaciones
 concurrentes; revocación de permiso SQL de otra clínica/sesión/flags; recuperación
 de prepare y caducidad; resultado proveedor desconocido; permiso retirado tras
 mutar; fallo del commit SQL del recibo; API cerrada/confirmación/no-store; rechazo
-legacy antes de credenciales; migración repetible y rollback que preserva historia.
+legacy antes de credenciales; pausa de otra clínica sin bloquear la recuperación
+de recibos; migración repetible y rollback que preserva historia.
 Contrato de esquema contrastado con metadata del MySQL del test. Evidencia privada
-`google-action-journal-20260918/`; no son llamadas reales a Google ni QA visual.
+`google-action-journal-20260918/` y `google-action-ui-20260918/`. UI Angular real y
+HttpClient con respuestas HTTP ficticias: 25 comprobaciones/18 capturas a 1440/390 px;
+pérdida de respuesta, reload, permisos retirados, caducidad, normalización, doble
+clic y almacenamiento no disponible. Build completo DEV correcto; 12 pruebas de
+modelo y método real del asistente y 35 regresiones backend. No son proveedor real
+ni sesión pública/MFA; no sumar estos lotes solapados como casos únicos.
 
 Suite completa del broker: 584/584 Node24, incluido cliente real CRM contra broker
 firmado/SQLite. Tras exigir tipos string para propietario/resource, lote focalizado: 28/28. Incluye transporte HTTPS

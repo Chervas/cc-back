@@ -8316,7 +8316,11 @@ exports.listGoogleAdsConversionActions = asyncHandler(async (req, res) => {
     connection_source: runtime.connectionSource,
     actions: result.actions,
     suggested_mapping: result.suggested_mapping,
-    clinicaclick_mapping: result.clinicaclick_mapping
+    clinicaclick_mapping: result.clinicaclick_mapping,
+    action_management: { mode: runtime.deliveryMode === 'broker' ? 'broker' : 'legacy',
+      enabled: runtime.deliveryMode !== 'broker' || (process.env.GOOGLE_ADS_CONVERSIONS_BROKER_ENABLED === 'true'
+        && process.env.GOOGLE_ADS_ACTION_MANAGEMENT_BROKER_ENABLED === 'true'
+        && String(process.env.RUNTIME_ROLE || '').toLowerCase() !== 'gateway') }
   });
 });
 

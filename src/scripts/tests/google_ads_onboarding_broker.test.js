@@ -124,7 +124,7 @@ test('actual endpoint code and scope helper use the broker while ignoring client
   for (const outcome of ['success', 'acl_removed', 'scope_changed', 'unauthenticated']) {
     const f = await fixture(); let permitted = true; let ids = [71];
     const scope = () => ({ assignment_scope: 'clinic', clinic_id: 71, group_id: 5, clinic_ids: [...ids] });
-    const context = { exports: {}, asyncHandler: fn => fn, getUserId: () => outcome === 'unauthenticated' ? null : 7,
+    const context = { exports: {}, process: { env: {} }, asyncHandler: fn => fn, getUserId: () => outcome === 'unauthenticated' ? null : 7,
       ...require('../../services/googleAdsConversionPreparation.service'), createGoogleAdsOnboardingBroker,
       db: f.options.models, normalizeCustomerId: value => value, GOOGLE_ADS_SCOPE: ADS, GOOGLE_DATA_MANAGER_SCOPE: DM,
       resolveScopeFromInput: async input => {
@@ -151,6 +151,14 @@ test('actual endpoint code and scope helper use the broker while ignoring client
       assert.deepEqual(Object.keys(f.calls[1].payload).sort(), ['conversionActionId', 'eventName', 'eventSource']);
       await context.exports.listGoogleAdsConversionActions({ query: { clinic_id: 71, customer_id: f.mapping.customerId } }, res);
       assert.equal(body.actions[0].id, '456'); assert.equal(f.calls.length, 3);
+      assert.equal(body.action_management.mode, 'broker'); assert.equal(body.action_management.enabled, false);
+      context.process.env.GOOGLE_ADS_CONVERSIONS_BROKER_ENABLED = 'true';
+      context.process.env.GOOGLE_ADS_ACTION_MANAGEMENT_BROKER_ENABLED = 'true';
+      await context.exports.listGoogleAdsConversionActions({ query: { clinic_id: 71, customer_id: f.mapping.customerId } }, res);
+      assert.equal(body.action_management.enabled, true);
+      context.process.env.RUNTIME_ROLE = 'gateway';
+      await context.exports.listGoogleAdsConversionActions({ query: { clinic_id: 71, customer_id: f.mapping.customerId } }, res);
+      assert.equal(body.action_management.mode, 'broker'); assert.equal(body.action_management.enabled, false);
     }
   }
 });
