@@ -19,10 +19,15 @@ function createAwsSecretStore({ client, accountId, prefix, kmsKeyArn }) {
         const result = await client.send(new GetSecretValueCommand({ SecretId: binding.secretArn, VersionStage: 'AWSCURRENT' }));
         if (result.ARN !== binding.secretArn || !result.VersionId || !result.VersionStages?.includes('AWSCURRENT')) fail('secret_unavailable');
         const value = JSON.parse(result.SecretString);
-        if (Object.keys(value).sort().join(',') !== 'accessToken,connectionRef,provider,version'
-          || value.version !== 1 || value.connectionRef !== binding.connectionRef || value.provider !== binding.provider
-          || typeof value.accessToken !== 'string' || !value.accessToken || value.accessToken.length > 16384) fail('secret_unavailable');
-        token = Buffer.from(value.accessToken);
+        if (value.version !== 1 || value.connectionRef !== binding.connectionRef || value.provider !== binding.provider) fail('secret_unavailable');
+        if (binding.provider === 'aws_bedrock') {
+          if (Object.keys(value).sort().join(',') !== 'connectionRef,credentials,provider,version') fail('secret_unavailable');
+          token = Buffer.from(JSON.stringify(require('./bedrock-contract').credentials(value.credentials)));
+        } else {
+          if (Object.keys(value).sort().join(',') !== 'accessToken,connectionRef,provider,version'
+            || typeof value.accessToken !== 'string' || !value.accessToken || value.accessToken.length > 16384) fail('secret_unavailable');
+          token = Buffer.from(value.accessToken);
+        }
       } catch { fail('secret_unavailable'); }
       try { return await work(token); }
       finally { token.fill(0); }

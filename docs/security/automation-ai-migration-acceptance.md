@@ -80,6 +80,71 @@ al proveedor. En simulación pasa ahora por la salida ficticia configurada.
 Ambos defectos fallaron en las pruebas previas y pasan con la corrección.
 No hay evidencia en esta revisión de una mezcla real de conversaciones.
 
+Ambas correcciones están publicadas: staging `553db422`, gateway `d8b81de7`
+y DEV aislado `245f7c51`. Se comprobaron los procesos API y fresh-inbound,
+los flags efectivos de MFA/jobs/IA y los 18 contratos SQL antes del reinicio.
+El importador pasivo de WhatsApp no se modificó ni reinició.
+
+## Transporte Bedrock preparado y probado, todavía sin activar
+
+La operación `ai.bedrock.converse.v1` usa un servicio independiente del de
+OCR/Groq: audiencia `clinicaclick:bedrock:<entorno>:v1`, clave de firma,
+política, ledger y cuatro plazas de ejecución propios. La política solo admite
+Bedrock, finalidades inventariadas —incluida `custom`— y modelos EU Nova
+micro/lite/pro en `eu-south-2`. El consumidor conserva el cuerpo nativo Converse;
+el SDK firma dentro del runtime aislado con el par IAM obtenido del vault.
+
+No hay lookup de conversaciones en AWS ni enlaces para el historial. Solo viaja
+el contexto que el CRM ya seleccionó. El contrato rechaza archivos, herramientas
+arbitrarias, endpoints/modelos ajenos y campos adicionales. Una petición firmada
+tiene un máximo de 1 MiB; se rechaza el exceso, sin recortar texto. Respuesta del
+proveedor limitada a 1 MiB antes de deserializar. El ledger conserva referencias,
+digest y resultado operativo, sin prompts, conversaciones ni respuesta clínica.
+
+Se preservan los dos intentos del SDK directo ante errores transitorios y el
+fallback controlado del orquestador; la operación firmada no se reenvía ni se
+reproduce. Un error de admisión, permisos, secreto o auditoría del broker no se
+disfraza de throttling del proveedor y no desencadena otro modelo. Con el flag
+activo, el consumidor no lee credenciales Bedrock locales ni vuelve a ellas si
+falla el broker. `BEDROCK_ENABLED=false` y las pausas siguen bloqueando llamadas.
+
+Pruebas del candidato:
+
+- Suite del broker: 526/526. Consumidores/contexto/recetas: 46/46 en Node18.
+  Tres scripts históricos que requieren BD/proveedor fueron detenidos por el
+  guard de red; no se ejecutaron contra MySQL ni se cuentan como aprobados.
+- Las 4470 definiciones vuelven a pasar por el broker firmado, adaptador de
+  secretos y adaptador Bedrock con respuesta SDK ficticia: mismas peticiones y
+  salidas que staging, incluidas las 17 recetas retiradas. Se conservan las
+  1904 ramas posteriores y 40 fallos de las ocho configuraciones activas.
+  El reloj de admisión es virtual en esta matriz para no confundir una ráfaga
+  de QA con tráfico operativo; la admisión real se prueba por TLS aparte.
+- Transporte SDK real con proveedor inyectado: texto Unicode largo, tool/schema
+  idénticos, firma solo al endpoint regional fijado, permisos, errores,
+  reflexión de secretos, respuesta excesiva, aborto y ausencia de replay.
+- Cuatro peticiones OCR/audio retenidas no impiden la respuesta del runtime
+  Bedrock separado. No equivale a una prueba de contención de CPU en AWS.
+- Capacidad en un proceso separado con TLS/SDK real y proveedor inyectado:
+  heap128 MiB, pico RSS144,5 MiB; una entrada960 KiB y cuatro entradas200 KiB
+  simultáneas con cuatro respuestas960 KiB. Exceso de 1 MiB rechazado antes del
+  proveedor. Propuesta de MemoryMax256 MiB pendiente de validar en el host AWS.
+
+Evidencia adicional: `bedrock-broker-suite.log`, `bedrock-offline-regressions.log`,
+`snapshot-broker-back-dev.json`, `snapshot-broker-comparison.json` y
+`bedrock-capacity-result.json` en el mismo directorio privado de QA. Estos pases
+no sustituyen la prueba del proveedor a través de AWS ni la interfaz autenticada.
+No se han creado aún el servicio/vault Bedrock ni activado flags de consumidores.
+
+Configuración del consumidor pendiente de provisionar: `BEDROCK_BROKER_ENABLED`,
+`BEDROCK_BROKER_ENVIRONMENT`, `BEDROCK_BROKER_ORIGIN`, `BEDROCK_BROKER_AUDIENCE`,
+`BEDROCK_BROKER_CONNECTION_REF`, `BEDROCK_BROKER_KEY_ID`,
+`BEDROCK_BROKER_KEY_FILE` y `BEDROCK_BROKER_CA_FILE`. Los ficheros de identidad
+deben ser privados, sin symlinks. Preparar una release con su propio lock y
+node_modules: el runtime incorpora SDK Bedrock3.1131.0 y no debe modificar las
+dependencias compartidas por servicios AWS anteriores. La aplicación mantiene
+su SDK existente. Inventariar workers/colas del gateway y fresh-inbound antes
+del corte; no deducir su inactividad únicamente de `JOBS_WORKER=false`.
+
 ## Condiciones antes de migrar Bedrock
 
 1. Conservar región/modelos, selección de contexto, tool `submit_analysis`,
