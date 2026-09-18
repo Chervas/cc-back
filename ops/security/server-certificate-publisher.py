@@ -25,6 +25,14 @@ Error = transport.CertificateError
 UTC = dt.timezone.utc
 
 
+def target_port_valid(target):
+    port=target.get('port');identity=target.get('id')
+    email_ports={'email-staging':8451,'email-dev':8452}
+    if not isinstance(port,int):return False
+    if identity in email_ports:return port==email_ports[identity]
+    return 8443<=port<=8450
+
+
 def identity(path):
     fields = transport.command(['x509', '-in', str(path), '-noout', '-subject', '-nameopt', 'RFC2253',
         '-ext', 'subjectAltName,extendedKeyUsage,keyUsage,basicConstraints'])
@@ -125,7 +133,7 @@ def configuration(filename):
     for target in config['targets']:
         if set(target) != {'id','certificateFile','hostname','port','publicKeySha256','identitySha256'} \
           or not re.fullmatch('[a-z][a-z0-9-]{1,39}',target['id']) or target['hostname'] != '13.39.100.55' \
-          or not isinstance(target['port'],int) or not 8443 <= target['port'] <= 8450 \
+          or not target_port_valid(target) \
           or any(not re.fullmatch('[a-f0-9]{64}',target[k]) for k in ['publicKeySha256','identitySha256']):
             raise Error('configuration_invalid')
         file = transport.private_path(target['certificateFile'])
