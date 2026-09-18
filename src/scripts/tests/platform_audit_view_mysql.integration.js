@@ -79,6 +79,23 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(whatsappPage.events[0].reason, 'state_claimed');
   assert(!Object.hasOwn(whatsappPage.events[0], 'receipt'));
   report.checks.push('WhatsApp authorization audit is filterable and exposes verified correlation/request references without claiming operational activation');
+  const { fromEnrollment, PHASES } = require('../../../services/platform-audit/src/google-ads-enrollment-event');
+  const enrollment = { enrollment_id: randomUUID(), scope_key: 'group:5', actor_user_id: 9, session_ref: sessionRef,
+    connection_ref: 'google:fixture', customer_id: '1234567890', mapping_id: 11, clinic_count: 2, clinic_digest: 'a'.repeat(64) };
+  for (const reason of Object.keys(PHASES)) {
+    const saved = await repo.append(fromEnrollment(enrollment, reason, { now: at,
+      ...(reason === 'enrollment_cancel_requested' ? { cause: 'scope_disconnected', actorId: 55, sessionRef } : {}) }));
+    await models.PlatformAuditEvent.update({ state: 'delivered', receipt: await writer.write(saved), delivered_at: at },
+      { where: { event_id: saved.event.eventId } });
+  }
+  const enrollmentPage = await view.read({ actorId: 1, sessionRef, query: { ...criteria, action: 'integration.asset.enrollment' } });
+  assert.equal(enrollmentPage.events.length, 4);
+  assert.deepEqual(enrollmentPage.events.map(row => row.reason).sort(), Object.keys(PHASES).sort());
+  assert.ok(enrollmentPage.events.every(row => row.adsEnrollment.requestRef === enrollment.enrollment_id
+    && row.adsEnrollment.clinicCount === 2 && row.adsEnrollment.assetRef === 'ads:1234567890' && row.verification === 's3_version_verified'));
+  assert.equal(enrollmentPage.events.find(row => row.reason === 'enrollment_cancel_requested').actorId, '55');
+  assert.equal(enrollmentPage.events.find(row => row.reason === 'enrollment_broker_confirmed').actorType, 'job');
+  report.checks.push('four enrollment audit phases share one request with distinct SQL parts; verified DTO keeps human/job attribution, pending mapping and confirmed cancellation separate');
   const broken = await models.PlatformAuditEvent.findByPk(first.events[0].eventId); const goodReceipt = broken.receipt;
   await broken.update({ receipt: { ...goodReceipt, versionId: 'missing-version' } });
   await assert.rejects(view.read({ actorId: 1, sessionRef, query: criteria }), /audit_view_unavailable/);

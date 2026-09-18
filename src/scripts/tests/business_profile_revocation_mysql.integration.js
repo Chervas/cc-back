@@ -20,6 +20,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.ClinicWebAsset = models.ClinicAnalyticsProperty = models.ClinicGoogleAdsAccount = empty;
   models.SearchConsoleBrokerBinding = models.AnalyticsBrokerBinding = models.GooglePropertyBrokerRevocation = models.GrupoClinica = models.GoogleAdsBrokerBinding = models.GoogleAdsBrokerRevocation = empty;
   models.GoogleConnectionAssignment = empty; models.GroupAssetClinicAssignment = empty;
+  models.GoogleAdsEnrollmentRequest = empty;
   models.Clinica = { findAll: async () => [{ id_clinica: 71 }, { id_clinica: 72 }] };
   const service = require('../../services/businessProfileRevocation.service');
   const { deactivateGoogleMappingsForScope: disconnect } = require('../../services/oauthScopedDisconnect.service');

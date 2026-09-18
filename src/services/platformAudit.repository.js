@@ -11,7 +11,8 @@ function createRepository(model) {
       const row = pack(value);
       try {
         await model.create({ event_id: row.event.eventId, correlation_id: row.event.correlationId, stage: row.event.stage,
-          result_part: row.event.version === 6 ? row.event.batchIndex : row.event.version === 12 ? Number(row.event.mappingId) : 0,
+          result_part: row.event.version === 6 ? row.event.batchIndex : row.event.version === 12 ? Number(row.event.mappingId)
+            : row.event.version === 16 ? require('../../services/platform-audit/src/google-ads-enrollment-event').PHASES[row.event.reason][1] : 0,
           occurred_at: new Date(row.event.occurredAt), body: row.body, digest: row.digest,
           next_attempt_at: new Date(row.event.occurredAt) }, { transaction });
       } catch (error) {

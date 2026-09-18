@@ -82,7 +82,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     repository, client, scope, now: () => at, enabled: () => workerEnabled, ...extra });
   const worker = workerFactory(); let sequence = 1000000000;
   const state = async id => C.request(await R.findByPk(id, { raw: true }));
-  const inputs = () => ({ scopeKey: 'group:5', connectionId: 2, clinicIds: [59,71], actorId: 9, sessionRef: randomUUID(), sessionExpiresAt: at + 3600000 });
+  const inputs = () => ({ scopeKey: 'group:5', connectionId: 2, clinicIds: [59,71], actorId: 9, sessionRef: randomUUID(), sessionExpiresAt: at + 300000 });
   const enqueue = async () => {
     const input = inputs(); const context = await scope.capture(input);
     const result = await repository.enqueue(context, { enrollmentId: randomUUID(), customerId: String(++sequence) });
@@ -231,13 +231,15 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const map = async (service = mappingFactory(), extra = {}) => service.save({ selection: (await capture()).selection,
     mappings: [{ clinicaId: 71, customerId: mappingRequest.result.customerId }], actorId: 9,
     sessionRef: mappingRequest.input.sessionRef, authorize: async () => true, ...extra });
+  let auditBaseline = await models.PlatformAuditEvent.count();
   await assert.rejects(map(mappingFactory(), { replaceExisting: true }), { code: 'google_ads_enrollment_not_ready' });
-  assert.equal(await models.PlatformAuditEvent.count(), 0); assert.equal(await models.GoogleAdsBrokerRevocation.count(), 0);
+  assert.equal(await models.PlatformAuditEvent.count(), auditBaseline); assert.equal(await models.GoogleAdsBrokerRevocation.count(), 0);
   assert.equal((await state(mappingRequest.id)).state, 'activate_pending'); await unchanged();
   report.checks.push('actual discovery and mapping reject an enrollment whose broker activation is unconfirmed; replacement, revocation and audit all roll back with the existing account preserved');
   at += 9000; await worker.run(); assert.equal((await state(mappingRequest.id)).state, 'activation_confirmed');
+  auditBaseline = await models.PlatformAuditEvent.count();
   await assert.rejects(map(mappingFactory(), { sessionRef: randomUUID() }), { code: 'google_ads_enrollment_scope_conflict' });
-  assert.equal(await models.PlatformAuditEvent.count(), 0);
+  assert.equal(await models.PlatformAuditEvent.count(), auditBaseline);
   const finalFailure = mappingFactory({ broker: { ...reader, assert: async (...args) => {
     await reader.assert(...args); fail('FICTITIOUS_FINAL_VALIDATION_FAILURE');
   } } });
@@ -245,7 +247,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const beforeAccepted = await state(mappingRequest.id); assert.equal(beforeAccepted.state, 'activation_confirmed');
   assert.equal((await M.findByPk(beforeAccepted.mapping_id, { raw: true })).isActive, 0);
   assert.equal((await B.findOne({ where: { mapping_id: beforeAccepted.mapping_id }, raw: true })).state, 'staged');
-  assert.equal(await models.PlatformAuditEvent.count(), 0); assert.equal(await models.GoogleAdsBrokerRevocation.count(), 0); await unchanged();
+  assert.equal(await models.PlatformAuditEvent.count(), auditBaseline); assert.equal(await models.GoogleAdsBrokerRevocation.count(), 0); await unchanged();
   report.checks.push('a different user session or a failure after enrollment acknowledgement rolls back the request, active mapping, replacement and durable human audit together');
   process.env.GOOGLE_ADS_ENROLLMENT_ENABLED = 'true';
   let accepted;
@@ -260,7 +262,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(accepted.mapped, 1); assert.equal((await state(mappingRequest.id)).state, 'active');
   assert.equal((await M.findByPk(beforeAccepted.mapping_id, { raw: true })).isActive, 1);
   assert.equal((await B.findOne({ where: { mapping_id: beforeAccepted.mapping_id }, raw: true })).state, 'active');
-  const [event] = await models.PlatformAuditEvent.findAll({ raw: true });
+  const event = (await models.PlatformAuditEvent.findAll({ raw: true })).find(row => JSON.parse(row.body).version === 12);
   const auditEvent = require('../../../services/platform-audit/src/event').unpack(event).event;
   assert.equal(auditEvent.version, 12); assert.equal(auditEvent.sessionRef, mappingRequest.input.sessionRef);
   assert.equal(auditEvent.reason, 'mapping_activated'); assert.equal(auditEvent.affectedClinicCount, 2);
@@ -293,5 +295,163 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal((await state(unknown.id)).last_error, 'google_ads_enrollment_unavailable');
   assert.doesNotMatch(JSON.stringify(unknownResult), /FICTITIOUS|PRIVATE/); beforeRemote = null; await cancelAll();
   report.checks.push('unknown provider/SQL details are replaced with a closed error code and all fixtures leave pre-existing accounts and credential values untouched');
+  const auditRows = (await models.PlatformAuditEvent.findAll({ raw: true })).map(row => require('../../../services/platform-audit/src/event').unpack(row).event);
+  const firstEvents = auditRows.filter(row => row.version === 16 && row.requestRef === first.id);
+  assert.deepEqual(firstEvents.map(row => row.reason).sort(), ['enrollment_broker_confirmed', 'enrollment_cancel_confirmed', 'enrollment_cancel_requested', 'enrollment_requested']);
+  assert.equal(firstEvents.find(e => e.reason === 'enrollment_requested').actor.id, '9');
+  assert.equal(firstEvents.find(e => e.reason === 'enrollment_requested').sessionRef, first.input.sessionRef);
+  assert.ok(firstEvents.filter(e => e.reason !== 'enrollment_requested').every(e => e.actor.type === 'job' && e.sessionRef === null));
+  const originals = auditRows.filter(row => row.reason === 'enrollment_requested'); assert.equal(originals.length, await R.count());
+  report.checks.push('four audit phases preserve human/job attribution and the original scope; idempotent enqueue and lost ACK recovery produce exactly one durable event per phase');
+
+  // Persistent sessions and real HTTP handlers against this owned database.
+  // Fictitious password-only QA issuance is not an authenticated product UI test.
+  models.Usuario = require('../../../models/usuario')(sql, D); await models.Usuario.sync({ alter: true });
+  await require('../../../migrations/20260912220000-create-auth-sessions').up(sql.getQueryInterface(), D);
+  await require('../../../migrations/20260913130000-create-auth-email-challenges').up(sql.getQueryInterface(), D);
+  await require('../../../migrations/20260914220000-create-auth-trusted-devices').up(sql.getQueryInterface(), D);
+  models.AuthSession = require('../../../models/authsession')(sql, D);
+  const user = await models.Usuario.create({ id_usuario: 9, nombre: 'Fictitious enrollment QA', email_usuario: 'enrollment@example.invalid',
+    password_usuario: require('bcryptjs').hashSync('FICTITIOUS_PASSWORD_NEVER_DEPLOY', 4) });
+  const sessionApi = require('../../services/accessSession.service');
+  const env = { JWT_SECRET: 'FICTITIOUS_SESSION_KEY_NEVER_DEPLOY', AUTH_SESSION_MODE: 'enforce', AUTH_EMAIL_MFA_MODE: 'off',
+    AUTH_ACCESS_TOKEN_TTL_SECONDS: '300', PLATFORM_AUDIT_AUTH_ENABLED: 'true', PLATFORM_AUDIT_AUTH_POLICY: 'auth-durable-v1' };
+  const sessions = sessionApi.createService({ models, now: () => new Date(at), config: () => sessionApi.settings(env) });
+  const token = (await sessions.authenticated(user)).body.token;
+  const apiClients = { client: { execute: command => command.operation === C.broker.OPERATIONS.discover
+    ? { requestId: command.requestId, replayed: false, data: { accounts: [{ id: '1999999999', manager: false,
+      currencyCode: 'EUR', timeZone: 'Europe/Madrid', descriptiveName: 'Fictitious eligible account', status: 'ENABLED' }], nextPageToken: null } }
+    : transport(command, false) }, controlClient: { execute: command => transport(command, true) } };
+  const enrollmentApi = require('../../services/googleAdsEnrollment.service').createGoogleAdsEnrollment({ models, sessions,
+    clients: apiClients, now: () => at, enabled: () => enrollmentEnabled, workerEnabled: () => workerEnabled, gateway: () => false });
+  const { authorizeRequestedMarketingConnectionScope, marketingScopeInputFromRequest } = require('../../lib/oauthMarketingScopeAccess');
+  const authorizeScope = req => authorizeRequestedMarketingConnectionScope({ userId: req.userData.userId,
+    ...marketingScopeInputFromRequest(req), access: 'write', findClinicGroupId: async id => (await models.Clinica.findByPk(id)).grupoClinicaId,
+    findGroupClinicIds: async id => (await models.Clinica.findAll({ where: { grupoClinicaId: id }, raw: true })).map(c => c.id_clinica),
+    authorizeClinicIds: input => hasMarketingClinicScopeAccess({ ...input, membershipModel: models.UsuarioClinica, globalAdminCheck: () => false }) });
+  const express = require('express'); const http = require('node:http'); const app = express(); app.use(express.json());
+  const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.fixture');
+  app.use(loadDiscoverySource('routes/auth.middleware.js', { '../services/accessSession.service': { ...sessions, bearer: sessionApi.bearer } }));
+  app.use('/oauth/google/ads/enrollment', require('../../routes/googleAdsEnrollment.routes').createRouter({ service: enrollmentApi,
+    sessions: { ...sessions, bearer: sessionApi.bearer }, authorizeScope, resolveConnection: async (_req, options) => {
+      assert.equal(options.allowLegacyUserFallback, false); assert.equal(options.metadataOnly, true);
+      return { connection: { id: 2 }, scope: { scopeKey: 'group:5' } };
+    } }));
+  const server = http.createServer(app); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const agent = new http.Agent({ keepAlive: false }); agent.createConnection = require('./fixtures/campaign_offline_runtime.cjs').connectionForTestServer(server);
+  const request = (path, body, bearer = token) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: server.address().port, agent,
+      path: '/oauth/google/ads/enrollment/' + path, method: body ? 'POST' : 'GET', headers: {
+        ...(bearer ? { authorization: 'Bearer ' + bearer } : {}), ...(body ? { 'content-type': 'application/json' } : {}) } }, res => {
+      const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => {
+        const text = Buffer.concat(chunks).toString(); assert.doesNotMatch(text, /FICTITIOUS|PRIVATE|google:ads:test|fictitious-subject/);
+        resolve({ status: res.statusCode, body: JSON.parse(text), cache: res.headers['cache-control'] });
+      });
+    }); req.on('error', reject); req.end(body ? JSON.stringify(body) : undefined);
+  });
+  try {
+    assert.equal((await request('accounts?group_id=5', undefined, null)).status, 401);
+    const listed = await request('accounts?group_id=5'); assert.equal(listed.status, 200);
+    assert.equal(listed.body.accounts[0].customerId, '1999999999'); assert.equal(listed.cache, 'private, no-store');
+    for (const path of ['accounts', 'accounts?group_id=5suffix', 'accounts?group_id=5&clinic_id=59',
+      'accounts?group_id=5&connectionRef=injected', 'accounts?group_id=5&group_id=6']) {
+      assert.equal((await request(path)).status, 400, path);
+    }
+    assert.equal((await request('accounts?group_id=6')).status, 403);
+    const newId = randomUUID(); const payload = { group_id: 5, customerId: String(++sequence), enrollmentId: newId };
+    assert.equal((await request('requests', { ...payload, assetRef: 'injected' })).status, 400);
+    for (const customerId of ['0000000000', '123-456-7890', '123suffix', 1234567890]) {
+      assert.equal((await request('requests', { ...payload, customerId })).status, 400);
+    }
+    const made = await request('requests', payload); assert.equal(made.status, 202); assert.equal(made.body.state, 'prepare_pending');
+    assert.equal((await request('requests', payload)).status, 202);
+    assert.equal((await request('requests/' + randomUUID() + '?group_id=5')).status, 404);
+    assert.equal((await request('requests/' + newId + '?group_id=5')).body.canComplete, false);
+    assert.equal((await enrollmentApi.run()).status, 'completed');
+    const visible = await request('requests/' + newId + '?group_id=5'); assert.equal(visible.body.state, 'activation_confirmed');
+    assert.equal(visible.body.canComplete, true); assert.equal(visible.cache, 'private, no-store');
+    env.AUTH_EMAIL_MFA_MODE = 'enforce';
+    assert.equal((await request('requests/' + newId + '?group_id=5')).status, 401); env.AUTH_EMAIL_MFA_MODE = 'off';
+    report.checks.push('real authenticated HTTP uses persistent session verification, strict scope/body, metadata-only resolution, idempotent enqueue and scoped status; enforcing MFA rejects the fictitious password-only session');
+
+    const claims = require('jsonwebtoken').decode(token);
+    const liveInput = { scopeKey: 'group:5', connectionId: 2, clinicIds: [59,71], actorId: 9,
+      sessionRef: claims.jti, sessionExpiresAt: claims.exp * 1000 };
+    const originalExecute = apiClients.client.execute; let releaseDiscovery; let readyDiscoveries; let enteredDiscoveries = 0;
+    const heldDiscovery = new Promise(resolve => { releaseDiscovery = resolve; });
+    const fourDiscoveries = new Promise(resolve => { readyDiscoveries = resolve; });
+    apiClients.client.execute = async command => {
+      if (command.operation === C.broker.OPERATIONS.discover) { if (++enteredDiscoveries === 4) readyDiscoveries(); await heldDiscovery; }
+      return originalExecute(command);
+    };
+    const running = Array.from({ length: 4 }, () => enrollmentApi.discover(liveInput));
+    try {
+      await fourDiscoveries;
+      assert.equal((await request('accounts?group_id=5')).status, 429); assert.equal(enteredDiscoveries, 4);
+    } finally { releaseDiscovery(); await Promise.all(running); apiClients.client.execute = originalExecute; }
+    const gatewayApi = require('../../services/googleAdsEnrollment.service').createGoogleAdsEnrollment({
+      models: () => assert.fail('gateway cannot access enrollment SQL'), sessions, clients: apiClients,
+      gateway: () => true, enabled: () => true, workerEnabled: () => true });
+    assert.equal((await gatewayApi.run()).skipped, true);
+    await assert.rejects(gatewayApi.discover(liveInput), { code: 'google_ads_enrollment_disabled' });
+    report.checks.push('four in-flight listings exhaust admission without an unbounded queue or fifth broker call; gateway cannot run or discover enrollments even with both flags enabled');
+
+    const inflightId = randomUUID();
+    assert.equal((await request('requests', { ...payload, customerId: String(++sequence), enrollmentId: inflightId })).status, 202);
+    afterRemote = async name => { if (name === 'prepare') { afterRemote = null; await sessions.revoke(token); } };
+    await enrollmentApi.run(); assert.equal((await state(inflightId)).state, 'revoked');
+    assert.equal((await state(inflightId)).mapping_id, null); assert.equal((await request('requests/' + inflightId + '?group_id=5')).status, 401);
+    at += 30001; await enrollmentApi.run(); assert.equal((await state(newId)).state, 'revoked');
+    report.checks.push('logout persisted during remote preparation prevents mapping creation, triggers independent cancellation and invalidates both later HTTP and earlier unaccepted enrollments');
+  } finally { agent.destroy(); await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); }
+  let failAuditReason = 'enrollment_requested';
+  report.phase = 'audit rollback on enqueue';
+  models.PlatformAuditEvent.addHook('beforeCreate', 'enrollment_audit_rollback', event => {
+    if (JSON.parse(event.body).reason === failAuditReason) throw Object.assign(Error('FICTITIOUS_AUDIT_FAILURE'), { code: 'audit_unavailable' });
+  });
+  const countBefore = await R.count();
+  await assert.rejects(enqueue(), { code: 'audit_unavailable' }); assert.equal(await R.count(), countBefore);
+  failAuditReason = null;
+  report.phase = 'enqueue for scoped disconnect';
+  const pendingDisconnect = await enqueue(); const disconnectModels = { ...models };
+  for (const key of ['ClinicWebAsset','ClinicAnalyticsProperty','ClinicBusinessLocation','SearchConsoleBrokerBinding',
+    'AnalyticsBrokerBinding','GooglePropertyBrokerRevocation','BusinessProfileBrokerBinding','BusinessProfileBrokerRevocation']) {
+    disconnectModels[key] = { findAll: async () => [] }; // Other cohorts are empty in this Ads fixture.
+  }
+  const disconnectSession = require('jsonwebtoken').decode((await sessions.authenticated(await models.Usuario.findByPk(9))).body.token).jti;
+  const disconnect = () => sql.transaction(transaction => require('../../services/oauthScopedDisconnect.service').deactivateGoogleMappingsForScope({
+    models: disconnectModels, transaction, scope: { assignmentScope: 'group', groupId: 5 }, connectionId: 2,
+    actorId: 9, sessionRef: disconnectSession, now: () => new Date(at) }));
+  const beforeDisconnectAudit = await models.PlatformAuditEvent.count();
+  process.env.GOOGLE_ADS_REVOCATION_ENABLED = 'true';
+  try {
+    report.phase = 'scoped disconnect audit rollback';
+    failAuditReason = 'enrollment_cancel_requested';
+    await assert.rejects(disconnect(), { code: 'audit_unavailable' });
+    assert.equal((await state(pendingDisconnect.id)).state, 'prepare_pending');
+    assert.equal(await models.GoogleAdsBrokerRevocation.count(), 0); assert.equal(await models.PlatformAuditEvent.count(), beforeDisconnectAudit);
+    await unchanged();
+    failAuditReason = null;
+    report.phase = 'scoped disconnect commit';
+    const result = await disconnect(); assert.equal(result.enrollmentPending, 1);
+    assert.ok(result.brokerRevocationsPending > 0); assert.equal(result.ads, 1);
+    const cancelled = await state(pendingDisconnect.id); assert.equal(cancelled.state, 'revoke_pending'); assert.equal(cancelled.mapping_id, null);
+    assert.equal((await M.findByPk(oldMapping.id, { raw: true })).isActive, 0);
+    assert.deepEqual(await M.findByPk(foreignRow.mapping_id, { raw: true }), foreignMapping);
+    const cancellation = (await models.PlatformAuditEvent.findAll({ raw: true })).map(row => JSON.parse(row.body))
+      .find(row => row.requestRef === pendingDisconnect.id && row.reason === 'enrollment_cancel_requested');
+    assert.equal(cancellation.actor.type, 'user'); assert.equal(cancellation.actor.id, '9'); assert.equal(cancellation.sessionRef, disconnectSession);
+    assert.equal((await enrollmentApi.disconnectionStatus([59,71])).pending_enrollments, 1);
+    report.phase = 'cancel after disconnected assignment';
+    await models.GoogleConnectionAssignment.update({ status: 'disconnected' }, { where: { id: 1 } });
+    failAuditReason = 'enrollment_cancel_confirmed'; await enrollmentApi.run();
+    assert.equal((await state(pendingDisconnect.id)).state, 'revoke_pending'); assert.equal(remote.get(pendingDisconnect.id).state, 'revoked');
+    failAuditReason = null; at += 60000; await enrollmentApi.run();
+    assert.equal((await state(pendingDisconnect.id)).state, 'revoked');
+    assert.equal((await enrollmentApi.disconnectionStatus([59,71])).pending_enrollments, 0);
+  } finally { delete process.env.GOOGLE_ADS_REVOCATION_ENABLED; models.PlatformAuditEvent.removeHook('beforeCreate', 'enrollment_audit_rollback'); }
+  report.checks.push('failed audit rolls back enqueue and the entire scoped disconnect; an authorized group disconnect cancels a request with no mapping, audits its actual user and preserves foreign ownership');
+  report.checks.push('independent cancellation continues after assignment disconnect; failed confirmation audit leaves retry pending and the same broker receipt is recovered without duplicate completion');
+  delete report.phase;
   report.externalProviderCalls = 0; report.authenticatedUi = false;
-}).catch(() => { process.exitCode = 1; });
+}).catch(error => { console.error(String(error.stack || '').split('\n').filter(line => /^\s+at /.test(line)).slice(0, 7).join('\n')); process.exitCode = 1; });

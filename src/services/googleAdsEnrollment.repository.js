@@ -3,6 +3,8 @@ const { randomUUID } = require('node:crypto');
 const { Op } = require('sequelize');
 const C = require('./googleAdsEnrollment.contract');
 const A = require('./googleAdsBrokerScope.service');
+const { fromEnrollment } = require('../../services/platform-audit/src/google-ads-enrollment-event');
+const { createRepository } = require('./platformAudit.repository');
 const PENDING = ['prepare_pending', 'prepared', 'activate_pending', 'activation_confirmed', 'revoke_pending'];
 const IDENTITY = C.REQUEST_FIELDS.filter(key => !['state', 'updated_at', 'attempts', 'next_attempt_at', 'lease_token', 'lease_until', 'last_error'].includes(key));
 const fail = code => C.fail(code || 'google_ads_enrollment_scope_conflict');
@@ -11,10 +13,17 @@ const same = (a, b) => IDENTITY.every(key => a[key] instanceof Date
   ? b[key] instanceof Date && a[key].getTime() === b[key].getTime() : a[key] === b[key]);
 const dto = row => ({ enrollmentId: row.enrollment_id, customerId: row.customer_id,
   state: row.state, mappingId: row.mapping_id, retryAt: row.next_attempt_at, error: row.last_error });
-function createGoogleAdsEnrollmentRepository({ models, scope, now = () => new Date() }) {
+function createGoogleAdsEnrollmentRepository({ models, scope, audit, now = () => new Date() }) {
   const getModels = () => typeof models === 'function' ? models() : models;
   const opts = transaction => ({ transaction, lock: transaction.LOCK.UPDATE, logging: false });
   const trans = work => getModels().sequelize.transaction(work);
+  async function record(row, reason, transaction, actor = {}) {
+    const events = audit || createRepository(getModels().PlatformAuditEvent);
+    const date = now(); const health = await events.health(date, { includeUnresolved: false, transaction });
+    if (!Number.isSafeInteger(health.pending) || health.pending >= 10000 || !Number.isFinite(health.oldestAgeSeconds)
+      || health.oldestAgeSeconds >= 3600) fail('audit_unavailable');
+    await events.append(fromEnrollment(plain(row), reason, { ...actor, now: date }), { transaction });
+  }
   async function load(id, transaction) {
     const row = await getModels().GoogleAdsEnrollmentRequest.findByPk(id, opts(transaction));
     if (!row) fail(); C.request(plain(row)); return row;
@@ -113,6 +122,7 @@ function createGoogleAdsEnrollmentRepository({ models, scope, now = () => new Da
           state: 'prepare_pending', requested_at: date, updated_at: date, attempts: 0, next_attempt_at: date,
           lease_token: null, lease_until: null, last_error: null });
         await getModels().GoogleAdsEnrollmentRequest.create(row, { transaction, logging: false });
+        await record(row, 'enrollment_requested', transaction);
         await scope.assert(context, { transaction }); return dto(row);
       });
     },
@@ -166,6 +176,7 @@ function createGoogleAdsEnrollmentRepository({ models, scope, now = () => new Da
       return trans(async transaction => {
         const row = await owned(claim, transaction); if (row.state !== 'activate_pending') fail();
         await assertContext(row, context, transaction); await assertMapping(C.request(plain(row)), transaction);
+        await record(row, 'enrollment_broker_confirmed', transaction);
         return release(row, { state: 'activation_confirmed', last_error: null }, transaction, 30000);
       });
     },
@@ -204,28 +215,53 @@ function createGoogleAdsEnrollmentRepository({ models, scope, now = () => new Da
       return trans(async transaction => {
         const row = await owned(claim, transaction);
         if (!/^[a-z_]{1,64}$/.test(reason || '')) fail('google_ads_enrollment_invalid');
+        if (['revoke_pending', 'revoked'].includes(row.state)) fail();
+        await record(row, 'enrollment_cancel_requested', transaction, { cause: reason });
         await blockLocal(plain(row), transaction);
         return release(row, { state: 'revoke_pending', last_error: reason }, transaction);
       });
     },
     // For an already authorized scope-disconnect transaction. It must not need
     // the enrolling user's session or an enabled enrollment switch to revoke.
-    async cancelScope({ scopeKey, connectionId, clinicIds, transaction }) {
+    async cancelScope({ scopeKey, connectionId, clinicIds, transaction, actorId, sessionRef, customerIds,
+      includeClinicScopes = false, childScopeClinicIds, reason = 'scope_disconnected' }) {
       if (!transaction?.LOCK?.UPDATE || !C.positive(connectionId)) fail('google_ads_enrollment_invalid');
       C.scopeKey(scopeKey); const ids = C.clinicIds(clinicIds);
+      if (typeof includeClinicScopes !== 'boolean' || includeClinicScopes && !scopeKey.startsWith('group:')) fail('google_ads_enrollment_invalid');
+      const children = childScopeClinicIds === undefined ? ids : Array.isArray(childScopeClinicIds) && !childScopeClinicIds.length ? [] : C.clinicIds(childScopeClinicIds);
+      if (children.some(id => !ids.includes(id)) || childScopeClinicIds !== undefined && !includeClinicScopes) fail('google_ads_enrollment_invalid');
+      const keys = [scopeKey, ...(includeClinicScopes ? children.map(id => 'clinic:' + id) : [])];
+      if (customerIds !== undefined && (!Array.isArray(customerIds) || !customerIds.length || customerIds.length > 1000
+        || customerIds.some(id => C.customer(id) !== id) || new Set(customerIds).size !== customerIds.length)) fail('google_ads_enrollment_invalid');
       const rows = await getModels().GoogleAdsEnrollmentRequest.findAll({ ...opts(transaction), limit: 1001,
-        order: [['enrollment_id','ASC']], where: { scope_key: scopeKey, google_connection_id: connectionId, state: { [Op.ne]: 'revoked' } } });
+        order: [['enrollment_id','ASC']], where: { scope_key: { [Op.in]: keys }, google_connection_id: connectionId, state: { [Op.ne]: 'revoked' },
+          ...(customerIds ? { customer_id: { [Op.in]: customerIds } } : {}) } });
       if (rows.length > 1000) fail('google_ads_enrollment_invalid');
+      if (rows.length && actorId != null && (!C.positive(actorId) || !C.UUID.test(sessionRef))) fail('google_discovery_session_required');
       for (const row of rows) {
         const value = C.request(plain(row)); if (value.clinicIds.some(id => !ids.includes(id))) fail();
-        await blockLocal(value, transaction); await release(row, { state: 'revoke_pending', last_error: 'scope_disconnected' }, transaction);
+        await blockLocal(value, transaction);
+        if (row.state !== 'revoke_pending') {
+          await record(row, 'enrollment_cancel_requested', transaction, { actorId, sessionRef, cause: reason });
+          await release(row, { state: 'revoke_pending', last_error: reason }, transaction);
+        }
       }
       return rows.length;
+    },
+    async disconnectionStatus(clinicIds) {
+      const ids = C.clinicIds(clinicIds);
+      const rows = await getModels().GoogleAdsEnrollmentRequest.findAll({ raw: true, logging: false, limit: 1001,
+        attributes: C.REQUEST_FIELDS, where: { tenant_clinic_id: { [Op.in]: ids }, state: { [Op.in]: ['revoke_pending', 'revoked'] } } });
+      if (rows.length > 1000) fail('google_ads_enrollment_unavailable');
+      const own = rows.map(C.request).filter(row => row.clinicIds.every(id => ids.includes(id)));
+      return { pending_enrollments: own.filter(row => row.state === 'revoke_pending').length,
+        cancelled_enrollments: own.filter(row => row.state === 'revoked').length };
     },
     revoked(claim, result) {
       receipt(claim, result, ['revoked']); if (result.accessBlocked !== true) fail('broker_response_invalid');
       return trans(async transaction => {
         const row = await owned(claim, transaction); if (row.state !== 'revoke_pending') fail();
+        await record(row, 'enrollment_cancel_confirmed', transaction);
         await blockLocal(plain(row), transaction); return release(row, { state: 'revoked', last_error: null }, transaction);
       });
     },

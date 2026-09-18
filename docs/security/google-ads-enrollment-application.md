@@ -1,11 +1,13 @@
 # Google Ads: ámbito y solicitudes de alta en la aplicación
 
 Estado 18/09/2026: preparados el esquema, validadores, comprobación de ámbito,
-cliente tipado, escritor y worker de conciliación. El guardado humano de mappings
-comprueba la confirmación del broker y actualiza la solicitud en la misma
-transacción que el mapping, binding y auditoría. Faltan las rutas de alta/estado,
-su enlace con bajas y Ajustes, y registrar/configurar el worker con autorización
-de sesión persistente. No hay alta real completa ni worker de alta instalado.
+cliente tipado, escritor y worker de conciliación. Las rutas de discovery,
+alta y estado verifican sesiones persistidas; las bajas cancelan también las
+solicitudes que todavía no tienen mapping. El guardado humano comprueba la
+confirmación del broker y actualiza la solicitud en la misma transacción que
+el mapping, binding y auditoría. El job está registrado en código, condicionado
+por su flag; no está instalado ni activo en el runtime. Falta el recorrido de
+selección/alta en Ajustes. No hay alta real completa.
 Las pruebas nuevas son aisladas y no sustituyen una prueba visual autenticada.
 
 ## Registro independiente
@@ -34,7 +36,9 @@ Los estados definidos son `prepare_pending`, `prepared`, `activate_pending`,
 `activation_confirmed`, `active`, `revoke_pending` y `revoked`. El contrato exige
 mapping para estados preparados/activados, fechas válidas, UUID distintos y
 clínicas canónicas sin duplicados. El repositorio y worker escriben estas
-transiciones, pero **aún no hay un worker de alta registrado ni funcionando**.
+transiciones. El catálogo registra `googleAdsEnrollment` cada minuto, con una
+sola tentativa por ejecución; los reintentos y leases pertenecen al repositorio.
+**No hay worker de alta funcionando en los entornos reales**.
 
 ## Autorización y cliente
 
@@ -48,7 +52,9 @@ La huella fija ámbitos, miembros, asignaciones e identidad. Los asserts dentro 
 una transacción usan `FOR UPDATE`, también si el snapshot previo era REPEATABLE
 READ. Restaurar una solicitud mantiene el conjunto original, la sesión y la
 caducidad; no amplía el ámbito con una captura nueva. La autorización de sesión
-persistente deberá inyectarse al conectar el servicio con las rutas y el worker.
+persistente se inyecta en `googleAdsEnrollment.service.js`: valida la referencia,
+el usuario, la caducidad y el permiso de escritura, incluso bajo la transacción
+de confirmación. La expiración o revocación de sesión impide aceptar un alta.
 
 La elegibilidad de un cliente nuevo consulta todos sus mappings, bindings,
 revocaciones y solicitudes, incluyendo el ID con guiones. Cualquier mapping
@@ -80,6 +86,25 @@ Configuración preparada, sin valores instalados:
 Las claves se leen de ficheros privados. Este bloque no crea claves, modifica
 variables del runtime ni instala un nuevo job.
 
+## Superficie HTTP
+
+Las rutas bajo `/api/oauth/google/ads/enrollment` usan autenticación normal y
+sesión administrada, con comprobaciones antes y después de las esperas:
+
+- `GET /accounts?clinic_id=…` o `group_id=…`: listado acotado, con un máximo de
+  cuatro peticiones simultáneas por proceso; una quinta obtiene 429 sin cola.
+- `POST /requests`: cuerpo exacto con un ámbito, `customerId` de diez dígitos
+  y `enrollmentId` UUID. Responde 202 al persistir la intención; exige los dos
+  flags y no llama al proveedor dentro de la petición.
+- `GET /requests/:enrollmentId`: historial limitado al ámbito solicitado;
+  `canComplete` exige la sesión original y una asignación aún válida. La lectura
+  del historial sigue disponible tras desconectar la conexión.
+
+Se rechazan campos adicionales, ámbitos ambiguos y referencias aportadas por
+el cliente. Resolver una conexión usa solamente metadata, sin fallback de
+credenciales. Los errores tienen códigos cerrados y las respuestas no se
+almacenan en caché. Gateway no puede ejecutar discovery, altas ni el worker.
+
 ## Escritura y conciliación
 
 El enqueue fija cliente, actor/sesión, vencimiento, miembros originales y tres
@@ -107,9 +132,32 @@ eliminado o cambiado provoca `revoke_pending`. La cancelación no requiere la
 sesión ni el switch de alta: usa la autoridad de control y la intención durable.
 Una desconexión concurrente invalida el lease anterior. Se bloquea solamente el
 propietario original; una fila reutilizada por otro ámbito no se modifica.
-El método de cancelación de ámbito existe, pero **todavía falta invocarlo desde
-las rutas de baja**. Una cuenta ya aceptada no se revoca por el vencimiento
+Las bajas de conexión, retirada de cuenta y sustitución de mappings invocan
+la cancelación en la misma transacción. La baja de grupo conserva los ámbitos
+de clínicas con asignaciones independientes. Las cuentas pendientes de alta
+se cuentan por separado de las revocaciones de activos existentes, pues pueden
+coincidir. Una cuenta ya aceptada no se revoca por el vencimiento
 posterior de la sesión que la dio de alta.
+
+## Auditoría y orden de publicación
+
+El contrato v16 registra cuatro fases con la misma solicitud y distinta parte
+SQL: solicitada, confirmada por broker, cancelación solicitada y cancelada. La
+confirmación del broker todavía exige asignar la cuenta en CRM. El primer actor
+y quien cancela se atribuyen a sus sesiones; las confirmaciones se atribuyen al
+worker. No contienen tokens ni contenido de proveedor. Un fallo de captura
+revierte la transición local; los ACK remotos se recuperan con el UUID original.
+
+El lector verifica la versión externa y proyecta un DTO específico. El panel
+de actividad distingue «Pendiente de asignar» de «Cancelación pendiente» y
+«Cancelada», e incorpora un filtro para estas altas.
+
+Antes de habilitar este flujo hay que publicar y verificar escritor y lector
+de auditoría compatibles con v16, preservando certificados, recibos y datos.
+Los servicios de auditoría actuales todavía usan v15. Después se publica el
+backend/frontend y se prepara el ámbito, principal y worker; los flags siguen
+apagados hasta validar el recorrido completo y todos los consumidores de la
+identidad Google compartida. No emitir v16 hacia un escritor anterior.
 
 ## Exclusión de credenciales antiguas
 
@@ -151,12 +199,11 @@ y doble factor. Este fundamento Ads se entrega probado y el alta general se apla
 según el [plan por etapas](incremental-delivery-plan.md); el objetivo completo de
 seguridad conserva todos sus pendientes.
 
-Faltan las rutas de discovery/enqueue/estado con sesión persistente, el registro
-del job, la conexión de bajas con cancelaciones pendientes, la auditoría humana
-específica del inicio/cancelación de alta, y el recorrido de Ajustes. La
-confirmación final del mapping sí utiliza la auditoría humana v12 existente;
-esto no acredita cobertura completa del alta. No activar los gates por tener
-el repositorio, worker o cliente probados.
+Quedan la publicación compatible de auditoría, instalación/configuración del
+worker, principals y ámbitos reales, y el recorrido de selección/alta en
+Ajustes. La confirmación final del mapping utiliza además la auditoría humana
+v12 existente. No activar los gates por tener el repositorio, rutas o cliente
+probados: falta probar proveedores reales e interfaz autenticada.
 
 También siguen pendientes la primera identidad Google sin conexión gestionada,
 el uso del ámbito independiente en el adaptador OAuth de la aplicación, otros
@@ -181,3 +228,11 @@ leases, activación final y preservación de cuentas existentes. Se verifican
 también los tests HTTP/boundary y las regresiones SQL Ads/enrollment. Evidencia
 privada en `security-resume-20260917/google-ads-enrollment-worker/`.
 No se llamó a Google/AWS ni se cambiaron servicios, flags o claves reales.
+
+QA posterior del 18/09: 23 comprobaciones de alta/HTTP con sesiones persistidas,
+57 regresiones MySQL de Ads/SC/GA/GBP y 10 comprobaciones del visor; todas con
+datos ficticios y cierre de las instancias propias. Contratos/HTTP: 34 tests;
+auditoría: 72 tests con Node 24. El compilador Angular y seis contratos frontend
+también pasan. Evidencia y límites del recorrido visual local en
+`security-resume-20260917/google-ads-enrollment-api/`. Las pruebas autenticadas
+HTTP con cuentas ficticias no son una sesión de usuario en la interfaz real.

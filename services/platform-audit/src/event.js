@@ -11,6 +11,7 @@ function exact(value, keys) {
     || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) fail();
 }
 function event(value) {
+  if (value?.version === 16) return require('./google-ads-enrollment-event').enrollmentEvent(value);
   if (value?.version === 15) return require('./whatsapp-authorization-event').whatsappAuthorizationEvent(value);
   if (value?.version === 14) return require('./meta-scope-block-event').metaScopeBlockEvent(value);
   if (value?.version === 13) return require('./email-auth-event').emailAuthEvent(value);

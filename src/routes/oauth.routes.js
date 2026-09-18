@@ -1330,6 +1330,17 @@ router.use((req, res, next) => {
     return authMiddleware(req, res, next);
 });
 
+// This surface accepts only its canonical scope/body and handles errors without
+// logging provider or SQL details. Authentication above still applies first.
+let adsEnrollmentRoutes;
+router.use('/google/ads/enrollment', (req, res, next) => {
+    adsEnrollmentRoutes ||= require('./googleAdsEnrollment.routes').createRouter({
+        service: require('../services/googleAdsEnrollment.service'), sessions: accessSessions,
+        authorizeScope: authorizeExplicitConnectionScope, resolveConnection: resolveGoogleRequestConnection,
+    });
+    return adsEnrollmentRoutes(req, res, next);
+});
+
 // Toda lectura o mutación scope-aware pasa por este guard antes de que los
 // resolvers puedan consultar, promover o crear assignments de conexión.
 router.use(async (req, res, next) => {
@@ -3631,10 +3642,13 @@ router.get('/google/disconnection-status', async (req, res) => {
         const gbp = await require('../services/businessProfileRevocation.service').status(clinicIds);
         const properties = await require('../services/googlePropertyRevocation.service').status(clinicIds);
         const ads = await require('../services/googleAdsRevocation.service').status(clinicIds);
+        const enrollments = await require('../services/googleAdsEnrollment.service').disconnectionStatus(clinicIds);
         const pending = gbp.pending_assets + properties.pending_assets + ads.pending_assets;
         const confirmed = gbp.confirmed_assets + properties.confirmed_assets + ads.confirmed_assets;
         if (![pending, confirmed].every(n => Number.isSafeInteger(n) && n >= 0)) throw new Error('invalid_revocation_counts');
-        const result = { status: pending ? 'pending' : confirmed ? 'confirmed' : 'none', pending_assets: pending, confirmed_assets: confirmed };
+        const result = { status: pending || enrollments.pending_enrollments ? 'pending'
+            : confirmed || enrollments.cancelled_enrollments ? 'confirmed' : 'none', pending_assets: pending, confirmed_assets: confirmed,
+            ...(enrollments.pending_enrollments || enrollments.cancelled_enrollments ? enrollments : {}) };
         const verified = await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
         if (String(verified.userId) !== String(getUserIdFromToken(req))) throw Object.assign(new Error('auth_failed'), { httpStatus: 401 });
         const current = await authorizeExplicitConnectionScope(req, 'write');
@@ -3668,6 +3682,7 @@ router.delete('/google/disconnect', async (req, res) => {
 
             const connectionId = connection?.id || assignment?.googleConnectionId || null;
             let brokerRevocationsPending = 0;
+            let enrollmentPending = 0;
             const originalClinicIds = [...(req.marketingConnectionScopeAuthorization?.clinicIds || [])].map(Number).sort((a, b) => a - b);
             const revalidateDisconnect = async () => {
                 const verified = await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
@@ -3693,6 +3708,7 @@ router.delete('/google/disconnect', async (req, res) => {
                         sessionRef: req.authSession?.id,
                     });
                     brokerRevocationsPending = result.brokerRevocationsPending;
+                    enrollmentPending = result.enrollmentPending || 0;
                     await GoogleConnectionAssignment.upsert({
                         scopeKey: scope.scopeKey,
                         assignmentScope: scope.assignmentScope,
@@ -3713,8 +3729,9 @@ router.delete('/google/disconnect', async (req, res) => {
             }
 
             res.set('Cache-Control', 'private, no-store');
-            if (brokerRevocationsPending) return res.status(202).json({ success: true, status: 'revocation_pending',
-                pending_assets: brokerRevocationsPending, message: 'La desconexión se ha solicitado y está pendiente de confirmación.' });
+            if (brokerRevocationsPending || enrollmentPending) return res.status(202).json({ success: true, status: 'revocation_pending',
+                pending_assets: brokerRevocationsPending, ...(enrollmentPending ? { pending_enrollments: enrollmentPending } : {}),
+                message: 'La desconexión se ha solicitado y está pendiente de confirmación.' });
             return res.json({ success: true, message: scope.assignmentScope === 'group' ? 'Conexión Google desconectada para todo el grupo' : 'Conexión Google desconectada para esta clínica' });
         }
 
@@ -3740,7 +3757,8 @@ router.delete('/google/disconnect', async (req, res) => {
         ]);
         let managedReferences = await db.BusinessProfileBrokerBinding.count({ where: { google_connection_id: conn.id } })
             + await db.BusinessProfileBrokerRevocation.count({ where: { google_connection_id: conn.id } });
-        for (const registry of [db.GoogleOAuthBrokerBinding, db.SearchConsoleBrokerBinding, db.AnalyticsBrokerBinding, db.GooglePropertyBrokerRevocation, db.GoogleAdsBrokerBinding, db.GoogleAdsBrokerRevocation]) {
+        for (const registry of [db.GoogleOAuthBrokerBinding, db.SearchConsoleBrokerBinding, db.AnalyticsBrokerBinding, db.GooglePropertyBrokerRevocation,
+            db.GoogleAdsBrokerBinding, db.GoogleAdsBrokerRevocation, db.GoogleAdsEnrollmentScope, db.GoogleAdsEnrollmentRequest]) {
             managedReferences += await registry.count({ where: { [Op.or]: [{ google_connection_id: conn.id },
                 ...(typeof conn.googleUserId === 'string' ? [{ google_user_id: conn.googleUserId }] : [])] }, logging: false });
         }
@@ -3754,6 +3772,10 @@ router.delete('/google/disconnect', async (req, res) => {
         await conn.destroy();
         return res.json({ success: true, message: 'Conexión Google desconectada' });
     } catch (e) {
+        if (e?.code === 'google_discovery_session_required') return res.status(401).json({ success: false, error: 'google_discovery_session_required' });
+        if (e?.code?.startsWith('google_ads_enrollment_') || e?.code === 'audit_unavailable') {
+            return res.status(503).json({ success: false, error: 'google_ads_enrollment_unavailable' });
+        }
         if (e?.code === 'gbp_revocation_unavailable') return res.status(503).json({ success: false, error: 'gbp_revocation_unavailable' });
         if (e?.code === 'google_property_revocation_unavailable') return res.status(503).json({ success: false, error: 'google_property_revocation_unavailable' });
         if (e?.code === 'google_ads_revocation_unavailable') return res.status(503).json({ success: false, error: 'google_ads_revocation_unavailable' });

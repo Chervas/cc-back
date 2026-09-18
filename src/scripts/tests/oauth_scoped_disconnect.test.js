@@ -26,6 +26,7 @@ function modelsForWebRow(webRow, consumerClinicIds = []) {
     Clinica: emptyModel, GrupoClinica: emptyModel,
     SearchConsoleBrokerBinding: emptyModel, AnalyticsBrokerBinding: emptyModel, GooglePropertyBrokerRevocation: emptyModel, GoogleAdsBrokerBinding: emptyModel, GoogleAdsBrokerRevocation: emptyModel,
     GoogleConnectionAssignment: emptyModel,
+    GoogleAdsEnrollmentRequest: emptyModel,
     BusinessProfileBrokerBinding: emptyModel,
     BusinessProfileBrokerRevocation: emptyModel,
     MetaConnectionAssignment: emptyModel,

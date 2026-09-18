@@ -100,6 +100,9 @@ function createGoogleAdsMapping({ models, discovery = discoveryService, broker =
         await revoke({ models: m, transaction, connectionId: request.connectionId, scope: { assignmentScope: type,
           clinicId: type === 'clinic' ? Number(id) : null, groupId: type === 'group' ? Number(id) : null },
         clinicIds: request.clinicIds, actorId: request.actorId, sessionRef: request.sessionRef, mappings: [row], customerIds: [owner.customerId], now: now() });
+        await (enrollment || createGoogleAdsEnrollmentRepository({ models: m, now })).cancelScope({ scopeKey: request.scopeKey,
+          connectionId: request.connectionId, clinicIds: request.clinicIds, actorId: request.actorId, sessionRef: request.sessionRef,
+          transaction, customerIds: [owner.customerId], includeClinicScopes: type === 'group', reason: 'account_removed' });
         await m.ClinicGoogleAdsAccount.update({ isActive: false }, { transaction, logging: false, where: { googleConnectionId: request.connectionId,
           customerId: { [Op.in]: [owner.customerId, `${owner.customerId.slice(0,3)}-${owner.customerId.slice(3,6)}-${owner.customerId.slice(6)}`] } } });
         await check(); return { success: true };
@@ -159,6 +162,8 @@ function createGoogleAdsMapping({ models, discovery = discoveryService, broker =
           await revoke({ models: m, transaction, connectionId: saved.connectionId, scope: { assignmentScope: type,
             clinicId: type === 'clinic' ? Number(id) : null, groupId: type === 'group' ? Number(id) : null },
           clinicIds: saved.clinicIds, actorId, sessionRef, mappings: removed, customerIds: removedCustomers, now: now() });
+          await enrollments.cancelScope({ scopeKey: saved.scopeKey, connectionId: saved.connectionId, clinicIds: saved.clinicIds,
+            actorId, sessionRef, transaction, customerIds: removedCustomers, includeClinicScopes: type === 'group', reason: 'account_replaced' });
           await m.ClinicGoogleAdsAccount.update({ isActive: false }, { transaction, logging: false,
             where: { googleConnectionId: saved.connectionId, isActive: true, customerId: { [Op.in]: removedCustomers.flatMap(id => [id, `${id.slice(0, 3)}-${id.slice(3, 6)}-${id.slice(6)}`]) } } });
         }
