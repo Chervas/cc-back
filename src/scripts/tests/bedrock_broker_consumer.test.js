@@ -106,6 +106,31 @@ test('a waiting request snapshots the native context before the caller can mutat
   assert.equal(received.system[0].text,'ORIGINAL');
 });
 
+test('broker switch and scope are rechecked after an asynchronous dispatch guard',async()=>{
+ for(const change of ['disable','environment','connection']){
+  const f=setup();let calls=0;
+  const broker=createBedrockBroker({env:f.env,admission:createBedrockAdmission({spacingMs:0}),readFile:()=>Buffer.from('fictitious'),
+   clientFactory:()=>({async execute(){calls++;return {data:{ok:true}};}})});
+  await assert.rejects(broker.execute('custom',{modelId:input.model},{beforeDispatch:async()=>{
+   await Promise.resolve();
+   if(change==='disable')f.env.BEDROCK_BROKER_ENABLED='false';
+   else if(change==='environment')f.env.BEDROCK_BROKER_ENVIRONMENT='dev';
+   else f.env.BEDROCK_BROKER_CONNECTION_REF='bedrock:foreign';
+  }}),{code:change==='disable'?'provider_disabled':'broker_configuration_invalid'});
+  assert.equal(calls,0);
+ }
+});
+
+test('provider disable during the asynchronous pause check prevents dispatch',async()=>{
+ for(const key of ['BEDROCK_ENABLED','BEDROCK_BROKER_ENABLED']){
+  const f=setup();
+  await assert.rejects(f.bedrock.analyzeStructured({...input,beforeDispatch:async()=>{
+   await Promise.resolve();f.env[key]='false';
+  }}),{code:key==='BEDROCK_ENABLED'?'bedrock_disabled':'provider_disabled'});
+  assert.equal(f.calls.length,0);
+ }
+});
+
 test('pause, disabled provider and foreign broker environment stop inference; malformed output retains the existing controlled fallback', async () => {
   const paused = setup(); paused.pause();
   await assert.rejects(paused.orchestrator.analyzeStructured(input), { code: 'ai_paused' }); assert.equal(paused.calls.length, 0);

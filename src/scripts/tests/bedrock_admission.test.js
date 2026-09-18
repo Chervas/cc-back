@@ -36,6 +36,16 @@ test('waiting bytes are bounded independently of the queue count',async()=>{
  hold.resolve();assert.equal(await second,42);await first;
 });
 
+test('a delayed expiry timer cannot dispatch an expired conversation after a promise frees capacity',async()=>{
+ const admission=createBedrockAdmission({maxConcurrent:1,waitTimeoutMs:20,spacingMs:0});
+ const hold=deferred(),first=admission.run(()=>hold.promise,1000);await tick();
+ const queued=admission.run(()=>assert.fail('expired conversation reached provider'),1000);
+ const rejected=assert.rejects(queued,{code:'broker_queue_timeout'});
+ Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50);
+ hold.resolve();await first;await rejected;
+ assert.equal(await admission.run(()=>42,1000),42);
+});
+
 test('default admission spaces starts even when the provider replies immediately',async()=>{
  const admission=createBedrockAdmission();const starts=[];
  await Promise.all([0,1,2].map(()=>admission.run(()=>{starts.push(performance.now());},100)));

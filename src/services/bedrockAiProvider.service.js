@@ -165,7 +165,12 @@ async function analyzeStructured({
   const startedAt = Date.now();
   const response = bedrockBroker.enabled()
     ? await bedrockBroker.execute(useCase, command.input, { timeoutMs: config.timeoutMs,
-      beforeDispatch: async () => { assertConfigured(); if (beforeDispatch) await beforeDispatch(); } })
+      beforeDispatch: async () => {
+        assertConfigured(); if (beforeDispatch) await beforeDispatch();
+        // Read the provider switch directly. A broker switch changed during
+        // the await must not make getConfig read local provider credentials.
+        if (!enabled()) throw Object.assign(Error('bedrock_disabled'), { code: 'bedrock_disabled' });
+      } })
     : await sendWithTimeout(getClient(), command, config.timeoutMs);
   const value = extractToolInput(response, toolName);
   if (!value) {

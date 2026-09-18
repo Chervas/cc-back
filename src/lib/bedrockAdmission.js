@@ -17,6 +17,12 @@ function createBedrockAdmission({ maxConcurrent = 3, maxWaiting = 32,
   let active = 0, activeBytes = 0, waitingBytes = 0, nextStart = 0, timer;
   function pump() {
     clearTimeout(timer); timer = undefined;
+    // Timers can be delayed by CPU work while a promise continuation frees
+    // capacity first. Expired context must never be admitted in that gap.
+    while (queue.length && performance.now() >= queue[0].expiresAt) {
+      const expired = queue.shift(); clearTimeout(expired.deadline);
+      waitingBytes -= expired.bytes; expired.reject(failure('broker_queue_timeout'));
+    }
     if (!queue.length || active >= maxConcurrent || activeBytes + queue[0].bytes > MAX_REQUEST_BYTES) return;
     const delay = nextStart - performance.now();
     if (delay > 0) { timer = setTimeout(pump, delay); return; }
@@ -33,7 +39,7 @@ function createBedrockAdmission({ maxConcurrent = 3, maxWaiting = 32,
       if (typeof work !== 'function' || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_REQUEST_BYTES) return Promise.reject(failure('invalid_request'));
       if (queue.length >= maxWaiting || waitingBytes + bytes > maxWaitingBytes) return Promise.reject(failure('broker_queue_full'));
       return new Promise((resolve, reject) => {
-        const item = { work, bytes, resolve, reject };
+        const item = { work, bytes, resolve, reject, expiresAt: performance.now() + waitTimeoutMs };
         item.deadline = setTimeout(() => {
           const index = queue.indexOf(item); if (index < 0) return;
           queue.splice(index, 1); waitingBytes -= bytes;

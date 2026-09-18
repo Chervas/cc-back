@@ -50,6 +50,8 @@ function createBedrockBroker({ env = process.env, clientFactory = createIntegrat
           if (!enabled()) fail('provider_disabled');
           if (env.BEDROCK_BROKER_ENVIRONMENT !== environment || env.BEDROCK_BROKER_CONNECTION_REF !== command.connectionRef) fail('broker_configuration_invalid');
           if (beforeDispatch) await beforeDispatch();
+          if (!enabled()) fail('provider_disabled');
+          if (env.BEDROCK_BROKER_ENVIRONMENT !== environment || env.BEDROCK_BROKER_CONNECTION_REF !== command.connectionRef) fail('broker_configuration_invalid');
           return client.execute(command, { timeoutMs: timeoutMs + 10000 });
         }, bytes);
         return result.data;
