@@ -7,7 +7,10 @@ const SERVER_LABELS = { 'maintenance-client': 'Mantenimiento de la comunicación
   publisher: 'Renovación de certificados en AWS', authorized: 'Envíos de WhatsApp',
   onboarding: 'Conexión de números WhatsApp', inbox: 'Servidor de recepción de WhatsApp',
   'audit-writer': 'Registro de actividad', 'audit-reader': 'Consulta de actividad',
-  google: 'Integración con Google', ai: 'Proveedores de inteligencia artificial', email: 'Entrega de correo' };
+  google: 'Integración con Google', ai: 'Proveedores de inteligencia artificial', email: 'Entrega de correo',
+  'ai-staging': 'Proveedores de inteligencia artificial (staging)',
+  'bedrock-staging': 'Automatizaciones con IA (staging)',
+  'email-staging': 'Entrega de correo (staging)', 'email-dev': 'Entrega de correo (DEV)' };
 function readHealth({ enabled = process.env.TRANSPORT_CERTIFICATE_MONITOR_ENABLED === 'true',
   serversEnabled = process.env.SERVER_CERTIFICATE_MONITOR_ENABLED === 'true',
   filename = STATUS_FILE, serverFilename = SERVER_STATUS_FILE, now = Date.now(), read = fs.readFileSync, stat = fs.lstatSync } = {}) {

@@ -64,3 +64,16 @@ test('server status requires every configured identity and alerts independently 
   servers.expectedIds=['maintenance-client','publisher'];servers.certificates=servers.certificates.slice(0,2);
   assert.equal(readHealth(o)[0].entity_id,'server-maintenance');
 });
+test('enrolled AI and email identities are healthy or alert individually; foreign identities remain invalid',()=>{
+  const ids=['maintenance-client','publisher','authorized','onboarding','inbox','ai-staging','bedrock-staging','email-staging','email-dev'];
+  const servers={...healthy,expectedIds:ids,certificates:ids.map(id=>({...healthy.certificates[0],id}))};
+  const o={...options(),enabled:false,serversEnabled:true,read:()=>JSON.stringify(servers)};
+  assert.deepEqual(readHealth(o),[]);
+  for(const id of ids.slice(5)){
+    const row=servers.certificates.find(c=>c.id===id);row.status='failed';
+    const alerts=readHealth(o);assert.equal(alerts.length,1);assert.equal(alerts[0].entity_id,id);
+    assert.match(alerts[0].detail,/no pausa/);row.status='healthy';
+  }
+  servers.expectedIds.push('foreign-runtime');servers.certificates.push({...healthy.certificates[0],id:'foreign-runtime'});
+  assert.equal(readHealth(o)[0].entity_id,'server-maintenance');
+});
