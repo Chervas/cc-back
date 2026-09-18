@@ -1238,7 +1238,7 @@ Matriz AWS, QA y alcance: `docs/security/implementation-status.md`.
 El runbook de seguridad mantiene las aprobaciones por lote para despliegue,
 secretos reales, IAM/red/retención y migraciones de la BD compartida.
 
-## 2026-09-12 - Costes AWS: caché y monitorización, pendientes de activar
+## Costes AWS: caché y monitorización
 
 `GET /api/metasync/jobs/usage/aws-infrastructure/costs?month=YYYY-MM` lee
 exclusivamente `AwsInfrastructureCostCaches`. Requiere JWT y administrador
@@ -1264,14 +1264,16 @@ sin heredar secretos ni .env. Solo IMDS/STS al rol fijo de costes; consulta
 etiquetas, uso, forecast y Budget. No acceso a Secrets/KMS ni proveedores.
 
 Migración aditiva `20260912180000-create-aws-infrastructure-cost-caches.js`:
-JSON, fechas/error y lease UUID de 180 s con CAS. Probada exclusivamente en
-MySQL temporal. Fallo conserva último dato; sin dato completo pendiente,
+JSON, fechas/error y lease UUID de 180 s con CAS. Fallo conserva último dato; sin dato completo pendiente,
 si el válido supera 36 h o falla la recogida queda atrasado. Ajustes añade
 `tab=aws` sin polling del colector ni suma con costes de IA.
 
-Contrato y lote pendiente de IAM/coste/migración/despliegue:
-`services/aws-cost-collector/README.md`. El código está probado offline;
-no acredita permisos efectivos, tags, factura AWS ni despliegue utilizado.
+Contrato y procedimiento de recogida: `services/aws-cost-collector/README.md`.
+La consulta y el colector tienen activación separada. El catálogo diario está
+preparado en DEV; la promoción pública inicial solo instala la consulta de caché.
+La recogida inicial puede ser manual y nunca convierte `collectionEnabled` en
+true: ese indicador requiere publicar y habilitar el executor con identidad
+permanente. Estado operativo y mediciones en el manual 19/99.
 
 ## 2026-09-12 - BD: TLS preparado, metadata y restauración ficticia
 
