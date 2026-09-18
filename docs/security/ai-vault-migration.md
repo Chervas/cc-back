@@ -273,3 +273,24 @@ used a 4 MiB response that fitted the OS socket buffer; the corrected backpressu
 case uses a 16 MiB range and confirms admission/revocation under a stalled reader.
 These checks are not authenticated UI evidence and do not resolve the OpenAI
 credit_balance_exhausted or Gemini permission failures recorded above.
+
+Preparation/HTTPS evidence after that commit: `clinicaclick-ai-files-staging`
+installed on the CRM host (UID 995, loopback 3098, Unix control, 256 MiB memory
+maximum / 50% CPU). No consumer flags changed and boot enablement deferred.
+Four simultaneous 32 MiB fictitious files passed upload/download/revocation:
+71.8 MiB peak process RSS in the installed runtime; cgroup peak including charged
+cache 160.7 MiB, zero memory-limit failures and zero restarts. Spool empty after
+QA. Real HTTPS HEAD/range/full SHA, HTTP rejection, no POST, and revoked 404 pass;
+no capability matches in six NGINX logs or service journal. DEV UID 998 is denied
+control-socket access. Evidence: `file-transfer-{installed-capacity-result,isolation}.json`
+and `private-link-qa-result.json` in the September 17 security-resume directory.
+
+AWS SSO expired before deploying `282e942b` remotely. The AWS runtime remains
+`release-553e9cdf` until renewed access and activation of the prepared archive
+(SHA256 `352eddd5dd3bd5380384b1fd16b963ebf442721cbc3294c3b4cd959f23f94680`,
+76 files). `activate-url-broker.py` is prepared with checked source/destination,
+configuration/unit backup and automatic rollback on failed restart. The pending
+`private-groq-consumer-qa.cjs` runs the actual consumer function with the real
+file issuer and signed AWS request, while injecting app DB/pause/telemetry only;
+it cannot count as authenticated UI verification. Never run it against the old
+AWS binary contract or interpret the earlier public-URL proof as its result.
