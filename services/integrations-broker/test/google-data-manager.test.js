@@ -113,6 +113,7 @@ test('status is bound to the durable sender/tenant/account receipt across broker
   const f = setup(t), request = f.command('ingest', payload()); await f.execute(request);
   f.state.response = f.status(); f.reset(f.policy);
   const result = await f.execute(f.command('status', { submissionId: request.requestId }));
+  assert.equal(result.data.submissionId, request.requestId); assert.equal(result.data.requestId, 'fictitious-provider-request');
   assert.equal(result.data.requestStatusPerDestination[0].requestStatus, 'SUCCESS');
   assert.equal(f.state.calls[1].path, '/v1/requestStatus:retrieve?requestId=fictitious-provider-request');
   const other = generateKeyPairSync('ed25519');
@@ -171,7 +172,8 @@ test('status rejects other destinations, unbounded counts and foreign statuses; 
   const result = await f.execute(f.command('status', { submissionId: request.requestId }));
   assert.deepEqual(result.data.requestStatusPerDestination[0].warningInfo.warningCounts, [{ reason: 'UNKNOWN', recordCount: 1 }]);
   f.state.response = {};
-  assert.deepEqual((await f.execute(f.command('status', { submissionId: request.requestId }))).data, { requestStatusPerDestination: [] });
+  assert.deepEqual((await f.execute(f.command('status', { submissionId: request.requestId }))).data,
+    { submissionId: request.requestId, requestId: 'fictitious-provider-request', requestStatusPerDestination: [] });
   f.state.response = f.status(); f.state.response.requestStatusPerDestination[0].requestStatus = 'FAILED';
   f.state.response.requestStatusPerDestination[0].errorInfo = { errorCounts: [{ reason: 'PROCESSING_ERROR_REASON_CLICK_NOT_FOUND', recordCount: '1' }] };
   assert.equal((await f.execute(f.command('status', { submissionId: request.requestId }))).data

@@ -464,8 +464,16 @@ function appendHistory(row) {
   return history.slice(-20);
 }
 
+function assertLegacyAttemptUnreserved(row) {
+  if (row?.requestMetadata && Object.hasOwn(row.requestMetadata, 'broker_submission_id')) {
+    throw Object.assign(new Error('Este envío ya está registrado y requiere comprobar su resultado antes de continuar'),
+      { code: 'GOOGLE_CONVERSION_BROKER_RESERVED' });
+  }
+}
+
 async function prepareAuditRow({ auditModel, values, status, reason = null }) {
   const existing = await auditModel.findOne({ where: { dedupeKey: values.dedupeKey } });
+  assertLegacyAttemptUnreserved(existing);
   if (['accepted', 'succeeded', 'partial_success'].includes(existing?.status)) {
     return { row: existing, duplicate: true, inProgress: false, terminalStatus: existing.status };
   }
@@ -499,6 +507,7 @@ async function prepareAuditRow({ auditModel, values, status, reason = null }) {
       if (!isUniqueCollision) throw error;
       const concurrent = await auditModel.findOne({ where: { dedupeKey: values.dedupeKey } });
       if (!concurrent) throw error;
+      assertLegacyAttemptUnreserved(concurrent);
       return {
         row: concurrent,
         duplicate: ['accepted', 'succeeded', 'partial_success'].includes(concurrent.status),
@@ -1051,6 +1060,7 @@ async function uploadGoogleConversionDestination({
   }
 
   const existingAudit = await auditModel.findOne({ where: { dedupeKey } });
+  assertLegacyAttemptUnreserved(existingAudit);
   if (['accepted', 'succeeded', 'partial_success'].includes(existingAudit?.status)) {
     return destinationResult({
       sent: false,

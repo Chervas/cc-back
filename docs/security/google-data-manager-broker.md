@@ -15,7 +15,7 @@ Data Manager; instalar código nuevo no convierte una cohorte de lectura en escr
 |---|---|---|
 | `google.ads.conversion.validate.v1` | Acción, evento y origen registrados | `validated`, número de avisos; siempre `validateOnly=true` con datos ficticios |
 | `google.ads.conversion.ingest.v1` | Selección y un evento tipado | Acuse `accepted`, UUID de envío, ID del proveedor y número de avisos |
-| `google.ads.conversion.status.v1` | UUID de un envío propio | Estado, cuenta/acción fijadas y códigos técnicos/conteos acotados |
+| `google.ads.conversion.status.v1` | UUID de un envío propio | UUID e ID de recibo originales, estado, cuenta/acción y códigos/conteos acotados |
 
 La política del broker fija cuenta, gestor, proyecto de cuota, acciones, eventos,
 orígenes y autorización de señales mejoradas. Cada grant fija principal, clínica,
@@ -65,8 +65,8 @@ en el recibo CRM; solo el UUID `submissionId` viaja como selección al broker.
 Cada consulta posterior usa un nuevo UUID de comando de lectura. Las respuestas
 se vuelven a validar en el cliente contra cuenta, acción y contrato exactos.
 
-El UUID de comando debe reservarse de forma durable en el CRM antes del envío y
-mantenerse entre reintentos. El broker persiste un intento antes de llamar a Google.
+El UUID de comando se reserva en el nuevo registro SQL descrito más abajo antes
+del envío y se conserva durante la recuperación. El broker persiste un intento antes de llamar a Google.
 El recibo aceptado, la respuesta de comando y el evento de auditoría se confirman
 en una misma transacción SQLite. Solo guarda referencias, digest de alcance,
 estado, ID de proveedor y fechas; no guarda clic, hashes personales, cuerpo ni token.
@@ -77,6 +77,11 @@ interrupción o fallo de persistencia después de llamar al proveedor queda con
 resultado desconocido: no se genera un nuevo UUID ni se reenvía automáticamente.
 La recuperación de un resultado desconocido necesita conciliación explícita; la
 API de estado solo sirve cuando existe un recibo aceptado durable.
+
+La consulta devuelve también `submissionId` y `requestId` desde ese recibo durable,
+ligados al mismo ámbito. Así el CRM recupera el identificador Google incluso si
+se perdió el ACK inicial. Una respuesta de Google todavía vacía no se interpreta
+como éxito de procesamiento. El panel conserva el formato de diagnóstico actual.
 
 El estado exige el mismo principal, clínica, conexión, activo y alcance de destino
 del envío; también vuelve a comprobar la revocación antes y después del proveedor.
@@ -109,11 +114,9 @@ el cliente CRM real al servidor HTTPS local; 23/23 de cliente, scope y lector
 Ads en Node18. Guardias de red/BD impiden acceder a los entornos operativos.
 
 Queda conectar y probar subida web, hitos CRM nativos, preparación validate-only,
-diagnóstico y sus resolutores de permisos. La reserva actual de
-`GoogleAdsConversionUploadAttempts` reutiliza pendientes antiguos y fallidos:
-antes de activar broker necesita identidad durable de comando, enlace al recibo,
-tratamiento de resultado desconocido y recuperación sin doble envío. Conservar
-los grants, la política del workspace, consentimiento, pausas y deduplicación.
+diagnóstico y sus resolutores de permisos. La nueva reserva SQL y el coordinador
+están preparados, pero todavía no se invocan desde esos flujos de negocio.
+Conservar los grants, la política del workspace, consentimiento, pausas y deduplicación.
 El [inventario de este tramo](google-data-manager-consumers.json) incluye los dos
 validadores de onboarding y el job que combina diagnósticos con otras tareas;
 no debe reactivarse ese job para probar aisladamente la consulta de un recibo.
@@ -127,3 +130,52 @@ No retirar credenciales locales ni marcar el bloque aceptado antes de esa eviden
 Referencias oficiales revisadas el 18/09/2026:
 [ingesta y validateOnly](https://developers.google.com/data-manager/api/reference/rest/v1/events/ingest),
 [estados, conteos y motivos](https://developers.google.com/data-manager/api/reference/rest/v1/requestStatus/retrieve).
+
+## Reserva SQL y recuperación en CRM, 18/09/2026
+
+`GoogleConversionSubmissions` conserva UUID, intento/dedupe, mapping, referencias
+de ámbito y hashes de contexto, identidad de firma, auditoría y comando. No
+almacena el cuerpo, clic, email/teléfono, hashes personales ni credenciales.
+El repositorio requiere la identidad estable de audiencia/clave y `activeSince`,
+una fecha de corte explícita y fija. No debe calcularse de nuevo al reiniciar.
+
+Solo se admiten intentos nuevos pendientes, con contador uno, datos de ámbito y
+consentimiento coincidentes, creados después del corte y dentro de cinco minutos.
+El evento también debe ser posterior al corte. Un registro preparado caduca para
+envío a los cinco minutos. No se adoptan pendientes históricos, fallidos o recibos
+legacy como nuevas conversiones broker. Dos reservas concurrentes del mismo
+intento convergen en un UUID; solo una puede pasar de `prepared` a `attempted`.
+
+`googleConversionDelivery` combina repositorio y cliente tipado. Después de
+persistir `attempted`, ninguna repetición vuelve a ejecutar ingesta, aunque el
+acuse o su guardado fallen. Un estado `unknown` exige conciliación mediante la
+operación de lectura. Incluso si falla guardar `unknown`, queda el marcador
+anterior `attempted`. Si el broker no conserva recibo, no se infiere permiso para
+reintentar: ese caso requiere revisión explícita.
+
+La aceptación y la actualización de `GoogleAdsConversionUploadAttempts` ocurren
+en una transacción SQL. Se conserva el historial y la forma de los diagnósticos
+que consume Salud. La consulta recupera el ID Google perdido y puede marcar
+aceptación, éxito, fallo o éxito parcial. Una respuesta tardía de procesamiento
+no degrada un estado terminal. Un fallo confirmado tampoco crea otro envío.
+
+El intento existente recibe `requestMetadata.broker_submission_id`. La vía legacy
+rechaza un registro marcado, incluido el camino de colisión al insertar. Esto
+no sustituye drenar todos los emisores antiguos antes del corte: un proceso viejo
+ya en vuelo no adquiere estas defensas por publicar una versión nueva.
+
+Migración aditiva `20260918110000-create-google-conversion-submissions.js`:
+tabla independiente sin borrado en cascada, tres CHECK de estado y unicidad por
+intento, dedupe y recibo. `down` se niega con cualquier historial. El contrato de
+despliegue pasa a 36 tablas y fija también la tabla de intentos existente y sus
+tres migraciones previas: **solo una tabla nueva**. Ninguna DDL operativa aplicada
+en este bloque. Un HEAD nuevo necesita un plan y preflight nuevos; no usar el
+plan de trece migraciones ya ejecutado ni publicar esquivando el comprobador.
+
+La prueba `google_conversion_submission_mysql.integration.js` usa MySQL propio,
+el repositorio/scope/cliente reales y broker firmado con SQLite. Google/AWS son
+ficticios; la única conexión SQL admitida es el socket de la instancia de prueba.
+Incluye concurrencia, commit fallido, doble fallo de persistencia, revocación,
+recuperación tras reapertura SQLite, rechazo de históricos y preservación de la
+evidencia que consume Salud. El mismo aplicador ejecuta la migración fijada y
+rechaza repetir su plan. No equivale a un recorrido autenticado ni a un corte real.

@@ -41,7 +41,7 @@ function createDataManagerOperations({ store, http, now = Date.now }) {
           path: '/v1/requestStatus:retrieve?requestId=' + encodeURIComponent(row.provider_id),
           token: secret, quotaProjectId: target.quotaProjectId, signal });
         assertActive(); receipt(request, { id: principalId }, binding);
-        return C.statusResult(raw, target);
+        return { submissionId: row.id, requestId: row.provider_id, ...C.statusResult(raw, target) };
       }
       const target = C.resource(binding, assetRef, payload);
       const json = C.body(operation, payload, target, requestId, now());

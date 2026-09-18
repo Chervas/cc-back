@@ -1,7 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "7db098a97c810109dc38c2e967144cc91d3f7d45",
+  "sourceBaseHead": "d7920ab10d187838f3277c70c05e80fdb6375f16",
   "includesWorkingChanges": true,
   "scope": "Bounded manual Data Manager caller inventory; not a complete inventory of all Google identity consumers or external OPS.",
   "runtimeConsumersMigrated": 0,
@@ -9,7 +9,9 @@
     "broker": 556,
     "backendClientScopeReader": 23,
     "provider": "fictitious_offline",
-    "authenticatedUI": "pending"
+    "authenticatedUI": "pending",
+    "mysqlJournalChecks": 18,
+    "schemaUnitTests": 4
   },
   "rows": [
     {
@@ -20,15 +22,15 @@
     },
     {
       "file": "src/services/googleAdsConversionUpload.service.js",
-      "sha256": "c927db47f17d0136807caf703b5bbe563ae5ca4aed0a74f7c2b537263f360650",
-      "role": "Subida web/CRM y reserva GoogleAdsConversionUploadAttempts: no renovar UUID ni reutilizar pendientes antiguos para retransmitir.",
-      "state": "durable_reservation_and_adapter_pending"
+      "sha256": "17d178166c59f5ce63fac1cd0980f9f2482b7c431ef7a027a80a5f1b92fe9b2b",
+      "role": "Vía legacy rechaza intentos con reserva broker, también tras colisión de inserción. Conectar la subida web/CRM al nuevo coordinador sigue pendiente.",
+      "state": "legacy_guard_prepared_business_adapter_pending"
     },
     {
       "file": "models/googleadsconversionuploadattempt.js",
       "sha256": "65ea80cd88cb8d104753e46d79fa95c8dc933ae49cb2d2d4f221795e6997adc2",
-      "role": "Registro CRM actual sin UUID de comando broker ni estado outcome_unknown explícito.",
-      "state": "durable_reservation_pending"
+      "role": "Modelo existente preservado; el repositorio nuevo registra el UUID en requestMetadata y confirma su estado junto al journal.",
+      "state": "legacy_schema_pinned_journal_prepared"
     },
     {
       "file": "src/services/googleDataManagerDiagnostics.service.js",
@@ -80,7 +82,7 @@
     },
     {
       "file": "src/services/googleDataManagerBrokerClient.service.js",
-      "sha256": "25743800c7f948e6c8ee4ba064520bd31fc9ffe99d0a7f10d6a20d694fe6c70c",
+      "sha256": "e843ba0bb8b3bdf1ef52c1d260507f685e44d04b1f64be018b86f788cf936fa0",
       "role": "Cliente tipado sin tokens con revalidación, DTO y UUID proporcionado; aún sin callsites de negocio.",
       "state": "prepared_offline"
     },
@@ -98,9 +100,39 @@
     },
     {
       "file": "services/integrations-broker/src/google-data-manager.js",
-      "sha256": "84063f30cb600953eb8d6da3580560efcc54df5b8b6bbdb26642ea464e34a19e",
+      "sha256": "9f53087c7b92a1d75e5f4782472e1602ef73fba9b8ef9b3d7128523474490af8",
       "role": "Ledger SQLite, recibos y auditoría atómicos sin reenvío automático.",
       "state": "prepared_offline"
+    },
+    {
+      "file": "src/services/googleConversionSubmission.repository.js",
+      "role": "Reserva SQL, control de identidad y aceptación/conciliación atómicas.",
+      "state": "prepared_offline",
+      "sha256": "4cfc7217908baddbd59a946e818d12ac9e96028a55a08792d370e5900d845dfe"
+    },
+    {
+      "file": "src/services/googleConversionDelivery.service.js",
+      "role": "Coordinador sin reenvío tras attempted; recuperación por lectura. Aún sin callsites de negocio.",
+      "state": "prepared_offline",
+      "sha256": "15479ccbf7516cff8d76fb1fdee3833109148e5e058dbd703c881bafdab2007a"
+    },
+    {
+      "file": "models/googleconversionsubmission.js",
+      "role": "Ledger independiente sin payload personal; identidad/digests/estado/recibos.",
+      "state": "prepared_offline",
+      "sha256": "76ead16844dee725963e250db60220d17dff144e276b487a7fee20527b8332d0"
+    },
+    {
+      "file": "migrations/20260918110000-create-google-conversion-submissions.js",
+      "role": "Una tabla nueva con unicidad y CHECK. DDL verificada solo en MySQL aislado.",
+      "state": "runtime_ddl_pending",
+      "sha256": "91b44f36f7a542c89c23de28391134e60f8fddaade0fdeaaaedf49f7b9878c70"
+    },
+    {
+      "file": "src/services/campaignWorkspaceGoogleSignalEvidence.service.js",
+      "role": "Salud consume ID de proveedor y diagnóstico normalizado; compatibilidad de datos recuperados probada. Resolver legacy todavía pendiente.",
+      "state": "health_data_parity_verified_resolver_pending",
+      "sha256": "35299c03aad3703fb840291e3afe3ce5538d86d6391a4bb3103c89fabd80660b"
     }
   ]
 }

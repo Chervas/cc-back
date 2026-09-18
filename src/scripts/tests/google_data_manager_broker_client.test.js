@@ -16,7 +16,7 @@ async function fixture() {
       state.calls.push({ command, budget }); await state.onCall?.(command);
       const data = command.operation === C.OPERATIONS.validate ? { validated: true, warningCount: 0 }
         : command.operation === C.OPERATIONS.ingest ? { accepted: true, submissionId: command.requestId, requestId: 'fictitious-provider', warningCount: 0 }
-          : { requestStatusPerDestination: [] };
+          : { submissionId: command.payload.submissionId, requestId: 'fictitious-provider', requestStatusPerDestination: [] };
       const response = { requestId: command.requestId, data }; state.mutate?.(response); return response;
     } } });
   const context = await service.prepare(f.mapping);
@@ -30,7 +30,8 @@ test('application facade binds all three conversion operations to the existing o
   assert.deepEqual(await f.invoke('validate', selection()), { validated: true, warningCount: 0 });
   const result = await f.invoke('ingest', payload(), { requestId });
   assert.deepEqual(result, { accepted: true, submissionId: requestId, requestId: 'fictitious-provider', warningCount: 0 });
-  assert.deepEqual(await f.invoke('status', { submissionId: requestId }, { expectedActionId: '456' }), { requestStatusPerDestination: [] });
+  assert.deepEqual(await f.invoke('status', { submissionId: requestId }, { expectedActionId: '456' }),
+    { submissionId: requestId, requestId: 'fictitious-provider', requestStatusPerDestination: [] });
   assert.equal(f.local.guards, 6);
   for (const { command, budget } of f.local.calls) {
     assert.equal(command.connectionRef, f.binding.connection_ref); assert.equal(command.assetRef, f.binding.asset_ref);
@@ -108,14 +109,16 @@ test('status accepts only the expected account/action, known projection and one 
   const status = () => ({ destination: { operatingAccount: { accountType: 'GOOGLE_ADS', accountId: f.mapping.customerId },
     loginAccount: { accountType: 'GOOGLE_ADS', accountId: f.mapping.loginCustomerId }, productDestinationId: '456' },
     requestStatus: 'SUCCESS', eventsIngestionStatus: { recordCount: 1 }, errorInfo: { errorCounts: [] }, warningInfo: { warningCounts: [] } });
-  f.local.mutate = r => { r.data = { requestStatusPerDestination: [status()] }; };
+  f.local.mutate = r => { r.data.requestStatusPerDestination = [status()]; };
   const result = await f.invoke('status', { submissionId: randomUUID() }, { expectedActionId: '456' });
   assert.equal(result.requestStatusPerDestination[0].requestStatus, 'SUCCESS');
   for (const mutate of [r => r.destination.operatingAccount.accountId = '1111111111', r => r.destination.productDestinationId = '999',
     r => r.eventsIngestionStatus.recordCount = 2, r => r.message = 'FICTITIOUS-SECRET', r => r.requestStatus = 'NEW_UNREVIEWED_STATUS']) {
-    f.local.mutate = r => { const row = status(); mutate(row); r.data = { requestStatusPerDestination: [row] }; };
+    f.local.mutate = r => { const row = status(); mutate(row); r.data.requestStatusPerDestination = [row]; };
     await assert.rejects(f.invoke('status', { submissionId: randomUUID() }, { expectedActionId: '456' }), { code: 'broker_response_invalid' });
   }
+  f.local.mutate = r => { r.data.submissionId = randomUUID(); };
+  await assert.rejects(f.invoke('status', { submissionId: randomUUID() }, { expectedActionId: '456' }), { code: 'broker_response_invalid' });
 });
 test('unknown outcomes and provider timeouts never retry or replace the caller command ID', async () => {
   for (const code of ['outcome_unknown', 'provider_timeout', 'idempotency_conflict']) {

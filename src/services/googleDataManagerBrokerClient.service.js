@@ -11,17 +11,18 @@ const SAFE = new Set(['broker_binding_invalid', 'broker_cohort_disabled', 'broke
   'credential_revoked', 'secret_unavailable', 'provider_failed', 'provider_timeout', 'provider_unauthorized', 'rate_limited',
   'audit_unavailable', 'idempotency_conflict', 'outcome_unknown', 'request_in_progress', 'conversion_paused', 'consent_not_granted']);
 const safe = error => SAFE.has(error?.code) ? error.code : 'google_data_manager_broker_failed';
-function project(family, data, requestId, captured, expectedActionId) {
+function project(family, data, requestId, captured, expectedActionId, expectedSubmissionId) {
   if (!plain(data) || Buffer.byteLength(JSON.stringify(data)) > 32768) fail('broker_response_invalid');
   if (family === 'status') {
-    if (!exact(data, 'requestStatusPerDestination')) fail('broker_response_invalid');
+    if (!exact(data, 'submissionId,requestId,requestStatusPerDestination') || data.submissionId !== expectedSubmissionId
+      || !C.providerId(data.requestId)) fail('broker_response_invalid');
     let projected;
     try { projected = C.statusResult(data, { customerId: captured.customerId, loginCustomerId: captured.loginCustomerId,
       destination: { conversionActionId: expectedActionId } }); } catch { fail('broker_response_invalid'); }
     // The remote projection has a fixed DTO; reject extra/changed fields rather than
     // returning raw provider content or silently accepting a different contract.
-    if (canonical(projected) !== canonical(data)) fail('broker_response_invalid');
-    return projected;
+    if (canonical(projected.requestStatusPerDestination) !== canonical(data.requestStatusPerDestination)) fail('broker_response_invalid');
+    return { submissionId: data.submissionId, requestId: data.requestId, ...projected };
   }
   if (!Number.isInteger(data.warningCount) || data.warningCount < 0 || data.warningCount > 100) fail('broker_response_invalid');
   if (family === 'validate') {
@@ -70,7 +71,7 @@ function createGoogleDataManagerBrokerClient({ client, assertContext, now = Date
         tenantRef: captured.tenantRef, assetRef: captured.assetRef, payload }, { timeoutMs: Math.min(30000, deadline - now()) });
       await verify();
       if (response?.requestId !== requestId) fail('broker_response_invalid');
-      return project(family, response.data, requestId, captured, expectedActionId);
+      return project(family, response.data, requestId, captured, expectedActionId, payload.submissionId);
     } catch (error) { fail(safe(error)); }
   } };
 }

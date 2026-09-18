@@ -1,5 +1,20 @@
 # Google: requisitos de esquema antes del despliegue
 
+Actualización de conversiones, 18/09/2026: el contrato del nuevo código exige
+36 tablas y 29 hashes de migración. Añade `GoogleConversionSubmissions` y fija la
+definición de `GoogleAdsConversionUploadAttempts` ya existente. Solo se crea una
+tabla nueva mediante `20260918110000-create-google-conversion-submissions.js`;
+esta migración aún no se ha aplicado a DEV ni staging. Las 34 tablas del corte
+inferior describen la release operativa anterior. Hace falta preflight y plan
+nuevos antes de publicar este código; no repetir las trece migraciones ya
+ejecutadas en DEV. [Contrato y pruebas del registro](google-data-manager-broker.md#reserva-sql-y-recuperación-en-crm-18092026).
+
+El preflight DEV de solo lectura del mismo día comprobó las 36 tablas: la única
+incidencia es la ausencia de `GoogleConversionSubmissions`, y la única migración
+pendiente es la anterior. La tabla histórica de intentos sí coincide con el
+contrato. Resultado esperado `incompatible`: impide publicar este código hasta
+preparar y aplicar un plan nuevo. No se ejecutó DDL durante esa comprobación.
+
 Estado comprobado el 18/09/2026. La preparación del esquema no migra tokens,
 no añade permisos y no activa consumidores. La conexión compartida observada en
 staging sirve 14 mappings de Business Profile, 6 de Search Console, 5 de

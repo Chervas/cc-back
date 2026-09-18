@@ -9,6 +9,11 @@ Pruebas offline con HTTPS/SQLite reales. Consumidores CRM, despliegue AWS,
 proveedor y aceptación UI autenticada todavía pendientes.
 [Contrato, límites y recuperación](../../docs/security/google-data-manager-broker.md).
 
+La reserva SQL y el coordinador CRM conservan el UUID aun con ACK perdido o fallo
+de commit. Consulta de estado devuelve el recibo original dentro del mismo scope.
+Dieciocho comprobaciones MySQL aisladas,556 broker y23 cliente/scope pasan; aún
+sin callsites de negocio conectados, DDL operativa ni aceptación UI real.
+
 ## 13/09/2026 — Alta WhatsApp durable en el broker
 
 Cohorte privada `whatsapp-onboarding-v1`: begin/finish/status/abort firmados,
