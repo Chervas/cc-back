@@ -336,7 +336,8 @@ Validación del candidato con este ajuste:
 - Ráfaga real de12 controles Micro por el consumidor exacto:12/12 correctos,
   3825ms totales, pico de dos llamadas simultáneas,297ms de separación mínima
   observada en el cliente. Contenido ficticio, sin BD/telemetría de aplicación.
- 24 eventos solicitados/completados, sin backlog; PIDs/reinicios de Bedrock,
+  24 eventos solicitados/completados, recibos S3 comprobados independientemente
+  por versión/SHA256/KMS y sin backlog; PIDs/reinicios de Bedrock,
   OCR/audio y WhatsApp autorizado sin cambios.
 
 Evidencia: `bedrock-paced-regressions.log`,
@@ -344,6 +345,13 @@ Evidencia: `bedrock-paced-regressions.log`,
 `broker-failures-paced-active.json` y `bedrock-runtime/paced-burst-qa.json`.
 La discrepancia semántica real21/22 se conserva; esta ráfaga de salud no la
 reclasifica como aprobada. Corte público y recorrido visual siguen pendientes.
+
+Código `ff0d9a85` publicado en DEV aislado por el publicador original, con
+preflight SQL previo, API UID998 y worker UID996. API sin claves de proveedor,
+MFA/sesiones enforce y jobs clínicos apagados. El candidato staging con la cola
+es `1f2e4dfa` en la misma rama de preparación, ya subido. La API pública staging,
+gateway y fresh-inbound conservaron sus PIDs y configuración;401 en auth/me de
+los tres puertos. La publicación DEV no activó ningún flag ni grant Bedrock.
 
 El diagnóstico WhatsApp correlacionó únicamente IDs, estados y auditoría:
 cuatro rechazos `rate_limited` carecen de comando reservado; hay20 envíos
