@@ -22,7 +22,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     { tableName: 'Clinicas', timestamps: false }); await models.Clinica.sync();
   await models.Clinica.bulkCreate([{ id_clinica: 59, grupoClinicaId: 5 }, { id_clinica: 71, grupoClinicaId: 5 }, { id_clinica: 99, grupoClinicaId: 6 }]);
   await sql.query('INSERT INTO GruposClinicas (id_grupo) VALUES (5),(6)');
-  const configFields = { assignment_scope: D.STRING, clinic_id: D.INTEGER, group_id: D.INTEGER, config: D.JSON };
+  const configFields = { assignment_scope: D.STRING, clinic_id: D.INTEGER, group_id: D.INTEGER, config: D.JSON, domains: D.JSON, hmac_key: D.STRING };
   for (const [name, type] of Object.entries(configFields)) await sql.getQueryInterface().addColumn('IntakeConfigs', name, { type });
   models.IntakeConfig = sql.define('IntakeConfig', { id: { type: D.INTEGER, primaryKey: true }, ...configFields },
     { tableName: 'IntakeConfigs', timestamps: false });
@@ -77,8 +77,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.GoogleConnection.addHook('beforeFind', options => {
     if (!options.attributes || options.attributes.includes('accessToken') || options.attributes.includes('refreshToken')) tokenReads++;
   });
-  f.binding.googleDataManager = { quotaProjectId: 'fictitious-project', destinations: [{ assetRef: 'ads:1234567890',
-    conversionActionId: '456', events: ['lead'], sources: ['WEB', 'OTHER'], enhancedPolicy: null }] };
+  const actionEvents = ['lead', 'qualified_lead', 'schedule'];
+  f.binding.googleDataManager = { quotaProjectId: 'fictitious-project', destinations: actionEvents.map((event, index) => ({ assetRef: 'ads:1234567890',
+    conversionActionId: String(456 + index), events: [event], sources: ['WEB', 'OTHER'], enhancedPolicy: null })) };
   f.policy.grants.forEach(grant => { grant.tenantRef = 'clinic:59'; });
   f.policy.grants[0].operations = [...f.policy.grants[0].operations, ...Object.values(C.OPERATIONS)];
   const sdk = { async send(command) { const result = await f.sdk.send(command);
@@ -86,23 +87,42 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
       const value = JSON.parse(result.SecretString); value.scopes.push(...C.SCOPES); result.SecretString = JSON.stringify(value);
     } return result;
   } };
+  const providerDestinations = new Map(); const validations = [];
   const http = async request => {
     if (request.hostname === 'oauth2.googleapis.com') return { access_token: ACCESS, token_type: 'Bearer', expires_in: 3600,
       scope: 'https://www.googleapis.com/auth/adwords ' + C.SCOPES[0] };
-    assert.equal(request.hostname, 'datamanager.googleapis.com'); assert.equal(request.token.toString(), ACCESS);
-    if (request.path === '/v1/events:ingest') { providerWrites++; return { requestId: 'fictitious-receipt-' + providerWrites }; }
+    assert.equal(request.token.toString(), ACCESS);
+    if (request.hostname === 'googleads.googleapis.com') {
+      assert.match(request.json.query, /FROM conversion_action LIMIT 5001$/);
+      assert.equal(request.loginCustomerId, mapping.loginCustomerId);
+      return { results: actionEvents.map((event, index) => ({ customer: { id: mapping.customerId }, conversionAction: {
+        id: String(456 + index), resourceName: `customers/${mapping.customerId}/conversionActions/${456 + index}`,
+        name: ['Lead - ClinicaClick', 'Qualified Lead - ClinicaClick', 'Schedule - ClinicaClick'][index],
+        type: 'UPLOAD_CLICKS', category: ['SUBMIT_LEAD_FORM', 'QUALIFIED_LEAD', 'BOOK_APPOINTMENT'][index], status: 'ENABLED',
+        countingType: 'MANY_PER_CLICK', primaryForGoal: false, includeInConversionsMetric: false } })) };
+    }
+    assert.equal(request.hostname, 'datamanager.googleapis.com');
+    if (request.path === '/v1/events:ingest') {
+      if (request.json.validateOnly) { validations.push(structuredClone(request.json)); return {}; }
+      providerWrites++; const id = 'fictitious-receipt-' + providerWrites;
+      providerDestinations.set(id, request.json.destinations[0].productDestinationId); return { requestId: id };
+    }
     assert.match(request.path, /^\/v1\/requestStatus:retrieve\?requestId=fictitious-receipt-/);
     return providerMode === 'EMPTY' ? {} : { requestStatusPerDestination: [{ destination: {
       operatingAccount: { accountType: 'GOOGLE_ADS', accountId: mapping.customerId },
-      loginAccount: { accountType: 'GOOGLE_ADS', accountId: mapping.loginCustomerId }, productDestinationId: '456' },
+      loginAccount: { accountType: 'GOOGLE_ADS', accountId: mapping.loginCustomerId }, productDestinationId: providerDestinations.get(request.path.split('requestId=')[1]) || '456' },
     requestStatus: providerMode, eventsIngestionStatus: { recordCount: '1' } }] };
   };
   const runtime = require('../../../services/integrations-broker/src/google-main');
   const secrets = require('../../../services/integrations-broker/src/google-secrets').createGoogleSecretStore({ client: sdk, http,
     accountId: runtime.ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: runtime.SECRET_KEY, provider: C.PROVIDER, now: () => at });
   let store = f.store;
+  const adsEngine = require('../../../services/integrations-broker/src/google-ads').createGoogleAdsOperations({ http,
+    cursor: require('../../../services/integrations-broker/src/provider-cursor').cursorCodec(require('node:crypto').randomBytes(32), () => at),
+    withDeveloperSecret: require('../../../services/integrations-broker/src/google-ads-developer-secret').createGoogleAdsDeveloperSecret({
+      client: sdk, accountId: runtime.ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: runtime.SECRET_KEY }), now: () => at });
   const makeRemote = () => new (require('../../../services/integrations-broker/src/broker').Broker)({ store, policy: f.policy, secrets,
-    operations: require('../../../services/integrations-broker/src/google-data-manager').createDataManagerOperations({ store, http, now: () => at }).operations,
+    operations: { ...adsEngine.operations, ...require('../../../services/integrations-broker/src/google-data-manager').createDataManagerOperations({ store, http, now: () => at }).operations },
     now: () => at });
   let remote = makeRemote();
   const transport = { execute: async command => {
@@ -405,6 +425,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     assert.equal((await delivery.submit(clickOnly)).state, 'accepted');
     report.checks.push('a configured enhanced authorization does not block a click-only event with no personal hashes');
 
+    await require('./fixtures/google_workspace_broker_checks.fixture')({ models, sql, report, broker, delivery, mapping,
+      now: () => new Date(at), writes: () => providerWrites, validations, setAfterRemote: fn => { afterRemote = fn; } });
+
     const table = 'GoogleConversionSubmissions';
     const query = async (text, values = []) => { const [rows] = await sql.query(text, { replacements: values }); return rows; };
     const metadata = await require('../../lib/securitySchemaContract').snapshot(query);
@@ -436,7 +459,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     report.checks.push('real CHECKs reject invalid lifecycle states, down preserves history, SQL credential hydration is zero and ledger stores no click/body/token/provider error text');
     report.providerWrites = providerWrites; report.signedBrokerCalls = remoteCalls.length; report.submissions = await J.count();
   } finally {
-    secrets.close(); if (store !== f.store) store.close();
+    adsEngine.close(); secrets.close(); if (store !== f.store) store.close();
     for (const close of cleanups.reverse()) await close();
   }
 }).catch(() => { process.exitCode = 1; });

@@ -24,6 +24,7 @@ cuenta y operación; no tenant de grupo ni operación genérica de búsqueda.
 | Operación | Payload exacto | Resultado permitido |
 |---|---|---|
 | `google.ads.discovery.read.v1` | `{}` | Resumen de cuenta: ID, nombre, manager, moneda, zona y estado; exactamente una fila |
+| `google.ads.conversion_actions.read.v1` | `{pageToken: null/string}` | Inventario de acciones de conversión y propiedades de aprobación; máximo 5.000, sin snippets |
 | `google.ads.account.read.v1` | `{}` | ID, manager=false, moneda y zona horaria |
 | `google.ads.campaigns.read.v1` | `{pageToken: null/string}` | Campañas y estados, máximo 5.000 |
 | `google.ads.campaign_metrics.read.v1` | `{startDate, endDate, pageToken}` | Métricas por campaña, fecha, red y dispositivo |
@@ -40,11 +41,12 @@ anuncios mantiene 15 días y 200.000 filas. Los límites de bytes pueden rechaza
 una consulta antes de alcanzar su máximo de filas. `campaignId` es null o una
 cadena de 1–20 dígitos, positiva sin ceros iniciales; no amplía el grant de cuenta.
 `pageToken` siempre es null o string y todos los campos de cada payload son
-obligatorios. El broker construye nueve plantillas GAQL cerradas.
+obligatorios. El broker construye diez plantillas GAQL cerradas.
 La ampliación [de inventario y estado](google-ads-discovery-migration.md) conecta
 discovery con API/sesión/permisos; account mantiene su proyección anterior.
 El consumidor no envía query, URL, método, cabeceras, cuenta, gestor, campos,
-versión de API ni tokens. No se exponen operaciones de escritura o conversión.
+versión de API ni tokens. La cohorte de lectura no expone escritura o ingesta;
+la cohorte explícita de conversiones se describe en [Data Manager](google-data-manager-broker.md).
 La revocación requiere principal y clave diferentes de todos los lectores;
 rechaza lectores con el mismo material criptográfico bajo otro keyId.
 
@@ -54,6 +56,16 @@ omitidos y excluye campos desconocidos. No entrega respuestas del proveedor
 directamente. El consumidor completo deberá detectar también duplicados o cambios
 entre páginas y conciliar las métricas antes de persistir el snapshot; el lector
 y los colectores tipados descritos abajo ya preparan esas comprobaciones.
+
+La lectura de acciones añadida el 18/09/2026 conserva el propietario real de
+`resourceName`, tipo, categoría, estado, conteo y flags de objetivo. Un booleano
+ausente queda desconocido, no se convierte en `false`. La preparación CRM exige
+acción canónica única, propietario de la cuenta seleccionada, `UPLOAD_CLICKS`,
+categoría del evento, estado activo, `MANY_PER_CLICK` y `primaryForGoal=false`.
+Los campos siguen el recurso oficial de
+[acciones de conversión v24](https://developers.google.com/google-ads/api/fields/v24/conversion_action).
+Se conservan paginación, rechazo de inventarios incompletos y grants explícitos;
+este código no añade permisos a ninguna conexión instalada.
 
 Las nuevas selecciones siguen los recursos oficiales de
 [destinos](https://developers.google.com/google-ads/api/fields/v24/landing_page_view),

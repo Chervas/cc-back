@@ -1,20 +1,19 @@
 {
-  "version": 3,
+  "version": 4,
   "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "5ba33b6da1d5d3617b198252191314705b83c65c",
+  "sourceBaseHead": "d159b95097e94ba21a63a891e83002d7147fc640",
   "includesWorkingChanges": true,
   "scope": "Bounded manual Data Manager caller inventory; not a complete inventory of all Google identity consumers or external OPS.",
   "runtimeConsumersMigrated": 0,
   "qa": {
-    "broker": "556 last unchanged engine regression; not repeated for CRM-only changes",
+    "broker": "560/560 current Node24 engine regression",
     "provider": "fictitious_offline",
     "authenticatedUI": "pending",
-    "mysqlJournalChecks": 29,
+    "mysqlJournalChecks": 39,
     "schemaUnitTests": 4,
-    "backendClientScopeReaderAndAdapter": 27,
-    "workspaceUnaffectedCases": 57,
-    "workspaceAuthorizationCases": 28,
-    "crmPayloadParityCases": 54
+    "crmPayloadParityCases": 54,
+    "backendClientScopeReaderAdapterAndPreparation": 36,
+    "workspaceAuthorizationPreparationNativeReceptionAndUpload": 84
   },
   "rows": [
     {
@@ -26,7 +25,7 @@
     {
       "file": "src/services/googleAdsConversionUpload.service.js",
       "sha256": "5c8839b7386a4c5bcb398b44d4ee50617800ffc816eb0644c6535031455dda41",
-      "role": "Emisor común conectado al coordinador para runtime gestionado; mantiene consentimiento y rechaza reservas en legacy. Resolutores workspace v2/nativos pendientes.",
+      "role": "Emisor común conectado al coordinador para runtime gestionado; conserva consentimiento y rechaza reservas en legacy. Invocado por los mandatos web y nativos.",
       "state": "common_emitter_prepared_undeployed"
     },
     {
@@ -43,9 +42,9 @@
     },
     {
       "file": "src/services/campaignWorkspaceGooglePreparation.service.js",
-      "sha256": "60d9c3812c3f6d9c10b05c604524a123cc2710b0541db5c412196c53fd5c5194",
-      "role": "Preparación validate-only más lectura de acciones canónicas; ambas rutas necesitan broker.",
-      "state": "preparation_adapter_pending"
+      "sha256": "e1e93eb8c456ef949b763a072f96b901b3be4aee36aa93bd57e4305e6e723400",
+      "role": "Inventario canónico y validate-only WEB/OTHER por broker, con permisos del usuario y configuración revalidados.",
+      "state": "workspace_preparation_prepared_undeployed"
     },
     {
       "file": "src/controllers/campaignOnboarding.controller.js",
@@ -55,15 +54,15 @@
     },
     {
       "file": "src/services/campaignWorkspaceGoogleConversion.service.js",
-      "sha256": "dccfa6cc2422340c01f26859737449f448f74d1bcf28d06347613a1d8d726895",
-      "role": "Resolver de conversión web con mandato de workspace y credencial legacy.",
-      "state": "workspace_resolver_pending"
+      "sha256": "8656ec61e1ef1c5f6d94b8a9f75a3c85afe87fae905dd2df9bd23b85be4e8531",
+      "role": "Mandato web llega al emisor común con capacidad opaca, sin leer credenciales para cuentas gestionadas.",
+      "state": "workspace_web_prepared_undeployed"
     },
     {
       "file": "src/services/campaignWorkspaceGoogleNative.service.js",
-      "sha256": "22791a2a0eecf1d46dafc2fb53948c12dcd224757139e2e5d7acdd0e52e72d5b",
-      "role": "Hitos CRM con mandato y consentimiento persistido específico.",
-      "state": "native_resolver_pending"
+      "sha256": "a121e98de4f37db681d220e670330aec75a332b82ba31ab330b07b7458e3f44d",
+      "role": "Hitos CRM usan capacidad opaca y conservan atribución, mandato, consentimiento y vigencia clínica.",
+      "state": "workspace_native_prepared_undeployed"
     },
     {
       "file": "src/services/googleAdsScopedRuntime.service.js",
@@ -91,8 +90,8 @@
     },
     {
       "file": "src/services/googleAdsBroker.service.js",
-      "sha256": "0884d07a2da73d39608a80e314cbcd9021fc27dc09713012a0f61d0fbf17137f",
-      "role": "Fachada Ads y transporte ligado a configuración inicial de audiencia/clave/endpoint; rechaza cambios de identidad en caliente.",
+      "sha256": "ecabf0eada7783ce0a3682fe0a7f3bbc962efa13afc3e0c7d6716ae52949a20d",
+      "role": "Fachada por modelos y transporte ligado a configuración inicial de audiencia/clave/endpoint; rechaza cambios de identidad en caliente.",
       "state": "prepared_offline"
     },
     {
@@ -133,8 +132,8 @@
     },
     {
       "file": "src/services/campaignWorkspaceGoogleSignalEvidence.service.js",
-      "role": "Salud consume ID de proveedor y diagnóstico normalizado; compatibilidad de datos recuperados probada. Resolver legacy todavía pendiente.",
-      "state": "health_data_parity_verified_resolver_pending",
+      "role": "Salud conserva formato de metadata v2/v3; rutas web/nativa probadas sin token. Falta diagnóstico automático y UI.",
+      "state": "health_data_parity_verified_ui_pending",
       "sha256": "35299c03aad3703fb840291e3afe3ce5538d86d6391a4bb3103c89fabd80660b"
     },
     {
@@ -142,6 +141,30 @@
       "sha256": "505437ce604b32b5329cb6b622f9ede734fd6e8d875495345a499e971cf0db35",
       "role": "Adaptador del emisor común: marca al insertar, constructor cerrado, guard de fuente/clínica/consentimiento y fábrica SQL con corte estable.",
       "state": "prepared_offline"
+    },
+    {
+      "file": "src/services/googleAdsGrantTransport.service.js",
+      "role": "Selector metadata/transporte: cierre legacy antes de credenciales y capacidad opaca que revalida todos los grants, subject, scopes y clínica.",
+      "state": "prepared_offline",
+      "sha256": "2808a6d035e992b3884f64f825a27f8b8c390ff0665755cb30cb1803e0db6870"
+    },
+    {
+      "file": "src/services/campaignWorkspaceSignalRouting.service.js",
+      "role": "Routing del mandato admite solo capacidades Google verificadas; conserva autorización, conflictos de destino y ámbito clínico.",
+      "state": "workspace_routing_prepared_undeployed",
+      "sha256": "4725449f60b52c2188cd3d4b0c0492f45f8b11093977cdcbee979e25615de9b7"
+    },
+    {
+      "file": "src/services/googleLeadReception.service.js",
+      "role": "Resolutor usado por hitos nativos sin tokens; sync managed sigue rechazado hasta disponer de lectura tipada de leads.",
+      "state": "reception_metadata_prepared_lead_sync_pending",
+      "sha256": "a72f8a307cbca0cf9f2b9a259bb54f8a96d5aed4dba9a92a28724abce84239e0"
+    },
+    {
+      "file": "services/integrations-broker/src/google-ads-contract.js",
+      "role": "Lectura tipada conversion_actions: inventario acotado, flags desconocidos y dueño real conservados, sin snippets.",
+      "state": "prepared_offline",
+      "sha256": "4e894d2d4236e5cb57f3f279f7dd29aeab159d4a738fa06ab9f452fc6853637e"
     }
   ]
 }

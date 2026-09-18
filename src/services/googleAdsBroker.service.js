@@ -58,4 +58,10 @@ function createConfiguredGoogleAdsClient({ env = process.env, readPrivateFile = 
 }
 const client = createConfiguredGoogleAdsClient();
 const service = createGoogleAdsBroker({ client, ...createGoogleAdsScopeRepository(() => require('../../models')) });
-module.exports = { ...service, createGoogleAdsBroker, createConfiguredGoogleAdsClient, safe };
+const modelServices = new WeakMap();
+function forModels(models) {
+  if (!models || typeof models !== 'object') fail('broker_configuration_invalid');
+  if (!modelServices.has(models)) modelServices.set(models, createGoogleAdsBroker({ client, ...createGoogleAdsScopeRepository(() => models) }));
+  return modelServices.get(models);
+}
+module.exports = { ...service, createGoogleAdsBroker, createConfiguredGoogleAdsClient, forModels, safe };

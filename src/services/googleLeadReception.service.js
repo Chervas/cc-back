@@ -1,12 +1,12 @@
 'use strict';
-const { loadGoogleAdsLegacyConnection } = require('./googleAdsLegacyConnection.service');
+const { resolveGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
 
 const crypto = require('node:crypto');
 const { Op } = require('sequelize');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
 const { campaignIncluded } = require('./campaignWorkspaceSettings.service');
-const { GOOGLE_ADS_SCOPE, missingGoogleScopes, ensureGoogleConnectionAccessToken } = require('./googleAdsScopedRuntime.service');
+const { GOOGLE_ADS_SCOPE, ensureGoogleConnectionAccessToken } = require('./googleAdsScopedRuntime.service');
 
 const JOB_TYPE = 'campaign_google_leads_sync';
 const ORIGIN = 'campaign_google_leads_poll';
@@ -100,9 +100,9 @@ async function receptionAccount({ models, settingId, accountId, transaction = nu
   const eligible = authorized.filter(account => members.some(clinic => covers(account, clinic)));
   if (!eligible.length || new Set(eligible.map(row => Number(row.googleConnectionId))).size !== 1
     || new Set(eligible.map(row => row.loginCustomerId || row.managerCustomerId || null)).size !== 1) fail('google_lead_account_access_required');
-  const connection = await loadGoogleAdsLegacyConnection(models, eligible[0].googleConnectionId, options);
-  if (!connection?.accessToken || missingGoogleScopes(connection.scopes, [GOOGLE_ADS_SCOPE]).length
-    || (!Number.isFinite(+new Date(connection.expiresAt)) || +new Date(connection.expiresAt) <= +now) && !connection.refreshToken) fail('google_lead_account_access_required');
+  const { connection, brokerGrant } = await resolveGoogleAdsGrantTransport({ models, accounts: eligible, requiredScopes: [GOOGLE_ADS_SCOPE], transaction });
+  if (!brokerGrant && (!Number.isFinite(+new Date(connection.expiresAt)) || +new Date(connection.expiresAt) <= +now)
+    && !connection.refreshToken) fail('google_lead_account_access_required');
   const loginCustomerId = eligible[0].loginCustomerId || eligible[0].managerCustomerId || null;
   const fingerprint = hash(JSON.stringify([setting.id, setting.scope_type, setting.scope_id, selected[0],
     members.map(row => [row.id_clinica, row.grupoClinicaId]).sort(),
@@ -110,7 +110,7 @@ async function receptionAccount({ models, settingId, accountId, transaction = nu
     assignments.filter(row => eligible.some(account => scopeKey(account) === row.scopeKey))
       .map(row => [row.id, row.scopeKey, row.googleConnectionId, row.connectedAt]).sort(),
     connection.id, connection.googleUserId, String(connection.scopes).split(/[\s,]+/).filter(Boolean).sort(), loginCustomerId]));
-  return { setting, members, accounts: authorized, eligible, connection, loginCustomerId, fingerprint };
+  return { setting, members, accounts: authorized, eligible, connection, brokerGrant, loginCustomerId, fingerprint };
 }
 
 async function receivingClinic({ models, context, identity, transaction = null }) {
@@ -199,6 +199,7 @@ async function runGoogleLeadSync(payload, job, dependencies = {}) {
   const counts = { received: 0, duplicates: 0, excluded: 0, pending: 0, invalid_contacts: 0 };
   try {
     const context = await receptionAccount({ models, settingId: payload.setting_id, accountId: payload.account_id, now });
+    if (context.brokerGrant) fail('google_lead_broker_sync_pending');
     const token = await (dependencies.ensureToken || ensureGoogleConnectionAccessToken)(context.connection, { requiredScopes: [GOOGLE_ADS_SCOPE] });
     const since = new Date(+now - LOOKBACK_DAYS * 86400000).toISOString().slice(0, 10);
     const search = dependencies.search || googleAdsSearchRows;

@@ -9,9 +9,24 @@ const db = require('../../../models');
 const { googleAdsSearchRows } = require('../../lib/googleAdsSearchRows');
 const { assertGoogleConversionMutationAccess } = require('../../lib/googleConversionMutationAccess');
 const { buildBaseUrls, GOOGLE_ADS_CONVERSIONS_API_VERSION } = require('../../lib/googleAdsClient');
-const { inspectCanonicalConversion, successfulValidationResponse } = require('../../services/googleAdsConversionPreparation.service');
+const { inspectCanonicalConversion, successfulValidationResponse, mapConversionActionRow } = require('../../services/googleAdsConversionPreparation.service');
 const { __test: { buildClinicaclickManagedMapping, ensureConversionActionsInternal } } = require('../../controllers/campaignOnboarding.controller');
 after(() => db.sequelize.close());
+
+test('broker action projection preserves canonical approval and cannot approve missing flags or a foreign owner', () => {
+  const { projectPage } = require('../../../services/integrations-broker/src/google-ads-contract');
+  const customerId = '1234567890';
+  const base = { id: '456', resourceName: `customers/${customerId}/conversionActions/456`,
+    name: 'Lead - ClinicaClick', category: 'SUBMIT_LEAD_FORM', type: 'UPLOAD_CLICKS',
+    status: 'ENABLED', countingType: 'MANY_PER_CLICK', primaryForGoal: false, includeInConversionsMetric: false };
+  for (const [patch, expected] of [[{}, null], [{ primaryForGoal: undefined }, 'canonical_action_primary_for_goal'],
+    [{ resourceName: 'customers/9999999999/conversionActions/456' }, 'canonical_action_type_incompatible']]) {
+    const rows = projectPage('conversion_actions', { results: [{ customer: { id: customerId }, conversionAction: { ...base, ...patch } }] }, {}, { customerId }).results;
+    const actions = rows.map(mapConversionActionRow);
+    assert.equal(inspectCanonicalConversion({ listed: { actions, clinicaclick_mapping: buildClinicaclickManagedMapping(actions) },
+      customerId, conversionActionId: '456', event: 'lead' }), expected);
+  }
+});
 
 test('conversion requests pin a supported version without changing the version used by other jobs', () => {
   const keys = ['GOOGLE_ADS_API_VERSION', 'GOOGLE_ADS_API_BASE_URL', 'GOOGLE_ADS_API_ENDPOINT'];

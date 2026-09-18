@@ -1,13 +1,13 @@
 'use strict';
-const { loadGoogleAdsLegacyConnection } = require('./googleAdsLegacyConnection.service');
+const { resolveGoogleAdsGrantTransport, assertGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
 
 const crypto = require('node:crypto');
 const { Op } = require('sequelize');
 const { settingScope, publicSettings } = require('./campaignWorkspaceSettings.service');
 const { EVENTS } = require('./campaignWorkspacePreferences.service');
-const { EVENT_CATALOG, listConversionActions, inspectCanonicalConversion, conversionFingerprint,
+const { EVENT_CATALOG, listConversionActions, mapConversionActionRow, buildClinicaclickManagedMapping, inspectCanonicalConversion, conversionFingerprint,
   successfulValidationResponse } = require('./googleAdsConversionPreparation.service');
-const { GOOGLE_ADS_SCOPE, GOOGLE_DATA_MANAGER_SCOPE, missingGoogleScopes,
+const { GOOGLE_ADS_SCOPE, GOOGLE_DATA_MANAGER_SCOPE,
   ensureGoogleConnectionAccessToken } = require('./googleAdsScopedRuntime.service');
 const { uploadConversionEvent } = require('./googleDataManagerConversion.service');
 
@@ -57,8 +57,7 @@ async function googlePreparationContext({ models, scope, accountId, transaction 
   const grantIds = new Set(eligible.map(row => Number(row.googleConnectionId)));
   const loginIds = new Set(eligible.map(row => String(row.loginCustomerId || row.managerCustomerId || '').replace(/\D/g, '')));
   if (grantIds.size !== 1 || loginIds.size !== 1) fail('workspace_google_connection_ambiguous');
-  const connection = await loadGoogleAdsLegacyConnection(models, eligible[0].googleConnectionId, options);
-  if (!connection?.accessToken || missingGoogleScopes(connection.scopes, REQUIRED_SCOPES).length) fail('workspace_google_permissions_required');
+  const { connection, brokerGrant } = await resolveGoogleAdsGrantTransport({ models, accounts: eligible, requiredScopes: REQUIRED_SCOPES, transaction });
   const relevantAssignments = assignments.filter(assignment => eligible.some(row => assignment.scopeKey === key(row)
     && Number(assignment.googleConnectionId) === Number(row.googleConnectionId)));
   // Tokens rotate routinely. Bind evidence to the grant/assignment, not to its access token or refresh timestamp.
@@ -68,7 +67,7 @@ async function googlePreparationContext({ models, scope, accountId, transaction 
     connection.id, connection.googleUserId, String(connection.scopes || '').split(/[\s,]+/).filter(Boolean).sort()]);
   const fingerprint = hash([grantFingerprint, setting.preferences,
     sorted(setting.accounts.map(row => ({ ...row, campaign_ids: [...row.campaign_ids].sort() })))]);
-  return { setting, connection, fingerprint, grantFingerprint, events, accountId, loginCustomerId: [...loginIds][0] || null };
+  return { setting, connection, brokerGrant, fingerprint, grantFingerprint, events, accountId, loginCustomerId: [...loginIds][0] || null };
 }
 
 function publicProof(context, now = new Date()) {
@@ -96,7 +95,7 @@ function checkError(error) {
 }
 
 async function checkConversions(context, { list = listConversionActions, ensureToken = ensureGoogleConnectionAccessToken,
-  upload = uploadConversionEvent, now = () => new Date() } = {}) {
+  upload = uploadConversionEvent, now = () => new Date(), beforeExecute } = {}) {
   const rows = context.events.map(event => ({ event, action_id: null, action_fingerprint: null, state: 'failed', error: null }));
   const deadline = Date.now() + 55000;
   const remaining = max => {
@@ -105,10 +104,26 @@ async function checkConversions(context, { list = listConversionActions, ensureT
     return time;
   };
   let listed; let accessToken;
+  const guard = async () => {
+    if (context.brokerGrant) {
+      if (typeof beforeExecute !== 'function' || await beforeExecute() !== true) fail('workspace_scope_changed');
+      await assertGoogleAdsGrantTransport(context.brokerGrant);
+    }
+    return true;
+  };
   try {
-    ({ accessToken } = await ensureToken(context.connection, { requiredScopes: REQUIRED_SCOPES }));
-    listed = await list({ accessToken, customerId: context.accountId, loginCustomerId: context.loginCustomerId,
-      includeAllTypes: true, timeoutMs: remaining(15000) });
+    if (context.brokerGrant) {
+      await guard();
+      const runtime = await assertGoogleAdsGrantTransport(context.brokerGrant);
+      const actions = (await runtime.broker.read(runtime.account, runtime.brokerContext, 'conversion_actions', {},
+        { timeoutMs: remaining(15000), beforeExecute: guard })).map(mapConversionActionRow)
+        .filter(action => action.id && action.status !== 'REMOVED');
+      listed = { actions, clinicaclick_mapping: buildClinicaclickManagedMapping(actions) };
+    } else {
+      ({ accessToken } = await ensureToken(context.connection, { requiredScopes: REQUIRED_SCOPES }));
+      listed = await list({ accessToken, customerId: context.accountId, loginCustomerId: context.loginCustomerId,
+        includeAllTypes: true, timeoutMs: remaining(15000) });
+    }
     if (!Array.isArray(listed?.actions)) fail('workspace_google_check_failed');
   } catch (error) { return rows.map(row => ({ ...row, error: checkError(error) })); }
   for (const row of rows) {
@@ -120,6 +135,18 @@ async function checkConversions(context, { list = listConversionActions, ensureT
     if (problem) { row.state = 'review'; row.error = problem; continue; }
     row.action_fingerprint = conversionFingerprint(action);
     try {
+      if (context.brokerGrant) {
+        await guard();
+        const runtime = await assertGoogleAdsGrantTransport(context.brokerGrant);
+        const sources = ['qualified_lead', 'schedule'].includes(row.event) ? ['WEB', 'OTHER'] : ['WEB'];
+        for (const eventSource of sources) {
+          const response = await runtime.broker.conversion(runtime.account, runtime.brokerContext, 'validate', {
+            conversionActionId: action.id, eventName: row.event, eventSource,
+          }, { requestId: crypto.randomUUID(), beforeExecute: guard, timeoutMs: remaining(12000) });
+          if (response?.validated !== true || response.warningCount !== 0) fail('data_manager_validation_unconfirmed');
+        }
+        row.state = 'verified'; row.error = null; continue;
+      }
       const response = await upload({ customerId: context.accountId, loginCustomerId: context.loginCustomerId, accessToken,
         conversionAction: action.resource_name, conversionDateTime: now(), externalId: `cc-check-${crypto.randomUUID()}`,
         gclid: 'GCLID_1', value: 0, currency: 'EUR', eventName: row.event, eventSource: 'WEB', validateOnly: true,
@@ -164,7 +191,12 @@ async function checkGooglePreparation({ models, scope, actorId, input, hasAccess
     } });
     return context;
   });
-  const rows = await checkConversions(started, { ...provider, now });
+  const rows = await checkConversions(started, { ...provider, now, beforeExecute: async () => {
+    await permitted();
+    const fresh = await googlePreparationContext({ models, scope, accountId });
+    const pending = fresh.setting.signal_preparation?.google_ads?.[accountId];
+    return fresh.fingerprint === started.fingerprint && pending?.run_id === runId && pending?.status === 'checking';
+  } });
   return models.sequelize.transaction(async transaction => {
     await permitted();
     const context = await googlePreparationContext({ models, scope, accountId, transaction });

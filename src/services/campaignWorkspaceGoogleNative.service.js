@@ -1,5 +1,6 @@
 'use strict';
 const { loadGoogleAdsLegacyConnection } = require('./googleAdsLegacyConnection.service');
+const { assertGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
 
 const crypto = require('node:crypto');
 const { Op } = require('sequelize');
@@ -27,6 +28,7 @@ async function resolveWorkspaceGoogleNativeRoute({ models, clinicId, identity, e
   if (!route) fail('workspace_google_native_mandate_required');
   // Reuse reception's current account/clinic ownership, not the historical label on the lead.
   const account = await readReceptionAccount({ models, settingId: route.authorization.policyRefs[0].setting_id, accountId: identity.account_id, now, transaction });
+  if (account.brokerGrant) await assertGoogleAdsGrantTransport(account.brokerGrant, { clinicId, transaction });
   const clinic = await receivingClinic({ models, context: account, identity, transaction });
   if (Number(clinic.id_clinica) !== clinicId || Number(account.connection.id) !== route.connectionId) fail('workspace_google_native_scope_changed');
   const groupId = Number(scope.clinic.grupoClinicaId) || null;
@@ -109,6 +111,8 @@ async function maybeUploadNativeGoogleLifecycleConversion(input, dependencies = 
       resolveWorkspaceSignalPolicy: revalidate,
       googleDeliveryContext: () => googleWorkspaceNativeDeliveryContext({ context }),
       resolveRuntime: async () => {
+        if (context.route.brokerGrant) return { ...await assertGoogleAdsGrantTransport(context.route.brokerGrant, { clinicId: context.clinicId }),
+          connectionSource: 'workspace_native_mandate' };
         const connection = await loadGoogleAdsLegacyConnection(models, context.route.connectionId);
         if (!connection) fail('workspace_google_permissions_required');
         const token = await (dependencies.ensureToken || ensureGoogleConnectionAccessToken)(connection,

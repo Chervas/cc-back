@@ -109,15 +109,17 @@ guardia de red offline. La comparación contra el constructor actual del CRM
 incluye 54 combinaciones WEB/OTHER, gclid/gbraid/wbraid y las dos señales de
 consentimiento. No acredita entrega real a Google ni una interfaz autenticada.
 
-Última regresión del motor broker: 556/556 en Node24, incluida la llamada desde
-el cliente CRM real al servidor HTTPS local. Regresión actual de cliente, scope,
-lector y adaptador CRM: 27/27 en Node18. Guardias de red/BD impiden acceder a los
-entornos operativos. El motor broker no cambió en este último tramo del adaptador.
+Última regresión del motor broker: 560/560 en Node24, incluida la llamada desde
+el cliente CRM real al servidor HTTPS local. Regresión actual de preparación,
+cliente, scope, lector y adaptador CRM: 36/36 en Node18; otras 84 pruebas de
+workspace/autorización/recepción/emisor pasan. Guardias de red/BD impiden acceder
+a los entornos operativos. MySQL aislado verifica 39 grupos, detallados más abajo.
 
 El emisor común de conversiones y su resolutor por mapping ya seleccionan el
-camino broker cuando el registro Ads lo exige. Falta conectar los resolutores
-de mandatos workspace v2 y de hitos CRM nativos, preparación validate-only,
-diagnóstico y sus permisos; estos todavía cargan credenciales legacy. No activar
+camino broker cuando el registro Ads lo exige. Ya están conectados los mandatos
+workspace v2, los hitos CRM nativos y su preparación validate-only. Siguen
+pendientes diagnóstico, dos validadores onboarding y recepción/sync de leads.
+La recepción managed falla cerrada antes de cargar un token local. No activar
 el conjunto parcial ni migrar la identidad compartida antes de completarlos.
 Conservar los grants, la política del workspace, consentimiento, pausas y deduplicación.
 El [inventario de este tramo](google-data-manager-consumers.json) incluye los dos
@@ -229,7 +231,49 @@ Google ficticios y el diagnóstico consultaba modelos globales. Corregida la
 preparación, esa suite pasa28/28 conservando el control real de credenciales.
 Se preservan logs de los fallos de prueba, incluido consentimiento mal configurado.
 
-Sin tabla nueva aplicada, despliegue ni cohortes activadas. Los resolutores
-workspace v2/nativos todavía dependen de autorización, preparación y recepción
-legacy; diagnóstico y dos validadores onboarding también requieren adaptación.
-No presentar el emisor común como aceptación de esos recorridos completos.
+Sin tabla nueva aplicada, despliegue ni cohortes activadas en ese corte. La
+adaptación posterior de workspace se describe a continuación; diagnóstico,
+onboarding y sync de leads aún requieren adaptación antes del corte compartido.
+
+## Mandatos workspace y hitos CRM, 18/09/2026
+
+`googleAdsGrantTransport` separa permisos y transporte. Lee primero identidad
+sin tokens y comprueba el cierre legacy, incluidas marcas independientes. Si
+la conexión está gestionada, prepara y revalida los contextos opacos Ads de todas
+las asignaciones elegibles. Solo devuelve identidad/scopes y una capacidad en
+memoria no serializable, ligada a esos modelos y referencias. Un objeto fabricado
+o una copia JSON no autoriza nada. Recomprueba subject, scopes, referencias,
+clínicas y grants cada vez; una pérdida de permisos nunca vuelve al token local.
+Los fingerprints actuales de autorización se conservan.
+
+La preparación obtiene el inventario mediante
+`google.ads.conversion_actions.read.v1`: consulta fija, máximo 5.000 acciones,
+paginación completa y sin snippets. El CRM aplica su aprobación canónica real;
+un flag omitido o propietario ajeno no se transforma en acción válida. Consulta
+y validaciones comprueban permiso del usuario, configuración y ejecución vigente
+antes/después. Los eventos `qualified_lead` y `schedule` validan WEB y OTHER;
+los demás, WEB. Estas operaciones usan datos ficticios y nunca ingieren un evento.
+
+La ruta web comprueba mandato, clínica y configuración web, y la nativa conserva
+atribución persistida, receptor, consentimiento y vigencia del hito/cita. Ambas
+llegan al coordinador SQL existente sin tokens locales y conservan el formato
+de Salud (contexto v2 web y v3 nativo). No se activan mandatos automáticamente.
+El resolutor de recepción ya entrega metadata/capacidad a los hitos; su job de
+importación todavía rechaza `google_lead_broker_sync_pending` para cuentas
+gestionadas. Hace falta la lectura tipada de leads antes de migrar esa identidad.
+
+Verificación:39 grupos con MySQL8.0.42 propio, servicios de negocio reales y
+broker firmado con SQLite, AWS/Google ficticios. Quince ingestas ficticias,
+32 comandos firmados,17 journals y cero lecturas SQL de tokens. Se prueban
+preparación real, deduplicación web/nativa, mandato pausado, cita ajena, revocación
+de asignación, retirada de scope, cambio de subject, pausa tras acuse y cambio de
+preferencias durante validate-only. La activación de la fixture se siembra desde
+la revisión real; no prueba el endpoint de activación ni autenticación/MFA.
+Los modelos mínimos de leads/citas de esa fixture no acreditan todo su DDL real.
+
+Las 560 pruebas del broker permanecen independientes del bootstrap del CRM:
+la aprobación canónica cruzada se comprueba en el proceso backend con guardia
+offline. Evidencia privada `google-workspace-broker/`. Sin DDL/despliegue,
+proveedores reales ni nueva evidencia visual; cero consumidores reales migrados.
+No retirar credenciales ni habilitar cohortes hasta completar consumidores,
+pruebas reales autorizadas y recorrido visual autenticado.
