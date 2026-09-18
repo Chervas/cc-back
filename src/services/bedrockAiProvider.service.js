@@ -129,6 +129,7 @@ async function analyzeStructured({
   outputFormat,
   maxTokens = 700,
   temperature = 0,
+  beforeDispatch,
 } = {}) {
   const modelId = clean(model, 160);
   if (!modelId) {
@@ -163,7 +164,8 @@ async function analyzeStructured({
 
   const startedAt = Date.now();
   const response = bedrockBroker.enabled()
-    ? await bedrockBroker.execute(useCase, command.input, { timeoutMs: config.timeoutMs })
+    ? await bedrockBroker.execute(useCase, command.input, { timeoutMs: config.timeoutMs,
+      beforeDispatch: async () => { assertConfigured(); if (beforeDispatch) await beforeDispatch(); } })
     : await sendWithTimeout(getClient(), command, config.timeoutMs);
   const value = extractToolInput(response, toolName);
   if (!value) {

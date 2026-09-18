@@ -6,6 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const { createBedrockBroker } = require('../../services/bedrockBroker.service');
+const { createBedrockAdmission } = require('../../lib/bedrockAdmission');
 const contract = require('../../../services/integrations-broker/src/bedrock-contract');
 const { PROVIDER_ERRORS } = require('../../../services/integrations-broker/src/bedrock-errors');
 const { response } = require('../../../services/integrations-broker/test/bedrock-fixture.cjs');
@@ -18,13 +19,13 @@ function load(name, env, dependencies) {
     require: key => Object.hasOwn(dependencies, key) ? dependencies[key] : local(key), console, AbortController, setTimeout, clearTimeout }, { filename });
   return module.exports;
 }
-function setup(work = async () => response()) {
+function setup(work = async () => response(), admission = createBedrockAdmission({spacingMs:0})) {
   const env = { BEDROCK_ENABLED: 'true', BEDROCK_BROKER_ENABLED: 'true', BEDROCK_BROKER_ENVIRONMENT: 'staging',
     BEDROCK_BROKER_AUDIENCE: 'clinicaclick:bedrock:staging:v1', BEDROCK_BROKER_CONNECTION_REF: 'bedrock:staging' };
   const calls = [], usage = [], pauses = []; let paused = false;
   for (const key of ['BEDROCK_AWS_ACCESS_KEY_ID', 'BEDROCK_AWS_SECRET_ACCESS_KEY', 'BEDROCK_AWS_SESSION_TOKEN'])
     Object.defineProperty(env, key, { get() { throw Error('LOCAL_PROVIDER_CREDENTIAL_WAS_READ'); } });
-  const broker = createBedrockBroker({ env, readFile: () => Buffer.from('fictitious signing identity'), clientFactory: config => {
+  const broker = createBedrockBroker({ env, admission, readFile: () => Buffer.from('fictitious signing identity'), clientFactory: config => {
     assert.equal(config.transportProfile, 'ai');
     return { async execute(command, options) {
       contract.validate(plain(command.payload)); calls.push(plain(command));
@@ -74,10 +75,35 @@ test('orchestrator retains provider fallback, usage and purpose, but never retri
     assert(f.calls.every(c => c.payload.useCase === input.useCase));
   }
   for (const code of ['rate_limited', 'scope_denied', 'secret_unavailable', 'audit_unavailable', 'connection_blocked',
-    'provider_unauthorized', 'provider_timeout', 'broker_timeout', 'broker_unavailable']) {
+    'provider_unauthorized', 'provider_timeout', 'broker_timeout', 'broker_unavailable', 'broker_queue_full', 'broker_queue_timeout']) {
     const f = setup(async () => { throw Object.assign(Error(code), { code }); });
     await assert.rejects(f.orchestrator.analyzeStructured(input), { code }); assert.equal(f.calls.length, 1);
   }
+});
+
+test('queued conversations recheck the pause and provider switch immediately before dispatch', async () => {
+  for (const scenario of ['pause','disabled']) {
+    let release;
+    const hold=new Promise(resolve=>{release=resolve;});
+    const f=setup(async()=>{await hold;return response();},createBedrockAdmission({maxConcurrent:1,spacingMs:0}));
+    const first=f.orchestrator.analyzeStructured(input);await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(f.calls.length,1);
+    const second=f.orchestrator.analyzeStructured(input);const denied=assert.rejects(second,{code:scenario==='pause'?'ai_paused':'bedrock_disabled'});
+    await new Promise(resolve=>setImmediate(resolve));
+    if(scenario==='pause')f.pause();else f.env.BEDROCK_ENABLED='false';
+    release();await first;await denied;assert.equal(f.calls.length,1);
+  }
+});
+
+test('a waiting request snapshots the native context before the caller can mutate it', async () => {
+  let run;let received;
+  const f=setup();
+  const body={modelId:input.model,system:[{text:'ORIGINAL'}]};
+  // Use a dedicated minimal client: this check concerns snapshotting, not the
+  // native Converse contract (validated independently by the other tests).
+  const broker=createBedrockBroker({env:f.env,readFile:()=>Buffer.from('fictitious'),admission:{run(work){run=work;return new Promise(resolve=>{run=()=>work().then(resolve);});}},clientFactory:()=>({async execute(command){received=command.payload.body;return {data:{ok:true}};}})});
+  const promise=broker.execute('custom',body);body.system[0].text='MUTATED';await run();await promise;
+  assert.equal(received.system[0].text,'ORIGINAL');
 });
 
 test('pause, disabled provider and foreign broker environment stop inference; malformed output retains the existing controlled fallback', async () => {

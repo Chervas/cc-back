@@ -301,6 +301,61 @@ hash del error; sin conversaciones, destinatarios ni cuerpos de mensajes).
 Son snapshots puntuales, no garantía de inactividad futura. El candidato sigue
 separado del runtime público y no cierra la aceptación visual ni funcional real.
 
+## Ráfagas antes del corte: espera acotada del consumidor
+
+El candidato incorpora una cola en memoria compartida por los consumidores
+Bedrock de un mismo proceso: hasta tres solicitudes activas, un presupuesto
+activo de1 MiB,32 solicitudes esperando/4 MiB y espera máxima30s. Se separan los
+inicios300ms para no agotar el límite de240/minuto de la identidad staging.
+El cálculo incluye2048bytes de margen para el sobre firmado. Se captura el JSON
+antes de esperar, sin cambiarlo ni truncarlo si el llamador muta su objeto.
+No se reintenta automáticamente una petición ya enviada ni un resultado incierto.
+`broker_queue_full` y `broker_queue_timeout` son rechazos locales explícitos sin
+llamada a AWS ni fallback a otra clave/modelo. La pausa funcional se vuelve a
+consultar justo antes de enviar, además del control inicial del orquestador.
+
+La cola no es distribuida ni durable. La activación exige un único proceso
+consumidor Bedrock: el inventario actual identifica la API staging. Fresh-inbound
+transcribe y encola el dispatch; no ejecuta el análisis. Gateway y DEV no tienen
+grant en ese runtime. Cualquier ampliación de procesos exige coordinación de
+admisión; no multiplicar estas cuotas por worker. El trabajo durable continúa
+siendo responsabilidad de JobRequests y las ejecuciones existentes.
+
+Validación del candidato con este ajuste:
+
+- 53 regresiones aisladas pasan, incluidas concurrencia, cuotas por bytes,
+  orden de espera, expiración sin envío, pausa/desactivación durante la espera
+  e inmutabilidad del contexto encolado.
+- 4470 resultados esperados, cero diferencias en peticiones/salidas,1904 ramas
+  y40 fallos iguales a staging;4453 comprobaciones de pausa adicionales antes
+  del envío. La admisión temporal se inyecta en esta matriz masiva para probar
+  el contenido sin esperar22min; su comportamiento real se prueba aparte.
+- 6440 fallos inyectados (diez por cada nodo activo), incluidos los dos nuevos
+  errores locales: ninguna confirmación ni segundo intento.6430 excepciones
+  y10 finales sin nodo siguiente para el caso1472/N3 ya descrito.
+- Ráfaga real de12 controles Micro por el consumidor exacto:12/12 correctos,
+  3825ms totales, pico de dos llamadas simultáneas,297ms de separación mínima
+  observada en el cliente. Contenido ficticio, sin BD/telemetría de aplicación.
+ 24 eventos solicitados/completados, sin backlog; PIDs/reinicios de Bedrock,
+  OCR/audio y WhatsApp autorizado sin cambios.
+
+Evidencia: `bedrock-paced-regressions.log`,
+`snapshot-paced-broker-candidate-comparison.json`,
+`broker-failures-paced-active.json` y `bedrock-runtime/paced-burst-qa.json`.
+La discrepancia semántica real21/22 se conserva; esta ráfaga de salud no la
+reclasifica como aprobada. Corte público y recorrido visual siguen pendientes.
+
+El diagnóstico WhatsApp correlacionó únicamente IDs, estados y auditoría:
+cuatro rechazos `rate_limited` carecen de comando reservado; hay20 envíos
+completados en ese minuto. El runtime admite ocho operaciones simultáneas y
+60/minuto; sin el contador histórico no se puede distinguir con certeza cuál
+límite se alcanzó. Los dos resultados inciertos constan `unknown` en el ledger
+y `provider_failed` en auditoría. Sus cuatro recibos S3 están verificados, pero
+ese error fijo no permite reconstruir la respuesta de Meta ni acreditar entrega.
+Conservarlos sin replay. No se subieron límites ni se reactivaron mensajes.
+Ver `whatsapp-failure-correlation.json`, `whatsapp-failure-audit-source.json`,
+`whatsapp-failure-audit-receipts.json` y `whatsapp-rate-window.json`.
+
 ## Condiciones antes de migrar Bedrock
 
 1. Conservar región/modelos, selección de contexto, tool `submit_analysis`,
