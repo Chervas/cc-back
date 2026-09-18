@@ -1,5 +1,9 @@
 # Login CRM: agotamiento de consultas preparadas, 18/09/2026
 
+Actualización posterior: la [revisión de salud SQL](audit-query-health.md) corrige
+también la reutilización de consultas y el polling DEV. Incluye el runtime
+actual, pruebas y mediciones; la cronología siguiente describe la recuperación inicial.
+
 El titular confirmó que volvió a entrar tras recuperar la auditoría. La causa
 estaba en el worker de seguridad DEV y afectó al MySQL compartido por ambos
 entornos; no en la contraseña, el frontend ni la nueva gestión Google sin desplegar.
