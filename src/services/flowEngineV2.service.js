@@ -6800,7 +6800,7 @@ async function processNode(node, context, runtime = {}) {
         throw new Error('ai_analysis_output_fields_required');
       }
 
-      const deterministicPresetOutput = presetKey === 'review_response_classifier'
+      const deterministicPresetOutput = presetKey === 'review_response_classifier' && !simulation
         ? await reviewResponseClassification.classifyReviewResponse({
           text: cleanString(aiContext?.last_response_context?.response_text || aiContext?.last_response),
           explicitRating: toIntOrNull(aiContext?.last_response_context?.response_rating),
