@@ -386,3 +386,36 @@ Ver `whatsapp-failure-correlation.json`, `whatsapp-failure-audit-source.json`,
 
 Las credenciales Bedrock y flags actuales permanecen sin cambiar durante esta
 revisión. La retirada de claves y el corte siguen formando parte del objetivo.
+
+## Esperas vencidas y cambios durante validación, 18/09 04:31 UTC
+
+Se reprodujeron tres casos de fallo antes del corte público: una continuación
+de promesa podía admitir trabajo vencido antes de ejecutarse su temporizador;
+el interruptor/entorno/conexión del broker podían cambiar durante el guard
+asíncrono sin volver a comprobarse; y desactivar el proveedor durante ese guard
+no impedía la llamada. Corrección `343f6a57`, publicada en DEV aislado, y
+`e157f3a2` en la candidata de staging todavía sin activar.
+
+La admisión comprueba el plazo monótono antes de reservar capacidad. Tras el
+guard se vuelven a comprobar interruptor y ámbito; el adaptador también relee
+`BEDROCK_ENABLED` sin consultar credenciales locales si cambia el flag del
+broker. Los límites, orden FIFO, tres plazas, memoria, contratos y errores
+existentes se conservan. `checkModel` comparte `analyzeStructured` y sus controles.
+
+- Los tres casos fallan antes y pasan después. Regresiones aisladas:36/36 en
+  DEV y30/30 en la candidata, con BD/red externa bloqueadas y proveedor ficticio.
+- Matriz de las definiciones guardadas:4470 resultados esperados, incluidos17
+  rechazos de recetas retiradas,644 nodos activos y ocho configuraciones. Los
+  hashes de peticiones/salidas,1904 ramas y40 fallos coinciden tanto con staging
+  directo como con la candidata anterior. La admisión temporal se prueba aparte;
+  la matriz usa una admisión inmediata para no confundirla con carga operativa.
+- Publicación DEV por el publicador original, dependencias sin cambio respecto
+  a la release SES preparada, preflight18 tablas compatible. Configuraciones
+  privadas conservan SHA256; MFA/sesiones enforce y jobs clínicos apagados.
+  Los procesos públicos conservan PID y los flags del broker siguen apagados.
+
+Evidencia: `automation-ai/delayed-admission-{before,after,regressions}.log`,
+`delayed-candidate-regressions.log`, `snapshot-delayed-broker-candidate.log` y
+`delayed-admission-matrix-comparison.json`. El snapshot no sustituye actualizar
+el inventario antes del corte. Tampoco reemplaza la discrepancia semántica real
+21/22 ni el recorrido autenticado de interfaz, que siguen pendientes.

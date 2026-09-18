@@ -174,9 +174,12 @@ demás servicios: los límites por proceso no prueban capacidad total.
 
 1. Revalidar las unidades, vault, identidades, red restringida y TLS preparados;
    comprobar capacidad bajo carga autorizada. No usar SSO administrativo para SES.
-2. Instalar dependencias en una release independiente: cambió el lock del broker.
-   El publicador DEV exige preparar dependencias; no eludir su guard. Backend
-   DEV continúa en `ff0d9a85`, sin esta implementación activa.
+2. Preparación de dependencias completada para DEV: release `fcf5a080`, con
+   instalación independiente del SDK SES, 2217 archivos cotejados con Git y
+   las resoluciones existentes del lock sin cambios. El guard original del
+   publicador se conserva. Se publicó después `343f6a57`, que añade defensas
+   de espera IA y reutiliza esas dependencias sin modificarlas. Flag SES broker
+   apagado: estar instalado no significa que haya cambiado el transporte.
 3. Actualizar el inventario de productores/workers, cohortes y concurrencia
    inmediatamente antes del corte. Marketing y email genérico siguen apagados. Verificar
    ráfagas y latencia antes de caducidad de códigos: probar dos plazas no acredita
@@ -193,3 +196,25 @@ Recuperación de esta preparación: mantener flag apagado y release activa. Tras
 un corte real, detener nuevas salidas y conciliar outbox/eventos/ledger; no
 activar directo como fallback, borrar ledger ni repetir inciertos. MFA/sesiones
 siguen exigidos. El objetivo global de seguridad conserva sus demás pendientes.
+
+## Publicación DEV del 18/09 04:31 UTC
+
+Sobre la copia instalada pasan77 pruebas de app/admisión/monitor/aislamiento y
+16 del runtime correo. El preflight comprueba18 tablas de seguridad, sin
+migración ni cambios de modelos. La prueba efectiva bajo UID998 y restricciones
+systemd accede solo a SQL/Redis DEV: rechaza tablas públicas, secretos del host,
+Redis público, APIs staging/gateway, AWS ajeno y salida general. API DEV continúa
+sin claves de proveedores; el worker conserva su transporte SES anterior.
+
+Antes y después del corte: cero jobs en ejecución, correos en cola/envío, citas
+y pacientes en la BD DEV. La primera comprobación usó por error `Citas` y paró
+antes de modificar servicios; se corrigió al nombre real `CitasPacientes`.
+Los dos archivos privados de configuración conservan su SHA256 y los procesos
+públicos mantienen PID. MFA/sesiones enforce y jobs clínicos apagados.
+`/api/auth/me` devuelve401 sin sesión. Evidencia `email-vault/dev-publication/`.
+
+La publicación usa las unidades aisladas existentes y recuperación del enlace
+de release, sin tocar PM2 público. Ante un problema de esta preparación con el
+broker todavía apagado, volver a la release aislada anterior preservando sus
+configuraciones; nunca restaurar el antiguo DEV compartido. Aceptación de envío
+y UI autenticada permanecen pendientes.
