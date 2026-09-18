@@ -281,6 +281,22 @@ async function buildConversationContext({
     return null;
   }
 
+  // Explicit conversation IDs must obey the same tenant boundary as a lookup.
+  // Check before reading content; a stale/mixed execution context must not send
+  // another clinic's or another known participant's history to the analyzer.
+  const expectedClinic = toIntOrNull(clinicId);
+  const expectedPatient = toIntOrNull(patientId);
+  const expectedLead = toIntOrNull(leadId);
+  if ((expectedClinic && toIntOrNull(conversation.clinic_id) !== expectedClinic)
+    || (expectedPatient && toIntOrNull(conversation.patient_id)
+      && toIntOrNull(conversation.patient_id) !== expectedPatient)
+    || (expectedLead && toIntOrNull(conversation.lead_id)
+      && toIntOrNull(conversation.lead_id) !== expectedLead)) {
+    const error = new Error('automation_conversation_scope_mismatch');
+    error.code = 'automation_conversation_scope_mismatch';
+    throw error;
+  }
+
   const messages = await Message.findAll({
     where: {
       conversation_id: conversation.id,
