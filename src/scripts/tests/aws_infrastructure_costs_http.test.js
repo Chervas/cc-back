@@ -6,7 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const http = require('node:http');
 const { createRequire } = require('node:module');
-const { randomBytes } = require('node:crypto');
+const { randomBytes, randomUUID } = require('node:crypto');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { connectionForTestServer } = require('./fixtures/campaign_offline_runtime.cjs');
@@ -30,21 +30,34 @@ async function fixture(t) {
     '../services/aiRuntimeMonitoring.service': {}, '../services/jobRequests.service': {}, '../services/jobScheduler.service': {},
     '../../models': {}, '../services/awsInfrastructureCosts.service': service,
   });
-  const secret = randomBytes(32);
+  const secret = randomBytes(32); const issuedAt = Math.floor(Date.now() / 1000);
+  const sessions = require('../../services/accessSession.service'); const rows = new Map();
   const auth = load('routes/auth.middleware.js', { '../services/accessSession.service': {
-    ...require('../../services/accessSession.service'),
-    ...require('../../services/accessSession.service').createService({ models: () => assert.fail('legacy auth must not load models'),
-      config: () => ({ mode: 'legacy', ttl: 43200, secret }) }),
+    ...sessions, ...sessions.createService({ config: () => ({ mode: 'enforce', emailMfaMode: 'enforce', ttl: 43200, secret }),
+      models: { sequelize: { query: async (_sql, options) => {
+        const row = rows.get(options.replacements.id);
+        return [[row && row.user_id === options.replacements.userId ? row : null].filter(Boolean)];
+      } } } }),
   } });
   const router = load('routes/metasync.routes.js', { './auth.middleware': auth,
     '../controllers/metasync.jobs.controller': jobs, '../controllers/socialstats.controller': unrelated,
-    '../controllers/metasync.controller': unrelated, '../controllers/metasync.diagnostic': unrelated });
+    '../controllers/metasync.controller': unrelated, '../controllers/metasync.diagnostic': unrelated,
+    '../controllers/securityMonitoring.controller': unrelated });
   const server = http.createServer(express().use('/api/metasync', router));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const agent = new http.Agent({ keepAlive: false }); agent.createConnection = connectionForTestServer(server);
   t.after(() => { agent.destroy(); return new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); });
   return { reads: () => reads, request: (actor, query = '') => new Promise((resolve, reject) => {
-    const token = actor === null ? null : jwt.sign(typeof actor === 'object' ? actor : { userId: actor }, secret, { expiresIn: 60 });
+    const claims = typeof actor === 'object' && actor !== null ? actor : { userId: actor };
+    const sessionId = randomUUID(); const user = { id_usuario: claims.userId, password_usuario: 'FICTITIOUS_HASH',
+      email_usuario: 'fictitious@example.invalid', estado_cuenta: 'activo', es_provisional: false };
+    rows.set(sessionId, { ...user, user_id: claims.userId, session_id: sessionId, state: 'active',
+      credential_binding: sessions.binding(user, secret), authentication_method: 'password_email',
+      issued_at: new Date(issuedAt * 1000), email_verified_at: new Date(issuedAt * 1000), email_challenge_id: randomUUID(),
+      expires_at: new Date((issuedAt + 60) * 1000), absolute_expires_at: new Date((issuedAt + 60) * 1000) });
+    const token = actor === null ? null : jwt.sign({ ...claims, sessionVersion: 1, type: 'cc_access', jti: sessionId,
+      iss: 'clinicaclick', aud: 'clinicaclick-platform', iat: issuedAt, amr: ['pwd','email'], emailVerifiedAt: issuedAt }, secret, { expiresIn: 60 });
+
     http.get({ host: '127.0.0.1', port: server.address().port, agent,
       path: '/api/metasync/jobs/usage/aws-infrastructure/costs' + query,
       headers: token ? { authorization: `Bearer ${token}` } : {} }, res => {

@@ -1,8 +1,20 @@
 # Costes AWS de integraciones y auditoría
 
-Implementado y probado con datos ficticios, pendiente de despliegue, migración
-de la BD compartida y verificación AWS. Paquete Node 24 con lockfile propio;
-la API existente conserva Node 18. No instala ni reinicia runtimes utilizados.
+Colector y caché probados con datos ficticios y lecturas AWS reales. El 18/09 se
+creó la tabla de caché en CRM y DEV aislado. La publicación de la consulta está
+separada de la recogida automática: el gate diario sigue apagado y el trust del
+rol lector sigue limitado al SSO aprovisionador. No dar por instalado un cron
+con acceso AWS permanente. Paquete Node 24 con lockfile propio; API Node 18.
+
+Lectura operativa del 18/09: las etiquetas `application/component/environment`
+estaban inactivas y el rol no permitía `ce:ListCostAllocationTags`. Se activaron
+solo esas tres y se añadió exclusivamente esa lectura a la policy existente.
+Se conservó el trust, sin claves nuevas. Backfill desde 01/09 solicitado 17:49:55
+UTC y completado 17:55:15. El primer informe posterior todavía devuelve cero
+filas, `amount:null`, `status:pending`: no prueba gasto cero. Budget leído de AWS:
+60 USD/mes; no coincide en ámbito/métrica con el informe y no es un límite duro.
+El cambio manual de policy debe incorporarse a la fuente de aprovisionamiento
+antes de volver a desplegarla; rollback exacto conservado en evidencia privada.
 
 ## Flujo y contrato
 

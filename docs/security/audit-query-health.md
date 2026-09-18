@@ -159,3 +159,26 @@ de persistencia. El primer intento staging detectó una expectativa desactualiza
 del número de tareas (35 frente a las 39 existentes, incluyendo auditoría y
 caducidad de sesiones); se actualizó esa aserción y pasó la suite completa.
 No se cambió ni reinició el código de ejecución en este seguimiento.
+
+
+### Visor que parecía no terminar de cargar (18/09, 17:41 UTC)
+
+Las seis consultas reales registradas hoy completaron con `records_verified` en
+293–619 ms (duraciones intento→resultado); 297 eventos estaban entregados y el
+índice `idx_platform_audit_view` seguía instalado. Un sondeo independiente de
+conciliación verificó 25/25 recibos en 337 ms; la selección SQL tardó 22,5 ms,
+incluido el arranque del cliente. No leyó cuerpos de actividad ni creó sesiones.
+
+La regresión se reprodujo en Angular: Ajustes usa `OnPush` y los componentes de
+Auditoría, Seguridad y Costes mutaban el estado de sus suscripciones HTTP sin
+marcar el contenedor. Con respuestas demoradas podían mantener el indicador de
+carga aunque ya hubiera respuesta. Corregido con `markForCheck` en éxito/error;
+los hosts ahora son bloques y respetan el espaciado de cabecera. No se han quitado
+la verificación S3, la paginación de 25 ni los límites de fecha/consulta.
+
+La QA anterior respondía sincrónicamente y no tenía un padre `OnPush`; por eso
+no detectaba este fallo. La nueva QA Chromium usa componentes reales bajo un
+padre `OnPush`, respuestas asíncronas, paginación, denegación y recuperación de
+errores a 1440/390 px. Usa datos ficticios; no acredita una sesión humana nueva
+contra producción. Las medidas del backend sí proceden del runtime real. No
+son una prueba de carga masiva ni una garantía de latencia bajo cualquier carga.
