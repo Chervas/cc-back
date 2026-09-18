@@ -1,9 +1,33 @@
 'use strict';
 const test = require('node:test'); const assert = require('node:assert/strict'); const { randomUUID } = require('node:crypto');
-const { assertRuntime, allowedEmail } = require('../dev-security-worker');
+const { assertRuntime, allowedEmail, createAuditPoller } = require('../dev-security-worker');
 const { authorize } = require('../../lib/devAuditRelay');
 const { pack, keyFor } = require('../../../services/platform-audit/src/event');
 const { fixture } = require('../../../services/platform-audit/test/fixture.cjs');
+test('idle polling bounds audit writes without slowing the one-second consumer loop', async () => {
+  let at = 0; let delivery = 0; let reconciliation = 0; let emailTicks = 0;
+  const poll = createAuditPoller({ now: () => at,
+    audit: async () => { delivery++; return {}; }, reconcile: async () => { reconciliation++; } });
+  for (; at < 120000; at += 1000) { await poll(); emailTicks++; }
+  assert.equal(delivery, 12); assert.equal(reconciliation, 4); assert.equal(emailTicks, 120);
+});
+test('audit failures remain paced and do not prevent the email consumer or reconciliation', async () => {
+  let at = 0; let errors = 0; let deliveries = 0; let reconciliations = 0;
+  const poll = createAuditPoller({ now: () => at, onError: () => { errors++; },
+    audit: async () => { deliveries++; throw Error('unavailable'); },
+    reconcile: async () => { reconciliations++; throw Error('unavailable'); } });
+  await poll(); assert.equal(errors, 2);
+  for (at = 1000; at < 10000; at += 1000) await poll();
+  assert.equal(deliveries, 1); assert.equal(reconciliations, 1);
+  at = 10000; await poll(); assert.equal(deliveries, 2); assert.equal(reconciliations, 1);
+});
+test('slow delivery does not cause a burst of catch-up executions', async () => {
+  let at = 0; let calls = 0;
+  const poll = createAuditPoller({ now: () => at, audit: async () => { calls++; at += 75000; return {}; }, reconcile: async () => {} });
+  await poll(); await poll(); assert.equal(calls, 1);
+  at += 9999; await poll(); assert.equal(calls, 1);
+  at++; await poll(); assert.equal(calls, 2);
+});
 test('security consumer requires DEV database, own identity and all business workers off', () => {
   const env = { DEV_SECURITY_WORKER: 'true', DB_NAME: 'clinicaclick_dev_isolated', DB_USERNAME: 'cc_dev_api', DB_HOST: '127.0.0.1',
     RUNTIME_NAMESPACE: 'dev', JOB_RUNTIME_NAMESPACE: 'dev', QUEUE_PREFIX: 'dev', JOBS_WORKER_ENABLED: 'false',

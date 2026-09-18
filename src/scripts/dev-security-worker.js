@@ -13,12 +13,32 @@ function allowedEmail(row) {
   return row && ['auth.email_verification', 'auth.password_reset'].includes(row.template_key)
     && row.recipient_kind === 'user' && row.stream === 'transactional' && !row.clinica_id && !row.paciente_id;
 }
+function createAuditPoller({ audit, reconcile, now = () => performance.now(), onError = () => {} }) {
+  let deliveryAt = -Infinity; let reconciliationAt = -Infinity;
+  return async () => {
+    if (now() >= deliveryAt) {
+      try { const result = await audit(); if (result.error) onError(); }
+      catch { onError(); }
+      finally { deliveryAt = now() + 10000; }
+    }
+    if (now() >= reconciliationAt) {
+      try { await reconcile(); }
+      catch { onError(); }
+      finally { reconciliationAt = now() + 30000; }
+    }
+  };
+}
 async function main() {
   assertRuntime();
   const db = require('../../models'); const jobs = require('../services/jobRequests.service');
   const delivery = require('../services/emailDelivery.service'); const audit = require('../services/platformAudit.delivery');
   const reader = require('../services/platformAudit.readerClient'); const relay = require('../lib/devAuditRelay');
   const session = require('../services/accessSession.service');
+  // Audit delivery/health need a heartbeat, not durable writes every second.
+  // Authentication email polling retains its one-second cadence.
+  const pollAudit = createAuditPoller({ audit: () => audit.run(),
+    reconcile: () => require('../services/platformAudit.reconciliation').run(),
+    onError: () => process.stderr.write('DEV_AUDIT_DELIVERY_PENDING\n') });
   // No scheduler/cron/queue worker import: this process has exactly these two jobs.
   let closing = false; let activeReads = 0;
   const server = http.createServer(async (req, res) => {
@@ -43,9 +63,7 @@ async function main() {
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
   while (!closing) {
     try {
-      const result = await audit.run();
-      if (result.error) process.stderr.write('DEV_AUDIT_DELIVERY_PENDING\n');
-      await require('../services/platformAudit.reconciliation').run();
+      await pollAudit();
       for (let i = 0; i < 5 && !closing; i++) {
         const job = await jobs.claimNextJob(['critical', 'high', 'normal', 'low'], ['email_send']);
         if (!job) break;
@@ -70,4 +88,4 @@ async function main() {
   await db.sequelize.close();
 }
 if (require.main === module) main().catch(() => { process.stderr.write('DEV_SECURITY_WORKER_FAILED\n'); process.exitCode = 1; });
-module.exports = { assertRuntime, allowedEmail };
+module.exports = { assertRuntime, allowedEmail, createAuditPoller };

@@ -49,23 +49,32 @@ function assess(health, state, now = new Date()) {
 }
 function createStateRepository(models) {
   const model = models.PlatformAuditDeliveryState; const sql = models.sequelize;
+  const generator = sql.getQueryInterface().queryGenerator;
+  // Sequelize inlines DATE range predicates in UPDATE, creating one prepared
+  // statement per clock tick. Bind both SET and WHERE so the SQL stays reusable.
+  async function updateState(values, predicate, bindings) {
+    const assignments = Object.keys(values).map(key => `${generator.quoteIdentifier(key)} = $${key}`);
+    const [, changed] = await sql.query(`UPDATE ${generator.quoteTable(model.getTableName())} SET ${assignments.join(', ')} WHERE ${predicate}`, {
+      bind: { ...values, ...bindings }, type: sql.constructor.QueryTypes.UPDATE, logging: false,
+    });
+    return changed === 1;
+  }
   const ensure = () => model.findOrCreate({ where: { state_key: STATE_KEY }, defaults: { state_key: STATE_KEY } });
   return {
     async read() { return model.findByPk(STATE_KEY, { raw: true }); },
     async acquire(now) {
       await ensure(); const lease = randomUUID();
-      const [changed] = await model.update({ lease_token: lease, lease_until: new Date(now.getTime() + 270000), last_started_at: now }, {
-        where: { state_key: STATE_KEY, [Op.or]: [{ lease_until: null }, { lease_until: { [Op.lte]: now } }] } });
-      return changed === 1 ? lease : null;
+      const changed = await updateState({ lease_token: lease, lease_until: new Date(now.getTime() + 270000), last_started_at: now },
+        '`state_key` = $stateKey AND (`lease_until` IS NULL OR `lease_until` <= $at)', { stateKey: STATE_KEY, at: now });
+      return changed ? lease : null;
     },
     async finish(lease, summary, error, now, { preserveError = false } = {}) {
       const value = summary ? { ...projectHealth(summary), delivered: summary.delivered, failed: summary.failed } : null;
       if (value && (![value.delivered, value.failed].every(v => Number.isSafeInteger(v) && v >= 0 && v <= 50))) fail('audit_health_invalid');
-      const [changed] = await model.update({ lease_token: null, lease_until: null, last_completed_at: now,
+      return updateState({ lease_token: null, lease_until: null, last_completed_at: now,
         ...(!preserveError ? { last_error: error ? safeError({ code: error }) : null } : {}),
-        ...(value?.delivered > 0 ? { last_confirmed_at: now } : {}), ...(value ? { summary: value } : {}) },
-      { where: { state_key: STATE_KEY, lease_token: lease, lease_until: { [Op.gt]: now } } });
-      return changed === 1;
+        ...(value?.delivered > 0 ? { last_confirmed_at: now } : {}), ...(value ? { summary: JSON.stringify(value) } : {}) },
+      '`state_key` = $stateKey AND `lease_token` = $owner AND `lease_until` > $at', { stateKey: STATE_KEY, owner: lease, at: now });
     },
     async observe(health, now) {
       await ensure();
