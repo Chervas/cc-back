@@ -11,6 +11,7 @@ function exact(value, keys) {
     || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) fail();
 }
 function event(value) {
+  if (value?.version === 19) return require('./google-receipt-review-event').receiptReviewEvent(value);
   if (value?.version === 18) return require('./google-destination-event').destinationEvent(value);
   if (value?.version === 17) return require('./google-action-plan-event').actionPlanEvent(value);
   if (value?.version === 16) return require('./google-ads-enrollment-event').enrollmentEvent(value);

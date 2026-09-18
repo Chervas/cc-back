@@ -1,15 +1,15 @@
 {
-  "version": 11,
+  "version": 12,
   "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "e773df8c1f18a76cc63c868a762571f5eed26909",
+  "sourceBaseHead": "08b3cbd8b78e500a132f535cd14657db3c0e399f",
   "includesWorkingChanges": true,
-  "scope": "Bounded original-receipt reconciliation primitive and CRM client review; no administrative consumer, public MFA acceptance or operational activation. Unchanged inventory rows retain their earlier evidence hashes.",
+  "scope": "Bounded managed human receipt-review API/service/index/audit v19 and UI review; automatic diagnostics unchanged. No real provider or public MFA acceptance, deployment or activation. Unchanged rows retain earlier evidence hashes.",
   "runtimeConsumersMigrated": 0,
   "qa": {
     "broker": "617/617 full Node24 regression, including 33 destination/receipt scenarios; external network blocked",
     "provider": "fictitious_offline",
     "authenticatedUI": "pending",
-    "mysqlJournalChecks": 56,
+    "mysqlJournalChecks": 65,
     "schemaUnitTests": 4,
     "crmPayloadParityCases": 54,
     "legacyDataManagerScript": "pass offline",
@@ -32,8 +32,16 @@
     "destinationFrontUnitTests": 27,
     "destinationRecoveryIndex": "full-row EXPLAIN: forced scoped index, ref, Backward index scan, no filesort; isolated MySQL, not a load test",
     "previous_broker_607": "607/607 final full Node24 regression, including 23 destination registry scenarios; external network blocked",
-    "receiptReconciliationConsumer": "pending managed administrative consumer, durable human audit, CRM publication, UI and real acceptance; automatic diagnostics unchanged",
-    "receiptReconciliationClientRegression": 36
+    "receiptReconciliationConsumer": "Prepared and undeployed: current managed session/all-account clinic ACL, durable intent, atomic receipt/audit completion, keyset list and explicit check; remote result fixture uses real projection, signed broker primitive tested separately; public MFA/provider integrated acceptance pending",
+    "receiptReconciliationClientRegression": 36,
+    "receiptReviewAuditCodec": "82/82 full local platform-audit regression, v19 unpublished; AWS remains v17",
+    "receiptReviewUiChecks": 100,
+    "receiptReviewUiScreenshots": 65,
+    "receiptReviewAuditUiScreenshots": 16,
+    "receiptReviewBackendClientScopeSchemaTests": 26,
+    "receiptReviewFrontModelTests": 16,
+    "receiptReviewAuditViewMysqlGroups": 14,
+    "receiptReviewIndex": "MySQL 8.0.42 EXPLAIN: ref, Backward index scan, no filesort; limit 21, metadata only; not load acceptance"
   },
   "rows": [
     {
@@ -129,9 +137,9 @@
     },
     {
       "file": "src/services/googleConversionSubmission.repository.js",
-      "role": "Reserva/conciliación atómicas; persiste errores acotados de diagnóstico sin alterar estado ni terminales concurrentes.",
-      "state": "prepared_offline",
-      "sha256": "3dd13b1b1929d6400d555c4eb23ed5db0942ac6d8ac190885fada8bfa762cfeb"
+      "role": "Existing delivery journal plus scoped 20-row keyset metadata and shared transactions for human audit.",
+      "state": "human_receipt_review_prepared_undeployed",
+      "sha256": "af2586912f5f3cfeb642cfb8f3d0973ae7f92e37f5cc3b3d91f44e86b4608e90"
     },
     {
       "file": "src/services/googleConversionDelivery.service.js",
@@ -336,6 +344,48 @@
       "sha256": "200fd9e75518ef207c96791d7ba5f554e2563cdcb0000e00df07c7ae8aa6ed7c",
       "role": "13 pruebas cliente incluyendo gate cerrado, pérdida de acceso y respuesta sustituida.",
       "state": "receipt_reconciliation_primitive_prepared_undeployed"
+    },
+    {
+      "file": "src/services/googleConversionReceiptReview.service.js",
+      "sha256": "a294d57b8a96c0395cbce764dc6850438a7091b53b76389c5fbfa5d5f3a14450",
+      "role": "Human read admission, current sessions/shared-account ACL, read-only reconcile and atomic SQL result/audit.",
+      "state": "human_receipt_review_prepared_undeployed"
+    },
+    {
+      "file": "src/routes/googleConversionReceipts.routes.js",
+      "sha256": "7a8eb8f7149f7f563928b285cb85ee5d72b8e0cad3c96ef1945c7e336d1eb580",
+      "role": "Closed POST list/check routes with managed scope and private no-store responses.",
+      "state": "human_receipt_review_prepared_undeployed"
+    },
+    {
+      "file": "services/platform-audit/src/google-receipt-review-event.js",
+      "sha256": "1254e4d2365f99b07314e0c17089d053f2e2979eee70a0bb1adeba713a199985",
+      "role": "Closed v19 human list/check audit, no receipt bodies or provider IDs.",
+      "state": "human_receipt_review_prepared_undeployed"
+    },
+    {
+      "file": "migrations/20260918235000-index-google-receipt-review.js",
+      "sha256": "2ed2c79f6707a1433b9125d5f2e1a86822bb316e77b3fcd20081d2e67f12c9e1",
+      "role": "Additive scoped receipt-review index; preserves all submission identities.",
+      "state": "human_receipt_review_prepared_undeployed"
+    },
+    {
+      "file": "src/scripts/tests/fixtures/google_receipt_review_checks.fixture.js",
+      "sha256": "93f2f42a358fabe2514185340d4d70e413a5ab7beb0d5552244f368dd64c3060",
+      "role": "Human consumer SQL/race/ACL/audit/index QA, remote receipt responses fictitious.",
+      "state": "human_receipt_review_prepared_undeployed"
+    },
+    {
+      "file": "src/scripts/tests/google_conversion_submission_mysql.integration.js",
+      "sha256": "7b6e1a71b9d9a33e4bd71edc3abdbcb029292b60b85382872c4681e3c86f39ec",
+      "role": "65 SQL groups, actual signed broker for emitter/diagnostics; synthetic human reconciliation responses.",
+      "state": "human_receipt_review_prepared_undeployed"
+    },
+    {
+      "file": "src/services/platformAudit.view.js",
+      "sha256": "232fe3df48a2c41e469d835d672e6132f78a12df33395f8159d44dbdea4e476e",
+      "role": "Bounded v19 human receipt projection after exact S3 version verification.",
+      "state": "human_receipt_review_prepared_undeployed"
     }
   ]
 }

@@ -267,6 +267,8 @@ router.use('/google-ads/conversion-action-plans', webRateLimit({ operation: 'goo
   windowMs: 60 * 1000 }), require('./googleAdsActionPlans.routes').createRouter());
 router.use('/google-ads/conversion-destinations', webRateLimit({ operation: 'google_conversion_destinations', limit: 30,
   windowMs: 60 * 1000 }), require('./googleDestinations.routes').createRouter());
+router.use('/google-ads/conversion-receipts', webRateLimit({ operation: 'google_conversion_receipts', limit: 30,
+  windowMs: 60 * 1000 }), require('./googleConversionReceipts.routes').createRouter());
 router.post('/google-ads/conversions/data-manager/validate', campaignOnboardingController.validateGoogleDataManagerConversion);
 router.post('/google-ads/conversions/enhanced/activation-gate', campaignOnboardingController.gateEnhancedConversionsActivation);
 

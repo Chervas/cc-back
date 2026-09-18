@@ -8,7 +8,7 @@
 Preparado y probado con proveedores ficticios. Sin publicación AWS/API, DDL
 operativa, flags habilitadas ni cohortes Google migradas. Diario humano, API,
 confirmación UI, recuperación sin referencia local y auditoría v18 preparados y
-probados; compatibilidad AWS v18 y aceptación integrada/autenticada pendientes.
+probados; compatibilidad AWS v19 (incluye v18) y aceptación integrada/autenticada pendientes.
 
 ## Decisión explícita y alcance
 
@@ -89,7 +89,7 @@ del recibo incluye UUID/ámbito del permiso; uno posterior no adopta el envío.
 Con el destino revocado `status` de Data Manager sigue cerrado. La nueva operación
 explícita `conversion.reconcile` preparada consulta solo recibos aceptados con
 referencia durable a su autorización original, sin restaurarla ni enviar. El
-consumidor administrativo y su aceptación siguen pendientes; contrato y límites en
+consumidor humano con auditoría v19 y UI está preparado; su publicación y aceptación siguen pendientes; contrato y límites en
 [recuperación de recibos](google-data-manager-broker.md#recibos-después-de-retirar-un-permiso-de-destino).
 
 En el broker, status o el mismo comando recuperan un permiso durable; el diario
@@ -237,8 +237,8 @@ requiere conversiones, acciones y `GOOGLE_ADS_DESTINATIONS_BROKER_ENABLED=true`,
 todas cerradas por defecto. El guard debe comprobar sesión/permisos sobre todas
 las clínicas de la cuenta; el diario implementado aporta esa comprobación durable.
 
-Faltan compatibilidad AWS v18 y aceptación integrada de la recuperación,
-consumidor administrativo de conciliación tras revocar, bootstrap/leads/job combinado y aceptación
+Faltan compatibilidad AWS v19, publicación/aceptación integrada de recuperación
+y revisión humana de recibos, bootstrap/leads/job combinado y aceptación
 Google/UI autenticada antes del corte compartido. QA usa MySQL/SQLite reales,
 firmas, cliente CRM, HTTP local, Chromium con componentes Angular reales y
 AWS/Google/S3 ficticios con red externa bloqueada. No es aceptación operativa.

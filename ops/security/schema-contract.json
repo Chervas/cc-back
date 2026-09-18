@@ -879,6 +879,7 @@
         {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
       ],
       "indexes": [
+        {"name": "cc_google_receipt_review","columns": [{"INDEX_NAME": "cc_google_receipt_review","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "mapping_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_receipt_review","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "scope_digest","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_receipt_review","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "delivery_digest","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_receipt_review","NON_UNIQUE": 1,"SEQ_IN_INDEX": 4,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_receipt_review","NON_UNIQUE": 1,"SEQ_IN_INDEX": 5,"COLUMN_NAME": "submission_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
         {"name": "attempt_id","columns": [{"INDEX_NAME": "attempt_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "attempt_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
         {"name": "cc_google_conversion_pending","columns": [{"INDEX_NAME": "cc_google_conversion_pending","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_conversion_pending","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "updated_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
         {"name": "cc_google_conversion_scope","columns": [{"INDEX_NAME": "cc_google_conversion_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "mapping_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_conversion_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
@@ -887,9 +888,9 @@
         {"name": "provider_request_id","columns": [{"INDEX_NAME": "provider_request_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "provider_request_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
       ],
       "checks": [
-        {"CONSTRAINT_NAME": "cc_google_conversion_ack","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` in (_utf8mb4\\'prepared\\',_utf8mb4\\'attempted\\',_utf8mb4\\'unknown\\')) and (`acknowledged_at` is null) and (`provider_request_id` is null)) or ((`state` in (_utf8mb4\\'accepted\\',_utf8mb4\\'succeeded\\',_utf8mb4\\'partial_success\\',_utf8mb4\\'failed\\')) and (`acknowledged_at` is not null)))"},
-        {"CONSTRAINT_NAME": "cc_google_conversion_attempt","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` = _utf8mb4\\'prepared\\') and (`attempted_at` is null)) or ((`state` <> _utf8mb4\\'prepared\\') and (`attempted_at` is not null)))"},
-        {"CONSTRAINT_NAME": "cc_google_conversion_terminal","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` in (_utf8mb4\\'succeeded\\',_utf8mb4\\'partial_success\\',_utf8mb4\\'failed\\')) and (`completed_at` is not null)) or ((`state` not in (_utf8mb4\\'succeeded\\',_utf8mb4\\'partial_success\\',_utf8mb4\\'failed\\')) and (`completed_at` is null)))"}
+        {"CONSTRAINT_NAME": "cc_google_conversion_ack","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` in (_ascii\\'prepared\\',_ascii\\'attempted\\',_ascii\\'unknown\\')) and (`acknowledged_at` is null) and (`provider_request_id` is null)) or ((`state` in (_ascii\\'accepted\\',_ascii\\'succeeded\\',_ascii\\'partial_success\\',_ascii\\'failed\\')) and (`acknowledged_at` is not null)))"},
+        {"CONSTRAINT_NAME": "cc_google_conversion_attempt","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` = _ascii\\'prepared\\') and (`attempted_at` is null)) or ((`state` <> _ascii\\'prepared\\') and (`attempted_at` is not null)))"},
+        {"CONSTRAINT_NAME": "cc_google_conversion_terminal","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` in (_ascii\\'succeeded\\',_ascii\\'partial_success\\',_ascii\\'failed\\')) and (`completed_at` is not null)) or ((`state` not in (_ascii\\'succeeded\\',_ascii\\'partial_success\\',_ascii\\'failed\\')) and (`completed_at` is null)))"}
       ]
     },
     "GoogleAdsActionPlans": {
@@ -1030,6 +1031,7 @@
     {"name": "20260918190000-create-google-ads-action-journal.js","sha256": "28bc9df36d9915253db783e7a68737b0008c7cb2f903e1ec8215dbcf833d5df7"},
     {"name": "20260918203000-google-action-recovery-ownership.js","sha256": "680b4457f49e641c9bc79ae44a2fcc6d4ab66e0c14ba5175423b5349a4e9c8b2"},
     {"name": "20260918220000-create-google-destination-journal.js","sha256": "245b2a00a272bfd031480bfe07fac1701b92252aa45f57f605ac30179dc236a3"},
-    {"name": "20260918224500-index-google-destination-recovery.js","sha256": "02bb1af1afddd008ae97269a64243cf5e4eb90b22ee89730005a1ea421c32f99"}
+    {"name": "20260918224500-index-google-destination-recovery.js","sha256": "02bb1af1afddd008ae97269a64243cf5e4eb90b22ee89730005a1ea421c32f99"},
+    {"name": "20260918235000-index-google-receipt-review.js","sha256": "2ed2c79f6707a1433b9125d5f2e1a86822bb316e77b3fcd20081d2e67f12c9e1"}
   ]
 }

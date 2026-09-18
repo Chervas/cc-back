@@ -33,13 +33,14 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.GoogleAdsConversionUploadAttempt = require('../../../models/googleadsconversionuploadattempt')(sql, D);
   await sql.getQueryInterface().createTable('SequelizeMeta', { name: { type: D.STRING(255), primaryKey: true } });
   const migrationName = '20260918110000-create-google-conversion-submissions.js';
+  const newMigrations = [migrationName, '20260918235000-index-google-receipt-review.js'];
   const legacyMigrations = ['20260711003000-create-google-ads-conversion-upload-attempts.js',
     '20260711012000-add-google-ads-conversion-destination-key.js', '20260712090000-add-data-manager-conversion-statuses.js'];
   await sql.getQueryInterface().bulkInsert('SequelizeMeta', legacyMigrations.map(name => ({ name })));
   const release = require('../../../ops/security/schema-contract.json');
   const contract = { version: 1, defaults: release.defaults,
     tables: Object.fromEntries(['GoogleAdsConversionUploadAttempts', 'GoogleConversionSubmissions'].map(name => [name, release.tables[name]])),
-    migrations: release.migrations.filter(row => [...legacyMigrations, migrationName].includes(row.name)) };
+    migrations: release.migrations.filter(row => [...legacyMigrations, ...newMigrations].includes(row.name)) };
   const schema = require('../../lib/securitySchemaContract');
   const connection = await sql.connectionManager.getConnection();
   try {
@@ -50,14 +51,14 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     const info = { revision: 'isolated-conversion-journal', contractDigest: schema.digest(contract), contract,
       migrations: Object.fromEntries(contract.migrations.map(row => [row.name, row.sha256])) };
     const plan = { version: 1, runtime: 'dev', database: 'clinicaclick_dev_isolated', revision: info.revision,
-      contractDigest: info.contractDigest, beforeDigest: schema.digest(before), migrations: [required] };
+      contractDigest: info.contractDigest, beforeDigest: schema.digest(before), migrations: newMigrations.map(name => contract.migrations.find(row => row.name === name)) };
     const applied = await require('../security-schema-release').applyPlan({ connection: connection.promise(), plan, info,
-      journal: () => {}, loadMigration: () => migration });
-    assert.deepEqual(applied.completed, [migrationName]); assert.equal(schema.compare(await schema.snapshot(query), contract).compatible, true);
+      journal: () => {}, loadMigration: value => require('../../../migrations/' + value.name) });
+    assert.deepEqual(applied.completed, newMigrations); assert.equal(schema.compare(await schema.snapshot(query), contract).compatible, true);
     await assert.rejects(require('../security-schema-release').applyPlan({ connection: connection.promise(), plan, info,
       journal: () => {}, loadMigration: () => assert.fail('must not repeat DDL') }), /schema_plan_stale_or_invalid/);
   } finally { await sql.connectionManager.releaseConnection(connection); }
-  report.checks.push('pinned schema plan applies only the new journal migration, validates both tables and rejects replay of the stale plan');
+  report.checks.push('pinned schema plan applies the journal and receipt-review index migrations, validates both tables and rejects replay of the stale plan');
   await models.GoogleConnection.create({ id: 2, googleUserId: 'fictitious-subject', accessToken: null, refreshToken: null,
     scopes: 'https://www.googleapis.com/auth/adwords https://www.googleapis.com/auth/datamanager' });
   await models.GoogleConnection.create({ id: 3, googleUserId: 'foreign-subject', accessToken: null, refreshToken: null });
@@ -429,6 +430,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
       now: () => new Date(at), writes: () => providerWrites, calls: () => remoteCalls.length, validations,
       setAfterRemote: fn => { afterRemote = fn; }, setBeforeRemote: fn => { beforeRemote = fn; },
       setProviderMode: value => { providerMode = value; } });
+
+    await require('./fixtures/google_receipt_review_checks.fixture')({ models, sql, report, broker, mapping, context,
+      input, repository, delivery, deliveryIdentity, activeSince, now: () => at });
 
     const table = 'GoogleConversionSubmissions';
     const query = async (text, values = []) => { const [rows] = await sql.query(text, { replacements: values }); return rows; };

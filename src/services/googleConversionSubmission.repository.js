@@ -1,8 +1,10 @@
 'use strict';
 const { createHash, randomUUID } = require('node:crypto');
 const C = require('../../services/integrations-broker/src/google-data-manager-contract');
+const { EVENTS } = require('../../services/integrations-broker/src/google-action-management-contract');
 const { canonical } = require('../../services/integrations-broker/src/canonical');
 const { safe } = require('./googleDataManagerBrokerClient.service');
+const { Op, IndexHints } = require('sequelize');
 const fail = code => { throw Object.assign(Error(code), { code }); };
 const digest = value => createHash('sha256').update(canonical(value)).digest('hex');
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -27,6 +29,16 @@ function auditDigest(attempt) {
 }
 const dto = row => ({ submissionId: row.submission_id, attemptId: String(row.attempt_id), state: row.state,
   providerRequestId: row.provider_request_id, conversionActionId: row.conversion_action_id, lastError: row.last_error });
+const summary = row => {
+  if (!UUID.test(row.submission_id || '') || !EVENTS.includes(row.event_name)
+    || !/^[1-9][0-9]{0,19}$/.test(row.conversion_action_id || '')
+    || !['prepared', 'attempted', 'unknown', 'accepted', 'succeeded', 'partial_success', 'failed'].includes(row.state)
+    || !(row.created_at instanceof Date) || !(row.updated_at instanceof Date)
+    || !Number.isFinite(+row.created_at) || !Number.isFinite(+row.updated_at) || row.updated_at < row.created_at) fail('conversion_submission_conflict');
+  return { submissionId: row.submission_id, eventName: row.event_name, conversionActionId: row.conversion_action_id,
+    state: row.state, createdAt: row.created_at.toISOString(), updatedAt: row.updated_at.toISOString(),
+    canCheck: ['attempted', 'unknown', 'accepted'].includes(row.state) };
+};
 function createGoogleConversionSubmissionRepository({ models, assertContext, deliveryIdentity, activeSince, now = () => new Date() }) {
   if (typeof assertContext !== 'function' || !deliveryIdentity || Object.keys(deliveryIdentity).sort().join(',') !== 'audience,keyId'
     || !['audience', 'keyId'].every(key => typeof deliveryIdentity[key] === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(deliveryIdentity[key]))
@@ -34,7 +46,11 @@ function createGoogleConversionSubmissionRepository({ models, assertContext, del
   const startAt = Date.parse(activeSince), deliveryDigest = digest({ ...deliveryIdentity, activeSince });
   const getModels = () => typeof models === 'function' ? models() : models;
   const options = transaction => ({ transaction, lock: transaction.LOCK.UPDATE, logging: false });
-  const trans = work => getModels().sequelize.transaction(work);
+  const trans = (work, { transaction } = {}) => {
+    if (!transaction) return getModels().sequelize.transaction(work);
+    if (transaction.sequelize !== getModels().sequelize || transaction.finished) fail('conversion_submission_conflict');
+    return work(transaction);
+  };
   function date() { const value = now(); if (!(value instanceof Date) || !Number.isFinite(+value) || +value < startAt) fail('broker_cohort_disabled'); return value; }
   async function scope(account, context, transaction) {
     const row = await assertContext(account, context, { transaction });
@@ -92,6 +108,26 @@ function createGoogleConversionSubmissionRepository({ models, assertContext, del
     return dto(row);
   }
   return {
+    listReview({ account, context, cursor }, transactionOptions) {
+      if (cursor !== null && (!cursor || Object.getPrototypeOf(cursor) !== Object.prototype
+        || Object.keys(cursor).sort().join(',') !== 'createdAt,submissionId' || !UUID.test(cursor.submissionId || '')
+        || typeof cursor.createdAt !== 'string' || !/^20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(cursor.createdAt)
+        || !Number.isFinite(Date.parse(cursor.createdAt)) || new Date(cursor.createdAt).toISOString() !== cursor.createdAt)) fail('invalid_request');
+      cursor = cursor === null ? null : { ...cursor };
+      return trans(async transaction => {
+        date(); const captured = await scope(account, context, transaction);
+        const rows = await getModels().GoogleConversionSubmission.findAll({ where: {
+          mapping_id: captured.id, scope_digest: digest(captured), delivery_digest: deliveryDigest,
+          ...(cursor ? { [Op.or]: [{ created_at: { [Op.lt]: new Date(cursor.createdAt) } },
+            { created_at: new Date(cursor.createdAt), submission_id: { [Op.lt]: cursor.submissionId } }] } : {}) },
+          order: [['created_at', 'DESC'], ['submission_id', 'DESC']], limit: 21, raw: true, logging: false, transaction,
+          indexHints: [{ type: IndexHints.FORCE, values: ['cc_google_receipt_review'] }],
+          attributes: ['submission_id', 'event_name', 'conversion_action_id', 'state', 'created_at', 'updated_at'] });
+        const items = rows.slice(0, 20).map(summary), last = items.at(-1);
+        return { items, nextCursor: rows.length > 20 ? { createdAt: last.createdAt, submissionId: last.submissionId } : null };
+      }, transactionOptions);
+    },
+    inspectReview: (input, transactionOptions) => trans(async transaction => summary((await load(input, transaction)).row), transactionOptions),
     async reserve({ account, context, attemptId, dedupeKey, payload }) {
       C.validate(C.OPERATIONS.ingest, payload); const data = structuredClone(payload), payloadDigest = digest(data);
       if (typeof dedupeKey !== 'string' || !/^[a-f0-9]{64}$/.test(dedupeKey)) fail('invalid_request');
@@ -195,7 +231,7 @@ function createGoogleConversionSubmissionRepository({ models, assertContext, del
       return trans(async transaction => { const { row, attempt } = await load(input, transaction);
         return applyReceipt(row, attempt, 'accepted', { providerRequestId: result.requestId, warningCount: result.warningCount }, transaction); });
     },
-    reconcile(input, result) {
+    reconcile(input, result, transactionOptions) {
       return trans(async transaction => {
         const { row, attempt } = await load(input, transaction); let projected;
         if (!result || Object.keys(result).sort().join(',') !== 'requestId,requestStatusPerDestination,submissionId'
@@ -211,7 +247,7 @@ function createGoogleConversionSubmissionRepository({ models, assertContext, del
           errors: entry.errorInfo.errorCounts.slice(0, 20).map(item => ({ reason: item.reason, record_count: item.recordCount })),
           warnings: entry.warningInfo.warningCounts.slice(0, 20).map(item => ({ reason: item.reason, record_count: item.recordCount })) }));
         return applyReceipt(row, attempt, state, { providerRequestId: result.requestId, destinations }, transaction);
-      });
+      }, transactionOptions);
     },
   };
 }

@@ -144,6 +144,20 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.deepEqual(listedPage.events[0].googleDestinationList,{assetRef:'ads:1234567890',mappingId:'11',clinicCount:2,resultCount:1});
   assert.equal(listedPage.events[0].verification,'s3_version_verified');assert(!Object.hasOwn(listedPage.events[0],'resultDigest'));
   report.checks.push('v18 list variant verifies its exact S3 object and exposes only count/scope in a separate projection, never a permission result');
+  for (const family of ['list','check']) {
+    const reviewed = require('../../../services/platform-audit/src/google-receipt-review-event').fromReceiptReview({
+      actor: { userId: 9, sessionRef }, captured: { id: 11, connectionRef: 'google:fixture', assetRef: 'ads:1234567890', clinicIds: [59,71] },
+      scopeKey: 'group:5', requestId: randomUUID(), family, input: family === 'list' ? { cursor: null } : { submissionId: randomUUID() }, now: at,
+      reason: family === 'list' ? 'list_prepared' : 'receipt_checked', result: family === 'list' ? { items: [] } : { item: { state: 'succeeded' } } });
+    const saved = await repo.append(reviewed);
+    await models.PlatformAuditEvent.update({ state: 'delivered', receipt: await writer.write(saved), delivered_at: at }, { where: { event_id: reviewed.eventId } });
+    const page = await view.read({ actorId: 1, sessionRef, query: { ...criteria, action: reviewed.action } });
+    assert.equal(page.events.length, 1); const dto = page.events[0];
+    assert.deepEqual(dto.googleReceiptReview, { assetRef: 'ads:1234567890', mappingId: '11', clinicCount: 2, family,
+      submissionRef: reviewed.submissionRef, resultCount: reviewed.resultCount, resultState: reviewed.resultState });
+    assert.equal(dto.verification,'s3_version_verified'); assert(!Object.hasOwn(dto,'resultDigest')); assert(!Object.hasOwn(dto,'connectionRef'));
+  }
+  report.checks.push('v19 list/check actions filter real SQL, verify exact S3 objects and project bounded human receipt metadata without provider identifiers');
   const broken = await models.PlatformAuditEvent.findByPk(first.events[0].eventId); const goodReceipt = broken.receipt;
   await broken.update({ receipt: { ...goodReceipt, versionId: 'missing-version' } });
   await assert.rejects(view.read({ actorId: 1, sessionRef, query: criteria }), /audit_view_unavailable/);

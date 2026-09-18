@@ -10454,7 +10454,7 @@ recuperada permite retirar aunque falle el almacenamiento local; una autorizaci�
 nueva sigue exigiendo conservar su UUID antes de enviarla.
 
 API, diario, confirmación/recuperación UI y visor v18 probados con datos ficticios;
-AWS aún admite v17. Faltan compatibilidad v18, consumidor de conciliación tras revocar y
+AWS aún admite v17. Faltan compatibilidad AWS v19 para el consumidor de recibos, despliegue y
 aceptación integrada/autenticada antes de
 activar cohortes. Contrato de esquema, errores, recuperación y rollback en el
 [contrato técnico](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-destinations-broker.md).
@@ -10477,14 +10477,13 @@ por un permiso posterior. Una respuesta vacía no prueba procesamiento.
 
 Recomprueba dentro del commit de auditoría; un fallo no devuelve el resultado.
 No guarda cuerpo/identificadores ni cambia recibos de ingesta o permisos. Intentos
-inciertos o recibos sin prueba original siguen requiriendo revisión. Faltan
-consumidor con sesión y permisos sobre todas las clínicas, diario/auditoría humana,
-actualización CRM y UI autenticada. [Contrato y recuperación](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-data-manager-broker.md#recibos-después-de-retirar-un-permiso-de-destino).
+inciertos o recibos sin prueba original siguen requiriendo revisión. Consumidor humano, actualización CRM y auditoría v19 preparados en DEV;
+publicación y aceptación UI autenticada pendientes. [Contrato y recuperación](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-data-manager-broker.md#recibos-después-de-retirar-un-permiso-de-destino).
 
 ### Inventario y diálogo de acciones
 
 El inventario `GET /api/marketing/google-ads/conversion-actions` añade
-`action_management:{mode:'broker'|'legacy',enabled:boolean,destinations_enabled:boolean}`. `mode` procede del
+`action_management:{mode:'broker'|'legacy',enabled:boolean,destinations_enabled:boolean,receipts_enabled:boolean}`. `mode` procede del
 runtime resuelto; `enabled` indica las flags de preparación y rol de proceso,
 no un permiso del usuario ni que el binding permita esos eventos.
 `destinations_enabled` exige además la flag de destinos y permite mostrar la
@@ -10499,3 +10498,49 @@ sin tokens ni pacientes, y al reabrir/recargar consulta status del mismo plan.
 No crea una sesión ni relaja MFA; una referencia no acredita propiedad. No hay
 polling ni reintento automático. Comportamiento de pantallas en el
 [contrato funcional](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/20.17-marketing-arquitectura-experiencia-objetivos.md#revisión-de-acciones-google-gestionadas).
+
+
+### Revisión humana de recibos de Google (18/09/2026)
+
+Preparada en DEV, sin desplegar: `POST /api/marketing/google-ads/conversion-receipts/list`
+y `POST /api/marketing/google-ads/conversion-receipts/:submissionId/check`.
+Cuerpo cerrado: exactamente uno de `clinic_id`/`group_id`, `customer_id` de diez
+dígitos y `request_id` UUID v4; list añade `cursor:null|{createdAt,submissionId}`.
+Sin query params, ID Google, contactos, payloads ni orden de envío del cliente.
+Las rutas son `private, no-store` y comparten límite de 30 solicitudes/minuto.
+
+Exigen sesión administrada actual, escritura en todas las clínicas que usan la
+cuenta, conexión/ámbito vigente, scope Data Manager y configuración estable de
+firma/corte. No se exige reactivar una clínica para esta lectura manual; no se
+modifica la política del diagnóstico automático. Flag adicional
+`GOOGLE_ADS_RECEIPT_RECONCILIATION_BROKER_ENABLED`, Ads/conversiones y rol distinto
+de gateway. `action_management.receipts_enabled` expone la disponibilidad al UI.
+
+Cada petición guarda un intento v19 antes de leer. Repetir su UUID devuelve 409,
+sin segunda consulta remota. List usa el índice `cc_google_receipt_review`
+(mapping, digest de ámbito, digest de entrega, fecha y UUID), keyset y LIMIT 21;
+devuelve como máximo 20 observaciones SQL, sin consultas Google por fila ni total.
+El cursor no sustituye los permisos ni incluye identidades de otros ámbitos.
+
+Check deriva el intento original del diario. Solo `attempted/unknown/accepted`
+consultan la operación tipada reconcile, una vez y sin transacción SQL abierta.
+`prepared` devuelve `not_sent`; un resultado terminal devuelve `stored`.
+El estado CRM y la finalización v19 se guardan en la misma transacción; un fallo
+no publica cambios parciales. Se revalida autorización antes/después y antes de
+liberar la respuesta. Locks: intento, envío y binding, como en diagnóstico;
+un resultado terminal concurrente nunca retrocede a procesamiento.
+
+DTO de fila cerrado: submissionId, eventName, conversionActionId, state,
+createdAt, updatedAt, canCheck. Sin ID de proveedor ni datos clínicos. Un fallo
+tras admisión deja un intento sin completar; requiere otra consulta explícita,
+no un reenvío. Un recibo sin prueba original queda `outcome_unknown`.
+
+Auditoría v19: `integration.google_ads.receipt_list/receipt_check`, usuario,
+sesión, ámbito, referencia y digests/conteo/estado; nunca contenido del recibo.
+Visor solo muestra registros confirmados por versión S3. AWS sigue en v17:
+publicar lector/escritor compatibles con v19 antes de habilitar captura.
+DDL aditivo `20260918235000-index-google-receipt-review.js`, metadata/hash fijados
+en schema-contract. MySQL 8 reescribe los literales de CHECK a charset ASCII al
+añadir el índice: el contrato registra la metadata observada, sin relajar CHECKs.
+Rollback: cerrar el gate y conservar índice, intentos, recibos, auditoría y lector
+compatible. No borrar/recrear identidades ni volver a una ingesta legacy.

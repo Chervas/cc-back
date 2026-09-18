@@ -148,10 +148,9 @@ El cliente `googleAdsBroker.conversion(...,'reconcile',...)` añade el gate
 `GOOGLE_ADS_RECEIPT_RECONCILIATION_BROKER_ENABLED=true`, cerrado por defecto y
 adicional a Ads/conversiones. Exige UUID de lectura, `expectedActionId` y guard
 explícitos, contexto opaco y permisos vigentes comprobados alrededor de la
-llamada. No hay ruta HTTP, cambio del coordinador automático, sesión humana ni
-aceptación UI de esta nueva vía. Faltan admisión/auditoría humana durables,
-permisos actuales por todas las clínicas, publicación del resultado CRM y
-recorrido visual autenticado antes de habilitarla.
+llamada. El consumidor HTTP humano, la admisión/auditoría v19 y la actualización CRM
+están preparados en DEV; no cambia el coordinador automático. Publicación y
+recorrido visual autenticado con proveedor real siguen pendientes.
 
 Consulta por claves únicas, sin barrido histórico. Una referencia SQLite por
 ingesta dinámica; cada conciliación implica una consulta al proveedor y auditoría
@@ -471,3 +470,25 @@ job mixto y el inventario completo de la identidad compartida. No se ha publicad
 aplicado DDL, alterado un grant/token/flag ni llamado a un proveedor real.
 Evidencia privada: `google-onboarding-validation/`; recuperación operativa sigue
 siendo conservar runtime/flags actuales, journal e historial sin replay.
+
+
+## Consumidor humano de revisión de recibos
+
+El contrato HTTP, controles y rollback vigentes se describen en
+[13-backend](../../src/Documentacion/13-backend.md#revisión-humana-de-recibos-de-google-18092026).
+`googleConversionReceiptReview.service` utiliza el diario SQL existente y dos
+capturas del outbox por lectura completada; no añade otra cola ni servicio.
+Revisar envíos, desde el diálogo de conversiones, lista páginas de 20, muestra
+observaciones guardadas y consulta solo por acción explícita. Sin polling,
+resend, datos de pacientes ni tokens. El backend permite la consulta de recibos
+con sesión renovada y escritura vigente sobre toda la cuenta, sin depender de
+quién inició el envío original. No amplía el acceso a bindings desconectados.
+
+QA: MySQL real aislado para diario, permisos, transacciones y EXPLAIN; proveedor
+y sesiones ficticios. Las respuestas remotas de este consumidor se simulan con
+el contrato real Data Manager; la primitiva firmada/SQLite/HTTPS conserva su QA
+separada. Chromium ejecuta los componentes Angular y HTTP reales con API ficticia,
+escritorio/móvil, pérdida de acceso, respuesta sustituida y doble clic. El visor
+v19 se prueba además con SQL y lectura firmada/versionada de objetos ficticios.
+No demuestra aún el recorrido completo humano–CRM–broker–Google en AWS.
+Evidencia privada: `qa-evidence/security-resume-20260917/google-receipt-review-20260918/`.

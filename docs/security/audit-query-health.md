@@ -217,10 +217,30 @@ históricas. El EXPLAIN de la prueba propia confirma índice y ausencia de SCAN 
 la consulta de la nueva tabla por `submission_id`. Es verificación a escala QA,
 no un ensayo de capacidad del broker.
 
-No se ejecuta esta lectura desde el panel ni desde el job automático existente;
-cliente y operación están preparados con gate adicional cerrado. Cada consulta
+Cliente, operación y consumidor humano están preparados con gate adicional
+cerrado; no se ha desplegado el panel ni alterado el job automático existente. Cada consulta
 explícita futura utilizará el ID Google registrado y una llamada de estado,
 con comprobaciones/auditoría alrededor, sin transmisión de archivos ni ingesta.
 La captura de metadata añade una fila por envío dinámico y la lectura genera
 los eventos técnicos del broker existentes. Sin despliegue, carga real nueva
 ni medición de coste incremental en este corte. [Contrato completo](google-data-manager-broker.md#recibos-después-de-retirar-un-permiso-de-destino).
+
+
+## Listado humano de recibos, preparado en DEV (18/09/2026)
+
+`GoogleConversionSubmissions` incorpora `cc_google_receipt_review`: igualdad por
+mapping/digest de ámbito/digest de entrega y keyset descendente fecha/UUID.
+LIMIT 21, salida máxima 20; solo siete campos derivados, sin payload, COUNT del
+historial, OFFSET ni llamadas remotas por fila. EXPLAIN real MySQL 8.0.42:
+`ref`, `Backward index scan`, sin filesort. Es un plan comprobado sobre una BD
+ficticia, no un ensayo de capacidad ni una nueva medición de salud en CRM.
+
+Cada lectura completa captura dos eventos en el outbox existente y conserva sus
+controles de salud; un fallo tras admisión deja solo el intento. La comprobación
+individual usa PK, suelta la transacción antes del proveedor y guarda recibo CRM
+y finalización auditada juntos. Se conserva el orden de locks del diagnóstico
+(intento → envío → ámbito). Un resultado terminal no retrocede por una respuesta
+PROCESSING tardía. La UI no hace polling y las rutas limitan 30 peticiones/minuto.
+La autorización sigue comprobando todas las clínicas de la cuenta compartida:
+esa carga no se evita con una caché de permisos. Coste/capacidad operativos nuevos
+sin medir, índice y código todavía sin publicar.

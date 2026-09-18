@@ -324,3 +324,20 @@ Renderiza el componente Angular real con datos ficticios, bloquea APIs externas
 y comprueba escritorio/móvil, vacíos, denegación, detalles, paginación y XSS.
 No acredita sesión real ni despliegue público. Registrar la evidencia y SHAs en
 99, y la madurez en 19; no duplicarlos en este runbook.
+
+
+## Compatibilidad v19 preparada: revisión humana de recibos (18/09/2026)
+
+El código DEV añade el sobre v19 `google-receipts-review-v1`, lectura de claves
+S3 v19 y filtros/proyección del visor para receipt_list/receipt_check de Google.
+Admisión humana y resultado guardados en el outbox de aplicación existente;
+sin cuerpos del proveedor ni identidad de pacientes. La finalización comparte
+transacción con el resultado CRM; intentos sin finalización no acreditan éxito.
+
+82/82 pruebas de codecs/lector/escritor en local, más visor SQL firmado con
+objetos ficticios y Chromium. AWS sigue en v17. Las candidatas v18 anteriores
+están congeladas: no habilitar el nuevo consumidor con ellas, no reetiquetarlas
+como v19 ni reusar ciegamente sus canarios. Preparar candidatas v19 por rol sobre
+fuentes vivas contrastadas, conservar v1–v18, publicar lector antes que escritor
+y verificar transporte/versiones/KMS antes de habilitar captura. Tras emitir v19,
+el rollback debe conservar un lector compatible y todas las evidencias.
