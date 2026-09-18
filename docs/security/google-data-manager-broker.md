@@ -118,8 +118,9 @@ son evidencia de sus cortes, con casos solapados; no sumar como casos únicos.
 El emisor común de conversiones y su resolutor por mapping ya seleccionan el
 camino broker cuando el registro Ads lo exige. Ya están conectados los mandatos
 workspace v2, los hitos CRM nativos y su preparación validate-only. Siguen
-pendientes dos validadores onboarding, otros consumidores de preparación/alta
-de acciones y recepción/sync de leads. El diagnóstico de recibos está conectado
+pendientes consumidores de preparación/alta de acciones y recepción/sync de leads.
+Los dos validadores onboarding ya están adaptados, como se describe al final.
+El diagnóstico de recibos está conectado
 y probado aisladamente, como se describe al final.
 La recepción managed falla cerrada antes de cargar un token local. No activar
 el conjunto parcial ni migrar la identidad compartida antes de completarlos.
@@ -390,8 +391,11 @@ los nuevos casos de onboarding no ingieren eventos. Instancia cerrada0. El prime
 ensayo del endpoint reveló un502 indebido para revocación de permisos; corregido,
 fallo conservado en evidencia. Estas pruebas no incluyen sesión/MFA ni UI real.
 
-Creación y normalización de acciones, enriquecimiento de ajustes por cuenta y
-bootstrap de capacidades siguen pendientes. Si se solicita crear una acción que
+La [base tipada de creación/normalización](google-action-management-broker.md)
+ya está preparada y probada en broker/cliente, con planes y bloqueos durables.
+Su conexión a los endpoints con permisos globales de cuenta y propiedad durable
+en CRM, el enriquecimiento por cuenta y bootstrap siguen pendientes.
+Si se solicita crear una acción que
 falta, el nuevo recorrido devuelve una necesidad de revisión explícita y no
 intenta OAuth local ni afirma estar listo. Este límite es temporal y bloquea el
 corte de Google: hay que conservar esas funciones con operaciones tipadas antes

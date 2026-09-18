@@ -56,7 +56,7 @@ function query(name, payload) {
   validate(PREFIX + name + '.read.v1', payload);
   if (name === 'discovery') return 'SELECT customer.id, customer.descriptive_name, customer.manager, customer.currency_code, customer.time_zone, customer.status FROM customer LIMIT 2';
   if (name === 'account') return 'SELECT customer.id, customer.manager, customer.currency_code, customer.time_zone FROM customer LIMIT 2';
-  if (name === 'conversion_actions') return 'SELECT customer.id, conversion_action.id, conversion_action.resource_name, conversion_action.name, conversion_action.category, conversion_action.type, conversion_action.status, conversion_action.counting_type, conversion_action.include_in_conversions_metric, conversion_action.primary_for_goal FROM conversion_action LIMIT 5001';
+  if (name === 'conversion_actions') return 'SELECT customer.id, conversion_action.id, conversion_action.resource_name, conversion_action.owner_customer, conversion_action.name, conversion_action.category, conversion_action.type, conversion_action.status, conversion_action.counting_type, conversion_action.include_in_conversions_metric, conversion_action.primary_for_goal FROM conversion_action LIMIT 5001';
   if (name === 'campaigns') return `SELECT ${RESOURCE_FIELDS.join(', ')} FROM campaign WHERE campaign.status IN ('ENABLED', 'PAUSED', 'REMOVED') LIMIT 5001`;
   if (name === 'publishing_campaigns') return `SELECT ${[...RESOURCE_FIELDS, 'campaign.advertising_channel_type',
     'campaign.final_url_suffix', 'campaign.asset_automation_settings'].join(', ')} FROM campaign WHERE campaign.status IN ('ENABLED', 'PAUSED') LIMIT 5001`;
@@ -137,16 +137,18 @@ function projectPage(name, raw, payload, account) {
     if (!plain(row) || !plain(row.customer) || row.customer.id !== account.customerId) fail('provider_failed');
     if (name === 'conversion_actions') {
       const action = row.conversionAction;
-      if (!plain(action) || !integerId(action.id)
+      if (!plain(action) || !integerId(action.id) || typeof action.resourceName !== 'string'
         || !new RegExp(`^customers/[0-9]{10}/conversionActions/${action.id}$`).test(action.resourceName || '')) fail('provider_failed');
       const nullableBoolean = value => {
         if (value === undefined || value === null) return null;
         if (typeof value !== 'boolean') fail('provider_failed'); return value;
       };
+      if (action.ownerCustomer != null && (typeof action.ownerCustomer !== 'string'
+        || !/^customers\/[0-9]{10}$/.test(action.ownerCustomer))) fail('provider_failed');
       // Cross-account actions retain their actual resource owner. Preparation
       // must reject a foreign owner, never reconstruct an apparently local ID.
       return { customer: { id: account.customerId }, conversionAction: {
-        id: action.id, resourceName: action.resourceName, name: text(action.name, 1024),
+        id: action.id, resourceName: action.resourceName, ownerCustomer: action.ownerCustomer ?? null, name: text(action.name, 1024),
         category: enumText(action.category), type: enumText(action.type), status: enumText(action.status),
         countingType: enumText(action.countingType), primaryForGoal: nullableBoolean(action.primaryForGoal),
         includeInConversionsMetric: nullableBoolean(action.includeInConversionsMetric) } };

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { adsFixture, CUSTOMER, MANAGER, ACCESS } = require('./google-ads-fixture.cjs');
 const contract = require('../src/google-ads-contract');
 const action = (id = '456') => ({ customer: { id: CUSTOMER }, conversionAction: { id,
-  resourceName: `customers/${CUSTOMER}/conversionActions/${id}`, name: 'Lead - ClinicaClick',
+  resourceName: `customers/${CUSTOMER}/conversionActions/${id}`, ownerCustomer: `customers/${CUSTOMER}`, name: 'Lead - ClinicaClick',
   type: 'UPLOAD_CLICKS', category: 'SUBMIT_LEAD_FORM', status: 'ENABLED', countingType: 'MANY_PER_CLICK',
   primaryForGoal: false, includeInConversionsMetric: false } });
 
@@ -47,7 +47,9 @@ test('missing approval flags remain unknown and cross-account action ownership i
 
 test('invalid conversion DTOs and provider secrets are rejected and asset revocation stops subsequent reads', async t => {
   const f = adsFixture(t);
-  for (const patch of [{ id: '0' }, { resourceName: 'https://foreign.invalid/' }, { primaryForGoal: 'false' }, { name: ACCESS }]) {
+  for (const patch of [{ id: '0' }, { resourceName: 'https://foreign.invalid/' },
+    { resourceName: [action().conversionAction.resourceName] }, { ownerCustomer: [`customers/${CUSTOMER}`] },
+    { primaryForGoal: 'false' }, { name: ACCESS }]) {
     f.state.response = { results: [{ ...action(), conversionAction: { ...action().conversionAction, ...patch } }] };
     await assert.rejects(f.execute('conversion_actions'), { code: 'provider_failed' });
   }

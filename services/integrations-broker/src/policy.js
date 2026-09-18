@@ -32,6 +32,7 @@ const validate = new Ajv({ strict: true }).compile(object({
     googleAdsEnrollmentScopes: { type: 'array', minItems: 1, maxItems: 100,
       items: require('./google-ads-enrollment-contract').scopeSchema },
     googleDataManager: require('./google-data-manager-contract').bindingSchema,
+    googleAdsActionManagement: require('./google-action-management-contract').bindingSchema,
     oauth: require('./google-oauth-contract').bindingSchema }, ['connectionRef', 'provider', 'initialState']) },
   grants: { type: 'array', maxItems: 100000, items: object({ principalId: ref, tenantRef: ref, connectionRef: ref, assetRef: ref, operations: strings }) },
 }));
@@ -46,6 +47,7 @@ function validatePolicy(policy) {
     if (!policy.principals.some(row => row.id === grant.principalId) || !policy.connections.some(row => row.connectionRef === grant.connectionRef)) fail('invalid_request');
   }
   for (const binding of policy.connections) {
+    if (binding.googleAdsActionManagement) require('./google-action-management-contract').validateBinding(binding);
     if (binding.googleDataManager) require('./google-data-manager-contract').validateBinding(binding);
     if (Boolean(binding.bedrock) !== (binding.provider === 'aws_bedrock')) fail('invalid_request');
     if (Boolean(binding.email) !== (binding.provider === 'aws_ses')) fail('invalid_request');

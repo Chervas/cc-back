@@ -4,7 +4,7 @@ const { BrokerError, fail } = require('./errors');
 const HOSTS = new Set(['mybusiness.googleapis.com', 'businessprofileperformance.googleapis.com',
   'mybusinessbusinessinformation.googleapis.com', 'mybusinessverifications.googleapis.com', 'mybusinessaccountmanagement.googleapis.com']);
 // This transport is private to reviewed operations. It never accepts consumer headers or URLs.
-function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManagerEnabled = false } = {}) {
+function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManagerEnabled = false, actionManagementEnabled = false } = {}) {
   return async function googleHttp({ hostname, path, token, form, json, signal, developerToken, loginCustomerId, quotaProjectId }) {
     const oauth = hostname === 'oauth2.googleapis.com' && path === '/token';
     const userinfo = hostname === 'www.googleapis.com' && path === '/oauth2/v2/userinfo';
@@ -13,7 +13,9 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManag
     const analytics = hostname === 'analyticsdata.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}:runReport$/.test(path);
     const discovery = hostname === 'analyticsadmin.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}$/.test(path)
       || hostname === 'www.googleapis.com' && /^\/webmasters\/v3\/sites\/[^/?#]+$/.test(path);
-    const ads = hostname === 'googleads.googleapis.com' && /^\/v24\/customers\/[0-9]{10}\/googleAds:search$/.test(path);
+    const adsWrite = actionManagementEnabled === true && hostname === 'googleads.googleapis.com'
+      && /^\/v24\/customers\/[0-9]{10}\/conversionActions:mutate$/.test(path);
+    const ads = adsWrite || hostname === 'googleads.googleapis.com' && /^\/v24\/customers\/[0-9]{10}\/googleAds:search$/.test(path);
     const dmWrite = dataManagerEnabled === true && hostname === 'datamanager.googleapis.com' && path === '/v1/events:ingest';
     let dmStatus = false;
     if (dataManagerEnabled === true && hostname === 'datamanager.googleapis.com' && typeof path === 'string'
@@ -47,7 +49,7 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManag
           ...(jsonRead ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}),
           ...(dm ? { 'x-goog-user-project': quotaProjectId } : {}),
           ...(ads ? { 'developer-token': developerToken.toString('utf8'), ...(loginCustomerId ? { 'login-customer-id': loginCustomerId } : {}) } : {}) } }, res => {
-        const chunks = []; let size = 0; const limit = oauth || userinfo ? 32768 : dm ? 131072 : ads ? 16 * 1024 * 1024 : 2097152;
+        const chunks = []; let size = 0; const limit = oauth || userinfo ? 32768 : dm || adsWrite ? 131072 : ads ? 16 * 1024 * 1024 : 2097152;
         if (res.statusCode >= 300 && res.statusCode < 400 || res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity'
           || !/^application\/json(?:\s*;.*)?$/i.test(res.headers['content-type'] || '')) {
           res.destroy(); finish(new BrokerError('provider_failed')); return;

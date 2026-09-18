@@ -1,5 +1,15 @@
 # Broker de integraciones
 
+## 18/09/2026 — Gestión tipada de acciones canónicas Google Ads
+
+Preparar, validar, aplicar y consultar planes propios; creación fija y ajuste de
+recuento/acción secundaria sólo con binding/grant explícitos. Bloqueo por cuenta
+y evento, comprobación de catálogo, marcador durable anterior a la escritura y
+recibo atómico con auditoría. Pérdida de respuesta/reinicio no generan reenvíos.
+Broker y cliente CRM probados offline; conexión a endpoints, propiedad del plan
+en CRM, despliegue, proveedor y UI autenticada pendientes. Flags por defecto OFF.
+[Contrato, recuperación y límites](../../docs/security/google-action-management-broker.md).
+
 ## 18/09/2026 — Contrato de conversiones Google Data Manager
 
 Validación ficticia, ingesta individual y estado ligado a recibo durable preparados

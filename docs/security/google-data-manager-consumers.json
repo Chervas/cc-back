@@ -1,12 +1,12 @@
 {
-  "version": 6,
+  "version": 7,
   "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "62ad760c95a81d843f9e7858d3afd60f03325fd1",
+  "sourceBaseHead": "eeed7e7b7aa662bc48378d30695055da03f896c3",
   "includesWorkingChanges": true,
   "scope": "Bounded manual Data Manager caller inventory; not a complete inventory of all Google identity consumers or external OPS.",
   "runtimeConsumersMigrated": 0,
   "qa": {
-    "broker": "560/560 previous workspace regression; engine unchanged in diagnostics/onboarding tranches",
+    "broker": "584/584 full regression; 28/28 focused after strict owner/resource type checks (overlapping)",
     "provider": "fictitious_offline",
     "authenticatedUI": "pending",
     "mysqlJournalChecks": 56,
@@ -19,7 +19,8 @@
     "previous_healthAuthorizationAndNative": 69,
     "previous_diagnosticsHealthAuthorizationNativeAdapterClient": 82,
     "onboardingPreparationAndNormalization": 49,
-    "readinessScript": "pass offline"
+    "readinessScript": "pass offline",
+    "actionManagementClientScopeReaderAndOnboarding": 60
   },
   "rows": [
     {
@@ -96,7 +97,7 @@
     },
     {
       "file": "src/services/googleAdsBroker.service.js",
-      "sha256": "ecabf0eada7783ce0a3682fe0a7f3bbc962efa13afc3e0c7d6716ae52949a20d",
+      "sha256": "6dfe4574096512546f4ff083fbf02df0721e6a3acd1fab02df1e3a54d60e5153",
       "role": "Fachada por modelos y transporte ligado a configuración inicial de audiencia/clave/endpoint; rechaza cambios de identidad en caliente.",
       "state": "prepared_offline"
     },
@@ -170,7 +171,7 @@
       "file": "services/integrations-broker/src/google-ads-contract.js",
       "role": "Lectura tipada conversion_actions: inventario acotado, flags desconocidos y dueño real conservados, sin snippets.",
       "state": "prepared_offline",
-      "sha256": "4e894d2d4236e5cb57f3f279f7dd29aeab159d4a738fa06ab9f452fc6853637e"
+      "sha256": "57d6d88b28c4b3b8df894ce2d9760d9194074f22fa3c9129666ce221a8a17d9f"
     },
     {
       "file": "src/services/googleConversionDiagnosticsBroker.service.js",
@@ -207,6 +208,54 @@
       "role": "ACL sobre todos los mappings activos de una cuenta, obligatoria para futura mutación tipada.",
       "state": "preserve_for_typed_action_mutation",
       "sha256": "0a185f14da5a52b20382864d01034c9f67456352d3361a8b5eb6d5ab7f7fd6f2"
+    },
+    {
+      "file": "services/integrations-broker/src/google-action-management-contract.js",
+      "role": "Contrato cerrado y binding explícito de acciones canónicas; sin comandos libres.",
+      "state": "prepared_offline_callsite_pending",
+      "sha256": "65cada402b5b569d035345875dd9ab6bc755e8b22ac5a64fdc3d23a19c2581e5"
+    },
+    {
+      "file": "services/integrations-broker/src/google-action-management.js",
+      "role": "Planes, bloqueos y recibos SQLite; validación fresca y ninguna repetición tras resultado desconocido.",
+      "state": "prepared_offline_callsite_pending",
+      "sha256": "d65bffc93339fa1dfc2ff1d26843c8ec26577d943ebcd2ca48cefd18e688067d"
+    },
+    {
+      "file": "services/integrations-broker/src/google-main.js",
+      "role": "Cohorte explícita de conversiones; runtime opt-in con grants exactos.",
+      "state": "prepared_offline_callsite_pending",
+      "sha256": "1547515244a2e3c08be8251a8424ccef11162108431e6eee3f3ff8f11d0fc0eb"
+    },
+    {
+      "file": "services/integrations-broker/src/google-http.js",
+      "role": "Transporte de mutación fijo y acotado, cerrado por defecto.",
+      "state": "prepared_offline_callsite_pending",
+      "sha256": "8968aa791aa74c20238e641b8ae952597c4aee3d7bcf3b90cb3519eb4b68f298"
+    },
+    {
+      "file": "services/integrations-broker/src/policy.js",
+      "role": "Valida binding y permisos explícitos de gestión de acciones.",
+      "state": "prepared_offline_callsite_pending",
+      "sha256": "6019d847de43258a619cef59d73d0d976aff44a5d9023cf085a2db78af6f8df3"
+    },
+    {
+      "file": "services/integrations-broker/src/google-ads-enrollment-contract.js",
+      "role": "Separación de claves de operación, enrollment, OAuth y revocación incluso sin permisos de lectura.",
+      "state": "prepared_offline_callsite_pending",
+      "sha256": "b567573907f578b2c26814ae1ee155ba99e50c32ba8717978923fa3c30b9629d"
+    },
+    {
+      "file": "services/integrations-broker/src/errors.js",
+      "role": "Códigos acotados de conflicto, caducidad y bloqueo de plan.",
+      "state": "prepared_offline_callsite_pending",
+      "sha256": "13b696e948c0f8b71f4e0dbf18d4ce80734490991f623d57b515ef859af95477"
+    },
+    {
+      "file": "src/services/googleAdsActionManagementBrokerClient.service.js",
+      "role": "Cliente con contexto opaco, UUID obligatorio y guard actual; propiedad durable y ACL global del endpoint todavía pendientes.",
+      "state": "prepared_offline_callsite_pending",
+      "sha256": "3761c3a42892ea2f92cb2231f0f6838e460f8fe8e9a3798f185a081c4e18e063"
     }
   ]
 }
