@@ -8,7 +8,7 @@ function createClient({ origin, ca, keyId, privateKey, timeoutMs = 20000, agent 
     read(command) {
       const { input, raw, headers } = signRequest(command, { keyId, privateKey });
       return new Promise((resolve, reject) => {
-        let timer; const request = https.request(new URL(PATH, base), { method: 'POST', ca, rejectUnauthorized: true,
+        let timer; const request = https.request(new URL(PATH, base), { method: 'POST', ca: typeof ca === 'function' ? ca() : ca, rejectUnauthorized: true,
           minVersion: 'TLSv1.2', agent, headers }, response => {
           const chunks = []; let size = 0;
           response.on('data', chunk => { size += chunk.length; if (size > 300000) request.destroy(); else chunks.push(chunk); });

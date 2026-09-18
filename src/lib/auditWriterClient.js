@@ -10,7 +10,7 @@ function createClient({ origin, ca, keyId, privateKey, timeoutMs = 75000, agent 
       return new Promise((resolve, reject) => {
         let timer;
         const unavailable = () => { clearTimeout(timer); reject(Object.assign(Error('audit_writer_unavailable'), { code: 'audit_writer_unavailable' })); };
-        const request = https.request(new URL(protocol.PATH, base), { method: 'POST', ca, rejectUnauthorized: true,
+        const request = https.request(new URL(protocol.PATH, base), { method: 'POST', ca: typeof ca === 'function' ? ca() : ca, rejectUnauthorized: true,
           minVersion: 'TLSv1.2', agent, headers }, response => {
           const chunks = []; let size = 0;
           response.on('data', chunk => { size += chunk.length; if (size > 128000) request.destroy(); else chunks.push(chunk); });
