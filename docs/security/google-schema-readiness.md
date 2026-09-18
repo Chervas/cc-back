@@ -41,16 +41,46 @@ DDL parcial sin reintento automático y preservación de datos. No acredita
 operaciones reales de Google ni interfaz autenticada.
 
 La primera ejecución detectó la ausencia de estas tablas en el contrato de
-despliegue; la ejecución final pasa con el contrato ampliado. Aún no se han
-aplicado estas migraciones a DEV ni staging ni publicado este cambio de
-contrato. Ambos esquemas observados carecen de las tablas de broker Google.
-El campo `accessToken` sigue siendo NOT NULL en ambos y requiere la modificación
-incluida en la secuencia; la prueba parte también de esa definición anterior.
+despliegue; la ejecución final pasa con el contrato ampliado. Antes de la publicación,
+los dos esquemas carecían de las tablas de broker Google y `accessToken` seguía
+siendo NOT NULL. La prueba parte también de esa definición anterior.
 No ejecutar `db:migrate` global ni reintentar automáticamente DDL parcial.
 
-Siguiente paso: preparar el plan DEV con revisión y hashes exactos, detener el
-runtime aislado al aplicar y comprobar paridad antes de publicar. El corte de
-staging exige además completar consumidores de la identidad compartida,
+El corte de staging exige completar consumidores de la identidad compartida,
 operaciones tipadas, inventario de pausas, drenaje y recuperación. La creación
 de solicitudes/reconciliación de altas Ads y las operaciones de escritura aún
 no están completas; este documento no autoriza dar esos recorridos por probados.
+
+
+## DEV aplicado y publicado, 18/09/2026 08:25 UTC
+
+Plan fijado a `68808b82047567e3f1b223ed4e24c16aaff61eb6`, contrato SHA256
+`4fcde15737813913fc7ae30cde0877db1de1a9638ac45c748bcf0291c494408f` y metadata previa.
+Se verificaron tablas Google/clinicas de prueba vacías y cero trabajos, flujos o
+correos en curso. Se detuvo la API DEV, se aplicaron exactamente trece migraciones
+con journal y se publicó mediante el publicador original. No hubo DDL parcial
+ni reintentos. Las 34 tablas pasan el contrato; los once registros nuevos siguen
+vacíos, sin grants ni credenciales añadidas. El campo de token ya admite NULL.
+
+Release `/opt/clinicaclick-dev/release-68808b82047567e3f1b223ed4e24c16aaff61eb6`,
+2.220 archivos comparados con Git. API UID998/PID1766048 y worker de seguridad
+UID996/PID1766060 activos, sin reinicios adicionales. Los dos archivos privados
+de configuración conservan sus hashes, MFA/sesiones enforce y jobs clínicos OFF.
+Los flags IA/Google/SES no se activaron. Auth/me devuelve401 en3000/3001/3004.
+
+Staging conserva exactamente el digest de metadata previo
+`cd74a9d7543b171d4a74eb15b11732e8ea57500ba5bf057ddabde6da408e5c73`:
+continúa incompatible con este contrato Google (24 incidencias/13 migraciones
+pendientes), por lo que no puede publicarse allí este conjunto todavía. Conserva
+una conexión, 17 asignaciones, los 31 mappings y dos bloqueos Meta. Sus procesos,
+gateway, fresh-inbound e importador conservaron los PIDs observados. Frontend
+no se reconstruyó: los cambios de esta continuación son pruebas y documentación.
+
+Recuperación DEV: puede restaurarse la release anterior `4fbf4bda` conservada,
+con su configuración aislada, manteniendo el esquema aditivo. No ejecutar down
+ni borrar registros/historial para recuperar código. El plan aplicado queda
+invalidado por el nuevo digest y el historial; no volver a ejecutarlo.
+Evidencia privada: `google-meta/dev-google-plan.json`, `dev-google-apply.jsonl`,
+`dev-release-{before,after}.json`, `installed-files.json` y `staging-after-dev.json`.
+Esto habilita los requisitos SQL de DEV; no acredita acceso real a Google,
+OAuth, altas Ads ni recorridos visuales autenticados.
