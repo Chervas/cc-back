@@ -4,7 +4,7 @@ const { exact, fail } = require('./reader-protocol'); const { UUID } = require('
 const ACTIONS = ['auth.sign_in', 'auth.token_sign_in', 'auth.unlock', 'auth.email_code', 'auth.password_reset', 'integration.meta.scope_block', 'session.issued', 'session.renewed', 'session.revoked', 'session.expired', 'audit.records.read',
   ...require('./access-policy-contract').PERMISSION_ACTIONS, ...require('./realtime-contract').REALTIME_ACTIONS,
   ...require('./patient-read-contract').PATIENT_READ_ACTIONS, 'integration.asset.disconnect', 'integration.asset.map',
-  'integration.oauth.authorize', 'integration.oauth.activate', 'integration.whatsapp.authorization_state', 'integration.asset.enrollment'];
+  'integration.oauth.authorize', 'integration.oauth.activate', 'integration.whatsapp.authorization_state', 'integration.asset.enrollment', 'integration.google_ads.action_plan'];
 function criteriaFor(v) {
   exact(v, ['from', 'to', 'action', 'userId']);
   const date = value => typeof value === 'string' && /^20\d\d-\d\d-\d\d$/.test(value) && Number.isFinite(Date.parse(value + 'T00:00:00Z'))

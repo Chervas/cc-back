@@ -11,7 +11,7 @@ function requested(req, family) {
   const scopeFields = Object.keys(body).filter(key => ['clinic_id', 'group_id'].includes(key));
   if (scopeFields.length !== 1 || !positive(body[scopeFields[0]])) fail('invalid_request');
   const expected = ['customer_id', 'request_id', scopeFields[0], ...(family === 'prepare' ? ['mode', 'currency', 'targets']
-    : family === 'apply' ? ['confirm_external_mutation'] : [])];
+    : family === 'apply' ? ['confirm_external_mutation'] : family === 'cancel' ? ['input'] : [])];
   if (Object.keys(body).sort().join(',') !== expected.sort().join(',')
     || typeof body.customer_id !== 'string' || !/^[0-9]{10}$/.test(body.customer_id) || body.customer_id === '0000000000'
     || typeof body.request_id !== 'string' || !UUID.test(body.request_id)
@@ -20,7 +20,8 @@ function requested(req, family) {
   return { scope: { clinicId: scopeFields[0] === 'clinic_id' ? Number(body.clinic_id) : null,
     groupId: scopeFields[0] === 'group_id' ? Number(body.group_id) : null,
     assignmentScope: scopeFields[0] === 'clinic_id' ? 'clinic' : 'group' }, customerId: body.customer_id,
-  input: family === 'prepare' ? structuredClone({ mode: body.mode, currency: body.currency, targets: body.targets }) : { planId: req.params.planId },
+  input: family === 'prepare' ? structuredClone({ mode: body.mode, currency: body.currency, targets: body.targets })
+    : { planId: req.params.planId, ...(family === 'cancel' ? { input: structuredClone(body.input) } : {}) },
   options: { requestId: body.request_id, confirmExternalMutation: body.confirm_external_mutation === true } };
 }
 function createRouter({ models = () => require('../../models'), sessions = require('../services/accessSession.service'),
@@ -57,7 +58,7 @@ function createRouter({ models = () => require('../../models'), sessions = requi
     } catch (error) { return res.status(status(error)).json({ success: false, error: safe(error) }); }
   };
   router.post('/', handle('prepare'));
-  for (const family of ['validate', 'apply', 'status']) router.post(`/:planId/${family}`, handle(family));
+  for (const family of ['validate', 'apply', 'status', 'cancel']) router.post(`/:planId/${family}`, handle(family));
   return router;
 }
 module.exports = { createRouter, requested };

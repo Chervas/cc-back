@@ -96,6 +96,24 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(enrollmentPage.events.find(row => row.reason === 'enrollment_cancel_requested').actorId, '55');
   assert.equal(enrollmentPage.events.find(row => row.reason === 'enrollment_broker_confirmed').actorType, 'job');
   report.checks.push('four enrollment audit phases share one request with distinct SQL parts; verified DTO keeps human/job attribution, pending mapping and confirmed cancellation separate');
+  const action = require('../../../services/platform-audit/src/google-action-plan-event').fromActionPlan({
+    plan_id: randomUUID(), scope_key: 'group:5', mapping_id: 11, closed_at: null,
+    input: { mode: 'create', currency: 'EUR', targets: [{ event: 'lead', actionId: null }] }, receipt: { state: 'applied' },
+  }, { command_id: randomUUID(), family: 'apply', session_ref: randomUUID() },
+  { connectionRef: 'google:fixture', assetRef: 'ads:1234567890', clinicIds: [59, 71] },
+  { userId: 9, sessionRef }, 'result_recovered', { now: at, relatedCommandRef: randomUUID() });
+  const actionSaved = await repo.append(action);
+  await models.PlatformAuditEvent.update({ state: 'delivered', receipt: await writer.write(actionSaved), delivered_at: at },
+    { where: { event_id: action.eventId } });
+  const actionPage = await view.read({ actorId: 1, sessionRef, query: { ...criteria, action: 'integration.google_ads.action_plan' } });
+  assert.equal(actionPage.events.length, 1); const actionDto = actionPage.events[0];
+  assert.equal(actionDto.adsActionPlan.planRef, action.planRef);
+  assert.equal(actionDto.adsActionPlan.initiatorSessionRef, action.initiatorSessionRef);
+  assert.equal(actionDto.adsActionPlan.relatedCommandRef, action.relatedCommandRef);
+  assert.equal(actionDto.sessionRef, sessionRef); assert.equal(actionDto.reason, 'result_recovered');
+  assert.equal(actionDto.verification, 's3_version_verified');
+  assert(!Object.hasOwn(actionDto, 'selectionDigest')); assert(!Object.hasOwn(actionDto, 'connectionRef'));
+  report.checks.push('v17 recovered Google action is filterable only after exact S3 verification; DTO retains original and recovering session/command references without provider credentials');
   const broken = await models.PlatformAuditEvent.findByPk(first.events[0].eventId); const goodReceipt = broken.receipt;
   await broken.update({ receipt: { ...goodReceipt, versionId: 'missing-version' } });
   await assert.rejects(view.read({ actorId: 1, sessionRef, query: criteria }), /audit_view_unavailable/);

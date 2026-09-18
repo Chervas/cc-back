@@ -10,6 +10,11 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const migrationName = '20260918190000-create-google-ads-action-journal.js';
   const migration = require('../../../migrations/' + migrationName);
   await migration.up(sql.getQueryInterface()); await migration.up(sql.getQueryInterface());
+  const recoveryName = '20260918203000-google-action-recovery-ownership.js';
+  const recovery = require('../../../migrations/' + recoveryName);
+  await recovery.up(sql.getQueryInterface()); await recovery.up(sql.getQueryInterface());
+  models.PlatformAuditEvent = require('../../../models/platformauditevent')(sql, D);
+  await models.PlatformAuditEvent.sync();
   for (const [name, file] of [['GoogleAdsActionPlan', 'googleadsactionplan'], ['GoogleAdsActionCommand', 'googleadsactioncommand']]) {
     models[name] = require('../../../models/' + file)(sql, D);
   }
@@ -95,11 +100,16 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     assert.equal((await run('prepare', input('lead'), planId)).planId, planId); assert.equal(calls.length, count);
     await assert.rejects(run('prepare', input('contact'), planId), { code: 'google_action_conflict' });
     for (const changed of [{ ...context, actor: { ...context.actor, userId: 91003 } },
-      { ...context, actor: { ...context.actor, sessionRef: randomUUID() } }, { ...context, scopeKey: 'clinic:59' }]) {
+      { ...context, scopeKey: 'clinic:59' }]) {
       // Actor 91003 lacks ACL; others retain ACL but cannot adopt the plan.
       await assert.rejects(run('status', { planId }, randomUUID(), changed));
     }
     assert.equal(calls.length, count);
+    const renewed = { ...context, actor: { ...context.actor, sessionRef: randomUUID(), expiresAt: at + 7200000 } };
+    const renewalRead = await run('status', { planId }, randomUUID(), renewed);
+    assert.equal(renewalRead.canApply, false); assert.equal(renewalRead.canCancel, true);
+    await assert.rejects(run('apply', { planId }, randomUUID(), renewed), { code: 'google_action_not_found' });
+    await assert.rejects(run('validate', { planId }, randomUUID(), renewed), { code: 'google_action_not_found' });
     await assert.rejects(run('apply', { planId }, randomUUID(), context, false), { code: 'google_action_confirmation_required' });
     await run('validate', { planId });
     report.checks.push('plan/input/session/scope ownership persists across service restart; confirmation and validateOnly preserve zero mutations');
@@ -109,8 +119,13 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     afterRemote = null; service = make(); const beforeReplay = calls.length;
     const replay = await run('apply', { planId }, applyId); assert.equal(replay.outcomeUnknown, true); assert.equal(replay.commandState, 'attempted');
     await assert.rejects(run('apply', { planId }), { code: 'google_action_conflict' }); assert.equal(calls.length, beforeReplay);
-    const recovered = await run('status', { planId }); assert.equal(recovered.plan.state, 'applied'); assert.equal(recovered.outcomeUnknown, false);
+    const recovered = await run('status', { planId }, randomUUID(), renewed); assert.equal(recovered.plan.state, 'applied'); assert.equal(recovered.outcomeUnknown, false);
     assert.equal(recovered.plan.results[0].actionId, '456'); assert.equal(writes, 1);
+    assert.equal((await models.GoogleAdsActionCommand.findByPk(applyId)).state, 'completed');
+    const recoveredEvent = JSON.parse((await models.PlatformAuditEvent.findOne({ where: { correlation_id: applyId, stage: 'completed' } })).body);
+    assert.equal(recoveredEvent.reason, 'result_recovered'); assert.equal(recoveredEvent.sessionRef, renewed.actor.sessionRef);
+    assert.equal(recoveredEvent.initiatorSessionRef, context.actor.sessionRef);
+    assert.equal(recoveredEvent.relatedCommandRef, recovered.commandId);
     report.checks.push('lost broker ACK + CRM restart recovers receipt by status, with exactly one real broker mutation and no retransmitted apply');
 
     const parallelId = randomUUID();
@@ -205,8 +220,95 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
       const accepted = await request('/' + body.request_id + '/apply', { ...follow, request_id: randomUUID(), confirm_external_mutation: true });
       assert.equal(accepted.status, 200); assert.equal(accepted.body.plan.state, 'applied'); assert.equal(writes, 5);
       assert.equal((await request('/' + randomUUID() + '/status', { ...follow, request_id: randomUUID() })).status, 404);
+      const httpClosedPlan = randomUUID(), httpClosedCalls = calls.length;
+      const cancelBody = { ...follow, request_id: randomUUID(), input: input('purchase') };
+      assert.equal((await request('/' + httpClosedPlan + '/cancel', { ...cancelBody, confirm_external_mutation: true })).status, 400);
+      const closedResponse = await request('/' + httpClosedPlan + '/cancel', cancelBody);
+      assert.equal(closedResponse.status, 200); assert.equal(closedResponse.body.closed, true);
+      assert.equal(closedResponse.body.canApply, false); assert.equal(closedResponse.body.plan, null);
+      assert.equal((await request('/' + httpClosedPlan + '/status', { ...follow, request_id: randomUUID() })).body.closed, true);
+      assert.equal(calls.length, httpClosedCalls);
+
     } finally { agent.destroy(); await new Promise(resolve => server.close(resolve)); }
     report.checks.push('real loopback HTTP routes enforce closed bodies, managed-session proof, explicit confirmation, SQL clinic permissions and no-store; no credentials leak');
+
+    // Closing a preparation must survive restart and renewed sessions, without
+    // discarding history or ever unlocking an attempted external mutation.
+    const cancelledPlan = (await run('prepare', input('purchase'))).planId;
+    const beforeCancel = calls.length;
+    await assert.rejects(run('cancel', { planId: cancelledPlan, input: input('lead') }), { code: 'google_action_conflict' });
+    await models.Clinica.update({ estado_clinica: false }, { where: { id_clinica: 71 } });
+    const cancelled = await run('cancel', { planId: cancelledPlan, input: input('purchase') }, randomUUID(), renewed);
+    assert.equal(cancelled.closed, true); assert.equal(cancelled.canApply, false); assert.equal(cancelled.canCancel, false);
+    assert.equal(calls.length, beforeCancel);
+    assert.equal((await run('status', { planId: cancelledPlan }, randomUUID(), renewed)).closed, true);
+    assert.equal(calls.length, beforeCancel);
+    await models.Clinica.update({ estado_clinica: true }, { where: { id_clinica: 71 } });
+    service = make(); await assert.rejects(run('apply', { planId: cancelledPlan }), { code: 'google_action_closed' });
+    await assert.rejects(run('cancel', { planId: uncertain, input: input('qualified_lead') }), { code: 'google_action_conflict' });
+    await assert.rejects(run('cancel', { planId, input: input('lead') }), { code: 'google_action_conflict' });
+    const tombstone = randomUUID();
+    assert.equal((await run('cancel', { planId: tombstone, input: input('purchase') })).closed, true);
+    assert.equal((await run('status', { planId: tombstone })).plan, null);
+    await assert.rejects(run('prepare', input('purchase'), tombstone), { code: 'google_action_closed' });
+    assert.equal(calls.length, beforeCancel);
+    report.checks.push('renewed same-user session cancels unattempted preparations even when a clinic is paused; persisted closure blocks apply/late prepare, and never cancels attempted or applied mutations');
+
+    let releaseRead, admitRead;
+    const waiting = new Promise(resolve => { admitRead = resolve; });
+    const barrier = new Promise(resolve => { releaseRead = resolve; });
+    const racing = randomUUID();
+    afterRemote = async command => { if (command.requestId === racing) { admitRead(); await barrier; } };
+    const inFlight = run('prepare', input('purchase'), racing);
+    await waiting;
+    try { assert.equal((await run('cancel', { planId: racing, input: input('purchase') }, randomUUID(), renewed)).closed, true); }
+    finally { releaseRead(); }
+    assert.equal((await inFlight).closed, true); afterRemote = null;
+    const abandoned = await models.GoogleAdsActionCommand.findByPk(racing);
+    assert.equal(abandoned.state, 'completed'); assert.equal(abandoned.last_error, 'google_action_closed');
+    const abandonedAudit = JSON.parse((await models.PlatformAuditEvent.findOne({ where: { correlation_id: racing, stage: 'completed' } })).body);
+    assert.equal(abandonedAudit.outcome, 'unknown'); assert.equal(abandonedAudit.reason, 'command_cancelled');
+    assert.equal(abandonedAudit.sessionRef, renewed.actor.sessionRef);
+    report.checks.push('cancellation wins against a late preparation ACK; the cancelled read remains closed with unknown outcome and both initiating/recovering session references');
+
+    const auditBefore = calls.length, failingAdmission = randomUUID();
+    models.PlatformAuditEvent.addHook('beforeCreate', 'audit-failure', () => { throw Error('FICTITIOUS_AUDIT_DOWN'); });
+    await assert.rejects(run('prepare', input('purchase'), failingAdmission));
+    models.PlatformAuditEvent.removeHook('beforeCreate', 'audit-failure');
+    assert.equal(calls.length, auditBefore); assert.equal(await models.GoogleAdsActionCommand.findByPk(failingAdmission), null);
+    const failedCompletion = randomUUID();
+    models.PlatformAuditEvent.addHook('beforeCreate', 'audit-failure', row => {
+      if (row.stage === 'completed') throw Error('FICTITIOUS_AUDIT_DOWN');
+    });
+    await assert.rejects(run('prepare', input('purchase'), failedCompletion));
+    models.PlatformAuditEvent.removeHook('beforeCreate', 'audit-failure');
+    assert.equal((await models.GoogleAdsActionCommand.findByPk(failedCompletion)).state, 'attempted');
+    assert.equal((await models.GoogleAdsActionPlan.findByPk(failedCompletion)).receipt, null);
+    assert.equal((await run('status', { planId: failedCompletion }, randomUUID(), renewed)).plan.state, 'prepared');
+    assert.equal((await models.GoogleAdsActionCommand.findByPk(failedCompletion)).state, 'completed');
+    const incompleteLegacy = (await run('prepare', input('purchase'))).planId;
+    await models.GoogleAdsActionPlan.update({ scope_digest: null }, { where: { plan_id: incompleteLegacy } });
+    await assert.rejects(run('status', { planId: incompleteLegacy }), { code: 'google_action_recovery_unavailable' });
+    const rollbackPlan = (await run('prepare', input('purchase'))).planId, rollbackCommand = randomUUID();
+    models.PlatformAuditEvent.addHook('beforeCreate', 'cancel-failure', row => {
+      if (JSON.parse(row.body).reason === 'preparation_cancelled') throw Error('FICTITIOUS_CANCEL_AUDIT_DOWN');
+    });
+    await assert.rejects(run('cancel', { planId: rollbackPlan, input: input('purchase') }, rollbackCommand));
+    models.PlatformAuditEvent.removeHook('beforeCreate', 'cancel-failure');
+    assert.equal((await models.GoogleAdsActionPlan.findByPk(rollbackPlan)).closed_at, null);
+    assert.equal(await models.GoogleAdsActionCommand.findByPk(rollbackCommand), null);
+    assert.equal(await models.PlatformAuditEvent.count({ where: { correlation_id: rollbackCommand } }), 0);
+    const raceWrites = writes;
+    const competing = await Promise.allSettled([run('apply', { planId: rollbackPlan }),
+      run('cancel', { planId: rollbackPlan, input: input('purchase') }, randomUUID(), renewed)]);
+    assert.equal(competing.filter(result => result.status === 'fulfilled').length, 1);
+    const winningPlan = await models.GoogleAdsActionPlan.findByPk(rollbackPlan);
+    assert.equal(writes - raceWrites, winningPlan.closed_at ? 0 : 1);
+    assert.equal(Boolean(winningPlan.apply_command_id), !winningPlan.closed_at);
+    report.checks.push('cancellation/audit commit rolls back together; simultaneous apply and cancellation have exactly one winner, preserving the durable exclusion');
+    const metadataOnly = JSON.stringify(await models.PlatformAuditEvent.findAll());
+    assert.doesNotMatch(metadataOnly, /FICTITIOUS|PRIVATE|refreshToken|accessToken|googleSubject|targets/);
+    report.checks.push('SQL outbox failure rolls admission back before transport and receipt completion back after transport; fresh authorized status recovers the original attempt; legacy rows without captured ownership fail closed');
 
     await assert.rejects(require('../../services/googleAdsScopedRuntime.service').resolveScopedGoogleAdsRuntime({
       userId: 91002, groupId: 5, assignmentScope: 'group', customerId: CUSTOMER, requireBroker: true,
@@ -216,11 +318,12 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     }), { code: 'google_action_broker_required' });
     report.checks.push('explicit plan API rejects a legacy mapping before any local credential read or OAuth request');
 
+    await assert.rejects(recovery.down(sql.getQueryInterface()), /Preserve recovery ownership/);
     await assert.rejects(migration.down(sql.getQueryInterface()), /Preserve Google action/);
     const schema = require('../../lib/securitySchemaContract');
     const snapshot = await schema.snapshot(async (query, values) => (await sql.query(query, { replacements: values }))[0]);
-    const contract = { tables: {}, migrations: [{ name: migrationName,
-      sha256: createHash('sha256').update(fs.readFileSync(path.resolve(__dirname, '../../../migrations', migrationName))).digest('hex') }] };
+    const contract = { tables: {}, migrations: [migrationName, recoveryName].map(name => ({ name,
+      sha256: createHash('sha256').update(fs.readFileSync(path.resolve(__dirname, '../../../migrations', name))).digest('hex') })) };
     for (const name of ['GoogleAdsActionPlans', 'GoogleAdsActionCommands']) {
       const table = snapshot.tables.find(row => row.TABLE_NAME === name);
       contract.tables[name] = { ENGINE: table.ENGINE, TABLE_COLLATION: table.TABLE_COLLATION,
@@ -229,9 +332,11 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
           columns: snapshot.indexes.filter(row => row.TABLE_NAME === name && row.INDEX_NAME === index).map(({ TABLE_NAME, ...row }) => row) })),
         checks: snapshot.checks.filter(row => row.TABLE_NAME === name).map(({ TABLE_NAME, ...row }) => row) };
     }
+    report.schema = path.join(report.root, 'action-schema.json'); fs.writeFileSync(report.schema, JSON.stringify(contract, null, 2));
+    console.log('SCHEMA_EVIDENCE=' + report.schema);
     const published = require('../../../ops/security/schema-contract.json');
     for (const name of Object.keys(contract.tables)) assert.deepEqual(published.tables[name], contract.tables[name]);
-    assert.deepEqual(published.migrations.find(row => row.name === migrationName), contract.migrations[0]);
+    for (const migration of contract.migrations) assert.deepEqual(published.migrations.find(row => row.name === migration.name), migration);
     report.schema = path.join(report.root, 'action-schema.json'); fs.writeFileSync(report.schema, JSON.stringify(contract, null, 2));
     report.checks.push('repeatable migration uses InnoDB and binary identities; destructive rollback refuses nonempty operation history');
     assert.equal(JSON.stringify(await models.GoogleAdsActionPlan.findAll()).includes('PRIVATE'), false);

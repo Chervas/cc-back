@@ -10334,6 +10334,7 @@ credenciales, URLs, GAQL u operaciones Google libres.
 | `/:planId/validate` | Ninguno | Revalida sin aplicar |
 | `/:planId/apply` | `confirm_external_mutation: true` | Aplica una vez el plan propio |
 | `/:planId/status` | Ninguno | Recupera estado/recibo del mismo plan |
+| `/:planId/cancel` | `input: {mode,currency,targets}` original | Cierra una preparación sin intento de aplicación; no llama a Google |
 
 `mode=create`: moneda ISO en mayúsculas y targets `{event,actionId:null}`.
 `mode=normalize`: `currency:null` y targets `{event,actionId}`; ID positivo string
@@ -10342,7 +10343,7 @@ lead/contact/qualified_lead/schedule/purchase. Crear añade solo acciones ausent
 normalizar solo modifica recuento y marca secundaria. El broker comprueba nombre,
 owner, categoría, tipo, estado y deriva del inventario antes de escribir.
 
-Respuesta: `{success,planId,commandId,commandState,outcomeUnknown,plan}`. `plan`
+Respuesta: `{success,planId,commandId,commandState,outcomeUnknown,closed,canCancel,canApply,plan}`. `plan`
 es null hasta recuperar metadata válida; después contiene `planId`, `state`,
 `expiresAt`, `changes` y, según operación, `validated`/`results`. Cada cambio solo
 contiene evento, ID y create/normalize/unchanged. No se devuelven referencias de
@@ -10353,21 +10354,41 @@ significa que se intentó aplicar y todavía no hay recibo aplicado. No es éxit
 la mutación. Un error tras transporte devuelve código seguro 503; se recupera con
 un UUID nuevo para **status del mismo plan**, nunca con otro apply.
 
-El diario guarda usuario, sesión, ámbito y huella del registro autorizado. No
-permite adoptar un plan desde otra sesión ni reutilizar el UUID con otros targets.
+El diario guarda usuario, sesión y caducidad originales, ámbito y huella del
+registro autorizado. Una sesión nueva del **mismo usuario** puede consultar o
+cancelar si conserva exactamente el ámbito y los grants capturados. No hereda
+permiso de aplicar ni validar. Otro usuario no adopta el plan; tampoco se permite
+reutilizar el UUID con otros targets. `canApply` expresa la autorización de esta
+sesión sobre la preparación vigente; `canCancel` excluye cualquier intento de
+aplicación o recibo attempted/applied. `closed` acredita el cierre local durable.
 Comprueba escritura en todas las clínicas de todos los mappings activos de la
 cuenta, sesión, grupo, grants y flags antes/después de cada operación; también en
 transacciones de admisión/recibo. Si alguna clínica de la cuenta está en pausa,
-prepare/validate/apply devuelven `409 conversion_paused`; status conserva la
+prepare/validate/apply devuelven `409 conversion_paused`; status/cancel conservan la
 recuperación de recibos con sesión y permisos vigentes, sin levantar la pausa. 401 sesión inválida, 403 ámbito denegado, 404 plan
-no propio/inexistente, 409 conflicto/falta de confirmación/plan no listo/caducado,
+no propio/inexistente, 409 conflicto/falta de confirmación/plan no listo/caducado/cerrado,
 400 cuerpo inválido; los errores de infraestructura permanecen cerrados.
 
 Los UUID se guardan antes del transporte. Solo cabe un comando apply por plan;
 concurrencia, reinicio o caducidad no autorizan otro. Un status retrasado no hace
-retroceder applied a prepared/attempted. Si expira la sesión o no existe recibo
-broker, se necesita conciliación operativa explícita aún pendiente: no borrar
-filas, copiar estados ni inventar confirmaciones.
+retroceder applied a prepared/attempted. La cancelación conserva la selección y
+el historial; si la preparación aún no llegó, crea un cierre durable que impide
+admitirla después. No cancela mutaciones Google ni libera intentos inciertos.
+Un cierre repetido se consulta localmente sin contactar al proveedor. La UI solo
+sustituye la referencia después del cierre confirmado, con una nueva revisión.
+Filas antiguas sin identidad original completa devuelven
+`409 google_action_recovery_unavailable`; no se reconstruyen usando grants
+actuales. Un resultado Google incierto, cambio de ámbito/usuario o pérdida de
+referencia requieren conciliación administrativa todavía pendiente.
+
+Admisión, recibo y cierre se registran con auditoría v17 en la misma transacción
+SQL del comando. Si la captura falla antes del envío, no hay transporte. Si falla
+después, se conserva el intento original y status puede recuperar su recibo.
+La recuperación completa también el registro del intento original, correlaciona
+la consulta y conserva ambas sesiones. Cerrar una lectura pendiente registra
+resultado desconocido, no éxito del proveedor. Solo metadata acotada, sin tokens
+ni contenido clínico. Requiere lector/escritor AWS compatibles con v17 **antes**
+de activar el consumidor; AWS operativo continúa en v16 en este corte.
 
 El endpoint legacy `conversion-actions/ensure` devuelve 409
 `google_action_plan_required` para mappings gestionados; la normalización legacy

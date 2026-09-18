@@ -90,22 +90,27 @@ Además de la flag Ads general, exige ambas
 No genera UUID, aplica automáticamente, reintenta ni recurre a tokens locales.
 
 `GoogleAdsActionPlans` conserva el UUID del plan, usuario, referencia de sesión,
-mapping, cuenta, huella del propietario/ámbito/registro y metadatos tipados. No
+caducidad original, ámbito/huella capturados, cierre durable, mapping, cuenta y
+metadatos tipados. No
 guarda JWT, secretos ni datos de pacientes. `GoogleAdsActionCommands` conserva
-cada UUID/familia e intento antes del transporte. El recibo y la finalización del
-comando se guardan juntos; nunca hay una transacción SQL abierta durante Google.
-La migración `20260918190000-create-google-ads-action-journal.js` y sus dos tablas
-están fijadas en `ops/security/schema-contract.json`; **no aplicada a BD operativa**.
+cada UUID/familia e intento antes del transporte. La admisión y su evento, y luego el recibo/finalización y su evento, se guardan
+en sendas transacciones; nunca hay una transacción SQL abierta durante Google.
+Las migraciones `20260918190000-create-google-ads-action-journal.js` y
+`20260918203000-google-action-recovery-ownership.js`, y sus dos tablas, están fijadas en `ops/security/schema-contract.json`; **no aplicada a BD operativa**.
 
 `POST /api/marketing/google-ads/conversion-action-plans` prepara el plan;
 `POST /:planId/validate`, `/apply` y `/status` ejecutan sus operaciones explícitas.
+`POST /:planId/cancel` cierra exclusivamente una preparación sin aplicación,
+conservando su selección original, incluso si todavía no se admitió prepare.
 Contrato de cuerpos y respuestas en el `13-backend.md` canónico. La API exige
 sesión gestionada vigente y revalida permisos de escritura sobre **todos los
 mappings activos de la cuenta**, mediante `assertGoogleConversionMutationAccess`,
 antes y después. Las comprobaciones dentro de transacciones bloquean también
 pertenencias y asignaciones; la pertenencia al grupo y el registro broker deben
 conservarse. Una clínica en pausa bloquea prepare/validate/apply para toda la
-cuenta; status sigue disponible con autorización vigente para recuperar recibos. Otro usuario, sesión o ámbito no puede adoptar un plan.
+cuenta; status/cancel siguen disponibles con autorización vigente. Una sesión
+nueva del mismo usuario puede consultar/cerrar bajo el mismo ámbito y huella de
+grants/registro. No hereda apply/validate. Otro usuario no adopta un plan.
 
 `apply` exige `confirm_external_mutation=true`. Solo se persiste un UUID de
 aplicación por plan. Una petición repetida devuelve el estado guardado; no vuelve
@@ -113,9 +118,40 @@ a despacharse, tampoco tras reinicio. Las respuestas antiguas de estado no
 retroceden un recibo ya aplicado. Si se pierde el ACK, un nuevo comando **status
 del mismo plan** puede recuperar el recibo del broker. Si no lo hay, se conserva
 el intento desconocido; no hay lease que habilite repetir la mutación, worker,
-reintento automático ni nuevo UUID de apply. Caducar la sesión no transfiere su
-propiedad: la conciliación operativa de ese caso requiere un procedimiento
-explícito aún pendiente, no editar/eliminar el diario.
+reintento automático ni nuevo UUID de apply. Cancelar una preparación persiste
+su cierre antes de habilitar una sustituta; una respuesta tardía no lo revierte.
+El cierre de un plan aún no admitido actúa como tombstone y no toca Google.
+No cancela ni libera una mutación intentada/aplicada. Consultar un cierre es local.
+Las filas antiguas sin ámbito/huella/caducidad originales fallan cerradas; no se
+rellenan a partir de permisos actuales. Cambio de propietario/ámbito, referencia
+perdida o resultado Google incierto siguen requiriendo conciliación explícita.
+
+### Registro de actividad y compatibilidad
+
+`integration.google_ads.action_plan` v17 registra cada comando admitido y su
+terminación en el outbox SQL, dentro de la transacción del diario. Salud acotada:
+menos de 10000 pendientes y antigüedad inferior a una hora; sin consulta de
+intentos no resueltos en esta vía. Captura previa fallida implica cero transporte;
+fallo de captura posterior deja el intento recuperable por estado. No hay
+transacción MySQL abierta durante AWS/Google.
+
+La recuperación por status completa también la auditoría del prepare/apply
+original: `result_recovered`, UUID de consulta y sesiones original/actual. El
+cierre de una consulta en vuelo registra `command_cancelled`, resultado unknown;
+no inventa éxito de esa lectura. `preparation_cancelled` acredita solo cierre
+local y `closure_observed` su consulta. Selección y conjunto clínico se representan
+por conteos/huellas; no se guardan tokens, JWT ni contenido clínico.
+
+El visor filtra la acción y proyecta plan, comando, consulta/cierre relacionado,
+cuenta, familia, estado y ambas sesiones solo tras verificar versión y bytes S3.
+Preparación verificada, cambios confirmados y resultado incierto son distintos.
+AWS lector/escritor operativo continúa v16: publicar compatibilidad v17 y probar
+entrega/lectura antes de activar este consumidor. Las flags siguen apagadas.
+
+**Rollback:** después de usar cancelación, el consumidor antiguo no conoce
+`closed_at`. Apagar gestión de acciones antes de revertir a ese código, o conservar
+una versión compatible. No eliminar diarios ni cierres. La migración down se
+niega con planes existentes; el rollback de UI no revoca una aplicación ya hecha.
 
 Las rutas antiguas `ensure` y normalización rechazan cuentas gestionadas; el
 resolutor del nuevo flujo rechaza cuentas legacy antes de leer sus credenciales.
@@ -124,8 +160,8 @@ Crear una acción no la registra
 automáticamente como destino Data Manager: ese permiso exige tratamiento
 explícito antes de declarar el onboarding listo.
 
-Quedan la aceptación autenticada, captura general de actividad de este flujo,
-conciliación tras expirar sesión o preparación no recuperable, enriquecimiento/bootstrap,
+Quedan la aceptación autenticada, compatibilidad/entrega real v17, conciliación
+administrativa de casos sin identidad/recibo verificables, enriquecimiento/bootstrap,
 sync tipado de leads, revisión del
 job combinado, inventario completo de consumidores compartidos, preflight/DDL y
 despliegue, pruebas autorizadas de proveedor y recorrido visual con login/MFA.
@@ -134,20 +170,25 @@ No reactivar históricos, campañas, leads ni jobs clínicos DEV para probar.
 ## Evidencia local
 
 Diario CRM: MySQL 8.0.42 aislado, broker firmado con SQLite y HTTP Express real
-por loopback, AWS/Google y prueba de sesión ficticios. **12 escenarios**: propiedad
+por loopback, AWS/Google y prueba de sesión ficticios. **16 escenarios**: propiedad
 usuario/sesión/ámbito y reinicio; ACK perdido; seis preparaciones y seis aplicaciones
 concurrentes; revocación de permiso SQL de otra clínica/sesión/flags; recuperación
 de prepare y caducidad; resultado proveedor desconocido; permiso retirado tras
 mutar; fallo del commit SQL del recibo; API cerrada/confirmación/no-store; rechazo
-legacy antes de credenciales; pausa de otra clínica sin bloquear la recuperación
-de recibos; migración repetible y rollback que preserva historia.
+legacy antes de credenciales; pausa de otra clínica sin bloquear recuperación/cierre;
+sesión renovada sin permiso heredado de aplicación; cierre previo a preparación
+y carrera con ACK tardío; fallo transaccional de auditoría y fila legacy incompleta;
+migración repetible y rollback que preserva historia.
 Contrato de esquema contrastado con metadata del MySQL del test. Evidencia privada
-`google-action-journal-20260918/` y `google-action-ui-20260918/`. UI Angular real y
-HttpClient con respuestas HTTP ficticias: 25 comprobaciones/18 capturas a 1440/390 px;
-pérdida de respuesta, reload, permisos retirados, caducidad, normalización, doble
-clic y almacenamiento no disponible. Build completo DEV correcto; 12 pruebas de
-modelo y método real del asistente y 35 regresiones backend. No son proveedor real
-ni sesión pública/MFA; no sumar estos lotes solapados como casos únicos.
+`google-action-recovery-20260918/`. UI Angular real/HttpClient con respuestas HTTP
+ficticias: **35 comprobaciones/24 capturas** a 1440/390 px, incluidas sesión nueva,
+cancelación previa a reemplazo y cierre sin ACK de preparación. El desbordamiento
+móvil detectado se corrigió con contenido desplazable y botones accesibles.
+Visor: **8 capturas**, acción nueva, correlación y estados diferenciados.
+**75 pruebas** del servicio de auditoría y **11 escenarios** del visor con MySQL,
+versión S3 ficticia y HTTP real local; **47 regresiones backend** y **19 frontend**.
+Build completo DEV correcto. No son proveedor real ni sesión pública/MFA; no
+sumar lotes solapados como casos únicos. Historial anterior en bitácora.
 
 Suite completa del broker: 584/584 Node24, incluido cliente real CRM contra broker
 firmado/SQLite. Tras exigir tipos string para propietario/resource, lote focalizado: 28/28. Incluye transporte HTTPS
