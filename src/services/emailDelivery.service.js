@@ -375,6 +375,7 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       from: message.from_email,
       replyTo: message.reply_to,
       outboxId: message.public_id,
+      deliveryAttempt: jobRequest?.attempts,
       stream: message.stream,
       configurationSet: message.configuration_set,
       templateKey: message.template_key,

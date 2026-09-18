@@ -25,10 +25,11 @@ function splitList(value) {
 
 function getConfig(env = process.env) {
   const provider = (cleanString(env.EMAIL_PROVIDER) || 'mock').toLowerCase();
+  const brokerEnabled = env.EMAIL_BROKER_ENABLED === 'true';
   const region = cleanString(env.EMAIL_AWS_REGION) || cleanString(env.AWS_REGION) || 'eu-west-3';
-  const accessKeyId = cleanString(env.EMAIL_AWS_ACCESS_KEY_ID);
-  const secretAccessKey = cleanString(env.EMAIL_AWS_SECRET_ACCESS_KEY);
-  const sessionToken = cleanString(env.EMAIL_AWS_SESSION_TOKEN);
+  const accessKeyId = brokerEnabled ? null : cleanString(env.EMAIL_AWS_ACCESS_KEY_ID);
+  const secretAccessKey = brokerEnabled ? null : cleanString(env.EMAIL_AWS_SECRET_ACCESS_KEY);
+  const sessionToken = brokerEnabled ? null : cleanString(env.EMAIL_AWS_SESSION_TOKEN);
   const defaultFrom = cleanString(env.EMAIL_DEFAULT_FROM) || 'Clinicaclick <no-contestar@clinicaclick.com>';
   const defaultReplyTo = cleanString(env.EMAIL_DEFAULT_REPLY_TO);
   const transactionalConfigurationSet = cleanString(env.EMAIL_TRANSACTIONAL_CONFIGURATION_SET)
@@ -43,6 +44,7 @@ function getConfig(env = process.env) {
 
   return {
     provider,
+    brokerEnabled,
     region,
     enabled: parseBool(env.EMAIL_ENABLED, provider === 'mock'),
     marketingEnabled: parseBool(env.EMAIL_MARKETING_ENABLED, false),
@@ -122,6 +124,9 @@ async function sendEmail(message, { env = process.env } = {}) {
   }
 
   const provider = String(config.provider || '').toLowerCase();
+  if (config.brokerEnabled && provider !== 'ses') {
+    throw Object.assign(new Error('email_broker_configuration_invalid'), { code: 'email_broker_configuration_invalid', retryable: false });
+  }
   if (provider === 'mock') {
     return {
       provider: 'mock',
@@ -138,9 +143,13 @@ async function sendEmail(message, { env = process.env } = {}) {
     throw error;
   }
 
-  assertSesCredentials(config);
+  if (!config.brokerEnabled) assertSesCredentials(config);
+  let recipientPolicy = 'allowlist';
+  // The broker path must not turn a disabled local allowlist into unrestricted
+  // recipients. Only the existing persisted-account policy can authorize MFA.
+  const recipientConfig = config.brokerEnabled ? { ...config, requireRecipientAllowlist: true } : config;
   try {
-    assertRecipientAllowed(message.to, config);
+    assertRecipientAllowed(message.to, recipientConfig);
   } catch (error) {
     if (error.code !== 'email_recipient_not_allowlisted') throw error;
     let authorized;
@@ -152,8 +161,17 @@ async function sendEmail(message, { env = process.env } = {}) {
       });
     }
     if (!authorized) throw error;
+    recipientPolicy = 'registered-account';
   }
   const configurationSet = cleanString(message.configurationSet) || mapStreamToConfigurationSet(message.stream, config);
+  if (config.brokerEnabled) {
+    return require('./emailBroker.service').createEmailBroker({ env }).send({
+      outboxId: message.outboxId, attempt: message.deliveryAttempt, timeoutMs: config.timeoutMs,
+      templateKey: message.templateKey, stream: message.stream, recipientPolicy,
+      to: message.to, from: cleanString(message.from) || config.defaultFrom, replyTo: cleanString(message.replyTo),
+      configurationSet, subject: message.subject, text: message.text || '', html: message.html || '',
+    });
+  }
   const client = buildClient(config);
   const body = {
     Text: { Data: message.text || '', Charset: 'UTF-8' },
@@ -245,6 +263,8 @@ function publicConfig(env = process.env) {
   const webhookToken = cleanString(env.EMAIL_EVENT_WEBHOOK_TOKEN);
   return {
     provider: config.provider,
+    brokerEnabled: config.brokerEnabled,
+    brokerConfigured: config.brokerEnabled && require('./emailBroker.service').isConfigured(env),
     enabled: config.enabled,
     marketingEnabled: config.marketingEnabled,
     region: config.region,

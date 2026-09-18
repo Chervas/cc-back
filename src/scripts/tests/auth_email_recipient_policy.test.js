@@ -13,6 +13,7 @@ const delivery = require('../../services/emailDelivery.service');
 const templates = require('../../services/emailTemplates.service');
 const sessions = require('../../services/accessSession.service');
 const C = require('../../services/authEmailChallenge.contract');
+const emailBroker = require('../../services/emailBroker.service');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-email-policy-'));
 const keyFile = path.join(directory, 'mfa.key');
 const key = Buffer.alloc(32, 9);
@@ -74,6 +75,26 @@ for (const kind of ['code', 'reset']) test('current registered account ' + kind 
   assert.equal(sends, 1);
   assert.equal(provider.getConfig(env).requireRecipientAllowlist, true);
   assert.equal(provider.getConfig(env).recipientAllowlist.includes(f.user.email_usuario), false);
+});
+
+for (const kind of ['code', 'reset']) test('broker authorizes only a persisted current ' + kind + ' and retains the same recipient and content', async t => {
+  const f = fixture(t, kind), brokerEnv = { ...env, EMAIL_BROKER_ENABLED: 'true' }; let sends = 0;
+  for (const key of ['EMAIL_AWS_ACCESS_KEY_ID', 'EMAIL_AWS_SECRET_ACCESS_KEY', 'EMAIL_AWS_SESSION_TOKEN']) {
+    Object.defineProperty(brokerEnv, key, { get() { assert.fail('broker mode read a local SES key'); } });
+  }
+  t.mock.method(SESv2Client.prototype, 'send', async () => assert.fail('broker mode called SES locally'));
+  t.mock.method(emailBroker, 'createEmailBroker', () => ({ async send(p) {
+    sends++; assert.equal(p.recipientPolicy, 'registered-account'); assert.equal(p.attempt, 2);
+    for (const field of ['to', 'subject', 'html', 'text', 'outboxId']) assert.equal(p[field], f.message[field]);
+    return { accepted: true, provider: 'ses', providerMessageId: 'FICTITIOUS_BROKER_RECEIPT' };
+  } }));
+  assert.equal((await provider.sendEmail({ ...f.message, deliveryAttempt: 2 }, { env: brokerEnv })).accepted, true);
+  for (const patch of [{ text: 'altered context' }, { to: 'foreign@example.invalid' }]) {
+    await assert.rejects(provider.sendEmail({ ...f.message, deliveryAttempt: 2, ...patch }, { env: brokerEnv }), { code: 'email_recipient_not_allowlisted' });
+  }
+  f.proof.expires_at = new Date(0);
+  await assert.rejects(provider.sendEmail({ ...f.message, deliveryAttempt: 3 }, { env: brokerEnv }), { code: 'email_recipient_not_allowlisted' });
+  assert.equal(sends, 1);
 });
 
 test('a template label, alternate recipient/body or stale outbox cannot authorize a send', async t => {

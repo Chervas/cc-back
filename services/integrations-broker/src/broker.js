@@ -8,16 +8,18 @@ const { OPERATIONS } = require('./operations');
 const { BrokerError, fail } = require('./errors');
 const { validatePolicy } = require('./policy');
 const aiLimits = require('./ai-limits');
+const emailLimits = require('./email-limits');
 
 const { canonical } = require('./canonical');
 const { canonicalDigest } = require('./canonical-digest');
 class Broker {
   constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, policyResolver, now = () => Date.now(), timeoutMs = 10000, transportProfile = 'default' }) {
-    if (!['default', 'ai'].includes(transportProfile)
-      || transportProfile === 'ai' && Object.keys(operations).some(op => !aiLimits.isAiOperation(op))) fail('invalid_request');
+    if (!['default', 'ai', 'email'].includes(transportProfile)
+      || transportProfile === 'ai' && Object.keys(operations).some(op => !aiLimits.isAiOperation(op))
+      || transportProfile === 'email' && Object.keys(operations).some(op => op !== emailLimits.OPERATION)) fail('invalid_request');
     this.store = store; this.policy = structuredClone(validatePolicy(policy)); this.secrets = secrets;
     this.transportProfile = transportProfile;
-    this.maxRequestBytes = transportProfile === 'ai' ? aiLimits.MAX_REQUEST_BYTES : 32768;
+    this.maxRequestBytes = transportProfile === 'ai' ? aiLimits.MAX_REQUEST_BYTES : transportProfile === 'email' ? emailLimits.MAX_REQUEST_BYTES : 32768;
     this.operations = operations; this.adsEnrollment = adsEnrollment; this.policyResolver = policyResolver; this.now = now;
     this.timeoutMs = Math.min(transportProfile === 'ai' ? aiLimits.MAX_TIMEOUT_MS : 30000, Math.max(1, timeoutMs));
     this.active = new Map(); this.activeAssets = new Map();
@@ -132,8 +134,9 @@ class Broker {
       }
       this.adsEnrollment?.assert(request, principal, this.policy);
       const result = { requestId: request.requestId, data, replayed: false };
+      const completedAudit = operation.completionAudit?.(data) || ['integration.completed', 'success', 'completed'];
       this.store.complete(principal.id, request.requestId, result,
-        eventFor(request, principal, resolved, 'integration.completed', 'success', 'completed', this.now()),
+        eventFor(request, principal, resolved, ...completedAudit, this.now()),
         { persistResult: operation.persistResult !== false, mutate: () => {
           // The final check shares the SQLite write lock with any enrollment,
           // receipt and audit changes, including revocations by another process.

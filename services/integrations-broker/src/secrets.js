@@ -20,7 +20,7 @@ function createAwsSecretStore({ client, accountId, prefix, kmsKeyArn }) {
         if (result.ARN !== binding.secretArn || !result.VersionId || !result.VersionStages?.includes('AWSCURRENT')) fail('secret_unavailable');
         const value = JSON.parse(result.SecretString);
         if (value.version !== 1 || value.connectionRef !== binding.connectionRef || value.provider !== binding.provider) fail('secret_unavailable');
-        if (binding.provider === 'aws_bedrock') {
+        if (['aws_bedrock', 'aws_ses'].includes(binding.provider)) {
           if (Object.keys(value).sort().join(',') !== 'connectionRef,credentials,provider,version') fail('secret_unavailable');
           token = Buffer.from(JSON.stringify(require('./bedrock-contract').credentials(value.credentials)));
         } else {

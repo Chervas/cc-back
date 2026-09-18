@@ -215,8 +215,10 @@ claves públicas a writer/reader conservando las públicas, instalar la unidad
 comprometido con `publish-isolated-dev.py`, drenar auditoría y comprobar SES antes
 de activar MFA. El consumidor usa `flock`; un resultado de envío incierto no se
 repite automáticamente. La clave SES heredada solo existe en el consumidor
-protegido: su traslado a un proveedor de credenciales temporales/vault sigue
-pendiente. El rol administrativo SSO del operador no participa en los envíos.
+protegido: su traslado al vault sigue pendiente de activación. El adaptador SES
+tipado y sus pruebas aisladas están preparados; límites, deduplicación y pasos
+pendientes en [email-vault-migration.md](email-vault-migration.md). El rol
+administrativo SSO del operador no participa en los envíos.
 
 Para desarrollo local, el retorno de recuperación puede ser exactamente
 `http://localhost:4200`; la excepción solo pertenece al consumidor DEV. Los

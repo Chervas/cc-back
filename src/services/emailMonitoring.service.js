@@ -142,7 +142,11 @@ function buildAlerts({ provider, summary, stuckQueueCount }) {
   if (!provider.dataEncryptionConfigured) {
     push('critical', 'email_encryption_missing', 'Cifrado no disponible', 'Falta EMAIL_DATA_ENCRYPTION_KEY o no cumple longitud minima.', 'Configurar secreto server-side y reiniciar runtime.');
   }
-  if (provider.provider === 'ses' && (!provider.accessKeyIdConfigured || !provider.secretAccessKeyConfigured)) {
+  if (provider.provider === 'ses' && provider.brokerEnabled && !provider.brokerConfigured) {
+    push('critical', 'email_broker_configuration_missing', 'Servicio de correo sin configurar',
+      'La conexión al servicio de correo está incompleta.', 'Revisar la configuración y la identidad firmante del consumidor de correo.');
+  }
+  if (provider.provider === 'ses' && !provider.brokerEnabled && (!provider.accessKeyIdConfigured || !provider.secretAccessKeyConfigured)) {
     push('critical', 'email_ses_credentials_missing', 'Credenciales SES incompletas', 'SES esta seleccionado pero faltan credenciales dedicadas.', 'Rotar/crear clave IAM y cargarla solo en el runtime.');
   }
   if (provider.provider === 'ses' && !provider.eventWebhookConfigured) {
