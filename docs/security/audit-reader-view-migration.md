@@ -23,8 +23,10 @@ Esto acredita las versiones comprobadas, **no la integridad ni exhaustividad
 del índice local**: quien pueda modificar la BD puede ocultar filas. Tampoco
 prueba inmutabilidad de S3; un administrador con permisos efectivos de borrado
 de versiones puede eliminarlas. Object Lock sigue apagado según la entrega.
-El lector admite los eventos versionados `app/platform/v1/` a `v17/`; no incluye
-el contrato `app/v1` del broker, eventos aún pendientes de entrega ni acciones
+El lector publicado admite los eventos versionados `app/platform/v1/` a `v17/`.
+El candidato v18 añade comandos de permisos Google y consulta de su listado,
+con esquemas separados; está probado localmente, sin publicación ni entrega AWS.
+No incluye el contrato `app/v1` del broker, eventos aún pendientes de entrega ni acciones
 no instrumentadas. La lista cerrada de acciones está en `src/view-contract.js`
 del paquete de auditoría. Añadir un esquema al writer requiere probar también
 `refFor`, `inputFor`, lectura, proyección y filtro: aceptar su escritura no
@@ -101,6 +103,13 @@ distinta. La UI distingue preparación, cambios confirmados y resultado incierto
 la consulta de un recibo no aplica de nuevo el plan. Contrato del consumidor en
 [acciones Google](google-action-management-broker.md). Compatibilidad de AWS y
 publicación de captura/API/UI son pasos separados; estado vigente en 19.
+
+La proyección v18 preparada distingue `googleDestinations` (comando, permiso y
+estado del recibo) de `googleDestinationList` (cuenta, mapping, número de clínicas
+y registros). Solo una variante puede estar presente. El listado registra una
+página preparada, no una autorización ni la recepción por la persona. Ambos
+filtros están en el catálogo cerrado; el lector publicado v17 todavía no admite
+sus rutas. Contrato en [destinos Google](google-destinations-broker.md).
 
 ## Lectura firmada y límites
 
@@ -225,17 +234,24 @@ configuración, identidades, diarios e índices. Guardar los overrides systemd
 exactos y verificar recibos existentes tras publicar cada servicio. No reutilizar
 un instalador antiguo que presuponga ausencia de overrides.
 
-La prueba de transporte puede usar eventos v17 de una cancelación real en MySQL
-**aislado**, con actor/ámbito/conexión explícitamente ficticios. Conservar sus UUID
-y evidencia de QA; no insertar esos eventos en el índice operativo de usuarios.
+La prueba de transporte puede usar eventos de una operación real en MySQL
+**aislado**, con actor/ámbito/conexión explícitamente ficticios. El corte v17
+utilizó una cancelación local; el candidato v18 prepara seis eventos desde el
+diario SQL y un broker SQLite firmado: intento de autorización sin respuesta,
+retirada, resultado original incierto y consulta del listado. Google y sesión
+son ficticios, y ninguna llamada sale al proveedor. Probar las dos variantes v18
+con los mismos bytes/UUID antes de escribir; conservar su clasificación y evidencia
+de QA. Los seis eventos preparados superan escritura, conciliación y lectura
+exacta en HTTPS local con las dos candidatas, firmas y SQLite reales y S3 ficticio. No insertar esos eventos en el índice operativo de usuarios.
 Conciliar mediante el actor técnico fijo y comprobar versión/bytes/KMS del
 objeto con el rol lector autorizado. Eso acredita transporte del esquema; no
 acredita autenticación humana, consulta HTTP `confirmed`, alta real de Google ni
 aceptación del consumidor. No fabricar una sesión administrativa para la prueba.
 
-Después de entregar v17, conservar un lector que admita v17 al revertir otros
-cambios. Retener los objetos de QA y su clasificación; no borrarlos para ocultar
-una incompatibilidad. La reversión de código no deshace eventos entregados.
+Después de entregar una versión, conservar un lector compatible con ella al
+revertir otros cambios. Hoy el mínimo publicado es v17; una primera entrega v18
+eleva ese requisito aunque se desactive después el consumidor. Retener los objetos
+de QA y su clasificación; no borrarlos para ocultar una incompatibilidad. La reversión de código no deshace eventos entregados.
 
 | Síntoma | Comprobación y acción |
 | --- | --- |
@@ -261,6 +277,25 @@ Rollback: cerrar gates, detener solo el lector/job aprobado, conservar journal,
 outbox/recibos/sesiones. Volver a UI previa o estado desactivado, nunca a servir
 cuerpos locales sin verificación. Retirar el índice solo si se aprueba y hace
 falta; no borrar evidencias, ampliar permisos ni deshacer el hotfix Meta.
+
+## Candidato v18 preparado, sin publicar
+
+Los candidatos de cada rol se derivan de sus fuentes v17 observadas al publicar,
+con hashes contrastados contra esa evidencia; no se sustituye el servicio entero
+por la rama DEV. Solo se superponen `event.js`, `google-destination-event.js`,
+`reader-protocol.js` y `view-contract.js`. Cada candidata supera 79 pruebas con
+Node 24 y red externa bloqueada. Lockfile, dependencias y fuentes ajenas al cambio
+se conservan. Antes de instalar, volver a comprobar hashes y release **en AWS**:
+la copia local verificada no acredita que no haya habido cambios posteriores.
+
+Publicar lector antes que escritor, guardar overrides exactos y conservar TLS,
+configuración, diarios e identidades. Contrastar recibos anteriores después de
+cada paso. Entregar los seis eventos QA solo tras comprobar ambos servicios;
+ante un ACK perdido, conciliar los UUID originales, sin regenerarlos ni reenviar
+por conjetura. Verificar después VersionId, SHA256, bytes y KMS con el rol lector.
+No fabricar sesión pública ni insertar la prueba en el índice operativo.
+Estado, prueba y límites del corte en 19/99; renovación SSO pendiente, sin
+modificación IAM ni publicación de esta candidata. No hay nueva medición de coste.
 
 ## QA y publicación
 

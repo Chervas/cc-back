@@ -215,7 +215,11 @@ Usa dos eventos del mismo outbox por página, sin eventos adicionales por cada f
 El visor proyecta el recibo después de verificar su versión S3 exacta y distingue
 permiso confirmado, permiso retirado y resultado inicial incierto. v18 está
 preparado en lector/escritor, pero AWS sigue en v17: publicar compatibilidad antes
-de activar captura. Usa el outbox, bucket S3 y servicios existentes, sin otro
+de activar captura. Las candidatas conservan las fuentes propias de cada rol
+observadas en la publicación v17, con 79 pruebas por rol. La prueba SQL aislada
+prepara seis eventos de las dos variantes, todavía sin entregar a AWS. Revalidar
+el estado vivo al renovar SSO; procedimiento en
+[lector y publicación](audit-reader-view-migration.md#candidato-v18-preparado-sin-publicar). Usa el outbox, bucket S3 y servicios existentes, sin otro
 servicio/cola contratados. Aumenta filas SQL, objetos/bytes S3 y solicitudes/KMS
 según uso; QA local no aporta un coste real incremental ni permite anotarlo como
 cero. La sección de costes de arquitectura conserva fecha/ámbito de medición.
