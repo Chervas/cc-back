@@ -154,7 +154,7 @@ def configuration(filename):
     for t in config['targets']:
         if set(t)!={'id','hostname','port','publicKeySha256','identitySha256'} \
           or not re.fullmatch('[a-z][a-z0-9-]{1,39}',t['id']) or t['hostname']!='13.39.100.55' \
-          or not isinstance(t['port'],int) or not 8443<=t['port']<=8450 \
+          or not publisher.target_port_valid(t) \
           or any(not re.fullmatch('[a-f0-9]{64}',t[k]) for k in ['publicKeySha256','identitySha256']) \
           or t['id'] in ids or t['port'] in ports:raise Error('configuration_invalid')
         ids.add(t['id']);ports.add(t['port'])
