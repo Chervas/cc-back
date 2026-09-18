@@ -71,10 +71,10 @@ class GroqAudioService {
       form.append('response_format', 'verbose_json');
     }
 
-    const response = await (brokerEnabled ? aiBroker.execute('groq', 'whatsapp_audio', {
-      model, response_format: 'verbose_json', mimeType: normalizedMimeType,
-      fileName: normalizedFileName, fileBase64: buffer.toString('base64'),
-    }, { timeoutMs: timeout }) : axios.post(`${baseUrl}/audio/transcriptions`, form, {
+    const response = await (brokerEnabled ? require('./aiFileTransfer.service').withTransfer({ useCase: 'whatsapp_audio',
+      buffer, mimeType: normalizedMimeType, fileName: normalizedFileName }, ref => aiBroker.execute('groq', 'whatsapp_audio', {
+      model, response_format: 'verbose_json', fileRef: ref,
+    }, { timeoutMs: timeout, requestId: ref.requestId })) : axios.post(`${baseUrl}/audio/transcriptions`, form, {
       headers: {
         Authorization: `Bearer ${apiKey}`,
       },

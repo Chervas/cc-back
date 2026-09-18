@@ -248,3 +248,28 @@ cruce de entorno, modelo, claves que no salen, metadata de auditoría, falta de
 fallback, errores/timeout sin retry y conservación de los cinco consumidores.
 Añadir pruebas reales de proveedor y revisión visual de las superficies
 afectadas antes de acreditar la migración en `19`.
+
+### 2026-09-18 — Temporary file references implemented in DEV
+
+The binary AI path now uses a dedicated CRM-side transfer daemon. OCR and Groq
+consumers check the AI pause before issuing a five-minute capability through a
+private Unix socket, bind it to the broker request UUID, and revoke it in finally.
+The broker pins the HTTPS origin/environment/use case, translates the reference
+to OpenAI file_url/image_url or Groq url, and rejects inline/base64 files. Its
+request and total admitted-body budget is now 1 MiB; provider results remain
+bounded to 8 MiB and four concurrent operations. Provider-echoed capabilities
+are rejected before application telemetry/output.
+
+See services/ai-file-transfer/README.md for permissions, independent resource
+limits, proxy logging requirements and recovery. No consumer flag has been
+activated by this code change. The existing service on AWS still needs the new
+release and pinned-origin configuration before a real capability proof.
+
+Validation: broker full suite 512/512; transfer service plus actual consumer
+payload/pause tests 15/15, including real Unix/HTTP reads, ranges, expiry,
+revocation, interrupted uploads, slow download concurrency, corruption, restart,
+request/environment/origin substitution and capability reflection. A test first
+used a 4 MiB response that fitted the OS socket buffer; the corrected backpressure
+case uses a 16 MiB range and confirms admission/revocation under a stalled reader.
+These checks are not authenticated UI evidence and do not resolve the OpenAI
+credit_balance_exhausted or Gemini permission failures recorded above.

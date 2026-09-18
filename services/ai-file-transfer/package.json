@@ -1,0 +1,8 @@
+{
+  "name": "@clinicaclick/ai-file-transfer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bounded temporary file delivery. No provider keys, database or application bootstrap.",
+  "engines": { "node": ">=18.20.0" },
+  "scripts": { "test": "node --test --test-concurrency=1 test/*.test.js" }
+}

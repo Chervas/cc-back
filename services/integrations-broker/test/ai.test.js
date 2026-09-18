@@ -11,21 +11,26 @@ const { randomUUID } = require('node:crypto');
 const { fixture } = require('./helpers');
 const { allowPort, removePort } = require('./offline-guard.cjs');
 const { createAiHttp } = require('../src/ai-http');
-const { validate } = require('../src/ai-contract');
+const { validate, authorize } = require('../src/ai-contract');
+const C = require('../src/ai-file-reference');
 const { OPERATIONS } = require('../src/ai-limits');
 const { validateConfig, main } = require('../src/ai-main');
 const { SECRET_KEY } = require('../src/google-main');
 const { createAiBroker } = require('../../../src/services/aiBroker.service');
 const { createIntegrationsBrokerClient } = require('../../../src/lib/integrationsBrokerClient');
 const { drainAudit } = require('../src/audit');
+const transferOrigin = 'https://fictitious.invalid';
+const ref = (useCase, mimeType, fill) => ({ version: 1, environment: 'staging', requestId: randomUUID(), useCase,
+  url: transferOrigin + C.PREFIX + Buffer.alloc(32, fill).toString('base64url'), expiresAt: Date.now() + 240000,
+  mimeType, fileName: 'fictitious', sizeBytes: 50000, sha256: 'a'.repeat(64) });
 const payloads = {
   openai: { useCase: 'accounting_ocr', timeoutMs: 120000, body: { model: 'gpt-fictitious', store: false, max_output_tokens: 1800,
     input: [{ role: 'user', content: [{ type: 'input_text', text: 'FICTITIOUS_DOCUMENT_ONLY' },
-      { type: 'input_file', filename: 'fictitious.pdf', file_data: `data:application/pdf;base64,${Buffer.alloc(50000, 65).toString('base64')}` }] }] } },
+      { type: 'input_file', file_ref: ref('accounting_ocr', 'application/pdf', 1) }] }] } },
   gemini: { useCase: 'visibility_gemini', timeoutMs: 90000, body: { model: 'gemini-fictitious', store: false,
     input: 'FICTITIOUS_SEARCH_ONLY', tools: [{ type: 'google_search' }] } },
   groq: { useCase: 'whatsapp_audio', timeoutMs: 30000, body: { model: 'whisper-fictitious', response_format: 'verbose_json',
-    mimeType: 'audio/ogg', fileName: 'fictitious.ogg', fileBase64: Buffer.alloc(50000, 66).toString('base64') } },
+    fileRef: ref('whatsapp_audio', 'audio/ogg', 2) } },
 };
 function stubHttp({ status = 200, body = { text: 'FICTITIOUS_TRANSCRIPTION', usage: { input_tokens: 2 } }, stall = false } = {}) {
   const calls = [];
@@ -41,13 +46,16 @@ function stubHttp({ status = 200, body = { text: 'FICTITIOUS_TRANSCRIPTION', usa
 test('AI transports use fixed HTTPS hosts, preserve input and attach the key only on AWS side', async () => {
   for (const provider of Object.keys(payloads)) {
     const f = stubHttp(); const token = Buffer.from('FICTITIOUS_PROVIDER_KEY');
-    const result = await f.http({ provider, payload: payloads[provider], token, binding: { ai: { organization: 'org-fictitious', project: 'proj-fictitious' } } });
+    const result = await f.http({ provider, payload: payloads[provider], token, binding: { ai: { organization: 'org-fictitious', project: 'proj-fictitious', fileTransferOrigin: transferOrigin } },
+      environment: 'staging', requestId: provider === 'groq' ? payloads.groq.body.fileRef.requestId : payloads.openai.body.input[0].content[1].file_ref.requestId });
     assert.equal(result.text, 'FICTITIOUS_TRANSCRIPTION'); assert.equal(f.calls.length, 1);
     const { options, bytes } = f.calls[0]; assert.equal(options.rejectUnauthorized, true); assert.equal(options.method, 'POST');
     assert.equal(options.headers[provider === 'gemini' ? 'x-goog-api-key' : 'authorization'], provider === 'gemini' ? token.toString() : `Bearer ${token}`);
     assert(!bytes.includes(token)); assert.equal(options.port, 443);
     assert.equal(options.hostname, { openai: 'api.openai.com', gemini: 'generativelanguage.googleapis.com', groq: 'api.groq.com' }[provider]);
-    if (provider === 'groq') { assert(bytes.includes(Buffer.alloc(50000, 66))); assert.match(bytes.toString(), /name="response_format"\r\n\r\nverbose_json/); }
+    assert(bytes.length < 1500);
+    if (provider === 'groq') { assert(!bytes.includes(Buffer.alloc(50000, 66))); assert(bytes.includes(Buffer.from(payloads.groq.body.fileRef.url))); assert(!bytes.includes(Buffer.from('name="file"'))); assert.match(bytes.toString(), /name="response_format"\r\n\r\nverbose_json/); }
+    else if (provider === 'openai') { const expected = structuredClone(payloads.openai.body); expected.input[0].content[1] = { type: 'input_file', file_url: expected.input[0].content[1].file_ref.url }; assert.deepEqual(JSON.parse(bytes), expected); }
     else assert.deepEqual(JSON.parse(bytes), payloads[provider].body);
   }
 });
@@ -70,7 +78,7 @@ test('upstream errors, redirects and ambiguous timeouts never retry or expose pr
   const pending = f.http({ provider: 'gemini', payload: payloads.gemini, token: Buffer.from('FICTITIOUS_KEY'), binding: { ai: {} }, signal: controller.signal });
   controller.abort(); await assert.rejects(pending, { code: 'provider_timeout' }); assert.equal(f.calls.length, 1);
 });
-test('actual TLS AI runtime preserves large files/output, isolates environment and audits without content or keys', async t => {
+test('actual TLS AI runtime sends only references, preserves large output, isolates environment and audits without content or keys', async t => {
   const f = fixture(t); const cert = path.join(f.dir, 'ai.crt'); const key = path.join(f.dir, 'ai.key');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert,
     '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
@@ -80,7 +88,7 @@ test('actual TLS AI runtime preserves large files/output, isolates environment a
   const policy = structuredClone(f.policy); policy.connections = []; policy.grants = [];
   for (const provider of Object.keys(payloads)) {
     const connectionRef = `ai:${provider}:staging`;
-    policy.connections.push({ connectionRef, provider: `ai_${provider}`, initialState: 'active', ai: { models: [payloads[provider].body.model] },
+    policy.connections.push({ connectionRef, provider: `ai_${provider}`, initialState: 'active', ai: { models: [payloads[provider].body.model], fileTransferOrigin: transferOrigin },
       secretArn: `arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/ai/${provider}/key-abcdef` });
     policy.grants.push({ principalId: 'api:test', tenantRef: 'platform:staging', connectionRef,
       assetRef: `ai:${payloads[provider].useCase}`, operations: [OPERATIONS[provider]] });
@@ -111,7 +119,7 @@ test('actual TLS AI runtime preserves large files/output, isolates environment a
   for (const provider of Object.keys(payloads)) { env[`AI_BROKER_${provider.toUpperCase()}_ENABLED`] = 'true'; env[`AI_BROKER_${provider.toUpperCase()}_CONNECTION_REF`] = `ai:${provider}:staging`; }
   const client = createAiBroker({ env });
   for (const [provider, payload] of Object.entries(payloads)) {
-    const requestId = randomUUID();
+    const requestId = provider === 'groq' ? payload.body.fileRef.requestId : provider === 'openai' ? payload.body.input[0].content[1].file_ref.requestId : randomUUID();
     const response = await client.execute(provider, payload.useCase, payload.body, { requestId, timeoutMs: payload.timeoutMs });
     assert(response.data.text.length > 1048576); assert.equal(response.data.usage.input_tokens, 17);
     await assert.rejects(client.execute(provider, payload.useCase, payload.body, { requestId, timeoutMs: payload.timeoutMs }), { code: 'outcome_unknown' });
@@ -120,15 +128,33 @@ test('actual TLS AI runtime preserves large files/output, isolates environment a
   const foreign = createAiBroker({ env: { ...env, AI_BROKER_ENVIRONMENT: 'dev' } });
   await assert.rejects(foreign.execute('groq', 'whatsapp_audio', payloads.groq.body), { code: 'scope_denied' });
   await assert.rejects(client.execute('groq', 'whatsapp_audio', { ...payloads.groq.body, model: 'unapproved-model' }), { code: 'scope_denied' });
-  leak = true; await assert.rejects(client.execute('groq', 'whatsapp_audio', payloads.groq.body), { code: 'provider_failed' });
+  leak = true; const leakingBody = structuredClone(payloads.groq.body); leakingBody.fileRef.requestId = randomUUID();
+  await assert.rejects(client.execute('groq', 'whatsapp_audio', leakingBody, { requestId: leakingBody.fileRef.requestId }), { code: 'provider_failed' });
   await drainAudit(runtime.store, sink);
   assert.equal(runtime.store.backlog().pending, 0);
   assert.equal(deliveries.filter(event => event.action === 'integration.completed').length, 3);
   assert(deliveries.some(event => event.operation === OPERATIONS.openai));
   const persisted = JSON.stringify(runtime.store.db.prepare('SELECT * FROM commands').all()) + JSON.stringify(deliveries);
-  for (const marker of ['FICTITIOUS_KEY_SENTINEL', 'FICTITIOUS_OUTPUT_CONTENT', 'FICTITIOUS_DOCUMENT_ONLY']) assert(!persisted.includes(marker));
+  for (const marker of ['FICTITIOUS_KEY_SENTINEL', 'FICTITIOUS_OUTPUT_CONTENT', 'FICTITIOUS_DOCUMENT_ONLY', payloads.groq.body.fileRef.url, payloads.openai.body.input[0].content[1].file_ref.url]) assert(!persisted.includes(marker));
   const legacy = createIntegrationsBrokerClient({ origin: env.AI_BROKER_ORIGIN, audience: policy.audience, keyId: 'qa-key',
     ca: fs.readFileSync(cert), privateKey: fs.readFileSync(env.AI_BROKER_KEY_FILE) });
   await assert.rejects(legacy.execute({ operation: OPERATIONS.openai, connectionRef: 'ai:openai:staging', tenantRef: 'platform:staging',
-    assetRef: 'ai:accounting_ocr', payload: payloads.openai }), { code: 'invalid_request' });
+    assetRef: 'ai:accounting_ocr', payload: { ...payloads.openai, body: { ...payloads.openai.body, input: 'x'.repeat(40000) } } }), { code: 'invalid_request' });
+});
+
+test('AWS authorization rejects a substituted origin, expired reference, wrong request, environment or purpose', () => {
+  const request = { requestId: payloads.groq.body.fileRef.requestId, tenantRef: 'platform:staging', operation: OPERATIONS.groq,
+    assetRef: 'ai:whatsapp_audio', payload: payloads.groq };
+  const binding = { provider: 'ai_groq', ai: { models: ['whisper-fictitious'], fileTransferOrigin: transferOrigin } };
+  authorize('groq', { request, binding });
+  for (const change of [{ environment: 'dev' }, { requestId: randomUUID() }, { useCase: 'accounting_ocr' }, { url: 'https://169.254.169.254/private' },
+    { url: payloads.groq.body.fileRef.url + '?redirect=1' }, { expiresAt: Date.now() - 1 }]) {
+    const other = structuredClone(request); Object.assign(other.payload.body.fileRef, change);
+    assert.throws(() => authorize('groq', { request: other, binding }), { code: 'scope_denied' });
+  }
+});
+test('AI operations reject provider output that echoes a temporary capability', async () => {
+  const { createAiOperations } = require('../src/ai-operations');
+  const operation = createAiOperations({ http: async () => ({ text: payloads.groq.body.fileRef.url }) })[OPERATIONS.groq];
+  await assert.rejects(operation.execute({ requestId: payloads.groq.body.fileRef.requestId, tenantRef: 'platform:staging', payload: payloads.groq, assertActive() {} }), { code: 'provider_failed' });
 });

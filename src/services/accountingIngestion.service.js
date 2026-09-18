@@ -253,19 +253,11 @@ async function extractWithOpenAi(asset, buffer, documentKind = 'expense') {
         'El resultado siempre será revisado por una persona antes de contabilizarse.',
       ].join(' '),
   }];
-  const encoded = buffer.toString('base64');
-  if (asset.content_type === 'application/pdf') {
-    content.push({
-      type: 'input_file',
-      filename: asset.original_filename || 'factura.pdf',
-      file_data: `data:application/pdf;base64,${encoded}`,
-    });
-  } else {
-    content.push({
-      type: 'input_image',
-      image_url: `data:${asset.content_type};base64,${encoded}`,
-      detail: 'high',
-    });
+  await require('./securityMonitoring.service').assertAiAllowed('accounting_ocr');
+  if (!brokerEnabled) {
+    const encoded = buffer.toString('base64');
+    if (asset.content_type === 'application/pdf') content.push({ type: 'input_file', filename: asset.original_filename || 'factura.pdf', file_data: `data:application/pdf;base64,${encoded}` });
+    else content.push({ type: 'input_image', image_url: `data:${asset.content_type};base64,${encoded}`, detail: 'high' });
   }
   const headers = {
     Authorization: `Bearer ${apiKey}`,
@@ -277,9 +269,7 @@ async function extractWithOpenAi(asset, buffer, documentKind = 'expense') {
   if (clean(process.env.OPENAI_PROJECT_ID, 200)) {
     headers['OpenAI-Project'] = clean(process.env.OPENAI_PROJECT_ID, 200);
   }
-  await require('./securityMonitoring.service').assertAiAllowed('accounting_ocr');
-  const http = brokerEnabled ? { post: (_url, body, options) => aiBroker.execute('openai', 'accounting_ocr', body, { timeoutMs: options.timeout }) } : axios;
-  const response = await http.post('https://api.openai.com/v1/responses', {
+  const body = {
     model: MODEL,
     store: false,
     reasoning: { effort: 'none' },
@@ -293,10 +283,14 @@ async function extractWithOpenAi(asset, buffer, documentKind = 'expense') {
         schema: isPayroll ? payrollSchema() : expenseSchema(),
       },
     },
-  }, {
-    headers,
-    timeout: 120000,
-  }).catch(async error => {
+  };
+  const response = await (brokerEnabled
+    ? require('./aiFileTransfer.service').withTransfer({ useCase: 'accounting_ocr', buffer, mimeType: asset.content_type,
+      fileName: asset.original_filename || (asset.content_type === 'application/pdf' ? 'factura.pdf' : 'factura') }, ref => {
+      content.push(asset.content_type === 'application/pdf' ? { type: 'input_file', file_ref: ref } : { type: 'input_image', file_ref: ref, detail: 'high' });
+      return aiBroker.execute('openai', 'accounting_ocr', body, { timeoutMs: 120000, requestId: ref.requestId });
+    })
+    : axios.post('https://api.openai.com/v1/responses', body, { headers, timeout: 120000 })).catch(async error => {
     await require('./aiUsageTelemetry.service').recordProviderFailure({provider:'openai',model:MODEL,useCase:'accounting_ocr',error});
     throw error;
   });

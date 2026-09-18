@@ -4,30 +4,32 @@ const https = require('node:https');
 const { randomUUID } = require('node:crypto');
 const { BrokerError, fail } = require('./errors');
 const { MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES } = require('./ai-limits');
-const { canonicalBase64, validate } = require('./ai-contract');
+const { validate, authorizeReferences } = require('./ai-contract');
 const ENDPOINTS = Object.freeze({
   openai: ['api.openai.com', '/v1/responses'],
   gemini: ['generativelanguage.googleapis.com', '/v1beta/interactions'],
   groq: ['api.groq.com', '/openai/v1/audio/transcriptions'],
 });
 function encodeBody(provider, body) {
+  if (provider === 'openai') {
+    const input = Array.isArray(body.input) ? body.input.map(message => ({ ...message, content: Array.isArray(message.content)
+      ? message.content.map(part => part.file_ref ? part.type === 'input_file'
+        ? { type: 'input_file', file_url: part.file_ref.url }
+        : { type: 'input_image', image_url: part.file_ref.url, ...(part.detail ? { detail: part.detail } : {}) } : part)
+      : message.content })) : body.input;
+    return { bytes: Buffer.from(JSON.stringify({ ...body, input })), contentType: 'application/json' };
+  }
   if (provider !== 'groq') return { bytes: Buffer.from(JSON.stringify(body)), contentType: 'application/json' };
   const boundary = `clinicaclick-${randomUUID()}`;
-  const file = canonicalBase64(body.fileBase64);
-  // Only metadata supplied by the application; no external URLs or arbitrary headers.
-  const filename = body.fileName.replace(/["\\]/g, '_');
-  const bytes = Buffer.concat([
-    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${body.model}\r\n`
-      + `--${boundary}\r\nContent-Disposition: form-data; name="response_format"\r\n\r\nverbose_json\r\n`
-      + `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${body.mimeType}\r\n\r\n`),
-    file, Buffer.from(`\r\n--${boundary}--\r\n`),
-  ]);
-  file.fill(0);
+  const bytes = Buffer.from(Object.entries({ model: body.model, response_format: 'verbose_json', url: body.fileRef.url })
+    .map(([name, value]) => `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`).join('')
+    + `--${boundary}--\r\n`);
   return { bytes, contentType: `multipart/form-data; boundary=${boundary}` };
 }
 function createAiHttp({ request = https.request } = {}) {
-  return async function aiHttp({ provider, payload, token, binding, signal }) {
+  return async function aiHttp({ provider, payload, token, binding, signal, requestId, environment }) {
     validate(provider, payload);
+    authorizeReferences(provider, { payload, binding, requestId, environment });
     if (!Buffer.isBuffer(token) || !token.length || token.length > 16384 || /[\r\n]/.test(token.toString('utf8'))) fail('secret_unavailable');
     if (signal?.aborted) fail('provider_timeout');
     const [hostname, path] = ENDPOINTS[provider];

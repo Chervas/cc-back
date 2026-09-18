@@ -13,6 +13,7 @@ const { createAiHttp } = require('./ai-http');
 const { createAiOperations } = require('./ai-operations');
 const { OPERATIONS, MAX_TIMEOUT_MS, MAX_CONCURRENT_REQUESTS } = require('./ai-limits');
 const { USE_CASES } = require('./ai-contract');
+const fileReference = require('./ai-file-reference');
 const { drainAudit } = require('./audit');
 const tlsReload = require('./tls-reload');
 
@@ -32,8 +33,13 @@ function validateConfig(config) {
       || !binding.secretArn?.startsWith(`arn:aws:secretsmanager:eu-west-3:${ACCOUNT}:secret:${prefix}ai/`)
       || Object.keys(binding).some(key => !['connectionRef', 'provider', 'initialState', 'expiresAt', 'secretArn', 'ai'].includes(key))) fail('invalid_request');
   }
+  for (const binding of config.policy.connections) {
+    if (binding.ai.fileTransferOrigin !== undefined) { try { fileReference.origin(binding.ai.fileTransferOrigin); } catch { fail('invalid_request'); } }
+  }
   for (const grant of config.policy.grants) {
     const provider = config.policy.connections.find(c => c.connectionRef === grant.connectionRef).provider.slice(3);
+    if (['accounting_ocr', 'whatsapp_audio'].some(use => grant.assetRef === `ai:${use}`)
+      && !config.policy.connections.find(c => c.connectionRef === grant.connectionRef).ai.fileTransferOrigin) fail('invalid_request');
     if (grant.tenantRef !== `platform:${config.environment}` || !USE_CASES[provider].some(use => grant.assetRef === `ai:${use}`)
       || grant.operations.length !== 1 || grant.operations[0] !== OPERATIONS[provider]) fail('invalid_request');
   }

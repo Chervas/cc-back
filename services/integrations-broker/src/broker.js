@@ -107,7 +107,7 @@ class Broker {
       };
       const execute = async secret => {
         assertActive();
-        const rawResult = await operation.execute({ payload: request.payload, binding, assetRef: request.assetRef,
+        const rawResult = await operation.execute({ requestId: request.requestId, payload: request.payload, binding, assetRef: request.assetRef,
           tenantRef: request.tenantRef, principalId: principal.id, policyVersion: this.policy.version, policy: this.policy, secret, signal: controller.signal, assertActive });
         if (controller.signal.aborted) fail('provider_timeout');
         // Recheck after awaits, including blocks written by a separate local operator process.
