@@ -29,6 +29,26 @@ La recarga modifica los nuevos handshakes TLS sin cerrar peticiones abiertas. Si
 
 Los certificados autofirmados originales de auditoría requieren preparar primero la confianza de sus clientes antes de cambiarlos a una CA. No apuntar `issuerCaFile` a una CA distinta esperando que el módulo acepte automáticamente esa migración.
 
+Los clientes HTTPS de escritura, consulta y reconciliación vuelven a leer su
+fichero privado de confianza antes de cada conexión. Conservan en memoria el
+destino y la identidad de firma iniciales. Un fichero ausente, con permisos
+abiertos o enlazado simbólicamente impide la petición; no hay reintento ni
+desactivación de la validación TLS. Las peticiones ya abiertas conservan su
+contexto. Esta capacidad requiere publicar el cliente nuevo: modificar el
+fichero en un proceso anterior no actualiza la confianza guardada en memoria.
+
+Para la primera transición de auditoría, publicar primero una confianza doble
+(certificado autofirmado anterior y CA nueva) en cada consumidor real. Emitir
+una hoja de servidor `CA:FALSE`, `serverAuth`, conservando clave, sujeto y SAN;
+las hojas originales `CA:TRUE` no deben convertirse en autoridades subordinadas.
+Ese cambio de usos es una migración inicial revisada, no una renovación ordinaria.
+Después de validar servicios, reconciliación y recepción de auditoría, retirar
+la confianza antigua; conservarla como respaldo para una recuperación explícita.
+No retirar un certificado del fichero y asumir que un cliente antiguo dejó de
+aceptarlo. El ensayo `audit_client_trust_transition.test.js` verifica con TLS real
+local ambas fases, renovación, vuelta atrás, peticiones en curso y rechazos para
+los tres usos. No acredita por sí solo el despliegue AWS ni la interfaz autenticada.
+
 ## Identidades mTLS del inbox
 
 El formato existente de `principals` mantiene `certificateSha256`. Puede añadir `publicKeySha256`, calculado exclusivamente desde el certificado ya autorizado, como SHA-256 del SPKI DER.

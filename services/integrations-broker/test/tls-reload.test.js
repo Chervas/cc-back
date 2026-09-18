@@ -28,10 +28,10 @@ async function fixture(t) {
   const reached = new Promise(resolve=>{arrived=resolve;}); const blocked = new Promise(resolve=>{release=resolve;});
   const server = https.createServer(initial,async(req,res)=>{if(req.url==='/held'){arrived();await blocked;} res.end('FICTITIOUS_OK');});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve)); const port=server.address().port; allowPort(port);
-  const signals=new EventEmitter(); const events=[]; let clock=Date.now();
+  const signals=new EventEmitter(); const events=[]; let clock=null;
   let maintenance;
   t.after(async()=>{release();maintenance?.close();await new Promise(resolve=>server.close(resolve));removePort(port);fs.rmSync(dir,{recursive:true,force:true});});
-  maintenance=R.install(server,config,initial,{signals,report:event=>events.push(event),now:()=>clock});
+  maintenance=R.install(server,config,initial,{signals,report:event=>events.push(event),now:()=>clock??Date.now()});
   const get=(route='/')=>new Promise((resolve,reject)=>{
     const req=https.get({host:'127.0.0.1',port,path:route,ca:fs.readFileSync(file('ca.crt')),agent:false},res=>{
       const fingerprint=res.socket.getPeerCertificate().fingerprint256; let body='';

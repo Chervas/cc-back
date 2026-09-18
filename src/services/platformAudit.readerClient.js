@@ -11,8 +11,9 @@ function client(mode) {
   if (!['confirmed', 'reconcile'].includes(mode)) throw Error('audit_reader_configuration_invalid');
   if (!clients.has(mode)) {
     const prefix = mode === 'confirmed' ? 'PLATFORM_AUDIT_VIEW' : 'PLATFORM_AUDIT_RECONCILE';
+    const caFile = process.env.PLATFORM_AUDIT_READER_CA_FILE;
     clients.set(mode, createClient({ origin: process.env.PLATFORM_AUDIT_READER_ORIGIN,
-      ca: privateFile(process.env.PLATFORM_AUDIT_READER_CA_FILE), keyId: process.env[prefix + '_KEY_ID'],
+      ca: () => privateFile(caFile), keyId: process.env[prefix + '_KEY_ID'],
       privateKey: privateFile(process.env[prefix + '_KEY_FILE']) }));
   }
   return clients.get(mode);
