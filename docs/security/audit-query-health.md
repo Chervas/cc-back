@@ -21,9 +21,26 @@ anteriores y las fechas de confirmación conservan su comportamiento.
 DEV entrega y calcula salud cada 10 segundos y concilia cada 30 segundos, con
 reloj monótono y espera contada desde la finalización, sin ráfagas para recuperar
 intervalos perdidos. El bucle de correo continúa cada segundo; una excepción de
-auditoría deja avanzar ese consumidor. Las tareas siguen secuenciales: una llamada
-externa lenta aún puede retrasar el siguiente ciclo; no se afirma aislamiento de
-latencia entre proveedores. CRM conserva su planificación de auditoría existente.
+auditoría deja avanzar ese consumidor. En ese proceso DEV, auditoría, conciliación
+y correo se ejecutan por turnos: una llamada externa lenta retrasa el siguiente
+trabajo del mismo consumidor. La API DEV es otro proceso. Esto no implica que
+una espera de red detenga toda la aplicación, pero tampoco aísla el correo de
+la latencia de auditoría. Los clientes HTTPS de auditoría tienen límites de
+75 segundos para escritura y 20 segundos para lectura; no son un límite total
+de duración del ciclo, que incluye SQL y procesamiento.
+
+CRM conserva su scheduler de `JobRequests`, persistente en MySQL, con tres
+grupos independientes: crítico, estándar e integraciones. Cada grupo procesa
+un trabajo a la vez. Los correos MFA se encolan como críticos; auditoría usa
+el grupo estándar. También existen colas BullMQ/Redis para WhatsApp y otras
+tareas, pero estas operaciones de seguridad no se ejecutan todas en BullMQ.
+Las prioridades no interrumpen un trabajo que ya está ejecutándose en su grupo.
+
+La separación de colas no separa los recursos del servidor MySQL. Su agotamiento
+puede afectar a distintos consumidores y a la API. Además, el login comprueba
+la capacidad de auditoría: una cola de auditoría atrasada más de una hora o con
+10.000 pendientes rechaza los accesos instrumentados. Esa dependencia explica
+que el incidente SQL terminara afectando al login pese a existir colas.
 
 ## Planes y coste actual
 
@@ -94,3 +111,45 @@ resolver en DEV/CRM; CRM completó entregas programadas después del reinicio.
 
 Esta observación acredita la carga actual durante esas ventanas y no constituye
 una prueba de capacidad máxima ni una garantía de ausencia de futuros fallos.
+
+## Seguimiento a las 16:17 UTC y origen del defecto
+
+La observación adicional de 90,7 segundos mantiene DEV en 7–8 consultas preparadas
+totales, aproximadamente 1,62 SELECT/s y 0,20 UPDATE/s, sin errores ni expulsiones.
+El máximo global observado es 115 frente al límite 16.382. Auditoría DEV/CRM al
+día, cero pendientes, y procesos DEV sin reinicios desde la publicación.
+
+Entre las muestras de las 14:39 y 16:17 no aumentaron los errores SQL registrados
+por usuario ni las consultas lentas. Sí hubo 13 esperas de fila globales que
+sumaron 54 ms; no son un bloqueo sostenido ni se atribuyen al worker DEV con
+esa métrica. En la nueva ventana de 90 segundos no aparecieron nuevas esperas.
+MySQL conserva el último error de agotamiento a las 10:44:20 para CRM y a las
+12:20:51 para DEV, ambos anteriores a la corrección.
+
+Las consultas que acumulaban recursos eran UPDATE de `PlatformAuditDeliveryStates`
+para adquirir/liberar el derecho temporal de ejecución y guardar el heartbeat.
+También se ejecutan SELECT para reclamar trabajos y eventos y calcular salud.
+La caché afectada guarda sentencias preparadas, no resultados de pacientes o IA.
+
+La revisión Git sitúa el consumidor de seguridad DEV en `6c775131` (16/09,
+14:18 UTC), y el repositorio de estado en `5f821282` (12/09). La combinación
+del polling de un segundo, fechas literales en SQL, caché por conexión de 16.000
+y límite global 16.382 permitió la acumulación incluso sin eventos nuevos.
+El primer error de agotamiento conservado por MySQL es del 16/09 a las 18:27 UTC.
+La comprobación original no detectó esta acumulación sostenida entre conexiones;
+las nuevas pruebas y mediciones cubren específicamente ese caso. No se ha
+encontrado otra causa que explique el agotamiento, ni se atribuye a una cola
+clínica grande o a archivos IA.
+
+Evidencia adicional: `query-health-followup-1615/`. Aclarar estos límites no
+equivale a haber separado en procesos los consumidores de seguridad DEV: esa
+mejora de aislamiento sigue pendiente y requiere comprobar ausencia de duplicados,
+timeouts y comportamiento de MFA con el escritor de auditoría deliberadamente lento.
+
+La suite existente `scheduled_jobs_orchestration.test.js` pasó en DEV y staging
+con conexiones externas bloqueadas por el preload de pruebas. Verifica reparto de
+tipos entre grupos, serialización de integraciones, recuperación, leases y fallos
+de persistencia. El primer intento staging detectó una expectativa desactualizada
+del número de tareas (35 frente a las 39 existentes, incluyendo auditoría y
+caducidad de sesiones); se actualizó esa aserción y pasó la suite completa.
+No se cambió ni reinició el código de ejecución en este seguimiento.
