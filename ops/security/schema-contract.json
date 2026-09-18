@@ -891,6 +891,51 @@
         {"CONSTRAINT_NAME": "cc_google_conversion_attempt","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` = _utf8mb4\\'prepared\\') and (`attempted_at` is null)) or ((`state` <> _utf8mb4\\'prepared\\') and (`attempted_at` is not null)))"},
         {"CONSTRAINT_NAME": "cc_google_conversion_terminal","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` in (_utf8mb4\\'succeeded\\',_utf8mb4\\'partial_success\\',_utf8mb4\\'failed\\')) and (`completed_at` is not null)) or ((`state` not in (_utf8mb4\\'succeeded\\',_utf8mb4\\'partial_success\\',_utf8mb4\\'failed\\')) and (`completed_at` is null)))"}
       ]
+    },
+    "GoogleAdsActionPlans": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "plan_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "owner_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "actor_user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "session_ref","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "mapping_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "input","COLUMN_TYPE": "json","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "receipt","COLUMN_TYPE": "json","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "apply_command_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "apply_command_id","columns": [{"INDEX_NAME": "apply_command_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "apply_command_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_google_action_owner","columns": [{"INDEX_NAME": "cc_google_action_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "actor_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_action_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "session_ref","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_action_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "plan_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ],
+      "checks": [
+
+      ]
+    },
+    "GoogleAdsActionCommands": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "command_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "plan_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "family","COLUMN_TYPE": "enum('prepare','validate','apply','status')","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('attempted','completed')","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "attempted_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "completed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
+      ],
+      "indexes": [
+        {"name": "cc_google_action_command_plan","columns": [{"INDEX_NAME": "cc_google_action_command_plan","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "plan_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_action_command_plan","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "attempted_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "command_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME": "cc_google_action_command_completion","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` = _utf8mb4\\'attempted\\') and (`completed_at` is null)) or ((`state` = _utf8mb4\\'completed\\') and (`completed_at` is not null)))"}
+      ]
     }
   },
   "migrations": [
@@ -922,6 +967,7 @@
     {"name": "20260711003000-create-google-ads-conversion-upload-attempts.js","sha256": "592ca0404b110b88225525413047eb5bdd4c3c863aedaabdd7a9464965cc015d"},
     {"name": "20260711012000-add-google-ads-conversion-destination-key.js","sha256": "96f796ba207c1dbe553447fd8c4d5ef080b3aa4f117889579a5163d42d99f520"},
     {"name": "20260712090000-add-data-manager-conversion-statuses.js","sha256": "535379bba4e5d1a8e2194559ac222d4abcc8dd69799f1af695bc2064a69c703f"},
-    {"name": "20260918110000-create-google-conversion-submissions.js","sha256": "91b44f36f7a542c89c23de28391134e60f8fddaade0fdeaaaedf49f7b9878c70"}
+    {"name": "20260918110000-create-google-conversion-submissions.js","sha256": "91b44f36f7a542c89c23de28391134e60f8fddaade0fdeaaaedf49f7b9878c70"},
+    {"name": "20260918190000-create-google-ads-action-journal.js","sha256": "28bc9df36d9915253db783e7a68737b0008c7cb2f903e1ec8215dbcf833d5df7"}
   ]
 }

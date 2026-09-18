@@ -93,4 +93,4 @@ function createGoogleAdsActionManagementBrokerClient({ client, assertContext, no
     } catch (error) { fail(safe(error)); }
   } };
 }
-module.exports = { createGoogleAdsActionManagementBrokerClient, safe };
+module.exports = { createGoogleAdsActionManagementBrokerClient, project, safe };

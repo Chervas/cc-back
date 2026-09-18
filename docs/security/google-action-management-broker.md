@@ -1,9 +1,9 @@
 # Acciones canónicas Google Ads por broker
 
-Estado 18/09/2026: contrato, broker y cliente CRM preparados y probados localmente.
+Estado 18/09/2026: contrato, broker, cliente, diario MySQL y API CRM preparados y probados localmente.
 Sin despliegue, DDL operativa, permisos nuevos, llamadas reales a Google ni
-aceptación visual autenticada. Los endpoints de creación/normalización todavía
-necesitan conectar este cliente con autorización y persistencia propias del CRM.
+aceptación visual autenticada. La API de planes ya conecta el cliente con
+autorización y persistencia CRM; falta integrar su revisión/confirmación en la UI.
 No activar el corte parcial de la identidad Google compartida.
 
 ## Contrato y alcance
@@ -74,7 +74,7 @@ conciliación explícita: no borrar bloqueos/planes, restaurar un SQLite antiguo
 regenerar comandos para forzar la escritura. Un validate-only histórico tampoco
 autoriza aplicar sin las comprobaciones frescas que hace `apply`.
 
-## Cliente CRM y trabajo pendiente
+## Cliente, diario y API CRM
 
 `googleAdsBroker.actionManagement(account, context, family, input, options)` usa
 el contexto opaco del registro Ads. Requiere UUID de comando explícito, callback
@@ -88,21 +88,56 @@ Además de la flag Ads general, exige ambas
 `GOOGLE_ADS_ACTION_MANAGEMENT_BROKER_ENABLED=true`; siguen apagadas por defecto.
 No genera UUID, aplica automáticamente, reintenta ni recurre a tokens locales.
 
-Antes de conectar los endpoints debe persistirse la propiedad del plan/comando
-en CRM y revalidarse la autorización del usuario para **todos los mappings activos
-de la cuenta**, mediante `assertGoogleConversionMutationAccess`, alrededor de cada
-operación. Un guard inyectable no sustituye esa integración. Deben mantenerse la
-confirmación de mutación existente, el alcance clínico y la recuperación de
-resultado desconocido en el flujo completo. Crear una acción no la registra
+`GoogleAdsActionPlans` conserva el UUID del plan, usuario, referencia de sesión,
+mapping, cuenta, huella del propietario/ámbito/registro y metadatos tipados. No
+guarda JWT, secretos ni datos de pacientes. `GoogleAdsActionCommands` conserva
+cada UUID/familia e intento antes del transporte. El recibo y la finalización del
+comando se guardan juntos; nunca hay una transacción SQL abierta durante Google.
+La migración `20260918190000-create-google-ads-action-journal.js` y sus dos tablas
+están fijadas en `ops/security/schema-contract.json`; **no aplicada a BD operativa**.
+
+`POST /api/marketing/google-ads/conversion-action-plans` prepara el plan;
+`POST /:planId/validate`, `/apply` y `/status` ejecutan sus operaciones explícitas.
+Contrato de cuerpos y respuestas en el `13-backend.md` canónico. La API exige
+sesión gestionada vigente y revalida permisos de escritura sobre **todos los
+mappings activos de la cuenta**, mediante `assertGoogleConversionMutationAccess`,
+antes y después. Las comprobaciones dentro de transacciones bloquean también
+pertenencias y asignaciones; la pertenencia al grupo y el registro broker deben
+conservarse. Otro usuario, sesión o ámbito no puede adoptar un plan.
+
+`apply` exige `confirm_external_mutation=true`. Solo se persiste un UUID de
+aplicación por plan. Una petición repetida devuelve el estado guardado; no vuelve
+a despacharse, tampoco tras reinicio. Las respuestas antiguas de estado no
+retroceden un recibo ya aplicado. Si se pierde el ACK, un nuevo comando **status
+del mismo plan** puede recuperar el recibo del broker. Si no lo hay, se conserva
+el intento desconocido; no hay lease que habilite repetir la mutación, worker,
+reintento automático ni nuevo UUID de apply. Caducar la sesión no transfiere su
+propiedad: la conciliación operativa de ese caso requiere un procedimiento
+explícito aún pendiente, no editar/eliminar el diario.
+
+Las rutas antiguas `ensure` y normalización rechazan cuentas gestionadas; el
+resolutor del nuevo flujo rechaza cuentas legacy antes de leer sus credenciales.
+El diario no escribe `IntakeConfig`, no encola conciliación ni declara readiness.
+Crear una acción no la registra
 automáticamente como destino Data Manager: ese permiso exige tratamiento
 explícito antes de declarar el onboarding listo.
 
-También quedan enriquecimiento/bootstrap, sync tipado de leads, revisión del
+Quedan la UI de planes y su aceptación autenticada, enriquecimiento/bootstrap, sync tipado de leads, revisión del
 job combinado, inventario completo de consumidores compartidos, preflight/DDL y
 despliegue, pruebas autorizadas de proveedor y recorrido visual con login/MFA.
 No reactivar históricos, campañas, leads ni jobs clínicos DEV para probar.
 
 ## Evidencia local
+
+Diario CRM: MySQL 8.0.42 aislado, broker firmado con SQLite y HTTP Express real
+por loopback, AWS/Google y prueba de sesión ficticios. **11 escenarios**: propiedad
+usuario/sesión/ámbito y reinicio; ACK perdido; seis preparaciones y seis aplicaciones
+concurrentes; revocación de permiso SQL de otra clínica/sesión/flags; recuperación
+de prepare y caducidad; resultado proveedor desconocido; permiso retirado tras
+mutar; fallo del commit SQL del recibo; API cerrada/confirmación/no-store; rechazo
+legacy antes de credenciales; migración repetible y rollback que preserva historia.
+Contrato de esquema contrastado con metadata del MySQL del test. Evidencia privada
+`google-action-journal-20260918/`; no son llamadas reales a Google ni QA visual.
 
 Suite completa del broker: 584/584 Node24, incluido cliente real CRM contra broker
 firmado/SQLite. Tras exigir tipos string para propietario/resource, lote focalizado: 28/28. Incluye transporte HTTPS

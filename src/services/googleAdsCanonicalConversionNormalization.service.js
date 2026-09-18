@@ -496,6 +496,9 @@ async function processAccount({
     if (cleanCustomerId(runtime?.customerId) !== account.customer_id) {
       throw runtimeError('RUNTIME_ACCOUNT_MISMATCH', 'El runtime no pertenece a la cuenta configurada', 403);
     }
+    if (runtime.deliveryMode === 'broker') {
+      throw runtimeError('GOOGLE_ACTION_PLAN_REQUIRED', 'La cuenta requiere un plan de acciones gestionado por el broker', 409);
+    }
     const providerActions = await fetchConversionActions({
       accessToken: runtime.accessToken,
       loginCustomerId: runtime.loginCustomerId,

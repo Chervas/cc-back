@@ -8537,6 +8537,10 @@ exports.ensureGoogleAdsConversionActions = asyncHandler(async (req, res) => {
   }
 
   let ensured;
+  // Managed mappings need explicit durable plans; this legacy endpoint must
+  // never fetch a local token or mark Data Manager ready after action creation.
+  if (runtime.deliveryMode === 'broker') return res.status(409).json({ success: false,
+    error: 'google_action_plan_required', message: 'Prepara y confirma un plan de acciones para esta cuenta.' });
   const recheckMutationAccess = async () => {
     const currentScope = await resolveScopeFromInput({ clinicIdRaw: req.body?.clinic_id, groupIdRaw: req.body?.group_id,
       assignmentScopeRaw: req.body?.assignment_scope });

@@ -154,7 +154,8 @@ async function resolveScopedGoogleAdsRuntime({
   ensureAccessToken = ensureGoogleConnectionAccessToken,
   broker = require('./googleAdsBroker.service'),
   credentials = googleLegacyCredentials.forModels({ ...db, GoogleConnection: connectionModel }),
-  requiredScopes = [GOOGLE_ADS_SCOPE]
+  requiredScopes = [GOOGLE_ADS_SCOPE],
+  requireBroker = false
 }) {
   const cleanCustomerId = normalizeCustomerId(customerId);
   if (!cleanCustomerId) throw runtimeError('CUSTOMER_ID_REQUIRED', 'customer_id es obligatorio', 400);
@@ -216,6 +217,7 @@ async function resolveScopedGoogleAdsRuntime({
       connectionSource: directClinicAccounts.length ? 'mapping_clinic' : 'mapping_group', scope,
       customerId: cleanCustomerId, loginCustomerId: captured.loginCustomerId };
   }
+  if (requireBroker) throw runtimeError('google_action_broker_required', 'La cuenta requiere una conexión gestionada por el broker', 409);
   const connection = await credentials.load(connectionIds[0], { includeScopes: true });
   if (!connection || Number(connection.id) !== connectionIds[0]) {
     throw runtimeError(

@@ -10313,3 +10313,64 @@ reversible.
 los umbrales de confianza, los estados, los buffers, el contrato estándar con
 `posible_urgencia` y que N16 no convierta ese campo en una rama específica.
 También valida el grafo completo.
+
+
+## Planes de acciones Google Ads por broker
+
+Contrato preparado en DEV (18/09/2026), sin DDL/despliegue operativo ni UI de
+confirmación publicada. Requiere las tres flags Ads, conversiones y gestión de
+acciones; no sustituye la aceptación del corte de todos los consumidores Google.
+
+Base: `/api/marketing/google-ads/conversion-action-plans`. Todas las operaciones
+son POST autenticados, con sesión gestionada vigente, `Cache-Control: private,
+no-store` y límite de 30 peticiones/minuto del middleware Marketing. Cuerpo cerrado:
+`customer_id` (diez dígitos, string), exactamente uno de `clinic_id`/`group_id`
+(entero positivo), `request_id` (UUID v4). No admite scope también en query ni
+credenciales, URLs, GAQL u operaciones Google libres.
+
+| Ruta relativa | Campos adicionales | Efecto |
+| --- | --- | --- |
+| `/` | `mode`, `currency`, `targets` | Prepara; `request_id` será el UUID del plan |
+| `/:planId/validate` | Ninguno | Revalida sin aplicar |
+| `/:planId/apply` | `confirm_external_mutation: true` | Aplica una vez el plan propio |
+| `/:planId/status` | Ninguno | Recupera estado/recibo del mismo plan |
+
+`mode=create`: moneda ISO en mayúsculas y targets `{event,actionId:null}`.
+`mode=normalize`: `currency:null` y targets `{event,actionId}`; ID positivo string
+o null para resolver por nombre canónico. Uno a cinco eventos distintos entre
+lead/contact/qualified_lead/schedule/purchase. Crear añade solo acciones ausentes;
+normalizar solo modifica recuento y marca secundaria. El broker comprueba nombre,
+owner, categoría, tipo, estado y deriva del inventario antes de escribir.
+
+Respuesta: `{success,planId,commandId,commandState,outcomeUnknown,plan}`. `plan`
+es null hasta recuperar metadata válida; después contiene `planId`, `state`,
+`expiresAt`, `changes` y, según operación, `validated`/`results`. Cada cambio solo
+contiene evento, ID y create/normalize/unchanged. No se devuelven referencias de
+secretos, tokens, detalles libres de proveedor ni identidad interna del binding.
+HTTP 200 indica comando terminado; repetir un comando todavía intentado devuelve
+202 con su estado actual, **sin despacharlo de nuevo**. `outcomeUnknown=true`
+significa que se intentó aplicar y todavía no hay recibo aplicado. No es éxito de
+la mutación. Un error tras transporte devuelve código seguro 503; se recupera con
+un UUID nuevo para **status del mismo plan**, nunca con otro apply.
+
+El diario guarda usuario, sesión, ámbito y huella del registro autorizado. No
+permite adoptar un plan desde otra sesión ni reutilizar el UUID con otros targets.
+Comprueba escritura en todas las clínicas de todos los mappings activos de la
+cuenta, sesión, grupo, grants y flags antes/después de cada operación; también en
+transacciones de admisión/recibo. 401 sesión inválida, 403 ámbito denegado, 404 plan
+no propio/inexistente, 409 conflicto/falta de confirmación/plan no listo/caducado,
+400 cuerpo inválido; los errores de infraestructura permanecen cerrados.
+
+Los UUID se guardan antes del transporte. Solo cabe un comando apply por plan;
+concurrencia, reinicio o caducidad no autorizan otro. Un status retrasado no hace
+retroceder applied a prepared/attempted. Si expira la sesión o no existe recibo
+broker, se necesita conciliación operativa explícita aún pendiente: no borrar
+filas, copiar estados ni inventar confirmaciones.
+
+El endpoint legacy `conversion-actions/ensure` devuelve 409
+`google_action_plan_required` para mappings gestionados; la normalización legacy
+los rechaza antes del transporte. La API nueva exige broker antes de cargar
+credenciales locales. No modifica `IntakeConfig`, no habilita Data Manager ni
+encola conciliación. Autorizar destinos y completar readiness es otra transición
+que debe verificarse antes de activar el flujo. Persistencia/recuperación en
+[contrato técnico](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-action-management-broker.md).
