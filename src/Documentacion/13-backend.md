@@ -8748,3 +8748,42 @@ reversible.
 los umbrales de confianza, los estados, los buffers, el contrato estándar con
 `posible_urgencia` y que N16 no convierta ese campo en una rama específica.
 También valida el grafo completo.
+
+
+## Costes AWS: caché y monitorización
+
+`GET /api/metasync/jobs/usage/aws-infrastructure/costs?month=YYYY-MM` lee
+exclusivamente `AwsInfrastructureCostCaches`. Requiere JWT y administrador
+técnico global (IDs canónicos 1/44), con `Cache-Control: private, no-store`.
+Mes opcional, limitado al actual/anterior UTC; inválido 400, no autorizado
+401/403. Sin tabla devuelve pendiente y `cost_migration_required`; no
+migra ni consulta AWS durante la petición.
+
+Respuesta: `version`, `month`, `availableMonths`, `status`
+(`pending/available/stale`), `snapshot`, `lastAttemptAt`, `error` cerrado,
+`collectionEnabled`, `refreshSchedule` y `reportedBudget` (60 USD reportados,
+sin verificar). Snapshot: importes string y moneda, periodo UTC con fin
+exclusivo, estimación de AWS, filas diarias, servicios agregados en backend,
+previsión restante separada y Budget con `referenceMonth`, `scopeMatches` y
+`metricMatches`. Sin ARN, credenciales, payload clínico ni errores SDK.
+El Budget vigente no se considera histórico al elegir el mes anterior.
+
+`awsInfrastructureCosts` / `aws_infrastructure_costs_refresh` entra en el
+catálogo durable existente a las `03:40 Europe/Madrid`, respetando leader y
+pausas. `AWS_INFRA_COSTS_ENABLED` es false por defecto. Node 18 inicia un
+colector Node 24 separado mediante `AWS_INFRA_COSTS_NODE_BINARY` absoluto,
+sin heredar secretos ni .env. Solo IMDS/STS al rol fijo de costes; consulta
+etiquetas, uso, forecast y Budget. No acceso a Secrets/KMS ni proveedores.
+
+Migración aditiva `20260912180000-create-aws-infrastructure-cost-caches.js`:
+JSON, fechas/error y lease UUID de 180 s con CAS. Fallo conserva último dato; sin dato completo pendiente,
+si el válido supera 36 h o falla la recogida queda atrasado. Ajustes añade
+`tab=aws` sin polling del colector ni suma con costes de IA.
+
+Contrato y procedimiento de recogida: `services/aws-cost-collector/README.md`.
+La consulta y el colector tienen activación separada. El catálogo diario está
+preparado en DEV; la promoción pública inicial solo instala la consulta de caché.
+La recogida inicial puede ser manual y nunca convierte `collectionEnabled` en
+true: ese indicador requiere publicar y habilitar el executor con identidad
+permanente. Estado operativo y mediciones en el manual 19/99.
+

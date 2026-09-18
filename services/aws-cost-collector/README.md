@@ -18,11 +18,12 @@ antes de volver a desplegarla; rollback exacto conservado en evidencia privada.
 
 ## Flujo y contrato
 
-El catálogo existente registra `awsInfrastructureCosts`, tipo durable
+El catálogo preparado en DEV registra `awsInfrastructureCosts`, tipo durable
 `aws_infrastructure_costs_refresh`, a las `03:40 Europe/Madrid`. Respeta los
 gates de cron, leader y workers anteriores. `AWS_INFRA_COSTS_ENABLED` ausente
 o distinto de `true` impide el encolado y la recogida. Una lectura de Ajustes
-nunca encola, reactiva jobs ni llama a AWS.
+nunca encola, reactiva jobs ni llama a AWS. La promoción inicial a staging
+instala solo la consulta; aún no incorpora ese executor ni su cron.
 
 El executor invoca `src/services/awsInfrastructureCosts.service.js`, que reserva
 un lease en `AwsInfrastructureCostCaches`, ejecuta el colector y guarda el
