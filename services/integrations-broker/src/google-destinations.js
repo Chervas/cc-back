@@ -40,6 +40,22 @@ function createGoogleDestinations({ store, actionManagement, now = Date.now }) {
   };
   const dto = row => ({ authorizationId: row.id, planId: row.plan_id, state: row.state,
     destinations: JSON.parse(row.destinations_json) });
+  // A caller that persisted its original decision can withdraw it before an
+  // in-flight authorize has committed. This tombstone never grants a target.
+  function revocation(request, principal, binding) {
+    const existing = store.db.prepare('SELECT id FROM google_destination_authorizations WHERE id=?').get(request.payload.authorizationId);
+    if (existing) {
+      const row = load(request, principal, binding);
+      if (request.payload.input && A.hash(request.payload.input) !== A.hash(JSON.parse(row.input_json))) fail('idempotency_conflict');
+      return { row, exists: true };
+    }
+    const input = request.payload.input;
+    if (!input) fail('scope_denied');
+    const checked = original(request, principal, binding, input);
+    if (store.db.prepare('SELECT 1 FROM google_destination_authorizations WHERE plan_id=?').get(input.planId)) fail('idempotency_conflict');
+    return { exists: false, row: { id: request.payload.authorizationId, plan_id: input.planId, state: 'revoked',
+      scope_digest: checked.scope, input_json: JSON.stringify(input), destinations_json: JSON.stringify(checked.destinations) } };
+  }
   function authorize(request, principal, binding) {
     const checked = original(request, principal, binding, request.payload);
     const existing = store.db.prepare('SELECT id,state FROM google_destination_authorizations WHERE plan_id=?').get(request.payload.planId);
@@ -60,7 +76,9 @@ function createGoogleDestinations({ store, actionManagement, now = Date.now }) {
     provider: A.PROVIDER, requiredScopes: A.SCOPES, effect: family === 'status' ? 'read' : 'write',
     persistResult: family !== 'status', validate: payload => C.validate(operation, payload),
     authorize({ request, principal, binding }) {
-      if (family === 'authorize') authorize(request, principal, binding); else load(request, principal, binding);
+      if (family === 'authorize') authorize(request, principal, binding);
+      else if (family === 'revoke') revocation(request, principal, binding);
+      else load(request, principal, binding);
     },
     async execute(context) {
       context.assertActive();
@@ -71,7 +89,7 @@ function createGoogleDestinations({ store, actionManagement, now = Date.now }) {
         const checked = authorize(request, principal, context.binding);
         return { authorizationId: request.requestId, planId: request.payload.planId, state: 'active', destinations: checked.destinations };
       }
-      const result = dto(load(request, principal, context.binding));
+      const result = dto(family === 'revoke' ? revocation(request, principal, context.binding).row : load(request, principal, context.binding));
       return family === 'revoke' ? { ...result, state: 'revoked' } : result;
     },
     project: value => structuredClone(value),
@@ -88,8 +106,11 @@ function createGoogleDestinations({ store, actionManagement, now = Date.now }) {
             .run(request.requestId, principal.id, request.tenantRef, request.connectionRef, request.assetRef, target.conversionActionId, target.event, source);
         }
       } else {
-        const row = load(request, principal, binding);
+        const { row, exists } = family === 'revoke' ? revocation(request, principal, binding) : { row: load(request, principal, binding) };
         if (family === 'revoke') {
+          if (!exists) store.db.prepare("INSERT INTO google_destination_authorizations VALUES (?,?,?,?,?,?,?,?,?,'revoked',?,?)")
+            .run(row.id, row.plan_id, principal.id, request.tenantRef, request.connectionRef, request.assetRef,
+              row.scope_digest, row.input_json, row.destinations_json, now(), now());
           store.db.prepare("UPDATE google_destination_authorizations SET state='revoked',revoked_at=COALESCE(revoked_at,?) WHERE id=?").run(now(), row.id);
           store.db.prepare("UPDATE google_destination_targets SET state='revoked' WHERE authorization_id=?").run(row.id);
         } else if (result.data.state !== row.state) fail('scope_denied');

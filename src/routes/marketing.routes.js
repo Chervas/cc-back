@@ -265,6 +265,8 @@ router.get('/google-ads/conversion-actions', campaignOnboardingController.listGo
 router.post('/google-ads/conversion-actions/ensure', campaignOnboardingController.ensureGoogleAdsConversionActions);
 router.use('/google-ads/conversion-action-plans', webRateLimit({ operation: 'google_conversion_action_plans', limit: 30,
   windowMs: 60 * 1000 }), require('./googleAdsActionPlans.routes').createRouter());
+router.use('/google-ads/conversion-destinations', webRateLimit({ operation: 'google_conversion_destinations', limit: 30,
+  windowMs: 60 * 1000 }), require('./googleDestinations.routes').createRouter());
 router.post('/google-ads/conversions/data-manager/validate', campaignOnboardingController.validateGoogleDataManagerConversion);
 router.post('/google-ads/conversions/enhanced/activation-gate', campaignOnboardingController.gateEnhancedConversionsActivation);
 

@@ -37,6 +37,16 @@ test('three destination operations preserve caller UUID, opaque account scope an
   }
   assert.equal(require.cache[require.resolve('../../../models')], undefined);
 });
+test('early withdrawal receipt is bound to the original plan and selection', async () => {
+  const f = await fixture(), value = input(); f.local.planId = value.planId;
+  const payload = { authorizationId: randomUUID(), input: value };
+  assert.equal((await f.invoke('revoke', payload)).state, 'revoked');
+  for (const mutate of [r => { r.data.planId = randomUUID(); }, r => { r.data.destinations[0].sources = ['OTHER']; },
+    r => { r.data.destinations[0].event = 'schedule'; }]) {
+    f.local.mutate = mutate;
+    await assert.rejects(f.invoke('revoke', payload), { code: 'broker_response_invalid' });
+  }
+});
 test('destination enrollment is disabled unless every explicit flag is true', async () => {
   const keys = ['GOOGLE_ADS_CONVERSIONS_BROKER_ENABLED', 'GOOGLE_ADS_ACTION_MANAGEMENT_BROKER_ENABLED', 'GOOGLE_ADS_DESTINATIONS_BROKER_ENABLED'];
   const previous = keys.map(key => process.env[key]);
@@ -108,4 +118,11 @@ test('unknown failures expose only a fixed safe code and never retransmit', asyn
   const f = await fixture(); f.local.onCall = () => { throw Error('FICTITIOUS-SECRET'); };
   await assert.rejects(f.invoke(), { code: 'google_destinations_broker_failed', message: 'google_destinations_broker_failed' });
   assert.equal(f.local.calls.length, 1);
+});
+
+test('closed human guard errors retain actionable session/pause/conflict semantics after transport', async () => {
+  for (const code of ['google_destination_session_required', 'conversion_paused', 'google_destination_conflict']) {
+    const f = await fixture(); f.local.onCall = () => { f.local.onGuard = () => { throw Object.assign(Error('PRIVATE'), { code }); }; };
+    await assert.rejects(f.invoke(), { code }); assert.equal(f.local.calls.length, 1);
+  }
 });

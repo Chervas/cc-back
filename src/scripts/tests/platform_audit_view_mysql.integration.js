@@ -114,6 +114,24 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(actionDto.verification, 's3_version_verified');
   assert(!Object.hasOwn(actionDto, 'selectionDigest')); assert(!Object.hasOwn(actionDto, 'connectionRef'));
   report.checks.push('v17 recovered Google action is filterable only after exact S3 verification; DTO retains original and recovering session/command references without provider credentials');
+  const destination = require('../../../services/platform-audit/src/google-destination-event').fromDestination({
+    authorization_id: randomUUID(), plan_id: action.planRef, scope_key: 'group:5', mapping_id: 11,
+    input: { planId: action.planRef, targets: [{ event: 'lead', sources: ['WEB'] }] }, receipt: { state: 'revoked' },
+  }, { command_id: randomUUID(), family: 'authorize', session_ref: randomUUID() },
+  { connectionRef: 'google:fixture', assetRef: 'ads:1234567890', clinicIds: [59, 71] },
+  { userId: 9, sessionRef }, 'authorization_withdrawn', { now: at, relatedCommandRef: randomUUID() });
+  const destinationSaved = await repo.append(destination);
+  await models.PlatformAuditEvent.update({ state: 'delivered', receipt: await writer.write(destinationSaved), delivered_at: at },
+    { where: { event_id: destination.eventId } });
+  const destinationPage = await view.read({ actorId: 1, sessionRef, query: { ...criteria, action: 'integration.google_ads.destinations' } });
+  assert.equal(destinationPage.events.length, 1); const destinationDto = destinationPage.events[0];
+  assert.equal(destinationDto.googleDestinations.authorizationRef, destination.authorizationRef);
+  assert.equal(destinationDto.googleDestinations.relatedCommandRef, destination.relatedCommandRef);
+  assert.equal(destinationDto.googleDestinations.initiatorSessionRef, destination.initiatorSessionRef);
+  assert.equal(destinationDto.outcome, 'unknown'); assert.equal(destinationDto.googleDestinations.receiptState, 'revoked');
+  assert.equal(destinationDto.verification, 's3_version_verified');
+  assert(!Object.hasOwn(destinationDto, 'selectionDigest')); assert(!Object.hasOwn(destinationDto, 'connectionRef'));
+  report.checks.push('v18 early withdrawal is verified by exact S3 version and preserves unknown initial outcome with original/recovery references in the viewer');
   const broken = await models.PlatformAuditEvent.findByPk(first.events[0].eventId); const goodReceipt = broken.receipt;
   await broken.update({ receipt: { ...goodReceipt, versionId: 'missing-version' } });
   await assert.rejects(view.read({ actorId: 1, sessionRef, query: criteria }), /audit_view_unavailable/);

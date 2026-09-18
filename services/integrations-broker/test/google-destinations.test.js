@@ -196,6 +196,52 @@ test('revocation survives restart, denies replay and new UUID adoption of the sa
   assert.equal(f.state.dmCalls, 0);
 });
 
+test('withdrawal before authorization persists a tombstone and denies a late or replaced authorize', async t => {
+  const f = setup(t), p = await f.prepare(); await f.apply(p);
+  const decision = input(p.planId), authorizationId = randomUUID();
+  const withdrawn = await f.invoke(C.OPERATIONS.revoke, { authorizationId, input: decision });
+  assert.equal(withdrawn.state, 'revoked'); assert.equal(withdrawn.planId, p.planId);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM google_destination_targets').get().n, 0);
+  f.reopen();
+  await assert.rejects(f.invoke(C.OPERATIONS.authorize, decision, { requestId: authorizationId }), { code: 'idempotency_conflict' });
+  await assert.rejects(f.invoke(C.OPERATIONS.authorize, decision), { code: 'idempotency_conflict' });
+  assert.equal((await f.invoke(C.OPERATIONS.status, { authorizationId })).state, 'revoked');
+  await assert.rejects(f.invoke(D.OPERATIONS.ingest, event()), { code: 'scope_denied' });
+});
+
+test('withdrawal races with an in-flight authorization without a late active permission', async t => {
+  const f = setup(t), p = await f.prepare(); await f.apply(p);
+  const request = f.command(C.OPERATIONS.authorize, input(p.planId));
+  f.state.onSecret = async () => {
+    f.state.onSecret = null;
+    await f.invoke(C.OPERATIONS.revoke, { authorizationId: request.requestId, input: request.payload });
+  };
+  await assert.rejects(f.execute(request), { code: 'idempotency_conflict' });
+  assert.equal((await f.invoke(C.OPERATIONS.status, { authorizationId: request.requestId })).state, 'revoked');
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM google_destination_targets WHERE state='active'").get().n, 0);
+});
+
+test('early withdrawal requires exact owned applied intent and cannot adopt another grant', async t => {
+  const f = setup(t), grant = await f.authorize(), original = input(grant.planId);
+  await assert.rejects(f.invoke(C.OPERATIONS.revoke, { authorizationId: grant.authorizationId,
+    input: { ...original, targets: [{ event: 'lead', sources: ['OTHER'] }] } }), { code: 'idempotency_conflict' });
+  await assert.rejects(f.invoke(C.OPERATIONS.revoke, { authorizationId: randomUUID(), input: original }), { code: 'idempotency_conflict' });
+  await assert.rejects(f.invoke(C.OPERATIONS.revoke, { authorizationId: randomUUID() }), { code: 'scope_denied' });
+  await assert.rejects(f.invoke(C.OPERATIONS.revoke, { authorizationId: randomUUID(), input: input(randomUUID()) }), { code: 'scope_denied' });
+  const before = f.state.secretReads;
+  await assert.rejects(f.invoke(C.OPERATIONS.revoke, { authorizationId: randomUUID(), input: { ...original, targets: [original.targets[0], original.targets[0]] } }), { code: 'invalid_request' });
+  assert.equal(f.state.secretReads, before);
+});
+
+test('failed audit cannot leave an unaudited early withdrawal', async t => {
+  const f = setup(t), p = await f.prepare(); await f.apply(p);
+  const append = f.store.appendAudit.bind(f.store), authorizationId = randomUUID();
+  f.store.appendAudit = value => { if (value.reason === 'conversion_destinations_revoked') fail('audit_unavailable'); return append(value); };
+  await assert.rejects(f.invoke(C.OPERATIONS.revoke, { authorizationId, input: input(p.planId) }), { code: 'audit_unavailable' });
+  f.store.appendAudit = append;
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM google_destination_authorizations WHERE id=?').get(authorizationId).n, 0);
+});
+
 test('overlap with another active authorization or a static grant cannot hide revocation', async t => {
   const f = setup(t), first = await f.authorize(), next = await f.prepare(); await f.apply(next);
   await assert.rejects(f.invoke(C.OPERATIONS.authorize, input(next.planId)), { code: 'idempotency_conflict' });

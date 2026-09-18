@@ -8,7 +8,11 @@ const ref = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0
 const plain = value => value && Object.getPrototypeOf(value) === Object.prototype;
 const exact = (value, keys) => plain(value) && Object.keys(value).sort().join(',') === keys.split(',').sort().join(',');
 const known = require('./googleAdsActionManagementBrokerClient.service').safe;
-const safe = error => { const code = known(error); return code === 'google_action_management_broker_failed' ? 'google_destinations_broker_failed' : code; };
+const GUARD_ERRORS = new Set(['google_destination_session_required', 'google_destination_conflict', 'conversion_paused']);
+const safe = error => {
+  if (GUARD_ERRORS.has(error?.code)) return error.code;
+  const code = known(error); return code === 'google_action_management_broker_failed' ? 'google_destinations_broker_failed' : code;
+};
 function project(family, data, requestId, input) {
   if (!exact(data, 'authorizationId,planId,state,destinations') || Buffer.byteLength(JSON.stringify(data)) > 32768
     || data.authorizationId !== (family === 'authorize' ? requestId : input.authorizationId) || !uuid(data.planId)
@@ -24,6 +28,8 @@ function project(family, data, requestId, input) {
     events.add(row.event); ids.add(row.conversionActionId);
   }
   if (family === 'authorize' && canonical(data.destinations.map(({ event, sources }) => ({ event, sources }))) !== canonical(input.targets)) fail('broker_response_invalid');
+  if (family === 'revoke' && input.input && (data.planId !== input.input.planId
+    || canonical(data.destinations.map(({ event, sources }) => ({ event, sources }))) !== canonical(input.input.targets))) fail('broker_response_invalid');
   return structuredClone(data);
 }
 

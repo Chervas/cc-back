@@ -10402,33 +10402,54 @@ que debe verificarse antes de activar el flujo. Persistencia/recuperación en
 
 ### Autorizacion interna de destinos Data Manager
 
-Preparado, sin endpoint HTTP ni activación: el método interno
-`googleAdsBroker.destinations(account, context, family, input, options)` permite
-authorize/status/revoke. Authorize recibe `{planId,targets:[{event,sources}]}`;
-status/revoke reciben `{authorizationId}`. Cada comando exige UUID explícito,
-contexto opaco, guard de permisos actuales de toda la cuenta y plazo máximo 30 s.
-Devuelve `{authorizationId,planId,state,destinations:[{event,conversionActionId,sources}]}`.
+Preparado en DEV, sin DDL ni activación operativa. API POST base
+`/api/marketing/google-ads/conversion-destinations`; todas sus peticiones requieren
+sesión gestionada, exactamente un `clinic_id`/`group_id`, `customer_id` y UUID
+`request_id`. El mismo usuario del plan mantiene escritura actual sobre todas
+las clínicas de la cuenta; no basta con una de ellas.
 
-Los IDs se derivan del recibo applied propio del broker. Se necesita política
-explícita `googleDataManagerEnrollment.accounts` con cuenta/eventos/WEB u OTHER;
-prepared, attempted o consultas no autorizan. SQLite conserva permiso, targets
-indexados, revocación y auditoría técnica atómica. Cambio de identidad/ámbito
-invalida el permiso; revocación bloquea replay y otro UUID del mismo plan.
-No autoriza señales mejoradas, readiness, cambios IntakeConfig ni jobs/envíos.
+- `/`: `plan_id`, `targets:[{event,sources}]`, `confirm_authorization:true`.
+- `/:authorizationId/status`: solo los campos comunes.
+- `/:authorizationId/revoke`: añade `input:{planId,targets}` original. Permite
+  retirar un authorize desconocido antes de su llegada; no autoriza otra selección.
 
-Requiere `GOOGLE_ADS_DESTINATIONS_BROKER_ENABLED=true` además de las flags Ads,
-conversiones y acciones; todas cerradas por defecto. No introduce retry, UUID
-automático ni fallback a credenciales locales. Falta el diario humano, API y UI
-con confirmación/recuperación; no invocar desde los endpoints de planes como efecto
-implícito. Incertidumbre, revocación y límites en el
+Respuesta cerrada `success,authorizationId,planId,commandId,commandState,
+outcomeUnknown,canRevoke,authorization`; el último campo es null o
+`{authorizationId,planId,state,destinations:[{event,conversionActionId,sources}]}`.
+200/202 no reemplazan la interpretación de estado. Sin query, retry automático,
+credenciales legacy ni caché (`private, no-store`). Límite de destinos 30/minuto, con clave propia separada de planes. El método interno `googleAdsBroker.destinations` conserva contexto
+opaco, UUID/guard explícitos y plazo máximo de 30 segundos.
+
+Los IDs se derivan del recibo applied propio del broker. La política
+`googleDataManagerEnrollment.accounts` fija cuenta/eventos/WEB u OTHER. Prepared,
+attempted, Finalizar y consultar no autorizan. SQLite confirma permiso, targets,
+revocación y auditoría técnica juntos. Retirada anticipada conserva el cierre y
+bloquea authorize tardío/otro UUID del mismo plan. Otra confirmación de retirada
+puede usar nuevo comando para la misma intención si se perdió el anterior.
+
+El diario MySQL (`GoogleDestinationAuthorizations/Commands`) admite el comando y
+su auditoría humana v18 dentro de una transacción antes del transporte, y guarda
+el recibo en otra. UUID repetido no se retransmite. Captura usuario/sesión/ámbito;
+una sesión renovada del mismo usuario puede consultar/retirar. La pausa clínica
+impide autorizar, pero no consultar/retirar con permiso vigente. Un active tardío
+no sobrescribe revoked ni inventa éxito para una autorización incierta.
+
+Requiere las cuatro flags Ads/conversiones/acciones/destinos, todas apagadas por
+defecto. No concede señales mejoradas, readiness, IntakeConfig ni jobs/envíos.
+API, diario, confirmación UI y visor v18 están probados con datos ficticios;
+AWS aún admite v17. Faltan compatibilidad v18, recuperación sin referencia local,
+conciliación después de revocar y aceptación integrada/autenticada antes de
+activar cohortes. Contrato de esquema, errores, recuperación y rollback en el
 [contrato técnico](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-destinations-broker.md).
 
 ### Inventario y diálogo de acciones
 
 El inventario `GET /api/marketing/google-ads/conversion-actions` añade
-`action_management:{mode:'broker'|'legacy',enabled:boolean}`. `mode` procede del
+`action_management:{mode:'broker'|'legacy',enabled:boolean,destinations_enabled:boolean}`. `mode` procede del
 runtime resuelto; `enabled` indica las flags de preparación y rol de proceso,
-no un permiso del usuario ni que el binding permita esos eventos. Una cuenta
+no un permiso del usuario ni que el binding permita esos eventos.
+`destinations_enabled` exige además la flag de destinos y permite mostrar la
+confirmación separada tras aplicar un plan. Una cuenta
 gestionada deshabilitada conserva `mode=broker`: el cliente no debe utilizar
 `ensure` como alternativa. La ausencia del campo solo mantiene compatibilidad
 con servidores anteriores; estos ya rechazan ensure para mappings gestionados.

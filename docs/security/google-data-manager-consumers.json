@@ -1,12 +1,12 @@
 {
-  "version": 8,
+  "version": 9,
   "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "8b8bba8b7e1d53981e50726ca3903e8b8c76dcb2",
+  "sourceBaseHead": "aaa87859e9b9ba3fafd7ec992232bfbf9c4f1a4a",
   "includesWorkingChanges": true,
-  "scope": "Bounded Data Manager caller inventory with destination registry/client review; unchanged rows retain their prior evidence hashes, not a fresh complete Google/OPS inventory.",
+  "scope": "Bounded Data Manager inventory with human destination journal/API/v18 review; unchanged rows retain prior evidence hashes, not a fresh complete Google/OPS inventory.",
   "runtimeConsumersMigrated": 0,
   "qa": {
-    "broker": "603/603 final full Node24 regression, including 19 destination registry scenarios; external network blocked",
+    "broker": "607/607 final full Node24 regression, including 23 destination registry scenarios; external network blocked",
     "provider": "fictitious_offline",
     "authenticatedUI": "pending",
     "mysqlJournalChecks": 56,
@@ -21,10 +21,15 @@
     "onboardingPreparationAndNormalization": 49,
     "readinessScript": "pass offline",
     "actionManagementClientScopeReaderAndOnboarding": 60,
-    "destinationClientRegression": 28,
-    "destinationRegistryRuntime": "19/19 included in 603; signed SQLite and real loopback HTTPS/CRM scope/client, fictitious AWS/Google/S3",
-    "destinationHumanJournalAndUI": "pending; no API, human audit journal or authenticated UI acceptance for authorization",
-    "previous_broker": "584/584 full regression; 28/28 focused after strict owner/resource type checks (overlapping)"
+    "destinationClientRegression": 30,
+    "destinationRegistryRuntime": "23/23 included in 607; signed SQLite and real loopback HTTPS/CRM scope/client, fictitious AWS/Google/S3",
+    "destinationHumanJournalAndUI": "prepared, undeployed: 13 MySQL groups, 16 parent-plan regressions, 12 viewer groups; actual Angular Chromium in desktop/mobile with fictitious APIs, public MFA acceptance pending",
+    "previous_broker": "584/584 full regression; 28/28 focused after strict owner/resource type checks (overlapping)",
+    "destinationHumanAuditCodec": "78/78 platform audit regression; v18 still not published to AWS",
+    "destinationUiChecks": 60,
+    "destinationUiScreenshots": 38,
+    "auditUiScreenshots": 10,
+    "destinationFrontUnitTests": 24
   },
   "rows": [
     {
@@ -59,9 +64,10 @@
     },
     {
       "file": "src/controllers/campaignOnboarding.controller.js",
-      "sha256": "bb2e8bf9c451d28e0a06023f693f84eca0ad647a2347452c14f3e035ab78d293",
+      "sha256": "4fca331eb0bc689079d1d9314b54fe66525b363c204b645bd811137d4bd04fc6",
       "role": "Listado y dos validadores conectados al broker, con ACL/ámbito vigente y confirmación sin avisos. Creación/normalización y bootstrap de capacidades/settings aún pendientes.",
-      "state": "validation_prepared_undeployed_action_mutations_pending"
+      "state": "validation_prepared_undeployed_action_mutations_pending",
+      "reviewNote": "This cut reviews only the destination capability projection/shared context diff; it does not migrate all consumers in this file."
     },
     {
       "file": "src/services/campaignWorkspaceGoogleConversion.service.js",
@@ -263,27 +269,51 @@
     },
     {
       "file": "services/integrations-broker/src/google-destination-contract.js",
-      "role": "Contrato de autorización por recibo aplicado y política explícita de cuenta/evento/origen.",
+      "role": "Contrato de autorización y retirada anticipada por recibo aplicado y selección original.",
       "state": "destination_registry_prepared_undeployed",
-      "sha256": "6c8c5d9aea4af7214d816a6119a2f65fac0105a3ffce884a5136f198cc030cc4"
+      "sha256": "a8921803ca5731aa24b019b5feff2621b33d7f255884a640455231079861d3db"
     },
     {
       "file": "services/integrations-broker/src/google-destinations.js",
-      "role": "Registro SQLite, revocación, resolución indexada y auditoría técnica atómica; sin permisos Enhanced.",
+      "role": "Registro SQLite y cierre anticipado con intención original; una respuesta tardía no reautoriza.",
       "state": "destination_registry_prepared_undeployed",
-      "sha256": "bad85b1afe583482a651817428c45d3ab0c25278865dccd2a71aa02b925c0046"
+      "sha256": "95bf1e10eb61479f96f1f511996b3f5e23d6f9dadef21fe188addc3d091e965f"
     },
     {
       "file": "src/services/googleDataManagerDestinationsBrokerClient.service.js",
-      "role": "Cliente opaco con UUID/guard explícitos; diario humano, API y UI de la decisión pendientes.",
-      "state": "destination_client_prepared_human_journal_pending",
-      "sha256": "a6fdb94540c641733cbb5f5ca7f98d82fc29e60708ab34a812549d87919f85dc"
+      "role": "Cliente opaco con UUID/guard; retirada anticipada e identidad original, errores cerrados de sesión/pausa/permisos.",
+      "state": "destination_client_prepared_undeployed",
+      "sha256": "6ac1986fa08e924dbc893c70fe2099acdaf001330456a49c8cb1eaf6ebbcefa6"
     },
     {
       "file": "services/integrations-broker/src/audit.js",
       "role": "Selecciona el grant de la operación auditada cuando el mismo ámbito tiene varios grants.",
       "state": "technical_audit_prepared_undeployed",
       "sha256": "5e02b6326e731f028370b53905008ed2abe1047986faaa4a0b87c563cb9c919c"
+    },
+    {
+      "file": "src/services/googleDestinationJournal.service.js",
+      "role": "Decisión humana SQL, sesión/ACL de todas las clínicas, v18 atómico, retiro incierto recuperable; sin transacción durante transporte.",
+      "state": "destination_human_journal_prepared_undeployed",
+      "sha256": "979fc0148ff0600b551f852ca6c530a848afcf20c7f9e76fa0e3aad954e49153"
+    },
+    {
+      "file": "src/routes/googleDestinations.routes.js",
+      "role": "API cerrada con sesión gestionada, confirmación explícita, status y retiro de intención original.",
+      "state": "destination_http_prepared_undeployed",
+      "sha256": "dda34e3838ea2e0e5cb9d883a4e614d6584b8bb51422d2fc749c61f3390db8cd"
+    },
+    {
+      "file": "src/lib/googleConversionRequestContext.js",
+      "role": "Contexto común de planes/destinos: sesión y membresía vigente de todo el ámbito.",
+      "state": "shared_google_context_prepared_undeployed",
+      "sha256": "c873e8b9c46c885491d2a676120f6edef990ed6c3af4285237016f352acfdb56"
+    },
+    {
+      "file": "services/platform-audit/src/google-destination-event.js",
+      "role": "Auditoría humana v18 cerrada; conserva desconocimiento de authorize retirado. AWS sigue v17.",
+      "state": "audit_v18_prepared_undeployed",
+      "sha256": "5cfb3c4b54ad06bfaf848f00a71ec467d77e7f5b0dda72390076cae5aaed913e"
     }
   ]
 }

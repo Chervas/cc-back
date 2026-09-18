@@ -10,11 +10,16 @@ const sources = { type: 'array', minItems: 1, maxItems: 2, uniqueItems: true, it
 const uuid = { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' };
 const bindingSchema = object({ accounts: { type: 'array', minItems: 1, maxItems: 1000,
   items: object({ assetRef: ref, events, sources }) } });
-const validators = { [OPERATIONS.authorize]: schema({ planId: uuid,
-  targets: { type: 'array', minItems: 1, maxItems: 5, items: object({ event: { enum: A.EVENTS }, sources }) } }),
+const authorizationInput = { planId: uuid,
+  targets: { type: 'array', minItems: 1, maxItems: 5, items: object({ event: { enum: A.EVENTS }, sources }) } };
+const revokeWithInput = schema({ authorizationId: uuid, input: object(authorizationInput) });
+const validators = { [OPERATIONS.authorize]: schema(authorizationInput),
   [OPERATIONS.status]: schema({ authorizationId: uuid }), [OPERATIONS.revoke]: schema({ authorizationId: uuid }) };
 function validate(operation, payload) {
-  if (!Object.hasOwn(validators, operation)) fail('operation_denied'); validators[operation](payload);
+  if (!Object.hasOwn(validators, operation)) fail('operation_denied');
+  if (operation === OPERATIONS.revoke && Object.hasOwn(payload || {}, 'input')) {
+    revokeWithInput(payload); validate(OPERATIONS.authorize, payload.input);
+  } else validators[operation](payload);
   if (operation === OPERATIONS.authorize && new Set(payload.targets.map(row => row.event)).size !== payload.targets.length) fail('invalid_request');
   return payload;
 }
