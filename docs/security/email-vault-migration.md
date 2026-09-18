@@ -1,9 +1,10 @@
 # Correo SES mediante vault y operación tipada
 
-Estado 2026-09-18: implementación preparada y pruebas aisladas aprobadas. No se
-ha creado un runtime SES en AWS, trasladado su credencial, activado consumidores
-ni enviado correos reales en este corte. El correo de acceso sigue usando el
-transporte anterior. Complementa [el contrato de acceso](meta-email-stage1.md).
+Estado 2026-09-18: dos servicios SES instalados en AWS para QA, credenciales
+actuales copiadas al vault y TLS renovado realmente. Consumidores desactivados;
+el correo de acceso sigue usando el transporte anterior y conserva su clave.
+No se ha enviado correo por estos servicios ni se ha acreditado entrega/UI.
+Complementa [el contrato de acceso](meta-email-stage1.md).
 
 ## Transporte y separación
 
@@ -29,6 +30,15 @@ Límites: petición 256 KiB (margen conservador de 2048 bytes para el sobre), do
 peticiones concurrentes, reserva agregada 512 KiB, respuesta SES 8 KiB, timeout
 SES máximo 20 s y un intento SDK. Se rechaza exceso sin truncar. El cuerpo del
 correo atraviesa este proceso; no transporta archivos ni ocupa las plazas IA.
+
+El consumidor comparte una admisión por proceso entre jobs críticos, normales
+y manuales: una petición activa, hasta 16 esperando/1 MiB, diez segundos de
+espera y al menos 300 ms desde que termina una petición hasta iniciar otra.
+Esto incluye el tiempo de comprobación asíncrona de permisos; una comprobación
+lenta no elimina la separación entre POST. Se comprueba el vencimiento con reloj
+monótono antes de admitir, incluso si el temporizador se retrasa por CPU.
+Exceso/caducidad **antes** de llamar al transporte permiten reintento del outbox;
+no permiten hacerlo una vez enviado el POST. No es una cuota distribuida.
 
 ## Duplicados y resultado incierto
 
@@ -74,6 +84,11 @@ esa modalidad a las dos plantillas expresamente declaradas; para otros correos
 exige allowlist. API DEV sigue produciendo jobs y su worker ya pasa el intento
 reclamado a `runEmailSendJob`.
 
+Al salir de la espera se comprueba otra vez que el mensaje sigue `sending`,
+no está suprimido y su desafío/enlace siguen vigentes. La política de cuenta se
+verifica sobre una copia del contenido anterior a la espera. Un evento de
+entrega concurrente conserva su estado; una consulta fallida detiene el envío.
+
 `email_provider_broker_unknown_outcome` es terminal sin reintento automático,
 preserva el token de recuperación y permite conciliación posterior por evento
 SES con `cc_outbox`. Un evento concurrente no se degrada al asentar el worker.
@@ -100,20 +115,70 @@ Logs privados en `qa-evidence/security-resume-20260917/`:
   exacto en su política. Staging tiene cuatro destinatarios en allowlist, DEV cero;
   ambos mantienen la política de autenticación para cuentas registradas.
 
-Red externa y BD bloqueadas durante QA. TLS, firmas, SQLite y serialización/firma
+En esas suites, red externa y BD bloqueadas. TLS, firmas, SQLite y serialización/firma
 del SDK son reales locales; SES, vault, S3 y modelos de app son ficticios. Una
 prueba anterior de eventos intentó MySQL: el guard la detuvo. Se corrigió su
 fixture/transacción y se conservó el log fallido; no se cuenta como prueba real.
 
+## Instalación AWS y comprobaciones sin envío
+
+Dos procesos sobre release `f74098ce`, con `npm ci` independiente: staging en
+8451/UID986 y DEV en8452/UID985, heap96 MiB y MemoryMax192 MiB cada uno. Las dos
+reglas SG solo admiten el host CRM/32. Todavía no están habilitados al arranque.
+Estado, política, firma y certificado son propios de cada entorno. Staging
+permite autenticación y las dos plantillas operativas existentes; DEV solo
+autenticación. No se ha dado grant a `automation.generic` ni a marketing.
+
+Slots `/clinicaclick/integrations/{prod,dev}/email/ses/key`, cifrados con la KMS
+existente. Copia del par IAM efectivo, sin crear ni rotar claves: ambos pares
+corresponden actualmente al mismo usuario SES staging. La nueva política IAM
+solo añade Describe/Get del ARN exacto DEV al rol de EC2. No confundir usuarios
+Unix/políticas separadas con roles IAM separados: comparten el rol de EC2.
+
+Evidencias en `email-vault/`:
+
+- `vault-probe.json`: lectura real de cada slot y STS con su credencial desde
+  UID986/985, ARN/KMS/envelope válidos; claves/configuración Unix del otro
+  servicio denegadas. No invoca SendEmail.
+- `client-unix-isolation.json`: UID998 no puede leer ninguna firma; UID996 solo
+  la de DEV y UID1000 solo la de staging. API DEV sigue sin clave de proveedor.
+- `signed-denials.json` y `audit-receipts.json`: diez rechazos TLS/firmados
+  (destinatario, remitente, plantilla, tenant y firma cruzada). Ocho denegaciones
+  autenticadas tienen recibo S3 verificado por versión/SHA256/KMS; las dos firmas
+  inválidas no se atribuyen a un principal. Cero comandos autorizados/envíos.
+- `certificates-renew-{staging,dev}.json`: dos renovaciones reales, nueva hoja
+  observada desde CRM y sin reiniciar los procesos de correo. Nueve identidades
+  sanas; unidad endurecida del firmante termina correctamente. Claves privadas
+  de servidores permanecen en AWS y CA privada permanece en CRM.
+- `admission-regressions-final.log`: 59/59 (admisión, outbox, sistema de correo,
+  política MFA/reset); incluye CPU que retrasa temporizadores, guard lento,
+  supresión/entrega/caducidad durante espera. La reproducción anterior del
+  temporizador falló y se conserva. `paced-runtime-regressions.log`: 16/16.
+- Pruebas Python de publicador/firmante: 6+5, ejecutadas como root con CA
+  ficticia. Las primeras ejecuciones sin root fallaron por permisos y no cuentan.
+- Monitor actualizado para reconocer IA/Bedrock y ambos correos: 14/14 pruebas
+  en DEV y staging. Solo esa corrección se publicó en staging (`38dfe7f8`), con
+  cero jobs/envíos/flujos ejecutándose y colas activas vacías antes del reinicio.
+  Flags protegidos y presencia de claves contrastados después; `/auth/me`401,
+  otros procesos intactos. La comparación inicial del entorno PM2 completo
+  falló; no se afirma igualdad de toda su metadata. UI/entrega de alerta pendientes.
+
+SES declara cuota de14/s en la lectura de este corte. Una API staging y un worker
+DEV son los consumidores inventariados; la admisión propuesta limita cada uno a
+menos de3,34/s. Esto no acredita entrega real ni capacidad de todos los procesos
+futuros. Los servicios nuevos consumen aproximadamente36/37 MiB en reposo; falta
+medir una carga autorizada completa. El host tiene memoria compartida con los
+demás servicios: los límites por proceso no prueban capacidad total.
+
 ## Antes del corte
 
-1. Preparar unidades, usuarios Unix, vault, identidades DEV/staging separadas,
-   red restringida, memoria y renovación TLS. No usar SSO administrativo para SES.
+1. Revalidar las unidades, vault, identidades, red restringida y TLS preparados;
+   comprobar capacidad bajo carga autorizada. No usar SSO administrativo para SES.
 2. Instalar dependencias en una release independiente: cambió el lock del broker.
    El publicador DEV exige preparar dependencias; no eludir su guard. Backend
    DEV continúa en `ff0d9a85`, sin esta implementación activa.
-3. Inventariar todos los productores/workers, cohortes/allowlist/plantillas,
-   tamaños y concurrencia. Marketing y email genérico siguen apagados. Verificar
+3. Actualizar el inventario de productores/workers, cohortes y concurrencia
+   inmediatamente antes del corte. Marketing y email genérico siguen apagados. Verificar
    ráfagas y latencia antes de caducidad de códigos: probar dos plazas no acredita
    carga real ni cuota SES. Congelar entrada durante el cambio para no mezclar
    intentos directos/broker del mismo mensaje.

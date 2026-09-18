@@ -2,7 +2,7 @@
 
 > **Tipo:** runbook.
 > **Fuente de verdad:** preparación, verificación y recuperación de certificados de transporte; no tokens de Meta/Google.
-> **Última revisión:** 2026-09-17.
+> **Última revisión:** 2026-09-18.
 > **Estado y prioridad:** manual central [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones) y [16](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/16-roadmap.md#seguridad-de-acceso-e-integraciones).
 
 ## Límites
@@ -154,6 +154,16 @@ IA y correo deben enrolarse al desplegarse. La CA requiere su propio plan de
 sustitución de confianza antes de vencer; este mecanismo no cambia esa raíz.
 El estado publicado y los servidores realmente cubiertos se registran en 19;
 esta sección define el procedimiento, no acredita un despliegue por sí sola.
+
+Los puertos nuevos8451 y8452 quedan ligados respectivamente a `email-staging`
+y `email-dev`, tanto en el firmante como en el publicador. Un identificador
+ajeno, intercambio de puertos o destino nuevo8453 se rechaza. Estos nombres,
+`ai-staging` y `bedrock-staging` también deben figurar en la lista cerrada del
+lector de salud del CRM; de lo contrario una hoja válida produce una alerta
+genérica de estado inválido. El lector conserva el rechazo de identidades
+desconocidas y las alertas individuales de fallo/caducidad. El corte SES del
+18/09 acredita dos renovaciones nuevas y nueve identidades sanas; no acredita
+por ello la entrega de notificaciones dentro de una sesión autenticada.
 
 Pruebas adicionales (CA ficticia, sin AWS ni proveedores):
 

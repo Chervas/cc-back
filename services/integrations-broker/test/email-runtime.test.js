@@ -52,7 +52,10 @@ async function setup(t, work = async () => F.accepted()) {
     keyId: 'qa-key', privateKey: fs.readFileSync(env.EMAIL_BROKER_KEY_FILE), ca: fs.readFileSync(cert), transportProfile: 'email' });
   const command = (p, change = {}) => ({ operation: L.OPERATION, tenantRef: 'platform:staging', connectionRef: 'email:staging',
     assetRef: `email:${p.templateKey}`, payload: p, ...change });
-  return { ...f, config, env, runtime, sink, calls, secretCalls, buffers, events, low, command, client: createEmailBroker({ env }) };
+  // These cases exercise broker concurrency/fencing directly. Consumer pacing
+  // is tested separately with its actual admission queue.
+  return { ...f, config, env, runtime, sink, calls, secretCalls, buffers, events, low, command,
+    client: createEmailBroker({ env, admission: { run: work => work() } }) };
 }
 
 test('signed TLS delivery preserves long Unicode content, metadata-only audit, and durable accepted dedupe', async t => {

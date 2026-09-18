@@ -132,3 +132,27 @@ test('durable outbox forwards claim attempt and retains a reset token on unknown
   const again = await delivery.runEmailSendJob({ email_message_id: 123 }, { attempts: 4 });
   assert.equal(again.result.already_terminal, true); assert.equal(sends, 1);
 });
+
+for (const scenario of ['suppressed', 'delivered']) test('outbox rechecks ' + scenario + ' after admission without sending or degrading a terminal event', async t => {
+  const prior = process.env.EMAIL_DATA_ENCRYPTION_KEY;
+  process.env.EMAIL_DATA_ENCRYPTION_KEY = 'FICTITIOUS_EMAIL_DATA_ENCRYPTION_KEY';
+  t.after(() => { if (prior === undefined) delete process.env.EMAIL_DATA_ENCRYPTION_KEY; else process.env.EMAIL_DATA_ENCRYPTION_KEY = prior; });
+  const id = `em_${randomUUID()}`, hash = delivery.hashEmail('qa@example.test'); let checks = 0;
+  const message = { id: 124, public_id: id, stream: 'transactional', status: 'queued', template_key: 'ops.email_test',
+    template_context: {}, recipient_hash: hash, recipient_domain: 'example.test',
+    recipient_email_envelope: encryptEmailValue('qa@example.test', `message:${id}:${hash}`),
+    async update(patch) { Object.assign(this, patch); return this; } };
+  t.mock.method(db.EmailMessage, 'findByPk', async () => message);
+  t.mock.method(db.EmailMessage, 'update', async patch => {
+    if (!['queued', 'sending'].includes(message.status)) return [0];
+    Object.assign(message, patch); return [1];
+  });
+  t.mock.method(db.EmailSuppression, 'findOne', async () => ++checks === 1 ? null : { status: 'active' });
+  t.mock.method(provider, 'sendEmail', async (_value, options) => {
+    if (scenario === 'delivered') { message.status = 'delivered'; message.provider_message_id = 'fictitious-event'; }
+    await options.beforeDispatch(); assert.fail('stale outbox reached broker');
+  });
+  const result = await delivery.runEmailSendJob({ email_message_id: 124 }, { attempts: 1 });
+  assert.equal(message.status, scenario); assert.equal(result.status, 'completed');
+  assert.equal(result.result.email_status, scenario);
+});

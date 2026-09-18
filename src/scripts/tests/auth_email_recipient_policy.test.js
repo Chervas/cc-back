@@ -111,6 +111,19 @@ test('a template label, alternate recipient/body or stale outbox cannot authoriz
   }
 });
 
+for (const kind of ['code', 'reset']) test('a ' + kind + ' that expires while waiting cannot pass broker dispatch', async t => {
+  const f = fixture(t, kind); let attempts = 0;
+  t.mock.method(SESv2Client.prototype, 'send', async () => assert.fail('no direct SES call'));
+  t.mock.method(emailBroker, 'createEmailBroker', () => ({ async send(_payload, options) {
+    attempts++; f.proof.expires_at = new Date(0);
+    await options.beforeDispatch(); assert.fail('expired account proof reached transport');
+  } }));
+  await assert.rejects(provider.sendEmail({ ...f.message, deliveryAttempt: 1 }, { env: { ...env, EMAIL_BROKER_ENABLED: 'true' } }), {
+    code: 'email_verification_no_longer_valid', retryable: false,
+  });
+  assert.equal(attempts, 1);
+});
+
 test('changed credentials, another user, exhausted or superseded code cannot bypass recipient restrictions', async t => {
   const f = fixture(t); const original = { ...f.proof };
   for (const change of [{ user_id: 999 }, { state: 'used' }, { attempts: 5 }, { email_message_id: 999 },

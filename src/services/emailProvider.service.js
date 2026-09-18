@@ -107,7 +107,7 @@ function buildClient(config) {
   });
 }
 
-async function sendEmail(message, { env = process.env } = {}) {
+async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
   const config = getConfig(env);
   if (!config.enabled) {
     const error = new Error('email_provider_disabled');
@@ -165,12 +165,31 @@ async function sendEmail(message, { env = process.env } = {}) {
   }
   const configurationSet = cleanString(message.configurationSet) || mapStreamToConfigurationSet(message.stream, config);
   if (config.brokerEnabled) {
+    const snapshot = { ...message };
     return require('./emailBroker.service').createEmailBroker({ env }).send({
       outboxId: message.outboxId, attempt: message.deliveryAttempt, timeoutMs: config.timeoutMs,
       templateKey: message.templateKey, stream: message.stream, recipientPolicy,
       to: message.to, from: cleanString(message.from) || config.defaultFrom, replyTo: cleanString(message.replyTo),
       configurationSet, subject: message.subject, text: message.text || '', html: message.html || '',
-    });
+    }, { beforeDispatch: async () => {
+      if (!getConfig(env).enabled) throw Object.assign(Error('email_provider_disabled'), { code: 'email_provider_disabled', retryable: false });
+      if (beforeDispatch) {
+        try { await beforeDispatch(); }
+        catch (error) {
+          if (['email_outbox_no_longer_sending', 'email_recipient_suppressed', 'email_verification_no_longer_valid'].includes(error.code)) throw error;
+          throw Object.assign(Error('email_delivery_guard_unavailable'), { code: 'email_delivery_guard_unavailable', retryable: true });
+        }
+      }
+      if (recipientPolicy === 'registered-account') {
+        let authorized;
+        try { authorized = await require('./authEmailRecipientPolicy.service').maySend(snapshot, { env }); }
+        catch { throw Object.assign(Error('email_authentication_policy_unavailable'), { code: 'email_authentication_policy_unavailable', retryable: true }); }
+        if (!authorized) throw Object.assign(Error('email_verification_no_longer_valid'), { code: 'email_verification_no_longer_valid', retryable: false });
+      }
+      if (env.EMAIL_BROKER_ENABLED !== 'true' || !getConfig(env).enabled) {
+        throw Object.assign(Error('email_provider_disabled'), { code: 'email_provider_disabled', retryable: false });
+      }
+    } });
   }
   const client = buildClient(config);
   const body = {

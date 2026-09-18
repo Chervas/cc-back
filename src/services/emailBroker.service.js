@@ -8,6 +8,8 @@ const { createHash } = require('node:crypto');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const L = require('../../services/integrations-broker/src/email-limits');
 const { validate } = require('../../services/integrations-broker/src/email-contract');
+const { createEmailAdmission } = require('../lib/emailAdmission');
+const sharedAdmission = createEmailAdmission();
 const REJECTION_CODES = new Set(['email_ses_account_suspended', 'email_ses_bad_request', 'email_ses_limit_exceeded',
   'email_ses_mail_from_unverified', 'email_ses_message_rejected', 'email_ses_resource_not_found', 'email_ses_sending_paused', 'email_ses_throttled']);
 const fail = (code, retryable = false) => { throw Object.assign(new Error(code), { code, retryable }); };
@@ -38,26 +40,34 @@ function isConfigured(env = process.env) {
       && [env.EMAIL_BROKER_KEY_FILE, env.EMAIL_BROKER_CA_FILE].every(file => typeof file === 'string' && path.isAbsolute(file));
   } catch { return false; }
 }
-function createEmailBroker({ env = process.env, readFile = privateFile, clientFactory = createIntegrationsBrokerClient } = {}) {
+function createEmailBroker({ env = process.env, readFile = privateFile, clientFactory = createIntegrationsBrokerClient, admission = sharedAdmission } = {}) {
   return {
-    async send(payload) {
+    async send(payload, { beforeDispatch } = {}) {
       if (env.EMAIL_BROKER_ENABLED !== 'true') fail('email_broker_disabled');
       const environment = env.EMAIL_BROKER_ENVIRONMENT;
       if (!isConfigured(env)) fail('email_broker_configuration_invalid');
-      try { validate(payload); } catch { fail('email_broker_request_invalid'); }
-      const client = clientFactory({ origin: env.EMAIL_BROKER_ORIGIN, audience: env.EMAIL_BROKER_AUDIENCE,
-        keyId: env.EMAIL_BROKER_KEY_ID, privateKey: readFile(env.EMAIL_BROKER_KEY_FILE), ca: readFile(env.EMAIL_BROKER_CA_FILE),
-        transportProfile: 'email', timeoutMs: L.MAX_TIMEOUT_MS });
-      let response;
-      try {
-        response = await client.execute({ requestId: requestId(payload.outboxId, payload.attempt), operation: L.OPERATION,
-          tenantRef: `platform:${environment}`, connectionRef: env.EMAIL_BROKER_CONNECTION_REF,
-          assetRef: `email:${payload.templateKey}`, payload }, { timeoutMs: L.MAX_TIMEOUT_MS });
-      } catch {
-        // A broker 429/500 is not an explicit SES rejection. Lost responses,
-        // uncertain commands and admission failures never cause a second send.
-        fail('email_provider_broker_unknown_outcome');
-      }
+      let bytes;
+      try { validate(payload); const json = JSON.stringify(payload); bytes = Buffer.byteLength(json) + 2048; payload = JSON.parse(json); }
+      catch { fail('email_broker_request_invalid'); }
+      const response = await admission.run(async () => {
+        if (env.EMAIL_BROKER_ENABLED !== 'true') fail('email_broker_disabled');
+        if (!isConfigured(env) || env.EMAIL_BROKER_ENVIRONMENT !== environment) fail('email_broker_configuration_invalid');
+        if (beforeDispatch) await beforeDispatch();
+        if (env.EMAIL_BROKER_ENABLED !== 'true') fail('email_broker_disabled');
+        if (!isConfigured(env) || env.EMAIL_BROKER_ENVIRONMENT !== environment) fail('email_broker_configuration_invalid');
+        const client = clientFactory({ origin: env.EMAIL_BROKER_ORIGIN, audience: env.EMAIL_BROKER_AUDIENCE,
+          keyId: env.EMAIL_BROKER_KEY_ID, privateKey: readFile(env.EMAIL_BROKER_KEY_FILE), ca: readFile(env.EMAIL_BROKER_CA_FILE),
+          transportProfile: 'email', timeoutMs: L.MAX_TIMEOUT_MS });
+        try {
+          return await client.execute({ requestId: requestId(payload.outboxId, payload.attempt), operation: L.OPERATION,
+            tenantRef: `platform:${environment}`, connectionRef: env.EMAIL_BROKER_CONNECTION_REF,
+            assetRef: `email:${payload.templateKey}`, payload }, { timeoutMs: L.MAX_TIMEOUT_MS });
+        } catch {
+          // Broker errors are not SES rejections. The local admission errors
+          // above are retryable only because execute has not been called.
+          fail('email_provider_broker_unknown_outcome');
+        }
+      }, bytes);
       const data = response?.data;
       if (data?.accepted === true && data.provider === 'ses' && typeof data.providerMessageId === 'string'
         && /^[A-Za-z0-9_-]{1,200}$/.test(data.providerMessageId)) {
