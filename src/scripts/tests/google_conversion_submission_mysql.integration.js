@@ -426,7 +426,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     report.checks.push('a configured enhanced authorization does not block a click-only event with no personal hashes');
 
     await require('./fixtures/google_workspace_broker_checks.fixture')({ models, sql, report, broker, delivery, mapping,
-      now: () => new Date(at), writes: () => providerWrites, validations, setAfterRemote: fn => { afterRemote = fn; } });
+      now: () => new Date(at), writes: () => providerWrites, calls: () => remoteCalls.length, validations,
+      setAfterRemote: fn => { afterRemote = fn; } });
 
     const table = 'GoogleConversionSubmissions';
     const query = async (text, values = []) => { const [rows] = await sql.query(text, { replacements: values }); return rows; };

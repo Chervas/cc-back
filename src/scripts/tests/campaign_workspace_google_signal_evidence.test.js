@@ -14,25 +14,25 @@ const { reconcileGoogleDataManagerDiagnostics } = require('../../services/google
 function harness() {
   const now = new Date('2026-09-10T20:00:00Z');
   const account = { id: 3, assignmentScope: 'clinic', clinicaId: 1, grupoClinicaId: null, googleConnectionId: 2,
-    customerId: '123', isActive: true, loginCustomerId: null };
+    customerId: '1234567890', isActive: true, loginCustomerId: null };
   const connection = { id: 2, googleUserId: 'private-google-identity', scopes: 'https://www.googleapis.com/auth/datamanager',
     accessToken: 'private-token', refreshToken: 'private-refresh', expiresAt: new Date(+now + 3600000) };
-  const selected = { provider: 'google_ads', account_id: '123', include_future: false, campaign_ids: ['7'] };
+  const selected = { provider: 'google_ads', account_id: '1234567890', include_future: false, campaign_ids: ['7'] };
   const setting = { id: 'setting', scope_type: 'clinic', scope_id: 1, version: 4, accounts: [selected], activation: {
     schema_version: 1, mode: 'measurement', status: 'active', signals: { enabled: true, events: ['lead', 'schedule'] }, account_authorizations: [selected],
   } };
   const record = { id: 10, assignment_scope: 'clinic', clinic_id: 1, config: { features: { consent_mode_enabled: true },
-    google_ads: { enabled: true, customer_id: '123', events: { lead: { enabled: true, conversion_action_id: '900' } } },
+    google_ads: { enabled: true, customer_id: '1234567890', events: { lead: { enabled: true, conversion_action_id: '900' } } },
     campaigns: { workspace_policy: { schema_version: 1, setting_id: 'setting', scope_type: 'clinic', scope_id: 1 } },
   } };
   const runtime = { account, connection, connectionSource: 'mapping_clinic', loginCustomerId: null };
   const policy = { applicable: true, allowed: true, policyRefs: [{ setting_id: 'setting', scope_type: 'clinic', scope_id: 1, version: 4 }] };
   const proof = () => googleDeliveryContext({ cfgRecord: record, runtime, policy, campaignId: '7' });
-  const row = { clinicaId: 1, grupoClinicaId: null, intakeConfigId: 10, assignmentScope: 'clinic', customerId: '123',
+  const row = { clinicaId: 1, grupoClinicaId: null, intakeConfigId: 10, assignmentScope: 'clinic', customerId: '1234567890',
     googleConnectionId: 2, connectionSource: 'mapping_clinic', loginCustomerId: null, eventName: 'lead',
-    destinationKey: 'legacy_123', conversionAction: 'customers/123/conversionActions/900', status: 'succeeded', providerRequestId: 'request-1',
+    destinationKey: 'legacy_1234567890', conversionAction: 'customers/1234567890/conversionActions/900', status: 'succeeded', providerRequestId: 'request-1',
     attemptedAt: new Date(+now - 3600000), completedAt: new Date(+now - 1000), requestMetadata: { workspace_delivery: proof() },
-    responseMetadata: { destinations: [{ status: 'SUCCESS', customer_id: '123', conversion_action_id: '900', record_count: 1, errors: [], warnings: [] }] },
+    responseMetadata: { destinations: [{ status: 'SUCCESS', customer_id: '1234567890', conversion_action_id: '900', record_count: 1, errors: [], warnings: [] }] },
   };
   const state = { rows: [row], records: [record], selectedClinics: [{ id_clinica: 1, grupoClinicaId: null }], account, connection, setting,
     assignment: { id: 6, scopeKey: 'clinic:1', assignmentScope: 'clinic', clinicaId: 1, googleConnectionId: 2,
@@ -48,7 +48,12 @@ function harness() {
     } }, CampaignWorkspaceSetting: { findByPk: async () => state.setting },
   };
   installGoogleAdsLegacyModels(models);
-  const campaign = { id: 'google_ads:123:7', provider: 'google_ads', account_id: '123', campaign_id: '7', assigned: true, clinicId: 1 };
+  // Exercise the real scoped resolver with a valid account ID and empty Ads
+  // registries. Managed registry behavior is tested with actual isolated SQL.
+  models.ClinicGoogleAdsAccount.findByPk = async id => state.account && Number(state.account.id) === Number(id) ? state.account : null;
+  models.GoogleAdsBrokerBinding.findAll = async () => [];
+  models.GoogleAdsBrokerRevocation.findAll = async () => [];
+  const campaign = { id: 'google_ads:1234567890:7', provider: 'google_ads', account_id: '1234567890', campaign_id: '7', assigned: true, clinicId: 1 };
   const run = extra => loadGoogleSignalEvidence({ models, campaigns: [campaign], selectedClinics: state.selectedClinics, now, ...extra });
   return { state, record, row, runtime, policy, proof, models, campaign, run, now };
 }
@@ -100,7 +105,7 @@ test('uploader, persisted diagnostics and Health share the same delivery contrac
     connectionModel: h.models.GoogleConnection, credentials: require('../../services/googleLegacyCredentials.service').forModels(h.models), now: h.now, ensureAccessToken: async () => ({ accessToken: 'test-only' }),
     retrieveStatus: async ({ requestId }) => {
       assert.equal(requestId, 'pipeline-request');
-      return { requestStatusPerDestination: [{ destination: { operatingAccount: { accountId: '123' }, productDestinationId: '900' },
+      return { requestStatusPerDestination: [{ destination: { operatingAccount: { accountId: '1234567890' }, productDestinationId: '900' },
         requestStatus: 'SUCCESS', eventsIngestionStatus: { recordCount: '1' } }] };
     } });
   assert.equal(result.succeeded, 1); assert.equal(audits[0].responseMetadata.destinations[0].record_count, 1);
@@ -114,7 +119,7 @@ test('a current receipt uses the existing scoped runtime and remains distinct fr
   assert.equal(result.ready, true); assert.equal(result.processed, 1); assert.equal(result.received, 1);
   assert.match(result.detail, /No confirma su atribución/);
   const query = h.state.queries.find(([kind]) => kind === 'attempts')[1];
-  assert.deepEqual(query.where[Op.or], [{ clinicaId: 1, customerId: '123' }]); assert.equal(query.limit, MAX_ROWS + 1);
+  assert.deepEqual(query.where[Op.or], [{ clinicaId: 1, customerId: '1234567890' }]); assert.equal(query.limit, MAX_ROWS + 1);
   assert.ok(query.where.attemptedAt[Op.between]);
   assert.doesNotMatch(JSON.stringify(query.attributes), /clickId|lastErrorMessage|history|eventId/);
 });
@@ -151,7 +156,7 @@ test('old, truncated, legacy and empty histories never turn the block green', as
 test('other clinics, accounts, campaigns, actions, grants or configurations cannot lend evidence', async () => {
   for (const patch of [{ clinicaId: 2 }, { grupoClinicaId: 28 }, { customerId: '999' }, { intakeConfigId: 11 }, { assignmentScope: 'group' },
     { googleConnectionId: 8 }, { connectionSource: 'mapping_group' }, { loginCustomerId: '999' }, { eventName: 'purchase' },
-    { destinationKey: 'other' }, { conversionAction: 'customers/123/conversionActions/901' },
+    { destinationKey: 'other' }, { conversionAction: 'customers/1234567890/conversionActions/901' },
     { requestMetadata: { workspace_delivery: { schema_version: 1, campaign_id: '8', fingerprint: 'x' } } }]) {
     const h = harness(); Object.assign(h.row, patch); assert.notEqual((await h.run()).get(h.campaign.id)?.ready, true);
   }
@@ -216,12 +221,12 @@ test('separate web and advertiser policies both bind inherited Google receipts',
 test('current Google action selection keeps multiple destinations separate', async () => {
   const h = harness();
   h.record.config.google_ads.events.lead.destinations = [
-    { key: 'first', customer_id: '123', conversion_action_id: '900', campaign_ids: ['7'] },
-    { key: 'second', customer_id: '123', conversion_action_id: '901', campaign_ids: ['8'] },
+    { key: 'first', customer_id: '1234567890', conversion_action_id: '900', campaign_ids: ['7'] },
+    { key: 'second', customer_id: '1234567890', conversion_action_id: '901', campaign_ids: ['8'] },
   ];
   h.row.destinationKey = 'first'; h.row.requestMetadata.workspace_delivery = h.proof();
   assert.equal((await h.run()).get(h.campaign.id).ready, true);
-  h.row.destinationKey = 'second'; h.row.conversionAction = 'customers/123/conversionActions/901';
+  h.row.destinationKey = 'second'; h.row.conversionAction = 'customers/1234567890/conversionActions/901';
   assert.notEqual((await h.run()).get(h.campaign.id)?.ready, true);
 });
 test('database failures remain failures, not a healthy or empty response', async () => {
@@ -230,10 +235,10 @@ test('database failures remain failures, not a healthy or empty response', async
 });
 test('health aggregates both providers once and retains incomplete campaign coverage', async () => {
   const h = harness(); const google = (await h.run()).get(h.campaign.id);
-  const campaigns = [h.campaign, { ...h.campaign, id: 'meta_ads:123:7', provider: 'meta_ads' }, { ...h.campaign, id: 'google_ads:123:8', campaign_id: '8' }];
+  const campaigns = [h.campaign, { ...h.campaign, id: 'meta_ads:1234567890:7', provider: 'meta_ads' }, { ...h.campaign, id: 'google_ads:1234567890:8', campaign_id: '8' }];
   const report = buildWorkspaceHealth({ period: { end: '2026-09-09' }, rows: campaigns.map(campaign => ({ campaign,
     coverage: {}, ads: [], performance: 'insufficient' })) }, new Map([
-    [h.campaign.id, { signals: google }], ['meta_ads:123:7', { signals: { checked: true, ready: true, received: 3 } }],
+    [h.campaign.id, { signals: google }], ['meta_ads:1234567890:7', { signals: { checked: true, ready: true, received: 3 } }],
   ]), h.now);
   const block = report.healthBlocks.find(row => row.id === 'signals');
   assert.equal(block.status, 'Datos parciales');

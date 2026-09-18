@@ -9,11 +9,12 @@
     "broker": "560/560 current Node24 engine regression",
     "provider": "fictitious_offline",
     "authenticatedUI": "pending",
-    "mysqlJournalChecks": 39,
+    "mysqlJournalChecks": 41,
     "schemaUnitTests": 4,
     "crmPayloadParityCases": 54,
     "backendClientScopeReaderAdapterAndPreparation": 36,
-    "workspaceAuthorizationPreparationNativeReceptionAndUpload": 84
+    "workspaceAuthorizationPreparationNativeReceptionAndUpload": 84,
+    "healthAuthorizationAndNative": 69
   },
   "rows": [
     {
@@ -132,9 +133,9 @@
     },
     {
       "file": "src/services/campaignWorkspaceGoogleSignalEvidence.service.js",
-      "role": "Salud conserva formato de metadata v2/v3; rutas web/nativa probadas sin token. Falta diagnóstico automático y UI.",
-      "state": "health_data_parity_verified_ui_pending",
-      "sha256": "35299c03aad3703fb840291e3afe3ce5538d86d6391a4bb3103c89fabd80660b"
+      "role": "Salud revalida contextos broker v1/v2/v3 sin tokens ni llamadas externas; emisor/persistencia/lectura probados. Diagnóstico automático y UI aún pendientes.",
+      "state": "health_reader_prepared_undeployed_ui_pending",
+      "sha256": "e62fd3c4c5d923b09aaa357248d798420ecd963d6cdccfd6450a99cee1cb9416"
     },
     {
       "file": "src/services/googleConversionUploadBroker.service.js",

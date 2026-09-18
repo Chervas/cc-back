@@ -5,7 +5,7 @@ const { randomUUID, createHash } = require('node:crypto');
 
 // Invoked only inside the owned MySQL/socket fixture. These are real SQL models
 // for the fields read by the services; only Google/AWS transport is fictitious.
-module.exports = async ({ models, sql, report, broker, mapping, now, writes, validations, setAfterRemote }) => {
+module.exports = async ({ models, sql, report, broker, mapping, now, writes, calls, validations, setAfterRemote }) => {
   const B = require('../../../services/googleAdsBroker.service');
   const previous = B.forModels;
   B.forModels = requested => { assert.equal(requested, models); return broker; };
@@ -83,6 +83,10 @@ module.exports = async ({ models, sql, report, broker, mapping, now, writes, val
       customData: { customer_id: mapping.customerId, campaign_id: '200', gclid: 'FICTITIOUS-CLICK' },
       consent: { ad_user_data: 'granted', ad_personalization: 'denied' }, dependencies });
     const uploadWeb = require('../../../services/campaignWorkspaceGoogleConversion.service').maybeUploadCampaignGoogleConversion;
+    const health = async (campaignId = '200') => require('../../../services/campaignWorkspaceGoogleSignalEvidence.service').loadGoogleSignalEvidence({
+      models, campaigns: [{ id: 'fictitious-campaign', provider: 'google_ads', assigned: true, clinicId: 71,
+        account_id: mapping.customerId, campaign_id: campaignId }],
+      selectedClinics: [await models.Clinica.findByPk(71, { raw: true })], now: now() });
     const firstWeb = web(), beforeWeb = writes();
     const uploaded = await uploadWeb(firstWeb);
     assert.equal(uploaded.sent, true); assert.equal(writes(), beforeWeb + 1);
@@ -90,6 +94,7 @@ module.exports = async ({ models, sql, report, broker, mapping, now, writes, val
     assert.equal(attempt.connectionSource, 'workspace_mandate');
     assert.equal(attempt.requestMetadata.workspace_delivery.schema_version, 2);
     assert.equal((await uploadWeb(firstWeb)).reason, 'duplicate_already_accepted'); assert.equal(writes(), beforeWeb + 1);
+    assert.equal((await health()).get('fictitious-campaign').processing, 1);
     report.checks.push('full workspace web mandate resolution reaches the common SQL coordinator and signed broker without tokens, preserves health binding and deduplicates repeated delivery');
 
     const beforePause = writes(), beforeAttempts = await models.GoogleAdsConversionUploadAttempt.count();
@@ -129,6 +134,42 @@ module.exports = async ({ models, sql, report, broker, mapping, now, writes, val
     await models.CitaPaciente.update({ clinica_id: 71 }, { where: { id_cita: 39 } });
     assert.equal((await native(appointment, dependencies)).sent, true);
     report.checks.push('native scheduling requires a current appointment for the same lead and clinic; a sibling clinic appointment cannot authorize delivery');
+
+    const readLead = models.LeadIntake.findByPk, healthWrites = writes(), healthValidations = validations.length, healthCalls = calls();
+    models.LeadIntake.findByPk = () => assert.fail('Health must not read personal lead contacts');
+    try {
+      const summary = (await health()).get('fictitious-campaign');
+      assert.equal(summary.checked, true); assert.equal(summary.processing, 2); assert.equal(summary.processed, 0);
+    } finally { models.LeadIntake.findByPk = readLead; }
+    assert.equal(writes(), healthWrites); assert.equal(validations.length, healthValidations); assert.equal(calls(), healthCalls);
+    report.checks.push('actual Health resolves managed web and native delivery records without tokens or contact reads, distinguishes acceptance from processing and discards old mandate evidence');
+
+    const oldSetting = (await getSetting()).get({ plain: true }), oldConfig = structuredClone(cfg.config);
+    const assignment = await models.GoogleConnectionAssignment.findByPk(100), oldConnectedAt = assignment.connectedAt;
+    try {
+      await (await getSetting()).update({ activation: { schema_version: 1, status: 'active', mode: 'measurement',
+        signals: { enabled: true, events: ['lead'] }, account_authorizations: accounts }, version: oldSetting.version + 1 });
+      await cfg.update({ config: { ...oldConfig, campaigns: { workspace_policy: {
+        schema_version: 1, setting_id: setting.id, scope_type: 'clinic', scope_id: 71 } } } });
+      await assignment.update({ connectedAt: new Date(+now() - 3600000) });
+      const options = web(); options.customData.campaign_id = '201';
+      const v1 = await require('../../../services/googleAdsConversionUpload.service').maybeUploadGoogleConversion({
+        ...options, groupId: 5, assignmentScope: 'clinic', dependencies: { ...dependencies,
+          auditModel: models.GoogleAdsConversionUploadAttempt,
+          resolveRuntime: input => require('../../../services/googleAdsScopedRuntime.service').resolveScopedGoogleAdsRuntime({ ...input, broker }) } });
+      assert.equal(v1.sent, true);
+      const attempt = await models.GoogleAdsConversionUploadAttempt.findByPk(v1.audit_id);
+      assert.equal(attempt.requestMetadata.workspace_delivery.schema_version, 1);
+      const callsBefore = calls();
+      const evidence = (await health('201')).get('fictitious-campaign');
+      assert.equal(evidence.checked, true); assert.equal(evidence.processing, 1); assert.equal(evidence.processed, 0);
+      assert.equal(calls(), callsBefore);
+      report.checks.push('schema-v1 workspace emitter and actual Health share the managed scoped runtime and metadata-only final permission checks without contacting the broker from the report');
+    } finally {
+      await cfg.update({ config: oldConfig });
+      await (await getSetting()).update({ activation: oldSetting.activation, version: oldSetting.version });
+      await assignment.update({ connectedAt: oldConnectedAt });
+    }
 
     const afterWrites = writes(); await models.GoogleConnectionAssignment.update({ status: 'disconnected' }, { where: { id: 100 } });
     await assert.rejects(grant.assertGoogleAdsGrantTransport(context.brokerGrant), { code: 'scope_denied' });

@@ -113,7 +113,7 @@ consentimiento. No acredita entrega real a Google ni una interfaz autenticada.
 el cliente CRM real al servidor HTTPS local. Regresión actual de preparación,
 cliente, scope, lector y adaptador CRM: 36/36 en Node18; otras 84 pruebas de
 workspace/autorización/recepción/emisor pasan. Guardias de red/BD impiden acceder
-a los entornos operativos. MySQL aislado verifica 39 grupos, detallados más abajo.
+a los entornos operativos. MySQL aislado verifica 41 grupos, detallados más abajo.
 
 El emisor común de conversiones y su resolutor por mapping ya seleccionan el
 camino broker cuando el registro Ads lo exige. Ya están conectados los mandatos
@@ -262,9 +262,9 @@ El resolutor de recepción ya entrega metadata/capacidad a los hitos; su job de
 importación todavía rechaza `google_lead_broker_sync_pending` para cuentas
 gestionadas. Hace falta la lectura tipada de leads antes de migrar esa identidad.
 
-Verificación:39 grupos con MySQL8.0.42 propio, servicios de negocio reales y
-broker firmado con SQLite, AWS/Google ficticios. Quince ingestas ficticias,
-32 comandos firmados,17 journals y cero lecturas SQL de tokens. Se prueban
+Verificación:41 grupos con MySQL8.0.42 propio, servicios de negocio reales y
+broker firmado con SQLite, AWS/Google ficticios. Dieciséis ingestas ficticias,
+33 comandos firmados,18 journals y cero lecturas SQL de tokens. Se prueban
 preparación real, deduplicación web/nativa, mandato pausado, cita ajena, revocación
 de asignación, retirada de scope, cambio de subject, pausa tras acuse y cambio de
 preferencias durante validate-only. La activación de la fixture se siembra desde
@@ -277,3 +277,15 @@ offline. Evidencia privada `google-workspace-broker/`. Sin DDL/despliegue,
 proveedores reales ni nueva evidencia visual; cero consumidores reales migrados.
 No retirar credenciales ni habilitar cohortes hasta completar consumidores,
 pruebas reales autorizadas y recorrido visual autenticado.
+
+La comprobación del informe real de Salud detectó y reprodujo un cierre legacy
+incorrecto al finalizar el recorrido nativo. Se sustituyó por revalidación de
+capacidades broker; el formato v1 también usa su contexto y metadata, sin token.
+La prueba SQL recorre emisor→persistencia→Salud para v1, v2 y v3; el GET no llama
+al broker/Google, no consulta contactos, descarta evidencia de un mandato antiguo
+y distingue recibido de procesado. La suite de Salud/v2/nativo pasa69/69; diez
+fallos iniciales del grupo v1 se reprodujeron con el servicio anterior: IDs de
+cuenta cortos y registros Ads ficticios incompletos. Se corrigió esa fixture para
+usar el resolutor y el cierre legacy reales, manteniendo sus casos de rechazo.
+No se ha probado aún el panel renderizado con autenticación real ni el diagnóstico
+automático de los recibos del broker.

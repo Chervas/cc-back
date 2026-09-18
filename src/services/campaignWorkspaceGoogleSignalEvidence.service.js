@@ -1,6 +1,7 @@
 'use strict';
 const { loadGoogleAdsLegacyConnection } = require('./googleAdsLegacyConnection.service');
 const googleLegacyCredentials = require('./googleLegacyCredentials.service');
+const { assertGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
 
 const { Op } = require('sequelize');
 const { googleDeliveryContext, googleWorkspaceRouteDeliveryContext, googleWorkspaceNativeDeliveryContext } = require('./googleWorkspaceDeliveryContext.service');
@@ -56,6 +57,17 @@ function googleDeliveryEvidence(rows, now = new Date()) {
 
 async function loadGoogleSignalEvidence({ models, campaigns, selectedClinics, now = new Date(), resolveRuntime = resolveScopedGoogleAdsRuntime }) {
   const credentials = googleLegacyCredentials.forModels(models);
+  const assertRuntime = async runtime => {
+    if (runtime.deliveryMode !== 'broker') return credentials.assert(runtime.connection);
+    const current = await runtime.broker.assert(runtime.account, runtime.brokerContext);
+    const connection = await models.GoogleConnection.findByPk(runtime.connection.id, {
+      attributes: ['id', 'googleUserId', 'scopes'], raw: true, logging: false });
+    const scopes = value => String(value || '').split(/[\s,]+/).filter(Boolean).sort();
+    if (!connection || Number(connection.id) !== current.googleConnectionId
+      || connection.googleUserId !== current.googleSubject || connection.googleUserId !== runtime.connection.googleUserId
+      || missingGoogleScopes(connection.scopes, [GOOGLE_DATA_MANAGER_SCOPE]).length
+      || JSON.stringify(scopes(connection.scopes)) !== JSON.stringify(scopes(runtime.connection.scopes))) fail('workspace_google_permissions_required');
+  };
   const eligible = campaigns.filter(row => row.provider === 'google_ads' && row.assigned && row.clinicId);
   const evidence = new Map();
   if (!eligible.length) return evidence;
@@ -79,7 +91,8 @@ async function loadGoogleSignalEvidence({ models, campaigns, selectedClinics, no
   const readReceptionAccount = input => {
     const key = `${input.settingId}:${input.accountId}`;
     if (!nativeAccounts.has(key)) nativeAccounts.set(key, require('./googleLeadReception.service').receptionAccount(input).then(context => {
-      nativeConnections.push({ id: context.connection.id, googleUserId: context.connection.googleUserId });
+      nativeConnections.push({ connection: { id: context.connection.id, googleUserId: context.connection.googleUserId },
+        brokerGrant: context.brokerGrant });
       return context;
     }));
     return nativeAccounts.get(key);
@@ -168,6 +181,7 @@ async function loadGoogleSignalEvidence({ models, campaigns, selectedClinics, no
         const runtime = await resolveRuntime({ clinicId: campaign.clinicId, groupId: clinic.grupoClinicaId,
           assignmentScope: state.record.assignment_scope, customerId: campaign.account_id,
           accountModel: models.ClinicGoogleAdsAccount, connectionModel: models.GoogleConnection, credentials,
+          broker: require('./googleAdsBroker.service').forModels(models),
           requiredScopes: [GOOGLE_DATA_MANAGER_SCOPE], ensureAccessToken: async connection => {
             if (!connection.accessToken || missingGoogleScopes(connection.scopes, [GOOGLE_DATA_MANAGER_SCOPE]).length
               || (!Number.isFinite(timestamp(connection.expiresAt)) || timestamp(connection.expiresAt) <= +now) && !connection.refreshToken) {
@@ -194,7 +208,7 @@ async function loadGoogleSignalEvidence({ models, campaigns, selectedClinics, no
     }
     const current = runtimes.get(runtimeKey);
     if (!current) continue;
-    await credentials.assert(current.runtime.connection);
+    await assertRuntime(current.runtime);
     const verified = [];
     for (const row of history) {
       if (Number(row.intakeConfigId) !== Number(state.record.id) || row.assignmentScope !== state.record.assignment_scope
@@ -222,9 +236,13 @@ async function loadGoogleSignalEvidence({ models, campaigns, selectedClinics, no
     }
     evidence.set(campaign.id, { ...googleDeliveryEvidence(verified, now), key: campaign.id });
   }
-  for (const cached of runtimes.values()) if (cached) await credentials.assert(cached.runtime.connection);
+  for (const cached of runtimes.values()) if (cached) await assertRuntime(cached.runtime);
   for (const pending of routeConnections.values()) await credentials.assert(await pending);
-  for (const connection of nativeConnections) await credentials.assert(connection);
+  for (const context of routeContexts.values()) if (context?.route.brokerGrant) await assertGoogleAdsGrantTransport(context.route.brokerGrant);
+  for (const cached of nativeConnections) {
+    if (cached.brokerGrant) await assertGoogleAdsGrantTransport(cached.brokerGrant);
+    else await credentials.assert(cached.connection);
+  }
   return evidence;
 }
 
