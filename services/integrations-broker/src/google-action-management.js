@@ -145,6 +145,11 @@ function createGoogleActionManagement({ store, http, withDeveloperSecret, now = 
     completionAudit() { return ['integration.completed', 'success', family === 'apply' ? 'canonical_actions_applied' : 'canonical_actions_checked']; },
   }]));
   const prepared = new WeakMap();
-  return { operations };
+  return { operations, appliedPlan(request, principal, binding) {
+    const value = load(request, principal, binding);
+    if (value.row.state === 'attempted') fail('outcome_unknown');
+    if (value.row.state !== 'applied' || !value.row.result_json) fail('action_plan_conflict');
+    return { ...value, results: JSON.parse(value.row.result_json) };
+  } };
 }
 module.exports = { createGoogleActionManagement };

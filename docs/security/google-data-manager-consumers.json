@@ -1,12 +1,12 @@
 {
-  "version": 7,
+  "version": 8,
   "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "eeed7e7b7aa662bc48378d30695055da03f896c3",
+  "sourceBaseHead": "8b8bba8b7e1d53981e50726ca3903e8b8c76dcb2",
   "includesWorkingChanges": true,
-  "scope": "Bounded manual Data Manager caller inventory; not a complete inventory of all Google identity consumers or external OPS.",
+  "scope": "Bounded Data Manager caller inventory with destination registry/client review; unchanged rows retain their prior evidence hashes, not a fresh complete Google/OPS inventory.",
   "runtimeConsumersMigrated": 0,
   "qa": {
-    "broker": "584/584 full regression; 28/28 focused after strict owner/resource type checks (overlapping)",
+    "broker": "603/603 final full Node24 regression, including 19 destination registry scenarios; external network blocked",
     "provider": "fictitious_offline",
     "authenticatedUI": "pending",
     "mysqlJournalChecks": 56,
@@ -20,7 +20,11 @@
     "previous_diagnosticsHealthAuthorizationNativeAdapterClient": 82,
     "onboardingPreparationAndNormalization": 49,
     "readinessScript": "pass offline",
-    "actionManagementClientScopeReaderAndOnboarding": 60
+    "actionManagementClientScopeReaderAndOnboarding": 60,
+    "destinationClientRegression": 28,
+    "destinationRegistryRuntime": "19/19 included in 603; signed SQLite and real loopback HTTPS/CRM scope/client, fictitious AWS/Google/S3",
+    "destinationHumanJournalAndUI": "pending; no API, human audit journal or authenticated UI acceptance for authorization",
+    "previous_broker": "584/584 full regression; 28/28 focused after strict owner/resource type checks (overlapping)"
   },
   "rows": [
     {
@@ -97,21 +101,21 @@
     },
     {
       "file": "src/services/googleAdsBroker.service.js",
-      "sha256": "6dfe4574096512546f4ff083fbf02df0721e6a3acd1fab02df1e3a54d60e5153",
-      "role": "Fachada por modelos y transporte ligado a configuración inicial de audiencia/clave/endpoint; rechaza cambios de identidad en caliente.",
-      "state": "prepared_offline"
+      "sha256": "c215e5a174bf55ca4c46f9c6ab503360bdbafdccb6661a67762c893f2fe9488d",
+      "role": "Frontera opaca para lecturas, acciones, conversiones y destinos; sin habilitación implícita.",
+      "state": "prepared_undeployed"
     },
     {
       "file": "services/integrations-broker/src/google-data-manager-contract.js",
-      "sha256": "db24927c9493611c5931a7b1170fcf28912f9aa7036de646a4165a0f76deabe8",
-      "role": "Contrato cerrado de validación/ingesta/estado, consentimiento y destino.",
-      "state": "prepared_offline"
+      "sha256": "d2b55beeb95aa2ec928a5af4e524196466fb8d468296212c22ffe65a5e0f7fdc",
+      "role": "Destinos estáticos o registro explícito; recibos dinámicos fijan UUID y ámbito de autorización.",
+      "state": "prepared_undeployed"
     },
     {
       "file": "services/integrations-broker/src/google-data-manager.js",
-      "sha256": "9f53087c7b92a1d75e5f4782472e1602ef73fba9b8ef9b3d7128523474490af8",
-      "role": "Ledger SQLite, recibos y auditoría atómicos sin reenvío automático.",
-      "state": "prepared_offline"
+      "sha256": "feceb2d193d4e242157a3a0f71842a0b2a577283e98e28c38ea44df59daa31fb",
+      "role": "Revalida autorización antes/después del proveedor y dentro del commit; revocación no reenvía intentos.",
+      "state": "prepared_undeployed"
     },
     {
       "file": "src/services/googleConversionSubmission.repository.js",
@@ -217,15 +221,15 @@
     },
     {
       "file": "services/integrations-broker/src/google-action-management.js",
-      "role": "Planes, bloqueos y recibos SQLite; validación fresca y ninguna repetición tras resultado desconocido.",
-      "state": "prepared_offline_callsite_pending",
-      "sha256": "d65bffc93339fa1dfc2ff1d26843c8ec26577d943ebcd2ca48cefd18e688067d"
+      "role": "Planes y recibos aplicados propios; autorizar destinos requiere operación posterior explícita.",
+      "state": "prepared_undeployed",
+      "sha256": "df6f152330bc65e3ac42493d4c3a2295b47d04d0dfc6f06478c9119e35f300c6"
     },
     {
       "file": "services/integrations-broker/src/google-main.js",
-      "role": "Cohorte explícita de conversiones; runtime opt-in con grants exactos.",
-      "state": "prepared_offline_callsite_pending",
-      "sha256": "1547515244a2e3c08be8251a8424ccef11162108431e6eee3f3ff8f11d0fc0eb"
+      "role": "Runtime combinado opt-in con destinos explícitos y separación criptográfica de roles.",
+      "state": "prepared_undeployed",
+      "sha256": "4b2656678bc641bc370be84fa95ac58807b3ed93922657325a62cee3f2b54353"
     },
     {
       "file": "services/integrations-broker/src/google-http.js",
@@ -235,15 +239,15 @@
     },
     {
       "file": "services/integrations-broker/src/policy.js",
-      "role": "Valida binding y permisos explícitos de gestión de acciones.",
-      "state": "prepared_offline_callsite_pending",
-      "sha256": "6019d847de43258a619cef59d73d0d976aff44a5d9023cf085a2db78af6f8df3"
+      "role": "Valida bindings de acciones, Data Manager y permisos de registro de destinos.",
+      "state": "prepared_undeployed",
+      "sha256": "78b9750b86e4f8b213f969a95df19ec3d71f1b8dd15d2c60fa9b8fc2c68d528f"
     },
     {
       "file": "services/integrations-broker/src/google-ads-enrollment-contract.js",
-      "role": "Separación de claves de operación, enrollment, OAuth y revocación incluso sin permisos de lectura.",
-      "state": "prepared_offline_callsite_pending",
-      "sha256": "b567573907f578b2c26814ae1ee155ba99e50c32ba8717978923fa3c30b9629d"
+      "role": "Separación de claves incluye operaciones de destinos aunque no existan grants de lectura.",
+      "state": "prepared_undeployed",
+      "sha256": "357ccbfcccd09143541005ddeb1f853c67b63a8aed9561d0dc09b3f5daf0534d"
     },
     {
       "file": "services/integrations-broker/src/errors.js",
@@ -256,6 +260,30 @@
       "role": "Cliente con contexto opaco, UUID obligatorio y guard actual; propiedad durable y ACL global del endpoint todavía pendientes.",
       "state": "prepared_offline_callsite_pending",
       "sha256": "3761c3a42892ea2f92cb2231f0f6838e460f8fe8e9a3798f185a081c4e18e063"
+    },
+    {
+      "file": "services/integrations-broker/src/google-destination-contract.js",
+      "role": "Contrato de autorización por recibo aplicado y política explícita de cuenta/evento/origen.",
+      "state": "destination_registry_prepared_undeployed",
+      "sha256": "6c8c5d9aea4af7214d816a6119a2f65fac0105a3ffce884a5136f198cc030cc4"
+    },
+    {
+      "file": "services/integrations-broker/src/google-destinations.js",
+      "role": "Registro SQLite, revocación, resolución indexada y auditoría técnica atómica; sin permisos Enhanced.",
+      "state": "destination_registry_prepared_undeployed",
+      "sha256": "bad85b1afe583482a651817428c45d3ab0c25278865dccd2a71aa02b925c0046"
+    },
+    {
+      "file": "src/services/googleDataManagerDestinationsBrokerClient.service.js",
+      "role": "Cliente opaco con UUID/guard explícitos; diario humano, API y UI de la decisión pendientes.",
+      "state": "destination_client_prepared_human_journal_pending",
+      "sha256": "a6fdb94540c641733cbb5f5ca7f98d82fc29e60708ab34a812549d87919f85dc"
+    },
+    {
+      "file": "services/integrations-broker/src/audit.js",
+      "role": "Selecciona el grant de la operación auditada cuando el mismo ámbito tiene varios grants.",
+      "state": "technical_audit_prepared_undeployed",
+      "sha256": "5e02b6326e731f028370b53905008ed2abe1047986faaa4a0b87c563cb9c919c"
     }
   ]
 }

@@ -23,6 +23,8 @@ const dmContract = require('./google-data-manager-contract');
 const { createDataManagerOperations } = require('./google-data-manager');
 const actionContract = require('./google-action-management-contract');
 const { createGoogleActionManagement } = require('./google-action-management');
+const destinationContract = require('./google-destination-contract');
+const { createGoogleDestinations } = require('./google-destinations');
 const ACCOUNT = '137819318729'; const REGION = 'eu-west-3';
 const SOURCE = `arn:aws:sts::${ACCOUNT}:assumed-role/clinicaclick-integrations-prod-ec2-role/i-0cf40cfe823f160fa`;
 const WRITER_ROLE = `arn:aws:iam::${ACCOUNT}:role/clinicaclick-audit-prod-writer-role`;
@@ -71,7 +73,7 @@ function validateConfig(config) {
     || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   validatePolicy(config.policy);
   const conversions = config.cohort === dmContract.COHORT;
-  if (!conversions && config.policy.connections.some(c => c.googleDataManager || c.googleAdsActionManagement)) fail('invalid_request');
+  if (!conversions && config.policy.connections.some(c => c.googleDataManager || c.googleAdsActionManagement || c.googleDataManagerEnrollment)) fail('invalid_request');
   if (config.cohort === 'google-ads-read-v1' || conversions) {
     if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== adsContract.PROVIDER || !c.secretArn || !c.clientSecretArn
       || !c.developerSecretArn || !require('./google-oauth-secrets').subject(c.googleSubject) || !(c.googleAdsAccounts?.length || c.googleAdsEnrollmentScopes?.length)
@@ -87,12 +89,12 @@ function validateConfig(config) {
     for (const grant of config.policy.grants) {
       if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef)
         || grant.operations.some(op => !adsContract.OPERATIONS.includes(op) && op !== adsContract.REVOKE_OPERATION
-          && !(conversions && [...Object.values(dmContract.OPERATIONS), ...Object.values(actionContract.OPERATIONS)].includes(op))
+          && !(conversions && [...Object.values(dmContract.OPERATIONS), ...Object.values(actionContract.OPERATIONS), ...Object.values(destinationContract.OPERATIONS)].includes(op))
           && !Object.values(oauthContract.operationsFor(adsContract.PROVIDER)).includes(op)
           && !Object.values(enrollmentContract.OPERATIONS).includes(op) && op !== enrollmentContract.REVOKE_OPERATION)) fail('invalid_request');
       const binding = config.policy.connections.find(c => c.connectionRef === grant.connectionRef);
       if (grant.assetRef.startsWith('ads-enroll:')) {
-        if (grant.operations.some(op => [...Object.values(dmContract.OPERATIONS), ...Object.values(actionContract.OPERATIONS)].includes(op))) fail('invalid_request');
+        if (grant.operations.some(op => [...Object.values(dmContract.OPERATIONS), ...Object.values(actionContract.OPERATIONS), ...Object.values(destinationContract.OPERATIONS)].includes(op))) fail('invalid_request');
         enrollmentContract.scopeFor(binding, grant.assetRef, grant.tenantRef);
       }
       else {
@@ -100,11 +102,14 @@ function validateConfig(config) {
         adsContract.resource(binding, grant.assetRef);
         if (grant.operations.some(op => Object.values(actionContract.OPERATIONS).includes(op))
           && !binding.googleAdsActionManagement?.accounts.some(row => row.assetRef === grant.assetRef)) fail('invalid_request');
+        if (grant.operations.some(op => Object.values(destinationContract.OPERATIONS).includes(op))
+          && !binding.googleDataManagerEnrollment?.accounts.some(row => row.assetRef === grant.assetRef)) fail('invalid_request');
         if (grant.operations.some(op => Object.values(dmContract.OPERATIONS).includes(op))
-          && !binding.googleDataManager?.destinations.some(row => row.assetRef === grant.assetRef)) fail('invalid_request');
+          && !binding.googleDataManager?.destinations.some(row => row.assetRef === grant.assetRef)
+          && !binding.googleDataManagerEnrollment?.accounts.some(row => row.assetRef === grant.assetRef)) fail('invalid_request');
       }
     }
-    const operations = { ...adsContract, OPERATIONS: [...adsContract.OPERATIONS, ...(conversions ? [...Object.values(dmContract.OPERATIONS), ...Object.values(actionContract.OPERATIONS)] : [])] };
+    const operations = { ...adsContract, OPERATIONS: [...adsContract.OPERATIONS, ...(conversions ? [...Object.values(dmContract.OPERATIONS), ...Object.values(actionContract.OPERATIONS), ...Object.values(destinationContract.OPERATIONS)] : [])] };
     validatePropertyControlSeparation(config.policy, operations);
     validateOAuthSeparation(config.policy, operations);
     enrollmentContract.validatePolicy(config.policy);
@@ -207,7 +212,7 @@ async function main(filename, { awsFactory = connectAws, http } = {}) {
     const searchConsole = config.cohort === 'google-search-console-read-v1';
     const analytics = config.cohort === 'google-analytics-read-v1';
     const ads = config.cohort === 'google-ads-read-v1' || config.cohort === dmContract.COHORT;
-    const dataManager = config.cohort === dmContract.COHORT ? createDataManagerOperations({ store, http }) : null;
+    let dataManager, destinations;
     secrets = createGoogleSecretStore({ client: aws.secrets, http, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY,
       provider: searchConsole ? scContract.PROVIDER : analytics ? gaContract.PROVIDER : ads ? adsContract.PROVIDER : PROVIDER });
     if (ads) {
@@ -216,6 +221,10 @@ async function main(filename, { awsFactory = connectAws, http } = {}) {
       adsEngine = createGoogleAdsOperations({ http, cursor, withDeveloperSecret });
       if (config.cohort === dmContract.COHORT && config.policy.connections.some(c => c.googleAdsActionManagement)) {
         actionManagement = createGoogleActionManagement({ store, http, withDeveloperSecret });
+      }
+      if (config.cohort === dmContract.COHORT) {
+        if (config.policy.connections.some(c => c.googleDataManagerEnrollment)) destinations = createGoogleDestinations({ store, actionManagement });
+        dataManager = createDataManagerOperations({ store, http, destinations });
       }
       if (config.policy.connections.some(c => c.googleAdsEnrollmentScopes?.length)) {
         adsEnrollment = createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret });
@@ -228,7 +237,7 @@ async function main(filename, { awsFactory = connectAws, http } = {}) {
       secrets: createGoogleOAuthSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY }),
       onActivated: ref => { secrets.invalidate(ref); for (const controller of broker.active.get(ref) || []) controller.abort(); } });
     broker = new Broker({ store, policy: config.policy, secrets, adsEnrollment,
-      operations: ads ? { ...adsEngine.operations, ...adsEnrollment?.operations, ...dataManager?.operations, ...actionManagement?.operations, ...oauthContract.controlsFor(adsContract.PROVIDER, oauth) }
+      operations: ads ? { ...adsEngine.operations, ...adsEnrollment?.operations, ...dataManager?.operations, ...actionManagement?.operations, ...destinations?.operations, ...oauthContract.controlsFor(adsContract.PROVIDER, oauth) }
         : searchConsole ? createSearchConsoleOperations({ http, cursor, oauth }) : analytics ? createAnalyticsOperations({ http, cursor, oauth }) : createGoogleBusinessProfileOperations({ http, cursor, oauth }), timeoutMs: 25000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {

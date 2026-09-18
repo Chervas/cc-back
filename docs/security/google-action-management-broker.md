@@ -7,6 +7,10 @@ autorización y persistencia CRM. Workspace y asistente comparten revisión/conf
 explícitas; falta su aceptación autenticada con proveedor real.
 No activar el corte parcial de la identidad Google compartida.
 
+La autorización posterior de destinos Data Manager tiene [contrato propio](google-destinations-broker.md):
+broker y cliente preparados, con decisión explícita sobre recibos applied.
+No se ejecuta al crear/aplicar/consultar un plan; su diario humano y UI aún pendientes.
+
 ## Contrato y alcance
 
 La cohorte `google-ads-conversions-v1` admite cuatro operaciones adicionales,

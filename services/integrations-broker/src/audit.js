@@ -4,8 +4,10 @@ const { randomUUID } = require('node:crypto');
 const { audit } = require('./contracts');
 const { fail } = require('./errors');
 function eventFor(request, principal, policy, action, result, reason, now = Date.now()) {
-  const grant = policy.grants.find(g => g.principalId === principal.id && g.connectionRef === request.connectionRef
-    && g.tenantRef === request.tenantRef && g.assetRef === request.assetRef);
+  const matchesScope = g => g.principalId === principal.id && g.connectionRef === request.connectionRef
+    && g.tenantRef === request.tenantRef && g.assetRef === request.assetRef;
+  const grant = policy.grants.find(g => matchesScope(g) && g.operations.includes(request.operation))
+    || policy.grants.find(matchesScope);
   return audit({ version: 2, eventId: randomUUID(), occurredAt: new Date(now).toISOString(),
     actorType: 'service', actorId: principal.id, tenantRef: request.tenantRef,
     action, resourceRef: request.assetRef, result, reason,

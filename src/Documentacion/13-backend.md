@@ -10400,6 +10400,31 @@ que debe verificarse antes de activar el flujo. Persistencia/recuperación en
 [contrato técnico](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-action-management-broker.md).
 
 
+### Autorizacion interna de destinos Data Manager
+
+Preparado, sin endpoint HTTP ni activación: el método interno
+`googleAdsBroker.destinations(account, context, family, input, options)` permite
+authorize/status/revoke. Authorize recibe `{planId,targets:[{event,sources}]}`;
+status/revoke reciben `{authorizationId}`. Cada comando exige UUID explícito,
+contexto opaco, guard de permisos actuales de toda la cuenta y plazo máximo 30 s.
+Devuelve `{authorizationId,planId,state,destinations:[{event,conversionActionId,sources}]}`.
+
+Los IDs se derivan del recibo applied propio del broker. Se necesita política
+explícita `googleDataManagerEnrollment.accounts` con cuenta/eventos/WEB u OTHER;
+prepared, attempted o consultas no autorizan. SQLite conserva permiso, targets
+indexados, revocación y auditoría técnica atómica. Cambio de identidad/ámbito
+invalida el permiso; revocación bloquea replay y otro UUID del mismo plan.
+No autoriza señales mejoradas, readiness, cambios IntakeConfig ni jobs/envíos.
+
+Requiere `GOOGLE_ADS_DESTINATIONS_BROKER_ENABLED=true` además de las flags Ads,
+conversiones y acciones; todas cerradas por defecto. No introduce retry, UUID
+automático ni fallback a credenciales locales. Falta el diario humano, API y UI
+con confirmación/recuperación; no invocar desde los endpoints de planes como efecto
+implícito. Incertidumbre, revocación y límites en el
+[contrato técnico](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-destinations-broker.md).
+
+### Inventario y diálogo de acciones
+
 El inventario `GET /api/marketing/google-ads/conversion-actions` añade
 `action_management:{mode:'broker'|'legacy',enabled:boolean}`. `mode` procede del
 runtime resuelto; `enabled` indica las flags de preparación y rol de proceso,

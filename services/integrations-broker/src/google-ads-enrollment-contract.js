@@ -47,7 +47,8 @@ function validatePolicy(policy) {
   const roles = { read: new Set(), control: new Set(), oauth: new Set(), enrollment: new Set() };
   const oauthOps = Object.values(oauth.operationsFor(ads.PROVIDER));
   const providerOps = [...ads.OPERATIONS, ...Object.values(require('./google-data-manager-contract').OPERATIONS),
-    ...Object.values(require('./google-action-management-contract').OPERATIONS)];
+    ...Object.values(require('./google-action-management-contract').OPERATIONS),
+    ...Object.values(require('./google-destination-contract').OPERATIONS)];
   for (const grant of policy.grants) {
     if (grant.operations.some(op => providerOps.includes(op))) roles.read.add(grant.principalId);
     if (grant.operations.some(op => [ads.REVOKE_OPERATION, REVOKE_OPERATION].includes(op))) roles.control.add(grant.principalId);

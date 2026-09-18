@@ -1,7 +1,9 @@
 'use strict';
 const C = require('./google-data-manager-contract');
 const { fail } = require('./errors');
-function createDataManagerOperations({ store, http, now = Date.now }) {
+function createDataManagerOperations({ store, http, destinations, now = Date.now }) {
+  const resource = (binding, assetRef, payload, principal, tenantRef) => destinations
+    ? destinations.resolve(binding, assetRef, payload, principal, tenantRef) : C.resource(binding, assetRef, payload);
   // Only operational receipt metadata. No conversion body, identifiers or tokens.
   store.db.exec(`CREATE TABLE IF NOT EXISTS google_data_manager_receipts (
     id TEXT PRIMARY KEY, principal TEXT NOT NULL, tenant TEXT NOT NULL, connection TEXT NOT NULL,
@@ -17,8 +19,8 @@ function createDataManagerOperations({ store, http, now = Date.now }) {
       .get(request.payload.submissionId, principal.id, request.tenantRef, request.connectionRef, request.assetRef);
     if (!row) fail('scope_denied');
     const selection = { conversionActionId: row.action_id, eventName: row.event_name, eventSource: row.event_source };
-    const target = C.resource(binding, request.assetRef, selection);
-    if (C.scopeDigest(binding, request.assetRef, selection) !== row.scope_digest) fail('scope_denied');
+    const target = resource(binding, request.assetRef, selection, principal, request.tenantRef);
+    if (C.scopeDigest(binding, request.assetRef, selection, target) !== row.scope_digest) fail('scope_denied');
     if (row.state !== 'accepted' || !C.providerId(row.provider_id)) fail('outcome_unknown');
     return { row, target };
   }
@@ -28,45 +30,58 @@ function createDataManagerOperations({ store, http, now = Date.now }) {
     validate: payload => C.validate(operation, payload),
     authorize({ request, binding, principal }) {
       if (operation === C.OPERATIONS.status) { receipt(request, principal, binding); return; }
-      const target = C.resource(binding, request.assetRef, request.payload);
+      const target = resource(binding, request.assetRef, request.payload, principal, request.tenantRef);
       if (operation === C.OPERATIONS.ingest) C.assertEnhanced(target, request.payload.event, now());
     },
     async execute(context) {
       const { payload, binding, assetRef, requestId, principalId, tenantRef, secret, signal, assertActive } = context;
+      const principal = context.policy.principals.find(row => row.id === principalId);
       assertActive();
       if (operation === C.OPERATIONS.status) {
         const request = { payload, assetRef, tenantRef, connectionRef: binding.connectionRef };
-        const { row, target } = receipt(request, { id: principalId }, binding);
+        const { row, target } = receipt(request, principal, binding);
         const raw = await http({ hostname: 'datamanager.googleapis.com',
           path: '/v1/requestStatus:retrieve?requestId=' + encodeURIComponent(row.provider_id),
           token: secret, quotaProjectId: target.quotaProjectId, signal });
-        assertActive(); receipt(request, { id: principalId }, binding);
+        assertActive(); receipt(request, principal, binding);
         return { submissionId: row.id, requestId: row.provider_id, ...C.statusResult(raw, target) };
       }
-      const target = C.resource(binding, assetRef, payload);
+      const target = resource(binding, assetRef, payload, principal, tenantRef);
+      const digest = C.scopeDigest(binding, assetRef, payload, target);
+      const verify = () => {
+        assertActive();
+        const current = resource(binding, assetRef, payload, principal, tenantRef);
+        if (C.scopeDigest(binding, assetRef, payload, current) !== digest) fail('scope_denied');
+        if (operation === C.OPERATIONS.ingest) C.assertEnhanced(current, payload.event, now());
+      };
       const json = C.body(operation, payload, target, requestId, now());
       if (operation === C.OPERATIONS.ingest) {
         store.transaction(() => {
-          assertActive();
+          verify();
           // A second principal cannot submit the same receipt ID concurrently.
           if (store.db.prepare('SELECT 1 FROM google_data_manager_receipts WHERE id=?').get(requestId)) fail('idempotency_conflict');
           store.db.prepare("INSERT INTO google_data_manager_receipts VALUES (?,?,?,?,?,?,?,?,?,'attempted',NULL,?,NULL)")
             .run(requestId, principalId, tenantRef, binding.connectionRef, assetRef, payload.conversionActionId,
-              payload.eventName, payload.eventSource, C.scopeDigest(binding, assetRef, payload), now());
+              payload.eventName, payload.eventSource, digest, now());
         });
       }
-      assertActive();
+      verify();
       const raw = await http({ hostname: 'datamanager.googleapis.com', path: '/v1/events:ingest',
         token: secret, quotaProjectId: target.quotaProjectId, json, signal });
-      assertActive();
+      verify();
       return C.ingestResult(raw, requestId, operation === C.OPERATIONS.validate);
     },
     project(result) {
       if (Buffer.byteLength(JSON.stringify(result)) > 32768) fail('provider_failed');
       return structuredClone(result);
     },
-    commit({ request, principal, result }) {
+    commit({ request, principal, policy, result }) {
       if (operation !== C.OPERATIONS.ingest) return;
+      const binding = policy.connections.find(row => row.connectionRef === request.connectionRef);
+      const target = resource(binding, request.assetRef, request.payload, principal, request.tenantRef);
+      const pending = store.db.prepare('SELECT scope_digest FROM google_data_manager_receipts WHERE id=?').get(request.requestId);
+      if (pending?.scope_digest !== C.scopeDigest(binding, request.assetRef, request.payload, target)) fail('scope_denied');
+      C.assertEnhanced(target, request.payload.event, now());
       const updated = store.db.prepare("UPDATE google_data_manager_receipts SET state='accepted',provider_id=?,accepted_at=? WHERE id=? AND principal=? AND tenant=? AND connection=? AND asset=? AND state='attempted'")
         .run(result.data.requestId, now(), request.requestId, principal.id, request.tenantRef, request.connectionRef, request.assetRef);
       if (updated.changes !== 1) fail('idempotency_conflict');

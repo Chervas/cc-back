@@ -20,7 +20,7 @@ const stamp = { type: 'string', pattern: '^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}
 const identifiers = ['email', 'phone'];
 const bindingSchema = object({
   quotaProjectId: { type: 'string', pattern: '^[a-z][a-z0-9-]{4,28}[a-z0-9]$' },
-  destinations: { type: 'array', minItems: 1, maxItems: 1000, items: object({ assetRef: ref,
+  destinations: { type: 'array', minItems: 0, maxItems: 1000, items: object({ assetRef: ref,
     conversionActionId: id, events: { type: 'array', minItems: 1, maxItems: 5, uniqueItems: true, items: { enum: EVENTS } },
     sources: { type: 'array', minItems: 1, maxItems: 2, uniqueItems: true, items: { enum: SOURCES } },
     enhancedPolicy: { anyOf: [{ type: 'null' }, object({ digest, notBefore: stamp, expiresAt: stamp,
@@ -55,7 +55,7 @@ function validate(operation, payload) {
 }
 function validateBinding(binding) {
   validateBindingShape({ value: binding.googleDataManager });
-  if (binding.provider !== PROVIDER) fail('invalid_request');
+  if (binding.provider !== PROVIDER || !binding.googleDataManager.destinations.length && !binding.googleDataManagerEnrollment) fail('invalid_request');
   const seen = new Set();
   for (const row of binding.googleDataManager.destinations) {
     ads.resource(binding, row.assetRef);
@@ -80,12 +80,12 @@ function assertEnhanced(resource, event, now) {
   if (!policy || event.enhancedPolicyDigest !== policy.digest || now < Date.parse(policy.notBefore)
     || now >= Date.parse(policy.expiresAt) || event.userIdentifiers.some(row => !policy.permittedIdentifiers.includes(row.type))) fail('scope_denied');
 }
-function scopeDigest(binding, assetRef, payload) {
-  const target = resource(binding, assetRef, payload);
+function scopeDigest(binding, assetRef, payload, target = resource(binding, assetRef, payload)) {
   return createHash('sha256').update(canonical({ connectionRef: binding.connectionRef, subject: binding.googleSubject,
     secretArn: binding.secretArn, clientSecretArn: binding.clientSecretArn, assetRef,
     customerId: target.customerId, loginCustomerId: target.loginCustomerId, quotaProjectId: target.quotaProjectId,
-    conversionActionId: payload.conversionActionId, eventName: payload.eventName, eventSource: payload.eventSource })).digest('hex');
+    conversionActionId: payload.conversionActionId, eventName: payload.eventName, eventSource: payload.eventSource,
+    ...(target.authorizationId ? { authorizationId: target.authorizationId, authorizationDigest: target.authorizationDigest } : {}) })).digest('hex');
 }
 function destination(target) {
   return { operatingAccount: { accountType: 'GOOGLE_ADS', accountId: target.customerId },

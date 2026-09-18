@@ -23,6 +23,11 @@ conexión y activo. Se mantienen las claves separadas de operación, revocación
 enrollment y OAuth. Ningún consumidor suministra tokens, URL, headers, GAQL ni ID
 arbitrario de petición Google para consultar su estado.
 
+Además de los destinos estáticos, está preparado el [registro explícito por recibo
+aplicado](google-destinations-broker.md). Crear una acción o recuperar su plan no
+lo autoriza. Los destinos dinámicos conservan identidad, evento/origen y revocación,
+sin conceder señales mejoradas; diario humano/API/UI de esa decisión pendientes.
+
 El scope adicional `https://www.googleapis.com/auth/datamanager` es obligatorio
 solo en los bindings OAuth Ads que declaran Data Manager. OAuth de Ads de lectura
 conserva sus scopes anteriores. La operación Data Manager no carga ni transmite
@@ -109,8 +114,9 @@ guardia de red offline. La comparación contra el constructor actual del CRM
 incluye 54 combinaciones WEB/OTHER, gclid/gbraid/wbraid y las dos señales de
 consentimiento. No acredita entrega real a Google ni una interfaz autenticada.
 
-La regresión del motor broker conserva560/560 Node24 del tramo workspace: su
-código no cambió en diagnóstico. El lote actual de Salud/autorización/nativo,
+La evidencia histórica del motor conserva 560/560 Node24 del tramo workspace.
+La regresión de destinos, posterior, se registra en 99 y en el inventario de
+este tramo; no sumar suites solapadas. El lote de Salud/autorización/nativo,
 adaptador y cliente pasa82/82 Node18; los scripts de contrato Data Manager y
 cadencia pasan. MySQL aislado verifica52 grupos. Las suites previas (36 y84)
 son evidencia de sus cortes, con casos solapados; no sumar como casos únicos.
@@ -118,7 +124,8 @@ son evidencia de sus cortes, con casos solapados; no sumar como casos únicos.
 El emisor común de conversiones y su resolutor por mapping ya seleccionan el
 camino broker cuando el registro Ads lo exige. Ya están conectados los mandatos
 workspace v2, los hitos CRM nativos y su preparación validate-only. Siguen
-pendientes consumidores de preparación/alta de acciones y recepción/sync de leads.
+pendientes la autorización humana de destinos, bootstrap y recepción/sync de leads.
+Planes de acciones ya preparados con diario/API/UI, todavía sin aceptación real.
 Los dos validadores onboarding ya están adaptados, como se describe al final.
 El diagnóstico de recibos está conectado
 y probado aisladamente, como se describe al final.

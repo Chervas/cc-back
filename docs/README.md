@@ -76,6 +76,7 @@ sincroniza el espejo frontend. Este índice no mantiene otro roadmap ni diario.
 - [Search Console: lecturas por broker preparadas](security/google-search-console-read-migration.md).
 - [GA4: lecturas por broker preparadas](security/google-analytics-read-migration.md).
 - [Google: listado de propiedades registradas mediante broker](security/google-property-discovery-migration.md).
+
 - [Google: propiedades registradas con varios mappings y asignaciones compartidas](security/google-shared-property-migration.md).
 - [Control de revocación de propiedades Search Console y GA4](security/google-property-revocation-control.md).
 - [Desconexión durable de Search Console y GA4](security/google-property-disconnect-migration.md).
@@ -92,6 +93,12 @@ sincroniza el espejo frontend. Este índice no mantiene otro roadmap ni diario.
 - [Google Ads: selección y baja de asignaciones gestionadas](security/google-ads-mapping-migration.md).
 - [Google Ads: alta de cuentas desde un ámbito aprobado](security/google-ads-enrollment-migration.md).
 - [Google Ads: ámbito y solicitudes de alta en la aplicación](security/google-ads-enrollment-application.md).
+
+### Cohortes Google: conversiones
+
+- [Entrega tipada y recibos Data Manager](security/google-data-manager-broker.md).
+- [Planes de acciones, diario CRM y recuperación](security/google-action-management-broker.md).
+- [Autorización explícita de destinos y revocación](security/google-destinations-broker.md).
 
 ## Cierre funcional Marketing Web W1-W5 (2026-07-19)
 

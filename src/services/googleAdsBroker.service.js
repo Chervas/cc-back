@@ -4,6 +4,7 @@ const { createGoogleAdsBrokerScope, createGoogleAdsScopeRepository, identity } =
 const { createGoogleAdsBrokerReader, safe } = require('./googleAdsBrokerReader.service');
 const { createGoogleDataManagerBrokerClient } = require('./googleDataManagerBrokerClient.service');
 const { createGoogleAdsActionManagementBrokerClient } = require('./googleAdsActionManagementBrokerClient.service');
+const { createGoogleDataManagerDestinationsBrokerClient } = require('./googleDataManagerDestinationsBrokerClient.service');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const fail = code => { throw Object.assign(Error(code), { code }); };
 function createGoogleAdsBroker(options) {
@@ -14,6 +15,8 @@ function createGoogleAdsBroker(options) {
     ...(options.now ? { now: options.now } : {}), ...(options.conversionsEnabled ? { enabled: options.conversionsEnabled } : {}) });
   const actionManagement = createGoogleAdsActionManagementBrokerClient({ client: options.client, assertContext: scope.assertContext,
     ...(options.now ? { now: options.now } : {}), ...(options.actionManagementEnabled ? { enabled: options.actionManagementEnabled } : {}) });
+  const destinations = createGoogleDataManagerDestinationsBrokerClient({ client: options.client, assertContext: scope.assertContext,
+    ...(options.now ? { now: options.now } : {}), ...(options.destinationsEnabled ? { enabled: options.destinationsEnabled } : {}) });
   const discoveryReader = createGoogleAdsBrokerReader({ client: options.client, assertContext: discoveryScope.assertContext, ...(options.now ? { now: options.now } : {}) });
   const check = scope => async (account, context, options) => {
     const captured = await scope.assertContext(context, options); const requested = identity(account);
@@ -22,6 +25,11 @@ function createGoogleAdsBroker(options) {
   };
   const assert = check(scope); const assertDiscovery = check(discoveryScope);
   return { prepare: scope.prepare, assert, prepareDiscovery: discoveryScope.prepare, assertDiscovery,
+    async destinations(account, context, family, input, options) {
+      await assert(account, context);
+      const result = await destinations.execute(context, family, input, options);
+      await assert(account, context); return result;
+    },
     async actionManagement(account, context, family, input, options) {
       await assert(account, context);
       const result = await actionManagement.execute(context, family, input, options);
