@@ -26,6 +26,9 @@ clave. No es un proxy de URL/cabeceras arbitrarias.
 Bedrock tiene su propio consumidor y credenciales AWS. Este transporte no lo
 migra ni sustituye sus funciones de texto/imagen. No declarar «IA migrada»
 mientras ese consumidor o cualquier escritor siga usando claves locales.
+Antes de cambiarlo, cumplir la [matriz de automatizaciones y contexto](automation-ai-migration-acceptance.md):
+incluye todas las versiones guardadas, recetas personalizadas, errores y prueba
+real del proveedor; la aceptación por el futuro broker todavía está pendiente.
 
 Las claves de IA son de plataforma: los grants usan `platform:dev` o
 `platform:staging`, y `ai:<finalidad>`. No representan por sí solos una ACL
