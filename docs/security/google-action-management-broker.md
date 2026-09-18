@@ -10,7 +10,8 @@ No activar el corte parcial de la identidad Google compartida.
 La autorización posterior de destinos Data Manager tiene [contrato propio](google-destinations-broker.md):
 broker, diario humano/API/UI y cliente preparados, con decisión explícita sobre
 recibos applied. No se ejecuta al crear/aplicar/consultar un plan. Compatibilidad
-AWS v18, recuperación sin referencia local y aceptación operativa aún pendientes.
+AWS v18 y aceptación operativa aún pendientes; la recuperación sin referencia
+local ya está preparada.
 
 ## Contrato y alcance
 

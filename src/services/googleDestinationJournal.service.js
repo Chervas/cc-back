@@ -37,15 +37,7 @@ function createGoogleDestinationJournal({ models, sessions, audit, now = Date.no
     && process.env.GOOGLE_ADS_DESTINATIONS_BROKER_ENABLED === 'true'
     && String(process.env.RUNTIME_ROLE || '').trim().toLowerCase() !== 'gateway' }) {
   const getModels = () => typeof models === 'function' ? models() : models;
-  return { async execute(context, family, input, options) {
-    try {
-      if (!Object.hasOwn(C.OPERATIONS, family) || !exact(options, 'requestId,confirmAuthorization')
-        || !uuid(options.requestId) || typeof options.confirmAuthorization !== 'boolean') fail('invalid_request');
-      const payload = structuredClone(input), requestId = options.requestId;
-      C.validate(C.OPERATIONS[family], payload);
-      if (family === 'authorize' && options.confirmAuthorization !== true) fail('google_destination_confirmation_required');
-      // Revocation always carries the original intent, including an unknown one.
-      if (family === 'revoke' && !payload.input) fail('invalid_request');
+  const prepareContext = async (context, family) => {
       const actor = structuredClone(context.actor), runtime = context.runtime, scopeKey = context.scopeKey, authorize = context.beforeExecute;
       if (!exact(actor, 'userId,sessionRef,expiresAt') || !positive(actor.userId) || !uuid(actor.sessionRef)
         || !Number.isSafeInteger(actor.expiresAt)) fail('google_destination_session_required');
@@ -72,6 +64,23 @@ function createGoogleDestinationJournal({ models, sessions, audit, now = Date.no
         if (canonical(await runtime.broker.assert(runtime.account, runtime.brokerContext, { transaction })) !== canonical(captured)) fail('scope_denied');
         gate(); return true;
       };
+      return { actor, runtime, scopeKey, m, captured, owner, scopeDigest, guard, events };
+  };
+  return {
+    async list(context, input, options) {
+      try { return await require('./googleDestinationRecovery.service').listDestinations({ prepareContext, now }, context, input, options); }
+      catch (error) { fail(safe(error)); }
+    },
+    async execute(context, family, input, options) {
+    try {
+      if (!Object.hasOwn(C.OPERATIONS, family) || !exact(options, 'requestId,confirmAuthorization')
+        || !uuid(options.requestId) || typeof options.confirmAuthorization !== 'boolean') fail('invalid_request');
+      const payload = structuredClone(input), requestId = options.requestId;
+      C.validate(C.OPERATIONS[family], payload);
+      if (family === 'authorize' && options.confirmAuthorization !== true) fail('google_destination_confirmation_required');
+      // Revocation always carries the original intent, including an unknown one.
+      if (family === 'revoke' && !payload.input) fail('invalid_request');
+      const { actor, runtime, scopeKey, m, captured, owner, scopeDigest, guard, events } = await prepareContext(context, family);
       const P = m.GoogleAdsActionPlan, D = m.GoogleDestinationAuthorization, Q = m.GoogleDestinationCommand;
       const auditCapacity = new WeakMap();
       const record = async (row, q, reason, transaction, relatedCommandRef = null) => {

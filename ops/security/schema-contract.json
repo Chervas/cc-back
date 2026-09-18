@@ -965,6 +965,7 @@
       ],
       "indexes": [
         {"name": "cc_google_destination_owner","columns": [{"INDEX_NAME": "cc_google_destination_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "actor_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "session_ref","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_google_destination_recovery","columns": [{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "actor_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "mapping_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "scope_key","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 4,"COLUMN_NAME": "scope_digest","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 5,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 6,"COLUMN_NAME": "authorization_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
         {"name": "plan_id","columns": [{"INDEX_NAME": "plan_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "plan_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
         {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "authorization_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
         {"name": "revoke_command_id","columns": [{"INDEX_NAME": "revoke_command_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "revoke_command_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
@@ -1028,6 +1029,7 @@
     {"name": "20260918110000-create-google-conversion-submissions.js","sha256": "91b44f36f7a542c89c23de28391134e60f8fddaade0fdeaaaedf49f7b9878c70"},
     {"name": "20260918190000-create-google-ads-action-journal.js","sha256": "28bc9df36d9915253db783e7a68737b0008c7cb2f903e1ec8215dbcf833d5df7"},
     {"name": "20260918203000-google-action-recovery-ownership.js","sha256": "680b4457f49e641c9bc79ae44a2fcc6d4ab66e0c14ba5175423b5349a4e9c8b2"},
-    {"name": "20260918220000-create-google-destination-journal.js","sha256": "245b2a00a272bfd031480bfe07fac1701b92252aa45f57f605ac30179dc236a3"}
+    {"name": "20260918220000-create-google-destination-journal.js","sha256": "245b2a00a272bfd031480bfe07fac1701b92252aa45f57f605ac30179dc236a3"},
+    {"name": "20260918224500-index-google-destination-recovery.js","sha256": "02bb1af1afddd008ae97269a64243cf5e4eb90b22ee89730005a1ea421c32f99"}
   ]
 }

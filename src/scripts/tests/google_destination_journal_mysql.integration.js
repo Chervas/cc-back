@@ -7,7 +7,7 @@ const { DataTypes: D } = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const migrations = ['20260918190000-create-google-ads-action-journal.js', '20260918203000-google-action-recovery-ownership.js',
-    '20260918220000-create-google-destination-journal.js'];
+    '20260918220000-create-google-destination-journal.js', '20260918224500-index-google-destination-recovery.js'];
   for (const name of migrations) { const m = require('../../../migrations/' + name); await m.up(sql.getQueryInterface()); await m.up(sql.getQueryInterface()); }
   for (const [name,file] of [['GoogleAdsActionPlan','googleadsactionplan'],['GoogleAdsActionCommand','googleadsactioncommand'],
     ['GoogleDestinationAuthorization','googledestinationauthorization'],['GoogleDestinationCommand','googledestinationcommand'],['PlatformAuditEvent','platformauditevent']]) {
@@ -174,6 +174,66 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     await run('status',{authorizationId:concurrent.authorizationId});await revoke(concurrent);
     report.checks.push('concurrent admission of one authorization UUID crosses transport at most once');
 
+    // A fresh browser knows no UUID. Listing only reads its own durable decisions;
+    // selecting one later triggers an explicit status request, never authorize.
+    const list=(cursor=null,planId=null,ctx=renewed)=>service.list(ctx,{cursor,planId},{requestId:randomUUID()});
+    const pending=await newIntent();beforeRemote=command=>{if(command.operation===C.OPERATIONS.authorize)throw Object.assign(Error('PRIVATE'),{code:'broker_unavailable'});};
+    await assert.rejects(run('authorize',pending.input,pending.authorizationId));beforeRemote=null;
+    const pendingPage=await list(null,pending.input.planId);assert.equal(pendingPage.items.length,1);
+    assert.equal(pendingPage.items[0].authorizationId,pending.authorizationId);assert.equal(pendingPage.items[0].observedState,'unknown');
+    assert.equal(pendingPage.items[0].outcomeUnknown,true);assert.deepEqual(pendingPage.items[0].input,pending.input);
+    assert.deepEqual(pendingPage.items[0].expected,[{event:'lead',conversionActionId:'456',sources:['WEB']}]);
+    const beforeList=calls.length;const commandCount=await models.GoogleDestinationCommand.count();
+    for(let i=0;i<2;i++)await list(null,pending.input.planId);
+    assert.equal(calls.length,beforeList);assert.equal(await models.GoogleDestinationCommand.count(),commandCount);
+    await revoke({authorizationId:pendingPage.items[0].authorizationId,input:pendingPage.items[0].input},renewed);
+    report.checks.push('reference-free renewed-session recovery includes unknown original decisions and derives exact action IDs from the applied parent; listing dispatches zero broker calls and no mutation commands');
+
+    for(let i=0;i<24;i++)await revoke(await newIntent());
+    const all=(await models.GoogleDestinationAuthorization.findAll({attributes:['authorization_id'],raw:true})).map(row=>row.authorization_id);
+    const pages=[],seen=[];let cursor=null;
+    do{const page=await list(cursor);pages.push(page.items.length);seen.push(...page.items.map(row=>row.authorizationId));cursor=page.nextCursor;}while(cursor);
+    assert.equal(new Set(seen).size,seen.length);assert.deepEqual([...seen].sort(),all.sort());assert(pages[0]===20&&pages.length>1);
+    const firstPage=await list();at+=1000;const inserted=await newIntent();await revoke(inserted);
+    const later=await list(firstPage.nextCursor);assert(!later.items.some(row=>row.authorizationId===inserted.authorizationId));
+    const captured=await broker.assert(context.runtime.account,context.runtime.brokerContext);
+    const [explain]=await sql.query('EXPLAIN SELECT * FROM GoogleDestinationAuthorizations FORCE INDEX (cc_google_destination_recovery) WHERE actor_user_id=? AND mapping_id=? AND scope_key=? AND scope_digest=? ORDER BY created_at DESC,authorization_id DESC LIMIT 21',
+      {replacements:[context.actor.userId,11,'group:5',A.hash(captured)]});
+    assert.equal(explain[0].key,'cc_google_destination_recovery');assert.doesNotMatch(explain[0].Extra||'',/filesort/);
+    report.recoveryQueryPlan=explain;
+    report.checks.push('20-row keyset pages cover equal-millisecond records exactly once and exclude newer inserts on later pages; full-row EXPLAIN uses the same forced scoped index without filesort');
+
+    await models.UsuarioClinica.bulkCreate([59,71].map(id_clinica=>({id_usuario:91003,id_clinica,rol_clinica:role,estado_invitacion:'aceptada'})));
+    assert.equal((await list(null,null,{...renewed,actor:{...renewed.actor,userId:91003}})).items.length,0);
+    assert.equal((await list(null,inserted.input.planId,{...renewed,actor:{...renewed.actor,userId:91003}})).items.length,0);
+    await models.Clinica.update({estado_clinica:false},{where:{id_clinica:71}});assert.equal((await list(null,inserted.input.planId)).items.length,1);
+    await models.Clinica.update({estado_clinica:true},{where:{id_clinica:71}});
+    await models.UsuarioClinica.destroy({where:{id_usuario:91002,id_clinica:71}});await assert.rejects(list(),{code:'scope_denied'});
+    await models.UsuarioClinica.create({id_usuario:91002,id_clinica:71,rol_clinica:role,estado_invitacion:'aceptada'});
+    sessionValid=false;await assert.rejects(list(),{code:'google_destination_session_required'});sessionValid=true;
+    enabled=false;await assert.rejects(list(),{code:'broker_cohort_disabled'});enabled=true;
+    for(const bad of [{createdAt:'bad',authorizationId:randomUUID()},{createdAt:'2026-99-01T00:00:00.000Z',authorizationId:randomUUID()},
+      {createdAt:new Date(at).toISOString(),authorizationId:randomUUID(),scope:'other'}])await assert.rejects(list(bad),{code:'invalid_request'});
+    await assert.rejects(list(firstPage.nextCursor,inserted.input.planId),{code:'invalid_request'});
+    const stored=await models.GoogleDestinationAuthorization.findByPk(inserted.authorizationId),ownerBefore=stored.owner_digest;
+    await stored.update({owner_digest:'a'.repeat(64)});await assert.rejects(list(null,inserted.input.planId),{code:'google_destination_recovery_unavailable'});
+    await stored.update({owner_digest:ownerBefore});
+    report.checks.push('listing cannot cross actor ownership, tampered original identity, missing shared-clinic permissions, session or cohort; paused clinics remain recoverable and malformed cursors cannot broaden scope');
+
+    let listReads=0;const originalFind=models.GoogleDestinationAuthorization.findAll.bind(models.GoogleDestinationAuthorization);
+    models.GoogleDestinationAuthorization.findAll=async(...args)=>{listReads++;return originalFind(...args);};
+    service=make({...repo,append:async(value,options)=>{if(value.reason===failAt.reason)throw Error('PRIVATE');return repo.append(value,options);}});
+    failAt.reason='list_requested';await assert.rejects(list(),{code:'audit_unavailable'});assert.equal(listReads,0);
+    failAt.reason='list_prepared';await assert.rejects(list(),{code:'audit_unavailable'});assert.equal(listReads,1);
+    failAt.reason=null;service=make();models.GoogleDestinationAuthorization.findAll=originalFind;
+    assert.equal((await list(null,inserted.input.planId)).items.length,1);
+    await require('../../../migrations/'+migrations[3]).down(sql.getQueryInterface());await require('../../../migrations/'+migrations[3]).up(sql.getQueryInterface());
+    assert.equal((await list(null,inserted.input.planId)).items.length,1);
+    service=make({...repo,append:async(value,options)=>{const result=await repo.append(value,options);if(value.reason==='list_prepared')allowed=false;return result;}});
+    await assert.rejects(list(),{code:'scope_denied'});allowed=true;service=make();
+    assert.equal((await list(null,inserted.input.planId)).items.length,1);
+    report.checks.push('failed list admission prevents decision reads; failed completion releases no page and leaves an auditable attempt; post-read permission loss suppresses the page; index rollback/reapply preserves all decisions');
+
     const httpNode=require('node:http'),express=require('express'),app=express();app.use(express.json({limit:'16kb'}));
     const apiSessions={...sessions,bearer:value=>{assert.equal(value,'Bearer FICTITIOUS_QA_SESSION');return 'FICTITIOUS';},
       verify:async()=>({sessionVersion:1,userId:context.actor.userId,jti:context.actor.sessionRef,exp:context.actor.expiresAt/1000})};
@@ -200,12 +260,15 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
       assert.equal((await request('/'+intent.authorizationId+'/status',follow)).status,200);
       assert.equal((await request('/'+intent.authorizationId+'/revoke',{...follow,request_id:randomUUID(),input:intent.input})).body.authorization.state,'revoked');
       assert.equal((await request('/'+randomUUID()+'/status',{...follow,request_id:randomUUID()})).status,404);
+      const listing=await request('/list',{...follow,request_id:randomUUID(),cursor:null,plan_id:intent.input.planId});
+      assert.equal(listing.status,200);assert.equal(listing.cache,'private, no-store');assert.equal(listing.body.items[0].authorizationId,intent.authorizationId);
+      for(const patch of [{cursor:{limit:1000}},{plan_id:'foreign'},{owner_id:91003}])assert.equal((await request('/list',{...follow,request_id:randomUUID(),cursor:null,plan_id:null,...patch})).status,400);
     }finally{agent.destroy();await new Promise(resolve=>server.close(resolve));}
     report.checks.push('loopback HTTP API checks managed-session proof, explicit confirmation, closed bodies, scope and no-store without credential exposure');
 
     await assert.rejects(require('../../../migrations/'+migrations[2]).down(sql.getQueryInterface()),/Preserve destination/);
     const snapshot=await require('../../lib/securitySchemaContract').snapshot(async(query,values)=>(await sql.query(query,{replacements:values}))[0]);
-    const contract={tables:{},migrations:[{name:migrations[2],sha256:createHash('sha256').update(fs.readFileSync(path.resolve(__dirname,'../../../migrations',migrations[2]))).digest('hex')}]};
+    const contract={tables:{},migrations:migrations.slice(2).map(name=>({name,sha256:createHash('sha256').update(fs.readFileSync(path.resolve(__dirname,'../../../migrations',name))).digest('hex')}))};
     for(const name of ['GoogleDestinationAuthorizations','GoogleDestinationCommands']){
       const table=snapshot.tables.find(row=>row.TABLE_NAME===name);
       contract.tables[name]={ENGINE:table.ENGINE,TABLE_COLLATION:table.TABLE_COLLATION,
@@ -219,7 +282,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     const published=require('../../../ops/security/schema-contract.json');
     if(process.env.GOOGLE_DESTINATION_SCHEMA_CAPTURE!=='1'){
       for(const [name,value] of Object.entries(contract.tables))assert.deepEqual(published.tables[name],value);
-      assert.deepEqual(published.migrations.find(v=>v.name===migrations[2]),contract.migrations[0]);
+      for(const migration of contract.migrations)assert.deepEqual(published.migrations.find(v=>v.name===migration.name),migration);
     }
     report.checks.push('repeatable additive migration, exact MySQL metadata and refusal to destroy authorization history');
     const events=(await models.PlatformAuditEvent.findAll({raw:true})).map(row=>JSON.parse(row.body));

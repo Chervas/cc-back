@@ -9,6 +9,7 @@ const uuid = v => typeof v === 'string' && UUID.test(v);
 const hash = v => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const KEYS = 'version,eventId,correlationId,occurredAt,action,stage,outcome,reason,actor,sessionRef,initiatorSessionRef,scope,provider,connectionRef,assetRef,planRef,authorizationRef,requestRef,relatedCommandRef,mappingId,family,receiptState,eventCount,selectionDigest,clinicCount,clinicSetDigest,capturePolicy';
 function destinationEvent(v) {
+  if (v?.action === 'integration.google_ads.destination_list') return destinationListEvent(v);
   if (!exact(v, KEYS) || !exact(v.actor, 'type,id') || !exact(v.scope, 'type,id')
     || v.version !== 18 || !uuid(v.eventId) || !uuid(v.correlationId) || v.correlationId !== v.requestRef
     || !uuid(v.planRef) || !uuid(v.authorizationRef) || !uuid(v.requestRef) || !uuid(v.sessionRef) || !uuid(v.initiatorSessionRef)
@@ -48,4 +49,34 @@ function fromDestination(row, command, captured, actor, reason, { now, relatedCo
     eventCount: row.input.targets.length, selectionDigest: hash(row.input), clinicCount: captured.clinicIds.length,
     clinicSetDigest: hash([...captured.clinicIds].sort((a,b) => a-b)), capturePolicy: 'google-destinations-durable-v1' });
 }
-module.exports = { destinationEvent, fromDestination };
+const LIST_KEYS = 'version,eventId,correlationId,occurredAt,action,stage,outcome,reason,actor,sessionRef,scope,provider,connectionRef,assetRef,mappingId,clinicCount,clinicSetDigest,criteriaDigest,resultCount,resultDigest,capturePolicy';
+function destinationListEvent(v) {
+  if (!exact(v, LIST_KEYS) || !exact(v.actor, 'type,id') || !exact(v.scope, 'type,id')
+    || v.version !== 18 || !uuid(v.eventId) || !uuid(v.correlationId) || !uuid(v.sessionRef) || !stamp(v.occurredAt)
+    || v.action !== 'integration.google_ads.destination_list' || v.actor.type !== 'user' || !id(v.actor.id)
+    || !['clinic','group'].includes(v.scope.type) || !id(v.scope.id) || v.provider !== 'google_ads' || !id(v.mappingId)
+    || typeof v.connectionRef !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(v.connectionRef)
+    || typeof v.assetRef !== 'string' || !/^ads:\d{10}$/.test(v.assetRef) || v.assetRef === 'ads:0000000000'
+    || !Number.isInteger(v.clinicCount) || v.clinicCount < 1 || v.clinicCount > 1000
+    || !/^[a-f0-9]{64}$/.test(v.clinicSetDigest || '') || !/^[a-f0-9]{64}$/.test(v.criteriaDigest || '')
+    || v.capturePolicy !== 'google-destinations-recovery-v1') fail();
+  if (v.reason === 'list_requested') {
+    if (v.stage !== 'attempted' || v.outcome !== 'unknown' || v.resultCount !== null || v.resultDigest !== null) fail();
+  } else if (v.reason === 'list_prepared') {
+    if (v.stage !== 'completed' || v.outcome !== 'success' || !Number.isInteger(v.resultCount) || v.resultCount < 0 || v.resultCount > 20
+      || !/^[a-f0-9]{64}$/.test(v.resultDigest || '')) fail();
+  } else fail();
+  return Object.fromEntries(LIST_KEYS.split(',').map(key => [key, ['actor','scope'].includes(key) ? { ...v[key] } : v[key]]));
+}
+function fromDestinationList({ actor, captured, scopeKey, mappingId, requestId, reason, rows, input, now }) {
+  const [type, scopeId] = scopeKey.split(':');
+  return destinationListEvent({ version: 18, eventId: randomUUID(), correlationId: requestId, occurredAt: now.toISOString(),
+    action: 'integration.google_ads.destination_list', stage: reason === 'list_requested' ? 'attempted' : 'completed',
+    outcome: reason === 'list_requested' ? 'unknown' : 'success', reason,
+    actor: { type: 'user', id: String(actor.userId) }, sessionRef: actor.sessionRef, scope: { type, id: scopeId },
+    provider: 'google_ads', connectionRef: captured.connectionRef, assetRef: captured.assetRef, mappingId: String(mappingId),
+    clinicCount: captured.clinicIds.length, clinicSetDigest: hash([...captured.clinicIds].sort((a,b) => a-b)),
+    criteriaDigest: hash(input), resultCount: rows === null ? null : rows.length, resultDigest: rows === null ? null : hash(rows),
+    capturePolicy: 'google-destinations-recovery-v1' });
+}
+module.exports = { destinationEvent, fromDestination, destinationListEvent, fromDestinationList };

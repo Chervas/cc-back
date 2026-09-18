@@ -126,7 +126,8 @@ camino broker cuando el registro Ads lo exige. Ya están conectados los mandatos
 workspace v2, los hitos CRM nativos y su preparación validate-only. Siguen
 pendientes la aceptación integrada de destinos, bootstrap y recepción/sync de leads.
 La autorización humana ya tiene diario/API/UI y retirada anticipada preparados;
-faltan compatibilidad AWS v18 y recuperación sin referencia local.
+la recuperación sin referencia local también está preparada. Faltan compatibilidad
+AWS v18 y aceptación integrada.
 Planes de acciones ya preparados con diario/API/UI, todavía sin aceptación real.
 Los dos validadores onboarding ya están adaptados, como se describe al final.
 El diagnóstico de recibos está conectado

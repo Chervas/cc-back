@@ -7,8 +7,8 @@
 
 Preparado y probado con proveedores ficticios. Sin publicación AWS/API, DDL
 operativa, flags habilitadas ni cohortes Google migradas. Diario humano, API,
-confirmación UI y auditoría v18 preparados y probados; compatibilidad AWS v18,
-recuperación sin referencia local y aceptación integrada/autenticada pendientes.
+confirmación UI, recuperación sin referencia local y auditoría v18 preparados y
+probados; compatibilidad AWS v18 y aceptación integrada/autenticada pendientes.
 
 ## Decisión explícita y alcance
 
@@ -134,11 +134,12 @@ API base `/api/marketing/google-ads/conversion-destinations`, POST:
 | Ruta | Cuerpo adicional a ámbito, customer_id y request_id |
 | --- | --- |
 | `/` | `plan_id`, `targets:[{event,sources}]`, `confirm_authorization:true` |
+| `/list` | `cursor:null` o `{createdAt,authorizationId}`; `plan_id:null` o UUID del plan aplicado |
 | `/:authorizationId/status` | Ninguno |
 | `/:authorizationId/revoke` | `input:{planId,targets}` original, siempre obligatorio en CRM |
 
 Exactamente un `clinic_id` o `group_id`; cuerpos cerrados, sin query ni IDs de
-acciones arbitrarios. Rate limit de destinos: 30/minuto; usa el mismo valor que planes, con clave propia. Respuesta
+acciones arbitrarios. Rate limit de destinos: 30/minuto; usa el mismo valor que planes, con clave propia. Respuesta de comandos
 `success,authorizationId,planId,commandId,commandState,outcomeUnknown,canRevoke,authorization`;
 authorization es null o el recibo tipado del broker. 202 conserva intento incierto;
 200 por sí solo tampoco implica permiso activo: interpretar estado/outcome.
@@ -146,16 +147,49 @@ Todas las respuestas son `private, no-store`; errores saneados, sin tokens.
 
 El diálogo de acciones aplicadas ofrece **Revisar permiso de envío**. Se eligen
 explícitamente hitos y WEB/OTHER; abrir, Finalizar o recuperar el plan no autoriza.
-Antes de enviar se conserva UUID, ámbito, selección y IDs esperados en
-`sessionStorage`; si no puede guardarlos, no envía la petición. Recargar consulta
-una vez; no vuelve a autorizar, aplicar ni hacer polling. Workspace y asistente
-permiten reabrir la referencia guardada. La retirada confirmada puede cerrar esa
-referencia local, conservando ambos diarios.
+Antes de una **nueva autorización** se conserva UUID, ámbito, selección y IDs
+esperados en `sessionStorage`; si no puede guardarlos, no envía la petición.
+Recargar consulta una vez; no vuelve a autorizar, aplicar ni hacer polling.
+Workspace y asistente ofrecen **Mis permisos de envío**, también sin referencia
+local. Una referencia ya recuperada del servidor permite consultar/retirar aunque
+el navegador no pueda guardarla. La retirada confirmada puede cerrar la referencia
+local; ambos diarios conservan el historial.
 
-**Límite pendiente:** no hay listado/recuperación de permisos entre navegadores
-sin la referencia original. No activar cohortes hasta completar esa recuperación
-y su aceptación. El servidor permite recuperar con referencia y sesión nueva del
-mismo usuario/ámbito; no admite adopción por otro usuario ni otra selección.
+### Recuperación sin referencia del navegador
+
+`POST /list` usa la misma sesión gestionada, usuario, ámbito, mapping y permisos
+vigentes de todas las clínicas que los comandos. La pausa clínica permite leer.
+La respuesta exacta es `success,requestId,customerId,scopeKey,items,nextCursor`.
+Cada item contiene `authorizationId,input,expected,revokeId,createdAt,observedAt,
+observedState,outcomeUnknown`. `expected` se deriva de los IDs del plan aplicado,
+convalidando propietario, sesiones originales, scope digest y recibo guardado.
+Una propiedad antigua incompleta o manipulada hace fallar la página completa.
+No expone credenciales, usuario/sesión original ni errores libres del proveedor.
+
+La lista representa **últimas observaciones SQL**, no una comprobación remota del
+estado actual. No crea comandos, autoriza, retira ni llama al broker por cada fila.
+Al abrir un permiso se hace una consulta status explícita. Unknown se conserva;
+active con una retirada pendiente no se presenta como autorización confirmada.
+El diálogo de un plan aplicado consulta primero por ese plan: si ya tiene permiso,
+recupera el original; no ofrece otro authorize. Si la consulta falla, impide una
+nueva autorización hasta resolverla. Se pueden consultar otros planes propios.
+
+Página máxima de 20, lectura SQL de 21 para detectar continuación y una lectura
+agrupada de hasta 20 planes por clave primaria. Orden `(created_at,authorization_id)`
+descendente, cursor exacto de posición, sin OFFSET ni COUNT del historial. El
+cursor no concede acceso: usuario/mapping/ámbito/digest se recalculan en cada
+petición; modificarlo solo cambia la posición dentro de lo ya autorizado.
+`plan_id` filtra por la clave única y exige cursor null. No es una exportación ni
+un snapshot congelado del estado mutable entre páginas.
+
+La migración aditiva `20260918224500-index-google-destination-recovery.js` añade
+`cc_google_destination_recovery(actor_user_id,mapping_id,scope_key,scope_digest,
+created_at,authorization_id)`. Listado general fija ese índice, con 21 filas como
+límite; EXPLAIN de filas completas confirma recorrido inverso sin filesort en
+MySQL aislado. No acredita capacidad bajo carga. El rollback del índice no borra
+datos, pero no puede retirarse mientras este código lo use. No se ha aplicado a
+BD operativa. Sesión renovada mantiene acceso solo con el mismo usuario y ámbito;
+no hay adopción por otro usuario ni conciliación administrativa de ámbito cambiado.
 
 ## Auditoría y coste
 
@@ -169,6 +203,14 @@ La salud del outbox se lee una vez por transacción y se reserva capacidad por
 evento añadido: 10.000 pendientes o antigüedad de una hora bloquean la operación.
 Recuperar status/retirada puede cerrar intentos anteriores con referencias
 correlacionadas; no reescribe su historia ni convierte unknown en éxito inventado.
+
+Listar tiene una variante cerrada v18 separada,
+`integration.google_ads.destination_list`: guarda intento antes de leer filas y
+`list_prepared` antes de liberar la página, con usuario/sesión, ámbito, cuenta,
+conteo y digests de criterios/resultado; no guarda el contenido de los permisos.
+La captura fallida impide devolver la página. Una pérdida de permisos en la última
+comprobación también la suprime; «consulta preparada» no afirma recepción humana.
+Usa dos eventos del mismo outbox por página, sin eventos adicionales por cada fila.
 
 El visor proyecta el recibo después de verificar su versión S3 exacta y distingue
 permiso confirmado, permiso retirado y resultado inicial incierto. v18 está
@@ -188,7 +230,7 @@ requiere conversiones, acciones y `GOOGLE_ADS_DESTINATIONS_BROKER_ENABLED=true`,
 todas cerradas por defecto. El guard debe comprobar sesión/permisos sobre todas
 las clínicas de la cuenta; el diario implementado aporta esa comprobación durable.
 
-Faltan recuperación sin referencia de navegador, compatibilidad AWS v18,
+Faltan compatibilidad AWS v18 y aceptación integrada de la recuperación,
 conciliación de entregas tras revocar, bootstrap/leads/job combinado y aceptación
 Google/UI autenticada antes del corte compartido. QA usa MySQL/SQLite reales,
 firmas, cliente CRM, HTTP local, Chromium con componentes Angular reales y

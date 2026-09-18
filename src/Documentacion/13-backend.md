@@ -10409,11 +10409,13 @@ sesión gestionada, exactamente un `clinic_id`/`group_id`, `customer_id` y UUID
 las clínicas de la cuenta; no basta con una de ellas.
 
 - `/`: `plan_id`, `targets:[{event,sources}]`, `confirm_authorization:true`.
+- `/list`: `cursor:null` o `{createdAt,authorizationId}`, y `plan_id:null` o UUID.
+  Recuperación SQL del mismo usuario/cuenta/ámbito, sin llamadas al broker.
 - `/:authorizationId/status`: solo los campos comunes.
 - `/:authorizationId/revoke`: añade `input:{planId,targets}` original. Permite
   retirar un authorize desconocido antes de su llegada; no autoriza otra selección.
 
-Respuesta cerrada `success,authorizationId,planId,commandId,commandState,
+Respuesta de comandos cerrada `success,authorizationId,planId,commandId,commandState,
 outcomeUnknown,canRevoke,authorization`; el último campo es null o
 `{authorizationId,planId,state,destinations:[{event,conversionActionId,sources}]}`.
 200/202 no reemplazan la interpretación de estado. Sin query, retry automático,
@@ -10436,9 +10438,24 @@ no sobrescribe revoked ni inventa éxito para una autorización incierta.
 
 Requiere las cuatro flags Ads/conversiones/acciones/destinos, todas apagadas por
 defecto. No concede señales mejoradas, readiness, IntakeConfig ni jobs/envíos.
-API, diario, confirmación UI y visor v18 están probados con datos ficticios;
-AWS aún admite v17. Faltan compatibilidad v18, recuperación sin referencia local,
-conciliación después de revocar y aceptación integrada/autenticada antes de
+La recuperación responde `success,requestId,customerId,scopeKey,items,nextCursor`,
+con hasta 20 referencias y sus selecciones/IDs derivados del plan, fechas y último
+estado observado. Consulta hasta 21 filas mediante índice por usuario, mapping,
+ámbito/digest y fecha/UUID; obtiene los planes en un lote por PK. Sin OFFSET,
+COUNT histórico, transporte al broker ni mutación de permisos. El cursor solo
+indica posición; nunca sustituye los permisos. Variante de auditoría v18
+`integration.google_ads.destination_list`: intento y página preparada por
+separado; un fallo de auditoría o pérdida final de permisos impide devolverla.
+
+Workspace/asistente permiten recuperar desde otro navegador sin UUID local.
+Al abrir se consulta status; listar no confirma estado remoto. El plan aplicado
+busca antes su permiso original para no ofrecer otro authorize. Una referencia
+recuperada permite retirar aunque falle el almacenamiento local; una autorización
+nueva sigue exigiendo conservar su UUID antes de enviarla.
+
+API, diario, confirmación/recuperación UI y visor v18 probados con datos ficticios;
+AWS aún admite v17. Faltan compatibilidad v18, conciliación después de revocar y
+aceptación integrada/autenticada antes de
 activar cohortes. Contrato de esquema, errores, recuperación y rollback en el
 [contrato técnico](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-destinations-broker.md).
 

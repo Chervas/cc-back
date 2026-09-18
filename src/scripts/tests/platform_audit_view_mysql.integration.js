@@ -132,6 +132,18 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(destinationDto.verification, 's3_version_verified');
   assert(!Object.hasOwn(destinationDto, 'selectionDigest')); assert(!Object.hasOwn(destinationDto, 'connectionRef'));
   report.checks.push('v18 early withdrawal is verified by exact S3 version and preserves unknown initial outcome with original/recovery references in the viewer');
+  const listed = require('../../../services/platform-audit/src/google-destination-event').fromDestinationList({
+    actor: { userId: 9, sessionRef }, captured: { connectionRef: 'google:fixture', assetRef: 'ads:1234567890', clinicIds: [59,71] },
+    scopeKey: 'group:5', mappingId: 11, requestId: randomUUID(), input: { cursor: null, planId: null }, now: at,
+    reason: 'list_prepared', rows: [{ authorizationId: randomUUID() }] });
+  const listedSaved = await repo.append(listed);
+  await models.PlatformAuditEvent.update({ state: 'delivered', receipt: await writer.write(listedSaved), delivered_at: at },
+    { where: { event_id: listed.eventId } });
+  const listedPage = await view.read({ actorId: 1, sessionRef, query: { ...criteria, action: 'integration.google_ads.destination_list' } });
+  assert.equal(listedPage.events.length,1);assert.equal(listedPage.events[0].googleDestinations,null);
+  assert.deepEqual(listedPage.events[0].googleDestinationList,{assetRef:'ads:1234567890',mappingId:'11',clinicCount:2,resultCount:1});
+  assert.equal(listedPage.events[0].verification,'s3_version_verified');assert(!Object.hasOwn(listedPage.events[0],'resultDigest'));
+  report.checks.push('v18 list variant verifies its exact S3 object and exposes only count/scope in a separate projection, never a permission result');
   const broken = await models.PlatformAuditEvent.findByPk(first.events[0].eventId); const goodReceipt = broken.receipt;
   await broken.update({ receipt: { ...goodReceipt, versionId: 'missing-version' } });
   await assert.rejects(view.read({ actorId: 1, sessionRef, query: criteria }), /audit_view_unavailable/);

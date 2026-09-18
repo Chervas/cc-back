@@ -1,9 +1,9 @@
 {
-  "version": 9,
+  "version": 10,
   "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "aaa87859e9b9ba3fafd7ec992232bfbf9c4f1a4a",
+  "sourceBaseHead": "800c7a9aba7676ef40b7c990a9ec8f7a78f1d334",
   "includesWorkingChanges": true,
-  "scope": "Bounded Data Manager inventory with human destination journal/API/v18 review; unchanged rows retain prior evidence hashes, not a fresh complete Google/OPS inventory.",
+  "scope": "Bounded Data Manager destination recovery/list/audit review; unchanged rows retain earlier evidence hashes and are not a fresh complete Google/OPS inventory.",
   "runtimeConsumersMigrated": 0,
   "qa": {
     "broker": "607/607 final full Node24 regression, including 23 destination registry scenarios; external network blocked",
@@ -23,13 +23,14 @@
     "actionManagementClientScopeReaderAndOnboarding": 60,
     "destinationClientRegression": 30,
     "destinationRegistryRuntime": "23/23 included in 607; signed SQLite and real loopback HTTPS/CRM scope/client, fictitious AWS/Google/S3",
-    "destinationHumanJournalAndUI": "prepared, undeployed: 13 MySQL groups, 16 parent-plan regressions, 12 viewer groups; actual Angular Chromium in desktop/mobile with fictitious APIs, public MFA acceptance pending",
+    "destinationHumanJournalAndUI": "prepared, undeployed: 17 MySQL journal/recovery groups; 13 viewer groups; desktop/mobile Angular Chromium with actual HTTP client and fictitious API, public MFA acceptance pending",
     "previous_broker": "584/584 full regression; 28/28 focused after strict owner/resource type checks (overlapping)",
-    "destinationHumanAuditCodec": "78/78 platform audit regression; v18 still not published to AWS",
-    "destinationUiChecks": 60,
-    "destinationUiScreenshots": 38,
-    "auditUiScreenshots": 10,
-    "destinationFrontUnitTests": 24
+    "destinationHumanAuditCodec": "79/79 platform audit regression; v18 command and list variants still not published to AWS",
+    "destinationUiChecks": 76,
+    "destinationUiScreenshots": 47,
+    "auditUiScreenshots": 12,
+    "destinationFrontUnitTests": 27,
+    "destinationRecoveryIndex": "full-row EXPLAIN: forced scoped index, ref, Backward index scan, no filesort; isolated MySQL, not a load test"
   },
   "rows": [
     {
@@ -293,15 +294,15 @@
     },
     {
       "file": "src/services/googleDestinationJournal.service.js",
-      "role": "Decisión humana SQL, sesión/ACL de todas las clínicas, v18 atómico, retiro incierto recuperable; sin transacción durante transporte.",
+      "role": "Contexto común con sesión/ACL/ámbito idénticos para comandos y recuperación propia.",
       "state": "destination_human_journal_prepared_undeployed",
-      "sha256": "979fc0148ff0600b551f852ca6c530a848afcf20c7f9e76fa0e3aad954e49153"
+      "sha256": "c36468040f149dcb8bd8e60a08144eea138b628a20f831a59ce0b46582d8bad9"
     },
     {
       "file": "src/routes/googleDestinations.routes.js",
-      "role": "API cerrada con sesión gestionada, confirmación explícita, status y retiro de intención original.",
+      "role": "POST cerrado de decisiones y listado de recuperación, todos con sesión actual y no-store.",
       "state": "destination_http_prepared_undeployed",
-      "sha256": "dda34e3838ea2e0e5cb9d883a4e614d6584b8bb51422d2fc749c61f3390db8cd"
+      "sha256": "fdd24a331f6fb10927204e2b7224c1d94c425d112579ecf3c3c99ffda3b12bb1"
     },
     {
       "file": "src/lib/googleConversionRequestContext.js",
@@ -311,9 +312,15 @@
     },
     {
       "file": "services/platform-audit/src/google-destination-event.js",
-      "role": "Auditoría humana v18 cerrada; conserva desconocimiento de authorize retirado. AWS sigue v17.",
+      "role": "V18 cerrado: decisiones y variante list_requested/list_prepared con conteo/digests sin contenido; AWS aún v17.",
       "state": "audit_v18_prepared_undeployed",
-      "sha256": "5cfb3c4b54ad06bfaf848f00a71ec467d77e7f5b0dda72390076cae5aaed913e"
+      "sha256": "2a22eac74b25ac019bebfc903c527008e07da03bdd4bd3eb158baba138a1f5df"
+    },
+    {
+      "file": "src/services/googleDestinationRecovery.service.js",
+      "role": "Recuperación propia sin UUID local: páginas de 20, índice forzado y lote de planes; sin llamadas broker ni mutación de permisos.",
+      "state": "destination_recovery_prepared_undeployed",
+      "sha256": "bdda48610158b81342ae19aff98cc68effc8126b17cac64ffcf2dc2d594fd648"
     }
   ]
 }

@@ -182,3 +182,25 @@ padre `OnPush`, respuestas asíncronas, paginación, denegación y recuperación
 errores a 1440/390 px. Usa datos ficticios; no acredita una sesión humana nueva
 contra producción. Las medidas del backend sí proceden del runtime real. No
 son una prueba de carga masiva ni una garantía de latencia bajo cualquier carga.
+
+
+## Recuperación de permisos Google preparada (2026-09-18 UTC)
+
+El listado nuevo de decisiones de envío no usa el broker como buscador: consulta
+el diario MySQL propio del entorno, con sesión/propietario/ámbito y permisos
+actuales sobre todas las clínicas. Página de 20, lectura de 21 para continuación,
+orden por fecha/UUID y un lote de hasta 20 planes por PK. Sin OFFSET, conteo global
+ni polling del navegador. El filtro por plan usa su índice único.
+
+La migración `20260918224500-index-google-destination-recovery.js` añade el índice
+compuesto por usuario/mapping/ámbito/digest/fecha/UUID, exigido por el listado
+general. EXPLAIN de filas completas, con los mismos predicados y FORCE INDEX del
+servicio, muestra `ref` y `Backward index scan`, sin filesort en MySQL aislado.
+Se probó paginación con fechas iguales y nuevas inserciones; el cursor no altera
+los predicados de acceso. No es una prueba de capacidad ni de carga operativa.
+
+Listar produce dos eventos del outbox, sin llamar a Google/AWS ni al broker por
+cada fila. Abrir una referencia consulta status una vez. Los controles habituales
+de salud del outbox pueden impedir liberar una página; fallo de auditoría y
+pérdida final de permisos también se probaron. Código/índice aún no desplegados.
+Contrato y límites: [destinos Google](google-destinations-broker.md#recuperación-sin-referencia-del-navegador).

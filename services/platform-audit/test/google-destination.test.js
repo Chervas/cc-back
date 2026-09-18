@@ -3,6 +3,7 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const { randomUUID, generateKeyPairSync } = require('node:crypto');
 const { Readable } = require('node:stream');
 const { fromDestination } = require('../src/google-destination-event');
+const { fromDestinationList } = require('../src/google-destination-event');
 const { pack, unpack, keyFor } = require('../src/event');
 const { refFor, signRequest } = require('../src/reader-protocol');
 function fixture(family = 'authorize', reason = 'command_admitted') {
@@ -49,5 +50,16 @@ test('signed v18 reader checks the precise S3 version, body digest and KMS objec
       return {ContentLength:Buffer.byteLength(row.body),ContentType:'application/json',ChecksumSHA256:Buffer.from(row.digest,'hex').toString('base64'),
         ServerSideEncryption:'aws:kms',SSEKMSKeyId:KEY_ARN,VersionId:wrong?'substituted':ref.versionId,Body:Readable.from([row.body])};
     }});assert.equal(result.results[0].status,wrong?'error':'verified');
+  }
+});
+test('v18 list audit separates the prepared page from a permission decision and keeps rows out of the event', () => {
+  const common = { actor: { userId: 9, sessionRef: randomUUID() }, captured: { connectionRef: 'google:fixture', assetRef: 'ads:1234567890', clinicIds: [59,71] },
+    scopeKey: 'group:5', mappingId: 11, requestId: randomUUID(), input: { cursor: null, planId: null }, now: new Date('2026-09-18T22:45:00.000Z') };
+  for (const [reason, rows] of [['list_requested', null], ['list_prepared', []], ['list_prepared', [{ authorizationId: randomUUID() }]]]) {
+    const e = fromDestinationList({ ...common, reason, rows }), row = pack(e);
+    assert.equal(unpack(row).body, row.body); assert.match(keyFor(row), /^app\/platform\/v18\//);
+    assert.equal(e.resultCount, rows === null ? null : rows.length); assert.doesNotMatch(row.body, /authorizationId|targets|token|clickId/);
+    for (const patch of [{ authorizationId: randomUUID() }, { actor: { type: 'job', id: '9' } }, { resultCount: 21 }, { resultDigest: 'raw' },
+      { reason: 'broker_acknowledged' }, { capturePolicy: 'google-destinations-durable-v1' }, { scope: { type: 'platform', id: null } }]) assert.throws(() => pack({ ...e, ...patch }));
   }
 });
