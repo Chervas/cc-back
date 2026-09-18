@@ -11,8 +11,11 @@ proveedor y aceptación UI autenticada todavía pendientes.
 
 La reserva SQL y el coordinador CRM conservan el UUID aun con ACK perdido o fallo
 de commit. Consulta de estado devuelve el recibo original dentro del mismo scope.
-Dieciocho comprobaciones MySQL aisladas,556 broker y23 cliente/scope pasan; aún
-sin callsites de negocio conectados, DDL operativa ni aceptación UI real.
+El emisor común y el resolutor por mapping ya seleccionan el broker sin tokens
+locales: 29 comprobaciones MySQL aisladas y 27 de cliente/scope/constructor pasan.
+La última regresión del motor broker, que no cambia aquí, sigue en556. Mandatos
+workspace v2, hitos nativos, diagnóstico y preparación aún necesitan adaptadores;
+sin DDL operativa, despliegue ni aceptación UI real de este conjunto.
 
 ## 13/09/2026 — Alta WhatsApp durable en el broker
 

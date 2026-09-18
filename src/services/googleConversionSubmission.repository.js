@@ -111,7 +111,10 @@ function createGoogleConversionSubmissionRepository({ models, assertContext, del
           fail('conversion_history_not_eligible');
         if (Number(attempt.googleConnectionId) !== captured.googleConnectionId || attempt.customerId !== captured.customerId
           || (attempt.loginCustomerId || null) !== captured.loginCustomerId
-          || (attempt.assignmentScope === 'group' ? 'group:' + attempt.grupoClinicaId : 'clinic:' + attempt.clinicaId) !== captured.scopeKey
+          || !['clinic', 'group'].includes(attempt.assignmentScope)
+          || (attempt.assignmentScope === 'group' ? 'group:' + attempt.grupoClinicaId !== captured.scopeKey
+            : !captured.clinicIds.includes(Number(attempt.clinicaId)))
+          || attempt.grupoClinicaId != null && Number(attempt.grupoClinicaId) !== captured.groupId
           || attempt.clinicaId != null && !captured.clinicIds.includes(Number(attempt.clinicaId))
           || attempt.conversionAction !== `customers/${captured.customerId}/conversionActions/${data.conversionActionId}`
           || attempt.eventName !== data.eventName || (attempt.eventId || null) !== data.event.transactionId
@@ -124,7 +127,7 @@ function createGoogleConversionSubmissionRepository({ models, assertContext, del
           || (metadata.explicit_ad_user_data_consent_status || 'UNSPECIFIED') !== (data.event.adUserData || 'UNSPECIFIED')
           || (metadata.visitor_ad_personalization_consent_status || 'UNSPECIFIED') !== (data.event.adPersonalization || 'UNSPECIFIED')
           || Number(metadata.user_identifier_count || 0) !== data.event.userIdentifiers.length
-          || (metadata.enhanced_conversion_authorization_digest || null) !== data.event.enhancedPolicyDigest) fail('conversion_submission_conflict');
+          || (data.event.userIdentifiers.length ? metadata.enhanced_conversion_authorization_digest || null : null) !== data.event.enhancedPolicyDigest) fail('conversion_submission_conflict');
         const row = await getModels().GoogleConversionSubmission.create({ submission_id: randomUUID(), attempt_id: attempt.id,
           dedupe_key: dedupeKey, mapping_id: captured.id, google_connection_id: captured.googleConnectionId,
           connection_ref: captured.connectionRef, asset_ref: captured.assetRef, tenant_ref: captured.tenantRef,

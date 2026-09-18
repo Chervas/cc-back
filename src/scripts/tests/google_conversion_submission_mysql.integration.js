@@ -17,10 +17,15 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     ['GoogleConnectionAssignment', 'googleconnectionassignment'], ['GroupAssetClinicAssignment', 'groupassetclinicassignment']]) {
     models[name] = require('../../../models/' + file)(sql, D); await models[name].sync();
   }
-  models.Clinica = sql.define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, grupoClinicaId: D.INTEGER },
+  models.Clinica = sql.define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, grupoClinicaId: D.INTEGER,
+    estado_clinica: { type: D.BOOLEAN, defaultValue: true } },
     { tableName: 'Clinicas', timestamps: false }); await models.Clinica.sync();
   await models.Clinica.bulkCreate([{ id_clinica: 59, grupoClinicaId: 5 }, { id_clinica: 71, grupoClinicaId: 5 }, { id_clinica: 99, grupoClinicaId: 6 }]);
   await sql.query('INSERT INTO GruposClinicas (id_grupo) VALUES (5),(6)');
+  const configFields = { assignment_scope: D.STRING, clinic_id: D.INTEGER, group_id: D.INTEGER, config: D.JSON };
+  for (const [name, type] of Object.entries(configFields)) await sql.getQueryInterface().addColumn('IntakeConfigs', name, { type });
+  models.IntakeConfig = sql.define('IntakeConfig', { id: { type: D.INTEGER, primaryKey: true }, ...configFields },
+    { tableName: 'IntakeConfigs', timestamps: false });
   for (const file of ['20260711003000-create-google-ads-conversion-upload-attempts',
     '20260711012000-add-google-ads-conversion-destination-key', '20260712090000-add-data-manager-conversion-statuses']) {
     await require('../../../migrations/' + file).up(sql.getQueryInterface(), require('sequelize'));
@@ -53,7 +58,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
       journal: () => {}, loadMigration: () => assert.fail('must not repeat DDL') }), /schema_plan_stale_or_invalid/);
   } finally { await sql.connectionManager.releaseConnection(connection); }
   report.checks.push('pinned schema plan applies only the new journal migration, validates both tables and rejects replay of the stale plan');
-  await models.GoogleConnection.create({ id: 2, googleUserId: 'fictitious-subject', accessToken: null, refreshToken: null });
+  await models.GoogleConnection.create({ id: 2, googleUserId: 'fictitious-subject', accessToken: null, refreshToken: null,
+    scopes: 'https://www.googleapis.com/auth/adwords https://www.googleapis.com/auth/datamanager' });
   await models.GoogleConnection.create({ id: 3, googleUserId: 'foreign-subject', accessToken: null, refreshToken: null });
   await models.GoogleConnectionAssignment.create({ id: 100, scopeKey: 'group:5', googleConnectionId: 2, assignmentScope: 'group', grupoClinicaId: 5, status: 'active' });
   const mapping = (await models.ClinicGoogleAdsAccount.create({ id: 11, clinicaId: 59, grupoClinicaId: 5, assignmentScope: 'group',
@@ -276,6 +282,128 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     await assert.rejects(repository.begin({ ...identity(expired, expiredReceipt), payload: expired.payload }), { code: 'conversion_history_not_eligible' });
     at = oldAt; assert.equal((await row(expiredReceipt.submissionId)).state, 'prepared');
     report.checks.push('a prepared request cannot wake after a long pause and emit an old conversion');
+
+    const scoped = require('../../services/googleAdsScopedRuntime.service').resolveScopedGoogleAdsRuntime;
+    const resolveRuntime = options => scoped({ ...options, accountModel: models.ClinicGoogleAdsAccount,
+      connectionModel: models.GoogleConnection, broker, credentials: { load: () => assert.fail('must not hydrate legacy credentials') },
+      ensureAccessToken: () => assert.fail('must not refresh legacy OAuth') });
+    const scopedArgs = { clinicId: 71, groupId: 5, assignmentScope: 'clinic', customerId: mapping.customerId,
+      requiredScopes: [C.SCOPES[0]] };
+    const managedRuntime = await resolveRuntime(scopedArgs);
+    assert.equal(managedRuntime.deliveryMode, 'broker'); assert(!Object.hasOwn(managedRuntime, 'accessToken'));
+    assert.deepEqual(Object.keys(managedRuntime.connection).sort(), ['googleUserId', 'id', 'scopes']);
+    await assert.rejects(resolveRuntime({ ...scopedArgs, clinicId: 99 }), { code: 'scope_denied' });
+    report.checks.push('actual scoped resolver uses the durable Ads scope without local tokens and rejects a foreign clinic under a group mapping');
+
+    const cfg = await models.IntakeConfig.create({ id: 1, assignment_scope: 'clinic', clinic_id: 71, group_id: 5,
+      config: { features: { consent_mode_enabled: true }, google_ads: { enabled: true, customer_id: mapping.customerId,
+        events: { lead: { enabled: true, conversion_action_id: '456', currency: 'EUR', value: 5 } } } } });
+    Object.assign(process.env, { GOOGLE_ADS_BROKER_AUDIENCE: deliveryIdentity.audience,
+      GOOGLE_ADS_BROKER_KEY_ID: deliveryIdentity.keyId, GOOGLE_ADS_CONVERSIONS_ACTIVE_SINCE: activeSince });
+    const web = eventId => ({ cfgRecord: cfg, eventName: 'lead', eventId, clinicId: 71, groupId: 5, assignmentScope: 'clinic',
+      consent: { marketing: true, ad_user_data: 'granted', ad_personalization: 'denied' },
+      customData: { gclid: 'FICTITIOUS-CLICK' }, dependencies: { models, auditModel: A, resolveRuntime,
+        uploadConversion: () => assert.fail('must not send using a local token'),
+        brokerEnabled: () => enabled, now: () => new Date(at) } });
+    const freshWeb = web(randomUUID()), writesBeforeWeb = providerWrites;
+    const webResults = await Promise.all(Array.from({ length: 5 }, () => legacy.maybeUploadGoogleConversion(freshWeb)));
+    assert.equal(webResults.filter(r => r.sent).length, 1); assert.equal(providerWrites, writesBeforeWeb + 1);
+    assert.equal(new Set(webResults.map(r => r.audit_id)).size, 1);
+    const webAttempt = await attempt(webResults[0].audit_id);
+    assert.equal(webAttempt.assignmentScope, 'clinic'); assert.equal(webAttempt.clinicaId, 71);
+    assert.equal(webAttempt.attemptCount, 1); assert.equal(webAttempt.requestMetadata.explicit_ad_user_data_consent_status, 'GRANTED');
+    assert.equal(webAttempt.requestMetadata.visitor_ad_personalization_consent_status, 'DENIED');
+    assert.equal(webAttempt.requestMetadata.broker_delivery_version, 1);
+    assert.equal((await legacy.maybeUploadGoogleConversion(freshWeb)).accepted, true);
+    assert.equal(providerWrites, writesBeforeWeb + 1);
+    report.checks.push('real business upload plus actual scoped resolver, SQL and signed broker emits once under concurrent clinic events with group grants; explicit DENIED signals and audit scope are preserved');
+
+    const webLost = web(randomUUID()); afterRemote = command => { if (command.operation === C.OPERATIONS.ingest) { afterRemote = null; fail('broker_timeout'); } };
+    await assert.rejects(legacy.maybeUploadGoogleConversion(webLost), { code: 'broker_timeout' });
+    const webLostWrites = providerWrites, repeatLost = await legacy.maybeUploadGoogleConversion(webLost);
+    assert.equal(repeatLost.sent, false); assert.equal(repeatLost.accepted, false); assert.equal(repeatLost.unknown_count, 1);
+    assert.equal(repeatLost.skipped_count, 0); assert.equal(providerWrites, webLostWrites);
+    const recoveredWeb = await delivery.reconcile({ account: managedRuntime.account, context: managedRuntime.brokerContext,
+      attemptId: repeatLost.audit_id, submissionId: repeatLost.submission_id, beforeExecute: async () => true });
+    assert.equal(recoveredWeb.state, 'succeeded');
+    assert.equal((await legacy.maybeUploadGoogleConversion(webLost)).reason, 'duplicate_already_succeeded');
+    assert.equal(providerWrites, webLostWrites);
+    const originalNow = at; at += 600000;
+    assert.equal((await legacy.maybeUploadGoogleConversion(webLost)).reason, 'duplicate_already_succeeded');
+    assert.equal(providerWrites, webLostWrites); at = originalNow;
+    report.checks.push('business-path lost ACK stays explicitly unknown, is not counted as skipped or accepted, and recovers by receipt without another ingest');
+
+    const gapWeb = web(randomUUID()); let gapAttempt;
+    gapWeb.dependencies.auditModel = { findOne: options => A.findOne(options), create: async values => {
+      const row = await A.create(values); gapAttempt = row;
+      await assert.rejects(legacy.prepareAuditRow({ auditModel: A, values, status: 'pending' }), { code: 'GOOGLE_CONVERSION_BROKER_RESERVED' });
+      fail('broker_timeout');
+    } };
+    const beforeGap = providerWrites;
+    await assert.rejects(legacy.maybeUploadGoogleConversion(gapWeb), { code: 'broker_timeout' });
+    assert(!gapAttempt.requestMetadata.broker_submission_id); assert.equal(providerWrites, beforeGap);
+    gapWeb.dependencies.auditModel = A;
+    assert.equal((await legacy.maybeUploadGoogleConversion(gapWeb)).sent, true);
+    assert.equal(providerWrites, beforeGap + 1);
+    report.checks.push('insert-time managed marker blocks legacy before UUID reservation; a crash before reservation can continue only the same fresh business attempt');
+
+    const guardEvent = web(randomUUID()); const guardCount = await A.count(); const guardWrites = providerWrites;
+    enabled = false; await assert.rejects(legacy.maybeUploadGoogleConversion(guardEvent), { code: 'broker_cohort_disabled' }); enabled = true;
+    await models.Clinica.update({ estado_clinica: false }, { where: { id_clinica: 71 } });
+    await assert.rejects(legacy.maybeUploadGoogleConversion(guardEvent), { code: 'conversion_paused' });
+    await models.Clinica.update({ estado_clinica: true }, { where: { id_clinica: 71 } });
+    const changedConfig = structuredClone(cfg.config); changedConfig.google_ads.enabled = false;
+    await models.IntakeConfig.update({ config: changedConfig }, { where: { id: cfg.id } });
+    await assert.rejects(legacy.maybeUploadGoogleConversion(guardEvent), { code: 'conversion_paused' });
+    await models.IntakeConfig.update({ config: cfg.config }, { where: { id: cfg.id } });
+    assert.equal(await A.count(), guardCount); assert.equal(providerWrites, guardWrites);
+    report.checks.push('real clinic pause, disabled conversion flag and changed SQL tracking configuration stop before creating an attempt or reaching the provider');
+
+    const foreignCfg = await models.IntakeConfig.create({ id: 2, assignment_scope: 'clinic', clinic_id: 59, group_id: 5, config: cfg.config });
+    await assert.rejects(legacy.maybeUploadGoogleConversion({ ...web(randomUUID()), cfgRecord: foreignCfg }), { code: 'scope_denied' });
+    assert.equal(await A.count(), guardCount); assert.equal(providerWrites, guardWrites);
+    report.checks.push('a sibling clinic tracking record cannot authorize an event merely because the Ads grant is shared by the group');
+
+    const mutatedWeb = web(randomUUID()); afterRemote = async command => {
+      if (command.operation === C.OPERATIONS.ingest) { afterRemote = null;
+        await models.IntakeConfig.update({ config: changedConfig }, { where: { id: cfg.id } }); }
+    };
+    await assert.rejects(legacy.maybeUploadGoogleConversion(mutatedWeb), { code: 'conversion_paused' });
+    const mutatedWrites = providerWrites;
+    await models.IntakeConfig.update({ config: cfg.config }, { where: { id: cfg.id } });
+    assert.equal((await legacy.maybeUploadGoogleConversion(mutatedWeb)).reason, 'broker_outcome_unknown');
+    assert.equal(providerWrites, mutatedWrites);
+    report.checks.push('tracking configuration changed during delivery leaves durable uncertainty and never re-enters legacy or sends again');
+
+    const deniedWeb = web(randomUUID()); deniedWeb.consent.ad_user_data = 'denied';
+    const deniedWrites = providerWrites;
+    assert.equal((await legacy.maybeUploadGoogleConversion(deniedWeb)).reason, 'consent_not_granted');
+    assert.equal(providerWrites, deniedWrites);
+    report.checks.push('the existing business consent gate still rejects explicit ad-user-data denial even with generic marketing consent');
+
+    const collisionWeb = web(randomUUID()); let oldAttempt;
+    collisionWeb.dependencies.auditModel = { findOne: options => A.findOne(options), create: async values => {
+      const metadata = { ...values.requestMetadata }; delete metadata.broker_delivery_version;
+      oldAttempt = await A.create({ ...values, requestMetadata: metadata, status: 'failed' });
+      throw Object.assign(Error('fictitious legacy insert race'), { name: 'SequelizeUniqueConstraintError' });
+    } };
+    const oldWrites = providerWrites;
+    await assert.rejects(legacy.maybeUploadGoogleConversion(collisionWeb), { code: 'conversion_history_not_eligible' });
+    assert.equal((await attempt(oldAttempt.id)).status, 'failed'); assert.equal(providerWrites, oldWrites);
+    report.checks.push('an insertion race with a failed legacy attempt cannot adopt that row, reset history or emit through the broker');
+
+    const configWeb = web(randomUUID()); const beforeConfig = await A.count();
+    delete process.env.GOOGLE_ADS_CONVERSIONS_ACTIVE_SINCE;
+    await assert.rejects(legacy.maybeUploadGoogleConversion(configWeb), { code: 'broker_configuration_invalid' });
+    process.env.GOOGLE_ADS_CONVERSIONS_ACTIVE_SINCE = activeSince;
+    assert.equal(await A.count(), beforeConfig);
+    report.checks.push('the production coordinator factory requires a configured stable cutover before creating any attempt');
+
+    const clickOnly = await input();
+    await A.update({ requestMetadata: { ...(await attempt(clickOnly.attemptId)).requestMetadata,
+      enhanced_conversion_authorization_digest: 'a'.repeat(64) } }, { where: { id: clickOnly.attemptId } });
+    assert.equal((await delivery.submit(clickOnly)).state, 'accepted');
+    report.checks.push('a configured enhanced authorization does not block a click-only event with no personal hashes');
 
     const table = 'GoogleConversionSubmissions';
     const query = async (text, values = []) => { const [rows] = await sql.query(text, { replacements: values }); return rows; };

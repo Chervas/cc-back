@@ -1,4 +1,5 @@
 'use strict';
+const { installGoogleAdsLegacyModels } = require('./fixtures/google_ads_legacy_models.fixture');
 
 const { test, mock } = require('node:test');
 const assert = require('node:assert/strict');
@@ -57,6 +58,7 @@ function harness() {
       update: async (values, { where }) => { const row = state.deliveries.find(row => Object.keys(where).every(key => row[key] === where[key])); if (!row) return [0]; Object.assign(row, values); return [1]; },
     },
   };
+  installGoogleAdsLegacyModels(models);
   const now = () => state.date;
   const googleActions = ['lead', 'schedule'].map((event, index) => ({ id: String(101 + index), name: event === 'lead' ? 'Lead - ClinicaClick' : 'Schedule - ClinicaClick',
     resource_name: `customers/10/conversionActions/${101 + index}`, type: 'UPLOAD_CLICKS', status: 'ENABLED',
@@ -374,7 +376,8 @@ test('Google v2 receipts move from processing to processed through the existing 
   const h = harness(); await h.prepare(); await h.authorize(); await h.workspaceGoogleUpload();
   h.state.date = new Date(+h.state.date + 3600000);
   const result = await reconcileGoogleDataManagerDiagnostics({ attemptModel: h.models.GoogleAdsConversionUploadAttempt,
-    connectionModel: h.models.GoogleConnection, now: h.state.date, ensureAccessToken: async () => ({ accessToken: 'test' }),
+    connectionModel: h.models.GoogleConnection, credentials: require('../../services/googleLegacyCredentials.service').forModels(h.models),
+    now: h.state.date, ensureAccessToken: async () => ({ accessToken: 'test' }),
     retrieveStatus: async ({ requestId }) => {
       assert.equal(requestId, 'workspace-google-receipt');
       return { requestStatusPerDestination: [{ destination: { operatingAccount: { accountId: '10' }, productDestinationId: '101' },

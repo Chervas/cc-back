@@ -43,12 +43,19 @@ function privateFile(filename) {
     return fs.readFileSync(filename);
   } catch { fail('broker_configuration_invalid'); }
 }
-let cachedClient;
-const client = { execute(command, budget) {
-  cachedClient ||= createIntegrationsBrokerClient({ origin: process.env.GOOGLE_ADS_BROKER_ORIGIN,
-    audience: process.env.GOOGLE_ADS_BROKER_AUDIENCE, keyId: process.env.GOOGLE_ADS_BROKER_KEY_ID,
-    privateKey: privateFile(process.env.GOOGLE_ADS_BROKER_KEY_FILE), ca: privateFile(process.env.GOOGLE_ADS_BROKER_CA_FILE), timeoutMs: 30000 });
-  return cachedClient.execute(command, budget);
-} };
+function createConfiguredGoogleAdsClient({ env = process.env, readPrivateFile = privateFile, createClient = createIntegrationsBrokerClient } = {}) {
+  let cachedClient, cachedConfiguration;
+  return { execute(command, budget) {
+    const current = { origin: env.GOOGLE_ADS_BROKER_ORIGIN,
+      audience: env.GOOGLE_ADS_BROKER_AUDIENCE, keyId: env.GOOGLE_ADS_BROKER_KEY_ID,
+      keyFile: env.GOOGLE_ADS_BROKER_KEY_FILE, caFile: env.GOOGLE_ADS_BROKER_CA_FILE };
+    if (cachedConfiguration && JSON.stringify(current) !== JSON.stringify(cachedConfiguration)) fail('broker_configuration_invalid');
+    cachedClient ||= createClient({ origin: current.origin, audience: current.audience, keyId: current.keyId,
+      privateKey: readPrivateFile(current.keyFile), ca: readPrivateFile(current.caFile), timeoutMs: 30000 });
+    cachedConfiguration ||= current;
+    return cachedClient.execute(command, budget);
+  } };
+}
+const client = createConfiguredGoogleAdsClient();
 const service = createGoogleAdsBroker({ client, ...createGoogleAdsScopeRepository(() => require('../../models')) });
-module.exports = { ...service, createGoogleAdsBroker, safe };
+module.exports = { ...service, createGoogleAdsBroker, createConfiguredGoogleAdsClient, safe };

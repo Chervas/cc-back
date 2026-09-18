@@ -109,13 +109,16 @@ guardia de red offline. La comparación contra el constructor actual del CRM
 incluye 54 combinaciones WEB/OTHER, gclid/gbraid/wbraid y las dos señales de
 consentimiento. No acredita entrega real a Google ni una interfaz autenticada.
 
-Regresión final: 556/556 pruebas del broker en Node24, incluida la llamada desde
-el cliente CRM real al servidor HTTPS local; 23/23 de cliente, scope y lector
-Ads en Node18. Guardias de red/BD impiden acceder a los entornos operativos.
+Última regresión del motor broker: 556/556 en Node24, incluida la llamada desde
+el cliente CRM real al servidor HTTPS local. Regresión actual de cliente, scope,
+lector y adaptador CRM: 27/27 en Node18. Guardias de red/BD impiden acceder a los
+entornos operativos. El motor broker no cambió en este último tramo del adaptador.
 
-Queda conectar y probar subida web, hitos CRM nativos, preparación validate-only,
-diagnóstico y sus resolutores de permisos. La nueva reserva SQL y el coordinador
-están preparados, pero todavía no se invocan desde esos flujos de negocio.
+El emisor común de conversiones y su resolutor por mapping ya seleccionan el
+camino broker cuando el registro Ads lo exige. Falta conectar los resolutores
+de mandatos workspace v2 y de hitos CRM nativos, preparación validate-only,
+diagnóstico y sus permisos; estos todavía cargan credenciales legacy. No activar
+el conjunto parcial ni migrar la identidad compartida antes de completarlos.
 Conservar los grants, la política del workspace, consentimiento, pausas y deduplicación.
 El [inventario de este tramo](google-data-manager-consumers.json) incluye los dos
 validadores de onboarding y el job que combina diagnósticos con otras tareas;
@@ -179,3 +182,54 @@ Incluye concurrencia, commit fallido, doble fallo de persistencia, revocación,
 recuperación tras reapertura SQLite, rechazo de históricos y preservación de la
 evidencia que consume Salud. El mismo aplicador ejecuta la migración fijada y
 rechaza repetir su plan. No equivale a un recorrido autenticado ni a un corte real.
+
+
+## Emisor común y selección por mapping, 18/09/2026
+
+`resolveScopedGoogleAdsRuntime` consulta siempre el registro Ads antes de leer
+credenciales, incluso con la cohorte apagada. Una cuenta gestionada devuelve
+contexto opaco, mapping y metadata sin tokens; comprueba clínica/grupo y scopes.
+El transporte rechaza cambios de audiencia, clave, endpoint o rutas privadas
+respecto a su configuración inicial; no firma con una identidad de caché distinta.
+
+El emisor común dirige ese runtime al coordinador SQL. El intento se crea sin
+actualizar filas anteriores y lleva `broker_delivery_version: 1` desde la inserción,
+antes de reservar UUID. Legacy rechaza tanto ese marcador como el UUID, incluso
+tras una colisión. Si un proceso cae en ese intervalo, solo el mismo intento nuevo
+con los mismos datos puede continuar dentro del límite original de cinco minutos.
+Un intento legacy que gane la colisión no se adopta ni reinicia.
+
+Se requiere `GOOGLE_ADS_CONVERSIONS_ACTIVE_SINCE` ISO UTC con milisegundos,
+explícito y estable, además de audiencia/clave y las dos flags Ads. La fábrica
+rechaza corte ausente antes de crear el intento. No calcularlo al arrancar ni
+cambiarlo para convertir un envío incierto en otro nuevo. Conservar corte,
+identidad, timestamp persistido, UUID y contador al recuperar el servicio.
+
+El guard relee estado clínico, propietario y contenido de la configuración SQL,
+mandato, consentimiento y vigencia de la autorización mejorada antes/después del
+transporte. Otra clínica del grupo no puede aportar su configuración. La reserva
+admite la clínica dentro del grant de grupo y conserva el ámbito original en el
+intento. Una autorización mejorada configurada no obliga a enviar hashes para
+un evento solo con clic. Se mantiene el consentimiento exigido por el emisor.
+
+Un acuse perdido queda desconocido: `unknown_count` evita computarlo como
+aceptado o saltado. La consulta del recibo puede recuperar el éxito sin reenvío;
+no se utiliza el reintento legacy tras cinco minutos ni se activa el job combinado.
+
+Prueba con emisor/resolutor/fábrica/coordinador reales, MySQL propio y broker
+firmado en proceso con SQLite:29 grupos pasan,11 ingestas ficticias,20 llamadas
+firmadas y cero lecturas de tokens SQL. Incluye concurrencia, acuse perdido,
+pausa, cambio de configuración durante envío, colisión legacy y fuente de otra
+clínica. La suite Node cliente/scope/constructor pasa27 casos, con54 comparaciones
+del cuerpo anterior frente al nuevo. No acredita tráfico real ni interfaz.
+
+Regresión workspace:57 casos de otros flujos pasan. Los27 fallos de la suite v2
+se reproducen también en el HEAD anterior5ba33b6d aislado: faltaban registros
+Google ficticios y el diagnóstico consultaba modelos globales. Corregida la
+preparación, esa suite pasa28/28 conservando el control real de credenciales.
+Se preservan logs de los fallos de prueba, incluido consentimiento mal configurado.
+
+Sin tabla nueva aplicada, despliegue ni cohortes activadas. Los resolutores
+workspace v2/nativos todavía dependen de autorización, preparación y recepción
+legacy; diagnóstico y dos validadores onboarding también requieren adaptación.
+No presentar el emisor común como aceptación de esos recorridos completos.

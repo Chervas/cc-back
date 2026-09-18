@@ -1,17 +1,20 @@
 {
-  "version": 2,
+  "version": 3,
   "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "d7920ab10d187838f3277c70c05e80fdb6375f16",
+  "sourceBaseHead": "5ba33b6da1d5d3617b198252191314705b83c65c",
   "includesWorkingChanges": true,
   "scope": "Bounded manual Data Manager caller inventory; not a complete inventory of all Google identity consumers or external OPS.",
   "runtimeConsumersMigrated": 0,
   "qa": {
-    "broker": 556,
-    "backendClientScopeReader": 23,
+    "broker": "556 last unchanged engine regression; not repeated for CRM-only changes",
     "provider": "fictitious_offline",
     "authenticatedUI": "pending",
-    "mysqlJournalChecks": 18,
-    "schemaUnitTests": 4
+    "mysqlJournalChecks": 29,
+    "schemaUnitTests": 4,
+    "backendClientScopeReaderAndAdapter": 27,
+    "workspaceUnaffectedCases": 57,
+    "workspaceAuthorizationCases": 28,
+    "crmPayloadParityCases": 54
   },
   "rows": [
     {
@@ -22,9 +25,9 @@
     },
     {
       "file": "src/services/googleAdsConversionUpload.service.js",
-      "sha256": "17d178166c59f5ce63fac1cd0980f9f2482b7c431ef7a027a80a5f1b92fe9b2b",
-      "role": "Vía legacy rechaza intentos con reserva broker, también tras colisión de inserción. Conectar la subida web/CRM al nuevo coordinador sigue pendiente.",
-      "state": "legacy_guard_prepared_business_adapter_pending"
+      "sha256": "5c8839b7386a4c5bcb398b44d4ee50617800ffc816eb0644c6535031455dda41",
+      "role": "Emisor común conectado al coordinador para runtime gestionado; mantiene consentimiento y rechaza reservas en legacy. Resolutores workspace v2/nativos pendientes.",
+      "state": "common_emitter_prepared_undeployed"
     },
     {
       "file": "models/googleadsconversionuploadattempt.js",
@@ -64,9 +67,9 @@
     },
     {
       "file": "src/services/googleAdsScopedRuntime.service.js",
-      "sha256": "49ecb17cffc9b2286dd8ce587d9be307cb5bb041e5151b337d9f90521eb07437",
-      "role": "Resolver compartido de asignación, conexión y accessToken; conservar prohibición de fallback managed.",
-      "state": "scoped_runtime_pending"
+      "sha256": "3a2957a88b6c676ee06c77ea28483f37d59766f7adfa0983beeb6bd6c84f3b02",
+      "role": "Consulta registro Ads antes de credenciales y devuelve contexto broker sin tokens; comprueba la clínica solicitada en grants de grupo.",
+      "state": "scoped_runtime_prepared_undeployed"
     },
     {
       "file": "src/services/googleLeadLifecycleConversion.service.js",
@@ -83,13 +86,13 @@
     {
       "file": "src/services/googleDataManagerBrokerClient.service.js",
       "sha256": "e843ba0bb8b3bdf1ef52c1d260507f685e44d04b1f64be018b86f788cf936fa0",
-      "role": "Cliente tipado sin tokens con revalidación, DTO y UUID proporcionado; aún sin callsites de negocio.",
+      "role": "Cliente sin tokens con revalidación y DTO de recibos; invocado por el emisor común mediante coordinador.",
       "state": "prepared_offline"
     },
     {
       "file": "src/services/googleAdsBroker.service.js",
-      "sha256": "4bd64a17c96f2041bb730b572ab009c1076aabe5f3ba233a554383301e96e7c4",
-      "role": "Fachada conecta conversion al contexto opaco Ads; flag adicional apagada.",
+      "sha256": "0884d07a2da73d39608a80e314cbcd9021fc27dc09713012a0f61d0fbf17137f",
+      "role": "Fachada Ads y transporte ligado a configuración inicial de audiencia/clave/endpoint; rechaza cambios de identidad en caliente.",
       "state": "prepared_offline"
     },
     {
@@ -108,11 +111,11 @@
       "file": "src/services/googleConversionSubmission.repository.js",
       "role": "Reserva SQL, control de identidad y aceptación/conciliación atómicas.",
       "state": "prepared_offline",
-      "sha256": "4cfc7217908baddbd59a946e818d12ac9e96028a55a08792d370e5900d845dfe"
+      "sha256": "aed201cd963f09608da4a32f05c145e22d228951beab1ecd8309f7de2cb29a26"
     },
     {
       "file": "src/services/googleConversionDelivery.service.js",
-      "role": "Coordinador sin reenvío tras attempted; recuperación por lectura. Aún sin callsites de negocio.",
+      "role": "Coordinador sin reenvío tras attempted conectado al emisor común; diagnóstico automático aún pendiente.",
       "state": "prepared_offline",
       "sha256": "15479ccbf7516cff8d76fb1fdee3833109148e5e058dbd703c881bafdab2007a"
     },
@@ -133,6 +136,12 @@
       "role": "Salud consume ID de proveedor y diagnóstico normalizado; compatibilidad de datos recuperados probada. Resolver legacy todavía pendiente.",
       "state": "health_data_parity_verified_resolver_pending",
       "sha256": "35299c03aad3703fb840291e3afe3ce5538d86d6391a4bb3103c89fabd80660b"
+    },
+    {
+      "file": "src/services/googleConversionUploadBroker.service.js",
+      "sha256": "505437ce604b32b5329cb6b622f9ede734fd6e8d875495345a499e971cf0db35",
+      "role": "Adaptador del emisor común: marca al insertar, constructor cerrado, guard de fuente/clínica/consentimiento y fábrica SQL con corte estable.",
+      "state": "prepared_offline"
     }
   ]
 }
