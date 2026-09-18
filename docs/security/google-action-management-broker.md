@@ -145,8 +145,11 @@ por conteos/huellas; no se guardan tokens, JWT ni contenido clínico.
 El visor filtra la acción y proyecta plan, comando, consulta/cierre relacionado,
 cuenta, familia, estado y ambas sesiones solo tras verificar versión y bytes S3.
 Preparación verificada, cambios confirmados y resultado incierto son distintos.
-AWS lector/escritor operativo continúa v16: publicar compatibilidad v17 y probar
-entrega/lectura antes de activar este consumidor. Las flags siguen apagadas.
+Lector/escritor deben admitir v17 antes de activar este consumidor. La
+compatibilidad AWS está publicada y el transporte de dos eventos de QA fue
+verificado por recibo firmado y versión/bytes/KMS S3. No publica la captura/API/UI
+del consumidor ni sustituye su aceptación autenticada; estado y corte en 19/99.
+Las flags siguen apagadas.
 
 **Rollback:** después de usar cancelación, el consumidor antiguo no conoce
 `closed_at`. Apagar gestión de acciones antes de revertir a ese código, o conservar
@@ -160,7 +163,7 @@ Crear una acción no la registra
 automáticamente como destino Data Manager: ese permiso exige tratamiento
 explícito antes de declarar el onboarding listo.
 
-Quedan la aceptación autenticada, compatibilidad/entrega real v17, conciliación
+Quedan la aceptación autenticada y entrega integrada del consumidor, conciliación
 administrativa de casos sin identidad/recibo verificables, enriquecimiento/bootstrap,
 sync tipado de leads, revisión del
 job combinado, inventario completo de consumidores compartidos, preflight/DDL y

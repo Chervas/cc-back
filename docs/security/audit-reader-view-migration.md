@@ -2,7 +2,7 @@
 
 > **Tipo:** runbook técnico.
 > **Fuente de verdad:** consulta verificada, proyección del visor y compatibilidad de despliegue.
-> **Última revisión:** 2026-09-17.
+> **Última revisión:** 2026-09-18.
 > **Relacionado con:** [manual central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md), [contrato 39](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md).
 
 Estado operativo y límites vigentes en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
@@ -23,7 +23,7 @@ Esto acredita las versiones comprobadas, **no la integridad ni exhaustividad
 del índice local**: quien pueda modificar la BD puede ocultar filas. Tampoco
 prueba inmutabilidad de S3; un administrador con permisos efectivos de borrado
 de versiones puede eliminarlas. Object Lock sigue apagado según la entrega.
-El lector admite los eventos versionados `app/platform/v1/` a `v15/`; no incluye
+El lector admite los eventos versionados `app/platform/v1/` a `v17/`; no incluye
 el contrato `app/v1` del broker, eventos aún pendientes de entrega ni acciones
 no instrumentadas. La lista cerrada de acciones está en `src/view-contract.js`
 del paquete de auditoría. Añadir un esquema al writer requiere probar también
@@ -94,7 +94,13 @@ El enlace a Usuario solo se construye con un ID numérico válido.
 
 La proyección incluye `correlationId` y, en v15, `whatsappAuthorization.requestRef`.
 Son referencias de auditoría, no el código OAuth, el estado de retorno ni el
-identificador de acceso Meta. Mantener esa distinción al añadir detalles.
+identificador de acceso Meta. V16 incorpora `adsEnrollment`; v17,
+`adsActionPlan` con plan/comando, consulta o cierre relacionado y sesión
+iniciadora. La sesión del evento identifica a quien recuperó/cerró cuando es
+distinta. La UI distingue preparación, cambios confirmados y resultado incierto;
+la consulta de un recibo no aplica de nuevo el plan. Contrato del consumidor en
+[acciones Google](google-action-management-broker.md). Compatibilidad de AWS y
+publicación de captura/API/UI son pasos separados; estado vigente en 19.
 
 ## Lectura firmada y límites
 
@@ -212,6 +218,25 @@ debe recoger ARNs, origen TLS y rutas realmente asignados; no inventarlos.
 5. Comprobar una consulta autorizada y el rechazo de otra no autorizada en cada
    entorno; DEV consulta su propio índice y no el de staging.
 
+Para cada actualización, copiar **cada release realmente ejecutada**, contrastar
+sus hashes y superponer solo los codecs revisados. Lector y escritor pueden
+conservar fuentes distintas ajenas a ese cambio. Preservar TLS, dependencias,
+configuración, identidades, diarios e índices. Guardar los overrides systemd
+exactos y verificar recibos existentes tras publicar cada servicio. No reutilizar
+un instalador antiguo que presuponga ausencia de overrides.
+
+La prueba de transporte puede usar eventos v17 de una cancelación real en MySQL
+**aislado**, con actor/ámbito/conexión explícitamente ficticios. Conservar sus UUID
+y evidencia de QA; no insertar esos eventos en el índice operativo de usuarios.
+Conciliar mediante el actor técnico fijo y comprobar versión/bytes/KMS del
+objeto con el rol lector autorizado. Eso acredita transporte del esquema; no
+acredita autenticación humana, consulta HTTP `confirmed`, alta real de Google ni
+aceptación del consumidor. No fabricar una sesión administrativa para la prueba.
+
+Después de entregar v17, conservar un lector que admita v17 al revertir otros
+cambios. Retener los objetos de QA y su clasificación; no borrarlos para ocultar
+una incompatibilidad. La reversión de código no deshace eventos entregados.
+
 | Síntoma | Comprobación y acción |
 | --- | --- |
 | Una página falla al incluir autorizaciones WhatsApp | Verificar soporte v15 en `reader-protocol.js` tanto en cliente como en servicio AWS. Publicar ambos; conservar el evento. |
@@ -225,9 +250,11 @@ debe recoger ARNs, origen TLS y rutas realmente asignados; no inventarlos.
 Por página no vacía hay hasta 25 GET S3, operaciones KMS que requiera S3 y
 verificación/asunción de roles (tres operaciones STS por petición). Se añaden
 dos eventos v3 a entregar; denegación genera uno. El conciliador añade lecturas
-por lote. No se ha medido facturación ni cotizado un despliegue; Budget 60 USD
-es reportado, alerta y no límite duro. Conciliar filtros/CloudFormation y
-Cost Explorer/tags antes de estimar el coste incremental. No sumar estos costes
+por lote. No se ha medido un coste incremental por consulta. La medición de
+cuenta, atribución por etiquetas y Budget real está en el
+[bloque de costes](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#7-costes-en-ajustes).
+El Budget de 60 USD es una alerta, no un límite duro. Conciliar sus filtros y
+Cost Explorer/tags antes de atribuir importes a este servicio. No sumar estos costes
 dos veces a IA ni afirmar que quedan cubiertos con una nueva instancia gratis.
 
 Rollback: cerrar gates, detener solo el lector/job aprobado, conservar journal,

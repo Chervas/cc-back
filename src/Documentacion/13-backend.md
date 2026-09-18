@@ -10388,7 +10388,8 @@ La recuperación completa también el registro del intento original, correlacion
 la consulta y conserva ambas sesiones. Cerrar una lectura pendiente registra
 resultado desconocido, no éxito del proveedor. Solo metadata acotada, sin tokens
 ni contenido clínico. Requiere lector/escritor AWS compatibles con v17 **antes**
-de activar el consumidor; AWS operativo continúa en v16 en este corte.
+de activar el consumidor. Publicar esa compatibilidad no publica la API ni
+activa el flujo: estado operativo y aceptación se mantienen en 19/99.
 
 El endpoint legacy `conversion-actions/ensure` devuelve 409
 `google_action_plan_required` para mappings gestionados; la normalización legacy
