@@ -1,23 +1,25 @@
 {
-  "version": 5,
+  "version": 6,
   "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "7bc21101ad93b800c155fc419f19880605a5b1a0",
+  "sourceBaseHead": "62ad760c95a81d843f9e7858d3afd60f03325fd1",
   "includesWorkingChanges": true,
   "scope": "Bounded manual Data Manager caller inventory; not a complete inventory of all Google identity consumers or external OPS.",
   "runtimeConsumersMigrated": 0,
   "qa": {
-    "broker": "560/560 previous workspace regression; engine unchanged in diagnostics tranche",
+    "broker": "560/560 previous workspace regression; engine unchanged in diagnostics/onboarding tranches",
     "provider": "fictitious_offline",
     "authenticatedUI": "pending",
-    "mysqlJournalChecks": 52,
+    "mysqlJournalChecks": 56,
     "schemaUnitTests": 4,
     "crmPayloadParityCases": 54,
-    "diagnosticsHealthAuthorizationNativeAdapterClient": 82,
     "legacyDataManagerScript": "pass offline",
     "diagnosticsCadenceScript": "pass offline",
     "previous_backendClientScopeReaderAdapterAndPreparation": 36,
     "previous_workspaceAuthorizationPreparationNativeReceptionAndUpload": 84,
-    "previous_healthAuthorizationAndNative": 69
+    "previous_healthAuthorizationAndNative": 69,
+    "previous_diagnosticsHealthAuthorizationNativeAdapterClient": 82,
+    "onboardingPreparationAndNormalization": 49,
+    "readinessScript": "pass offline"
   },
   "rows": [
     {
@@ -52,9 +54,9 @@
     },
     {
       "file": "src/controllers/campaignOnboarding.controller.js",
-      "sha256": "4e56f64f290d81d4a20e94805c165d9864a83170aafbdd2ee40ead87bb22bb80",
-      "role": "Dos validadores Data Manager: configuración por objetivo y dry-run; conservar ACL y validación ficticia.",
-      "state": "onboarding_adapters_pending"
+      "sha256": "bb2e8bf9c451d28e0a06023f693f84eca0ad647a2347452c14f3e035ab78d293",
+      "role": "Listado y dos validadores conectados al broker, con ACL/ámbito vigente y confirmación sin avisos. Creación/normalización y bootstrap de capacidades/settings aún pendientes.",
+      "state": "validation_prepared_undeployed_action_mutations_pending"
     },
     {
       "file": "src/services/campaignWorkspaceGoogleConversion.service.js",
@@ -181,6 +183,30 @@
       "role": "Autorización metadata para status: ámbito clínico, configuración, mandatos v1/v2/v3 y permiso enhanced; sin contactos ni OAuth local.",
       "state": "prepared_offline",
       "sha256": "d94de90b6a3edc35a349169d980523c57fc1bfb9e6aa73bb3a18c3389950ed8a"
+    },
+    {
+      "file": "src/services/googleAdsOnboardingBroker.service.js",
+      "role": "Adaptador sólo lectura/validate-only; catálogo privado, clínica/scopes/grants/ACL antes y después, sin tokens ni ingesta.",
+      "state": "prepared_offline",
+      "sha256": "f4e45801f789536fd0dcc29c98561cb26fee67df1f3a11e955e8bc81c6d1a89a"
+    },
+    {
+      "file": "src/services/googleAdsConversionPreparation.service.js",
+      "role": "Inspector/mapeador canónico compartido; transporte legacy de listado se conserva para conexiones sin migrar.",
+      "state": "shared_canonical_checks",
+      "sha256": "f21b6a0941a32682e1e5e1d6d058c16babb5e34f3e5187265e04fc9591248fb0"
+    },
+    {
+      "file": "src/services/googleAdsCanonicalConversionNormalization.service.js",
+      "role": "Plan y cambios de acciones canónicas aún requieren transporte tipado y permisos vigentes sobre todos los mappings.",
+      "state": "action_normalization_adapter_pending",
+      "sha256": "b612e0b38c9a183d8c83f23531ab584adf99a1476b1a0e785f61883ffdd418d4"
+    },
+    {
+      "file": "src/lib/googleConversionMutationAccess.js",
+      "role": "ACL sobre todos los mappings activos de una cuenta, obligatoria para futura mutación tipada.",
+      "state": "preserve_for_typed_action_mutation",
+      "sha256": "0a185f14da5a52b20382864d01034c9f67456352d3361a8b5eb6d5ab7f7fd6f2"
     }
   ]
 }

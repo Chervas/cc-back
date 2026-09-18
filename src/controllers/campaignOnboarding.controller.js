@@ -33,6 +33,7 @@ const {
   resolveMetaConnectionForScope,
 } = require('../services/scopeConnectionResolver.service');
 const { resolveScopedGoogleAdsRuntime } = require('../services/googleAdsScopedRuntime.service');
+const { createGoogleAdsOnboardingBroker } = require('../services/googleAdsOnboardingBroker.service');
 const {
   GOOGLE_DATA_MANAGER_SCOPE,
   GOOGLE_ENHANCED_CONVERSION_ALLOWED_IDENTIFIERS,
@@ -6091,6 +6092,24 @@ async function resolveLoginCustomerId(connectionId, customerId, scope) {
   }
 }
 
+async function onboardingBrokerForScope({ runtime, userId, scope }) {
+  const input = { clinicIdRaw: scope.clinic_id,
+    groupIdRaw: scope.assignment_scope === 'group' ? scope.group_id : null,
+    assignmentScopeRaw: scope.assignment_scope };
+  const initial = Array.isArray(scope.clinic_ids) ? scope : await resolveScopeFromInput(input);
+  const scopeKey = row => JSON.stringify([row.assignment_scope, row.clinic_id || null, row.group_id || null,
+    [...row.clinic_ids].map(Number).sort((a, b) => a - b)]);
+  const expected = scopeKey(initial);
+  return createGoogleAdsOnboardingBroker({ runtime, models: db, clinicIds: initial.clinic_ids.map(Number),
+    beforeExecute: async () => {
+      const current = await resolveScopeFromInput(input);
+      if (scopeKey(current) !== expected) return false;
+      // Internal audits have no user session; their durable Ads grant remains
+      // mandatory. HTTP callers must retain their current marketing permission.
+      return userId == null || await hasMarketingClinicScopeAccess({ userId, clinicIds: current.clinic_ids, access: 'read' });
+    } });
+}
+
 async function ensureConversionActionsInternal({
   accessToken,
   customerId,
@@ -6247,6 +6266,7 @@ async function evaluateGoogleConversionOnboardingReadiness({
   const capabilitiesByCustomer = {};
   const validationsByTarget = {};
   const runtimesByCustomer = {};
+  const managedByCustomer = {};
   const runtimeIssues = [];
   const created = [];
   const quotaProjectConfigured = Boolean(
@@ -6286,7 +6306,9 @@ async function evaluateGoogleConversionOnboardingReadiness({
     const hasDataManagerScope = hasScopeText(runtime.connection?.scopes || '', GOOGLE_DATA_MANAGER_SCOPE);
     capabilitiesByCustomer[customerId] = {
       data_manager_scope_granted: hasDataManagerScope,
-      data_manager_quota_project_configured: quotaProjectConfigured
+      // For managed connections this is confirmed by the remote validation,
+      // never by an unrelated quota-project variable in the CRM process.
+      data_manager_quota_project_configured: runtime.deliveryMode === 'broker' ? false : quotaProjectConfigured
     };
 
     const customerEvents = listToUniqueArray(
@@ -6295,6 +6317,18 @@ async function evaluateGoogleConversionOnboardingReadiness({
         .map((target) => target.event)
     );
     try {
+      if (runtime.deliveryMode === 'broker') {
+        const managed = await onboardingBrokerForScope({ runtime, userId, scope });
+        managedByCustomer[customerId] = managed;
+        const listed = await managed.list({ includeAllTypes: true });
+        if (createMissing && customerEvents.some(event => !listed.clinicaclick_mapping[event])) {
+          throw Object.assign(new Error('La configuración necesita revisión antes de crear las acciones que faltan.'),
+            { code: 'google_conversion_action_broker_provisioning_pending' });
+        }
+        mappingsByCustomer[customerId] = listed.clinicaclick_mapping;
+        actionsByCustomer[customerId] = listed.actions;
+        continue;
+      }
       let ensured = await ensureConversionActionsInternal({
         accessToken: runtime.accessToken,
         customerId,
@@ -6323,7 +6357,8 @@ async function evaluateGoogleConversionOnboardingReadiness({
       actionsByCustomer[customerId] = listed.actions || [];
     } catch (error) {
       runtimeIssues.push({
-        reason: 'conversion_actions_read_failed',
+        reason: error.code === 'google_conversion_action_broker_provisioning_pending'
+          ? error.code : 'conversion_actions_read_failed',
         customer_id: customerId,
         message: error?.response?.data?.error?.message || error.message || null
       });
@@ -6350,14 +6385,18 @@ async function evaluateGoogleConversionOnboardingReadiness({
     if (
       !runtime
       || capability.data_manager_scope_granted !== true
-      || capability.data_manager_quota_project_configured !== true
+      || runtime.deliveryMode !== 'broker' && capability.data_manager_quota_project_configured !== true
       || String(action?.status || '').toUpperCase() !== 'ENABLED'
       || String(action?.counting_type || '').toUpperCase() !== 'MANY_PER_CLICK'
       || action?.primary_for_goal !== false
     ) continue;
     if (validationsByTarget[target.validation_key]) continue;
     try {
-      await uploadGoogleDataManagerConversion({
+      const managed = managedByCustomer[target.customer_id];
+      if (runtime.deliveryMode === 'broker' && !managed) throw Object.assign(new Error('scope_denied'), { code: 'scope_denied' });
+      const validation = managed
+        ? await managed.validate({ conversionActionId: target.conversion_action_id, event: target.event })
+        : await uploadGoogleDataManagerConversion({
         customerId: target.customer_id,
         conversionAction: `customers/${target.customer_id}/conversionActions/${target.conversion_action_id}`,
         conversionDateTime: new Date(),
@@ -6371,6 +6410,11 @@ async function evaluateGoogleConversionOnboardingReadiness({
         loginCustomerId: runtime.loginCustomerId,
         validateOnly: true
       });
+      if (managed ? validation?.validated !== true : !successfulValidationResponse(validation)) {
+        throw Object.assign(new Error('Google no ha confirmado una validación completa sin avisos.'),
+          { code: 'DATA_MANAGER_VALIDATION_UNCONFIRMED' });
+      }
+      if (managed) capability.data_manager_quota_project_configured = true;
       validationsByTarget[target.validation_key] = {
         status: 'validated',
         validated: true,
@@ -6387,6 +6431,16 @@ async function evaluateGoogleConversionOnboardingReadiness({
         error: String(providerError?.status || error?.code || 'data_manager_validation_failed').toLowerCase(),
         message: providerError?.message || error.message || 'Google no pudo validar Data Manager'
       };
+    }
+  }
+
+  for (const [customerId, managed] of Object.entries(managedByCustomer)) {
+    try { await managed.assert(); }
+    catch (error) {
+      for (const target of preValidation.targets.filter(row => row.customer_id === customerId)) {
+        delete validationsByTarget[target.validation_key];
+      }
+      planWithRuntimeIssues.issues.push({ reason: 'google_conversion_validation_scope_changed', customer_id: customerId });
     }
   }
 
@@ -8243,14 +8297,16 @@ exports.listGoogleAdsConversionActions = asyncHandler(async (req, res) => {
 
   let result;
   try {
-    result = await listConversionActionsInternal({
+    result = runtime.deliveryMode === 'broker'
+      ? await (await onboardingBrokerForScope({ runtime, userId, scope })).list({ includeAllTypes: req.query.all_types === 'true' })
+      : await listConversionActionsInternal({
       accessToken: runtime.accessToken,
       customerId,
       loginCustomerId: runtime.loginCustomerId,
       includeAllTypes: req.query.all_types === 'true'
     });
   } catch (error) {
-    return res.status(error.httpStatus || 502).json({ success: false,
+    return res.status(error.httpStatus || (error.code === 'scope_denied' ? 403 : error.code === 'broker_binding_invalid' ? 409 : 502)).json({ success: false,
       error: String(error.code || 'google_ads_query_failed').toLowerCase(),
       message: 'No se han podido consultar las conversiones de Google. No se ha cambiado ninguna accion.' });
   }
@@ -8307,16 +8363,17 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
     });
   }
 
-  let listed;
+  let listed; let managed;
   try {
-    listed = await listConversionActionsInternal({
+    managed = runtime.deliveryMode === 'broker' ? await onboardingBrokerForScope({ runtime, userId, scope }) : null;
+    listed = managed ? await managed.list({ includeAllTypes: true }) : await listConversionActionsInternal({
       accessToken: runtime.accessToken,
       customerId,
       loginCustomerId: runtime.loginCustomerId,
       includeAllTypes: true
     });
   } catch (error) {
-    return res.status(error.httpStatus || 502).json({ success: false, validated: false, validate_only: true,
+    return res.status(error.httpStatus || (error.code === 'scope_denied' ? 403 : error.code === 'broker_binding_invalid' ? 409 : 502)).json({ success: false, validated: false, validate_only: true,
       error: String(error.code || 'google_ads_query_failed').toLowerCase(),
       message: 'No se han podido comprobar las conversiones de Google. No se ha enviado ninguna conversion.' });
   }
@@ -8378,7 +8435,9 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
   }
 
   try {
-    const validation = await uploadGoogleDataManagerConversion({
+    const validation = managed
+      ? await managed.validate({ conversionActionId, event: canonicalEvent })
+      : await uploadGoogleDataManagerConversion({
       customerId,
       conversionAction: `customers/${customerId}/conversionActions/${conversionActionId}`,
       conversionDateTime: new Date(),
@@ -8394,7 +8453,7 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
       loginCustomerId: runtime.loginCustomerId,
       validateOnly: true
     });
-    if (!successfulValidationResponse(validation)) {
+    if (managed ? validation?.validated !== true : !successfulValidationResponse(validation)) {
       throw Object.assign(new Error('Google no ha confirmado una validacion completa sin avisos.'), { code: 'DATA_MANAGER_VALIDATION_UNCONFIRMED' });
     }
   } catch (error) {
@@ -8404,8 +8463,9 @@ exports.validateGoogleDataManagerConversion = asyncHandler(async (req, res) => {
       validated: false,
       validate_only: true,
       error: String(providerError?.status || error?.code || 'data_manager_validation_failed').toLowerCase(),
-      message: providerError?.message || error.message || 'Google no pudo validar la configuración de Data Manager',
-      details: Array.isArray(providerError?.details) ? providerError.details : []
+      message: managed ? 'No se ha podido confirmar la validación de Data Manager. No se ha enviado ninguna conversión.'
+        : providerError?.message || error.message || 'Google no pudo validar la configuración de Data Manager',
+      details: !managed && Array.isArray(providerError?.details) ? providerError.details : []
     });
   }
 
@@ -10225,6 +10285,8 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
 });
 
 exports.__test = {
+  onboardingBrokerForScope,
+  evaluateGoogleConversionOnboardingReadiness,
   ensureGoogleAccessToken,
   ensureConversionActionsInternal,
   CAMPAIGN_MODES,

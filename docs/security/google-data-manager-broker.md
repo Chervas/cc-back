@@ -351,3 +351,52 @@ compartido, plan exacto del journal, despliegue completo, prueba autorizada del
 proveedor y recorrido visual con sesión/MFA. Mantener ledger y UUID; nunca borrar
 historia ni reactivar campañas, leads o jobs clínicos para intentar recuperar un
 resultado desconocido.
+
+
+## Validación de onboarding por broker, 18/09/2026
+
+El listado público de acciones, el validador individual de Data Manager y la
+comprobación compartida por onboarding/estrategias/auditoría interna ya admiten
+runtime gestionado. `googleAdsOnboardingBroker` sólo expone listar, validar y
+recomprobar autorización; no recibe cuerpo de conversión, clic, contacto, token
+ni opciones de ingesta o mutación. El catálogo se obtiene por lectura tipada y
+se conserva internamente: modificar la copia devuelta no autoriza otra acción.
+Se mantienen nombre canónico único, dueño/resource, tipo, categoría, estado,
+recuento y condición secundaria antes de validar WEB con datos ficticios.
+
+Alrededor de cada lectura/página/validación se revalidan contexto opaco, identidad,
+scopes, clínica activa y pertenencia al grupo, además del ámbito y ACL actual del
+usuario. Una clínica con grupo padre sigue siendo un ámbito clínico: resolverla
+no puede ampliar el conjunto de clínicas a todo el grupo. Las auditorías internas
+sin sesión mantienen su grant durable y política clínica, no una credencial de
+usuario simulada. El resultado final de la comprobación compartida vuelve a
+invalidar evidencia de cualquier cuenta cuyo ámbito haya cambiado.
+
+El proceso CRM no necesita declarar el proyecto de cuota del broker: sólo lo da
+por confirmado tras una respuesta tipada positiva sin avisos. La comprobación
+legacy también exige respuesta válida y sin avisos; antes podía marcar como
+validada cualquier respuesta que no lanzara excepción. Un error managed jamás
+recurre al transporte con token. La pérdida de ACL se comunica como403 y un
+binding cambiado como409 en la lectura pública, sin confundirlos con un fallo
+remoto ni revelar detalles de proveedor.
+
+QA de este corte:49 pruebas Node (adaptador, código real del endpoint/ACL,
+preparación y normalización), scripts legacy Data Manager y readiness PASS.
+MySQL real propio pasa56 grupos, incluidos cuatro nuevos del controlador real
+con broker firmado/SQLite: validación sin cuota local, acción ausente con creación
+solicitada, clínica pausada y pausa concurrente con recuperación. El conjunto
+mantiene21 ingestas ficticias,58 comandos,25 journals y cero lecturas SQL de tokens;
+los nuevos casos de onboarding no ingieren eventos. Instancia cerrada0. El primer
+ensayo del endpoint reveló un502 indebido para revocación de permisos; corregido,
+fallo conservado en evidencia. Estas pruebas no incluyen sesión/MFA ni UI real.
+
+Creación y normalización de acciones, enriquecimiento de ajustes por cuenta y
+bootstrap de capacidades siguen pendientes. Si se solicita crear una acción que
+falta, el nuevo recorrido devuelve una necesidad de revisión explícita y no
+intenta OAuth local ni afirma estar listo. Este límite es temporal y bloquea el
+corte de Google: hay que conservar esas funciones con operaciones tipadas antes
+de activar el nuevo runtime. También faltan sync tipado de leads, revisión del
+job mixto y el inventario completo de la identidad compartida. No se ha publicado,
+aplicado DDL, alterado un grant/token/flag ni llamado a un proveedor real.
+Evidencia privada: `google-onboarding-validation/`; recuperación operativa sigue
+siendo conservar runtime/flags actuales, journal e historial sin replay.

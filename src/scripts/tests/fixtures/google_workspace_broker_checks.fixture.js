@@ -51,6 +51,8 @@ module.exports = async ({ models, sql, report, broker, mapping, now, writes, cal
     assert.equal(validations.filter(body => body.events[0].eventSource === 'OTHER').length, 2);
     report.checks.push('actual workspace preparation lists actions through the signed Ads broker and validates web/native origins with five fictitious validate-only calls and no event ingestion');
 
+    await require('./google_onboarding_broker_checks.fixture')({ models, sql, report, broker, mapping, writes, calls, validations, setAfterRemote });
+
     const context = await preparation.googlePreparationContext({ models, scope, accountId: mapping.customerId });
     assert(context.brokerGrant); assert(!Object.hasOwn(context.connection, 'accessToken'));
     await assert.rejects(grant.assertGoogleAdsGrantTransport({}), { code: 'broker_binding_invalid' });

@@ -146,3 +146,33 @@ test('the validation endpoint checks the provider action and never trusts a clie
     }
   }
 });
+
+test('shared onboarding readiness never labels a legacy provider warning or malformed response as validated', async () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../../controllers/campaignOnboarding.controller.js'), 'utf8');
+  const start = source.indexOf('async function evaluateGoogleConversionOnboardingReadiness(');
+  const end = source.indexOf('\nfunction isConsentVerificationRenewalIssue', start);
+  const helpers = require('../../controllers/campaignOnboarding.controller').__test;
+  const customerId = '1234567890', ADS = 'https://www.googleapis.com/auth/adwords', DM = 'https://www.googleapis.com/auth/datamanager';
+  const actions = [{ id: '456', name: 'Lead - ClinicaClick', type: 'UPLOAD_CLICKS', category: 'SUBMIT_LEAD_FORM',
+    resource_name: `customers/${customerId}/conversionActions/456`, status: 'ENABLED', counting_type: 'MANY_PER_CLICK', primary_for_goal: false }];
+  for (const response of [{}, { fieldWarnings: [] }, { fieldWarnings: [{ message: 'warning' }] }, null, { error: {} }, { unexpected: true }]) {
+    let calls = 0;
+    const context = { ...helpers, process: { env: { GOOGLE_DATA_MANAGER_QUOTA_PROJECT: 'fictitious-project' } },
+      hasScopeText: (text, scope) => text.split(' ').includes(scope), listToUniqueArray: values => [...new Set(values)],
+      GOOGLE_ADS_SCOPE: ADS, GOOGLE_DATA_MANAGER_SCOPE: DM, successfulValidationResponse,
+      resolveScopedGoogleAdsRuntime: async () => ({ connection: { scopes: ADS + ' ' + DM }, accessToken: 'fictitious' }),
+      ensureConversionActionsInternal: async () => ({ created: [] }),
+      listConversionActionsInternal: async () => ({ actions, clinicaclick_mapping: { lead: '456' } }),
+      uploadGoogleDataManagerConversion: async input => { calls++; assert.equal(input.validateOnly, true); return response; } };
+    // Use the actual function body plus real readiness/plan helpers; only scope,
+    // action retrieval and provider transport are fictitious here.
+    vm.runInNewContext(source.slice(start, end), context);
+    const result = await context.evaluateGoogleConversionOnboardingReadiness({ userId: 7, scope: { clinic_id: 71 },
+      fallbackCustomerId: customerId, rawGoogleAdsConfig: { enabled: true, customer_id: customerId,
+        events: { lead: { enabled: true, conversion_action_id: '456' }, contact: { enabled: false }, schedule: { enabled: false },
+          qualified_lead: { enabled: false }, purchase: { enabled: false } } },
+      consentReadiness: { ready: true, validated: true, issues: [] } });
+    assert.equal(calls, 1); assert.equal(result.ready, successfulValidationResponse(response));
+    assert.equal(result.validated, successfulValidationResponse(response));
+  }
+});
