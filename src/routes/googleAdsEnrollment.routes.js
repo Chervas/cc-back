@@ -5,12 +5,12 @@ const defaults = require('../services/googleAdsEnrollment.service');
 function createRouter({ service = defaults, sessions, authorizeScope, resolveConnection }) {
   const router = express.Router();
   function requested(req) {
-    const post = req.method === 'POST'; const values = post ? req.body : req.query;
+    const post = req.method === 'POST'; const enqueue = post && !req.params.enrollmentId; const values = post ? req.body : req.query;
     if (!values || typeof values !== 'object' || Array.isArray(values) || post && Object.keys(req.query).length) C.fail();
     const keys = Object.keys(values); const scopeFields = keys.filter(k => ['clinic_id','group_id'].includes(k));
-    if (scopeFields.length !== 1 || keys.some(k => !scopeFields.includes(k) && !(post && ['customerId','enrollmentId'].includes(k)))) C.fail();
+    if (scopeFields.length !== 1 || keys.some(k => !scopeFields.includes(k) && !(enqueue && ['customerId','enrollmentId'].includes(k)))) C.fail();
     const field = scopeFields[0]; if (!C.positive(values[field])) C.fail();
-    if (post && (keys.length !== 3 || !C.UUID.test(values.enrollmentId) || typeof values.customerId !== 'string'
+    if (enqueue && (keys.length !== 3 || !C.UUID.test(values.enrollmentId) || typeof values.customerId !== 'string'
       || !/^\d{10}$/.test(values.customerId) || values.customerId === '0000000000')) C.fail();
     return { scopeKey: (field === 'clinic_id' ? 'clinic:' : 'group:') + Number(values[field]), values };
   }
@@ -39,16 +39,21 @@ function createRouter({ service = defaults, sessions, authorizeScope, resolveCon
     res.set('Cache-Control', 'private, no-store');
     try {
       const { values } = requested(req); const input = await authorize(req, null, connectionRequired);
-      const result = action === 'discover' ? await service.discover(input)
+      const result = ['capabilities', 'list'].includes(action) ? await service[action](input)
+        : action === 'cancel' ? await service.cancel(input, req.params.enrollmentId)
+        : action === 'discover' ? await service.discover(input)
         : action === 'enqueue' ? await service.enqueue(input, { enrollmentId: values.enrollmentId, customerId: values.customerId })
           : await service.read(input, req.params.enrollmentId);
       await authorize(req, input, connectionRequired);
-      return res.status(action === 'enqueue' ? 202 : 200).json({ success: true, ...result });
+      return res.status(['enqueue', 'cancel'].includes(action) ? 202 : 200).json({ success: true, ...result });
     } catch (error) { return res.status(defaults.status(error)).json({ success: false, error: defaults.safe(error) }); }
   };
+  router.get('/capabilities', handle('capabilities', true));
   router.get('/accounts', handle('discover', true));
+  router.get('/requests', handle('list', false));
   router.post('/requests', handle('enqueue', true));
   router.get('/requests/:enrollmentId', handle('read', false));
+  router.post('/requests/:enrollmentId/cancel', handle('cancel', false));
   return router;
 }
 module.exports = { createRouter };

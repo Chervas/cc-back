@@ -6,8 +6,10 @@ alta y estado verifican sesiones persistidas; las bajas cancelan también las
 solicitudes que todavía no tienen mapping. El guardado humano comprueba la
 confirmación del broker y actualiza la solicitud en la misma transacción que
 el mapping, binding y auditoría. El job está registrado en código, condicionado
-por su flag; no está instalado ni activo en el runtime. Falta el recorrido de
-selección/alta en Ajustes. No hay alta real completa.
+por su flag; no está instalado ni activo en el runtime. El recorrido de
+selección/alta está preparado en Ajustes y en el selector de cuentas de campañas,
+con pruebas de componente y navegador local. Falta su publicación y la prueba
+autenticada con el proveedor real. No hay alta real completa.
 Las pruebas nuevas son aisladas y no sustituyen una prueba visual autenticada.
 
 ## Registro independiente
@@ -91,6 +93,8 @@ variables del runtime ni instala un nuevo job.
 Las rutas bajo `/api/oauth/google/ads/enrollment` usan autenticación normal y
 sesión administrada, con comprobaciones antes y después de las esperas:
 
+- `GET /capabilities`: comprueba configuración y ámbito sin llamadas al proveedor.
+  La disponibilidad exige los dos flags; un ámbito sin preparar no habilita el alta.
 - `GET /accounts?clinic_id=…` o `group_id=…`: listado acotado, con un máximo de
   cuatro peticiones simultáneas por proceso; una quinta obtiene 429 sin cola.
 - `POST /requests`: cuerpo exacto con un ámbito, `customerId` de diez dígitos
@@ -99,11 +103,25 @@ sesión administrada, con comprobaciones antes y después de las esperas:
 - `GET /requests/:enrollmentId`: historial limitado al ámbito solicitado;
   `canComplete` exige la sesión original y una asignación aún válida. La lectura
   del historial sigue disponible tras desconectar la conexión.
+- `GET /requests`: últimas 25 solicitudes del usuario y sesión actuales para
+  ese ámbito, con indicador `hasMore`; no mezcla sesiones ni amplía el grupo.
+- `POST /requests/:enrollmentId/cancel`: cuerpo exacto con un ámbito. Cancela
+  únicamente una solicitud todavía no asignada, incluso con el alta desactivada.
+  La intención y la auditoría `user_cancelled` son atómicas; responde 202 con su
+  estado explícito. Una cuenta ya asignada necesita el recorrido normal de baja.
 
 Se rechazan campos adicionales, ámbitos ambiguos y referencias aportadas por
 el cliente. Resolver una conexión usa solamente metadata, sin fallback de
 credenciales. Los errores tienen códigos cerrados y las respuestas no se
 almacenan en caché. Gateway no puede ejecutar discovery, altas ni el worker.
+
+El panel consulta inicialmente solo metadata y recupera las solicitudes de la
+sesión. El listado remoto requiere un clic y actualizar el estado no dispara
+consultas a Google. Una respuesta incierta conserva el UUID; se consulta antes
+de reintentar exactamente la misma intención. No se guardan tokens ni solicitudes
+en almacenamiento del navegador. Cambiar de ámbito, perder permiso o destruir
+el componente invalida las respuestas anteriores. La selección requiere otra
+comprobación de `canComplete` y después el guardado explícito de mappings.
 
 ## Escritura y conciliación
 
@@ -200,8 +218,8 @@ según el [plan por etapas](incremental-delivery-plan.md); el objetivo completo 
 seguridad conserva todos sus pendientes.
 
 Quedan la publicación compatible de auditoría, instalación/configuración del
-worker, principals y ámbitos reales, y el recorrido de selección/alta en
-Ajustes. La confirmación final del mapping utiliza además la auditoría humana
+worker, principals y ámbitos reales, y la validación autenticada del recorrido
+de selección/alta. La confirmación final del mapping utiliza además la auditoría humana
 v12 existente. No activar los gates por tener el repositorio, rutas o cliente
 probados: falta probar proveedores reales e interfaz autenticada.
 
@@ -236,3 +254,14 @@ auditoría: 72 tests con Node 24. El compilador Angular y seis contratos fronten
 también pasan. Evidencia y límites del recorrido visual local en
 `security-resume-20260917/google-ads-enrollment-api/`. Las pruebas autenticadas
 HTTP con cuentas ficticias no son una sesión de usuario en la interfaz real.
+
+Ampliación del recorrido de selección: 24 comprobaciones MySQL del worker/API,
+23 regresiones HTTP/boundary y 72 pruebas de auditoría pasan. Frontend: 17 pruebas
+de servicio, componente y selección existente; compilador Angular correcto.
+Chromium ejecuta el componente y HttpClient reales contra un servidor local
+ficticio, con 12 capturas a 1440/390 px: alta pendiente, lista para asignar,
+cancelación pendiente/confirmada, respuesta incierta y permiso denegado. No hay
+desbordamiento horizontal, errores JS ni llamadas externas. Se verifica que
+cancelar retire la cuenta de la selección pendiente y que una respuesta tardía
+no cruce de grupo. Evidencia privada en `google-ads-enrollment-ui/`. No acredita
+el login/MFA ni el guardado contra Google/AWS reales.

@@ -4,7 +4,7 @@ const { UUID, fail } = require('./event');
 const { stamp } = require('./view-contract');
 const PHASES = Object.freeze({ enrollment_requested: ['prepare_pending', 1], enrollment_broker_confirmed: ['activation_confirmed', 2],
   enrollment_cancel_requested: ['revoke_pending', 3], enrollment_cancel_confirmed: ['revoked', 4] });
-const CAUSES = new Set(['scope_disconnected', 'account_removed', 'account_replaced', 'google_discovery_session_required',
+const CAUSES = new Set(['scope_disconnected', 'account_removed', 'account_replaced', 'user_cancelled', 'google_discovery_session_required',
   'google_discovery_scope_forbidden', 'google_ads_enrollment_scope_conflict', 'google_ads_enrollment_scope_unconfigured',
   'google_ads_enrollment_disabled', 'google_ads_enrollment_account_in_use', 'asset_revoked']);
 const id = v => typeof v === 'string' && /^[1-9]\d{0,9}$/.test(v) && Number(v) <= 2147483647;

@@ -370,6 +370,43 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     assert.equal((await enrollmentApi.run()).status, 'completed');
     const visible = await request('requests/' + newId + '?group_id=5'); assert.equal(visible.body.state, 'activation_confirmed');
     assert.equal(visible.body.canComplete, true); assert.equal(visible.cache, 'private, no-store');
+    const providerBeforeCapabilities = calls.length;
+    assert.equal((await request('capabilities?group_id=5')).body.enabled, true);
+    workerEnabled = false;
+    assert.equal((await request('capabilities?group_id=5')).body.enabled, false); workerEnabled = true;
+    assert.equal(calls.length, providerBeforeCapabilities);
+    const resumed = await request('requests?group_id=5'); assert.equal(resumed.status, 200);
+    assert.deepEqual(resumed.body.requests.map(row => row.enrollmentId), [newId]);
+    assert.equal(resumed.body.requests[0].canComplete, true); assert.equal(resumed.body.hasMore, false);
+    const anotherToken = (await sessions.authenticated(user)).body.token;
+    assert.deepEqual((await request('requests?group_id=5', undefined, anotherToken)).body.requests, []);
+    assert.equal((await request('requests/' + newId + '?group_id=5', undefined, anotherToken)).body.canComplete, false);
+    await models.Clinica.update({ grupoClinicaId: 6 }, { where: { id_clinica: 71 } });
+    try {
+      const resized = await request('requests?group_id=5'); assert.equal(resized.status, 200); assert.deepEqual(resized.body.requests, []);
+      assert.equal((await request('requests/' + newId + '?group_id=5')).status, 409);
+    } finally { await models.Clinica.update({ grupoClinicaId: 5 }, { where: { id_clinica: 71 } }); }
+    const cancelId = randomUUID(); const cancelPayload = { ...payload, customerId: String(++sequence), enrollmentId: cancelId };
+    assert.equal((await request('requests', cancelPayload)).status, 202);
+    const cancelPath = 'requests/' + cancelId + '/cancel';
+    assert.equal((await request(cancelPath, { group_id: 5, customerId: cancelPayload.customerId })).status, 400);
+    assert.equal((await request(cancelPath, { group_id: 6 })).status, 403);
+    models.PlatformAuditEvent.addHook('beforeCreate', 'http_cancel_audit', event => {
+      if (JSON.parse(event.body).reason === 'enrollment_cancel_requested') throw Object.assign(Error('FICTITIOUS_AUDIT_FAILURE'), { code: 'audit_unavailable' });
+    });
+    assert.equal((await request(cancelPath, { group_id: 5 })).status, 503);
+    assert.equal((await state(cancelId)).state, 'prepare_pending'); models.PlatformAuditEvent.removeHook('beforeCreate', 'http_cancel_audit');
+    enrollmentEnabled = false;
+    const cancel = await request(cancelPath, { group_id: 5 }); assert.equal(cancel.status, 202);
+    assert.equal(cancel.body.state, 'revoke_pending'); assert.equal(cancel.body.canComplete, false);
+    assert.equal((await request(cancelPath, { group_id: 5 })).status, 202);
+    await enrollmentApi.run(); assert.equal((await state(cancelId)).state, 'revoked');
+    assert.equal((await state(cancelId)).mapping_id, null); enrollmentEnabled = true;
+    const cancelAudit = (await models.PlatformAuditEvent.findAll({ raw: true })).map(e => JSON.parse(e.body))
+      .filter(e => e.requestRef === cancelId && e.reason === 'enrollment_cancel_requested');
+    assert.equal(cancelAudit.length, 1); assert.equal(cancelAudit[0].cause, 'user_cancelled');
+    assert.equal(cancelAudit[0].actor.id, '9'); assert.equal(cancelAudit[0].sessionRef, require('jsonwebtoken').decode(token).jti);
+    report.checks.push('metadata capabilities never call the provider; same-session history resumes pending requests while another session cannot complete them; explicit cancellation works with enrollment disabled, rolls back failed audit and confirms once');
     env.AUTH_EMAIL_MFA_MODE = 'enforce';
     assert.equal((await request('requests/' + newId + '?group_id=5')).status, 401); env.AUTH_EMAIL_MFA_MODE = 'off';
     report.checks.push('real authenticated HTTP uses persistent session verification, strict scope/body, metadata-only resolution, idempotent enqueue and scoped status; enforcing MFA rejects the fictitious password-only session');
