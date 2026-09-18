@@ -116,6 +116,12 @@ node --test src/scripts/tests/whatsapp_inbox_client_tls.test.js
 
 La prueba Python usa únicamente una CA y claves ficticias en `/tmp`; necesita root para probar las mismas restricciones de propietario del firmante. No usa AWS, Meta ni BD. La revisión visual del panel debe comprobar que el aviso lleva a Seguridad y que nunca ofrece pausar una clínica por este motivo.
 
+Para clientes de auditoría, ejecutar también desde la raíz backend:
+
+```sh
+node --test src/scripts/tests/audit_client_trust_transition.test.js
+```
+
 ## Certificados de servidores AWS
 
 `server-certificates.py` firma únicamente hojas de las identidades fijadas en
@@ -191,3 +197,65 @@ Pruebas adicionales (CA ficticia, sin AWS ni proveedores):
 sudo python3 ops/security/test-server-certificates.py
 sudo python3 ops/security/test-server-certificate-publisher.py
 ```
+
+### Sustitución planificada de la autoridad
+
+La autoridad actual vence el **15/09/2027 a las 04:04:15 UTC**. El firmante
+rechaza una autoridad con menos de 31 días de vigencia, pero esa protección no
+la sustituye. Preparar la transición con al menos 90 días de margen; no esperar
+al aviso de caducidad de una hoja. La huella fijada, el fichero de salud y los
+recibos del publicador deben seguir correspondiendo a la autoridad realmente
+instalada durante todo el corte.
+
+1. Inventariar consumidores efectivos, incluidos workers y unidades aisladas,
+   sus rutas de confianza, identidades mTLS, SPKI y recargas. Los entrypoints
+   de servidor fijan la CA al arrancar: sustituir su fichero no cambia la CA
+   en memoria. Tampoco cambia la huella de autoridad del firmante/publicador.
+2. Crear la nueva autoridad exclusivamente bajo root en el host firmante.
+   Distribuir solo su certificado público y preparar confianza doble en todos
+   los clientes de servidores y validadores mTLS. Verificar que la identidad
+   anterior sigue funcionando y que otra clave/rol sigue siendo rechazada.
+3. Emitir hojas con los mismos SPKI, sujetos, SAN y usos. Preparar las nuevas
+   configuraciones fijadas y sus respaldos; desplegar servidor por servidor,
+   manteniendo las identidades antiguas aún válidas como recuperación. Probar
+   recepción, consulta y operaciones tipadas con cada consumidor real.
+4. Probar renovación por el temporizador, comprobación externa y alertas antes
+   de retirar la confianza anterior. Confirmar qué procesos recargaron o se
+   reiniciaron: un fichero actualizado no prueba el estado TLS en memoria.
+5. Retirar la antigua autoridad únicamente al verificar todo el inventario y
+   cerrar las conexiones anteriores. Documentar nueva huella, vencimiento y
+   recuperación. Conservar los respaldos protegidos; no rotar por esta vía
+   credenciales de proveedores ni repetir operaciones de negocio.
+
+Este procedimiento no acredita una sustitución de la CA raíz. La transición de
+los dos certificados autofirmados de auditoría a la CA ya existente es un corte
+distinto; tampoco equivale a renovar credenciales de proveedores.
+
+### Corte verificado de auditoría, 18/09/2026
+
+Clientes DEV `4fbf4bda` y staging `2cb6a65c` publicados; candidata IA conserva el
+arreglo en `88351630`. Los cuatro ficheros de confianza de staging/worker DEV
+pasaron por confianza doble y terminaron con solo la CA existente. API DEV no
+puede leerlos. Servidores AWS parten de sus respectivas releases reales:
+`release-writer-tls-4fbf4bda` y `release-reader-tls-4fbf4bda`; solo se añade el
+hook/módulo de recarga. Dependencias, grants, protocolos, claves y estado se
+conservan. Cada reinicio inicial y comprobación duró aproximadamente tres
+segundos. Posteriormente ambos renovaron realmente sin cambiar PID.
+
+El publicador/firmante tiene diez servidores y la identidad de mantenimiento:
+once estados sanos, unidad root `Result=success` y temporizador activo. Dos
+rechazos de login visuales en DEV, más el del ensayo cuyo capturador agotó el
+plazo esperando animaciones, produjeron tres eventos anónimos. El worker los
+entregó por el escritor renovado y el lector verificó sus recibos; HEAD S3
+independiente contrastó las tres versiones, SHA256 y clave KMS. No aumentaron
+correos, desafíos MFA ni sesiones. Capturas 1440/390px inspeccionadas; no equivale
+a una sesión autenticada ni al panel de actividad/automatizaciones.
+
+Evidencia privada: `qa-evidence/security-resume-20260917/audit-certificates/`;
+respaldos AWS: `/var/lib/clinicaclick-audit-tls-20260918/`. Para recuperar el
+certificado autofirmado, restaurar **primero** la confianza doble en todos los
+clientes y comprobarla; luego restaurar configuración/selector del servidor.
+Restaurar también las listas del publicador/firmante para retirar exclusivamente
+los destinos revertidos. No reemplazar SQLite, recibos, permisos ni claves. Una
+recuperación entre hojas firmadas por la misma CA no exige volver al certificado
+autofirmado. Los nuevos registros ya entregados se conservan siempre.
