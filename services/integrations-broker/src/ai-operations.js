@@ -1,10 +1,11 @@
 'use strict';
 
-const { OPERATIONS } = require('./ai-limits');
+const { OPERATIONS, MODEL_CHECK_OPERATION } = require('./ai-limits');
+const { createModelHealthOperation } = require('./ai-model-health');
 const contract = require('./ai-contract');
 const { fail } = require('./errors');
-function createAiOperations({ http }) {
-  return Object.fromEntries(Object.entries(OPERATIONS).map(([provider, operation]) => [operation, {
+function createAiOperations({ http, modelHealthHttp }) {
+  const operations = Object.fromEntries(Object.entries(OPERATIONS).map(([provider, operation]) => [operation, {
     provider: `ai_${provider}`, persistResult: false,
     validate: value => contract.validate(provider, value),
     authorize: input => contract.authorize(provider, input),
@@ -26,5 +27,7 @@ function createAiOperations({ http }) {
       return value;
     },
   }]));
+  operations[MODEL_CHECK_OPERATION] = createModelHealthOperation({ http: modelHealthHttp });
+  return operations;
 }
 module.exports = { createAiOperations };

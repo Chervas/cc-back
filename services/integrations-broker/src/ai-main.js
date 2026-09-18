@@ -11,7 +11,7 @@ const { createServer } = require('./server');
 const { createAwsSecretStore } = require('./secrets');
 const { createAiHttp } = require('./ai-http');
 const { createAiOperations } = require('./ai-operations');
-const { OPERATIONS, MAX_TIMEOUT_MS, MAX_CONCURRENT_REQUESTS } = require('./ai-limits');
+const { OPERATIONS, MODEL_CHECK_OPERATION, MAX_TIMEOUT_MS, MAX_CONCURRENT_REQUESTS } = require('./ai-limits');
 const { USE_CASES } = require('./ai-contract');
 const fileReference = require('./ai-file-reference');
 const { drainAudit } = require('./audit');
@@ -38,14 +38,16 @@ function validateConfig(config) {
   }
   for (const grant of config.policy.grants) {
     const provider = config.policy.connections.find(c => c.connectionRef === grant.connectionRef).provider.slice(3);
+    const health = provider === 'groq' && grant.assetRef === 'ai:provider_health'
+      && grant.operations.length === 1 && grant.operations[0] === MODEL_CHECK_OPERATION;
     if (['accounting_ocr', 'whatsapp_audio'].some(use => grant.assetRef === `ai:${use}`)
       && !config.policy.connections.find(c => c.connectionRef === grant.connectionRef).ai.fileTransferOrigin) fail('invalid_request');
-    if (grant.tenantRef !== `platform:${config.environment}` || !USE_CASES[provider].some(use => grant.assetRef === `ai:${use}`)
-      || grant.operations.length !== 1 || grant.operations[0] !== OPERATIONS[provider]) fail('invalid_request');
+    if (grant.tenantRef !== `platform:${config.environment}` || !health && (!USE_CASES[provider].some(use => grant.assetRef === `ai:${use}`)
+      || grant.operations.length !== 1 || grant.operations[0] !== OPERATIONS[provider])) fail('invalid_request');
   }
   return config;
 }
-async function main(filename, { awsFactory = connectAws, http = createAiHttp() } = {}) {
+async function main(filename, { awsFactory = connectAws, http = createAiHttp(), modelHealthHttp } = {}) {
   const config = validateConfig(JSON.parse(privateFile(filename)));
   const tls = { cert: privateFile(config.tlsCertFile, 65536), key: privateFile(config.tlsKeyFile, 65536) };
   const store = new BrokerStore(config.stateFile);
@@ -54,7 +56,7 @@ async function main(filename, { awsFactory = connectAws, http = createAiHttp() }
     aws = await awsFactory();
     const secrets = createAwsSecretStore({ client: aws.secrets, accountId: ACCOUNT, kmsKeyArn: SECRET_KEY,
       prefix: config.environment === 'dev' ? '/clinicaclick/integrations/dev/' : '/clinicaclick/integrations/prod/' });
-    broker = new Broker({ store, policy: config.policy, secrets, operations: createAiOperations({ http }),
+    broker = new Broker({ store, policy: config.policy, secrets, operations: createAiOperations({ http, modelHealthHttp }),
       transportProfile: 'ai', timeoutMs: MAX_TIMEOUT_MS - 5000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {

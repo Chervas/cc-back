@@ -13,7 +13,7 @@ const { allowPort, removePort } = require('./offline-guard.cjs');
 const { createAiHttp } = require('../src/ai-http');
 const { validate, authorize } = require('../src/ai-contract');
 const C = require('../src/ai-file-reference');
-const { OPERATIONS } = require('../src/ai-limits');
+const { OPERATIONS, MODEL_CHECK_OPERATION } = require('../src/ai-limits');
 const { validateConfig, main } = require('../src/ai-main');
 const { SECRET_KEY } = require('../src/google-main');
 const { createAiBroker } = require('../../../src/services/aiBroker.service');
@@ -93,6 +93,8 @@ test('actual TLS AI runtime sends only references, preserves large output, isola
     policy.grants.push({ principalId: 'api:test', tenantRef: 'platform:staging', connectionRef,
       assetRef: `ai:${payloads[provider].useCase}`, operations: [OPERATIONS[provider]] });
   }
+  policy.grants.push({ principalId: 'api:test', tenantRef: 'platform:staging', connectionRef: 'ai:groq:staging',
+    assetRef: 'ai:provider_health', operations: [MODEL_CHECK_OPERATION] });
   const config = { enabled: true, cohort: 'ai-providers-v1', environment: 'staging', policy, listenAddress: '127.0.0.1', port,
     stateFile: path.join(f.dir, 'ai.sqlite'), tlsCertFile: cert, tlsKeyFile: key };
   const wrongEnvironment = structuredClone(config); wrongEnvironment.environment = 'dev';
@@ -100,7 +102,7 @@ test('actual TLS AI runtime sends only references, preserves large output, isola
   const wrongGrant = structuredClone(config); wrongGrant.policy.grants[0].assetRef = 'ai:whatsapp_audio';
   assert.throws(() => validateConfig(wrongGrant), { code: 'invalid_request' });
   const filename = path.join(f.dir, 'ai.json'); fs.writeFileSync(filename, JSON.stringify(config), { mode: 0o600 });
-  const deliveries = [], providerCalls = []; let keyBuffers = []; let leak = false;
+  const deliveries = [], providerCalls = []; let keyBuffers = []; let leak = false; let healthCalls = 0;
   const secrets = { async send(command) {
     const binding = policy.connections.find(c => c.secretArn === command.input.SecretId); assert(binding);
     if (command.constructor.name === 'DescribeSecretCommand') return { ARN: binding.secretArn, KmsKeyId: SECRET_KEY };
@@ -109,7 +111,8 @@ test('actual TLS AI runtime sends only references, preserves large output, isola
       SecretString: JSON.stringify({ version: 1, provider: binding.provider, connectionRef: binding.connectionRef, accessToken: 'FICTITIOUS_KEY_SENTINEL' }) };
   } };
   const sink = { async write(row) { deliveries.push(JSON.parse(row.event)); return { versionId: 'fictitious-audit', digest: row.digest }; } };
-  const runtime = await main(filename, { awsFactory: async () => ({ secrets, sink, close() {} }),
+  const runtime = await main(filename, { modelHealthHttp: async ({ payload, token }) => {
+    healthCalls++; assert.equal(token.toString(), 'FICTITIOUS_KEY_SENTINEL'); return { model: payload.body.model, available: true }; }, awsFactory: async () => ({ secrets, sink, close() {} }),
     http: async input => { providerCalls.push(input.provider); keyBuffers.push(input.token); assert.equal(input.token.toString(), 'FICTITIOUS_KEY_SENTINEL');
       return { model: input.payload.body.model, text: leak ? input.token.toString() : 'FICTITIOUS_OUTPUT_CONTENT'.repeat(60000), usage: { input_tokens: 17 } }; } });
   t.after(async () => { await runtime.close(); removePort(port); });
@@ -125,14 +128,20 @@ test('actual TLS AI runtime sends only references, preserves large output, isola
     await assert.rejects(client.execute(provider, payload.useCase, payload.body, { requestId, timeoutMs: payload.timeoutMs }), { code: 'outcome_unknown' });
   }
   assert.deepEqual(providerCalls, ['openai', 'gemini', 'groq']); assert(keyBuffers.every(buffer => buffer.every(byte => byte === 0)));
+  assert.deepEqual((await client.checkModel('groq', payloads.groq.body.model)).data, { model: payloads.groq.body.model, available: true });
+  assert.equal(healthCalls, 1);
+  await assert.rejects(client.checkModel('groq', 'unapproved-model'), { code: 'scope_denied' });
+  assert.equal(healthCalls, 1);
   const foreign = createAiBroker({ env: { ...env, AI_BROKER_ENVIRONMENT: 'dev' } });
   await assert.rejects(foreign.execute('groq', 'whatsapp_audio', payloads.groq.body), { code: 'scope_denied' });
   await assert.rejects(client.execute('groq', 'whatsapp_audio', { ...payloads.groq.body, model: 'unapproved-model' }), { code: 'scope_denied' });
+  await assert.rejects(foreign.checkModel('groq', payloads.groq.body.model), { code: 'scope_denied' });
+  assert.equal(healthCalls, 1);
   leak = true; const leakingBody = structuredClone(payloads.groq.body); leakingBody.fileRef.requestId = randomUUID();
   await assert.rejects(client.execute('groq', 'whatsapp_audio', leakingBody, { requestId: leakingBody.fileRef.requestId }), { code: 'provider_failed' });
   await drainAudit(runtime.store, sink);
   assert.equal(runtime.store.backlog().pending, 0);
-  assert.equal(deliveries.filter(event => event.action === 'integration.completed').length, 3);
+  assert.equal(deliveries.filter(event => event.action === 'integration.completed').length, 4);
   assert(deliveries.some(event => event.operation === OPERATIONS.openai));
   const persisted = JSON.stringify(runtime.store.db.prepare('SELECT * FROM commands').all()) + JSON.stringify(deliveries);
   for (const marker of ['FICTITIOUS_KEY_SENTINEL', 'FICTITIOUS_OUTPUT_CONTENT', 'FICTITIOUS_DOCUMENT_ONLY', payloads.groq.body.fileRef.url, payloads.openai.body.input[0].content[1].file_ref.url]) assert(!persisted.includes(marker));

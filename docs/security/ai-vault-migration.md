@@ -294,3 +294,35 @@ configuration/unit backup and automatic rollback on failed restart. The pending
 file issuer and signed AWS request, while injecting app DB/pause/telemetry only;
 it cannot count as authenticated UI verification. Never run it against the old
 AWS binary contract or interpret the earlier public-URL proof as its result.
+
+### Monitoring is an AI credential consumer (2026-09-18)
+
+The inventory includes `aiRuntimeMonitoring.service`: its previous Groq check
+called `/models` directly and provider configuration depended only on local keys.
+The migrated inventory recognizes broker flags, and Groq uses the separate typed
+read `ai.groq.model.check.v1`, asset `ai:provider_health`. Grant it explicitly to
+the staging monitor identity; a transcription grant does not imply this grant.
+The broker allows only a configured model at the fixed HTTPS model endpoint,
+uses the vault key, bounds the reply to 16 KiB, and projects only model/available.
+It does not transcribe, send files, retry or follow redirects for this check.
+See the [Groq model endpoint](https://console.groq.com/docs/api-reference#models).
+The existing four-hour application cache and error visibility are preserved.
+An enabled broker never falls back to a remaining legacy key. Startup no longer
+warns that Groq is unavailable merely because its local key was removed.
+
+Six broker-consumer/monitor tests, fourteen focused transport/TLS/admission tests
+and ten existing Bedrock/runtime tests pass. The exact health HTTP adapter also
+read the real Groq model successfully using the existing host's credential;
+that proves the provider endpoint, **not** an AWS broker migration. Evidence:
+`monitoring-{consumers-tests,broker-tests,existing-runtime-tests}.log` and
+`real-model-health-result.json`. This change is not yet deployed to AWS or the
+application runtimes. The old SSO device code was invalidated; no replacement
+has been requested while the operator is unavailable.
+
+The read-only AWS identity inventory separately confirms the remaining keys:
+Bedrock is `clinicaclick-bedrock-prod` in account137819318729, region eu-south-2,
+models EU Nova Micro/Lite/Pro, on staging and gateway. Staging SES uses
+`clinicaclick-ses-sender-staging`, eu-west-3, transactional enabled and marketing
+disabled. Gateway has email disabled/no SES key. DEV API has neither credential
+pair; its isolated security worker is a distinct remaining inventory target.
+No key value, token or clinical data is in the inventory evidence.

@@ -4,7 +4,7 @@ const bedrockEnabled = ['1', 'true', 'yes', 'on'].includes(String(process.env.BE
 if (!bedrockEnabled || !process.env.BEDROCK_AWS_ACCESS_KEY_ID || !process.env.BEDROCK_AWS_SECRET_ACCESS_KEY) {
     console.warn('[startup] Bedrock para texto clínico no está activo o no tiene credenciales dedicadas. Los nodos condition/ai_analysis no podrán usar el proveedor principal.');
 }
-if (!process.env.GROQ_API_KEY) {
+if (!process.env.GROQ_API_KEY && process.env.AI_BROKER_GROQ_ENABLED !== 'true') {
     console.warn('[startup] GROQ_API_KEY no está definida. La transcripción automática de audios no estará disponible.');
 }
 const cors = require('cors');
