@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-18",
+  "sourceBaseHead": "7db098a97c810109dc38c2e967144cc91d3f7d45",
+  "includesWorkingChanges": true,
+  "scope": "Bounded manual Data Manager caller inventory; not a complete inventory of all Google identity consumers or external OPS.",
+  "runtimeConsumersMigrated": 0,
+  "qa": {
+    "broker": 556,
+    "backendClientScopeReader": 23,
+    "provider": "fictitious_offline",
+    "authenticatedUI": "pending"
+  },
+  "rows": [
+    {
+      "file": "src/services/googleDataManagerConversion.service.js",
+      "sha256": "a2e7a9dd395e3ae4fe1ec55209e89463f874928864628d3985b524742936ceb2",
+      "role": "Constructor y transportes legacy de ingesta/estado; conservar las señales de consentimiento y la política mejorada.",
+      "state": "legacy_consumer_pending"
+    },
+    {
+      "file": "src/services/googleAdsConversionUpload.service.js",
+      "sha256": "c927db47f17d0136807caf703b5bbe563ae5ca4aed0a74f7c2b537263f360650",
+      "role": "Subida web/CRM y reserva GoogleAdsConversionUploadAttempts: no renovar UUID ni reutilizar pendientes antiguos para retransmitir.",
+      "state": "durable_reservation_and_adapter_pending"
+    },
+    {
+      "file": "models/googleadsconversionuploadattempt.js",
+      "sha256": "65ea80cd88cb8d104753e46d79fa95c8dc933ae49cb2d2d4f221795e6997adc2",
+      "role": "Registro CRM actual sin UUID de comando broker ni estado outcome_unknown explícito.",
+      "state": "durable_reservation_pending"
+    },
+    {
+      "file": "src/services/googleDataManagerDiagnostics.service.js",
+      "sha256": "2963fd7ed9fb8d850ce7370cd5e0bf12eb05fee3cf502330f9a48ccd0862b6f8",
+      "role": "Diagnóstico por ID proveedor con tokens locales; necesita recibo broker y misma identidad propietaria.",
+      "state": "receipt_adapter_pending"
+    },
+    {
+      "file": "src/services/campaignWorkspaceGooglePreparation.service.js",
+      "sha256": "60d9c3812c3f6d9c10b05c604524a123cc2710b0541db5c412196c53fd5c5194",
+      "role": "Preparación validate-only más lectura de acciones canónicas; ambas rutas necesitan broker.",
+      "state": "preparation_adapter_pending"
+    },
+    {
+      "file": "src/controllers/campaignOnboarding.controller.js",
+      "sha256": "4e56f64f290d81d4a20e94805c165d9864a83170aafbdd2ee40ead87bb22bb80",
+      "role": "Dos validadores Data Manager: configuración por objetivo y dry-run; conservar ACL y validación ficticia.",
+      "state": "onboarding_adapters_pending"
+    },
+    {
+      "file": "src/services/campaignWorkspaceGoogleConversion.service.js",
+      "sha256": "dccfa6cc2422340c01f26859737449f448f74d1bcf28d06347613a1d8d726895",
+      "role": "Resolver de conversión web con mandato de workspace y credencial legacy.",
+      "state": "workspace_resolver_pending"
+    },
+    {
+      "file": "src/services/campaignWorkspaceGoogleNative.service.js",
+      "sha256": "22791a2a0eecf1d46dafc2fb53948c12dcd224757139e2e5d7acdd0e52e72d5b",
+      "role": "Hitos CRM con mandato y consentimiento persistido específico.",
+      "state": "native_resolver_pending"
+    },
+    {
+      "file": "src/services/googleAdsScopedRuntime.service.js",
+      "sha256": "49ecb17cffc9b2286dd8ce587d9be307cb5bb041e5151b337d9f90521eb07437",
+      "role": "Resolver compartido de asignación, conexión y accessToken; conservar prohibición de fallback managed.",
+      "state": "scoped_runtime_pending"
+    },
+    {
+      "file": "src/services/googleLeadLifecycleConversion.service.js",
+      "sha256": "d4925444281f0f38b4530359e523bb3e2003ae517395117dbffac2dcdcc96c1a",
+      "role": "Entradas de hitos CRM que alimentan la subida de conversiones.",
+      "state": "lifecycle_regression_pending"
+    },
+    {
+      "file": "src/jobs/sync.jobs.js",
+      "sha256": "2c4ebc5cace33882c9ef986d354351007d4d7667ce0b942acaa5ce25cd54c7ac",
+      "role": "Diagnóstico se ejecuta junto a reconciliaciones/activaciones: no ejecutar el job completo como canary.",
+      "state": "job_adapter_and_pause_review_pending"
+    },
+    {
+      "file": "src/services/googleDataManagerBrokerClient.service.js",
+      "sha256": "25743800c7f948e6c8ee4ba064520bd31fc9ffe99d0a7f10d6a20d694fe6c70c",
+      "role": "Cliente tipado sin tokens con revalidación, DTO y UUID proporcionado; aún sin callsites de negocio.",
+      "state": "prepared_offline"
+    },
+    {
+      "file": "src/services/googleAdsBroker.service.js",
+      "sha256": "4bd64a17c96f2041bb730b572ab009c1076aabe5f3ba233a554383301e96e7c4",
+      "role": "Fachada conecta conversion al contexto opaco Ads; flag adicional apagada.",
+      "state": "prepared_offline"
+    },
+    {
+      "file": "services/integrations-broker/src/google-data-manager-contract.js",
+      "sha256": "db24927c9493611c5931a7b1170fcf28912f9aa7036de646a4165a0f76deabe8",
+      "role": "Contrato cerrado de validación/ingesta/estado, consentimiento y destino.",
+      "state": "prepared_offline"
+    },
+    {
+      "file": "services/integrations-broker/src/google-data-manager.js",
+      "sha256": "84063f30cb600953eb8d6da3580560efcc54df5b8b6bbdb26642ea464e34a19e",
+      "role": "Ledger SQLite, recibos y auditoría atómicos sin reenvío automático.",
+      "state": "prepared_offline"
+    }
+  ]
+}

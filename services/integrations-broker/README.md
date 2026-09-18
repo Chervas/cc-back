@@ -1,5 +1,14 @@
 # Broker de integraciones
 
+## 18/09/2026 — Contrato de conversiones Google Data Manager
+
+Validación ficticia, ingesta individual y estado ligado a recibo durable preparados
+en la cohorte explícita `google-ads-conversions-v1`. Conserva consentimiento,
+alcance y revocación; un resultado desconocido no se reenvía automáticamente.
+Pruebas offline con HTTPS/SQLite reales. Consumidores CRM, despliegue AWS,
+proveedor y aceptación UI autenticada todavía pendientes.
+[Contrato, límites y recuperación](../../docs/security/google-data-manager-broker.md).
+
 ## 13/09/2026 — Alta WhatsApp durable en el broker
 
 Cohorte privada `whatsapp-onboarding-v1`: begin/finish/status/abort firmados,

@@ -19,6 +19,8 @@ const { createGoogleAdsOperations } = require('./google-ads');
 const { createGoogleAdsDeveloperSecret } = require('./google-ads-developer-secret');
 const enrollmentContract = require('./google-ads-enrollment-contract');
 const { createGoogleAdsEnrollment } = require('./google-ads-enrollment');
+const dmContract = require('./google-data-manager-contract');
+const { createDataManagerOperations } = require('./google-data-manager');
 const ACCOUNT = '137819318729'; const REGION = 'eu-west-3';
 const SOURCE = `arn:aws:sts::${ACCOUNT}:assumed-role/clinicaclick-integrations-prod-ec2-role/i-0cf40cfe823f160fa`;
 const WRITER_ROLE = `arn:aws:iam::${ACCOUNT}:role/clinicaclick-audit-prod-writer-role`;
@@ -62,14 +64,17 @@ function validateConfig(config) {
   const keys = 'cohort,cursorKeyFile,enabled,listenAddress,policy,port,stateFile,tlsCertFile,tlsKeyFile'.split(',');
   if (Object.hasOwn(config || {}, 'tlsRenewal')) keys.push('tlsRenewal');
   if (!config || Object.keys(config).sort().join(',') !== keys.sort().join(',')
-    || config.enabled !== true || !['google-business-profile-read-v1', 'google-search-console-read-v1', 'google-analytics-read-v1', 'google-ads-read-v1'].includes(config.cohort)
+    || config.enabled !== true || !['google-business-profile-read-v1', 'google-search-console-read-v1', 'google-analytics-read-v1', 'google-ads-read-v1', dmContract.COHORT].includes(config.cohort)
     || !net.isIP(config.listenAddress) || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535
     || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   validatePolicy(config.policy);
-  if (config.cohort === 'google-ads-read-v1') {
+  const conversions = config.cohort === dmContract.COHORT;
+  if (!conversions && config.policy.connections.some(c => c.googleDataManager)) fail('invalid_request');
+  if (config.cohort === 'google-ads-read-v1' || conversions) {
     if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== adsContract.PROVIDER || !c.secretArn || !c.clientSecretArn
       || !c.developerSecretArn || !require('./google-oauth-secrets').subject(c.googleSubject) || !(c.googleAdsAccounts?.length || c.googleAdsEnrollmentScopes?.length)
       || c.analyticsProperties || c.searchConsoleSites)) fail('invalid_request');
+    if (conversions && config.policy.connections.some(c => !c.googleDataManager)) fail('invalid_request');
     for (const connection of config.policy.connections) {
       const ids = new Set();
       for (const row of connection.googleAdsAccounts || []) {
@@ -80,17 +85,24 @@ function validateConfig(config) {
     for (const grant of config.policy.grants) {
       if (!/^clinic:[1-9]\d{0,9}$/.test(grant.tenantRef)
         || grant.operations.some(op => !adsContract.OPERATIONS.includes(op) && op !== adsContract.REVOKE_OPERATION
+          && !(conversions && Object.values(dmContract.OPERATIONS).includes(op))
           && !Object.values(oauthContract.operationsFor(adsContract.PROVIDER)).includes(op)
           && !Object.values(enrollmentContract.OPERATIONS).includes(op) && op !== enrollmentContract.REVOKE_OPERATION)) fail('invalid_request');
       const binding = config.policy.connections.find(c => c.connectionRef === grant.connectionRef);
-      if (grant.assetRef.startsWith('ads-enroll:')) enrollmentContract.scopeFor(binding, grant.assetRef, grant.tenantRef);
+      if (grant.assetRef.startsWith('ads-enroll:')) {
+        if (grant.operations.some(op => Object.values(dmContract.OPERATIONS).includes(op))) fail('invalid_request');
+        enrollmentContract.scopeFor(binding, grant.assetRef, grant.tenantRef);
+      }
       else {
         if (grant.operations.some(op => Object.values(enrollmentContract.OPERATIONS).includes(op) || op === enrollmentContract.REVOKE_OPERATION)) fail('invalid_request');
         adsContract.resource(binding, grant.assetRef);
+        if (grant.operations.some(op => Object.values(dmContract.OPERATIONS).includes(op))
+          && !binding.googleDataManager?.destinations.some(row => row.assetRef === grant.assetRef)) fail('invalid_request');
       }
     }
-    validatePropertyControlSeparation(config.policy, adsContract);
-    validateOAuthSeparation(config.policy, adsContract);
+    const operations = { ...adsContract, OPERATIONS: [...adsContract.OPERATIONS, ...(conversions ? Object.values(dmContract.OPERATIONS) : [])] };
+    validatePropertyControlSeparation(config.policy, operations);
+    validateOAuthSeparation(config.policy, operations);
     enrollmentContract.validatePolicy(config.policy);
     return config;
   }
@@ -179,8 +191,9 @@ async function connectAws() {
       close: () => clients.forEach(c => c.destroy()) };
   } catch (error) { clients.forEach(c => c.destroy()); throw error; }
 }
-async function main(filename, { awsFactory = connectAws, http = createGoogleHttp() } = {}) {
+async function main(filename, { awsFactory = connectAws, http } = {}) {
   const config = validateConfig(JSON.parse(privateFile(filename)));
+  http ||= createGoogleHttp({ dataManagerEnabled: config.cohort === dmContract.COHORT });
   const cert = privateFile(config.tlsCertFile, 65536); const key = privateFile(config.tlsKeyFile, 65536);
   const cursorKey = privateFile(config.cursorKeyFile, 32); const cursor = cursorCodec(cursorKey);
   const store = new BrokerStore(config.stateFile); let aws; let secrets; let oauth; let adsEngine; let adsEnrollment; let server; let timer; let draining;
@@ -188,7 +201,8 @@ async function main(filename, { awsFactory = connectAws, http = createGoogleHttp
     aws = await awsFactory();
     const searchConsole = config.cohort === 'google-search-console-read-v1';
     const analytics = config.cohort === 'google-analytics-read-v1';
-    const ads = config.cohort === 'google-ads-read-v1';
+    const ads = config.cohort === 'google-ads-read-v1' || config.cohort === dmContract.COHORT;
+    const dataManager = config.cohort === dmContract.COHORT ? createDataManagerOperations({ store, http }) : null;
     secrets = createGoogleSecretStore({ client: aws.secrets, http, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY,
       provider: searchConsole ? scContract.PROVIDER : analytics ? gaContract.PROVIDER : ads ? adsContract.PROVIDER : PROVIDER });
     if (ads) {
@@ -206,7 +220,7 @@ async function main(filename, { awsFactory = connectAws, http = createGoogleHttp
       secrets: createGoogleOAuthSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY }),
       onActivated: ref => { secrets.invalidate(ref); for (const controller of broker.active.get(ref) || []) controller.abort(); } });
     broker = new Broker({ store, policy: config.policy, secrets, adsEnrollment,
-      operations: ads ? { ...adsEngine.operations, ...adsEnrollment?.operations, ...oauthContract.controlsFor(adsContract.PROVIDER, oauth) }
+      operations: ads ? { ...adsEngine.operations, ...adsEnrollment?.operations, ...dataManager?.operations, ...oauthContract.controlsFor(adsContract.PROVIDER, oauth) }
         : searchConsole ? createSearchConsoleOperations({ http, cursor, oauth }) : analytics ? createAnalyticsOperations({ http, cursor, oauth }) : createGoogleBusinessProfileOperations({ http, cursor, oauth }), timeoutMs: 25000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {
