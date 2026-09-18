@@ -8,7 +8,8 @@ const PROVIDER = ads.PROVIDER;
 const COHORT = 'google-ads-conversions-v1';
 const SCOPES = Object.freeze(['https://www.googleapis.com/auth/datamanager']);
 const OPERATIONS = Object.freeze({ validate: 'google.ads.conversion.validate.v1',
-  ingest: 'google.ads.conversion.ingest.v1', status: 'google.ads.conversion.status.v1' });
+  ingest: 'google.ads.conversion.ingest.v1', status: 'google.ads.conversion.status.v1',
+  reconcile: 'google.ads.conversion.reconcile.v1' });
 const EVENTS = ['lead', 'contact', 'qualified_lead', 'schedule', 'purchase'];
 const SOURCES = ['WEB', 'OTHER'];
 const object = properties => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) });
@@ -38,7 +39,7 @@ const eventSchema = object({ timestamp: stamp, transactionId: { type: ['string',
   enhancedPolicyDigest: nullableDigest,
 });
 const validators = { [OPERATIONS.validate]: schema(choice), [OPERATIONS.ingest]: schema({ ...choice, event: eventSchema }),
-  [OPERATIONS.status]: schema({ submissionId: uuid }) };
+  [OPERATIONS.status]: schema({ submissionId: uuid }), [OPERATIONS.reconcile]: schema({ submissionId: uuid }) };
 const validStamp = value => Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 function validate(operation, payload) {
   if (!Object.hasOwn(validators, operation)) fail('operation_denied');

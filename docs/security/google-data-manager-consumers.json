@@ -1,12 +1,12 @@
 {
-  "version": 10,
+  "version": 11,
   "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "800c7a9aba7676ef40b7c990a9ec8f7a78f1d334",
+  "sourceBaseHead": "e773df8c1f18a76cc63c868a762571f5eed26909",
   "includesWorkingChanges": true,
-  "scope": "Bounded Data Manager destination recovery/list/audit review; unchanged rows retain earlier evidence hashes and are not a fresh complete Google/OPS inventory.",
+  "scope": "Bounded original-receipt reconciliation primitive and CRM client review; no administrative consumer, public MFA acceptance or operational activation. Unchanged inventory rows retain their earlier evidence hashes.",
   "runtimeConsumersMigrated": 0,
   "qa": {
-    "broker": "607/607 final full Node24 regression, including 23 destination registry scenarios; external network blocked",
+    "broker": "617/617 full Node24 regression, including 33 destination/receipt scenarios; external network blocked",
     "provider": "fictitious_offline",
     "authenticatedUI": "pending",
     "mysqlJournalChecks": 56,
@@ -22,7 +22,7 @@
     "readinessScript": "pass offline",
     "actionManagementClientScopeReaderAndOnboarding": 60,
     "destinationClientRegression": 30,
-    "destinationRegistryRuntime": "23/23 included in 607; signed SQLite and real loopback HTTPS/CRM scope/client, fictitious AWS/Google/S3",
+    "destinationRegistryRuntime": "33/33 included in 617; signed SQLite and actual loopback HTTPS/CRM client with post-withdrawal receipt lookup, fictitious AWS/Google/S3",
     "destinationHumanJournalAndUI": "prepared, undeployed: 17 MySQL journal/recovery groups; 13 viewer groups; desktop/mobile Angular Chromium with actual HTTP client and fictitious API, public MFA acceptance pending",
     "previous_broker": "584/584 full regression; 28/28 focused after strict owner/resource type checks (overlapping)",
     "destinationHumanAuditCodec": "79/79 platform audit regression; v18 command and list variants still not published to AWS",
@@ -30,7 +30,10 @@
     "destinationUiScreenshots": 47,
     "auditUiScreenshots": 12,
     "destinationFrontUnitTests": 27,
-    "destinationRecoveryIndex": "full-row EXPLAIN: forced scoped index, ref, Backward index scan, no filesort; isolated MySQL, not a load test"
+    "destinationRecoveryIndex": "full-row EXPLAIN: forced scoped index, ref, Backward index scan, no filesort; isolated MySQL, not a load test",
+    "previous_broker_607": "607/607 final full Node24 regression, including 23 destination registry scenarios; external network blocked",
+    "receiptReconciliationConsumer": "pending managed administrative consumer, durable human audit, CRM publication, UI and real acceptance; automatic diagnostics unchanged",
+    "receiptReconciliationClientRegression": 36
   },
   "rows": [
     {
@@ -102,27 +105,27 @@
     },
     {
       "file": "src/services/googleDataManagerBrokerClient.service.js",
-      "sha256": "e843ba0bb8b3bdf1ef52c1d260507f685e44d04b1f64be018b86f788cf936fa0",
-      "role": "Cliente sin tokens con revalidación y DTO de recibos; invocado por el emisor común mediante coordinador.",
-      "state": "prepared_offline"
+      "sha256": "355a29ca778fb02097bd8d82155aa06b1596fef4cc81f243ea5d8158e5e14821",
+      "role": "Cliente tipado con gate adicional cerrado para reconcile, scope opaco, guard y proyección exacta.",
+      "state": "receipt_reconciliation_primitive_prepared_undeployed"
     },
     {
       "file": "src/services/googleAdsBroker.service.js",
-      "sha256": "c215e5a174bf55ca4c46f9c6ab503360bdbafdccb6661a67762c893f2fe9488d",
-      "role": "Frontera opaca para lecturas, acciones, conversiones y destinos; sin habilitación implícita.",
-      "state": "prepared_undeployed"
+      "sha256": "dfaa8dcd02b4d959f52b97c1490f83364cf7fa9f684ebfd6417b59305a1f2499",
+      "role": "Fachada interna conserva contexto Ads actual y gate independiente de conciliación.",
+      "state": "receipt_reconciliation_primitive_prepared_undeployed"
     },
     {
       "file": "services/integrations-broker/src/google-data-manager-contract.js",
-      "sha256": "d2b55beeb95aa2ec928a5af4e524196466fb8d468296212c22ffe65a5e0f7fdc",
-      "role": "Destinos estáticos o registro explícito; recibos dinámicos fijan UUID y ámbito de autorización.",
-      "state": "prepared_undeployed"
+      "sha256": "f2bf59e282a63903c3e204be57cfeca26222f4d7a60d84bf5419f53675580aec",
+      "role": "Contratos tipados validate/ingest/status y nueva lectura explícita reconcile por UUID propio.",
+      "state": "receipt_reconciliation_primitive_prepared_undeployed"
     },
     {
       "file": "services/integrations-broker/src/google-data-manager.js",
-      "sha256": "feceb2d193d4e242157a3a0f71842a0b2a577283e98e28c38ea44df59daa31fb",
-      "role": "Revalida autorización antes/después del proveedor y dentro del commit; revocación no reenvía intentos.",
-      "state": "prepared_undeployed"
+      "sha256": "b64a5e739a228f69f77832174facf65a45bc68f506127f9a2e4f5b5cf2c96d7a",
+      "role": "Recibo y referencia original atómicos; lectura histórica solo con recibo aceptado, sin ingesta, con revalidación final y auditoría.",
+      "state": "receipt_reconciliation_primitive_prepared_undeployed"
     },
     {
       "file": "src/services/googleConversionSubmission.repository.js",
@@ -276,9 +279,9 @@
     },
     {
       "file": "services/integrations-broker/src/google-destinations.js",
-      "role": "Registro SQLite y cierre anticipado con intención original; una respuesta tardía no reautoriza.",
-      "state": "destination_registry_prepared_undeployed",
-      "sha256": "95bf1e10eb61479f96f1f511996b3f5e23d6f9dadef21fe188addc3d091e965f"
+      "role": "Permisos/retirada y resolutor histórico de una autorización original; no rehabilita targets.",
+      "state": "receipt_reconciliation_primitive_prepared_undeployed",
+      "sha256": "7530f069f26dc8d5e07fc3ecbb52e21bcf3551469da4711dd5048aef8d6fd99a"
     },
     {
       "file": "src/services/googleDataManagerDestinationsBrokerClient.service.js",
@@ -321,6 +324,18 @@
       "role": "Recuperación propia sin UUID local: páginas de 20, índice forzado y lote de planes; sin llamadas broker ni mutación de permisos.",
       "state": "destination_recovery_prepared_undeployed",
       "sha256": "bdda48610158b81342ae19aff98cc68effc8126b17cac64ffcf2dc2d594fd648"
+    },
+    {
+      "file": "services/integrations-broker/test/google-destinations.test.js",
+      "sha256": "4ee43b074f7803e1e499c713c41cc639bbabe4372e68cc8e2d07d0f7295306d1",
+      "role": "33 escenarios firmados SQLite/HTTPS: permisos, retirada y conciliación, red externa bloqueada.",
+      "state": "receipt_reconciliation_primitive_prepared_undeployed"
+    },
+    {
+      "file": "src/scripts/tests/google_data_manager_broker_client.test.js",
+      "sha256": "200fd9e75518ef207c96791d7ba5f554e2563cdcb0000e00df07c7ae8aa6ed7c",
+      "role": "13 pruebas cliente incluyendo gate cerrado, pérdida de acceso y respuesta sustituida.",
+      "state": "receipt_reconciliation_primitive_prepared_undeployed"
     }
   ]
 }

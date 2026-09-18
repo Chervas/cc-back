@@ -8,14 +8,16 @@ separado la conexión Google compartida mientras queden consumidores legacy.
 ## Operaciones y permisos
 
 La cohorte explícita `google-ads-conversions-v1` incorpora las lecturas y controles
-Ads existentes y tres operaciones. `google-ads-read-v1` rechaza la configuración
+Ads existentes y cuatro operaciones tipadas. La conciliación histórica exige
+su propio grant explícito; añadir código no lo incorpora a políticas existentes. `google-ads-read-v1` rechaza la configuración
 Data Manager; instalar código nuevo no convierte una cohorte de lectura en escritura.
 
 | Operación | Entrada específica | Resultado |
 |---|---|---|
 | `google.ads.conversion.validate.v1` | Acción, evento y origen registrados | `validated`, número de avisos; siempre `validateOnly=true` con datos ficticios |
 | `google.ads.conversion.ingest.v1` | Selección y un evento tipado | Acuse `accepted`, UUID de envío, ID del proveedor y número de avisos |
-| `google.ads.conversion.status.v1` | UUID de un envío propio | UUID e ID de recibo originales, estado, cuenta/acción y códigos/conteos acotados |
+| `google.ads.conversion.status.v1` | UUID de un envío propio con destino activo | UUID e ID de recibo originales, estado, cuenta/acción y códigos/conteos acotados |
+| `google.ads.conversion.reconcile.v1` | UUID de un envío con recibo aceptado y autorización original registrada | Misma proyección de estado, aun después de retirar ese permiso; lectura explícita sin reenviar |
 
 La política del broker fija cuenta, gestor, proyecto de cuota, acciones, eventos,
 orígenes y autorización de señales mejoradas. Cada grant fija principal, clínica,
@@ -104,6 +106,61 @@ Para recuperar el servicio, conservar el SQLite actual, sus comandos, recibos,
 bloqueos y auditoría. No restaurar una copia anterior del ledger después de un
 envío, borrar intentos ni cambiar UUID para forzar repetición. Una pausa de la
 cohorte impide nuevas operaciones y no rehabilita el acceso legacy.
+
+## Recibos después de retirar un permiso de destino
+
+Primitiva broker y cliente CRM preparados, **sin consumidor administrativo ni
+activación operativa**. `google.ads.conversion.reconcile.v1` permite leer un recibo
+aceptado ligado al permiso original, activo o retirado. La consulta automática
+existente mantiene `status` y su política de destino activo; no se cambia un job
+por esta vía ni se usa como alternativa automática tras un error.
+
+Cada ingesta nueva mediante permiso dinámico registra, en la misma transacción
+SQLite que su intento, `google_data_manager_receipt_authorizations`:
+`submission_id` (PK/FK del recibo), `authorization_id` y `authorization_digest`.
+No añade contenido, clic, identificadores personales ni tokens. Es una tabla
+aditiva del SQLite existente; no otro servicio ni una modificación de las columnas
+del recibo previo. Si falla esta escritura, no hay llamada al proveedor.
+
+La lectura acepta solo el UUID de envío. Busca recibo propio por principal,
+clínica, conexión y activo; exige estado `accepted`, ID Google durable y prueba
+del permiso original. Recupera ese permiso por PK y vuelve a comprobar su plan
+aplicado, selección, identidad de firma, política, cuenta/manager y digest de
+ámbito. Un permiso posterior, aunque use la misma acción, no puede sustituirlo.
+La retirada permite esta lectura concreta; desconectar el activo, revocar la
+conexión, cambiar identidad/ámbito/política o retirar el grant siguen denegando.
+
+Usa exclusivamente `requestStatus:retrieve`, con ID obtenido del ledger. Valida
+cuenta/acción, una sola conversión y proyección cerrada; una respuesta vacía no
+prueba procesamiento. Revalida antes/después del proveedor y dentro de la
+transacción final de auditoría, incluido que no cambie el ID del recibo. No
+modifica permiso, targets ni recibo de ingesta. Registra auditoría técnica
+`receipt_reconciled` y la operación exacta; un fallo de auditoría no libera el
+resultado. La respuesta de lectura no se conserva como replay: cada consulta
+explícita posterior usa otro UUID de lectura, nunca otro UUID de conversión.
+
+Un intento sin ACK durable, un recibo anterior sin esta prueba o un destino
+estático sin autorización dinámica permanece `outcome_unknown` en esta vía.
+No se reconstruyen referencias desde el digest ni desde los grants actuales.
+El estado normal de destinos estáticos conserva su contrato previo.
+
+El cliente `googleAdsBroker.conversion(...,'reconcile',...)` añade el gate
+`GOOGLE_ADS_RECEIPT_RECONCILIATION_BROKER_ENABLED=true`, cerrado por defecto y
+adicional a Ads/conversiones. Exige UUID de lectura, `expectedActionId` y guard
+explícitos, contexto opaco y permisos vigentes comprobados alrededor de la
+llamada. No hay ruta HTTP, cambio del coordinador automático, sesión humana ni
+aceptación UI de esta nueva vía. Faltan admisión/auditoría humana durables,
+permisos actuales por todas las clínicas, publicación del resultado CRM y
+recorrido visual autenticado antes de habilitarla.
+
+Consulta por claves únicas, sin barrido histórico. Una referencia SQLite por
+ingesta dinámica; cada conciliación implica una consulta al proveedor y auditoría
+por el outbox técnico existente. No hay medición de coste incremental ni nuevos
+recursos contratados. Para revertir, cerrar gate/grant de conciliación y conservar
+ambas tablas, permisos retirados, intentos y recibos. No eliminar ni completar
+retroactivamente las referencias; una versión anterior no producirá esa prueba
+en nuevas ingestas y no debe seguir creando envíos si se requiere recuperarlas
+posteriormente por esta vía.
 
 ## Verificación y trabajo necesario antes del corte
 

@@ -12,7 +12,8 @@ function createGoogleAdsBroker(options) {
   const discoveryScope = createGoogleAdsBrokerScope({ ...options, discoveryOnly: true });
   const reader = createGoogleAdsBrokerReader({ client: options.client, assertContext: scope.assertContext, ...(options.now ? { now: options.now } : {}) });
   const conversions = createGoogleDataManagerBrokerClient({ client: options.client, assertContext: scope.assertContext,
-    ...(options.now ? { now: options.now } : {}), ...(options.conversionsEnabled ? { enabled: options.conversionsEnabled } : {}) });
+    ...(options.now ? { now: options.now } : {}), ...(options.conversionsEnabled ? { enabled: options.conversionsEnabled } : {}),
+    ...(options.receiptReconciliationEnabled ? { reconciliationEnabled: options.receiptReconciliationEnabled } : {}) });
   const actionManagement = createGoogleAdsActionManagementBrokerClient({ client: options.client, assertContext: scope.assertContext,
     ...(options.now ? { now: options.now } : {}), ...(options.actionManagementEnabled ? { enabled: options.actionManagementEnabled } : {}) });
   const destinations = createGoogleDataManagerDestinationsBrokerClient({ client: options.client, assertContext: scope.assertContext,

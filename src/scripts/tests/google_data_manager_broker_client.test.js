@@ -10,8 +10,9 @@ const payload = () => ({ ...selection(), event: { timestamp: '2026-09-18T10:00:0
   currency: 'EUR', advertisingConsent: 'GRANTED', adUserData: null, adPersonalization: 'DENIED',
   clickId: { type: 'gbraid', value: 'FICTITIOUS-CLICK' }, userIdentifiers: [], enhancedPolicyDigest: null } });
 async function fixture() {
-  const f = scopeFixture(), state = { at: 1, enabled: true, allowed: true, calls: [], guards: 0 };
+  const f = scopeFixture(), state = { at: 1, enabled: true, reconciliation: false, allowed: true, calls: [], guards: 0 };
   const service = createGoogleAdsBroker({ ...f.options, conversionsEnabled: () => state.enabled, now: () => state.at,
+    receiptReconciliationEnabled: () => state.reconciliation,
     client: { execute: async (command, budget) => {
       state.calls.push({ command, budget }); await state.onCall?.(command);
       const data = command.operation === C.OPERATIONS.validate ? { validated: true, warningCount: 0 }
@@ -129,4 +130,63 @@ test('unknown outcomes and provider timeouts never retry or replace the caller c
   }
   const f = await fixture(); f.local.onCall = () => { throw Error('FICTITIOUS-SECRET'); };
   await assert.rejects(f.invoke(), { code: 'google_data_manager_broker_failed', message: 'google_data_manager_broker_failed' });
+});
+
+test('historical reconciliation requires its separate default-closed gate and an exact caller-owned receipt reference', async () => {
+  const f = await fixture(), submissionId = randomUUID(), input = { submissionId };
+  await assert.rejects(f.invoke('reconcile', input, { expectedActionId: '456' }), { code: 'broker_cohort_disabled' });
+  assert.equal(f.local.calls.length, 0);
+  f.local.reconciliation = true;
+  for (const [payload, options] of [[{ submissionId, requestId: 'foreign-provider-id' }, { expectedActionId: '456' }],
+    [input, {}], [input, { expectedActionId: '456', beforeExecute: undefined }]]) {
+    await assert.rejects(f.invoke('reconcile', payload, options), { code: 'invalid_request' });
+  }
+  f.local.onGuard = () => { input.submissionId = randomUUID(); };
+  assert.deepEqual(await f.invoke('reconcile', input, { expectedActionId: '456' }),
+    { submissionId, requestId: 'fictitious-provider', requestStatusPerDestination: [] });
+  assert.equal(f.local.calls.length, 1); assert.equal(f.local.calls[0].command.operation, C.OPERATIONS.reconcile);
+  assert.deepEqual(f.local.calls[0].command.payload, { submissionId });
+});
+
+test('enabling conversions alone does not enable historical receipt reconciliation', async () => {
+  const f = scopeFixture(); let calls = 0;
+  const previous = process.env.GOOGLE_ADS_RECEIPT_RECONCILIATION_BROKER_ENABLED;
+  delete process.env.GOOGLE_ADS_RECEIPT_RECONCILIATION_BROKER_ENABLED;
+  try {
+    const service = createGoogleAdsBroker({ ...f.options, conversionsEnabled: () => true,
+      client: { execute: async () => { calls++; } } });
+    const context = await service.prepare(f.mapping);
+    await assert.rejects(service.conversion(f.mapping, context, 'reconcile', { submissionId: randomUUID() },
+      { requestId: randomUUID(), expectedActionId: '456', beforeExecute: async () => true }), { code: 'broker_cohort_disabled' });
+    assert.equal(calls, 0);
+  } finally {
+    if (previous === undefined) delete process.env.GOOGLE_ADS_RECEIPT_RECONCILIATION_BROKER_ENABLED;
+    else process.env.GOOGLE_ADS_RECEIPT_RECONCILIATION_BROKER_ENABLED = previous;
+  }
+});
+
+test('historical reconciliation rechecks its own gate, clinical guard, mapping and current grants after transport', async () => {
+  for (const mode of ['gate', 'guard', 'mapping', 'grant']) {
+    const f = await fixture(); f.local.reconciliation = true;
+    f.local.onCall = () => {
+      if (mode === 'gate') f.local.reconciliation = false;
+      if (mode === 'guard') f.local.allowed = false;
+      if (mode === 'mapping') f.mapping.isActive = false;
+      if (mode === 'grant') f.state.grants[0].status = 'revoked';
+    };
+    await assert.rejects(f.invoke('reconcile', { submissionId: randomUUID() }, { expectedActionId: '456' }),
+      { code: { gate: 'broker_cohort_disabled', guard: 'conversion_paused', mapping: 'broker_binding_invalid', grant: 'scope_denied' }[mode] });
+    assert.equal(f.local.calls.length, 1);
+  }
+});
+
+test('historical reconciliation rejects substituted receipt identities, foreign actions and unprojected provider fields', async () => {
+  for (const mutate of [r => { r.data.submissionId = randomUUID(); }, r => { r.data.message = 'FICTITIOUS-SECRET'; },
+    r => { r.data.requestStatusPerDestination = [{ destination: { operatingAccount: { accountType: 'GOOGLE_ADS', accountId: '1234567890' },
+      productDestinationId: '999' }, requestStatus: 'SUCCESS', eventsIngestionStatus: { recordCount: 1 } }]; }]) {
+    const f = await fixture(); f.local.reconciliation = true; f.local.mutate = mutate;
+    await assert.rejects(f.invoke('reconcile', { submissionId: randomUUID() }, { expectedActionId: '456' }),
+      { code: 'broker_response_invalid', message: 'broker_response_invalid' });
+    assert.equal(f.local.calls.length, 1);
+  }
 });

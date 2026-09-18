@@ -130,10 +130,25 @@ function createGoogleDestinations({ store, actionManagement, now = Date.now }) {
     const selected = JSON.parse(row.destinations_json).find(item => item.event === payload.eventName
       && item.conversionActionId === payload.conversionActionId && item.sources.includes(payload.eventSource));
     if (!selected) fail('scope_denied');
+    return resolved(binding, assetRef, row, selected);
+  }
+  function resolved(binding, assetRef, row, selected) {
     return { ...require('./google-ads-contract').resource(binding, assetRef), quotaProjectId: binding.googleDataManager.quotaProjectId,
       authorizationId: row.id, authorizationDigest: row.scope_digest,
       destination: { assetRef, conversionActionId: selected.conversionActionId, events: [selected.event], sources: selected.sources, enhancedPolicy: null } };
   }
-  return { operations, resolve };
+  // Only a durable submission may select this historical authorization. This
+  // reader never supplies a target to validation/ingestion or changes its state.
+  function resolveReceipt(binding, assetRef, payload, principal, tenantRef, authority) {
+    if (!authority || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(authority.authorization_id || '')
+      || !/^[a-f0-9]{64}$/.test(authority.authorization_digest || '')) fail('scope_denied');
+    const row = load({ assetRef, tenantRef, connectionRef: binding.connectionRef, payload: {} }, principal, binding, authority.authorization_id);
+    if (row.scope_digest !== authority.authorization_digest) fail('scope_denied');
+    const selected = JSON.parse(row.destinations_json).find(item => item.event === payload.eventName
+      && item.conversionActionId === payload.conversionActionId && item.sources.includes(payload.eventSource));
+    if (!selected) fail('scope_denied');
+    return resolved(binding, assetRef, row, selected);
+  }
+  return { operations, resolve, resolveReceipt };
 }
 module.exports = { createGoogleDestinations };

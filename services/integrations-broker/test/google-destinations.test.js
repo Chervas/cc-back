@@ -22,11 +22,12 @@ function setup(t) {
   f.binding.googleAdsActionManagement = { accounts: [{ assetRef: ASSET, events: A.EVENTS, currencies: ['EUR'], allowCreate: true, allowNormalize: true }] };
   f.binding.googleDataManagerEnrollment = { accounts: [{ assetRef: ASSET, events: ['lead', 'schedule'], sources: ['WEB', 'OTHER'] }] };
   f.policy.grants[0].operations = [...f.policy.grants[0].operations, ...Object.values(A.OPERATIONS), ...Object.values(C.OPERATIONS), ...Object.values(D.OPERATIONS)];
-  const state = { at: Date.now(), rows: [], writes: 0, googleCalls: 0, dmCalls: 0, secretReads: 0, nextId: 456 };
+  const state = { at: Date.now(), rows: [], writes: 0, googleCalls: 0, dmCalls: 0, dmRequests: [], secretReads: 0, nextId: 456 };
   const http = async request => {
     if (request.hostname === 'datamanager.googleapis.com') {
+      state.dmRequests.push({ path: request.path, json: request.json });
       state.dmCalls++; await state.onDataManager?.();
-      if (request.path.startsWith('/v1/requestStatus:retrieve')) return { requestStatusPerDestination: [] };
+      if (request.path.startsWith('/v1/requestStatus:retrieve')) return structuredClone(state.statusResponse || { requestStatusPerDestination: [] });
       return request.json.validateOnly ? {} : { requestId: 'fictitious-' + state.dmCalls };
     }
     state.googleCalls++;
@@ -351,7 +352,7 @@ test('configuration requires explicit destination policy and keeps reader, OAuth
   }
 });
 
-test('real HTTPS runtime and CRM scope/client authorize, validate, ingest and revoke across restart with fictitious providers', async t => {
+test('real HTTPS runtime and CRM scope/client authorize, ingest, withdraw and reconcile across restart with fictitious providers', async t => {
   const fs = require('node:fs'), path = require('node:path'), net = require('node:net');
   const { randomBytes } = require('node:crypto'), { execFileSync } = require('node:child_process');
   const { allowPort, removePort } = require('./offline-guard.cjs');
@@ -386,7 +387,7 @@ test('real HTTPS runtime and CRM scope/client authorize, validate, ingest and re
   const client = createIntegrationsBrokerClient({ origin: 'https://127.0.0.1:' + port, audience: f.policy.audience,
     keyId: 'qa-key', privateKey: f.keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), ca: fs.readFileSync(cert) });
   const service = createGoogleAdsBroker({ ...crm.options, client, actionManagementEnabled: () => true,
-    destinationsEnabled: () => true, conversionsEnabled: () => true });
+    destinationsEnabled: () => true, conversionsEnabled: () => true, receiptReconciliationEnabled: () => true });
   const context = await service.prepare(crm.mapping), options = () => ({ requestId: randomUUID(), beforeExecute: async () => true });
   const invoke = (method, family, payload, config = options()) => service[method](crm.mapping, context, family, payload, config);
   const p = await invoke('actionManagement', 'prepare', { mode: 'create', currency: 'EUR', targets: [{ event: 'lead', actionId: null }] });
@@ -404,8 +405,166 @@ test('real HTTPS runtime and CRM scope/client authorize, validate, ingest and re
   await app.close(); app = null; app = await runtime.main(filename, dependencies);
   assert.equal((await invoke('destinations', 'status', { authorizationId: authorized.authorizationId })).state, 'revoked');
   await assert.rejects(invoke('conversion', 'ingest', event()), { code: 'scope_denied' });
-  assert.equal(f.state.dmCalls, 3); assert.equal(f.state.writes, 1);
+  await assert.rejects(invoke('conversion', 'status', { submissionId: sent.submissionId }, { ...options(), expectedActionId: '456' }), { code: 'scope_denied' });
+  const recovered = await invoke('conversion', 'reconcile', { submissionId: sent.submissionId }, { ...options(), expectedActionId: '456' });
+  assert.equal(recovered.submissionId, sent.submissionId); assert.equal(recovered.requestId, sent.requestId);
+  assert.equal(f.state.dmCalls, 4); assert.equal(f.state.writes, 1);
+  assert.equal((await invoke('destinations', 'status', { authorizationId: authorized.authorizationId })).state, 'revoked');
   assert(delivered.some(row => row.reason === 'conversion_destinations_authorized'));
   assert(delivered.some(row => row.reason === 'conversion_destinations_revoked'));
   assert.equal(require.cache[require.resolve('../../../models')], undefined);
+});
+
+test('explicit reconciliation reads the original accepted receipt after withdrawal and restart without granting or sending', async t => {
+  const f=setup(t),grant=await f.authorize(),sent=await f.invoke(D.OPERATIONS.ingest,event());
+  const authority=f.store.db.prepare('SELECT * FROM google_data_manager_receipt_authorizations WHERE submission_id=?').get(sent.submissionId);
+  assert.equal(authority.authorization_id,grant.authorizationId);assert.match(authority.authorization_digest,/^[a-f0-9]{64}$/);
+  await f.invoke(C.OPERATIONS.revoke,{authorizationId:grant.authorizationId});f.reopen();
+  await assert.rejects(f.invoke(D.OPERATIONS.status,{submissionId:sent.submissionId}),{code:'scope_denied'});
+  const before=f.state.dmCalls,request=f.command(D.OPERATIONS.reconcile,{submissionId:sent.submissionId}),result=await f.execute(request);
+  assert.deepEqual(result.data,{submissionId:sent.submissionId,requestId:sent.requestId,requestStatusPerDestination:[]});
+  assert.equal(f.state.dmCalls,before+1);assert.equal(f.state.dmRequests.at(-1).path,'/v1/requestStatus:retrieve?requestId='+sent.requestId);
+  assert.equal(f.state.dmRequests.at(-1).json,undefined);
+  const db=f.getStore().db;assert.equal(db.prepare("SELECT COUNT(*) n FROM google_destination_targets WHERE state='active'").get().n,0);
+  assert.equal(db.prepare('SELECT state FROM google_destination_authorizations WHERE id=?').get(grant.authorizationId).state,'revoked');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM google_data_manager_receipts').get().n,1);
+  const evidence=db.prepare('SELECT event FROM audit_outbox').all().map(row=>JSON.parse(row.event));
+  assert(evidence.some(row=>row.correlationId===request.requestId&&row.operation===D.OPERATIONS.reconcile&&row.reason==='receipt_reconciled'));
+  assert.equal(db.prepare('SELECT result FROM commands WHERE id=?').get(request.requestId).result,null);
+  await assert.rejects(f.execute(request),{code:'outcome_unknown'});assert.equal(f.state.dmCalls,before+1);
+  await assert.rejects(f.invoke(D.OPERATIONS.ingest,event()),{code:'scope_denied'});
+  assert.doesNotMatch(JSON.stringify(authority),/FICTITIOUS-CLICK|FICTITIOUS-EVENT|token|secret|userIdentifiers/);
+});
+
+test('reconciliation projects the original destination and never adopts a replacement grant', async t => {
+  const f=setup(t),first=await f.authorize(),sent=await f.invoke(D.OPERATIONS.ingest,event());
+  await f.invoke(C.OPERATIONS.revoke,{authorizationId:first.authorizationId});const second=await f.authorize();
+  f.state.statusResponse={requestStatusPerDestination:[{destination:{operatingAccount:{accountType:'GOOGLE_ADS',accountId:CUSTOMER},
+    loginAccount:{accountType:'GOOGLE_ADS',accountId:'9876543210'},productDestinationId:'456'},requestStatus:'SUCCESS',eventsIngestionStatus:{recordCount:'1'}}]};
+  assert.equal((await f.invoke(D.OPERATIONS.reconcile,{submissionId:sent.submissionId})).requestStatusPerDestination[0].requestStatus,'SUCCESS');
+  const db=f.getStore().db,other=db.prepare('SELECT scope_digest FROM google_destination_authorizations WHERE id=?').get(second.authorizationId);
+  db.prepare('UPDATE google_data_manager_receipt_authorizations SET authorization_id=?,authorization_digest=? WHERE submission_id=?').run(second.authorizationId,other.scope_digest,sent.submissionId);
+  const before=f.state.dmCalls;await assert.rejects(f.invoke(D.OPERATIONS.reconcile,{submissionId:sent.submissionId}),{code:'scope_denied'});
+  assert.equal(f.state.dmCalls,before);assert.equal(db.prepare('SELECT state FROM google_destination_authorizations WHERE id=?').get(first.authorizationId).state,'revoked');
+});
+
+test('missing original authority, uncertain provider ACK and caller-supplied provider IDs cannot adopt history', async t => {
+  for(const mode of ['missing_authority','unknown_ack']){
+    const f=setup(t),grant=await f.authorize(),request=f.command(D.OPERATIONS.ingest,event());
+    if(mode==='unknown_ack')f.state.onDataManager=()=>fail('provider_timeout');
+    if(mode==='unknown_ack')await assert.rejects(f.execute(request),{code:'provider_timeout'});else await f.execute(request);
+    f.state.onDataManager=null;await f.invoke(C.OPERATIONS.revoke,{authorizationId:grant.authorizationId});
+    if(mode==='missing_authority')f.store.db.prepare('DELETE FROM google_data_manager_receipt_authorizations WHERE submission_id=?').run(request.requestId);
+    f.reopen();const before=f.state.dmCalls;
+    await assert.rejects(f.invoke(D.OPERATIONS.reconcile,{submissionId:request.requestId}),{code:'outcome_unknown'});
+    await assert.rejects(f.invoke(D.OPERATIONS.reconcile,{submissionId:request.requestId,requestId:'fictitious-arbitrary'}),{code:'invalid_request'});
+    assert.equal(f.state.dmCalls,before);
+  }
+});
+
+test('historical receipt requires an explicit grant and the original principal, key, tenant, connection and asset', async t => {
+  for(const mode of ['grant','principal','key','tenant','connection','asset']){
+    const f=setup(t),grant=await f.authorize(),sent=await f.invoke(D.OPERATIONS.ingest,event());
+    await f.invoke(C.OPERATIONS.revoke,{authorizationId:grant.authorizationId});
+    const keys=generateKeyPairSync('ed25519');let patch={},signing={};
+    if(mode==='grant')f.policy.grants[0].operations=f.policy.grants[0].operations.filter(op=>op!==D.OPERATIONS.reconcile);
+    else if(mode==='principal'){
+      f.policy.principals.push({...f.policy.principals[0],id:'api:other',keyId:'other-key',publicKey:keys.publicKey.export({type:'spki',format:'pem'})});
+      f.policy.grants.push({...f.policy.grants[0],principalId:'api:other'});signing={privateKey:keys.privateKey,keyId:'other-key'};
+    }else if(mode==='key'){f.policy.principals[0].publicKey=keys.publicKey.export({type:'spki',format:'pem'});signing={privateKey:keys.privateKey};}
+    else{
+      patch=mode==='tenant'?{tenantRef:'clinic:999'}:mode==='asset'?{assetRef:'ads:9999999999'}:{connectionRef:'connection:other'};
+      if(mode==='connection')f.policy.connections.push({...f.binding,connectionRef:patch.connectionRef});
+      f.policy.grants.push({...f.policy.grants[0],...patch});
+    }
+    f.reset();const before=f.state.secretReads;
+    await assert.rejects(f.invoke(D.OPERATIONS.reconcile,{submissionId:sent.submissionId},patch,signing),{code:'scope_denied'});
+    assert.equal(f.state.secretReads,before);
+  }
+});
+
+test('reconciliation denies changed binding and policy both before and during provider lookup', async t => {
+  for(const late of [false,true])for(const change of ['subject','manager','policy','authority']){
+    const f=setup(t),grant=await f.authorize(),sent=await f.invoke(D.OPERATIONS.ingest,event());
+    await f.invoke(C.OPERATIONS.revoke,{authorizationId:grant.authorizationId});
+    const mutate=()=>{
+      const b=late?f.getBroker().policy.connections[0]:f.binding;
+      if(change==='subject')b.googleSubject='other-subject';
+      if(change==='manager')b.googleAdsAccounts[0].loginCustomerId='1111111111';
+      if(change==='policy')b.googleDataManagerEnrollment.accounts[0].sources=['OTHER'];
+      if(change==='authority')f.store.db.prepare('UPDATE google_data_manager_receipt_authorizations SET authorization_digest=? WHERE submission_id=?').run('0'.repeat(64),sent.submissionId);
+    };
+    if(late)f.state.onDataManager=mutate;else{mutate();f.reset();}
+    const before=f.state.dmCalls;await assert.rejects(f.invoke(D.OPERATIONS.reconcile,{submissionId:sent.submissionId}),{code:'scope_denied'});
+    assert.equal(f.state.dmCalls,before+(late?1:0));
+  }
+});
+
+test('final SQLite completion verifies receipt proof and provider ID, and failed audit releases no result', async t => {
+  for(const change of ['authority','provider','audit']){
+    const f=setup(t),grant=await f.authorize(),sent=await f.invoke(D.OPERATIONS.ingest,event());
+    await f.invoke(C.OPERATIONS.revoke,{authorizationId:grant.authorizationId});
+    const original=f.store.complete.bind(f.store),append=f.store.appendAudit.bind(f.store);
+    if(change==='audit')f.store.appendAudit=value=>{if(value.reason==='receipt_reconciled')fail('audit_unavailable');return append(value);};
+    else f.store.complete=(principal,id,result,audit,options)=>{
+      if(audit.reason==='receipt_reconciled'){
+        if(change==='authority')f.store.db.prepare('UPDATE google_data_manager_receipt_authorizations SET authorization_digest=? WHERE submission_id=?').run('0'.repeat(64),sent.submissionId);
+        else f.store.db.prepare('UPDATE google_data_manager_receipts SET provider_id=? WHERE id=?').run('fictitious-other',sent.submissionId);
+      }
+      return original(principal,id,result,audit,options);
+    };
+    await assert.rejects(f.invoke(D.OPERATIONS.reconcile,{submissionId:sent.submissionId}),{code:change==='audit'?'audit_unavailable':'scope_denied'});
+    assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM google_destination_targets WHERE state='active'").get().n,0);
+    assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM google_data_manager_receipts').get().n,1);
+  }
+});
+
+test('additive authority ledger is atomic with admission and preserves existing receipts across restart', async t => {
+  const f=setup(t);await f.authorize();
+  f.store.db.exec("CREATE TRIGGER qa_fail_authority BEFORE INSERT ON google_data_manager_receipt_authorizations BEGIN SELECT RAISE(ABORT,'QA'); END");
+  const request=f.command(D.OPERATIONS.ingest,event());
+  await assert.rejects(f.execute(request));assert.equal(f.state.dmCalls,0);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM google_data_manager_receipts').get().n,0);
+  f.store.db.exec('DROP TRIGGER qa_fail_authority');
+  const sent=await f.invoke(D.OPERATIONS.ingest,event()),before=f.store.db.prepare('SELECT * FROM google_data_manager_receipts').all();
+  f.reopen();assert.deepEqual(f.getStore().db.prepare('SELECT * FROM google_data_manager_receipts').all(),before);
+  const plan=f.getStore().db.prepare('EXPLAIN QUERY PLAN SELECT authorization_id,authorization_digest FROM google_data_manager_receipt_authorizations WHERE submission_id=?').all(sent.submissionId);
+  assert(plan.every(row=>!row.detail.includes('SCAN')));assert(plan.some(row=>row.detail.includes('INDEX')));
+});
+
+test('historical lookup still honors connection and asset revocation before and during provider access', async t => {
+  for(const late of [false,true])for(const type of ['connection','asset']){
+    const f=setup(t),grant=await f.authorize(),sent=await f.invoke(D.OPERATIONS.ingest,event());
+    await f.invoke(C.OPERATIONS.revoke,{authorizationId:grant.authorizationId});
+    const block=()=>{
+      if(type==='connection')f.store.db.prepare("UPDATE connections SET state='revoked',revision=revision+1 WHERE ref=?").run(f.binding.connectionRef);
+      else f.store.db.prepare('INSERT INTO asset_revocations VALUES (?,?,?,?,?)').run('clinic:123',f.binding.connectionRef,ASSET,randomUUID(),f.state.at);
+    };
+    if(late)f.state.onDataManager=block;else block();
+    const before=f.state.dmCalls;await assert.rejects(f.invoke(D.OPERATIONS.reconcile,{submissionId:sent.submissionId}),{code:type==='connection'?'connection_blocked':'asset_revoked'});
+    assert.equal(f.state.dmCalls,before+(late?1:0));
+  }
+});
+
+test('legacy receipt schema gains an empty authority ledger without inferring permission from its digest', async t => {
+  const f=setup(t),grant=await f.authorize(),sent=await f.invoke(D.OPERATIONS.ingest,event());
+  await f.invoke(C.OPERATIONS.revoke,{authorizationId:grant.authorizationId});
+  const receipts=f.store.db.prepare('SELECT * FROM google_data_manager_receipts').all();
+  f.store.db.exec('DROP TABLE google_data_manager_receipt_authorizations');f.reopen();
+  assert.deepEqual(f.getStore().db.prepare('SELECT * FROM google_data_manager_receipts').all(),receipts);
+  assert.equal(f.getStore().db.prepare('SELECT COUNT(*) n FROM google_data_manager_receipt_authorizations').get().n,0);
+  const before=f.state.dmCalls;await assert.rejects(f.invoke(D.OPERATIONS.reconcile,{submissionId:sent.submissionId}),{code:'outcome_unknown'});
+  assert.equal(f.state.dmCalls,before);
+});
+
+test('historical lookup fails closed on full audit backlog and foreign provider destination', async t => {
+  const f=setup(t),grant=await f.authorize(),sent=await f.invoke(D.OPERATIONS.ingest,event());
+  await f.invoke(C.OPERATIONS.revoke,{authorizationId:grant.authorizationId});
+  f.getBroker().policy.maxBacklog=f.store.backlog().pending;
+  const before=f.state.dmCalls;await assert.rejects(f.invoke(D.OPERATIONS.reconcile,{submissionId:sent.submissionId}),{code:'audit_unavailable'});
+  assert.equal(f.state.dmCalls,before);f.getBroker().policy.maxBacklog=10000;
+  f.state.statusResponse={requestStatusPerDestination:[{destination:{operatingAccount:{accountType:'GOOGLE_ADS',accountId:CUSTOMER},
+    productDestinationId:'999'},requestStatus:'SUCCESS',eventsIngestionStatus:{recordCount:1}}]};
+  await assert.rejects(f.invoke(D.OPERATIONS.reconcile,{submissionId:sent.submissionId}),{code:'provider_failed'});
+  assert.equal(f.state.dmCalls,before+1);
 });

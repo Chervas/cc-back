@@ -10454,10 +10454,32 @@ recuperada permite retirar aunque falle el almacenamiento local; una autorizaci�
 nueva sigue exigiendo conservar su UUID antes de enviarla.
 
 API, diario, confirmación/recuperación UI y visor v18 probados con datos ficticios;
-AWS aún admite v17. Faltan compatibilidad v18, conciliación después de revocar y
+AWS aún admite v17. Faltan compatibilidad v18, consumidor de conciliación tras revocar y
 aceptación integrada/autenticada antes de
 activar cohortes. Contrato de esquema, errores, recuperación y rollback en el
 [contrato técnico](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-destinations-broker.md).
+
+### Conciliacion interna de recibos tras retirar destinos
+
+Preparada sin publicar: `googleAdsBroker.conversion(account, context, 'reconcile',
+{submissionId}, {requestId, expectedActionId, beforeExecute})`. No es una ruta HTTP
+ni sustituye el diagnóstico automático. Requiere el gate adicional
+`GOOGLE_ADS_RECEIPT_RECONCILIATION_BROKER_ENABLED=true` y grant específico del
+broker, ambos sin activar; contexto opaco, UUID y guard de permisos actuales.
+
+El broker registra permiso/digest original junto al intento de cada nueva ingesta
+dinámica en `google_data_manager_receipt_authorizations` de su SQLite. Busca
+recibo y permiso por PK y verifica principal/ámbito, firma, plan aplicado,
+cuenta/manager y selección. Un recibo aceptado conserva la consulta después de
+retirar ese permiso; la desconexión del activo/conexión sigue bloqueando. Solo
+recupera estado con el ID Google durable, sin ingesta, reautorización ni adopción
+por un permiso posterior. Una respuesta vacía no prueba procesamiento.
+
+Recomprueba dentro del commit de auditoría; un fallo no devuelve el resultado.
+No guarda cuerpo/identificadores ni cambia recibos de ingesta o permisos. Intentos
+inciertos o recibos sin prueba original siguen requiriendo revisión. Faltan
+consumidor con sesión y permisos sobre todas las clínicas, diario/auditoría humana,
+actualización CRM y UI autenticada. [Contrato y recuperación](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-data-manager-broker.md#recibos-después-de-retirar-un-permiso-de-destino).
 
 ### Inventario y diálogo de acciones
 

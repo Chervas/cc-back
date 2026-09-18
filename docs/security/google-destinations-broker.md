@@ -86,8 +86,11 @@ Ingesta comprueba el permiso antes de secretos, al resolverlos, antes/después d
 Google y al confirmar su recibo. Una revocación después de comenzar el envío deja
 el intento incierto: no se afirma que Google no lo recibió ni se repite. El digest
 del recibo incluye UUID/ámbito del permiso; uno posterior no adopta el envío.
-Con el destino revocado tampoco se consulta su recibo Data Manager: la
-conciliación administrativa de ese caso sigue pendiente.
+Con el destino revocado `status` de Data Manager sigue cerrado. La nueva operación
+explícita `conversion.reconcile` preparada consulta solo recibos aceptados con
+referencia durable a su autorización original, sin restaurarla ni enviar. El
+consumidor administrativo y su aceptación siguen pendientes; contrato y límites en
+[recuperación de recibos](google-data-manager-broker.md#recibos-después-de-retirar-un-permiso-de-destino).
 
 En el broker, status o el mismo comando recuperan un permiso durable; el diario
 CRM **no retransmite** un UUID admitido. Si falta el permiso, un error de status
@@ -235,7 +238,7 @@ todas cerradas por defecto. El guard debe comprobar sesión/permisos sobre todas
 las clínicas de la cuenta; el diario implementado aporta esa comprobación durable.
 
 Faltan compatibilidad AWS v18 y aceptación integrada de la recuperación,
-conciliación de entregas tras revocar, bootstrap/leads/job combinado y aceptación
+consumidor administrativo de conciliación tras revocar, bootstrap/leads/job combinado y aceptación
 Google/UI autenticada antes del corte compartido. QA usa MySQL/SQLite reales,
 firmas, cliente CRM, HTTP local, Chromium con componentes Angular reales y
 AWS/Google/S3 ficticios con red externa bloqueada. No es aceptación operativa.

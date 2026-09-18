@@ -13,7 +13,7 @@ const SAFE = new Set(['broker_binding_invalid', 'broker_cohort_disabled', 'broke
 const safe = error => SAFE.has(error?.code) ? error.code : 'google_data_manager_broker_failed';
 function project(family, data, requestId, captured, expectedActionId, expectedSubmissionId) {
   if (!plain(data) || Buffer.byteLength(JSON.stringify(data)) > 32768) fail('broker_response_invalid');
-  if (family === 'status') {
+  if (family === 'status' || family === 'reconcile') {
     if (!exact(data, 'submissionId,requestId,requestStatusPerDestination') || data.submissionId !== expectedSubmissionId
       || !C.providerId(data.requestId)) fail('broker_response_invalid');
     let projected;
@@ -38,21 +38,25 @@ function project(family, data, requestId, captured, expectedActionId, expectedSu
 // command identity/body digest before invoking this boundary. beforeExecute must
 // re-read the caller's consent, clinical pause and workspace policy and return true.
 function createGoogleDataManagerBrokerClient({ client, assertContext, now = Date.now,
-  enabled = () => process.env.GOOGLE_ADS_CONVERSIONS_BROKER_ENABLED === 'true' }) {
+  enabled = () => process.env.GOOGLE_ADS_CONVERSIONS_BROKER_ENABLED === 'true',
+  reconciliationEnabled = () => process.env.GOOGLE_ADS_RECEIPT_RECONCILIATION_BROKER_ENABLED === 'true' }) {
   if (typeof client?.execute !== 'function' || typeof assertContext !== 'function'
-    || typeof enabled !== 'function' || typeof now !== 'function') fail('broker_configuration_invalid');
+    || typeof enabled !== 'function' || typeof reconciliationEnabled !== 'function' || typeof now !== 'function') fail('broker_configuration_invalid');
   return { async execute(context, family, input, options = {}) {
     try {
       if (!Object.hasOwn(C.OPERATIONS, family) || !plain(options)
         || Object.keys(options).some(key => !['requestId', 'beforeExecute', 'timeoutMs', 'expectedActionId'].includes(key))) fail('invalid_request');
       const { requestId, beforeExecute, timeoutMs = 30000, expectedActionId } = options;
       if (!uuid(requestId) || typeof beforeExecute !== 'function' || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000
-        || (family === 'status' ? typeof expectedActionId !== 'string' || !/^[1-9][0-9]{0,19}$/.test(expectedActionId)
+        || (['status', 'reconcile'].includes(family) ? typeof expectedActionId !== 'string' || !/^[1-9][0-9]{0,19}$/.test(expectedActionId)
           : expectedActionId !== undefined)) fail('invalid_request');
       const payload = structuredClone(input), operation = C.OPERATIONS[family];
       C.validate(operation, payload);
       const deadline = now() + timeoutMs;
-      const checkGate = () => { if (enabled() !== true) fail('broker_cohort_disabled'); if (now() >= deadline) fail('broker_timeout'); };
+      const checkGate = () => {
+        if (enabled() !== true || family === 'reconcile' && reconciliationEnabled() !== true) fail('broker_cohort_disabled');
+        if (now() >= deadline) fail('broker_timeout');
+      };
       checkGate();
       const captured = await assertContext(context);
       if (!plain(captured) || captured.discoveryOnly !== false || !ref(captured.connectionRef)

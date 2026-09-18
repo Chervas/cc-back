@@ -204,3 +204,23 @@ cada fila. Abrir una referencia consulta status una vez. Los controles habituale
 de salud del outbox pueden impedir liberar una página; fallo de auditoría y
 pérdida final de permisos también se probaron. Código/índice aún no desplegados.
 Contrato y límites: [destinos Google](google-destinations-broker.md#recuperación-sin-referencia-del-navegador).
+
+
+## Consulta preparada de recibos con permiso retirado (18/09/2026)
+
+La nueva primitiva interna `google.ads.conversion.reconcile.v1` trabaja en el
+SQLite del broker, no en el MySQL compartido que sufrió el incidente de sentencias
+preparadas. Requiere un recibo aceptado y prueba del permiso original, guardada
+con el intento en una tabla aditiva. Consulta por UUID/PK el recibo, la prueba,
+el permiso y su plan aplicado; no busca candidatos recorriendo autorizaciones
+históricas. El EXPLAIN de la prueba propia confirma índice y ausencia de SCAN en
+la consulta de la nueva tabla por `submission_id`. Es verificación a escala QA,
+no un ensayo de capacidad del broker.
+
+No se ejecuta esta lectura desde el panel ni desde el job automático existente;
+cliente y operación están preparados con gate adicional cerrado. Cada consulta
+explícita futura utilizará el ID Google registrado y una llamada de estado,
+con comprobaciones/auditoría alrededor, sin transmisión de archivos ni ingesta.
+La captura de metadata añade una fila por envío dinámico y la lectura genera
+los eventos técnicos del broker existentes. Sin despliegue, carga real nueva
+ni medición de coste incremental en este corte. [Contrato completo](google-data-manager-broker.md#recibos-después-de-retirar-un-permiso-de-destino).
