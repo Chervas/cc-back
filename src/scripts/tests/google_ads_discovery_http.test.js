@@ -24,7 +24,8 @@ async function fixture(t) {
     }, findAll: async query => { assert.deepEqual(Array.from(query.attributes), ['id']); return state.noConnection ? [] : [{ id: 2 }]; } },
     GoogleConnectionAssignment: { findOne: async query => { assert.deepEqual(Array.from(query.include[0].attributes), ['id']);
       return state.noConnection ? null : { googleConnection: { id: state.changedConnection ? 3 : 2 } }; } },
-    ClinicGoogleAdsAccount: empty, ClinicAnalyticsProperty: empty, ClinicWebAsset: empty, ClinicBusinessLocation: empty };
+    ClinicGoogleAdsAccount: empty, GoogleAdsEnrollmentRequest: empty,
+    ClinicAnalyticsProperty: empty, ClinicWebAsset: empty, ClinicBusinessLocation: empty };
   state.mappingAudits = []; state.mappingWrites = 0;
   models.sequelize = { transaction: async work => {
     const before = structuredClone({ mappings: state.mappings, bindings: state.bindings, mappingAudits: state.mappingAudits });

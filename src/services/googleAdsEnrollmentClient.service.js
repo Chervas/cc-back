@@ -6,7 +6,8 @@ const SAFE = new Set(['invalid_request', 'invalid_signature', 'scope_denied', 'o
   'idempotency_conflict', 'outcome_unknown', 'rate_limited', 'provider_disabled', 'provider_failed', 'provider_timeout',
   'provider_unauthorized', 'credential_revoked', 'secret_unavailable', 'audit_unavailable', 'broker_timeout', 'broker_unavailable',
   'broker_response_invalid', 'google_ads_enrollment_disabled', 'google_ads_enrollment_invalid', 'google_ads_enrollment_scope_unconfigured',
-  'google_ads_enrollment_scope_conflict', 'google_discovery_scope_forbidden', 'google_discovery_session_required']);
+  'google_ads_enrollment_scope_conflict', 'google_ads_enrollment_lease_lost', 'google_ads_enrollment_worker_disabled',
+  'google_discovery_scope_forbidden', 'google_discovery_session_required']);
 const safe = error => SAFE.has(error?.code) ? error.code : 'google_ads_enrollment_unavailable';
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join(',') === keys.slice().sort().join(',');

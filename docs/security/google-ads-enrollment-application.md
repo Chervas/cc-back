@@ -1,10 +1,12 @@
 # Google Ads: ámbito y solicitudes de alta en la aplicación
 
-Estado 13/09/2026: preparados el esquema, validadores, comprobación de ámbito y
-cliente tipado. La exclusión de credenciales antiguas ya consulta estos registros
-en el código. Todavía faltan el escritor de solicitudes, la conciliación y su
-conexión con rutas/Ajustes. No hay alta completa de extremo a extremo, nuevas
-cuentas reales, configuración instalada ni despliegue.
+Estado 18/09/2026: preparados el esquema, validadores, comprobación de ámbito,
+cliente tipado, escritor y worker de conciliación. El guardado humano de mappings
+comprueba la confirmación del broker y actualiza la solicitud en la misma
+transacción que el mapping, binding y auditoría. Faltan las rutas de alta/estado,
+su enlace con bajas y Ajustes, y registrar/configurar el worker con autorización
+de sesión persistente. No hay alta real completa ni worker de alta instalado.
+Las pruebas nuevas son aisladas y no sustituyen una prueba visual autenticada.
 
 ## Registro independiente
 
@@ -23,16 +25,16 @@ de este flujo.
 
 La DDL es **obligatoria antes del futuro corte de código aunque los gates estén
 apagados**: la barrera de credenciales consulta ambas tablas. Un esquema ausente
-falla cerrado. La migración no se ha aplicado a la BD compartida; su up/down/up
-se ha ejecutado exclusivamente en un MySQL privado con datos ficticios. No usar
-un `db:migrate` general para instalarla.
+falla cerrado. El 18/09 se aplicó por plan exacto a DEV aislado junto con las
+otras doce migraciones Google necesarias: registros vacíos, flags apagados,
+sin mover credenciales. Staging sigue pendiente. El up/down/up se probó solo
+en MySQL privado con datos ficticios. No usar un `db:migrate` general.
 
 Los estados definidos son `prepare_pending`, `prepared`, `activate_pending`,
 `activation_confirmed`, `active`, `revoke_pending` y `revoked`. El contrato exige
 mapping para estados preparados/activados, fechas válidas, UUID distintos y
-clínicas canónicas sin duplicados. **La máquina que escribe y entrega esas
-transiciones sigue pendiente**; la presencia de columnas de lease no implica que
-haya un worker funcionando.
+clínicas canónicas sin duplicados. El repositorio y worker escriben estas
+transiciones, pero **aún no hay un worker de alta registrado ni funcionando**.
 
 ## Autorización y cliente
 
@@ -65,17 +67,49 @@ Preparar usa el UUID durable de preparación; activar exige que la intención es
 en un estado de activación. La revocación utiliza otro cliente/principal y exige
 un callback que confirme la intención durable. Puede ejecutarse cuando la sesión
 original haya caducado: no activa cuentas ni amplía permisos. La comprobación
-concreta de la fila y del lease corresponde al repositorio de entrega pendiente.
+concreta de la fila y del lease la realiza ahora el repositorio de entrega.
 
 Configuración preparada, sin valores instalados:
 
 - `GOOGLE_ADS_ENROLLMENT_ENABLED`, apagado salvo valor exacto `true`.
+- `GOOGLE_ADS_ENROLLMENT_WORKER_ENABLED`, también apagado salvo `true`.
 - `GOOGLE_ADS_BROKER_ENROLLMENT_KEY_ID` y `GOOGLE_ADS_BROKER_ENROLLMENT_KEY_FILE`,
   principal de alta distinto de lectura/control/OAuth.
 - Reutiliza ORIGIN, AUDIENCE, CA_FILE y las claves CONTROL de la cohorte Ads.
 
 Las claves se leen de ficheros privados. Este bloque no crea claves, modifica
 variables del runtime ni instala un nuevo job.
+
+## Escritura y conciliación
+
+El enqueue fija cliente, actor/sesión, vencimiento, miembros originales y tres
+UUID de comandos. Repetir el mismo UUID de alta exige la misma identidad; no
+reserva cuentas ya mapeadas ni borra historia. El recibo de preparación crea un
+mapping inactivo y binding `staged` en una transacción. Un ACK perdido se consulta
+con status; si aún no hay recibo, solo se reintenta el UUID original. Confirmar
+la activación remota deja el mapping inactivo en `activation_confirmed`.
+
+El guardado humano exige esa confirmación y la sesión original todavía válida.
+Su autorización y ámbito se vuelven a comprobar bajo los locks de la transacción
+existente. Una excepción revierte también cualquier sustitución de cuentas,
+revocación y auditoría; `active` solo se confirma con el mapping. Las cuentas
+estáticas anteriores, sin historial de alta, conservan sus controles previos.
+
+Cada claim tiene lease de 120 segundos; hay un máximo de veinte pasos o treinta
+segundos por ejecución. La petición individual mantiene el límite de diez
+segundos. El claim usa SQL explícito `FOR UPDATE SKIP LOCKED`: Sequelize 6.37.7
+omite silenciosamente `skipLocked` en su dialecto MySQL. La prueba mantiene una
+fila bloqueada mientras otra transacción reclama otra fila, y verifica que un
+lease caducado no puede confirmar, reintentar ni cancelar trabajo posterior.
+
+Antes de aceptar un mapping, una sesión caducada, permiso retirado, ámbito
+eliminado o cambiado provoca `revoke_pending`. La cancelación no requiere la
+sesión ni el switch de alta: usa la autoridad de control y la intención durable.
+Una desconexión concurrente invalida el lease anterior. Se bloquea solamente el
+propietario original; una fila reutilizada por otro ámbito no se modifica.
+El método de cancelación de ámbito existe, pero **todavía falta invocarlo desde
+las rutas de baja**. Una cuenta ya aceptada no se revoca por el vencimiento
+posterior de la sesión que la dio de alta.
 
 ## Exclusión de credenciales antiguas
 
@@ -117,12 +151,12 @@ y doble factor. Este fundamento Ads se entrega probado y el alta general se apla
 según el [plan por etapas](incremental-delivery-plan.md); el objetivo completo de
 seguridad conserva todos sus pendientes.
 
-Falta enlazar estas piezas: crear intenciones bajo autorización y locks, escribir
-mappings/bindings inactivos después del recibo válido, cancelar desde las bajas
-de ámbito, conciliar comandos y ACK perdidos, y confirmar la asignación local con
-auditoría humana. La selección original y las cuentas que se sustituyen deberán
-conservarse hasta la confirmación de la transacción final. No activar el gate por
-tener los modelos o el cliente listos.
+Faltan las rutas de discovery/enqueue/estado con sesión persistente, el registro
+del job, la conexión de bajas con cancelaciones pendientes, la auditoría humana
+específica del inicio/cancelación de alta, y el recorrido de Ajustes. La
+confirmación final del mapping sí utiliza la auditoría humana v12 existente;
+esto no acredita cobertura completa del alta. No activar los gates por tener
+el repositorio, worker o cliente probados.
 
 También siguen pendientes la primera identidad Google sin conexión gestionada,
 el uso del ámbito independiente en el adaptador OAuth de la aplicación, otros
@@ -135,6 +169,15 @@ comandos, fallos corregidos, recuentos y cierre de cada instancia. No acredita
 ninguna llamada o permiso real de AWS/Google. Las consultas de guardas añadirán
 lecturas SQL; los costes efectivos del broker aún no se han medido.
 
-QA definitiva del bloque: 574 tests Node (391 backend, 183 broker), 141 checks
+QA histórica del fundamento del 13/09: 574 tests Node (391 backend, 183 broker), 141 checks
 en nueve MySQL propios con cierre 0. No se repite build/UI porque no cambia
 la interfaz; acta privada `ads-enrollment-app-qa.json`.
+
+QA adicional del 18/09: `google_ads_enrollment_worker_mysql.integration.js`
+ejecuta ámbito, cliente, repositorio, worker, discovery, guardado y auditoría
+reales contra MySQL propio; simula exclusivamente el transporte del broker.
+Cubre ACK perdidos, rollback SQL, permisos/sesiones, cancelación concurrente,
+leases, activación final y preservación de cuentas existentes. Se verifican
+también los tests HTTP/boundary y las regresiones SQL Ads/enrollment. Evidencia
+privada en `security-resume-20260917/google-ads-enrollment-worker/`.
+No se llamó a Google/AWS ni se cambiaron servicios, flags o claves reales.
