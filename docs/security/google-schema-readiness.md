@@ -56,7 +56,7 @@ no están completas; este documento no autoriza dar esos recorridos por probados
 
 Plan fijado a `68808b82047567e3f1b223ed4e24c16aaff61eb6`, contrato SHA256
 `4fcde15737813913fc7ae30cde0877db1de1a9638ac45c748bcf0291c494408f` y metadata previa.
-Se verificaron tablas Google/clinicas de prueba vacías y cero trabajos, flujos o
+Se verificaron tablas Google, citas y pacientes vacías, y cero trabajos, flujos o
 correos en curso. Se detuvo la API DEV, se aplicaron exactamente trece migraciones
 con journal y se publicó mediante el publicador original. No hubo DDL parcial
 ni reintentos. Las 34 tablas pasan el contrato; los once registros nuevos siguen
