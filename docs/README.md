@@ -2,7 +2,7 @@
 
 > **Tipo:** índice técnico local.
 > **Fuente de verdad:** localiza procedimientos del backend; el menú general es [00-README](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md).
-> **Ultima revision de navegación de seguridad:** 2026-09-14.
+> **Última revisión de navegación de seguridad:** 2026-09-18.
 > **Relacionado con:** [CONTRIBUTING](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/CONTRIBUTING.md).
 
 ## Seguridad
@@ -50,6 +50,9 @@ sincroniza el espejo frontend. Este índice no mantiene otro roadmap ni diario.
 - [Interfaz de autorización exclusiva de WhatsApp](security/whatsapp-onboarding-ui.md).
 
 ### Auditoría y cifrado
+
+- [Incidente de login: causa y recuperación](security/login-mysql-cache-incident.md).
+- [Salud SQL de auditoría: cambios, pruebas y mediciones](security/audit-query-health.md).
 
 - [Credenciales de IA: corte y diagnóstico por consumidor](security/ai-vault-migration.md).
 - [Renovación y diagnóstico de certificados de transporte](security/transport-certificate-maintenance.md).

@@ -1,5 +1,11 @@
 # Auditoría de plataforma: primer bloque de autenticación
 
+> **Tipo:** guía técnica del componente con cortes de preparación fechados.
+> **Fuente de verdad:** formato y mecanismos del servicio; los estados de preparación inferiores describen su corte original, no el despliegue vigente.
+> **Última revisión de autoridad documental:** 2026-09-18; no implica revalidar cada cohorte.
+> **Relacionado con:** [00-README](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md), [39: arquitectura de auditoría](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#cola-sql-y-conciliación).
+> **Estado y evidencias:** [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones), [salud SQL](../../docs/security/audit-query-health.md). Consultarlos antes de interpretar «apagado/no instalado» como situación actual.
+
 ## 13/09/2026 — Asignaciones Ads v12
 
 Codec y lector S3 admiten integration.asset.map v12, con estado y propiedad

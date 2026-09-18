@@ -1,5 +1,11 @@
 # Salud de las consultas de auditoría tras limitar la caché
 
+> **Tipo:** histórico técnico de verificación.
+> **Fuente de verdad:** mediciones y verificación del consumo SQL del corte del 18/09/2026; no redefine la arquitectura ni sustituye el estado central.
+> **Última revisión del alcance y referencias:** 2026-09-18.
+> **Relacionado con:** [00-README](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md), [21: colas](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/21-arquitectura-colas-y-tiempo-real.md#persistencia-planificación-y-recursos), [31: entornos](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md#dev-con-datos-ficticios-y-proceso-aislado), [39: auditoría](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#cola-sql-y-conciliación).
+> **Estado vigente:** [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones); resumen del corte en [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#salud-sql-de-auditoría-y-revisión-documental-2026-09-18).
+
 Revisión del 18/09/2026, continuación del incidente de login. El límite de 128
 consultas por conexión protege el servidor, pero no elimina el trabajo SQL
 innecesario. Se midió el worker real y se corrigió su comportamiento.
@@ -38,9 +44,9 @@ Las prioridades no interrumpen un trabajo que ya está ejecutándose en su grupo
 
 La separación de colas no separa los recursos del servidor MySQL. Su agotamiento
 puede afectar a distintos consumidores y a la API. Además, el login comprueba
-la capacidad de auditoría: una cola de auditoría atrasada más de una hora o con
-10.000 pendientes rechaza los accesos instrumentados. Esa dependencia explica
-que el incidente SQL terminara afectando al login pese a existir colas.
+la capacidad de auditoría: con al menos 10.000 pendientes o si el evento más
+antiguo alcanza una hora, se rechazan los accesos instrumentados. Esa dependencia
+explica que el incidente SQL terminara afectando al login pese a existir colas.
 
 ## Planes y coste actual
 

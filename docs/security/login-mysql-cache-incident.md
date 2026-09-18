@@ -1,5 +1,11 @@
 # Login CRM: agotamiento de consultas preparadas, 18/09/2026
 
+> **Tipo:** histórico técnico de verificación.
+> **Fuente de verdad:** causa, recuperación y comprobaciones del incidente del 18/09/2026; no redefine la arquitectura ni sustituye el estado central.
+> **Última revisión del alcance y referencias:** 2026-09-18.
+> **Relacionado con:** [00-README](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md), [21: colas](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/21-arquitectura-colas-y-tiempo-real.md#persistencia-planificación-y-recursos), [31: entornos](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md#dev-con-datos-ficticios-y-proceso-aislado), [39: auditoría](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#cola-sql-y-conciliación).
+> **Estado vigente:** [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones); resumen del corte en [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#salud-sql-de-auditoría-y-revisión-documental-2026-09-18).
+
 Actualización posterior: la [revisión de salud SQL](audit-query-health.md) corrige
 también la reutilización de consultas y el polling DEV. Incluye el runtime
 actual, pruebas y mediciones; la cronología siguiente describe la recuperación inicial.
