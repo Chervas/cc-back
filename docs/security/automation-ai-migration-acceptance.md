@@ -1,8 +1,9 @@
 # Automatizaciones con IA: conservación del contexto durante la migración
 
 Revisión 2026-09-18. Complementa [el runbook IA](ai-vault-migration.md).
-El transporte Bedrock todavía no está migrado al broker. Esta revisión no
-autoriza a declarar el corte ni la comprobación visual terminados.
+Los consumidores públicos todavía usan Bedrock directo. El runtime separado
+del broker está desplegado y probado en AWS, sin activar el corte ni dar por
+terminada la comprobación visual.
 
 ## Recorridos que deben conservarse
 
@@ -133,9 +134,11 @@ Evidencia adicional: `bedrock-broker-suite.log`, `bedrock-offline-regressions.lo
 `snapshot-broker-back-dev.json`, `snapshot-broker-comparison.json` y
 `bedrock-capacity-result.json` en el mismo directorio privado de QA. Estos pases
 no sustituyen la prueba del proveedor a través de AWS ni la interfaz autenticada.
-No se han creado aún el servicio/vault Bedrock ni activado flags de consumidores.
+En ese corte de preparación todavía no existían servicio/vault Bedrock; el
+despliegue y la evidencia posteriores se detallan a continuación. Los flags de
+consumidores continúan apagados.
 
-Configuración del consumidor pendiente de provisionar: `BEDROCK_BROKER_ENABLED`,
+Configuración del consumidor preparada para staging: `BEDROCK_BROKER_ENABLED`,
 `BEDROCK_BROKER_ENVIRONMENT`, `BEDROCK_BROKER_ORIGIN`, `BEDROCK_BROKER_AUDIENCE`,
 `BEDROCK_BROKER_CONNECTION_REF`, `BEDROCK_BROKER_KEY_ID`,
 `BEDROCK_BROKER_KEY_FILE` y `BEDROCK_BROKER_CA_FILE`. Los ficheros de identidad
@@ -144,6 +147,83 @@ node_modules: el runtime incorpora SDK Bedrock3.1131.0 y no debe modificar las
 dependencias compartidas por servicios AWS anteriores. La aplicación mantiene
 su SDK existente. Inventariar workers/colas del gateway y fresh-inbound antes
 del corte; no deducir su inactividad únicamente de `JOBS_WORKER=false`.
+
+## AWS real: despliegue aislado y discrepancia semántica conservada
+
+Desplegada la release `1b74ab2d` en `clinicaclick-bedrock-staging`, UID987,
+puerto8449, heap128 MiB, MemoryMax256 MiB, MemoryHigh224 MiB, CPUQuota75%.
+Tiene su instalación de dependencias y permanece desactivada al arranque mientras
+no haya consumidores migrados. Solo admite conexiones desde el origen CRM /32
+ya usado por el servicio IA. Staging dispone de una identidad de firma propia;
+no se ha concedido una identidad gateway ni DEV en este runtime.
+
+El slot `/clinicaclick/integrations/prod/ai/bedrock/key` contiene una copia del
+par IAM existente de staging, comparado con gateway. No se ha rotado ni creado
+una clave IAM. No hubo ampliación IAM: el rol EC2 ya tenía lectura del prefijo
+prod y uso de la clave KMS correspondiente. Seed mediante memoria/memfd y TLS,
+sin claves en argumentos, evidencia o archivos nuevos de aplicación. Las claves
+locales de los consumidores públicos siguen presentes hasta su corte verificado.
+
+Pruebas AWS con datos exclusivamente ficticios y sin BD/colas/envíos clínicos:
+
+- Siete controles de acceso pasan: placeholder sin proveedor, entorno/finalidad/
+  conexión/modelo ajenos, firma ajena y audiencia de OCR/audio rechazados.
+  El UID998 de DEV no puede leer la nueva clave de firma staging.
+- Las 22 invocaciones de las ocho configuraciones activas completan transporte
+  y respuesta estructurada reales. **21/22 cumplen todas las aserciones
+  semánticas**. Una petición de cambio de cita devuelve `confirma_asistencia=false`
+  y, de forma incorrecta, `requiere_respuesta=false`. No se ha ocultado ni
+  convertido en verde esa discrepancia mediante reintentos.
+- Diagnóstico limitado a tres repeticiones por vía, conservando la misma
+  petición nativa: la discrepancia aparece dos veces con Bedrock directo y una
+  por broker. El SHA256 del cuerpo coincide en las seis. Es comportamiento del
+  modelo que también existe en el recorrido anterior; no se cambió prompt,
+  modelo, definición ni campo para forzar el resultado.
+- En las seis observaciones el nodo posterior deriva a revisión humana. Además,
+  952 evaluaciones aisladas de las 476 confirmaciones activas prueban
+  `confirma_asistencia=false`/`requiere_respuesta=false` con confianza alta y baja:
+  todas terminan en notificación de revisión, sin ejecutar acciones clínicas.
+  Esto acredita esa protección concreta; no demuestra clasificación infalible.
+- Cuatro análisis reales simultáneos, cada uno con contexto ficticio de 36049
+  caracteres/49549 bytes, responden en 943–975 ms mientras las cuatro plazas del
+  runtime OCR/audio están retenidas por peticiones de QA sin cuerpo. Cero llamadas
+  al proveedor de archivos durante la retención. Al terminar se cierran esas
+  peticiones. Pico RSS94,4 MiB; pico cgroup46,9 MiB, cero OOM/límites/reinicios.
+  Ambas medidas son distintas: la memoria compartida no se imputa igual.
+- 64 eventos y recibos verificados independientemente en S3 mediante versión,
+  SHA256 y KMS: 30 solicitudes, 29 completadas, cuatro denegaciones y el fallo
+  esperado del placeholder. Backlog cero y respuestas del modelo no persistidas.
+- Certificado enrolado en mantenedor/publicador. Renovación real sin reinicio
+  del proceso, preservando clave/identidad/CA; siete identidades sanas. Servicios
+  WhatsApp y OCR/Groq conservaron sus PIDs; solo el publicador reinició al añadir
+  el nuevo destino.
+
+DEV aislado publicado a `release-1b74ab2d42a601d004171fe6c539ab65b63f5e95`, con
+flags de broker apagados, API UID998 sin claves de proveedor, MFA/sesiones enforce
+y jobs clínicos desactivados. El publicador original se detuvo antes del corte
+al detectar el lock nuevo. Se instaló la dependencia en un directorio propio,
+se comparó cada archivo preparado con Git, se pasó el preflight SQL y se completó
+el mismo cambio de symlink/reinicio con recuperación. No se alteró el guard del
+publicador ni las dependencias de la release previa.
+
+Evidencia privada: `qa-evidence/security-resume-20260917/bedrock-runtime/`, en
+particular `real-bedrock-broker-result.json`, `cannot-attend-diagnosis.json`,
+`not-confirmed-routing.json`, `installed-capacity-result.json`,
+`installed-capacity-metrics.json`, `audit-receipts.json`,
+`certificate-renewal.json` y `dev-runtime-verified.json`.
+
+La migración de consumidores sigue pendiente: actualizar inventario de
+definiciones/workers antes de activar, evaluar la limitación
+semántica y su impacto en la validación funcional y completar el recorrido visual autenticado.
+La discrepancia semántica no se contabiliza como un test aprobado, aunque el
+flujo probado mantiene revisión humana. No se declara este bloque terminado.
+
+Recuperación del runtime preparado, mientras ningún consumidor use el flag:
+retirar solo su destino de ambos mantenedores conservando los demás; validar y
+reiniciar únicamente el publicador; detener el servicio y retirar únicamente
+la regla ingress8449 de esta entrega. Preservar vault, ledger y recibos. Backups
+AWS en `/var/lib/clinicaclick-bedrock-deployment-20260918`; configuración local
+anterior en `/var/backups/clinicaclick-security/bedrock-staging-20260918`.
 
 ## Condiciones antes de migrar Bedrock
 
