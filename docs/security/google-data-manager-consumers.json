@@ -1,20 +1,23 @@
 {
-  "version": 4,
+  "version": 5,
   "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "d159b95097e94ba21a63a891e83002d7147fc640",
+  "sourceBaseHead": "7bc21101ad93b800c155fc419f19880605a5b1a0",
   "includesWorkingChanges": true,
   "scope": "Bounded manual Data Manager caller inventory; not a complete inventory of all Google identity consumers or external OPS.",
   "runtimeConsumersMigrated": 0,
   "qa": {
-    "broker": "560/560 current Node24 engine regression",
+    "broker": "560/560 previous workspace regression; engine unchanged in diagnostics tranche",
     "provider": "fictitious_offline",
     "authenticatedUI": "pending",
-    "mysqlJournalChecks": 41,
+    "mysqlJournalChecks": 52,
     "schemaUnitTests": 4,
     "crmPayloadParityCases": 54,
-    "backendClientScopeReaderAdapterAndPreparation": 36,
-    "workspaceAuthorizationPreparationNativeReceptionAndUpload": 84,
-    "healthAuthorizationAndNative": 69
+    "diagnosticsHealthAuthorizationNativeAdapterClient": 82,
+    "legacyDataManagerScript": "pass offline",
+    "diagnosticsCadenceScript": "pass offline",
+    "previous_backendClientScopeReaderAdapterAndPreparation": 36,
+    "previous_workspaceAuthorizationPreparationNativeReceptionAndUpload": 84,
+    "previous_healthAuthorizationAndNative": 69
   },
   "rows": [
     {
@@ -37,9 +40,9 @@
     },
     {
       "file": "src/services/googleDataManagerDiagnostics.service.js",
-      "sha256": "2963fd7ed9fb8d850ce7370cd5e0bf12eb05fee3cf502330f9a48ccd0862b6f8",
-      "role": "Diagnóstico por ID proveedor con tokens locales; necesita recibo broker y misma identidad propietaria.",
-      "state": "receipt_adapter_pending"
+      "sha256": "bc4ef1c78cc3196162cc0a185ff06414f80bf165fb356e38fc0c264cb5fd2080",
+      "role": "Lote selecciona aceptados y pendientes con marca/UUID; managed recupera por broker, nunca por token ni nuevo envío.",
+      "state": "diagnostics_batch_prepared_undeployed"
     },
     {
       "file": "src/services/campaignWorkspaceGooglePreparation.service.js",
@@ -80,8 +83,8 @@
     {
       "file": "src/jobs/sync.jobs.js",
       "sha256": "2c4ebc5cace33882c9ef986d354351007d4d7667ce0b942acaa5ce25cd54c7ac",
-      "role": "Diagnóstico se ejecuta junto a reconciliaciones/activaciones: no ejecutar el job completo como canary.",
-      "state": "job_adapter_and_pause_review_pending"
+      "role": "Entrada llama al lote adaptado pero combina otras reconciliaciones/activaciones; no ejecutar job completo como canary. Revisar el resto antes del corte.",
+      "state": "combined_job_review_pending"
     },
     {
       "file": "src/services/googleDataManagerBrokerClient.service.js",
@@ -109,13 +112,13 @@
     },
     {
       "file": "src/services/googleConversionSubmission.repository.js",
-      "role": "Reserva SQL, control de identidad y aceptación/conciliación atómicas.",
+      "role": "Reserva/conciliación atómicas; persiste errores acotados de diagnóstico sin alterar estado ni terminales concurrentes.",
       "state": "prepared_offline",
-      "sha256": "aed201cd963f09608da4a32f05c145e22d228951beab1ecd8309f7de2cb29a26"
+      "sha256": "3dd13b1b1929d6400d555c4eb23ed5db0942ac6d8ac190885fada8bfa762cfeb"
     },
     {
       "file": "src/services/googleConversionDelivery.service.js",
-      "role": "Coordinador sin reenvío tras attempted conectado al emisor común; diagnóstico automático aún pendiente.",
+      "role": "Coordinador sin reenvío tras attempted; el diagnóstico llama reconcile con la identidad original y política vigente.",
       "state": "prepared_offline",
       "sha256": "15479ccbf7516cff8d76fb1fdee3833109148e5e058dbd703c881bafdab2007a"
     },
@@ -133,7 +136,7 @@
     },
     {
       "file": "src/services/campaignWorkspaceGoogleSignalEvidence.service.js",
-      "role": "Salud revalida contextos broker v1/v2/v3 sin tokens ni llamadas externas; emisor/persistencia/lectura probados. Diagnóstico automático y UI aún pendientes.",
+      "role": "Salud revalida contextos broker v1/v2/v3 sin tokens/contactos/llamadas; consume también la conciliación real del diagnóstico. UI pendiente.",
       "state": "health_reader_prepared_undeployed_ui_pending",
       "sha256": "e62fd3c4c5d923b09aaa357248d798420ecd963d6cdccfd6450a99cee1cb9416"
     },
@@ -166,6 +169,18 @@
       "role": "Lectura tipada conversion_actions: inventario acotado, flags desconocidos y dueño real conservados, sin snippets.",
       "state": "prepared_offline",
       "sha256": "4e894d2d4236e5cb57f3f279f7dd29aeab159d4a738fa06ab9f452fc6853637e"
+    },
+    {
+      "file": "src/services/googleConversionDiagnosticsBroker.service.js",
+      "role": "Recuperación por journal/UUID con mismo firmante/corte, sin reserva ni ingesta; persiste errores acotados.",
+      "state": "prepared_offline",
+      "sha256": "ae334629d4d9bc93ea5cc583dfc4511bcafe4b6c62a8dfd42f335b452b97a2c9"
+    },
+    {
+      "file": "src/services/googleConversionDiagnosticsPolicy.service.js",
+      "role": "Autorización metadata para status: ámbito clínico, configuración, mandatos v1/v2/v3 y permiso enhanced; sin contactos ni OAuth local.",
+      "state": "prepared_offline",
+      "sha256": "d94de90b6a3edc35a349169d980523c57fc1bfb9e6aa73bb3a18c3389950ed8a"
     }
   ]
 }

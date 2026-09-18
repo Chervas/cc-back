@@ -109,16 +109,18 @@ guardia de red offline. La comparación contra el constructor actual del CRM
 incluye 54 combinaciones WEB/OTHER, gclid/gbraid/wbraid y las dos señales de
 consentimiento. No acredita entrega real a Google ni una interfaz autenticada.
 
-Última regresión del motor broker: 560/560 en Node24, incluida la llamada desde
-el cliente CRM real al servidor HTTPS local. Regresión actual de preparación,
-cliente, scope, lector y adaptador CRM: 36/36 en Node18; otras 84 pruebas de
-workspace/autorización/recepción/emisor pasan. Guardias de red/BD impiden acceder
-a los entornos operativos. MySQL aislado verifica 41 grupos, detallados más abajo.
+La regresión del motor broker conserva560/560 Node24 del tramo workspace: su
+código no cambió en diagnóstico. El lote actual de Salud/autorización/nativo,
+adaptador y cliente pasa82/82 Node18; los scripts de contrato Data Manager y
+cadencia pasan. MySQL aislado verifica52 grupos. Las suites previas (36 y84)
+son evidencia de sus cortes, con casos solapados; no sumar como casos únicos.
 
 El emisor común de conversiones y su resolutor por mapping ya seleccionan el
 camino broker cuando el registro Ads lo exige. Ya están conectados los mandatos
 workspace v2, los hitos CRM nativos y su preparación validate-only. Siguen
-pendientes diagnóstico, dos validadores onboarding y recepción/sync de leads.
+pendientes dos validadores onboarding, otros consumidores de preparación/alta
+de acciones y recepción/sync de leads. El diagnóstico de recibos está conectado
+y probado aisladamente, como se describe al final.
 La recepción managed falla cerrada antes de cargar un token local. No activar
 el conjunto parcial ni migrar la identidad compartida antes de completarlos.
 Conservar los grants, la política del workspace, consentimiento, pausas y deduplicación.
@@ -287,5 +289,65 @@ y distingue recibido de procesado. La suite de Salud/v2/nativo pasa69/69; diez
 fallos iniciales del grupo v1 se reprodujeron con el servicio anterior: IDs de
 cuenta cortos y registros Ads ficticios incompletos. Se corrigió esa fixture para
 usar el resolutor y el cierre legacy reales, manteniendo sus casos de rechazo.
-No se ha probado aún el panel renderizado con autenticación real ni el diagnóstico
-automático de los recibos del broker.
+En ese corte no se probó el diagnóstico automático, conectado en el tramo
+siguiente. El panel renderizado con autenticación real sigue pendiente.
+
+
+## Diagnóstico de recibos propios, 18/09/2026
+
+`googleDataManagerDiagnostics` conserva la consulta legacy para conexiones sin
+migrar y selecciona además pendientes marcados, aunque no tengan ID de Google.
+Los intentos marcados usan siempre `googleConversionDiagnosticsBroker`, incluido
+un error o UUID ausente; nunca pasan al transporte antiguo. Una consulta SQL
+estática de presencia JSON evita seleccionar pendientes legacy sin marca. La
+frecuencia/límite anteriores se conservan; no se crea ni activa un job nuevo.
+
+El adaptador carga UUID y mapping del journal, exige la identidad de firma y el
+corte originales, prepara un contexto Ads actual y llama exclusivamente a
+`coordinator.reconcile`. No reserva, reconstruye payload ni invoca ingesta.
+La política de lectura vuelve a comprobar clínicas activas, conexión/scopes,
+instalación y destino habilitados, mandatos y fingerprints v1/v2/v3, y autorización
+mejorada vigente si se enviaron hashes. También cubre conversiones configuradas
+sin mandato. En nativos verifica identidad publicitaria persistida y receptor
+actual sin consultar contactos o el cuerpo del lead. Una política distinta
+durante la consulta impide guardar el resultado; los grants y configuración de
+firma se revalidan alrededor de la operación.
+
+Un ACK perdido puede recuperarse por el UUID propio y obtener el ID Google sin
+volver a enviar. Sin recibo durable, permanece desconocido. Una reserva que no
+llegó a enviarse permanece `prepared`: diagnóstico no la despacha ni consulta a
+Google. El resumen expone `unconfirmed`; no suma esos casos como recibidos,
+procesados o saltados. Un marcador sin journal/UUID necesita revisión, no un UUID
+nuevo ni adopción de historia. La consulta normal no selecciona resultados
+terminales; una llamada repetida autorizada devuelve su estado sin transporte.
+
+`repository.diagnosticError` bloquea las mismas filas y comprueba digests de
+identidad/auditoría antes de guardar un código acotado y mensaje fijo. No cambia
+el estado ni habilita reintentos. Un fallo tardío nunca sobrescribe éxito,
+metadata, fecha o historial terminales confirmados por otra consulta. Una
+conciliación exitosa limpia el error previo. Ningún error de proveedor, token,
+URL, contacto o payload se copia a esa metadata.
+
+QA:52 grupos con MySQL8.0.42 propio, servicio de lote real, resolutores actuales,
+coordinador SQL y broker firmado con SQLite.21 ingestas ficticias,51 comandos
+firmados,25 journals,0 lecturas SQL de tokens y cierre limpio de todas las
+instancias. Incluye selección por antigüedad, ACK perdido, ausencia de recibo,
+reserva sin envío, v1/v2/v3/sin mandato, destino deshabilitado, pausas, revocación,
+firmante ajeno, UUID intercambiado, cambios durante status y fallo concurrente
+posterior al éxito. Salud consume la conciliación real; no hay UI autenticada.
+
+Se preservan los fallos iniciales: reconstrucción incompleta de identidad nativa,
+JSON path escapado incorrectamente por Sequelize y fixture de antigüedad que no
+modificaba timestamps. La prueba legacy también dependía de modelos y proyecto
+de cuota del entorno; ambos fallos se reprodujeron con el servicio anterior. La
+fixture ahora declara identidad/registros vacíos y proyecto ficticio, conserva
+el comprobador real y pasa sin leer `.env` o red operativa.
+
+No se ejecutó `sync.jobs` completo: combina diagnóstico con reconciliación y
+activación que aún requieren revisión. Sin DDL, despliegue, cambio de cohortes,
+credenciales o tráfico real. Evidencia privada: `google-conversion-diagnostics/`.
+Antes del corte: completar onboarding/acciones/leads e inventario Google
+compartido, plan exacto del journal, despliegue completo, prueba autorizada del
+proveedor y recorrido visual con sesión/MFA. Mantener ledger y UUID; nunca borrar
+historia ni reactivar campañas, leads o jobs clínicos para intentar recuperar un
+resultado desconocido.

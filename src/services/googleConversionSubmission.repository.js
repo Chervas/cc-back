@@ -87,7 +87,7 @@ function createGoogleConversionSubmissionRepository({ models, assertContext, del
         request_accepted: true, result_count: 0, partial_failure: false, has_job_id: false,
         broker_submission_id: row.submission_id, processing_status: state === 'accepted' ? 'PROCESSING' : state.toUpperCase(),
         ...(receipt.warningCount !== undefined ? { warning_count: receipt.warningCount } : {}),
-        ...(receipt.destinations ? { diagnostics_checked_at: at.toISOString(), destinations: receipt.destinations } : {}) },
+        ...(receipt.destinations ? { diagnostics_checked_at: at.toISOString(), diagnostics_error: null, destinations: receipt.destinations } : {}) },
     }, options(transaction));
     return dto(row);
   }
@@ -153,6 +153,25 @@ function createGoogleConversionSubmissionRepository({ models, assertContext, del
       });
     },
     inspect: input => trans(async transaction => dto((await load(input, transaction)).row)),
+    diagnosticError(input, error) {
+      // Recording a failed read requires the original local identity, not a
+      // still-active grant. It never changes delivery state or grants a retry.
+      return trans(async transaction => {
+        if (!UUID.test(input.submissionId || '')) fail('invalid_request');
+        const attempt = await audit(input.attemptId, transaction);
+        const row = await getModels().GoogleConversionSubmission.findByPk(input.submissionId, options(transaction));
+        if (!row || row.delivery_digest !== deliveryDigest) fail('conversion_submission_conflict');
+        matchAudit(row, attempt);
+        if (terminal(row.state)) return dto(row);
+        const at = date(), code = safe(error);
+        await row.update({ last_error: code, updated_at: at }, options(transaction));
+        await attempt.update({ updated_at: at, responseMetadata: { ...(attempt.responseMetadata || {}),
+          transport: 'google_data_manager', delivery_mode: 'broker', diagnostics_error: {
+            checked_at: at.toISOString(), code, message: 'No se pudo verificar el recibo; no se reenviará la conversión' },
+        } }, options(transaction));
+        return dto(row);
+      });
+    },
     unknown(input, error) {
       // Persist delivery uncertainty even if permission was revoked while the
       // request was in flight. This grants no access, does not issue any request,

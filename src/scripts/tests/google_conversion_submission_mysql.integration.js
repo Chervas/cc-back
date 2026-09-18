@@ -427,7 +427,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
 
     await require('./fixtures/google_workspace_broker_checks.fixture')({ models, sql, report, broker, delivery, mapping,
       now: () => new Date(at), writes: () => providerWrites, calls: () => remoteCalls.length, validations,
-      setAfterRemote: fn => { afterRemote = fn; } });
+      setAfterRemote: fn => { afterRemote = fn; }, setBeforeRemote: fn => { beforeRemote = fn; },
+      setProviderMode: value => { providerMode = value; } });
 
     const table = 'GoogleConversionSubmissions';
     const query = async (text, values = []) => { const [rows] = await sql.query(text, { replacements: values }); return rows; };

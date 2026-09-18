@@ -5,7 +5,7 @@ const { randomUUID, createHash } = require('node:crypto');
 
 // Invoked only inside the owned MySQL/socket fixture. These are real SQL models
 // for the fields read by the services; only Google/AWS transport is fictitious.
-module.exports = async ({ models, sql, report, broker, mapping, now, writes, calls, validations, setAfterRemote }) => {
+module.exports = async ({ models, sql, report, broker, mapping, now, writes, calls, validations, setAfterRemote, setBeforeRemote, setProviderMode }) => {
   const B = require('../../../services/googleAdsBroker.service');
   const previous = B.forModels;
   B.forModels = requested => { assert.equal(requested, models); return broker; };
@@ -144,6 +144,10 @@ module.exports = async ({ models, sql, report, broker, mapping, now, writes, cal
     assert.equal(writes(), healthWrites); assert.equal(validations.length, healthValidations); assert.equal(calls(), healthCalls);
     report.checks.push('actual Health resolves managed web and native delivery records without tokens or contact reads, distinguishes acceptance from processing and discards old mandate evidence');
 
+    await require('./google_conversion_diagnostics_checks.fixture')({ models, report, now, writes, calls,
+      setAfterRemote, setBeforeRemote, setProviderMode, web, uploadWeb, getSetting, health,
+      nativeAttemptId: nativeResult.audit_id });
+
     const oldSetting = (await getSetting()).get({ plain: true }), oldConfig = structuredClone(cfg.config);
     const assignment = await models.GoogleConnectionAssignment.findByPk(100), oldConnectedAt = assignment.connectedAt;
     try {
@@ -165,6 +169,27 @@ module.exports = async ({ models, sql, report, broker, mapping, now, writes, cal
       assert.equal(evidence.checked, true); assert.equal(evidence.processing, 1); assert.equal(evidence.processed, 0);
       assert.equal(calls(), callsBefore);
       report.checks.push('schema-v1 workspace emitter and actual Health share the managed scoped runtime and metadata-only final permission checks without contacting the broker from the report');
+      const beforeStatus = writes();
+      const receipt = await require('../../../services/googleConversionDiagnosticsBroker.service').reconcileManagedGoogleConversion({ models, attemptId: v1.audit_id, now });
+      assert.equal(receipt.state, 'succeeded'); assert.equal(writes(), beforeStatus);
+      assert.equal((await health('201')).get('fictitious-campaign').processed, 1);
+      report.checks.push('schema-v1 diagnostics revalidate current installation and mandate, reconcile through the signed broker and update Health without another ingestion');
+      await cfg.update({ config: oldConfig });
+      await (await getSetting()).update({ activation: null, version: oldSetting.version + 2 });
+      const direct = await require('../../../services/googleAdsConversionUpload.service').maybeUploadGoogleConversion({
+        ...web(), groupId: 5, assignmentScope: 'clinic', dependencies: { ...dependencies,
+          auditModel: models.GoogleAdsConversionUploadAttempt,
+          resolveRuntime: input => require('../../../services/googleAdsScopedRuntime.service').resolveScopedGoogleAdsRuntime({ ...input, broker }) } });
+      assert.equal(direct.sent, true);
+      assert.equal((await models.GoogleAdsConversionUploadAttempt.findByPk(direct.audit_id)).requestMetadata.workspace_delivery, undefined);
+      const directCalls = calls(), directWrites = writes();
+      await cfg.update({ config: { ...oldConfig, google_ads: { ...oldConfig.google_ads, enabled: false } } });
+      await assert.rejects(require('../../../services/googleConversionDiagnosticsBroker.service').reconcileManagedGoogleConversion({ models, attemptId: direct.audit_id, now }), { code: 'conversion_paused' });
+      assert.equal(calls(), directCalls);
+      await cfg.update({ config: oldConfig });
+      assert.equal((await require('../../../services/googleConversionDiagnosticsBroker.service').reconcileManagedGoogleConversion({ models, attemptId: direct.audit_id, now })).state, 'succeeded');
+      assert.equal(writes(), directWrites);
+      report.checks.push('configured direct conversions without a workspace mandate recover by owned receipt, while disabling current tracking stops status access before transport');
     } finally {
       await cfg.update({ config: oldConfig });
       await (await getSetting()).update({ activation: oldSetting.activation, version: oldSetting.version });
