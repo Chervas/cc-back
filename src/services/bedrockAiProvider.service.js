@@ -4,6 +4,7 @@ const {
   BedrockRuntimeClient,
   ConverseCommand,
 } = require('@aws-sdk/client-bedrock-runtime');
+const bedrockBroker = require('./bedrockBroker.service');
 
 const DEFAULT_REGION = 'eu-south-2';
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -33,9 +34,9 @@ function getConfig() {
   return {
     enabled: enabled(),
     region: clean(process.env.BEDROCK_REGION, 80) || DEFAULT_REGION,
-    accessKeyId: clean(process.env.BEDROCK_AWS_ACCESS_KEY_ID, 200),
-    secretAccessKey: clean(process.env.BEDROCK_AWS_SECRET_ACCESS_KEY, 300),
-    sessionToken: clean(process.env.BEDROCK_AWS_SESSION_TOKEN, 1000),
+    accessKeyId: bedrockBroker.enabled() ? '' : clean(process.env.BEDROCK_AWS_ACCESS_KEY_ID, 200),
+    secretAccessKey: bedrockBroker.enabled() ? '' : clean(process.env.BEDROCK_AWS_SECRET_ACCESS_KEY, 300),
+    sessionToken: bedrockBroker.enabled() ? '' : clean(process.env.BEDROCK_AWS_SESSION_TOKEN, 1000),
     timeoutMs: Math.max(1_000, Number.parseInt(String(process.env.BEDROCK_TIMEOUT_MS || DEFAULT_TIMEOUT_MS), 10) || DEFAULT_TIMEOUT_MS),
   };
 }
@@ -47,7 +48,7 @@ function assertConfigured() {
     error.code = 'bedrock_disabled';
     throw error;
   }
-  if (!config.accessKeyId || !config.secretAccessKey) {
+  if (!bedrockBroker.enabled() && (!config.accessKeyId || !config.secretAccessKey)) {
     const error = new Error('bedrock_credentials_missing');
     error.code = 'bedrock_credentials_missing';
     throw error;
@@ -120,6 +121,7 @@ async function sendWithTimeout(client, command, timeoutMs) {
 }
 
 async function analyzeStructured({
+  useCase = 'automation_v2_analysis',
   model,
   systemPrompt,
   prompt,
@@ -135,7 +137,6 @@ async function analyzeStructured({
     throw error;
   }
   const config = assertConfigured();
-  const client = getClient();
   const toolName = 'submit_analysis';
   const command = new ConverseCommand({
     modelId,
@@ -161,7 +162,9 @@ async function analyzeStructured({
   });
 
   const startedAt = Date.now();
-  const response = await sendWithTimeout(client, command, config.timeoutMs);
+  const response = bedrockBroker.enabled()
+    ? await bedrockBroker.execute(useCase, command.input, { timeoutMs: config.timeoutMs })
+    : await sendWithTimeout(getClient(), command, config.timeoutMs);
   const value = extractToolInput(response, toolName);
   if (!value) {
     const error = new Error('bedrock_invalid_structured_response');
@@ -191,6 +194,7 @@ async function checkModel(model) {
   try {
     const startedAt = Date.now();
     const response = await analyzeStructured({
+      useCase: 'health_check',
       model: modelId,
       systemPrompt: 'Responde mediante la herramienta y cumple exactamente el esquema.',
       prompt: 'Confirma que el modelo está operativo.',
