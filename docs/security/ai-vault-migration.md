@@ -23,12 +23,14 @@ clave. No es un proxy de URL/cabeceras arbitrarias.
 | `groqAudio.service` | `ai.groq.audio.transcribe.v1` | `whatsapp_audio` | Transcripción y uso/duración del proveedor |
 | `aiRuntimeMonitoring.service` | `ai.groq.model.check.v1` | `provider_health` | Disponibilidad del modelo; grant separado |
 
-Bedrock tiene su propio consumidor y credenciales AWS. Este transporte no lo
-migra ni sustituye sus funciones de texto/imagen. No declarar «IA migrada»
-mientras ese consumidor o cualquier escritor siga usando claves locales.
-Antes de cambiarlo, cumplir la [matriz de automatizaciones y contexto](automation-ai-migration-acceptance.md):
-incluye todas las versiones guardadas, recetas personalizadas, errores y prueba
-real del proveedor; la aceptación por el futuro broker todavía está pendiente.
+Bedrock tiene su propio runtime separado, operación `ai.bedrock.converse.v1`
+y credenciales AWS en el vault. No comparte plazas de ejecución con OCR/audio.
+La [matriz de automatizaciones y contexto](automation-ai-migration-acceptance.md)
+incluye las 4470 definiciones, fallos y comparación de peticiones/salidas, además
+de pruebas reales a través de AWS. Se conserva una discrepancia semántica del
+modelo reproducida también por conexión directa. Micro/Lite/Pro pasan el
+monitor real. Los consumidores públicos todavía usan claves locales; su corte
+y la prueba visual autenticada siguen pendientes. No declarar «IA migrada».
 
 Las claves de IA son de plataforma: los grants usan `platform:dev` o
 `platform:staging`, y `ai:<finalidad>`. No representan por sí solos una ACL

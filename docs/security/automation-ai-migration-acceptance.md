@@ -11,8 +11,8 @@ terminada la comprobación visual.
   El enlace temporal pertenece solo al audio; el nodo analiza su transcripción.
 - Nodo `condition/ai_analysis` → selección de contexto en CRM → orquestador →
   Bedrock/Nova → resultado estructurado → condiciones posteriores del flujo.
-  El broker no consulta la BD ni elige otra conversación. La futura operación
-  tipada debe recibir exactamente el texto ya seleccionado y devolver el mismo
+  El broker no consulta la BD ni elige otra conversación. La operación
+  tipada recibe exactamente el texto ya seleccionado y devuelve el mismo
   contrato; no convertir la conversación en un archivo público o en un enlace.
 - Confirmación actual: `last_response_context`, cita y evento. No añadir un
   histórico completo para compensar un fallo de transporte. Clasificación de
@@ -82,7 +82,7 @@ Ambos defectos fallaron en las pruebas previas y pasan con la corrección.
 No hay evidencia en esta revisión de una mezcla real de conversaciones.
 
 Ambas correcciones están publicadas: staging `553db422`, gateway `d8b81de7`
-y DEV aislado `245f7c51`. Se comprobaron los procesos API y fresh-inbound,
+y DEV aislado `1b74ab2d` (incluye la corrección `245f7c51`). Se comprobaron los procesos API y fresh-inbound,
 los flags efectivos de MFA/jobs/IA y los 18 contratos SQL antes del reinicio.
 El importador pasivo de WhatsApp no se modificó ni reinició.
 
@@ -224,6 +224,82 @@ reiniciar únicamente el publicador; detener el servicio y retirar únicamente
 la regla ingress8449 de esta entrega. Preservar vault, ledger y recibos. Backups
 AWS en `/var/lib/clinicaclick-bedrock-deployment-20260918`; configuración local
 anterior en `/var/backups/clinicaclick-security/bedrock-staging-20260918`.
+
+## Monitor y candidato exacto de staging, 18/09 02:30 UTC
+
+`bedrockAiProvider.checkModel` real pasa con los tres modelos EU Nova Micro,
+Lite y Pro, por la identidad de firma staging y sin claves AWS en el harness.
+La BD está bloqueada y la telemetría inyectada; no es una prueba de UI. Los seis
+eventos tienen recibos independientes S3 verificados por versión/SHA256/KMS.
+Backlog cero y sin reinicios del servicio Bedrock ni del servicio OCR/audio.
+
+La promoción limitada `3c3eacc7`, subida a
+`security/automation-ai-context-staging-20260918`, conserva su propio motor,
+telemetría y pausas: solo cambia el adaptador, la finalidad enviada y el perfil
+del cliente firmado. No incorpora todo DEV ni cambia ningún flag público.
+4470/4470 resultados esperados vuelven a pasar, con cero diferencias en los
+hashes de petición/salida respecto de staging, 1904 ramas y 40 fallos iguales.
+Además pasan 46 regresiones aisladas, 13 pruebas TLS/runtime usando su cliente
+exacto y 18 controles del consumidor WhatsApp existente. Dos scripts históricos
+de citas intentaron MySQL bajo el guard de red y se detuvieron; no forman parte
+de los 46 pases ni se han ejecutado contra datos clínicos.
+
+Ocho fallos adicionales del broker se inyectan en cada uno de los 644 nodos
+activos: saturación, timeout del proveedor y del cliente, permisos, secreto,
+auditoría, resultado incierto y respuesta inválida. Pasan 5152/5152 comprobaciones:
+una sola llamada por evaluación, sin segundo modelo ni proveedor local, y nunca
+una confirmación. 5144 devuelven una excepción; ocho (una receta por los ocho
+errores) devuelven proveedor no disponible y terminan sin nodo siguiente. No
+afirmar que todos los fallos notifican a un humano: eso depende del flujo.
+Estas pruebas no ejecutan el worker ni sus reintentos de jobs, ni acciones
+clínicas; prueban el nodo y orquestador concretos ante fallos de transporte.
+
+El grafo de errores tiene 438 destinos directos de notificación y 206 nodos sin
+`on_fail`, todos alcanzables; no hay referencias colgantes. De estos últimos,
+204 son confirmaciones, uno es `custom` y uno es `classify_intent`. El caso que
+termina sin nodo siguiente es `1472/N3`, clasificación de intención: comportamiento
+previo de salida segura, no una rama añadida por el broker. No se modificaron las
+definiciones ni se afirma que la revisión humana sea inmediata en todos los casos.
+El monitor existente corre a las 10:00 y 16:00 Europe/Madrid; su último barrido
+guardado del 17/09 a las14:00UTC registró dos ejecuciones fallidas. Su estado
+`failed` también representa incidencias encontradas, no necesariamente fallo
+interno del monitor. La entrega/lectura de esas notificaciones no se ha probado.
+
+Lectura acotada de fallos de las últimas24h a las02:40UTC:26 ejecuciones, todas
+en `action/send_whatsapp`, ninguna en nodo IA. Veinte son `whatsapp_config_missing`
+y pertenecen a clínicas sin binding operativo autorizado; no abrir su alcance
+para convertirlos en verde. Las seis restantes son cuatro `rate_limited` y dos
+`whatsapp_delivery_unknown` dentro de clínicas con binding. Requieren diagnóstico
+del transporte WhatsApp antes de declarar el conjunto operativo sin fallos.
+No se reenvió ningún mensaje, liberó histórico ni alteró esas ejecuciones.
+Que Bedrock todavía siga directo excluye atribuir esos fallos al nuevo corte IA.
+
+Inventario de procesos y Redis de solo lectura a las 02:25 UTC:
+
+- Staging tiene seis workers BullMQ; gateway mantiene `webhook_whatsapp` aunque
+  su planificador `JOBS_WORKER_ENABLED` esté apagado. Ninguna de las doce colas
+  consultadas tiene trabajos activos, esperando, pausados o diferidos. Gateway
+  conserva seis fallos históricos, sin leer sus cuerpos ni reintentarlos.
+- `fresh-inbound` importa la configuración de staging y debe incluirse en el
+  corte/reinicio. Tiene credenciales presentes heredadas; su presencia no prueba
+  que ejecute todos los proveedores. La API y gateway conservan Bedrock/Groq
+  locales. No basta con editar un `.env` para retirarlos de procesos vivos.
+- DEV API UID998 sigue sin claves de proveedor. El worker de seguridad UID996
+  conserva SES; los jobs clínicos continúan apagados y MFA/sesiones enforce.
+- El audio gateway aún solicita `response_format=json`, y staging usa
+  `verbose_json` con telemetría. Su promoción necesita un parche específico y
+  prueba de compatibilidad; no copiar el consumidor completo silenciosamente.
+
+Evidencia: `bedrock-runtime/model-health-qa.json`,
+`model-health-audit-receipts.json`, `automation-ai/runtime-consumers.json`,
+`snapshot-broker-candidate-comparison.json`,
+`bedrock-candidate-offline-regressions.log`, `bedrock-candidate-transport.log`
+y `broker-failures-active.json`.
+El grafo y el monitor constan en `active-ai-error-routes.json`,
+`health-monitor-metadata.json` y `recent-failure-metadata.json` (IDs/categorías y
+hash del error; sin conversaciones, destinatarios ni cuerpos de mensajes).
+Son snapshots puntuales, no garantía de inactividad futura. El candidato sigue
+separado del runtime público y no cierra la aceptación visual ni funcional real.
 
 ## Condiciones antes de migrar Bedrock
 
