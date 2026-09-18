@@ -7,8 +7,9 @@ async function snapshot(query) {
   const tables = await query("SELECT TABLE_NAME,ENGINE,TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME", []);
   const columns = await query('SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,CHARACTER_SET_NAME,COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_NAME,ORDINAL_POSITION', []);
   const indexes = await query('SELECT TABLE_NAME,INDEX_NAME,NON_UNIQUE,SEQ_IN_INDEX,COLUMN_NAME,SUB_PART,INDEX_TYPE FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX', []);
+  const checks = await query("SELECT t.TABLE_NAME,t.CONSTRAINT_NAME,t.ENFORCED,c.CHECK_CLAUSE FROM information_schema.TABLE_CONSTRAINTS t JOIN information_schema.CHECK_CONSTRAINTS c ON c.CONSTRAINT_SCHEMA=t.CONSTRAINT_SCHEMA AND c.CONSTRAINT_NAME=t.CONSTRAINT_NAME WHERE t.CONSTRAINT_SCHEMA=DATABASE() AND t.CONSTRAINT_TYPE='CHECK' ORDER BY t.TABLE_NAME,t.CONSTRAINT_NAME", []);
   const migrations = tables.some(t => t.TABLE_NAME === 'SequelizeMeta') ? (await query('SELECT name FROM SequelizeMeta ORDER BY name', [])).map(r => r.name) : [];
-  return { defaults, tables, columns, indexes, migrations };
+  return { defaults, tables, columns, indexes, checks, migrations };
 }
 function compare(actual, contract) {
   const issues = [];
@@ -25,6 +26,12 @@ function compare(actual, contract) {
     for (const index of expected.indexes) {
       const found = actual.indexes.filter(i => i.TABLE_NAME === name && i.INDEX_NAME === index.name).map(({ TABLE_NAME, ...i }) => i);
       if (JSON.stringify(found) !== JSON.stringify(index.columns)) issues.push({ table: name, index: index.name, reason: 'index_definition' });
+    }
+    for (const check of expected.checks || []) {
+      const found = (actual.checks || []).find(c => c.TABLE_NAME === name && c.CONSTRAINT_NAME === check.CONSTRAINT_NAME);
+      if (!found || Object.keys(check).some(key => found[key] !== check[key])) {
+        issues.push({ table: name, constraint: check.CONSTRAINT_NAME, reason: 'check_definition' });
+      }
     }
   }
   const missingMigrations = contract.migrations.filter(m => !actual.migrations.includes(m.name)).map(m => m.name);

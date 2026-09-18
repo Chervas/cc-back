@@ -8,6 +8,7 @@ function baseline() {
   return { defaults: { ...schema.defaults }, tables: Object.entries(schema.tables).map(([TABLE_NAME,t]) => ({ TABLE_NAME,ENGINE:t.ENGINE,TABLE_COLLATION:t.TABLE_COLLATION })),
     columns: Object.entries(schema.tables).flatMap(([TABLE_NAME,t]) => t.columns.map(c => ({TABLE_NAME,...c}))),
     indexes: Object.entries(schema.tables).flatMap(([TABLE_NAME,t]) => t.indexes.flatMap(i => i.columns.map(c => ({TABLE_NAME,...c})))),
+    checks: Object.entries(schema.tables).flatMap(([TABLE_NAME,t]) => (t.checks || []).map(c => ({TABLE_NAME,...c}))),
     migrations: schema.migrations.map(m => m.name) };
 }
 test('contract permits additive fields but rejects security type, default, index and history drift', () => {
@@ -18,6 +19,20 @@ test('contract permits additive fields but rejects security type, default, index
     s=>s.columns[0].COLUMN_DEFAULT='unexpected',s=>s.indexes.shift(),s=>s.migrations.pop(),
     s=>s.defaults.DEFAULT_COLLATION_NAME='utf8mb4_unicode_ci']) {
     const altered=baseline();change(altered);assert.equal(compare(altered,schema).compatible,false);
+  }
+});
+test('required CHECK constraints must exist, be enforced and retain their expression', () => {
+  const actual = baseline();
+  const table = Object.keys(schema.tables)[0];
+  const constraint = { CONSTRAINT_NAME: 'synthetic_required_check', ENFORCED: 'YES', CHECK_CLAUSE: '(`id` > 0)' };
+  const contract = structuredClone(schema);
+  contract.tables[table].checks = [constraint];
+  assert.equal(compare(actual, contract).compatible, false);
+  actual.checks.push({ TABLE_NAME: table, ...constraint });
+  assert.equal(compare(actual, contract).compatible, true);
+  for (const change of [c => c.ENFORCED = 'NO', c => c.CHECK_CLAUSE = 'true', c => c.CONSTRAINT_NAME = 'different']) {
+    const changed = structuredClone(actual); change(changed.checks.at(-1));
+    assert.equal(compare(changed, contract).compatible, false);
   }
 });
 test('plans bind exact schema, code, ordered migration content and isolated target', () => {
