@@ -31,7 +31,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 35, 'the canonical scheduler must retain email, web, report cache and campaign periodic jobs');
+  assert.equal(definitions.length, 39, 'the canonical scheduler retains existing jobs plus audit delivery/monitor/reconciliation and session expiry');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
