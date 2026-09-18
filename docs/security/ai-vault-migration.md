@@ -2,7 +2,7 @@
 
 > **Tipo:** runbook y contrato técnico del transporte.
 > **Fuente de verdad:** operaciones de OpenAI, Gemini y Groq en el broker y su migración; no acredita activación.
-> **Última revisión:** 2026-09-17.
+> **Última revisión:** 2026-09-18.
 > **Estado:** [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones). Prioridades: [16](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/16-roadmap.md#seguridad-de-acceso-e-integraciones).
 
 ## Recorrido y límites
@@ -21,6 +21,7 @@ clave. No es un proxy de URL/cabeceras arbitrarias.
 | `marketingAiVisibility.service` | misma | `visibility_openai` | Texto, citas, fuentes y consumo |
 | mismo | `ai.gemini.interactions.create.v1` | `visibility_gemini` | Resultado de búsqueda, fuentes y consumo |
 | `groqAudio.service` | `ai.groq.audio.transcribe.v1` | `whatsapp_audio` | Transcripción y uso/duración del proveedor |
+| `aiRuntimeMonitoring.service` | `ai.groq.model.check.v1` | `provider_health` | Disponibilidad del modelo; grant separado |
 
 Bedrock tiene su propio consumidor y credenciales AWS. Este transporte no lo
 migra ni sustituye sus funciones de texto/imagen. No declarar «IA migrada»
@@ -87,32 +88,27 @@ Los destinos son `api.openai.com/v1/responses`,
 los consumidores; un cambio de versión es otra modificación que exige QA.
 
 OpenAI/Gemini exigen `store=false`. Se admiten exclusivamente las estructuras
-que usan estos consumidores: búsqueda web, JSON estructurado y entrada local
-PDF/imagen para OpenAI; búsqueda Google para Gemini; archivo de audio/video
-con `verbose_json` para Groq. No se admiten URLs de archivos, streaming,
-conversaciones almacenadas, herramientas MCP ni cabeceras elegidas por el CRM.
-Para añadir una función legítima, ampliar el contrato con su consumidor y
-pruebas; no convertirlo en un proxy general ni silenciar el rechazo.
+usadas por estos consumidores: búsqueda web, JSON estructurado y referencias
+privadas de PDF/imagen para OpenAI; búsqueda Google para Gemini; referencia
+privada de audio/video con `verbose_json` para Groq. Los archivos inline/base64,
+URLs arbitrarias, streaming, conversaciones almacenadas, MCP y cabeceras
+elegidas por el CRM se rechazan. Ampliar funciones exige contrato y pruebas.
 
-El perfil `ai` permite 32 MiB decodificados de archivos, aproximadamente
-44 MiB de petición y 8 MiB de respuesta. Es un techo de transporte, no una
-garantía de admisión del proveedor. Los límites de los demás brokers permanecen
-en 32 KiB. Tiempo de proveedor hasta 180 s y presupuesto de transporte hasta
-190 s. El runtime limita a cuatro operaciones simultáneas y ocho conexiones.
-Antes de recibir el cuerpo exige una longitud explícita y reserva un presupuesto
-total equivalente a una petición máxima. Varias peticiones pequeñas pueden
-coincidir; una subida máxima ocupa ese presupuesto completo. La reserva se
-mantiene hasta terminar el trabajo y entregar o cerrar la respuesta; desconectar
-el cliente no libera capacidad mientras el proveedor sigue trabajando. Un exceso
-devuelve `rate_limited` antes de leer el archivo y sin llamar al proveedor.
-Verificar además memoria y concurrencia de la instancia antes del corte.
-El digest de idempotencia del perfil IA se calcula de forma incremental, con
-los mismos bytes canónicos, para evitar copias del archivo en cada nivel JSON.
-En el ensayo aislado del 17/09, Node 24 con heap de 512 MiB admitió archivos de
-32 MiB y cuatro de 8 MiB simultáneos, con respuestas de unos 7,94 MiB. El pico
-RSS fue 422,4 MiB. Es evidencia local con proveedor inyectado; no sustituye la
-prueba real en AWS ni acredita capacidad ilimitada. Conservar el informe de
-capacidad y aplicar un límite de memoria al servicio antes de habilitarlo.
+El perfil `ai` admite un máximo de 1 MiB de petición y 8 MiB de respuesta.
+El presupuesto total de cuerpos admitidos es 1 MiB; cuatro operaciones y ocho
+conexiones como máximo. La reserva se obtiene antes de leer el cuerpo y continúa
+hasta terminar el trabajo y la respuesta, incluso tras desconexión del cliente.
+Los archivos, hasta 32 MiB, viajan por descarga directa proveedor desde el
+servicio de transferencias CRM, separado del broker. Los demás transportes
+conservan su límite de petición de 32 KiB. El timeout de proveedor llega a 180 s
+y el transporte a 190 s. Un exceso de admisión devuelve `rate_limited` sin llamar
+al proveedor. El digest canónico se calcula incrementalmente.
+
+AWS usa heap de 512 MiB, MemoryMax de 768 MiB y MemoryHigh de 640 MiB. El auxiliar
+CRM usa heap64/MemoryMax256/MemoryHigh192 MiB y 50% CPU. Cuatro archivos ficticios
+de32MiB simultáneos se cargaron, descargaron y revocaron: pico RSS71,8MiB,
+cgroup160,7MiB incluyendo caché, cero fallos de límite y cero reinicios.
+Estos límites y pruebas no garantizan capacidad ilimitada.
 
 No se reintentan llamadas al proveedor automáticamente. Repetir el mismo
 `requestId` completado produce `outcome_unknown`, no otra llamada ni una copia
@@ -126,60 +122,45 @@ equivale al evento de actividad del usuario que inició la operación.
 
 ## Corte por proveedor
 
-### Revisión de transporte solicitada por el titular el 17/09
+### Archivos mediante enlaces privados
 
-La activación de consumidores queda pendiente de resolver el transporte de
-archivos grandes. Los límites y ensayos de memoria acreditan el comportamiento
-del prototipo, pero no deciden por sí solos la arquitectura de producción.
-El servicio AWS se ha preparado para QA; no se han habilitado sus flags en CRM
-ni gateway ni retirado las claves locales.
+1. El consumidor conserva ACL y comprueba la pausa IA antes de crear el permiso.
+2. Emite por socket Unix una referencia de lectura ligada a archivo, UUID,
+   entorno, finalidad, tamaño y SHA256. No existe API pública de emisión.
+3. AWS valida origen HTTPS fijo, ruta y contrato, obtiene la clave del vault y
+   envía la referencia al endpoint fijo del proveedor. No descarga el archivo.
+4. El proveedor descarga directamente desde CRM. El resultado de texto/JSON
+   vuelve por el broker al consumidor; no contiene la clave ni el permiso.
+5. El consumidor revoca el permiso en `finally`; la caducidad de cinco minutos
+   limita el acceso si se interrumpe el proceso o falla esa revocación.
 
-Se propone mantener la autenticación y operaciones en el broker y entregar los
-archivos directamente al proveedor mediante referencias temporales:
-
-1. El consumidor comprueba permisos, ámbito del documento y pausa de la función.
-2. Crea una referencia de lectura limitada a ese archivo, petición y entorno.
-3. El broker valida esa referencia y llama al endpoint fijo del proveedor con
-   su clave y una URL temporal de un origen permitido.
-4. El proveedor obtiene el archivo directamente; texto/JSON de respuesta sigue
-   el circuito normal proveedor → broker → consumidor.
-
-La clave autentica la petición HTTP; no se envía por separado para que el
-proveedor redirija automáticamente su respuesta al CRM. Una entrega directa de
-resultados requiere un contrato asíncrono específico, cuando exista, y no forma
-parte de esta propuesta.
-
-Capacidad confirmada en documentación oficial: OpenAI Responses acepta
+La clave autentica la petición al proveedor, no es una orden separada para que
+entregue el resultado a otro servidor. OpenAI Responses admite
 [archivos por URL](https://developers.openai.com/api/docs/guides/file-inputs)
-y Groq admite [audio mediante `url`](https://console.groq.com/docs/speech-to-text).
-Prueba real Groq del 17/09: audio ficticio de 299592 bytes servido temporalmente
-desde CRM; petición desde AWS de 395 bytes, respuesta 200 y transcripción
-esperada. Se retiró el archivo y se verificó que ya no se servía. Esa prueba
-empleó una muestra pública temporal: demuestra la descarga directa del
-proveedor, **no** acredita el contrato privado ni cambia consumidores reales.
+y Groq [audio mediante `url`](https://console.groq.com/docs/speech-to-text).
 
-`clinicalPrivateStorage.service` actualmente solo implementa almacenamiento
-local privado. No tiene URLs de proveedor con caducidad. El audio WhatsApp llega
-como buffer después de la descarga autenticada a Meta. Falta implementar y probar:
+`services/ai-file-transfer` guarda solo hashes de capacidades en metadata,
+archivos0600/directorio0700, cuotas8ficheros/128MiB,4descargas,16peticiones y
+presupuesto de lectura3veces el tamaño por permiso. Admite HEAD y rangos,
+comprueba integridad y recupera/limpia estado al reiniciar. El proxy HTTPS no
+registra capacidades ni sigue redirecciones. HTTP las rechaza sin redirigir.
+El contrato rechaza sustitución de origen/petición/entorno/finalidad y respuestas
+del proveedor que reflejen el permiso antes de entregarlas a app/telemetría.
+Ver [servicio de transferencias](../../services/ai-file-transfer/README.md).
 
-- Emisión interna después del control funcional, vinculada a archivo, trabajo,
-  finalidad y entorno; sin API pública para emitir permisos ni claves IA en CRM.
-- Caducidad, revocación al terminar y limpieza tras timeout/reinicio. La descarga
-  puede necesitar HEAD/Range y lecturas repetidas del mismo archivo; no consumir
-  el permiso irrevocablemente con el primer HEAD.
-- Origen y ruta cerrados, sin URLs arbitrarias, redirecciones, recorridos de
-  directorios ni posibilidad de leer otro archivo cambiando un identificador.
-- Transferencia por streaming con tamaño y concurrencia limitados. Reutilizar
-  el documento privado existente; resolver por separado la vida temporal del
-  buffer de audio, sin convertir carpetas clínicas en contenido público.
-- Ausencia de referencias con acceso en logs, auditoría y navegador. El permiso
-  temporal también es una credencial de lectura, aunque no sea la clave IA.
-- Pruebas de expiración, archivo alterado, firma/ámbito ajeno, cancelación,
-  limpieza y proveedor real; después, recorridos integrados y visuales.
+Configurar `AI_FILE_TRANSFER_CONFIG_FILE` con el JSON privado del cliente local
+junto con los flags del broker. El UID de DEV no debe acceder al emisor staging.
+El auxiliar debe estar habilitado y supervisado antes del corte del consumidor.
 
-El contrato actual rechaza URLs externas. No quitar esa validación para hacer
-pasar una prueba: sustituirla por un contrato acotado y promover juntos emisor,
-descarga y consumidor. Bedrock y el resto de integraciones conservan su fase.
+Estado verificado el18/09: AWS ejecuta1371e7b5, política
+`ai-staging-20260918-url-health-v3`, después de renovar SSO. Recorrido privado real
+Groq con consumidor exacto: audio ficticio299592bytes, payload531bytes, texto
+esperado y salud tipada correcta. Cero transferencias/reserva/spool al terminar;
+cuatro recibos externos S3 comprobados por versión/checksum/KMS y sin backlog.
+El harness inyecta DB/pausa/telemetría: no es prueba integrada ni visual.
+Flags CRM/gateway todavía apagados, claves locales presentes y servicios IA aún
+sin habilitación al arranque. OpenAI sigue sin saldo y Gemini403, igual que
+antes desde el host original. No repetir operaciones para disimular esos fallos.
 
 ### Secuencia operativa
 
@@ -249,80 +230,30 @@ fallback, errores/timeout sin retry y conservación de los cinco consumidores.
 Añadir pruebas reales de proveedor y revisión visual de las superficies
 afectadas antes de acreditar la migración en `19`.
 
-### 2026-09-18 — Temporary file references implemented in DEV
+### Evidencia vigente de enlaces y monitor (2026-09-18)
 
-The binary AI path now uses a dedicated CRM-side transfer daemon. OCR and Groq
-consumers check the AI pause before issuing a five-minute capability through a
-private Unix socket, bind it to the broker request UUID, and revoke it in finally.
-The broker pins the HTTPS origin/environment/use case, translates the reference
-to OpenAI file_url/image_url or Groq url, and rejects inline/base64 files. Its
-request and total admitted-body budget is now 1 MiB; provider results remain
-bounded to 8 MiB and four concurrent operations. Provider-echoed capabilities
-are rejected before application telemetry/output.
+516/516 pruebas del broker; 15/15 del emisor y consumidores; seis de monitor y
+consumidores; diez existentes de runtime/Bedrock. HTTP/Unix/HTTPS reales: rangos,
+expiración, revocación, corrupción, concurrencia, interrupción, reinicio y
+separación de UID. Sin capacidades en seis logs NGINX ni journal del emisor.
+La comprobación de Groq solo lee el modelo permitido, limita la respuesta a
+16KiB y proyecta disponibilidad. Conserva la caché de cuatro horas, grant propio
+`ai:provider_health` y ausencia de fallback. Se ha probado por AWS y Groq reales;
+el recorrido autenticado en Ajustes sigue pendiente.
 
-See services/ai-file-transfer/README.md for permissions, independent resource
-limits, proxy logging requirements and recovery. No consumer flag has been
-activated by this code change. The existing service on AWS still needs the new
-release and pinned-origin configuration before a real capability proof.
+Evidencias bajo `qa-evidence/security-resume-20260917/ai-runtime/`:
+`private-groq-consumer-result.json`, `private-url-aws-verified.json`,
+`private-url-audit-receipts.json`, `file-transfer-installed-capacity-result.json`,
+`file-transfer-isolation.json`, `private-link-qa-result.json` y suites registradas.
+La muestra pública ficticia inicial ya retirada y el ensayo de memoria con
+base64 fueron prototipos anteriores; no representan el transporte vigente.
 
-Validation: broker full suite 512/512; transfer service plus actual consumer
-payload/pause tests 15/15, including real Unix/HTTP reads, ranges, expiry,
-revocation, interrupted uploads, slow download concurrency, corruption, restart,
-request/environment/origin substitution and capability reflection. A test first
-used a 4 MiB response that fitted the OS socket buffer; the corrected backpressure
-case uses a 16 MiB range and confirms admission/revocation under a stalled reader.
-These checks are not authenticated UI evidence and do not resolve the OpenAI
-credit_balance_exhausted or Gemini permission failures recorded above.
-
-Preparation/HTTPS evidence after that commit: `clinicaclick-ai-files-staging`
-installed on the CRM host (UID 995, loopback 3098, Unix control, 256 MiB memory
-maximum / 50% CPU). No consumer flags changed and boot enablement deferred.
-Four simultaneous 32 MiB fictitious files passed upload/download/revocation:
-71.8 MiB peak process RSS in the installed runtime; cgroup peak including charged
-cache 160.7 MiB, zero memory-limit failures and zero restarts. Spool empty after
-QA. Real HTTPS HEAD/range/full SHA, HTTP rejection, no POST, and revoked 404 pass;
-no capability matches in six NGINX logs or service journal. DEV UID 998 is denied
-control-socket access. Evidence: `file-transfer-{installed-capacity-result,isolation}.json`
-and `private-link-qa-result.json` in the September 17 security-resume directory.
-
-AWS SSO expired before deploying `282e942b` remotely. The AWS runtime remains
-`release-553e9cdf` until renewed access and activation of the prepared archive
-(SHA256 `352eddd5dd3bd5380384b1fd16b963ebf442721cbc3294c3b4cd959f23f94680`,
-76 files). `activate-url-broker.py` is prepared with checked source/destination,
-configuration/unit backup and automatic rollback on failed restart. The pending
-`private-groq-consumer-qa.cjs` runs the actual consumer function with the real
-file issuer and signed AWS request, while injecting app DB/pause/telemetry only;
-it cannot count as authenticated UI verification. Never run it against the old
-AWS binary contract or interpret the earlier public-URL proof as its result.
-
-### Monitoring is an AI credential consumer (2026-09-18)
-
-The inventory includes `aiRuntimeMonitoring.service`: its previous Groq check
-called `/models` directly and provider configuration depended only on local keys.
-The migrated inventory recognizes broker flags, and Groq uses the separate typed
-read `ai.groq.model.check.v1`, asset `ai:provider_health`. Grant it explicitly to
-the staging monitor identity; a transcription grant does not imply this grant.
-The broker allows only a configured model at the fixed HTTPS model endpoint,
-uses the vault key, bounds the reply to 16 KiB, and projects only model/available.
-It does not transcribe, send files, retry or follow redirects for this check.
-See the [Groq model endpoint](https://console.groq.com/docs/api-reference#models).
-The existing four-hour application cache and error visibility are preserved.
-An enabled broker never falls back to a remaining legacy key. Startup no longer
-warns that Groq is unavailable merely because its local key was removed.
-
-Six broker-consumer/monitor tests, fourteen focused transport/TLS/admission tests
-and ten existing Bedrock/runtime tests pass. The exact health HTTP adapter also
-read the real Groq model successfully using the existing host's credential;
-that proves the provider endpoint, **not** an AWS broker migration. Evidence:
-`monitoring-{consumers-tests,broker-tests,existing-runtime-tests}.log` and
-`real-model-health-result.json`. This change is not yet deployed to AWS or the
-application runtimes. The old SSO device code was invalidated; no replacement
-has been requested while the operator is unavailable.
-
-The read-only AWS identity inventory separately confirms the remaining keys:
-Bedrock is `clinicaclick-bedrock-prod` in account137819318729, region eu-south-2,
-models EU Nova Micro/Lite/Pro, on staging and gateway. Staging SES uses
-`clinicaclick-ses-sender-staging`, eu-west-3, transactional enabled and marketing
-disabled. Gateway has email disabled/no SES key. DEV API has neither credential
-pair; its isolated security worker is a distinct remaining inventory target.
-No key value, token or clinical data is in the inventory evidence.
+Recuperación de AWS: configuración/unidad anteriores bajo
+`/var/lib/clinicaclick-ai-deployment-20260918`; conservar ledger y vault.
+Release anterior553e9cdf usa contrato binario incompatible con el consumidor
+nuevo: no volver a ella con flags del consumidor activos. Preferir restaurar
+una release compatible con referencias privadas. Recuperación del proxy:
+restaurar `/var/backups/clinicaclick-security/ai-files-20260918/crm.nginx.before`,
+validar NGINX y recargar antes de detener el auxiliar, únicamente tras retirar
+los consumidores que lo necesiten. No borrar fuentes clínicas. No retirar un
+servidor supervisado sin actualizar su destino de certificados.
