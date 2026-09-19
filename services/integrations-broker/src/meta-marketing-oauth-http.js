@@ -49,6 +49,7 @@ function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 800
     });
   }
   return {
+    discover: require('./meta-marketing-discovery-http').createMetaMarketingDiscoveryHttp({ request, timeoutMs, now }),
     async withExchangedToken({ binding, code, appSecret, signal: callerSignal }, work) {
       const b = C.bindingFor(binding);
       if (!Buffer.isBuffer(code) || !/^[\x21-\x7e]{1,4096}$/.test(code.toString('latin1'))

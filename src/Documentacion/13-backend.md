@@ -11126,3 +11126,71 @@ permanecen intactos. Falta el escritor de selección/activación de activos y gr
 un candidato nuevo no borra bajas ni restaura bindings históricos. Runbook
 `docs/security/meta-marketing-oauth.md`, inventario CRM separado, funcional20.17,
 variables03, jobs11, madurez19, costes39 y corte/evidencia/recuperación99.
+
+
+### Inventario candidato Meta desde Ajustes (preparado, 19/09/2026)
+
+La autorización candidata añade consulta explícita de cuentas publicitarias,
+páginas e Instagram profesional. `POST /oauth/meta/marketing/authorization/:id/assets`
+solo admite scope canónico y cuerpo vacío. Gate local
+`META_MARKETING_OAUTH_DISCOVERY_ENABLED`, apagado por defecto. Requiere la sesión
+actual con MFA por correo, mismo iniciador, permiso completo sobre clínica/grupo,
+y que sigan válidos la sesión original, slot, snapshot de bajas y candidato staged.
+Revalida antes/después del transporte y antes de registrar/devolver el resultado.
+No consulta Meta al abrir Ajustes ni mantiene locks MySQL durante I/O externo.
+
+Comando `meta.marketing.oauth.assets.v1`, proveedor meta_marketing_onboarding,
+payload cerrado `{flowId,scopeDigest}`. El runtime OAuth incorpora `assetDiscovery`
+booleano opcional, false por defecto; true exige el grant exacto de esa operación
+para gateway. Control conserva solo status/abort. Configuraciones anteriores con
+cuatro operaciones siguen válidas sin abrir inventario; ninguna opción abre campañas,
+leads, mensajes o activos mediante URL/ID arbitrario. Se conserva admisión de dos
+operaciones ordinarias y una de control, 20 peticiones/minuto y plazo 25 s.
+
+El broker toma prestado el token **candidato** por versión/hash y el secreto de app
+solo dentro del proceso, comprobando slot AWSCURRENT, KMS, pins y metadata alrededor
+del uso. No promueve AWSPENDING, no crea, borra ni rota versiones ni requiere capacidad
+para escribir al leer. Verifica token USER, app/sujeto/scopes y concesiones granulares
+antes/después de la lista. Comprueba grant/principal/bloqueo de nuevo entre páginas.
+Abortar interrumpe la lectura y evita entregar un resultado tardío. Buffers propios
+se limpian al terminar/cancelar; no se afirma borrado completo del heap JavaScript.
+
+HTTPS fijo Graph v24: `/{subjectId}/adaccounts` pide ID/nombre/estado/moneda/zona;
+`/{subjectId}/accounts` pide ID/nombre y, con permiso, la relación Instagram con
+ID/nombre/username. No solicita token de página, perfil personal, conversaciones ni
+ficheros. Las capacidades de listado proceden de scopes: ads_read para Ads;
+pages_show_list+pages_read_engagement para páginas, más instagram_basic para IG.
+Una lista vacía solo describe las capacidades concedidas. El conjunto concedido
+se muestra en metadata; la activación futura deberá comprobar cada activo otra vez.
+
+Hasta 100 filas por página, 10 páginas en total, 500 activos, 128 KiB por respuesta,
+1 MiB agregado y 256 KiB de resultado. Se usa únicamente el cursor opaco de Meta
+para construir otra llamada al mismo edge; nunca se sigue `paging.next`. Cursores
+no salen ni se persisten. Duplicados, bucles, límites, pérdida de permisos o una
+respuesta incompleta rechazan **todo** el resultado; no anuncian una lista completa
+truncada. Esos límites requieren contraste con la cardinalidad y cuotas reales.
+
+La respuesta contiene metadata de activos, vínculo Instagram→página, capacidades,
+flow/versión/digest/ámbito y observación con validez hasta 5 minutos, siempre
+accessBlocked=true. CRM coteja todos esos vínculos, caducidad y desfase máximo 5 s;
+no conserva la lista en la tabla OAuth. Nueva auditoría humana v23
+`integration.meta.asset_list` registra solicitud/resultado, actor/sesión/ámbito,
+referencia de autorización, digest candidato, recuento y hash del resultado, sin
+nombres, IDs remotos completos en lote ni credenciales. Captura o confirmación
+fallidas no devuelven lista; perder permiso produce denegación. La auditoría técnica
+v2 usa la UUID de consulta y la operación, separadas de la autorización inicial.
+
+Ajustes ofrece «Consultar activos disponibles» únicamente sobre staged habilitado.
+La lista se muestra sin selección/activación; otra consulta, cambio de ámbito/sesión
+o vencimiento la retiran. El temporizador comprueba el vencimiento cada segundo
+mientras el navegador lo programa; no representa una nueva llamada HTTP. ES/CAT y
+el panel de Actividad existente muestran consulta y resultado. Falta el escritor
+transaccional de selección/bindings/grants y la activación idempotente: descubrir
+un activo no prueba propiedad clínica ni permite borrar una baja o crear permisos.
+
+Preparado con proveedores ficticios; publicación y aceptación pública/titular/Meta,
+cardinalidad, cuotas/costes y carga siguen pendientes. No nuevo DDL ni job con este
+corte; usa los requisitos del OAuth candidato. Lector AWS v23, luego escritor y
+finalmente productor antes de habilitarlo. El archivo/canary v19 permanece intacto.
+Contrato operativo `docs/security/meta-marketing-discovery.md`; funcional 20.17,
+variables 03, recursos/costes 39, estado 19/prioridades 16 y evidencia/corte 99.

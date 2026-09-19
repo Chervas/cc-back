@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),{randomUUID,randomBytes}=require('node:crypto'),{Readable}=require('node:stream');
-module.exports=async({models,sessions,app,now})=>{
+module.exports=async({models,sessions,app,now,discovery=false})=>{
   const admin=await models.Usuario.create({id_usuario:1,nombre:'Administrador ficticio',email_usuario:'revocation-admin@example.invalid',password_usuario:'FICTITIOUS_ADMIN_HASH'});
   const token=(await sessions.authenticated(admin)).body.token;
   const {createRepository,drain}=require('../../../services/platformAudit.repository'),audit=createRepository(models.PlatformAuditEvent);
@@ -18,7 +18,7 @@ module.exports=async({models,sessions,app,now})=>{
   const view=require('../../../services/platformAudit.view').createView({model:models.PlatformAuditEvent,audit,reader,now,codec:require('../../../../services/platform-audit/src/view-contract').cursorCodec(randomBytes(32))});
   const read=async(userId,sessionRef)=>{
     await drain(audit,createWriter(s3),{limit:100,now});const date=now().toISOString().slice(0,10);
-    return view.read({actorId:userId,sessionRef,query:{from:date,to:date,action:'integration.oauth.authorize'}});
+    return view.read({actorId:userId,sessionRef,query:{from:date,to:date,...(discovery?{}:{action:'integration.oauth.authorize'})}});
   };
   app.get('/api/system-monitoring/audit/events',async(req,res)=>{
     try{const claims=await sessions.verify(require('../../../services/accessSession.service').bearer(req.headers.authorization));res.json(await read(claims.userId,claims.jti));}

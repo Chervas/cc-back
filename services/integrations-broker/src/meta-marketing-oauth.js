@@ -1,7 +1,7 @@
 'use strict';
 const { BrokerError, fail } = require('./errors'), { eventFor } = require('./audit');
-const C = require('./meta-marketing-oauth-contract'), { GRAPH_VERSION } = require('./meta-marketing-contract');
-function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Date.now() }) {
+const C = require('./meta-marketing-oauth-contract'), D = require('./meta-marketing-discovery-contract'), { GRAPH_VERSION } = require('./meta-marketing-contract');
+function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Date.now(), assetDiscovery = false }) {
   // This table is installed only by the explicit onboarding runtime, not the generic broker.
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_oauth_flows (
     id TEXT PRIMARY KEY, principal TEXT NOT NULL, tenant TEXT NOT NULL, connection TEXT NOT NULL, asset TEXT NOT NULL,
@@ -51,8 +51,8 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
     close() { closed = true; for (const controller of running.values()) controller.abort(); },
     async execute({ request, principal, binding }) {
       C.authorize({ request, principal, binding }); const b = C.bindingFor(binding);
-      const name = Object.keys(C.OPERATIONS).find(k => C.OPERATIONS[k] === request.operation);
-      if (!name) fail('operation_denied'); C.validators[name](request.payload);
+      const name = assetDiscovery && request.operation === D.OPERATION ? 'assets' : Object.keys(C.OPERATIONS).find(k => C.OPERATIONS[k] === request.operation);
+      if (!name) fail('operation_denied'); (name === 'assets' ? D.validate : C.validators[name])(request.payload);
       const id = request.payload.flowId || request.requestId;
       if (closed) fail('connection_blocked');
       if (name === 'abort') {
@@ -79,7 +79,38 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
       if (running.has(id) || running.size >= 2) fail('oauth_flow_busy');
       const controller = new AbortController(), signal = controller.signal; running.set(id,controller);
       const timer = setTimeout(() => controller.abort(),25000); timer.unref?.();
+      const discoveryAudit = (action,result,reason) => {
+        if (store.backlog().pending >= policy.maxBacklog) fail('audit_unavailable');
+        store.appendAudit(eventFor(request,principal,policy,action,result,reason,now()));
+      };
       try {
+        if (name === 'assets') {
+          const authority=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey]));
+          const assertCurrent = () => {
+            const configured=policy.principals.find(p=>p.id===principal.id);
+            if(!configured?.enabled||C.hash(JSON.stringify([configured.id,configured.keyId,configured.publicKey]))!==authority)fail('scope_denied');
+            require('./auth').authorize(configured,request,policy);
+            const row = checked(request,binding,principal); active(request,binding);
+            if (signal.aborted) fail('provider_timeout');
+            if (row.state !== 'staged' || row.scope_digest !== request.payload.scopeDigest) fail('scope_denied');
+            const value=C.metadata(JSON.parse(row.credential_metadata),binding);
+            if ([value.expiresAt,value.dataAccessExpiresAt].some(v=>v!==null && v<=now())) fail('credential_revoked');
+            return row;
+          };
+          const row=assertCurrent();
+          store.transaction(()=>{assertCurrent();if(store.backlog().pending+2>policy.maxBacklog)fail('audit_unavailable');
+            discoveryAudit('integration.requested','accepted','meta_inventory_requested');});
+          const assets=await secrets.withCandidate(binding,row,row.secret_digest,async context=>{
+            const fresh=assertCurrent();if(JSON.stringify(context.metadata)!==fresh.credential_metadata)fail('secret_unavailable');
+            return http.discover({binding,...context,signal,authorize:assertCurrent});
+          },signal);
+          return store.transaction(()=>{
+            const fresh=assertCurrent(),metadata=C.metadata(JSON.parse(fresh.credential_metadata),binding);
+            const result=D.result({assets,metadata,request,binding,row:fresh,now:now()});
+            discoveryAudit('integration.completed','success','meta_inventory_verified');
+            return {requestId:request.requestId,data:result,replayed:false};
+          });
+        }
         if (name === 'begin') {
           active(request,binding);
           const old = rowFor(id), p = request.payload;
@@ -156,8 +187,10 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
   };
   return service;
 }
-function createMetaMarketingOAuthOperations(oauth) {
-  return Object.fromEntries(Object.entries(C.OPERATIONS).map(([name,operation]) => [operation,
+function createMetaMarketingOAuthOperations(oauth, { assetDiscovery = false } = {}) {
+  const operations=Object.fromEntries(Object.entries(C.OPERATIONS).map(([name,operation]) => [operation,
     {provider:C.PROVIDER,control:'meta_marketing_oauth',validate:C.validators[name],authorize:C.authorize,execute:args=>oauth.execute(args)}]));
+  if(assetDiscovery)operations[D.OPERATION]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:D.validate,authorize:C.authorize,execute:args=>oauth.execute(args)};
+  return operations;
 }
 module.exports={createMetaMarketingOAuth,createMetaMarketingOAuthOperations};

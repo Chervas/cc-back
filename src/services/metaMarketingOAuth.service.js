@@ -2,12 +2,13 @@
 const {randomUUID,randomBytes}=require('node:crypto'),{Op}=require('sequelize');
 const C=require('./metaMarketingOAuth.contract'),B=require('../../services/integrations-broker/src/meta-marketing-oauth-contract');
 const {fromFlow}=require('../../services/platform-audit/src/meta-oauth-event');
+const D=require('../../services/integrations-broker/src/meta-marketing-discovery-contract'),{fromDiscovery}=require('../../services/platform-audit/src/meta-discovery-event');
 const SAFE=new Set(['meta_oauth_unavailable','meta_oauth_disabled','meta_oauth_scope_invalid','meta_oauth_scope_changed','meta_oauth_scope_forbidden','meta_oauth_scope_blocked',
   'meta_oauth_session_required','auth_email_verification_required','meta_oauth_busy','meta_oauth_state_invalid','meta_oauth_outcome_unknown','meta_oauth_unconfigured',
   'broker_response_invalid','broker_configuration_invalid','broker_timeout','broker_unavailable','audit_unavailable']);
 const safe=e=>SAFE.has(e?.code)?e.code:'meta_oauth_unavailable';
 function createService({models,sessions,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_OAUTH_ENABLED==='true',
-  workerEnabled=()=>process.env.META_MARKETING_OAUTH_WORKER_ENABLED==='true',returnOrigin='https://crm.clinicaclick.com'}){
+  workerEnabled=()=>process.env.META_MARKETING_OAUTH_WORKER_ENABLED==='true',discoveryEnabled=()=>process.env.META_MARKETING_OAUTH_DISCOVERY_ENABLED==='true',returnOrigin='https://crm.clinicaclick.com'}){
   const origin=new URL(returnOrigin);if(origin.origin!==returnOrigin||!['http:','https:'].includes(origin.protocol))C.fail();
   const R=models.MetaMarketingOAuthRequest,S=models.MetaMarketingOAuthSlot,scope=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now});
   const audit=require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
@@ -17,12 +18,13 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const actor=row=>({scopeKey:row.scope_key,actorId:Number(row.actor_user_id),sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at});
   const projection=row=>({requestId:row.flow_id,status:row.state,connected:false,expiresAt:row.expires_at.toISOString(),
     pending:!['staged','cancelled','interrupted'].includes(row.state),clinicCount:JSON.parse(row.clinic_ids).length,cancellationConfirmed:row.state==='cancelled',
-    candidateReady:row.state==='staged'});
-  async function record(row,reason,transaction,worker=false){
+    candidateReady:row.state==='staged',canListAssets:discoveryEnabled()&&row.state==='staged'});
+  async function recordEvent(value,transaction){
     const health=await audit.health(now(),{includeUnresolved:false,transaction});
     if(!Number.isSafeInteger(health.pending)||health.pending>=9999||health.oldestAgeSeconds>=3600)C.fail('audit_unavailable');
-    await audit.append(fromFlow(row,reason,now(),worker),{transaction});
+    await audit.append(value,{transaction});
   }
+  const record=(row,reason,transaction,worker=false)=>recordEvent(fromFlow(row,reason,now(),worker),transaction);
   async function authorizedRow(row,transaction){
     gate();await scope.revalidate(row,transaction);const fresh=await R.findByPk(row.flow_id,locked(transaction));
     if(!fresh||['slot_digest','scope_digest','session_ref','actor_user_id','state_hash','connection_ref','asset_ref','clinic_ids','scopes','app_id'].some(k=>fresh[k]!==row[k]))C.fail('meta_oauth_scope_changed',409);
@@ -99,6 +101,34 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     }catch(e){if([401,403,409].includes(e.httpStatus))await cancelPending(row,true);throw e;}
   }
   const service={
+    async assets(input,id){
+      gate();if(!discoveryEnabled())C.fail('meta_oauth_disabled');if(!C.UUID.test(id))C.fail('meta_oauth_state_invalid',400);
+      const requestId=randomUUID(),startedAt=+now();let captured;
+      const authorize=async transaction=>{
+        gate();if(!discoveryEnabled())C.fail('meta_oauth_disabled');
+        await scope.authorize(input,transaction);const row=await R.findByPk(id,locked(transaction));
+        if(!row||row.scope_key!==input.scopeKey||Number(row.actor_user_id)!==input.actorId)C.fail('meta_oauth_scope_forbidden',403);
+        await authorizedRow(plain(row),transaction);
+        if(row.state!=='staged'||!row.candidate_metadata||captured&&captured.candidate_metadata!==row.candidate_metadata)C.fail('meta_oauth_scope_changed',409);
+        const candidate=C.candidate(JSON.parse(row.candidate_metadata),plain(row));
+        if([candidate.expiresAt,candidate.dataAccessExpiresAt].some(v=>v!==null&&v<=+now()))C.fail('meta_oauth_scope_changed',409);
+        return plain(row);
+      };
+      try{
+        captured=await tx(async transaction=>{const row=await authorize(transaction);await recordEvent(fromDiscovery(row,input,requestId,'inventory_requested',now()),transaction);return row;});
+        await tx(authorize);
+        const response=await client.execute({requestId,operation:D.OPERATION,tenantRef:'clinic:'+JSON.parse(captured.clinic_ids)[0],connectionRef:captured.connection_ref,assetRef:captured.asset_ref,
+          payload:{flowId:id,scopeDigest:captured.scope_digest}},{timeoutMs:30000});
+        if(!C.exact(response,'requestId,data,replayed')||response.requestId!==requestId||response.replayed!==false)C.fail('broker_response_invalid');
+        const inventory=D.validateResult(response.data,{flowId:id,candidateDigest:JSON.parse(captured.candidate_metadata).digest,scopeDigest:captured.scope_digest,scopeKey:captured.scope_key,
+          clinicSetDigest:C.hash(captured.clinic_ids),metadata:JSON.parse(captured.candidate_metadata),startedAt,now:+now()});
+        return await tx(async transaction=>{const row=await authorize(transaction);if(inventory.expiresAt<=+now())C.fail('broker_response_invalid');
+          await recordEvent(fromDiscovery(row,input,requestId,'inventory_verified',now(),inventory),transaction);return {...projection(row),inventory};});
+      }catch(e){
+        if(captured)try{await tx(t=>recordEvent(fromDiscovery(captured,input,requestId,[401,403,409].includes(e.httpStatus)?'access_changed':'inventory_unavailable',now()),t));}catch{}
+        throw e;
+      }
+    },
     async status(input){
       if(!enabled())return {enabled:false};
       return tx(async transaction=>{
@@ -185,5 +215,5 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   return service;
 }
 let singleton;const instance=()=>singleton||=createService({models:require('../../models'),sessions:require('./accessSession.service'),client:require('./metaMarketingOAuthClient.service').createClient(),returnOrigin:C.frontendOrigin()});
-module.exports={createService,safe,...Object.fromEntries(['status','begin','callback','cancel','reconcile'].map(k=>[k,(...args)=>instance()[k](...args)])),
+module.exports={createService,safe,...Object.fromEntries(['status','begin','callback','cancel','reconcile','assets'].map(k=>[k,(...args)=>instance()[k](...args)])),
   run:()=>process.env.RUNTIME_ROLE==='gateway'?Promise.resolve({status:'completed',skipped:true,reason:'gateway_runtime'}):process.env.META_MARKETING_OAUTH_WORKER_ENABLED==='true'?instance().run():Promise.resolve({status:'completed',skipped:true,reason:'meta_oauth_worker_disabled'})};

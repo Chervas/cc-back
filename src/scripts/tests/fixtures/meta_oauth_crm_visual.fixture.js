@@ -38,6 +38,14 @@ module.exports=async({models,app,server,base,token,service,callback,latest,repor
     await callback({requestId:stored.flow_id,authUrl});assert.equal((await latest(stored.flow_id)).state,'staged');
     await tab.click('[data-qa="meta-oauth-reconcile"]');await waitState('Autorización guardada');await shot('mobile-staged');
     await tab.setViewport({width:1440,height:1050});await shot('desktop-staged');
+    const discovery=process.env.META_OAUTH_DISCOVERY_TEST==='1';
+    if(discovery){
+      const h=f.state.httpCalls.length;await tab.click('[data-qa="meta-oauth-assets"]');await tab.waitForSelector('[data-qa="meta-oauth-inventory"]');
+      assert.equal((await tab.$$('[data-qa="meta-oauth-inventory-asset"]')).length,3);assert.equal(f.state.httpCalls.length-h,4);await shot('desktop-inventory');
+      await tab.setViewport({width:390,height:844});await shot('mobile-inventory');
+      await tab.evaluate(()=>window.QA_TOKEN='FICTITIOUS_CHANGED_SESSION');await tab.waitForFunction(()=>!document.querySelector('[data-qa="meta-oauth-inventory"]'));
+      await tab.evaluate(v=>window.QA_TOKEN=v,token());await tab.setViewport({width:1440,height:1050});
+    }
     const providerBeforeCancel=f.state.httpCalls.length,secretsBeforeCancel=f.state.awsCalls.length;
     models.PlatformAuditEvent.addHook('beforeCreate','qa-meta-visual-cancel',row=>{if(JSON.parse(row.body).reason==='authorization_cancelled')throw Error('FICTITIOUS_VISUAL_AUDIT_FAILURE');});
     try{
@@ -54,7 +62,8 @@ module.exports=async({models,app,server,base,token,service,callback,latest,repor
     await tab.evaluate(value=>window.QA_TOKEN=value,auditView.token);await tab.click('#audit');await tab.waitForSelector('[data-qa="audit-meta-oauth"]');
     await tab.$eval('[data-qa="audit-meta-oauth"]',e=>{e.closest('details').open=true;e.scrollIntoView({block:'center'});});
     assert.match(await tab.$eval('body',e=>e.innerText),/autorización/i);await tab.screenshot({path:path.join(output,'audit.png')});shots.push('audit');
-    assert.deepEqual(errors,[]);assert.deepEqual(blocked,[]);assert.equal(writes.filter(v=>v.method==='DELETE').length,1);assert.equal(writes.length,4);
+    if(discovery){await tab.waitForSelector('[data-qa="audit-meta-discovery"]');await tab.$eval('[data-qa="audit-meta-discovery"]',e=>{e.closest('details').open=true;e.scrollIntoView({block:'center'});});await tab.screenshot({path:path.join(output,'audit-discovery.png')});shots.push('audit-discovery');}
+    assert.deepEqual(errors,[]);assert.deepEqual(blocked,[]);assert.equal(writes.filter(v=>v.method==='DELETE').length,1);assert.equal(writes.length,discovery?5:4);
     report.oauthVisual={shots,errors,blocked,businessWrites:0,authorizationRequests:writes.length,openingProviderCalls:0,cancellationProviderCalls:0,cancellationSecretCalls:0,provider:'fictitious transport; no actual Facebook popup'};
   }catch(error){fs.writeFileSync(path.join(output,'failure.txt'),error.stack);await tab?.screenshot({path:path.join(output,'failure.png'),fullPage:true});throw error;}
   finally{await browser?.close();}

@@ -3,7 +3,8 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const {execFileSync}=require('node:child_process'),{randomUUID,randomBytes}=require('node:crypto'),{DataTypes:D}=require('sequelize');
 const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fixture');
 withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})=>{
-  const cleanup=[],{fixture,TOKEN,APP}=require('../../../services/integrations-broker/test/meta-marketing-oauth-fixture.cjs'),f=fixture({after:fn=>cleanup.push(fn)});
+  const discovery=process.env.META_OAUTH_DISCOVERY_TEST==='1';
+  const cleanup=[],{fixture,TOKEN,APP}=require('../../../services/integrations-broker/test/meta-marketing-oauth-fixture.cjs'),f=fixture({after:fn=>cleanup.push(fn)},{discovery});
   const B=require('../../../services/integrations-broker/src/meta-marketing-oauth-contract'),C=require('../../services/metaMarketingOAuth.contract');
   let brokerApp,server,browser,clock=new Date(),queryCount=0;
   try{
@@ -45,10 +46,10 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     const wire=require('../../services/metaMarketingOAuthClient.service').createClient({env:{META_MARKETING_OAUTH_BROKER_ORIGIN:'https://127.0.0.1:'+f.config.port,META_MARKETING_OAUTH_BROKER_AUDIENCE:f.policy.audience,
       META_MARKETING_OAUTH_BROKER_KEY_ID:'qa-gateway',META_MARKETING_OAUTH_BROKER_KEY_FILE:gatewayKey,META_MARKETING_OAUTH_BROKER_CONTROL_KEY_ID:'qa-control',META_MARKETING_OAUTH_BROKER_CONTROL_KEY_FILE:controlKey,META_MARKETING_OAUTH_BROKER_CA_FILE:f.config.tlsCertFile}});
     let commands=0,enabled=true,afterWire=null;
-    const service=require('../../services/metaMarketingOAuth.service').createService({models,sessions,now:()=>clock,enabled:()=>enabled,workerEnabled:()=>true,
+    const service=require('../../services/metaMarketingOAuth.service').createService({models,sessions,now:()=>clock,enabled:()=>enabled,workerEnabled:()=>true,discoveryEnabled:()=>discovery,
       client:{execute:async(...args)=>{commands++;const result=await wire.execute(...args);if(afterWire)await afterWire(args[0],result);return result;}},returnOrigin:'https://app.example.invalid'});
     const app=require('express')();app.use(require('express').json());app.use('/oauth/meta/marketing',require('../../routes/metaMarketingOAuth.routes').createRouter({service,sessions,returnOrigin:'https://app.example.invalid'}));
-    const auditView=await require('./fixtures/meta_oauth_audit.fixture')({models,sessions,app,now:()=>clock});
+    const auditView=await require('./fixtures/meta_oauth_audit.fixture')({models,sessions,app,now:()=>clock,discovery});
     server=http.createServer(app);await new Promise(r=>server.listen(0,'127.0.0.1',r));registerOwnedLoopbackServer(server);const base='http://127.0.0.1:'+server.address().port;
     const endpoint='/oauth/meta/marketing/authorization',query='?assignment_scope=group&group_id=5';
     const request=(method='GET',target=endpoint+query,body)=>new Promise((resolve,reject)=>{
@@ -73,12 +74,24 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     const cb=await callback(flow);assert.equal(cb.status,303);assert(cb.location.startsWith('https://app.example.invalid/pages/settings?meta_authorization='));
     assert.equal((await latest(flow.requestId)).state,'staged');assert.equal(f.state.codes,codes+1);
     await callback(flow);assert.equal(f.state.codes,codes+1);assert.equal((await request()).body.candidateReady,true);
+    if(discovery){
+      const target=endpoint+'/'+flow.requestId+'/assets'+query,q=queryCount,t=Date.now();const d=await request('POST',target);assert.equal(d.status,200,JSON.stringify(d.body));assert.equal(d.body.inventory.assets.length,3);
+      report.discoveryFirst={queries:queryCount-q,elapsedMs:Date.now()-t,assets:d.body.inventory.assets.length};
+      models.PlatformAuditEvent.addHook('beforeCreate','qa-inventory-capture',row=>{if(JSON.parse(row.body).version===23)throw Error('FICTITIOUS_DISCOVERY_AUDIT_FAILURE');});
+      const before=commands;try{assert.equal((await request('POST',target)).status,503);assert.equal(commands,before);}finally{models.PlatformAuditEvent.removeHook('beforeCreate','qa-inventory-capture');}
+      afterWire=async command=>{if(command.operation.endsWith('.assets.v1'))await models.UsuarioClinica.update({rol_clinica:'personaldeclinica'},{where:{id_clinica:71}});};
+      const changed=await request('POST',target);afterWire=null;assert.equal(changed.status,403);assert.equal(changed.body.inventory,undefined);
+      await models.UsuarioClinica.update({rol_clinica:role},{where:{id_clinica:71}});
+      models.PlatformAuditEvent.addHook('beforeCreate','qa-inventory-result',row=>{if(JSON.parse(row.body).version===23&&row.stage==='completed')throw Error('FICTITIOUS_DISCOVERY_RESULT_FAILURE');});
+      try{const r=await request('POST',target);assert.equal(r.status,503);assert.equal(r.body.inventory,undefined);}finally{models.PlatformAuditEvent.removeHook('beforeCreate','qa-inventory-result');}
+      report.checks.push('Candidate inventory traverses actual CRM/TLS/broker/Graph adapter; human v23 capture/result and fresh whole-scope permission gate output; no partial result after audit failure');
+    }
     const serialized=JSON.stringify(await Requests.findAll({raw:true}));for(const hidden of [TOKEN,APP,new URL(flow.authUrl).searchParams.get('state'),'FICTITIOUS_CRM_CODE_'+flow.requestId])assert(!serialized.includes(hidden));
     models.PlatformAuditEvent.addHook('beforeCreate','qa-meta-cancel-failure',row=>{if(JSON.parse(row.body).reason==='authorization_cancelled')throw Error('FICTITIOUS_CANCEL_AUDIT_FAILURE');});
     try{
       const pending=await cancel(flow);assert.equal(pending.status,200);assert.equal(pending.body.status,'cancel_pending');
       const health=await require('../../services/platformAudit.repository').createRepository(models.PlatformAuditEvent).health(clock);
-      assert.equal(health.unresolvedAttempts,1,'A staged credential must not hide an unconfirmed cancellation');
+      assert.equal(health.unresolvedAttempts,discovery?2:1,'A staged credential must not hide an unconfirmed cancellation or a failed inventory audit');
     }finally{models.PlatformAuditEvent.removeHook('beforeCreate','qa-meta-cancel-failure');}
     const cancelled=await cancel(flow);assert.equal(cancelled.status,200,JSON.stringify(cancelled.body));assert.equal(cancelled.body.status,'cancelled');assert.equal((await cancel(flow)).body.status,'cancelled');
     const phases=await models.PlatformAuditEvent.findAll({where:{correlation_id:flow.requestId},attributes:['stage','result_part'],raw:true});
@@ -108,7 +121,13 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     assert(events.length>=12);for(const hidden of [TOKEN,APP])assert(!JSON.stringify(events).includes(hidden));await auditView.verify(token);
     report.humanAuditEvents=events.length;
     // Visual extension uses product components and this same API below.
-    if(process.env.META_OAUTH_CRM_VISUAL==='1')await require('./fixtures/meta_oauth_crm_visual.fixture')({models,app,server,base,token:()=>token,service,request,begin,callback,cancel,latest,report,auditView,f,advance:ms=>{clock=new Date(+clock+ms);}});
+    if(process.env.META_OAUTH_CRM_VISUAL==='1'){
+      // Time-controlled recovery tests end here. Browser work must use a moving clock
+      // to exercise the actual five-second broker/CRM observation skew contract.
+      let visualOffset=0;clock=new Date();const tick=setInterval(()=>{clock=new Date(Date.now()+visualOffset);},20);
+      try{await require('./fixtures/meta_oauth_crm_visual.fixture')({models,app,server,base,token:()=>token,service,request,begin,callback,cancel,latest,report,auditView,f,
+        advance:ms=>{visualOffset+=ms;clock=new Date(Date.now()+visualOffset);}});}finally{clearInterval(tick);}
+    }
     report.commands=commands;report.metaCalls=f.state.httpCalls.length;report.secretCalls=f.state.awsCalls.length;report.queries=queryCount;
     report.pool={inUse:sql.connectionManager.pool.using,waiting:sql.connectionManager.pool.waiting};assert.equal(report.pool.inUse,0);assert.equal(report.pool.waiting,0);
     assert(technical.every(e=>!JSON.stringify(e).includes(TOKEN)&&!JSON.stringify(e).includes(APP)));

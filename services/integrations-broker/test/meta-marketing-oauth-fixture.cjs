@@ -5,7 +5,7 @@ const { BrokerStore } = require('../src/store'); const { Broker } = require('../
 const { createMetaMarketingOAuth, createMetaMarketingOAuthOperations } = require('../src/meta-marketing-oauth'); const { createMetaMarketingOAuthSecrets } = require('../src/meta-marketing-oauth-secrets');
 const { createMetaMarketingOAuthHttp } = require('../src/meta-marketing-oauth-http'); const C = require('../src/meta-marketing-oauth-contract'); const { ACCOUNT, SECRET_KEY } = require('../src/google-main');
 const TOKEN = 'FICTITIOUS_META_OAUTH_TOKEN'; const APP = '0123456789abcdef'.repeat(2);
-function fixture(t) {
+function fixture(t, { discovery = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-meta-oauth-qa-')); fs.chmodSync(dir, 0o700);
   const filename = path.join(dir, 'state.sqlite'); const gateway = generateKeyPairSync('ed25519'); const control = generateKeyPairSync('ed25519');
   const prefix = `arn:aws:secretsmanager:eu-west-3:${ACCOUNT}:secret:/clinicaclick/integrations/prod/meta-marketing/staging/`;
@@ -14,12 +14,14 @@ function fixture(t) {
       appId: '101', redirectUri: 'https://app.example.invalid/oauth/meta/marketing/callback', appVersionId: 'a'.repeat(32), slotVersionId: 's'.repeat(32),
       scopeKey: 'group:9', clinicIds: [71, 72], scopes: ['public_profile', 'ads_read', 'pages_read_engagement', 'instagram_basic'],
     } };
+  if(discovery)binding.metaMarketingOAuth.scopes.push('pages_show_list');
   const principal = (id, keyId, key) => ({ id, keyId, enabled: true, maxPerMinute: 20, publicKey: key.publicKey.export({ type: 'spki', format: 'pem' }) });
   const grant = { connectionRef: binding.connectionRef, tenantRef: 'clinic:71', assetRef: 'meta-enroll:group:9' };
   const policy = { audience: 'broker:meta-oauth-qa', version: 'meta-oauth-qa-v1', maxBacklog: 100,
     principals: [principal('gateway:staging:meta-marketing-oauth', 'qa-gateway', gateway), principal('control:staging:meta-marketing-oauth', 'qa-control', control)],
     connections: [binding], grants: [{ ...grant, principalId: 'gateway:staging:meta-marketing-oauth', operations: Object.values(C.OPERATIONS) },
       { ...grant, principalId: 'control:staging:meta-marketing-oauth', operations: [C.OPERATIONS.status, C.OPERATIONS.abort] }] };
+  if(discovery)policy.grants[0].operations.push(require('../src/meta-marketing-discovery-contract').OPERATION);
   const records = new Map();
   const seed = (arn, version, value) => records.set(arn, new Map([[version, { body: JSON.stringify(value), stages: ['AWSCURRENT'] }]]));
   seed(binding.secretArn, binding.metaMarketingOAuth.slotVersionId, { version: 1, provider: 'meta-marketing-oauth-slot', connectionRef: binding.connectionRef, scopeKey: 'group:9', clinicSetDigest: C.clinicDigest(binding.metaMarketingOAuth), appId: '101' });
@@ -52,7 +54,7 @@ function fixture(t) {
     const req = new EventEmitter(); let destroyed=false; req.destroy = () => {destroyed=true;}; req.end = () => {
       const url=new URL('https://graph.facebook.com'+settings.path);
       assert.equal(settings.hostname,'graph.facebook.com'); assert.equal(settings.method,'GET');
-      const kind=url.pathname.endsWith('/debug_token')?'inspect':url.searchParams.has('code')?'code':'extend';
+      const kind=url.pathname.endsWith('/debug_token')?'inspect':url.pathname.endsWith('/adaccounts')?'adaccounts':url.pathname.endsWith('/accounts')?'accounts':url.searchParams.has('code')?'code':'extend';
       state.httpCalls.push({kind}); if(kind==='code')state.codes++;
       queueMicrotask(async()=>{
         try {
@@ -63,6 +65,12 @@ function fixture(t) {
             assert.equal(settings.headers.authorization,'Bearer 101|'+APP);assert.equal(url.searchParams.get('input_token'),TOKEN);
             response={data:{app_id:'101',user_id:'201',type:'USER',is_valid:true,expires_at:Math.floor(now()/1000)+3600,data_access_expires_at:0,
               scopes:[...binding.metaMarketingOAuth.scopes],granular_scopes:[{scope:'ads_read',target_ids:['301']}]}};
+          } else if(['adaccounts','accounts'].includes(kind)) {
+            assert.equal(settings.headers.authorization,'Bearer '+TOKEN);assert.match(url.searchParams.get('appsecret_proof'),/^[a-f0-9]{64}$/);
+            assert.equal(url.pathname,'/v24.0/201/'+kind);assert.equal(url.searchParams.get('limit'),'100');assert(!url.searchParams.get('fields').includes('access_token'));
+            response=kind==='adaccounts'?{data:[{id:'act_301',account_id:'301',name:'Cuenta ficticia',account_status:1,currency:'EUR',timezone_name:'Europe/Madrid'}]}
+              :{data:[{id:'401',name:'Página ficticia',instagram_business_account:{id:'501',name:'Instagram ficticio',username:'qa_ficticio'}}]};
+            state.lastAfter=url.searchParams.get('after');
           } else {
             assert.equal(url.pathname,'/v24.0/oauth/access_token');assert.equal(url.searchParams.get('client_secret'),APP);
             if(kind==='code')assert.equal(url.searchParams.get('redirect_uri'),binding.metaMarketingOAuth.redirectUri);
@@ -79,8 +87,8 @@ function fixture(t) {
   const secrets = createMetaMarketingOAuthSecrets({ client: aws, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/meta-marketing/staging/', kmsKeyArn: SECRET_KEY });
   const stores = []; const engines = [];
   function make(target = new BrokerStore(filename), chosenPolicy = policy) {
-    stores.push(target); const engine = createMetaMarketingOAuth({ store: target, policy: chosenPolicy, secrets, http, now }); engines.push(engine);
-    return { store: target, engine, broker: new Broker({ store: target, policy: chosenPolicy, secrets, operations: createMetaMarketingOAuthOperations(engine), now }) };
+    stores.push(target); const engine = createMetaMarketingOAuth({ store: target, policy: chosenPolicy, secrets, http, now, assetDiscovery:discovery }); engines.push(engine);
+    return { store: target, engine, broker: new Broker({ store: target, policy: chosenPolicy, secrets, operations: createMetaMarketingOAuthOperations(engine,{assetDiscovery:discovery}), now }) };
   }
   let current = make();
   const command = (operation, payload, overrides = {}) => ({ requestId: randomUUID(), ...grant, operation, payload, ...overrides });
@@ -98,6 +106,7 @@ function fixture(t) {
     .map(table=>instance.store.db.prepare('SELECT * FROM '+table).all()));
   const config={cohort:C.COHORT,enabled:true,environment:'staging',listenAddress:'127.0.0.1',port:19093,
     stateFile:path.join(dir,'runtime.sqlite'),tlsCertFile:path.join(dir,'tls.crt'),tlsKeyFile:path.join(dir,'tls.key'),policy};
+  if(discovery)config.assetDiscovery=true;
   t.after(() => { for (const engine of engines) engine.close(); for (const store of stores) try { store.close(); } catch {} fs.rmSync(dir, { recursive: true, force: true }); });
   return { dir, filename, binding, policy, state, records, secrets, aws, http, request, config, now, make, command, signed, execute,
     begin, finish, status, abort, snapshot, gateway, control, get current() { return current; }, restart() { current.engine.close(); current.store.close(); current = make(); return current; } };

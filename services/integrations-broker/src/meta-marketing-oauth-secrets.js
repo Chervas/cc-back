@@ -57,7 +57,7 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
       try { if (!body.equals(encoded.body)) fail('secret_unavailable'); return encoded.metadata; } finally { encoded.body.fill(0); }
     } finally { token?.fill(0); if (parsed && typeof parsed === 'object') delete parsed.accessToken; }
   }
-  async function candidate(binding, flow, expectedDigest, signal) {
+  async function candidate(binding, flow, expectedDigest, signal, work) {
     const b = await slot(binding, signal);
     const app = await describe(binding.clientSecretArn, signal);
     if (!app.VersionIdsToStages[b.appVersionId]?.includes('AWSCURRENT')) fail('secret_version_changed');
@@ -65,21 +65,26 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
     // AWSPENDING is a convenience label, never the candidate identity: another
     // attempt may move it. Only the immutable version, digest and flow count.
     if (r.VersionStages.includes('AWSCURRENT') || r.VersionStages.includes('AWSPREVIOUS')) fail('secret_version_changed');
-    const body = Buffer.from(r.SecretString);
+    const body = Buffer.from(r.SecretString); let borrowed, abort;
     try {
       if (!/^[a-f0-9]{64}$/.test(expectedDigest) || C.hash(body) !== expectedDigest) fail('secret_unavailable');
-      const metadata = validateEnvelope(body, binding, flow); await slot(binding, signal);
+      const metadata = validateEnvelope(body, binding, flow); let result;
+      if (work) {
+        const parsed = JSON.parse(body.toString('utf8')); borrowed = Buffer.from(parsed.accessToken); delete parsed.accessToken;
+        abort = () => borrowed.fill(0); signal?.addEventListener('abort', abort, { once: true }); check(signal);
+        result = await work(borrowed, metadata); check(signal);
+        const text = JSON.stringify(result); if (typeof text !== 'string' || text.includes(borrowed.toString('utf8'))) fail('secret_unavailable');
+      }
+      await slot(binding, signal);
       const currentApp = await describe(binding.clientSecretArn, signal);
       if (!currentApp.VersionIdsToStages[b.appVersionId]?.includes('AWSCURRENT')) fail('secret_version_changed');
-      return { versionId: flow.id, digest: expectedDigest, metadata };
-    } finally { body.fill(0); }
+      return work ? result : { versionId: flow.id, digest: expectedDigest, metadata };
+    } finally { if (abort) signal?.removeEventListener('abort', abort); borrowed?.fill(0); body.fill(0); }
   }
-  return {
-    encode: envelope,
-    async withApplication(binding, work, signal) {
+  async function application(binding, work, signal, checkCapacity) {
       let secret; let borrowed; let abort;
       try {
-        const b = await slot(binding, signal); await capacity(binding, signal);
+        const b = await slot(binding, signal); if (checkCapacity) await capacity(binding, signal);
         const r = await read(binding.clientSecretArn, b.appVersionId, 'AWSCURRENT', signal);
         const value = JSON.parse(r.SecretString);
         if (!C.exact(value, 'version,provider,appId,appSecret') || value.version !== 1 || value.provider !== 'meta-app'
@@ -92,6 +97,14 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
         await slot(binding, signal);
         if (JSON.stringify(result)?.includes(secret.toString('utf8'))) fail('secret_unavailable'); return result;
       } catch (e) { throw cleanError(e); } finally { if (abort) signal?.removeEventListener('abort', abort); secret?.fill(0); borrowed?.fill(0); }
+  }
+  return {
+    encode: envelope,
+    withApplication: (binding, work, signal) => application(binding, work, signal, true),
+    async withCandidate(binding, flow, digest, work, signal) {
+      try { return await application(binding, appSecret => candidate(binding, flow, digest, signal,
+        (token, metadata) => work({ token, appSecret, metadata })), signal, false); }
+      catch (e) { throw cleanError(e); }
     },
     async preflight(binding, signal) {
       try { await slot(binding, signal); await capacity(binding, signal); const b = C.bindingFor(binding);

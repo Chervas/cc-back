@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "6ff184e12ea3f389786f2fb21a1d87fd3caa961d",
+    "front": "90b32a7ec45c9af81069122cb87ac26b3aba8ddd"
+  },
+  "includesWorkingChanges": true,
+  "scope": "Prepared candidate asset inventory through typed Meta OAuth broker, whole-scope authenticated CRM API, human audit v23 and Angular Settings. Changed-source inventory, not a standalone deployment bundle; prior OAuth/CRM/revocation dependencies remain required. No selection, activation or public deployment.",
+  "files": {
+    "back": {
+      "services/integrations-broker/src/meta-marketing-discovery-contract.js": "d0c4002930a44990225b9faf4625c336afa9175b5e4892710b8e37bdf9956b7e",
+      "services/integrations-broker/src/meta-marketing-discovery-http.js": "616bbb76635cec032383cd6cfbb5d0baec91fe4d480d234d058116492dd9734b",
+      "services/integrations-broker/src/meta-marketing-oauth-http.js": "455b69627e4ac56dc6c8042df57681a79baab2789263441b4fb679e4084cc0c3",
+      "services/integrations-broker/src/meta-marketing-oauth-main.js": "be6e49d0c2398a3457c081903d7228fae0e28d10a1592f9251cd089ac77b86c6",
+      "services/integrations-broker/src/meta-marketing-oauth-secrets.js": "4ca6a8be8fd42f713180105ae9dbb05663a654c60885ffd13bb542dfd1cf8fe0",
+      "services/integrations-broker/src/meta-marketing-oauth.js": "b653752e77750fc22c663832384f422302c493344c2d4da05579b452cba485a3",
+      "services/integrations-broker/test/meta-marketing-discovery.test.js": "6b2f6c4b88189633482d5c47b648c54ed52aab6456bba71bf14cf103416569fc",
+      "services/integrations-broker/test/meta-marketing-oauth-fixture.cjs": "83c1dbcc08a0b950a20598700976347247821182bd712d914fdb21a594007e70",
+      "services/integrations-broker/test/meta-marketing-oauth-runtime.test.js": "5c866c2e82e39ed628f0cf13fa871cf968217911e2c1303aa9c6952e0702b2c4",
+      "services/platform-audit/src/event.js": "7838a8742b1731c91bbaa030e10f4f5c7947bb04197dbe89e5fc8195cdfc2706",
+      "services/platform-audit/src/meta-discovery-event.js": "30e053ae5c27bccbdc3a64788bc91a4fb3fdbde282662ca9dd6602c989f0c638",
+      "services/platform-audit/src/reader-protocol.js": "6c61f8c8d0e65ab8da3264d8a218fa33abacbdccd30a56eba817356e5326ebdc",
+      "services/platform-audit/src/view-contract.js": "1f47dabcbdfd55051310d51fa38ae98c237a03d748021e39faa00c97750a5f35",
+      "services/platform-audit/test/google-action-plan.test.js": "c7f2bfa6901a8d4211073ec57c474e2473787b5c5ae7ddd3ae082ed36e0ab446",
+      "services/platform-audit/test/google-ads-enrollment.test.js": "0bddf2ecdbc7db236be4b3d5e0d6192b5df2eec31945fddee4ada1a5e35ee1c1",
+      "services/platform-audit/test/google-destination.test.js": "7aa51afbd661a7d19144f88ed5b5cd07ce0c9c3602309869070eead3661ba5e4",
+      "services/platform-audit/test/google-receipt-review.test.js": "2b13aafb22e1a23825e9618c5ab912ca594fdad8f5562db598a9642c10b4d244",
+      "services/platform-audit/test/meta-access-check.test.js": "963f8071bfd4ffd02efc13014b4c744689567e55d616708a5091a1308ebf84db",
+      "services/platform-audit/test/meta-discovery.test.js": "50f91acff1c641a175dbb9266f0f9465ce12b89fc905d172a14535685790d258",
+      "services/platform-audit/test/whatsapp-authorization-event.test.js": "20320783e61219c00b8292c15bcd049b1f4ab156109012043ac39cb0278cfd17",
+      "src/routes/metaMarketingOAuth.routes.js": "f0ecc67d4e116ffa426bc24d991be8794d976f94f1b6c4cd6593e8871c4c6bde",
+      "src/scripts/tests/fixtures/meta_oauth_audit.fixture.js": "2dfd0008c84fcff973a14918af0acea7a81dcc1297478716f9e9c1cf43861fc4",
+      "src/scripts/tests/fixtures/meta_oauth_crm_visual.fixture.js": "d90dc71d34fe7679f45cbbfdeed30b2fb2be598d3db08b62be53d472d9a890d2",
+      "src/scripts/tests/fixtures/meta_settings_visual_host.fixture.js": "d71924c6ab99e4a8974524fe87355a51e324542ad6e6a76023c42195c10a8d69",
+      "src/scripts/tests/meta_marketing_oauth_mysql.integration.js": "82f1becdd34f668352a4d4c6f40f96098249ef06c9737be1bbe5f8f7a896d8c8",
+      "src/services/metaMarketingOAuth.service.js": "2d86b4d3709d1c157c529f80cc248d07dec349c9c94b6ca8f5beeaab03e55d87",
+      "src/services/metaMarketingOAuthClient.service.js": "ea37adf181f780795281d0073121cfda1aa22aae6915488235577891215b023a",
+      "src/services/platformAudit.view.js": "beb5f5a66d93990ae7946feae6eb624a980ae73fd329feebbadb6b1eb4a2ee60"
+    },
+    "front": {
+      "src/app/modules/admin/pages/settings/connected-accounts/meta-oauth-status.component.ts": "e0d3bf19587786bdcbfaa5f0e2602cb893570453fbba19a8c47f9a6e5bfdc120",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.html": "ec928ffb2fadb82d0cc312935cff2b3586b959f6ee909c6712bfd680ce4ae9d3",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.ts": "9f3bf9d7eb85345a7d71a70c91b50640442fb60488fe97fa4aa2c1a503e4d67e",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.service.ts": "412f2e3be0dbdb4161931ca1ec75e62f4a5503fa8f971547a9463ebd797cc7b7",
+      "src/assets/i18n/cat.json": "abf194c88d13aef376674ca12a3ad9ed07f0a9c25e6200051eee55146d1266f3",
+      "src/assets/i18n/es.json": "7caed60690b2869386d1427fe09d8cd0e398c9b53f7b57b9ad2298176d7dacc5"
+    }
+  },
+  "previousInventories": [
+    "meta-marketing-oauth-consumers.json",
+    "meta-marketing-oauth-crm-consumers.json"
+  ],
+  "qa": {
+    "brokerTests": 715,
+    "focusedDiscoveryAndTlsTests": 19,
+    "auditTests": 124,
+    "mountedOAuthRegressionTests": 6,
+    "mysqlGroups": 8,
+    "visualScreenshots": 11,
+    "visualProductComponents": true,
+    "fakeMetaSecretsS3": true,
+    "realSignedTLS": true,
+    "temporaryMysql": "8.0.42",
+    "publicMfa": false,
+    "deployed": false,
+    "angularBuildHash": "dabc973ae64efea6",
+    "angularBuildMs": 101507,
+    "syntaxFiles": 28
+  },
+  "costSample": {
+    "isolatedDiscovery": {
+      "secretManagerCalls": 15,
+      "graphCalls": 4,
+      "assets": 3,
+      "secretListCalls": 0,
+      "secretPutCalls": 0
+    },
+    "crmFirstDiscovery": {
+      "queries": 57,
+      "elapsedMs": 95,
+      "assets": 3
+    },
+    "testTotalQueries": 1296,
+    "pool": {
+      "inUse": 0,
+      "waiting": 0
+    },
+    "actualAwsCost": null,
+    "costExplorerRefreshed": false
+  },
+  "pending": [
+    "selection and transactional binding/grant writer with current identity and ownership checks",
+    "activation preserving physical revocations and independent history",
+    "reader then writer v23 before producer; frozen v19 archive and six events unchanged",
+    "selective dependency/DDL/IAM/TLS/slots/gates release",
+    "public MFA, real Meta acceptance and measured load"
+  ],
+  "evidence": "qa-evidence/security-resume-20260917/meta-discovery-20260919/"
+}

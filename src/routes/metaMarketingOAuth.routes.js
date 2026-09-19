@@ -28,7 +28,7 @@ function createRouter({service=require('../services/metaMarketingOAuth.service')
       // Reject an ambiguous extra pivot instead of silently authorizing one scope over another.
       if(type==='clinic'&&req.query.group_id||type==='group'&&req.query.clinic_id)C.fail('meta_oauth_scope_invalid',400);
       const input={scopeKey:type+':'+id,actorId:claims.userId,sessionRef:claims.jti,sessionExpiresAt:new Date(claims.exp*1000)};
-      if(['cancel','reconcile'].includes(name)&&!C.UUID.test(req.params.id))C.fail('meta_oauth_state_invalid',400);
+      if(['cancel','reconcile','assets'].includes(name)&&!C.UUID.test(req.params.id))C.fail('meta_oauth_state_invalid',400);
       return res.json(await service[name](input,req.params.id));
     }catch(e){
       const code=safe(e),status=e?.name==='JsonWebTokenError'?401:[400,401,403,409,429].includes(e.httpStatus)?e.httpStatus:503;
@@ -37,6 +37,7 @@ function createRouter({service=require('../services/metaMarketingOAuth.service')
   };
   router.get('/authorization',handler('status'));router.post('/authorization',handler('begin'));
   router.delete('/authorization/:id',handler('cancel'));router.post('/authorization/:id/reconcile',handler('reconcile'));
+  router.post('/authorization/:id/assets',handler('assets'));
   return router;
 }
 module.exports={createRouter};

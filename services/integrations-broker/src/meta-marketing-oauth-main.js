@@ -5,12 +5,14 @@ const {privateFile,connectAws,ACCOUNT,SECRET_KEY}=require('./google-main');
 const {BrokerStore}=require('./store'),{Broker}=require('./broker'),{createServer}=require('./server');
 const {drainAudit}=require('./audit'),tlsReload=require('./tls-reload');
 const C=require('./meta-marketing-oauth-contract');
+const D=require('./meta-marketing-discovery-contract');
 const {createMetaMarketingOAuthSecrets}=require('./meta-marketing-oauth-secrets');
 const {createMetaMarketingOAuthHttp}=require('./meta-marketing-oauth-http');
 const {createMetaMarketingOAuth,createMetaMarketingOAuthOperations}=require('./meta-marketing-oauth');
 const prefix=environment=>`/clinicaclick/integrations/prod/meta-marketing/${environment}/`;
 function validateConfig(config) {
   const fields=['cohort','enabled','environment','listenAddress','policy','port','stateFile','tlsCertFile','tlsKeyFile'];
+  if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
   if (config?.tlsRenewal) { fields.push('tlsRenewal');tlsReload.validateSettings(config.tlsRenewal); }
   if (!config || Object.keys(config).sort().join(',')!==fields.sort().join(',') || config.enabled!==true || config.cohort!==C.COHORT
     || !['dev','staging'].includes(config.environment) || !net.isIP(config.listenAddress) || !Number.isInteger(config.port)
@@ -32,7 +34,7 @@ function validateConfig(config) {
     const grants=policy.grants.filter(g=>g.connectionRef===binding.connectionRef);
     if (grants.length!==2) fail('invalid_request');
     for (const principal of [gateway,control]) {
-      const grant=grants.find(g=>g.principalId===principal),operations=principal===gateway?Object.values(C.OPERATIONS):[C.OPERATIONS.status,C.OPERATIONS.abort];
+      const grant=grants.find(g=>g.principalId===principal),operations=principal===gateway?[...Object.values(C.OPERATIONS),...(config.assetDiscovery?[D.OPERATION]:[])]:[C.OPERATIONS.status,C.OPERATIONS.abort];
       if (!grant || grant.tenantRef!=='clinic:'+b.clinicIds[0] || grant.assetRef!=='meta-enroll:'+b.scopeKey
         || JSON.stringify([...grant.operations].sort())!==JSON.stringify(operations.sort())) fail('invalid_request');
     }
@@ -46,8 +48,8 @@ async function main(filename,{awsFactory=connectAws,http=createMetaMarketingOAut
   try {
     aws=await awsFactory();
     const secrets=createMetaMarketingOAuthSecrets({client:aws.secrets,accountId:ACCOUNT,prefix:prefix(config.environment),kmsKeyArn:SECRET_KEY});
-    oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http});
-    const broker=new Broker({store,policy:config.policy,secrets,operations:createMetaMarketingOAuthOperations(oauth)});
+    oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true});
+    const broker=new Broker({store,policy:config.policy,secrets,operations:createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true})});
     const controlKey=config.policy.principals.find(p=>p.id.startsWith('control:')).keyId;
     let ordinary=0,controls=0;
     server=createServer({async execute(...args) {

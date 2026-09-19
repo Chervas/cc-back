@@ -19,8 +19,8 @@ test('runtime requires own environment, independent control key, empty slots and
   }
   assert.equal(aws,0);
 });
-test('signed TLS runtime stages new identity, drains technical audit and recovers lost ACK after actual server restart',async t=>{
-  const f=fixture(t),config=f.config;
+for(const discovery of [false,true])test('signed TLS runtime stages new identity, drains audit and recovers lost ACK; discovery='+discovery,async t=>{
+  const f=fixture(t,{discovery}),config=f.config;
   execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',config.tlsKeyFile,'-out',config.tlsCertFile,'-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'});
   fs.chmodSync(config.tlsKeyFile,0o600);fs.chmodSync(config.tlsCertFile,0o600);
   const probe=net.createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));config.port=probe.address().port;await new Promise(r=>probe.close(r));allowPort(config.port);
@@ -37,6 +37,12 @@ test('signed TLS runtime stages new identity, drains technical audit and recover
   f.state.losePut=true;await assert.rejects(gateway.execute(f.command(C.OPERATIONS.finish,{flowId,state,code:'FICTITIOUS_TLS_CODE'})),{code:'secret_unavailable'});
   assert.equal(f.state.codes,1);await app.close();app=null;app=await runtime.main(filename,{awsFactory,http:f.http});
   const result=await gateway.execute(f.command(C.OPERATIONS.status,{flowId}));assert.equal(result.data.status,'staged');assert.equal(result.data.accessBlocked,true);
+  if(discovery){
+    const D=require('../src/meta-marketing-discovery-contract'),command=f.command(D.OPERATION,{flowId,scopeDigest:begin.payload.scopeDigest});
+    const inventory=await gateway.execute(command);assert.equal(inventory.data.assets.length,3);assert.equal(inventory.data.accessBlocked,true);
+    const calls=f.state.httpCalls.length;await assert.rejects(control.execute({...command,requestId:randomUUID()}),{code:'scope_denied'});assert.equal(f.state.httpCalls.length,calls);
+    assert.equal(f.state.codes,1);assert.equal(f.state.puts,1);
+  }
   await drainAudit(app.store,sink);assert.equal(app.store.backlog().pending,0);assert(events.some(e=>e.reason==='oauth_credentials_staged'));
   for(const secret of [TOKEN,APP,state,'FICTITIOUS_TLS_CODE'])assert(!JSON.stringify(events).includes(secret));
   const awsCalls=f.state.awsCalls.length;assert.equal((await control.execute(f.command(C.OPERATIONS.abort,{flowId}))).data.status,'aborted');
