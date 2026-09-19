@@ -439,6 +439,2524 @@
         {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
         {"name": "token_hash","columns": [{"INDEX_NAME": "token_hash","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "token_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
       ]
+    },
+    "MetaConnections": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {
+          "COLUMN_NAME": "id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "auto_increment",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "userId",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "metaUserId",
+          "COLUMN_TYPE": "varchar(50)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "accessToken",
+          "COLUMN_TYPE": "varchar(512)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "expiresAt",
+          "COLUMN_TYPE": "datetime",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "userName",
+          "COLUMN_TYPE": "varchar(255)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "userEmail",
+          "COLUMN_TYPE": "varchar(255)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "createdAt",
+          "COLUMN_TYPE": "datetime",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updatedAt",
+          "COLUMN_TYPE": "datetime",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "credentials_external",
+          "COLUMN_TYPE": "tinyint(1)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "0",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "broker_app_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_meta_connections_provider_id",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_meta_connections_provider_id",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "metaUserId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_meta_connections_user_id",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_meta_connections_user_id",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "userId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "uniq_meta_connections_user_provider",
+          "columns": [
+            {
+              "INDEX_NAME": "uniq_meta_connections_user_provider",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "userId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "uniq_meta_connections_user_provider",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "metaUserId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "CONSTRAINT_NAME": "cc_meta_credential_storage",
+          "ENFORCED": "YES",
+          "CHECK_CLAUSE": "(((`credentials_external` = 0) and (`broker_app_id` is null) and (`accessToken` is not null)) or ((`credentials_external` = 1) and (`broker_app_id` is not null) and regexp_like(`broker_app_id`,_utf8mb4\\'^[1-9][0-9]{0,29}$\\') and (`accessToken` is null)))"
+        }
+      ],
+      "foreignKeys": [
+        {
+          "CONSTRAINT_NAME": "MetaConnections_ibfk_1",
+          "ORDINAL_POSITION": 1,
+          "COLUMN_NAME": "userId",
+          "REFERENCED_TABLE_SCHEMA": "<self>",
+          "REFERENCED_TABLE_NAME": "Usuarios",
+          "REFERENCED_COLUMN_NAME": "id_usuario",
+          "UPDATE_RULE": "CASCADE",
+          "DELETE_RULE": "SET NULL"
+        }
+      ]
+    },
+    "ClinicMetaAssets": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {
+          "COLUMN_NAME": "id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "auto_increment",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clinicaId",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "metaConnectionId",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "metaAssetId",
+          "COLUMN_TYPE": "varchar(255)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "metaAssetName",
+          "COLUMN_TYPE": "varchar(255)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "pageAccessToken",
+          "COLUMN_TYPE": "varchar(512)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "createdAt",
+          "COLUMN_TYPE": "datetime",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updatedAt",
+          "COLUMN_TYPE": "datetime",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "assetAvatarUrl",
+          "COLUMN_TYPE": "varchar(1024)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "additionalData",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "isActive",
+          "COLUMN_TYPE": "tinyint(1)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "1",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "assetType",
+          "COLUMN_TYPE": "enum('facebook_page','instagram_business','ad_account','whatsapp_business_account','whatsapp_phone_number')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "ad_account_status",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "ad_account_disable_reason",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "ad_account_spend_cap",
+          "COLUMN_TYPE": "decimal(18,2)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "ad_account_amount_spent",
+          "COLUMN_TYPE": "decimal(18,2)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "ad_account_refreshed_at",
+          "COLUMN_TYPE": "datetime",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "grupoClinicaId",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "assignmentScope",
+          "COLUMN_TYPE": "enum('unassigned','clinic','group')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "clinic",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "wabaId",
+          "COLUMN_TYPE": "varchar(255)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "phoneNumberId",
+          "COLUMN_TYPE": "varchar(255)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "waVerifiedName",
+          "COLUMN_TYPE": "varchar(255)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "quality_rating",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "messaging_limit",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "waAccessToken",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "meta_billed_by",
+          "COLUMN_TYPE": "tinyint(1)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "cc_meta_asset_identity",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_asset_identity",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "assetType",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_asset_identity",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "metaAssetId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "clinic_meta_assets_asset_type_is_active",
+          "columns": [
+            {
+              "INDEX_NAME": "clinic_meta_assets_asset_type_is_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "assetType",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "clinic_meta_assets_asset_type_is_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "isActive",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "clinic_meta_assets_clinica_id_is_active",
+          "columns": [
+            {
+              "INDEX_NAME": "clinic_meta_assets_clinica_id_is_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "clinicaId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "clinic_meta_assets_clinica_id_is_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "isActive",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "clinic_meta_assets_grupo_clinica_id_is_active",
+          "columns": [
+            {
+              "INDEX_NAME": "clinic_meta_assets_grupo_clinica_id_is_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "grupoClinicaId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "clinic_meta_assets_grupo_clinica_id_is_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "isActive",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "clinic_meta_assets_is_active",
+          "columns": [
+            {
+              "INDEX_NAME": "clinic_meta_assets_is_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "isActive",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_clinic_meta_assets_clinica_active",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_clinic_meta_assets_clinica_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "clinicaId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "idx_clinic_meta_assets_clinica_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "isActive",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_clinic_meta_assets_connection",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_clinic_meta_assets_connection",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "metaConnectionId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_clinic_meta_assets_group_active",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_clinic_meta_assets_group_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "grupoClinicaId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "idx_clinic_meta_assets_group_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "isActive",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_clinic_meta_assets_is_active",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_clinic_meta_assets_is_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "isActive",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_clinic_meta_assets_phone_number",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_clinic_meta_assets_phone_number",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "phoneNumberId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_clinic_meta_assets_type_active",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_clinic_meta_assets_type_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "assetType",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "idx_clinic_meta_assets_type_active",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "isActive",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_clinic_meta_assets_waba",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_clinic_meta_assets_waba",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "wabaId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "unique_clinic_asset",
+          "columns": [
+            {
+              "INDEX_NAME": "unique_clinic_asset",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "clinicaId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "unique_clinic_asset",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "assetType",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "unique_clinic_asset",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 3,
+              "COLUMN_NAME": "metaAssetId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": [
+        {
+          "CONSTRAINT_NAME": "ClinicMetaAssets_grupoClinicaId_foreign_idx",
+          "ORDINAL_POSITION": 1,
+          "COLUMN_NAME": "grupoClinicaId",
+          "REFERENCED_TABLE_SCHEMA": "<self>",
+          "REFERENCED_TABLE_NAME": "GruposClinicas",
+          "REFERENCED_COLUMN_NAME": "id_grupo",
+          "UPDATE_RULE": "CASCADE",
+          "DELETE_RULE": "SET NULL"
+        },
+        {
+          "CONSTRAINT_NAME": "ClinicMetaAssets_ibfk_3",
+          "ORDINAL_POSITION": 1,
+          "COLUMN_NAME": "clinicaId",
+          "REFERENCED_TABLE_SCHEMA": "<self>",
+          "REFERENCED_TABLE_NAME": "Clinicas",
+          "REFERENCED_COLUMN_NAME": "id_clinica",
+          "UPDATE_RULE": "CASCADE",
+          "DELETE_RULE": "CASCADE"
+        },
+        {
+          "CONSTRAINT_NAME": "ClinicMetaAssets_ibfk_4",
+          "ORDINAL_POSITION": 1,
+          "COLUMN_NAME": "metaConnectionId",
+          "REFERENCED_TABLE_SCHEMA": "<self>",
+          "REFERENCED_TABLE_NAME": "MetaConnections",
+          "REFERENCED_COLUMN_NAME": "id",
+          "UPDATE_RULE": "CASCADE",
+          "DELETE_RULE": "CASCADE"
+        }
+      ]
+    },
+    "MetaMarketingBrokerBindings": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {
+          "COLUMN_NAME": "mapping_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "asset_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "meta_connection_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "meta_user_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "app_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_key",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "tenant_clinic_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "parent_page_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "enum('staged','active','blocked')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "staged",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "enrollment_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "cc_meta_binding_enrollment",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_binding_enrollment",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "enrollment_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_marketing_asset",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_marketing_asset",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "asset_ref",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_marketing_connection",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_marketing_connection",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "meta_connection_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_marketing_parent",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_marketing_parent",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "parent_page_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_marketing_scope",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_marketing_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "scope_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_marketing_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_marketing_subject",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_marketing_subject",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "meta_user_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_marketing_subject",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "app_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "mapping_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": []
+    },
+    "MetaMarketingBrokerRevocations": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {
+          "COLUMN_NAME": "tuple_hash",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "asset_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "tenant_clinic_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "meta_connection_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "meta_user_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "app_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "parent_page_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_key",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clinic_ids",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "mapping_ids",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "request_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "actor_user_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "requested_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "confirmed_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "enum('pending','confirmed')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "pending",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "attempts",
+          "COLUMN_TYPE": "int unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "0",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "next_attempt_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "lease_token",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "lease_until",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "last_error",
+          "COLUMN_TYPE": "varchar(48)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "cc_meta_revoke_asset",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_revoke_asset",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "asset_ref",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_revoke_connection",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_revoke_connection",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "meta_connection_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_revoke_delivery",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_revoke_delivery",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_revoke_delivery",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "next_attempt_at",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_revoke_delivery",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 3,
+              "COLUMN_NAME": "lease_until",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_revoke_parent",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_revoke_parent",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "parent_page_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_revoke_scope",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_revoke_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "scope_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_revoke_tenant",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_revoke_tenant",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "tenant_clinic_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "tuple_hash",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "request_id",
+          "columns": [
+            {
+              "INDEX_NAME": "request_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "request_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": []
+    },
+    "MetaMarketingOAuthSlots": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {
+          "COLUMN_NAME": "scope_key",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "asset_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "app_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clinic_ids",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scopes",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "redirect_uri",
+          "COLUMN_TYPE": "varchar(512)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "expires_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "enum('active','blocked')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "asset_ref",
+          "columns": [
+            {
+              "INDEX_NAME": "asset_ref",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "asset_ref",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "connection_ref",
+          "columns": [
+            {
+              "INDEX_NAME": "connection_ref",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "connection_ref",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "scope_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": []
+    },
+    "MetaMarketingOAuthRequests": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {
+          "COLUMN_NAME": "flow_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state_hash",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_key",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "asset_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "app_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clinic_ids",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scopes",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "redirect_uri",
+          "COLUMN_TYPE": "varchar(512)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "slot_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "actor_user_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "session_ref",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "session_expires_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "return_origin",
+          "COLUMN_TYPE": "varchar(256)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "requested_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "expires_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "enum('begin_pending','awaiting','processing','staged','cancel_pending','cancelled','interrupted')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "code_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "candidate_metadata",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "attempts",
+          "COLUMN_TYPE": "int unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "0",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "next_attempt_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "lease_token",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "lease_until",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "last_error",
+          "COLUMN_TYPE": "varchar(48)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "completed_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "cc_meta_oauth_delivery",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_oauth_delivery",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_oauth_delivery",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "next_attempt_at",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_oauth_delivery",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 3,
+              "COLUMN_NAME": "lease_until",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_oauth_scope",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_oauth_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "scope_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_oauth_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "requested_at",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_oauth_scope_state",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_oauth_scope_state",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "scope_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_oauth_scope_state",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "code_digest",
+          "columns": [
+            {
+              "INDEX_NAME": "code_digest",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "code_digest",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "flow_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "state_hash",
+          "columns": [
+            {
+              "INDEX_NAME": "state_hash",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "state_hash",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": []
+    },
+    "MetaMarketingEnrollmentRequests": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {
+          "COLUMN_NAME": "enrollment_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "flow_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_key",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clinic_ids",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "flow_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "candidate_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "meta_user_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "app_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "meta_connection_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "assignment_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "assets",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "mapping_ids",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "actor_user_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "session_ref",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "session_expires_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "prepare_request_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "activate_request_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "revoke_request_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "selection_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "enum('prepare_pending','prepared','activate_pending','active','revoke_pending','revoked')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "requested_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updated_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "prepared_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "activated_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "revoked_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "attempts",
+          "COLUMN_TYPE": "int unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "0",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "next_attempt_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "lease_token",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "lease_until",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "last_error",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "prepare_sent_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "activate_sent_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "delivery_due_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "STORED GENERATED",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": "(case when (`state` = _ascii\\'revoked\\') then NULL else `next_attempt_at` end)"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "activate_request_id",
+          "columns": [
+            {
+              "INDEX_NAME": "activate_request_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "activate_request_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_enroll_delivery",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_enroll_delivery",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_enroll_delivery",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "next_attempt_at",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_enroll_delivery",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 3,
+              "COLUMN_NAME": "lease_until",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_enroll_due",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_enroll_due",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "delivery_due_at",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_enroll_due",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "enrollment_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_enroll_latest",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_enroll_latest",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "scope_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_enroll_latest",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "requested_at",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_enroll_latest",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 3,
+              "COLUMN_NAME": "enrollment_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_enroll_scope",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_enroll_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "scope_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_meta_enroll_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_meta_enroll_subject",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_enroll_subject",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "meta_user_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "flow_id",
+          "columns": [
+            {
+              "INDEX_NAME": "flow_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "flow_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "prepare_request_id",
+          "columns": [
+            {
+              "INDEX_NAME": "prepare_request_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "prepare_request_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "enrollment_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "revoke_request_id",
+          "columns": [
+            {
+              "INDEX_NAME": "revoke_request_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "revoke_request_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": []
+    },
+    "MetaMarketingEnrollmentClaims": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {
+          "COLUMN_NAME": "asset_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "enrollment_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "created_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "cc_meta_enroll_claim_owner",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_meta_enroll_claim_owner",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "enrollment_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "asset_ref",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": []
+    },
+    "MetaMarketingEnrollmentIdentities": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {
+          "COLUMN_NAME": "meta_user_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "app_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "meta_connection_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "created_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "meta_connection_id",
+          "columns": [
+            {
+              "INDEX_NAME": "meta_connection_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "meta_connection_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "meta_user_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": []
     }
   },
   "migrations": [
@@ -453,6 +2971,15 @@
     {"name": "20260913150000-create-whatsapp-authorization-states.js", "sha256": "0516245b18fa1d7ec384c599569ff03e230382d85f3e4e372f6e60e4bf27a8a9"},
     {"name": "20260915190000-add-whatsapp-authorization-channel-role.js", "sha256": "760f4cc3097ab25aa89d0b584674b99cb6f2932d8885a6ce2c36f34b34f46f78"},
     {"name": "20260915040000-create-whatsapp-inbox-imports.js", "sha256": "4a35e8e039fc1a141356e8c029b9f6d7eb57e62caec5c72503ba1cd6dafbfe41"},
-    {"name": "20260916103000-security-monitoring-and-ai-prices.js", "sha256": "0ee3aaab634875e4acc19cffc5ede7cd2de4aeef6e07b7d26cea1a2ab134245e"}
+    {"name": "20260916103000-security-monitoring-and-ai-prices.js", "sha256": "0ee3aaab634875e4acc19cffc5ede7cd2de4aeef6e07b7d26cea1a2ab134245e"},
+    {"name":"20260919040000-meta-marketing-broker-registry.js","sha256":"375f6994beef8032bb69aaf5c39a1f8b525fcdcef774ea4d520850a78f573595"},
+    {"name":"20260919050000-meta-marketing-broker-revocations.js","sha256":"886828648b18a378da53ef8859fa2a67d6fa4f7323c8a3edf21b630a173f0efb"},
+    {"name":"20260919060000-meta-marketing-oauth.js","sha256":"023ee8974a2e9195d0dee4a981d0e364633bea61672589ae817e778610afd58a"},
+    {"name":"20260919070000-meta-marketing-parent-identity-indexes.js","sha256":"b563de4f6c221e6e9c3f063c81f2033c43516d8b76c0213e15ce9dce3937772f"},
+    {"name":"20260919080000-meta-marketing-enrollment-journal.js","sha256":"5d4b9fa1fa1347f8ab794a3cf4bd62178cb144a095cd5819a42233421a9d4408"},
+    {"name":"20260919090000-meta-marketing-enrollment-binding-owner.js","sha256":"5ea51cff3eb6d7a0c0521e5516046d69ace876d320da6d08d56daacb600edda0"},
+    {"name":"20260919100000-meta-marketing-enrollment-delivery-markers.js","sha256":"f6a41057f0271be81e1535f2418cf3edcb52a664c29c138fee5dd34672985218"},
+    {"name":"20260919110000-meta-marketing-enrollment-due-index.js","sha256":"9dfa04628ef1ea25920c42168c9080f22a3abe763e527ad1a9b5a0c5490394e6"},
+    {"name":"20260919120000-meta-marketing-enrollment-scope-latest.js","sha256":"3daff36382d7f0c649bce200b6e901d2551ecd0a114c5dc78acf7f2b386d2a99"}
   ]
 }
