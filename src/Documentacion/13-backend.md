@@ -11646,8 +11646,8 @@ la prueba fuerza la lectura, no habilita cron/notificaciones ni acredita su entr
 
 ### Candidata selectiva de consumidores Meta (19/09/2026)
 
-Preparada sobre las ramas públicas actuales: backend `07e37fc77bc7c9a11fea0aeb757d8c7d5817aacd`, frontend
-`a8331d0d29b6f9410974b4c61add6b8ea5b2f7a2`, rama `security/meta-clinical-candidate-20260919` en ambos repositorios.
+Preparada sobre las ramas públicas actuales: backend `1da9f5a74f9f1f718abdc762af56b3f71e853e4b`, frontend
+`27afa85ce45667091654f0c2a21cf5c9395d83b4`, rama `security/meta-clinical-candidate-20260919` en ambos repositorios.
 Incluye metadatos, OAuth, descubrimiento, selección/confirmación/retirada, auditoría
 v24 y tres jobs cerrados. API/UI de CRM todavía sin desplegar ni cohortes activadas;
 las nueve DDL Meta ya están aplicadas solo en DEV desde las 12:46 UTC.
@@ -11767,3 +11767,50 @@ nuevos. Faltan identidades/transporte, app/slots/IAM, ámbito elegido por el tit
 OAuth/MFA y capacidad con proveedor real. CRM conserva su candidata sin publicar.
 Fuente, empaquetado, diagnóstico, evidencia y recuperación en
 `docs/security/meta-dev-ui.md` y su manifiesto JSON.
+
+
+### Corte explícito del esquema Meta clínico (19/09/2026)
+
+`meta-clinical-schema-release.js` añade un operador separado de la herramienta
+DEV. Solo admite las nueve migraciones Meta04–12, con fuente limpia fijada por
+revisión y hashes; plan vinculado al esquema y a todas las columnas originales
+de `MetaConnections` y `ClinicMetaAssets`. Las huellas se calculan en SQL sin
+extraer tokens a la evidencia. Rechaza otro destino, cambios de filas/esquema,
+DDL parcial o ya aplicada y escritores públicos vivos. No carga modelos ni
+proveedores ni detiene servicios por su cuenta.
+
+El inventario clínico contiene una conexión y42 activos, incluidos activos de
+WhatsApp dependientes de esa conexión. Deben conservarse íntegros, también sus
+credenciales legacy y pausas; preparar tablas nuevas no migra ni rota esos tokens.
+Antes de cada DDL exige configuración original, escritores detenidos y un respaldo
+puntual cifrado AES-GCM verificado, privado de root. Plan, clave y recibo se
+sincronizan a disco con su directorio; el diario registra y sincroniza cada paso.
+No hay rollback transaccional de DDL, repetición automática ni restauración ciega.
+La restauración del dump cifrado está probada en MySQL aislado con filas ficticias,
+Unicode, JSON y claves foráneas, además de los rechazos anteriores a la escritura.
+
+La coordinación incluye API staging, gateway y dos unidades independientes de
+WhatsApp: importador de recepción y despachador de entradas recientes. Comprobar
+trabajo activo y conexiones SQL ajenas; preservar configuración, recibos, cursores,
+pausas e histórico. DEV mantiene sus procesos y jobs clínicos OFF. Tras un corte
+correcto verificar compatibilidad con los consumidores anteriores antes de
+reiniciarlos; ningún paso activa los nuevos gates Meta. El inventario también
+detectó cuatro scripts antiguos ya sin trabajo SQL ni actividad Redis; se
+retiraron por identidad exacta sin repetir sus comandos de negocio.
+
+Estado y acta del corte en `docs/security/meta-clinical-schema.md`; API/UI de CRM
+siguen pendientes de publicación selectiva y aceptación real. Las copias generales
+siguen al final del objetivo: este respaldo solo protege las dos tablas del corte.
+
+Intento clínico de14:30 UTC cancelado antes de respaldo/DDL al comenzar un job de
+reseñas entre ambas comprobaciones. El coordinador reinició erróneamente API y
+gateway en su recuperación, aunque aún no los había detenido; el job terminó en
+su segundo intento. La corrección `metaClinicalCutRecovery` conserva los procesos
+que siguen activos con su identidad original y solo inicia participantes cuya
+parada se había solicitado y se observa completa. Cuatro pruebas cubren esa
+carrera, parada parcial y estados ajenos/fallidos, sin reintentos automáticos.
+No elimina la carrera de admisión del scheduler: revisar esa coordinación antes
+de otro corte. Esquema,43 filas y cola histórica gateway verificados intactos;
+fuentes/configuración preservadas, DEV sin reiniciar y login anónimo real de ambos
+entornos comprobado en escritorio/móvil. No se repitió la migración ni se acredita
+aceptación MFA/OAuth. Planes anteriores históricos, sin dump ni diario.

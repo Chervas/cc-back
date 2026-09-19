@@ -10,9 +10,9 @@ entrypoints ni sustituir los servicios AWS.
 
 ## Fuente y alcance
 
-- Backend `07e37fc77bc7c9a11fea0aeb757d8c7d5817aacd`, desde staging `ac4703a3`, worktree
+- Backend `1da9f5a74f9f1f718abdc762af56b3f71e853e4b`, desde staging `ac4703a3`, worktree
   `/home/ubuntu/wt/security-meta-back-candidate-20260919`.
-- Frontend `a8331d0d29b6f9410974b4c61add6b8ea5b2f7a2`, desde staging `288ca987`, worktree
+- Frontend `27afa85ce45667091654f0c2a21cf5c9395d83b4`, desde staging `288ca987`, worktree
   `/home/ubuntu/wt/security-meta-front-candidate-20260919`.
 - Ambos en `security/meta-clinical-candidate-20260919`, separados de los worktrees
   ejecutados. No se ha fusionado DEV ni actualizado el frontend público.
@@ -126,10 +126,10 @@ este corte. Los gates Meta siguen sin configurar; MFA permanece enforce.
    datos existentes, respaldo privado de recuperación y diario. La herramienta
    compartida sigue admitiendo escritura **solo en DEV**; su comprobación pública
    es de lectura. MySQL no ofrece rollback transaccional de DDL.
-2. DEV ya ejecuta una composición propia `d07e9c85` sobre su release aislada,
-   conservando perfil/credenciales y jobs clínicos OFF. Incorporar a la candidata
-   CRM los ajustes de cierre de los servicios Meta desarrollados en DEV 9c54f261
-   y volver a validar antes de su publicación; no intercambiar ambos runtimes.
+2. DEV ejecuta su composición propia `d07e9c85`, conservando perfil/credenciales
+   y jobs clínicos OFF. La candidata CRM ya incorpora los cierres desarrollados
+   en DEV 9c54f261 y el aviso de pausa corregido; nueva QA HTTP/visual y build
+   `354410eb1dba3209` pasan. No intercambiar ambos runtimes.
 3. Un único ejecutor de conciliación por entorno: cron/JobRequests de CRM; DEV
    ya dispone de sus tres bucles en el worker de seguridad, todavía OFF. Faltan
    identidades/configuración y validación real para habilitarlos; publicar el
@@ -145,7 +145,7 @@ este corte. Los gates Meta siguen sin configurar; MFA permanece enforce.
 
 Conservar los runtimes actuales y el esquema aditivo aplicado en DEV. No ejecutar
 un `down` para volver a la versión de código anterior: ya se verificó compatible.
-Si una DDL futura falla, mantener DEV detenido e inspeccionar el último paso del
+Si una DDL futura falla, mantener sus escritores detenidos e inspeccionar el último paso del
 diario antes de decidir una reparación; no repetir automáticamente el plan. Tras
 introducir datos nuevos, cerrar altas y preservar controles, lectores v24,
 claims/marcas/diarios/revocaciones. No ejecutar inversas con datos, restaurar tokens
@@ -154,3 +154,20 @@ SQL, volver a auditoría v19 ni repetir canarios o activaciones inciertas.
 Coste incremental facturado `null`; sin consulta CE nueva. Se conserva el snapshot
 etiquetado estimado/Unblended de 4,6195124129 USD, recogido19/09 08:22 UTC para1–18/09.
 No se crearon instancias, secretos o conexiones clínicas en este corte.
+
+
+## Preparación clínica y corte cancelado a las14:30 UTC
+
+La candidata incorpora el operador explícito de las nueve DDL, respaldo cifrado
+con persistencia previa a DDL, prueba real de restauración aislada y recuperación
+selectiva de participantes. Datos clínicos observados: una conexión y42 activos,
+con dependencia WhatsApp compartida. No se han copiado sus tokens a evidencia.
+
+El intento se canceló al empezar un job de reseñas mientras se detenían las dos
+unidades independientes WhatsApp. La recuperación reinició indebidamente las API;
+el job terminó con dos intentos. Corregido ese comportamiento y probado con cuatro
+casos en DEV/candidata. No se ejecutó DDL ni respaldo clínico. Contratos públicos,
+huellas de filas, histórico gateway y login anónimo real comprobados después;
+MFA/gates/configuración intactos. Revisar coordinación de admisión/parada antes de
+otro intento; no reusar planes históricos ni repetir el coordinador ya cancelado.
+Detalles, límites y evidencias en [corte clínico](meta-clinical-schema.md).

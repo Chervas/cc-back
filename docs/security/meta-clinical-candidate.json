@@ -1,7 +1,7 @@
 {
   "back": {
     "candidateBase": "ac4703a38796a7ecf469cd91e6b9e2619d57a0cc",
-    "devSource": "5c217d9017e6e7209b83cd7723fb05f4d8f2ba07",
+    "devSource": "7a0001dba01c6c46311854edbddbe53f97163932",
     "files": [
       {
         "path": "migrations/20260919040000-meta-marketing-broker-registry.js",
@@ -559,6 +559,16 @@
         "exactDev": false
       },
       {
+        "path": "src/lib/metaClinicalCutRecovery.js",
+        "sha256": "fe7b450d2a0acd6a8b8b83ed28e164541a65480af1e69fdb56b9c024c44a2a28",
+        "exactDev": true
+      },
+      {
+        "path": "src/lib/metaClinicalSchemaRelease.js",
+        "sha256": "d81495b5bc3ea547122d0a001e9ce2577e48417de1e3bcd540418d3554f3571d",
+        "exactDev": true
+      },
+      {
         "path": "src/lib/securitySchemaContract.js",
         "sha256": "56b9331ab140f2348faaba8e669f0af6a36e7bb5d7e916519676d71e96f2ff57",
         "exactDev": true
@@ -589,6 +599,11 @@
         "exactDev": false
       },
       {
+        "path": "src/scripts/meta-clinical-schema-release.js",
+        "sha256": "36160012460ad262dae2402bd9fe9ce98c6ab83aaa02111c611f9001729d2cfc",
+        "exactDev": true
+      },
+      {
         "path": "src/scripts/security-schema-release.js",
         "sha256": "5072ebd01a022ba85bab0be4e4b865e52402ca08f232a20d728ab4e8e87650c2",
         "exactDev": true
@@ -616,7 +631,7 @@
       {
         "path": "src/scripts/tests/fixtures/meta_enrollment_runtime.fixture.js",
         "sha256": "412b818e204a5835fdee2845ad5e1bbe974fee1e0d6e04650f5c8e57e70e16f9",
-        "exactDev": true
+        "exactDev": false
       },
       {
         "path": "src/scripts/tests/fixtures/meta_enrollment_selection_visual.fixture.js",
@@ -671,6 +686,21 @@
       {
         "path": "src/scripts/tests/fixtures/scheduled_jobs.fixture.cjs",
         "sha256": "03b5b5ef8f1f398714183b3fb732430a93f00b875356984a858b56775d0e8a6b",
+        "exactDev": true
+      },
+      {
+        "path": "src/scripts/tests/meta_clinical_cut_recovery.test.js",
+        "sha256": "bc982baf285975b15a38174b788db2abc04eb9fac94d74382fcf202a4a876669",
+        "exactDev": true
+      },
+      {
+        "path": "src/scripts/tests/meta_clinical_schema_mysql.test.js",
+        "sha256": "734def1b769e24e48fa731bfdcb75403a5fc6fc062b7c814165e8cba72dad7fc",
+        "exactDev": true
+      },
+      {
+        "path": "src/scripts/tests/meta_clinical_schema_release.test.js",
+        "sha256": "5bb8ab225a56f9be71e1a9257c385265903438144fdda2f70b7329098763d694",
         "exactDev": true
       },
       {
@@ -755,7 +785,7 @@
       },
       {
         "path": "src/services/metaMarketingEnrollment.service.js",
-        "sha256": "b985dd6e11d310850db832483ae2d4c28cb55b1d19b0ef9075702fe30826ad9e",
+        "sha256": "d44ea62f0724704c5fa9cc0079913667aaa783d4f7b4d798717104bf756afe0d",
         "exactDev": true
       },
       {
@@ -780,7 +810,7 @@
       },
       {
         "path": "src/services/metaMarketingOAuth.service.js",
-        "sha256": "d2701a2de89b17875ebec525e15c24336c514bd8041206f5760b4f35e95f5e30",
+        "sha256": "d3ffd2a313d46ff62ccdf487f6260dbb0dc646bd1871690c02c2a8148e0c170c",
         "exactDev": true
       },
       {
@@ -800,7 +830,7 @@
       },
       {
         "path": "src/services/metaMarketingRevocation.service.js",
-        "sha256": "ccc7fc8d224b9b05594b06200cf8c07db2a066c52da6e19ab2b173b237916794",
+        "sha256": "8e6bec2305e0696cb4b91d465acc2d600fb718978db887084a0a765b501ecfda",
         "exactDev": true
       },
       {
@@ -828,11 +858,12 @@
         "sha256": "c98959fa2c4c04ada2a4fcd874b55443142813af2f26c4de21c9dca895f78c59",
         "exactDev": true
       }
-    ]
+    ],
+    "initialDevSource": "5c217d9017e6e7209b83cd7723fb05f4d8f2ba07"
   },
   "front": {
     "candidateBase": "288ca987621a4ea7270e9831638f24feffd4a046",
-    "devSource": "83c6c9dd6be0e66e03e8872a745b3d71a54c9a08",
+    "devSource": "d49d11d2a67e9640861f44216085ccbfdfab180c",
     "files": [
       {
         "path": "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.html",
@@ -886,27 +917,28 @@
       },
       {
         "path": "src/assets/i18n/cat.json",
-        "sha256": "1400daa32ee6eb451026fd4fb3e6ed2bfd0a89ce0b1bdfa46593fbb5f8160b72",
+        "sha256": "01279841f7d27a26994a8c7668b5659d1da26332789a0c45346fa42c0ac927d9",
         "exactDev": false
       },
       {
         "path": "src/assets/i18n/en.json",
-        "sha256": "15eecf8e70c7d7d1e13043d2a66f225be6a57e4068e1854edeb92971477ede50",
+        "sha256": "728561700637740da44467a867655b858eb0a325ec9e375ea73013f2e98ea61d",
         "exactDev": false
       },
       {
         "path": "src/assets/i18n/es.json",
-        "sha256": "b81770daa9183bc690ac557907e9328f44901d1cba3d8f7b6ae80735e52a9adc",
+        "sha256": "ac8f31b31c998c087e916a3f4d16b0d145041c2ce4673cd9887756862c07bdb3",
         "exactDev": false
       }
-    ]
+    ],
+    "initialDevSource": "83c6c9dd6be0e66e03e8872a745b3d71a54c9a08"
   },
   "version": 1,
   "reviewedAt": "2026-09-19",
   "scope": "Selective CRM Meta consumers and QA dependencies; not a deployed release or real-provider acceptance. DEV needs its own immutable composition preserving isolated-security-v2.",
   "candidateCommits": {
-    "back": "07e37fc77bc7c9a11fea0aeb757d8c7d5817aacd",
-    "front": "a8331d0d29b6f9410974b4c61add6b8ea5b2f7a2"
+    "back": "1da9f5a74f9f1f718abdc762af56b3f71e853e4b",
+    "front": "27afa85ce45667091654f0c2a21cf5c9395d83b4"
   },
   "deployed": false,
   "realProvider": false,
@@ -938,5 +970,22 @@
     "published": true,
     "metaGatesEnabled": false,
     "manifest": "meta-dev-consumers.json"
+  },
+  "clinicalPreflight": {
+    "status": "aborted_before_backup_and_ddl",
+    "at": "2026-09-19T14:30:00.728Z",
+    "originalConnections": 1,
+    "originalAssets": 42,
+    "schemaUnchanged": true,
+    "originalRowsUnchanged": true,
+    "publicProcessesRestartedDuringRecovery": true,
+    "publicConfigurationPreserved": true,
+    "googleReviewsJobCompletedAttempts": 2,
+    "recoveryCorrectedAndTested": true,
+    "cutRetriedAfterFix": false,
+    "anonymousLoginScreens": 4,
+    "authenticatedMfa": false,
+    "runbook": "meta-clinical-schema.md",
+    "evidence": "qa-evidence/security-resume-20260917/meta-crm-preflight-20260919/"
   }
 }

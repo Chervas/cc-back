@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "at": "2026-09-19T14:35:30.514Z",
+  "status": "aborted_before_backup_and_ddl",
+  "candidateCommits": {
+    "back": "1da9f5a74f9f1f718abdc762af56b3f71e853e4b",
+    "front": "27afa85ce45667091654f0c2a21cf5c9395d83b4"
+  },
+  "schemaUnchanged": true,
+  "originalRows": {
+    "MetaConnections": 1,
+    "ClinicMetaAssets": 42
+  },
+  "originalRowDigestsUnchanged": true,
+  "publicSourceChanged": false,
+  "publicConfigurationChanged": false,
+  "publicProcessesRestarted": true,
+  "devProcessesUnchanged": true,
+  "historicalGatewayJobsUnchanged": true,
+  "observedJob": {
+    "id": 103273,
+    "type": "business_profile_reviews_recent",
+    "status": "completed",
+    "attempts": 2
+  },
+  "recoveryCorrection": {
+    "dev": "7a0001dba01c6c46311854edbddbe53f97163932",
+    "candidate": "1da9f5a74f9f1f718abdc762af56b3f71e853e4b",
+    "tests": 4,
+    "cutRetried": false
+  },
+  "tests": {
+    "operator": 7,
+    "isolatedMysqlRestoreDev": true,
+    "isolatedMysqlRestoreCandidate": true,
+    "loginAnonymousScreens": 4,
+    "selectionFictitiousProviderScreens": 9,
+    "authenticatedMfa": false,
+    "realMetaOAuth": false
+  },
+  "backupCreated": false,
+  "ddlExecuted": false,
+  "awsChanges": false,
+  "costExplorerQueried": false,
+  "incrementalBilledUsd": null,
+  "pending": [
+    "scheduler_admission_and_stop_coordination",
+    "new_pinned_plan",
+    "clinical_schema_cut",
+    "clinical_api_ui_publication",
+    "operator_chosen_meta_scope",
+    "real_mfa_oauth_provider_acceptance"
+  ],
+  "evidence": "qa-evidence/security-resume-20260917/meta-crm-preflight-20260919/"
+}
