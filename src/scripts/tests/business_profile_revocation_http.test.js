@@ -15,6 +15,7 @@ async function fixture(t, options = {}) {
       upsert: async (value, { transaction }) => { assert.equal(value.status, 'disconnected'); transaction.writes++; await state.onUpsert?.(); } },
     ClinicWebAsset: empty, ClinicAnalyticsProperty: empty, ClinicGoogleAdsAccount: empty, ClinicBusinessLocation: empty,
     GoogleOAuthBrokerBinding: empty, SearchConsoleBrokerBinding: empty, AnalyticsBrokerBinding: empty, GoogleAdsBrokerBinding: empty, GoogleAdsBrokerRevocation: { count: async () => state.adsManaged },
+    GoogleAdsEnrollmentScope: empty, GoogleAdsEnrollmentRequest: { count: async () => state.enrollmentManaged || 0 },
     GooglePropertyBrokerRevocation: { count: async ({ where }) => {
       assert.deepEqual(JSON.parse(JSON.stringify(where[sequelize.Op.or])), [{ google_connection_id: 81 }, { google_user_id: 'fictitious-subject' }]); return state.propertyManaged;
     } },
@@ -30,6 +31,8 @@ async function fixture(t, options = {}) {
   const resolver = loadDiscoverySource('services/scopeConnectionResolver.service.js', { '../../models': models, sequelize });
   const router = loadDiscoverySource('routes/oauth.routes.js', { express, sequelize, '../../models': models, './auth.middleware': auth,
     '../services/accessSession.service': session,
+    '../services/googleAdsEnrollment.service': { disconnectionStatus: async () => ({
+      pending_enrollments: state.enrollmentPending || 0, cancelled_enrollments: state.enrollmentCancelled || 0 }) },
     '../services/scopeConnectionResolver.service': { ...resolver, resolveGoogleConnectionForScope: async opts => {
       assert.equal(opts.metadataOnly, true); state.resolves++; return { connection: conn, assignment: { googleConnectionId: 81 } };
     }, findSingleUserConnection: async (model, userId, attributes) => {
@@ -57,7 +60,7 @@ async function fixture(t, options = {}) {
       assert.equal(args.actorId, 701); assert.equal(args.connectionId, 81); args.transaction.attempts++;
       if (state.enqueueFailure === 'scope_disconnect_shared_asset_conflict') throw Object.assign(Error('La propiedad se utiliza fuera del ámbito.'), { code: state.enqueueFailure, httpStatus: 409 });
       if (state.enqueueFailure) throw Object.assign(Error('FICTITIOUS_SECRET'), { code: typeof state.enqueueFailure === 'string' ? state.enqueueFailure : 'gbp_revocation_unavailable' });
-      return { brokerRevocationsPending: state.pending };
+      return { brokerRevocationsPending: state.pending, enrollmentPending: state.enrollmentPending || 0 };
     } },
   }, { logs });
   const app = express(); app.use('/oauth', router); const server = http.createServer(app);
@@ -107,6 +110,14 @@ test('status loses stale metadata on post-read revocation, scope loss, membershi
 });
 test('unscoped deletion refuses connections with any surviving managed reference', async t => {
   const f = await fixture(t); assert.equal((await f.request({ query: '' })).status, 409); assert.equal(f.state.destroyed, 0);
+});
+test('an enrollment without a mapping keeps scoped disconnect pending and prevents unscoped connection deletion', async t => {
+  const f = await fixture(t, { pending: 0, managed: 0, enrollmentManaged: 1, enrollmentPending: 1 });
+  assert.equal((await f.request({ query: '' })).status, 409); assert.equal(f.state.destroyed, 0);
+  const result = await f.request(); assert.equal(result.status, 202); assert.equal(result.body.pending_enrollments, 1);
+  const status = await f.request({ status: true }); assert.equal(status.body.status, 'pending'); assert.equal(status.body.pending_enrollments, 1);
+  f.state.enrollmentPending = 0; f.state.enrollmentCancelled = 1;
+  assert.equal((await f.request({ status: true })).body.cancelled_enrollments, 1);
 });
 test('property metadata is aggregated with GBP and a property-only tombstone prevents unscoped deletion', async t => {
   const f = await fixture(t, { managed: 0, propertyManaged: 1, propertyPending: 2, propertyConfirmed: 3 });

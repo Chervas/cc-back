@@ -63,20 +63,20 @@ function createGoogleAdsEnrollmentScope({ snapshot, candidate, authorize, now = 
         'google_ads_enrollment_account_in_use', 'asset_revoked'].includes(error?.code) ? error.code : 'google_ads_enrollment_unavailable');
     }
   };
-  const capture = guarded(async input => {
+  const capture = guarded(async (input, { transaction } = {}) => {
     const hint = { clinicIds: C.clinicIds(input.clinicIds), scopeKey: input.scopeKey, connectionId: Number(input.connectionId),
       actorId: Number(input.actorId), sessionRef: input.sessionRef, sessionExpiresAt: input.sessionExpiresAt };
-    const saved = await inspect(hint); const handle = Object.freeze({});
+    const saved = await inspect(hint, undefined, transaction); const handle = Object.freeze({});
     contexts.set(handle, { hint, scopeDigest: saved.scopeDigest }); return handle;
   });
   const assert = guarded(async (handle, { transaction } = {}) => {
     const saved = handle && typeof handle === 'object' && contexts.get(handle); if (!saved) C.fail();
     return inspect(saved.hint, saved.scopeDigest, transaction);
   });
-  return { capture, assert, restore: guarded(async row => {
+  return { capture, assert, restore: guarded(async (row, { transaction } = {}) => {
     const r = C.request(row); const handle = await capture({ clinicIds: r.clinicIds, scopeKey: r.scope_key,
-      connectionId: r.google_connection_id, actorId: r.actor_user_id, sessionRef: r.session_ref, sessionExpiresAt: r.session_expires_at.getTime() });
-    const current = await assert(handle);
+      connectionId: r.google_connection_id, actorId: r.actor_user_id, sessionRef: r.session_ref, sessionExpiresAt: r.session_expires_at.getTime() }, { transaction });
+    const current = await assert(handle, { transaction });
     if (current.scopeDigest !== r.scope_digest || current.google_user_id !== r.google_user_id || current.connection_ref !== r.connection_ref
       || current.asset_ref !== r.scope_ref || current.tenant_clinic_id !== Number(r.tenant_clinic_id)
       || (current.login_customer_id || current.root_customer_id) !== r.login_customer_id) C.fail('google_ads_enrollment_scope_conflict');

@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { Op } = require('sequelize');
 const { workspaceSignalDecision } = require('./campaignWorkspaceSignalPolicy.service');
+const { assertGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
 
 const id = value => typeof value === 'string' && /^[0-9]{1,64}$/.test(value);
 const eventKey = value => String(value || '').replace(/[_\s-]/g, '').toLowerCase();
@@ -42,7 +43,10 @@ async function resolveWorkspaceSignalRoute({ models, provider, accountId, campai
       destinationId: provider === 'google_ads' ? `customers/${accountId}/conversionActions/${event.destination_id}` : event.destination_id,
       includeGrant: true });
     const current = verified.grant;
-    if (!current?.connection?.accessToken) fail('workspace_signal_connection_changed');
+    if (current?.brokerGrant) {
+      if (provider !== 'google_ads') fail('workspace_signal_connection_changed');
+      await assertGoogleAdsGrantTransport(current.brokerGrant, { clinicId, transaction });
+    } else if (!current?.connection?.accessToken) fail('workspace_signal_connection_changed');
     if (runtime && (destinationId !== verified.destinationId || Number(runtime.connection.id) !== Number(current.connection.id)
       || (runtime.loginCustomerId || null) !== (current.loginCustomerId || null))) fail('workspace_signal_routes_conflict');
     runtime = current; destinationId = verified.destinationId;
@@ -52,6 +56,7 @@ async function resolveWorkspaceSignalRoute({ models, provider, accountId, campai
   const destinationKey = crypto.createHash('sha256').update(JSON.stringify({ clinic: clinicId, group: clinic.grupoClinicaId || null,
     provider, account: accountId, destination: destinationId, grants })).digest('hex');
   return { destinationId, destinationKey, connectionId: Number(runtime.connection.id), accessToken: runtime.connection.accessToken,
+    ...(runtime.brokerGrant ? { brokerGrant: runtime.brokerGrant } : {}),
     loginCustomerId: runtime.loginCustomerId || null,
     authorization: { applicable: true, allowed: true, reason: 'workspace_signal_authorized', authorizationSchema: 2,
       version: refs[refs.length - 1].version, policyRefs: refs } };

@@ -152,8 +152,10 @@ async function resolveScopedGoogleAdsRuntime({
   accountModel = db.ClinicGoogleAdsAccount,
   connectionModel = db.GoogleConnection,
   ensureAccessToken = ensureGoogleConnectionAccessToken,
+  broker = require('./googleAdsBroker.service'),
   credentials = googleLegacyCredentials.forModels({ ...db, GoogleConnection: connectionModel }),
-  requiredScopes = [GOOGLE_ADS_SCOPE]
+  requiredScopes = [GOOGLE_ADS_SCOPE],
+  requireBroker = false
 }) {
   const cleanCustomerId = normalizeCustomerId(customerId);
   if (!cleanCustomerId) throw runtimeError('CUSTOMER_ID_REQUIRED', 'customer_id es obligatorio', 400);
@@ -191,6 +193,31 @@ async function resolveScopedGoogleAdsRuntime({
       409
     );
   }
+  const account = candidates.find((candidate) => (
+    parseInteger(candidate?.googleConnectionId) === connectionIds[0]
+  ));
+  // Inspect the durable registry before any credential read, even with the
+  // cohort disabled. A managed/blocked mapping must never fall back to OAuth.
+  const brokerContext = await broker.prepare(account);
+  if (brokerContext) {
+    const captured = await broker.assert(account, brokerContext);
+    if (scope.clinicId && !captured.clinicIds.includes(scope.clinicId)
+      || scope.groupId && captured.groupId !== scope.groupId) {
+      throw runtimeError('scope_denied', 'La cuenta no pertenece al ámbito solicitado', 403);
+    }
+    const connection = await connectionModel.findByPk(connectionIds[0], {
+      attributes: ['id', 'googleUserId', 'scopes'], raw: true, logging: false,
+    });
+    if (!connection || connection.googleUserId !== captured.googleSubject
+      || missingGoogleScopes(connection.scopes, requiredScopes).length) {
+      throw runtimeError('INSUFFICIENT_SCOPE', 'La conexión Google requiere permisos adicionales', 403);
+    }
+    await broker.assert(account, brokerContext);
+    return { deliveryMode: 'broker', brokerContext, broker, account, connection, assignment: null,
+      connectionSource: directClinicAccounts.length ? 'mapping_clinic' : 'mapping_group', scope,
+      customerId: cleanCustomerId, loginCustomerId: captured.loginCustomerId };
+  }
+  if (requireBroker) throw runtimeError('google_action_broker_required', 'La cuenta requiere una conexión gestionada por el broker', 409);
   const connection = await credentials.load(connectionIds[0], { includeScopes: true });
   if (!connection || Number(connection.id) !== connectionIds[0]) {
     throw runtimeError(
@@ -199,10 +226,6 @@ async function resolveScopedGoogleAdsRuntime({
       404
     );
   }
-  const account = candidates.find((candidate) => (
-    parseInteger(candidate?.googleConnectionId) === connectionIds[0]
-  ));
-
   const token = await ensureAccessToken(connection, { requiredScopes, credentials });
   await credentials.assert(connection);
   return {

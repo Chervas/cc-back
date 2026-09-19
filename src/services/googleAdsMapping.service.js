@@ -6,11 +6,14 @@ const { fromMapping } = require('../../services/platform-audit/src/google-ads-ma
 const { createRepository } = require('./platformAudit.repository');
 const discoveryService = require('./googleAdsDiscovery.service'); const brokerService = require('./googleAdsBroker.service');
 const revocations = require('./googleAdsRevocation.service');
+const { createGoogleAdsEnrollmentRepository } = require('./googleAdsEnrollment.repository');
+const { createGoogleAdsEnrollmentScope, createGoogleAdsEnrollmentScopeRepository } = require('./googleAdsEnrollmentScope.service');
 const fail = (code = 'google_ads_mapping_invalid') => { throw Object.assign(Error(code), { code }); };
 const SAFE = new Set(['google_ads_mapping_invalid', 'google_ads_mapping_disabled', 'google_ads_mapping_unavailable',
   'google_ads_mapping_scope_conflict', 'google_ads_account_not_accessible', 'scope_disconnect_shared_asset_conflict',
   'broker_binding_invalid', 'broker_cohort_disabled', 'broker_discovery_timeout', 'scope_denied', 'asset_revoked',
-  'google_discovery_scope_forbidden', 'google_discovery_session_required', 'google_ads_revocation_unavailable', 'audit_unavailable']);
+  'google_discovery_scope_forbidden', 'google_discovery_session_required', 'google_ads_revocation_unavailable', 'audit_unavailable',
+  'google_ads_enrollment_not_ready', 'google_ads_enrollment_scope_conflict', 'google_ads_enrollment_disabled']);
 function input(mappings) {
   if (!Array.isArray(mappings) || !mappings.length || mappings.length > 1000) fail();
   const seen = new Set();
@@ -24,7 +27,7 @@ function input(mappings) {
 }
 const dto = row => Object.fromEntries(['id', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'googleConnectionId', 'customerId',
   'descriptiveName', 'currencyCode', 'timeZone', 'accountStatus', 'managerCustomerId', 'loginCustomerId', 'isActive'].map(k => [k, row[k] ?? null]));
-function createGoogleAdsMapping({ models, discovery = discoveryService, broker = brokerService, audit, revoke = revocations.enqueue,
+function createGoogleAdsMapping({ models, discovery = discoveryService, broker = brokerService, audit, revoke = revocations.enqueue, enrollment,
   snapshot,
   enabled = () => process.env.GOOGLE_ADS_MAPPING_ENABLED === 'true', now = () => new Date() }) {
   const assertEnabled = () => { if (!enabled()) fail('google_ads_mapping_disabled'); };
@@ -97,6 +100,9 @@ function createGoogleAdsMapping({ models, discovery = discoveryService, broker =
         await revoke({ models: m, transaction, connectionId: request.connectionId, scope: { assignmentScope: type,
           clinicId: type === 'clinic' ? Number(id) : null, groupId: type === 'group' ? Number(id) : null },
         clinicIds: request.clinicIds, actorId: request.actorId, sessionRef: request.sessionRef, mappings: [row], customerIds: [owner.customerId], now: now() });
+        await (enrollment || createGoogleAdsEnrollmentRepository({ models: m, now })).cancelScope({ scopeKey: request.scopeKey,
+          connectionId: request.connectionId, clinicIds: request.clinicIds, actorId: request.actorId, sessionRef: request.sessionRef,
+          transaction, customerIds: [owner.customerId], includeClinicScopes: type === 'group', reason: 'account_removed' });
         await m.ClinicGoogleAdsAccount.update({ isActive: false }, { transaction, logging: false, where: { googleConnectionId: request.connectionId,
           customerId: { [Op.in]: [owner.customerId, `${owner.customerId.slice(0,3)}-${owner.customerId.slice(3,6)}-${owner.customerId.slice(6)}`] } } });
         await check(); return { success: true };
@@ -108,6 +114,9 @@ function createGoogleAdsMapping({ models, discovery = discoveryService, broker =
       if (typeof replaceExisting !== 'boolean' || !scope.positive(actorId) || !UUID.test(sessionRef) || typeof authorize !== 'function') fail();
       assertEnabled();
       const m = typeof models === 'function' ? models() : models; const events = audit || createRepository(m.PlatformAuditEvent);
+      const enrollments = enrollment || createGoogleAdsEnrollmentRepository({ models: m, now,
+        scope: createGoogleAdsEnrollmentScope({ ...createGoogleAdsEnrollmentScopeRepository(() => m), now: () => now().getTime(),
+          authorize: (input, { transaction }) => authorize({ ...input, transaction }) }) });
       const correlationId = randomUUID();
       return await m.sequelize.transaction(async transaction => {
         const saved = await discovery.assertSelection(selection, { transaction });
@@ -153,6 +162,8 @@ function createGoogleAdsMapping({ models, discovery = discoveryService, broker =
           await revoke({ models: m, transaction, connectionId: saved.connectionId, scope: { assignmentScope: type,
             clinicId: type === 'clinic' ? Number(id) : null, groupId: type === 'group' ? Number(id) : null },
           clinicIds: saved.clinicIds, actorId, sessionRef, mappings: removed, customerIds: removedCustomers, now: now() });
+          await enrollments.cancelScope({ scopeKey: saved.scopeKey, connectionId: saved.connectionId, clinicIds: saved.clinicIds,
+            actorId, sessionRef, transaction, customerIds: removedCustomers, includeClinicScopes: type === 'group', reason: 'account_replaced' });
           await m.ClinicGoogleAdsAccount.update({ isActive: false }, { transaction, logging: false,
             where: { googleConnectionId: saved.connectionId, isActive: true, customerId: { [Op.in]: removedCustomers.flatMap(id => [id, `${id.slice(0, 3)}-${id.slice(3, 6)}-${id.slice(6)}`]) } } });
         }
@@ -180,6 +191,7 @@ function createGoogleAdsMapping({ models, discovery = discoveryService, broker =
           const after = { ...mapping, ...updates };
           await events.append(fromMapping({ before: mapping, after, binding, clinicIds: saved.clinicIds,
             actorId, sessionRef, correlationId, now: now() }), { transaction });
+          await enrollments.mapped({ binding: { ...binding, state: 'active' }, clinicIds: saved.clinicIds, actorId, sessionRef, transaction });
           results.push(after);
         }
         await check();
@@ -200,6 +212,7 @@ const singleton = createGoogleAdsMapping({ models: () => require('../../models')
 const safe = error => SAFE.has(error?.code) ? error.code : 'google_ads_mapping_unavailable';
 const status = error => ['google_discovery_session_required'].includes(safe(error)) ? 401
   : ['scope_denied', 'google_discovery_scope_forbidden'].includes(safe(error)) ? 403
-    : ['google_ads_mapping_scope_conflict', 'scope_disconnect_shared_asset_conflict', 'broker_binding_invalid', 'asset_revoked'].includes(safe(error)) ? 409
+    : ['google_ads_mapping_scope_conflict', 'scope_disconnect_shared_asset_conflict', 'broker_binding_invalid', 'asset_revoked',
+      'google_ads_enrollment_not_ready', 'google_ads_enrollment_scope_conflict'].includes(safe(error)) ? 409
       : ['google_ads_mapping_invalid', 'google_ads_account_not_accessible'].includes(safe(error)) ? 400 : 503;
 module.exports = { ...singleton, createGoogleAdsMapping, input, safe, status };

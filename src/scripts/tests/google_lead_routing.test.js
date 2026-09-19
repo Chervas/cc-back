@@ -239,8 +239,8 @@ async function run() {
     'The attribution audit must retain the resolved clinic routing source');
   assert.match(controllerSource, /clinic_match_value:\s*clinicMatchValue\s*\|\|\s*null/,
     'The attribution audit must retain the resolved clinic routing value');
-  assert.match(controllerSource, /const googleAdsCampaignIdValue = resolveGoogleAdsCampaignId\(/,
-    'Lead intake must persist the strict campaign fallback');
+  assert.match(controllerSource, /const googleAdsCampaignIdValue = webLandingAttribution\s*\? \(webLandingAttribution\.google_ads_campaign_id \|\| null\)\s*: resolveGoogleAdsCampaignId\(/,
+    'Lead intake must prefer verified landing attribution and retain the strict fallback otherwise');
 
   const webEventsSource = fs.readFileSync(
     path.join(__dirname, '../../services/webEvents.service.js'),

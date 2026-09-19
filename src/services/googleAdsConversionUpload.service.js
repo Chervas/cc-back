@@ -15,6 +15,7 @@ const { resolveScopedGoogleAdsRuntime } = require('./googleAdsScopedRuntime.serv
 const { extractGoogleLeadIdentity } = require('../lib/google-lead-routing');
 const { resolveWorkspaceSignalPolicy, CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
 const { googleDeliveryContext } = require('./googleWorkspaceDeliveryContext.service');
+const { uploadManagedGoogleConversion, owned: brokerOwned } = require('./googleConversionUploadBroker.service');
 
 const GOOGLE_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
 
@@ -464,8 +465,16 @@ function appendHistory(row) {
   return history.slice(-20);
 }
 
+function assertLegacyAttemptUnreserved(row) {
+  if (brokerOwned(row)) {
+    throw Object.assign(new Error('Este envío ya está registrado y requiere comprobar su resultado antes de continuar'),
+      { code: 'GOOGLE_CONVERSION_BROKER_RESERVED' });
+  }
+}
+
 async function prepareAuditRow({ auditModel, values, status, reason = null }) {
   const existing = await auditModel.findOne({ where: { dedupeKey: values.dedupeKey } });
+  assertLegacyAttemptUnreserved(existing);
   if (['accepted', 'succeeded', 'partial_success'].includes(existing?.status)) {
     return { row: existing, duplicate: true, inProgress: false, terminalStatus: existing.status };
   }
@@ -499,6 +508,7 @@ async function prepareAuditRow({ auditModel, values, status, reason = null }) {
       if (!isUniqueCollision) throw error;
       const concurrent = await auditModel.findOne({ where: { dedupeKey: values.dedupeKey } });
       if (!concurrent) throw error;
+      assertLegacyAttemptUnreserved(concurrent);
       return {
         row: concurrent,
         duplicate: ['accepted', 'succeeded', 'partial_success'].includes(concurrent.status),
@@ -1051,7 +1061,7 @@ async function uploadGoogleConversionDestination({
   }
 
   const existingAudit = await auditModel.findOne({ where: { dedupeKey } });
-  if (['accepted', 'succeeded', 'partial_success'].includes(existingAudit?.status)) {
+  if (!brokerOwned(existingAudit) && ['accepted', 'succeeded', 'partial_success'].includes(existingAudit?.status)) {
     return destinationResult({
       sent: false,
       accepted: true,
@@ -1062,7 +1072,7 @@ async function uploadGoogleConversionDestination({
     });
   }
   const existingAttemptedAt = existingAudit?.attemptedAt ? new Date(existingAudit.attemptedAt).getTime() : 0;
-  if (existingAudit?.status === 'pending' && existingAttemptedAt > Date.now() - 5 * 60 * 1000) {
+  if (!brokerOwned(existingAudit) && existingAudit?.status === 'pending' && existingAttemptedAt > Date.now() - 5 * 60 * 1000) {
     return destinationResult({ sent: false, reason: 'duplicate_upload_in_progress', audit_id: existingAudit.id || null });
   }
 
@@ -1076,6 +1086,7 @@ async function uploadGoogleConversionDestination({
       requiredScopes: [GOOGLE_DATA_MANAGER_SCOPE]
     });
   } catch (error) {
+    if (existingAudit) return destinationResult({ sent: false, reason: String(error.code || 'scoped_connection_unavailable').toLowerCase(), audit_id: existingAudit.id });
     return skip(String(error.code || 'scoped_connection_unavailable').toLowerCase());
   }
 
@@ -1092,6 +1103,45 @@ async function uploadGoogleConversionDestination({
       signalPolicyRecord: signalPolicyRecord || cfgRecord, runtime, policy: workspacePolicy,
       campaignId: extractGoogleLeadIdentity(customData).campaignId });
   }
+  if (runtime.deliveryMode === 'broker') {
+    const clock = () => typeof dependencies.now === 'function' ? dependencies.now() : dependencies.now || new Date();
+    if (rawOccurredAt && !Number.isFinite(+parsedOccurredAt)) throw Object.assign(Error('invalid_request'), { code: 'invalid_request' });
+    const revalidate = async () => {
+      const fresh = await (dependencies.resolveWorkspaceSignalPolicy || resolveWorkspaceSignalPolicy)({
+        records: [cfgRecord, signalPolicyRecord], provider: 'google_ads', accountId: eventConfig.customer_id,
+        campaignId: extractGoogleLeadIdentity(customData).campaignId, eventName: eventConfig.event_name,
+        crmEventSource, clinicId: scope.clinicId, destinationId: conversionAction,
+        connectionId: runtime.connection?.id || 0, loginCustomerId: runtime.loginCustomerId || null,
+      });
+      if (!fresh.allowed || fresh.applicable !== workspacePolicy.applicable
+        || fresh.authorizationSchema !== workspacePolicy.authorizationSchema
+        || fresh.version !== workspacePolicy.version
+        || JSON.stringify(fresh.policyRefs) !== JSON.stringify(workspacePolicy.policyRefs)) return false;
+      if (!cfgRecord && (!verifiedNativeConsent || fresh.authorizationSchema !== 2)) return false;
+      const latestNative = verifiedNativeConsent ? await dependencies.resolveNativeConsent() : null;
+      const inputs = verifiedNativeConsent ? [latestNative?.consent] : consentInputs;
+      if (verifiedNativeConsent && latestNative?.source !== 'google_ads_native_crm'
+        || mergeExplicitGoogleAdvertisingConsent(...inputs) !== consentStatus
+        || normalizeExplicitAdUserDataConsent(...inputs) !== adUserDataConsentStatus
+        || normalizeExplicitAdPersonalizationConsent(...inputs) !== adPersonalizationConsentStatus) return false;
+      const policy = resolveUserDataPolicy(googleConfig, eventConfig, {
+        adUserDataConsentStatus, adPersonalizationConsentStatus, now: clock() });
+      return policy.enabled === userDataPolicy.enabled
+        && (policy.authorization?.digest || null) === (userDataPolicy.authorization?.digest || null);
+    };
+    const valueRaw = coalesce(customData.value, eventConfig.value, 0);
+    return destinationResult(await uploadManagedGoogleConversion({ runtime, models: dependencies.models || db,
+      auditModel, values, sourceRecords: [cfgRecord, signalPolicyRecord], revalidate, now: clock,
+      delivery: dependencies.brokerDelivery,
+      ...(dependencies.brokerEnabled ? { enabled: dependencies.brokerEnabled } : {}),
+      event: { conversionAction, eventName: eventConfig.event_name, eventSource: verifiedNativeConsent ? 'OTHER' : 'WEB',
+        timestamp: parsedOccurredAt?.toISOString() || null, eventId: eventId || null,
+        value: Number.isFinite(Number(valueRaw)) ? Number(valueRaw) : 0,
+        currency: String(coalesce(customData.currency, eventConfig.currency, 'EUR') || 'EUR').toUpperCase(),
+        advertisingConsent: consentStatus, adUserData: adUserDataConsentStatus, adPersonalization: adPersonalizationConsentStatus,
+        clickId, userIdentifiers, enhancedPolicyDigest: userDataPolicy.authorization?.digest || null } }));
+  }
+  assertLegacyAttemptUnreserved(existingAudit);
   const prepared = await prepareAuditRow({ auditModel, values, status: 'pending' });
   if (prepared.duplicate) {
     return destinationResult({
@@ -1286,6 +1336,7 @@ async function maybeUploadGoogleConversion(options) {
   const processingErrorCount = results.filter((item) => (
     item.reason === 'audit_persistence_error' || item.reason === 'destination_processing_error'
   )).length;
+  const unknownCount = results.filter(item => item.reason === 'broker_outcome_unknown').length;
   const aggregate = {
     sent: sentCount > 0,
     accepted: acceptedCount > 0,
@@ -1297,7 +1348,8 @@ async function maybeUploadGoogleConversion(options) {
     accepted_count: acceptedCount,
     failed_count: failedCount,
     processing_error_count: processingErrorCount,
-    skipped_count: results.length - sentCount - failedCount - processingErrorCount,
+    unknown_count: unknownCount,
+    skipped_count: results.length - sentCount - failedCount - processingErrorCount - unknownCount,
     destinations: results
   };
   if (results.length === 0) {

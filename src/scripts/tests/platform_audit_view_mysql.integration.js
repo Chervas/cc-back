@@ -79,6 +79,85 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(whatsappPage.events[0].reason, 'state_claimed');
   assert(!Object.hasOwn(whatsappPage.events[0], 'receipt'));
   report.checks.push('WhatsApp authorization audit is filterable and exposes verified correlation/request references without claiming operational activation');
+  const { fromEnrollment, PHASES } = require('../../../services/platform-audit/src/google-ads-enrollment-event');
+  const enrollment = { enrollment_id: randomUUID(), scope_key: 'group:5', actor_user_id: 9, session_ref: sessionRef,
+    connection_ref: 'google:fixture', customer_id: '1234567890', mapping_id: 11, clinic_count: 2, clinic_digest: 'a'.repeat(64) };
+  for (const reason of Object.keys(PHASES)) {
+    const saved = await repo.append(fromEnrollment(enrollment, reason, { now: at,
+      ...(reason === 'enrollment_cancel_requested' ? { cause: 'scope_disconnected', actorId: 55, sessionRef } : {}) }));
+    await models.PlatformAuditEvent.update({ state: 'delivered', receipt: await writer.write(saved), delivered_at: at },
+      { where: { event_id: saved.event.eventId } });
+  }
+  const enrollmentPage = await view.read({ actorId: 1, sessionRef, query: { ...criteria, action: 'integration.asset.enrollment' } });
+  assert.equal(enrollmentPage.events.length, 4);
+  assert.deepEqual(enrollmentPage.events.map(row => row.reason).sort(), Object.keys(PHASES).sort());
+  assert.ok(enrollmentPage.events.every(row => row.adsEnrollment.requestRef === enrollment.enrollment_id
+    && row.adsEnrollment.clinicCount === 2 && row.adsEnrollment.assetRef === 'ads:1234567890' && row.verification === 's3_version_verified'));
+  assert.equal(enrollmentPage.events.find(row => row.reason === 'enrollment_cancel_requested').actorId, '55');
+  assert.equal(enrollmentPage.events.find(row => row.reason === 'enrollment_broker_confirmed').actorType, 'job');
+  report.checks.push('four enrollment audit phases share one request with distinct SQL parts; verified DTO keeps human/job attribution, pending mapping and confirmed cancellation separate');
+  const action = require('../../../services/platform-audit/src/google-action-plan-event').fromActionPlan({
+    plan_id: randomUUID(), scope_key: 'group:5', mapping_id: 11, closed_at: null,
+    input: { mode: 'create', currency: 'EUR', targets: [{ event: 'lead', actionId: null }] }, receipt: { state: 'applied' },
+  }, { command_id: randomUUID(), family: 'apply', session_ref: randomUUID() },
+  { connectionRef: 'google:fixture', assetRef: 'ads:1234567890', clinicIds: [59, 71] },
+  { userId: 9, sessionRef }, 'result_recovered', { now: at, relatedCommandRef: randomUUID() });
+  const actionSaved = await repo.append(action);
+  await models.PlatformAuditEvent.update({ state: 'delivered', receipt: await writer.write(actionSaved), delivered_at: at },
+    { where: { event_id: action.eventId } });
+  const actionPage = await view.read({ actorId: 1, sessionRef, query: { ...criteria, action: 'integration.google_ads.action_plan' } });
+  assert.equal(actionPage.events.length, 1); const actionDto = actionPage.events[0];
+  assert.equal(actionDto.adsActionPlan.planRef, action.planRef);
+  assert.equal(actionDto.adsActionPlan.initiatorSessionRef, action.initiatorSessionRef);
+  assert.equal(actionDto.adsActionPlan.relatedCommandRef, action.relatedCommandRef);
+  assert.equal(actionDto.sessionRef, sessionRef); assert.equal(actionDto.reason, 'result_recovered');
+  assert.equal(actionDto.verification, 's3_version_verified');
+  assert(!Object.hasOwn(actionDto, 'selectionDigest')); assert(!Object.hasOwn(actionDto, 'connectionRef'));
+  report.checks.push('v17 recovered Google action is filterable only after exact S3 verification; DTO retains original and recovering session/command references without provider credentials');
+  const destination = require('../../../services/platform-audit/src/google-destination-event').fromDestination({
+    authorization_id: randomUUID(), plan_id: action.planRef, scope_key: 'group:5', mapping_id: 11,
+    input: { planId: action.planRef, targets: [{ event: 'lead', sources: ['WEB'] }] }, receipt: { state: 'revoked' },
+  }, { command_id: randomUUID(), family: 'authorize', session_ref: randomUUID() },
+  { connectionRef: 'google:fixture', assetRef: 'ads:1234567890', clinicIds: [59, 71] },
+  { userId: 9, sessionRef }, 'authorization_withdrawn', { now: at, relatedCommandRef: randomUUID() });
+  const destinationSaved = await repo.append(destination);
+  await models.PlatformAuditEvent.update({ state: 'delivered', receipt: await writer.write(destinationSaved), delivered_at: at },
+    { where: { event_id: destination.eventId } });
+  const destinationPage = await view.read({ actorId: 1, sessionRef, query: { ...criteria, action: 'integration.google_ads.destinations' } });
+  assert.equal(destinationPage.events.length, 1); const destinationDto = destinationPage.events[0];
+  assert.equal(destinationDto.googleDestinations.authorizationRef, destination.authorizationRef);
+  assert.equal(destinationDto.googleDestinations.relatedCommandRef, destination.relatedCommandRef);
+  assert.equal(destinationDto.googleDestinations.initiatorSessionRef, destination.initiatorSessionRef);
+  assert.equal(destinationDto.outcome, 'unknown'); assert.equal(destinationDto.googleDestinations.receiptState, 'revoked');
+  assert.equal(destinationDto.verification, 's3_version_verified');
+  assert(!Object.hasOwn(destinationDto, 'selectionDigest')); assert(!Object.hasOwn(destinationDto, 'connectionRef'));
+  report.checks.push('v18 early withdrawal is verified by exact S3 version and preserves unknown initial outcome with original/recovery references in the viewer');
+  const listed = require('../../../services/platform-audit/src/google-destination-event').fromDestinationList({
+    actor: { userId: 9, sessionRef }, captured: { connectionRef: 'google:fixture', assetRef: 'ads:1234567890', clinicIds: [59,71] },
+    scopeKey: 'group:5', mappingId: 11, requestId: randomUUID(), input: { cursor: null, planId: null }, now: at,
+    reason: 'list_prepared', rows: [{ authorizationId: randomUUID() }] });
+  const listedSaved = await repo.append(listed);
+  await models.PlatformAuditEvent.update({ state: 'delivered', receipt: await writer.write(listedSaved), delivered_at: at },
+    { where: { event_id: listed.eventId } });
+  const listedPage = await view.read({ actorId: 1, sessionRef, query: { ...criteria, action: 'integration.google_ads.destination_list' } });
+  assert.equal(listedPage.events.length,1);assert.equal(listedPage.events[0].googleDestinations,null);
+  assert.deepEqual(listedPage.events[0].googleDestinationList,{assetRef:'ads:1234567890',mappingId:'11',clinicCount:2,resultCount:1});
+  assert.equal(listedPage.events[0].verification,'s3_version_verified');assert(!Object.hasOwn(listedPage.events[0],'resultDigest'));
+  report.checks.push('v18 list variant verifies its exact S3 object and exposes only count/scope in a separate projection, never a permission result');
+  for (const family of ['list','check']) {
+    const reviewed = require('../../../services/platform-audit/src/google-receipt-review-event').fromReceiptReview({
+      actor: { userId: 9, sessionRef }, captured: { id: 11, connectionRef: 'google:fixture', assetRef: 'ads:1234567890', clinicIds: [59,71] },
+      scopeKey: 'group:5', requestId: randomUUID(), family, input: family === 'list' ? { cursor: null } : { submissionId: randomUUID() }, now: at,
+      reason: family === 'list' ? 'list_prepared' : 'receipt_checked', result: family === 'list' ? { items: [] } : { item: { state: 'succeeded' } } });
+    const saved = await repo.append(reviewed);
+    await models.PlatformAuditEvent.update({ state: 'delivered', receipt: await writer.write(saved), delivered_at: at }, { where: { event_id: reviewed.eventId } });
+    const page = await view.read({ actorId: 1, sessionRef, query: { ...criteria, action: reviewed.action } });
+    assert.equal(page.events.length, 1); const dto = page.events[0];
+    assert.deepEqual(dto.googleReceiptReview, { assetRef: 'ads:1234567890', mappingId: '11', clinicCount: 2, family,
+      submissionRef: reviewed.submissionRef, resultCount: reviewed.resultCount, resultState: reviewed.resultState });
+    assert.equal(dto.verification,'s3_version_verified'); assert(!Object.hasOwn(dto,'resultDigest')); assert(!Object.hasOwn(dto,'connectionRef'));
+  }
+  report.checks.push('v19 list/check actions filter real SQL, verify exact S3 objects and project bounded human receipt metadata without provider identifiers');
   const broken = await models.PlatformAuditEvent.findByPk(first.events[0].eventId); const goodReceipt = broken.receipt;
   await broken.update({ receipt: { ...goodReceipt, versionId: 'missing-version' } });
   await assert.rejects(view.read({ actorId: 1, sessionRef, query: criteria }), /audit_view_unavailable/);

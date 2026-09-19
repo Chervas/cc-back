@@ -392,11 +392,12 @@ class MetaSyncJobs {
     
     // Descripciones por job (usadas por el monitor/UX)
     this.jobDescriptions = {
+      googleAdsEnrollment: 'Concilia altas Google Ads ya solicitadas y sus cancelaciones; conserva las cuentas actuales hasta guardar la asignación.',
+      platformAuditDelivery: 'Entrega eventos de auditoría pendientes y conserva las confirmaciones externas verificadas.',
+      businessProfileRevocations: 'Confirma revocaciones de accesos a fichas Google ya solicitadas; no consulta al proveedor ni envía mensajes.',
       metaMarketingRevocations: 'Confirma bloqueos Meta Ads/páginas/Instagram ya solicitados; no llama al proveedor ni afecta WhatsApp.',
       metaMarketingOAuth: 'Concilia candidatos OAuth Meta y cancelaciones aceptadas, sin recanjear códigos ni activar activos.',
       metaMarketingEnrollment: 'Concilia selecciones Meta confirmadas y retiradas mediante su diario, sin reactivar campañas ni repetir activaciones inciertas.',
-      platformAuditDelivery: 'Entrega eventos de auditoría pendientes y conserva las confirmaciones externas verificadas.',
-      businessProfileRevocations: 'Confirma revocaciones de accesos a fichas Google ya solicitadas; no consulta al proveedor ni envía mensajes.',
       googleAdsRevocations: 'Confirma bloqueos Ads solicitados mediante el broker; no llama a Google ni modifica campañas.',
       googlePropertyRevocations: 'Confirma bloqueos SC/GA ya solicitados mediante el broker; no llama a Google ni envía conversiones.',
       googleOAuthReconciliation: 'Concilia reautorizaciones Google solicitadas y confirma su activación mediante el broker.',
@@ -447,11 +448,12 @@ class MetaSyncJobs {
     // Configuración desde variables de entorno
     this.config = {
       schedules: {
+        googleAdsEnrollment: '* * * * *',
+        platformAuditDelivery: '* * * * *',
+        businessProfileRevocations: '* * * * *',
         metaMarketingRevocations: '* * * * *',
         metaMarketingOAuth: '* * * * *',
         metaMarketingEnrollment: '* * * * *',
-        platformAuditDelivery: '* * * * *',
-        businessProfileRevocations: '* * * * *',
         googleAdsRevocations: '* * * * *',
         googlePropertyRevocations: '* * * * *',
         googleOAuthReconciliation: '* * * * *',
@@ -4428,6 +4430,9 @@ try {
   }
   async executeGoogleAdsRevocations() {
     return require('../services/googleAdsRevocation.service').run();
+  }
+  async executeGoogleAdsEnrollment() {
+    return require('../services/googleAdsEnrollment.service').run();
   }
   async executeGooglePropertyRevocations() {
     return require('../services/googlePropertyRevocation.service').run();

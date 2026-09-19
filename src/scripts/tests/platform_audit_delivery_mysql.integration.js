@@ -25,10 +25,23 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const repo = createRepository(models.PlatformAuditEvent); let state = createStateRepository(models);
   let now = new Date('2026-09-12T12:00:00Z');
   const zero = () => ({ pending: 0, reconcile: 0, oldestAgeSeconds: 0, unresolvedAttempts: 0, oldestUnresolvedAgeSeconds: 0, delivered: 0, failed: 0 });
+  const status = async name => Number((await sql.query(`SHOW GLOBAL STATUS LIKE '${name}'`))[0][0].Value);
+  const preparedBefore = await status('Com_stmt_prepare');
+  for (let i = 0; i < 256; i++) {
+    const clock = new Date(now.getTime() + i);
+    const lease = await state.acquire(clock); assert(lease);
+    assert.equal(await state.finish(lease, zero(), null, clock), true);
+    assert.equal(new Date((await state.read()).last_completed_at).getTime(), clock.getTime());
+  }
+  const prepared = await status('Com_stmt_prepare') - preparedBefore;
+  assert(prepared <= 24, `changing dates must reuse statements, prepared=${prepared}`);
+  report.checks.push(`256 changing-clock acquire/finish cycles preserve milliseconds and prepare only ${prepared} statements`);
   const leases = await Promise.all(Array.from({ length: 6 }, () => state.acquire(now)));
   assert.equal(leases.filter(Boolean).length, 1); report.checks.push('six dispatchers acquire one global SQL lease across shared runtimes');
   const old = leases.find(Boolean); now = new Date(now.getTime() + 271000); state = createStateRepository(models);
   const current = await state.acquire(now); assert(current);
+  assert.equal(await state.finish(current, zero(), null, new Date(now.getTime() + 270000)), false);
+  assert.equal((await state.read()).lease_token, current);
   assert.equal(await state.finish(old, zero(), null, now), false);
   assert.equal(await state.finish(current, zero(), null, now), true);
   assert.equal((await state.read()).summary.pending, 0);

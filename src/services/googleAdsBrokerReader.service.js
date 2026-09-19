@@ -21,7 +21,7 @@ function createGoogleAdsBrokerReader({ client, assertContext, now = Date.now }) 
         || !input || typeof input !== 'object' || Array.isArray(input) || Object.hasOwn(input, 'pageToken')) fail('invalid_request');
       const operation = contract.PREFIX + family + '.read.v1';
       const basePayload = structuredClone(input);
-      contract.validate(operation, { ...basePayload, ...(['account', 'discovery'].includes(family) ? {} : { pageToken: null }) });
+      contract.validate(operation, { ...basePayload, ...(contract.singleResult(family) ? {} : { pageToken: null }) });
       const deadline = now() + timeoutMs;
       const captured = await assertContext(context);
       if (captured?.discoveryOnly === true && family !== 'discovery') fail('operation_denied');
@@ -29,33 +29,47 @@ function createGoogleAdsBrokerReader({ client, assertContext, now = Date.now }) 
         || !contract.customer(captured.customerId) || captured.assetRef !== 'ads:' + captured.customerId) fail('broker_binding_invalid');
       const identity = { connectionRef: captured.connectionRef, tenantRef: captured.tenantRef,
         customerId: captured.customerId, assetRef: captured.assetRef, discoveryOnly: captured.discoveryOnly };
+      const singleSettings = family === 'conversion_settings';
       const verify = async () => {
         const fresh = await assertContext(context);
         if (!fresh || Object.keys(identity).some(key => fresh[key] !== identity[key])) fail('broker_binding_invalid');
         if (now() >= deadline) fail('broker_timeout');
+        return fresh;
       };
       const rows = []; const seen = new Set(); const tokens = new Set(); const resources = new Map();
       let pageToken = null; let bytes = 0;
       // Byte-adaptive broker slices may be smaller than 250 rows. Enforce the
       // row limit independently and cap total calls; never silently truncate.
       for (let page = 0; page < 2000; page++) {
-        await verify(); await beforeExecute?.();
+        // Settings has one result and no pagination. Its initial assertion is
+        // the pre-request snapshot; share that fresh metadata with the caller's
+        // session/ACL guard instead of querying the same binding again.
+        const before = singleSettings ? captured : await verify();
+        await beforeExecute?.(singleSettings ? structuredClone(before) : undefined);
         if (now() >= deadline) fail('broker_timeout');
-        const payload = { ...basePayload, ...(['account', 'discovery'].includes(family) ? {} : { pageToken }) };
+        const payload = { ...basePayload, ...(contract.singleResult(family) ? {} : { pageToken }) };
         const requestId = randomUUID();
         const response = await client.execute({ requestId, operation, connectionRef: identity.connectionRef,
           tenantRef: identity.tenantRef, assetRef: identity.assetRef, payload }, { timeoutMs: Math.min(30000, deadline - now()) });
-        await verify(); await beforeExecute?.();
+        const after = await verify();
+        await beforeExecute?.(singleSettings ? structuredClone(after) : undefined);
         if (now() >= deadline) fail('broker_timeout');
         const data = response?.data;
-        if (response?.requestId !== requestId || !data || Object.keys(data).sort().join(',') !== 'nextPageToken,results'
+        const settings = family === 'conversion_settings';
+        if (response?.requestId !== requestId || !data || Object.keys(data).sort().join(',') !== (settings ? 'dataManagerConfiguration,nextPageToken,results' : 'nextPageToken,results')
           || !Array.isArray(data.results) || data.results.length > contract.PAGE_SIZE
           || Buffer.byteLength(JSON.stringify(data)) > 786432) fail('broker_response_invalid');
         const next = data.nextPageToken;
         if (next !== null && (typeof next !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(next)
-          || !data.results.length || ['account', 'discovery'].includes(family) || tokens.has(next))) fail('broker_response_invalid');
+          || !data.results.length || contract.singleResult(family) || tokens.has(next))) fail('broker_response_invalid');
         let projected;
-        try { projected = contract.projectPage(family, { results: data.results }, payload, identity).results; }
+        try {
+          projected = contract.projectPage(family, { results: data.results }, payload, identity).results;
+          if (settings) {
+            const configuration = contract.dataManagerConfiguration(data.dataManagerConfiguration);
+            projected = projected.map(row => ({ ...row, dataManagerConfiguration: configuration }));
+          }
+        }
         catch { fail('broker_response_invalid'); }
         bytes += Buffer.byteLength(JSON.stringify(projected));
         if (bytes > 64 * 1024 * 1024 || rows.length + projected.length > contract.rowLimit(family)) fail('broker_response_invalid');
@@ -72,7 +86,12 @@ function createGoogleAdsBrokerReader({ client, assertContext, now = Date.now }) 
           }
           seen.add(key); rows.push(row);
         }
-        if (next === null) { await verify(); await beforeExecute?.(); if (now() >= deadline) fail('broker_timeout'); return rows; }
+        if (next === null) {
+          // Projection above is synchronous. The post-response snapshot and
+          // caller guard already cover the single settings result.
+          if (!singleSettings) { await verify(); await beforeExecute?.(); }
+          if (now() >= deadline) fail('broker_timeout'); return rows;
+        }
         if (rows.length === contract.rowLimit(family)) fail('broker_response_invalid');
         tokens.add(next); pageToken = next;
       }

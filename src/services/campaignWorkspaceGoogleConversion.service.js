@@ -1,5 +1,6 @@
 'use strict';
 const { loadGoogleAdsLegacyConnection } = require('./googleAdsLegacyConnection.service');
+const { assertGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
 
 const { loadSignalRoutingScope, resolveWorkspaceSignalRoute } = require('./campaignWorkspaceSignalRouting.service');
 const { resolveWorkspaceWebSignalContext } = require('./campaignWorkspaceWebSignalContext.service');
@@ -29,9 +30,13 @@ async function resolveWorkspaceGoogleWebContext({ models, clinicId, recordId, cu
     campaignId: identity.campaignId, eventName, crmEventSource, now, loadScope: async () => scope, verify: verifyRoute });
   if (!route) fail('workspace_signal_authorization_unavailable');
   const web = await resolveWorkspaceWebSignalContext({ models, clinic: scope.clinic, recordId, records: webRecords });
-  const connection = await readConnection(route.connectionId);
-  if (!connection?.accessToken || (!Number.isFinite(+new Date(connection.expiresAt))
-    || +new Date(connection.expiresAt) <= +now) && !connection.refreshToken) fail('workspace_google_permissions_required');
+  if (route.brokerGrant) {
+    await assertGoogleAdsGrantTransport(route.brokerGrant, { clinicId });
+  } else {
+    const connection = await readConnection(route.connectionId);
+    if (!connection?.accessToken || (!Number.isFinite(+new Date(connection.expiresAt))
+      || +new Date(connection.expiresAt) <= +now) && !connection.refreshToken) fail('workspace_google_permissions_required');
+  }
   const tracking = resolveEffectiveTrackingConfig({ assignment_scope: web.record.assignment_scope,
     clinic_id: clinicId, group_id: web.groupId }, web.records).google_ads;
   const key = eventKey(eventName) === 'qualifiedlead' ? 'qualified_lead' : eventKey(eventName);
@@ -88,6 +93,8 @@ async function maybeUploadCampaignGoogleConversion(options = {}) {
         } catch (error) { return { applicable: true, allowed: false, reason: reason(error) }; }
       },
       resolveRuntime: async () => {
+        if (route.brokerGrant) return { ...await assertGoogleAdsGrantTransport(route.brokerGrant, { clinicId: options.clinicId }),
+          connectionSource: 'workspace_mandate' };
         const connection = await loadGoogleAdsLegacyConnection(models, route.connectionId);
         if (!connection) fail('workspace_google_permissions_required');
         const token = await (dependencies.ensureToken || ensureGoogleConnectionAccessToken)(connection,
