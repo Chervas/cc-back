@@ -160,11 +160,11 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
       });
     },
     async cancel(input,id){return tx(async transaction=>project(await cancelLocked(await access(input,id,transaction),transaction,{actorId:input.actorId,sessionRef:input.sessionRef})));},
-    async run({enrollmentId}={}){
-      if(!workerEnabled()||running)return {status:'completed',skipped:true,reason:'meta_enrollment_worker_disabled_or_busy'};
+    async run({enrollmentId,closing=()=>false}={}){
+      if(!workerEnabled()||running||closing())return {status:'completed',skipped:true,reason:'meta_enrollment_worker_disabled_or_busy'};
       running=true;let advanced=0,failed=0,cancelled=0;const deadline=+now()+30000;
       try{
-        for(let n=0;n<(enrollmentId?1:10)&&+now()<deadline&&workerEnabled();n++){
+        for(let n=0;n<(enrollmentId?1:10)&&+now()<deadline&&workerEnabled()&&!closing();n++){
           const row=await claim(enrollmentId);if(!row)break;
           try{await advance(row);advanced++;}
           catch(error){
@@ -186,5 +186,5 @@ let singleton;
 const instance=()=>singleton||=createService({models:require('../../models'),sessions:require('./accessSession.service'),
   oauth:require('./metaMarketingOAuth.service'),client:require('./metaMarketingOAuthClient.service').createClient()});
 module.exports={createService,safe,claimSql,...Object.fromEntries(['overview','reserve','status','confirm','cancel'].map(k=>[k,(...args)=>instance()[k](...args)])),
-  run:()=>process.env.RUNTIME_ROLE==='gateway'?Promise.resolve({status:'completed',skipped:true,reason:'gateway_runtime'}):
-    process.env.META_MARKETING_ENROLLMENT_WORKER_ENABLED==='true'?instance().run():Promise.resolve({status:'completed',skipped:true,reason:'meta_enrollment_worker_disabled'})};
+  run:options=>process.env.RUNTIME_ROLE==='gateway'?Promise.resolve({status:'completed',skipped:true,reason:'gateway_runtime'}):
+    process.env.META_MARKETING_ENROLLMENT_WORKER_ENABLED==='true'?instance().run(options):Promise.resolve({status:'completed',skipped:true,reason:'meta_enrollment_worker_disabled'})};
