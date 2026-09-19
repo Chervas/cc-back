@@ -1,7 +1,7 @@
 {
   "back": {
     "candidateBase": "ac4703a38796a7ecf469cd91e6b9e2619d57a0cc",
-    "devSource": "9929de205c29400df462feea5853ffc1fd1484b3",
+    "devSource": "5c217d9017e6e7209b83cd7723fb05f4d8f2ba07",
     "files": [
       {
         "path": "migrations/20260919040000-meta-marketing-broker-registry.js",
@@ -92,6 +92,11 @@
         "path": "models/metamarketingoauthslot.js",
         "sha256": "de98dc8b41658369466718515bdb85340d7436d0ac9e0429a7ee976b0359f0f9",
         "exactDev": true
+      },
+      {
+        "path": "ops/security/schema-contract.json",
+        "sha256": "d56683a34699f144cf0ec12302efdccb34ccd6d7810a8ed91f98770f2c756d41",
+        "exactDev": false
       },
       {
         "path": "services/integrations-broker/package-lock.json",
@@ -554,6 +559,11 @@
         "exactDev": false
       },
       {
+        "path": "src/lib/securitySchemaContract.js",
+        "sha256": "56b9331ab140f2348faaba8e669f0af6a36e7bb5d7e916519676d71e96f2ff57",
+        "exactDev": true
+      },
+      {
         "path": "src/lib/sharedMarketingAssetMutationAccess.js",
         "sha256": "2e496dcc0764ffe6730a58e3bcbde428b643c620aa694e079ac3033fbe22f466",
         "exactDev": true
@@ -577,6 +587,11 @@
         "path": "src/routes/oauth.routes.js",
         "sha256": "21a15cdd53f66eabec5c73a331ca55dfc322fa1d899f561d60d15dad1b34490a",
         "exactDev": false
+      },
+      {
+        "path": "src/scripts/security-schema-release.js",
+        "sha256": "5072ebd01a022ba85bab0be4e4b865e52402ca08f232a20d728ab4e8e87650c2",
+        "exactDev": true
       },
       {
         "path": "src/scripts/tests/fixtures/business_profile_discovery.fixture.js",
@@ -634,6 +649,11 @@
         "exactDev": true
       },
       {
+        "path": "src/scripts/tests/fixtures/meta_pre_migration_schema.json",
+        "sha256": "e7bd4462d233f2f76d5224b3f91f7c1fd71557a7943fa66b7b9ef95936d44450",
+        "exactDev": true
+      },
+      {
         "path": "src/scripts/tests/fixtures/meta_revocation_audit.fixture.js",
         "sha256": "b9b3f2ce28859cd3fc516e3cfc39464484ce31aaf57a7620cc0e6c951a48c3bd",
         "exactDev": true
@@ -684,6 +704,11 @@
         "exactDev": true
       },
       {
+        "path": "src/scripts/tests/meta_schema_release_mysql.test.js",
+        "sha256": "a298a850c26ea2daa96b95e551e56f77b8af4839ff7bddfee5e310e0fa2d288c",
+        "exactDev": true
+      },
+      {
         "path": "src/scripts/tests/meta_security_containment.test.js",
         "sha256": "96deee9b10d182c786f2f1d745995cb7bc0b42f7a3a52c5b3779c1d5d3ba1449",
         "exactDev": true
@@ -697,6 +722,11 @@
         "path": "src/scripts/tests/scheduled_jobs_orchestration.test.js",
         "sha256": "03520def79ce37548f2bf3575718407455dd60af8e6c938a12a019c9429e506d",
         "exactDev": false
+      },
+      {
+        "path": "src/scripts/tests/security_schema_release.test.js",
+        "sha256": "2eab1bf8c4e0284f6bfaefd6cd8b2d1e2c1f7548a1ad74371804190c608882a6",
+        "exactDev": true
       },
       {
         "path": "src/services/metaConnectionMetadata.service.js",
@@ -875,12 +905,32 @@
   "reviewedAt": "2026-09-19",
   "scope": "Selective CRM Meta consumers and QA dependencies; not a deployed release or real-provider acceptance. DEV needs its own immutable composition preserving isolated-security-v2.",
   "candidateCommits": {
-    "back": "ae49fedcbc0370511c518dbb71a59120d202542a",
+    "back": "07e37fc77bc7c9a11fea0aeb757d8c7d5817aacd",
     "front": "a8331d0d29b6f9410974b4c61add6b8ea5b2f7a2"
   },
   "deployed": false,
   "realProvider": false,
   "publicMfa": false,
-  "metaDdlApplied": false,
-  "evidence": "qa-evidence/security-resume-20260917/meta-clinical-candidate-20260919/"
+  "metaDdlApplied": {
+    "dev": true,
+    "staging": false,
+    "gatewaySharedClinical": false
+  },
+  "evidence": "qa-evidence/security-resume-20260917/meta-clinical-candidate-20260919/",
+  "schemaPublication": {
+    "at": "2026-09-19T12:46:30.974Z",
+    "appliedRuntime": "dev",
+    "migrations": 9,
+    "metaTablesEmpty": 9,
+    "candidateContractTables": 27,
+    "preservedRuntimeContractTables": 34,
+    "devSourceContractTables": 49,
+    "currentRuntimeAndCandidateCompatible": true,
+    "runtimeSourceUnchanged": true,
+    "runtimeConfigurationUnchanged": true,
+    "publicProcessesUnchanged": true,
+    "publicSchemaUnchanged": true,
+    "realMfaAcceptance": false,
+    "evidence": "qa-evidence/security-resume-20260917/meta-schema-publication-20260919/"
+  }
 }

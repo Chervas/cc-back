@@ -11646,10 +11646,11 @@ la prueba fuerza la lectura, no habilita cron/notificaciones ni acredita su entr
 
 ### Candidata selectiva de consumidores Meta (19/09/2026)
 
-Preparada sobre las ramas públicas actuales: backend `ae49fedcbc0370511c518dbb71a59120d202542a`, frontend
+Preparada sobre las ramas públicas actuales: backend `07e37fc77bc7c9a11fea0aeb757d8c7d5817aacd`, frontend
 `a8331d0d29b6f9410974b4c61add6b8ea5b2f7a2`, rama `security/meta-clinical-candidate-20260919` en ambos repositorios.
 Incluye metadatos, OAuth, descubrimiento, selección/confirmación/retirada, auditoría
-v24 y tres jobs cerrados. No se ha desplegado, aplicado DDL ni activado cohortes.
+v24 y tres jobs cerrados. API/UI todavía sin desplegar ni cohortes activadas;
+las nueve DDL Meta ya están aplicadas solo en DEV desde las 12:46 UTC.
 Fuentes, adaptación de dependencias, comandos y recuperación en
 `docs/security/meta-clinical-candidate.md` y su manifiesto JSON.
 
@@ -11668,9 +11669,25 @@ retirada tras nueva sesión/logout. Proveedores/entrega MFA ficticios: no acredi
 login público ni aceptación del titular. SQL de grupo:17 consultas/127 ms con100
 activos y1.000 clínicas; muestra aislada, no garantía de carga real.
 
-Metadata SQL operativa leída a las12:21 UTC: ninguna de las siete tablas Meta
-nuevas ni columnas de marcador de credencial existen todavía en DEV/staging.
-Antes del corte, ampliar el contrato de esquema (el actual18/34 no cubre Meta),
-revisar/aplicar DDL04–12 y componer DEV sobre su release aislada. Fijar ejecutor
-único por entorno sin jobs clínicos DEV; app/slots/IAM y cohorte de titular siguen
-pendientes. Los runtimes AWS vacíos permanecen como en el acta anterior.
+Esquema Meta aplicado solo en DEV el 19/09 a las 12:46 UTC: DDL04–12,
+con plan fijado por revisión/hash, respaldo de estructura y diario de cada paso.
+Las dos tablas originales estaban vacías al detener API/worker; las nueve tablas
+quedan vacías. Se conservan las claves foráneas originales y los diarios nuevos
+no admiten cascadas. El preflight verifica además CHECK aplicados y la expresión
+generada de vencimiento; la prueba MySQL rechaza alteraciones reales de esas
+restricciones y conserva tokens ficticios, pausas, Unicode e identidades legacy.
+
+El contrato fuente DEV pasa de 40 a 49 tablas; la candidata CRM, de 18 a 27.
+La release aislada ejecutada conserva su contrato de 34 tablas. Pasan tanto ese
+contrato como el de 27 tras el cambio: no aplicar migraciones ajenas para forzar
+el contrato completo de la fuente DEV ni sustituir su runtime por la candidata
+CRM. API y worker DEV arrancan con la misma release/configuración, MFA enforce y
+cron/jobs clínicos OFF; CRM/gateway no se reinician. QA de login anónimo real en
+ambos frontends, escritorio/móvil, sin mocks: no sustituye aceptación MFA.
+
+Staging conserva el mismo digest de esquema y sigue pendiente de las nueve DDL;
+la candidata no puede publicarse allí hasta un corte revisado con respaldo de sus
+datos. Falta componer los consumidores sobre DEV aislado y fijar el ejecutor único
+por entorno sin jobs clínicos DEV; app/slots/IAM, ámbito elegido y OAuth real del
+titular también siguen pendientes. Los servicios AWS permanecen como en el acta
+anterior. Procedimiento, evidencias y recuperación en el runbook de la candidata.

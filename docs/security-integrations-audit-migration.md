@@ -82,7 +82,9 @@ pendientes como parte de un push de código.
 ## Esquema de seguridad y publicación entre entornos
 
 El contrato `ops/security/schema-contract.json` fija las tablas, columnas,
-collations, índices y migraciones que necesita esta capa de código. Se actualiza
+collations, índices y migraciones que necesita esta capa de código. En Meta
+comprueba también CHECK aplicados, expresiones generadas y el conjunto exacto de
+claves foráneas, incluido el conjunto vacío en diarios independientes. Se actualiza
 junto a las migraciones revisadas, nunca copiando automáticamente lo que haya en
 la BD. Admite tablas y columnas adicionales de otros módulos. La validación no
 certifica todos los módulos ni sustituye QA funcional, claves, permisos o flags.
@@ -125,6 +127,14 @@ de esquema/código o un destino distinto de `clinicaclick_dev_isolated`. Usa un
 bloqueo SQL y la misma conexión para DDL y registro. No llama a `sync()` ni aplica
 todo el historial pendiente. Las migraciones se revisan antes: también pueden
 contener código JS con efectos ajenos a SQL.
+
+El corte Meta del 19/09 detuvo también `clinicaclick-dev-security.service` antes
+de respaldar/aplicar sus nueve DDL y arrancó después **la misma release**, tras
+pasar los contratos del runtime y del candidato. Cuando exista ese worker,
+incluirlo entre los escritores que deben detenerse; el CLI solo verifica por sí
+mismo que la API esté detenida. No confundir la fuente DEV49 con la release34 ni
+con el candidato CRM27. Estado y recuperación en
+[la candidata Meta](security/meta-clinical-candidate.md#esquema-dev-aplicado-y-verificado--1909-1246-utc).
 
 MySQL confirma DDL de forma implícita. Ante fallo, DEV queda detenido, la
 migración incompleta no se registra y el diario conserva el último paso. Revisar

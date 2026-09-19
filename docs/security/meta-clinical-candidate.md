@@ -1,6 +1,6 @@
 # Candidata selectiva CRM de consumidores Meta — 19/09/2026
 
-Estado: candidata comprobada, **sin publicación de API/UI ni DDL operativa**.
+Estado: candidata comprobada, **DDL04–12 aplicadas solo en DEV; API/UI sin publicar**.
 Contrato canónico en [13](../../src/Documentacion/13-backend.md#candidata-selectiva-de-consumidores-meta-19092026).
 Fuente y huellas en `meta-clinical-candidate.json`. El manifiesto enumera también
 fixtures y dependencias necesarias para probar; no autoriza ejecutar todos sus
@@ -8,7 +8,7 @@ entrypoints ni sustituir los servicios AWS.
 
 ## Fuente y alcance
 
-- Backend `ae49fedcbc0370511c518dbb71a59120d202542a`, desde staging `ac4703a3`, worktree
+- Backend `07e37fc77bc7c9a11fea0aeb757d8c7d5817aacd`, desde staging `ac4703a3`, worktree
   `/home/ubuntu/wt/security-meta-back-candidate-20260919`.
 - Frontend `a8331d0d29b6f9410974b4c61add6b8ea5b2f7a2`, desde staging `288ca987`, worktree
   `/home/ubuntu/wt/security-meta-front-candidate-20260919`.
@@ -26,10 +26,10 @@ El lector de auditoría entiende las versiones intermedias ya admitidas en AWS;
 ello no publica las integraciones Google. La clausura de fixtures incluye módulos
 compartidos del broker y su lock, sin activarlos como servicios del backend.
 
-Las seis adaptaciones backend y cinco frontend frente a DEV están enumeradas en
+Las adaptaciones backend y frontend frente a DEV están enumeradas en
 el manifiesto (`exactDev=false`): montaje sin routers Google pendientes, catálogo
 público de 39 jobs más tres Meta, pruebas correspondientes, desconexión Google
-conservada y traducciones que incorporan solo claves Meta. Los helpers compartidos
+conservada, contrato SQL selectivo y traducciones que incorporan solo claves Meta. Los helpers compartidos
 incluyen proyecciones de metadatos, bloqueo persistente y primarias de grupos.
 
 ## Dependencias detectadas mediante pruebas
@@ -79,16 +79,50 @@ Los enlaces locales a dependencias se usaron solo después de comparar manifest 
 lock; no deben copiarse a la release aislada. Instalar/verificar las dependencias
 propias requeridas por los contratos antes de arrancar la API.
 
-## Antes de publicar
+## Esquema DEV aplicado y verificado — 19/09, 12:46 UTC
 
-Lectura de metadata SQL a las 12:21 UTC: DEV y staging tienen **cero** de las siete
-tablas Meta nuevas, cero columnas `credentials_external`/`broker_app_id` y ninguna
-DDL04–12 registrada. Los gates Meta siguen sin configurar; MFA permanece enforce.
-La sesión AWS se comprobó con STS; no se modificaron servicios ni secretos AWS.
+Las nueve migraciones04–12 se aplicaron una sola vez con `apply-dev` de la candidata
+`07e37fc7`, plan fijado por hashes y diario fsync. Antes se comprobaron el contrato
+actual y la ausencia de trabajos activos, se detuvieron exclusivamente API/worker
+DEV y se respaldaron estructura, historial y metadata. Las tablas originales
+`MetaConnections`/`ClinicMetaAssets` tenían cero filas también con ambos servicios
+detenidos: no fue necesario exportar credenciales ni datos de pacientes.
 
-1. Ampliar el preflight para cubrir estas DDL/modelos: el contrato actual de 18/34
-   tablas no acredita Meta. Preparar y revisar el plan exacto04–12, dependencia,
-   respaldo puntual y diario DDL; MySQL no ofrece rollback transaccional de DDL.
+Resultado: nueve DDL registradas, siete tablas nuevas y nueve tablas Meta vacías;
+1,903 s entre el primer inicio de migración y la comprobación final del diario.
+Las pruebas contra MySQL aislado conservan filas legacy ficticias, tokens, pausas,
+Unicode y relaciones; rechazan mezclas de credenciales, claims duplicados y una
+inversa con datos. El preflight detecta CHECK desactivado, expresión generada
+alterada, cascada añadida y falta del índice de última selección. DEV: cinco tests
+unitarios y dos MySQL; candidata: cinco unitarios y la cadena MySQL completa.
+
+El contrato fuente DEV es de49 tablas (antes40), el candidato CRM de27 (antes18).
+El runtime DEV sigue con su contrato34: **ambos contratos34/27 pasan** después del
+cambio. No publicar toda la fuente DEV ni aplicar DDL ajena para satisfacer49.
+Se reiniciaron los mismos servicios con el mismo enlace y configuración protegida;
+MFA sigue enforce, cron/jobs clínicos false. PIDs y arranques de CRM/gateway intactos.
+Las primeras lecturas de logs no contienen errores de esquema ni los marcadores
+comprobados de fallo del worker; esto no acredita capacidad bajo carga real.
+
+Chromium real verifica login anónimo en CRM/DEV,1440/390 px, sin mocks de API:
+HTTP200, `/api/auth/me`401, formulario vacío sin POST, cero errores JS/5xx u overflow.
+Se revisaron visualmente las capturas CRM escritorio y DEV móvil. No se usó una
+sesión autenticada ni se envió MFA: el recorrido autenticado sigue pendiente.
+Evidencia privada: `qa-evidence/security-resume-20260917/meta-schema-publication-20260919/`,
+especialmente `dev-plan.json`, `dev-schema-point-backup.json`, `dev-journal.jsonl`,
+`dev-operation-*.json`, `preflight-dev-after.json`, `current-dev-contract-after.json`
+y `login-smoke.json`. No repetir ese plan ya aplicado.
+
+## Antes de publicar API/UI y migrar staging
+
+Staging conserva el digest SQL previo: mismo esquema, doce diferencias Meta y
+nueve DDL pendientes. No se modificaron servicios, secretos o recursos AWS en
+este corte. Los gates Meta siguen sin configurar; MFA permanece enforce.
+
+1. Preparar un corte explícito de las nueve DDL en staging, con comprobación de
+   datos existentes, respaldo privado de recuperación y diario. La herramienta
+   compartida sigue admitiendo escritura **solo en DEV**; su comprobación pública
+   es de lectura. MySQL no ofrece rollback transaccional de DDL.
 2. Componer DEV sobre su release aislada actual, conservando su perfil,
    credenciales, worker y restricciones. Esta candidata nace de CRM y no reemplaza
    directamente el runtime DEV. No encender cron/jobs clínicos DEV.
@@ -104,7 +138,10 @@ La sesión AWS se comprobó con STS; no se modificaron servicios ni secretos AWS
 
 ## Recuperación y coste
 
-Ahora basta conservar los runtimes actuales: no hubo cambio operativo. Tras
+Conservar los runtimes actuales y el esquema aditivo aplicado en DEV. No ejecutar
+un `down` para volver a la versión de código anterior: ya se verificó compatible.
+Si una DDL futura falla, mantener DEV detenido e inspeccionar el último paso del
+diario antes de decidir una reparación; no repetir automáticamente el plan. Tras
 introducir datos nuevos, cerrar altas y preservar controles, lectores v24,
 claims/marcas/diarios/revocaciones. No ejecutar inversas con datos, restaurar tokens
 SQL, volver a auditoría v19 ni repetir canarios o activaciones inciertas.
