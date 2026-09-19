@@ -10783,7 +10783,8 @@ corte en 99 y recuperación en `docs/security/meta-marketing-metadata.md`.
 ## Broker de lecturas Meta no WhatsApp (preparado, 19/09/2026)
 
 `meta-marketing-main.js` prepara un runtime separado de solo lectura y revocación
-local. No está desplegado ni conectado a los consumidores CRM. El proveedor
+local. No está desplegado. Su consumidor CRM de comprobación manual está
+preparado en la sección siguiente; los demás consumidores siguen pendientes. El proveedor
 `meta_marketing` admite `meta.marketing.connection.read.v1`,
 `meta.marketing.asset.read.v1` y `meta.marketing.asset.revoke.v1`; payload vacío,
 principal/entorno, clínica, conexión y activo fijados en cada grant. No descubre
@@ -10819,11 +10820,11 @@ persisten en el diario; una respuesta perdida no se recupera como una copia de
 salud pasada. Otra consulta explícita necesita UUID nuevo. Auditoría técnica v2
 conserva referencias y códigos, no tokens, nombres o respuestas del proveedor.
 
-TLS/firmas/SQLite/reinicio y límites probados con AWS/Meta ficticios. No acredita
-los permisos reales del proveedor, MFA público, recorrido visual de Ajustes ni
-integración con MySQL del consumidor. Continúan pendientes registro/asignaciones
-CRM y revocación coordinada, OAuth nuevo en vault, consumidores/UI, despliegue,
-IAM/grants y aceptación real. Meta Ads, CAPI y sincronizaciones siguen en pausa;
+TLS/firmas/SQLite/reinicio y límites probados con AWS/Meta ficticios. El corte
+posterior añade MySQL, comprobación manual en Ajustes y auditoría humana v20,
+descritos abajo. No acredita permisos reales del proveedor ni MFA público.
+Continúan pendientes OAuth nuevo en vault, alta de registros/grants, revocación
+coordinada CRM→broker, consumidores restantes, despliegue y aceptación real. Meta Ads, CAPI y sincronizaciones siguen en pausa;
 WhatsApp conserva su transporte. Runbook en `docs/security/meta-marketing-broker.md`,
 estado en 19, costes en 39 y evidencia en 99.
 
@@ -10857,8 +10858,72 @@ ciclos A→B→A. El resumen de Marketing se invalida al cambiar de clínica. El
 compartido no intenta un estado sin ámbito tras un rechazo; el modelo del workspace
 traduce la pausa sin iniciar OAuth ni discovery. WhatsApp conserva su flujo separado.
 
-Preparación de consumidores locales, todavía sin conexión CRM→broker Meta ni
-migración de credenciales, registro/grants o revocación coordinada. La integración
-del runtime tipado de la sección anterior sigue pendiente. No se despliega ni
-habilita una cohorte con este corte. QA, carga y recuperación en
+Estas dos rutas siguen siendo locales. Con los dos gates de la comprobación
+manual abiertos, mappings añade `verificationAvailable` solo para registros
+activos del ámbito exacto; consulta SQL, sin llamar al broker. La operación manual
+separada se describe abajo. Sin migración de credenciales ni cohorte habilitada. QA, carga y recuperación en
 `docs/security/meta-settings-metadata.md`; madurez en 19 y evidencia/corte en 99.
+
+
+### Comprobación manual Meta desde CRM y registro v20 (preparado, 19/09/2026)
+
+`GET /oauth/meta/mappings/:mappingId/verification` usa sesión gestionada SQL y
+ámbito explícito. `META_MARKETING_BROKER_ENABLED` y
+`META_MARKETING_ACCESS_CHECK_ENABLED` deben valer `true`; por defecto permanece
+cerrado. La ruta recibe únicamente el mapping: conexión, app, sujeto, activo,
+clínicas y página padre de Instagram proceden del registro independiente
+`MetaMarketingBrokerBindings`, no del navegador. El grupo exige el ámbito completo
+y permiso actual sobre cada clínica, incluso si la cuenta tiene una clínica pivote.
+
+La migración `20260919040000-meta-marketing-broker-registry.js` prepara una tabla
+sin borrado en cascada y el marcador `MetaConnections.credentials_external` con
+`broker_app_id`. El CHECK SQL exige credencial local presente para legacy o
+credencial NULL con marcador/app válidos para vault. No copia, limpia, enrola ni
+activa conexiones. Solo se ha ejecutado contra MySQL temporal propio. La DDL debe
+preceder a la publicación del modelo; no arrancar ese modelo contra esquema antiguo.
+
+El lector rechaza estados staged/blocked, asignaciones incoherentes, alias del
+mismo activo sin registro consistente, shares fuera del ámbito, referencias
+primarias de grupos ajenos y cambios de permisos/bloqueos. Un bloqueo independiente
+sobrevive al borrado de su mapping e impide usar otro alias. Comprueba en SQL que
+OAuth, tokens de página/WhatsApp y additionalData sean NULL; obtiene booleanos,
+nunca sus valores. El contexto opaco se revalida antes/después del proveedor.
+Las consultas de listas se limitan a 1.001 y rechazan más de 1.000 filas; no se
+sustituye autorización actual por caché ni se mantiene transacción durante HTTP.
+
+`metaMarketingBrokerReader` admite solo las dos lecturas tipadas, payload vacío,
+UUID nuevo generado en servidor y respuesta cerrada con identidad comprobada.
+El cliente usa HTTPS, CA y firma Ed25519 privadas de solo lectura; no tiene clave
+de revocación. Archivos absolutos, sin symlinks, propios y sin permisos de grupo/u
+otros, máximo 64 KiB. Configuración distinta después de crear el cliente exige
+reinicio. El presupuesto del lector es 30 s, además del límite propio del broker;
+SQL lento aún puede superar ese tiempo de pared: no hay cancelación SQL global.
+
+La comprobación humana graba intento durable v20 antes de llamar al broker y
+resultado antes de devolver éxito; máximo de salud del outbox: menos de 10.000
+pendientes y antigüedad menor de 3.600 s. Una auditoría fallida devuelve 503 sin
+resultado. Después de guardar el resultado vuelve a comprobar contexto/sesión/ACL.
+`asset_verified` acredita la prueba remota en ese instante, no la entrega final
+al navegador ni disponibilidad de campañas. La misma referencia correlaciona
+el registro humano SQL/v20 con la auditoría técnica v2 del broker. Solo conserva
+actor/sesión, ámbito, referencias y hashes; no nombres, tokens ni respuesta íntegra.
+El panel existente acepta el tipo `integration.meta.access_check` y mantiene su
+acceso exclusivo a administradores técnicos y comprobación de versión S3.
+
+Ajustes ofrece «Comprobar acceso» por activo elegible, sin consulta remota al abrir
+la página. Un clic correcto muestra «Acceso comprobado. Meta Ads continúa en pausa»;
+`connected` y `availability.available` siguen falsos. Un cambio de clínica/sesión
+cancela o descarta respuestas viejas; 401/403 retira identidad y asignaciones tras
+refrescar el estado. El resultado vive solo en esa pantalla y no cambia mappings,
+readiness, campañas, CAPI, leads ni jobs. Activos sin etiqueta muestran su ID.
+
+Preparación probada con HTTP, MySQL, TLS, firmas, SQLite, componentes Angular y
+proveedores/Secrets/S3 ficticios. Router OAuth completo, MFA público, permisos Meta,
+cardinalidad real y publicación siguen pendientes. No existe todavía escritor
+OAuth/alta de este registro ni entrega durable coordinada de bajas CRM→broker.
+Antes de habilitar el gate humano publicar soporte v20 en lector y escritor AWS,
+con preflight propio; el candidato/canary v19 congelado no se modifica. Recuperación:
+cerrar ambos gates y conservar registros, exclusiones y auditoría; no restaurar
+credenciales ni ejecutar down sobre registros poblados. Runbook e inventario en
+`docs/security/meta-crm-broker.md` y `meta-crm-broker-consumers.json`; funcionalidad
+en 20.17, variables en 03, madurez/prioridades en 19/16 y carga/corte en 39/99.

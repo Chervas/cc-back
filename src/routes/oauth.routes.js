@@ -3806,6 +3806,17 @@ const metaConnectionMetadata = metaMetadataContract.createMetaConnectionMetadata
     loadMappings: metaMetadataContract.createMetaMetadataRepository(db)
 });
 router.get('/meta/connection-status', metaConnectionMetadata.handler());
+const metaMarketingAccessCheck = require('../services/metaMarketingAccessCheck.service').createMetaMarketingAccessCheck({
+    models: db, broker: require('../services/metaMarketingBrokerReader.service').forModels(db),
+    sessions: async req => {
+        try { return await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); }
+        catch { throw Object.assign(Error('meta_broker_session_required'), { code: 'meta_broker_session_required' }); }
+    },
+    authorizeScope: req => authorizeExplicitConnectionScope(req, 'read'),
+    scopeInput: (_req, authorized) => `${authorized.assignmentScope}:${authorized.assignmentScope === 'group' ? authorized.groupId : authorized.clinicId}`
+});
+router.get('/meta/mappings/:mappingId/verification', metaMarketingAccessCheck.handler());
+
 
 /**
  * GET /oauth/meta/assets

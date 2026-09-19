@@ -29,8 +29,9 @@ sesión al recibir. El selector no cae a la autorización de usuario sin ámbito
 El workspace interpreta el mismo motivo antes de descubrir cuentas.
 
 El resto de OAuth/Meta no está auditado íntegramente por este corte. El consumidor
-CRM del runtime `meta-marketing-*` sigue pendiente: registro independiente de
-identidad/grants, OAuth nuevo en vault, baja coordinada, auditoría del actor,
+CRM del runtime `meta-marketing-*` avanza en [el corte posterior](meta-crm-broker.md):
+registro independiente, lector manual y auditoría humana preparados. Siguen
+pendientes escritor de alta/grants, OAuth nuevo en vault, baja coordinada,
 operaciones restantes y aceptación con el titular. No usar estas pantallas como
 prueba de que la migración de credenciales terminó. No cambia DDL, jobs, MFA,
 pausas clínicas, infraestructura ni configuración de proveedor.

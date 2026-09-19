@@ -1,7 +1,8 @@
 # Lecturas Meta no WhatsApp desde el vault
 
-Preparado el 19/09/2026. No desplegado, sin cohorte real y sin consumidores CRM
-conectados. Contrato canónico en [13-backend](../../src/Documentacion/13-backend.md#broker-de-lecturas-meta-no-whatsapp-preparado-19092026).
+Preparado el 19/09/2026. No desplegado ni con cohorte real. El corte posterior
+[CRM y comprobación manual](meta-crm-broker.md) añade un consumidor preparado;
+este documento conserva el contrato y QA de la base del broker. Contrato canónico en [13-backend](../../src/Documentacion/13-backend.md#broker-de-lecturas-meta-no-whatsapp-preparado-19092026).
 La contención no WhatsApp y las pausas clínicas permanecen. WhatsApp conserva
 su transporte independiente. No usar credenciales investigadas como QA.
 
@@ -55,7 +56,8 @@ CPU, disco, sockets ni recursos AWS. Los límites son por proceso, no globales.
 Una lectura correcta hace seis llamadas Secrets (cuatro Describe/dos Get) y una
 inspección Meta; cuenta/página añaden un GET, Instagram dos. No se cachea autoridad
 para ahorrar comprobaciones. Sin recurso creado ni precio/ahorro facturado medido;
-medir volumen/coste antes de abrir cohortes. No hay nueva DDL o job del CRM.
+medir volumen/coste antes de abrir cohortes. Esta base no añade DDL/job CRM;
+el consumidor posterior sí prepara DDL, sin aplicarla fuera de su MySQL temporal.
 
 `persistResult:false`: diario de referencia/digest/estado, sin nombres/respuestas.
 Repetir UUID no devuelve salud pasada: `outcome_unknown`; la consulta explícita
@@ -84,17 +86,19 @@ durante `debug_token` de revocación del usuario inspeccionado: el primero no
 demuestra la segunda y devuelve indisponibilidad sin bloquear duraderamente al
 usuario. La suite conserva las comprobaciones de los proveedores anteriores.
 
-No cambia una pantalla ni conecta la API CRM al runtime. Las capturas anteriores
-del asistente pausado no prueban estas operaciones. La preparación posterior del
+El corte inicial de esta base no cambiaba pantallas ni conectaba CRM. Las capturas
+del asistente pausado no prueban por sí solas estas operaciones. La preparación posterior del
 estado local y Ajustes/selector está descrita en
 [lector local](meta-settings-metadata.md); no ejecuta este transporte. Continúan
-pendientes registro CRM, consumidores del broker y discovery de activos. No se
-declara completo el bloque sin su aceptación visual y real.
+pendientes el escritor de alta del registro, OAuth, baja coordinada CRM→broker,
+discovery y consumidores restantes. El registro, lector manual y auditoría humana
+v20 ya están preparados y probados en [el corte posterior](meta-crm-broker.md),
+con proveedores ficticios. No se declara completo el bloque sin aceptación real.
 Antes de publicar:
 
-1. Completar registro CRM de identidad/activos/grants, auditoría del actor humano,
-   permisos de todas las clínicas afectadas, baja coordinada y rechazo durante I/O.
-   No asignar un grupo usando solo su clínica representativa.
+1. Completar escritores del registro y grants y baja coordinada desde CRM. El
+   lector preparado ya exige permisos de todas las clínicas, rechazo durante I/O
+   y auditoría humana v20; falta desplegar y aceptar su recorrido real.
 2. Autorizar credenciales nuevas directamente en vault; no usar tokens
    invalidados/investigados ni fallback SQL. Aceptar app review, scopes, tipos,
    granularidad y campos reales con el titular.

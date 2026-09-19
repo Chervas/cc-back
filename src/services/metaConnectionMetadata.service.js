@@ -30,7 +30,7 @@ function createMetaConnectionMetadata({ authorize, resolve, session, loadMapping
   async function read(req, mappings = false) {
     const before = await snapshot(req);
     const { connection, assignment, scope, source } = before.resolved;
-    const rows = mappings && connection ? await loadMappings(connection.id, before.clinicIds) : [];
+    const rows = mappings && connection ? await loadMappings(connection.id, before.clinicIds, { scopeKey: scope?.scopeKey }) : [];
     if (!Array.isArray(rows) || rows.length > 1000) fail('meta_metadata_limit', 503);
     const after = await snapshot(req);
     if (before.signature !== after.signature) fail('meta_metadata_scope_changed', 409);
@@ -56,7 +56,7 @@ function createMetaConnectionMetadata({ authorize, resolve, session, loadMapping
         avatar_url: row.clinica?.url_avatar || null }, assets: { facebook_pages: [], instagram_business: [], ad_accounts: [] }, totalAssets: 0 });
       const group = grouped.get(id);
       const key = { facebook_page: 'facebook_pages', instagram_business: 'instagram_business', ad_account: 'ad_accounts' }[row.assetType];
-      group.assets[key].push(Object.fromEntries(['id', 'metaAssetId', 'metaAssetName', 'assetType', 'createdAt', 'updatedAt'].map(k => [k, row[k]])));
+      group.assets[key].push({ ...Object.fromEntries(['id', 'metaAssetId', 'metaAssetName', 'assetType', 'createdAt', 'updatedAt'].map(k => [k, row[k]])), verificationAvailable: row.verificationAvailable === true });
       group.totalAssets++; count++;
     }
     return { success: true, availability, connectionStored: !!connection, mappings: [...grouped.values()], totalMappings: count, totalClinics: grouped.size };
@@ -72,11 +72,20 @@ function createMetaConnectionMetadata({ authorize, resolve, session, loadMapping
   } };
 }
 function createMetaMetadataRepository(models) {
-  return (connectionId, clinicIds) => models.ClinicMetaAsset.findAll({
+  return async (connectionId, clinicIds, { scopeKey } = {}) => {
+    const rows = await models.ClinicMetaAsset.findAll({
     attributes: ASSET_FIELDS,
     where: { metaConnectionId: connectionId, isActive: true, clinicaId: { [Op.in]: clinicIds }, assetType: { [Op.in]: TYPES } },
     include: [{ model: models.Clinica, as: 'clinica', attributes: ['nombre_clinica', 'url_avatar'] }],
     order: [['clinicaId', 'ASC'], ['id', 'ASC']], limit: 1001, logging: false
-  });
+    });
+    if (process.env.META_MARKETING_BROKER_ENABLED === 'true' && process.env.META_MARKETING_ACCESS_CHECK_ENABLED === 'true' && rows.length && rows.length <= 1000) {
+      const bindings = await models.MetaMarketingBrokerBinding.findAll({ attributes: ['mapping_id'], raw: true, logging: false, limit: 1001,
+        where: { mapping_id: { [Op.in]: rows.map(row => row.id) }, meta_connection_id: connectionId, scope_key: scopeKey, state: 'active' } });
+      const ids = new Set(bindings.map(row => Number(row.mapping_id)));
+      for (const row of rows) row.verificationAvailable = ids.has(Number(row.id));
+    }
+    return rows;
+  };
 }
 module.exports = { createMetaConnectionMetadata, createMetaMetadataRepository, ASSET_FIELDS, TYPES };

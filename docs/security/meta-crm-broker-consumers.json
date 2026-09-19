@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "ffdf3ee3dcb76b71f073ced9033ce0aee6f04399",
+    "front": "45bd8d8fcec3b9fd942159e72afa177304a29ac6"
+  },
+  "includesWorkingChanges": true,
+  "scope": "Prepared CRM Meta manual access-check reader, independent registry/credential exclusion, human audit v20 and Angular button/panel. No deployment, real cohort, OAuth enrollment or coordinated CRM revocation.",
+  "preparedFiles": {
+    "back": {
+      "migrations/20260919040000-meta-marketing-broker-registry.js": "375f6994beef8032bb69aaf5c39a1f8b525fcdcef774ea4d520850a78f573595",
+      "models/MetaConecction.js": "1fab25ef5a3d558c3faf898a2dfb915dac2a9d8b338bb8973524cdc171124536",
+      "models/metamarketingbrokerbinding.js": "1e82943a3ed0d8076f236a23ff907519a2a9d9d03ab171d556ad3a4dec310aea",
+      "services/platform-audit/src/event.js": "cb033da1ffcb02b37317586e6ec096ab24ba0000239731e76c055fc5a9734081",
+      "services/platform-audit/src/meta-access-check-event.js": "5550eb68947f058060e27c26c9791134ce6d64f6e4f1bb51cfdc8f9a4e81a301",
+      "services/platform-audit/src/reader-protocol.js": "a68dfbe86ac5d1699f1b012fa624cf710daf68e40ec3c0e0dae963148baa45a1",
+      "services/platform-audit/src/view-contract.js": "ee86b4c3cd49b02e8daff1363a68e207804034c57681f6e33a310cf48fca66c3",
+      "services/platform-audit/test/google-action-plan.test.js": "9ed7d2eb00d473b96900c43d12b7d1a7d36a51dc0f7f2fbab889bd5f7ca21693",
+      "services/platform-audit/test/google-ads-enrollment.test.js": "cd5f4a564a69d7929a0815143ea7538d56cb19e0358004f952d91e0a73229be3",
+      "services/platform-audit/test/google-destination.test.js": "51e27809783dfe276ad10616efc594fa5a2d889733cef8e7b499bb4c485009b2",
+      "services/platform-audit/test/google-receipt-review.test.js": "4042f6db5e83a83113eef6945a1a83babae4f0239e348ce2b14b0cb5ac3b2560",
+      "services/platform-audit/test/meta-access-check.test.js": "530e3191250933a699e35501ba2e13a2814b55d889f1f54e9760aa0fae92d1c7",
+      "services/platform-audit/test/whatsapp-authorization-event.test.js": "e8224739bf78ed08e5faaf04a392c3fd24ba9c12f725f2fe5c58cee4547fa2ea",
+      "src/routes/oauth.routes.js": "083966db34a30af50240949ca7b5833267d4abc16af1ee2c539b26dede636c0a",
+      "src/scripts/tests/fixtures/meta_connection_metadata_visual.fixture.js": "91c9dca6ec533bb76c901a1ececfa0041c4b746f5677bcd25f115b7b226e4554",
+      "src/scripts/tests/fixtures/meta_marketing_access_e2e.fixture.js": "786a7a6521a46635274e257024bfcac88562a0d59368c84d53db5ce923e09337",
+      "src/scripts/tests/fixtures/meta_settings_visual_host.fixture.js": "7eea28f7e1d019dff9d9cf635ec246f73678e7e10f2c79e0b9e670fc18ead3cd",
+      "src/scripts/tests/meta_marketing_broker_mysql.integration.js": "d9e039618e953daec4f7c5efff2694783ce0c9cdf1009315352406764e02f4a2",
+      "src/services/metaConnectionMetadata.service.js": "a21af368a12c524c4a3f0942c75484056d0903a42f88578e29173542433119d0",
+      "src/services/metaMarketingAccessCheck.service.js": "ee0fe0a92ff3692827f7eed2d35d8c4bcb5e8e344182fb861bc538157c3135ec",
+      "src/services/metaMarketingBrokerReader.service.js": "db922843625a9c6f62e88c6b2917b1b84450f972c2991e591adcd39eb2ae3839",
+      "src/services/metaMarketingBrokerScope.service.js": "71604af29aa1a163dd569496df2dcba5357907dfbb7b3e054a0065f8f7c155f5",
+      "src/services/platformAudit.view.js": "32db01ba5cc3d2117334b939080ad993ffa1f35a8fd95833e2e0c02eb2a9aff0"
+    },
+    "front": {
+      "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.html": "d7b6ddae19c0b958ad10b794364210750483e6a13b1d482368f18bd6d6a52d31",
+      "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.ts": "a11dbfb242f3329ed071049a2fc191e2e47a3454e4999a23c3bcb332474354e0",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.html": "b0f32a97d5971c35d98c392e4bb95fc51bf6624dc4e37578de13a0d77b5e6dd7",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.ts": "b2fa8c95a12e764c8e078f96483e4fea2e725d8d42be56a70c7c56fc736d5082",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.service.ts": "59ae68c3c9cb0a82e8bcff52cf14af18c6bb9a0b4ffd20942f2517fabd9d83cf",
+      "src/assets/i18n/cat.json": "36e7b777b5fd04897373f87781108fe400f2f47f000b5dff02fa162dd9cd111d",
+      "src/assets/i18n/es.json": "169cd3fbce9c2d3565788ddc701f0a74ef56b80262a66c71dabdd417d9dd8c0c"
+    }
+  },
+  "qa": {
+    "mysqlGroups": 10,
+    "metadataRegressionGroups": 9,
+    "auditTests": 85,
+    "brokerTests": 27,
+    "containmentRegressionTests": 10,
+    "angularBuild": "development; passed; existing CommonJS debug warning",
+    "visual": {
+      "shots": [
+        "desktop-verified",
+        "mobile-verified",
+        "permission-revoked",
+        "audit-v20"
+      ],
+      "errors": [],
+      "writes": [],
+      "blocked": [],
+      "verificationRequests": 3
+    },
+    "metadataVisual": {
+      "shots": [
+        "desktop-settings",
+        "mobile-settings",
+        "changed-clinic",
+        "permission-revoked",
+        "selector-paused"
+      ],
+      "metaRequests": 23,
+      "errors": [],
+      "writes": [],
+      "blocked": [],
+      "actualComponents": [
+        "SettingsConnectedAccountsComponent",
+        "AssetMappingComponent"
+      ],
+      "workspace": "actual decision model; no full workspace rendering"
+    },
+    "firstReads": {
+      "queries": 148,
+      "elapsedMs": 293
+    },
+    "firstManualCheck": {
+      "queries": 64,
+      "elapsedMs": 246
+    },
+    "firstLocalOpen": {
+      "queries": 29,
+      "elapsedMs": 88
+    },
+    "repeatedLocalOpens": {
+      "count": 8,
+      "queries": 232,
+      "minMs": 29,
+      "maxMs": 52
+    },
+    "commands": 18,
+    "secretCalls": 100,
+    "providerCalls": 34,
+    "queryCount": 1140,
+    "tokenSelects": 0,
+    "pool": {
+      "inUse": 0,
+      "waiting": 0
+    },
+    "correlatedHumanAndTechnicalEvents": true,
+    "wholeOauthRouter": false,
+    "publicMfa": false,
+    "realProvider": false,
+    "realS3": false,
+    "deployed": false
+  },
+  "pending": [
+    "OAuth directly to vault and registry/grant enrollment writer",
+    "coordinated durable CRM to broker revocation",
+    "remaining Meta discovery/campaign/CAPI/lead consumers",
+    "AWS audit v20 publication; frozen v19 remains separate",
+    "IAM/TLS and provider/public MFA acceptance",
+    "selective release/schema preflight and real-cardinality load acceptance"
+  ],
+  "cost": {
+    "incrementalBilledCost": null,
+    "billingRefreshed": false,
+    "secretCallsPerSuccessfulRead": 6,
+    "metaCallsPerSuccessfulAssetRead": {
+      "ad_account": 2,
+      "facebook_page": 2,
+      "instagram_business": 3
+    },
+    "humanAuditRowsPerSuccessfulManualCheck": 2
+  }
+}
