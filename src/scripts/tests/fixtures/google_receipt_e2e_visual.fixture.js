@@ -3,7 +3,7 @@
 // The parent owns all state and fake providers. Browser requests are loopback-only.
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),{createRequire}=require('node:module');
 module.exports=async({app,apiServer,report,submissions,token,setProviderState,revoke,renew,reads,ingests})=>{
-  const front=path.resolve(__dirname,'../../../../../front-dev');
+  const front=fs.realpathSync(process.env.GOOGLE_VISUAL_FRONTEND_SOURCE||path.resolve(__dirname,'../../../../../front-dev'));
   const req=createRequire(path.join(front,'package.json')),ts=req('typescript'),buildReq=createRequire(req.resolve('@angular-devkit/build-angular/package.json'));
   const esbuild=buildReq('esbuild'),sass=buildReq('sass'),puppeteer=require('puppeteer-core');
   const dir='src/app/modules/admin/apps/marketing/campaign-workspace/';

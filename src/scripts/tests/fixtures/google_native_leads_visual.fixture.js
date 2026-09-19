@@ -20,7 +20,7 @@ module.exports=async({sql,models,report,registerOwnedLoopbackServer})=>{
   const express=require('express'),app=express(),server=require('node:http').createServer(app);let browser,reads=0;const apiErrors=[];
   app.get('/api/intake/leads/search',async(req,res,next)=>{try{req.userData=await sessions.verify(sessions.bearer(req.headers.authorization));reads++;next();}catch(error){next(error);}},require('../../../controllers/intake.controller').listLeads);
   app.use((error,_req,res,_next)=>{apiErrors.push(error.message);res.status(error.status||500).json({error:error.code||'fixture_error'});});
-  const front=path.resolve(__dirname,'../../../../../front-dev'),req=createRequire(path.join(front,'package.json'));
+  const front=fs.realpathSync(process.env.GOOGLE_VISUAL_FRONTEND_SOURCE||path.resolve(__dirname,'../../../../../front-dev')),req=createRequire(path.join(front,'package.json'));
   const ts=req('typescript'),buildReq=createRequire(req.resolve('@angular-devkit/build-angular/package.json')),esbuild=buildReq('esbuild'),sass=buildReq('sass');
   const dir='src/app/modules/admin/apps/marketing/leads/',html=fs.readFileSync(path.join(front,dir+'leads.component.html'),'utf8');
   const start=html.indexOf('<div class="grid">',html.indexOf('<!-- Leads list -->')),end=html.indexOf('<!-- Paginator',start);assert(start>0&&end>start);

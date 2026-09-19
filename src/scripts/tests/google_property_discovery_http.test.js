@@ -2,7 +2,7 @@
 require('./fixtures/security_offline_runtime.cjs');
 const test = require('node:test'); const assert = require('node:assert/strict'); const http = require('node:http');
 const express = require('express'); const sequelize = require('sequelize');
-const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.fixture');
+const { loadDiscoverySource, unusedMetaSurfaceDependencies } = require('./fixtures/business_profile_discovery.fixture');
 const { propertyFixture } = require('./fixtures/google_property_discovery.fixture');
 const { credentialsFixture } = require('./fixtures/google_legacy_credentials.fixture');
 const { connectionForTestServer } = require('./fixtures/campaign_offline_runtime.cjs');
@@ -21,7 +21,7 @@ async function fixture(t, kind = 'analytics') {
       return state.noConnection ? null : { googleConnection: { id: state.changedConnection ? 82 : 81 } }; } },
     ClinicGoogleAdsAccount: empty, ClinicAnalyticsProperty: empty, ClinicWebAsset: empty, ClinicBusinessLocation: empty };
   const resolver = loadDiscoverySource('services/scopeConnectionResolver.service.js', { '../../models': models, sequelize });
-  const router = loadDiscoverySource('routes/oauth.routes.js', { express, sequelize, '../../models': models, './auth.middleware': auth,
+  const router = loadDiscoverySource('routes/oauth.routes.js', { ...unusedMetaSurfaceDependencies(), express, sequelize, '../../models': models, './auth.middleware': auth,
     '../services/accessSession.service': sessions, '../services/googlePropertyDiscovery.service': f.service,
     '../services/googlePropertyInventoryScope.service': { resolve: async () => state.effectiveMappings || [] },
     '../services/googleLegacyCredentials.service': legacy.credentials, '../services/scopeConnectionResolver.service': resolver,
