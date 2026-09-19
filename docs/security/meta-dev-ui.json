@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "candidate": "ddc84c5a8dc93d98a87ba11c71560c96463ce413",
+  "branch": "security/meta-dev-ui-20260919",
+  "base": "35ab61cf34c3af4da9e8cdc7771d18172f0906fd",
+  "componentSourceDev": "9d2879072191d0f9d054aa9cec521ee263110963",
+  "copyCorrectionDev": "034f0d99889b4ed72e4aad6a00e6b976fb6f366c",
+  "buildSource": "b75ea265d317d70961e85f9f271c6c6f681a31a8",
+  "buildHash": "25fc544988678fac",
+  "staticResourceOverlay": [
+    "assets/i18n/en.json"
+  ],
+  "files": [
+    {
+      "path": "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.ts",
+      "exactDev": true,
+      "sha256": "1e44c495e831e3db443ea50330825be93f61254360cfe72550f3116804eb802f",
+      "previousSha256": "9adb79ca3c1cb51ac50c72d68492c8d1539ab7f267257bd5beb7b06f6e6eaaff"
+    },
+    {
+      "path": "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.html",
+      "exactDev": true,
+      "sha256": "c2cd83d197232d14e70c34758d74221162f05c389c2b6dbf03863dd91e8fcb9c",
+      "previousSha256": "b9ddfd9ec77b851cc98c73b173128099e1a60041d8f432981a8eac09bd665f36"
+    },
+    {
+      "path": "src/app/modules/admin/pages/settings/connected-accounts/meta-enrollment-status.component.ts",
+      "exactDev": true,
+      "sha256": "98c2ec4a7936c3e4febba8b767cca37023d85d93e330569e26ad68491b52ecec",
+      "previousSha256": null
+    },
+    {
+      "path": "src/app/modules/admin/pages/settings/connected-accounts/meta-oauth-status.component.ts",
+      "exactDev": true,
+      "sha256": "52749dd416463b00fbf0d4a9894b8cad0ce7bf702cbc4cee6e2844c20075720e",
+      "previousSha256": null
+    },
+    {
+      "path": "src/app/modules/admin/pages/settings/connected-accounts/meta-revocation-status.component.ts",
+      "exactDev": true,
+      "sha256": "2f3d14baac7dfa4fe681d8c42b306f9406c906eadcd05d59d7e361eb577bde0d",
+      "previousSha256": null
+    },
+    {
+      "path": "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.ts",
+      "exactDev": true,
+      "sha256": "caaa5ecdcbdb8d9089d1596f62be10c6498b34c46102fc72728b05fd61f84f35",
+      "previousSha256": "810d1ee906cc043582c562403ade0c47727203ee3fca5b1ed4a7bd9ed0b9ee19"
+    },
+    {
+      "path": "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.html",
+      "exactDev": true,
+      "sha256": "4249f367ac2774359af6ac3128530d80f09fe2bb987205468a2822b2c8da4632",
+      "previousSha256": "1dd46f7a6b6e4726df5bfb7fb109ddf54d284d8b295712a6bda7ea6bb156feea"
+    },
+    {
+      "path": "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.service.ts",
+      "exactDev": true,
+      "sha256": "b65bb5d6ef074cbf98d52e81f7630fb8bdd7ad9766eba7f0261d84322180e5b4",
+      "previousSha256": "aa05d402ddf5351d75af4a4f1bb325eb00497f44d9b4cf078bacfb7d4132a1fe"
+    },
+    {
+      "path": "src/app/modules/admin/pages/settings/shared/asset-mapping.component.ts",
+      "exactDev": true,
+      "sha256": "1324361e2e3efd36bd5f1cab7f47f0d6c96b91b66c2357d48947670c35d7f349",
+      "previousSha256": "8e364304cc1c214de1c3b37d603197bc49926f3680794bd6e58b3b6bce1a0188"
+    },
+    {
+      "path": "src/app/modules/admin/pages/settings/shared/asset-mapping.component.html",
+      "exactDev": true,
+      "sha256": "5bc728e0b0856f6398667d6e755e81bb02084257817e1e9a731d2d8433f801bf",
+      "previousSha256": "02438ca585069d8dcbca50e47e5fcaba0caaa745fecdcb383ff29440db59fb80"
+    },
+    {
+      "path": "src/assets/i18n/es.json",
+      "exactDev": false,
+      "sha256": "050a0eec21c315085d3a683d1877ec15c5d1089eb059af2832a49063fbfc1dae",
+      "selectiveKeys": 88
+    },
+    {
+      "path": "src/assets/i18n/cat.json",
+      "exactDev": false,
+      "sha256": "eb652930cfb67ed6334f64b66f970bfaff33b6f6748350f1cb62a14a748ec7c3",
+      "selectiveKeys": 88
+    },
+    {
+      "path": "src/assets/i18n/en.json",
+      "exactDev": false,
+      "sha256": "27f7e2016ed208c758b273f14ce8066f30d771e362a50ba638d358154f6035f9",
+      "selectiveKeys": 33
+    }
+  ],
+  "published": true,
+  "publicationAt": "2026-09-19T13:45:28.306923+00:00",
+  "activeRuntime": "/home/ubuntu/www/front-dev-release-ddc84c5a8dc93d98a87ba11c71560c96463ce413-meta",
+  "previousRuntime": "/home/ubuntu/www/front-dev-release-2fa090e7-ses",
+  "indexSha256": "a7801212bb773e5f00078046c78373ece9dceeedb042f851135d3ed705e14a85",
+  "publishedBuildFiles": 677,
+  "metaGatesEnabled": false,
+  "realMfaAcceptance": false,
+  "realMetaAcceptance": false,
+  "evidence": "qa-evidence/security-resume-20260917/meta-dev-ui-20260919/"
+}

@@ -11736,3 +11736,34 @@ cambian. Pendientes: publicar UI compatible, identidades/transporte y primer ám
 con autorización del titular; revisar capacidad y parada con tráfico real antes
 de abrir gates. CRM todavía necesita su DDL y publicación coordinada. Detalle,
 manifest y recuperación en `docs/security/meta-dev-consumers.md`.
+
+
+### Interfaz Meta publicada en DEV aislado (19/09/2026, 13:45 UTC)
+
+Frontend `ddc84c5a8dc93d98a87ba11c71560c96463ce413`, rama
+`security/meta-dev-ui-20260919`, publicado sobre el backend `d07e9c85` sin reiniciarlo.
+Parte de la fuente realmente servida `35ab61cf`, contrastada con los 791 archivos
+fuente incluidos en sus mapas. Trece archivos de producto incorporan los estados
+Meta, selección/confirmación/retirada y proyecciones de actividad compatibles;
+conserva autenticación, WhatsApp, Google y las correcciones de carga/cabeceras.
+No publica el resto del desarrollo pendiente de Google. El aviso de pausa ya no
+asegura que se conserve una autorización después de retirarla explícitamente.
+Corrección desarrollada primero en DEV `034f0d99`, también en ES/CAT/EN.
+
+Compilación completa, 35 regresiones de autenticación/auditoría, nueve capturas
+Meta con SQL/HTTPS reales aislados y 16 de actividad pasan. Recuperar la respuesta
+perdida no repite la activación; la retirada funciona tras logout/sesión nueva.
+Graph, Secrets, S3 y entrega MFA son ficticios en ese ensayo; el visor usa actividad
+sintética. La aplicación completa se comprueba además contra la API DEV publicada,
+en acceso anónimo: login y redirección de Ajustes protegidos, 1440/390 px, sin POST,
+errores JS/5xx ni overflow. Tras publicar pasan cuatro capturas anónimas DEV/CRM.
+No sustituye el recorrido autenticado ni la aceptación real de Meta o del panel.
+
+Publicación atómica del enlace del preview, 677 archivos del build contrastados,
+assets anteriores y release anterior conservados. Índice y bundles comprobados por
+HTTP; MFA, configuración, procesos DEV/CRM/gateway y cron/jobs clínicos sin cambios.
+Todos los gates Meta siguen OFF. No AWS, DDL, conexiones, permisos o envíos reales
+nuevos. Faltan identidades/transporte, app/slots/IAM, ámbito elegido por el titular,
+OAuth/MFA y capacidad con proveedor real. CRM conserva su candidata sin publicar.
+Fuente, empaquetado, diagnóstico, evidencia y recuperación en
+`docs/security/meta-dev-ui.md` y su manifiesto JSON.

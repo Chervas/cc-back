@@ -1,7 +1,7 @@
 # Candidata selectiva CRM de consumidores Meta — 19/09/2026
 
-Estado CRM: candidata comprobada, API/UI sin publicar. **DDL04–12 y consumidores
-backend publicados solo en DEV**, con todos los gates Meta OFF; detalle en
+Estado CRM: candidata comprobada, API/UI sin publicar. **DDL04–12, consumidores
+backend e interfaz publicados solo en DEV**, con todos los gates Meta OFF; detalle en
 [la publicación DEV](meta-dev-consumers.md).
 Contrato canónico en [13](../../src/Documentacion/13-backend.md#candidata-selectiva-de-consumidores-meta-19092026).
 Fuente y huellas en `meta-clinical-candidate.json`. El manifiesto enumera también
@@ -99,8 +99,9 @@ alterada, cascada añadida y falta del índice de última selección. DEV: cinco
 unitarios y dos MySQL; candidata: cinco unitarios y la cadena MySQL completa.
 
 El contrato fuente DEV es de49 tablas (antes40), el candidato CRM de27 (antes18).
-El runtime DEV sigue con su contrato34: **ambos contratos34/27 pasan** después del
-cambio. No publicar toda la fuente DEV ni aplicar DDL ajena para satisfacer49.
+En ese corte el runtime DEV mantuvo su contrato34: **ambos contratos34/27 pasaron**
+después del cambio. La publicación posterior DEV usa 43; ver su acta. No publicar
+toda la fuente DEV ni aplicar DDL ajena para satisfacer 49.
 Se reiniciaron los mismos servicios con el mismo enlace y configuración protegida;
 MFA sigue enforce, cron/jobs clínicos false. PIDs y arranques de CRM/gateway intactos.
 Las primeras lecturas de logs no contienen errores de esquema ni los marcadores

@@ -1,7 +1,8 @@
 # Consumidores Meta en DEV aislado — 19/09/2026
 
 Estado: backend y worker publicados a las 13:13 UTC, **todos los gates Meta OFF**.
-No hay conexiones reales ni slots configurados. Frontend Meta aún sin publicar.
+No hay conexiones reales ni slots configurados. Frontend Meta publicado después,
+a las 13:45 UTC; ver [su acta](meta-dev-ui.md).
 Contrato canónico en [13](../../src/Documentacion/13-backend.md#consumidores-meta-publicados-en-dev-aislado-19092026-1313-utc).
 Fuentes y huellas en `meta-dev-consumers.json`.
 
@@ -106,7 +107,7 @@ volver a comprobar estado, datos y compatibilidad. No restaurar bases, secretos,
 recibos ni bajar los lectores AWS v24. Si aparecen altas/claims nuevos, la retirada
 o reparación debe preservar sus controles; no volver a rutas legacy por defecto.
 
-Pendientes: UI compatible, configuración de transporte/identidades por usuario
+UI compatible publicada; pendientes: transporte/identidades por usuario
 API/worker, app/slots/IAM y ámbito elegido por el titular; después pruebas OAuth,
 MFA e interfaz autenticadas reales. Mantener DEV sin cron/jobs clínicos. La
 candidata CRM07e37fc7 todavía no incluye los ajustes de parada de 9c54f261: al
