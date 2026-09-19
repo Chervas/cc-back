@@ -14,4 +14,5 @@ module.exports = (sequelize, D) => sequelize.define('MetaMarketingBrokerRevocati
   { name: 'cc_meta_revoke_delivery', fields: ['state', 'next_attempt_at', 'lease_until'] },
   { name: 'cc_meta_revoke_connection', fields: ['meta_connection_id'] }, { name: 'cc_meta_revoke_scope', fields: ['scope_key'] },
   { name: 'cc_meta_revoke_asset', fields: ['asset_ref'] }, { name: 'cc_meta_revoke_tenant', fields: ['tenant_clinic_id'] },
+  { name: 'cc_meta_revoke_parent', fields: ['parent_page_id'] },
 ] });

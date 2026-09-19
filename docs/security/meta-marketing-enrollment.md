@@ -4,6 +4,8 @@ Preparado sobre backend `3f5d61f5`, 19/09/2026. No desplegado ni aceptado con
 proveedor real. Contrato canónico en
 [13-backend](../../src/Documentacion/13-backend.md#selección-y-activación-meta-dentro-del-broker-preparado-19092026).
 Este núcleo todavía necesita el consumidor SQL/API/UI de selección de CRM.
+El inventario CRM ya incorpora una revisión local orientativa, descrita al final;
+no es ese escritor ni una reserva de activos.
 
 ## Operación y autoridad
 
@@ -137,3 +139,63 @@ Coste incremental real `null`; no se consultó Cost Explorer ni se crearon recur
 Estado/push/hashes en `source-final.json` privado y fuentes cambiadas en
 `meta-marketing-enrollment-consumers.json`. La medición es ficticia y no acepta
 la migración de conexiones reales ni reemplaza las comprobaciones del titular.
+
+## Revisión SQL del inventario antes de asignar — 19/09/2026
+
+`metaMarketingEnrollmentReview.service.js` se ejecuta en la transacción final de
+la consulta manual de inventario. La autorización actual precede la revisión y el
+evento humano v23 completado precede la respuesta. No devuelve inventario parcial
+si falla SQL/auditoría. El DTO `assignmentReview` contiene hora, estado/razones
+cerradas de ámbito y activo y `reservationMade=false`; no da permiso para escribir.
+
+Comprueba identidad única de Meta, marcador/app y presencia de credencial mediante
+un booleano SQL, sin seleccionar el token. Una identidad legacy compartida exige
+migración revisada; no vacía su credencial ni toca WhatsApp. Revisa asignaciones
+directas/heredadas, tombstones generales/Meta y miembros completos del grupo.
+Aliases numéricos/`act_`, bindings y bajas físicos anteriores son conflictos aunque
+estén inactivos o se haya borrado el mapping. Para IG revisa también página y
+relación inversa de otro IG, sin devolver IDs ajenos. Las consultas se agrupan y
+deduplican en SQL; no recorren todo el historial por cada activo. La lectura física
+usa snapshot sin bloqueos de rango: una prueba registra una baja de otra clínica
+antes de cerrar la transacción de diagnóstico, y la siguiente observación la ve.
+
+Migración aditiva `20260919070000-meta-marketing-parent-identity-indexes.js`:
+índices `cc_meta_marketing_parent`/`cc_meta_revoke_parent` por `parent_page_id`.
+Preparar después de las DDL Meta anteriores y antes de publicar el consumidor
+con discovery habilitado. Solo ejecutada en MySQL temporal; no hay tablas, flags,
+jobs ni protocolo humano nuevos. Lector/escritor AWS v23 sigue siendo requisito.
+Publicar API y UI juntas mediante candidato selectivo, sin promover todo DEV.
+
+El diagnóstico no acredita primarias/shares, propiedad clínica ni ausencia de
+cambios posteriores como contrato de escritura. El futuro escritor debe repetir
+la comprobación completa y reservar identidades con exclusión, antes de confirmar
+bindings y resultado remoto. Nunca usar un resultado `clear` como claim durable;
+no borrar bajas/aliases para hacer que pase. La UI conserva estado sin conexión,
+avisa del conflicto y retira la observación con su inventario al cambiar ámbito,
+sesión o caducar; depende del temporizador local, sin nuevas consultas periódicas.
+
+Pruebas desde backend, con Node 24 y red real bloqueada por la fixture:
+
+```sh
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/meta_marketing_enrollment_review_mysql.integration.js
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 META_OAUTH_CRM_VISUAL=1 META_OAUTH_DISCOVERY_TEST=1 node src/scripts/tests/meta_marketing_oauth_mysql.integration.js
+```
+
+Diez grupos MySQL nuevos, ocho de regresión OAuth, 13 capturas reales Angular
+con API/MySQL/TLS/SQLite reales y Meta/Secrets/S3 ficticios. Sin error JS, overflow,
+tráfico externo ni mutaciones de negocio; se comprueba WhatsApp intacto. Build
+Angular completo válido, sin publicación del preview. Detalles y conteos en99.
+500 IG/500 padres ante 10.000 bindings y 10.000 bajas: 13 sentencias/78 ms; tres
+activos: 13/21 ms, incluidas las tres sentencias de transacción. EXPLAIN usa rangos
+por los índices de activo/padre. Petición manual completa: 67 sentencias/111 ms,
+frente a 57 en el corte anterior; la revisión añade diez consultas, sin I/O externo
+extra ni trabajo por abrir Ajustes. Pool 0/0. Son muestras, no prueba de carga real.
+
+Coste incremental real `null`, sin refresco Cost Explorer. Inventario de fuentes en
+`meta-marketing-assignment-review-consumers.json`; evidencia privada
+`qa-evidence/security-resume-20260917/meta-assignment-review-20260919/`.
+Rollback de este diagnóstico: volver al par API/UI anterior manteniendo los gates
+de proveedor, datos y contención. Los índices pueden permanecer; no bajarlos mientras
+el consumidor los usa. Preservar journals/claims/revocaciones y el canary v19 intacto.
+No rotación, migración de credenciales, activación de cohortes ni recuperación por
+tokens legacy. La conexión real y su aceptación permanecen pendientes.

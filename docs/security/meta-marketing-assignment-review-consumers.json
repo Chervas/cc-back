@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "4e997ef9286551f8b1a369f0196082e32bb0a15d",
+    "front": "0b6f0e9a15e51a80ac7bd5b2d955dc94638844f8"
+  },
+  "includesWorkingChanges": true,
+  "scope": "Read-only CRM assignment review in the manually requested Meta candidate inventory; current managed session/full clinical scope and v23 human audit preserved. No durable claims or selection/activation writer. Changed-source inventory, not a standalone release bundle.",
+  "files": {
+    "back": {
+      "migrations/20260919070000-meta-marketing-parent-identity-indexes.js": "b563de4f6c221e6e9c3f063c81f2033c43516d8b76c0213e15ce9dce3937772f",
+      "models/metamarketingbrokerbinding.js": "9ba3639ec06312c03b89ea0180bfbd19d3128193e2605ab9de47b8d69c89b56f",
+      "models/metamarketingbrokerrevocation.js": "54bdaca424f6eb90351140ca0e80c2d592f9545506bc1276bb889c0744a2a374",
+      "src/services/metaMarketingEnrollmentReview.service.js": "17c71edc5142d80306334feb3073e90cb9512006c3f64c52cf39ce396c4899a0",
+      "src/services/metaMarketingOAuth.service.js": "ae1cb9136224811f8e31fae93ebe106804d4793d98107e31b497df2cd7f0d7f1",
+      "src/scripts/tests/meta_marketing_enrollment_review_mysql.integration.js": "894999a0d8d9d629b75499f5db54a3a4ab0b62db76b9d7386bde73e9765c247d",
+      "src/scripts/tests/meta_marketing_oauth_mysql.integration.js": "b5c1250964a611f9018f067b2c393e80a60d9c7ea4aac28ac1cd3020389ea0d3",
+      "src/scripts/tests/fixtures/meta_oauth_crm_visual.fixture.js": "7de8d4b0e2b5f54efde22ebb080f090ec07a52bfcf24941634938e86b7c693f7"
+    },
+    "front": {
+      "src/app/modules/admin/pages/settings/connected-accounts/meta-oauth-status.component.ts": "641ec5d2b0b6c09cf71baa7b8e9b018b6f9e4836774de16cd7aade9e1acc7e44",
+      "src/assets/i18n/es.json": "863be3222eb879b774b198944eb6eadf56faf97fd476c976d28239053a2fc102",
+      "src/assets/i18n/cat.json": "3c91f6f8b5d23be82fcdd99dbe15c42c5f6a2b1f1728ec7921108cd1592c5756"
+    }
+  },
+  "previousInventories": [
+    "meta-marketing-discovery-consumers.json",
+    "meta-marketing-enrollment-consumers.json"
+  ],
+  "qa": {
+    "mysqlReviewGroups": 10,
+    "mysqlOAuthRegressionGroups": 8,
+    "mountedOAuthRegressionTests": 6,
+    "visualScreenshots": 13,
+    "visualScope": "Actual Angular Settings and Activity components, SQL/API/TLS/SQLite; fictitious Meta/Secrets/S3. Desktop/mobile, legacy shared identity, physical parent withdrawal, scope/session/expiry invalidation. No new selection/activation UI.",
+    "syntaxFiles": 8,
+    "angularBuildHash": "29c4dcb58132606b",
+    "angularBuildExit": 0,
+    "temporaryMysql": "8.0.42",
+    "realSignedTlsAndSqlite": true,
+    "publicMfa": false,
+    "deployed": false
+  },
+  "costSample": {
+    "capacity": {
+      "assets": 500,
+      "historyRows": 10000,
+      "bindingRows": 10000,
+      "small": {
+        "queries": 13,
+        "elapsedMs": 21
+      },
+      "large": {
+        "queries": 13,
+        "elapsedMs": 78
+      },
+      "plans": [
+        {
+          "table": "MetaMarketingBrokerBinding",
+          "key": "cc_meta_marketing_asset",
+          "type": "range",
+          "rows": 1000
+        },
+        {
+          "table": "MetaMarketingBrokerBinding",
+          "key": "cc_meta_marketing_parent",
+          "type": "range",
+          "rows": 500
+        },
+        {
+          "table": "MetaMarketingBrokerRevocation",
+          "key": "cc_meta_revoke_asset",
+          "type": "range",
+          "rows": 1000
+        },
+        {
+          "table": "MetaMarketingBrokerRevocation",
+          "key": "cc_meta_revoke_parent",
+          "type": "range",
+          "rows": 500
+        }
+      ]
+    },
+    "inventoryHttp": {
+      "queries": 67,
+      "elapsedMs": 111,
+      "assets": 3
+    },
+    "additionalSqlReads": 10,
+    "additionalSecretsOrMetaCalls": 0,
+    "actualAwsCost": null,
+    "costExplorerRefreshed": false
+  },
+  "pending": [
+    "durable physical claims and transactional assignment/binding writer with full primary/share/identity authority checks",
+    "human audit and reconciliation of broker prepare/activate/revoke outcomes",
+    "selective schema/API/UI/AWS publication and real provider/titular acceptance",
+    "current AWS SSO expired; frozen v19 unchanged; backups last"
+  ],
+  "evidence": "qa-evidence/security-resume-20260917/meta-assignment-review-20260919/"
+}

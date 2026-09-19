@@ -9,7 +9,8 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
   let brokerApp,server,browser,clock=new Date(),queryCount=0;
   try{
     for(const [name,file] of [['Usuario','usuario'],['Clinica','clinica'],['GrupoClinica','grupoclinica'],['AuthSession','authsession'],['AuthEmailChallenge','authemailchallenge'],
-      ['PlatformAuditEvent','platformauditevent'],['MetaScopeBlock','metascopeblock'],['MetaMarketingBrokerRevocation','metamarketingbrokerrevocation']]){
+      ['PlatformAuditEvent','platformauditevent'],['MetaScopeBlock','metascopeblock'],['MetaMarketingBrokerRevocation','metamarketingbrokerrevocation'],
+      ['MetaConnection','MetaConecction'],['MetaConnectionAssignment','metaconnectionassignment'],['ClinicMetaAsset','ClinicMetaAsset'],['MetaMarketingBrokerBinding','metamarketingbrokerbinding']]){
       models[name]=require('../../../models/'+file)(sql,D);for(const attribute of Object.values(models[name].rawAttributes))delete attribute.references;models[name].refreshAttributes();await models[name].sync();
     }
     models.UsuarioClinica=sql.define('UsuarioClinica',{id_usuario:D.INTEGER,id_clinica:D.INTEGER,rol_clinica:D.STRING,estado_invitacion:D.STRING},{timestamps:false});await models.UsuarioClinica.sync();
@@ -77,6 +78,10 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     if(discovery){
       const target=endpoint+'/'+flow.requestId+'/assets'+query,q=queryCount,t=Date.now();const d=await request('POST',target);assert.equal(d.status,200,JSON.stringify(d.body));assert.equal(d.body.inventory.assets.length,3);
       report.discoveryFirst={queries:queryCount-q,elapsedMs:Date.now()-t,assets:d.body.inventory.assets.length};
+      assert.equal(d.body.assignmentReview.reservationMade,false);assert.equal(d.body.assignmentReview.scopeStatus,'clear');assert(d.body.assignmentReview.assets.every(v=>v.status==='clear'));
+      models.MetaMarketingBrokerBinding.addHook('beforeFind','qa-assignment-review-failure',()=>{throw Error('FICTITIOUS_REVIEW_FAILURE');});
+      try{const r=await request('POST',target);assert.equal(r.status,503);assert.equal(r.body.inventory,undefined);assert.equal(r.body.assignmentReview,undefined);}
+      finally{models.MetaMarketingBrokerBinding.removeHook('beforeFind','qa-assignment-review-failure');}
       models.PlatformAuditEvent.addHook('beforeCreate','qa-inventory-capture',row=>{if(JSON.parse(row.body).version===23)throw Error('FICTITIOUS_DISCOVERY_AUDIT_FAILURE');});
       const before=commands;try{assert.equal((await request('POST',target)).status,503);assert.equal(commands,before);}finally{models.PlatformAuditEvent.removeHook('beforeCreate','qa-inventory-capture');}
       afterWire=async command=>{if(command.operation.endsWith('.assets.v1'))await models.UsuarioClinica.update({rol_clinica:'personaldeclinica'},{where:{id_clinica:71}});};

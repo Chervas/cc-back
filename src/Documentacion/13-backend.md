@@ -11273,3 +11273,37 @@ con TLS/SQLite reales y proveedor simulado; regresión visual del OAuth/inventar
 actual, no de una UI de selección inexistente. Runbook
 `docs/security/meta-marketing-enrollment.md`; variables03, funcional20.17, estado19,
 prioridades16, recursos/costes39 y evidencias/recuperación99. Canary v19 intacto.
+
+### Revisión local del inventario Meta antes de asignar (19/09/2026)
+
+El listado manual de activos añade `assignmentReview`: un diagnóstico SQL, sin
+reserva ni escritura de conexiones, asignaciones o credenciales. Se calcula en
+la transacción final, después de volver a verificar sesión/MFA, todas las clínicas
+y el candidato, y antes de confirmar el evento humano v23 de inventario. Si falla
+la revisión o su auditoría, no se entrega un resultado parcial. No añade llamadas
+a Meta/Secrets, jobs, tablas ni un protocolo de auditoría nuevo.
+La migración aditiva `20260919070000-meta-marketing-parent-identity-indexes.js`
+añade índices de `parent_page_id` en bindings y bajas, necesarios para consultar
+también la relación inversa: otro Instagram que conserva la misma página.
+Los datos físicos se leen mediante snapshot, sin bloqueos de rango de activos:
+esta observación no debe reservar identidades ni retrasar una retirada ajena.
+
+Una identidad Meta que conserva credencial SQL, tiene marcador/app incompatible
+o varias conexiones requiere revisión; no se transforma automáticamente. Así se
+preserva también la credencial compartida que aún consumen servicios WhatsApp.
+Se revisan asignaciones efectivas de clínica/grupo y bajas de ámbito. Por lotes se
+buscan aliases físicos (también `act_`), registros y bajas independientes, incluidos
+los padres de Instagram. Una fila anterior, incluso inactiva o cuyo mapping fue
+borrado, impide presentar el activo como libre para un alta nueva. No se devuelven
+identidades, tokens ni datos de otras clínicas: solo razones cerradas por activo.
+
+La interfaz distingue «sin conflictos locales detectados» y «requiere revisión»;
+ambos siguen sin conexión. La observación caduca con el inventario y se retira al
+cambiar ámbito o sesión. No acredita propiedad clínica ni disponibilidad futura:
+el escritor pendiente debe repetir las comprobaciones con exclusión transaccional,
+reservar la identidad física y conciliar activación/retirada antes de confirmar
+bindings. No usar este diagnóstico como una autorización o un claim durable.
+
+Probado en MySQL aislado y en la interfaz real con proveedor ficticio; aceptación real y el
+consumidor de selección/activación siguen pendientes. Runbook
+`docs/security/meta-marketing-enrollment.md`; estado19, funcional20.17 y corte99.

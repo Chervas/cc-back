@@ -12,6 +12,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const origin=new URL(returnOrigin);if(origin.origin!==returnOrigin||!['http:','https:'].includes(origin.protocol))C.fail();
   const R=models.MetaMarketingOAuthRequest,S=models.MetaMarketingOAuthSlot,scope=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now});
   const audit=require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
+  const reviewAssignment=require('./metaMarketingEnrollmentReview.service').createReview({models,now});
   const tx=fn=>models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},fn),locked=transaction=>({transaction,lock:transaction.LOCK.UPDATE,logging:false});
   const plain=r=>r?.get?r.get({plain:true}):r;
   const gate=()=>{if(!enabled())C.fail('meta_oauth_disabled');};
@@ -123,7 +124,8 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
         const inventory=D.validateResult(response.data,{flowId:id,candidateDigest:JSON.parse(captured.candidate_metadata).digest,scopeDigest:captured.scope_digest,scopeKey:captured.scope_key,
           clinicSetDigest:C.hash(captured.clinic_ids),metadata:JSON.parse(captured.candidate_metadata),startedAt,now:+now()});
         return await tx(async transaction=>{const row=await authorize(transaction);if(inventory.expiresAt<=+now())C.fail('broker_response_invalid');
-          await recordEvent(fromDiscovery(row,input,requestId,'inventory_verified',now(),inventory),transaction);return {...projection(row),inventory};});
+          const assignmentReview=await reviewAssignment({row,inventory},transaction);
+          await recordEvent(fromDiscovery(row,input,requestId,'inventory_verified',now(),inventory),transaction);return {...projection(row),inventory,assignmentReview};});
       }catch(e){
         if(captured)try{await tx(t=>recordEvent(fromDiscovery(captured,input,requestId,[401,403,409].includes(e.httpStatus)?'access_changed':'inventory_unavailable',now()),t));}catch{}
         throw e;

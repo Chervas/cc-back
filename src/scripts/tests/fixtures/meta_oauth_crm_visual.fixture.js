@@ -40,9 +40,35 @@ module.exports=async({models,app,server,base,token,service,callback,latest,repor
     await tab.setViewport({width:1440,height:1050});await shot('desktop-staged');
     const discovery=process.env.META_OAUTH_DISCOVERY_TEST==='1';
     if(discovery){
-      const h=f.state.httpCalls.length;await tab.click('[data-qa="meta-oauth-assets"]');await tab.waitForSelector('[data-qa="meta-oauth-inventory"]');
+      const loadInventory=async()=>{const pending=tab.waitForResponse(r=>r.url().includes('/assets?')&&r.request().method()==='POST');await tab.click('[data-qa="meta-oauth-assets"]');
+        const response=await pending;assert.equal(response.status(),200);const data=await response.json();await tab.waitForSelector('[data-qa="meta-oauth-inventory"]');return data;};
+      const h=f.state.httpCalls.length,first=await loadInventory();
       assert.equal((await tab.$$('[data-qa="meta-oauth-inventory-asset"]')).length,3);assert.equal(f.state.httpCalls.length-h,4);await shot('desktop-inventory');
+      assert((await tab.$$eval('[data-qa="meta-oauth-asset-review"]',els=>els.map(e=>e.textContent))).every(v=>v.includes('Sin conflictos locales')));
       await tab.setViewport({width:390,height:844});await shot('mobile-inventory');
+      const candidate=JSON.parse((await latest(stored.flow_id)).candidate_metadata),C=require('../../../services/metaMarketingOAuth.contract');
+      const shared=await models.MetaConnection.create({id:987,userId:91002,metaUserId:candidate.subjectId,accessToken:'FICTITIOUS_SHARED_WA_CREDENTIAL'});
+      const wa=await models.ClinicMetaAsset.create({id:988,clinicaId:59,metaConnectionId:987,assignmentScope:'clinic',assetType:'whatsapp_phone_number',metaAssetId:'700001',waAccessToken:'FICTITIOUS_WA_CREDENTIAL'});
+      const grant=await models.MetaConnectionAssignment.create({scopeKey:'group:5',assignmentScope:'group',grupoClinicaId:5,metaConnectionId:987,status:'active'});
+      const ad=first.inventory.assets.find(a=>a.kind==='ad_account'),ig=first.inventory.assets.find(a=>a.kind==='instagram_business');
+      const alias=await models.ClinicMetaAsset.create({clinicaId:88,metaConnectionId:987,assignmentScope:'clinic',assetType:'ad_account',metaAssetId:'act_'+ad.id,isActive:false});
+      const history=await models.MetaMarketingBrokerRevocation.create({tuple_hash:C.hash('VISUAL_FOREIGN_PARENT_HISTORY'),connection_ref:'meta:other',asset_ref:'meta-instagram_business:999999',parent_page_id:ig.parentPageId,
+        tenant_clinic_id:88,meta_connection_id:987,meta_user_id:'999',app_id:candidate.appId,scope_key:'group:6',clinic_ids:'[88]',mapping_ids:'[999]',
+        request_id:require('node:crypto').randomUUID(),actor_user_id:91002,requested_at:new Date(),next_attempt_at:new Date(),state:'confirmed'});
+      try{
+        const checked=await loadInventory();assert.equal(checked.connected,false);assert.deepEqual(checked.assignmentReview.scopeReasons,['identity_review']);
+        await tab.waitForSelector('[data-qa="meta-oauth-assignment-review"]');
+        const rendered=await tab.$eval('[data-qa="meta-oauth-inventory"]',e=>e.textContent);
+        assert.match(rendered,/migración revisada/);assert.match(rendered,/retirada de acceso registrada/);assert(!rendered.includes('CREDENTIAL'));assert(!rendered.includes('999999'));
+        assert((await tab.$$eval('[data-qa="meta-oauth-asset-review"]',els=>els.map(e=>e.textContent))).every(v=>v.includes('Requiere revisión')));
+        await shot('mobile-assignment-review');await tab.setViewport({width:1440,height:1050});await shot('desktop-assignment-review');
+        await shared.reload();await wa.reload();assert.equal(shared.accessToken,'FICTITIOUS_SHARED_WA_CREDENTIAL');assert.equal(wa.waAccessToken,'FICTITIOUS_WA_CREDENTIAL');assert.equal(wa.isActive,true);
+        await tab.click('#clinic-b');await tab.waitForFunction(()=>!document.querySelector('[data-qa="meta-oauth-inventory"]'));
+        await tab.goto(base,{waitUntil:'networkidle0'});await tab.waitForSelector('[data-qa="meta-oauth-assets"]');await loadInventory();
+        await tab.evaluate(()=>{window.QA_REAL_NOW=Date.now;Date.now=()=>window.QA_REAL_NOW()+300001;});
+        await tab.waitForFunction(()=>!document.querySelector('[data-qa="meta-oauth-inventory"]'));await tab.evaluate(()=>Date.now=window.QA_REAL_NOW);
+        await loadInventory();
+      }finally{await history.destroy();await alias.destroy();await grant.destroy();await wa.destroy();await shared.destroy();}
       await tab.evaluate(()=>window.QA_TOKEN='FICTITIOUS_CHANGED_SESSION');await tab.waitForFunction(()=>!document.querySelector('[data-qa="meta-oauth-inventory"]'));
       await tab.evaluate(v=>window.QA_TOKEN=v,token());await tab.setViewport({width:1440,height:1050});
     }
@@ -63,7 +89,7 @@ module.exports=async({models,app,server,base,token,service,callback,latest,repor
     await tab.$eval('[data-qa="audit-meta-oauth"]',e=>{e.closest('details').open=true;e.scrollIntoView({block:'center'});});
     assert.match(await tab.$eval('body',e=>e.innerText),/autorización/i);await tab.screenshot({path:path.join(output,'audit.png')});shots.push('audit');
     if(discovery){await tab.waitForSelector('[data-qa="audit-meta-discovery"]');await tab.$eval('[data-qa="audit-meta-discovery"]',e=>{e.closest('details').open=true;e.scrollIntoView({block:'center'});});await tab.screenshot({path:path.join(output,'audit-discovery.png')});shots.push('audit-discovery');}
-    assert.deepEqual(errors,[]);assert.deepEqual(blocked,[]);assert.equal(writes.filter(v=>v.method==='DELETE').length,1);assert.equal(writes.length,discovery?5:4);
+    assert.deepEqual(errors,[]);assert.deepEqual(blocked,[]);assert.equal(writes.filter(v=>v.method==='DELETE').length,1);assert.equal(writes.length,discovery?8:4);
     report.oauthVisual={shots,errors,blocked,businessWrites:0,authorizationRequests:writes.length,openingProviderCalls:0,cancellationProviderCalls:0,cancellationSecretCalls:0,provider:'fictitious transport; no actual Facebook popup'};
   }catch(error){fs.writeFileSync(path.join(output,'failure.txt'),error.stack);await tab?.screenshot({path:path.join(output,'failure.png'),fullPage:true});throw error;}
   finally{await browser?.close();}
