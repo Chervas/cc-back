@@ -36,6 +36,7 @@ const validate = new Ajv({ strict: true }).compile(object({
     googleDataManager: require('./google-data-manager-contract').bindingSchema,
     googleDataManagerEnrollment: require('./google-destination-contract').bindingSchema,
     googleAdsActionManagement: require('./google-action-management-contract').bindingSchema,
+    googleBusinessProfileWrites: require('./google-business-profile-write-contract').bindingSchema,
     oauth: require('./google-oauth-contract').bindingSchema }, ['connectionRef', 'provider', 'initialState']) },
   grants: { type: 'array', maxItems: 100000, items: object({ principalId: ref, tenantRef: ref, connectionRef: ref, assetRef: ref, operations: strings }) },
 }));
@@ -55,6 +56,7 @@ function validatePolicy(policy) {
     if (Boolean(binding.metaMarketingOAuth) !== (binding.provider === 'meta_marketing_onboarding')) fail('invalid_request');
     if (binding.metaMarketingOAuth) require('./meta-marketing-oauth-contract').bindingFor(binding);
     if (binding.googleAdsActionManagement) require('./google-action-management-contract').validateBinding(binding);
+    if (binding.googleBusinessProfileWrites) require('./google-business-profile-write-contract').validateBinding(binding);
     if (binding.googleDataManager) require('./google-data-manager-contract').validateBinding(binding);
     if (binding.googleDataManagerEnrollment) require('./google-destination-contract').validateBinding(binding);
     if (Boolean(binding.bedrock) !== (binding.provider === 'aws_bedrock')) fail('invalid_request');

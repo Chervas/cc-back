@@ -122,7 +122,10 @@ class Broker {
         if (secret && JSON.stringify(data).includes(secret.toString('utf8'))) fail('provider_failed');
         return data;
       };
-      const work = metadataOnly ? execute(null) : this.secrets.withSecret(binding, execute,
+      // GBP receipts need no provider credential. Unlike enrollment controls,
+      // they still require the active connection revision and asset throughout.
+      const receiptOnly = operation.control === 'google_business_profile_status' && operation.secretless === true;
+      const work = metadataOnly || receiptOnly ? execute(null) : this.secrets.withSecret(binding, execute,
         { signal: controller.signal, onRevoked, requiredScopes: operation.requiredScopes });
       const data = await Promise.race([work, new Promise((_, reject) => {
         timer = setTimeout(() => { controller.abort(); reject(new BrokerError('provider_timeout')); }, this.timeoutMs);

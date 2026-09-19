@@ -55,6 +55,7 @@ sincroniza el espejo frontend. Este índice no mantiene otro roadmap ni diario.
 - [Consumidores publicados en DEV, QA y recuperación](security/google-dev-consumers.md).
 - [Esquema clínico Google aplicado y recuperación](security/google-clinical-cut.md).
 - [Candidata de consumidores públicos y límites de validación](security/google-public-consumers.md).
+- [Escrituras Business Profile, diario y recuperación de recibos](security/google-business-profile-writes.md).
 
 ### Meta no WhatsApp
 

@@ -12011,11 +12011,32 @@ antes de abrir el diálogo. Consultar no reenvía conversiones ni activa permiso
 
 Antes de cerrar la identidad Google compartida deben migrarse también sus escritores
 existentes. La respuesta y retirada de respuestas a reseñas, publicación de fotos y
-horarios especiales de Business Profile aún leen credenciales SQL; el contrato del
-broker preparado solo cubre sus lecturas/revocación. No retirar la credencial local
+horarios especiales de Business Profile aún leen credenciales SQL. El broker y
+adaptador de escritura ya están preparados en fuente DEV, todavía sin conectar
+esas funciones, su diario SQL, UI y automatizaciones. No retirar la credencial local
 ni declarar esta identidad migrada mientras falten esos consumidores, el inventario
 completo y el recorrido autenticado. Estado de preparación y recuperación en
 `docs/security/google-public-consumers.md`.
+
+### Escrituras tipadas Business Profile preparadas
+
+Cohorte explícita y apagada `google-business-profile-write-v1`: respuestas a
+reseñas, retirada de respuestas, fotos públicas y horarios especiales. Ubicación
+y capacidades salen de grants por clínica; escritores, lectores, OAuth y
+revocación usan claves distintas. El broker registra la frontera de envío y
+bloquea escrituras repetidas sobre un recurso incierto, incluso con otro UUID.
+Recibo confirmado y auditoría se guardan juntos. Consultar el recibo tras perder
+una respuesta no usa credenciales ni repite la mutación, conservando los controles
+de conexión/activo/permisos. Los locks sobreviven al reinicio y no caducan solos.
+
+Solo se envían enlaces de marketing público de la clínica; los archivos no pasan
+por el broker. Los horarios viajan como hasta80 periodos compactos y conservan
+el límite previo de730 días. El adaptador exige identidad de intento persistida
+y autorización del llamante antes/después de la operación. Faltan diario SQL,
+orden de actualización local, rutas, nodo de horarios y UI: no acredita migración
+de los cuatro consumidores ni aceptación clínica. Contrato, límites, variables,
+QA HTTPS aislada y recuperación en
+`docs/security/google-business-profile-writes.md`.
 
 ### Esquema clínico Google: corte limitado y conservación de identidad compartida
 

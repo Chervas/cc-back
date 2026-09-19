@@ -8,6 +8,8 @@ const { BrokerStore } = require('./store'); const { Broker } = require('./broker
 const { createServer } = require('./server'); const { createGoogleHttp } = require('./google-http');
 const { createGoogleSecretStore } = require('./google-secrets');
 const { createGoogleBusinessProfileOperations } = require('./google-business-profile');
+const gbpWriteContract = require('./google-business-profile-write-contract');
+const { createBusinessProfileWrites } = require('./google-business-profile-writes');
 const scContract = require('./google-search-console-contract');
 const { createSearchConsoleOperations } = require('./google-search-console');
 const gaContract = require('./google-analytics-contract'); const { createAnalyticsOperations } = require('./google-analytics');
@@ -68,10 +70,13 @@ function validateConfig(config) {
   const keys = 'cohort,cursorKeyFile,enabled,listenAddress,policy,port,stateFile,tlsCertFile,tlsKeyFile'.split(',');
   if (Object.hasOwn(config || {}, 'tlsRenewal')) keys.push('tlsRenewal');
   if (!config || Object.keys(config).sort().join(',') !== keys.sort().join(',')
-    || config.enabled !== true || !['google-business-profile-read-v1', 'google-search-console-read-v1', 'google-analytics-read-v1', 'google-ads-read-v1', dmContract.COHORT].includes(config.cohort)
+    || config.enabled !== true || !['google-business-profile-read-v1', gbpWriteContract.COHORT, 'google-search-console-read-v1', 'google-analytics-read-v1', 'google-ads-read-v1', dmContract.COHORT].includes(config.cohort)
     || !net.isIP(config.listenAddress) || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535
     || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   validatePolicy(config.policy);
+  const businessProfileWrites = config.cohort === gbpWriteContract.COHORT;
+  if (!businessProfileWrites && config.policy.connections.some(c => c.googleBusinessProfileWrites)
+    || businessProfileWrites && !config.policy.connections.some(c => c.googleBusinessProfileWrites)) fail('invalid_request');
   const conversions = config.cohort === dmContract.COHORT;
   if (!conversions && config.policy.connections.some(c => c.googleDataManager || c.googleAdsActionManagement || c.googleDataManagerEnrollment)) fail('invalid_request');
   if (config.cohort === 'google-ads-read-v1' || conversions) {
@@ -152,19 +157,31 @@ function validateConfig(config) {
     validateOAuthSeparation(config.policy, gaContract);
     return config;
   }
+  const writeOperations = businessProfileWrites ? Object.values(gbpWriteContract.OPERATIONS) : [];
   if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== PROVIDER || !c.secretArn || !c.clientSecretArn)
     || config.policy.connections.some(c => c.searchConsoleSites || c.googleSubject || c.analyticsProperties)
-    || config.policy.grants.some(g => !/^clinic:[1-9]\d{0,9}$/.test(g.tenantRef) || g.operations.some(op => !OPERATIONS.includes(op) && op !== REVOKE_OPERATION
+    || config.policy.grants.some(g => !/^clinic:[1-9]\d{0,9}$/.test(g.tenantRef) || g.operations.some(op => !OPERATIONS.includes(op) && !writeOperations.includes(op) && op !== REVOKE_OPERATION
       && !Object.values(oauthContract.OPERATIONS).includes(op)))) fail('invalid_request');
   const readers = new Set(config.policy.grants.filter(g => g.operations.some(op => OPERATIONS.includes(op))).map(g => g.principalId));
-  if (config.policy.grants.some(g => g.operations.includes(REVOKE_OPERATION) && readers.has(g.principalId))) fail('invalid_request');
   const keyFor = id => {
     try { return createPublicKey(config.policy.principals.find(p => p.id === id).publicKey).export({ type: 'spki', format: 'der' }).toString('base64'); }
     catch { fail('invalid_request'); }
   };
   const readerKeys = new Set([...readers].map(keyFor));
-  if (config.policy.grants.some(g => g.operations.includes(REVOKE_OPERATION) && readerKeys.has(keyFor(g.principalId)))) fail('invalid_request');
-  const priorControls = new Set([...readers, ...config.policy.grants.filter(g => g.operations.includes(REVOKE_OPERATION)).map(g => g.principalId)]);
+  const writers = new Set(config.policy.grants.filter(g => g.operations.some(op => writeOperations.includes(op))).map(g => g.principalId));
+  for (const writer of writers) if (readers.has(writer) || readerKeys.has(keyFor(writer))) fail('invalid_request');
+  const consumers = new Set([...readers, ...writers]); const consumerKeys = new Set([...consumers].map(keyFor));
+  if (config.policy.grants.some(g => g.operations.includes(REVOKE_OPERATION)
+    && (consumers.has(g.principalId) || consumerKeys.has(keyFor(g.principalId))))) fail('invalid_request');
+  for (const grant of config.policy.grants.filter(g => g.operations.some(op => writeOperations.includes(op)))) {
+    const binding = config.policy.connections.find(c => c.connectionRef === grant.connectionRef);
+    for (const [kind, op] of Object.entries(gbpWriteContract.OPERATIONS)) if (grant.operations.includes(op)) {
+      // Photo URL is validated per request, capabilities and scope at startup.
+      const target = gbpWriteContract.resource(binding, grant.assetRef, grant.tenantRef, kind === 'photo' ? 'status' : kind, {});
+      if (kind === 'photo' && !target.policy.allowPhotos) fail('invalid_request');
+    }
+  }
+  const priorControls = new Set([...consumers, ...config.policy.grants.filter(g => g.operations.includes(REVOKE_OPERATION)).map(g => g.principalId)]);
   const priorKeys = new Set([...priorControls].map(keyFor));
   for (const grant of config.policy.grants.filter(g => g.operations.some(op => Object.values(oauthContract.OPERATIONS).includes(op)))) {
     if (priorControls.has(grant.principalId) || priorKeys.has(keyFor(grant.principalId))) fail('invalid_request');
@@ -203,7 +220,8 @@ async function connectAws() {
 async function main(filename, { awsFactory = connectAws, http } = {}) {
   const config = validateConfig(JSON.parse(privateFile(filename)));
   http ||= createGoogleHttp({ dataManagerEnabled: config.cohort === dmContract.COHORT,
-    actionManagementEnabled: config.cohort === dmContract.COHORT && config.policy.connections.some(c => c.googleAdsActionManagement) });
+    actionManagementEnabled: config.cohort === dmContract.COHORT && config.policy.connections.some(c => c.googleAdsActionManagement),
+    businessProfileWritesEnabled: config.cohort === gbpWriteContract.COHORT });
   const cert = privateFile(config.tlsCertFile, 65536); const key = privateFile(config.tlsKeyFile, 65536);
   const cursorKey = privateFile(config.cursorKeyFile, 32); const cursor = cursorCodec(cursorKey);
   const store = new BrokerStore(config.stateFile); let aws; let secrets; let oauth; let adsEngine; let actionManagement; let adsEnrollment; let server; let timer; let draining;
@@ -212,6 +230,7 @@ async function main(filename, { awsFactory = connectAws, http } = {}) {
     const searchConsole = config.cohort === 'google-search-console-read-v1';
     const analytics = config.cohort === 'google-analytics-read-v1';
     const ads = config.cohort === 'google-ads-read-v1' || config.cohort === dmContract.COHORT;
+    const businessProfileWrites = config.cohort === gbpWriteContract.COHORT ? createBusinessProfileWrites({ store, http }) : null;
     let dataManager, destinations;
     secrets = createGoogleSecretStore({ client: aws.secrets, http, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY,
       provider: searchConsole ? scContract.PROVIDER : analytics ? gaContract.PROVIDER : ads ? adsContract.PROVIDER : PROVIDER });
@@ -238,7 +257,8 @@ async function main(filename, { awsFactory = connectAws, http } = {}) {
       onActivated: ref => { secrets.invalidate(ref); for (const controller of broker.active.get(ref) || []) controller.abort(); } });
     broker = new Broker({ store, policy: config.policy, secrets, adsEnrollment,
       operations: ads ? { ...adsEngine.operations, ...adsEnrollment?.operations, ...dataManager?.operations, ...actionManagement?.operations, ...destinations?.operations, ...oauthContract.controlsFor(adsContract.PROVIDER, oauth) }
-        : searchConsole ? createSearchConsoleOperations({ http, cursor, oauth }) : analytics ? createAnalyticsOperations({ http, cursor, oauth }) : createGoogleBusinessProfileOperations({ http, cursor, oauth }), timeoutMs: 25000 });
+        : searchConsole ? createSearchConsoleOperations({ http, cursor, oauth }) : analytics ? createAnalyticsOperations({ http, cursor, oauth })
+          : { ...createGoogleBusinessProfileOperations({ http, cursor, oauth }), ...businessProfileWrites?.operations }, timeoutMs: 25000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {
       if (inFlight >= 8) fail('rate_limited'); inFlight++;

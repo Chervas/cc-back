@@ -51,3 +51,46 @@ test('independent registry stops recreated or unmarked locations even with the c
   await assert.rejects(service.prepare(recreated, async () => { tokenReads++; return { accessToken: 'FICTITIOUS' }; }, new Map()), { code: 'broker_binding_invalid' });
   assert.equal(tokenReads, 0);
 });
+test('writer adapter requires a durable operation ID, its own client/gate and repeated caller authorization', async () => {
+  const { randomUUID } = require('node:crypto');
+  const input = { operationId: randomUUID(), reviewId: 'review_1', comment: 'FICTITIOUS_REPLY' };
+  let writes = 0, enabled = true, authorized = true, revokeAfter = false, guards = 0;
+  const service = createBusinessProfileBroker({ enabled: () => true, writesEnabled: () => enabled,
+    client: { execute() { throw Error('READER_KEY_CANNOT_WRITE'); } },
+    writerClient: { async execute(command) {
+      writes++; assert.equal(command.operation, 'google.business_profile.review.reply.update.v1');
+      assert.equal(command.payload.operationId, input.operationId);
+      if (revokeAfter) authorized = false;
+      return { data: { operationId: input.operationId, kind: 'replyUpdate', state: 'applied', result: { comment: input.comment } } };
+    } }, loadLocation: async () => managed, loadManagedBinding: async () => record });
+  const context = await service.prepare(managed, () => { throw Error('LEGACY_FORBIDDEN'); }, new Map());
+  const beforeExecute = async () => { guards++; if (!authorized) throw Object.assign(Error(), { code: 'scope_denied' }); };
+  await assert.rejects(service.write(managed, context, 'replyUpdate', input), { code: 'broker_binding_invalid' });
+  await assert.rejects(service.write(managed, {}, 'replyUpdate', input, { beforeExecute }), { code: 'broker_binding_invalid' });
+  const { operationId, ...missingId } = input;
+  await assert.rejects(service.write(managed, context, 'replyUpdate', missingId, { beforeExecute }), { code: 'invalid_request' });
+  enabled = false;
+  await assert.rejects(service.write(managed, context, 'replyUpdate', input, { beforeExecute }), { code: 'broker_cohort_disabled' });
+  assert.equal(writes, 0); enabled = true;
+  assert.equal((await service.write(managed, context, 'replyUpdate', input, { beforeExecute })).data.state, 'applied');
+  assert.equal(guards, 2); assert.equal(writes, 1);
+  revokeAfter = true;
+  await assert.rejects(service.write(managed, context, 'replyUpdate', input, { beforeExecute }), { code: 'scope_denied' });
+  assert.equal(guards, 4); assert.equal(writes, 2);
+});
+test('writer rechecks mapping and revocation after authorization awaits and after the provider returns', async () => {
+  const input = { operationId: require('node:crypto').randomUUID() };
+  for (const phase of ['authorization', 'provider']) {
+    let current = { ...managed }, revoked = false, calls = 0;
+    const service = createBusinessProfileBroker({ enabled: () => true, writesEnabled: () => true, client: {},
+      writerClient: { async execute() {
+        calls++; revoked = true;
+        return { data: { operationId: input.operationId, kind: null, state: 'not_found', result: null } };
+      } }, loadLocation: async () => current, loadManagedBinding: async () => record, loadRevocation: async () => revoked ? {} : null });
+    const context = await service.prepare(managed, () => { throw Error(); }, new Map());
+    await assert.rejects(service.write(managed, context, 'status', input, { beforeExecute: async () => {
+      if (phase === 'authorization') current = { ...current, google_connection_id: 999 };
+    } }), { code: phase === 'authorization' ? 'broker_binding_invalid' : 'asset_revoked' });
+    assert.equal(calls, phase === 'authorization' ? 0 : 1);
+  }
+});

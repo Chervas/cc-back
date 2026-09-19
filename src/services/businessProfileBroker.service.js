@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('node:fs'); const path = require('node:path');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
+const writeContract = require('../../services/integrations-broker/src/google-business-profile-write-contract');
 const PREFIX = 'google.business_profile.';
 const OPERATIONS = new Set(['metrics', 'reviews', 'posts', 'media', 'details', 'verification', 'discovery']);
 const fail = code => { throw Object.assign(new Error(code), { code }); };
@@ -27,7 +28,9 @@ function binding(location) {
     || !Number.isSafeInteger(Number(location.id)) || Number(location.id) < 1) fail('broker_binding_invalid');
   return { connectionRef: ref, assetRef: location.broker_read_asset_ref, tenantRef: `clinic:${Number(location.clinica_id)}` };
 }
-function createBusinessProfileBroker({ client, loadLocation, loadManagedBinding, loadRevocation = async () => null, enabled = () => process.env.GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED === 'true' }) {
+function createBusinessProfileBroker({ client, writerClient, loadLocation, loadManagedBinding, loadRevocation = async () => null,
+  enabled = () => process.env.GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED === 'true',
+  writesEnabled = () => process.env.GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED === 'true' }) {
   const contexts = new WeakMap();
   const managed = (location, context) => marked(location) || !!(context && typeof context === 'object' && contexts.has(context));
   async function recordedBinding(location) {
@@ -38,6 +41,17 @@ function createBusinessProfileBroker({ client, loadLocation, loadManagedBinding,
     const scope = binding(location);
     if (record.external_location_id !== externalLocationId(location) || record.connection_ref !== scope.connectionRef || record.asset_ref !== scope.assetRef
       || Number(record.clinica_id) !== Number(location.clinica_id) || Number(record.google_connection_id) !== Number(location.google_connection_id)) fail('broker_binding_invalid');
+    return scope;
+  }
+  async function currentWriteScope(location, context) {
+    if (!enabled() || !writesEnabled()) fail('broker_cohort_disabled');
+    const captured = context && typeof context === 'object' && contexts.get(context);
+    if (!captured || captured.id !== Number(location.id)) fail('broker_binding_invalid');
+    const current = await loadLocation(captured.id);
+    if (!current || !current.is_active || !marked(current) || Number(current.google_connection_id) !== captured.googleConnectionId) fail('broker_binding_invalid');
+    const scope = await recordedBinding(current);
+    if (!scope || Object.entries(scope).some(([key, value]) => captured[key] !== value)) fail('broker_binding_invalid');
+    if (!enabled() || !writesEnabled()) fail('broker_cohort_disabled');
     return scope;
   }
   return {
@@ -72,6 +86,24 @@ function createBusinessProfileBroker({ client, loadLocation, loadManagedBinding,
       if (Object.entries(latestScope).some(([key, value]) => value !== captured[key])) fail('broker_binding_invalid');
       return { data: result.data };
     },
+    async write(location, context, kind, payload, options = {}) {
+      // The caller must save operationId before sending and keep it through
+      // retries/reconciliation. A transport requestId is a separate identity.
+      writeContract.validate(kind, payload);
+      if (!writerClient || typeof options.beforeExecute !== 'function') fail('broker_binding_invalid');
+      await currentWriteScope(location, context);
+      const transportOptions = await options.beforeExecute();
+      const scope = await currentWriteScope(location, context);
+      const result = await writerClient.execute({ ...scope, operation: writeContract.OPERATIONS[kind], payload }, transportOptions);
+      // Session, asset permissions and mapping may change during the provider
+      // call. Do not accept a receipt for a local update until reauthorized.
+      await options.beforeExecute();
+      await currentWriteScope(location, context);
+      if (result?.data?.operationId !== payload.operationId
+        || !['applied', 'unknown', 'not_found'].includes(result.data.state)
+        || kind !== 'status' && (result.data.kind !== kind || result.data.state !== 'applied')) fail('broker_response_invalid');
+      return { data: result.data };
+    },
   };
 }
 let cachedClient;
@@ -81,7 +113,14 @@ const client = { execute(command, options) {
     ca: privateFile(process.env.INTEGRATIONS_BROKER_CA_FILE), privateKey: privateFile(process.env.GOOGLE_BUSINESS_PROFILE_BROKER_KEY_FILE), timeoutMs: 30000 });
   return cachedClient.execute(command, options);
 } };
-const service = createBusinessProfileBroker({ client,
+let cachedWriterClient;
+const writerClient = { execute(command, options) {
+  cachedWriterClient ||= createIntegrationsBrokerClient({ origin: process.env.INTEGRATIONS_BROKER_ORIGIN,
+    audience: process.env.INTEGRATIONS_BROKER_AUDIENCE, keyId: process.env.GOOGLE_BUSINESS_PROFILE_WRITER_KEY_ID,
+    ca: privateFile(process.env.INTEGRATIONS_BROKER_CA_FILE), privateKey: privateFile(process.env.GOOGLE_BUSINESS_PROFILE_WRITER_KEY_FILE), timeoutMs: 30000 });
+  return cachedWriterClient.execute(command, options);
+} };
+const service = createBusinessProfileBroker({ client, writerClient,
   loadRevocation: id => require('../../models').BusinessProfileBrokerRevocation.findByPk(id, { attributes: ['external_location_id'], raw: true }),
   loadManagedBinding: id => require('../../models').BusinessProfileBrokerBinding.findByPk(id, { raw: true }),
   loadLocation: id => require('../../models').ClinicBusinessLocation.findByPk(id, {

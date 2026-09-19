@@ -145,8 +145,11 @@ El inventario de fuente identifica cuatro escritores en
 `src/services/businessProfileLocal.service.js`: `updateReviewReply`,
 `deleteReviewReply`, `publishPhoto` y `updateSpecialHours`. Usan
 `ensureGoogleAccessToken`, que todavía carga tokens SQL y renueva con secreto
-local. El contrato `google-business-profile-contract.js` solo define lecturas y
-revocación de activo; faltan operaciones tipadas de escritura y su recuperación.
+local. El contrato de lectura/revocación permanece separado. Se han preparado en
+fuente DEV el contrato de escritura, diario del broker, recuperación de recibos y
+adaptador con identidad propia; todavía falta conectarlos al diario SQL, rutas,
+pantallas y automatizaciones. Estas candidatas aún no incorporan la preparación.
+Contrato y límites en [escrituras GBP](google-business-profile-writes.md).
 
 Antes del primer marcador de cierre hay que migrar esos consumidores conservando
 permisos, validación de activo y automatizaciones; probar pérdida de ACK, resultado
