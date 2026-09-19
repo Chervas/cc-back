@@ -2,13 +2,17 @@
 
 > **Tipo:** histórico técnico de verificación.
 > **Fuente de verdad:** mediciones y verificación del consumo SQL del corte del 18/09/2026; no redefine la arquitectura ni sustituye el estado central.
-> **Última revisión del alcance y referencias:** 2026-09-18.
+> **Última revisión del alcance y referencias:** 2026-09-19.
 > **Relacionado con:** [00-README](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md), [21: colas](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/21-arquitectura-colas-y-tiempo-real.md#persistencia-planificación-y-recursos), [31: entornos](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md#dev-con-datos-ficticios-y-proceso-aislado), [39: auditoría](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#cola-sql-y-conciliación).
 > **Estado vigente:** [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones); resumen del corte en [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#salud-sql-de-auditoría-y-revisión-documental-2026-09-18).
 
 Revisión del 18/09/2026, continuación del incidente de login. El límite de 128
 consultas por conexión protege el servidor, pero no elimina el trabajo SQL
 innecesario. Se midió el worker real y se corrigió su comportamiento.
+
+El comportamiento secuencial descrito en el corte del 18/09 queda sustituido
+en DEV por la [separación publicada el 19/09](#separación-de-esperas-del-worker-dev-19092026).
+Las mediciones históricas conservan su alcance original.
 
 ## Hallazgos y cambio
 
@@ -253,3 +257,46 @@ de salud del servicio vigente v17, no publicación del nuevo consumidor ni carga
 máxima. La prueba integrada nueva usa MySQL propio y servidores HTTP/HTTPS propios:
 la guardia permite únicamente servidores locales registrados y todavía vivos;
 ninguna conexión a BD ajena, Redis o proveedor real está permitida.
+
+
+## Separación de esperas del worker DEV (19/09/2026)
+
+Publicado `0688d0d2` de forma selectiva: solo `dev-security-worker.js` sobre la
+release anterior, con preflight SQL, dependencias y configuración conservadas.
+Tres bucles asíncronos independientes esperan 1/10/30 segundos desde completar
+correo/entrega/conciliación. Cada uno tiene una única ejecución activa y no
+recupera intervalos perdidos en ráfaga. El error de conciliación queda registrado
+aunque el servicio devuelva un resultado fallido en lugar de lanzar una excepción.
+
+No cambia el outbox, el claim SQL ni el `flock` de la unidad; tampoco importa el
+scheduler/cron clínico. Un destino lento no retiene una transacción SQL durante
+su espera. Al parar, no se admiten nuevas tareas/lecturas, se cancelan las esperas
+de calendario y se drena antes de cerrar SQL. Se conserva el límite systemd de
+45 segundos; si fuerza el cierre, permanecen los leases/recibos y la incertidumbre,
+sin autorizar reenvíos. El relay, los bucles y el pool aún comparten recursos.
+
+Diez pruebas unitarias/aislamiento y tres grupos integrados MySQL 8.0.42 propios:
+con escritor y lector retenidos, un MFA real de la aplicación se encola/cifra,
+lo acepta SES ficticio y se verifica la sesión; job completado en ~1,04 segundos. No es
+una medición SES real ni un SLA. Segundo dispatcher rechazado por lease, fallo
+lector mantiene UUID/backoff, nuevas instancias recuperan el pendiente sin
+recrear objetos; un correo `sending` no se reenvía. Jobs staging/clínicos intactos.
+Se conservó la primera prueba fallida: la fecha histórica del fixture activó el
+umbral de auditoría y bloqueó correctamente MFA; se corrigió la fecha ficticia,
+sin alterar el guard de capacidad. Evidencia: `qa-evidence/security-resume-20260917/dev-security-lanes-20260919/`.
+
+
+Tras publicar, observación de 90,7 s: 149 SELECT del usuario DEV (~1,64/s), seis
+preparaciones y 21 ejecuciones preparadas, cero cierres por expulsión, cero errores
+SQL DEV y cero nuevas consultas lentas/esperas de fila globales. Once sentencias
+retenidas en cuatro conexiones DEV al final. La ventana incluye un rechazo de
+login ficticio generado desde Chromium; no representa carga máxima ni atribuye
+el trabajo de otros usuarios SQL al cambio.
+
+Chromium contra ambas interfaces servidas, 1440/390 px: cuatro capturas sin
+JavaScript/5xx/desbordamiento. Un único POST ficticio en DEV devuelve 401; su evento
+nuevo se entrega y concilia con igualdad exacta del recibo (~225 ms). Se conservan
+los ocho correos DEV completados, sin correo real nuevo. DEV/CRM tienen 62/299
+eventos entregados y cero pendientes en el corte de 00:29 UTC, con heartbeat sin
+error. La prueba pública fue anónima; el MFA con entrega SES simulada pertenece al
+MySQL aislado. No se desactivó MFA ni se crearon sesiones públicas de pruebas.

@@ -10555,3 +10555,40 @@ la fila CRM, y el intento queda sin finalización. Angular → HTTP → sesión 
 broker HTTPS/SQLite está probado en un mismo recorrido aislado con Google ficticio,
 incluida retirada, reinicio, sesión renovada, ACK perdido y UI escritorio/móvil.
 No sustituye publicación AWS ni aceptación con proveedor/sesión pública reales.
+
+
+## Worker de seguridad DEV: ciclos independientes (19/09/2026)
+
+`src/scripts/dev-security-worker.js` ejecuta tres bucles asíncronos independientes:
+correo de autenticación, entrega de auditoría y conciliación. Cada uno espera
+1, 10 o 30 segundos desde su propia finalización, respectivamente; no acumula
+intervalos perdidos ni solapa dos ejecuciones de la misma tarea. Una espera de
+red del escritor/lector no obliga al correo a esperar su finalización. Errores
+lanzados y resultados de fallo se registran con códigos acotados por tarea.
+
+Se conserva el proceso único protegido por `flock`, UID/BD/namespace DEV y leases
+SQL existentes. El correo solo reclama `email_send` del namespace DEV, valida la
+plantilla de autenticación/usuario y procesa como máximo cinco por turno. No
+cambia su política de reintentos: un outbox `sending` de resultado incierto no se
+reenvía. La entrega y conciliación reclaman estados distintos del mismo outbox;
+no mantienen una transacción SQL abierta durante la espera externa.
+
+SIGTERM/SIGINT detienen nuevas iteraciones y peticiones al relay, interrumpen las
+esperas de calendario y drenan llamadas activas antes de cerrar SQL. No se usa un
+timeout que abandone una promesa y permita un segundo envío. La unidad conserva
+su límite de parada de 45 s: un cierre forzado posterior sigue dependiendo de
+leases/recibos y no acredita un resultado desconocido. Un fallo interno del
+planificador cancela las esperas de los otros bucles y espera su drenaje.
+
+Esta separación de esperas no reserva CPU, memoria ni conexiones. Los tres bucles
+y el relay comparten proceso/pool, y MySQL sigue compartido con CRM. Una llamada
+síncrona intensiva o saturación SQL puede afectar a todos. El login conserva la
+política de capacidad de auditoría; no se permite acceso si no puede capturarse.
+CRM mantiene sus carriles existentes y no ejecuta este worker DEV.
+
+Publicado selectivamente desde `0688d0d2` sobre la release DEV anterior; código de
+API, dependencias, flags y secretos conservados. Sin DDL ni publicación pública.
+Pruebas: diez unitarias/aislamiento y recorrido SQL con desafío MFA real, SES
+ficticio y escritor/lector detenidos; sesión verificada mientras ambos esperan,
+recuperación de pendientes y rechazo de duplicados/envío incierto. Estado/medición
+en 19/99 y `docs/security/audit-query-health.md`.
