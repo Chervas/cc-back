@@ -18,6 +18,7 @@ const validate = new Ajv({ strict: true }).compile(object({
     templateReaderSecretArn: { type: 'string', maxLength: 2048 },
     whatsapp: require('./whatsapp-contract').bindingSchema,
     whatsappOnboarding: require('./whatsapp-onboarding-contract').bindingSchema,
+    metaMarketing: require('./meta-marketing-contract').bindingSchema,
     ai: require('./ai-contract').bindingSchema,
     bedrock: require('./bedrock-contract').bindingSchema,
     email: require('./email-contract').bindingSchema,
@@ -48,6 +49,8 @@ function validatePolicy(policy) {
     if (!policy.principals.some(row => row.id === grant.principalId) || !policy.connections.some(row => row.connectionRef === grant.connectionRef)) fail('invalid_request');
   }
   for (const binding of policy.connections) {
+    if (Boolean(binding.metaMarketing) !== (binding.provider === 'meta_marketing')) fail('invalid_request');
+    if (binding.metaMarketing) require('./meta-marketing-contract').bindingFor(binding);
     if (binding.googleAdsActionManagement) require('./google-action-management-contract').validateBinding(binding);
     if (binding.googleDataManager) require('./google-data-manager-contract').validateBinding(binding);
     if (binding.googleDataManagerEnrollment) require('./google-destination-contract').validateBinding(binding);

@@ -396,3 +396,16 @@ código/configuración, TLS, grants, principales de despliegue y servicio, red,
 disco/backups, retención, entrega AWS, coste y rollback. No ejecutar el template
 de aprovisionamiento de nuevo. Un rollback conserva bloqueos, comandos y audit;
 no recupera tokens de BD ni permite reabrir `getAssetStats`.
+
+## 19/09/2026 — Lecturas Meta no WhatsApp preparadas
+
+Runtime separado `src/meta-marketing-main.js`, estado de credencial, metadatos de
+activo explícito y revocación local por clave de control distinta. Secretos
+versionados del vault, identidad/permisos/caducidad comprobados, GET Graph fijo y
+proyección sin tokens. Cuenta Ads, página e Instagram vinculado; sin discovery
+general, escrituras publicitarias o CAPI. Cuatro lecturas y un hueco reservado
+para control; respuestas sin persistencia en SQLite.
+
+Probado con HTTPS/firmas/SQLite y AWS/Meta ficticios. No publicado ni conectado
+a CRM; no es aceptación visual ni real. OAuth, registro/consumidores, IAM y canary
+pendientes. [Contrato y recuperación](../../docs/security/meta-marketing-broker.md).

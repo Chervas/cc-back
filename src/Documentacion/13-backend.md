@@ -10779,3 +10779,50 @@ inicio mixto sin cambios SQL. No es aceptación de MFA público, proveedor real
 ni todos los recorridos de campañas. Sin DDL, variable, cola, activación o
 despliegue nuevo. Contrato funcional en 20.17, carga/coste en 39, estado en 19,
 corte en 99 y recuperación en `docs/security/meta-marketing-metadata.md`.
+
+## Broker de lecturas Meta no WhatsApp (preparado, 19/09/2026)
+
+`meta-marketing-main.js` prepara un runtime separado de solo lectura y revocación
+local. No está desplegado ni conectado a los consumidores CRM. El proveedor
+`meta_marketing` admite `meta.marketing.connection.read.v1`,
+`meta.marketing.asset.read.v1` y `meta.marketing.asset.revoke.v1`; payload vacío,
+principal/entorno, clínica, conexión y activo fijados en cada grant. No descubre
+todos los activos de una identidad ni acepta URLs, campos o IDs en el payload.
+
+El binding fija aplicación, sujeto, scopes de lectura, activos explícitos y
+versiones del token y secreto de aplicación. El runtime valida un prefijo de
+Secrets distinto para DEV/staging, ARN/cuenta/KMS y AWSCURRENT; comprueba ambas
+versiones antes y después del proveedor. No rota, renueva, copia credenciales
+legacy ni selecciona una versión nueva automáticamente. La credencial solo se
+materializa dentro del broker; no se conserva una caché entre operaciones.
+
+Cada lectura verifica `debug_token` por HTTPS: identidad, tipo USER/SYSTEM_USER,
+scopes exactos y caducidades. Comprueba los destinos granulares cuando Meta los
+devuelve; su ausencia no inventa una restricción ni demuestra acceso al activo.
+Por eso la lectura de conexión devuelve `assetAccessVerified:false`. La lectura
+del activo exige además respuesta con el ID fijado; Instagram comprueba primero
+la página vinculada. Salen únicamente etiquetas y metadatos cerrados de cuenta,
+página o perfil. El nombre opcional de Instagram conserva el fallback a username.
+
+Graph v24.0, host/método/campos fijos; GET sin redirección ni reintento, 8 s por
+llamada y 128 KiB por respuesta, presupuesto broker de 25 s. Cuatro lecturas
+simultáneas por runtime y un hueco separado para revocación: cuatro consultas
+lentas no ocupan ese hueco. La firma y el grant siguen siendo obligatorios allí.
+No reserva CPU, disco, sockets ni recursos AWS; no es aislamiento de proceso
+frente a saturación global. Cada principal tiene como máximo 60 peticiones/minuto.
+
+La revocación persiste en SQLite con auditoría, interrumpe lecturas pendientes y
+se conserva al reiniciar. El lector no tiene la clave de control. Un token
+declarado inválido bloquea duraderamente su conexión; no invalida otros activos
+por inferencia a partir de un error genérico. Los resultados de lectura no se
+persisten en el diario; una respuesta perdida no se recupera como una copia de
+salud pasada. Otra consulta explícita necesita UUID nuevo. Auditoría técnica v2
+conserva referencias y códigos, no tokens, nombres o respuestas del proveedor.
+
+TLS/firmas/SQLite/reinicio y límites probados con AWS/Meta ficticios. No acredita
+los permisos reales del proveedor, MFA público, recorrido visual de Ajustes ni
+integración con MySQL del consumidor. Continúan pendientes registro/asignaciones
+CRM y revocación coordinada, OAuth nuevo en vault, consumidores/UI, despliegue,
+IAM/grants y aceptación real. Meta Ads, CAPI y sincronizaciones siguen en pausa;
+WhatsApp conserva su transporte. Runbook en `docs/security/meta-marketing-broker.md`,
+estado en 19, costes en 39 y evidencia en 99.

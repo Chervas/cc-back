@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHead": "74fc068546f9701501a9386bf483cbe0f8660157",
+  "includesWorkingChanges": true,
+  "scope": "Dedicated Meta non-WhatsApp read-only vault runtime foundation, explicit asset bindings and independent local revocation. CRM consumers and OAuth remain pending. No deployment, live credential use or visual/public MFA/provider acceptance.",
+  "runtimeConsumersMigrated": 0,
+  "preparedFiles": {
+    "services/integrations-broker/src/meta-marketing-contract.js": "2991c1729e0e918d4cc54b0285e57ecefbaa15f344679943d4a6190fc13b9cec",
+    "services/integrations-broker/src/meta-marketing-http.js": "800cd5b4a021f89ddff27070690a53164eee3dcd7eed8c880fcedb9b123dd5a3",
+    "services/integrations-broker/src/meta-marketing-main.js": "9186251b4b708234324eb32e3099bfc3750d4440462a72d8a40878df2049fdc7",
+    "services/integrations-broker/src/meta-marketing-operations.js": "004ff4030e6509965df01e6c63fe6231bcb04bf960889ffcc12960161764f710",
+    "services/integrations-broker/src/meta-marketing-secrets.js": "c779b45955fd2b1d93741d74f991a989d0a3af48120cc7f2f9fbb016dd0a80b4",
+    "services/integrations-broker/test/meta-marketing-fixture.cjs": "b56899ad25062378e2660c9d5baf296d0f6139ee25506224cd763b3368d971ac",
+    "services/integrations-broker/test/meta-marketing-http.test.js": "55ea38d10164df39ba19deaf448ec06117c11c603d7d938266723517d64626e3",
+    "services/integrations-broker/test/meta-marketing-runtime.test.js": "1fee05c78fa5a58f22f0f0d91327467e6c2fbbe578b9fdd05859b3b3a743cb57",
+    "services/integrations-broker/test/meta-marketing.test.js": "49b5eb5522598029910bb95c6279b45fe1798c3dbac50c845402bf07f07944ea",
+    "services/integrations-broker/src/policy.js": "00ddedeb11e6b6cc051333bd9a9f679360a6d7c13c2d329dcbc9068b1623761c"
+  },
+  "pendingConsumerSnapshots": {
+    "note": "Relevant call sites inspected; hashes identify source snapshot, not a completed whole-file migration review.",
+    "backend": {
+      "src/routes/oauth.routes.js": "ef40df777feaa50b809728a1d354ff2e9002b59e9263e9993ce54400a041a85a",
+      "src/services/scopeConnectionResolver.service.js": "c98959fa2c4c04ada2a4fcd874b55443142813af2f26c4de21c9dca895f78c59"
+    },
+    "frontendBaseHead": "0228cd1ff012a708e6f24554226c66d87c377bf3",
+    "frontend": {
+      "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.ts": "9adb79ca3c1cb51ac50c72d68492c8d1539ab7f267257bd5beb7b06f6e6eaaff",
+      "src/app/modules/admin/pages/settings/shared/asset-mapping.component.ts": "8e364304cc1c214de1c3b37d603197bc49926f3680794bd6e58b3b6bce1a0188",
+      "src/app/modules/admin/apps/marketing/campaign-workspace/campaign-account-connection.service.ts": "ae322c641ebbc9331ccf897f90635f723ecc1eb9c86c0e983b267b132d279267"
+    }
+  },
+  "qa": {
+    "targeted": 27,
+    "brokerFull": 656,
+    "targetedIncludedInFull": true,
+    "realTlsAndSqlite": true,
+    "provider": "fictitious_offline",
+    "visualAcceptance": false,
+    "crmMysqlIntegration": false,
+    "publicMfa": false,
+    "realProvider": false,
+    "deployed": false
+  },
+  "cost": {
+    "successfulReadSecretsCalls": {
+      "describe": 4,
+      "get": 2
+    },
+    "metaRequests": {
+      "status": 1,
+      "ad_account": 2,
+      "facebook_page": 2,
+      "instagram_business": 3
+    },
+    "billedIncrementalUsd": null
+  }
+}
