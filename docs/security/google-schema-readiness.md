@@ -7,6 +7,10 @@
 
 ## Estado vigente — 19/09/2026, 17:06 UTC
 
+La aplicación SQL descrita aquí no debe repetirse. A las 17:38–17:39 UTC se
+publicaron después los [consumidores DEV](google-dev-consumers.md), manteniendo
+este esquema y gates cerrados. El acta siguiente conserva el alcance del corte SQL.
+
 El contrato completo del código preparado exige **49 tablas y 43 migraciones**;
 Google aporta 22 tablas y 22 migraciones (tres históricas de julio y diecinueve
 posteriores). Las cinco tablas nuevas son `GoogleConversionSubmissions`,
@@ -81,8 +85,9 @@ Evidencia privada en `qa-evidence/security-resume-20260917/google-clinical-prefl
 
 ## Pendiente
 
-Preparar candidata selectiva de consumidores y operador clínico Google con
-recuperación/drenaje propios antes de las 19 DDL públicas; el operador Meta
+Los consumidores selectivos ya están publicados en DEV con activación pendiente.
+Preparar la composición pública y un operador clínico Google con recuperación y
+drenaje propios antes de las 19 DDL públicas; el operador Meta
 existente está limitado a su plan Meta y no debe reutilizarse para este lote.
 Faltan primera identidad Google y ámbitos de todas sus verticales, configuración
 AWS, aceptación del titular/proveedor y recorridos autenticados/carga real. Una

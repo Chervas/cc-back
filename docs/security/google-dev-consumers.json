@@ -1,0 +1,172 @@
+{
+  "reviewedAt": "2026-09-19T17:46:53.016131+00:00",
+  "status": "published_dev_inactive_pending_real_acceptance",
+  "backend": {
+    "at": "2026-09-19T17:38:38.400115+00:00",
+    "sourceCommit": "aeb87ce46b33c064405522b738a0061e16beeb5b",
+    "previous": "/opt/clinicaclick-dev/release-d07e9c8579bafc446a0f86a283ec52a8fc733c90-meta-consumers",
+    "active": "/opt/clinicaclick-dev/release-aeb87ce46b33c064405522b738a0061e16beeb5b-google-consumers",
+    "published": true,
+    "schemaTables": 49,
+    "schemaCompatible": true,
+    "privateEnvironmentUnchanged": true,
+    "publicProcessesUnchanged": true,
+    "runtimeFlagsChanged": false,
+    "ddlApplied": false,
+    "changedFiles": 104,
+    "recovery": "/var/lib/clinicaclick-consumer-recovery/google-dev-20260919-aeb87ce4"
+  },
+  "frontend": {
+    "at": "2026-09-19T17:39:39.352913+00:00",
+    "sourceCommit": "95f55fe728803b781119901e216da9e80f6ee5b5",
+    "buildSourceCommit": "641127af",
+    "productTreeUnchangedSinceBuild": true,
+    "previous": "/home/ubuntu/www/front-dev-release-ddc84c5a8dc93d98a87ba11c71560c96463ce413-meta",
+    "target": "/home/ubuntu/www/front-dev-release-95f55fe728803b781119901e216da9e80f6ee5b5-google",
+    "completedAt": "2026-09-19T17:39:43.935537+00:00",
+    "published": true,
+    "indexSha256": "e60a9c57c64f1f0559f41301f648c7e4f1d13303a61dd70f3bf460fb62241239",
+    "previousDirectoryRetained": true,
+    "oldDistinctAssetNamesRetained": true,
+    "stableDevAssetNamesUseNoCache": true,
+    "publicFrontendUnchanged": true,
+    "backendRestarted": false
+  },
+  "frontendVerifiedFiles": 677,
+  "backendProductFiles": 58,
+  "backendQaFiles": 46,
+  "frontendProductFiles": 17,
+  "frontendQaFiles": 4,
+  "devSchemaDigest": "d139b2c676931c122a4f090795ffc15f33ea4dc95b5a33491f830d09749bbadc",
+  "publicSchemaDigest": "9e5be889b2d5b18d9b201c98a4f5a4505c56fbc963dffba0b317e4a3ee06d98d",
+  "publicSchemaCompatibleTables": 27,
+  "publicGoogleDdlPending": 19,
+  "tests": {
+    "broker": 629,
+    "backendInitialPassed": 168,
+    "backendFixtureFailuresResolvedAndRetested": 39,
+    "frontend": 65,
+    "mysqlSuites": [
+      {
+        "name": "bootstrap-mysql-visual.log",
+        "groups": 10,
+        "success": true,
+        "mysqlShutdown": 0
+      },
+      {
+        "name": "google_receipt_review_e2e.log",
+        "groups": 5,
+        "success": true,
+        "mysqlShutdown": 0
+      },
+      {
+        "name": "google_combined_diagnostics.log",
+        "groups": 12,
+        "success": true,
+        "mysqlShutdown": 0
+      },
+      {
+        "name": "google_native_leads.log",
+        "groups": 14,
+        "success": true,
+        "mysqlShutdown": 0
+      },
+      {
+        "name": "google_ads_enrollment_worker.log",
+        "groups": 24,
+        "success": true,
+        "mysqlShutdown": 0
+      },
+      {
+        "name": "google_conversion_submission.log",
+        "groups": 65,
+        "success": true,
+        "mysqlShutdown": 0
+      },
+      {
+        "name": "google_ads_action_journal-verified.log",
+        "groups": 16,
+        "success": true,
+        "mysqlShutdown": 0
+      },
+      {
+        "name": "google_destination_journal-verified.log",
+        "groups": 17,
+        "success": true,
+        "mysqlShutdown": 0
+      }
+    ],
+    "mysqlGroups": 163,
+    "integratedVisualScreenshots": 19,
+    "dialogChecks": 100,
+    "dialogScreenshots": 65,
+    "liveAnonymousLoginScreenshots": 4,
+    "realProvider": false,
+    "publicMfaAcceptance": false
+  },
+  "sqlObservation": {
+    "elapsedSeconds": 60.49581175413914,
+    "devSelects": 98,
+    "devSelectsPerSecond": 1.6199468551357163,
+    "devStatementErrors": 0,
+    "preparedStatements": 8,
+    "connectionsWithPreparedStatements": 4,
+    "maxPreparedPerConnection": 2,
+    "googleTableReadWriteDeltas": {
+      "clinicaclick_dev_isolated.GoogleConnections": [
+        0,
+        0
+      ],
+      "clinicaclick_dev_isolated.GoogleAdsEnrollmentRequests": [
+        0,
+        0
+      ],
+      "clinicaclick_dev_isolated.GoogleConversionSubmissions": [
+        0,
+        0
+      ],
+      "clinicaclick_dev_isolated.GoogleAdsActionPlans": [
+        0,
+        0
+      ],
+      "clinicaclick_dev_isolated.GoogleAdsActionCommands": [
+        0,
+        0
+      ],
+      "clinicaclick_dev_isolated.GoogleDestinationAuthorizations": [
+        0,
+        0
+      ],
+      "clinicaclick_dev_isolated.GoogleDestinationCommands": [
+        0,
+        0
+      ]
+    },
+    "globalSlowQueriesDelta": 0,
+    "globalRowLockWaitsDelta": 0,
+    "scope": "Inactive Google gates and existing DEV tasks; not a real provider load test"
+  },
+  "invariants": {
+    "devClinicalJobsAndCronsOff": true,
+    "mfaAndSessionEnforce": true,
+    "googleAndMetaGatesUnchanged": true,
+    "devGoogleRecordsEmpty": true,
+    "publicProcessIdentitiesAndEnvironmentsUnchanged": true,
+    "publicFrontendUnchanged": true,
+    "ddlAppliedInThisPublication": false,
+    "awsMutations": false,
+    "historicalJobsReplayed": false
+  },
+  "cost": {
+    "newCostExplorerCollection": false,
+    "incrementalBilledUsd": null
+  },
+  "evidenceDirectory": "/home/ubuntu/qa-evidence/security-resume-20260917/google-dev-candidate-20260919",
+  "pending": [
+    "public Google schema and consumers",
+    "all consumers of shared Google identity",
+    "AWS SSO, grants and credential migration",
+    "real authenticated UI and provider acceptance",
+    "full security objective remains active; rotation deferred; general backups last"
+  ]
+}

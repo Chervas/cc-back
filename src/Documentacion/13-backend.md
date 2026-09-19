@@ -11963,7 +11963,33 @@ metadata; rechaza fuente/cambio de esquema o replay. No habilita flags ni mueve
 credenciales. La secuencia real en MySQL aislado conserva datos anteriores y
 comprueba que las referencias incompletas o el borrado de recibos se rechazan.
 
-DEV ya dispone del esquema completo, manteniendo su release y gates anteriores.
-El corte clínico Google y publicación/aceptación de consumidores siguen pendientes.
+DEV ya dispone del esquema completo. Desde el corte siguiente ejecuta los
+consumidores preparados de Google, conservando sus gates cerrados. El corte
+clínico Google y la aceptación autenticada/de proveedor siguen pendientes.
 Requisitos, plan consumido, pruebas y recuperación en
 `docs/security/google-schema-readiness.md/json`; madurez central en19.
+
+### Consumidores Google publicados en DEV con activación pendiente
+
+La release aislada incorpora lectura/configuración sin hidratar tokens, altas Ads,
+conciliación, recepción nativa, recibos y diarios tipados de acciones/destinos.
+La interfaz conserva la selección, exige confirmación humana para mutaciones y
+presenta un resultado incierto como pendiente de consulta; no ofrece repetir una
+aplicación para resolver una respuesta perdida. El acceso actual a clínica y sesión
+se comprueba también al recuperar recibos o retirar permisos. Meta en pausa mantiene
+sus conexiones y activos guardados; el bootstrap rechaza un inicio mixto antes de
+escribir y no consulta sus credenciales.
+
+Publicar estas rutas no activa integraciones: DEV mantiene datos ficticios/vacíos,
+MFA/session enforce, jobs/crons clínicos OFF y los gates Google/Meta anteriores.
+La promoción selecciona producto sobre la release realmente ejecutada y conserva
+dependencias root compatibles con sus locks; no publica enlaces de dependencias QA.
+CRM/gateway requieren su composición y las 19 DDL Google pendientes antes del corte.
+No se cambia el esquema clínico al publicar DEV ni se reutiliza el operador Meta.
+
+Pruebas de concurrencia, pérdida de respuestas, auditoría transaccional, revocación
+y componentes Angular usan SQL/HTTPS reales aislados con proveedor/sesión ficticios.
+El login anónimo se comprueba además contra las aplicaciones publicadas. Ninguno
+sustituye OAuth, MFA autenticado, carga real o aceptación clínica de Google.
+Versiones, evidencia, diagnóstico y recuperación:
+`docs/security/google-dev-consumers.md/json`.
