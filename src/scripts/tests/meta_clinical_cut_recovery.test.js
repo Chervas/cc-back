@@ -29,3 +29,10 @@ test('duplicate participants and failed start are rejected without retrying any 
   g.options.start=async id=>g.started.push(id);
   await assert.rejects(recoverStoppedParticipants(g.options),/start_failed/);assert.deepEqual(g.started,['api']);
 });
+test('same manager PID cannot hide a replaced application or reused process identity',async()=>{
+ const f=fixture();f.participants[0].originalIdentity={manager:{pid:101,startTicks:'10'},application:{pid:901,startTicks:'11'}};
+ f.state.api.identity={manager:{pid:101,startTicks:'10'},application:{pid:902,startTicks:'12'}};
+ await assert.rejects(recoverStoppedParticipants(f.options),/identity_changed/);assert.deepEqual(f.started,[]);
+ f.state.api.identity=structuredClone(f.participants[0].originalIdentity);
+ await recoverStoppedParticipants(f.options);assert.deepEqual(f.started,[]);
+});

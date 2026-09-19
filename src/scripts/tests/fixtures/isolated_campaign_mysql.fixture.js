@@ -21,7 +21,12 @@ async function withIsolatedCampaignMysql(work) {
   const log = path.join(root, 'mysql-error.log');
   const originalConnect = net.Socket.prototype.connect;
   require('./campaign_offline_runtime.cjs');
-  const rejected = [], ownedServers = new Map(); let ownedHttpConnections = 0;
+  const rejected = [], ownedServers = new Map(), ownedUnixSockets = new Set(); let ownedHttpConnections = 0;
+  const registerOwnedUnixSocket = socket => {
+    const actual = fs.realpathSync(socket), stat = fs.statSync(actual);
+    if (!actual.startsWith(root + path.sep) || !stat.isSocket() || stat.uid !== process.getuid()) throw Error('TEST_SOCKET_NOT_OWNED');
+    ownedUnixSockets.add(actual);
+  };
   const registerOwnedLoopbackServer = server => {
     if (!(server instanceof net.Server) || !server.listening) throw Error('TEST_SERVER_NOT_LISTENING');
     const address = server.address();
@@ -38,7 +43,7 @@ async function withIsolatedCampaignMysql(work) {
     if (host === '127.0.0.1' && server?.listening && server.address()?.port === port) {
       ownedHttpConnections++; return originalConnect.apply(this, args);
     }
-    if (socket !== socketPath || input?.port || input?.host) {
+    if ((socket !== socketPath && !ownedUnixSockets.has(socket)) || input?.port || input?.host) {
       rejected.push('non-test socket'); throw Error('NETWORK_FORBIDDEN_IN_MYSQL_CAMPAIGN_TEST');
     }
     return originalConnect.apply(this, args);
@@ -73,7 +78,7 @@ async function withIsolatedCampaignMysql(work) {
     sql = new Sequelize({ ...config, database: report.database, timezone: '+00:00' });
     sql.addHook('afterConnect', connection => new Promise((resolve, reject) => connection.query('SET SESSION innodb_lock_wait_timeout = 5', error => error ? reject(error) : resolve())));
     models.sequelize = sql;
-    await work({ sql, models, report, registerOwnedLoopbackServer });
+    await work({ sql, models, report, registerOwnedLoopbackServer, registerOwnedUnixSocket });
     if (ownedHttpConnections) report.ownedLoopbackConnections = ownedHttpConnections;
     assert.equal(rejected.length, 0, 'No other database, Redis or provider connection is allowed');
     if (process.env.PLATFORM_AUDIT_FIXTURE_EXPORT) {
