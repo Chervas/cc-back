@@ -122,3 +122,8 @@ el SDK y los dobles no sustituyen la aceptación de permisos/granularidad con Me
 Evidencia privada: `qa-evidence/security-resume-20260917/meta-marketing-broker-20260919/`.
 Inventario acotado: `meta-marketing-broker-consumers.json`; estado/corte en 19/99 y
 carga/coste en 39. Las fuentes no incluidas no se dan por migradas.
+
+
+OAuth nuevo tiene preparada la fase interna de intercambio/inspección y candidato
+separado en vault: [contrato y límites](meta-marketing-oauth.md). No monta callback
+CRM ni activa grants; el escritor de altas y aceptación real continúan pendientes.

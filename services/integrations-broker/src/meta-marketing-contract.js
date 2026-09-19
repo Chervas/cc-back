@@ -52,7 +52,13 @@ function expiry(value, now) {
   return value * 1000;
 }
 function verifyCredential(raw, binding, now) {
-  const expected = bindingFor(binding), data = raw?.data;
+  return inspectCredential(raw, bindingFor(binding), now);
+}
+function inspectCredential(raw, expected, now) {
+  if (!graphId(expected?.appId) || !graphId(expected?.subjectId) || !Array.isArray(expected.scopes)
+    || !expected.scopes.length || new Set(expected.scopes).size !== expected.scopes.length
+    || expected.scopes.some(scope => !SCOPES.includes(scope))) fail('invalid_request');
+  const data = raw?.data;
   if (raw?.error || !data || typeof data !== 'object' || Array.isArray(data)) fail('oauth_credentials_incomplete');
   if (data.is_valid !== true) fail('credential_revoked');
   if (data.app_id !== expected.appId || data.user_id !== expected.subjectId || !['USER', 'SYSTEM_USER'].includes(data.type)) fail('oauth_identity_mismatch');
@@ -91,4 +97,4 @@ function projectAsset(raw, asset) {
   return result;
 }
 module.exports = { PROVIDER, COHORT, GRAPH_VERSION, STATUS, ASSET, REVOKE, OPERATIONS, SCOPES,
-  bindingSchema, bindingFor, resource, requiredScopes, graphId, validate, verifyCredential, assertAssetCredential, projectAsset };
+  bindingSchema, bindingFor, resource, requiredScopes, graphId, validate, verifyCredential, inspectCredential, assertAssetCredential, projectAsset };

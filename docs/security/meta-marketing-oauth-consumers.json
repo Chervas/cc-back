@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "3a0254e30724696fd8030c4a3e20b530e9e24569",
+    "front": "5f168eb41e2e04d3ac6e66303fb654315794aa49"
+  },
+  "includesWorkingChanges": true,
+  "scope": "Prepared Meta new authorization exchange, inspected candidate vault storage, cancellation and recovery; no CRM callback/selection/grants/UI/runtime activation",
+  "files": {
+    "services/integrations-broker/src/broker.js": "6bb8a9e24f23a6a6572b5d98b0bf16e110e6532c67180fc19ec11b0efde38611",
+    "services/integrations-broker/src/meta-marketing-contract.js": "901d57ab200cfe6b586431858393baf033bf2c3d631356721666879c4a724539",
+    "services/integrations-broker/src/policy.js": "04cf3e90f92c74cf1b0fe7077f5d240126651fe0172bd985ad841964fc83841c",
+    "services/integrations-broker/src/meta-marketing-oauth-contract.js": "973c9bfec92708528fdca2bb972f8cc9193dbc8ec6afb9be7f3165189b14f9ba",
+    "services/integrations-broker/src/meta-marketing-oauth-http.js": "97e73345ae37dbf5b3f390335c5b9e262d2b32b5853d60b7a82d439735ac9181",
+    "services/integrations-broker/src/meta-marketing-oauth-main.js": "a1e26e0cc5fce3a7db15c4942ae63b409a513325efe2b461c1854cbfdf673361",
+    "services/integrations-broker/src/meta-marketing-oauth-secrets.js": "57c4fc3baeecf4b4a8da3b620fb7abcd6e4fda2f13c4c7a15aa7727c1b681f5e",
+    "services/integrations-broker/src/meta-marketing-oauth.js": "a18908e08c7e3aad0847c1e945154ff91cd9b2608c7ab35977589ac75fbd5b42",
+    "services/integrations-broker/test/meta-marketing-oauth-fixture.cjs": "ad501b44b6c7af1824d02c81dd5dea7445414cfa9587b51cffd17beed3e66474",
+    "services/integrations-broker/test/meta-marketing-oauth-http.test.js": "24077659ffbb84f93586e5832a30152b3d4f0d2a662edb17c1533dca2e72c809",
+    "services/integrations-broker/test/meta-marketing-oauth-runtime.test.js": "f704e9e478c9b4c60398b3155240a73940cd6d44450511e54f9c3d73c00f84c8",
+    "services/integrations-broker/test/meta-marketing-oauth.test.js": "c6f1f62fc38580dd37041f0dabfbb322c7fa6cc85662355c73473a79f6d2deec"
+  },
+  "qa": {
+    "focusedTests": 42,
+    "fullBrokerTests": 698,
+    "syntaxFiles": 12,
+    "realSignedTLS": true,
+    "sqliteDurableRestart": true,
+    "externalNetworkBlocked": true,
+    "fakeMetaSecretsS3": true,
+    "visualAcceptance": false,
+    "publicMfa": false,
+    "deployed": false
+  },
+  "costSample": {
+    "begin": {
+      "elapsedMs": 15.43,
+      "awsCalls": {
+        "DescribeSecretCommand": 2,
+        "GetSecretValueCommand": 1,
+        "ListSecretVersionIdsCommand": 1
+      },
+      "metaCalls": []
+    },
+    "finish": {
+      "elapsedMs": 31.01,
+      "awsCalls": {
+        "DescribeSecretCommand": 15,
+        "GetSecretValueCommand": 10,
+        "ListSecretVersionIdsCommand": 2,
+        "PutSecretValueCommand": 1
+      },
+      "metaCalls": [
+        "code",
+        "extend",
+        "inspect"
+      ]
+    },
+    "confirmedStatus": {
+      "elapsedMs": 5.94,
+      "awsCalls": {},
+      "metaCalls": []
+    },
+    "abort": {
+      "elapsedMs": 10.17,
+      "awsCalls": {},
+      "metaCalls": []
+    },
+    "auditEvents": 3,
+    "credentialTablesTouched": "owned SQLite and fictitious Secrets only",
+    "actualAwsCost": null
+  },
+  "pending": [
+    "CRM managed session/MFA/begin/callback and human audit",
+    "asset discovery/selection and transactional binding/grant writer",
+    "activation that preserves physical-asset revocations and independent history",
+    "real provider/AWS/authenticated visual acceptance",
+    "selective release IAM/TLS/slots and measured load"
+  ]
+}

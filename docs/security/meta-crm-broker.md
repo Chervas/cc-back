@@ -123,3 +123,8 @@ UUID nuevo, sin reproducir el anterior. Backups/restauración siguen al final.
 
 Inventario de fuentes y hashes en `meta-crm-broker-consumers.json`. Contratos en
 13/20.17, variables en 03, madurez en 19, prioridades en 16 y corte/recuperación en 99.
+
+
+OAuth nuevo tiene preparada la fase interna de intercambio/inspección y candidato
+separado en vault: [contrato y límites](meta-marketing-oauth.md). No monta callback
+CRM ni activa grants; el escritor de altas y aceptación real continúan pendientes.

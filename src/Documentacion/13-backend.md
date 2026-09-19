@@ -10996,3 +10996,58 @@ escritor de altas/grants, aceptación pública/titular, carga real y publicació
 pendientes. Contrato funcional20.17, variables03, jobs11, recursos/costes39 y estado19.
 Runbook e inventario: `docs/security/meta-marketing-revocation.md` y
 `meta-marketing-revocation-consumers.json`; corte/evidencia/recuperación en99.
+
+
+### OAuth Meta: candidato nuevo dentro del broker (preparado, 19/09/2026)
+
+`services/integrations-broker/src/meta-marketing-oauth-main.js` prepara un runtime
+explícito `meta-marketing-oauth-v1`, separado del lector. Proveedor
+`meta_marketing_onboarding`, operaciones tipadas begin/finish/status/abort y claves
+Ed25519 distintas para gateway y control de cada entorno. Solo trabaja con slots
+vacíos preasignados del namespace Meta del entorno, aplicación/versiones fijadas,
+clínicas completas y callback HTTPS fijo `/oauth/meta/marketing/callback`.
+No se registra en el arranque genérico ni monta todavía ese callback en gateway.
+
+Begin liga state aleatorio, UUID, digest de autorización, conjunto ordenado de
+clínicas y caducidad máxima10 minutos a la política. Verifica slot/KMS/versiones y
+capacidad antes de ofrecer la URL; máximo6 solicitudes/hora por conexión. Finish
+consume el código una sola vez, intercambia por token largo e inspecciona app,
+identidad USER, expiraciones y scopes/grants granulares dentro del broker. Solo
+acepta los permisos de lectura Meta configurados, excluye WhatsApp y no consulta
+nombre, email ni contenido clínico. El secreto de app y los tokens no salen hacia
+CRM, SQLite, auditoría o errores. Buffers propios se borran; no se promete borrado
+verificable de todas las copias de strings/SDK dentro del heap JavaScript.
+
+Guarda una versión candidata Secrets Manager por UUID y hash, máximo64 KiB, con
+AWSPENDING. AWSCURRENT conserva el slot sin token. Verifica nombre/ARN, KMS, versión,
+hash, ámbito y pins antes/después; sin CreateSecret, promoción, borrado, fallback a
+credenciales históricas o rotación. El límite de versiones se comprueba también
+antes de consumir el código, no solo al escribir. La respuesta es metadata cerrada
+con `accessBlocked=true`; todavía no crea bindings/grants de lectura ni asignaciones.
+
+SQLite propio conserva state/code como hashes, identidades, estado y digest del
+candidato, con auditoría técnica v2 atómica. ACK de escritura perdido se recupera
+consultando la misma versión: nunca vuelve a canjear el código ni vuelve a hacer
+Put. Un candidato ausente conserva incertidumbre y exige abort/nueva autorización.
+Un proceso caído durante exchange conserva su estado incierto, sin modificarlo al
+arrancar; finish no reejecuta exchange. Cancelar antes de begin crea tombstone, y
+cancelar durante I/O impide confirmación tardía. Puede quedar una versión candidata
+inactiva si el Put remoto termina tras abort; no se borra ni concede acceso.
+
+Dos peticiones ordinarias concurrentes y una admisión reservada para control;
+20 solicitudes/minuto por principal, HTTP8 s por llamada y límite de operación25 s.
+SDK respeta AbortSignal; no se afirma aislamiento de CPU/disco ni cancelación de
+una dependencia que lo ignore. Una sola instancia debe poseer el SQLite. Status
+confirmado y abort no consultan Meta/Secrets; status de staging revalida la versión
+pendiente. El outbox técnico usa el drain existente; no crea jobs clínicos o BullMQ.
+
+No publicado ni montado en la interfaz. Faltan inicio/callback CRM con MFA y sesión
+vigentes, auditoría humana y selección de activos; escritor transaccional de bindings,
+grants y activación que revalide bloqueos físicos/historial de bajas independiente.
+No reutilizar un candidato para borrar `MetaMarketingBrokerRevocations`, reactivar
+un binding ni compartir derechos fuera del conjunto autorizado. El OAuth legacy y
+su almacenamiento local siguen sin migrar; este módulo no acredita el alta final.
+Pruebas de interfaz/titular/proveedor/AWS y coste real siguen pendientes. Sin cambios
+de runtime, esquema MySQL, campañas, leads, WhatsApp o releases; canary v19 intacto.
+Runbook: `docs/security/meta-marketing-oauth.md`; recursos39, configuración03,
+funcional20.17, madurez19, prioridades16 y evidencia/recuperación99.
