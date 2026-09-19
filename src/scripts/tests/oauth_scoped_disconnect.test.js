@@ -1,6 +1,10 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+require('./fixtures/security_offline_runtime.cjs');
+const modelIndex = require.resolve('../../../models');
+assert.equal(require.cache[modelIndex], undefined, 'Production models must never load in this isolated test');
+require.cache[modelIndex] = { id: modelIndex, filename: modelIndex, loaded: true, exports: {} };
 const {
   deactivateGoogleMappingsForScope,
   deactivateMetaMappingsForScope,
@@ -75,6 +79,8 @@ async function testMetaClinicMappingIsDeactivatedWithTombstoneScope() {
   const emptyModel = { findAll: async () => [] };
   const models = {
     Clinica: emptyModel,
+    MetaScopeBlock: { findOrCreate: async () => [{}, true] },
+    PlatformAuditEvent: { sequelize: {}, create: async () => {}, count: async () => 0, min: async () => null },
     MetaConnectionAssignment: emptyModel,
     ClinicMetaAsset: { findAll: async () => [mapping] },
     GroupAssetClinicAssignment: {
@@ -86,7 +92,7 @@ async function testMetaClinicMappingIsDeactivatedWithTombstoneScope() {
   };
   const result = await deactivateMetaMappingsForScope({
     scope: { assignmentScope: 'clinic', clinicId: 36, groupId: 5 },
-    connectionId: 158,
+    connectionId: 158, actorId: 123,
     transaction: { LOCK: { UPDATE: 'UPDATE' } },
     models,
   });

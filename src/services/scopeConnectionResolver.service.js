@@ -13,6 +13,7 @@ const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const ClinicWebAsset = db.ClinicWebAsset;
 const ClinicAnalyticsProperty = db.ClinicAnalyticsProperty;
 const ClinicBusinessLocation = db.ClinicBusinessLocation;
+const META_METADATA_FIELDS = Object.freeze(['id', 'userId', 'metaUserId', 'expiresAt', 'userName', 'userEmail', 'createdAt', 'updatedAt']);
 
 function parseInteger(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
@@ -110,13 +111,14 @@ function buildAuthorizedBy(connection, fallbackUserId = null) {
   };
 }
 
-async function findSingleUserConnection(Model, userId) {
+async function findSingleUserConnection(Model, userId, attributes) {
   const parsedUserId = parseInteger(userId);
   if (!parsedUserId) return { connection: null, ambiguous: false };
   const updatedAttribute = Model.rawAttributes?.updatedAt
     ? 'updatedAt'
     : (Model.rawAttributes?.updated_at ? 'updated_at' : null);
   const connections = await Model.findAll({
+    ...(attributes ? { attributes } : {}),
     where: { userId: parsedUserId },
     order: [...(updatedAttribute ? [[updatedAttribute, 'DESC']] : []), ['id', 'DESC']],
     limit: 2,
@@ -128,6 +130,7 @@ async function findSingleUserConnection(Model, userId) {
 }
 
 async function upsertMetaAssignment({ connection, scope, authorizedByUserId = null }) {
+  require('../lib/metaQuarantineHttp').assertMetaAvailable();
   if (!connection?.id || !scope?.scopeKey) return null;
   const authorizedBy = buildAuthorizedBy(connection, authorizedByUserId);
   const values = {
@@ -181,25 +184,25 @@ async function upsertGoogleAssignment({ connection, scope, authorizedByUserId = 
   return GoogleConnectionAssignment.create(values);
 }
 
-async function findMetaAssignment(scope, statuses = ['active', 'reauthorization_required']) {
+async function findMetaAssignment(scope, statuses = ['active', 'reauthorization_required'], attributes) {
   if (!scope?.scopeKey) return null;
   return MetaConnectionAssignment.findOne({
     where: {
       scopeKey: scope.scopeKey,
       status: { [Op.in]: statuses }
     },
-    include: [{ model: MetaConnection, as: 'metaConnection' }]
+    include: [{ model: MetaConnection, as: 'metaConnection', ...(attributes ? { attributes } : {}) }]
   });
 }
 
-async function findGoogleAssignment(scope, statuses = ['active', 'reauthorization_required']) {
+async function findGoogleAssignment(scope, statuses = ['active', 'reauthorization_required'], attributes) {
   if (!scope?.scopeKey) return null;
   return GoogleConnectionAssignment.findOne({
     where: {
       scopeKey: scope.scopeKey,
       status: { [Op.in]: statuses }
     },
-    include: [{ model: GoogleConnection, as: 'googleConnection' }]
+    include: [{ model: GoogleConnection, as: 'googleConnection', ...(attributes ? { attributes } : {}) }]
   });
 }
 
@@ -216,16 +219,16 @@ async function distinctConnectionIds(Model, field, where) {
     .filter((id) => Number.isInteger(id) && id > 0)));
 }
 
-async function resolveSingleMappedConnection(Model, ids, source) {
+async function resolveSingleMappedConnection(Model, ids, source, attributes) {
   if (ids.length > 1) {
     return { connection: null, source: `${source}_ambiguous`, ambiguous: true };
   }
   if (ids.length !== 1) return { connection: null, source: null, ambiguous: false };
-  const connection = await Model.findByPk(ids[0]);
+  const connection = await Model.findByPk(ids[0], attributes ? { attributes } : undefined);
   return { connection: connection || null, source: connection ? source : null, ambiguous: false };
 }
 
-async function findLegacyMetaConnectionFromMappings(scope) {
+async function findLegacyMetaConnectionFromMappings(scope, attributes) {
   if (scope?.clinicId) {
     const clinicConnectionIds = await distinctConnectionIds(
       ClinicMetaAsset,
@@ -235,7 +238,7 @@ async function findLegacyMetaConnectionFromMappings(scope) {
     const clinicResult = await resolveSingleMappedConnection(
       MetaConnection,
       clinicConnectionIds,
-      'legacy_mapping_clinic'
+      'legacy_mapping_clinic', attributes
     );
     if (clinicResult.connection || clinicResult.ambiguous) return clinicResult;
   }
@@ -253,7 +256,7 @@ async function findLegacyMetaConnectionFromMappings(scope) {
     const groupResult = await resolveSingleMappedConnection(
       MetaConnection,
       groupConnectionIds,
-      'legacy_mapping_group'
+      'legacy_mapping_group', attributes
     );
     if (groupResult.connection || groupResult.ambiguous) return groupResult;
   }
@@ -283,13 +286,13 @@ async function googleClinicMappingConnectionIds(clinicId) {
   return Array.from(new Set([...ads, ...web, ...analytics, ...local]));
 }
 
-async function findLegacyGoogleConnectionFromMappings(scope) {
+async function findLegacyGoogleConnectionFromMappings(scope, attributes) {
   if (scope?.clinicId) {
     const clinicConnectionIds = await googleClinicMappingConnectionIds(scope.clinicId);
     const clinicResult = await resolveSingleMappedConnection(
       GoogleConnection,
       clinicConnectionIds,
-      'legacy_mapping_google_clinic'
+      'legacy_mapping_google_clinic', attributes
     );
     if (clinicResult.connection || clinicResult.ambiguous) return clinicResult;
   }
@@ -307,7 +310,7 @@ async function findLegacyGoogleConnectionFromMappings(scope) {
     const groupResult = await resolveSingleMappedConnection(
       GoogleConnection,
       groupConnectionIds,
-      'legacy_mapping_google_group'
+      'legacy_mapping_google_group', attributes
     );
     if (groupResult.connection || groupResult.ambiguous) return groupResult;
   }
@@ -321,12 +324,18 @@ async function resolveMetaConnectionForScope({
   groupIdRaw = null,
   assignmentScopeRaw = null,
   allowLegacyUserFallback = true,
+  metadataOnly = false,
 }) {
+  const attributes = metadataOnly === true ? META_METADATA_FIELDS : undefined;
   const scope = await normalizeScope({ clinicIdRaw, groupIdRaw, assignmentScopeRaw });
 
   const requestedScope = buildSharedConnectionScope(scope) || scope;
+  if (requestedScope.scopeKey && await require('./metaScopeBlock.service').blocked(requestedScope)) {
+    return { connection: null, assignment: null, scope: requestedScope, source: 'security_scope_blocked' };
+  }
+
   for (const candidateScope of buildConnectionResolutionPlan(scope)) {
-    const assignment = await findMetaAssignment(candidateScope);
+    const assignment = await findMetaAssignment(candidateScope, undefined, attributes);
     if (assignment?.metaConnection) {
       const suffix = candidateScope.assignmentScope === requestedScope.assignmentScope
         ? candidateScope.assignmentScope
@@ -339,7 +348,7 @@ async function resolveMetaConnectionForScope({
       };
     }
 
-    const blockedAssignment = await findMetaAssignment(candidateScope, ['disconnected', 'revoked']);
+    const blockedAssignment = await findMetaAssignment(candidateScope, ['disconnected', 'revoked'], attributes);
     if (blockedAssignment) {
       return {
         connection: null,
@@ -350,7 +359,7 @@ async function resolveMetaConnectionForScope({
     }
   }
 
-  const legacy = await findLegacyMetaConnectionFromMappings(requestedScope);
+  const legacy = await findLegacyMetaConnectionFromMappings(requestedScope, attributes);
   if (legacy.connection) {
     const targetScope = requestedScope;
     return { connection: legacy.connection, assignment: null, scope: targetScope, source: legacy.source };
@@ -365,7 +374,7 @@ async function resolveMetaConnectionForScope({
   }
 
   if (allowLegacyUserFallback && userId) {
-    const { connection, ambiguous } = await findSingleUserConnection(MetaConnection, userId);
+    const { connection, ambiguous } = await findSingleUserConnection(MetaConnection, userId, attributes);
     if (connection) {
       return { connection, assignment: null, scope: requestedScope, source: 'legacy_user' };
     }
@@ -388,12 +397,14 @@ async function resolveGoogleConnectionForScope({
   groupIdRaw = null,
   assignmentScopeRaw = null,
   allowLegacyUserFallback = true,
+  metadataOnly = false,
 }) {
+  const attributes = metadataOnly ? ['id'] : undefined;
   const scope = await normalizeScope({ clinicIdRaw, groupIdRaw, assignmentScopeRaw });
 
   const requestedScope = buildSharedConnectionScope(scope) || scope;
   for (const candidateScope of buildConnectionResolutionPlan(scope)) {
-    const assignment = await findGoogleAssignment(candidateScope);
+    const assignment = await findGoogleAssignment(candidateScope, undefined, attributes);
     if (assignment?.googleConnection) {
       const suffix = candidateScope.assignmentScope === requestedScope.assignmentScope
         ? candidateScope.assignmentScope
@@ -406,7 +417,7 @@ async function resolveGoogleConnectionForScope({
       };
     }
 
-    const blockedAssignment = await findGoogleAssignment(candidateScope, ['disconnected', 'revoked']);
+    const blockedAssignment = await findGoogleAssignment(candidateScope, ['disconnected', 'revoked'], attributes);
     if (blockedAssignment) {
       return {
         connection: null,
@@ -417,7 +428,7 @@ async function resolveGoogleConnectionForScope({
     }
   }
 
-  const legacy = await findLegacyGoogleConnectionFromMappings(requestedScope);
+  const legacy = await findLegacyGoogleConnectionFromMappings(requestedScope, attributes);
   if (legacy.connection) {
     const targetScope = requestedScope;
     return { connection: legacy.connection, assignment: null, scope: targetScope, source: legacy.source };
@@ -432,7 +443,7 @@ async function resolveGoogleConnectionForScope({
   }
 
   if (allowLegacyUserFallback && userId) {
-    const { connection, ambiguous } = await findSingleUserConnection(GoogleConnection, userId);
+    const { connection, ambiguous } = await findSingleUserConnection(GoogleConnection, userId, attributes);
     if (connection) {
       return { connection, assignment: null, scope: requestedScope, source: 'legacy_user' };
     }
@@ -450,6 +461,7 @@ async function resolveGoogleConnectionForScope({
 }
 
 module.exports = {
+  META_METADATA_FIELDS,
   parseInteger,
   buildScopeKey,
   normalizeScope,

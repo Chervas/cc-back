@@ -7,6 +7,21 @@
  * reintentos y la recuperación tras reinicio pertenecen al scheduler durable.
  */
 const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
+  metaMarketingEnrollment: Object.freeze({
+    type: 'meta_marketing_enrollment_reconciliation', priority: 'high', executorMethod: 'executeMetaMarketingEnrollment',
+    enabledEnv: 'META_MARKETING_ENROLLMENT_WORKER_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
+  metaMarketingRevocations: Object.freeze({
+    type: 'meta_marketing_broker_revocations', priority: 'high', executorMethod: 'executeMetaMarketingRevocations',
+    enabledEnv: 'META_MARKETING_REVOCATION_WORKER_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
+  metaMarketingOAuth: Object.freeze({
+    type: 'meta_marketing_oauth_reconciliation', priority: 'high', executorMethod: 'executeMetaMarketingOAuth',
+    enabledEnv: 'META_MARKETING_OAUTH_WORKER_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
   platformAuditDelivery: Object.freeze({
     type: 'platform_audit_delivery', priority: 'normal', executorMethod: 'executePlatformAuditDelivery',
     enabledEnv: 'PLATFORM_AUDIT_DELIVERY_ENABLED', timezone: 'Europe/Madrid',

@@ -374,6 +374,9 @@ class MetaSyncJobs {
     
     // Descripciones por job (usadas por el monitor/UX)
     this.jobDescriptions = {
+      metaMarketingEnrollment: 'Concilia selecciones Meta confirmadas y retiradas mediante su diario, sin reactivar campañas ni repetir activaciones inciertas.',
+      metaMarketingRevocations: 'Confirma bloqueos Meta Ads/páginas/Instagram ya solicitados; no llama al proveedor ni afecta WhatsApp.',
+      metaMarketingOAuth: 'Concilia candidatos OAuth Meta y cancelaciones aceptadas, sin recanjear códigos ni activar activos.',
         platformAuditDelivery: 'Entrega eventos de auditoría pendientes y conserva las confirmaciones externas verificadas.',
         platformAuditMonitor: 'Comprueba la entrega de auditoría y guarda avisos para los administradores técnicos.',
         platformAuditReconciliation: 'Comprueba entregas de auditoría dudosas mediante el lector separado.',
@@ -418,6 +421,9 @@ class MetaSyncJobs {
     // Configuración desde variables de entorno
     this.config = {
       schedules: {
+        metaMarketingEnrollment: '* * * * *',
+        metaMarketingRevocations: '* * * * *',
+        metaMarketingOAuth: '* * * * *',
         platformAuditDelivery: '* * * * *',
         platformAuditMonitor: '*/5 * * * *',
         platformAuditReconciliation: '*/5 * * * *',
@@ -611,6 +617,9 @@ class MetaSyncJobs {
     const definition = getScheduledJobDefinition(jobName);
     if (!definition) {
       throw new Error(`Job periódico '${jobName}' no definido en el catálogo`);
+    }
+    if (definition.enabledEnv && process.env[definition.enabledEnv] !== 'true') {
+      return { status: 'disabled', queued: false, job_type: definition.type };
     }
 
     const suppliedPayload = options.payload
@@ -990,6 +999,18 @@ class MetaSyncJobs {
   /**
    * Job: Sincronización de métricas de Meta
    */
+  async executeMetaMarketingEnrollment() {
+    return require('../services/metaMarketingEnrollment.service').run();
+  }
+
+  async executeMetaMarketingRevocations() {
+    return require('../services/metaMarketingRevocation.service').run();
+  }
+
+  async executeMetaMarketingOAuth() {
+    return require('../services/metaMarketingOAuth.service').run();
+  }
+
   async executePlatformAuditDelivery() {
     return require('../services/platformAudit.delivery').run();
   }
