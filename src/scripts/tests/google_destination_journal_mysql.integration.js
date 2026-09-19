@@ -281,7 +281,14 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     console.log('SCHEMA_EVIDENCE='+report.schema);
     const published=require('../../../ops/security/schema-contract.json');
     if(process.env.GOOGLE_DESTINATION_SCHEMA_CAPTURE!=='1'){
-      for(const [name,value] of Object.entries(contract.tables))assert.deepEqual(published.tables[name],value);
+      for(const [name,value] of Object.entries(contract.tables)){
+        // Older journal contracts imply no generated columns. Check the empty
+        // expression explicitly so an unexpected computed column still fails.
+        const expected=published.tables[name];
+        assert.deepEqual(value,{...expected,columns:expected.columns.map(column=>({
+          ...column,GENERATION_EXPRESSION:column.GENERATION_EXPRESSION??'',
+        }))});
+      }
       for(const migration of contract.migrations)assert.deepEqual(published.migrations.find(v=>v.name===migration.name),migration);
     }
     report.checks.push('repeatable additive migration, exact MySQL metadata and refusal to destroy authorization history');

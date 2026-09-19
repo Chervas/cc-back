@@ -335,7 +335,14 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     report.schema = path.join(report.root, 'action-schema.json'); fs.writeFileSync(report.schema, JSON.stringify(contract, null, 2));
     console.log('SCHEMA_EVIDENCE=' + report.schema);
     const published = require('../../../ops/security/schema-contract.json');
-    for (const name of Object.keys(contract.tables)) assert.deepEqual(published.tables[name], contract.tables[name]);
+    for (const name of Object.keys(contract.tables)) {
+      // These journals predate generated-column metadata in the contract.
+      // Require an empty expression; do not discard it from the observation.
+      const expected = published.tables[name];
+      assert.deepEqual(contract.tables[name], { ...expected, columns: expected.columns.map(column => ({
+        ...column, GENERATION_EXPRESSION: column.GENERATION_EXPRESSION ?? '',
+      })) });
+    }
     for (const migration of contract.migrations) assert.deepEqual(published.migrations.find(row => row.name === migration.name), migration);
     report.schema = path.join(report.root, 'action-schema.json'); fs.writeFileSync(report.schema, JSON.stringify(contract, null, 2));
     report.checks.push('repeatable migration uses InnoDB and binary identities; destructive rollback refuses nonempty operation history');
