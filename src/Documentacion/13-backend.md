@@ -12026,9 +12026,14 @@ Los cuatro consumidores manuales guardan el UUID y su autor en SQL antes del env
 El broker conserva su propio intento/recibo. La caché SQL, evento de auditoría v25,
 recibo y liberación de locks se confirman juntos; recuperar el resultado no repite
 la mutación ni aplica un recibo antiguo sobre una edición posterior del diario.
-Todavía falta coordinar los commits del sync de reseñas/medios/detalles para
-rechazar lecturas antiguas que regresen después de una escritura. Sesión, ámbito,
-aliases y permisos de todas las clínicas se revalidan durante el recorrido.
+El sync de reseñas/medios/detalles comprueba época y observación en SQL para
+rechazar lecturas anteriores a otra mutación u observación. Hasta tres filas por
+ubicación global coordinan aliases y cuentan pendientes por familia; no hay
+espera de red dentro de la transacción ni bloqueo global de la aplicación.
+La poda autoritativa usa lotes de hasta500, revalidados antes de borrar.
+Sesión, ámbito, aliases y permisos se revalidan durante el recorrido. Esta prueba
+no acredita consistencia inmediata del proveedor tras un cambio ni escrituras
+hechas directamente en Google; tampoco ordena aún los escritores legacy.
 
 La UI distingue incertidumbre de éxito y permite «Consultar resultado». Conserva
 referencias de la pestaña por usuario/clínica; el servidor permite recuperar sus
@@ -12038,8 +12043,9 @@ panel de actividad incorpora v25 con metadatos, sin texto de reseñas, fotos o U
 Preparado y probado con MySQL/SQLite/HTTP y componentes Angular aislados; sin
 publicación, DDL real ni activación. Faltan nodo de horarios/lease, tratamiento
 operativo de incertidumbres, compatibilidad AWS v25, aceptación clínica y carga.
-La migración nueva añade dos tablas: el contrato de fuente pasa de49 a51; no se
-reutiliza ni amplía el corte clínico ya consumido de19 DDL. Contrato y recuperación:
+Las dos migraciones nuevas añaden tres tablas: el contrato de fuente pasa de49
+a52; primero se requiere DDL, con escritores/sync drenados y sin intentos inciertos,
+y después el código coordinado. No se reutiliza ni amplía el corte clínico de19 DDL. Contrato y recuperación:
 `docs/security/google-business-profile-writes.md`.
 
 ### Esquema clínico Google: corte limitado y conservación de identidad compartida

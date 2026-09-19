@@ -6,10 +6,12 @@ const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysq
 withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackServer }) => {
   const migration = require('../../../migrations/20260919200000-create-business-profile-mutation-journal');
   await migration.up(sql.getQueryInterface()); await migration.up(sql.getQueryInterface());
+  const coordinationMigration = require('../../../migrations/20260919210000-create-business-profile-cache-coordination');
+  await coordinationMigration.up(sql.getQueryInterface()); await coordinationMigration.up(sql.getQueryInterface());
   const observed = await require('../../lib/securitySchemaContract').snapshot(async (query, replacements) =>
     (await sql.query(query, { replacements, logging: false }))[0]);
   const schemaTables = {};
-  for (const name of ['BusinessProfileMutations', 'BusinessProfileMutationLocks']) {
+  for (const name of ['BusinessProfileMutations', 'BusinessProfileMutationLocks', 'BusinessProfileCacheStates']) {
     const table = observed.tables.find(row => row.TABLE_NAME === name);
     const indexes = observed.indexes.filter(row => row.TABLE_NAME === name);
     schemaTables[name] = { ENGINE: table.ENGINE, TABLE_COLLATION: table.TABLE_COLLATION,
@@ -22,7 +24,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
   require('node:fs').writeFileSync(require('node:path').join(report.root, 'gbp-mutation-schema.json'),
     JSON.stringify(schemaTables, null, 2), { mode: 0o600, flag: 'wx' });
   for (const [name, file] of [['BusinessProfileMutation', 'businessprofilemutation'], ['BusinessProfileMutationLock', 'businessprofilemutationlock'],
-    ['PlatformAuditEvent', 'platformauditevent']]) models[name] = require('../../../models/' + file)(sql, D);
+    ['BusinessProfileCacheState', 'businessprofilecachestate'], ['PlatformAuditEvent', 'platformauditevent']]) models[name] = require('../../../models/' + file)(sql, D);
   await models.PlatformAuditEvent.sync();
   const Session = sql.define('QaGbpSession', { id: { type: D.UUID, primaryKey: true }, user_id: D.INTEGER, expires_at: D.DATE(3), active: D.BOOLEAN }, { timestamps: false });
   const Cache = sql.define('QaGbpCache', { id: { type: D.INTEGER, primaryKey: true }, value: D.JSON, writes: D.INTEGER }, { timestamps: false });
@@ -170,6 +172,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
     assert.equal(JSON.parse(auditRows.find(row => row.stage === 'completed').body).actor.type, 'user');
     report.checks.push('automation requires an active execution guard; its original owner can recover without impersonating a live job or redispatching hours');
 
+    await require('./fixtures/business_profile_consumers.fixture')({ sql, models, report, writerClient,
+      sessions, actor, policy: f.policy, registerOwnedLoopbackServer, resetRemote: () => { remote = makeRemote(); }, setAfter: fn => { afterRemote = fn; }, writes: () => writes });
+
     const absent = reply('Todavía no recibido'); beforeRemote = command => { if (command.operation !== C.OPERATIONS.status) throw Object.assign(Error(), { code: 'broker_unavailable' }); };
     await assert.rejects(run(absent), { code: 'broker_unavailable' }); beforeRemote = null;
     assert.equal((await recover(absent)).state, 'unknown'); await assert.rejects(run(reply()), { code: 'business_profile_mutation_busy' });
@@ -177,10 +182,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
     remoteFailure = true; await assert.rejects(run(unknownPhoto, context, 'photo', { publicMediaAssetId: 123 }), { code: 'provider_timeout' }); remoteFailure = false;
     assert.equal((await recover(unknownPhoto)).state, 'unknown');
     await assert.rejects(run({ ...unknownPhoto, operationId: randomUUID() }, context, 'photo', { publicMediaAssetId: 123 }), { code: 'business_profile_mutation_busy' });
+    await assert.rejects(coordinationMigration.up(sql.getQueryInterface()), /Reconcile pending Business Profile/);
     report.checks.push('broker not_found and provider timeout remain uncertain, preserving locks without automatic replay or false failed/success status');
 
-    await require('./fixtures/business_profile_consumers.fixture')({ sql, models, report, writerClient,
-      sessions, actor, policy: f.policy, registerOwnedLoopbackServer, resetRemote: () => { remote = makeRemote(); }, setAfter: fn => { afterRemote = fn; }, writes: () => writes });
     const packed = require('../../../services/platform-audit/src/event');
     const rows = await models.PlatformAuditEvent.findAll({ raw: true });
     for (const row of rows) { const event = packed.unpack(row).event; assert.equal(event.version, 25); assert(!row.body.includes('Gracias')); assert(!row.body.includes('FICTITIOUS_GBP_TOKEN')); assert(!row.body.includes('sourceUrl')); }

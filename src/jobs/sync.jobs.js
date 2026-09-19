@@ -68,6 +68,7 @@ const webDomainsService = require('../services/webDomains.service');
 const webPublicationHealthMonitorService = require('../services/webPublicationHealthMonitor.service');
 const googleReviewMatchService = require('../services/googleReviewMatch.service');
 const businessProfileBroker = require('../services/businessProfileBroker.service');
+const businessProfileCache = require('../services/businessProfileCache.service');
 const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
 const searchConsoleBroker = require('../services/searchConsoleBroker.service');
 const analyticsBroker = require('../services/analyticsBroker.service');
@@ -1950,12 +1951,12 @@ class MetaSyncJobs {
     }
   }
 
-  async _mergeBusinessProfileLocation(location, rawPatch = {}, columnPatch = {}) {
+  async _mergeBusinessProfileLocation(location, rawPatch = {}, columnPatch = {}, options = {}) {
     const mappingId = Number(location?.id);
     if (!Number.isInteger(mappingId) || mappingId <= 0) {
       throw new Error('Ubicación Google Business Profile sin mapping persistente');
     }
-    await sequelize.transaction(async (transaction) => {
+    const merge = async (transaction) => {
       const locked = await ClinicBusinessLocation.findByPk(mappingId, {
         transaction,
         lock: transaction.LOCK.UPDATE,
@@ -1974,9 +1975,18 @@ class MetaSyncJobs {
         ...columnPatch,
         raw_payload: { ...currentRaw, ...(rawPatch || {}) },
       }, { transaction });
-    });
-    await location.reload();
+    };
+    if (options.transaction) await merge(options.transaction);
+    else await sequelize.transaction(merge);
+    await location.reload(options.transaction ? { transaction: options.transaction } : {});
     return location;
+  }
+
+  _beginBusinessProfileObservation(location, accessToken, family) {
+    const validate = businessProfileBroker.managed(location, accessToken)
+      ? transaction => businessProfileBroker.assertRead(location, accessToken, { transaction, lock: transaction.LOCK.UPDATE })
+      : null;
+    return businessProfileCache.begin(location, family, validate);
   }
 
   async executeBusinessProfileSync(options = {}) {
@@ -2743,6 +2753,7 @@ class MetaSyncJobs {
       throw new Error('Ubicación Google Business Profile sin accountName para sincronizar reseñas');
     }
 
+    const observation = await this._beginBusinessProfileObservation(location, accessToken, 'reviews');
     await this._expireOldBusinessProfileReviews(location);
 
     const maxPages = Math.max(1, Number(options.maxPages || 0) || Number.MAX_SAFE_INTEGER);
@@ -2769,89 +2780,93 @@ class MetaSyncJobs {
         .map((review) => review.name || review.reviewId || null)
         .filter(Boolean);
       reviewNames.forEach((name) => seenReviewNames.add(String(name)));
-      const existingRows = reviewNames.length
-        ? await BusinessProfileReview.findAll({ where: { review_name: { [Op.in]: reviewNames } } })
-        : [];
-      const existingByName = new Map(existingRows.map((row) => [String(row.review_name), row]));
-      const payloads = [];
-      const newReviewNames = [];
-      let pageHasChanges = false;
-      for (const review of reviews) {
-        const reviewName = review.name || review.reviewId || null;
-        if (!reviewName) {
-          continue;
-        }
-        const starRating = this._normalizeGoogleStarRating(review.starRating);
-        const reply = review.reviewReply || null;
-        const payload = {
-          clinica_id: location.clinica_id,
-          business_location_id: location.id,
-          review_name: reviewName,
-          reviewer_name: review.reviewer?.displayName || review.reviewer?.name || null,
-          reviewer_profile_photo_url: review.reviewer?.profilePhotoUrl || null,
-          star_rating: starRating,
-          comment: review.comment || null,
-          create_time: review.createTime ? new Date(review.createTime) : null,
-          update_time: review.updateTime ? new Date(review.updateTime) : null,
-          review_state: review.reviewState || null,
-          is_new: review.createTime ? (Date.now() - new Date(review.createTime).getTime()) <= 30 * MS_PER_DAY : false,
-          is_negative: starRating > 0 && starRating <= 3,
-          reply_comment: reply?.comment || null,
-          reply_update_time: reply?.updateTime ? new Date(reply.updateTime) : null,
-          has_reply: Boolean(reply?.comment),
-          raw_payload: review
-        };
-        const existing = existingByName.get(String(reviewName));
-        let shouldUpsert = false;
-        if (!existing) {
-          newReviewNames.push(reviewName);
-          pageHasChanges = true;
-          shouldUpsert = true;
-        } else {
-          const existingUpdatedAt = existing.update_time ? new Date(existing.update_time).getTime() : 0;
-          const incomingUpdatedAt = payload.update_time ? new Date(payload.update_time).getTime() : 0;
-          const existingReplyAt = existing.reply_update_time ? new Date(existing.reply_update_time).getTime() : 0;
-          const incomingReplyAt = payload.reply_update_time ? new Date(payload.reply_update_time).getTime() : 0;
-          // MySQL DATETIME in this schema drops provider milliseconds. A
-          // sub-second difference must not make every 15-minute sync walk the
-          // complete review history again.
-          const timestampToleranceMs = 1000;
-          if (
-            incomingUpdatedAt > existingUpdatedAt + timestampToleranceMs
-            || incomingReplyAt > existingReplyAt + timestampToleranceMs
-            || Boolean(existing.has_reply) !== payload.has_reply
-            || Number(existing.star_rating || 0) !== payload.star_rating
-          ) {
+      const { payloads, newReviewNames, pageHasChanges } = await businessProfileCache.commit(observation, async transaction => {
+        const existingRows = reviewNames.length
+          ? await BusinessProfileReview.findAll({ where: { review_name: { [Op.in]: reviewNames } }, transaction, lock: transaction.LOCK.UPDATE })
+          : [];
+        const existingByName = new Map(existingRows.map((row) => [String(row.review_name), row]));
+        const payloads = [];
+        const newReviewNames = [];
+        let pageHasChanges = false;
+        for (const review of reviews) {
+          const reviewName = review.name || review.reviewId || null;
+          if (!reviewName) {
+            continue;
+          }
+          const starRating = this._normalizeGoogleStarRating(review.starRating);
+          const reply = review.reviewReply || null;
+          const payload = {
+            clinica_id: location.clinica_id,
+            business_location_id: location.id,
+            review_name: reviewName,
+            reviewer_name: review.reviewer?.displayName || review.reviewer?.name || null,
+            reviewer_profile_photo_url: review.reviewer?.profilePhotoUrl || null,
+            star_rating: starRating,
+            comment: review.comment || null,
+            create_time: review.createTime ? new Date(review.createTime) : null,
+            update_time: review.updateTime ? new Date(review.updateTime) : null,
+            review_state: review.reviewState || null,
+            is_new: review.createTime ? (Date.now() - new Date(review.createTime).getTime()) <= 30 * MS_PER_DAY : false,
+            is_negative: starRating > 0 && starRating <= 3,
+            reply_comment: reply?.comment || null,
+            reply_update_time: reply?.updateTime ? new Date(reply.updateTime) : null,
+            has_reply: Boolean(reply?.comment),
+            raw_payload: review
+          };
+          const existing = existingByName.get(String(reviewName));
+          let shouldUpsert = false;
+          if (!existing) {
+            newReviewNames.push(reviewName);
             pageHasChanges = true;
             shouldUpsert = true;
+          } else {
+            const existingUpdatedAt = existing.update_time ? new Date(existing.update_time).getTime() : 0;
+            const incomingUpdatedAt = payload.update_time ? new Date(payload.update_time).getTime() : 0;
+            const existingReplyAt = existing.reply_update_time ? new Date(existing.reply_update_time).getTime() : 0;
+            const incomingReplyAt = payload.reply_update_time ? new Date(payload.reply_update_time).getTime() : 0;
+            // MySQL DATETIME in this schema drops provider milliseconds. A
+            // sub-second difference must not make every 15-minute sync walk the
+            // complete review history again.
+            const timestampToleranceMs = 1000;
+            if (
+              incomingUpdatedAt > existingUpdatedAt + timestampToleranceMs
+              || incomingReplyAt > existingReplyAt + timestampToleranceMs
+              || Boolean(existing.has_reply) !== payload.has_reply
+              || Number(existing.star_rating || 0) !== payload.star_rating
+            ) {
+              pageHasChanges = true;
+              shouldUpsert = true;
+            }
           }
+          if (shouldUpsert) payloads.push(payload);
         }
-        if (shouldUpsert) payloads.push(payload);
-      }
 
-      if (payloads.length) {
-        await BusinessProfileReview.bulkCreate(payloads, {
-          updateOnDuplicate: [
-            'clinica_id',
-            'business_location_id',
-            'reviewer_name',
-            'reviewer_profile_photo_url',
-            'star_rating',
-            'comment',
-            'create_time',
-            'update_time',
-            'review_state',
-            'is_new',
-            'is_negative',
-            'reply_comment',
-            'reply_update_time',
-            'has_reply',
-            'raw_payload',
-            'updated_at'
-          ]
-        });
-        processed += payloads.length;
-      }
+        if (payloads.length) {
+          await BusinessProfileReview.bulkCreate(payloads, {
+            transaction,
+            updateOnDuplicate: [
+              'clinica_id',
+              'business_location_id',
+              'reviewer_name',
+              'reviewer_profile_photo_url',
+              'star_rating',
+              'comment',
+              'create_time',
+              'update_time',
+              'review_state',
+              'is_new',
+              'is_negative',
+              'reply_comment',
+              'reply_update_time',
+              'has_reply',
+              'raw_payload',
+              'updated_at'
+            ]
+          });
+        }
+        return { payloads, newReviewNames, pageHasChanges };
+      });
+      processed += payloads.length;
 
       const namesToEnqueue = enqueueOnlyNewReviews
         ? newReviewNames
@@ -2883,19 +2898,22 @@ class MetaSyncJobs {
       && expectedReviewCount !== null
       && seenReviewNames.size >= expectedReviewCount
     ) {
-      const storedRows = await BusinessProfileReview.findAll({
-        where: { business_location_id: location.id },
-        attributes: ['id', 'review_name'],
-        raw: true,
-      });
-      const staleIds = storedRows
-        .filter((row) => !seenReviewNames.has(String(row.review_name)))
-        .map((row) => Number(row.id))
-        .filter(Number.isFinite);
-      for (let index = 0; index < staleIds.length; index += 500) {
-        await BusinessProfileReview.destroy({
-          where: { id: { [Op.in]: staleIds.slice(index, index + 500) } },
+      let afterId = 0, more = true;
+      while (more) {
+        const batch = await businessProfileCache.commit(observation, async transaction => {
+          const storedRows = await BusinessProfileReview.findAll({
+            where: { business_location_id: location.id, id: { [Op.gt]: afterId } },
+            attributes: ['id', 'review_name'], order: [['id', 'ASC']], limit: 500,
+            raw: true, transaction, lock: transaction.LOCK.UPDATE,
+          });
+          const staleIds = storedRows.filter(row => !seenReviewNames.has(String(row.review_name)))
+            .map(row => Number(row.id));
+          if (staleIds.length) await BusinessProfileReview.destroy({
+            where: { id: { [Op.in]: staleIds } }, transaction,
+          });
+          return { lastId: Number(storedRows.at(-1)?.id || afterId), more: storedRows.length === 500 };
         });
+        afterId = batch.lastId; more = batch.more;
       }
     }
 
@@ -2974,6 +2992,7 @@ class MetaSyncJobs {
       throw new Error('Ubicación Google Business Profile sin accountName para sincronizar fotos');
     }
 
+    const observation = await this._beginBusinessProfileObservation(location, accessToken, 'media');
     const mediaItems = [];
     let nextPageToken = null;
     do {
@@ -2987,14 +3006,15 @@ class MetaSyncJobs {
       nextPageToken = response.data?.nextPageToken || null;
     } while (nextPageToken);
 
-    await this._mergeBusinessProfileLocation(location, {
+    await businessProfileCache.commit(observation, transaction => this._mergeBusinessProfileLocation(location, {
       clinicaclick_media_items: mediaItems,
       clinicaclick_content_synced_at: new Date().toISOString()
-    });
+    }, {}, { transaction }));
     return mediaItems.length;
   }
 
   async _syncBusinessProfileLocationDetails(location, accessToken) {
+    const observation = await this._beginBusinessProfileObservation(location, accessToken, 'details');
     let rawPayload = location.raw_payload;
     if (typeof rawPayload === 'string') {
       try {
@@ -3027,7 +3047,7 @@ class MetaSyncJobs {
       || location.primary_category
       || null;
 
-    await this._mergeBusinessProfileLocation(location, {
+    await businessProfileCache.commit(observation, transaction => this._mergeBusinessProfileLocation(location, {
       ...details,
       accountName,
       accountDisplayName: rawPayload.accountDisplayName || rawPayload.account_display_name || null
@@ -3043,7 +3063,7 @@ class MetaSyncJobs {
       is_suspended: Array.isArray(details.metadata?.suspensionReasons)
         ? details.metadata.suspensionReasons.length > 0
         : location.is_suspended
-    });
+    }, { transaction }));
 
     return details;
   }

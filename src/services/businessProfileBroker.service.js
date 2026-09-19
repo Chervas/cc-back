@@ -43,19 +43,21 @@ function createBusinessProfileBroker({ client, writerClient, loadLocation, loadM
       || Number(record.clinica_id) !== Number(location.clinica_id) || Number(record.google_connection_id) !== Number(location.google_connection_id)) fail('broker_binding_invalid');
     return scope;
   }
-  async function currentWriteScope(location, context, options = {}) {
-    if (!enabled() || !writesEnabled()) fail('broker_cohort_disabled');
+  async function currentScope(location, context, options = {}, writing = false) {
+    if (!enabled() || writing && !writesEnabled()) fail('broker_cohort_disabled');
     const captured = context && typeof context === 'object' && contexts.get(context);
     if (!captured || captured.id !== Number(location.id)) fail('broker_binding_invalid');
     const current = await loadLocation(captured.id, options);
     if (!current || !current.is_active || !marked(current) || Number(current.google_connection_id) !== captured.googleConnectionId) fail('broker_binding_invalid');
     const scope = await recordedBinding(current, options);
     if (!scope || Object.entries(scope).some(([key, value]) => captured[key] !== value)) fail('broker_binding_invalid');
-    if (!enabled() || !writesEnabled()) fail('broker_cohort_disabled');
+    if (!enabled() || writing && !writesEnabled()) fail('broker_cohort_disabled');
     return scope;
   }
+  const currentWriteScope = (location, context, options) => currentScope(location, context, options, true);
   return {
     managed,
+    assertRead: (location, context, options) => currentScope(location, context, options),
     async assert(location, context, options = {}) {
       const scope = await currentWriteScope(location, context, options);
       const captured = contexts.get(context);

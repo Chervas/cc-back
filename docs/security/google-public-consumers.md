@@ -146,7 +146,9 @@ y `updateSpecialHours` en `businessProfileLocal.service.js`. Fuente DEV ya conec
 sus recorridos manuales gestionados al broker, diario SQL, auditoría v25, rutas de
 recuperación y UI. Las fichas no migradas conservan `ensureGoogleAccessToken` con
 el guard de credenciales legacy. Faltan automatización de horarios, resolución de
-incertidumbres, publicación/DDL y aceptación real. Las candidatas públicas de este
+incertidumbres, publicación/DDL y aceptación real. El sync preparado invalida
+lecturas anteriores a otra mutación/observación mediante coordinación SQL por
+ubicación y familia; se prueba de forma aislada, aún sin aceptación del proveedor. Las candidatas públicas de este
 documento aún no incorporan esa preparación.
 Contrato y límites en [escrituras GBP](google-business-profile-writes.md).
 
@@ -160,7 +162,7 @@ independiente. Cero cohortes Google reales migradas en este corte.
 ## Siguiente publicación y recuperación
 
 1. Completar la automatización de horarios, resolución operativa de incertidumbres,
-   corte SQL nuevo de dos tablas y compatibilidad de auditoría v25. Promover las
+   corte SQL nuevo de tres tablas y compatibilidad de auditoría v25. Promover las
    escrituras Business Profile y su UI a cada candidato que las consuma, con QA.
 2. Completar toda la identidad Google compartida y todos sus consumidores antes
    de crear el primer marcador que cierre credenciales legacy. La preparación

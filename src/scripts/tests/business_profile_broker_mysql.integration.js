@@ -5,6 +5,9 @@ const { loadBusinessProfileJobs } = require('./fixtures/business_profile_jobs.fi
 const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.fixture');
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const qi = sql.getQueryInterface();
+  await require('../../../migrations/20260919200000-create-business-profile-mutation-journal').up(qi);
+  await require('../../../migrations/20260919210000-create-business-profile-cache-coordination').up(qi);
+  models.BusinessProfileCacheState = require('../../../models/businessprofilecachestate')(sql, D);
   for (const [name, key] of [['Clinicas', 'id_clinica'], ['GoogleConnections', 'id'], ['ClinicMetaAssets', 'id']]) {
     await qi.createTable(name, { [key]: { type: D.INTEGER, primaryKey: true } });
   }

@@ -34,8 +34,10 @@ module.exports = async ({ sql, models, report, writerClient, sessions, actor, po
     purpose: 'marketing_image', bucket: 'fictitious', region: 'eu-west-3', object_key: 'fictitious', public_url: url,
     content_type: 'image/jpeg', sha256: 'a'.repeat(64), metadata: { non_clinical_asserted: true } });
   policy.connections[0].googleBusinessProfileWrites.locations[0].publicMediaClinicIds = [72]; resetRemote();
-  const broker = require('../../../services/businessProfileBroker.service').createBusinessProfileBroker({ client: {}, writerClient,
-    enabled: () => true, writesEnabled: () => true,
+  let readProvider = async () => { throw Error('UNEXPECTED_GBP_READ'); }, writesEnabled = true;
+  const broker = require('../../../services/businessProfileBroker.service').createBusinessProfileBroker({
+    client: { execute: command => readProvider(command) }, writerClient,
+    enabled: () => true, writesEnabled: () => writesEnabled,
     loadLocation: (id, options) => models.ClinicBusinessLocation.findByPk(id, { ...options, raw: true, logging: false }),
     loadManagedBinding: (id, options) => models.BusinessProfileBrokerBinding.findByPk(id, { ...options, raw: true, logging: false }) });
   const requestSessions = { ...sessions, bearer: value => value, async verify(token) {
@@ -146,5 +148,7 @@ module.exports = async ({ sql, models, report, writerClient, sessions, actor, po
       if (originalAuth) require.cache[authFile] = originalAuth; else delete require.cache[authFile];
       if (originalHours) require.cache[hoursFile] = originalHours; else delete require.cache[hoursFile];
     }
+    await require('./business_profile_sync_ordering.fixture')({ models, report, broker, local, consumer, resolved, request,
+      setRead: fn => { readProvider = fn; }, setWritesEnabled: value => { writesEnabled = value; }, setAfter, writes });
   } finally { Object.assign(module, original); setAfter(null); }
 };

@@ -120,12 +120,31 @@ La recuperación humana requiere el mismo usuario original, clínica, namespace 
 ámbito íntegro, con una sesión vigente; puede recuperar un intento de ese usuario
 originado en una automatización sin simular que el job continúa activo. Una
 operación ya aplicada devuelve la caché actual, sin volver a aplicar su recibo.
-Esta protección ordena los escritores que participan en el diario. El sync de
-reseñas todavía usa `bulkCreate(updateOnDuplicate)` y el de medios/detalles
-actualiza la caché por su vía anterior: falta impedir que una lectura iniciada
-antes del cambio publique después una observación antigua. Debe coordinarse con
-el diario antes de activar escritores; no se acredita aislamiento frente a esos
-jobs ni frente a cambios hechos directamente en Google.
+`BusinessProfileCacheStates` coordina ese diario con el sync de reseñas, medios
+y detalles. Conserva hasta tres filas por ubicación global Google, independientes
+de la cuenta, mapping o namespace del proceso; DEV sigue separado por su BD.
+Cada familia guarda época, identificador de observación y número de mutaciones
+pendientes. Admisión/finalización modifican época y contador en la misma transacción
+que el intento o recibo. La recuperación histórica no los modifica de nuevo.
+
+El sync captura época/observación antes del HTTP y comprueba ambas al guardar,
+junto con el mapping/registro/revocación actuales. Otra mutación o una observación
+posterior invalida la respuesta antigua. Los bloqueos SQL duran solo el trabajo
+local; ninguna transacción espera la llamada a Google. Un intento incierto impide
+iniciar lecturas de su familia incluso si después se cierra el gate escritor; las
+otras familias pueden avanzar. El job conserva su error/reintento existente, sin
+nuevo envío de la mutación ni borrado de pendientes. No es un bloqueo global de CRM.
+
+Cada página de reseñas y cada lote de borrado autoritativo valida esa observación
+dentro de la transacción que cambia la caché. La poda recorre por ID en lotes de
+hasta 500, conserva la condición de paginación completa y no corre en incremental.
+Medios/detalles combinan sus datos con el JSON actual bajo bloqueo de fila.
+También los lectores legacy usan esta coordinación, para respetar una mutación
+gestionada sobre un alias; requiere la tabla antes de publicar esos lectores.
+Las escrituras legacy todavía no participan en el diario. Esta protección tampoco
+prueba consistencia inmediata de Google ni ordena cambios externos en su interfaz:
+una lectura nueva posterior a la confirmación podría recibir datos aún no
+convergentes del proveedor. Esa aceptación real y su política siguen pendientes.
 Cambiar la lista de clínicas o el mapping mantiene el resultado pendiente de
 revisión; no se eluden sus bloqueos ni se crean UUID alternativos.
 
@@ -156,14 +175,17 @@ ni admitido claves reales de escritor ni instalado esta cohorte en AWS.
 
 Siguiente implementación necesaria:
 
-1. Coordinar el commit de las lecturas de reseñas/medios/detalles con las escrituras
-   nuevas y probar respuestas de sync tardías. Adaptar `applyScheduledSpecialHoursPeriod` y el nodo de flujos: identidad estable
+1. Adaptar `applyScheduledSpecialHoursPeriod` y el nodo de flujos: identidad estable
    por ejecución/nodo, comprobación de lease/plantilla/gates y recuperación sin
    recomponer otro plan ni repetir una acción. Mantener DEV clínico apagado.
-2. Preparar corte SQL nuevo para la migración
-   `20260919200000-create-business-profile-mutation-journal.js` (dos tablas), primero
-   en DEV. El contrato de fuente requiere 51 tablas; el corte clínico anterior de 49
-   sigue consumido y no se amplía ni se ejecuta de nuevo.
+2. Preparar corte SQL nuevo para `20260919200000-create-business-profile-mutation-journal.js`
+   y `20260919210000-create-business-profile-cache-coordination.js` (tres tablas),
+   primero en DEV y antes de publicar los consumidores/sync nuevos. El contrato de
+   fuente requiere 52 tablas; el corte clínico anterior de 49 sigue consumido y no
+   se amplía ni se ejecuta de nuevo. Drenar escritores y sync para el corte; la
+   migración de coordinación rechaza intentos inciertos existentes. No inicializar
+   contadores a cero sobre actividad anterior ni mezclar escritores de versiones
+   que no participan. El down rechaza borrar filas de coordinación existentes.
 3. Publicar compatibilidad AWS de auditoría v25 —lector antes que escritor— antes
    de emitir esos eventos. El panel y filtro v25 están preparados en fuente.
 4. Completar resolución/retención de incertidumbres, censo de identidad compartida,
@@ -182,7 +204,10 @@ son ficticios: no es aceptación clínica autenticada. Resultado de regresión g
 la [bitácora](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-consumidores-manuales-gbp-diario-sql-y-pendientes-2026-09-19).
 
 Evidencia privada: `qa-evidence/security-resume-20260917/google-gbp-consumers-20260919/`
-y el corte previo `google-gbp-writers-20260919/`.
+y los cortes `google-gbp-writers-20260919/` y `google-gbp-sync-20260919/`.
+La coordinación se prueba además con respuestas tardías reales entre promesas,
+mutaciones simultáneas, aliases, pérdida de ACK, gate escritor cerrado, revocación
+y poda por lotes en el MySQL aislado. No sustituye la prueba Google/CRM real.
 No hay despliegue que revertir. Conservar las releases/grants actuales. Una futura
 recuperación debe mantener el diario y los intentos inciertos; volver a código
 que lea tokens o borrar bloqueos no es una recuperación válida de una cohorte

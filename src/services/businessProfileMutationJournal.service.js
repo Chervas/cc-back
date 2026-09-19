@@ -47,6 +47,7 @@ function createBusinessProfileMutationJournal({ models, sessions, audit, now = D
       const gate = () => { if (!enabled() || namespace() !== runtimeNamespace) fail('broker_cohort_disabled'); }; gate();
       const m = typeof models === 'function' ? models() : models;
       const P = m.BusinessProfileMutation, L = m.BusinessProfileMutationLock;
+      const cache = require('./businessProfileCache.service').createBusinessProfileCache({ models: m });
       const events = audit || createRepository(m.PlatformAuditEvent);
       const broker = context.broker, location = context.location, brokerContext = context.brokerContext;
       if (typeof broker?.assert !== 'function' || typeof broker?.write !== 'function') fail('broker_binding_invalid');
@@ -115,6 +116,7 @@ function createBusinessProfileMutationJournal({ models, sessions, audit, now = D
           if (await L.findByPk(key, { transaction, lock: transaction.LOCK.UPDATE, logging: false })) fail('business_profile_mutation_busy');
           await L.create({ resource_key: key, operation_id: payload.operationId }, { transaction });
         }
+        await cache.mutation(row.asset_ref, row.kind, 1, transaction);
         await record(row, 'mutation_admitted', transaction);
         return { send: true, row };
       });
@@ -140,6 +142,7 @@ function createBusinessProfileMutationJournal({ models, sessions, audit, now = D
           const providerResult = C.project(row.kind, receipt.result, asset(row.asset_ref), row.input);
           // Local cache changes, the original human/job audit and lock release
           // are atomic. A lost response cannot let a later command overtake them.
+          await cache.mutation(row.asset_ref, row.kind, -1, transaction);
           await context.applyResult({ row, result: providerResult, completedAt: receipt.completedAt, transaction });
           await record(row, recovering ? 'mutation_recovered' : 'mutation_applied', transaction);
           await row.update({ state: 'applied', broker_receipt: { ...receipt, result: providerResult }, last_error: null,
