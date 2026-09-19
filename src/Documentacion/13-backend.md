@@ -10454,7 +10454,7 @@ recuperada permite retirar aunque falle el almacenamiento local; una autorizaci�
 nueva sigue exigiendo conservar su UUID antes de enviarla.
 
 API, diario, confirmación/recuperación UI y visor v18 probados con datos ficticios;
-AWS aún admite v17. Faltan compatibilidad AWS v19 para el consumidor de recibos, despliegue y
+AWS admite v1–v24 tras el corte del 19/09 10:15 UTC. Faltan despliegue y
 aceptación integrada/autenticada antes de
 activar cohortes. Contrato de esquema, errores, recuperación y rollback en el
 [contrato técnico](https://github.com/Chervas/cc-back/blob/dev/docs/security/google-destinations-broker.md).
@@ -11385,15 +11385,15 @@ La reserva y sus rechazos están probados en MySQL/HTTPS/SQLite aislados, con
 proveedores ficticios; dos solicitudes simultáneas conservan una solicitud,
 tres claims para dos activos y un evento. El componente real de Actividad muestra
 «Selección guardada» y explica que conectar sigue pendiente, en escritorio/móvil.
-El gate `META_MARKETING_ENROLLMENT_ENABLED` es opt-in del servicio todavía sin
-ruta ni worker integrados; no basta habilitarlo para tener un recorrido operativo.
+El gate `META_MARKETING_ENROLLMENT_ENABLED` es opt-in del servicio. Rutas/UI y
+worker están preparados en el corte posterior; habilitarlo no publica el recorrido.
 
 V24 registra transiciones durables separadas: selección registrada, preparada,
 confirmación humana solicitada, activación local confirmada, retirada solicitada
 y confirmada. Cantidades/digests e IDs técnicos, sin nombres de activos ni tokens.
 Publicar lector/escritor compatible antes del productor; conservar el paquete
-v19 congelado. El nuevo consumidor permanece apagado hasta integrar rutas,
-planificación, UI y pruebas completas; este contrato no acredita aceptación operativa.
+v19 congelado. El nuevo consumidor permanece apagado: rutas, planificación y UI
+están preparados; faltan despliegue y aceptación operativa con titular/proveedor.
 
 ### Consumidor Meta: confirmación, asignación y retirada (preparado, 19/09/2026)
 
@@ -11465,8 +11465,8 @@ hora. Preparado espera 30 s; activo se comprueba cada cinco minutos; incertidumb
 de envío consulta a los 60 s. Son intervalos del diario; el job preparado corre
 cada minuto y no garantiza esa cadencia ni reserva recursos/latencia. Cifras y
 límites en39; pruebas y recuperación en el runbook Meta y99. Pendientes publicación
-selectiva, dueño de ejecución, capacidad real, compatibilidad AWS v24 y aceptación
-con proveedor/titular reales.
+selectiva, dueño de ejecución, capacidad real y aceptación con proveedor/titular
+reales. Compatibilidad AWS v24 publicada y verificada en el corte siguiente.
 
 ### API y pantalla de selección Meta (preparadas, 19/09/2026)
 
@@ -11507,7 +11507,7 @@ entrega MFA ficticios; no sustituye aceptación pública con titular/proveedor.
 
 ### Compatibilidad de auditoría AWS v19 publicada (19/09/2026)
 
-Lector y escritor ejecutan las candidatas por rol de `d73c5631`, compatibles con
+El corte v19 publicó las candidatas por rol de `d73c5631`, compatibles con
 v1–v19. Se publicó primero el lector, verificando los recibos anteriores entre
 cambios; configuración, TLS, identidades, dependencias y diarios conservados.
 Seis eventos sintéticos congelados se entregaron una sola vez: recibos conciliados
@@ -11517,6 +11517,30 @@ en el índice operativo. El control posterior verifica los 25 recibos consultado
 Tras esa entrega, conservar un lector compatible con v19 incluso en recuperación;
 no volver a v17 ni regenerar/repetir el canario. Esto acredita compatibilidad del
 servicio de auditoría, no aceptación de consumidores Google ni de sus cohortes.
-Los productores Meta v20–v24 aún necesitan una publicación compatible posterior.
+La publicación v24 posterior, descrita a continuación, amplía esta compatibilidad.
 No cambian las releases clínicas, DDL, gates o IAM. Evidencia, recursos/costes y
 recuperación en19/39/99 y `docs/security/audit-reader-view-migration.md`.
+
+
+### Compatibilidad de auditoría AWS v24 publicada (19/09/2026, 10:15 UTC)
+
+Lector y escritor ejecutan `release-reader-v24-724aa889` y
+`release-writer-v24-724aa889`, compatibles v1–v24. Candidatas derivadas de cada
+release v19 viva, superponiendo solo ocho codecs/protocolos revisados; fuentes
+ajenas, dependencias, configuración, TLS, identidades y diarios preservados.
+El lector se publicó antes del escritor, con comprobación de recibos entre ambos.
+
+25 eventos ficticios originales de MySQL aislado cubren v20/21/22/23/24
+(5/6/4/4/6). Una sola entrega, conciliación y lectura directa de cada VersionId
+S3: 20.089 bytes, SHA256 y KMS verificados. Cero filas de canario en los índices
+operativos DEV/CRM. Los seis canarios anteriores v18/v19 conservan sus versiones;
+25/25 recibos operativos siguen verificados. TLS válido y peticiones sin firma
+rechazadas; ambos servicios activos con cero reinicios automáticos.
+
+Desde esta entrega, conservar un lector compatible v24 en cualquier recuperación;
+no volver a v19 ni repetir/regenerar los canarios, borrar marcas o restaurar diarios
+antiguos. Ante incertidumbre, conciliar UUID/bytes originales. No cambia esquema,
+release clínica, gates, IAM ni conexiones de proveedor. Este corte acredita
+transporte/compatibilidad AWS; la aceptación con titular, UI pública y carga real
+sigue pendiente. Contrato/recuperación en `docs/security/audit-reader-view-migration.md`,
+estado 19, recursos/costes 39 y evidencia 99.

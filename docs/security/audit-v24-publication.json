@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "publishedAt": "2026-09-19T10:15:02.511922+00:00",
+  "scope": "AWS platform audit compatibility only; no clinical consumer/schema/gate deployment",
+  "sourceCommit": "724aa88915ab043b0069792db4d29d93ef04a4e9",
+  "archive": "audit-v24-724aa889.tar.gz",
+  "archiveSha256": "2fd3807839c0807d221d4cad2923ce01ebac8141a0d410bd7df03f50079608d1",
+  "payload": {
+    "event.js": "01815a809a8842ba65c648b12ebdc2c33a5878a845d8b43395de82c82c007a0d",
+    "meta-access-check-event.js": "5550eb68947f058060e27c26c9791134ce6d64f6e4f1bb51cfdc8f9a4e81a301",
+    "meta-disconnect-event.js": "9e0a22ab5ba9a939e4552ddc5f91a4872a84823d0086b5746ec758a98f7d743d",
+    "meta-oauth-event.js": "2c642e38cbe17437841f653c2b2b99d61b5da14f54e8baf08f6cae18830a0b0a",
+    "meta-discovery-event.js": "30e053ae5c27bccbdc3a64788bc91a4fb3fdbde282662ca9dd6602c989f0c638",
+    "meta-enrollment-event.js": "28d9091454b951290629ca230e79621ec61c8f118fbc397d20a5db7421016799",
+    "reader-protocol.js": "b765f5cdff7fafc97d523474f9525d1c99865ad7f11dbd7d23e04aa7da810e1c",
+    "view-contract.js": "7d28802f953571fb3c7953a84772e760b6b2fe6474fa269068dc830f6abaf085"
+  },
+  "releases": {
+    "reader": "release-reader-v24-724aa889",
+    "writer": "release-writer-v24-724aa889"
+  },
+  "compatibility": {
+    "minimum": 1,
+    "maximum": 24,
+    "requiredReaderSupportThrough": 24
+  },
+  "checks": {
+    "offlineTestsPerRole": 94,
+    "sqlGeneratedCanary": {
+      "count": 25,
+      "bytes": 20089,
+      "versions": {
+        "20": 5,
+        "21": 6,
+        "22": 4,
+        "23": 4,
+        "24": 6
+      },
+      "sha256": "f7462f84303ea5581e85ff2af557acaf6a352057f2d6fd410f5f3de3ad1422d3",
+      "delivered": 25,
+      "reconciled": 25,
+      "s3ExactVersionBodyDigestKms": 25,
+      "operationalIndexRows": 0
+    },
+    "existingReceiptsVerified": 25,
+    "priorCanaryVersionsUnchanged": 6,
+    "tlsValid": true,
+    "unsignedRejected": true,
+    "angularSelectionScreenshots": 9
+  },
+  "canarySource": {
+    "sourceBase": "724aa88915ab043b0069792db4d29d93ef04a4e9",
+    "workingChanges": [
+      "isolated_campaign_mysql.fixture.js",
+      "platform_audit_canary_export.fixture.js"
+    ],
+    "files": {
+      "src/scripts/tests/fixtures/isolated_campaign_mysql.fixture.js": "a5d8b65f168e61828754a0b7d63d662ac0b18093831635031d3c412abbce3bd0",
+      "src/scripts/tests/fixtures/platform_audit_canary_export.fixture.js": "728baeb913ef7ef133bf1b40ca2f320784e5e03ceb965b13d30ed59a43ff6831",
+      "src/scripts/tests/meta_marketing_oauth_mysql.integration.js": "22da3c2fadeeabdc79fa25b174855d5b3c5d54f411fe4566a13ff1195c27775c",
+      "src/scripts/tests/meta_marketing_broker_mysql.integration.js": "0d4e9ba413a9dd53ea9f47a02b2f748244801ba16966e62e8cada226f0c6ce4a",
+      "src/scripts/tests/fixtures/meta_enrollment_runtime.fixture.js": "412b818e204a5835fdee2845ad5e1bbe974fee1e0d6e04650f5c8e57e70e16f9",
+      "src/scripts/tests/fixtures/meta_enrollment_selection_visual.fixture.js": "88bc7f9f39db20065e6b0483fcb0fbe27fd734af551465d54b9aa075a9a2637b",
+      "src/scripts/tests/fixtures/meta_marketing_access_e2e.fixture.js": "786a7a6521a46635274e257024bfcac88562a0d59368c84d53db5ce923e09337",
+      "src/scripts/tests/fixtures/meta_marketing_revocation_e2e.fixture.js": "c05197523b0d00a4dc5426c02abae21e1c7a89639326cf6333e2553b3dc2b099"
+    }
+  },
+  "evidenceDirectory": "/home/ubuntu/qa-evidence/security-resume-20260917/audit-v24-publication-20260919",
+  "limitations": [
+    "Synthetic canary, no public MFA/provider acceptance",
+    "No sustained-capacity test",
+    "No new CE measurement or incremental billed-cost attribution"
+  ],
+  "recovery": "Keep v1-v24 compatible reader after delivery. Never replay either canary or remove ownership/delivery markers; reconcile original UUID/bytes on uncertainty."
+}

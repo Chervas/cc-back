@@ -1,5 +1,10 @@
 # Comprobación manual Meta desde CRM
 
+> Estado 19/09/2026 10:15 UTC: compatibilidad de auditoría AWS v1–v24 publicada y
+> verificada; el consumidor de este documento sigue pendiente de publicación y
+> aceptación real. Conservar lector v24 en recuperación. Detalle y evidencia en
+> [runbook de auditoría](audit-reader-view-migration.md).
+
 Preparada el 19/09/2026 en los mismos worktrees DEV. Sin despliegue, cohorte real,
 escrituras en bases de clientes ni uso de credenciales Meta reales. Contrato
 canónico primero en [13-backend](../../src/Documentacion/13-backend.md#comprobación-manual-meta-desde-crm-y-registro-v20-preparado-19092026)

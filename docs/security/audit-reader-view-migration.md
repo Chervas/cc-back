@@ -23,9 +23,11 @@ Esto acredita las versiones comprobadas, **no la integridad ni exhaustividad
 del índice local**: quien pueda modificar la BD puede ocultar filas. Tampoco
 prueba inmutabilidad de S3; un administrador con permisos efectivos de borrado
 de versiones puede eliminarlas. Object Lock sigue apagado según la entrega.
-El lector publicado admite los eventos versionados `app/platform/v1/` a `v17/`.
-El candidato v18 añade comandos de permisos Google y consulta de su listado,
-con esquemas separados; está probado localmente, sin publicación ni entrega AWS.
+El lector publicado admite `app/platform/v1/` a `v24/` desde el 19/09 10:15 UTC.
+Las preparaciones históricas inferiores se conservan fechadas; el corte v24 al
+final de este runbook describe la recuperación vigente.
+El sobre v18 de comandos/permisos Google y consulta de listado conserva esquemas
+separados; su transporte AWS se verificó en el corte v19 y se conserva en v24.
 No incluye el contrato `app/v1` del broker, eventos aún pendientes de entrega ni acciones
 no instrumentadas. La lista cerrada de acciones está en `src/view-contract.js`
 del paquete de auditoría. Añadir un esquema al writer requiere probar también
@@ -108,8 +110,8 @@ La proyección v18 preparada distingue `googleDestinations` (comando, permiso y
 estado del recibo) de `googleDestinationList` (cuenta, mapping, número de clínicas
 y registros). Solo una variante puede estar presente. El listado registra una
 página preparada, no una autorización ni la recepción por la persona. Ambos
-filtros están en el catálogo cerrado; el lector publicado v17 todavía no admite
-sus rutas. Contrato en [destinos Google](google-destinations-broker.md).
+filtros están en el catálogo cerrado y sus rutas están incluidas en el lector
+AWS v24 actual. Contrato en [destinos Google](google-destinations-broker.md).
 
 ## Lectura firmada y límites
 
@@ -249,8 +251,8 @@ acredita autenticación humana, consulta HTTP `confirmed`, alta real de Google n
 aceptación del consumidor. No fabricar una sesión administrativa para la prueba.
 
 Después de entregar una versión, conservar un lector compatible con ella al
-revertir otros cambios. Hoy el mínimo publicado es v17; una primera entrega v18
-eleva ese requisito aunque se desactive después el consumidor. Retener los objetos
+revertir otros cambios. El mínimo después del corte 19/09 10:15 UTC es v24; desactivar un consumidor no
+reduce ese requisito ni elimina eventos ya entregados. Retener los objetos
 de QA y su clasificación; no borrarlos para ocultar una incompatibilidad. La reversión de código no deshace eventos entregados.
 
 | Síntoma | Comprobación y acción |
@@ -395,3 +397,42 @@ Los productores Meta v20–v24 siguen apagados hasta su publicación compatible.
 Evidencia privada `qa-evidence/security-resume-20260917/audit-v19-preparation/`:
 `publication-result.json`, `deployed-aws.json`, resultados SSM, conciliación y
 verificación S3. Madurez19, costes39 y bitácora99 actualizados con este alcance.
+
+
+## Publicación v24 verificada — 19/09/2026, 10:15 UTC
+
+Sustituye las referencias de compatibilidad pendiente para Meta v20–v24. Candidatas
+`release-reader-v24-724aa889` y `release-writer-v24-724aa889`: ocho fuentes nuevas
+(o modificadas) superpuestas sobre cada release v19 contrastada por SSM; 44 hashes
+por rol y dependencias/configuración/TLS/diarios preservados. No se igualaron sus
+bootstraps distintos. 94/94 pruebas por candidata, codec bajo su UID real en AWS y
+transporte local firmado con SQLite real antes de publicar.
+
+Lector publicado 10:11:39 UTC, recibos operativos y originales v18/v19 comprobados;
+escritor 10:12:32. Guard remoto instalado antes de la única entrega. 25 eventos
+ficticios exactos generados por servicios HTTP/SQL aislados: v20 acceso(5), v21
+retirada(6), v22 OAuth(4), v23 inventario(4), v24 selección(6), 20.089 bytes. Entregados
+25/25 (~559 ms), conciliados 25/25 (~335 ms), VersionId/bytes/SHA256/KMS contrastados
+directamente con el rol lector autorizado. Cero filas en `clinicaclick` y
+`clinicaclick_dev_isolated`. Los seis canarios v18/v19 originales conservan sus
+VersionIds; no se repitió su entrega.
+
+Control posterior: 25/25 recibos operativos (~279 ms), TLS válido, peticiones sin
+firma400, servicios activos/running/NRestarts=0. No hubo cambios IAM, claves,
+esquema/gates clínicos o consumidores Meta/Google. La UI de selección revisada usa
+componentes producto y SQL/broker aislados; no acredita login público ni Meta real.
+
+Recuperación: conservar soporte v1–v24 después de la primera entrega. No ejecutar
+de nuevo los scripts single-use, regenerar identidades/eventos, quitar guards o
+volver a la release v19. Conciliar el UUID y bytes originales ante incertidumbre;
+preservar diarios, configuración, TLS y fuentes propias de cada rol. Corregir el
+código manteniendo compatibilidad con eventos ya persistidos. No borrar el índice
+ni presentar como verificado un cuerpo local sin contrastar su objeto externo.
+
+Evidencia privada `qa-evidence/security-resume-20260917/audit-v24-publication-20260919/`:
+`manifest.json`, `deployed-aws.json`, resultados SSM, `publication-result.json`,
+`canary-input.json` inmutable, fuentes productoras congeladas, conciliación,
+verificación directa S3 y pruebas de recibos/TLS. Helpers de exportación de canario
+solo funcionan desde MySQL ficticio propiedad de la prueba, generan fichero exclusivo
+y no entregan ni insertan eventos operativos. Coste incremental real sin aislar;
+recursos/operaciones medidas en 39. El objetivo completo sigue activo.

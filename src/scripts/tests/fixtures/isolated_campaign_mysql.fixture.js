@@ -76,6 +76,9 @@ async function withIsolatedCampaignMysql(work) {
     await work({ sql, models, report, registerOwnedLoopbackServer });
     if (ownedHttpConnections) report.ownedLoopbackConnections = ownedHttpConnections;
     assert.equal(rejected.length, 0, 'No other database, Redis or provider connection is allowed');
+    if (process.env.PLATFORM_AUDIT_FIXTURE_EXPORT) {
+      await require('./platform_audit_canary_export.fixture')({ models, report });
+    }
     report.success = true;
   } catch (error) {
     report.error = { message: error.message, code: error.original?.code || error.code || null };

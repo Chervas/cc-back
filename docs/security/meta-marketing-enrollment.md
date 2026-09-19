@@ -268,8 +268,8 @@ compatibles preparados; no expandir a una fila por sede ni cambiar primarias imp
 El codec v24 tiene fases durables separadas y `result_part` por fase. El visor
 muestra pendientes con etiqueta explícita y cantidades/IDs técnicos, sin tokens
 ni inventario. La reserva verificada desde SQL atraviesa lector/escritor y S3
-ficticio antes de mostrarse en Angular real. Compatibilidad AWS actual **v19**;
-publicar v24 compatible antes del productor, manteniendo los seis canarios v19
+ficticio antes de mostrarse en Angular real. Compatibilidad AWS actual **v24**, publicada 19/09 10:15 UTC;
+verificarla antes del productor, manteniendo los seis canarios v19
 ya entregados y sus guards. No repetirlos ni volver a lector v17.
 
 Prueba de autoridad independiente, desde backend y Node24:
@@ -399,8 +399,14 @@ Prueba del catálogo incluye gate, namespace y delegación al ejecutor; gateway 
 
 Para publicar, preparar candidato selectivo desde el inventario
 `meta-marketing-enrollment-ui-consumers.json` y dependencias anteriores. Instalar
-DDL04–12 y compatibilidad AWS v24 antes del productor; el servicio AWS actual sigue
-en v19. Mantener controles y lectores compatibles al cerrar altas. No revertir
+DDL04–12 antes del productor y comprobar la compatibilidad AWS v24 ya publicada. Mantener controles y lectores compatibles al cerrar altas. No revertir
 propiedad/marcas/diarios ni quitar índice12 bajo la API activa; ninguna recuperación
 restaura credenciales SQL o reproduce activación incierta. Evidencia privada en
 `qa-evidence/security-resume-20260917/meta-enrollment-ui-20260919/`, costes39 y corte99.
+
+
+Compatibilidad AWS v24 publicada y verificada 19/09 10:15 UTC; evidencia y recuperación
+en `audit-reader-view-migration.md`. Los 25 eventos ficticios nuevos cubren v20–v24;
+no prueban Meta real ni autorizan abrir cohortes. Conservar lector v24 desde la
+primera entrega, además de los originales/guards v19. No repetir ninguno de los
+canarios. API/UI/DDL/job clínicos siguen sin publicación ni activación en este corte.

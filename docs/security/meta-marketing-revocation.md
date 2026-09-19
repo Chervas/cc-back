@@ -1,5 +1,10 @@
 # Baja coordinada Meta no WhatsApp
 
+> Estado 19/09/2026 10:15 UTC: compatibilidad de auditoría AWS v1–v24 publicada y
+> verificada; el consumidor de este documento sigue pendiente de publicación y
+> aceptación real. Conservar lector v24 en recuperación. Detalle y evidencia en
+> [runbook de auditoría](audit-reader-view-migration.md).
+
 Preparada el 19/09/2026; no publicada. Mismos worktrees DEV. Contrato primero en
 [13-backend](../../src/Documentacion/13-backend.md#baja-coordinada-meta-no-whatsapp-preparada-19092026)
 y espejo idéntico en frontend. No se han modificado AWS, bases clínicas, flags,
@@ -55,7 +60,8 @@ Auditoría v21 `integration.asset.disconnect`, provider `meta_marketing`: actor 
 y confirmación por job, ámbito completo, activo y correlación; sin nombres, tokens
 o contenido clínico. Panel existente exclusivo de administradores técnicos, versión
 S3/hash/KMS comprobados. La consulta del panel también deja su propia auditoría.
-El archivo/canary AWS v19 congelado no cambia; v21 necesita un candidato separado.
+El archivo/canary AWS v19 congelado no cambia; el soporte v21 se publicó con la
+candidata v24 separada. No repetir ninguno de los canarios.
 
 ## QA y carga observada
 
@@ -117,7 +123,8 @@ Coste incremental facturado null; sin Cost Explorer nuevo ni recursos contratado
    ClinicMetaAssets(assetType,metaAssetId). DDL MySQL no transaccional; comprobar cada
    objeto/SequelizeMeta y resolver estados parciales expresamente. El nuevo lector
    depende de la tabla aunque solo se abra la comprobación manual anterior.
-3. Preparar/publicar lector AWS v21 antes del escritor y ambos antes del productor.
+3. Verificar lector/escritor AWS v24 publicados, que incluyen v21, antes del productor.
+   No volver a una versión menor durante esta publicación.
    Verificar versiones, recibos, TLS, IAM y carga. No reconstruir/sustituir archivo
    ni seis eventos del canary v19 congelado. Aceptación real y SSO operativo pendientes.
 4. Habilitar captura/worker con los flags de03, identidad de control y namespace
