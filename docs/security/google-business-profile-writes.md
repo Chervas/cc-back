@@ -120,6 +120,12 @@ La recuperación humana requiere el mismo usuario original, clínica, namespace 
 ámbito íntegro, con una sesión vigente; puede recuperar un intento de ese usuario
 originado en una automatización sin simular que el job continúa activo. Una
 operación ya aplicada devuelve la caché actual, sin volver a aplicar su recibo.
+Esta protección ordena los escritores que participan en el diario. El sync de
+reseñas todavía usa `bulkCreate(updateOnDuplicate)` y el de medios/detalles
+actualiza la caché por su vía anterior: falta impedir que una lectura iniciada
+antes del cambio publique después una observación antigua. Debe coordinarse con
+el diario antes de activar escritores; no se acredita aislamiento frente a esos
+jobs ni frente a cambios hechos directamente en Google.
 Cambiar la lista de clínicas o el mapping mantiene el resultado pendiente de
 revisión; no se eluden sus bloqueos ni se crean UUID alternativos.
 
@@ -150,7 +156,8 @@ ni admitido claves reales de escritor ni instalado esta cohorte en AWS.
 
 Siguiente implementación necesaria:
 
-1. Adaptar `applyScheduledSpecialHoursPeriod` y el nodo de flujos: identidad estable
+1. Coordinar el commit de las lecturas de reseñas/medios/detalles con las escrituras
+   nuevas y probar respuestas de sync tardías. Adaptar `applyScheduledSpecialHoursPeriod` y el nodo de flujos: identidad estable
    por ejecución/nodo, comprobación de lease/plantilla/gates y recuperación sin
    recomponer otro plan ni repetir una acción. Mantener DEV clínico apagado.
 2. Preparar corte SQL nuevo para la migración

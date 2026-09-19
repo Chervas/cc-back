@@ -12025,7 +12025,9 @@ clínica propietaria o de otra clínica admitida expresamente para esa ficha.
 Los cuatro consumidores manuales guardan el UUID y su autor en SQL antes del envío.
 El broker conserva su propio intento/recibo. La caché SQL, evento de auditoría v25,
 recibo y liberación de locks se confirman juntos; recuperar el resultado no repite
-la mutación ni aplica un recibo antiguo sobre una edición posterior. Sesión, ámbito,
+la mutación ni aplica un recibo antiguo sobre una edición posterior del diario.
+Todavía falta coordinar los commits del sync de reseñas/medios/detalles para
+rechazar lecturas antiguas que regresen después de una escritura. Sesión, ámbito,
 aliases y permisos de todas las clínicas se revalidan durante el recorrido.
 
 La UI distingue incertidumbre de éxito y permite «Consultar resultado». Conserva
