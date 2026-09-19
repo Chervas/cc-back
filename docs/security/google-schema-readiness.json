@@ -1,0 +1,256 @@
+{
+  "version": 1,
+  "status": "google_schema_applied_only_to_isolated_dev",
+  "observedAt": "2026-09-19T17:10:26.461840+00:00",
+  "sourceCommit": "dea531ac",
+  "requiredContractTables": 49,
+  "googleContractTables": 22,
+  "devMigrationsApplied": [
+    "20260918110000-create-google-conversion-submissions.js",
+    "20260918190000-create-google-ads-action-journal.js",
+    "20260918203000-google-action-recovery-ownership.js",
+    "20260918220000-create-google-destination-journal.js",
+    "20260918224500-index-google-destination-recovery.js",
+    "20260918235000-index-google-receipt-review.js"
+  ],
+  "beforeDevSchema": "3201805e4e696c150eef744a35517545d9494fb37a2d838bd0595ae7313d8983",
+  "afterDevSchema": "d139b2c676931c122a4f090795ffc15f33ea4dc95b5a33491f830d09749bbadc",
+  "devRunningRelease": "/opt/clinicaclick-dev/release-d07e9c8579bafc446a0f86a283ec52a8fc733c90-meta-consumers",
+  "devUnits": {
+    "clinicaclick-back-dev.service": {
+      "MainPID": "1979550",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "clinicaclick-dev-security.service": {
+      "MainPID": "1979551",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    }
+  },
+  "devGoogleRows": {
+    "GoogleConnections": 0,
+    "GoogleConnectionAssignments": 0,
+    "ClinicBusinessLocations": 0,
+    "ClinicWebAssets": 0,
+    "ClinicAnalyticsProperties": 0,
+    "ClinicGoogleAdsAccounts": 0,
+    "GoogleAdsConversionUploadAttempts": 0
+  },
+  "newGoogleJournalTablesEmpty": true,
+  "devOldReleaseCompatible": true,
+  "preparedFullContractCompatible": true,
+  "stagingSchemaUnchanged": true,
+  "stagingSchemaDigest": "9e5be889b2d5b18d9b201c98a4f5a4505c56fbc963dffba0b317e4a3ee06d98d",
+  "stagingMissingMigrations": [
+    "20260913000000-add-business-profile-broker-read-binding.js",
+    "20260913010000-create-business-profile-broker-revocations.js",
+    "20260913020000-create-google-oauth-broker-flows.js",
+    "20260913030000-add-search-console-broker-read-binding.js",
+    "20260913040000-add-analytics-broker-read-binding.js",
+    "20260913050000-scope-search-console-bindings-by-mapping.js",
+    "20260913060000-create-google-property-broker-revocations.js",
+    "20260913070000-scope-google-oauth-by-service.js",
+    "20260913080000-add-google-ads-broker-bindings.js",
+    "20260913090000-create-google-ads-broker-revocations.js",
+    "20260913100000-add-ads-google-oauth-cohort.js",
+    "20260913110000-stage-google-ads-broker-mappings.js",
+    "20260913120000-create-google-ads-enrollment.js",
+    "20260918110000-create-google-conversion-submissions.js",
+    "20260918190000-create-google-ads-action-journal.js",
+    "20260918203000-google-action-recovery-ownership.js",
+    "20260918220000-create-google-destination-journal.js",
+    "20260918224500-index-google-destination-recovery.js",
+    "20260918235000-index-google-receipt-review.js"
+  ],
+  "stagingRunningContractCompatible": true,
+  "publicProcessesUnchanged": true,
+  "configurationUnchanged": true,
+  "mfaEnforce": true,
+  "clinicalDevJobsEnabled": false,
+  "tokensMigrated": false,
+  "providerOperations": false,
+  "isolatedMysql": {
+    "root": "/tmp/cc-campaign-opt-mysql-vkMhtV",
+    "database": "campaign_optimization_qa",
+    "checks": [
+      "missing registries block the new credential loader before token hydration even with broker activation absent",
+      "all 19 real migrations run in order under the deployment lock; journaled once and stale replay rejected",
+      "active/inactive mappings, clinic/group/disconnected assignments, fictitious credentials and pending/accepted/partial conversion history preserved; sixteen new registries and journals empty, legacy access remains available",
+      "all four real CHECK constraints reject either half binding and admit complete or empty pairs",
+      "release contract pins actual columns, compound uniqueness, enums, blocked defaults, migration hashes and enforced CHECK expressions",
+      "unknown conversion, attempted action and pending withdrawal survive destructive down attempts; parent deletion cannot cascade away receipt/command ownership",
+      "one blocked enrollment marker closes shared identity and duplicate ID before token hydration; destructive down refuses retained history"
+    ],
+    "rejected": [],
+    "success": true,
+    "mysql": "8.0.42-0ubuntu0.20.04.1",
+    "pid": 1978978,
+    "migrations": [
+      "20260913000000-add-business-profile-broker-read-binding.js",
+      "20260913010000-create-business-profile-broker-revocations.js",
+      "20260913020000-create-google-oauth-broker-flows.js",
+      "20260913030000-add-search-console-broker-read-binding.js",
+      "20260913040000-add-analytics-broker-read-binding.js",
+      "20260913050000-scope-search-console-bindings-by-mapping.js",
+      "20260913060000-create-google-property-broker-revocations.js",
+      "20260913070000-scope-google-oauth-by-service.js",
+      "20260913080000-add-google-ads-broker-bindings.js",
+      "20260913090000-create-google-ads-broker-revocations.js",
+      "20260913100000-add-ads-google-oauth-cohort.js",
+      "20260913110000-stage-google-ads-broker-mappings.js",
+      "20260913120000-create-google-ads-enrollment.js",
+      "20260918110000-create-google-conversion-submissions.js",
+      "20260918190000-create-google-ads-action-journal.js",
+      "20260918203000-google-action-recovery-ownership.js",
+      "20260918220000-create-google-destination-journal.js",
+      "20260918224500-index-google-destination-recovery.js",
+      "20260918235000-index-google-receipt-review.js"
+    ],
+    "historicalMigrations": [
+      "20260711003000-create-google-ads-conversion-upload-attempts.js",
+      "20260711012000-add-google-ads-conversion-destination-key.js",
+      "20260712090000-add-data-manager-conversion-statuses.js"
+    ],
+    "tables": [
+      "GoogleConnections",
+      "ClinicBusinessLocations",
+      "ClinicWebAssets",
+      "ClinicAnalyticsProperties",
+      "ClinicGoogleAdsAccounts",
+      "GoogleAdsConversionUploadAttempts",
+      "GoogleConversionSubmissions",
+      "GoogleAdsActionPlans",
+      "GoogleAdsActionCommands",
+      "GoogleDestinationAuthorizations",
+      "GoogleDestinationCommands",
+      "BusinessProfileBrokerBindings",
+      "BusinessProfileBrokerRevocations",
+      "GoogleOAuthBrokerBindings",
+      "GoogleOAuthBrokerRequests",
+      "SearchConsoleBrokerBindings",
+      "AnalyticsBrokerBindings",
+      "GooglePropertyBrokerRevocations",
+      "GoogleAdsBrokerBindings",
+      "GoogleAdsBrokerRevocations",
+      "GoogleAdsEnrollmentScopes",
+      "GoogleAdsEnrollmentRequests"
+    ],
+    "legacyRowsPreserved": 16,
+    "shutdown": {
+      "code": 0,
+      "signal": null
+    }
+  },
+  "visual": {
+    "at": "2026-09-19T17:07:28.751Z",
+    "scope": "Live CRM and DEV anonymous login after the six Google schema migrations in isolated DEV; no authenticated session or provider acceptance",
+    "authenticated": false,
+    "results": [
+      {
+        "name": "crm",
+        "origin": "https://crm.clinicaclick.com",
+        "width": 1440,
+        "status": "passed",
+        "liveApplication": true,
+        "apiResponsesMocked": false,
+        "emptyFormBlocked": true,
+        "authStatus": 401,
+        "errors": [],
+        "failures": [],
+        "dimensions": {
+          "viewport": 1440,
+          "body": 1440
+        },
+        "contrast": {
+          "color": "rgb(185, 28, 28)",
+          "background": "rgb(255, 255, 255)",
+          "ratio": 6.4700447145121895
+        },
+        "screenshot": "crm-sign-in-stable-1440.png"
+      },
+      {
+        "name": "crm",
+        "origin": "https://crm.clinicaclick.com",
+        "width": 390,
+        "status": "passed",
+        "liveApplication": true,
+        "apiResponsesMocked": false,
+        "emptyFormBlocked": true,
+        "authStatus": 401,
+        "errors": [],
+        "failures": [],
+        "dimensions": {
+          "viewport": 390,
+          "body": 390
+        },
+        "contrast": {
+          "color": "rgb(185, 28, 28)",
+          "background": "rgb(241, 245, 249)",
+          "ratio": 5.905927118870345
+        },
+        "screenshot": "crm-sign-in-stable-390.png"
+      },
+      {
+        "name": "dev",
+        "origin": "http://127.0.0.1:4203",
+        "width": 1440,
+        "status": "passed",
+        "liveApplication": true,
+        "apiResponsesMocked": false,
+        "emptyFormBlocked": true,
+        "authStatus": 401,
+        "errors": [],
+        "failures": [],
+        "dimensions": {
+          "viewport": 1440,
+          "body": 1440
+        },
+        "contrast": {
+          "color": "rgb(185, 28, 28)",
+          "background": "rgb(255, 255, 255)",
+          "ratio": 6.4700447145121895
+        },
+        "screenshot": "dev-sign-in-stable-1440.png"
+      },
+      {
+        "name": "dev",
+        "origin": "http://127.0.0.1:4203",
+        "width": 390,
+        "status": "passed",
+        "liveApplication": true,
+        "apiResponsesMocked": false,
+        "emptyFormBlocked": true,
+        "authStatus": 401,
+        "errors": [],
+        "failures": [],
+        "dimensions": {
+          "viewport": 390,
+          "body": 390
+        },
+        "contrast": {
+          "color": "rgb(185, 28, 28)",
+          "background": "rgb(241, 245, 249)",
+          "ratio": 5.905927118870345
+        },
+        "screenshot": "dev-sign-in-stable-390.png"
+      }
+    ]
+  },
+  "incrementalBilledCostUsd": null,
+  "artifacts": {
+    "dev-check.log": "dd6434fda6ecbdc095c942e0f49cfd524273b7f913129ac41da22d56f66f67cc",
+    "staging-check.log": "94485bb8b7d73a5930c5f8cd24a1cf10c0beab3ea3ed6c8ccd3d945efc93acf8",
+    "dev-running-check.log": "6bf73b2f0aa3bb7f3ab6ba22d0c0c8086b34ae91f043d5d058cfd718d9ce50df",
+    "staging-running-check.log": "fc5d174e0ee10228005ff1005c4ff0cf0ffd7faf7163318eb2c6020684c07b4c",
+    "complete-chain-mysql.log": "5e4f6d5a250e4502e33b58c3f5ab831518413216675a8c495f32e1b02b23cc64",
+    "dev-before.json": "a0d0b314f6fd177628882d5ef45ee8b082e1b21580a5571c802a2148fc731fc0",
+    "dev-stopped.json": "4a27d636df16ac34e7b359b8b15ef49729f9278b3a4ba504767d93293c96d1d7",
+    "dev-apply.json": "81e12ffa62f2a1f1c92e060519e2981d6a24034fe2c1f3425ee237364cefb13a",
+    "dev-schema-verified.json": "dd84f9db23c4bf8fda329873b4824a3a25f360e89a14528b0b1c5bbcf685393a",
+    "dev-resumed.json": "14d949c78bc619be04c5dca3f3037fe9cf8f084637e65e1e1bee4a401f1965ef",
+    "staging-after-dev-check.log": "0e8e8d6b10a1b5d953e1ad353dad3a3ea352a1b77aae2bf09a6fc218239fc08c",
+    "login-smoke.json": "9a0c5a8e01667b1ea202707378049eadc76973e16727a42a1d14db8a605dd9a3",
+    "dev-state.cjs": "6b5a07f7a48f32ec865c2c19c1eb89213a922bacd722295fa63aac8c94e2c557"
+  }
+}

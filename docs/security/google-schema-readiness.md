@@ -1,5 +1,99 @@
 # Google: requisitos de esquema antes del despliegue
 
+> **Tipo:** runbook de requisitos SQL y recuperación.
+> **Fuente de verdad:** compatibilidad de esquema Google; no certifica migración de credenciales ni acceso al proveedor.
+> **Última revisión:** 2026-09-19.
+> **Relacionado con:** [contrato backend](../../src/Documentacion/13-backend.md#esquema-google-completo-y-publicación-por-entorno), [estado central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
+
+## Estado vigente — 19/09/2026, 17:06 UTC
+
+El contrato completo del código preparado exige **49 tablas y 43 migraciones**;
+Google aporta 22 tablas y 22 migraciones (tres históricas de julio y diecinueve
+posteriores). Las cinco tablas nuevas son `GoogleConversionSubmissions`,
+`GoogleAdsActionPlans`, `GoogleAdsActionCommands`, `GoogleDestinationAuthorizations`
+y `GoogleDestinationCommands`. El historial de intentos ya existía y se conserva.
+
+La inspección de solo metadata encontró seis migraciones pendientes en DEV y
+19 en staging. **Las seis de DEV ya se aplicaron** con fuente `dea531ac`; no repetir
+el plan. DEV pasa ahora las 49 tablas del código preparado y las 43 exigidas por
+su release ejecutada `d07e9c85`. No se publicó código Google nuevo. El esquema
+clínico conserva exactamente su digest, 19 migraciones Google pendientes y
+compatibilidad con las 27 tablas exigidas por su release `48d69879`.
+La incompatibilidad era con el código futuro, no un fallo de las API operativas.
+
+## Secuencia completa probada
+
+`google_broker_schema_mysql.integration.js` ejecuta las diecinueve migraciones
+reales desde el esquema anterior en un MySQL propio, sin acceso a BD, Redis ni
+proveedores del host. Parte de las tres migraciones de julio y conserva 16 filas
+ficticias: credenciales, mappings activos/inactivos, asignaciones de clínica/grupo
+y conversiones pendientes/aceptadas/parciales. Los dieciséis registros y diarios
+nuevos quedan vacíos antes de probar su comportamiento. El cargador legacy sigue
+operativo hasta que aparece un marcador; una identidad compartida marcada se
+cierra antes de leer tokens, incluso bajo otro ID.
+
+Verificados los 22 contratos Google, hashes de las 22 migraciones, pares completos
+de referencias y rechazo del mismo plan reaplicado. Se desactivan CHECK y retiran
+índices en la BD ficticia para demostrar que el preflight detecta ese drift.
+Los recibos de conversión incierta, aplicación intentada y retirada pendiente
+sobreviven a los intentos de `down`; borrar sus padres no puede borrarlos en
+cascada. Siete grupos de comprobaciones pasan y el MySQL temporal termina en 0.
+
+```sh
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/google_broker_schema_mysql.integration.js
+```
+
+No acredita cardinalidad clínica, proveedor Google, MFA público ni aceptación
+visual de las nuevas pantallas. [Acta estructurada](google-schema-readiness.json).
+
+## Aplicación DEV y recuperación
+
+Con plan de fuente/contrato/metadata fijados, se comprobaron siete tablas Google
+vacías y cero jobs, correos o flujos en curso. Se detuvieron solo API y worker de
+seguridad DEV; el aplicador versionado ejecutó exclusivamente estas seis DDL:
+
+1. `20260918110000-create-google-conversion-submissions.js`.
+2. `20260918190000-create-google-ads-action-journal.js`.
+3. `20260918203000-google-action-recovery-ownership.js`.
+4. `20260918220000-create-google-destination-journal.js`.
+5. `20260918224500-index-google-destination-recovery.js`.
+6. `20260918235000-index-google-receipt-review.js`.
+
+Las cinco tablas siguen vacías. La misma release DEV arrancó con ambos archivos
+de configuración intactos, MFA/sesiones enforce, jobs/crons clínicos OFF y cero
+reinicios automáticos. No se activaron consumidores, tokens ni conexiones nuevas.
+CRM, gateway y los dos consumidores WhatsApp conservaron PID/inicio/entorno;
+los archivos públicos y el esquema clínico conservaron sus huellas.
+
+Plan y diario root bajo
+`/var/lib/clinicaclick-schema-recovery/google-dev-20260919-dea531ac/`.
+Solo crea/ajusta tablas nuevas vacías; no se modificaron filas ni tablas históricas.
+No se necesitó exportar datos clínicos para este corte de la BD ficticia. La
+recuperación mantiene el esquema aditivo y la misma release compatible: no usar
+`down`, borrar journals ni volver a aplicar un plan ya consumido. Ante DDL parcial,
+conservar diario y examinar antes de cualquier acción; no hay rollback transaccional
+MySQL. El operador genérico sigue prohibiendo escrituras fuera de DEV.
+
+Login anónimo real CRM/DEV verificado después en 1440/390px: cuatro capturas,
+API sin mocks, auth/me401 y formulario vacío sin POST, errores JS/5xx ni overflow.
+Se revisaron CRM escritorio y DEV móvil. No equivale a login autenticado por MFA.
+Evidencia privada en `qa-evidence/security-resume-20260917/google-clinical-preflight-20260919/`.
+
+## Pendiente
+
+Preparar candidata selectiva de consumidores y operador clínico Google con
+recuperación/drenaje propios antes de las 19 DDL públicas; el operador Meta
+existente está limitado a su plan Meta y no debe reutilizarse para este lote.
+Faltan primera identidad Google y ámbitos de todas sus verticales, configuración
+AWS, aceptación del titular/proveedor y recorridos autenticados/carga real. Una
+identidad compartida no puede migrarse por partes sin considerar sus consumidores.
+El cambio DEV no abre campañas, leads, conversiones ni envíos históricos.
+Sin AWS, instancias o consulta Cost Explorer en este corte; coste incremental
+facturado `null`, no cero. Las copias generales siguen al final del objetivo.
+
+## Antecedente del 18/09 — no reutilizar sus planes ni recuentos
+
+
 Actualización de conversiones, 18/09/2026: el contrato del nuevo código exige
 36 tablas y 29 hashes de migración. Añade `GoogleConversionSubmissions` y fija la
 definición de `GoogleAdsConversionUploadAttempts` ya existente. Solo se crea una

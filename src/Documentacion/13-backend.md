@@ -11946,3 +11946,24 @@ su red de correo/auditoría: su exclusión en esta fase es de archivos/firmas.
 Las sondas del cliente real validan TLS y rechazo de claves sin autoridad, no
 OAuth del titular ni carga de proveedor. Operación, evidencia y recuperación en
 `docs/security/meta-client-identities.md/json`; estado central 19 y arquitectura 31.
+
+
+### Esquema Google completo y publicación por entorno
+
+El contrato SQL preparado agrupa 22 tablas Google: registros de lectura/OAuth,
+altas Ads, intentos anteriores, recibos de conversión y diarios humanos de acciones
+y destinos. Fija 22 migraciones (tres históricas y diecinueve posteriores), incluidos
+CHECK, índices de recuperación y relaciones que preservan los recibos. Forma parte
+del contrato completo de seguridad de 49 tablas; no todas son tablas Google nuevas.
+
+El preflight compara el contrato de la fuente candidata y, por separado, el del
+runtime ejecutado. Una candidata incompatible no implica que la API actual lo sea.
+El aplicador genérico solo escribe en DEV, con plan fijado a revisión, hashes y
+metadata; rechaza fuente/cambio de esquema o replay. No habilita flags ni mueve
+credenciales. La secuencia real en MySQL aislado conserva datos anteriores y
+comprueba que las referencias incompletas o el borrado de recibos se rechazan.
+
+DEV ya dispone del esquema completo, manteniendo su release y gates anteriores.
+El corte clínico Google y publicación/aceptación de consumidores siguen pendientes.
+Requisitos, plan consumido, pruebas y recuperación en
+`docs/security/google-schema-readiness.md/json`; madurez central en19.
