@@ -76,8 +76,23 @@ test('all read families use the same complete-page validator and downstream erro
     if (['ads', 'ad_metrics'].includes(family)) input.campaignId = null;
     f.state.response = { results: ['account', 'discovery'].includes(family)
       ? [{ customer: { id: account.customerId, manager: false, currencyCode: 'EUR', timeZone: 'Europe/Madrid', ...(family === 'discovery' ? { descriptiveName: 'Fictitious account', status: 'ENABLED' } : {}) } }] : [], nextPageToken: null };
-    assert.equal((await f.read(family, input)).length, ['account', 'discovery'].includes(family) ? 1 : 0);
+    if (family === 'conversion_settings') f.state.response = { results: [{ customer: { id: account.customerId, conversionTrackingSetting: {} } }], nextPageToken: null, dataManagerConfiguration: { quotaProjectConfigured: true } };
+    assert.equal((await f.read(family, input)).length, contract.singleResult(family) ? 1 : 0);
   }
   f.state.onCall = () => { throw Error('FICTITIOUS_SECRET_NOT_FOR_LOGS'); };
   await assert.rejects(f.read(), error => { assert.equal(error.code, 'google_ads_broker_read_failed'); assert.doesNotMatch(error.message, /FICTITIOUS_SECRET/); return true; });
+});
+
+test('settings configuration must be a closed broker assertion and cannot arrive through provider rows', async () => {
+  const f = fixture();
+  const data = { results: [{ customer: { id: account.customerId, conversionTrackingSetting: { acceptedCustomerDataTerms: true } },
+    dataManagerConfiguration: { quotaProjectConfigured: true } }], nextPageToken: null, dataManagerConfiguration: { quotaProjectConfigured: false } };
+  f.state.response = data;
+  const rows = await f.read('conversion_settings', {});
+  assert.deepEqual(rows[0].dataManagerConfiguration, { quotaProjectConfigured: false });
+  assert.equal(rows[0].customer.conversionTrackingSetting.enhancedConversionsForLeadsEnabled, null);
+  for (const configuration of [undefined, {quotaProjectConfigured:'true'}, {quotaProjectConfigured:true,projectId:'private'}]) {
+    f.state.response = { ...data, dataManagerConfiguration: configuration };
+    await assert.rejects(f.read('conversion_settings', {}), { code: 'broker_response_invalid' });
+  }
 });

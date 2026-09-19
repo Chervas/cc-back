@@ -65,12 +65,16 @@ function createGoogleAdsOperations({ http, cursor, withDeveloperSecret, now = Da
         const end = offset + results.length;
         const nextPageToken = end < entry.rows.length || entry.nextPageToken
           ? cursor.seal(JSON.stringify({ id: entry.id, offset: end }), scope) : null;
-        return { results, nextPageToken };
+        return { results, nextPageToken, ...(name === 'conversion_settings' ? {
+          dataManagerConfiguration: { quotaProjectConfigured: Boolean(binding.googleDataManager?.quotaProjectId) },
+        } : {}) };
       }, { signal });
     },
     project(result) {
-      if (!result || Object.keys(result).sort().join(',') !== 'nextPageToken,results' || !Array.isArray(result.results)
+      const settings = contract.family(operation) === 'conversion_settings';
+      if (!result || Object.keys(result).sort().join(',') !== (settings ? 'dataManagerConfiguration,nextPageToken,results' : 'nextPageToken,results') || !Array.isArray(result.results)
         || result.results.length > contract.PAGE_SIZE || Buffer.byteLength(JSON.stringify(result)) > 786432) fail('provider_failed');
+      if (settings) contract.dataManagerConfiguration(result.dataManagerConfiguration);
       return structuredClone(result);
     },
   })]));

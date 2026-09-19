@@ -460,7 +460,8 @@ fallo conservado en evidencia. Estas pruebas no incluyen sesión/MFA ni UI real.
 La [base tipada de creación/normalización](google-action-management-broker.md)
 ya está preparada y probada en broker/cliente, con planes y bloqueos durables.
 Su conexión a los endpoints con permisos globales de cuenta y propiedad durable
-en CRM, el enriquecimiento por cuenta y bootstrap siguen pendientes.
+en CRM conserva su aceptación operativa pendiente. El enriquecimiento y bootstrap
+ya están preparados en el corte del 19/09 descrito debajo, sin publicar.
 Si se solicita crear una acción que
 falta, el nuevo recorrido devuelve una necesidad de revisión explícita y no
 intenta OAuth local ni afirma estar listo. Este límite es temporal y bloquea el
@@ -500,3 +501,39 @@ El consumidor revalida acceso tras un error saneado del cliente, sin reintento.
 Cero tokens OAuth hidratados desde MySQL, proveedor/Secrets Manager/S3 ficticios.
 Evidencia adicional: `qa-evidence/security-resume-20260917/audit-v19-preparation/`.
 Evidencia privada: `qa-evidence/security-resume-20260917/google-receipt-review-20260918/`.
+
+
+## Bootstrap y ajustes de cuenta por broker (19/09/2026)
+
+Contrato vigente en [13-backend](../../src/Documentacion/13-backend.md#bootstrap-google-sin-credenciales-locales-19092026).
+`conversion_settings.read.v1` es una lectura de una cuenta, sin paginación ni
+mutación. Campos del proveedor contrastados con [Customer v24](https://developers.google.com/google-ads/api/fields/v24/customer)
+y [ConversionTrackingSetting](https://developers.google.com/google-ads/api/reference/rpc/v24/ConversionTrackingSetting).
+La cuota es metadata del binding propio: una respuesta Google no puede activarla.
+En cohorte Ads de solo lectura se devuelve false; un proyecto local no lo suple.
+No se ha añadido el permiso a ninguna política operativa ni migrado una cuenta.
+
+Pruebas: 621/621 broker Node24; 34/34 lector/adaptador Node18; scripts legacy
+Data Manager y activación mejorada offline. Seis grupos integrados MySQL/HTTP/TLS,
+14 comandos de lectura y cuatro capturas Chromium del asistente real/tarjeta Web;
+cero ingestas, mutaciones Google, hidrataciones OAuth locales o accesos externos.
+La tarjeta Web usa la plantilla exacta y el resultado del asistente; no es una
+prueba de toda la navegación Web ni aceptación pública/MFA/Google real.
+Las comprobaciones de configuración no sustituyen validate-only ni autorización.
+
+Rendimiento: 198 sentencias SQL y 539 ms en la primera apertura de una cuenta
+con dos clínicas, en MySQL propio sin latencia real de Google. Las guardias
+repetidas son un pendiente explícito de optimización y carga antes del despliegue.
+El límite de concurrencia/plazo evita una ráfaga ilimitada al broker por petición;
+no garantiza CPU, aislamiento entre peticiones ni una cuota global de proveedor.
+
+Antes del corte: publicar operación y consumidor conjuntamente, revisar grants,
+reducir las revalidaciones SQL duplicadas manteniendo todos los rechazos, medir
+carga y latencia reales, completar leads/job combinado/identidad compartida y
+aceptación autenticada. No activar envíos por el resultado de este GET. AWS v19
+para recibos sigue siendo otro requisito pendiente, con sus candidatos conservados.
+Rollback: conservar las releases actuales mientras no haya corte. Tras un corte,
+retirar el grant de esta lectura o cerrar la cohorte afectada; preservar registro,
+revocaciones, journals y auditoría. Nunca restaurar tokens locales o ejecutar una
+versión legacy sobre una cuenta ya gestionada. No hay DDL propio de este tramo.
+Evidencia privada: `qa-evidence/security-resume-20260917/google-bootstrap-settings-20260919/`.

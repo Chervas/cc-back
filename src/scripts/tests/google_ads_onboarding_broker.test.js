@@ -25,6 +25,8 @@ async function fixture() {
       let data;
       if (command.operation === 'google.ads.conversion_actions.read.v1') {
         data = { results: state.actions.map(conversionAction => ({ customer: { id: f.mapping.customerId }, conversionAction })), nextPageToken: null };
+      } else if (command.operation === 'google.ads.conversion_settings.read.v1') {
+        data = { results: [{ customer: { id: f.mapping.customerId, conversionTrackingSetting: { acceptedCustomerDataTerms: true } } }], nextPageToken: null, dataManagerConfiguration: { quotaProjectConfigured: true } };
       } else {
         assert.equal(command.operation, 'google.ads.conversion.validate.v1'); data = state.validation;
       }
@@ -124,7 +126,10 @@ test('actual endpoint code and scope helper use the broker while ignoring client
   for (const outcome of ['success', 'acl_removed', 'scope_changed', 'unauthenticated']) {
     const f = await fixture(); let permitted = true; let ids = [71];
     const scope = () => ({ assignment_scope: 'clinic', clinic_id: 71, group_id: 5, clinic_ids: [...ids] });
-    const context = { exports: {}, process: { env: {} }, asyncHandler: fn => fn, getUserId: () => outcome === 'unauthenticated' ? null : 7,
+    const context = { exports: {}, process: { env: {} }, require: name => {
+      assert.equal(name, '../services/googleConversionReceiptReview.service');
+      return { reviewEnabled: () => false };
+    }, asyncHandler: fn => fn, getUserId: () => outcome === 'unauthenticated' ? null : 7,
       ...require('../../services/googleAdsConversionPreparation.service'), createGoogleAdsOnboardingBroker,
       db: f.options.models, normalizeCustomerId: value => value, GOOGLE_ADS_SCOPE: ADS, GOOGLE_DATA_MANAGER_SCOPE: DM,
       resolveScopeFromInput: async input => {
@@ -161,4 +166,50 @@ test('actual endpoint code and scope helper use the broker while ignoring client
       assert.equal(body.action_management.mode, 'broker'); assert.equal(body.action_management.enabled, false);
     }
   }
+});
+
+test('settings reader rechecks current ACL and metadata without any local token or conversion permission', async () => {
+  const f = await fixture(); f.state.conversions = false;
+  const result = await f.adapter.settings();
+  assert.equal(result.dataManagerConfiguration.quotaProjectConfigured, true);
+  assert.equal(result.customer.conversionTrackingSetting.acceptedCustomerDataTerms, true);
+  assert.deepEqual(f.calls[0].payload, {});
+  assert.equal(f.calls[0].operation, 'google.ads.conversion_settings.read.v1');
+  f.state.afterCall = () => { f.state.allowed = false; };
+  await assert.rejects(f.adapter.settings()); assert.equal(f.calls.length, 2);
+  await assert.rejects(f.adapter.settings()); assert.equal(f.calls.length, 2);
+});
+
+test('account enrichment bounds concurrency, preserves order and revalidates managed settings without using a local quota or token', async () => {
+  const source=fs.readFileSync(path.resolve(__dirname,'../../controllers/campaignOnboarding.controller.js'),'utf8');
+  const segment=source.slice(source.indexOf('async function enrichGoogleAdsAccountsWithConversionTracking('),source.indexOf('function normalizeConsentDomain('));
+  let active=0,peak=0,guards=0;const accounts=Array.from({length:7},(_,i)=>({customer_id:String(1234567800+i)}));
+  const deadlines=[],finalGuards=[];
+  const context={Date,Promise,process:{env:{GOOGLE_DATA_MANAGER_QUOTA_PROJECT:'irrelevant-local-project',GOOGLE_ADS_CONVERSIONS_BROKER_ENABLED:'false'}},
+    require: name=>{assert.equal(name,'../services/googleAdsBrokerReader.service');return {safe:()=> 'broker_response_invalid'};},
+    normalizeCustomerId:value=>String(value||''),GOOGLE_ADS_SCOPE:ADS,GOOGLE_DATA_MANAGER_SCOPE:DM,
+    hasScopeText:(value,scope)=>value.includes(scope),
+    readGoogleConversionTrackingSettings:response=>({customer_id:response.results[0].customer.id}),
+    resolveScopedGoogleAdsRuntime:async({customerId})=>({customerId,deliveryMode:'broker',connection:{scopes:ADS+' '+DM}}),
+    googleAdsRequest:()=>assert.fail('managed settings cannot use local token'),
+    onboardingBrokerForScope:async({runtime,beforeExecute,deadlineAt})=>{
+      deadlines.push(deadlineAt);assert.equal(await beforeExecute(),true);
+      return {settings:async()=>{active++;peak=Math.max(peak,active);await new Promise(resolve=>setTimeout(resolve,5));active--;
+        return {customer:{id:runtime.customerId},dataManagerConfiguration:{quotaProjectConfigured:false}};},assert:async()=>{guards++;return true;}};
+    }};
+  vm.runInNewContext(segment+'\nthis.enrich=enrichGoogleAdsAccountsWithConversionTracking;this.summary=summarizeGoogleMappedAccountAccess;',context);
+  const result=await context.enrich({userId:7,scope:{},accounts,beforeExecute:async()=>true,finalGuards});
+  assert.equal(peak,2);assert.equal(active,0);assert.deepEqual(Array.from(result,r=>r.customer_id),accounts.map(r=>r.customer_id));
+  assert.equal(new Set(deadlines).size,1);assert.equal(finalGuards.length,7);
+  assert(result.every(r=>r.delivery_mode==='broker'&&r.data_manager_quota_project_configured===false&&r.data_manager_delivery_enabled===false));
+  for(const check of finalGuards)await check();assert.equal(guards,7);
+  assert.equal(context.summary(result).has_data_manager_configuration,false);
+  assert.equal(context.summary(result,[accounts[0].customer_id,'9999999999']).all_connected,false);
+});
+
+test('a shared settings deadline denies queued work before another provider call', async () => {
+  const f=await fixture();
+  const adapter=createGoogleAdsOnboardingBroker({...f.options,deadlineAt:5});
+  await adapter.settings();assert.equal(f.calls.length,1);
+  f.state.at=5;await assert.rejects(adapter.settings(),{code:'broker_timeout'});assert.equal(f.calls.length,1);
 });

@@ -2976,20 +2976,28 @@ function buildGoogleAdsCapabilities(
   connected,
   hasAdsScope,
   hasDataManagerScope = false,
-  accounts = []
+  accounts = [],
+  selectedCustomerId = null
 ) {
   const adsEnabled = !!connected && !!hasAdsScope;
-  const quotaProjectConfigured = Boolean(
+  const accountRows = Array.isArray(accounts) ? accounts : [];
+  const selected = accountRows.find(account => normalizeCustomerId(account.customer_id) === normalizeCustomerId(selectedCustomerId))
+    || accountRows[0];
+  const quotaProjectConfigured = selected?.delivery_mode === 'broker'
+    ? selected.data_manager_quota_project_configured === true : Boolean(
     process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT
       || process.env.GOOGLE_CLOUD_PROJECT
   );
   const dataManagerMissing = [];
   if (!hasDataManagerScope) dataManagerMissing.push('oauth_scope');
   if (!quotaProjectConfigured) dataManagerMissing.push('quota_project');
+  if (selected?.delivery_mode === 'broker' && selected.data_manager_delivery_enabled !== true) dataManagerMissing.push('delivery_disabled');
   const dataManagerReady = adsEnabled && dataManagerMissing.length === 0;
   const enhancedConversionsEnabledAccounts = (Array.isArray(accounts) ? accounts : [])
     .filter((account) => (
       account?.enhanced_conversions_for_leads_enabled === true
+      && (account.delivery_mode !== 'broker' || account.google_connection_healthy === true
+        && account.data_manager_quota_project_configured === true && account.data_manager_delivery_enabled === true)
       && GOOGLE_ENHANCED_CONVERSION_PROPDENTAL_CUSTOMER_IDS.includes(
         normalizeCustomerId(account?.customer_id || '')
       )
@@ -2998,7 +3006,10 @@ function buildGoogleAdsCapabilities(
     .filter(Boolean);
   return {
     can_list_conversion_actions: adsEnabled,
-    can_create_conversion_actions: adsEnabled,
+    can_create_conversion_actions: adsEnabled && (selected?.delivery_mode !== 'broker'
+      || selected.data_manager_delivery_enabled === true
+        && process.env.GOOGLE_ADS_ACTION_MANAGEMENT_BROKER_ENABLED === 'true'
+        && String(process.env.RUNTIME_ROLE || '').toLowerCase() !== 'gateway'),
     // Data Manager y la autorización documentada hacen posible el envío, pero
     // Google exige además activar el ajuste en cada cuenta de Ads. Ese campo
     // es de solo lectura en la API y se presenta por cuenta en el bootstrap.
@@ -3047,10 +3058,13 @@ function readGoogleConversionTrackingSettings(response, customerId) {
 async function enrichGoogleAdsAccountsWithConversionTracking({
   userId,
   scope,
-  accounts
+  accounts,
+  beforeExecute = null,
+  finalGuards = null,
 }) {
   const rows = Array.isArray(accounts) ? accounts : [];
-  return Promise.all(rows.map(async (account) => {
+  const deadlineAt = Date.now() + 15000;
+  const enrich = async (account) => {
     const customerId = normalizeCustomerId(account?.customer_id || '');
     if (!customerId) return account;
     let runtime;
@@ -3080,9 +3094,23 @@ async function enrichGoogleAdsAccountsWithConversionTracking({
       google_ads_scope_granted: hasScopeText(runtime.connection?.scopes || '', GOOGLE_ADS_SCOPE),
       data_manager_scope_granted: hasScopeText(runtime.connection?.scopes || '', GOOGLE_DATA_MANAGER_SCOPE),
       connection_reason: null,
-      connection_source: runtime.connectionSource || null
+      connection_source: runtime.connectionSource || null,
+      delivery_mode: runtime.deliveryMode === 'broker' ? 'broker' : 'legacy',
     };
     try {
+      if (runtime.deliveryMode === 'broker') {
+        const managed = await onboardingBrokerForScope({ runtime, userId, scope, beforeExecute, deadlineAt });
+        const response = await managed.settings();
+        finalGuards?.push(() => managed.assert());
+        return {
+          ...account, ...runtimeMetadata,
+          ...readGoogleConversionTrackingSettings({ results: [response] }, customerId),
+          data_manager_quota_project_configured: response.dataManagerConfiguration.quotaProjectConfigured,
+          data_manager_delivery_enabled: process.env.GOOGLE_ADS_CONVERSIONS_BROKER_ENABLED === 'true'
+            && String(process.env.RUNTIME_ROLE || '').toLowerCase() !== 'gateway',
+          conversion_tracking_settings_available: true,
+        };
+      }
       const response = await googleAdsRequest(
         'POST',
         `customers/${customerId}/googleAds:search`,
@@ -3110,15 +3138,31 @@ async function enrichGoogleAdsAccountsWithConversionTracking({
         conversion_tracking_settings_available: true
       };
     } catch (error) {
+      const denied = runtime.deliveryMode === 'broker';
       return {
         ...account,
         ...runtimeMetadata,
+        ...(denied ? { google_connection_healthy: false, connection_reason: require('../services/googleAdsBrokerReader.service').safe(error),
+          data_manager_quota_project_configured: false, data_manager_delivery_enabled: false } : {}),
         conversion_tracking_settings_available: false,
         conversion_tracking_settings_error:
-          String(error?.code || error?.response?.data?.error?.status || 'unavailable').toLowerCase()
+          denied ? require('../services/googleAdsBrokerReader.service').safe(error)
+            : String(error?.code || error?.response?.data?.error?.status || 'unavailable').toLowerCase()
       };
     }
+  };
+  // A large group must not produce an unbounded burst against the broker.
+  // Queued managed reads share the same deadline; promises are always drained.
+  const results = new Array(rows.length);
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(2, rows.length) }, async () => {
+    for (;;) {
+      const index = cursor++;
+      if (index >= rows.length) return;
+      results[index] = await enrich(rows[index]);
+    }
   }));
+  return results;
 }
 
 function summarizeGoogleMappedAccountAccess(accounts, customerIds = null) {
@@ -3130,12 +3174,17 @@ function summarizeGoogleMappedAccountAccess(accounts, customerIds = null) {
     return requested.has(normalizeCustomerId(account?.customer_id || ''));
   });
   const healthy = relevant.filter((account) => account?.google_connection_healthy === true);
+  const mapped = new Set(relevant.map(account => normalizeCustomerId(account?.customer_id || '')));
+  const complete = relevant.length > 0 && (!requested || [...requested].every(id => mapped.has(id)));
   return {
     relevant,
     connected: healthy.length > 0,
-    all_connected: relevant.length > 0 && healthy.length === relevant.length,
-    has_ads_scope: relevant.length > 0 && relevant.every((account) => account?.google_ads_scope_granted === true),
-    has_data_manager_scope: relevant.length > 0 && relevant.every((account) => account?.data_manager_scope_granted === true),
+    all_connected: complete && healthy.length === relevant.length,
+    has_ads_scope: complete && relevant.every((account) => account?.google_ads_scope_granted === true),
+    has_data_manager_scope: complete && relevant.every((account) => account?.data_manager_scope_granted === true),
+    has_data_manager_configuration: complete && relevant.every(account => account?.delivery_mode === 'broker'
+      ? account.data_manager_quota_project_configured === true && account.data_manager_delivery_enabled === true
+      : Boolean(process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT || process.env.GOOGLE_CLOUD_PROJECT)),
     reasons: Array.from(new Set(relevant
       .map((account) => account?.connection_reason)
       .filter(Boolean)))
@@ -6092,7 +6141,7 @@ async function resolveLoginCustomerId(connectionId, customerId, scope) {
   }
 }
 
-async function onboardingBrokerForScope({ runtime, userId, scope }) {
+async function onboardingBrokerForScope({ runtime, userId, scope, beforeExecute = null, deadlineAt = null }) {
   const input = { clinicIdRaw: scope.clinic_id,
     groupIdRaw: scope.assignment_scope === 'group' ? scope.group_id : null,
     assignmentScopeRaw: scope.assignment_scope };
@@ -6100,8 +6149,9 @@ async function onboardingBrokerForScope({ runtime, userId, scope }) {
   const scopeKey = row => JSON.stringify([row.assignment_scope, row.clinic_id || null, row.group_id || null,
     [...row.clinic_ids].map(Number).sort((a, b) => a - b)]);
   const expected = scopeKey(initial);
-  return createGoogleAdsOnboardingBroker({ runtime, models: db, clinicIds: initial.clinic_ids.map(Number),
+  return createGoogleAdsOnboardingBroker({ runtime, models: db, clinicIds: initial.clinic_ids.map(Number), deadlineAt,
     beforeExecute: async () => {
+      if (beforeExecute && await beforeExecute() !== true) return false;
       const current = await resolveScopeFromInput(input);
       if (scopeKey(current) !== expected) return false;
       // Internal audits have no user session; their durable Ads grant remains
@@ -7391,6 +7441,15 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
   const userId = getUserId(req);
   if (!userId) return res.status(401).json({ success: false, error: 'unauthenticated' });
 
+  res.set('Cache-Control', 'private, no-store');
+  const sessions = require('../services/accessSession.service');
+  const assertSession = async () => {
+    const claims = await sessions.verify(sessions.bearer(req.headers?.authorization));
+    if (Number(claims.userId) !== Number(userId)) throw Object.assign(Error('auth_invalid'), { code: 'auth_invalid', status: 401 });
+    return true;
+  };
+  await assertSession();
+  const googleFinalGuards = [];
   const scope = await resolveScopeFromInput({
     clinicIdRaw: req.query.clinic_id,
     groupIdRaw: req.query.group_id,
@@ -7401,7 +7460,8 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
   const marketingState = await resolveEffectiveMarketingState({
     clinicIdRaw: scope.clinic_id,
     groupIdRaw: scope.group_id,
-    assignmentScopeRaw: scope.assignment_scope
+    assignmentScopeRaw: scope.assignment_scope,
+    googleMetadataOnly: true,
   });
   const webMeasurementState = resolveWebMeasurementMarketingState(scope, marketingState);
   const intakeRecord = webMeasurementState.record;
@@ -7424,7 +7484,9 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     googleAccounts = await enrichGoogleAdsAccountsWithConversionTracking({
       userId,
       scope,
-      accounts: googleAccounts
+      accounts: googleAccounts,
+      beforeExecute: assertSession,
+      finalGuards: googleFinalGuards,
     });
   }
   const selectedGoogleAccount = googleAccounts.find((account) => (
@@ -7481,7 +7543,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
         bootstrapActivationAccess.all_connected
         && bootstrapActivationAccess.has_ads_scope
         && bootstrapActivationAccess.has_data_manager_scope
-        && (process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT || process.env.GOOGLE_CLOUD_PROJECT)
+        && bootstrapActivationAccess.has_data_manager_configuration
       ),
       requestBody: internalAdvertiserAuthorizationRequest(),
       actorUserId: null,
@@ -7560,6 +7622,19 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
   if (!marketingState.meta.effective_assets?.pixel?.pixel_id && !process.env.META_PIXEL_ID) capiMissing.push('pixel_id');
   if (!(intakeRecord?.hmac_key || '').trim()) capiMissing.push('intake_hmac_key');
 
+  await assertSession();
+  const finalScope = await resolveScopeFromInput({ clinicIdRaw: req.query.clinic_id,
+    groupIdRaw: req.query.group_id, assignmentScopeRaw: req.query.assignment_scope });
+  if (JSON.stringify([...scope.clinic_ids].map(Number).sort((a,b) => a-b))
+    !== JSON.stringify([...finalScope.clinic_ids].map(Number).sort((a,b) => a-b))) {
+    return res.status(403).json({ success: false, error: 'scope_denied' });
+  }
+  if (!(await requireMarketingClinicScope(req, res, finalScope.clinic_ids, 'read'))) return;
+  try { for (const guard of googleFinalGuards) await guard(); }
+  catch (error) {
+    await assertSession();
+    return res.status(503).json({ success: false, error: require('../services/googleAdsBrokerReader.service').safe(error) });
+  }
   return res.json({
     success: true,
     scope: {
@@ -7590,6 +7665,10 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
         ? (marketingState.descriptors.group_name || null)
         : (marketingState.descriptors.clinic_name || null),
       manager_id: (() => {
+        if (selectedGoogleAccount?.delivery_mode === 'broker') {
+          const id = normalizeCustomerId(selectedGoogleAccount.login_customer_id || '');
+          return id ? formatCustomerId(id) : null;
+        }
         try {
           return formatCustomerId(ensureGoogleAdsConfig().managerId);
         } catch (_e) {
@@ -7611,7 +7690,8 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
         googleConnected,
         hasAdsScope,
         hasDataManagerScope,
-        googleAccounts
+        googleAccounts,
+        selectedCustomerId
       )
     },
     meta_ads: {
@@ -10298,6 +10378,8 @@ exports.createMarketingStrategy = asyncHandler(async (req, res) => {
 });
 
 exports.__test = {
+  enrichGoogleAdsAccountsWithConversionTracking,
+  summarizeGoogleMappedAccountAccess,
   onboardingBrokerForScope,
   evaluateGoogleConversionOnboardingReadiness,
   ensureGoogleAccessToken,

@@ -10592,3 +10592,48 @@ Pruebas: diez unitarias/aislamiento y recorrido SQL con desafío MFA real, SES
 ficticio y escritor/lector detenidos; sesión verificada mientras ambos esperan,
 recuperación de pendientes y rechazo de duplicados/envío incierto. Estado/medición
 en 19/99 y `docs/security/audit-query-health.md`.
+
+
+## Bootstrap Google sin credenciales locales (19/09/2026)
+
+Preparado en DEV, sin despliegue. `GET /api/marketing/campaign-onboarding/bootstrap`
+usa el inventario efectivo y solicita solo metadata de la conexión Google general.
+Cada cuenta gestionada consulta `google.ads.conversion_settings.read.v1` con cuerpo
+vacío, grant de cuenta y una GAQL fija. La respuesta contiene una sola cuenta,
+aceptación de términos, ajuste de conversiones mejoradas y propietario de las
+conversiones; un propietario heredado se conserva, no autoriza escribir en él.
+No admite query, cursor, cuenta, evento ni cabeceras suministrados por el cliente.
+
+El broker añade `dataManagerConfiguration.quotaProjectConfigured` exclusivamente
+desde su binding validado; no expone el ID del proyecto ni acepta ese dato del
+proveedor. Las banderas ausentes son null en el DTO tipado; la proyección histórica
+del bootstrap solo trata true como habilitado. El enriquecimiento gestionado no
+lee access/refresh tokens ni recurre al transporte legacy después de un fallo.
+La cuota local solo sigue aplicando a cuentas legacy. Configuración disponible,
+gate de envío, creación de acciones y validación efectiva son estados distintos:
+`conversion_validation_status` permanece `not_validated` en este bootstrap.
+Gateway y gates cerrados no presentan capacidades de envío/creación habilitadas.
+
+El endpoint devuelve `private, no-store` y revalida la sesión, las clínicas del
+ámbito y sus permisos antes de liberar resultados. Cada cuenta exige binding,
+identidad/scopes Google y estado clínico vigentes alrededor de la consulta y al
+final. Una revocación de sesión/ACL durante la lectura devuelve 401/403; un fallo
+remoto queda saneado, sin usarlo como autorización. Un conjunto que solicita una
+cuenta ausente no se considera completamente conectado.
+
+Máximo dos enriquecimientos simultáneos por petición, conservando el orden. Las
+lecturas gestionadas comparten un plazo de 15 s; una cuenta en espera no recibe
+un plazo nuevo. Las comprobaciones SQL siguen siendo esperadas y el límite no
+es un timeout global de toda la petición. No hay polling, reintento automático,
+DDL, nueva cola ni envío. El job combinado de personalización/activación/diagnóstico
+no queda migrado por reutilizar este enriquecimiento; su aceptación sigue pendiente.
+
+QA integrada: inventario/controlador reales, MySQL propio, sesión administrada,
+HTTP y broker HTTPS firmado, Google/AWS ficticios. Se comprueba revocación durante
+la respuesta, cambio del grupo, fallo remoto, reinicio sin cuota remota y ausencia
+de tokens locales. UI: asistente Angular y tarjeta exacta de Marketing Web en
+1440/390 px; se atribuye el envío desactivado a ClinicaClick y no pide reconexión.
+Medición inicial: 198 sentencias/539 ms para una cuenta y dos clínicas ficticias.
+Es evidencia de consultas repetidas, no aceptación de carga: reducir duplicación
+de revalidaciones sin debilitar revocación antes del corte real. Detalle operativo,
+pruebas y recuperación en `docs/security/google-data-manager-broker.md` y 19/99.

@@ -1308,7 +1308,7 @@ async function resolveEffectiveGoogleMappings(params, dependencies = {}) {
 }
 
 async function resolveEffectiveMarketingState(
-  { clinicIdRaw = null, groupIdRaw = null, assignmentScopeRaw = null },
+  { clinicIdRaw = null, groupIdRaw = null, assignmentScopeRaw = null, googleMetadataOnly = false },
   dependencies = {}
 ) {
   const params = { clinicIdRaw, groupIdRaw, assignmentScopeRaw };
@@ -1331,7 +1331,8 @@ async function resolveEffectiveMarketingState(
       clinicIdRaw: scope.clinic_id,
       groupIdRaw: scope.group_id,
       assignmentScopeRaw: scope.assignment_scope,
-      allowLegacyUserFallback: true
+      allowLegacyUserFallback: true,
+      ...(googleMetadataOnly === true ? { metadataOnly: true } : {}),
     })
   ]);
 

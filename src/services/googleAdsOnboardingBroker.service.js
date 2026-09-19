@@ -10,7 +10,7 @@ const fail = code => { throw Object.assign(Error(code), { code, httpStatus: code
 
 // Read/validate only. There is no event body, token, action mutation or ingestion
 // method at this boundary. The caller owns the current user/scope ACL check.
-function createGoogleAdsOnboardingBroker({ runtime, models, clinicIds, beforeExecute, now = Date.now }) {
+function createGoogleAdsOnboardingBroker({ runtime, models, clinicIds, beforeExecute, now = Date.now, deadlineAt = null }) {
   if (runtime?.deliveryMode !== 'broker' || typeof beforeExecute !== 'function'
     || !Array.isArray(clinicIds) || !clinicIds.length
     || clinicIds.some(id => !Number.isSafeInteger(id) || id < 1)) fail('broker_binding_invalid');
@@ -18,7 +18,7 @@ function createGoogleAdsOnboardingBroker({ runtime, models, clinicIds, beforeExe
   const connection = { id: Number(runtime.connection?.id), subject: runtime.connection?.googleUserId,
     scopes: scopes(runtime.connection?.scopes) };
   const selectedClinics = [...new Set(clinicIds)].sort((a, b) => a - b);
-  const deadline = now() + 55000;
+  const deadline = Math.min(now() + 55000, deadlineAt ?? Infinity);
   let captured, listed;
   const remaining = max => {
     const value = Math.min(max, deadline - now());
@@ -49,6 +49,14 @@ function createGoogleAdsOnboardingBroker({ runtime, models, clinicIds, beforeExe
     remaining(15000); return true;
   };
   return {
+    async settings() {
+      await guard();
+      const rows = await broker.read(account, brokerContext, 'conversion_settings', {},
+        { timeoutMs: remaining(15000), beforeExecute: () => guard() });
+      await guard();
+      if (rows.length !== 1) fail('broker_response_invalid');
+      return structuredClone(rows[0]);
+    },
     async list({ includeAllTypes = false } = {}) {
       await guard();
       const rows = await broker.read(account, brokerContext, 'conversion_actions', {},

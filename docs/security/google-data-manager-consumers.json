@@ -1,12 +1,12 @@
 {
-  "version": 13,
+  "version": 14,
   "reviewedAt": "2026-09-19",
-  "sourceBaseHead": "d73c56319cdc0e2954cd347e6c8c870e7b3559d5",
+  "sourceBaseHead": "b21205a193d0bda26be3a712b9853426040768d6",
   "includesWorkingChanges": true,
-  "scope": "Bounded integrated human receipt review and sanitized session-error correction. Actual Angular/HTTP/SQL managed session/signed TLS broker/SQLite, fake Google/AWS only. Previous inventory rows retain their earlier evidence hashes; no operational cut.",
+  "scope": "Bounded bootstrap/settings typed read and metadata-only inventory. Actual controller/inventory/SQL/session/HTTP/signed broker and Angular stepper/Web card with fictitious Google/AWS; no operational cohort. 198 SQL statements per initial bootstrap require optimization before deployment. Unreviewed historical rows retain their earlier hashes.",
   "runtimeConsumersMigrated": 0,
   "qa": {
-    "broker": "617/617 full Node24 regression, including 33 destination/receipt scenarios; external network blocked",
+    "broker": "621/621 full Node24 regression; fake providers, external network blocked",
     "provider": "fictitious_offline",
     "authenticatedUI": "pending",
     "mysqlJournalChecks": 65,
@@ -43,7 +43,16 @@
     "receiptReviewAuditViewMysqlGroups": 14,
     "receiptReviewIndex": "MySQL 8.0.42 EXPLAIN: ref, Backward index scan, no filesort; limit 21, metadata only; not load acceptance",
     "receiptReconciliationIntegrated": "5 end-to-end groups with actual managed SQL session, HTTP routes, signed TLS broker/SQLite restart and real Angular desktop/mobile;4 fake ingests,1 fake action mutation,6 status reads,15 signed commands; no public MFA/provider acceptance",
-    "auditV19Candidates": "82/82 per role based on preserved v17 runtime sources;6 frozen SQL records (v18/v19,5587bytes) written/reconciled/confirmed over local TLS with fake S3; not published"
+    "auditV19Candidates": "82/82 per role based on preserved v17 runtime sources;6 frozen SQL records (v18/v19,5587bytes) written/reconciled/confirmed over local TLS with fake S3; not published",
+    "previous_broker_617": "617/617 full Node24 regression, including 33 destination/receipt scenarios; external network blocked",
+    "bootstrapSettingsReaderAdapter": 34,
+    "bootstrapRelatedBackend": 32,
+    "bootstrapIntegrated": "6 groups,14 signed reads,4 real Angular stepper/exact Web card screenshots,0 token hydration/ingests/action writes; owned MySQL/HTTP/HTTPS and fake providers",
+    "bootstrapInitialQueries": 198,
+    "bootstrapInitialMilliseconds": 539,
+    "bootstrapLoadAcceptance": "pending: reduce repeated authorization queries and test concurrency",
+    "bootstrapBuild": "development pass ffeddace3a9b48f9",
+    "bootstrapCatalogParity": "pre-existing failure identical to HEAD:4 missing keys,5 quality mismatches"
   },
   "rows": [
     {
@@ -78,10 +87,10 @@
     },
     {
       "file": "src/controllers/campaignOnboarding.controller.js",
-      "sha256": "4fca331eb0bc689079d1d9314b54fe66525b363c204b645bd811137d4bd04fc6",
-      "role": "Listado y dos validadores conectados al broker, con ACL/ámbito vigente y confirmación sin avisos. Creación/normalización y bootstrap de capacidades/settings aún pendientes.",
-      "state": "validation_prepared_undeployed_action_mutations_pending",
-      "reviewNote": "This cut reviews only the destination capability projection/shared context diff; it does not migrate all consumers in this file."
+      "sha256": "7a27fc905fb4c6cea252f91fe140c8260b0aeff48f66f8361cda0071e2553bfd",
+      "role": "Bootstrap metadata-only, typed settings, managed capability gates, current session/scope rechecks and bounded concurrency; whole combined job and other identity consumers remain pending.",
+      "state": "bootstrap_settings_prepared_undeployed_load_pending",
+      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
     },
     {
       "file": "src/services/campaignWorkspaceGoogleConversion.service.js",
@@ -193,9 +202,10 @@
     },
     {
       "file": "services/integrations-broker/src/google-ads-contract.js",
-      "role": "Lectura tipada conversion_actions: inventario acotado, flags desconocidos y dueño real conservados, sin snippets.",
-      "state": "prepared_offline",
-      "sha256": "57d6d88b28c4b3b8df894ce2d9760d9194074f22fa3c9129666ce221a8a17d9f"
+      "role": "Fixed conversion settings query and strict one-customer projection, inherited owner preserved.",
+      "state": "bootstrap_settings_prepared_undeployed_load_pending",
+      "sha256": "0dec38131762ad706c8dbaf7a7a13ae18fa65a0323a1dc32125235f57bd2a1a9",
+      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
     },
     {
       "file": "src/services/googleConversionDiagnosticsBroker.service.js",
@@ -211,9 +221,10 @@
     },
     {
       "file": "src/services/googleAdsOnboardingBroker.service.js",
-      "role": "Adaptador sólo lectura/validate-only; catálogo privado, clínica/scopes/grants/ACL antes y después, sin tokens ni ingesta.",
-      "state": "prepared_offline",
-      "sha256": "f4e45801f789536fd0dcc29c98561cb26fee67df1f3a11e955e8bc81c6d1a89a"
+      "role": "Typed settings and shared deadline with post-read identity, scope, session and clinical guards; read/validate adapter.",
+      "state": "bootstrap_settings_prepared_undeployed_load_pending",
+      "sha256": "426c26ef57872e20984d9592bdf9353d87a3a34ce18476f43b566bf683850108",
+      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
     },
     {
       "file": "src/services/googleAdsConversionPreparation.service.js",
@@ -406,6 +417,74 @@
       "role": "Own MySQL socket by default; explicit live loopback server registration for end-to-end HTTP/TLS, external sockets denied.",
       "state": "human_receipt_review_integrated_prepared_undeployed",
       "sha256": "7b344161e065eb09ab1a000ddd9f05b7cda251c77ebde51c71dad7f40ed6be8e"
+    },
+    {
+      "file": "src/services/effectiveMarketingAssets.service.js",
+      "sha256": "657aa3af86512c0bb185ee678b21ee8e5bb20013994a0e53e35577608c9c1f91",
+      "role": "Explicit Google metadata-only option for bootstrap; other consumers retain existing behavior.",
+      "state": "bootstrap_settings_prepared_undeployed_load_pending",
+      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+    },
+    {
+      "file": "src/services/googleAdsBrokerReader.service.js",
+      "sha256": "70c211af3c0eee5613ed25a06df98026ed53450d1b3335966ed97951300ff8e7",
+      "role": "Single result typed settings projection and broker-owned quota boolean; no arbitrary request fields.",
+      "state": "bootstrap_settings_prepared_undeployed_load_pending",
+      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+    },
+    {
+      "file": "services/integrations-broker/src/google-ads.js",
+      "sha256": "95476b9dae1d5a5dcb33307f10bcdbccff1e7262d3cd63d763969ac4760156e2",
+      "role": "Adds configuration boolean from validated binding, never from provider payload.",
+      "state": "bootstrap_settings_prepared_undeployed_load_pending",
+      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+    },
+    {
+      "file": "services/integrations-broker/test/google-conversion-settings.test.js",
+      "sha256": "1c8d982c893494157c562a7cee0786d884ad81891606af384a9e738e6a90dc62",
+      "role": "4 focused signed read, projection, fixed policy, quota spoofing and revocation tests.",
+      "state": "bootstrap_settings_prepared_undeployed_load_pending",
+      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+    },
+    {
+      "file": "src/scripts/tests/google_ads_broker_reader.test.js",
+      "sha256": "6225b7d47a668344ebaec9eef709be95af63096bbed7eac1b9b04844af03082c",
+      "role": "Typed response validation and missing/spoofed configuration rejection.",
+      "state": "bootstrap_settings_prepared_undeployed_load_pending",
+      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+    },
+    {
+      "file": "src/scripts/tests/google_ads_onboarding_broker.test.js",
+      "sha256": "7ade0eac2890516d8b979fbf14e0faf662a93b42d5e644292307cd5b78a8321d",
+      "role": "Settings guards, deadline, concurrency and existing onboarding behavior.",
+      "state": "bootstrap_settings_prepared_undeployed_load_pending",
+      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+    },
+    {
+      "file": "src/scripts/tests/google_bootstrap_settings_mysql.integration.js",
+      "sha256": "b4f911172b076b3cb13340565717a801a9f4c0a6e52b4d3c4c885031f7c55510",
+      "role": "Actual inventory/controller/SQL/session/HTTP/signed TLS broker, races/restart and per-request SQL measurement.",
+      "state": "bootstrap_settings_prepared_undeployed_load_pending",
+      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+    },
+    {
+      "file": "src/scripts/tests/fixtures/google_bootstrap_e2e_visual.fixture.js",
+      "sha256": "dbb90e09c14b7956d8ffe752225602e812612740bce481667e4732aa8ef49262",
+      "role": "Real Angular stepper and exact Web status card against same local API, desktop/mobile, no writes.",
+      "state": "bootstrap_settings_prepared_undeployed_load_pending",
+      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
     }
-  ]
+  ],
+  "frontendSnapshot": {
+    "sourceBaseHead": "be31f530eb2a87facb00fe3dd05383d6e674253b",
+    "includesWorkingChanges": true,
+    "files": {
+      "src/app/modules/admin/apps/marketing/campanas/campaign-onboarding.service.ts": "46c8bfe02cea88663f610fc29b16d65783f1c457e9f8a32682ad5edfeca5fe34",
+      "src/app/modules/admin/apps/marketing/campanas/campaign-onboarding-stepper/campaign-onboarding-stepper.component.ts": "988764d34e5ff7663adb04e07b126a17dce4840b11ef58cc18e9924b795e393a",
+      "src/app/modules/admin/apps/marketing/web/web.component.html": "feda48a630a6e71c9bb26f8deb9426eed8639ba6707e5a100a155b69691434f4",
+      "src/assets/i18n/es.json": "d5b45b4a0a111f718e9bb51fdfe1863d4c437c84a04c9ba55b36668f8882c4ea",
+      "src/assets/i18n/en.json": "38fa105b07ea5eaf5c4058f604e6289a93cbd0056a5c7ad0bbaeb1d142ff4a16",
+      "src/assets/i18n/cat.json": "dd6373e0c4fc63872d7544dc948d15e9d6476a20c40856863f019f5d712c7636"
+    }
+  }
 }
