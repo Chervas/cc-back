@@ -1,8 +1,10 @@
 # Candidata selectiva CRM de consumidores Meta — 19/09/2026
 
-Estado CRM: candidata comprobada, API/UI sin publicar. **DDL04–12 aplicadas en
-DEV y en la BD clínica staging/gateway**; consumidores backend e interfaz
-publicados solo en DEV, con todos los gates Meta OFF. Acta vigente del esquema
+Estado CRM: **API, gateway e interfaz publicados el 19/09 a las 16:14–16:16 UTC**;
+aceptación autenticada y conexión real pendientes. **DDL04–12 aplicadas en
+DEV y en la BD clínica staging/gateway**; todos los gates Meta siguen OFF.
+Acta de publicación y recuperación en [meta-clinical-publication.md](meta-clinical-publication.md).
+Acta vigente del esquema
 clínico en [meta-clinical-cut.md](meta-clinical-cut.md); publicación DEV en
 [meta-dev-consumers.md](meta-dev-consumers.md).
 Contrato canónico en [13](../../src/Documentacion/13-backend.md#candidata-selectiva-de-consumidores-meta-19092026).
@@ -16,8 +18,9 @@ entrypoints ni sustituir los servicios AWS.
   `/home/ubuntu/wt/security-meta-back-candidate-20260919`.
 - Frontend `27afa85ce45667091654f0c2a21cf5c9395d83b4`, desde staging `288ca987`, worktree
   `/home/ubuntu/wt/security-meta-front-candidate-20260919`.
-- Ambos en `security/meta-clinical-candidate-20260919`, separados de los worktrees
-  ejecutados. No se ha fusionado DEV ni actualizado el frontend público.
+- Ambos en `security/meta-clinical-candidate-20260919`, promovidos selectivamente
+  a staging. Gateway usa su candidata propia `fdb2636a`, sobre `d8b81de7`, en
+  `security/meta-gateway-candidate-20260919`. No se ha fusionado toda la rama DEV.
 - Correcciones desarrolladas primero en DEV: `9929de20` permite seleccionar la
   fuente y estilos exactos de QA; `83c6c9dd` retira las afirmaciones de permisos
   legacy mientras Meta está pausado. El alta preparada solo permite lectura.
@@ -51,7 +54,8 @@ incluyen proyecciones de metadatos, bloqueo persistente y primarias de grupos.
 
 ## QA y límites
 
-- Build Angular completo `429dbde4e7388b0a`; advertencia CommonJS de `debug`
+- Build Angular publicado `354410eb1dba3209` (el inicial `429dbde4e7388b0a` queda
+  como evidencia histórica); advertencia CommonJS de `debug`
   preexistente. 156 archivos JS/CJS pasan sintaxis.
 - Router HTTP completo: autenticación, callback, no-store y rechazo de parámetros
   ajenos. Catálogo/executor de jobs y desconexiones legacy pasan.
@@ -118,16 +122,16 @@ especialmente `dev-plan.json`, `dev-schema-point-backup.json`, `dev-journal.json
 `dev-operation-*.json`, `preflight-dev-after.json`, `current-dev-contract-after.json`
 y `login-smoke.json`. No repetir ese plan ya aplicado.
 
-## Antes de publicar API/UI y migrar staging
+## Publicación completada; requisitos para el alta real
 
-Staging conserva el digest SQL previo: mismo esquema, doce diferencias Meta y
-nueve DDL pendientes. No se modificaron servicios, secretos o recursos AWS en
-este corte. Los gates Meta siguen sin configurar; MFA permanece enforce.
+Las nueve DDL clínicas terminaron a las15:40 UTC; **no repetirlas**. La publicación
+posterior conserva el digest `9e5be889…`, las filas Meta, los trabajos pendientes
+y la configuración. No se modificaron servicios, secretos o recursos AWS durante
+la publicación local. MFA permanece enforce.
 
-1. Preparar un corte explícito de las nueve DDL en staging, con comprobación de
-   datos existentes, respaldo privado de recuperación y diario. La herramienta
-   compartida sigue admitiendo escritura **solo en DEV**; su comprobación pública
-   es de lectura. MySQL no ofrece rollback transaccional de DDL.
+1. Esquema y publicación local completados y verificados. El operador de esquema
+   y el publicador tienen diarios distintos; ninguno se vuelve a ejecutar sobre
+   este estado. Recuperación en sus actas, sin `down` ni restaurar datos antiguos.
 2. DEV ejecuta su composición propia `d07e9c85`, conservando perfil/credenciales
    y jobs clínicos OFF. La candidata CRM ya incorpora los cierres desarrollados
    en DEV 9c54f261 y el aviso de pausa corregido; nueva QA HTTP/visual y build
@@ -139,13 +143,13 @@ este corte. Los gates Meta siguen sin configurar; MFA permanece enforce.
 4. App/slots, cuatro identidades de firma, TLS, IAM/KMS exactos y ámbito de la
    primera clínica/grupo deben revisarse antes de habilitar el alta. Sigue
    pendiente que el titular indique ese ámbito y autorice un OAuth nuevo.
-5. Publicación coordinada API/UI tras esquema compatible; comprobar permisos
-   efectivos y recorrido autenticado público. No reutilizar tokens investigados,
+5. Comprobar permisos efectivos y recorrido autenticado público cuando el titular
+   aporte el ámbito y complete la autorización. No reutilizar tokens investigados,
    ampliar grants WhatsApp ni retirar pausas para hacer pasar una prueba.
 
 ## Recuperación y coste
 
-Conservar los runtimes actuales y el esquema aditivo aplicado en DEV. No ejecutar
+Conservar los runtimes actuales y el esquema aditivo aplicado en DEV/CRM. No ejecutar
 un `down` para volver a la versión de código anterior: ya se verificó compatible.
 Si una DDL futura falla, mantener sus escritores detenidos e inspeccionar el último paso del
 diario antes de decidir una reparación; no repetir automáticamente el plan. Tras
@@ -158,7 +162,7 @@ etiquetado estimado/Unblended de 4,6195124129 USD, recogido19/09 08:22 UTC para1
 No se crearon instancias, secretos o conexiones clínicas en este corte.
 
 
-## Preparación clínica y corte cancelado a las14:30 UTC
+## Histórico: preparación clínica y corte cancelado a las14:30 UTC
 
 La candidata incorpora el operador explícito de las nueve DDL, respaldo cifrado
 con persistencia previa a DDL, prueba real de restauración aislada y recuperación

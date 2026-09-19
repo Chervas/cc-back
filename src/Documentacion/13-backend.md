@@ -11649,7 +11649,8 @@ la prueba fuerza la lectura, no habilita cron/notificaciones ni acredita su entr
 Preparada sobre las ramas públicas actuales: backend `48d69879fa529e657e19fd5cddb6e88623561be6`, frontend
 `27afa85ce45667091654f0c2a21cf5c9395d83b4`, rama `security/meta-clinical-candidate-20260919` en ambos repositorios.
 Incluye metadatos, OAuth, descubrimiento, selección/confirmación/retirada, auditoría
-v24 y tres jobs cerrados. API/UI de CRM todavía sin desplegar ni cohortes activadas;
+v24 y tres jobs cerrados. API/UI de CRM publicadas a las16:14–16:16 UTC, con gateway
+`fdb2636a` sobre su base propia y sin cohortes activadas;
 las nueve DDL Meta están aplicadas en DEV desde las 12:46 UTC y en la BD clínica
 compartida por staging/gateway desde las 15:40 UTC.
 Fuentes, adaptación de dependencias, comandos y recuperación en
@@ -11686,12 +11687,11 @@ CRM. API y worker DEV arrancan con la misma release/configuración, MFA enforce 
 cron/jobs clínicos OFF; CRM/gateway no se reinician. QA de login anónimo real en
 ambos frontends, escritorio/móvil, sin mocks: no sustituye aceptación MFA.
 
-Staging conserva el mismo digest de esquema y sigue pendiente de las nueve DDL;
-la candidata no puede publicarse allí hasta un corte revisado con respaldo de sus
-datos. La composición DEV y su ejecutor de seguridad se publican en el corte
-siguiente, con todos los gates Meta cerrados. App/slots/IAM, ámbito elegido y OAuth
-real del titular siguen pendientes. Los servicios AWS permanecen como en el acta
-anterior. Procedimiento, evidencias y recuperación en el runbook de la candidata.
+El esquema clínico se aplicó a las15:40 UTC y los consumidores públicos a las
+16:14–16:16 UTC, como se detalla en sus actas. No repetir las DDL ni sustituir DEV
+por el runtime CRM. App/slots/IAM, ámbito elegido y OAuth real del titular siguen
+pendientes, con todos los gates Meta cerrados. Procedimiento y recuperación en
+`docs/security/meta-clinical-publication.md`.
 
 
 ### Consumidores Meta publicados en DEV aislado (19/09/2026, 13:13 UTC)
@@ -11799,8 +11799,9 @@ reiniciarlos; ningún paso activa los nuevos gates Meta. El inventario también
 detectó cuatro scripts antiguos ya sin trabajo SQL ni actividad Redis; se
 retiraron por identidad exacta sin repetir sus comandos de negocio.
 
-Estado y acta del corte en `docs/security/meta-clinical-schema.md`; API/UI de CRM
-siguen pendientes de publicación selectiva y aceptación real. Las copias generales
+Estado histórico de ese intento en `docs/security/meta-clinical-schema.md`; la
+publicación selectiva posterior consta en `meta-clinical-publication.md`, con
+aceptación real pendiente. Las copias generales
 siguen al final del objetivo: este respaldo solo protege las dos tablas del corte.
 
 Intento clínico de14:30 UTC cancelado antes de respaldo/DDL al comenzar un job de
@@ -11891,5 +11892,34 @@ configuración previas. DEV no se reinició; MFA/session enforce y gates Meta OF
 Tras reiniciar se vuelven a comprobar esquema, huellas, cola histórica y barrera
 SQL liberada. Login anónimo real CRM/DEV comprobado visualmente en escritorio y
 móvil, sin errores JS/5xx ni POST del formulario vacío. No acredita MFA/OAuth
-autenticados: API/UI Meta públicas, ámbito del titular y aceptación real siguen
-pendientes. Acta vigente: `docs/security/meta-clinical-cut.md/json`.
+autenticados. La publicación de API/UI posterior se detalla a continuación;
+ámbito del titular y aceptación real siguen pendientes. Acta del esquema:
+`docs/security/meta-clinical-cut.md/json`.
+
+### Consumidores Meta publicados en CRM y gateway (19/09/2026, 16:14–16:16 UTC)
+
+CRM ejecuta backend `48d69879`, gateway `fdb2636a` sobre su base `d8b81de7`, y la
+interfaz pública procede de `27afa85c`, build `354410eb1dba3209`. Promoción selectiva
+desde DEV: gateway conserva sus diferencias anteriores, incluido el límite de
+respuesta de su cliente broker. La QA detectó un contrato WhatsApp ausente en
+esa composición; se incorporó la fuente ya revisada en DEV y se repitió el flujo.
+No se cambian grants, ámbitos, flags ni proveedores; MFA/session siguen enforce.
+
+Dependencias raíz verificadas contra lock:527 por runtime. Broker/auditoría tienen
+instalaciones propias de42/29 paquetes en cada runtime, preparadas con `npm ci`.
+No se publicaron enlaces de dependencias QA. Bajo las barreras SQL/BullMQ y con
+cuatro escritores detenidos se promovieron las fuentes y dependencias: esquema
+inalterado,43 filas Meta y520 trabajos pendientes íntegros, siete tablas Meta
+nuevas vacías. Se restauraron solo cinco pausas propias; las siete previas siguen.
+DEV conserva sus procesos, configuración y jobs clínicos OFF. Sin nuevas DDL.
+
+QA gateway:94 contratos de auditoría, HTTP, desconexión, catálogo y contención
+dirigida; once grupos de lectura SQL sin tokens y selección Angular integrada,
+con recuperación de respuesta perdida y retirada tras otra sesión/logout. Nueve
+capturas con proveedor/MFA ficticios. Carga aislada de100 activos/1.000 clínicas:
+17 consultas,114 ms,26.276 bytes y pool sin espera; no acredita carga real.
+El build público concilia736 fuentes,424 assets y667 archivos. Índice sustituido
+al final; rutas y bundles anteriores conservados. Login anónimo real CRM/DEV
+en1440/390px, cuatro capturas revisadas, sin errores JS/5xx ni POST vacío.
+No equivale a MFA autenticado, conexión Meta real ni aceptación de Ajustes.
+Acta, manifiesto, diagnóstico y recuperación: `docs/security/meta-clinical-publication.md/json`.

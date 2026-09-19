@@ -31,7 +31,9 @@
   "awsInfrastructureChanged": false,
   "costExplorerQueried": false,
   "incrementalBilledUsd": null,
-  "pending": ["selective_clinical_api_ui_publication", "operator_chosen_meta_scope", "real_mfa_oauth_provider_acceptance"],
+  "pendingAtSchemaCut": ["selective_clinical_api_ui_publication", "operator_chosen_meta_scope", "real_mfa_oauth_provider_acceptance"],
+  "subsequentConsumerPublication": "meta-clinical-publication.json",
+  "pending": ["operator_chosen_meta_scope", "real_mfa_oauth_provider_acceptance"],
   "evidence": "qa-evidence/security-resume-20260917/meta-crm-cut-20260919-48d69879/",
   "testEvidence": "qa-evidence/security-resume-20260917/meta-crm-operator-20260919/"
 }

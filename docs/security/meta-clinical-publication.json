@@ -1,0 +1,648 @@
+{
+  "version": 1,
+  "status": "published_gates_off_pending_real_acceptance",
+  "apiCompletedAt": "2026-09-19T16:14:36.298Z",
+  "uiCompletedAt": "2026-09-19T16:16:34.518728+00:00",
+  "sourceManifest": "meta-clinical-candidate.json",
+  "sourceManifestSha256": "21b39eedffaf02841c15e521e5689fb7d0c7f1fc5d3bdb8810b46c0b458c9ecd",
+  "candidateCommits": {
+    "back": "48d69879fa529e657e19fd5cddb6e88623561be6",
+    "front": "27afa85ce45667091654f0c2a21cf5c9395d83b4",
+    "gateway": "fdb2636abc040eea837973ec30a0416d3bb33696"
+  },
+  "gatewayChangedFiles": 186,
+  "gatewayFilesIdenticalToCrmCandidate": true,
+  "schemaAndRowsBeforeRestart": {
+    "at": "2026-09-19T16:14:28.500Z",
+    "sources": [
+      {
+        "runtime": "staging",
+        "revision": "48d69879fa529e657e19fd5cddb6e88623561be6"
+      },
+      {
+        "runtime": "gateway",
+        "revision": "fdb2636abc040eea837973ec30a0416d3bb33696"
+      }
+    ],
+    "counts": {
+      "jobs": 0,
+      "emails": 0,
+      "flows": 0,
+      "dueStaging": 0
+    },
+    "otherClinicalConnections": 0,
+    "schemaDigest": "9e5be889b2d5b18d9b201c98a4f5a4505c56fbc963dffba0b317e4a3ee06d98d",
+    "rows": {
+      "MetaConnections": {
+        "count": 1,
+        "digest": "a11ac994461eabd086870ffb0ae7940ee16d6e27d73331993f5724a1d2ed1e91"
+      },
+      "ClinicMetaAssets": {
+        "count": 42,
+        "digest": "45b8600664398e5fdc45d4d28584755a06ee1e49a86d2b9643c17851cb74724f"
+      }
+    },
+    "empty": {
+      "MetaMarketingBrokerBindings": 0,
+      "MetaMarketingBrokerRevocations": 0,
+      "MetaMarketingOAuthSlots": 0,
+      "MetaMarketingOAuthRequests": 0,
+      "MetaMarketingEnrollmentRequests": 0,
+      "MetaMarketingEnrollmentClaims": 0,
+      "MetaMarketingEnrollmentIdentities": 0
+    },
+    "pendingJobs": {
+      "count": 520,
+      "digest": "0df1795372ed69f73603c3ada2a48af28d2f436ddd6972c471032b2f9a320255"
+    },
+    "historicalGatewayDigest": "471e688005dce84e018915af78cd38fa9ab341868b4713d0d48f2e8fe58e9e23",
+    "noMigrationsExecuted": true
+  },
+  "preserved": {
+    "devProcessesUnchanged": true,
+    "mfaEnforced": true,
+    "metaGatesOff": true,
+    "queueStates": [
+      {
+        "prefix": "staging",
+        "name": "outbound_whatsapp",
+        "paused": false
+      },
+      {
+        "prefix": "staging",
+        "name": "webhook_whatsapp",
+        "paused": false
+      },
+      {
+        "prefix": "staging",
+        "name": "whatsapp_template_create",
+        "paused": true
+      },
+      {
+        "prefix": "staging",
+        "name": "whatsapp_template_sync",
+        "paused": true
+      },
+      {
+        "prefix": "staging",
+        "name": "whatsapp_phone_sync",
+        "paused": true
+      },
+      {
+        "prefix": "staging",
+        "name": "automation_defaults",
+        "paused": false
+      },
+      {
+        "prefix": "gateway",
+        "name": "outbound_whatsapp",
+        "paused": true
+      },
+      {
+        "prefix": "gateway",
+        "name": "webhook_whatsapp",
+        "paused": false
+      },
+      {
+        "prefix": "gateway",
+        "name": "whatsapp_template_create",
+        "paused": true
+      },
+      {
+        "prefix": "gateway",
+        "name": "whatsapp_template_sync",
+        "paused": true
+      },
+      {
+        "prefix": "gateway",
+        "name": "whatsapp_phone_sync",
+        "paused": true
+      },
+      {
+        "prefix": "gateway",
+        "name": "automation_defaults",
+        "paused": false
+      }
+    ],
+    "noMigrationsExecuted": true
+  },
+  "runtime": [
+    {
+      "name": "staging",
+      "pid": 1974569,
+      "managerPid": 1974557,
+      "revision": "48d69879fa529e657e19fd5cddb6e88623561be6"
+    },
+    {
+      "name": "gateway",
+      "pid": 1974653,
+      "managerPid": 1974641,
+      "revision": "fdb2636abc040eea837973ec30a0416d3bb33696"
+    }
+  ],
+  "dependencies": [
+    {
+      "runtime": "staging",
+      "root": {
+        "count": 527,
+        "digest": "6c9cff7bd0c2b974fdf0c83f3d8d8393f1fae3ed3f8aa91acedc7e34d98446d3",
+        "packageDigest": "51edcf489760bdc11fbe6ddf5ab1094437b3fe774a23722b026bdd505e4894f7",
+        "lockDigest": "3ef39562888fa100c82a950dfd1a7f18467b88be618fdc34ac52be508e9f4099"
+      },
+      "nested": [
+        {
+          "service": "integrations-broker",
+          "count": 42,
+          "lockDigest": "28b73a1741ae7bf30356ad60997782826eaf31b75153eb272684eae3d40ec2de"
+        },
+        {
+          "service": "platform-audit",
+          "count": 29,
+          "lockDigest": "ec2bd96fe327bdd560ed051c52d769d08b18d50a64f2bc9baba758ccf6d075f6"
+        }
+      ]
+    },
+    {
+      "runtime": "gateway",
+      "root": {
+        "count": 527,
+        "digest": "6c9cff7bd0c2b974fdf0c83f3d8d8393f1fae3ed3f8aa91acedc7e34d98446d3",
+        "packageDigest": "51edcf489760bdc11fbe6ddf5ab1094437b3fe774a23722b026bdd505e4894f7",
+        "lockDigest": "3ef39562888fa100c82a950dfd1a7f18467b88be618fdc34ac52be508e9f4099"
+      },
+      "nested": [
+        {
+          "service": "integrations-broker",
+          "count": 42,
+          "lockDigest": "28b73a1741ae7bf30356ad60997782826eaf31b75153eb272684eae3d40ec2de"
+        },
+        {
+          "service": "platform-audit",
+          "count": 29,
+          "lockDigest": "ec2bd96fe327bdd560ed051c52d769d08b18d50a64f2bc9baba758ccf6d075f6"
+        }
+      ]
+    }
+  ],
+  "frontend": {
+    "build": "354410eb1dba3209",
+    "indexSha256": "ae2aadafdf18011482448e03394359f7a460acb7d6a8e10e8f7fb3b68f807b5e",
+    "matchingSources": 736,
+    "matchingAssets": 424,
+    "publishedFiles": 667,
+    "previousPathsRetained": 666,
+    "unchangedFiles": 425,
+    "createdFiles": 238,
+    "replacedNonhashedFiles": 3,
+    "http": [
+      {
+        "path": "/sign-in",
+        "status": 200,
+        "sha256": "ae2aadafdf18011482448e03394359f7a460acb7d6a8e10e8f7fb3b68f807b5e",
+        "cacheControl": "no-cache, no-store, must-revalidate"
+      },
+      {
+        "path": "/styles.6090561cd546c955.css",
+        "status": 200,
+        "sha256": "4a54a0a69ff78022743702064a2cfbddafa8850aba3210bfa4e2ad734a72e202",
+        "cacheControl": null
+      },
+      {
+        "path": "/runtime.d93ce948c99eacdf.js",
+        "status": 200,
+        "sha256": "fa0ddb5318247694d96bf3a10c63a9c25ec63f8bbc403b532606bf54f217e5b1",
+        "cacheControl": null
+      },
+      {
+        "path": "/main.f57a389245a2f331.js",
+        "status": 200,
+        "sha256": "5e25c5fa4457f2f8afea0430af407cbd8799eabcc2eec9d1cf55a7a8225f7000",
+        "cacheControl": null
+      }
+    ]
+  },
+  "qa": {
+    "gatewayAudit": {
+      "passed": 94,
+      "failed": 0
+    },
+    "gatewayMetadataGroups": 11,
+    "gatewayMetadataGroupCapacity": {
+      "clinics": 1000,
+      "groupAssets": 100,
+      "queries": 17,
+      "elapsedMs": 114,
+      "bytes": 26276
+    },
+    "gatewayVisual": {
+      "screens": 9,
+      "provider": "fictitious",
+      "publicMfa": false,
+      "activationCalls": 1,
+      "directlyReviewed": [
+        "desktop-active",
+        "mobile-response-lost",
+        "mobile-revoked"
+      ]
+    },
+    "liveAnonymousLogin": {
+      "at": "2026-09-19T16:17:20.454Z",
+      "scope": "Live CRM and DEV anonymous login after Meta API/gateway/UI publication; no authenticated session or provider acceptance",
+      "authenticated": false,
+      "results": [
+        {
+          "name": "crm",
+          "origin": "https://crm.clinicaclick.com",
+          "width": 1440,
+          "status": "passed",
+          "liveApplication": true,
+          "apiResponsesMocked": false,
+          "emptyFormBlocked": true,
+          "authStatus": 401,
+          "errors": [],
+          "failures": [],
+          "dimensions": {
+            "viewport": 1440,
+            "body": 1440
+          },
+          "contrast": {
+            "color": "rgb(185, 28, 28)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 6.4700447145121895
+          },
+          "screenshot": "crm-sign-in-stable-1440.png"
+        },
+        {
+          "name": "crm",
+          "origin": "https://crm.clinicaclick.com",
+          "width": 390,
+          "status": "passed",
+          "liveApplication": true,
+          "apiResponsesMocked": false,
+          "emptyFormBlocked": true,
+          "authStatus": 401,
+          "errors": [],
+          "failures": [],
+          "dimensions": {
+            "viewport": 390,
+            "body": 390
+          },
+          "contrast": {
+            "color": "rgb(185, 28, 28)",
+            "background": "rgb(241, 245, 249)",
+            "ratio": 5.905927118870345
+          },
+          "screenshot": "crm-sign-in-stable-390.png"
+        },
+        {
+          "name": "dev",
+          "origin": "http://127.0.0.1:4203",
+          "width": 1440,
+          "status": "passed",
+          "liveApplication": true,
+          "apiResponsesMocked": false,
+          "emptyFormBlocked": true,
+          "authStatus": 401,
+          "errors": [],
+          "failures": [],
+          "dimensions": {
+            "viewport": 1440,
+            "body": 1440
+          },
+          "contrast": {
+            "color": "rgb(185, 28, 28)",
+            "background": "rgb(255, 255, 255)",
+            "ratio": 6.4700447145121895
+          },
+          "screenshot": "dev-sign-in-stable-1440.png"
+        },
+        {
+          "name": "dev",
+          "origin": "http://127.0.0.1:4203",
+          "width": 390,
+          "status": "passed",
+          "liveApplication": true,
+          "apiResponsesMocked": false,
+          "emptyFormBlocked": true,
+          "authStatus": 401,
+          "errors": [],
+          "failures": [],
+          "dimensions": {
+            "viewport": 390,
+            "body": 390
+          },
+          "contrast": {
+            "color": "rgb(185, 28, 28)",
+            "background": "rgb(241, 245, 249)",
+            "ratio": 5.905927118870345
+          },
+          "screenshot": "dev-sign-in-stable-390.png"
+        }
+      ]
+    },
+    "liveRouteGuards": [
+      {
+        "origin": "http://127.0.0.1:3001",
+        "path": "/api/auth/me",
+        "status": 401,
+        "ms": 5,
+        "noStore": false
+      },
+      {
+        "origin": "http://127.0.0.1:3001",
+        "path": "/oauth/meta/marketing/authorization?assignment_scope=clinic&clinic_id=1",
+        "status": 401,
+        "ms": 2,
+        "noStore": false
+      },
+      {
+        "origin": "http://127.0.0.1:3001",
+        "path": "/oauth/meta/marketing/enrollment?assignment_scope=clinic&clinic_id=1",
+        "status": 401,
+        "ms": 2,
+        "noStore": false
+      },
+      {
+        "origin": "http://127.0.0.1:3000",
+        "path": "/api/auth/me",
+        "status": 401,
+        "ms": 2,
+        "noStore": false
+      },
+      {
+        "origin": "http://127.0.0.1:3000",
+        "path": "/oauth/meta/marketing/authorization?assignment_scope=clinic&clinic_id=1",
+        "status": 401,
+        "ms": 4,
+        "noStore": false
+      },
+      {
+        "origin": "http://127.0.0.1:3000",
+        "path": "/oauth/meta/marketing/enrollment?assignment_scope=clinic&clinic_id=1",
+        "status": 401,
+        "ms": 2,
+        "noStore": false
+      },
+      {
+        "origin": "https://crm.clinicaclick.com",
+        "path": "/api/auth/me",
+        "status": 401,
+        "ms": 28,
+        "noStore": false
+      },
+      {
+        "origin": "https://crm.clinicaclick.com",
+        "path": "/oauth/meta/marketing/authorization?assignment_scope=clinic&clinic_id=1",
+        "status": 401,
+        "ms": 6,
+        "noStore": false
+      },
+      {
+        "origin": "https://crm.clinicaclick.com",
+        "path": "/oauth/meta/marketing/enrollment?assignment_scope=clinic&clinic_id=1",
+        "status": 401,
+        "ms": 5,
+        "noStore": false
+      },
+      {
+        "origin": "https://autenticacion.clinicaclick.com",
+        "path": "/api/auth/me",
+        "status": 401,
+        "ms": 13,
+        "noStore": false
+      },
+      {
+        "origin": "https://autenticacion.clinicaclick.com",
+        "path": "/oauth/meta/marketing/authorization?assignment_scope=clinic&clinic_id=1",
+        "status": 401,
+        "ms": 6,
+        "noStore": false
+      },
+      {
+        "origin": "https://autenticacion.clinicaclick.com",
+        "path": "/oauth/meta/marketing/enrollment?assignment_scope=clinic&clinic_id=1",
+        "status": 401,
+        "ms": 7,
+        "noStore": false
+      }
+    ],
+    "earlyHealthSample": {
+      "at": "2026-09-19T16:17:37.646Z",
+      "jobs": [
+        {
+          "type": "auth_session_expiry",
+          "status": "completed",
+          "attempts": 1,
+          "n": "1"
+        },
+        {
+          "type": "business_profile_reviews_recent",
+          "status": "completed",
+          "attempts": 1,
+          "n": "1"
+        },
+        {
+          "type": "ops_global_discovery",
+          "status": "running",
+          "attempts": 1,
+          "n": "1"
+        },
+        {
+          "type": "platform_audit_delivery",
+          "status": "completed",
+          "attempts": 1,
+          "n": "3"
+        },
+        {
+          "type": "platform_audit_monitor",
+          "status": "completed",
+          "attempts": 1,
+          "n": "1"
+        },
+        {
+          "type": "platform_audit_reconciliation",
+          "status": "completed",
+          "attempts": 1,
+          "n": "1"
+        },
+        {
+          "type": "system_notification_check",
+          "status": "completed",
+          "attempts": 1,
+          "n": "1"
+        },
+        {
+          "type": "web_events_aggregate",
+          "status": "completed",
+          "attempts": 1,
+          "n": "1"
+        }
+      ],
+      "auditUndelivered": [],
+      "gateOwner": null
+    },
+    "opsDiscoveryFollowup": {
+      "history": {
+        "at": "2026-09-19T16:25:05.104Z",
+        "jobs": [
+          {
+            "id": 103506,
+            "type": "ops_global_discovery",
+            "status": "running",
+            "attempts": 3,
+            "created_at": "2026-09-19T16:17:00.000Z",
+            "updated_at": "2026-09-19T16:24:52.000Z",
+            "errorPresent": true,
+            "errorDigest": "247c7e3335010afb064e41fdfc6f105ed2954b8825f2390bffd073137056842e",
+            "safeClass": "OPS bridge push_ops_global_discovery.js terminó con código 1"
+          },
+          {
+            "id": 102977,
+            "type": "ops_global_discovery",
+            "status": "failed",
+            "attempts": 3,
+            "created_at": "2026-09-19T12:17:00.000Z",
+            "updated_at": "2026-09-19T12:27:12.000Z",
+            "errorPresent": true,
+            "errorDigest": "247c7e3335010afb064e41fdfc6f105ed2954b8825f2390bffd073137056842e",
+            "safeClass": "OPS bridge push_ops_global_discovery.js terminó con código 1"
+          },
+          {
+            "id": 102451,
+            "type": "ops_global_discovery",
+            "status": "failed",
+            "attempts": 3,
+            "created_at": "2026-09-19T08:17:00.000Z",
+            "updated_at": "2026-09-19T08:27:14.000Z",
+            "errorPresent": true,
+            "errorDigest": "247c7e3335010afb064e41fdfc6f105ed2954b8825f2390bffd073137056842e",
+            "safeClass": "OPS bridge push_ops_global_discovery.js terminó con código 1"
+          },
+          {
+            "id": 101916,
+            "type": "ops_global_discovery",
+            "status": "failed",
+            "attempts": 3,
+            "created_at": "2026-09-19T04:17:00.000Z",
+            "updated_at": "2026-09-19T04:27:13.000Z",
+            "errorPresent": true,
+            "errorDigest": "247c7e3335010afb064e41fdfc6f105ed2954b8825f2390bffd073137056842e",
+            "safeClass": "OPS bridge push_ops_global_discovery.js terminó con código 1"
+          },
+          {
+            "id": 101390,
+            "type": "ops_global_discovery",
+            "status": "failed",
+            "attempts": 3,
+            "created_at": "2026-09-19T00:17:00.000Z",
+            "updated_at": "2026-09-19T00:27:17.000Z",
+            "errorPresent": true,
+            "errorDigest": "247c7e3335010afb064e41fdfc6f105ed2954b8825f2390bffd073137056842e",
+            "safeClass": "OPS bridge push_ops_global_discovery.js terminó con código 1"
+          },
+          {
+            "id": 100859,
+            "type": "ops_global_discovery",
+            "status": "failed",
+            "attempts": 3,
+            "created_at": "2026-09-18T20:17:00.000Z",
+            "updated_at": "2026-09-18T20:27:15.000Z",
+            "errorPresent": true,
+            "errorDigest": "247c7e3335010afb064e41fdfc6f105ed2954b8825f2390bffd073137056842e",
+            "safeClass": "OPS bridge push_ops_global_discovery.js terminó con código 1"
+          },
+          {
+            "id": 100306,
+            "type": "ops_global_discovery",
+            "status": "failed",
+            "attempts": 3,
+            "created_at": "2026-09-18T16:17:00.000Z",
+            "updated_at": "2026-09-18T16:27:13.000Z",
+            "errorPresent": true,
+            "errorDigest": "247c7e3335010afb064e41fdfc6f105ed2954b8825f2390bffd073137056842e",
+            "safeClass": "OPS bridge push_ops_global_discovery.js terminó con código 1"
+          },
+          {
+            "id": 99705,
+            "type": "ops_global_discovery",
+            "status": "failed",
+            "attempts": 3,
+            "created_at": "2026-09-18T12:17:00.000Z",
+            "updated_at": "2026-09-18T12:27:16.000Z",
+            "errorPresent": true,
+            "errorDigest": "247c7e3335010afb064e41fdfc6f105ed2954b8825f2390bffd073137056842e",
+            "safeClass": "OPS bridge push_ops_global_discovery.js terminó con código 1"
+          }
+        ]
+      },
+      "logDiagnostic": {
+        "scope": "Matching OPS discovery stderr only; no raw response bodies or credentials exported",
+        "timeout45000Lines": 35,
+        "connectorSyncRunsLines": 24,
+        "logDigest": "62136669450ddd668ae95dcf38660604ab6a7a38c9f2395cfe681b7a2847413e"
+      },
+      "sourceAndRunnerUnchanged": true,
+      "manuallyReplayed": false
+    },
+    "finalHealth": {
+      "at": "2026-09-19T16:28:33.069Z",
+      "jobs": [
+        {
+          "id": 103506,
+          "type": "ops_global_discovery",
+          "status": "failed",
+          "attempts": 3,
+          "created_at": "2026-09-19T16:17:00.000Z",
+          "updated_at": "2026-09-19T16:27:14.000Z"
+        }
+      ],
+      "auditUndelivered": [],
+      "security": [
+        {
+          "type": "platform_audit_delivery",
+          "status": "completed",
+          "attempts": 1,
+          "n": "14"
+        },
+        {
+          "type": "platform_audit_monitor",
+          "status": "completed",
+          "attempts": 1,
+          "n": "3"
+        },
+        {
+          "type": "platform_audit_reconciliation",
+          "status": "completed",
+          "attempts": 1,
+          "n": "3"
+        },
+        {
+          "type": "auth_session_expiry",
+          "status": "completed",
+          "attempts": 1,
+          "n": "3"
+        }
+      ]
+    }
+  },
+  "cost": {
+    "incrementalBilledUsd": null,
+    "costExplorerQueried": false,
+    "existingTaggedEstimatedUnblendedUsd": "4.6195124129",
+    "existingPeriod": "2026-09-01/2026-09-18"
+  },
+  "operators": {
+    "publish-consumers.cjs": "28ef8fdc087fb404fd7d8eb4223a8b842e1f5083eabe7ad0c93390c52b894f6a",
+    "publish-frontend.py": "9255e42ad43cde1702461354d8530be0e7ad19fa7a0ca02253078118a4772831",
+    "login-smoke.cjs": "aca6beda0a795abe81c39143c1471d5be535b356eb248fe27f407e7b2c5bacd4"
+  },
+  "evidence": "/home/ubuntu/qa-evidence/security-resume-20260917/meta-publication-20260919",
+  "recovery": "/var/lib/clinicaclick-consumer-recovery/meta-20260919-fdb2636a",
+  "pending": [
+    "first_clinic_or_group_and_holder",
+    "AWS_SSO_operator_renewal",
+    "signing_identities_app_slots_IAM",
+    "authenticated_public_UI_and_MFA",
+    "live_Meta_OAuth_and_provider_acceptance"
+  ]
+}

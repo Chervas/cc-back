@@ -1,6 +1,9 @@
 # Esquema clínico Meta aplicado — 19/09/2026, 15:40 UTC
 
-Estado: **nueve migraciones aplicadas y verificadas; API/UI candidatas aún sin publicar**.
+Estado del esquema: **nueve migraciones aplicadas y verificadas**. La publicación
+posterior de API/UI terminó a las16:14–16:16 UTC:
+[acta vigente de consumidores](meta-clinical-publication.md). Este documento
+conserva los procesos y resultados del corte de esquema de las15:40.
 Contrato canónico: [13](../../src/Documentacion/13-backend.md#esquema-clínico-meta-aplicado-y-operador-verificado-19092026-1540-utc).
 El esquema clínico es compartido por staging y gateway; DEV conserva su BD ficticia.
 
@@ -70,9 +73,9 @@ El diario está completo. No volver a aplicar este plan, borrar sus actas ni
 restaurar tablas/credenciales automáticamente; las fuentes anteriores ya son
 compatibles con la ampliación aditiva. Las copias generales siguen aplazadas.
 
-Queda la publicación selectiva de API/UI preservando los contratos Google,
-WhatsApp y MFA, configurar el ámbito Meta que elija el titular y comprobar su
-recorrido autenticado real. La migración completa de seguridad sigue activa.
+La publicación selectiva de API/UI se completó posteriormente, preservando
+Google, WhatsApp y MFA. Queda configurar el ámbito Meta que elija el titular y
+comprobar su recorrido autenticado real. La migración completa sigue activa.
 
 Evidencia privada: `qa-evidence/security-resume-20260917/meta-crm-operator-20260919/`
 (tests y capturas), `meta-crm-cut-20260919-93b9d7df/` (aborto recuperado) y
