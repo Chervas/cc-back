@@ -114,6 +114,30 @@ const GOOGLE_BUSINESS_DAILY_METRICS = [
   'BUSINESS_BOOKINGS'
 ];
 
+const analyticsBroker = require('../services/analyticsBroker.service');
+
+const searchConsoleBroker = require('../services/searchConsoleBroker.service');
+
+const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
+
+const businessProfileBroker = require('../services/businessProfileBroker.service');
+
+const googleAdsBroker = require('../services/googleAdsBroker.service');
+
+const { guardGoogleAdsLegacyRequest } = require('../services/googleAdsLegacyConnection.service');
+
+const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
+
+const googleCampaignMetricsCache = require('../services/googleCampaignMetricsCache.service');
+
+const googleAdCache = require('../services/googleAdCache.service');
+
+const { saveObservedGoogleDestination } = require('../services/campaignWorkspaceGoogleDestination.service');
+
+const { selectGoogleAdsSyncAccounts, googleAdsSyncWindow, finishGoogleAdsSync, updateGoogleAdsSyncMetadata } = require('../lib/googleAdsSyncHelpers');
+
+const { ensureGoogleConnectionAccessToken: ensureGoogleAdsConnectionAccessToken } = require('../services/googleAdsScopedRuntime.service');
+
 function googleBusinessMetricPointValue(point = {}) {
   const raw = point?.value && typeof point.value === 'object'
     ? point.value.value
@@ -215,6 +239,8 @@ const cleanGoogleAccessToken = (value) => String(value || '').trim();
 
 async function ensureGoogleConnectionAccessToken(connection, options = {}) {
   if (!connection) throw new Error('GoogleConnection no encontrada');
+  const credentials = options.credentials || googleLegacyCredentials;
+  await credentials.assert(connection);
 
   const nowMs = Number(options.nowMs ?? Date.now());
   const httpClient = options.httpClient || syncHttp;
@@ -245,11 +271,11 @@ async function ensureGoogleConnectionAccessToken(connection, options = {}) {
       grant_type: 'refresh_token',
       refresh_token: refreshToken
     });
-    const response = await httpClient.post(
+    const response = await credentials.request(connection, () => httpClient.post(
       'https://oauth2.googleapis.com/token',
       params.toString(),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-    );
+    ));
     accessToken = cleanGoogleAccessToken(response.data?.access_token);
     if (!accessToken) {
       throw new Error('Google OAuth no devolvió un access_token válido al renovar la conexión');
@@ -258,7 +284,7 @@ async function ensureGoogleConnectionAccessToken(connection, options = {}) {
     const expiresIn = Number.isFinite(parsedExpiresIn) && parsedExpiresIn > 0
       ? parsedExpiresIn
       : 3600;
-    await connection.update({
+    await credentials.saveRefresh(connection, {
       accessToken,
       expiresAt: new Date(nowMs + expiresIn * 1000)
     });
@@ -268,6 +294,7 @@ async function ensureGoogleConnectionAccessToken(connection, options = {}) {
   if (!accessToken) {
     throw new Error('La conexión de Google no dispone de un access_token válido');
   }
+  await credentials.assert(connection);
   return accessToken;
 }
 
@@ -374,6 +401,11 @@ class MetaSyncJobs {
     
     // Descripciones por job (usadas por el monitor/UX)
     this.jobDescriptions = {
+      googleAdsEnrollment: 'Concilia altas Google Ads ya solicitadas y sus cancelaciones; conserva las cuentas actuales hasta guardar la asignación.',
+      googleAdsRevocations: 'Confirma bloqueos Ads solicitados mediante el broker; no llama a Google ni modifica campañas.',
+      googlePropertyRevocations: 'Confirma bloqueos SC/GA ya solicitados mediante el broker; no llama a Google ni envía conversiones.',
+      googleOAuthReconciliation: 'Concilia reautorizaciones Google solicitadas y confirma su activación mediante el broker.',
+      businessProfileRevocations: 'Confirma revocaciones de accesos a fichas Google ya solicitadas; no consulta al proveedor ni envía mensajes.',
       metaMarketingEnrollment: 'Concilia selecciones Meta confirmadas y retiradas mediante su diario, sin reactivar campañas ni repetir activaciones inciertas.',
       metaMarketingRevocations: 'Confirma bloqueos Meta Ads/páginas/Instagram ya solicitados; no llama al proveedor ni afecta WhatsApp.',
       metaMarketingOAuth: 'Concilia candidatos OAuth Meta y cancelaciones aceptadas, sin recanjear códigos ni activar activos.',
@@ -421,6 +453,11 @@ class MetaSyncJobs {
     // Configuración desde variables de entorno
     this.config = {
       schedules: {
+        googleAdsEnrollment: '* * * * *',
+        googleAdsRevocations: '* * * * *',
+        googlePropertyRevocations: '* * * * *',
+        googleOAuthReconciliation: '* * * * *',
+        businessProfileRevocations: '* * * * *',
         metaMarketingEnrollment: '* * * * *',
         metaMarketingRevocations: '* * * * *',
         metaMarketingOAuth: '* * * * *',
@@ -1413,7 +1450,7 @@ class MetaSyncJobs {
   // ===== Web jobs (Search Console + PSI) =====
   async executeWebSync(options = {}) {
     const { clinicId = null, siteUrls = null, siteMappings = null } = options;
-    const { ClinicWebAsset, GoogleConnection, WebScDaily, WebScDailyAgg, WebPsiSnapshot, WebIndexCoverageDaily, WebScQueryDaily } = require('../../models');
+    const { ClinicWebAsset, WebScDaily, WebScDailyAgg, WebPsiSnapshot, WebIndexCoverageDaily, WebScQueryDaily } = require('../../models');
     const SyncLog = require('../../models').SyncLog;
     console.log('🌐 Ejecutando webSync (Search Console + PSI)…');
     const syncLog = await SyncLog.create({ job_type: 'web_sync', status: 'running', start_time: new Date(), records_processed: 0 });
@@ -1457,7 +1494,8 @@ class MetaSyncJobs {
         sites: assets.length,
         clinics: byClinic.size,
         processed: 0,
-        errors: []
+        errors: [],
+        rowLimits: []
       };
       const end = new Date(); end.setHours(0,0,0,0);
       const start = new Date(end); start.setDate(start.getDate() - (this.config.web.recentDays-1));
@@ -1465,44 +1503,18 @@ class MetaSyncJobs {
       const fmt = (d)=>d.toISOString().slice(0,10);
       const tokenByConnectionId = new Map();
       const accessTokenForMapping = async (asset) => {
+        const brokerContext = await searchConsoleBroker.prepare(asset);
+        if (brokerContext) return { brokerContext };
         const connectionId = Number(asset?.googleConnectionId);
         if (!Number.isInteger(connectionId) || connectionId <= 0) {
           throw new Error(`Mapping Search Console ${asset?.id || 'unknown'} sin googleConnectionId válido`);
         }
         if (tokenByConnectionId.has(connectionId)) {
-          return tokenByConnectionId.get(connectionId);
+          const cached = await tokenByConnectionId.get(connectionId);
+          await googleLegacyCredentials.assert(cached.connection);
+          return cached;
         }
-        const tokenPromise = (async () => {
-          const connection = await GoogleConnection.findByPk(connectionId);
-          if (!connection) {
-            throw new Error(`Conexión Google ${connectionId} no encontrada`);
-          }
-          let accessToken = connection.accessToken;
-          const expiresAt = connection.expiresAt ? new Date(connection.expiresAt).getTime() : 0;
-          const needsRefresh = !expiresAt || expiresAt < Date.now() + 60000;
-          if (needsRefresh) {
-            if (!connection.refreshToken) {
-              throw new Error(`Conexión Google ${connectionId} sin expiración verificable ni refresh token`);
-            }
-            const tr = await syncHttp.post('https://oauth2.googleapis.com/token', new URLSearchParams({
-              client_id: process.env.GOOGLE_CLIENT_ID,
-              client_secret: process.env.GOOGLE_CLIENT_SECRET,
-              grant_type: 'refresh_token',
-              refresh_token: connection.refreshToken
-            }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-            accessToken = tr.data?.access_token || null;
-            if (!accessToken) {
-              throw new Error(`Google no devolvió access token para la conexión ${connectionId}`);
-            }
-            const expiresIn = tr.data?.expires_in || 3600;
-            await connection.update({
-              accessToken,
-              expiresAt: new Date(Date.now() + expiresIn * 1000)
-            });
-          }
-          if (!accessToken) throw new Error(`Conexión Google ${connectionId} sin access token`);
-          return accessToken;
-        })();
+        const tokenPromise = this._ensureGoogleAccessToken(connectionId);
         tokenByConnectionId.set(connectionId, tokenPromise);
         try {
           return await tokenPromise;
@@ -1519,23 +1531,22 @@ class MetaSyncJobs {
             try {
               authorizedMappings.push({
                 asset,
-                accessToken: await accessTokenForMapping(asset)
+                credentials: await accessTokenForMapping(asset)
               });
             } catch (error) {
               report.errors.push({
                 clinicaId,
                 siteUrl: asset.siteUrl,
                 phase: 'authorization',
-                message: error.message
+                message: googleLegacyCredentials.safe(error)
               });
             }
           }
 
           // Timeseries por siteUrl (guardar por clínica+site+fecha)
-          for (const { asset: a, accessToken } of authorizedMappings) {
+          for (const { asset: a, credentials } of authorizedMappings) {
             try {
-              const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
-              const resp = await syncHttp.post(url, { startDate: fmt(start), endDate: fmt(end), dimensions: ['date'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
+              const resp = await this._readSearchConsole(a, credentials, 'timeseries', { startDate: fmt(start), endDate: fmt(end) });
               clinicSucceeded = true;
               const rows = resp.data?.rows || [];
               for (const r of rows) {
@@ -1557,7 +1568,7 @@ class MetaSyncJobs {
                 clinicaId,
                 siteUrl: a.siteUrl,
                 phase: 'timeseries',
-                message: error.message
+                message: googleLegacyCredentials.safe(error)
               });
             }
           }
@@ -1580,12 +1591,12 @@ class MetaSyncJobs {
           }
           const daysWindow = Math.round((end - start) / 86400000) + 1;
           const useChunks = daysWindow > 62;
-          for (const { asset: a, accessToken } of authorizedMappings) {
+          for (const { asset: a, credentials } of authorizedMappings) {
             try {
-              const urlQ = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(a.siteUrl)}/searchAnalytics/query`;
               const ranges = useChunks ? Array.from(monthChunks(start, end)) : [{ s: fmt(start), e: fmt(end) }];
               for (const rg of ranges) {
-                const respQ = await syncHttp.post(urlQ, { startDate: rg.s, endDate: rg.e, dimensions: ['date','query','page'], rowLimit: 25000 }, { headers: { Authorization: `Bearer ${accessToken}` } });
+                const respQ = await this._readSearchConsole(a, credentials, 'queries', { startDate: rg.s, endDate: rg.e });
+                if (respQ.data?.rowLimitReached) report.rowLimits.push({ clinicaId, siteUrl: a.siteUrl, start: rg.s, end: rg.e, limit: 25000 });
                 clinicSucceeded = true;
                 const rowsQ = respQ.data?.rows || [];
                 for (const r of rowsQ) {
@@ -1633,7 +1644,7 @@ class MetaSyncJobs {
                 clinicaId,
                 siteUrl: a.siteUrl,
                 phase: 'queries',
-                message: error.message
+                message: googleLegacyCredentials.safe(error)
               });
             }
           }
@@ -1707,11 +1718,8 @@ class MetaSyncJobs {
                 // Index status (1 URL via URL Inspection API)
                 let indexed_ok = null;
                 try {
-                  const siteProperty = psiAsset.siteUrl;
-                  const inspectUrl = siteUrl;
-                  const accessToken = await accessTokenForMapping(psiAsset);
-                  const inspectEndpoint = 'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect';
-                  const respI = await syncHttp.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${accessToken}` } });
+                  const credentials = await accessTokenForMapping(psiAsset);
+                  const respI = await this._readSearchConsole(psiAsset, credentials, 'inspection', {});
                   const verdict = respI.data?.inspectionResult?.indexStatusResult?.verdict || '';
                   const coverageState = respI.data?.inspectionResult?.indexStatusResult?.coverageState || '';
                   indexed_ok = (String(verdict).toUpperCase() === 'PASS') || /indexed/i.test(String(coverageState));
@@ -1730,7 +1738,7 @@ class MetaSyncJobs {
                 await WebPsiSnapshot.create(sn);
               }
             }
-          } catch (e) { console.warn('PSI error:', e.response?.data?.error?.message || e.message); }
+          } catch (e) { console.warn('PSI error:', googleLegacyCredentials.safe(e)); }
 
           // (Cobertura eliminada)
 
@@ -1739,8 +1747,8 @@ class MetaSyncJobs {
           await syncLog.update({ records_processed: processed });
           if (this.config.web.betweenClinicsSleepMs>0) await new Promise(r=>setTimeout(r,this.config.web.betweenClinicsSleepMs));
         } catch (err) {
-          console.error('❌ webSync clínica error:', clinicaId, err.message);
-          report.errors.push({ clinicaId, message: err.message });
+          console.error('❌ webSync clínica error:', clinicaId, googleLegacyCredentials.safe(err));
+          report.errors.push({ clinicaId, message: googleLegacyCredentials.safe(err) });
         }
       }
       const totalFailure = assets.length > 0 && processed === 0 && report.errors.length > 0;
@@ -1759,9 +1767,10 @@ class MetaSyncJobs {
         report
       };
     } catch (e) {
-      await syncLog.update({ status:'failed', end_time:new Date(), error_message: e.message });
-      console.error('❌ Error en webSync:', e);
-      throw e;
+      const reason = googleLegacyCredentials.safe(e);
+      await syncLog.update({ status:'failed', end_time:new Date(), error_message: reason });
+      console.error('❌ Error en webSync:', reason);
+      throw Object.assign(new Error(reason), { code: reason });
     }
   }
 
@@ -1816,32 +1825,37 @@ class MetaSyncJobs {
         end: endStr,
         rows: 0,
         dimensionRows: 0,
+        dataQuality: [],
         errors: []
       };
       let processed = 0;
       for (const property of properties) {
         try {
-          const { accessToken } = await this._ensureGoogleAccessToken(property.googleConnectionId);
-          const counts = await this._syncGaProperty(property, accessToken, startStr, endStr);
+          const analyticsContext = await analyticsBroker.prepare(property);
+          const credentials = analyticsContext ? { analyticsContext } : await this._ensureGoogleAccessToken(property.googleConnectionId);
+          const counts = await this._syncGaProperty(property, credentials, startStr, endStr);
           report.processedProperties += 1;
           processed += counts.rows || 0;
           report.rows += counts.rows || 0;
           report.dimensionRows += counts.dimensionRows || 0;
+          report.dataQuality.push(...(counts.dataQuality || []).map(value => ({ propertyId: property.id, ...value })));
         } catch (err) {
-          console.error('❌ analyticsSync property error:', property.id, err.message);
-          report.errors.push({ propertyId: property.id, clinicaId: property.clinicaId, message: err.message });
+          console.error('❌ analyticsSync property error:', property.id, analyticsBroker.safe(err));
+          report.errors.push({ propertyId: property.id, clinicaId: property.clinicaId, message: analyticsBroker.safe(err) });
         }
         if (this.config.analytics.betweenClinicsSleepMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, this.config.analytics.betweenClinicsSleepMs));
         }
       }
-      await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: processed, status_report: report });
+      const status = report.processedProperties === 0 && report.errors.length > 0 ? 'failed' : 'completed';
+      await syncLog.update({ status, end_time: new Date(), records_processed: processed, status_report: report });
       console.log('✅ analyticsSync completado', report);
-      return { status: 'completed', processed, report };
+      return { status, processed, report };
     } catch (error) {
-      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message });
-      console.error('❌ Error en analyticsSync:', error);
-      throw error;
+      await syncLog.update({ status: 'failed', end_time: new Date(), error_message: analyticsBroker.safe(error) });
+      console.error('❌ Error en analyticsSync:', analyticsBroker.safe(error));
+      const reason = analyticsBroker.safe(error);
+      throw Object.assign(new Error(reason), { code: reason });
     }
   }
 
@@ -1940,7 +1954,7 @@ class MetaSyncJobs {
       const aggregate = {
         status: 'completed',
         processed: 0,
-        report: { properties: 0, processedProperties: 0, rows: 0, dimensionRows: 0, errors: [] }
+        report: { properties: 0, processedProperties: 0, rows: 0, dimensionRows: 0, dataQuality: [], errors: [] }
       };
       for (const [clinicId, mapping] of mappingsByClinic.entries()) {
         const result = await this.executeAnalyticsSync({
@@ -1954,8 +1968,10 @@ class MetaSyncJobs {
         aggregate.report.processedProperties += Number(report.processedProperties || 0);
         aggregate.report.rows += Number(report.rows || result?.processed || 0);
         aggregate.report.dimensionRows += Number(report.dimensionRows || 0);
+        aggregate.report.dataQuality.push(...(Array.isArray(report.dataQuality) ? report.dataQuality : []));
         aggregate.report.errors.push(...(Array.isArray(report.errors) ? report.errors : []));
       }
+      if (aggregate.report.processedProperties === 0 && aggregate.report.errors.length > 0) aggregate.status = 'failed';
       return aggregate;
     } finally {
       this._analyticsBackfillMode = prevMode;
@@ -2037,11 +2053,8 @@ class MetaSyncJobs {
 
       for (const location of locations) {
         try {
-          let accessToken = tokenByConnection.get(Number(location.google_connection_id));
-          if (!accessToken) {
-            ({ accessToken } = await this._ensureGoogleAccessToken(location.google_connection_id));
-            tokenByConnection.set(Number(location.google_connection_id), accessToken);
-          }
+          const accessToken = await businessProfileBroker.prepare(location,
+            id => this._ensureGoogleAccessToken(id), tokenByConnection);
           const sectionErrors = [];
           let details = null;
           try {
@@ -2174,11 +2187,8 @@ class MetaSyncJobs {
 
       for (const location of locations) {
         try {
-          let accessToken = tokenByConnection.get(Number(location.google_connection_id));
-          if (!accessToken) {
-            ({ accessToken } = await this._ensureGoogleAccessToken(location.google_connection_id));
-            tokenByConnection.set(Number(location.google_connection_id), accessToken);
-          }
+          const accessToken = await businessProfileBroker.prepare(location,
+            id => this._ensureGoogleAccessToken(id), tokenByConnection);
           const reviews = await this._syncBusinessProfileReviews(location, accessToken, {
             maxPages: report.maxPages,
             enqueueOnlyNewReviews: true
@@ -2691,7 +2701,9 @@ class MetaSyncJobs {
     }
 
     const params = this._buildBusinessProfileMetricParams(start, end);
-    const response = await syncHttp.get(
+    const response = businessProfileBroker.managed(location, accessToken)
+      ? await businessProfileBroker.read(location, accessToken, 'metrics', { startDate: this._formatDate(start), endDate: this._formatDate(end) })
+      : await syncHttp.get(
       `${GOOGLE_BUSINESS_PERFORMANCE_API}/${locationName}:fetchMultiDailyMetricsTimeSeries`,
       { params, headers: { Authorization: `Bearer ${accessToken}` } }
     );
@@ -2757,7 +2769,9 @@ class MetaSyncJobs {
     let expectedReviewCount = null;
     do {
       page += 1;
-      const response = await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/reviews`, {
+      const response = businessProfileBroker.managed(location, accessToken)
+        ? await businessProfileBroker.read(location, accessToken, 'reviews', { pageToken: nextPageToken })
+        : await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/reviews`, {
         params: { pageSize: 50, pageToken: nextPageToken || undefined },
         headers: { Authorization: `Bearer ${accessToken}` }
       });
@@ -2926,7 +2940,9 @@ class MetaSyncJobs {
     let nextPageToken = null;
     let processed = 0;
     do {
-      const response = await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/localPosts`, {
+      const response = businessProfileBroker.managed(location, accessToken)
+        ? await businessProfileBroker.read(location, accessToken, 'posts', { pageToken: nextPageToken })
+        : await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/localPosts`, {
         params: { pageSize: 100, pageToken: nextPageToken || undefined },
         headers: { Authorization: `Bearer ${accessToken}` }
       });
@@ -2976,7 +2992,9 @@ class MetaSyncJobs {
     const mediaItems = [];
     let nextPageToken = null;
     do {
-      const response = await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/media`, {
+      const response = businessProfileBroker.managed(location, accessToken)
+        ? await businessProfileBroker.read(location, accessToken, 'media', { pageToken: nextPageToken })
+        : await syncHttp.get(`${GOOGLE_MY_BUSINESS_API}/${resourceBase}/media`, {
         params: { pageSize: 100, pageToken: nextPageToken || undefined },
         headers: { Authorization: `Bearer ${accessToken}` }
       });
@@ -3001,14 +3019,18 @@ class MetaSyncJobs {
       }
     }
     if (!rawPayload || typeof rawPayload !== 'object' || Array.isArray(rawPayload)) rawPayload = {};
-    const accountName = rawPayload.accountName || rawPayload.account_name || null;
+    const accountName = location.broker_read_asset_ref
+      ? `accounts/${businessProfileBroker.binding(location).assetRef.split(':')[1]}`
+      : rawPayload.accountName || rawPayload.account_name || null;
     const locationName = this._normalizeBusinessProfilePerformanceLocation(location.location_id);
     const locationId = locationName ? locationName.split('/').pop() : null;
     if (!accountName || !locationId) {
       throw new Error('Ubicación Google Business Profile sin accountName para sincronizar detalles');
     }
 
-    const response = await syncHttp.get(`${GOOGLE_BUSINESS_INFORMATION_API}/locations/${locationId}`, {
+    const response = businessProfileBroker.managed(location, accessToken)
+      ? await businessProfileBroker.read(location, accessToken, 'details', {})
+      : await syncHttp.get(`${GOOGLE_BUSINESS_INFORMATION_API}/locations/${locationId}`, {
       params: { readMask: GOOGLE_BUSINESS_LOCATION_READ_MASK },
       headers: { Authorization: `Bearer ${accessToken}` }
     });
@@ -3046,7 +3068,9 @@ class MetaSyncJobs {
     if (!locationName) {
       throw new Error('Ubicación Google Business Profile sin location_id para consultar verificación');
     }
-    const response = await syncHttp.get(
+    const response = businessProfileBroker.managed(location, accessToken)
+      ? await businessProfileBroker.read(location, accessToken, 'verification', {})
+      : await syncHttp.get(
       `${GOOGLE_BUSINESS_VERIFICATIONS_API}/${locationName}/VoiceOfMerchantState`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
@@ -3103,6 +3127,10 @@ class MetaSyncJobs {
   }
 
   _buildBusinessProfileV4LocationPath(location) {
+    if (location.broker_read_asset_ref) {
+      const [, accountId, locationId] = businessProfileBroker.binding(location).assetRef.split(':');
+      return `accounts/${accountId}/locations/${locationId}`;
+    }
     const rawPayload = location.raw_payload && typeof location.raw_payload === 'object'
       ? location.raw_payload
       : {};
@@ -3165,20 +3193,25 @@ class MetaSyncJobs {
 
   async _ensureGoogleAccessToken(connectionId) {
     if (!connectionId) { throw new Error('Sin googleConnectionId en propiedad Analytics'); }
-    const conn = await GoogleConnection.findByPk(connectionId);
+    const conn = await googleLegacyCredentials.load(connectionId);
     if (!conn) { throw new Error('GoogleConnection no encontrada'); }
     const accessToken = await ensureGoogleConnectionAccessToken(conn);
     return { accessToken, connection: conn };
   }
 
-  async _runGaReport(accessToken, propertyName, body) {
+  async _runGaReport(credentials, property, body, family) {
+    const fresh = await analyticsBroker.prepare(property);
+    if (!!fresh !== !!credentials.analyticsContext) throw Object.assign(new Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+    if (credentials.analyticsContext) return analyticsBroker.read(property, credentials.analyticsContext, family,
+      { startDate: body.dateRanges[0].startDate, endDate: body.dateRanges[0].endDate });
+    const propertyName = property.propertyName;
     if (!propertyName) { throw new Error('Propiedad GA sin propertyName'); }
     const url = `https://analyticsdata.googleapis.com/v1beta/${propertyName}:runReport`;
-    const resp = await syncHttp.post(url, body, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const resp = await googleLegacyCredentials.request(credentials.connection, () => syncHttp.post(url, body, { headers: { Authorization: `Bearer ${credentials.accessToken}` } }));
     return resp.data || {};
   }
 
-  async _syncGaProperty(property, accessToken, start, end) {
+  async _syncGaProperty(property, credentials, start, end) {
     const propertyName = property.propertyName;
     if (!propertyName) { throw new Error('Propiedad GA sin propertyName'); }
     const metrics = ['sessions', 'activeUsers', 'newUsers', 'conversions', 'totalRevenue'];
@@ -3188,7 +3221,15 @@ class MetaSyncJobs {
       metrics: metrics.map((name) => ({ name })),
       limit: 100000
     };
-    const mainReport = await this._runGaReport(accessToken, propertyName, baseRequest);
+    const mainReport = await this._runGaReport(credentials, property, baseRequest, 'daily');
+    const dataQuality = [];
+    const noteReport = (family, response) => {
+      if (credentials.analyticsContext && dataQuality.length && (response.metadata.currencyCode !== dataQuality[0].currencyCode
+        || response.metadata.timeZone !== dataQuality[0].timeZone)) throw Object.assign(new Error('broker_response_invalid'), { code: 'broker_response_invalid' });
+      if (credentials.analyticsContext) dataQuality.push({ family, rowCount: response.rowCount, returnedRows: response.rows.length,
+        rowLimitReached: response.rowLimitReached, ...response.metadata });
+    };
+    noteReport('daily', mainReport);
     const rows = mainReport.rows || [];
     let inserted = 0;
     for (const row of rows) {
@@ -3232,7 +3273,8 @@ class MetaSyncJobs {
           limit: 100000,
           orderBys: [{ dimension: { dimensionName: 'date' } }]
         };
-        const resp = await this._runGaReport(accessToken, propertyName, body);
+        const resp = await this._runGaReport(credentials, property, body, def.type);
+        noteReport(def.type, resp);
         const dRows = resp.rows || [];
         for (const row of dRows) {
           const dateKey = this._normalizeGaDate(row.dimensionValues?.[0]?.value);
@@ -3258,10 +3300,13 @@ class MetaSyncJobs {
           dimensionRows += 1;
         }
       } catch (err) {
-        console.warn(`⚠️ GA dimension ${def.type} error`, err.response?.data?.error?.message || err.message);
+        const reason = analyticsBroker.safe(err);
+        if (credentials.analyticsContext || reason.startsWith('broker_') || reason === 'analytics_read_failed'
+          || ['google_oauth_legacy_closed', 'google_connection_changed', 'google_connection_missing'].includes(reason)) throw err;
+        console.warn(`⚠️ GA dimension ${def.type} error`, reason);
       }
     }
-    return { rows: inserted, dimensionRows };
+    return { rows: inserted, dimensionRows, dataQuality };
   }
 
   _coerceDate(value) {
@@ -4468,48 +4513,21 @@ try {
           ]
         },
         include: [
-          { model: GoogleConnection, as: 'googleConnection' },
+          { model: GoogleConnection, as: 'googleConnection', attributes: ['id', 'googleUserId'] },
           { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }
         ]
       });
 
-      if (Array.isArray(options.clinicIds) && options.clinicIds.length) {
-        const allowedIds = options.clinicIds
-          .map((id) => Number(id))
-          .filter(Number.isFinite);
-        accounts = accounts.filter((acc) => allowedIds.includes(Number(acc.clinicaId ?? acc.clinica?.id_clinica)));
-      }
-
-      if (Array.isArray(options.groupIds) && options.groupIds.length) {
-        const allowedGroupIds = options.groupIds
-          .map((id) => Number(id))
-          .filter(Number.isFinite);
-        if (allowedGroupIds.length) {
-          accounts = accounts.filter((acc) => {
-            const groupId = Number(acc.grupoClinicaId ?? acc.clinica?.grupoClinicaId);
-            if (!Number.isFinite(groupId)) {
-              return false;
-            }
-            return allowedGroupIds.includes(groupId);
-          });
-        }
-      }
-
-      report.accounts = accounts.length;
+      const selection = selectGoogleAdsSyncAccounts(accounts, options);
+      accounts = selection.accounts;
+      report.accounts = accounts.length + selection.errors.length;
+      report.duplicateMappings = selection.duplicateMappings;
+      report.errors.push(...selection.errors);
       if (!accounts.length) {
-        await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0, status_report: report });
         console.log('ℹ️ googleAdsSync sin cuentas activas.');
-        return { status: 'completed', ...report };
+        return finishGoogleAdsSync(syncLog, report);
       }
 
-      // Ventana: últimos N días hasta ayer
-      const defaultEnd = new Date();
-      defaultEnd.setHours(0, 0, 0, 0);
-      defaultEnd.setDate(defaultEnd.getDate() - 1);
-
-      const parsedEnd = parseDateInput(options.endDate, 'endDate') || defaultEnd;
-      const parsedStart = parseDateInput(options.startDate, 'startDate');
-      const customWindowDays = Number(options.windowDays || options.days);
 
       const usageStatus = await getGoogleAdsUsageStatus();
       if (usageStatus.pauseUntil && usageStatus.pauseUntil > Date.now()) {
@@ -4526,35 +4544,16 @@ try {
 
       for (const account of accounts) {
         try {
-          const token = await this._getGoogleAccessToken(account.googleConnection);
-
-          let end = new Date(parsedEnd);
-          let start;
-          if (parsedStart) {
-            start = new Date(parsedStart);
-          } else {
-            let days;
-            if (Number.isFinite(customWindowDays) && customWindowDays > 0) {
-              days = Math.floor(customWindowDays);
-            } else {
-              days = report.windowDays;
-            }
-            days = Math.max(1, days);
-            start = new Date(end);
-            start.setDate(start.getDate() - (days - 1));
-          }
-
-          [start, end] = ensureAscending(start, end);
-          const rangeDays = diffInDaysInclusive(start, end);
-          if (rangeDays) {
-            report.windowDays = rangeDays;
-            report.dateRange = {
-              start: start.toISOString().slice(0, 10),
-              end: end.toISOString().slice(0, 10)
-            };
-          }
+          const window = googleAdsSyncWindow(options, account, Math.max(60, this.config.googleAds.recentDays));
+          const { start, end } = window;
+          report.windowDays = window.days;
+          report.dateRange = { start, end };
+          (report.windows ||= []).push({ customerId: normalizeCustomerId(account.customerId), ...window });
+          const brokerContext = await googleAdsBroker.prepare(account);
+          const token = brokerContext ? undefined : await this._getGoogleAccessToken(account.googleConnection);
 
           const stats = await this._syncGoogleAdsAccount(account, {
+            brokerContext,
             start,
             end,
             chunkDays: options.chunkDays || this.config.googleAds.chunkDays,
@@ -4570,9 +4569,14 @@ try {
             report.notes.push(`Cuenta ${formatCustomerId(account.customerId)} sin inventario o métricas persistidas; lastSyncedAt no se actualiza.`);
             continue;
           }
+          if (brokerContext) {
+            await sequelize.transaction(async transaction => {
+              await googleAdsBroker.assert(account, brokerContext, { transaction });
+              await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, { lastSyncedAt: new Date() }, { transaction });
+            });
+          } else await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, { lastSyncedAt: new Date() });
           report.processed += 1;
           report.rows += stats.rows || 0;
-          await ClinicGoogleAdsAccount.update({ lastSyncedAt: new Date() }, { where: { id: account.id } });
 
           if (this.config.googleAds.betweenAccountsSleepMs > 0) {
             await new Promise(r => setTimeout(r, this.config.googleAds.betweenAccountsSleepMs));
@@ -4602,7 +4606,7 @@ try {
             });
           }
           console.error('❌ Error en googleAdsSync para cuenta:', account.customerId, err.message, details);
-          report.errors.push({ customerId: account.customerId, error: err.message, details });
+          report.errors.push({ customerId: account.customerId, error: err.message, details, progress: err.syncProgress });
           await notificationService.dispatchEvent({
             event: 'ads.sync_error',
             clinicId: account.clinicaId || account.clinica?.id_clinica || null,
@@ -4617,9 +4621,7 @@ try {
         }
       }
 
-      await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: report.processed, status_report: report });
-      console.log('✅ googleAdsSync completado', report);
-      return { status: 'completed', ...report };
+      return finishGoogleAdsSync(syncLog, report);
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
       console.error('❌ Error en googleAdsSync:', error);
@@ -4657,82 +4659,35 @@ try {
           ]
         },
         include: [
-          { model: GoogleConnection, as: 'googleConnection' },
+          { model: GoogleConnection, as: 'googleConnection', attributes: ['id', 'googleUserId'] },
           { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }
         ]
       });
-      if (Array.isArray(options.customerIds) && options.customerIds.length) {
-        const allowedCustomerIds = new Set(options.customerIds
-          .map((id) => normalizeCustomerId(id))
-          .filter(Boolean));
-        if (allowedCustomerIds.size) {
-          accounts = accounts.filter((account) => (
-            allowedCustomerIds.has(normalizeCustomerId(account.customerId))
-          ));
-        }
-      }
-      if (Array.isArray(options.clinicIds) && options.clinicIds.length) {
-        const allowedIds = options.clinicIds.map((id) => Number(id)).filter(Number.isFinite);
-        if (allowedIds.length) {
-          accounts = accounts.filter((acc) => allowedIds.includes(Number(acc.clinicaId ?? acc.clinica?.id_clinica)));
-        }
-      }
-
-      if (Array.isArray(options.groupIds) && options.groupIds.length) {
-        const allowedGroupIds = options.groupIds.map((id) => Number(id)).filter(Number.isFinite);
-        if (allowedGroupIds.length) {
-          accounts = accounts.filter((acc) => {
-            const groupId = Number(acc.grupoClinicaId ?? acc.clinica?.grupoClinicaId);
-            if (!Number.isFinite(groupId)) {
-              return false;
-            }
-            return allowedGroupIds.includes(groupId);
-          });
-        }
-      }
-
-      report.accounts = accounts.length;
+      const selection = selectGoogleAdsSyncAccounts(accounts, options);
+      accounts = selection.accounts;
+      report.accounts = accounts.length + selection.errors.length;
+      report.duplicateMappings = selection.duplicateMappings;
+      report.errors.push(...selection.errors);
       if (!accounts.length) {
-        await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0, status_report: report });
         console.log('ℹ️ googleAdsBackfill sin cuentas activas.');
-        return { status: 'completed', ...report };
+        return finishGoogleAdsSync(syncLog, report);
       }
 
-      const defaultEnd = new Date();
-      defaultEnd.setHours(0, 0, 0, 0);
-      defaultEnd.setDate(defaultEnd.getDate() - 1);
-
-      let end = parseDateInput(options.endDate, 'endDate') || defaultEnd;
-      let start = parseDateInput(options.startDate, 'startDate');
-      let windowDays = Number(options.windowDays || options.days);
-      if (!Number.isFinite(windowDays) || windowDays <= 0) {
-        windowDays = this.config.googleAds.backfillDays;
-      } else {
-        windowDays = Math.floor(windowDays);
-      }
-
-      if (!start) {
-        start = new Date(end);
-        start.setDate(start.getDate() - (Math.max(1, windowDays) - 1));
-      }
-
-      [start, end] = ensureAscending(start, end);
-
-      report.windowDays = diffInDaysInclusive(start, end) || report.windowDays;
-      report.dateRange = {
-        start: start.toISOString().slice(0, 10),
-        end: end.toISOString().slice(0, 10)
-      };
 
       for (const account of accounts) {
         try {
-          const token = await this._getGoogleAccessToken(account.googleConnection);
-          const accountStart = new Date(start);
-          const accountEnd = new Date(end);
+          const window = googleAdsSyncWindow(options, account, this.config.googleAds.backfillDays);
+          const { start, end } = window;
+          report.windowDays = window.days;
+          report.dateRange = { start, end };
+          (report.windows ||= []).push({ customerId: normalizeCustomerId(account.customerId), ...window });
+          const brokerContext = await googleAdsBroker.prepare(account);
+          const token = brokerContext ? undefined : await this._getGoogleAccessToken(account.googleConnection);
 
           const stats = await this._syncGoogleAdsAccount(account, {
-            start: accountStart,
-            end: accountEnd,
+            brokerContext,
+            start,
+            end,
             chunkDays: options.chunkDays || this.config.googleAds.chunkDays,
             accessToken: token,
             report
@@ -4746,9 +4701,14 @@ try {
             report.notes.push(`Cuenta ${formatCustomerId(account.customerId)} sin inventario o métricas persistidas; lastSyncedAt no se actualiza.`);
             continue;
           }
+          if (brokerContext) {
+            await sequelize.transaction(async transaction => {
+              await googleAdsBroker.assert(account, brokerContext, { transaction });
+              await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, { lastSyncedAt: new Date() }, { transaction });
+            });
+          } else await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, { lastSyncedAt: new Date() });
           report.processed += 1;
           report.rows += stats.rows || 0;
-          await ClinicGoogleAdsAccount.update({ lastSyncedAt: new Date() }, { where: { id: account.id } });
 
           if (this.config.googleAds.betweenAccountsSleepMs > 0) {
             await new Promise(r => setTimeout(r, this.config.googleAds.betweenAccountsSleepMs));
@@ -4767,13 +4727,11 @@ try {
             });
           }
           console.error('❌ Error en googleAdsBackfill para cuenta:', account.customerId, err.message, details);
-          report.errors.push({ customerId: account.customerId, error: err.message, details });
+          report.errors.push({ customerId: account.customerId, error: err.message, details, progress: err.syncProgress });
         }
       }
 
-      await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: report.processed, status_report: report });
-      console.log('✅ googleAdsBackfill completado', report);
-      return { status: 'completed', ...report };
+      return finishGoogleAdsSync(syncLog, report);
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
       console.error('❌ Error en googleAdsBackfill:', error);
@@ -4785,253 +4743,67 @@ try {
     if (!conn) {
       throw new Error('No existe conexión Google asociada');
     }
-    if (!conn.accessToken) {
-      throw new Error('No existe access token Google almacenado');
-    }
-    let accessToken = conn.accessToken;
-    let expiresAt = conn.expiresAt ? new Date(conn.expiresAt) : null;
-    const now = Date.now();
-    const threshold = now + 60_000;
-
-    if (conn.refreshToken && (!expiresAt || expiresAt.getTime() <= threshold)) {
-      try {
-        const tr = await syncHttp.post('https://oauth2.googleapis.com/token', new URLSearchParams({
-          client_id: process.env.GOOGLE_CLIENT_ID,
-          client_secret: process.env.GOOGLE_CLIENT_SECRET,
-          grant_type: 'refresh_token',
-          refresh_token: conn.refreshToken
-        }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-        const newToken = tr.data?.access_token;
-        const expiresIn = tr.data?.expires_in || 3600;
-        if (newToken) {
-          accessToken = newToken;
-          expiresAt = new Date(Date.now() + expiresIn * 1000);
-          await conn.update({ accessToken, expiresAt });
-        }
-      } catch (err) {
-        console.error('❌ Error refrescando token Google Ads:', err.message);
-        throw err;
-      }
-    }
-    return accessToken;
+    const connection = await googleLegacyCredentials.load(conn.id, { includeScopes: true, expectedSubject: conn.googleUserId });
+    const token = await ensureGoogleAdsConnectionAccessToken(connection, { axiosClient: syncHttp, credentials: googleLegacyCredentials });
+    return token.accessToken;
   }
 
-  async _syncGoogleAdsAccount(account, { start, end, chunkDays = 7, accessToken, report }) {
-    const managerId = ensureGoogleAdsConfig().managerId;
-    const effectiveLoginCustomerId = normalizeCustomerId(account.loginCustomerId || account.managerCustomerId || managerId);
-    if (!effectiveLoginCustomerId) {
-      throw new Error(`No se puede sincronizar la cuenta ${account.customerId}: falta loginCustomerId`);
-    }
-    const customerId = normalizeCustomerId(account.customerId);
-    const clinicId = account.clinicaId;
-
-    const assignment = await this._buildMetaAssignmentContext(account);
-    const groupId = assignment.groupId || account.grupoClinicaId || (account.clinica ? account.clinica.grupoClinicaId : null) || null;
-    const defaultClinicId = assignment.mode === 'manual'
-      ? (assignment.clinicaId || clinicId || null)
-      : (assignment.mode === 'group-manual' ? null : (assignment.clinicaId || null));
-
-    const metricVariants = [
-      {
-        name: 'extended',
-        metrics: [
-          'metrics.impressions',
-          'metrics.clicks',
-          'metrics.cost_micros',
-          'metrics.conversions',
-          'metrics.conversions_value',
-          'metrics.all_conversions',
-          'metrics.all_conversions_value',
-          'metrics.ctr',
-          'metrics.average_cpc',
-          'metrics.average_cpm',
-          'metrics.average_cost',
-          'metrics.conversions_from_interactions_rate'
-        ]
-      },
-      {
-        name: 'basic',
-        metrics: [
-          'metrics.impressions',
-          'metrics.clicks'
-        ]
-      }
-    ];
-
-    let variantIndex = 0;
-
-    const resourceFields = [
-      'campaign.id',
-      'campaign.name',
-      'campaign.status',
-      'campaign.serving_status',
-      'campaign.primary_status',
-      'campaign.primary_status_reasons',
-      'campaign.advertising_channel_type',
-      'ad_group.id',
-      'ad_group.name',
-      'ad_group.status'
-    ];
-    const segmentFields = ['segments.date', 'segments.ad_network_type', 'segments.device'];
-
-    const buildQuery = (metrics, startDate, endDate) => {
-      const selectFields = [...resourceFields, ...metrics, ...segmentFields];
-      const lines = selectFields.map((field, idx) => {
-        const suffix = idx < selectFields.length - 1 ? ',' : '';
-        return `  ${field}${suffix}`;
-      });
-      return [
-        'SELECT',
-        ...lines,
-        'FROM ad_group',
-        `WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'`
-      ].join('\n');
-    };
-
-    const isInvalidArgumentError = (err) => err?.response?.data?.error?.status === 'INVALID_ARGUMENT';
-
-    const extractErrorMessages = (err) => {
-      const messages = new Set();
-      const rootMessage = err?.response?.data?.error?.message || err?.message;
-      if (rootMessage) messages.add(rootMessage);
-      const details = err?.response?.data?.error?.details;
-      if (Array.isArray(details)) {
-        for (const detail of details) {
-          if (Array.isArray(detail?.errors)) {
-            for (const detailError of detail.errors) {
-              if (detailError?.message) {
-                messages.add(detailError.message);
-              }
-              const fieldPath = detailError?.location?.fieldPathElements;
-              if (Array.isArray(fieldPath) && fieldPath.length) {
-                const last = fieldPath[fieldPath.length - 1]?.fieldName;
-                if (last) {
-                  messages.add(`Campo: ${last}`);
-                }
-              }
-            }
-          }
-        }
-      }
-      return Array.from(messages);
-    };
-
-    let persistedMetricsRows = 0;
-    const dayMs = 86400000;
-    let cursor = new Date(start);
-
-    const processedCampaignDates = new Set();
-
-    const persistedInventoryRows = await this._syncGoogleAdsPublishingState(account, {
-      accessToken,
-      effectiveLoginCustomerId,
-      report
-    });
-
-    while (cursor <= end) {
-      const chunkEnd = new Date(Math.min(end.getTime(), cursor.getTime() + (chunkDays - 1) * dayMs));
-      const startDate = cursor.toISOString().slice(0, 10);
-      const endDate = chunkEnd.toISOString().slice(0, 10);
-
-      let chunkProcessed = false;
-      while (!chunkProcessed) {
-        const activeVariant = metricVariants[variantIndex];
-        const query = buildQuery(activeVariant.metrics, startDate, endDate);
-
-        let pageToken = null;
-        try {
-          do {
-            const resp = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, {
-              accessToken,
-              loginCustomerId: effectiveLoginCustomerId,
-              data: { query, pageToken }
-            });
-            const results = resp?.results || [];
-            const nextToken = resp?.nextPageToken || resp?.next_page_token || null;
-            for (const row of results) {
-              const campaignId = row?.campaign?.id ? String(row.campaign.id) : null;
-              const date = row?.segments?.date;
-              if (campaignId && date) {
-                processedCampaignDates.add(`${campaignId}:${date}`);
-              }
-            }
-            persistedMetricsRows += await this._persistGoogleAdsResults({
-              account,
-              assignment,
-              groupId,
-              defaultClinicId,
-              results,
-              report
-            });
-            pageToken = nextToken;
-          } while (pageToken);
-
-          chunkProcessed = true;
-        } catch (err) {
-          const detailMessages = extractErrorMessages(err);
-          const managerAccountMessage = detailMessages.find(msg => /Metrics cannot be requested for a manager account/i.test(msg));
-          if (managerAccountMessage) {
-            const formattedId = formatCustomerId(customerId);
-            const skipNote = `Cuenta ${formattedId} es un MCC. Google Ads no permite solicitar métricas directamente al manager; mapea la(s) cuenta(s) hija(s) y vuelve a ejecutar.`;
-            console.warn(`⏭️ ${skipNote}`);
-            if (report && Array.isArray(report.notes)) {
-              report.notes.push(skipNote);
-            }
-            return {
-              rows: persistedMetricsRows,
-              persistedMetricsRows,
-              persistedInventoryRows: 0,
-              skipped: true,
-              skippedReason: 'manager_account'
-            };
-          }
-
-          if (isInvalidArgumentError(err) && variantIndex < metricVariants.length - 1) {
-            const fallbackVariant = metricVariants[variantIndex + 1];
-            const warnMsg = `Google Ads devolvió INVALID_ARGUMENT para ${customerId} con el set '${activeVariant.name}'. Cambiando a '${fallbackVariant.name}'.${detailMessages.length ? ` Detalle: ${detailMessages.join(' | ')}` : ''}`;
-            console.warn(`⚠️ ${warnMsg}`);
-            if (report && Array.isArray(report.notes)) {
-              report.notes.push(warnMsg);
-            }
-            variantIndex += 1;
-            continue;
-          }
-          throw err;
-        }
-      }
-
-      // Fallback: cualquier campaña sin filas a nivel ad_group (SMART, PMAX y otros casos).
-      try {
-        const fallbackRows = await this._fetchCampaignLevelMetrics({
-          account,
-          assignment,
-          groupId,
-          defaultClinicId,
-          accessToken,
-          effectiveLoginCustomerId,
-          startDate,
-          endDate,
-          processedCampaignDates,
-          report
+  async _syncGoogleAdsAccount(account, { start, end, chunkDays = 7, accessToken, report, brokerContext }) {
+    const request = brokerContext ? undefined : guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest);
+    const assertRead = transaction => brokerContext ? googleAdsBroker.assert(account, brokerContext, { transaction })
+      : googleLegacyCredentials.assert(account.googleConnection);
+    const readTyped = brokerContext ? (family, payload, budget) => googleAdsBroker.read(account, brokerContext, family, payload, budget) : undefined;
+    await assertRead();
+    const effectiveLoginCustomerId = brokerContext ? null
+      : normalizeCustomerId(account.loginCustomerId || account.managerCustomerId || ensureGoogleAdsConfig().managerId);
+    if (!brokerContext && !effectiveLoginCustomerId) throw new Error('google_ads_missing_login_customer');
+    const models = require('../../models');
+    const days = googleAdCache.daysBetween(start, end);
+    let persistedMetricsRows = 0; let persistedInventoryRows = 0;
+    let adCache = null;
+    try {
+      // Bounded snapshots reconcile Search and PMax before replacing any metric rows.
+      for (let offset = 0; offset < days.length; offset += 60) {
+        const slice = days.slice(offset, offset + 60);
+        const snapshot = await googleCampaignMetricsCache.collectGoogleCampaignMetrics({
+          account, accessToken, loginCustomerId: effectiveLoginCustomerId, start: slice[0], end: slice.at(-1),
+          readTyped,
+          read: options => googleAdsSearchRows({ ...options, request }),
         });
-        persistedMetricsRows += fallbackRows;
-      } catch (fallbackErr) {
-        console.error('⚠️ Error en fallback Google Ads a nivel campaña:', fallbackErr.message || fallbackErr);
-        report?.notes?.push?.(`Campaign fallback ${startDate}..${endDate}: ${fallbackErr.message || fallbackErr}`);
+        await assertRead();
+        const saved = await googleCampaignMetricsCache.persistGoogleCampaignMetrics({
+          models, account, snapshot, useGroupAttribution: true,
+          ...(brokerContext ? { beforeReplace: ({ transaction }) => assertRead(transaction) } : {}),
+        });
+        persistedMetricsRows += saved.rows;
       }
-
-      cursor = new Date(chunkEnd.getTime() + dayMs);
+      const publishing = await this._syncGoogleAdsPublishingState(account, {
+        accessToken, effectiveLoginCustomerId, report, request, readTyped, assertRead,
+      });
+      persistedInventoryRows = publishing.rows;
+      adCache = await googleAdCache.syncGoogleAdCache({ models, account, accessToken,
+        loginCustomerId: effectiveLoginCustomerId, start, end, chunkDays, ensureHistory: true,
+        readTyped, ...(brokerContext ? { beforeReplace: ({ transaction }) => assertRead(transaction) } : {}),
+        request: (method, route, options) => request(method, route, {
+          ...options, apiVersion: googleCampaignMetricsCache.API_VERSION,
+        }),
+      });
+      await assertRead();
+      if (publishing.destinationError) throw publishing.destinationError;
+      report?.notes?.push?.(`Google Ads anuncios: ${adCache.inventoryRows} inventariados, ${adCache.metricRows} filas diarias, ${adCache.days || 0} fechas completas${adCache.skipped ? ' (otra captura mas reciente)' : ''}.`);
+      return { complete: true, rows: persistedMetricsRows + adCache.metricRows,
+        persistedMetricsRows, persistedInventoryRows, adCache, metricVariant: 'reconciled' };
+    } catch (error) {
+      error.syncProgress = { persistedMetricsRows, persistedInventoryRows,
+        ...(adCache ? { adCache: { inventoryRows: adCache.inventoryRows, metricRows: adCache.metricRows,
+          days: adCache.days, skipped: Boolean(adCache.skipped) } } : {}) };
+      throw error;
     }
-
-    return {
-      rows: persistedMetricsRows,
-      persistedMetricsRows,
-      persistedInventoryRows,
-      metricVariant: metricVariants[variantIndex]?.name
-    };
   }
 
-  async _syncGoogleAdsPublishingState(account, { accessToken, effectiveLoginCustomerId, report }) {
+  async _syncGoogleAdsPublishingState(account, { accessToken, effectiveLoginCustomerId, report,
+    request, readTyped, assertRead = () => googleLegacyCredentials.assert(account.googleConnection) }) {
+    if (!readTyped) request ||= guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest);
     const customerId = normalizeCustomerId(account.customerId);
     const query = [
       'SELECT',
@@ -5043,24 +4815,23 @@ try {
       '  campaign.primary_status_reasons,',
       '  campaign.advertising_channel_type,',
       '  campaign.final_url_suffix,',
-      '  campaign.url_expansion_opt_out',
+      '  campaign.asset_automation_settings',
       'FROM campaign',
       "WHERE campaign.status != 'REMOVED'"
     ].join('\n');
 
-    let pageToken = null;
     let selectedIssue = null;
     let persistedInventoryRows = 0;
-    const campaignRows = [];
-    do {
-      const resp = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, {
-        accessToken,
-        loginCustomerId: effectiveLoginCustomerId,
-        data: { query, pageToken }
-      });
-      const results = resp?.results || [];
-      campaignRows.push(...results);
-      for (const row of results) {
+    const campaignRows = readTyped ? await readTyped('publishing_campaigns', {}) : await googleAdsSearchRows({ customerId, accessToken,
+      loginCustomerId: effectiveLoginCustomerId, apiVersion: googleCampaignMetricsCache.API_VERSION,
+      query: `${query} LIMIT 5001`, request });
+    if (campaignRows.length > 5000 || campaignRows.some(row => !/^[1-9]\d*$/.test(String(row?.campaign?.id || '')))) {
+      throw new Error('google_ads_inventory_incomplete');
+    }
+    const persistInventory = async transaction => {
+      if (readTyped) await assertRead(transaction);
+      let rows = 0;
+      for (const row of campaignRows) {
         const campaign = row?.campaign || {};
         if (ExternalCampaignInventory && campaign.id) {
           await ExternalCampaignInventory.upsert({
@@ -5073,8 +4844,8 @@ try {
             channel_type: campaign.advertisingChannelType || campaign.advertising_channel_type || null,
             source: 'provider_sync',
             last_seen_at: new Date()
-          });
-          persistedInventoryRows += 1;
+          }, { transaction });
+          rows += 1;
         }
         const issue = evaluateGooglePublishingIssue(campaign);
         if (!issue) {
@@ -5088,45 +4859,56 @@ try {
           };
         }
       }
-      pageToken = resp?.nextPageToken || resp?.next_page_token || null;
-    } while (pageToken);
+      return rows;
+    };
+    persistedInventoryRows = readTyped ? await sequelize.transaction(persistInventory) : await persistInventory();
 
+    let destinationError = null;
     try {
       await this._syncGoogleAdsCampaignDestinations(account, {
         accessToken,
         effectiveLoginCustomerId,
         campaignRows,
+        request,
+        readTyped, assertRead,
       });
-    } catch (destinationError) {
-      // Destination evidence enriches reporting but must never block the
-      // normal metrics sync. A later daily run will retry the read-only query.
+    } catch (error) {
+      // Finish the independent ad cache, but do not label the whole account complete.
+      destinationError = error;
       report?.notes?.push?.(
-        `Google Ads destination audit ${formatCustomerId(customerId)}: ${destinationError.message || destinationError}`
+        `Google Ads destination audit ${formatCustomerId(customerId)}: ${error.message || error}`
       );
     }
 
-    await account.update({
-      publishingStatus: selectedIssue?.status || null,
-      publishingReason: selectedIssue?.reason || null,
-      publishingReasons: selectedIssue?.reasons ? JSON.stringify(selectedIssue.reasons) : null,
-      publishingCampaignId: selectedIssue?.campaignId || null,
-      publishingCampaignName: selectedIssue?.campaignName || null,
-      publishingSyncedAt: new Date()
-    });
+    await assertRead();
+    const persistPublishing = async transaction => {
+      if (readTyped) await assertRead(transaction);
+      await updateGoogleAdsSyncMetadata(ClinicGoogleAdsAccount, account, {
+        publishingStatus: selectedIssue?.status || null,
+        publishingReason: selectedIssue?.reason || null,
+        publishingReasons: selectedIssue?.reasons ? JSON.stringify(selectedIssue.reasons) : null,
+        publishingCampaignId: selectedIssue?.campaignId || null,
+        publishingCampaignName: selectedIssue?.campaignName || null,
+        publishingSyncedAt: new Date()
+      }, { transaction });
+    };
+    if (readTyped) await sequelize.transaction(persistPublishing); else await persistPublishing();
 
     if (selectedIssue && report && Array.isArray(report.notes)) {
       report.notes.push(`Google Ads publishing issue ${account.customerId}: ${selectedIssue.status}`);
     }
 
-    return persistedInventoryRows;
+    return { rows: persistedInventoryRows, destinationError };
   }
 
   async _syncGoogleAdsCampaignDestinations(account, {
     accessToken,
     effectiveLoginCustomerId,
     campaignRows = [],
+    request, readTyped, assertRead,
   }) {
     if (!ExternalCampaignInventory || !campaignRows.length) return 0;
+    if (!readTyped) request ||= guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest);
     const customerId = normalizeCustomerId(account.customerId);
     const end = new Date();
     const start = new Date(end.getTime() - (29 * MS_PER_DAY));
@@ -5140,17 +4922,10 @@ try {
       `WHERE segments.date BETWEEN '${start.toISOString().slice(0, 10)}' AND '${end.toISOString().slice(0, 10)}'`,
     ].join('\n');
 
-    const landingRows = [];
-    let pageToken = null;
-    do {
-      const response = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, {
-        accessToken,
-        loginCustomerId: effectiveLoginCustomerId,
-        data: { query, pageToken },
-      });
-      landingRows.push(...(response?.results || []));
-      pageToken = response?.nextPageToken || response?.next_page_token || null;
-    } while (pageToken);
+    const landingRows = readTyped ? await readTyped('landing_pages', { startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10) })
+      : await googleAdsSearchRows({ customerId, accessToken,
+      loginCustomerId: effectiveLoginCustomerId, apiVersion: googleCampaignMetricsCache.API_VERSION,
+      query, request });
 
     const detections = buildGoogleDestinationDetections({
       campaignRows,
@@ -5159,33 +4934,12 @@ try {
     });
     let updated = 0;
     for (const [campaignId, detection] of detections.entries()) {
-      const inventory = await ExternalCampaignInventory.findOne({
-        where: {
-          provider: 'google_ads',
-          customer_id: customerId,
-          campaign_id: campaignId,
-        },
+      updated += await saveObservedGoogleDestination({
+        models: { sequelize, ExternalCampaignInventory },
+        reference: { account_id: customerId, campaign_id: campaignId },
+        detection,
+        ...(readTyped ? { beforeWrite: ({ transaction }) => assertRead(transaction) } : {}),
       });
-      if (!inventory) continue;
-      const current = inventory.destination_detection && typeof inventory.destination_detection === 'object'
-        ? inventory.destination_detection
-        : {};
-      const hasFreshObservedUrls = Array.isArray(detection.urls) && detection.urls.length > 0;
-      await inventory.update({
-        destination_detection: {
-          ...current,
-          ...detection,
-          ...(!hasFreshObservedUrls && Array.isArray(current.urls) && current.urls.length ? {
-            status: 'observed_stale',
-            urls: current.urls,
-            domains: current.domains || [],
-            primary_url: current.primary_url || current.urls[0],
-            observed_destination_count: current.observed_destination_count || current.urls.length,
-            expanded_beyond_primary: detection.url_expansion_enabled === true && current.urls.length > 1,
-          } : {}),
-        },
-      });
-      updated += 1;
     }
     return updated;
   }
@@ -5208,7 +4962,7 @@ try {
     let fallbackRows = 0;
     let pageToken = null;
     do {
-      const resp = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, {
+      const resp = await guardGoogleAdsLegacyRequest(account.googleConnection, googleAdsRequest)('POST', `customers/${customerId}/googleAds:search`, {
         accessToken,
         loginCustomerId: effectiveLoginCustomerId,
         data: { query, pageToken }
@@ -5546,6 +5300,45 @@ try {
       }
     }
     return persistedRows;
+  }
+
+async _readSearchConsole(asset, credentials, family, payload) {
+    // Check the independent registry even for a token prepared earlier in this job.
+    const fresh = await searchConsoleBroker.prepare(asset);
+    if (!!fresh !== !!credentials.brokerContext) throw Object.assign(new Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+    if (credentials.brokerContext) return searchConsoleBroker.read(asset, credentials.brokerContext, family, payload);
+    return googleLegacyCredentials.request(credentials.connection, () => {
+      if (family === 'inspection') {
+        const siteUrl = asset.siteUrl;
+        const inspectionUrl = siteUrl.startsWith('http') ? siteUrl : 'https://' + siteUrl.replace('sc-domain:', '');
+        return syncHttp.post('https://searchconsole.googleapis.com/v1/urlInspection/index:inspect', { siteUrl, inspectionUrl },
+          { headers: { Authorization: `Bearer ${credentials.accessToken}` } });
+      }
+      if (!['timeseries', 'queries'].includes(family)) throw new Error('search_console_operation_invalid');
+      const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(asset.siteUrl)}/searchAnalytics/query`;
+      return syncHttp.post(url, { ...payload, dimensions: family === 'timeseries' ? ['date'] : ['date', 'query', 'page'], rowLimit: 25000 },
+        { headers: { Authorization: `Bearer ${credentials.accessToken}` } });
+    });
+  }
+
+async executeBusinessProfileRevocations() {
+    return require('../services/businessProfileRevocation.service').run();
+  }
+
+async executeGoogleAdsRevocations() {
+    return require('../services/googleAdsRevocation.service').run();
+  }
+
+async executeGoogleAdsEnrollment() {
+    return require('../services/googleAdsEnrollment.service').run();
+  }
+
+async executeGooglePropertyRevocations() {
+    return require('../services/googlePropertyRevocation.service').run();
+  }
+
+async executeGoogleOAuthReconciliation() {
+    return require('../services/googleOAuthBroker.service').run();
   }
 }
 

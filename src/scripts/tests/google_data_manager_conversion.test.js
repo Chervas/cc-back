@@ -408,6 +408,10 @@ function testDiagnosticsClassification() {
 }
 
 async function testDiagnosticsReconciliation() {
+  const models = require('./fixtures/google_ads_legacy_models.fixture').installGoogleAdsLegacyModels({
+    GoogleConnection: { async findByPk() { return { id: 23, googleUserId: 'fictitious-legacy-subject',
+      scopes: GOOGLE_DATA_MANAGER_SCOPE, accessToken: 'fictitious-legacy-token' }; } },
+  });
   const attempt = {
     id: 7,
     status: 'accepted',
@@ -425,7 +429,8 @@ async function testDiagnosticsReconciliation() {
   };
   const result = await reconcileGoogleDataManagerDiagnostics({
     attemptModel: { async findAll() { return [attempt]; } },
-    connectionModel: { async findByPk() { return { id: 23 }; } },
+    connectionModel: models.GoogleConnection,
+    credentials: require('../../services/googleLegacyCredentials.service').forModels(models),
     ensureAccessToken: async (_connection, options) => {
       assert.deepEqual(options.requiredScopes, [GOOGLE_DATA_MANAGER_SCOPE]);
       return { accessToken: 'dm-token' };
@@ -530,12 +535,16 @@ function testScopeAndProvisioningContracts() {
     conversion_customer_id: '5992356722'
   });
 
-  const enhancedCapabilities = campaignOnboardingTest.buildGoogleAdsCapabilities(
-    true,
-    true,
-    true,
-    [{ customer_id: '1851215478', enhanced_conversions_for_leads_enabled: true }]
-  );
+  const previousProject = process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT;
+  let enhancedCapabilities;
+  try {
+    process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT = 'fictitious-offline-project';
+    enhancedCapabilities = campaignOnboardingTest.buildGoogleAdsCapabilities(true, true, true,
+      [{ customer_id: '1851215478', enhanced_conversions_for_leads_enabled: true }]);
+  } finally {
+    if (previousProject === undefined) delete process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT;
+    else process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT = previousProject;
+  }
   assert.equal(enhancedCapabilities.enhanced_conversions_supported, true);
   assert.equal(enhancedCapabilities.can_upload_enhanced_conversions, true);
   assert.deepEqual(enhancedCapabilities.enhanced_conversions_enabled_accounts, ['1851215478']);

@@ -117,6 +117,217 @@ const ALLOWED_FRONTEND_ORIGINS = new Set([
     FRONTEND_DEV_INTEGRATION_URL
 ]);
 
+const { resolveWorkspaceGroupAccountScope } = require('../lib/campaignWorkspaceAccountScope');
+
+const googleOAuthBroker = require('../services/googleOAuthBroker.service');
+
+const { discoverGoogleAdsAccountSelection } = require('../services/googleAdsAccountDiscovery.service');
+
+const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
+
+const googlePropertyInventoryScope = require('../services/googlePropertyInventoryScope.service');
+
+const googleAdsMapping = require('../services/googleAdsMapping.service');
+
+const googleAdsDiscovery = require('../services/googleAdsDiscovery.service');
+
+const googlePropertyDiscovery = require('../services/googlePropertyDiscovery.service');
+
+const businessProfileDiscovery = require('../services/businessProfileDiscovery.service');
+
+async function googlePropertyInventory(req, kind) {
+    const resolved = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+    if (!resolved.connection) throw Object.assign(Error('google_discovery_no_connection'), { code: 'google_discovery_no_connection' });
+    const clinicIds = req.marketingConnectionScopeAuthorization?.clinicIds?.slice();
+    const actor = getUserIdFromToken(req);
+    const revalidate = async managed => {
+        let claims;
+        try { claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { claims = null; }
+        if (!claims || Number(claims.userId) !== Number(actor) || managed && (claims.sessionVersion !== 1 || !claims.jti)) {
+            throw Object.assign(Error('google_discovery_session_required'), { code: 'google_discovery_session_required' });
+        }
+        let scope;
+        try { scope = await authorizeExplicitConnectionScope(req, 'write'); } catch {
+            throw Object.assign(Error('google_discovery_scope_forbidden'), { code: 'google_discovery_scope_forbidden' });
+        }
+        const latest = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+        if (!scope.requested || scope.clinicIds.length !== clinicIds?.length || scope.clinicIds.some(id => !clinicIds.includes(id))
+            || Number(latest.connection?.id) !== Number(resolved.connection.id)) {
+            throw Object.assign(Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+        }
+    };
+    const managed = await googlePropertyDiscovery.list({ kind, clinicIds, connectionId: Number(resolved.connection.id), revalidate,
+        resolveEffectiveMappings: () => googlePropertyInventoryScope.resolve({ kind, clinicIds,
+            connectionId: Number(resolved.connection.id), scopeInput: getScopeInputFromRequest(req) }) });
+    if (managed !== null) return { managed, resolved };
+    await revalidate(false); await googlePropertyDiscovery.assertLegacyAllowed();
+    const connection = await googleLegacyCredentials.load(resolved.connection.id);
+    await googlePropertyDiscovery.assertLegacyAllowed();
+    const scopedRequest = async (current, send) => {
+        await revalidate(false); await googlePropertyDiscovery.assertLegacyAllowed();
+        const result = await googleLegacyCredentials.request(current, send);
+        await googlePropertyDiscovery.assertLegacyAllowed(); await revalidate(false);
+        return result;
+    };
+    const { accessToken } = await ensureGoogleAccessToken(connection, { credentials: { ...googleLegacyCredentials, request: scopedRequest } });
+    return { managed: null, resolved, connection, request: send => scopedRequest(connection, () => send(accessToken)) };
+}
+
+async function googleAdsMappingScope(req, access) {
+    const fail = code => { throw Object.assign(Error(code), { code }); };
+    let authorization;
+    try { authorization = await authorizeExplicitConnectionScope(req, access); } catch { fail('google_discovery_scope_forbidden'); }
+    if (!authorization.requested) fail('google_discovery_scope_forbidden');
+    let claims;
+    try { claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { fail('google_discovery_session_required'); }
+    if (claims.sessionVersion !== 1 || !claims.jti) fail('google_discovery_session_required');
+    const resolved = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+    if (!resolved.connection || !resolved.scope?.scopeKey) fail('broker_binding_invalid');
+    const clinicIds = authorization.clinicIds.slice();
+    const revalidate = async () => {
+        let fresh;
+        try { fresh = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { fail('google_discovery_session_required'); }
+        if (fresh.userId !== claims.userId || fresh.jti !== claims.jti || fresh.sessionVersion !== 1) fail('google_discovery_session_required');
+        let latest;
+        try { latest = await authorizeExplicitConnectionScope(req, access); } catch { fail('google_discovery_scope_forbidden'); }
+        const connection = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+        if (!latest.requested || latest.clinicIds.length !== clinicIds.length || latest.clinicIds.some(id => !clinicIds.includes(id))
+            || connection.scope?.scopeKey !== resolved.scope.scopeKey || Number(connection.connection?.id) !== Number(resolved.connection.id)) fail('broker_binding_invalid');
+    };
+    return { clinicIds, scopeKey: resolved.scope.scopeKey, connectionId: Number(resolved.connection.id), actorId: claims.userId,
+        sessionRef: claims.jti, revalidate, authorize: async ({ transaction }) => {
+            try { await accessSessions.verifyReference({ userId: claims.userId, sessionRef: claims.jti, expiresAt: new Date(claims.exp * 1000) }, { transaction }); }
+            catch { fail('google_discovery_session_required'); }
+            return hasMarketingClinicScopeAccess({ userId: claims.userId, clinicIds, access: 'write',
+                membershipModel: { findAll: options => db.UsuarioClinica.findAll({ ...options, transaction, lock: transaction.LOCK.UPDATE, logging: false }) } });
+        } };
+}
+
+async function googleAdsInventory(req, { capture = false } = {}) {
+    const deadline = Date.now() + 60000;
+    const resolved = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+    if (!resolved.connection) throw Object.assign(Error('google_discovery_no_connection'), { code: 'google_discovery_no_connection' });
+    const clinicIds = req.marketingConnectionScopeAuthorization?.clinicIds?.slice();
+    const actor = getUserIdFromToken(req);
+    const revalidate = async managed => {
+        let claims;
+        try { claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { claims = null; }
+        if (!claims || Number(claims.userId) !== Number(actor) || managed && (claims.sessionVersion !== 1 || !claims.jti)) {
+            throw Object.assign(Error('google_discovery_session_required'), { code: 'google_discovery_session_required' });
+        }
+        let authorized;
+        try { authorized = await authorizeExplicitConnectionScope(req, 'write'); } catch {
+            throw Object.assign(Error('google_discovery_scope_forbidden'), { code: 'google_discovery_scope_forbidden' });
+        }
+        const latest = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+        if (!authorized.requested || authorized.clinicIds.length !== clinicIds?.length
+            || authorized.clinicIds.some(id => !clinicIds.includes(id)) || latest.scope?.scopeKey !== resolved.scope?.scopeKey
+            || Number(latest.connection?.id) !== Number(resolved.connection.id)) {
+            throw Object.assign(Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+        }
+    };
+    const managed = await googleAdsDiscovery[capture ? 'capture' : 'list']({ clinicIds, connectionId: Number(resolved.connection.id), scopeKey: resolved.scope?.scopeKey, revalidate });
+    if (managed !== null) return { managed, resolved };
+    const check = async () => {
+        await revalidate(false); await googleAdsDiscovery.assertLegacyAllowed();
+        if (Date.now() >= deadline) throw Object.assign(Error('broker_discovery_timeout'), { code: 'broker_discovery_timeout' });
+    };
+    await check();
+    const connection = await googleLegacyCredentials.load(resolved.connection.id, { includeScopes: true });
+    await check();
+    if (!hasScopeText(connection.scopes || '', GOOGLE_ADS_SCOPE)) throw Object.assign(Error('google_ads_legacy_insufficient_scope'), { code: 'google_ads_legacy_insufficient_scope' });
+    const scopedRequest = async (current, send) => {
+        await check();
+        const result = await googleLegacyCredentials.request(current, send);
+        await check(); return result;
+    };
+    let accessToken;
+    try {
+        ({ accessToken } = await ensureGoogleAccessToken(connection, { credentials: { ...googleLegacyCredentials, request: scopedRequest } }));
+        ensureGoogleAdsConfig();
+    } catch (error) {
+        await check(); // A new managed marker takes precedence over a legacy token error.
+        const reason = ['TOKEN_EXPIRED', 'TOKEN_EXPIRY_UNKNOWN', 'REFRESH_FAILED'].includes(error?.code) ? 'token_expired'
+            : error?.code === 'ADS_CONFIG_MISSING' ? 'config_missing' : 'token_error';
+        throw Object.assign(Error('google_ads_legacy_' + reason), { code: 'google_ads_legacy_' + reason });
+    }
+    await check();
+    let failure; let requests = 0;
+    const request = async (method, path, options = {}) => {
+        if (failure) throw failure;
+        let closedAccount = false;
+        try {
+            await check();
+            if (++requests > 100) throw Object.assign(Error('broker_discovery_limit'), { code: 'broker_discovery_limit' });
+            return await scopedRequest(connection, async () => {
+                try { return await googleAdsRequest(method, path, { ...options, singleAttempt: true,
+                    timeoutMs: Math.max(1, Math.min(8000, deadline - Date.now(), options.timeoutMs || 8000)) }); }
+                catch (error) {
+                    const details = error.response?.data?.error?.details;
+                    const codes = Array.isArray(details) ? details.flatMap(detail => (Array.isArray(detail.errors) ? detail.errors : [])
+                        .flatMap(item => Object.values(item.errorCode || {}))) : [];
+                    closedAccount = req.query.view === 'selection' && error.response?.status === 403 && codes.length > 0
+                        && codes.every(code => code === 'CUSTOMER_NOT_ENABLED');
+                    throw error;
+                }
+            });
+        } catch (error) {
+            // Preserve the picker’s documented unavailable-account case using
+            // only a fixed code, after rechecking the failed request’s authority.
+            if (closedAccount) {
+                await googleLegacyCredentials.assert(connection); await check();
+                throw Object.assign(Error('provider_unauthorized'), { response: { status: 403,
+                    data: { error: { details: [{ errors: [{ errorCode: { authorizationError: 'CUSTOMER_NOT_ENABLED' } }] }] } } } });
+            }
+            failure = Object.assign(Error(googleAdsDiscovery.safe(error)), { code: googleAdsDiscovery.safe(error) }); throw failure;
+        }
+    };
+    return { managed: null, resolved, connection, accessToken, request,
+        check: async () => { if (failure) throw failure; await check(); } };
+}
+
+function sendGoogleAdsDiscoveryError(res, error, connectionStatus = false) {
+    const reasons = { google_ads_legacy_insufficient_scope: 'insufficient_scope', google_ads_legacy_token_expired: 'token_expired',
+        google_ads_legacy_config_missing: 'config_missing', google_ads_legacy_token_error: 'token_error' };
+    const reason = Object.hasOwn(reasons, error?.code) ? reasons[error.code] : null;
+    if (reason) return connectionStatus ? res.json({ connected: false, reason })
+        : res.status(reason === 'insufficient_scope' ? 403 : 400).json({ success: false, error: reason });
+    return sendGooglePropertyDiscoveryError(res, error, connectionStatus);
+}
+
+function googleAnalyticsInventoryAccounts(properties) {
+    const accounts = new Map();
+    for (const property of properties) {
+        const key = 'accountSummaries/' + property.account.slice('accounts/'.length);
+        if (!accounts.has(key)) accounts.set(key, { accountName: key, accountDisplayName: property.account, properties: [] });
+        accounts.get(key).properties.push({ propertyName: property.name, propertyDisplayName: property.displayName,
+            propertyType: property.propertyType, parent: property.parent });
+    }
+    return [...accounts.values()];
+}
+
+function sendGooglePropertyDiscoveryError(res, error, connectionStatus = false) {
+    if (connectionStatus && error?.code === 'google_discovery_no_connection') return res.json({ connected: false, reason: 'no_connection' });
+    if (connectionStatus && error?.code !== 'google_oauth_legacy_closed'
+        && (String(error?.code || '').startsWith('google_oauth_') || error?.code === 'auth_invalid')) {
+        return res.status([400, 401, 403, 409].includes(error?.httpStatus) ? error.httpStatus : 503)
+            .json({ connected: false, reason: googleOAuthBroker.safe(error) });
+    }
+    const code = googlePropertyDiscovery.safe(error);
+    return res.status(googlePropertyDiscovery.status(error)).json(connectionStatus
+        ? { connected: false, reason: code } : { success: false, error: code });
+}
+
+function sendBusinessProfileDiscoveryError(res, error) {
+    const code = error?.code;
+    if (!businessProfileDiscovery.ERROR_CODES.has(code)) return false;
+    const status = businessProfileDiscovery.CONFLICT_CODES.has(code) ? 409 : 503;
+    res.status(status).json({ success: false, error: code });
+    return true;
+}
+
+let adsEnrollmentRoutes;
+
 function getMetaGraphError(error) {
     return error?.response?.data?.error || null;
 }
@@ -371,12 +582,12 @@ async function subscribeLeadgenToPage(pageId, pageAccessToken) {
         const params = { access_token: pageAccessToken };
         if (META_BUSINESS_ID) params.business = META_BUSINESS_ID;
         const data = { subscribed_fields: 'leadgen' };
-        const resp = await axios.post(url, data, { params });
+        const resp = await metaHttp.post(url, data, { params });
         console.log(`✅ Subscrita la página ${pageId} a leadgen (${resp.data?.success ? 'success' : 'no success flag'})`);
 
         // Verificación rápida opcional: comprobar que la app aparece en subscribed_apps
         try {
-            const verify = await axios.get(`${META_API_BASE_URL}/${pageId}/subscribed_apps`, { params });
+            const verify = await metaHttp.get(`${META_API_BASE_URL}/${pageId}/subscribed_apps`, { params });
             const apps = Array.isArray(verify.data?.data) ? verify.data.data : [];
             const found = apps.find((a) => String(a.id || a.app_id) === META_APP_ID.toString());
             if (!found) {
@@ -452,13 +663,15 @@ function buildScopeResponse(scope, assignment) {
 
 async function resolveGoogleRequestConnection(req, {
     allowLegacyUserFallback = true,
-    scopeInput = null
+    scopeInput = null,
+    metadataOnly = false
 } = {}) {
     const userId = getUserIdFromToken(req);
     const resolved = await resolveGoogleConnectionForScope({
         userId,
         ...(scopeInput || getScopeInputFromRequest(req)),
-        allowLegacyUserFallback
+        allowLegacyUserFallback,
+        metadataOnly
     });
     return { userId, ...resolved };
 }
@@ -484,10 +697,12 @@ function googleTokenError(code, message) {
     return err;
 }
 
-async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
+async function ensureGoogleAccessToken(conn, { allowExpired = false, credentials = null } = {}) {
     if (!conn) {
         throw googleTokenError('NO_CONNECTION', 'No existe conexión Google para este usuario');
     }
+    await googleOAuthBroker.assertLegacyConnection(conn);
+    if (credentials) await credentials.assert(conn);
     if (!conn.accessToken) {
         throw googleTokenError('NO_TOKEN', 'No existe access token de Google almacenado');
     }
@@ -501,18 +716,20 @@ async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
     let refreshError = null;
     if (shouldRefresh) {
         try {
-            const tr = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+            const refresh = () => axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
                 client_id: GOOGLE_CLIENT_ID,
                 client_secret: GOOGLE_CLIENT_SECRET,
                 grant_type: 'refresh_token',
                 refresh_token: conn.refreshToken
-            }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+            }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, ...(credentials ? { timeout: 8000 } : {}) });
+            const tr = credentials ? await credentials.request(conn, refresh) : await refresh();
             const newToken = tr.data?.access_token;
             const expiresIn = tr.data?.expires_in || 3600;
             if (newToken) {
                 accessToken = newToken;
                 expiresAt = new Date(Date.now() + expiresIn * 1000);
-                await conn.update({ accessToken, expiresAt });
+                if (credentials) await credentials.saveRefresh(conn, { accessToken, expiresAt });
+                else await conn.update({ accessToken, expiresAt });
             }
         } catch (refreshErr) {
             refreshError = refreshErr;
@@ -537,6 +754,7 @@ async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
         throw googleTokenError('TOKEN_EXPIRED', 'El token de Google ha expirado');
     }
 
+    if (credentials) await credentials.assert(conn);
     return { accessToken, expiresAt, expired: isExpired };
 }
 
@@ -561,13 +779,13 @@ async function ensureGoogleAdsAccess(conn) {
     return tokenInfo;
 }
 
-async function listAccessibleAdsCustomers(accessToken) {
-    const resp = await googleAdsRequest('GET', 'customers:listAccessibleCustomers', { accessToken });
+async function listAccessibleAdsCustomers(accessToken, request = googleAdsRequest) {
+    const resp = await request('GET', 'customers:listAccessibleCustomers', { accessToken });
     const resourceNames = resp?.resourceNames || [];
     return resourceNames.map((name) => normalizeCustomerId(name.split('/').pop()));
 }
 
-async function fetchAdsCustomerSummary(accessToken, customerId, { loginCustomerId } = {}) {
+async function fetchAdsCustomerSummary(accessToken, customerId, { loginCustomerId, request = googleAdsRequest } = {}) {
     if (!customerId) {
         return null;
     }
@@ -589,7 +807,7 @@ async function fetchAdsCustomerSummary(accessToken, customerId, { loginCustomerI
     if (loginCustomerId) {
         requestOptions.loginCustomerId = normalizeCustomerId(loginCustomerId);
     }
-    const result = await googleAdsRequest('POST', `customers/${cleanId}/googleAds:search`, requestOptions);
+    const result = await request('POST', `customers/${cleanId}/googleAds:search`, requestOptions);
     const row = Array.isArray(result?.results) ? result.results[0] : null;
     if (!row?.customer) {
         return { customerId: cleanId };
@@ -604,7 +822,7 @@ async function fetchAdsCustomerSummary(accessToken, customerId, { loginCustomerI
     };
 }
 
-async function fetchAdsCustomerClients(accessToken, managerCustomerId) {
+async function fetchAdsCustomerClients(accessToken, managerCustomerId, request = googleAdsRequest) {
     const manager = normalizeCustomerId(managerCustomerId);
     if (!manager) {
         return [];
@@ -627,7 +845,7 @@ async function fetchAdsCustomerClients(accessToken, managerCustomerId) {
     const clients = [];
     let pageToken = null;
     do {
-        const resp = await googleAdsRequest('POST', `customers/${manager}/googleAds:search`, {
+        const resp = await request('POST', `customers/${manager}/googleAds:search`, {
             accessToken,
             loginCustomerId: manager,
             data: { query, pageToken }
@@ -660,7 +878,7 @@ async function fetchAdsCustomerClients(accessToken, managerCustomerId) {
     return clients;
 }
 
-async function fetchManagerLinkForCustomer(accessToken, customerId, managerId, { loginCustomerId } = {}) {
+async function fetchManagerLinkForCustomer(accessToken, customerId, managerId, { loginCustomerId, request = googleAdsRequest } = {}) {
     const manager = normalizeCustomerId(managerId);
     if (!manager) {
         return null;
@@ -679,7 +897,7 @@ async function fetchManagerLinkForCustomer(accessToken, customerId, managerId, {
     if (loginCustomerId) {
         requestOptions.loginCustomerId = normalizeCustomerId(loginCustomerId);
     }
-    const result = await googleAdsRequest('POST', `customers/${customerId}/googleAds:search`, requestOptions);
+    const result = await request('POST', `customers/${customerId}/googleAds:search`, requestOptions);
     const row = Array.isArray(result?.results) ? result.results[0] : null;
     if (!row?.customerManagerLink) {
         return null;
@@ -695,6 +913,7 @@ async function fetchAllGoogleBusinessAccounts(accessToken) {
     const accounts = [];
     let nextPageToken = null;
     do {
+        await businessProfileDiscovery.assertLegacyAllowed();
         const resp = await axios.get(`${GOOGLE_BUSINESS_ACCOUNT_API}/accounts`, {
             params: { pageSize: 100, pageToken: nextPageToken || undefined },
             headers: { Authorization: `Bearer ${accessToken}` }
@@ -714,6 +933,7 @@ async function fetchAllGoogleBusinessLocations(accessToken, accountName) {
         readMask: GOOGLE_BUSINESS_LOCATION_READ_MASK
     };
     do {
+        await businessProfileDiscovery.assertLegacyAllowed();
         const resp = await axios.get(`${GOOGLE_BUSINESS_INFORMATION_API}/${accountName}/locations`, {
             params: { ...paramsBase, pageToken: nextPageToken || undefined },
             headers: { Authorization: `Bearer ${accessToken}` }
@@ -726,6 +946,7 @@ async function fetchAllGoogleBusinessLocations(accessToken, accountName) {
 }
 
 async function fetchAccessibleGoogleBusinessLocations(connection) {
+    await businessProfileDiscovery.assertLegacyAllowed();
     const { accessToken } = await ensureGoogleAccessToken(connection);
     const accounts = await fetchAllGoogleBusinessAccounts(accessToken);
     const locations = [];
@@ -1092,14 +1313,17 @@ function sendKnownOAuthMappingError(res, error) {
 const PROVIDER_INVENTORY_PATHS = new Set([
     '/google/assets',
     '/google/analytics/properties',
+    '/google/analytics/connection-status',
     '/google/local/locations',
     '/google/ads/accounts',
+    '/google/ads/connection-status',
     '/meta/assets'
 ]);
 const EXPLICIT_SCOPE_REQUIRED_PATHS = new Set([
     ...PROVIDER_INVENTORY_PATHS,
     '/google/effective-mappings',
     '/google/connect',
+    '/google/disconnection-status',
     '/meta/connect',
     '/google/ads/request-link',
     '/google/ads/accept-link'
@@ -1152,6 +1376,7 @@ router.use(async (req, res, next) => {
     }
 
     const isConnectionMutation = providerInventory
+        || normalizedPath === '/google/disconnection-status'
         || req.method !== 'GET'
         || /\/(?:connect|disconnect)$/.test(normalizedPath);
     try {
@@ -1425,8 +1650,15 @@ router.get('/meta/callback', metaHttp.middleware, async (req, res) => {
  */
 router.get('/google/connect', async (req, res) => {
     try {
+        res.set('Cache-Control', 'no-store');
         const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
+        const resolved = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: false, metadataOnly: true });
+        const binding = await googleOAuthBroker.bindingFor(resolved.connection?.id, req.query?.google_service);
+        if (binding) return res.json(await googleOAuthBroker.begin({ binding, scopeKey: resolved.scope?.scopeKey,
+            actorId: userId, sessionRef: req.authSession?.id, sessionExpiresAt: req.authSession?.expiresAt,
+            returnTo: new URL(normalizeFrontendReturnTo(req.query?.return_to || null)).origin }));
+        await googleOAuthBroker.assertLegacyAllowed();
         if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
             return res.status(503).json({ success: false, error: 'google_oauth_not_configured' });
         }
@@ -1454,8 +1686,8 @@ router.get('/google/connect', async (req, res) => {
         const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
         return res.json({ success: true, authUrl });
     } catch (e) {
-        console.error('❌ Error generando authUrl de Google:', e.message);
-        return res.status(500).json({ success: false, error: 'No se pudo generar authUrl' });
+        const code = googleOAuthBroker.safe(e);
+        return res.status([400, 401, 403, 409].includes(e?.httpStatus) ? e.httpStatus : 503).json({ success: false, error: code });
     }
 });
 
@@ -1465,14 +1697,19 @@ router.get('/google/connect', async (req, res) => {
  */
 router.get('/google/callback', async (req, res) => {
     let frontendOrigin = FRONTEND_URL;
+    res.set('Cache-Control', 'no-store');
+    res.set('Referrer-Policy', 'no-referrer');
     try {
         const { code, state, error } = req.query;
+        const managed = await googleOAuthBroker.callback({ state, code, denied: Boolean(error) });
+        if (managed) return res.redirect(buildFrontendSettingsRedirect(normalizeFrontendReturnTo(managed.returnTo),
+            `?google_authorization=${managed.activation_confirmed ? 'confirmed' : managed.pending ? 'pending' : 'cancelled'}`));
+        await googleOAuthBroker.assertLegacyAllowed();
         const oauthState = await consumeOAuthState('google', state);
         frontendOrigin = normalizeFrontendReturnTo(oauthState.returnTo);
         await authorizeStoredOAuthState(oauthState);
         if (error) {
-            console.error('❌ Error en callback Google:', error);
-            return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent(String(error))}`));
+            return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, '?error=google_authorization_cancelled'));
         }
         if (!code) {
             return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('Código no proporcionado')}`));
@@ -1491,6 +1728,7 @@ router.get('/google/callback', async (req, res) => {
         }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
 
         const accessToken = tokenResp.data?.access_token;
+        await googleOAuthBroker.assertLegacyAllowed();
         const refreshToken = tokenResp.data?.refresh_token || null; // puede ser null si ya concedido
         const expiresIn = tokenResp.data?.expires_in || 3600;
         if (!accessToken) throw new Error('No access_token en respuesta de token');
@@ -1509,6 +1747,7 @@ router.get('/google/callback', async (req, res) => {
         if (!userId) {
             console.warn('⚠️ state vacío en callback Google');
         }
+        await googleOAuthBroker.assertLegacyAllowed();
         const storedConnection = await persistGoogleConnection({
             userId,
             googleUserId,
@@ -1536,7 +1775,6 @@ router.get('/google/callback', async (req, res) => {
         // 4) Redirigir al frontend
         return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?connected=google&googleUserId=${googleUserId}`));
     } catch (err) {
-        console.error('❌ Error en /oauth/google/callback:', err.response?.data || err.message);
         return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('Error en autenticación de Google')}`));
     }
 });
@@ -1547,7 +1785,16 @@ router.get('/google/callback', async (req, res) => {
  */
 router.get('/google/connection-status', async (req, res) => {
     try {
+        res.set('Cache-Control', 'no-store');
         const scopedRequest = hasRequestedScope(req);
+        const metadata = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: !scopedRequest, metadataOnly: true });
+        const binding = await googleOAuthBroker.bindingFor(metadata.connection?.id, req.query?.google_service);
+        if (binding) {
+            await authorizeExplicitConnectionScope(req, 'write');
+            return res.json(await googleOAuthBroker.status({ binding, scopeKey: metadata.scope?.scopeKey,
+                actorId: getUserIdFromToken(req), sessionRef: req.authSession?.id, sessionExpiresAt: req.authSession?.expiresAt }));
+        }
+        await googlePropertyDiscovery.assertLegacyAllowed();
         const { userId, connection: conn, assignment, scope, source } = await resolveGoogleRequestConnection(req, {
             allowLegacyUserFallback: !scopedRequest
         });
@@ -1592,8 +1839,7 @@ router.get('/google/connection-status', async (req, res) => {
             source
         });
     } catch (e) {
-        console.error('❌ Error en connection-status Google:', e.message);
-        return res.status(500).json({ connected: false, message: 'Error interno' });
+        return sendGooglePropertyDiscoveryError(res, e, true);
     }
 });
 
@@ -1602,35 +1848,22 @@ router.get('/google/connection-status', async (req, res) => {
  * GET /oauth/google/assets
  */
 router.get('/google/assets', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
-        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-
-        let accessToken;
-        try {
-            ({ accessToken } = await ensureGoogleAccessToken(conn));
-        } catch (tokenErr) {
-            console.error('❌ Token Google inválido al listar assets:', tokenErr.message);
-            return res.status(401).json({ success: false, error: tokenErr.code || 'TOKEN_ERROR' });
-        }
-
-        // Llamar a Search Console sites.list
-        const resp = await axios.get('https://www.googleapis.com/webmasters/v3/sites', {
-            headers: { Authorization: `Bearer ${accessToken}` }
-        });
-        const entries = resp.data?.siteEntry || [];
+        const inventory = await googlePropertyInventory(req, 'search_console');
+        const resp = inventory.managed === null ? await inventory.request(accessToken => axios.get('https://www.googleapis.com/webmasters/v3/sites', {
+            headers: { Authorization: `Bearer ${accessToken}` }, timeout: 8000, maxContentLength: 1048576
+        })) : null;
+        const entries = inventory.managed === null ? resp.data?.siteEntry || [] : inventory.managed;
+        if (!Array.isArray(entries) || entries.length > 1000) throw Error('invalid_inventory');
         const assets = entries.map((s) => ({
             siteUrl: s.siteUrl,
             permissionLevel: s.permissionLevel,
             propertyType: s.siteUrl.startsWith('sc-domain:') ? 'sc-domain' : 'url-prefix'
         }));
-        return res.json({ success: true, assets, total: assets.length });
+        return res.json({ success: true, assets, total: assets.length, ...(inventory.managed !== null ? { inventory_mode: 'broker_grants' } : {}) });
     } catch (e) {
-        console.error('❌ Error en /oauth/google/assets:', e.response?.data || e.message);
-        return res.status(500).json({ success: false, error: 'Error obteniendo propiedades' });
+        return sendGooglePropertyDiscoveryError(res, e);
     }
 });
 
@@ -1638,38 +1871,33 @@ router.get('/google/assets', async (req, res) => {
  * GOOGLE — Estado de conexión para Google Analytics
  */
 router.get('/google/analytics/connection-status', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn, assignment, scope, source } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
-        if (!userId) return res.status(401).json({ connected: false, reason: 'unauthenticated' });
-        if (!conn) return res.json({ connected: false, reason: 'no_connection' });
-
-        let accessToken;
-        try {
-            ({ accessToken } = await ensureGoogleAccessToken(conn));
-        } catch (tokenErr) {
-            if (['TOKEN_EXPIRED', 'TOKEN_EXPIRY_UNKNOWN', 'REFRESH_FAILED'].includes(tokenErr.code)) {
-                return res.json({ connected: false, reason: 'token_expired' });
-            }
-            throw tokenErr;
+        const inventory = await googlePropertyInventory(req, 'analytics');
+        const { assignment, scope, source } = inventory.resolved;
+        if (inventory.managed !== null) {
+            const accounts = googleAnalyticsInventoryAccounts(inventory.managed);
+            return res.json({ connected: true, hasAccounts: accounts.length > 0, accounts: accounts.length,
+                scope: buildScopeResponse(scope, assignment), source, inventory_mode: 'broker_grants',
+                verification: 'registered_properties_read' });
         }
 
         try {
-            const resp = await axios.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
+            const resp = await inventory.request(accessToken => axios.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
                 params: { pageSize: 1 },
-                headers: { Authorization: `Bearer ${accessToken}` }
-            });
+                headers: { Authorization: `Bearer ${accessToken}` }, timeout: 8000, maxContentLength: 1048576
+            }));
             const summaries = resp.data?.accountSummaries || [];
             return res.json({
                 connected: true,
                 hasAccounts: summaries.length > 0,
                 accounts: summaries.length,
-                expiresAt: conn.expiresAt,
+                expiresAt: inventory.connection.expiresAt,
                 scope: buildScopeResponse(scope, assignment),
                 source
             });
         } catch (apiErr) {
+            if (apiErr?.code) throw apiErr;
             const status = apiErr.response?.status;
             if (status === 403) {
                 return res.json({ connected: false, reason: 'insufficient_scope' });
@@ -1677,12 +1905,10 @@ router.get('/google/analytics/connection-status', async (req, res) => {
             if (status === 401) {
                 return res.json({ connected: false, reason: 'token_invalid' });
             }
-            console.error('❌ Error comprobando Analytics:', apiErr.response?.data || apiErr.message);
             return res.json({ connected: false, reason: 'api_error' });
         }
     } catch (e) {
-        console.error('❌ Error en analytics/connection-status:', e.message);
-        return res.status(500).json({ connected: false, reason: 'internal_error' });
+        return sendGooglePropertyDiscoveryError(res, e, true);
     }
 });
 
@@ -1690,31 +1916,30 @@ router.get('/google/analytics/connection-status', async (req, res) => {
  * GOOGLE — Listar propiedades de Google Analytics (GA4)
  */
 router.get('/google/analytics/properties', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
-        if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        if (!conn) return res.status(404).json({ success: false, error: 'No hay conexión Google' });
-
-        let accessToken;
-        try {
-            ({ accessToken } = await ensureGoogleAccessToken(conn));
-        } catch (tokenErr) {
-            console.error('❌ Token Google inválido al listar Analytics:', tokenErr.message);
-            return res.status(401).json({ success: false, error: tokenErr.code || 'TOKEN_ERROR' });
-        }
+        const inventory = await googlePropertyInventory(req, 'analytics');
+        if (inventory.managed !== null) return res.json({ success: true, accounts: googleAnalyticsInventoryAccounts(inventory.managed), inventory_mode: 'broker_grants' });
 
         const accountSummaries = [];
-        let pageToken;
+        let pageToken; let bytes = 0; const seen = new Set(); const deadline = Date.now() + 60000;
         do {
-            const resp = await axios.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
-                params: { pageSize: 200, pageToken },
-                headers: { Authorization: `Bearer ${accessToken}` }
+            if (seen.size >= 20 || Date.now() >= deadline) throw Object.assign(Error('broker_discovery_limit'), { code: 'broker_discovery_limit' });
+            const resp = await inventory.request(accessToken => {
+                const remaining = deadline - Date.now();
+                if (remaining <= 0) throw Object.assign(Error('broker_discovery_timeout'), { code: 'broker_discovery_timeout' });
+                return axios.get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
+                    params: { pageSize: 200, pageToken },
+                    headers: { Authorization: `Bearer ${accessToken}` }, timeout: Math.min(8000, remaining), maxContentLength: 1048576
+                });
             });
             const entries = resp.data?.accountSummaries || [];
+            bytes += Buffer.byteLength(JSON.stringify(entries));
+            if (!Array.isArray(entries) || entries.length > 200 || bytes > 1048576 || Date.now() >= deadline) throw Error('invalid_inventory');
             accountSummaries.push(...entries);
             pageToken = resp.data?.nextPageToken || null;
+            if (pageToken && (typeof pageToken !== 'string' || pageToken.length > 4096 || seen.has(pageToken))) throw Error('invalid_inventory');
+            if (pageToken) seen.add(pageToken);
         } while (pageToken);
 
         const mapped = accountSummaries.map((acc) => ({
@@ -1730,12 +1955,7 @@ router.get('/google/analytics/properties', async (req, res) => {
 
         return res.json({ success: true, accounts: mapped });
     } catch (e) {
-        const status = e.response?.status;
-        if (status === 403) {
-            return res.status(403).json({ success: false, error: 'insufficient_scope' });
-        }
-        console.error('❌ Error listando propiedades de Analytics:', e.response?.data || e.message);
-        return res.status(500).json({ success: false, error: 'Error listando propiedades' });
+        return sendGooglePropertyDiscoveryError(res, e);
     }
 });
 
@@ -1891,16 +2111,50 @@ router.post('/google/analytics/map-properties', async (req, res) => {
  * GOOGLE — Listar ubicaciones de Google Business Profile accesibles
  */
 router.get('/google/local/locations', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
+        const { userId, connection: metadata } = await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: true,
+            metadataOnly: true
         });
         if (!userId) {
             return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         }
-        if (!conn) {
+        if (!metadata) {
             return res.status(404).json({ success: false, error: 'No hay conexión Google' });
         }
+
+        const clinicIds = req.marketingConnectionScopeAuthorization?.clinicIds;
+        const revalidate = async () => {
+            await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
+            const scope = await authorizeExplicitConnectionScope(req, 'write');
+            const latest = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+            if (!scope.requested || scope.clinicIds.length !== clinicIds?.length
+                || scope.clinicIds.some(id => !clinicIds.includes(id))
+                || Number(latest.connection?.id) !== Number(metadata.id)) {
+                throw Object.assign(new Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+            }
+        };
+        const granted = await businessProfileDiscovery.list({ clinicIds, connectionId: Number(metadata.id), revalidate });
+        if (granted !== null) {
+            const grouped = new Map();
+            for (const { account, location } of granted) {
+                if (!grouped.has(account.name)) grouped.set(account.name, {
+                    accountName: account.name,
+                    accountDisplayName: account.accountName || account.name,
+                    accountNumber: account.accountNumber || null,
+                    locations: []
+                });
+                grouped.get(account.name).locations.push(normalizeBusinessLocation(location, account));
+            }
+            return res.json({ success: true, accounts: [...grouped.values()], inventory_mode: 'broker_grants' });
+        }
+
+        // Only the legacy branch obtains credential columns. A cut must drain
+        // old requests; a registry change observed here stops their dispatch.
+        await businessProfileDiscovery.assertLegacyAllowed();
+        const conn = await GoogleConnection.findByPk(metadata.id);
+        await businessProfileDiscovery.assertLegacyAllowed();
 
         let accessToken;
         try {
@@ -1929,6 +2183,7 @@ router.get('/google/local/locations', async (req, res) => {
                         locations: simplified
                     });
                 } catch (accountErr) {
+                    if (businessProfileDiscovery.ERROR_CODES.has(accountErr?.code)) throw accountErr;
                     const status = accountErr.response?.status;
                     if (status === 403) {
                         throw accountErr;
@@ -1941,16 +2196,26 @@ router.get('/google/local/locations', async (req, res) => {
                 }
             }
 
+            await businessProfileDiscovery.assertLegacyAllowed();
+            await revalidate();
             return res.json({ success: true, accounts: response });
         } catch (apiErr) {
+            if (['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(apiErr.name)) throw apiErr;
             const status = apiErr.response?.status;
             if (status === 403) {
                 return res.status(403).json({ success: false, error: 'insufficient_scope' });
             }
+            if (sendBusinessProfileDiscoveryError(res, apiErr)) return;
+            if (sendKnownOAuthMappingError(res, apiErr)) return;
             console.error('❌ Error listando ubicaciones de Google Business Profile:', apiErr.response?.data || apiErr.message);
             return res.status(500).json({ success: false, error: 'Error obteniendo ubicaciones' });
         }
     } catch (err) {
+        if (['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(err.name)) {
+            return res.status(401).json({ success: false, error: 'unauthenticated' });
+        }
+        if (sendBusinessProfileDiscoveryError(res, err)) return;
+        if (sendKnownOAuthMappingError(res, err)) return;
         console.error('❌ Error interno en /oauth/google/local/locations:', err.message);
         return res.status(500).json({ success: false, error: 'Error interno' });
     }
@@ -2078,6 +2343,9 @@ router.post('/google/local/map-locations', async (req, res) => {
             });
         }
 
+        // Grant creation/reassignment needs a separate cutover operation. Do not
+        // let this legacy writer discover assets or mutate migrated mappings.
+        await businessProfileDiscovery.assertLegacyAllowed();
         const { connection: conn, destinationClinicIds } = await resolveAuthorizedDestinationGoogleConnection({
             userId,
             mappings,
@@ -2242,6 +2510,7 @@ router.post('/google/local/map-locations', async (req, res) => {
 
         return res.json({ success: true, mapped: createdOrUpdated.length, locations: createdOrUpdated });
     } catch (err) {
+        if (sendBusinessProfileDiscoveryError(res, err)) return;
         console.error('❌ Error en /oauth/google/local/map-locations:', err.response?.data || err.message);
         const status = Number(err.httpStatus || err.status || 500);
         if ([400, 403, 404, 409].includes(status)) {
@@ -2360,89 +2629,35 @@ router.get('/google/local/mappings', async (req, res) => {
  * GOOGLE — Estado de conexión Google Ads
  */
 router.get('/google/ads/connection-status', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn, assignment, scope, source } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
-        if (!userId) {
-            return res.status(401).json({ connected: false, reason: 'unauthenticated' });
-        }
-        if (!conn) {
-            return res.json({ connected: false, reason: 'no_connection' });
-        }
-
-        if (!hasScopeText(conn.scopes || '', GOOGLE_ADS_SCOPE)) {
-            return res.json({ connected: false, reason: 'insufficient_scope' });
-        }
-
-        let accessToken;
-        try {
-            ({ accessToken } = await ensureGoogleAdsAccess(conn));
-        } catch (tokenErr) {
-            if (tokenErr.code === 'INSUFFICIENT_SCOPE') {
-                return res.json({ connected: false, reason: 'insufficient_scope' });
-            }
-            if (['TOKEN_EXPIRED', 'TOKEN_EXPIRY_UNKNOWN', 'REFRESH_FAILED'].includes(tokenErr.code)) {
-                return res.json({ connected: false, reason: 'token_expired' });
-            }
-            if (tokenErr.code === 'ADS_CONFIG_MISSING') {
-                return res.json({ connected: false, reason: 'config_missing' });
-            }
-            console.error('❌ Error obteniendo token Google Ads:', tokenErr.message);
-            return res.json({ connected: false, reason: 'token_error' });
-        }
-
-        let customers = [];
-        try {
-            customers = await listAccessibleAdsCustomers(accessToken);
-        } catch (adsErr) {
-            console.error('❌ Error consultando cuentas Ads accesibles:', adsErr.details || adsErr.message);
-            return res.json({ connected: false, reason: 'api_error', details: adsErr.details || adsErr.message });
-        }
-
-        return res.json({
-            connected: true,
-            hasAccessibleAccounts: customers.length > 0,
-            scope: buildScopeResponse(scope, assignment),
-            source
-        });
-    } catch (err) {
-        if (err.code === 'ADS_CONFIG_MISSING') {
-            return res.json({ connected: false, reason: 'config_missing' });
-        }
-        console.error('❌ Error en /oauth/google/ads/connection-status:', err.details || err.message);
-        return res.status(500).json({ connected: false, reason: 'internal_error' });
-    }
+        const inventory = await googleAdsInventory(req);
+        const { assignment, scope, source } = inventory.resolved;
+        if (inventory.managed !== null) return res.json({ connected: true,
+            hasAccessibleAccounts: inventory.managed.accounts.length > 0, scope: buildScopeResponse(scope, assignment), source,
+            inventory_mode: 'broker_grants', verification: 'registered_accounts_read' });
+        const customers = await listAccessibleAdsCustomers(inventory.accessToken, inventory.request); await inventory.check();
+        return res.json({ connected: true, hasAccessibleAccounts: customers.length > 0, scope: buildScopeResponse(scope, assignment), source });
+    } catch (error) { return sendGoogleAdsDiscoveryError(res, error, true); }
 });
 
 /**
  * GOOGLE — Listar cuentas Google Ads accesibles
  */
 router.get('/google/ads/accounts', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     try {
-        const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
-        if (!userId) {
-            return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
-        }
-        if (!conn) {
-            return res.status(404).json({ success: false, error: 'No hay conexión Google' });
+        const inventory = await googleAdsInventory(req);
+        if (inventory.managed !== null) return res.json({ success: true, ...inventory.managed, inventory_mode: 'broker_grants' });
+        const { userId } = inventory.resolved;
+        const { connection: conn, accessToken, request } = inventory;
+
+        if (req.query.view === 'selection') {
+            const selection = await discoverGoogleAdsAccountSelection({ accessToken, request });
+            await inventory.check(); return res.json({ success: true, ...selection });
         }
 
-        if (!hasScopeText(conn.scopes || '', GOOGLE_ADS_SCOPE)) {
-            return res.status(403).json({ success: false, error: 'insufficient_scope' });
-        }
-
-        let accessToken;
-        try {
-            ({ accessToken } = await ensureGoogleAdsAccess(conn));
-        } catch (tokenErr) {
-            const reason = tokenErr.code === 'INSUFFICIENT_SCOPE' ? 'insufficient_scope' : tokenErr.code === 'TOKEN_EXPIRED' ? 'token_expired' : tokenErr.code === 'ADS_CONFIG_MISSING' ? 'config_missing' : 'token_error';
-            return res.status(400).json({ success: false, error: reason });
-        }
-
-        const baseCustomers = await listAccessibleAdsCustomers(accessToken);
+        const baseCustomers = await listAccessibleAdsCustomers(accessToken, request);
         const uniqueCustomers = new Set();
         const queue = [];
         const parentByCustomer = new Map();
@@ -2470,7 +2685,7 @@ router.get('/google/ads/accounts', async (req, res) => {
             let summary = summaries.get(currentId);
             if (!summary) {
                 try {
-                    summary = await fetchAdsCustomerSummary(accessToken, currentId, { loginCustomerId: parentId });
+                    summary = await fetchAdsCustomerSummary(accessToken, currentId, { loginCustomerId: parentId, request });
                     if (summary) {
                         summaries.set(currentId, summary);
                     }
@@ -2486,7 +2701,7 @@ router.get('/google/ads/accounts', async (req, res) => {
 
             processedManagers.add(currentId);
             try {
-                const clients = await fetchAdsCustomerClients(accessToken, currentId);
+                const clients = await fetchAdsCustomerClients(accessToken, currentId, request);
                 for (const client of clients) {
                     if (!client?.customerId) {
                         continue;
@@ -2556,12 +2771,12 @@ router.get('/google/ads/accounts', async (req, res) => {
             try {
                 let summary = summaries.get(cleanId);
                 if (!summary) {
-                    summary = await fetchAdsCustomerSummary(accessToken, cleanId, { loginCustomerId: parentId });
+                    summary = await fetchAdsCustomerSummary(accessToken, cleanId, { loginCustomerId: parentId, request });
                     if (summary) {
                         summaries.set(cleanId, summary);
                     }
                 }
-                const link = await fetchManagerLinkForCustomer(accessToken, cleanId, getGoogleManagerId(), { loginCustomerId: parentId });
+                const link = await fetchManagerLinkForCustomer(accessToken, cleanId, getGoogleManagerId(), { loginCustomerId: parentId, request });
                 const parentSummary = parentId ? summaries.get(parentId) : null;
                 response.descriptiveName = summary?.descriptiveName || null;
                 response.currencyCode = summary?.currencyCode || null;
@@ -2604,14 +2819,9 @@ router.get('/google/ads/accounts', async (req, res) => {
             accounts.push(response);
         }
 
+        await inventory.check();
         return res.json({ success: true, managerId: formatCustomerId(getGoogleManagerId()), accounts });
-    } catch (err) {
-        if (err.code === 'ADS_CONFIG_MISSING') {
-            return res.status(500).json({ success: false, error: 'config_missing' });
-        }
-        console.error('❌ Error en /oauth/google/ads/accounts:', err.details || err.message);
-        return res.status(500).json({ success: false, error: 'internal_error' });
-    }
+    } catch (error) { return sendGoogleAdsDiscoveryError(res, error); }
 });
 
 /**
@@ -2765,6 +2975,42 @@ router.post('/google/ads/accept-link', async (req, res) => {
  * GOOGLE — Guardar mapeo de cuentas Ads ↔ clínicas
  */
 router.post('/google/ads/map-accounts', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    let managed = false;
+    try { await googleAdsDiscovery.assertLegacyAllowed(); }
+    catch (error) {
+        if (error?.code === 'google_oauth_legacy_closed') managed = true;
+        else return res.status(503).json({ success: false, error: 'broker_registry_unavailable' });
+    }
+    if (managed) {
+        try {
+            googleAdsMapping.assertEnabled();
+            googleAdsMapping.input(req.body?.mappings);
+            const authorization = await authorizeExplicitConnectionScope(req, 'write');
+            if (!authorization.requested) throw Object.assign(Error('google_discovery_scope_forbidden'), { code: 'google_discovery_scope_forbidden' });
+            req.marketingConnectionScopeAuthorization = authorization;
+            const claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
+            if (claims.sessionVersion !== 1 || !claims.jti) throw Object.assign(Error('google_discovery_session_required'), { code: 'google_discovery_session_required' });
+            const inventory = await googleAdsInventory(req, { capture: true });
+            if (!inventory.managed) throw Object.assign(Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+            const result = await googleAdsMapping.save({ selection: inventory.managed.selection, mappings: req.body.mappings,
+                replaceExisting: req.body.replace_existing ?? false, actorId: claims.userId, sessionRef: claims.jti,
+                authorize: async ({ transaction, actorId, sessionRef, clinicIds }) => {
+                    try { await accessSessions.verifyReference({ userId: actorId, sessionRef, expiresAt: new Date(claims.exp * 1000) }, { transaction }); }
+                    catch { throw Object.assign(Error('google_discovery_session_required'), { code: 'google_discovery_session_required' }); }
+                    return hasMarketingClinicScopeAccess({ userId: actorId, clinicIds, access: 'write',
+                        membershipModel: { findAll: options => db.UsuarioClinica.findAll({ ...options, transaction,
+                            lock: transaction.LOCK.UPDATE, logging: false }) } });
+                } });
+            try {
+                const { job } = await jobRequestsService.enqueueUniqueJobRequest({ type: 'google_ads_recent',
+                    payload: withRequestedRuntimeNamespace(req, { clinicIds: authorization.clinicIds }), priority: 'critical',
+                    origin: 'google:map-accounts', requestedBy: claims.userId });
+                jobScheduler.triggerImmediate(job.id).catch(() => console.error('google_ads_mapping_sync_queue_unavailable'));
+            } catch { console.error('google_ads_mapping_sync_queue_unavailable'); }
+            return res.json(result);
+        } catch (error) { return res.status(googleAdsMapping.status(error)).json({ success: false, error: googleAdsMapping.safe(error) }); }
+    }
     try {
         const userId = getUserIdFromToken(req);
         if (!userId) {
@@ -2785,7 +3031,13 @@ router.post('/google/ads/map-accounts', async (req, res) => {
             `${Number.parseInt(String(mapping.clinicaId), 10)}|${normalizeCustomerId(mapping.customerId)}`,
             mapping
         ])).values());
-        const { connection: conn } = await resolveAuthorizedDestinationGoogleConnection({
+        const workspaceGroup = await resolveWorkspaceGroupAccountScope({ body: req.body,
+            clinicIds: clinicIdsFromAssetMappings(mappings), userId,
+            findGroupClinics: getClinicIdsForGroup, hasAccess: hasMarketingClinicScopeAccess });
+        const { connection: conn } = workspaceGroup ? await resolveGoogleRequestConnection(req, {
+            allowLegacyUserFallback: false,
+            scopeInput: { clinicIdRaw: null, groupIdRaw: workspaceGroup.grupoClinicaId, assignmentScopeRaw: 'group' }
+        }) : await resolveAuthorizedDestinationGoogleConnection({
             userId,
             mappings,
             authorizeDestinations: hasMarketingClinicScopeAccess,
@@ -2794,6 +3046,7 @@ router.post('/google/ads/map-accounts', async (req, res) => {
                 scopeInput: { clinicIdRaw: clinicId, groupIdRaw: null, assignmentScopeRaw: 'clinic' }
             })
         });
+        if (!conn) throw inaccessibleAssetError('workspace_google_connection_required', 'Conecta Google para el ámbito seleccionado antes de elegir una cuenta.');
         const authorizedAccounts = await loadAuthorizedGoogleAdsAccounts(conn);
         for (const mapping of mappings) {
             const customerId = normalizeCustomerId(mapping?.customerId);
@@ -2819,10 +3072,11 @@ router.post('/google/ads/map-accounts', async (req, res) => {
 
         const transaction = await db.sequelize.transaction();
         const results = [];
-        const clinicsToSync = new Set();
+        const clinicsToSync = new Set(workspaceGroup?.clinicIds || []);
         const clinicAssignmentCache = new Map();
 
         async function resolveAssignment(clinicaId) {
+            if (workspaceGroup) return { assignmentScope: workspaceGroup.assignmentScope, grupoClinicaId: workspaceGroup.grupoClinicaId };
             if (!clinicaId) {
                 return { assignmentScope: 'clinic', grupoClinicaId: null };
             }
@@ -2979,6 +3233,17 @@ router.post('/google/ads/map-accounts', async (req, res) => {
  * GOOGLE — Obtener mapeos Ads actuales
  */
 router.get('/google/ads/mappings', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    let managed = false;
+    try { await googleAdsDiscovery.assertLegacyAllowed(); }
+    catch (error) {
+        if (error?.code === 'google_oauth_legacy_closed') managed = true;
+        else return res.status(503).json({ success: false, error: 'broker_registry_unavailable' });
+    }
+    if (managed) {
+        try { return res.json(await googleAdsMapping.list(await googleAdsMappingScope(req, 'read'))); }
+        catch (error) { return res.status(googleAdsMapping.status(error)).json({ success: false, error: googleAdsMapping.safe(error) }); }
+    }
     try {
         const { userId, connection: conn } = await resolveGoogleRequestConnection(req, {
             allowLegacyUserFallback: true
@@ -3036,6 +3301,17 @@ router.get('/google/ads/mappings', async (req, res) => {
 });
 
 router.delete('/google/ads/mappings/:mappingId', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    let managed = false;
+    try { await googleAdsDiscovery.assertLegacyAllowed(); }
+    catch (error) {
+        if (error?.code === 'google_oauth_legacy_closed') managed = true;
+        else return res.status(503).json({ success: false, error: 'broker_registry_unavailable' });
+    }
+    if (managed) {
+        try { return res.json(await googleAdsMapping.remove({ ...await googleAdsMappingScope(req, 'write'), mappingId: req.params.mappingId })); }
+        catch (error) { return res.status(googleAdsMapping.status(error)).json({ success: false, error: googleAdsMapping.safe(error) }); }
+    }
     const mappingId = Number.parseInt(req.params.mappingId, 10);
     if (!Number.isInteger(mappingId)) {
         return res.status(400).json({ success: false, error: 'mappingId inválido' });
@@ -3384,7 +3660,7 @@ router.delete('/google/disconnect', async (req, res) => {
 
         if (scope.scopeKey) {
             const { connection, assignment } = await resolveGoogleRequestConnection(req, {
-                allowLegacyUserFallback: true
+                allowLegacyUserFallback: true, metadataOnly: true
             });
 
             if (!connection && !assignment) {
@@ -3392,13 +3668,34 @@ router.delete('/google/disconnect', async (req, res) => {
             }
 
             const connectionId = connection?.id || assignment?.googleConnectionId || null;
+            let brokerRevocationsPending = 0;
+            let enrollmentPending = 0;
+            const originalClinicIds = [...(req.marketingConnectionScopeAuthorization?.clinicIds || [])].map(Number).sort((a, b) => a - b);
+            const revalidateDisconnect = async () => {
+                const verified = await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
+                if (String(verified.userId) !== String(userId)) throw Object.assign(new Error('auth_failed'), { httpStatus: 401 });
+                const authorized = await authorizeExplicitConnectionScope(req, 'write');
+                if (JSON.stringify([...authorized.clinicIds].map(Number).sort((a, b) => a - b)) !== JSON.stringify(originalClinicIds)) {
+                    throw Object.assign(new Error('El ámbito de la conexión ha cambiado.'), { code: 'connection_scope_changed', httpStatus: 409 });
+                }
+            };
             if (connectionId) {
                 await db.sequelize.transaction(async (transaction) => {
-                    await deactivateGoogleMappingsForScope({
+                    await revalidateDisconnect();
+                    const currentAssignment = await GoogleConnectionAssignment.findOne({ where: { scopeKey: scope.scopeKey }, transaction, lock: transaction.LOCK.UPDATE });
+                    if (currentAssignment && ['active', 'reauthorization_required'].includes(currentAssignment.status)
+                        && Number(currentAssignment.googleConnectionId) !== Number(connectionId)) {
+                        throw Object.assign(new Error('La conexión del ámbito ha cambiado.'), { code: 'connection_scope_changed', httpStatus: 409 });
+                    }
+                    const result = await deactivateGoogleMappingsForScope({
                         scope,
                         connectionId,
-                        transaction
+                        transaction,
+                        actorId: userId,
+                        sessionRef: req.authSession?.id,
                     });
+                    brokerRevocationsPending = result.brokerRevocationsPending;
+                    enrollmentPending = result.enrollmentPending || 0;
                     await GoogleConnectionAssignment.upsert({
                         scopeKey: scope.scopeKey,
                         assignmentScope: scope.assignmentScope,
@@ -3414,13 +3711,18 @@ router.delete('/google/disconnect', async (req, res) => {
                         lastErrorCode: 'DISCONNECTED_BY_USER',
                         lastErrorMessage: 'Disconnected from scope settings'
                     }, { transaction });
+                    await revalidateDisconnect();
                 });
             }
 
+            res.set('Cache-Control', 'private, no-store');
+            if (brokerRevocationsPending || enrollmentPending) return res.status(202).json({ success: true, status: 'revocation_pending',
+                pending_assets: brokerRevocationsPending, ...(enrollmentPending ? { pending_enrollments: enrollmentPending } : {}),
+                message: 'La desconexión se ha solicitado y está pendiente de confirmación.' });
             return res.json({ success: true, message: scope.assignmentScope === 'group' ? 'Conexión Google desconectada para todo el grupo' : 'Conexión Google desconectada para esta clínica' });
         }
 
-        const { connection: conn, ambiguous } = await findSingleUserConnection(GoogleConnection, userId);
+        const { connection: conn, ambiguous } = await findSingleUserConnection(GoogleConnection, userId, ['id', 'googleUserId']);
         if (ambiguous) {
             const error = new Error('Hay varias conexiones Google; indica la clínica o el grupo que quieres desconectar.');
             error.code = 'connection_scope_required';
@@ -3440,7 +3742,14 @@ router.delete('/google/disconnect', async (req, res) => {
             ClinicBusinessLocation.count({ where: { google_connection_id: conn.id } }),
             ClinicGoogleAdsAccount.count({ where: { googleConnectionId: conn.id } })
         ]);
-        if (activeAssignments + webMappings + analyticsMappings + localMappings + adsMappings > 0) {
+        let managedReferences = await db.BusinessProfileBrokerBinding.count({ where: { google_connection_id: conn.id } })
+            + await db.BusinessProfileBrokerRevocation.count({ where: { google_connection_id: conn.id } });
+        for (const registry of [db.GoogleOAuthBrokerBinding, db.SearchConsoleBrokerBinding, db.AnalyticsBrokerBinding, db.GooglePropertyBrokerRevocation,
+            db.GoogleAdsBrokerBinding, db.GoogleAdsBrokerRevocation, db.GoogleAdsEnrollmentScope, db.GoogleAdsEnrollmentRequest]) {
+            managedReferences += await registry.count({ where: { [Op.or]: [{ google_connection_id: conn.id },
+                ...(typeof conn.googleUserId === 'string' ? [{ google_user_id: conn.googleUserId }] : [])] }, logging: false });
+        }
+        if (activeAssignments + webMappings + analyticsMappings + localMappings + adsMappings + managedReferences > 0) {
             const conflict = new Error('La conexión sigue en uso por uno o más scopes o mappings. Desconéctalos de forma individual.');
             conflict.code = 'connection_in_use';
             conflict.httpStatus = 409;
@@ -3450,8 +3759,18 @@ router.delete('/google/disconnect', async (req, res) => {
         await conn.destroy();
         return res.json({ success: true, message: 'Conexión Google desconectada' });
     } catch (e) {
+        if (e?.code === 'google_discovery_session_required') return res.status(401).json({ success: false, error: 'google_discovery_session_required' });
+        if (e?.code?.startsWith('google_ads_enrollment_') || e?.code === 'audit_unavailable') {
+            return res.status(503).json({ success: false, error: 'google_ads_enrollment_unavailable' });
+        }
+        if (e?.code === 'gbp_revocation_unavailable') return res.status(503).json({ success: false, error: 'gbp_revocation_unavailable' });
+        if (e?.code === 'google_property_revocation_unavailable') return res.status(503).json({ success: false, error: 'google_property_revocation_unavailable' });
+        if (e?.code === 'google_ads_revocation_unavailable') return res.status(503).json({ success: false, error: 'google_ads_revocation_unavailable' });
+        if (['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(e?.name) || e?.httpStatus === 401) {
+            return res.status(401).json({ success: false, error: 'auth_failed' });
+        }
         if (sendKnownOAuthMappingError(res, e)) return;
-        console.error('❌ Error en /oauth/google/disconnect:', e.response?.data || e.message);
+        console.error('❌ Error en /oauth/google/disconnect:', { code: 'google_disconnect_failed' });
         return res.status(500).json({ success: false, error: 'Error al desconectar Google' });
     }
 });
@@ -4017,6 +4336,41 @@ router.delete('/meta/disconnect', async (req, res) => {
             success: false,
             error: 'Error interno del servidor'
         });
+    }
+});
+
+router.use('/google/ads/enrollment', (req, res, next) => {
+    adsEnrollmentRoutes ||= require('./googleAdsEnrollment.routes').createRouter({
+        service: require('../services/googleAdsEnrollment.service'), sessions: accessSessions,
+        authorizeScope: authorizeExplicitConnectionScope, resolveConnection: resolveGoogleRequestConnection,
+    });
+    return adsEnrollmentRoutes(req, res, next);
+});
+
+router.get('/google/disconnection-status', async (req, res) => {
+    try {
+        const clinicIds = [...req.marketingConnectionScopeAuthorization.clinicIds].map(Number).sort((a, b) => a - b);
+        const gbp = await require('../services/businessProfileRevocation.service').status(clinicIds);
+        const properties = await require('../services/googlePropertyRevocation.service').status(clinicIds);
+        const ads = await require('../services/googleAdsRevocation.service').status(clinicIds);
+        const enrollments = await require('../services/googleAdsEnrollment.service').disconnectionStatus(clinicIds);
+        const pending = gbp.pending_assets + properties.pending_assets + ads.pending_assets;
+        const confirmed = gbp.confirmed_assets + properties.confirmed_assets + ads.confirmed_assets;
+        if (![pending, confirmed].every(n => Number.isSafeInteger(n) && n >= 0)) throw new Error('invalid_revocation_counts');
+        const result = { status: pending || enrollments.pending_enrollments ? 'pending'
+            : confirmed || enrollments.cancelled_enrollments ? 'confirmed' : 'none', pending_assets: pending, confirmed_assets: confirmed,
+            ...(enrollments.pending_enrollments || enrollments.cancelled_enrollments ? enrollments : {}) };
+        const verified = await accessSessions.verify(accessSessions.bearer(req.headers.authorization));
+        if (String(verified.userId) !== String(getUserIdFromToken(req))) throw Object.assign(new Error('auth_failed'), { httpStatus: 401 });
+        const current = await authorizeExplicitConnectionScope(req, 'write');
+        if (JSON.stringify([...current.clinicIds].map(Number).sort((a, b) => a - b)) !== JSON.stringify(clinicIds)) {
+            return res.status(403).json({ success: false, error: 'connection_scope_changed' });
+        }
+        return res.set('Cache-Control', 'private, no-store').json(result);
+    } catch (error) {
+        const invalidSession = ['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error?.name) || error?.httpStatus === 401;
+        const denied = error?.httpStatus === 403;
+        return res.status(invalidSession ? 401 : denied ? 403 : 503).json({ success: false, error: invalidSession ? 'auth_failed' : denied ? 'scope_denied' : 'google_revocation_unavailable' });
     }
 });
 

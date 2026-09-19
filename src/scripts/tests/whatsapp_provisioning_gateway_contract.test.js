@@ -10,7 +10,7 @@ test('Automatic provisioning contract loads from the gateway package without the
   const root = path.resolve(__dirname, '../../..');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-gateway-contract-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  for (const file of ['whatsapp-provisioning-contract.js', 'whatsapp-onboarding-contract.js', 'canonical.js', 'contracts.js', 'errors.js']) {
+  for (const file of ['whatsapp-provisioning-contract.js', 'whatsapp-onboarding-contract.js', 'canonical.js', 'contracts.js', 'errors.js', 'bedrock-errors.js']) {
     fs.copyFileSync(path.join(root, 'services/integrations-broker/src', file), path.join(dir, file));
   }
   const script = `const P = require('./whatsapp-provisioning-contract');

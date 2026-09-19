@@ -23,8 +23,12 @@ function row(values) {
 function modelsForWebRow(webRow, consumerClinicIds = []) {
   const emptyModel = { findAll: async () => [] };
   return {
-    Clinica: emptyModel,
+    Clinica: emptyModel, GrupoClinica: emptyModel,
+    SearchConsoleBrokerBinding: emptyModel, AnalyticsBrokerBinding: emptyModel, GooglePropertyBrokerRevocation: emptyModel, GoogleAdsBrokerBinding: emptyModel, GoogleAdsBrokerRevocation: emptyModel,
     GoogleConnectionAssignment: emptyModel,
+    GoogleAdsEnrollmentRequest: emptyModel,
+    BusinessProfileBrokerBinding: emptyModel,
+    BusinessProfileBrokerRevocation: emptyModel,
     MetaConnectionAssignment: emptyModel,
     ClinicWebAsset: { findAll: async () => webRow ? [webRow] : [] },
     ClinicAnalyticsProperty: emptyModel,
@@ -32,7 +36,8 @@ function modelsForWebRow(webRow, consumerClinicIds = []) {
     ClinicGoogleAdsAccount: emptyModel,
     GroupAssetClinicAssignment: {
       findAll: async ({ where }) => {
-        assert.deepEqual(where, { assetType: 'google.search_console', assetId: 10 });
+        assert.equal(where.assetType, 'google.search_console');
+        assert(where.assetId === 10 || where.assetId[require('sequelize').Op.in]?.includes(10));
         return consumerClinicIds.map((clinicaId) => ({ clinicaId }));
       },
     },
@@ -48,7 +53,7 @@ async function testExactClinicDeactivatesOnlyItsUnsharedMapping() {
     models: modelsForWebRow(mapping),
   });
   assert.equal(mapping.isActive, false);
-  assert.deepEqual(result, { web: 1, analytics: 0, local: 0, ads: 0 });
+  assert.deepEqual(result, { web: 1, analytics: 0, local: 0, ads: 0, brokerRevocationsPending: 0 });
 }
 
 async function testSharedOutsideScopeBlocksAtomically() {
@@ -104,6 +109,29 @@ async function run() {
   await testExactClinicDeactivatesOnlyItsUnsharedMapping();
   await testSharedOutsideScopeBlocksAtomically();
   await testMetaClinicMappingIsDeactivatedWithTombstoneScope();
+  // An independent managed Ads record still prevents partial unlinking even
+  // when the original Ads mapping has already been deleted.
+  for (const missing of [false, true]) {
+    const mapping = row({ id: 10, clinicaId: 55, googleConnectionId: 8, isActive: true });
+    const models = modelsForWebRow(mapping);
+    const record = { customer_id: '1234567890', mapping_id: 11, google_connection_id: 8, google_user_id: 'fictitious-subject',
+      connection_ref: 'connection:ads-test', asset_ref: 'ads:1234567890', scope_key: 'clinic:55', tenant_clinic_id: 55, login_customer_id: null, state: 'active' };
+    models.GoogleAdsBrokerBinding = { findAll: async options => {
+      assert.equal(options.lock, 'UPDATE'); assert.equal(options.attributes.includes('accessToken'), false);
+      if (missing) throw Error('FICTITIOUS_DATABASE_DETAILS'); return [record];
+    } };
+    await assert.rejects(deactivateGoogleMappingsForScope({ scope: { assignmentScope: 'clinic', clinicId: 55, groupId: 5 }, connectionId: 8,
+      transaction: { LOCK: { UPDATE: 'UPDATE' } }, models }), { code: 'google_ads_revocation_unavailable', httpStatus: 503 });
+    assert.equal(mapping.isActive, true);
+  }
+  const ads = row({ id: 11, customerId: '1234567890', assignmentScope: 'group', grupoClinicaId: 5, clinicaId: 999, googleConnectionId: 8, isActive: true });
+  const models = modelsForWebRow(null);
+  models.ClinicGoogleAdsAccount = { findAll: async () => [ads] };
+  models.Clinica = { findAll: async () => [{ id_clinica: 55 }, { id_clinica: 56 }] };
+  models.GroupAssetClinicAssignment = { findAll: async () => [] };
+  const groupResult = await deactivateGoogleMappingsForScope({ scope: { assignmentScope: 'group', groupId: 5 }, connectionId: 8,
+    transaction: { LOCK: { UPDATE: 'UPDATE' } }, models });
+  assert.equal(groupResult.ads, 1); assert.equal(ads.isActive, false, 'The representative clinic is not the owner of a group Ads mapping');
   console.log('oauth scoped disconnect tests: ok');
 }
 

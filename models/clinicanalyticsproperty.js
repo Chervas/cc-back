@@ -10,6 +10,8 @@ module.exports = (sequelize, DataTypes) => {
     propertyType: { type: DataTypes.STRING(32), allowNull: true, field: 'propertyType' },
     parent: { type: DataTypes.STRING(128), allowNull: true, field: 'parent' },
     measurementId: { type: DataTypes.STRING(128), allowNull: true, field: 'measurementId' },
+    broker_read_connection_ref: { type: DataTypes.STRING(128), allowNull: true },
+    broker_read_asset_ref: { type: DataTypes.STRING(128), allowNull: true },
     isActive: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true, field: 'isActive' }
   }, {
     tableName: 'ClinicAnalyticsProperties',

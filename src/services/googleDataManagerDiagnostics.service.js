@@ -1,12 +1,13 @@
 'use strict';
 
-const { Op } = require('sequelize');
+const { Op, literal } = require('sequelize');
 const db = require('../../models');
 const {
   GOOGLE_DATA_MANAGER_SCOPE,
   retrieveRequestStatus
 } = require('./googleDataManagerConversion.service');
 const { ensureGoogleConnectionAccessToken } = require('./googleAdsScopedRuntime.service');
+const googleLegacyCredentials = require('./googleLegacyCredentials.service');
 
 function cleanString(value) {
   if (value === undefined || value === null) return null;
@@ -100,8 +101,10 @@ function appendHistory(row) {
 async function reconcileGoogleDataManagerDiagnostics({
   limit = 100,
   minAgeMinutes = 30,
-  attemptModel = db.GoogleAdsConversionUploadAttempt,
-  connectionModel = db.GoogleConnection,
+  models = db,
+  attemptModel = models.GoogleAdsConversionUploadAttempt,
+  connectionModel = models.GoogleConnection,
+  credentials = googleLegacyCredentials.forModels({ ...models, GoogleConnection: connectionModel }),
   ensureAccessToken = ensureGoogleConnectionAccessToken,
   retrieveStatus = retrieveRequestStatus,
   now = new Date()
@@ -109,33 +112,49 @@ async function reconcileGoogleDataManagerDiagnostics({
   const cutoff = new Date(now.getTime() - Math.max(1, Number(minAgeMinutes) || 30) * 60 * 1000);
   const attempts = await attemptModel.findAll({
     where: {
-      status: 'accepted',
-      providerRequestId: { [Op.ne]: null },
+      [Op.or]: [
+        { status: 'accepted', providerRequestId: { [Op.ne]: null } },
+        // Static SQL: Sequelize fn() doubles JSON-path '$' in this dialect.
+        { status: 'pending', [Op.and]: literal("JSON_CONTAINS_PATH(`request_metadata`, 'one', '$.broker_delivery_version', '$.broker_submission_id') = 1") },
+      ],
       updated_at: { [Op.lte]: cutoff }
     },
     order: [['updated_at', 'ASC']],
     limit: Math.min(500, Math.max(1, Number(limit) || 100))
   });
 
-  const summary = { checked: 0, processing: 0, succeeded: 0, partial_success: 0, failed: 0, errors: 0 };
+  const summary = { checked: 0, processing: 0, succeeded: 0, partial_success: 0, failed: 0, errors: 0, unconfirmed: 0 };
   const tokenCache = new Map();
+  const brokerModels = models.GoogleAdsConversionUploadAttempt === attemptModel && models.GoogleConnection === connectionModel
+    ? models : { ...models, GoogleAdsConversionUploadAttempt: attemptModel, GoogleConnection: connectionModel };
 
   for (const attempt of attempts) {
     summary.checked += 1;
+    if (require('./googleConversionUploadBroker.service').owned(attempt)) {
+      try {
+        const result = await require('./googleConversionDiagnosticsBroker.service').reconcileManagedGoogleConversion({
+          models: brokerModels,
+          attemptId: attempt.id, now: () => new Date(now) });
+        if (['accepted', 'succeeded', 'partial_success', 'failed'].includes(result.state)) {
+          summary[result.state === 'accepted' ? 'processing' : result.state]++;
+        } else summary.unconfirmed++;
+      } catch { summary.errors++; summary.unconfirmed += attempt.status === 'pending' ? 1 : 0; }
+      continue; // A marked attempt can never enter legacy, including after an error.
+    }
     try {
       const connectionId = Number(attempt.googleConnectionId || 0) || null;
       if (!connectionId) throw Object.assign(new Error('El intento no conserva google_connection_id'), { code: 'CONNECTION_REQUIRED' });
-      let accessToken = tokenCache.get(connectionId);
-      if (!accessToken) {
-        const connection = await connectionModel.findByPk(connectionId);
-        const token = await ensureAccessToken(connection, { requiredScopes: [GOOGLE_DATA_MANAGER_SCOPE] });
-        accessToken = token.accessToken;
-        tokenCache.set(connectionId, accessToken);
+      let cached = tokenCache.get(connectionId);
+      if (!cached) {
+        const connection = await credentials.load(connectionId, { includeScopes: true });
+        const token = await ensureAccessToken(connection, { requiredScopes: [GOOGLE_DATA_MANAGER_SCOPE], credentials });
+        cached = { connection, accessToken: token.accessToken };
+        tokenCache.set(connectionId, cached);
       }
-      const payload = await retrieveStatus({
-        accessToken,
+      const payload = await credentials.request(cached.connection, () => retrieveStatus({
+        accessToken: cached.accessToken,
         requestId: attempt.providerRequestId
-      });
+      }));
       const classified = classifyDiagnostics(payload);
       const previousMetadata = attempt.responseMetadata && typeof attempt.responseMetadata === 'object'
         ? attempt.responseMetadata
@@ -159,6 +178,7 @@ async function reconcileGoogleDataManagerDiagnostics({
       });
       summary[classified.status === 'accepted' ? 'processing' : classified.status] += 1;
     } catch (error) {
+      tokenCache.delete(Number(attempt.googleConnectionId));
       summary.errors += 1;
       const previousMetadata = attempt.responseMetadata && typeof attempt.responseMetadata === 'object'
         ? attempt.responseMetadata

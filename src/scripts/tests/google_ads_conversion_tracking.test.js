@@ -193,6 +193,8 @@ async function testScopedRuntime() {
         return connection;
       }
     },
+    credentials: { load: async id => { loadedConnectionId = id; return connection; }, assert: async row => assert.equal(row, connection) },
+    broker: { prepare: async () => null },
     ensureAccessToken: async (resolvedConnection) => {
       assert.equal(resolvedConnection, connection);
       return { accessToken: 'scoped-access-token' };

@@ -14,6 +14,8 @@ module.exports = (sequelize, DataTypes) => {
     assignmentScope: { type: DataTypes.ENUM('clinic', 'group'), allowNull: false, defaultValue: 'clinic', field: 'assignmentScope' },
     googleConnectionId: { type: DataTypes.INTEGER, allowNull: false, field: 'googleConnectionId' },
     customerId: { type: DataTypes.STRING(32), allowNull: false, field: 'customerId' },
+    broker_read_connection_ref: { type: DataTypes.STRING(128), allowNull: true },
+    broker_read_asset_ref: { type: DataTypes.STRING(128), allowNull: true },
     descriptiveName: { type: DataTypes.STRING(256), allowNull: true, field: 'descriptiveName' },
     currencyCode: { type: DataTypes.STRING(16), allowNull: true, field: 'currencyCode' },
     timeZone: { type: DataTypes.STRING(64), allowNull: true, field: 'timeZone' },

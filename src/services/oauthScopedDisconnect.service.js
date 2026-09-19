@@ -123,6 +123,9 @@ async function deactivateGoogleMappingsForScope({
   connectionId,
   transaction,
   models = db,
+  actorId,
+  sessionRef,
+  now = () => new Date(),
 }) {
   const isClinic = scope.assignmentScope === 'clinic';
   const allGroupClinicIds = isClinic
@@ -199,10 +202,27 @@ async function deactivateGoogleMappingsForScope({
     ...sharedArgs,
     rows: ads,
     assetType: 'google.ads_account',
-    ownerClinicIdOf: (row) => row.clinicaId,
+    ownerClinicIdOf: (row) => row.assignmentScope === 'group' ? null : row.clinicaId,
   });
 
+  const adsPending = await require('./googleAdsRevocation.service').enqueue({
+    models, transaction, connectionId, scope, clinicIds: ordinaryClinicIds, mappings: ads, actorId, sessionRef, now: now(),
+  });
+  const propertyPending = await require('./googlePropertyRevocation.service').enqueue({
+    models, transaction, connectionId, clinicIds: ordinaryClinicIds, actorId, sessionRef, now: now(),
+    mappings: { search_console: web, analytics },
+  });
+  const brokerRevocationsPending = adsPending + propertyPending + await require('./businessProfileRevocation.service').enqueue({
+    models, transaction, connectionId, clinicIds: ordinaryClinicIds, actorId, sessionRef, now: now(),
+  });
+  const enrollmentPending = await require('./googleAdsEnrollment.repository').createGoogleAdsEnrollmentRepository({ models, now }).cancelScope({
+    scopeKey: `${scope.assignmentScope}:${isClinic ? scope.clinicId : scope.groupId}`, connectionId, clinicIds: allGroupClinicIds,
+    transaction, actorId, sessionRef, includeClinicScopes: !isClinic,
+    ...(!isClinic ? { childScopeClinicIds: ordinaryClinicIds } : {}),
+  });
   return {
+    brokerRevocationsPending,
+    ...(enrollmentPending ? { enrollmentPending } : {}),
     web: await deactivateRows(web, 'isActive', transaction),
     analytics: await deactivateRows(analytics, 'isActive', transaction),
     local: await deactivateRows(local, 'is_active', transaction),

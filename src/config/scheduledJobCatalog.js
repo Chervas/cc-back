@@ -7,6 +7,31 @@
  * reintentos y la recuperación tras reinicio pertenecen al scheduler durable.
  */
 const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
+  googleAdsEnrollment: Object.freeze({
+    type: 'google_ads_broker_enrollment', priority: 'high', executorMethod: 'executeGoogleAdsEnrollment',
+    enabledEnv: 'GOOGLE_ADS_ENROLLMENT_WORKER_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
+  googleAdsRevocations: Object.freeze({
+    type: 'google_ads_broker_revocations', priority: 'high', executorMethod: 'executeGoogleAdsRevocations',
+    enabledEnv: 'GOOGLE_ADS_REVOCATION_WORKER_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
+  googlePropertyRevocations: Object.freeze({
+    type: 'google_property_broker_revocations', priority: 'high', executorMethod: 'executeGooglePropertyRevocations',
+    enabledEnv: 'GOOGLE_PROPERTY_REVOCATION_WORKER_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
+  googleOAuthReconciliation: Object.freeze({
+    type: 'google_oauth_broker_reconciliation', priority: 'high', executorMethod: 'executeGoogleOAuthReconciliation',
+    enabledEnv: 'GOOGLE_OAUTH_BROKER_WORKER_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
+  businessProfileRevocations: Object.freeze({
+    type: 'business_profile_broker_revocations', priority: 'high', executorMethod: 'executeBusinessProfileRevocations',
+    enabledEnv: 'GOOGLE_BUSINESS_PROFILE_REVOCATION_WORKER_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
   metaMarketingEnrollment: Object.freeze({
     type: 'meta_marketing_enrollment_reconciliation', priority: 'high', executorMethod: 'executeMetaMarketingEnrollment',
     enabledEnv: 'META_MARKETING_ENROLLMENT_WORKER_ENABLED', timezone: 'Europe/Madrid',

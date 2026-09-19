@@ -465,6 +465,15 @@ function testMutationGuardRejectsExtraFieldsAndWrongAccount() {
 }
 
 async function main() {
+  const managed = await normalizeCanonicalGoogleAdsConversions({
+    scope: { group_id: 5, assignment_scope: 'group' },
+    configuredAccounts: [{ customer_id: CUSTOMER_A, expected_actions: [{ id: '1', name: 'Lead - ClinicaClick' }] }],
+    apply: true, confirmExternalMutation: true,
+    dependencies: { resolveRuntime: async () => ({ deliveryMode: 'broker', customerId: CUSTOMER_A }),
+      request: async () => assert.fail('Managed account must not reach legacy Google transport') },
+  });
+  assert.equal(managed.accounts[0].outcome, 'failed');
+  assert.equal(managed.accounts[0].error.code, 'GOOGLE_ACTION_PLAN_REQUIRED');
   testConfiguredSelectorsAreStrict();
   testPlanTouchesOnlySelectedCanonicalActions();
   testIdStillRequiresCanonicalNameTypeAndAccount();

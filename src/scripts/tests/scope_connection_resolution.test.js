@@ -179,6 +179,7 @@ async function testMixedGoogleMappingsFailClosed() {
 
 async function testMixedMetaMappingsFailClosed() {
   const originals = {
+    blockFindOne: db.MetaScopeBlock.findOne,
     clinicFindByPk: db.Clinica.findByPk,
     assignmentFindOne: db.MetaConnectionAssignment.findOne,
     assetFindAll: db.ClinicMetaAsset.findAll,
@@ -186,6 +187,7 @@ async function testMixedMetaMappingsFailClosed() {
     connectionFindByPk: db.MetaConnection.findByPk,
   };
   try {
+    db.MetaScopeBlock.findOne = async () => null;
     db.Clinica.findByPk = async () => ({ id_clinica: 55, grupoClinicaId: 9 });
     db.MetaConnectionAssignment.findOne = async () => null;
     db.ClinicMetaAsset.findAll = async () => [
@@ -208,6 +210,7 @@ async function testMixedMetaMappingsFailClosed() {
     assert.equal(result.connection, null);
     assert.equal(result.source, 'legacy_mapping_clinic_ambiguous');
   } finally {
+    db.MetaScopeBlock.findOne = originals.blockFindOne;
     db.Clinica.findByPk = originals.clinicFindByPk;
     db.MetaConnectionAssignment.findOne = originals.assignmentFindOne;
     db.ClinicMetaAsset.findAll = originals.assetFindAll;

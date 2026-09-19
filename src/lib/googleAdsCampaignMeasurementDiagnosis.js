@@ -48,6 +48,19 @@ function hasClinicaclickAttributionSuffix(value) {
   return GOOGLE_ATTRIBUTION_KEYS.every((key) => suffix.includes(key));
 }
 
+function googleUrlExpansionOptedOut(campaign = {}) {
+  // v22+ replaced the legacy boolean; unknown settings never prove fixed destinations.
+  if (Object.hasOwn(campaign, 'assetAutomationSettings') || Object.hasOwn(campaign, 'asset_automation_settings')) {
+    const settings = campaign.assetAutomationSettings ?? campaign.asset_automation_settings;
+    if (!Array.isArray(settings)) return false;
+    const expansion = settings.filter(item => (item?.assetAutomationType ?? item?.asset_automation_type)
+      === 'FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION');
+    return expansion.length === 1
+      && (expansion[0].assetAutomationStatus ?? expansion[0].asset_automation_status) === 'OPTED_OUT';
+  }
+  return (campaign.urlExpansionOptOut ?? campaign.url_expansion_opt_out) === true;
+}
+
 function mergeObservedDestination(map, rawUrl, clicks = 0) {
   const url = normalizeDestinationUrl(rawUrl);
   if (!url) return;
@@ -67,7 +80,7 @@ function buildGoogleDestinationDetections({ campaignRows = [], landingRows = [],
       campaignName: campaign.name || null,
       channelType: campaign.advertisingChannelType || campaign.advertising_channel_type || null,
       urlExpansionEnabled: (campaign.advertisingChannelType || campaign.advertising_channel_type) === 'PERFORMANCE_MAX'
-        ? !(campaign.urlExpansionOptOut ?? campaign.url_expansion_opt_out ?? false)
+        ? !googleUrlExpansionOptedOut(campaign)
         : false,
       attributionSuffixPresent: hasClinicaclickAttributionSuffix(
         campaign.finalUrlSuffix || campaign.final_url_suffix
@@ -231,5 +244,6 @@ module.exports = {
   destinationDomain,
   diagnoseGoogleCampaignMeasurement,
   hasClinicaclickAttributionSuffix,
+  googleUrlExpansionOptedOut,
   normalizeDestinationUrl,
 };
