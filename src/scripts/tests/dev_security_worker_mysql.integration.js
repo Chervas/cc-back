@@ -43,6 +43,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const email = createEmailPoller({ jobs, model: models.EmailMessage, delivery });
   const sourceRoleArn = 'arn:aws:iam::137819318729:role/fictitious-audit-source';
   const writerEntered = deferred(), readerEntered = deferred(), writerRelease = deferred(), readerRelease = deferred();
+  const metaEntered = deferred(), metaRelease = deferred(); let metaRuns = 0, metaClosing;
   const objects = new Map(), errors = []; let loops, writes = 0, reads = 0, sends = 0, offset = 0;
   const now = () => new Date(Date.now()+offset), originalSend = SESv2Client.prototype.send;
   SESv2Client.prototype.send = async () => ({ MessageId: 'FICTITIOUS_SES_'+(++sends) });
@@ -69,9 +70,10 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     return {user,challenge,message};
   }
   try {
-    loops=startSecurityLoops({email,audit:()=>slowWriter.run(),reconcile:()=>slowReader.run(),onError:name=>errors.push(name)});
+    loops=startSecurityLoops({email,audit:()=>slowWriter.run(),reconcile:()=>slowReader.run(),onError:name=>errors.push(name),
+      meta:{metaEnrollment:async closing=>{metaRuns++;metaClosing=closing;metaEntered.resolve();await metaRelease.promise;}}});
     await until(async()=>Boolean((await stateFactory().read())?.lease_token),'writer entered');
-    await Promise.all([writerEntered.promise,readerEntered.promise]);
+    await Promise.all([writerEntered.promise,readerEntered.promise,metaEntered.promise]);
     assert.equal((await makeDelivery(write).run()).reason,'audit_delivery_in_progress');
     assert.equal(await repo.claim(now(),'reconcile'),null);
     const begin=performance.now(),pending=await enqueue(1);
@@ -82,7 +84,10 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     assert.equal((await sessions.verify(authenticated.token)).userId,pending.user.id_usuario);
     report.checks.push('Actual SQL MFA challenge/outbox/job sends once and verifies a managed session while writer and reader remain unresolved; duplicate delivery lease and reconcile claim are denied');
     loops.stop();let drained=false;loops.done.then(()=>{drained=true;});await new Promise(r=>setImmediate(r));assert.equal(drained,false);
-    writerRelease.resolve();readerRelease.resolve();await loops.done;loops=null;
+    writerRelease.resolve();readerRelease.resolve();await new Promise(r=>setImmediate(r));
+    assert.equal(drained,false);assert.equal(metaClosing(),true);assert.equal(metaRuns,1);
+    metaRelease.resolve();await loops.done;loops=null;
+    report.checks.push('Actual encrypted MFA/outbox/session proceeds while Meta enrollment remains unresolved; stop also drains that lane without another run');
     assert.equal((await models.PlatformAuditEvent.findByPk(first.event.eventId)).state,'delivered');
     assert.equal((await models.PlatformAuditEvent.findByPk(old.event.eventId)).state,'reconcile');
     assert.equal(errors.filter(x=>x==='reconcile').length,1);
@@ -103,6 +108,6 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     report.checks.push('New loop instances recover persisted pending work and reconcile the original receipt once; uncertain SES is never resent, staging and clinical jobs stay untouched');
     report.sesSends=sends;report.auditWrites=writes;report.auditReads=reads;report.externalCalls=0;report.realProvider=false;report.publicMfaAcceptance=false;
   } finally {
-    loops?.stop();writerRelease.resolve();readerRelease.resolve();if(loops)await loops.done;SESv2Client.prototype.send=originalSend;
+    loops?.stop();writerRelease.resolve();readerRelease.resolve();metaRelease.resolve();if(loops)await loops.done;SESv2Client.prototype.send=originalSend;
   }
 }).catch(error=>{console.error(error.stack);process.exitCode=1;});

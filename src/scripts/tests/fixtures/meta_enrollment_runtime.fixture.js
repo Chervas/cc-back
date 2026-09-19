@@ -26,6 +26,8 @@ module.exports=async({models,sql,sessions,service,callback,request,token,now,rep
     loseActivationReply:()=>{lostReply=C.E.OPERATIONS.activate;},closeEnrollment:()=>{enabled=false;},commands});
   const reserved=await api('POST','',{flowId:flow.requestId,assetRefs:['meta-ad_account:301','meta-instagram_business:501']});
   const id=reserved.requestId,latest=()=>R.findByPk(id,{raw:true}),run=()=>enrollment.run({enrollmentId:id});
+  if(process.env.META_ENROLLMENT_RUNTIME_CASE==='dev_worker')return require('./meta_dev_worker.fixture')({models,sql,service,enrollment,api,id,latest,report,commands,
+    setBeforeWire:fn=>{beforeWire=fn;},closeEnrollment:()=>{enabled=false;}});
   if(process.env.META_ENROLLMENT_RUNTIME_CASE==='query_health'){
     const original=await latest(),future=new Date(+now()+86400000);
     for(let offset=0;offset<11000;offset+=250)await R.bulkCreate(Array.from({length:250},(_,n)=>({...original,

@@ -1,6 +1,6 @@
 'use strict';
 const test = require('node:test'); const assert = require('node:assert/strict'); const { randomUUID } = require('node:crypto');
-const { assertRuntime, allowedEmail, startSecurityLoops, createEmailPoller } = require('../dev-security-worker');
+const { assertRuntime, allowedEmail, startSecurityLoops, createEmailPoller, createMetaPollers } = require('../dev-security-worker');
 const { authorize } = require('../../lib/devAuditRelay');
 const { pack, keyFor } = require('../../../services/platform-audit/src/event');
 const { fixture } = require('../../../services/platform-audit/test/fixture.cjs');
@@ -93,6 +93,36 @@ test('security consumer requires DEV database, own identity and all business wor
   assert.equal(allowedEmail(row), true);
   for (const change of [{ template_key: 'marketing' }, { stream: 'automation' }, { clinica_id: 19 }, { paciente_id: 1 }])
     assert.equal(!!allowedEmail({ ...row, ...change }), false);
+});
+test('Meta lanes remain lazy and separately gated; stop prevents imports and forwards draining to active services', async () => {
+  const env = {}, loaded = [], calls = [];
+  const meta = createMetaPollers({ env, load: id => { loaded.push(id); return { run: async options => { calls.push(options); return { status: 'completed' }; } }; } });
+  for (const run of Object.values(meta)) assert.equal((await run()).skipped, true);
+  assert.deepEqual(loaded, []);
+  env.META_MARKETING_OAUTH_WORKER_ENABLED = 'TRUE'; await meta.metaOAuth(); assert.deepEqual(loaded, []);
+  env.META_MARKETING_OAUTH_WORKER_ENABLED = 'true';
+  const closing = () => false; await meta.metaOAuth(closing);
+  assert.deepEqual(loaded, ['../services/metaMarketingOAuth.service']); assert.equal(calls[0].closing, closing);
+  env.META_MARKETING_ENROLLMENT_WORKER_ENABLED = 'true';
+  await meta.metaEnrollment(() => true); assert.equal(loaded.length, 1);
+  await meta.metaRevocations(); assert.equal(loaded.length, 1);
+});
+test('slow Meta enrollment does not hold auth/audit or revocation; failed row batches are visible and shutdown drains once', async () => {
+  const pending = deferred(), w = waits(), errors = [], calls = { email: 0, audit: 0, reconcile: 0, enrollment: 0, revocation: 0 };
+  let draining;
+  const loops = startSecurityLoops({ wait: w.wait, onError: name => errors.push(name),
+    email: async () => { calls.email++; }, audit: async () => { calls.audit++; }, reconcile: async () => { calls.reconcile++; },
+    meta: { metaEnrollment: async closing => { calls.enrollment++; draining = closing; await pending.promise; },
+      metaRevocations: async () => { calls.revocation++; return { status: 'failed', failed: 1 }; } } });
+  try {
+    await turn(); for (let n = 0; n < 4; n++) { w.release(1000); await turn(); }
+    w.release(10000); w.release(30000); w.release(60000); await turn();
+    assert.deepEqual(calls, { email: 5, audit: 2, reconcile: 2, enrollment: 1, revocation: 2 });
+    assert.deepEqual(errors, ['metaRevocations', 'metaRevocations']); assert.equal(draining(), false);
+    loops.stop(); let done = false; loops.done.then(() => { done = true; }); await turn();
+    assert.equal(draining(), true); assert.equal(done, false); pending.resolve(); await loops.done;
+    assert.equal(calls.enrollment, 1); assert.equal(w.pending.length, 0);
+  } finally { loops.stop(); pending.resolve(); await loops.done; }
 });
 test('DEV relay requires live DEV session and exact locally confirmed receipt', async () => {
   const row = { ...pack(fixture()), state: 'delivered' };
