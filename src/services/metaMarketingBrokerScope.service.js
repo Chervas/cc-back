@@ -9,7 +9,7 @@ const digest = value => createHash('sha256').update(JSON.stringify(value)).diges
 const bounded = rows => { if (!Array.isArray(rows) || rows.length > 1000) fail(); return rows; };
 const ids = values => { if (values.some(v => !positive(v))) fail(); return [...new Set(values.map(Number))].sort((a,b) => a-b); };
 const MAPPING_FIELDS = ['id','metaConnectionId','assetType','metaAssetId','assignmentScope','clinicaId','grupoClinicaId','isActive'];
-const BINDING_FIELDS = ['mapping_id','asset_ref','meta_connection_id','meta_user_id','app_id','connection_ref','scope_key','tenant_clinic_id','parent_page_id','state'];
+const BINDING_FIELDS = ['mapping_id','enrollment_id','asset_ref','meta_connection_id','meta_user_id','app_id','connection_ref','scope_key','tenant_clinic_id','parent_page_id','state'];
 function asset(value) {
   if (typeof value !== 'string') fail();
   const match = /^meta-(ad_account|facebook_page|instagram_business):([1-9][0-9]{0,29})$/.exec(value);
@@ -19,10 +19,11 @@ function binding(value) {
   if (!value || !positive(value.mapping_id) || !positive(value.meta_connection_id) || !positive(value.tenant_clinic_id)
     || !reference(value.connection_ref) || !C.graphId(value.meta_user_id) || !C.graphId(value.app_id)
     || !/^(clinic|group):[1-9]\d{0,9}$/.test(value.scope_key || '') || !positive(value.scope_key.split(':')[1])
-    || !['staged','active','blocked'].includes(value.state)) fail();
+    || !['staged','active','blocked'].includes(value.state)
+    || value.enrollment_id != null && !require('./metaMarketingEnrollment.contract').UUID.test(value.enrollment_id)) fail();
   const resource = asset(value.asset_ref);
   if (resource.kind === 'instagram_business' ? !C.graphId(value.parent_page_id) : value.parent_page_id !== null) fail();
-  return Object.fromEntries(BINDING_FIELDS.map(k => [k, ['mapping_id','meta_connection_id','tenant_clinic_id'].includes(k) ? Number(value[k]) : value[k]]));
+  return Object.fromEntries(BINDING_FIELDS.map(k => [k, k==='enrollment_id' ? value[k]??null : ['mapping_id','meta_connection_id','tenant_clinic_id'].includes(k) ? Number(value[k]) : value[k]]));
 }
 function mapping(value) {
   if (!value || !positive(value.id) || !positive(value.metaConnectionId) || !['clinic','group'].includes(value.assignmentScope)
@@ -34,7 +35,7 @@ function mapping(value) {
   return { ...resource, mappingId:Number(value.id), connectionId:Number(value.metaConnectionId), assignmentScope:value.assignmentScope,
     clinicId:value.clinicaId === null ? null : Number(value.clinicaId), groupId:value.grupoClinicaId === null ? null : Number(value.grupoClinicaId), active:[true,1].includes(value.isActive) };
 }
-function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocations, loadMappings, loadClinics, loadShared, loadPrimaryGroups,
+function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocations, loadMappings, loadClinics, loadShared, loadPrimaryGroups, inspectEnrollment,
   loadGrants, loadConnection, blocked, enabled = () => process.env.META_MARKETING_BROKER_ENABLED === 'true' }) {
   const contexts = new WeakMap();
   async function inspect(mappingId, expected) {
@@ -48,6 +49,12 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
     // The independent delivery history remains an exclusion if a binding is recreated.
     if (bounded(await loadRevocations(selected.asset_ref)).length) fail('asset_revoked');
     if (selected.state !== 'active') fail('meta_broker_not_active');
+    let enrollment=null;
+    if(selected.enrollment_id){
+      if(typeof inspectEnrollment!=='function')fail();
+      enrollment=await inspectEnrollment(selected.enrollment_id);
+      if(enrollment?.enrollmentId!==selected.enrollment_id||!Array.isArray(enrollment.mappingIds)||!enrollment.mappingIds.includes(Number(mappingId)))fail();
+    }
     if (!current) fail(); const requested = mapping(current);
     if (!requested.active || requested.assetRef !== selected.asset_ref || requested.connectionId !== selected.meta_connection_id) fail();
     const [scopeType, rawScopeId] = selected.scope_key.split(':'), scopeId = Number(rawScopeId);
@@ -57,6 +64,7 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
     if (!clinicIds.length || clinics.length !== clinicIds.length || !clinicIds.includes(selected.tenant_clinic_id)
       || scopeType === 'clinic' && (clinicIds.length !== 1 || clinicIds[0] !== scopeId)
       || scopeType === 'group' && clinics.some(row => Number(row.grupoClinicaId) !== scopeId)) fail();
+    if(enrollment&&JSON.stringify(enrollment.clinicIds)!==JSON.stringify(clinicIds))fail('scope_denied');
     if (await blocked(scope)) fail('asset_revoked');
     const records = bounded(await loadBindings(selected.asset_ref, null)).map(binding);
     const aliases = bounded(await loadMappings(requested));
@@ -66,7 +74,7 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
       if (record.asset_ref !== selected.asset_ref || record.connection_ref !== selected.connection_ref
         || record.meta_connection_id !== selected.meta_connection_id || record.meta_user_id !== selected.meta_user_id
         || record.app_id !== selected.app_id || record.scope_key !== selected.scope_key || record.tenant_clinic_id !== selected.tenant_clinic_id
-        || record.parent_page_id !== selected.parent_page_id) fail();
+        || record.parent_page_id !== selected.parent_page_id || record.enrollment_id!==selected.enrollment_id) fail();
       // A deleted alias's block still excludes this credential/asset tuple.
       if (record.state === 'blocked') fail('asset_revoked');
       const owner = all.find(row => row.mappingId === record.mapping_id);
@@ -109,6 +117,7 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
     const captured = { mappingId:requested.mappingId, ...asset(selected.asset_ref), parentPageId:selected.parent_page_id,
       connectionId:selected.meta_connection_id, connectionRef:selected.connection_ref, appId:selected.app_id, subjectId:selected.meta_user_id,
       tenantRef:`clinic:${selected.tenant_clinic_id}`, scopeKey:selected.scope_key, clinicIds,
+      enrollmentHash:enrollment?.digest??null,
       registryHash:digest(records.sort((a,b) => a.mapping_id-b.mapping_id)), mappingsHash:digest(active.sort((a,b) => a.mappingId-b.mappingId)),
       sharedHash:digest(shared), primaryHash:digest(primary), grantsHash:digest(grants), clinicsHash:digest(clinics) };
     if (expected && digest(captured) !== digest(expected)) fail('meta_broker_scope_changed');
@@ -126,6 +135,8 @@ function createMetaMarketingScopeRepository(getModels) {
   const options = { raw:true,logging:false,limit:1001 };
   const mappingOptions = { ...options, attributes:[...MAPPING_FIELDS,[literal('(pageAccessToken IS NULL AND waAccessToken IS NULL AND additionalData IS NULL)'),'credentials_absent']] };
   return {
+    inspectEnrollment:id=>getModels().sequelize.transaction({isolationLevel:'REPEATABLE READ'},transaction=>
+      require('./metaMarketingEnrollmentBinding.service').createBindings({models:getModels()}).committed(id,transaction)),
     loadMapping:id => getModels().ClinicMetaAsset.findByPk(id,mappingOptions),
     loadRevocations:assetRef => getModels().MetaMarketingBrokerRevocation.findAll({ ...options,attributes:['tuple_hash'],where:{asset_ref:assetRef} }),
     loadBindings:(assetRef,mappingId) => getModels().MetaMarketingBrokerBinding.findAll({ ...options,attributes:BINDING_FIELDS,

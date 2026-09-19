@@ -31,16 +31,17 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     if(!fresh||['slot_digest','scope_digest','session_ref','actor_user_id','state_hash','connection_ref','asset_ref','clinic_ids','scopes','app_id'].some(k=>fresh[k]!==row[k]))C.fail('meta_oauth_scope_changed',409);
     return fresh;
   }
-  async function cancelPending(row,worker=false,sessionRef=row.session_ref){
-    return tx(async transaction=>{
+  async function cancelInTransaction(row,transaction,worker=false,sessionRef=row.session_ref){
       const current=await R.findByPk(row.flow_id,locked(transaction));if(!current)C.fail('meta_oauth_state_invalid',400);
       if(!['cancel_pending','cancelled'].includes(current.state)){
         await record({...plain(current),session_ref:sessionRef},'authorization_cancel_requested',transaction,worker);
         await current.update({state:'cancel_pending',next_attempt_at:now(),last_error:null},{transaction});
       }
+      if(models.MetaMarketingEnrollmentRequest)await require('./metaMarketingEnrollment.service').createService({models,sessions,now})
+        .cancelFromOAuth(current.flow_id,transaction,worker?undefined:{actorId:Number(current.actor_user_id),sessionRef});
       return plain(current);
-    });
   }
+  const cancelPending=(row,worker=false,sessionRef=row.session_ref)=>tx(t=>cancelInTransaction(row,t,worker,sessionRef));
   async function call(row,name,payload={}){
     const requestId=name==='begin'?row.flow_id:randomUUID();
     const value=await client.execute({requestId,operation:B.OPERATIONS[name],tenantRef:'clinic:'+JSON.parse(row.clinic_ids)[0],connectionRef:row.connection_ref,assetRef:row.asset_ref,
@@ -102,6 +103,15 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     }catch(e){if([401,403,409].includes(e.httpStatus))await cancelPending(row,true);throw e;}
   }
   const service={
+    async cancelAfterEnrollment(enrollment,transaction){
+      // Internal hook: only a locally committed withdrawal of this exact
+      // selection can queue retirement of its OAuth candidate. No user session
+      // is required to finish an already authorized withdrawal.
+      if(!transaction||!models.MetaMarketingEnrollmentRequest||!C.UUID.test(enrollment.enrollment_id))C.fail();
+      const saved=await models.MetaMarketingEnrollmentRequest.findByPk(enrollment.enrollment_id,locked(transaction));
+      if(!saved||saved.state!=='revoked'||saved.flow_id!==enrollment.flow_id||saved.scope_key!==enrollment.scope_key)C.fail();
+      return cancelInTransaction({flow_id:saved.flow_id},transaction,true);
+    },
     async assets(input,id){
       gate();if(!discoveryEnabled())C.fail('meta_oauth_disabled');if(!C.UUID.test(id))C.fail('meta_oauth_state_invalid',400);
       const requestId=randomUUID(),startedAt=+now();let captured;

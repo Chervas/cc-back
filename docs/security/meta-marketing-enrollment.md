@@ -1,10 +1,10 @@
-# Selección y activación Meta: núcleo del broker
+# Selección y activación Meta: broker y consumidor CRM preparado
 
 Preparado sobre backend `3f5d61f5`, 19/09/2026. No desplegado ni aceptado con
 proveedor real. Contrato canónico en
 [13-backend](../../src/Documentacion/13-backend.md#selección-y-activación-meta-dentro-del-broker-preparado-19092026).
-Este núcleo todavía necesita completar el consumidor SQL/API/UI de selección de CRM.
-La reserva clínica y su evento humano v24 están preparados; alcance vigente al final.
+El consumidor SQL/worker y su evento humano v24 están preparados; alcance vigente
+en «Consumidor transaccional» al final. Faltan API/UI, metadatos de grupo y planificación.
 El inventario CRM ya incorpora una revisión local orientativa, descrita al final;
 no es ese escritor ni una reserva de activos.
 
@@ -63,11 +63,11 @@ fallback al lector anterior, a tokens SQL o a otra base SQLite. Antes del corte,
 verificar e incorporar el historial físico autorizado de todos los consumidores;
 el código no puede conocer bajas de otro archivo/servidor no incorporado.
 
-Falta el escritor CRM: sesión/MFA, permiso de todas las clínicas, identidad,
-asignaciones, aliases/primarias/shares, historial independiente y commit local tras
-resultado del broker. Una activación solo en broker no permite afirmar conexión
-clínica completada. El consumidor nuevo añadirá auditoría humana y UI antes de
-aceptar la fase. No se añade un job ni DDL MySQL aquí, ni se migra el callback legacy.
+El núcleo necesita el escritor CRM preparado al final: sesión/MFA, permiso de todas
+las clínicas, identidad, asignaciones, aliases/primarias/shares, historial independiente
+y commit local tras resultado del broker. Una activación solo en broker no confirma
+conexión clínica. La UI y la planificación siguen pendientes. No se migra el callback
+legacy ni se instala un job por publicar únicamente este núcleo.
 
 No desplegar todo DEV. Seleccionar dependencias, revisar migraciones anteriores,
 IAM/slots/grants/TLS, registros y fuente de configuración por entorno. Mantener
@@ -232,10 +232,9 @@ rechazadas y activación sin respuesta conciliada tras reinicio. El control func
 sin clave ordinaria; la allowlist y configuración inválida fallan antes de la red.
 No usa tablas, claves o proveedores operativos. Evidencia y conteos finales en99.
 
-Faltan el servicio de autoridad clínica, comprobación completa de aliases/primarias/
-shares, escritor de bindings/asignaciones, lease/worker, auditoría humana y UI.
-No hay routes/gates nuevos ni despliegue; este esquema/cliente por sí solo no autoriza
-una conexión. Publicar mediante candidato selectivo cuando estén unidos y probados
+Este corte estructural precede a la autoridad, escritor y worker descritos después.
+El esquema/cliente por sí solo no autoriza una conexión. Aún sin rutas ni despliegue.
+Publicar mediante candidato selectivo cuando estén unidos y probados
 los consumidores y su lector/escritor de auditoría compatible. Preservar el canary
 AWSv19 congelado y registrar por separado su eventual publicación.
 
@@ -252,15 +251,15 @@ no se transforma, vacía su token ni se altera WhatsApp.
 Una transacción conserva solicitud, claims y evento humano. Un fallo de auditoría
 revierte también una identidad externa nueva. Dos selecciones idénticas simultáneas
 convergen en una solicitud/evento; el conjunto no se reemplaza. `assertPending`
-revalida la sesión original, ámbito completo, identidad, política y claims. El futuro
-worker debe bloquear la solicitud y poseer su lease antes de usarla. Cancelar OAuth
-invalida la autoridad y conserva reservas; falta encolar/conciliar esa retirada en
-el nuevo diario. Ningún mapping/grant clínico se crea en esta fase.
+revalida la sesión original, ámbito completo, identidad, política y claims. El
+worker preparado bloquea la solicitud y posee su lease antes de usarla. Cancelar
+OAuth invalida autoridad y encola retirada en el nuevo diario, conservando reservas.
+Ningún mapping/grant clínico se crea durante la reserva.
 
 El gate `META_MARKETING_ENROLLMENT_ENABLED` está apagado por defecto; todavía sin
-rutas, bootstrap o worker del consumidor. No activarlo ni aplicar DDL operativa.
-Faltan confirmación humana, escritor final atómico (también primarias/shares),
-conciliación tras ACK perdido/commit fallido, retirada independiente y UI completa.
+rutas, bootstrap ni planificación del worker preparado. No activarlo por disponer
+de esta fuente. Confirmación, escritor y conciliación se detallan a continuación;
+la UI completa y su aceptación siguen pendientes.
 Para grupos, conservar una fila canónica por activo/grupo y adaptar sus lectores
 antes de publicar; no expandir a una fila por sede ni cambiar primarias implícitas.
 
@@ -289,3 +288,75 @@ Recuperación: conservar gates cerrados y releases actuales; este corte está so
 en fuente DEV. No bajar tablas con datos ni borrar claims/identidades/bajas.
 Inventario de fuentes `meta-marketing-enrollment-authority-consumers.json`; es un
 manifiesto de cambios, no un paquete listo para publicar toda la rama DEV.
+
+## Consumidor transaccional: confirmación y retirada — 19/09/2026
+
+Factoría `metaMarketingEnrollment.service.js` y escritor
+`metaMarketingEnrollmentBinding.service.js`. Contrato canónico en13, apartado
+«Consumidor Meta: confirmación, asignación y retirada». Sin rutas, singleton o job
+instalado. Los gates de altas y `META_MARKETING_ENROLLMENT_WORKER_ENABLED` siguen
+OFF. Las nuevas migraciones09/10/11 solo se ejecutaron en MySQL temporal.
+
+El worker consulta estado antes de mutar y guarda marcas de posible envío. Una
+respuesta perdida recupera el recibo tras reinicio sin repetir activate. Si el
+estado remoto aún no permite saber qué ocurrió, deja pendiente explícito; la
+interfaz futura deberá ofrecer retirada, no un reintento automático ni éxito.
+No existe todavía un comando humano para reintentar con otra UUID. Nunca borrar
+marcas/claims o modificar UUID para forzar ese recorrido.
+
+Lease120 s, diez solicitudes por invocación y plazo de admisión30 s; no es un
+timeout total de la función. `SKIP LOCKED` real, fecha generada de trabajo y rango
+por índice excluyen retiradas/futuras. Las operaciones de red quedan fuera de SQL.
+Preparado revalida a30 s, incertidumbre a60 s, activo a cinco minutos; backoff hasta
+una hora. La planificación y capacidad bajo carga real permanecen pendientes.
+
+El commit local exige recibo activo sin bloqueo y autoridad original vigente.
+Grant, mappings canónicos de grupo/clínica, bindings propietarios y evento humano
+se guardan atómicamente. Una referencia primaria/share ajena al ID recién asignado
+revierte todo. Un grant nuevo que amplíe WhatsApp compartido se rechaza; sus
+credenciales y estado permanecen intactos. Sin selección de primaria implícita.
+
+Un fallo de auditoría local deja el remoto recuperable por estado. Pérdida de
+permisos encola retirada. Los nuevos lectores comprueban selección completa,
+padres/claims, asignaciones y bajas sin depender de la sesión original después
+del commit. El llamador conserva su propia autorización vigente. Un miembro añadido
+al grupo, share ajeno o baja de otro activo impide servir el conjunto.
+
+Retirada bloquea solo mappings/bindings propios y conserva el grant genérico
+compartido, identidad y claims. Funciona con altas OFF y termina tras logout.
+Cancelar OAuth encola la retirada de selección en la misma transacción; terminar
+la retirada encola cancelar el candidato OAuth. Su worker completa ese último
+control. Auditoría v24 distingue las seis fases, sin guardar inventario ni tokens. El visor
+muestra la cancelación OAuth confirmada como «Cancelada» y la excluye del contador
+de denegaciones de acceso, conservando el outcome técnico del evento v22.
+
+Publicación futura: DDL Meta04–08 y luego09 propietario,10 marcas,11 índice antes
+del código; incluso el lector/cancelación OAuth con altas OFF necesitan ese
+esquema. Publicar AWS compatible v24 antes del productor. Adaptar metadatos de grupo
+y completar API/UI/job; no publicar toda la rama DEV. Las migraciones09/10 rechazan
+inversa con propiedad/marcas pobladas. La11 solo se retira después de detener o
+sustituir consumidores que consulten su columna; no elimina diario ni histórico.
+Mantener guard de propiedad mientras existan bindings nuevos. Preservar lectores,
+controles, marcas y bajas al recuperar; no volver a tokens SQL. AWSv19 y sus seis
+canarios permanecen intactos; no hay publicación o DDL operativa nueva en este corte.
+
+Pruebas desde backend con Node24:
+
+```sh
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 META_OAUTH_DISCOVERY_TEST=1 META_ENROLLMENT_RUNTIME_TEST=1 META_ENROLLMENT_RUNTIME_CASE=query_health META_OAUTH_CRM_VISUAL=1 node src/scripts/tests/meta_marketing_oauth_mysql.integration.js
+```
+
+Ejecutar cada caso negativo con un runtime nuevo, sustituyendo `query_health`
+por `uncertain`, `permission_race`, `foreign_primary`, `foreign_share` o `wa_grant`.
+No compartir la BD/slot de pruebas ni relajar cuotas. Regresiones de autoridad,
+diario, lector y OAuth se ejecutan por separado. MySQL8/TLS/SQLite/cliente CRM y
+componentes Angular reales; Graph/Secrets/S3 ficticios, sin login público nuevo.
+La prueba visual muestra confirmación pendiente, conexión y retirada en Actividad;
+no sustituye el recorrido pendiente de selección desde Cuentas conectadas.
+
+Evidencia privada `qa-evidence/security-resume-20260917/meta-enrollment-runtime-20260919/`;
+conteos y límites en39/99. Manifiesto nuevo
+`meta-marketing-enrollment-runtime-consumers.json`; los manifiestos anteriores
+conservan las huellas históricas de sus cortes. Coste incremental real null, sin
+cambiar la última recogida etiquetada real. La fase sigue pendiente de aceptación
+con proveedor y titular; no activa campañas, leads, envíos ni jobs clínicos DEV.

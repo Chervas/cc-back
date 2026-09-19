@@ -11351,12 +11351,12 @@ con exclusión SQL; guarda solicitud y evento humano v24 en la misma transacció
 Un fallo de auditoría revierte también identidad nueva y reservas. Una identidad
 legacy compartida nunca se convierte ni se vacía; requiere migración revisada.
 
-La reserva aún no crea mappings o grants clínicos. El worker deberá repetir estas
-comprobaciones antes/después del broker y el escritor final comprobar también las
-primarias/shares de los IDs asignados. Para grupos se prevé una fila canónica por
-activo en el grupo, conservando su ámbito completo; adaptar los lectores de
-metadatos a esa representación antes de publicar, sin multiplicar filas por sede
-ni elegir implícitamente una nueva primaria.
+La reserva no crea mappings o grants clínicos. El servicio/worker y escritor final
+preparados se describen en el apartado siguiente: repiten la autoridad y comprueban
+primarias/shares al asignar IDs. Para grupos crean una fila canónica por activo,
+conservando su ámbito completo. Falta adaptar los lectores de metadatos a esa
+representación antes de publicar, sin multiplicar filas por sede ni elegir
+implícitamente una nueva primaria.
 
 La reserva y sus rechazos están probados en MySQL/HTTPS/SQLite aislados, con
 proveedores ficticios; dos solicitudes simultáneas conservan una solicitud,
@@ -11369,8 +11369,76 @@ V24 registra transiciones durables separadas: selección registrada, preparada,
 confirmación humana solicitada, activación local confirmada, retirada solicitada
 y confirmada. Cantidades/digests e IDs técnicos, sin nombres de activos ni tokens.
 Publicar lector/escritor compatible antes del productor; conservar el paquete
-v19 congelado. El nuevo consumidor permanece apagado hasta integrar servicio,
-worker, UI y pruebas completas; este contrato no acredita aceptación operativa.
+v19 congelado. El nuevo consumidor permanece apagado hasta integrar rutas,
+planificación, UI y pruebas completas; este contrato no acredita aceptación operativa.
+
+### Consumidor Meta: confirmación, asignación y retirada (preparado, 19/09/2026)
+
+`metaMarketingEnrollment.service.js` implementa reserva, estado, confirmación,
+cancelación y ejecución con leases. Es una factoría probada, todavía sin singleton,
+rutas públicas, planificación ni pantalla de selección. Ambos gates de altas y
+worker están apagados por defecto. No se aplicaron sus DDL a bases operativas.
+
+La confirmación exige la sesión/MFA original, permiso vigente sobre todas las
+clínicas y el digest de la selección preparada. El worker usa transacciones cortas,
+lease de 120 s y `FOR UPDATE SKIP LOCKED` real de MySQL 8. Consulta estado antes
+de enviar prepare/activate y guarda su marcador de posible envío antes de la red.
+Los tres comandos conservan sus UUID. Tras una respuesta perdida recupera el
+resultado por estado; no activa otra vez. Si sigue sin poder confirmar el envío,
+conserva el pendiente explícito y permite retirarlo, sin inventar éxito ni cambiar
+UUID. No hay todavía una acción humana de reintento de activación incierta.
+
+El escritor `metaMarketingEnrollmentBinding.service.js` exige lease y autoridad
+vigentes después de la respuesta remota. Una transacción crea el grant compatible,
+una fila canónica por activo/ámbito, bindings con propietario `enrollment_id` y la
+fase v24 de conexión confirmada. Fallo de auditoría revierte todas esas escrituras;
+el siguiente ciclo puede completar el commit desde el recibo remoto. Pérdida de
+autoridad encola retirada. No cambia primarias; rechaza referencias ajenas incluso
+si apuntaban anticipadamente al ID recién asignado. No añade un grant genérico que
+amplíe acceso a WhatsApp de una conexión compartida. No lee ni borra sus tokens.
+
+Las lecturas de bindings nuevos comprueban toda la selección, sus claims y padres,
+identidad, candidato, scope, asignaciones efectivas, aliases, shares y bajas. Una
+alteración de miembros del grupo o de un activo invalida el conjunto. Una conexión
+confirmada no depende de mantener abierta la sesión que la creó; cada petición
+humana sigue necesitando su propia sesión y permiso. Bindings legacy con propietario
+null conservan su guard anterior, sin convertirse implícitamente.
+
+Una retirada autorizada bloquea inmediatamente los bindings y mappings propios;
+conserva grants genéricos compartidos, claims, identidad e historial. El control
+termina tras logout o cierre del gate de altas. Cancelar OAuth encola la retirada
+del enrollment en la misma transacción. Confirmar la retirada del enrollment
+encola también la cancelación de su candidato OAuth; el worker OAuth existente
+completa ese control. No reabre otras asignaciones ni procesa campañas o leads.
+
+El visor presenta la cancelación OAuth confirmada como «Cancelada» y la excluye
+del contador de denegaciones de acceso. Conserva intacto el outcome técnico
+`denied` del evento v22: significa autorización retirada, no fallo de su cancelación.
+
+DDL aditivas, posteriores a las de Meta 04–08:
+
+- `20260919090000-meta-marketing-enrollment-binding-owner.js`: propietario nullable
+  e índice de bindings. La inversa rechaza propietarios poblados.
+- `20260919100000-meta-marketing-enrollment-delivery-markers.js`: marcas de posible
+  envío prepare/activate; la inversa rechaza marcas pobladas.
+- `20260919110000-meta-marketing-enrollment-due-index.js`: fecha de trabajo generada,
+  null para retiradas, e índice `(delivery_due_at,enrollment_id)`. El ORM no escribe
+  esa columna; la consulta toma solo el rango vencido y evita ordenar el histórico.
+
+Instalar el esquema antes de cargar estos consumidores, incluso con altas OFF:
+el lector incluye la columna de propietario y cancelar OAuth consulta el diario.
+No retirar la columna/guard de propietario mientras existan bindings nuevos. Para
+recuperar, cerrar altas y mantener lectores compatibles, diarios y controles;
+no borrar marcas para forzar un reenvío ni restaurar tablas/bajas antiguas.
+
+Ejecución acotada a diez solicitudes por invocación, con plazo de admisión 30 s;
+una operación ya iniciada puede prolongarlo. Una sola ejecución local, leases SQL
+entre procesos, controles de permisos antes/después del I/O y backoff hasta una
+hora. Preparado espera 30 s; activo se comprueba cada cinco minutos; incertidumbre
+de envío consulta a los 60 s. Estos son intervalos del diario, no un job ya instalado
+ni una garantía de recursos/latencia. Cifras y límites en39; pruebas y recuperación
+en el runbook Meta y99. Pendientes API/UI, metadatos de grupo, planificación,
+compatibilidad AWS v24 y aceptación con proveedor/titular reales.
 
 ### Compatibilidad de auditoría AWS v19 publicada (19/09/2026)
 

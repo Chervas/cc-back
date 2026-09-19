@@ -19,6 +19,7 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     const migration=require('../../../migrations/20260919040000-meta-marketing-broker-registry'),qi=sql.getQueryInterface();
     await models.MetaConnection.create({id:90,metaUserId:'999',accessToken:'LEGACY_SENTINEL_UNTOUCHED'});
     await migration.up(qi);await migration.down(qi);await migration.up(qi);
+    await require('../../../migrations/20260919090000-meta-marketing-enrollment-binding-owner').up(qi);
     models.MetaConnection=require('../../../models/MetaConecction')(sql,D);
     models.MetaMarketingBrokerBinding=require('../../../models/metamarketingbrokerbinding')(sql,D);
     await require('../../../migrations/20260919050000-meta-marketing-broker-revocations').up(qi);

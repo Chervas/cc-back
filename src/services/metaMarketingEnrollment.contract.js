@@ -20,6 +20,7 @@ function request(row){
     ||!Array.isArray(mappings)||JSON.stringify(mappings)!==row.mapping_ids||mappings.some((v,i)=>!C.positive(v)||i>0&&v<=mappings[i-1])||mappings.length>1000)fail();
   for(const key of ['session_expires_at','requested_at','updated_at','next_attempt_at'])if(!(row[key] instanceof Date)||!Number.isFinite(+row[key]))fail();
   for(const key of ['prepared_at','activated_at','revoked_at'])if(row[key]!==null&&(!(row[key] instanceof Date)||!Number.isFinite(+row[key])))fail();
+  for(const key of ['prepare_sent_at','activate_sent_at'])if(Object.hasOwn(row,key)&&row[key]!==null&&(!(row[key] instanceof Date)||!Number.isFinite(+row[key])))fail();
   if(!Number.isInteger(Number(row.attempts))||Number(row.attempts)<0||Number(row.attempts)>1000000000
     ||row.selection_digest!==null&&!HASH.test(row.selection_digest)||['prepared','activate_pending','active'].includes(row.state)&&!HASH.test(row.selection_digest)
     ||['prepared','activate_pending','active'].includes(row.state)&&row.prepared_at===null

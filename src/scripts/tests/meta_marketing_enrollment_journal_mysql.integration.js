@@ -8,6 +8,7 @@ const C=require('../../services/metaMarketingEnrollment.contract');
 withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})=>{
   const qi=sql.getQueryInterface(),migration=require('../../../migrations/20260919080000-meta-marketing-enrollment-journal');
   await migration.up(qi);await migration.down(qi);await migration.up(qi);
+  const delivery=require('../../../migrations/20260919100000-meta-marketing-enrollment-delivery-markers');await delivery.up(qi);await delivery.down(qi);await delivery.up(qi);
   for(const [name,file] of [['MetaMarketingEnrollmentRequest','metamarketingenrollmentrequest'],['MetaMarketingEnrollmentClaim','metamarketingenrollmentclaim'],['MetaMarketingEnrollmentIdentity','metamarketingenrollmentidentity']])
     models[name]=require('../../../models/'+file)(sql,D);
   const Requests=models.MetaMarketingEnrollmentRequest,Claims=models.MetaMarketingEnrollmentClaim,Identities=models.MetaMarketingEnrollmentIdentity;

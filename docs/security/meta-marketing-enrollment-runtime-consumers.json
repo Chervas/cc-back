@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "60e509bac34291f34d7029b6f7816129ac58ea68",
+    "front": "8dc54d0c0179d11d09acaa6bd636d92d9556c8ff"
+  },
+  "includesWorkingChanges": true,
+  "scope": "Prepared enrollment service, leased worker, atomic canonical binding writer, status-first recovery, coordinated OAuth withdrawal and whole-selection read guard. No routes, singleton, scheduled job or selection UI. Changed-source inventory; not a deployable full DEV bundle. AWS audit remains v19. Activity now labels confirmed OAuth cancellation accurately and excludes it from access-denial counts.",
+  "back": {
+    "migrations/20260919090000-meta-marketing-enrollment-binding-owner.js": "5ea51cff3eb6d7a0c0521e5516046d69ace876d320da6d08d56daacb600edda0",
+    "migrations/20260919100000-meta-marketing-enrollment-delivery-markers.js": "f6a41057f0271be81e1535f2418cf3edcb52a664c29c138fee5dd34672985218",
+    "migrations/20260919110000-meta-marketing-enrollment-due-index.js": "9dfa04628ef1ea25920c42168c9080f22a3abe763e527ad1a9b5a0c5490394e6",
+    "models/metamarketingbrokerbinding.js": "73135a3a1a7a5616286865488caba1348922a1a60b187f0941c0bb58e9ec6c21",
+    "models/metamarketingenrollmentrequest.js": "c9c3134bb4ab8db270656e0d2393a159d09f5c2c9ba0c9374e4756bf1fab93a2",
+    "src/scripts/tests/fixtures/meta_enrollment_authority.fixture.js": "74e6bd5f03724c7bf82e193d51b9d33dcc3a2f6ea99d892dc37af37f3d17341f",
+    "src/scripts/tests/fixtures/meta_enrollment_runtime.fixture.js": "8113d222e9678c1d5b9bbafd5e0340acb58765c5e2e69e343092825eadeddf3e",
+    "src/scripts/tests/fixtures/meta_enrollment_visual.fixture.js": "02e7cb8a2dea5b5ee524ec044f934f3cfa76065efbe65045763d823463c80dd0",
+    "src/scripts/tests/meta_marketing_broker_mysql.integration.js": "0d4e9ba413a9dd53ea9f47a02b2f748244801ba16966e62e8cada226f0c6ce4a",
+    "src/scripts/tests/meta_marketing_enrollment_journal_mysql.integration.js": "31bc61a15b32f1c64c24c83d13812277017e208e2369735a2b9bf6b46687654b",
+    "src/scripts/tests/meta_marketing_oauth_mysql.integration.js": "c43e70534407f5802d8cfb17cefed2d3bfe6dd1d5796777058ef1f04fb61fa70",
+    "src/services/metaMarketingBrokerScope.service.js": "f465f397f22e6a9c9e93a9716b07d74ea9dbd78c6ba8676be651a9f0cd997abf",
+    "src/services/metaMarketingEnrollment.contract.js": "3d3fae7b87f7f241355037941d1017d0fc8c8e1a00433d62ceb10321087a9fe9",
+    "src/services/metaMarketingEnrollment.service.js": "c5a6f770e328b607158185ddd1b9814fbe647ebc0d3c2f522b05d132c216bd65",
+    "src/services/metaMarketingEnrollmentBinding.service.js": "ffc9582b9040077a4284de7df0689a275d7ff9cf3fa94715e65440dd9043cd85",
+    "src/services/metaMarketingOAuth.service.js": "e612ca6100b42f878e8aae60fded3855640054b8dbab7187a75beaebe37a1587",
+    "src/services/metaMarketingOAuthScope.service.js": "e614bffbff3b536a9f692315f5028f2c3587d5af4f3accb233b275ced499efc6"
+  },
+  "front": {
+    "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.ts": "caaa5ecdcbdb8d9089d1596f62be10c6498b34c46102fc72728b05fd61f84f35"
+  },
+  "qa": {
+    "runtimeGroups": 7,
+    "negativeScenarios": 5,
+    "authorityGroups": 7,
+    "oauthRegressionGroups": 8,
+    "journalGroups": 7,
+    "readerGroups": 9,
+    "httpTests": 6,
+    "visualScreenshots": 6,
+    "visualInspected": [
+      "desktop-meta_enrollment_activated",
+      "mobile-meta_enrollment_activation_requested",
+      "mobile-meta_enrollment_cancelled"
+    ],
+    "syntaxFiles": 17,
+    "providerReal": false,
+    "deployed": false,
+    "frontendContractTests": 8,
+    "angularBuild": "a723fb4a114ed3e3",
+    "angularBuildMs": 136474
+  },
+  "pending": [
+    "Canonical group metadata API/UI representation and full scope authorization",
+    "Selection/confirmation API/UI, singleton and operational scheduling",
+    "AWS audit v24 compatibility before producer, exact DDL and selective release",
+    "Real provider/titular acceptance and authenticated public walkthrough"
+  ],
+  "evidence": "qa-evidence/security-resume-20260917/meta-enrollment-runtime-20260919/"
+}

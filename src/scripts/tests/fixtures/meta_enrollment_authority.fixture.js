@@ -3,6 +3,7 @@ const assert=require('node:assert/strict'),{randomUUID}=require('node:crypto'),{
 const fs=require('node:fs'),path=require('node:path'),C=require('../../../services/metaMarketingEnrollment.contract');
 module.exports=async({models,sql,sessions,service,begin,callback,cancel,latest,token,now,report,app,server,base,auditView,visualHostMounted})=>{
   await require('../../../../migrations/20260919080000-meta-marketing-enrollment-journal').up(sql.getQueryInterface());
+  await require('../../../../migrations/20260919100000-meta-marketing-enrollment-delivery-markers').up(sql.getQueryInterface());
   for(const [name,file] of [['MetaMarketingEnrollmentRequest','metamarketingenrollmentrequest'],['MetaMarketingEnrollmentClaim','metamarketingenrollmentclaim'],['MetaMarketingEnrollmentIdentity','metamarketingenrollmentidentity']])models[name]=require('../../../../models/'+file)(sql,D);
   const R=models.MetaMarketingEnrollmentRequest,P=models.MetaMarketingEnrollmentClaim,I=models.MetaMarketingEnrollmentIdentity;
   const claims=await sessions.verify(token()),input={scopeKey:'group:5',actorId:claims.userId,sessionRef:claims.jti,sessionExpiresAt:new Date(claims.exp*1000)};
@@ -68,7 +69,8 @@ module.exports=async({models,sql,sessions,service,begin,callback,cancel,latest,t
   report.checks.push('Pending authority rechecks original session/ACL, full group, primary policy, effective grants and universal block; failures leave request/ownership untouched');
 
   await cancel(flow);await assert.rejects(assertPending(saved),{code:'meta_enrollment_scope_changed'});assert.equal(await P.count(),3);
-  report.checks.push('Source OAuth cancellation prevents use of a pending selection and preserves claims; enrollment cancellation worker integration remains pending');
+  assert.equal((await R.findByPk(saved.enrollment_id)).state,'revoke_pending');
+  report.checks.push('Source OAuth cancellation atomically queues pending enrollment withdrawal, prevents use and preserves all claims');
   await auditView.verify(token());
   if(process.env.META_OAUTH_CRM_VISUAL==='1'){
     if(!visualHostMounted)await require('./meta_settings_visual_host.fixture')({app,server,token,groupMode:true});
