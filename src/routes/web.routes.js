@@ -5,7 +5,13 @@ const axios = require('axios');
 const router = express.Router();
 const authMiddleware = require('./auth.middleware');
 const db = require('../../models');
-const GoogleConnection = db.GoogleConnection;
+const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
+const searchConsoleBroker = require('../services/searchConsoleBroker.service');
+const accessSessions = require('../services/accessSession.service');
+const WEB_AUTH_ERRORS = new Set(['web_mapping_connection_missing', 'web_mapping_token_expired',
+  'web_mapping_token_expiry_unknown', 'web_mapping_refresh_failed', 'web_mapping_token_missing', 'broker_cohort_disabled',
+  'broker_binding_invalid', 'search_console_scope_forbidden', 'search_console_session_required', 'broker_response_invalid']);
+const authorizationReason = error => WEB_AUTH_ERRORS.has(error?.code) ? error.code : googleLegacyCredentials.safe(error);
 const Clinica = db.Clinica;
 const WebGaDaily = db.WebGaDaily;
 const WebGaDimensionDaily = db.WebGaDimensionDaily;
@@ -54,7 +60,7 @@ router.use('/clinica/:clinicaId', async (req, res, next) => {
 });
 
 async function getGoogleAccessTokenForConnection(connectionId, {
-  connectionModel = GoogleConnection,
+  credentials = googleLegacyCredentials,
   http = axios,
   nowMs = Date.now()
 } = {}) {
@@ -64,7 +70,7 @@ async function getGoogleAccessTokenForConnection(connectionId, {
     error.code = 'web_mapping_connection_missing';
     throw error;
   }
-  const conn = await connectionModel.findByPk(normalizedConnectionId);
+  const conn = await credentials.load(connectionId);
   if (!conn || Number(conn.id) !== normalizedConnectionId) {
     const error = new Error('La conexión Google del mapping web no existe');
     error.code = 'web_mapping_connection_missing';
@@ -79,12 +85,12 @@ async function getGoogleAccessTokenForConnection(connectionId, {
       error.code = Number.isFinite(expiresAt) ? 'web_mapping_token_expired' : 'web_mapping_token_expiry_unknown';
       throw error;
     }
-    const resp = await http.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+    const resp = await credentials.request(conn, () => http.post('https://oauth2.googleapis.com/token', new URLSearchParams({
       client_id: process.env.GOOGLE_CLIENT_ID,
       client_secret: process.env.GOOGLE_CLIENT_SECRET,
       grant_type: 'refresh_token',
       refresh_token: conn.refreshToken
-    }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }));
     accessToken = resp.data?.access_token || null;
     if (!accessToken) {
       const error = new Error('Google no devolvió un token para el mapping web');
@@ -92,18 +98,20 @@ async function getGoogleAccessTokenForConnection(connectionId, {
       throw error;
     }
     const expiresIn = resp.data?.expires_in || 3600;
-    await conn.update({ accessToken, expiresAt: new Date(nowMs + expiresIn * 1000) });
+    await credentials.saveRefresh(conn, { accessToken, expiresAt: new Date(nowMs + expiresIn * 1000) });
   }
   if (!accessToken) {
     const error = new Error('La conexión Google del mapping web no tiene token');
     error.code = 'web_mapping_token_missing';
     throw error;
   }
+  await credentials.assert(conn);
   return { accessToken, connection: conn };
 }
 
 async function getClinicSiteMappings(clinicaId, {
-  inventoryResolver = resolveEffectiveMarketingAssetInventory
+  inventoryResolver = resolveEffectiveMarketingAssetInventory,
+  allowEmpty = false
 } = {}) {
   const inventory = await inventoryResolver({
     clinicIdRaw: clinicaId,
@@ -123,7 +131,7 @@ async function getClinicSiteMappings(clinicaId, {
       assignmentOrigin: row.assignment_origin || null,
       isActive: true
     }));
-  if (!mappings.length) throw new Error('No siteUrl mapped for clinic');
+  if (!mappings.length && !allowEmpty) throw new Error('No siteUrl mapped for clinic');
   return mappings;
 }
 
@@ -132,9 +140,25 @@ function selectPrimarySiteMapping(mappings) {
   return rows.find((row) => String(row.siteUrl || '').startsWith('http')) || rows[0] || null;
 }
 
+async function assertWebBrokerScope(req, mappings) {
+  let claims;
+  try { claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { claims = null; }
+  if (!claims || claims.sessionVersion !== 1 || !claims.jti || Number(claims.userId) !== Number(req.webClinicUserId)) {
+    throw Object.assign(Error('search_console_session_required'), { code: 'search_console_session_required', httpStatus: 401 });
+  }
+  const access = req.method === 'GET' ? 'read' : 'write';
+  const allowed = await hasMarketingClinicScopeAccess({ userId: claims.userId, clinicIds: [req.webClinicId], access });
+  const current = allowed ? await getClinicSiteMappings(req.webClinicId, { allowEmpty: true }) : [];
+  if (!allowed || mappings.some(mapping => !current.some(row => Number(row.id) === Number(mapping.id)
+    && row.siteUrl === mapping.siteUrl && Number(row.googleConnectionId) === Number(mapping.googleConnectionId)
+    && Number(row.clinicaId) === Number(mapping.clinicaId)))) {
+    throw Object.assign(Error('search_console_scope_forbidden'), { code: 'search_console_scope_forbidden', httpStatus: 403 });
+  }
+}
+
 async function getAccessTokenForWebMapping(mapping, tokenCache = new Map(), dependencies = {}) {
-  const connectionId = Number.parseInt(String(mapping?.googleConnectionId || ''), 10);
-  if (!Number.isInteger(connectionId) || connectionId <= 0) {
+  const connectionId = Number(mapping?.googleConnectionId);
+  if (!/^[1-9]\d{0,9}$/.test(String(mapping?.googleConnectionId)) || !Number.isInteger(connectionId) || connectionId > 2147483647) {
     const error = new Error('Mapping web sin googleConnectionId válido');
     error.code = 'web_mapping_connection_missing';
     throw error;
@@ -146,7 +170,14 @@ async function getAccessTokenForWebMapping(mapping, tokenCache = new Map(), depe
         throw error;
       }));
   }
-  return tokenCache.get(connectionId);
+  try {
+    const result = await tokenCache.get(connectionId);
+    await (dependencies.credentials || googleLegacyCredentials).assert(result.connection);
+    return result;
+  } catch (error) {
+    tokenCache.delete(connectionId);
+    throw error;
+  }
 }
 
 function resolveDateRange(startDate, endDate, fallbackDays = 90) {
@@ -197,14 +228,22 @@ router.get('/clinica/:clinicaId/status', async (req, res) => {
     const tokenCache = new Map();
     const authorizationChecks = await Promise.all(assets.map(async (asset) => {
       try {
+        const context = await searchConsoleBroker.prepare(asset);
+        if (context) {
+          await assertWebBrokerScope(req, [asset]);
+          return { ok: false, managed: true, reason: 'search_console_broker_metadata' };
+        }
         await getAccessTokenForWebMapping(asset, tokenCache);
         return { ok: true };
       } catch (error) {
-        return { ok: false, reason: error.code || 'web_mapping_authorization_failed' };
+        if (error.httpStatus === 401 || error.httpStatus === 403) throw error;
+        return { ok: false, reason: authorizationReason(error) };
       }
     }));
-    const authorizationFailures = authorizationChecks.filter((item) => !item.ok);
-    const googleConnected = assets.length > 0 && authorizationFailures.length === 0;
+    const managedSites = authorizationChecks.filter(item => item.managed).length;
+    if (managedSites) await assertWebBrokerScope(req, assets);
+    const authorizationFailures = authorizationChecks.filter((item) => !item.ok && !item.managed);
+    const googleConnected = assets.length > 0 && authorizationChecks.every(item => item.ok);
     return res.json({
       success: true,
       clinic: { id: clinicaId, website: clinic?.url_web || null },
@@ -213,8 +252,10 @@ router.get('/clinica/:clinicaId/status', async (req, res) => {
         connected: googleConnected,
         mapped_connections: connectionIds.length,
         mapped_sites: assets.length,
+        managed_sites: managedSites,
+        metadata_only: managedSites > 0,
         unavailable_sites: authorizationFailures.length,
-        reasons: Array.from(new Set(authorizationFailures.map((item) => item.reason)))
+        reasons: Array.from(new Set(authorizationChecks.filter(item => !item.ok).map((item) => item.reason)))
       },
       hasAssets: assets.length > 0,
       siteUrls: assets.map(a => a.siteUrl),
@@ -223,6 +264,7 @@ router.get('/clinica/:clinicaId/status', async (req, res) => {
       lastTech: psiLast ? { https_ok: psiLast.https_ok, https_status: psiLast.https_status, sitemap_found: psiLast.sitemap_found, sitemap_url: psiLast.sitemap_url, sitemap_status: psiLast.sitemap_status } : null
     });
   } catch (e) {
+    if (e.httpStatus === 401 || e.httpStatus === 403) return res.status(e.httpStatus).json({ success: false, error: authorizationReason(e) });
     console.error('❌ /web/status:', e.message);
     return res.status(500).json({ success:false, error: 'Error obteniendo estado Web' });
   }
@@ -544,21 +586,32 @@ router.get('/clinica/:clinicaId/sc/pages', async (req, res) => {
     const tokenCache = new Map();
     const out = [];
     const authorizationErrors = [];
+    let managedRead = false;
     for (const mapping of mappings) {
       const siteUrl = mapping.siteUrl;
       try {
-        const { accessToken } = await getAccessTokenForWebMapping(mapping, tokenCache);
-        const resp = await axios.post(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`, {
-          startDate: start, endDate: end, dimensions: ['page'], rowLimit: Number(limit), startRow: Number(offset)
-        }, { headers: { Authorization: `Bearer ${accessToken}` } });
+        const context = await searchConsoleBroker.prepare(mapping);
+        let resp;
+        if (context) {
+          managedRead = true;
+          resp = await searchConsoleBroker.read(mapping, context, 'pages', { startDate: start, endDate: end, rowLimit: Number(limit), startRow: Number(offset) },
+            { beforeExecute: () => assertWebBrokerScope(req, [mapping]) });
+        } else {
+          const { accessToken, connection } = await getAccessTokenForWebMapping(mapping, tokenCache);
+          resp = await googleLegacyCredentials.request(connection, () => axios.post(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`, {
+            startDate: start, endDate: end, dimensions: ['page'], rowLimit: Number(limit), startRow: Number(offset)
+          }, { headers: { Authorization: `Bearer ${accessToken}` } }));
+        }
         (resp.data?.rows||[]).forEach(r=>out.push({ page: r.keys?.[0]||'', clicks: r.clicks||0, impressions: r.impressions||0, ctr: r.ctr||0, position: r.position||0 }));
       } catch (error) {
+        if (error.httpStatus === 401 || error.httpStatus === 403) throw error;
         authorizationErrors.push({
           site_url: siteUrl,
-          reason: error.code || 'search_console_request_failed'
+          reason: authorizationReason(error)
         });
       }
     }
+    if (managedRead) await assertWebBrokerScope(req, mappings);
     if (!out.length && authorizationErrors.length === mappings.length) {
       return res.status(409).json({
         success: false,
@@ -574,7 +627,8 @@ router.get('/clinica/:clinicaId/sc/pages', async (req, res) => {
       authorization_errors: authorizationErrors
     });
   } catch (e) {
-    console.error('❌ /web/sc/pages:', e.response?.data || e.message);
+    if (e.httpStatus === 401 || e.httpStatus === 403) return res.status(e.httpStatus).json({ success: false, error: authorizationReason(e) });
+    console.error('❌ /web/sc/pages:', googleLegacyCredentials.safe(e));
     return res.status(500).json({ success:false, error:'Error consultando páginas' });
   }
 });
@@ -630,7 +684,7 @@ router.post('/clinica/:clinicaId/psi/refresh', async (req, res) => {
     // PSI live
     const params = { url: siteUrl, strategy: 'mobile', category: ['performance','accessibility'] };
     if (process.env.GOOGLE_PSI_API_KEY) params['key'] = process.env.GOOGLE_PSI_API_KEY;
-    let snapshot = null; let tech = {};
+    let snapshot = null; let tech = {}; let managedInspection = false;
     try {
       const psi = await axios.get('https://www.googleapis.com/pagespeedonline/v5/runPagespeed', { params });
       const lr = psi.data?.lighthouseResult || {};
@@ -654,15 +708,24 @@ router.post('/clinica/:clinicaId/psi/refresh', async (req, res) => {
       // Index status (1 URL via URL Inspection API)
       let indexed_ok = null;
       try {
-        const { accessToken } = await getAccessTokenForWebMapping(primaryMapping);
         const siteProperty = primaryMapping.siteUrl;
         const inspectUrl = siteUrl.startsWith('http') ? siteUrl : ('https://' + siteUrl.replace('sc-domain:',''));
         const inspectEndpoint = 'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect';
-        const respI = await axios.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${accessToken}` } });
+        const context = await searchConsoleBroker.prepare(primaryMapping);
+        let respI;
+        if (context) {
+          managedInspection = true;
+          respI = await searchConsoleBroker.read(primaryMapping, context, 'inspection', {}, { beforeExecute: () => assertWebBrokerScope(req, [primaryMapping]) });
+        } else {
+          const { accessToken, connection } = await getAccessTokenForWebMapping(primaryMapping);
+          respI = await googleLegacyCredentials.request(connection, () => axios.post(inspectEndpoint, { inspectionUrl: inspectUrl, siteUrl: siteProperty }, { headers: { Authorization: `Bearer ${accessToken}` } }));
+        }
         const verdict = respI.data?.inspectionResult?.indexStatusResult?.verdict || '';
         const coverageState = respI.data?.inspectionResult?.indexStatusResult?.coverageState || '';
         indexed_ok = (String(verdict).toUpperCase() === 'PASS') || /indexed/i.test(String(coverageState));
-      } catch {}
+      } catch (error) {
+        if (error.httpStatus === 401 || error.httpStatus === 403) throw error;
+      }
 
       snapshot = await db.WebPsiSnapshot.create({
         clinica_id: clinicaId,
@@ -677,9 +740,11 @@ router.post('/clinica/:clinicaId/psi/refresh', async (req, res) => {
         indexed_ok
       }, { returning: true });
     } catch (e) {
-      return res.status(429).json({ success:false, error: e.response?.data?.error?.message || e.message });
+      if (e.httpStatus === 401 || e.httpStatus === 403) return res.status(e.httpStatus).json({ success: false, error: authorizationReason(e) });
+      return res.status(429).json({ success:false, error: 'web_psi_refresh_failed' });
     }
 
+    if (managedInspection) await assertWebBrokerScope(req, [primaryMapping]);
     tech['https_reach'] = { url: new URL(snapshot.url).origin, status: snapshot.https_status, ok: snapshot.https_ok };
     tech['sitemap'] = { found: snapshot.sitemap_found, url: snapshot.sitemap_url, status: snapshot.sitemap_status };
 
@@ -691,7 +756,8 @@ router.post('/clinica/:clinicaId/psi/refresh', async (req, res) => {
       indexed_ok: snapshot.indexed_ok
     }, tech });
   } catch (e) {
-    console.error('❌ /web/psi/refresh:', e.message);
+    if (e.httpStatus === 401 || e.httpStatus === 403) return res.status(e.httpStatus).json({ success: false, error: authorizationReason(e) });
+    console.error('❌ /web/psi/refresh:', authorizationReason(e));
     return res.status(500).json({ success:false, error:'Error refrescando PSI' });
   }
 });

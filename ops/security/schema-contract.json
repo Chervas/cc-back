@@ -440,6 +440,563 @@
         {"name": "token_hash","columns": [{"INDEX_NAME": "token_hash","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "token_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
       ]
     },
+    "GoogleConnections": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "accessToken","COLUMN_TYPE": "text","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+      ]
+    },
+    "ClinicBusinessLocations": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "broker_read_connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "broker_read_asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME": "cc_gbp_broker_read_pair","ENFORCED": "YES","CHECK_CLAUSE": "(((`broker_read_connection_ref` is null) and (`broker_read_asset_ref` is null)) or ((`broker_read_connection_ref` is not null) and (`broker_read_asset_ref` is not null)))"}
+      ]
+    },
+    "ClinicWebAssets": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "broker_read_connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "broker_read_asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME": "cc_sc_broker_read_pair","ENFORCED": "YES","CHECK_CLAUSE": "(((`broker_read_connection_ref` is null) and (`broker_read_asset_ref` is null)) or ((`broker_read_connection_ref` is not null) and (`broker_read_asset_ref` is not null)))"}
+      ]
+    },
+    "ClinicAnalyticsProperties": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "broker_read_connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "broker_read_asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME": "cc_ga_broker_read_pair","ENFORCED": "YES","CHECK_CLAUSE": "(((`broker_read_connection_ref` is null) and (`broker_read_asset_ref` is null)) or ((`broker_read_connection_ref` is not null) and (`broker_read_asset_ref` is not null)))"}
+      ]
+    },
+    "ClinicGoogleAdsAccounts": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "broker_read_connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "broker_read_asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME": "cc_ads_broker_read_pair","ENFORCED": "YES","CHECK_CLAUSE": "(((`broker_read_connection_ref` is null) and (`broker_read_asset_ref` is null)) or ((`broker_read_connection_ref` is not null) and (`broker_read_asset_ref` is not null)))"}
+      ]
+    },
+    "BusinessProfileBrokerBindings": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "external_location_id","COLUMN_TYPE": "varchar(30)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinica_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "idx_gbp_binding_scope","columns": [{"INDEX_NAME": "idx_gbp_binding_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_gbp_binding_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "clinica_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_gbp_binding_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "external_location_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "external_location_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "BusinessProfileBrokerRevocations": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "external_location_id","COLUMN_TYPE": "varchar(30)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinica_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "request_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "actor_user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "requested_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "confirmed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "varchar(16)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "pending","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "attempts","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "next_attempt_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "lease_token","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "lease_until","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(48)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+        {"name": "idx_gbp_revocation_delivery","columns": [{"INDEX_NAME": "idx_gbp_revocation_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_gbp_revocation_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "next_attempt_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_gbp_revocation_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "lease_until","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_gbp_revocation_scope","columns": [{"INDEX_NAME": "idx_gbp_revocation_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "clinica_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_gbp_revocation_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_gbp_revocation_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "external_location_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "external_location_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "request_id","columns": [{"INDEX_NAME": "request_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "request_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "GoogleOAuthBrokerBindings": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "google_user_id","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinica_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "scope_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "policy_version","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "secret_version","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "confirmed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "cohort","COLUMN_TYPE": "enum('business_profile','search_console','analytics','ads')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "business_profile","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+        {"name": "cc_oauth_connection_ref_cohort","columns": [{"INDEX_NAME": "cc_oauth_connection_ref_cohort","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "connection_ref","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_oauth_connection_ref_cohort","NON_UNIQUE": 0,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "cohort","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_oauth_google_connection_id_cohort","columns": [{"INDEX_NAME": "cc_oauth_google_connection_id_cohort","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_oauth_google_connection_id_cohort","NON_UNIQUE": 0,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "cohort","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "cohort","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "GoogleOAuthBrokerRequests": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "flow_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "activation_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "state_hash","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "binding_digest","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "google_user_id","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinica_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "scope_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinic_ids","COLUMN_TYPE": "json","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "actor_user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "session_ref","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "return_to","COLUMN_TYPE": "varchar(256)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "requested_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "varchar(24)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "next_attempt_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "attempts","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "lease_token","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_bin"},
+        {"COLUMN_NAME": "lease_until","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(48)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "completed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "cohort","COLUMN_TYPE": "enum('business_profile','search_console','analytics','ads')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "business_profile","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "policy_version","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": "google-oauth-pinned-v1","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "request_scope_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+        {"name": "activation_id","columns": [{"INDEX_NAME": "activation_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "activation_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_google_oauth_connection","columns": [{"INDEX_NAME": "idx_google_oauth_connection","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_google_oauth_connection","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "requested_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_google_oauth_delivery","columns": [{"INDEX_NAME": "idx_google_oauth_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_google_oauth_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "next_attempt_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_google_oauth_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "lease_until","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "flow_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "state_hash","columns": [{"INDEX_NAME": "state_hash","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "SearchConsoleBrokerBindings": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "site_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "site_url","COLUMN_TYPE": "varchar(512)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "mapping_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinica_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_user_id","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('active','blocked')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "blocked","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+        {"name": "cc_sc_broker_connection","columns": [{"INDEX_NAME": "cc_sc_broker_connection","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_sc_broker_subject","columns": [{"INDEX_NAME": "cc_sc_broker_subject","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "site_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "mapping_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "AnalyticsBrokerBindings": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "property_name","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "mapping_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinica_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_user_id","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('active','blocked')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "blocked","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+        {"name": "cc_ga_broker_connection","columns": [{"INDEX_NAME": "cc_ga_broker_connection","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ga_broker_subject","columns": [{"INDEX_NAME": "cc_ga_broker_subject","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "property_name","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "mapping_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "GooglePropertyBrokerRevocations": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "tuple_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "kind","COLUMN_TYPE": "enum('search_console','analytics')","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "resource","COLUMN_TYPE": "varchar(512)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "clinica_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_user_id","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "request_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "actor_user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "requested_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "confirmed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('pending','confirmed')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "pending","EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "attempts","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "next_attempt_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "lease_token","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "lease_until","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(48)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
+      ],
+      "indexes": [
+        {"name": "cc_property_revoke_asset","columns": [{"INDEX_NAME": "cc_property_revoke_asset","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "kind","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_property_revoke_asset","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "asset_ref","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_property_revoke_delivery","columns": [{"INDEX_NAME": "cc_property_revoke_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_property_revoke_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "next_attempt_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_property_revoke_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "lease_until","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_property_revoke_scope","columns": [{"INDEX_NAME": "cc_property_revoke_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_property_revoke_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "clinica_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_property_revoke_subject","columns": [{"INDEX_NAME": "cc_property_revoke_subject","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "tuple_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "request_id","columns": [{"INDEX_NAME": "request_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "request_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "GoogleAdsBrokerBindings": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "mapping_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_user_id","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "scope_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "tenant_clinic_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "login_customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('active','blocked','staged')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "blocked","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+      ],
+      "indexes": [
+        {"name": "cc_ads_broker_connection","columns": [{"INDEX_NAME": "cc_ads_broker_connection","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ads_broker_mapping","columns": [{"INDEX_NAME": "cc_ads_broker_mapping","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "mapping_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ads_broker_subject","columns": [{"INDEX_NAME": "cc_ads_broker_subject","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "customer_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "mapping_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "GoogleAdsBrokerRevocations": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "tuple_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "tenant_clinic_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_user_id","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "login_customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "scope_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "clinic_ids","COLUMN_TYPE": "text","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "mapping_ids","COLUMN_TYPE": "text","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "request_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "actor_user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "requested_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "confirmed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('pending','confirmed')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "pending","EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "attempts","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "next_attempt_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "lease_token","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "lease_until","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(48)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
+      ],
+      "indexes": [
+        {"name": "cc_ads_revoke_connection","columns": [{"INDEX_NAME": "cc_ads_revoke_connection","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ads_revoke_customer","columns": [{"INDEX_NAME": "cc_ads_revoke_customer","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "customer_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ads_revoke_delivery","columns": [{"INDEX_NAME": "cc_ads_revoke_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_ads_revoke_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "next_attempt_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_ads_revoke_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "lease_until","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ads_revoke_subject","columns": [{"INDEX_NAME": "cc_ads_revoke_subject","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ads_revoke_tenant","columns": [{"INDEX_NAME": "cc_ads_revoke_tenant","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "tenant_clinic_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "tuple_hash","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "request_id","columns": [{"INDEX_NAME": "request_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "request_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "GoogleAdsEnrollmentScopes": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "scope_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_user_id","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "tenant_clinic_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "root_customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "login_customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('blocked','active')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "blocked","EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
+      ],
+      "indexes": [
+        {"name": "cc_ads_enrollment_scope_connection","columns": [{"INDEX_NAME": "cc_ads_enrollment_scope_connection","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ads_enrollment_scope_subject","columns": [{"INDEX_NAME": "cc_ads_enrollment_scope_subject","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "scope_key","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "GoogleAdsEnrollmentRequests": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "enrollment_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "scope_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_user_id","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "scope_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "tenant_clinic_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "login_customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "clinic_ids","COLUMN_TYPE": "text","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "clinic_count","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "clinic_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "scope_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "mapping_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "actor_user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "session_ref","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "session_expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "prepare_request_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "activate_request_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "revoke_request_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('prepare_pending','prepared','activate_pending','activation_confirmed','active','revoke_pending','revoked')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "prepare_pending","EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "requested_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "attempts","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "0","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "next_attempt_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "lease_token","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "lease_until","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
+      ],
+      "indexes": [
+        {"name": "activate_request_id","columns": [{"INDEX_NAME": "activate_request_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "activate_request_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ads_enrollment_delivery","columns": [{"INDEX_NAME": "cc_ads_enrollment_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_ads_enrollment_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "next_attempt_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_ads_enrollment_delivery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "lease_until","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ads_enrollment_request_connection","columns": [{"INDEX_NAME": "cc_ads_enrollment_request_connection","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ads_enrollment_request_scope","columns": [{"INDEX_NAME": "cc_ads_enrollment_request_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "scope_key","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_ads_enrollment_request_subject","columns": [{"INDEX_NAME": "cc_ads_enrollment_request_subject","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "customer_id","columns": [{"INDEX_NAME": "customer_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "customer_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "mapping_id","columns": [{"INDEX_NAME": "mapping_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "mapping_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "prepare_request_id","columns": [{"INDEX_NAME": "prepare_request_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "prepare_request_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "enrollment_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "revoke_request_id","columns": [{"INDEX_NAME": "revoke_request_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "revoke_request_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ]
+    },
+    "GoogleAdsConversionUploadAttempts": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "id","COLUMN_TYPE": "bigint unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "auto_increment","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "dedupe_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "clinica_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "grupo_clinica_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "intake_config_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_connection_assignment_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "assignment_scope","COLUMN_TYPE": "enum('clinic','group')","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "destination_key","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "connection_source","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "customer_id","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "login_customer_id","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "conversion_action","COLUMN_TYPE": "varchar(256)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "event_name","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "event_id","COLUMN_TYPE": "varchar(191)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "click_id_type","COLUMN_TYPE": "enum('gclid','gbraid','wbraid')","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "click_id_hash","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "consent_status","COLUMN_TYPE": "enum('GRANTED','DENIED','UNSPECIFIED')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "UNSPECIFIED","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "status","COLUMN_TYPE": "enum('pending','accepted','succeeded','partial_success','failed','skipped')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "pending","EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "reason","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "provider_request_id","COLUMN_TYPE": "varchar(191)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "attempt_count","COLUMN_TYPE": "int unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": "1","EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "request_metadata","COLUMN_TYPE": "json","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "response_metadata","COLUMN_TYPE": "json","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "history","COLUMN_TYPE": "json","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error_code","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "last_error_message","COLUMN_TYPE": "text","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "attempted_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": "CURRENT_TIMESTAMP","EXTRA": "DEFAULT_GENERATED","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "completed_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": "CURRENT_TIMESTAMP","EXTRA": "DEFAULT_GENERATED","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime","IS_NULLABLE": "NO","COLUMN_DEFAULT": "CURRENT_TIMESTAMP","EXTRA": "DEFAULT_GENERATED","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "google_connection_assignment_id","columns": [{"INDEX_NAME": "google_connection_assignment_id","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_assignment_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "google_connection_id","columns": [{"INDEX_NAME": "google_connection_id","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_google_ads_conversion_upload_clinic","columns": [{"INDEX_NAME": "idx_google_ads_conversion_upload_clinic","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "clinica_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_google_ads_conversion_upload_clinic","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "attempted_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_google_ads_conversion_upload_customer_status","columns": [{"INDEX_NAME": "idx_google_ads_conversion_upload_customer_status","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "customer_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_google_ads_conversion_upload_customer_status","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "status","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_google_ads_conversion_upload_customer_status","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "attempted_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_google_ads_conversion_upload_destination","columns": [{"INDEX_NAME": "idx_google_ads_conversion_upload_destination","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "destination_key","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_google_ads_conversion_upload_destination","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "status","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_google_ads_conversion_upload_destination","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "attempted_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_google_ads_conversion_upload_event","columns": [{"INDEX_NAME": "idx_google_ads_conversion_upload_event","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "event_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "idx_google_ads_conversion_upload_group","columns": [{"INDEX_NAME": "idx_google_ads_conversion_upload_group","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "grupo_clinica_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_google_ads_conversion_upload_group","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "attempted_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "intake_config_id","columns": [{"INDEX_NAME": "intake_config_id","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "intake_config_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "uniq_google_ads_conversion_upload_dedupe","columns": [{"INDEX_NAME": "uniq_google_ads_conversion_upload_dedupe","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "dedupe_key","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ],
+      "checks": [
+      ]
+    },
+    "GoogleConversionSubmissions": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "submission_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "attempt_id","COLUMN_TYPE": "bigint unsigned","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "dedupe_key","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "mapping_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "tenant_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "login_customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "conversion_action_id","COLUMN_TYPE": "varchar(20)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "event_name","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "scope_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "delivery_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "audit_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "payload_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('prepared','attempted','unknown','accepted','succeeded','partial_success','failed')","IS_NULLABLE": "NO","COLUMN_DEFAULT": "prepared","EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "provider_request_id","COLUMN_TYPE": "varchar(191)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "attempted_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "acknowledged_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "completed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
+      ],
+      "indexes": [
+        {"name": "cc_google_receipt_review","columns": [{"INDEX_NAME": "cc_google_receipt_review","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "mapping_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_receipt_review","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "scope_digest","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_receipt_review","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "delivery_digest","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_receipt_review","NON_UNIQUE": 1,"SEQ_IN_INDEX": 4,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_receipt_review","NON_UNIQUE": 1,"SEQ_IN_INDEX": 5,"COLUMN_NAME": "submission_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "attempt_id","columns": [{"INDEX_NAME": "attempt_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "attempt_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_google_conversion_pending","columns": [{"INDEX_NAME": "cc_google_conversion_pending","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_conversion_pending","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "updated_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_google_conversion_scope","columns": [{"INDEX_NAME": "cc_google_conversion_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "mapping_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_conversion_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "dedupe_key","columns": [{"INDEX_NAME": "dedupe_key","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "dedupe_key","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "submission_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "provider_request_id","columns": [{"INDEX_NAME": "provider_request_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "provider_request_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME": "cc_google_conversion_ack","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` in (_ascii\\'prepared\\',_ascii\\'attempted\\',_ascii\\'unknown\\')) and (`acknowledged_at` is null) and (`provider_request_id` is null)) or ((`state` in (_ascii\\'accepted\\',_ascii\\'succeeded\\',_ascii\\'partial_success\\',_ascii\\'failed\\')) and (`acknowledged_at` is not null)))"},
+        {"CONSTRAINT_NAME": "cc_google_conversion_attempt","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` = _ascii\\'prepared\\') and (`attempted_at` is null)) or ((`state` <> _ascii\\'prepared\\') and (`attempted_at` is not null)))"},
+        {"CONSTRAINT_NAME": "cc_google_conversion_terminal","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` in (_ascii\\'succeeded\\',_ascii\\'partial_success\\',_ascii\\'failed\\')) and (`completed_at` is not null)) or ((`state` not in (_ascii\\'succeeded\\',_ascii\\'partial_success\\',_ascii\\'failed\\')) and (`completed_at` is null)))"}
+      ]
+    },
+    "GoogleAdsActionPlans": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "plan_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "owner_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "actor_user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "session_ref","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "mapping_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "input","COLUMN_TYPE": "json","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "receipt","COLUMN_TYPE": "json","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "apply_command_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "scope_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "scope_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "session_expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "closed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "closed_by_session_ref","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
+      ],
+      "indexes": [
+        {"name": "apply_command_id","columns": [{"INDEX_NAME": "apply_command_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "apply_command_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_google_action_owner","columns": [{"INDEX_NAME": "cc_google_action_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "actor_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_action_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "session_ref","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_action_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "plan_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ],
+      "checks": [
+      ]
+    },
+    "GoogleAdsActionCommands": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "command_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "plan_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "family","COLUMN_TYPE": "enum('prepare','validate','apply','status','cancel')","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('attempted','completed')","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "attempted_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "completed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "actor_user_id","COLUMN_TYPE": "int","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "session_ref","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
+      ],
+      "indexes": [
+        {"name": "cc_google_action_command_plan","columns": [{"INDEX_NAME": "cc_google_action_command_plan","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "plan_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_action_command_plan","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "attempted_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "command_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME": "cc_google_action_command_completion","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` = _ascii\\'attempted\\') and (`completed_at` is null)) or ((`state` = _ascii\\'completed\\') and (`completed_at` is not null)))"}
+      ]
+    },
+    "GoogleDestinationAuthorizations": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "authorization_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "plan_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "owner_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "actor_user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "session_ref","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "session_expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "scope_key","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "scope_digest","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "mapping_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "customer_id","COLUMN_TYPE": "char(10)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "input","COLUMN_TYPE": "json","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "receipt","COLUMN_TYPE": "json","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "revoke_command_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "created_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "updated_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+      ],
+      "indexes": [
+        {"name": "cc_google_destination_owner","columns": [{"INDEX_NAME": "cc_google_destination_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "actor_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "session_ref","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_owner","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_google_destination_recovery","columns": [{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "actor_user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "mapping_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "scope_key","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 4,"COLUMN_NAME": "scope_digest","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 5,"COLUMN_NAME": "created_at","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_recovery","NON_UNIQUE": 1,"SEQ_IN_INDEX": 6,"COLUMN_NAME": "authorization_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "plan_id","columns": [{"INDEX_NAME": "plan_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "plan_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "authorization_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "revoke_command_id","columns": [{"INDEX_NAME": "revoke_command_id","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "revoke_command_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ],
+      "checks": [
+      ]
+    },
+    "GoogleDestinationCommands": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME": "command_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "authorization_id","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "family","COLUMN_TYPE": "enum('authorize','status','revoke')","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "actor_user_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "session_ref","COLUMN_TYPE": "char(36)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "state","COLUMN_TYPE": "enum('attempted','completed')","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "attempted_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "completed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
+        {"COLUMN_NAME": "last_error","COLUMN_TYPE": "varchar(64)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
+      ],
+      "indexes": [
+        {"name": "cc_google_destination_commands","columns": [{"INDEX_NAME": "cc_google_destination_commands","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "authorization_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_commands","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "attempted_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "cc_google_destination_pending","columns": [{"INDEX_NAME": "cc_google_destination_pending","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "authorization_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_pending","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_pending","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "family","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "cc_google_destination_pending","NON_UNIQUE": 1,"SEQ_IN_INDEX": 4,"COLUMN_NAME": "command_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
+        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "command_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME": "cc_google_destination_completion","ENFORCED": "YES","CHECK_CLAUSE": "(((`state` = _utf8mb4\\'attempted\\') and (`completed_at` is null)) or ((`state` = _utf8mb4\\'completed\\') and (`completed_at` is not null)))"}
+      ]
+    },
     "MetaConnections": {
       "ENGINE": "InnoDB",
       "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
@@ -2972,6 +3529,28 @@
     {"name": "20260915190000-add-whatsapp-authorization-channel-role.js", "sha256": "760f4cc3097ab25aa89d0b584674b99cb6f2932d8885a6ce2c36f34b34f46f78"},
     {"name": "20260915040000-create-whatsapp-inbox-imports.js", "sha256": "4a35e8e039fc1a141356e8c029b9f6d7eb57e62caec5c72503ba1cd6dafbfe41"},
     {"name": "20260916103000-security-monitoring-and-ai-prices.js", "sha256": "0ee3aaab634875e4acc19cffc5ede7cd2de4aeef6e07b7d26cea1a2ab134245e"},
+    {"name": "20260913000000-add-business-profile-broker-read-binding.js","sha256": "d25f098ff761bd32f8ca3d0f587c064ebad58988fbaa49f85aec0f8970ca1914"},
+    {"name": "20260913010000-create-business-profile-broker-revocations.js","sha256": "0a66a2cc9e63b46cc82ac996b98033cbf19bd5d6b02e24329cfb6f02f409df55"},
+    {"name": "20260913020000-create-google-oauth-broker-flows.js","sha256": "49eea8afb6e6d73a3ca72571ceb332395202fa0b28c5cef165a02060a17ed1bb"},
+    {"name": "20260913030000-add-search-console-broker-read-binding.js","sha256": "2f9a6d20757683fb5bc81e0d65f7e0c835a62cd37b30aeacba1f76e61ae12161"},
+    {"name": "20260913040000-add-analytics-broker-read-binding.js","sha256": "bd0e88f1d3ea08ace4e943ce23e2157062ae3e3a7c1f651e903cf48670a74798"},
+    {"name": "20260913050000-scope-search-console-bindings-by-mapping.js","sha256": "40fe91ec374864696387be65c0295420034f3e7d63a41b12aa7904a3ed61cb1d"},
+    {"name": "20260913060000-create-google-property-broker-revocations.js","sha256": "c9639364a46ceb1ebd3b4302d5e7c71bca0cda00027dbc01bf62fa7c2a80f402"},
+    {"name": "20260913070000-scope-google-oauth-by-service.js","sha256": "b702afe94bc5b1f36bb8c11777f1d7fad2c568ffdc3f7d5ec0c73ee1a93848d0"},
+    {"name": "20260913080000-add-google-ads-broker-bindings.js","sha256": "fa03dbfba3b41e0ab154013d647598695fa2a78b2d380e16e6dc99de895e3787"},
+    {"name": "20260913090000-create-google-ads-broker-revocations.js","sha256": "f42a15411c33d0ee154c013b8d34da03b68a287f394ef532996b39d6f25c14ea"},
+    {"name": "20260913100000-add-ads-google-oauth-cohort.js","sha256": "7be428f8dcac4dd5cdd4d94dabcea17c13581d3bd3373e6e28416486c94d43de"},
+    {"name": "20260913110000-stage-google-ads-broker-mappings.js","sha256": "e558102c69af164879edbc99a0ca14f670a4940fb2890d6697c3d7054bc9379e"},
+    {"name": "20260913120000-create-google-ads-enrollment.js","sha256": "d6f45168727272f70664836fac37b8493a805b29bbd9878e60d14729d3dcaf59"},
+    {"name": "20260711003000-create-google-ads-conversion-upload-attempts.js","sha256": "592ca0404b110b88225525413047eb5bdd4c3c863aedaabdd7a9464965cc015d"},
+    {"name": "20260711012000-add-google-ads-conversion-destination-key.js","sha256": "96f796ba207c1dbe553447fd8c4d5ef080b3aa4f117889579a5163d42d99f520"},
+    {"name": "20260712090000-add-data-manager-conversion-statuses.js","sha256": "535379bba4e5d1a8e2194559ac222d4abcc8dd69799f1af695bc2064a69c703f"},
+    {"name": "20260918110000-create-google-conversion-submissions.js","sha256": "91b44f36f7a542c89c23de28391134e60f8fddaade0fdeaaaedf49f7b9878c70"},
+    {"name": "20260918190000-create-google-ads-action-journal.js","sha256": "28bc9df36d9915253db783e7a68737b0008c7cb2f903e1ec8215dbcf833d5df7"},
+    {"name": "20260918203000-google-action-recovery-ownership.js","sha256": "680b4457f49e641c9bc79ae44a2fcc6d4ab66e0c14ba5175423b5349a4e9c8b2"},
+    {"name": "20260918220000-create-google-destination-journal.js","sha256": "245b2a00a272bfd031480bfe07fac1701b92252aa45f57f605ac30179dc236a3"},
+    {"name": "20260918224500-index-google-destination-recovery.js","sha256": "02bb1af1afddd008ae97269a64243cf5e4eb90b22ee89730005a1ea421c32f99"},
+    {"name": "20260918235000-index-google-receipt-review.js","sha256": "2ed2c79f6707a1433b9125d5f2e1a86822bb316e77b3fcd20081d2e67f12c9e1"},
     {"name":"20260919040000-meta-marketing-broker-registry.js","sha256":"375f6994beef8032bb69aaf5c39a1f8b525fcdcef774ea4d520850a78f573595"},
     {"name":"20260919050000-meta-marketing-broker-revocations.js","sha256":"886828648b18a378da53ef8859fa2a67d6fa4f7323c8a3edf21b630a173f0efb"},
     {"name":"20260919060000-meta-marketing-oauth.js","sha256":"023ee8974a2e9195d0dee4a981d0e364633bea61672589ae817e778610afd58a"},

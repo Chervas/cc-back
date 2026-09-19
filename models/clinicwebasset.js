@@ -9,6 +9,8 @@ module.exports = (sequelize, DataTypes) => {
     propertyType: { type: DataTypes.STRING(32), allowNull: true, field: 'propertyType' }, // 'sc-domain' | 'url-prefix'
     permissionLevel: { type: DataTypes.STRING(64), allowNull: true, field: 'permissionLevel' },
     verified: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true, field: 'verified' },
+    broker_read_connection_ref: { type: DataTypes.STRING(128), allowNull: true },
+    broker_read_asset_ref: { type: DataTypes.STRING(128), allowNull: true },
     isActive: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true, field: 'isActive' }
   }, {
     tableName: 'ClinicWebAssets',

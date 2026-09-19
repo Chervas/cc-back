@@ -19,6 +19,8 @@ const ClinicAnalyticsProperty = db.ClinicAnalyticsProperty;
 const ClinicBusinessLocation = db.ClinicBusinessLocation;
 const GroupAssetClinicAssignment = db.GroupAssetClinicAssignment;
 const MetaConnection = db.MetaConnection;
+const META_ASSET_METADATA_FIELDS = Object.freeze(['id', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'metaConnectionId',
+  'assetType', 'metaAssetId', 'metaAssetName', 'isActive', 'ad_account_refreshed_at', 'createdAt', 'updatedAt']);
 
 const GROUP_ASSET_TYPES = Object.freeze({
   META_AD_ACCOUNT: 'meta.ad_account',
@@ -1021,6 +1023,7 @@ async function listScopedMetaAssets(scope, dependencies = {}) {
   );
   const explicitAssetIds = assignmentRows.map((row) => row.assetId);
   const rawRows = await assetModel.findAll({
+    attributes: META_ASSET_METADATA_FIELDS,
     where: {
       isActive: true,
       assetType: { [Op.in]: ['facebook_page', 'instagram_business', 'ad_account'] },
@@ -1155,6 +1158,8 @@ function pickEffectiveGoogleAccount(googleAccounts, googleConfig) {
 }
 
 async function listMetaPixelsForScopeAdAccount({ scope, adAccountId, connectionId = null }) {
+  // Current non-WhatsApp transport is closed; reject before loading any token.
+  require('../lib/metaQuarantineHttp').assertMetaAvailable();
   const normalizedAccountId = normalizeMetaAdAccountId(adAccountId);
   if (!normalizedAccountId) return [];
 
@@ -1308,7 +1313,7 @@ async function resolveEffectiveGoogleMappings(params, dependencies = {}) {
 }
 
 async function resolveEffectiveMarketingState(
-  { clinicIdRaw = null, groupIdRaw = null, assignmentScopeRaw = null },
+  { clinicIdRaw = null, groupIdRaw = null, assignmentScopeRaw = null, googleMetadataOnly = false, metaMetadataOnly = false },
   dependencies = {}
 ) {
   const params = { clinicIdRaw, groupIdRaw, assignmentScopeRaw };
@@ -1325,13 +1330,15 @@ async function resolveEffectiveMarketingState(
       clinicIdRaw: scope.clinic_id,
       groupIdRaw: scope.group_id,
       assignmentScopeRaw: scope.assignment_scope,
-      allowLegacyUserFallback: true
+      allowLegacyUserFallback: true,
+      ...(metaMetadataOnly === true ? { metadataOnly: true } : {}),
     }),
     googleConnectionResolver({
       clinicIdRaw: scope.clinic_id,
       groupIdRaw: scope.group_id,
       assignmentScopeRaw: scope.assignment_scope,
-      allowLegacyUserFallback: true
+      allowLegacyUserFallback: true,
+      ...(googleMetadataOnly === true ? { metadataOnly: true } : {}),
     })
   ]);
 
@@ -1351,6 +1358,7 @@ async function resolveEffectiveMarketingState(
 }
 
 module.exports = {
+  META_ASSET_METADATA_FIELDS,
   extractGoogleTagId,
   mergeGoogleAdsConfig,
   mergeProvisionedGoogleAdsConfig,

@@ -13,6 +13,9 @@ const {
 } = require('./googleDataManagerConversion.service');
 const { resolveScopedGoogleAdsRuntime } = require('./googleAdsScopedRuntime.service');
 const { extractGoogleLeadIdentity } = require('../lib/google-lead-routing');
+const { resolveWorkspaceSignalPolicy, CRM_MILESTONE_SOURCE } = require('./campaignWorkspaceSignalPolicy.service');
+const { googleDeliveryContext } = require('./googleWorkspaceDeliveryContext.service');
+const { uploadManagedGoogleConversion, owned: brokerOwned } = require('./googleConversionUploadBroker.service');
 
 const GOOGLE_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/;
 
@@ -462,8 +465,16 @@ function appendHistory(row) {
   return history.slice(-20);
 }
 
+function assertLegacyAttemptUnreserved(row) {
+  if (brokerOwned(row)) {
+    throw Object.assign(new Error('Este envío ya está registrado y requiere comprobar su resultado antes de continuar'),
+      { code: 'GOOGLE_CONVERSION_BROKER_RESERVED' });
+  }
+}
+
 async function prepareAuditRow({ auditModel, values, status, reason = null }) {
   const existing = await auditModel.findOne({ where: { dedupeKey: values.dedupeKey } });
+  assertLegacyAttemptUnreserved(existing);
   if (['accepted', 'succeeded', 'partial_success'].includes(existing?.status)) {
     return { row: existing, duplicate: true, inProgress: false, terminalStatus: existing.status };
   }
@@ -497,6 +508,7 @@ async function prepareAuditRow({ auditModel, values, status, reason = null }) {
       if (!isUniqueCollision) throw error;
       const concurrent = await auditModel.findOne({ where: { dedupeKey: values.dedupeKey } });
       if (!concurrent) throw error;
+      assertLegacyAttemptUnreserved(concurrent);
       return {
         row: concurrent,
         duplicate: ['accepted', 'succeeded', 'partial_success'].includes(concurrent.status),
@@ -825,6 +837,8 @@ function resolveUserDataPolicy(googleConfig = {}, eventConfig = {}, options = {}
 
 async function uploadGoogleConversionDestination({
   cfgRecord,
+  signalPolicyRecord = null,
+  crmEventSource = null,
   googleAdsConfig,
   eventConfig: suppliedEventConfig = null,
   eventName,
@@ -869,23 +883,27 @@ async function uploadGoogleConversionDestination({
     || process.env.GOOGLE_DATA_MANAGER_DEFAULT_PHONE_COUNTRY_CODE
     || null;
   const configuredConsentModeEnabled = cfgObject.features?.consent_mode_enabled === true;
+  // Native CRM sources have no website CMP. Only an internal resolver can supply their persisted consent.
+  const nativeConsent = !cfgRecord && crmEventSource === CRM_MILESTONE_SOURCE
+    && ['qualified_lead', 'schedule'].includes(eventConfig.event_name) && typeof dependencies.resolveNativeConsent === 'function'
+    ? await dependencies.resolveNativeConsent() : null;
+  const verifiedNativeConsent = nativeConsent?.source === 'google_ads_native_crm';
+  const consentInputs = verifiedNativeConsent ? [nativeConsent.consent] : [customData.consent, consent];
+  const consentSourceReady = verifiedNativeConsent || configuredConsentModeEnabled && consentModeEnabled !== false;
   // Advertising conversions always require an explicit, per-visitor grant.
-  // A disabled/missing Consent Mode configuration is a blocker, never a
+  // For web sources, a disabled/missing Consent Mode configuration is a blocker, never a
   // legacy permission or an invitation to infer consent from analytics/contact.
   const requiresExplicitAdvertisingConsent = true;
-  const requestConsentStatus = mergeExplicitGoogleAdvertisingConsent(customData.consent, consent);
-  const requestedAdUserDataConsentStatus = normalizeExplicitAdUserDataConsent(customData.consent, consent);
-  const requestedAdPersonalizationConsentStatus = normalizeExplicitAdPersonalizationConsent(
-    customData.consent,
-    consent
-  );
-  const consentStatus = configuredConsentModeEnabled && consentModeEnabled !== false
+  const requestConsentStatus = mergeExplicitGoogleAdvertisingConsent(...consentInputs);
+  const requestedAdUserDataConsentStatus = normalizeExplicitAdUserDataConsent(...consentInputs);
+  const requestedAdPersonalizationConsentStatus = normalizeExplicitAdPersonalizationConsent(...consentInputs);
+  const consentStatus = consentSourceReady
     ? requestConsentStatus
     : (requestConsentStatus === 'DENIED' ? 'DENIED' : null);
-  const adUserDataConsentStatus = configuredConsentModeEnabled && consentModeEnabled !== false
+  const adUserDataConsentStatus = consentSourceReady
     ? requestedAdUserDataConsentStatus
     : (requestedAdUserDataConsentStatus === 'DENIED' ? 'DENIED' : null);
-  const adPersonalizationConsentStatus = configuredConsentModeEnabled && consentModeEnabled !== false
+  const adPersonalizationConsentStatus = consentSourceReady
     ? requestedAdPersonalizationConsentStatus
     : (requestedAdPersonalizationConsentStatus === 'DENIED' ? 'DENIED' : null);
   const authorizationCheckNow = typeof dependencies.now === 'function'
@@ -993,6 +1011,7 @@ async function uploadGoogleConversionDestination({
         userDataPolicy.authorization?.adPersonalizationSource || null,
       visitor_ad_personalization_consent_status: adPersonalizationConsentStatus || 'UNSPECIFIED',
       consent_mode_configured: configuredConsentModeEnabled,
+      ...(verifiedNativeConsent ? { consent_source: 'google_ads_native_crm' } : {}),
       explicit_advertising_consent_required: requiresExplicitAdvertisingConsent,
       explicit_ad_user_data_consent_status: adUserDataConsentStatus || 'UNSPECIFIED'
     }
@@ -1027,8 +1046,22 @@ async function uploadGoogleConversionDestination({
   ) return skip('consent_not_granted');
   if (!scope.clinicId && !scope.groupId) return skip('scope_required');
 
+  const workspacePolicy = await (dependencies.resolveWorkspaceSignalPolicy || resolveWorkspaceSignalPolicy)({
+    records: [cfgRecord, signalPolicyRecord], provider: 'google_ads', accountId: eventConfig.customer_id,
+    campaignId: extractGoogleLeadIdentity(customData).campaignId, eventName: eventConfig.event_name,
+    crmEventSource, clinicId: scope.clinicId, destinationId: conversionAction,
+  });
+  if (verifiedNativeConsent && (!workspacePolicy.allowed || workspacePolicy.authorizationSchema !== 2)) {
+    return skip(!workspacePolicy.allowed ? workspacePolicy.reason : 'workspace_google_native_mandate_required');
+  }
+  if (workspacePolicy.applicable) {
+    auditBase.requestMetadata.workspace_policy_version = workspacePolicy.version;
+    auditBase.requestMetadata.workspace_policy_reason = workspacePolicy.reason;
+    if (!workspacePolicy.allowed) return skip(workspacePolicy.reason);
+  }
+
   const existingAudit = await auditModel.findOne({ where: { dedupeKey } });
-  if (['accepted', 'succeeded', 'partial_success'].includes(existingAudit?.status)) {
+  if (!brokerOwned(existingAudit) && ['accepted', 'succeeded', 'partial_success'].includes(existingAudit?.status)) {
     return destinationResult({
       sent: false,
       accepted: true,
@@ -1039,7 +1072,7 @@ async function uploadGoogleConversionDestination({
     });
   }
   const existingAttemptedAt = existingAudit?.attemptedAt ? new Date(existingAudit.attemptedAt).getTime() : 0;
-  if (existingAudit?.status === 'pending' && existingAttemptedAt > Date.now() - 5 * 60 * 1000) {
+  if (!brokerOwned(existingAudit) && existingAudit?.status === 'pending' && existingAttemptedAt > Date.now() - 5 * 60 * 1000) {
     return destinationResult({ sent: false, reason: 'duplicate_upload_in_progress', audit_id: existingAudit.id || null });
   }
 
@@ -1053,6 +1086,7 @@ async function uploadGoogleConversionDestination({
       requiredScopes: [GOOGLE_DATA_MANAGER_SCOPE]
     });
   } catch (error) {
+    if (existingAudit) return destinationResult({ sent: false, reason: String(error.code || 'scoped_connection_unavailable').toLowerCase(), audit_id: existingAudit.id });
     return skip(String(error.code || 'scoped_connection_unavailable').toLowerCase());
   }
 
@@ -1063,6 +1097,51 @@ async function uploadGoogleConversionDestination({
     connectionSource: runtime.connectionSource || null,
     loginCustomerId: runtime.loginCustomerId || null
   };
+  if (workspacePolicy.applicable && workspacePolicy.allowed) {
+    // A receipt without this server-built binding cannot prove campaign health.
+    values.requestMetadata.workspace_delivery = (dependencies.googleDeliveryContext || googleDeliveryContext)({ cfgRecord,
+      signalPolicyRecord: signalPolicyRecord || cfgRecord, runtime, policy: workspacePolicy,
+      campaignId: extractGoogleLeadIdentity(customData).campaignId });
+  }
+  if (runtime.deliveryMode === 'broker') {
+    const clock = () => typeof dependencies.now === 'function' ? dependencies.now() : dependencies.now || new Date();
+    if (rawOccurredAt && !Number.isFinite(+parsedOccurredAt)) throw Object.assign(Error('invalid_request'), { code: 'invalid_request' });
+    const revalidate = async () => {
+      const fresh = await (dependencies.resolveWorkspaceSignalPolicy || resolveWorkspaceSignalPolicy)({
+        records: [cfgRecord, signalPolicyRecord], provider: 'google_ads', accountId: eventConfig.customer_id,
+        campaignId: extractGoogleLeadIdentity(customData).campaignId, eventName: eventConfig.event_name,
+        crmEventSource, clinicId: scope.clinicId, destinationId: conversionAction,
+        connectionId: runtime.connection?.id || 0, loginCustomerId: runtime.loginCustomerId || null,
+      });
+      if (!fresh.allowed || fresh.applicable !== workspacePolicy.applicable
+        || fresh.authorizationSchema !== workspacePolicy.authorizationSchema
+        || fresh.version !== workspacePolicy.version
+        || JSON.stringify(fresh.policyRefs) !== JSON.stringify(workspacePolicy.policyRefs)) return false;
+      if (!cfgRecord && (!verifiedNativeConsent || fresh.authorizationSchema !== 2)) return false;
+      const latestNative = verifiedNativeConsent ? await dependencies.resolveNativeConsent() : null;
+      const inputs = verifiedNativeConsent ? [latestNative?.consent] : consentInputs;
+      if (verifiedNativeConsent && latestNative?.source !== 'google_ads_native_crm'
+        || mergeExplicitGoogleAdvertisingConsent(...inputs) !== consentStatus
+        || normalizeExplicitAdUserDataConsent(...inputs) !== adUserDataConsentStatus
+        || normalizeExplicitAdPersonalizationConsent(...inputs) !== adPersonalizationConsentStatus) return false;
+      const policy = resolveUserDataPolicy(googleConfig, eventConfig, {
+        adUserDataConsentStatus, adPersonalizationConsentStatus, now: clock() });
+      return policy.enabled === userDataPolicy.enabled
+        && (policy.authorization?.digest || null) === (userDataPolicy.authorization?.digest || null);
+    };
+    const valueRaw = coalesce(customData.value, eventConfig.value, 0);
+    return destinationResult(await uploadManagedGoogleConversion({ runtime, models: dependencies.models || db,
+      auditModel, values, sourceRecords: [cfgRecord, signalPolicyRecord], revalidate, now: clock,
+      delivery: dependencies.brokerDelivery,
+      ...(dependencies.brokerEnabled ? { enabled: dependencies.brokerEnabled } : {}),
+      event: { conversionAction, eventName: eventConfig.event_name, eventSource: verifiedNativeConsent ? 'OTHER' : 'WEB',
+        timestamp: parsedOccurredAt?.toISOString() || null, eventId: eventId || null,
+        value: Number.isFinite(Number(valueRaw)) ? Number(valueRaw) : 0,
+        currency: String(coalesce(customData.currency, eventConfig.currency, 'EUR') || 'EUR').toUpperCase(),
+        advertisingConsent: consentStatus, adUserData: adUserDataConsentStatus, adPersonalization: adPersonalizationConsentStatus,
+        clickId, userIdentifiers, enhancedPolicyDigest: userDataPolicy.authorization?.digest || null } }));
+  }
+  assertLegacyAttemptUnreserved(existingAudit);
   const prepared = await prepareAuditRow({ auditModel, values, status: 'pending' });
   if (prepared.duplicate) {
     return destinationResult({
@@ -1083,11 +1162,27 @@ async function uploadGoogleConversionDestination({
   const currency = String(coalesce(customData.currency, eventConfig.currency, 'EUR') || 'EUR').toUpperCase();
   const conversionDateTime = toGoogleAdsDateTime(customData.conversion_time || customData.conversionDateTime || new Date());
 
+  // Recheck after both OAuth resolution and audit reservation, immediately before transport.
+  if (workspacePolicy.authorizationSchema === 2) {
+    const fresh = await (dependencies.resolveWorkspaceSignalPolicy || resolveWorkspaceSignalPolicy)({
+      records: [cfgRecord, signalPolicyRecord], provider: 'google_ads', accountId: eventConfig.customer_id,
+      campaignId: extractGoogleLeadIdentity(customData).campaignId, eventName: eventConfig.event_name,
+      crmEventSource, clinicId: scope.clinicId, destinationId: conversionAction,
+      connectionId: runtime.connection?.id || 0, loginCustomerId: runtime.loginCustomerId || null,
+    });
+    if (!fresh.allowed || fresh.authorizationSchema !== 2 || JSON.stringify(fresh.policyRefs) !== JSON.stringify(workspacePolicy.policyRefs)) {
+      const reason = fresh.allowed ? 'workspace_signal_connection_changed' : fresh.reason;
+      await prepared.row.update({ status: 'skipped', reason, completedAt: new Date() });
+      return destinationResult({ sent: false, reason, audit_id: prepared.row?.id || null });
+    }
+  }
+
   let result;
   try {
     result = await uploadConversion({
       customerId: eventConfig.customer_id,
       conversionAction,
+      ...(verifiedNativeConsent ? { eventSource: 'OTHER' } : {}),
       ...(clickId ? { [clickId.type]: clickId.value } : {}),
       value,
       currency,
@@ -1241,6 +1336,7 @@ async function maybeUploadGoogleConversion(options) {
   const processingErrorCount = results.filter((item) => (
     item.reason === 'audit_persistence_error' || item.reason === 'destination_processing_error'
   )).length;
+  const unknownCount = results.filter(item => item.reason === 'broker_outcome_unknown').length;
   const aggregate = {
     sent: sentCount > 0,
     accepted: acceptedCount > 0,
@@ -1252,7 +1348,8 @@ async function maybeUploadGoogleConversion(options) {
     accepted_count: acceptedCount,
     failed_count: failedCount,
     processing_error_count: processingErrorCount,
-    skipped_count: results.length - sentCount - failedCount - processingErrorCount,
+    unknown_count: unknownCount,
+    skipped_count: results.length - sentCount - failedCount - processingErrorCount - unknownCount,
     destinations: results
   };
   if (results.length === 0) {
