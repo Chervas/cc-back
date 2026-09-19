@@ -10,7 +10,9 @@ const SERVER_LABELS = { 'maintenance-client': 'Mantenimiento de la comunicación
   google: 'Integración con Google', ai: 'Proveedores de inteligencia artificial', email: 'Entrega de correo',
   'ai-staging': 'Proveedores de inteligencia artificial (staging)',
   'bedrock-staging': 'Automatizaciones con IA (staging)',
-  'email-staging': 'Entrega de correo (staging)', 'email-dev': 'Entrega de correo (DEV)' };
+  'email-staging': 'Entrega de correo (staging)', 'email-dev': 'Entrega de correo (DEV)',
+  'meta-marketing-dev': 'Conexiones Meta de publicidad (DEV)',
+  'meta-marketing-staging': 'Conexiones Meta de publicidad (staging)' };
 function readHealth({ enabled = process.env.TRANSPORT_CERTIFICATE_MONITOR_ENABLED === 'true',
   serversEnabled = process.env.SERVER_CERTIFICATE_MONITOR_ENABLED === 'true',
   filename = STATUS_FILE, serverFilename = SERVER_STATUS_FILE, now = Date.now(), read = fs.readFileSync, stat = fs.lstatSync } = {}) {
