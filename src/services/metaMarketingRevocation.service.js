@@ -104,12 +104,12 @@ function createRevocationRepository(models){
 }
 function createRevocationWorker({repository,client,enabled=()=>process.env.META_MARKETING_REVOCATION_WORKER_ENABLED==='true',now=()=>new Date()}){
   let running=false;
-  return {async run(){
-    if(!enabled()||running)return {status:'completed',skipped:true,reason:'meta_revocation_worker_disabled_or_busy'};
+  return {async run({closing=()=>false}={}){
+    if(!enabled()||running||closing())return {status:'completed',skipped:true,reason:'meta_revocation_worker_disabled_or_busy'};
     running=true;let confirmed=0,failed=0;
     try{
       const deadline=now().getTime()+30000;
-      for(let n=0;n<20&&now().getTime()<deadline;n++){
+      for(let n=0;n<20&&now().getTime()<deadline&&!closing();n++){
         const row=await repository.claim(now());if(!row)break;
         try{
           R.validate(row);const remaining=deadline-now().getTime();if(remaining<=0)throw Object.assign(Error('broker_timeout'),{code:'broker_timeout'});
@@ -126,8 +126,8 @@ let worker;
 module.exports={enqueue,createRevocationRepository,createRevocationWorker,safe,async assertLegacyDisconnectAllowed(models,connectionId){
   const connection=await models.MetaConnection.findByPk(connectionId,{attributes:['credentials_external'],raw:true,logging:false});
   if(Number(connection?.credentials_external)===1)throw Object.assign(Error('meta_marketing_scoped_revocation_required'),{code:'meta_marketing_scoped_revocation_required',httpStatus:409});
-},async run(){
+},async run(options){
   if(process.env.META_MARKETING_REVOCATION_WORKER_ENABLED!=='true'||process.env.RUNTIME_ROLE==='gateway')return {status:'completed',skipped:true,reason:'meta_revocation_worker_disabled'};
   worker||=createRevocationWorker({repository:createRevocationRepository(require('../../models')),
-    client:require('./metaMarketingRevocationClient.service').client});return worker.run();
+    client:require('./metaMarketingRevocationClient.service').client});return worker.run(options);
 }};

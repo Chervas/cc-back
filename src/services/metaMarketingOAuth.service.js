@@ -208,10 +208,10 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       if(row.lease_until&&row.lease_until>now())return projection(row);
       return projection(await reconcileRow(row));
     },
-    async run(){
-      if(!workerEnabled())return {status:'completed',skipped:true,reason:'meta_oauth_worker_disabled'};
+    async run({closing=()=>false}={}){
+      if(!workerEnabled()||closing())return {status:'completed',skipped:true,reason:'meta_oauth_worker_disabled'};
       let processed=0,failed=0;const deadline=+now()+30000;
-      for(let n=0;n<10&&+now()<deadline;n++){
+      for(let n=0;n<10&&+now()<deadline&&!closing();n++){
         const row=await tx(async transaction=>{
           const r=await R.findOne({...locked(transaction),skipLocked:true,where:{state:{[Op.in]:['begin_pending','awaiting','processing','cancel_pending','interrupted']},next_attempt_at:{[Op.lte]:now()},[Op.or]:[{lease_until:null},{lease_until:{[Op.lte]:now()}}]},order:[['requested_at','ASC'],['flow_id','ASC']]});
           if(!r)return null;await r.update({lease_token:randomUUID(),lease_until:new Date(+now()+120000),attempts:Math.min(Number(r.attempts)+1,1000000)},{transaction});return plain(r);
@@ -228,4 +228,4 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
 }
 let singleton;const instance=()=>singleton||=createService({models:require('../../models'),sessions:require('./accessSession.service'),client:require('./metaMarketingOAuthClient.service').createClient(),returnOrigin:C.frontendOrigin()});
 module.exports={createService,safe,...Object.fromEntries(['status','begin','callback','cancel','reconcile','assets','cancelAfterEnrollment'].map(k=>[k,(...args)=>instance()[k](...args)])),
-  run:()=>process.env.RUNTIME_ROLE==='gateway'?Promise.resolve({status:'completed',skipped:true,reason:'gateway_runtime'}):process.env.META_MARKETING_OAUTH_WORKER_ENABLED==='true'?instance().run():Promise.resolve({status:'completed',skipped:true,reason:'meta_oauth_worker_disabled'})};
+  run:options=>process.env.RUNTIME_ROLE==='gateway'?Promise.resolve({status:'completed',skipped:true,reason:'gateway_runtime'}):process.env.META_MARKETING_OAUTH_WORKER_ENABLED==='true'?instance().run(options):Promise.resolve({status:'completed',skipped:true,reason:'meta_oauth_worker_disabled'})};
