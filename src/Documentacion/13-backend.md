@@ -11307,3 +11307,36 @@ bindings. No usar este diagnóstico como una autorización o un claim durable.
 Probado en MySQL aislado y en la interfaz real con proveedor ficticio; aceptación real y el
 consumidor de selección/activación siguen pendientes. Runbook
 `docs/security/meta-marketing-enrollment.md`; estado19, funcional20.17 y corte99.
+
+### Selección Meta en CRM: diario y reservas transaccionales (en preparación)
+
+El consumidor de selección necesita un diario independiente por UUID/flujo y
+claims persistentes de identidad y activo físico. Instagram reserva también su
+página; esa reserva no concede lectura de una página no seleccionada. No se borran
+claims ni solicitudes al cancelar o eliminar un mapping. Una autorización nueva
+no puede reutilizar activos retirados mediante otra identidad o ámbito.
+
+La captura usa inventario fresco del broker, sesión/MFA y permisos de todas las
+clínicas, y conserva el candidato y la asignación esperada. Una conexión legacy
+compartida requiere migración revisada: no se vacía su token ni se mueve WhatsApp.
+Solo se crea una identidad externa nueva o se reutiliza exactamente la identidad
+externa compatible. No se crean grants clínicos antes de la confirmación remota.
+
+Prepare, confirmación humana, activate y retirada se concilian fuera de la
+transacción SQL; estados, leases y UUIDs de comando sobreviven al reinicio. Una
+respuesta perdida exige consultar estado antes de otra operación. Si se pierde
+autoridad o falla el commit después de activar en el broker, se conservan la
+incertidumbre y una retirada pendiente; no se presenta una conexión completada.
+La escritura local final debe ser atómica con sus bindings y auditoría humana.
+
+Contrato en implementación; aún sin publicar. El diagnóstico anterior no sustituye
+estas garantías. Aceptación real, UI de selección, protocolo de auditoría y pruebas
+del consumidor deberán constar en19/99 antes de abrir el gate. Canary v19 intacto.
+
+El transporte CRM de este consumidor admite únicamente las cuatro operaciones
+tipadas de selección. Prepare/activate usan la identidad ordinaria de OAuth;
+status/revoke usan la identidad de control, también cuando la ordinaria no está
+disponible. Conserva TLS verificado, firmas Ed25519, presupuesto temporal y UUID
+del comando. No reenvía una activación al perder la respuesta: el consumidor debe
+conciliarla mediante status. Este adaptador no acredita todavía la escritura
+clínica, la auditoría humana ni el recorrido completo de selección.

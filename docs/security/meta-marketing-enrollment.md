@@ -199,3 +199,41 @@ de proveedor, datos y contención. Los índices pueden permanecer; no bajarlos m
 el consumidor los usa. Preservar journals/claims/revocaciones y el canary v19 intacto.
 No rotación, migración de credenciales, activación de cohortes ni recuperación por
 tokens legacy. La conexión real y su aceptación permanecen pendientes.
+
+## Diario CRM y transporte de selección preparados — 19/09/2026
+
+DDL `20260919080000-meta-marketing-enrollment-journal.js` y tres modelos:
+`MetaMarketingEnrollmentRequests`, `MetaMarketingEnrollmentClaims` y
+`MetaMarketingEnrollmentIdentities`. Solicitud única por flujo, UUIDs estables
+por comando, selección/candidato/ámbito inmutables y estados recuperables. Claims
+únicos por activo físico y sujeto Meta; IG reserva también su página, sin otorgar
+lectura de una página no seleccionada. Son registros de seguridad sin cascada al
+borrar mappings. La migración inversa rechaza cualquier tabla poblada.
+
+El contrato valida recibos contra identidad, ámbito, candidato y selección de la
+solicitud SQL. El estado remoto `active` no confirma el commit clínico; su
+`accessBlocked` también deberá comprobarlo el consumidor. Solo una retirada anterior
+a prepare puede devolver un tombstone sin candidato/selección y con acceso bloqueado.
+El cliente CRM admite las cuatro operaciones tipadas: prepare/activate con gateway,
+status/revoke con control. Conserva UUID, TLS, firma y timeout, sin reenvío automático
+tras respuesta perdida. Un cambio de configuración rechaza el cliente ya inicializado.
+
+Prueba estructural desde backend con Node24:
+
+```sh
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/meta_marketing_enrollment_journal_mysql.integration.js
+```
+
+MySQL temporal real, cliente CRM configurado, HTTPS/Ed25519, broker y SQLite reales;
+Graph/Secrets ficticios. Comprueba DDL ida/vuelta, conflicto/concurrencia, rollback
+sin huérfanos, conservación de claims tras retirada, respuestas de otra selección
+rechazadas y activación sin respuesta conciliada tras reinicio. El control funciona
+sin clave ordinaria; la allowlist y configuración inválida fallan antes de la red.
+No usa tablas, claves o proveedores operativos. Evidencia y conteos finales en99.
+
+Faltan el servicio de autoridad clínica, comprobación completa de aliases/primarias/
+shares, escritor de bindings/asignaciones, lease/worker, auditoría humana y UI.
+No hay routes/gates nuevos ni despliegue; este esquema/cliente por sí solo no autoriza
+una conexión. Publicar mediante candidato selectivo cuando estén unidos y probados
+los consumidores y su lector/escritor de auditoría compatible. Preservar el canary
+AWSv19 congelado y registrar por separado su eventual publicación.

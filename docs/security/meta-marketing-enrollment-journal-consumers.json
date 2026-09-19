@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "31315bbf251ad23d58b692dd6bfc0e134c50b13d",
+    "front": "14329664e58d58fcd11ef95854aa5358e3d49145"
+  },
+  "includesWorkingChanges": true,
+  "scope": "CRM enrollment journal, physical ownership schema, immutable receipt validation and configured typed transport. No authority service, binding writer, worker, routes or new selection UI; changed-source inventory, not a release bundle.",
+  "files": {
+    "migrations/20260919080000-meta-marketing-enrollment-journal.js": "5d4b9fa1fa1347f8ab794a3cf4bd62178cb144a095cd5819a42233421a9d4408",
+    "models/metamarketingenrollmentclaim.js": "a1756b22adc269dfc4144bba3334abe22de77c806b3ec91650ce633fde2dc3a2",
+    "models/metamarketingenrollmentidentity.js": "51439525b201deae642fbcab591eacd54ec2c87983362dc6238b8420992c851e",
+    "models/metamarketingenrollmentrequest.js": "61bf65c31aea6a8539208af2a743e4f7600b8d040d49ee7e913155a348a6f9b9",
+    "src/services/metaMarketingEnrollment.contract.js": "b0564d3b746f0abc8f46f77a7caea8e8026586d19d36852d6f1ce94b7e304801",
+    "src/services/metaMarketingOAuthClient.service.js": "e7a7462f9b858cd105eaca8c4ac7d7866c72f6acc6d71ea75d1a3da2e0d8fe97",
+    "src/scripts/tests/meta_marketing_enrollment_journal_mysql.integration.js": "f80c0939405dfeeb603e1d5a1cf45987395d5c7648f5910eb975e3159f81ca1d"
+  },
+  "qa": {
+    "journalGroups": 7,
+    "oauthRegressionGroups": 8,
+    "visualScreenshots": 13,
+    "visualScope": "Existing Angular Settings/OAuth/inventory/Activity components with actual SQL/API/TLS/SQLite; fictitious providers, not the pending selection flow or public MFA.",
+    "syntaxFiles": 7,
+    "noFrontendSourceChange": true,
+    "providerReal": false,
+    "deployed": false
+  },
+  "schema": {
+    "migration": "migrations/20260919080000-meta-marketing-enrollment-journal.js",
+    "appliedOnlyToTemporaryMysql": true,
+    "populatedRollbackRejected": true,
+    "cascadeForeignKeys": false
+  },
+  "pending": [
+    "Full clinical authority, identity/alias/primary/share exclusion and transactional assignment/binding writer",
+    "Human activity events and reader/writer compatibility before producer",
+    "Leased worker, restart reconciliation, cancellation integration and selection/confirmation UI",
+    "Selective publication and real provider/titular acceptance; frozen AWS audit v19 remains separate"
+  ],
+  "evidence": "qa-evidence/security-resume-20260917/meta-enrollment-crm-20260919/"
+}
