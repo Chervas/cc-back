@@ -118,6 +118,7 @@ function createBusinessProfileMutationJournal({ models, sessions, audit, now = D
         }
         await cache.mutation(row.asset_ref, row.kind, 1, transaction);
         await record(row, 'mutation_admitted', transaction);
+        await guard(transaction);
         return { send: true, row };
       });
       if (!claim.send) { await guard(); return dto(claim.row); }
@@ -148,6 +149,7 @@ function createBusinessProfileMutationJournal({ models, sessions, audit, now = D
           await row.update({ state: 'applied', broker_receipt: { ...receipt, result: providerResult }, last_error: null,
             updated_at: new Date(now()), applied_at: new Date(now()) }, { transaction });
           await L.destroy({ where: { operation_id: row.operation_id }, transaction, logging: false });
+          await guard(transaction);
           return dto(row);
         });
         await guard(); return result;

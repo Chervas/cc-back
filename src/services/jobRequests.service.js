@@ -490,13 +490,17 @@ async function updateJob(id, patch = {}) {
  * cambió el estado. Se devuelve como conflicto resuelto para que un worker
  * atrasado no sobrescriba ese estado más reciente.
  */
-async function settleRunningJob(jobId, patch = {}) {
+function runningClaimWhere(jobId, expectedAttempt) {
+  if (expectedAttempt != null && (!Number.isSafeInteger(expectedAttempt) || expectedAttempt < 1)) throw Error('invalid_job_claim_attempt');
+  return { id: jobId, status: 'running', ...(expectedAttempt != null ? { attempts: expectedAttempt } : {}) };
+}
+async function settleRunningJob(jobId, patch = {}, expectedAttempt = null) {
   const [updated] = await JobRequest.update(
     {
       ...patch,
       updated_at: new Date(),
     },
-    { where: { id: jobId, status: 'running' } }
+    { where: runningClaimWhere(jobId, expectedAttempt) }
   );
 
   if (updated > 0) {
@@ -649,6 +653,7 @@ async function claimJobById(jobId) {
 }
 
 async function markWaiting(jobId, {
+  expectedAttempt = null,
   nextRunAt,
   errorMessage = null,
   resultSummary = null,
@@ -663,10 +668,10 @@ async function markWaiting(jobId, {
   if (syncLogId !== null && syncLogId !== undefined) {
     patch.sync_log_id = syncLogId;
   }
-  return settleRunningJob(jobId, patch);
+  return settleRunningJob(jobId, patch, expectedAttempt);
 }
 
-async function markCompleted(jobId, { syncLogId = null, resultSummary = null } = {}) {
+async function markCompleted(jobId, { syncLogId = null, resultSummary = null, expectedAttempt = null } = {}) {
   const now = new Date();
   const patch = {
     status: 'completed',
@@ -678,10 +683,11 @@ async function markCompleted(jobId, { syncLogId = null, resultSummary = null } =
   if (syncLogId !== null && syncLogId !== undefined) {
     patch.sync_log_id = syncLogId;
   }
-  return settleRunningJob(jobId, patch);
+  return settleRunningJob(jobId, patch, expectedAttempt);
 }
 
 async function markFailed(jobId, {
+  expectedAttempt = null,
   errorMessage,
   nextRunAt = null,
   resultSummary = null,
@@ -696,7 +702,7 @@ async function markFailed(jobId, {
   if (syncLogId !== null && syncLogId !== undefined) {
     patch.sync_log_id = syncLogId;
   }
-  return settleRunningJob(jobId, patch);
+  return settleRunningJob(jobId, patch, expectedAttempt);
 }
 
 async function markCancelled(jobId, { errorMessage = null } = {}) {
@@ -715,6 +721,7 @@ async function markCancelled(jobId, { errorMessage = null } = {}) {
  * revierte completed/failed a waiting.
  */
 async function recoverRunningJobAfterSettlementFailure(jobId, {
+  expectedAttempt = null,
   status = 'failed',
   nextRunAt = null,
   errorMessage,
@@ -739,12 +746,13 @@ async function recoverRunningJobAfterSettlementFailure(jobId, {
   }
 
   const [updated] = await JobRequest.update(patch, {
-    where: { id: jobId, status: 'running' },
+    where: runningClaimWhere(jobId, expectedAttempt),
   });
   const job = await JobRequest.findByPk(jobId);
   return {
     updated,
-    resolved: updated > 0 || Boolean(job && job.status !== 'running'),
+    resolved: updated > 0 || Boolean(job && (job.status !== 'running'
+      || expectedAttempt != null && Number(job.attempts) !== expectedAttempt)),
     job,
   };
 }

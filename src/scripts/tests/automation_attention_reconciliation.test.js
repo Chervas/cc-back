@@ -149,10 +149,18 @@ test('cierra estado y avisos cuando el paciente resuelve explícitamente la peti
 test('no cierra la revisión con baja confianza ni estados urgentes', async (t) => {
   const originalStateFindOne = db.ConversationAutomationState.findOne;
   const originalMessageFindAll = db.Message.findAll;
+  const originalExecutionFindByPk = db.FlowExecutionV2.findByPk;
+  let executionReads = 0;
   t.after(() => {
     db.ConversationAutomationState.findOne = originalStateFindOne;
     db.Message.findAll = originalMessageFindAll;
+    db.FlowExecutionV2.findByPk = originalExecutionFindByPk;
   });
+  db.FlowExecutionV2.findByPk = async id => {
+    executionReads++;
+    assert.equal(id, 2320);
+    return { id, trigger_type: 'appointment_created', trigger_entity_type: 'appointment' };
+  };
 
   const state = {
     clinic_id: 19,
@@ -223,6 +231,7 @@ test('no cierra la revisión con baja confianza ni estados urgentes', async (t) 
   assert.equal(urgent.resolved, false);
   assert.equal(urgent.reason, 'state_not_reconcilable');
   assert.equal(completions, 0);
+  assert.equal(executionReads, 1, 'urgent state returns before reading its execution');
 });
 
 test('no reconcilia por IA una acción de agenda que sigue pendiente', async (t) => {

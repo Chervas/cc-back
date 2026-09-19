@@ -173,7 +173,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
     report.checks.push('automation requires an active execution guard; its original owner can recover without impersonating a live job or redispatching hours');
 
     await require('./fixtures/business_profile_consumers.fixture')({ sql, models, report, writerClient,
-      sessions, actor, policy: f.policy, registerOwnedLoopbackServer, resetRemote: () => { remote = makeRemote(); }, setAfter: fn => { afterRemote = fn; }, writes: () => writes });
+      sessions, actor, policy: f.policy, registerOwnedLoopbackServer, resetRemote: () => { remote = makeRemote(); },
+      setBefore: fn => { beforeRemote = fn; }, setAfter: fn => { afterRemote = fn; }, writes: () => writes });
 
     const absent = reply('Todavía no recibido'); beforeRemote = command => { if (command.operation !== C.OPERATIONS.status) throw Object.assign(Error(), { code: 'broker_unavailable' }); };
     await assert.rejects(run(absent), { code: 'broker_unavailable' }); beforeRemote = null;

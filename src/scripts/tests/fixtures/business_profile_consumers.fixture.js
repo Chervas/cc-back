@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const { DataTypes: D } = require('sequelize');
-module.exports = async ({ sql, models, report, writerClient, sessions, actor, policy, registerOwnedLoopbackServer, resetRemote, setAfter, writes }) => {
+module.exports = async ({ sql, models, report, writerClient, sessions, actor, policy, registerOwnedLoopbackServer, resetRemote, setBefore, setAfter, writes }) => {
   for (const [name, file] of [['ClinicBusinessLocation', 'clinicbusinesslocation'], ['BusinessProfileReview', 'businessprofilereview'],
     ['PublicMediaAsset', 'publicmediaasset'], ['GroupAssetClinicAssignment', 'groupassetclinicassignment'],
     ['BusinessProfileBrokerBinding', 'businessprofilebrokerbinding'], ['BusinessProfileBrokerRevocation', 'businessprofilebrokerrevocation']]) {
@@ -150,5 +150,6 @@ module.exports = async ({ sql, models, report, writerClient, sessions, actor, po
     }
     await require('./business_profile_sync_ordering.fixture')({ models, report, broker, local, consumer, resolved, request,
       setRead: fn => { readProvider = fn; }, setWritesEnabled: value => { writesEnabled = value; }, setAfter, writes });
+    await require('./business_profile_automation.fixture')({ sql, models, report, local, consumer, resolved, actor, setBefore, setAfter, writes });
   } finally { Object.assign(module, original); setAfter(null); }
 };

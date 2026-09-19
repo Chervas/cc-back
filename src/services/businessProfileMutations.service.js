@@ -103,6 +103,7 @@ function createBusinessProfileMutations({ models, broker, sessions, journal, sco
     await ctx.beforeExecute();
     if (ctx.actor.type === 'user') await sessions.verifyReference({ userId: ctx.actor.userId,
       sessionRef: ctx.actor.sessionRef, expiresAt: new Date(ctx.actor.expiresAt) });
+    else if (await ctx.verifyAutomation?.({}) !== true) fail('business_profile_automation_required');
     await broker.assert(ctx.location, ctx.brokerContext);
     return result;
   }
@@ -121,15 +122,16 @@ function createBusinessProfileMutations({ models, broker, sessions, journal, sco
       const ctx = await context({ clinicId: Number(resolved.clinicId), location, brokerContext, request, actor, verifyAutomation, target });
       return response(ctx, await log.execute(ctx, kind, input, localInput));
     }),
-    recover: guarded(async ({ clinicId, operationId, request }) => {
-      C.validate('status', { operationId }); const actor = await user(request);
+    recover: guarded(async ({ clinicId, operationId, request, actor: automationActor, verifyAutomation }) => {
+      C.validate('status', { operationId }); const actor = automationActor ? actorFor(automationActor) : await user(request);
+      if (automationActor && actor.type !== 'automation') fail('business_profile_automation_required');
       const row = await db().BusinessProfileMutation.findOne({ where: { operation_id: operationId,
         actor_user_id: actor.userId, requested_clinic_id: clinicId, runtime_namespace: namespace() }, logging: false });
       if (!row) fail('business_profile_mutation_not_found');
       const location = await db().ClinicBusinessLocation.findByPk(row.mapping_id, { logging: false });
       if (!location) fail('scope_denied');
       const brokerContext = await broker.prepare(location, () => fail('broker_binding_invalid'), new Map());
-      const ctx = await context({ clinicId, location, brokerContext, actor, target: row });
+      const ctx = await context({ clinicId, location, brokerContext, actor, verifyAutomation, target: row });
       return response(ctx, await log.recover(ctx, operationId));
     }),
     pending: guarded(async ({ clinicId, request }) => {

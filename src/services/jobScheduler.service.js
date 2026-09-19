@@ -234,13 +234,15 @@ function buildRetryAt(job, now = new Date()) {
 }
 
 async function settleJobResult(job, result, options = {}) {
+  const expectedAttempt = Number.isSafeInteger(Number(job.attempts)) && Number(job.attempts) > 0 ? Number(job.attempts) : null;
   if (!result) {
-    await jobRequestsService.markCompleted(job.id, { resultSummary: null });
+    await jobRequestsService.markCompleted(job.id, { resultSummary: null, expectedAttempt });
     return;
   }
 
   if (result.status === 'waiting') {
     await jobRequestsService.markWaiting(job.id, {
+      expectedAttempt,
       nextRunAt: result.nextRunAt,
       errorMessage: result?.error?.message || null,
       resultSummary: result.result || null,
@@ -254,6 +256,7 @@ async function settleJobResult(job, result, options = {}) {
     const retryable = result.retryable !== false && result?.result?.retryable !== false;
     if (retryable && hasRetryAttemptRemaining(job)) {
       await jobRequestsService.markWaiting(job.id, {
+        expectedAttempt,
         nextRunAt: buildRetryAt(job, options.now || new Date()),
         errorMessage,
         resultSummary: result.result || null,
@@ -262,6 +265,7 @@ async function settleJobResult(job, result, options = {}) {
       return;
     }
     await jobRequestsService.markFailed(job.id, {
+      expectedAttempt,
       errorMessage,
       resultSummary: result.result || null,
       syncLogId: result?.syncLogId || null,
@@ -270,6 +274,7 @@ async function settleJobResult(job, result, options = {}) {
   }
 
   await jobRequestsService.markCompleted(job.id, {
+    expectedAttempt,
     syncLogId: result?.syncLogId || null,
     resultSummary: result.result || null
   });
@@ -334,6 +339,7 @@ async function processJob(job) {
       try {
         const recoveryState = buildSettlementRecovery(job, result);
         recovery = await jobRequestsService.recoverRunningJobAfterSettlementFailure(job.id, {
+          expectedAttempt: Number.isSafeInteger(Number(job.attempts)) && Number(job.attempts) > 0 ? Number(job.attempts) : null,
           status: recoveryState.status,
           nextRunAt: recoveryState.nextRunAt,
           errorMessage: recoveryState.errorMessage

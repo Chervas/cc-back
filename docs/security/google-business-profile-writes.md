@@ -1,19 +1,21 @@
 # Escrituras Google Business Profile y recuperación de recibos
 
 > **Tipo:** contrato de implementación y validación.
-> **Fuente de verdad:** broker, diario SQL y consumidores manuales preparados en fuente DEV; no acredita publicación ni aceptación clínica.
+> **Fuente de verdad:** broker, diario SQL y consumidores manuales/automatizados preparados en fuente DEV; no acredita publicación ni aceptación clínica.
 > **Última revisión:** 2026-09-19.
 > **Relacionado con:** [consumidores públicos](google-public-consumers.md), [contrato backend](../../src/Documentacion/13-backend.md#escrituras-tipadas-business-profile-preparadas), [estado central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
 
 ## Estado y frontera
 
 Preparados en fuente DEV el broker, diario SQLite, diario SQL, cuatro consumidores
-manuales, rutas de recuperación y UI. Las fichas gestionadas ya tienen un recorrido
+manuales, nodo de horarios programados, rutas de recuperación y UI. Las fichas gestionadas ya tienen un recorrido
 sin leer tokens locales; las no migradas conservan la vía anterior con el guard de
-credenciales legacy. **El nodo de automatización de horarios aún no está adaptado**.
-No retirar tokens compartidos ni activar la cohorte hasta completar ese consumidor,
-el censo y la aceptación autenticada. Ninguna candidata pública ni runtime incorpora
-este corte; las dos tablas SQL nuevas tampoco están aplicadas a DEV o CRM.
+credenciales legacy. El nodo gestionado conserva un intento por ejecución/nodo y
+comprueba el intento vigente del job antes de aceptar su resultado.
+No retirar tokens compartidos ni activar la cohorte hasta completar el censo,
+la resolución de incertidumbres y la aceptación autenticada. Ninguna candidata
+pública ni runtime incorpora este corte; las tres tablas SQL nuevas tampoco están
+aplicadas a DEV o CRM.
 
 La cohorte explícita `google-business-profile-write-v1` admite lectores y escritores
 con identidades distintas. La cohorte anterior de lectura rechaza tanto grants
@@ -168,6 +170,55 @@ quedar sin recibo; todavía exige revisión. No hay acción para borrar pendient
 ni resolución manual de `not_found/unknown`. El almacenamiento de pestaña no
 sustituye al diario SQL ni al procedimiento operativo pendiente.
 
+## Horarios programados y propiedad de la ejecución
+
+`businessProfileAutomation.service` adapta el nodo existente
+`action/update_google_special_hours`; no añade programación de citas ni un job
+nuevo. Las fichas sin migrar conservan su recorrido anterior. La simulación del
+motor no llama al broker. En una ficha gestionada se exige una ejecución V2
+persistida, su log de nodo y un `JobRequest.automations_v2_execute` vigente; una
+llamada directa sin ese contexto no puede publicar.
+
+El UUID se deriva de namespace, ejecución y nodo. El diario guarda el plan
+combinado original, autor y hashes de plantilla/nodo: otro intento del job no
+recompone fechas ni sustituye el comando. Antes de admitir se verifica que el
+plan local no cambió desde su lectura. Se comprueban plantilla publicada/activa,
+clínica, creador, nodo actual, gates y permisos de todas las clínicas afectadas
+antes/después de las esperas y dentro de las transacciones. Editar la plantilla
+o retirar un permiso impide aceptar el recibo antiguo.
+
+`jobClaim` identifica el intento por ID, contador monotónico `attempts`, instante
+de adquisición, namespace explícito y ejecución. Conserva también la vigencia
+del executor en memoria; se invalida al terminar o agotar el plazo. **No es un
+lease con renovación ni cancela una petición externa ya enviada.** La finalización
+del scheduler y su reparación SQL comparan el número de intento esperado: un
+trabajador anterior no puede finalizar el intento de otro.
+
+El motor comprueba ese claim al entrar, entre nodos, tras procesarlos y al guardar
+el estado, bajo bloqueo breve ejecución→job. Las escrituras de estado y la
+reanudación de esperas rechazan un nodo/estado que cambió entretanto. La red queda
+fuera de estas transacciones. Esto protege la aceptación del estado del motor;
+no convierte automáticamente los demás efectos de los nodos en cancelables o
+idempotentes. Siguen sujetos a sus contratos propios.
+
+Si falta la confirmación, el flujo queda `waiting` en el mismo nodo, con
+`provider_status: outcome_unknown` y plantilla activa. Los siguientes intentos
+consultan únicamente el UUID original: espera de 1, 2, 4… minutos, con tope de
+una hora; `not_found` tampoco permite reenviar. Un recibo confirmado permite
+guardar juntos log, salida, siguiente nodo y desactivación opcional de la
+plantilla. Un fallo durante ese guardado revierte esos cuatro cambios, aunque el
+diario ya tenga el recibo aplicado; el siguiente intento acepta ese recibo sin
+otra publicación. Las excepciones conservan el nodo y no toman `on_fail`, porque
+una interrupción no demuestra que la escritura externa haya fallado.
+
+El timeout global del executor conserva su política existente: resultado fallido
+**sin reintento automático**. Tras él, el manejador tardío pierde su claim y no
+puede aceptar ni avanzar. La recuperación forzada del fixture demuestra seguridad
+ante otro intento autorizado; no implementa ni autoriza un botón de reejecución
+clínica. Continúan pendientes el tratamiento operativo de incertidumbres,
+agotamiento/revisión humana y su prueba autenticada. Tampoco se libera un lock
+por antigüedad. Los jobs clínicos de DEV permanecen apagados.
+
 Variables sin activar: `GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED`,
 `GOOGLE_BUSINESS_PROFILE_WRITER_KEY_ID` y `GOOGLE_BUSINESS_PROFILE_WRITER_KEY_FILE`,
 además del gate lector GBP y `JOB_RUNTIME_NAMESPACE` explícito. No se han generado
@@ -175,9 +226,9 @@ ni admitido claves reales de escritor ni instalado esta cohorte en AWS.
 
 Siguiente implementación necesaria:
 
-1. Adaptar `applyScheduledSpecialHoursPeriod` y el nodo de flujos: identidad estable
-   por ejecución/nodo, comprobación de lease/plantilla/gates y recuperación sin
-   recomponer otro plan ni repetir una acción. Mantener DEV clínico apagado.
+1. Completar el tratamiento operativo de incertidumbres y la aceptación real del
+   nodo adaptado. Mantener apagados en DEV los jobs que actúan sobre pacientes,
+   leads, campañas y automatizaciones; este corte no autoriza su activación.
 2. Preparar corte SQL nuevo para `20260919200000-create-business-profile-mutation-journal.js`
    y `20260919210000-create-business-profile-cache-coordination.js` (tres tablas),
    primero en DEV y antes de publicar los consumidores/sync nuevos. El contrato de
@@ -204,14 +255,21 @@ son ficticios: no es aceptación clínica autenticada. Resultado de regresión g
 la [bitácora](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-consumidores-manuales-gbp-diario-sql-y-pendientes-2026-09-19).
 
 Evidencia privada: `qa-evidence/security-resume-20260917/google-gbp-consumers-20260919/`
-y los cortes `google-gbp-writers-20260919/` y `google-gbp-sync-20260919/`.
+y los cortes `google-gbp-writers-20260919/`, `google-gbp-sync-20260919/` y
+`google-gbp-automation-20260919/`.
 La coordinación se prueba además con respuestas tardías reales entre promesas,
 mutaciones simultáneas, aliases, pérdida de ACK, gate escritor cerrado, revocación
 y poda por lotes en el MySQL aislado. No sustituye la prueba Google/CRM real.
+La fuente real del executor y motor se carga con dependencias explícitas en el
+MySQL aislado. Se prueban ACK perdido, timeout real antes/después de aceptar Google
+ficticio, reemplazo/cancelación de claim, namespace/ejecución incorrectos, permisos
+y plantilla modificados durante la llamada, rollback del nodo, plan concurrente
+y consulta de incertidumbres sin reenvío. No prueba interfaz autenticada ni Google real.
 No hay despliegue que revertir. Conservar las releases/grants actuales. Una futura
 recuperación debe mantener el diario y los intentos inciertos; volver a código
 que lea tokens o borrar bloqueos no es una recuperación válida de una cohorte
-ya migrada. Copias generales al final; rotación periódica aplazada.
+ya migrada. No trabajar en copias generales ni rotación hasta nueva instrucción
+expresa del titular; antes debe acordarse dónde se alojarán las copias.
 
 Fuentes primarias contrastadas: [actualizar respuesta](https://developers.google.com/my-business/reference/rest/v4/accounts.locations.reviews/updateReply),
 [eliminar respuesta](https://developers.google.com/my-business/reference/rest/v4/accounts.locations.reviews/deleteReply),

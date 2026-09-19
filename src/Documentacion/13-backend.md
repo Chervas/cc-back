@@ -12035,13 +12035,23 @@ Sesión, ámbito, aliases y permisos se revalidan durante el recorrido. Esta pru
 no acredita consistencia inmediata del proveedor tras un cambio ni escrituras
 hechas directamente en Google; tampoco ordena aún los escritores legacy.
 
+El nodo de horarios programados gestionado guarda un UUID estable por ejecución/
+nodo y el plan original. Comprueba plantilla, permisos y claim vigente del job;
+una respuesta tardía no permite al intento vencido guardar el avance. Incertidumbre
+mantiene el mismo nodo en espera y consulta solo su recibo, con backoff hasta una
+hora. Log, salida, siguiente nodo y desactivación opcional se aceptan juntos.
+El claim es un control por intento y vigencia del executor, no un lease renovable.
+La finalización/reparación del scheduler compara el intento esperado. El motor
+guarda su estado bajo esa comprobación; los efectos de otros nodos conservan sus
+contratos. Un timeout global sigue sin reintento automático ni liberación de locks.
+
 La UI distingue incertidumbre de éxito y permite «Consultar resultado». Conserva
 referencias de la pestaña por usuario/clínica; el servidor permite recuperar sus
 intentos con una sesión nueva. HTTP202 no significa publicación confirmada. El
 panel de actividad incorpora v25 con metadatos, sin texto de reseñas, fotos o URLs.
 
 Preparado y probado con MySQL/SQLite/HTTP y componentes Angular aislados; sin
-publicación, DDL real ni activación. Faltan nodo de horarios/lease, tratamiento
+publicación, DDL real ni activación. Faltan aceptación real de horarios, tratamiento
 operativo de incertidumbres, compatibilidad AWS v25, aceptación clínica y carga.
 Las dos migraciones nuevas añaden tres tablas: el contrato de fuente pasa de49
 a52; primero se requiere DDL, con escritores/sync drenados y sin intentos inciertos,

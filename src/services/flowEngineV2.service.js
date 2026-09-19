@@ -46,6 +46,7 @@ const whatsappAuthorizedBroker = require('../lib/whatsappAuthorizedBrokerClient'
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
 const FlowExecutionLogV2 = db.FlowExecutionLogV2;
+const executionJobClaim = Symbol('executionJobClaim');
 const AutomationRateLimitBucket = db.AutomationRateLimitBucket;
 const CitaPaciente = db.CitaPaciente;
 const LeadIntake = db.LeadIntake;
@@ -967,8 +968,31 @@ function emitExecutionLogEvent(execution, log, extra = {}) {
   io.emit('flow_execution:log', payload);
 }
 
+async function assertExecutionJobClaim(execution, transaction) {
+  const claim = execution[executionJobClaim];
+  if (!claim) return;
+  try { await claim.assert({ executionId: execution.id, transaction }); }
+  catch (error) { error.preserveFlowState = true; throw error; }
+}
+
+async function withExecutionJobClaim(execution, work) {
+  if (!execution[executionJobClaim]) return work(undefined);
+  return db.sequelize.transaction(async transaction => {
+    // Match GBP acceptance's execution -> job lock order. Never wrap node or
+    // provider execution in this transaction: only persist engine state here.
+    const current = await FlowExecutionV2.findByPk(execution.id, { transaction, lock: transaction.LOCK.UPDATE });
+    await assertExecutionJobClaim(execution, transaction);
+    if (!current || current.status !== execution.status || current.current_node_id !== execution.current_node_id) {
+      throw Object.assign(Error('flow_execution_changed'), { code: 'flow_execution_changed', preserveFlowState: true });
+    }
+    const result = await work(transaction);
+    await assertExecutionJobClaim(execution, transaction);
+    return result;
+  }).catch(error => { error.preserveFlowState = true; throw error; });
+}
+
 async function updateExecutionAndEmit(execution, patch, eventName = 'flow_execution:updated', extra = {}) {
-  await execution.update(patch);
+  await withExecutionJobClaim(execution, transaction => execution.update(patch, { transaction }));
   emitExecutionEvent(execution, eventName, extra);
 }
 
@@ -6536,6 +6560,9 @@ async function processNode(node, context, runtime = {}) {
           : 'business_profile_special_hours_period_missing');
       }
 
+      const managed = await require('./businessProfileAutomation.service').run({ node, context, runtime, clinicId });
+      if (managed) return managed;
+
       const template = await AutomationFlowTemplateV2.findByPk(runtime?.execution?.template_version_id);
       if (!template || template.is_active === false) {
         return {
@@ -7560,6 +7587,9 @@ async function runExecution(executionId, options = {}) {
     throw new Error('execution_not_found');
   }
 
+  if (options.jobClaim) execution[executionJobClaim] = options.jobClaim;
+  await assertExecutionJobClaim(execution);
+
   const clearResponseProcessingState = () => {
     const conversationId = toIntOrNull(getByPath(execution.context, 'conversation.id'));
     const responseMessageId = toIntOrNull(
@@ -7598,7 +7628,7 @@ async function runExecution(executionId, options = {}) {
     // Frontera de compatibilidad: una ejecución creada antes de introducir el
     // snapshot conserva español. Nunca se rellena desde la ficha viva al reanudar.
     context.communication_language = 'es';
-    await execution.update({ context });
+    await withExecutionJobClaim(execution, transaction => execution.update({ context }, { transaction }));
   }
   if (!context.outputs || typeof context.outputs !== 'object') {
     context.outputs = {};
@@ -7620,18 +7650,19 @@ async function runExecution(executionId, options = {}) {
       return execution;
     }
 
-    const [claimedRows] = await FlowExecutionV2.update(
+    const [claimedRows] = await withExecutionJobClaim(execution, transaction => FlowExecutionV2.update(
       {
         status: 'running',
         updated_at: new Date(),
       },
       {
+        transaction,
         where: {
           id: execution.id,
           status: 'waiting',
         },
       }
-    );
+    ));
 
     if (!claimedRows) {
       const freshExecution = await FlowExecutionV2.findByPk(executionId, {
@@ -7685,6 +7716,7 @@ async function runExecution(executionId, options = {}) {
 
   for (let step = 0; step < maxSteps; step += 1) {
     if (localStatus !== 'running') break;
+    await assertExecutionJobClaim(execution);
 
     if (!currentNodeId) {
       await updateExecutionAndEmit(execution, {
@@ -7729,7 +7761,7 @@ async function runExecution(executionId, options = {}) {
 
     const startedAt = new Date();
     const nodeOutputBefore = summarizeNodeOutputForAudit(context, currentNodeId);
-    const log = await FlowExecutionLogV2.create({
+    const log = await withExecutionJobClaim(execution, transaction => FlowExecutionLogV2.create({
       flow_execution_id: execution.id,
       node_id: currentNodeId,
       node_type: cleanString(node.type),
@@ -7739,11 +7771,23 @@ async function runExecution(executionId, options = {}) {
         started_at: startedAt.toISOString(),
         node_output_before: nodeOutputBefore,
       },
-    });
+    }, { transaction }));
 
     try {
-      const result = await processNode(node, context, { execution });
+      const result = await processNode(node, context, { execution, log, jobClaim: options.jobClaim });
+      await assertExecutionJobClaim(execution);
       const finishedAt = new Date();
+
+      if (result.kind === 'persisted') {
+        // Typed GBP acceptance saved log, output, next node and optional template
+        // deactivation together, while holding the current job claim in SQL.
+        await execution.reload(); await log.reload();
+        context = clone(execution.context) || {};
+        currentNodeId = cleanString(execution.current_node_id); localStatus = execution.status;
+        emitExecutionLogEvent(execution, log, { kind: localStatus === 'waiting' ? 'waiting' : 'success' });
+        emitExecutionEvent(execution, localStatus === 'completed' ? 'flow_execution:completed' : 'flow_execution:updated');
+        continue;
+      }
 
       if (result.kind === 'waiting') {
         context = mergeNodeOutput(context, currentNodeId, {
@@ -7827,8 +7871,22 @@ async function runExecution(executionId, options = {}) {
         last_error: null,
       }, 'flow_execution:updated');
     } catch (error) {
+      try { await assertExecutionJobClaim(execution); }
+      catch (claimError) { error = claimError; }
       const finishedAt = new Date();
       const errorMessage = cleanString(error?.message) || 'node_execution_error';
+      if (error.preserveFlowState === true) {
+        // A late worker may only finish its own still-running log; never
+        // overwrite an already accepted GBP log or take the on_fail branch.
+        const [updatedLogs] = await FlowExecutionLogV2.update({ status: 'error', finished_at: finishedAt,
+          error_message: error.code || 'business_profile_automation_required' },
+        { where: { id: log.id, status: 'running' } });
+        if (updatedLogs) {
+          await log.reload();
+          emitExecutionLogEvent(execution, log, { kind: 'error' });
+        }
+        throw error;
+      }
       const onFailNode = readOutputTarget(node, 'on_fail');
       if (cleanString(node?.type) === 'action/send_whatsapp') {
         await materializeFailedAutomationWhatsappMessage({

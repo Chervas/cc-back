@@ -1559,7 +1559,7 @@ async function updateSpecialHours(resolved, payload = {}, options = {}) {
   if (mutations.managed(location, brokerContext)) return mutations.execute({ resolved, location, brokerContext, ...options,
     kind: 'hours', input: { operationId: payload.operationId, periods: plan.periods.map(
       ({ kind, startDate, endDate, openTime, closeTime }) => ({ kind, startDate, endDate, openTime, closeTime })) },
-    localInput: { plan } });
+    localInput: { plan, ...(options.automation ? { automation: options.automation } : {}) } });
   const locationName = cleanString(location.location_id);
   if (!/^locations\/[^/]+$/.test(locationName)) {
     throw specialHoursError('business_profile_location_name_invalid', 409);
@@ -1661,8 +1661,8 @@ function preserveSpecialHoursOutsideRange(item, incoming, today) {
   return segments;
 }
 
-async function applyScheduledSpecialHoursPeriod(clinicIdRaw, payload = {}) {
-  const resolved = await resolveEffectiveLocations(clinicIdRaw);
+async function applyScheduledSpecialHoursPeriod(clinicIdRaw, payload = {}, options = {}) {
+  const resolved = options.resolved || await resolveEffectiveLocations(clinicIdRaw);
   const location = resolved?.locations?.[0] || null;
   if (!location) throw specialHoursError('business_profile_location_not_configured', 409);
 
@@ -1678,9 +1678,10 @@ async function applyScheduledSpecialHoursPeriod(clinicIdRaw, payload = {}) {
   const preserved = storedPeriods.flatMap((item) => preserveSpecialHoursOutsideRange(item, incoming, today));
 
   return updateSpecialHours(resolved, {
+    operationId: payload.operationId,
     timeZone: requested.timeZone,
     periods: [...preserved, incoming],
-  });
+  }, options);
 }
 
 function googleTimeToHHmm(value) {

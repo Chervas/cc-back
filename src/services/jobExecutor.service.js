@@ -33,6 +33,7 @@ const {
 } = require('../lib/jobExecutionTimeoutPolicy');
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.JOB_EXECUTOR_MAX_RUNTIME_MS || 30 * 60 * 1000);
+const { createJobClaim } = require('./jobClaim.service');
 const DEFAULT_WAITING_BACKOFF_MS = Number(process.env.JOB_SCHEDULER_WAITING_BACKOFF_MS || 15 * 60 * 1000);
 const DEFAULT_FLOW_WAITING_BACKOFF_MS = Number(process.env.FLOW_V2_WAITING_BACKOFF_MS || 60 * 1000);
 
@@ -107,7 +108,7 @@ async function loadInboundResponseFromMessageIds(payload = {}, waitingMeta = {},
   };
 }
 
-async function runAutomationFlowV2Job(payload = {}) {
+async function runAutomationFlowV2Job(payload = {}, _job, jobClaim) {
   const executionId = Number(payload.execution_id || payload.executionId || 0);
   if (!Number.isInteger(executionId) || executionId <= 0) {
     throw new Error('automations_v2_execute requires payload.execution_id');
@@ -136,7 +137,7 @@ async function runAutomationFlowV2Job(payload = {}) {
     };
   }
 
-  const options = {};
+  const options = { jobClaim };
   const waitingMeta = execution?.waiting_meta && typeof execution.waiting_meta === 'object'
     ? execution.waiting_meta
     : {};
@@ -574,7 +575,7 @@ const JOB_HANDLERS = {
   automation_message_received_fire: async (payload = {}, jobRequest = null) => (
     require('./automationInboundMessage.service').runMessageReceivedFireJob(payload, jobRequest)
   ),
-  automations_v2_execute: async (payload = {}) => runAutomationFlowV2Job(payload),
+  automations_v2_execute: async (payload = {}, job, claim) => runAutomationFlowV2Job(payload, job, claim),
   automation_whatsapp_quiet_send: async (payload = {}) => flowEngineV2Service.runScheduledWhatsappSendJob(payload),
   appointment_automation_schedule_fire: async (payload = {}) => runAppointmentAutomationScheduleJob(payload),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),
@@ -726,15 +727,17 @@ async function runJob(jobRequest) {
   let handler = JOB_HANDLERS[jobType];
   if (!handler && jobType === 'automations_v2_execute') {
     // Salvaguarda frente a estados parciales de carga del módulo en arranque.
-    handler = async (payload = {}) => runAutomationFlowV2Job(payload);
+    handler = (payload, job, claim) => runAutomationFlowV2Job(payload, job, claim);
   }
   if (!handler) {
     throw new Error(`No handler registered for job type '${jobType || jobRequest?.type || 'unknown'}'`);
   }
 
+  let active = true;
+  const claim = createJobClaim(jobRequest, { isActive: () => active });
   try {
     const payload = jobRequest.payload || {};
-    const execution = Promise.resolve().then(() => handler(payload, jobRequest));
+    const execution = Promise.resolve().then(() => handler(payload, jobRequest, claim));
     // Promise.race no cancela el handler original. Los cron del catálogo deben
     // finalizar por sí mismos para que nunca se reprograme un segundo barrido
     // mientras el primero aún puede seguir mutando proveedores o la BD.
@@ -790,6 +793,10 @@ async function runJob(jobRequest) {
       syncLogId: null,
       error
     };
+  } finally {
+    // Promise.race does not cancel the handler. Typed side effects and flow
+    // acceptance must reject this claim after timeout or return.
+    active = false;
   }
 }
 
