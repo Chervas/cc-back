@@ -25,10 +25,11 @@ function createGoogleAdsOnboardingBroker({ runtime, models, clinicIds, beforeExe
     if (value < 1) fail('broker_timeout');
     return value;
   };
-  const guard = async (dataManager = false, verifiedContext = null) => {
+  const guard = async (dataManager = false, verifiedContext = null, transaction = null) => {
     remaining(15000);
     if (await beforeExecute() !== true) fail('scope_denied');
-    const current = verifiedContext || await broker.assert(account, brokerContext);
+    const locked = transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {};
+    const current = verifiedContext || await broker.assert(account, brokerContext, transaction ? { transaction } : undefined);
     if (current.customerId !== customerId || (current.loginCustomerId || null) !== (loginCustomerId || null)
       || current.googleConnectionId !== connection.id || current.googleSubject !== connection.subject
       || selectedClinics.some(id => !current.clinicIds.includes(id))) fail('broker_binding_invalid');
@@ -36,13 +37,13 @@ function createGoogleAdsOnboardingBroker({ runtime, models, clinicIds, beforeExe
     if (captured && captured !== identity) fail('broker_binding_invalid');
     captured = identity;
     const fresh = await models.GoogleConnection.findByPk(connection.id, {
-      attributes: ['id', 'googleUserId', 'scopes'], raw: true, logging: false });
+      attributes: ['id', 'googleUserId', 'scopes'], raw: true, logging: false, ...locked });
     if (!fresh || Number(fresh.id) !== connection.id || fresh.googleUserId !== connection.subject
       || canonical(scopes(fresh.scopes)) !== canonical(connection.scopes)
       || !connection.scopes.includes(ADS) || dataManager && !connection.scopes.includes(DM)) fail('scope_denied');
     for (const id of selectedClinics) {
       const clinic = await models.Clinica.findByPk(id, {
-        attributes: ['id_clinica', 'grupoClinicaId', 'estado_clinica'], raw: true, logging: false });
+        attributes: ['id_clinica', 'grupoClinicaId', 'estado_clinica'], raw: true, logging: false, ...locked });
       if (!clinic || Number(clinic.id_clinica) !== id || ![true, 1, '1'].includes(clinic.estado_clinica)
         || current.groupId != null && Number(clinic.grupoClinicaId) !== current.groupId) fail('conversion_paused');
     }
@@ -78,7 +79,16 @@ function createGoogleAdsOnboardingBroker({ runtime, models, clinicIds, beforeExe
       if (response?.validated !== true || response.warningCount !== 0) fail('DATA_MANAGER_VALIDATION_UNCONFIRMED');
       return { validated: true, validate_only: true };
     },
-    assert: () => guard(),
+    async assert({ transaction = null, requireDataManager = false } = {}) {
+      const checkDelivery = () => {
+        if (requireDataManager && (process.env.GOOGLE_ADS_CONVERSIONS_BROKER_ENABLED !== 'true'
+          || String(process.env.RUNTIME_ROLE || '').toLowerCase() === 'gateway')) fail('broker_cohort_disabled');
+      };
+      checkDelivery();
+      await guard(requireDataManager, null, transaction);
+      checkDelivery();
+      return true;
+    },
   };
 }
 module.exports = { createGoogleAdsOnboardingBroker };

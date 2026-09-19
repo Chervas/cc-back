@@ -10647,3 +10647,52 @@ casos nuevos niegan cambios de ACL, grant, clínica, scopes, sujeto, cohorte y c
 antes/durante la consulta. Sigue pendiente la aceptación de carga con datos,
 latencia y concurrencia reales; no equivale a salud global de MySQL. Detalle,
 pruebas y recuperación en `docs/security/google-data-manager-broker.md` y 19/99.
+
+## Job combinado Google Data Manager (preparado, 19/09/2026)
+
+La adaptación del job `google_data_manager_diagnostics` conserva sus cuatro
+fases: capacidad de personalización elegida por el visitante; autorización
+interna Enhanced de la cohorte documentada; comprobación de estrategias activas
+`connect_only`; consulta del estado de recibos pendientes. La capacidad del
+snippet no concede consentimiento y guardar readiness no activa campañas.
+El transporte operativo y la aceptación con Google real siguen pendientes.
+
+Las fases Enhanced y readiness resuelven inventario y configuración sin cargar
+conexiones generales ni tokens Google/Meta. Una cuenta gestionada consulta los
+ajustes tipados y la cuota de su binding remoto; la variable de cuota local no
+la autoriza. Se conservan la allowlist documental, consentimiento vigente,
+acciones canónicas/secundarias y `validateOnly` por evento. La autorización
+Enhanced local no crea ni sustituye la política Enhanced del binding del broker:
+su digest y alcance deben comprobarse por separado antes de admitir identificadores.
+
+Tras terminar las llamadas al proveedor, el guard del consumidor vuelve a
+comprobar y bloquear binding, asignaciones, identidad/scopes y clínicas dentro
+de la transacción que guarda el resultado. Exige además el gate de Data Manager
+abierto y un runtime distinto de gateway. No espera a Google con la transacción
+SQL abierta. Enhanced verifica el contenido del IntakeConfig bajo bloqueo,
+incluso si ya figuraba activo. Cambiar configuración o clave del snippet sin
+cambiar `updated_at` invalida la comprobación: `stale_retry` devuelve `ready=false`.
+La huella incluye un hash de la clave, nunca la clave en el resultado; las
+huellas históricas de estrategias requerirán una validación nueva una vez.
+Readiness conserva el bloqueo de configuración y estrategia y hace rollback
+conjunto si falla una escritura del lote.
+
+Se mantiene la cadencia de seis horas para las tres primeras fases y el sondeo
+de recibos en cada ejecución. Fallar los ajustes o readiness no omite la fase
+de recibos; ésta conserva sus propias autorizaciones y puede rechazar una
+cuenta revocada. No hay reingesta, creación de acciones, activación de campañas,
+nueva cola, DDL ni cambio de flags. Un `stale_retry` no programa un reintento
+inmediato: espera otra reconciliación solicitada o la siguiente pasada debida.
+
+QA integrada usa el método real del job, modelos/transacciones MySQL propios,
+broker HTTPS firmado y SQLite, con proveedores ficticios y sin inicializar cron.
+Cubre las cuatro fases, fallos, revocación tras I/O, pausa clínica, cierre de gate,
+cambio de clave/configuración, rollback e idempotencia. El asistente Angular
+consulta esa misma API y realiza validaciones nuevas en escritorio/móvil.
+El job no selecciona credenciales generales; el bootstrap compartido conserva
+su consumidor legacy de Meta, pendiente de migrar, y eso no se presenta como
+eliminación de todas las credenciales del frontend/backend.
+
+Las mediciones y límites de carga, evidencia visual, corte y recuperación están
+en 19/39/99 y `docs/security/google-data-manager-broker.md`. Falta carga con
+cardinalidad/proveedor reales y aceptación autenticada antes del despliegue.

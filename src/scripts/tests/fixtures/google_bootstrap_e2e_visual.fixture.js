@@ -2,7 +2,7 @@
 // Real stepper class/template plus the exact Web status card. Actual bootstrap
 // HTTP/SQL/signed broker; isolated provider and selection, never public MFA.
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),{createRequire}=require('node:module');
-module.exports=async({app,apiServer,report,token,reads})=>{
+module.exports=async({app,apiServer,report,token,reads,deliveryEnabled=false})=>{
   const front=path.resolve(__dirname,'../../../../../front-dev'),req=createRequire(path.join(front,'package.json'));
   const ts=req('typescript'),buildReq=createRequire(req.resolve('@angular-devkit/build-angular/package.json'));
   const esbuild=buildReq('esbuild'),sass=buildReq('sass'),puppeteer=require('puppeteer-core');
@@ -41,32 +41,52 @@ module.exports=async({app,apiServer,report,token,reads})=>{
   app.use('/assets',require('express').static(path.join(front,'src/assets')));
   app.get('/favicon.ico',(_req,res)=>res.sendStatus(204));
   app.get('/',(_req,res)=>res.set('Cache-Control','private, no-store').type('html').send('<!doctype html><html lang="es"><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body class="light theme-default"><qa-root></qa-root><script>window.QA_TOKEN='+JSON.stringify(token())+';</script><script src="/fixture.js"></script></body></html>'));
-  const output=path.join(report.root,'visual');fs.mkdirSync(output,{mode:0o700});let browser;const errors=[],blocked=[],shots=[],writes=[];
+  const output=path.join(report.root,'visual');fs.mkdirSync(output,{mode:0o700});let browser;const errors=[],blocked=[],shots=[],writes=[],validationRequests=[];
   try{
     browser=await puppeteer.launch({executablePath:'/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell',headless:true,pipe:true,args:['--no-sandbox','--disable-dev-shm-usage']});
     const page=await browser.newPage(),base='http://127.0.0.1:'+apiServer.address().port;
-    await page.setRequestInterception(true);page.on('request',r=>{if(!['GET','HEAD'].includes(r.method())){writes.push(r.url());r.abort();}else if(r.url().startsWith(base+'/')||r.url().startsWith('data:'))r.continue();else{blocked.push(r.url().split('?')[0]);r.abort();}});
+    await page.setRequestInterception(true);page.on('request',r=>{
+      if(deliveryEnabled&&r.method()==='POST'&&r.url()===base+'/api/marketing/google-ads/conversions/data-manager/validate'){
+        const body=JSON.parse(r.postData());assert.deepEqual(Object.keys(body).sort(),['assignment_scope','conversion_action_id','customer_id','event','group_id']);
+        validationRequests.push({event:body.event,actionId:body.conversion_action_id});r.continue();
+      }else if(!['GET','HEAD'].includes(r.method())){writes.push(r.url());r.abort();}
+      else if(r.url().startsWith(base+'/')||r.url().startsWith('data:'))r.continue();else{blocked.push(r.url().split('?')[0]);r.abort();}
+    });
     page.on('pageerror',e=>errors.push(e.message));
     for(const v of [{name:'desktop',width:1440,height:1000},{name:'mobile',width:390,height:844}]){
       await page.setViewport(v);const prior=reads();await page.goto(base,{waitUntil:'networkidle0'});
       await page.waitForFunction(()=>window.QA_COMPONENT?.step?.bootstrapLoaded&&!window.QA_COMPONENT.step.conversionLoading);
-      assert(reads()>prior);assert.equal(await page.evaluate(()=>window.QA_COMPONENT.step.googleAds.capabilities.data_manager_ready),false);
-      await page.evaluate(()=>window.QA_COMPONENT.step.stepper.selectedIndex=1);
-      await page.waitForFunction(()=>document.querySelector('#conversion-clinicaclick-title')?.getClientRects().length);
-      const notice=await page.$eval('#conversion-clinicaclick-title',e=>e.parentElement.textContent);assert.match(notice,/envío de conversiones sigue desactivado/);
+      assert(reads()>prior);assert.equal(await page.evaluate(()=>window.QA_COMPONENT.step.googleAds.capabilities.data_manager_ready),deliveryEnabled);
+      const headers=await page.$$('mat-step-header');assert(headers.length>=2);await headers[1].click();
+      await page.waitForFunction(()=>document.querySelectorAll('mat-step-header')[1]?.getAttribute('aria-selected')==='true');
+      if(deliveryEnabled){
+        await page.waitForFunction(()=>window.QA_COMPONENT.step.conversionsValid===true);
+        assert.equal(await page.evaluate(()=>window.QA_COMPONENT.step.conversionActions.length),4);
+        assert.match(await page.$eval('body',e=>e.textContent),/Google ha validado en modo seguro/);
+        await page.evaluate(()=>[...document.querySelectorAll('span')].find(e=>e.textContent.startsWith('Google ha validado en modo seguro')).parentElement.setAttribute('data-qa-validation','true'));
+        assert.equal(await page.$('#conversion-readiness-title'),null);
+        assert.doesNotMatch(await page.$eval('#web-card',e=>e.textContent),/No necesitas reconectar Google/);
+      }else{
+        await page.waitForFunction(()=>document.querySelector('#conversion-clinicaclick-title')?.getClientRects().length);
+        const notice=await page.$eval('#conversion-clinicaclick-title',e=>e.parentElement.textContent);assert.match(notice,/envío de conversiones sigue desactivado/);
+        assert.match(await page.$eval('#web-card',e=>e.textContent),/No necesitas reconectar Google/);
+      }
       assert.doesNotMatch(await page.$eval('body',e=>e.textContent),/Preparando automáticamente/);
       assert.equal(await page.$('#conversion-user-google-title'),null);
-      assert.match(await page.$eval('#web-card',e=>e.textContent),/No necesitas reconectar Google/);
-      assert.equal(await page.evaluate(()=>window.QA_COMPONENT.step.conversionsValid),false);
-      for(const [name,selector] of [['stepper','#conversion-readiness-title'],['web','#web-card']]){
+      assert.equal(await page.evaluate(()=>window.QA_COMPONENT.step.conversionsValid),deliveryEnabled);
+      for(const [name,selector] of [['stepper',deliveryEnabled?'[data-qa-validation]':'#conversion-readiness-title'],['web','#web-card']]){
         await page.$eval(selector,e=>e.scrollIntoView({block:'center'}));
         await page.screenshot({path:path.join(output,v.name+'-'+name+'.png')});
         const overflow=await page.$eval(selector,e=>{const block=e.closest('section')||e.parentElement;return [...block.querySelectorAll('li,p,h5')].some(n=>n.getClientRects().length&&n.scrollWidth>n.clientWidth+2);});assert.equal(overflow,false);shots.push(v.name+'-'+name);
       }
     }
     assert.deepEqual(errors,[]);assert.deepEqual(blocked,[]);assert.deepEqual(writes,[]);
-    fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({screenshots:shots,actualStepper:true,actualWebStatusCard:true,actualBootstrapHttp:true,actualSql:true,actualSignedTlsBroker:true,publicMfa:false,realProvider:false,errors,blocked,writes},null,2),{mode:0o600});
-    report.visual={screenshots:shots.length,errors,blocked,writes};report.checks.push('real Angular stepper and exact Web status card, desktop/mobile, consume actual bootstrap HTTP; disabled delivery belongs to ClinicaClick, no reconnect request or validated state and no write attempted');
+    assert.equal(validationRequests.length,deliveryEnabled?8:0);
+    fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({screenshots:shots,actualStepper:true,actualWebStatusCard:true,actualBootstrapHttp:true,actualSql:true,actualSignedTlsBroker:true,publicMfa:false,realProvider:false,errors,blocked,writes,validationRequests},null,2),{mode:0o600});
+    report.visual={screenshots:shots.length,errors,blocked,writes,validateOnlyRequests:validationRequests.length};
+    report.checks.push(deliveryEnabled
+      ? 'real Angular stepper and exact Web status card, desktop/mobile, consume post-job configuration via actual HTTP/SQL/TLS; four fresh validate-only requests per viewport confirm readiness, no other POST or provider mutation'
+      : 'real Angular stepper and exact Web status card, desktop/mobile, consume actual bootstrap HTTP; disabled delivery belongs to ClinicaClick, no reconnect request or validated state and no write attempted');
   }catch(error){if(browser){const page=(await browser.pages()).at(-1);await page.screenshot({path:path.join(output,'failure.png'),fullPage:true});fs.writeFileSync(path.join(output,'failure.txt'),JSON.stringify(errors)+'\n'+await page.$eval('body',e=>e.innerText));}throw error;
   }finally{if(browser)await browser.close();}
 };

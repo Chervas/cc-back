@@ -542,3 +542,53 @@ retirar el grant de esta lectura o cerrar la cohorte afectada; preservar registr
 revocaciones, journals y auditoría. Nunca restaurar tokens locales o ejecutar una
 versión legacy sobre una cuenta ya gestionada. No hay DDL propio de este tramo.
 Evidencia privada: `qa-evidence/security-resume-20260917/google-bootstrap-settings-20260919/`.
+
+## Job combinado: preparación integrada (19/09/2026)
+
+Contrato en [13](../../src/Documentacion/13-backend.md#job-combinado-google-data-manager-preparado-19092026).
+Se mantienen las cuatro fases y sus restricciones. Inventario sin tokens para
+Enhanced/readiness; cuota del binding remoto; guards transaccionales después del
+I/O, consentimiento y huella del IntakeConfig/HMAC vigentes. `stale_retry` no
+devuelve readiness verdadero. El gate del broker se comprueba también al guardar.
+No se activa cron ni se cambia la planificación de CRM.
+
+La prueba `google_combined_diagnostics_mysql.integration.js` ejecuta el método
+real del job con MySQL/SQLite y HTTPS firmados, Google/Secrets/S3 ficticios.
+Incluye la primera pasada, consulta de un recibo previamente aceptado,
+continuación de ese sondeo si fallan los ajustes, revocación en ambas fases que
+persisten, pausa clínica, cierre del gate, cambios concurrentes de configuración
+y HMAC, fallo de la segunda escritura con rollback de la primera e idempotencia.
+El único envío ficticio lo crea expresamente el fixture para obtener el recibo:
+ninguna ejecución del job ni recorrido visual reenvía o ingiere conversiones.
+
+Chromium usa el asistente Angular real y la tarjeta exacta de Marketing Web con
+la misma API/sesión MySQL/broker. Cuatro capturas en 1440/390 px; ocho peticiones
+`validateOnly` nuevas en el navegador, sin otras escrituras ni llamadas externas.
+No es una prueba de toda la navegación Web ni aceptación de MFA/proveedor públicos.
+La UI del bootstrap mantiene consultas legacy de Meta; se contabilizan aparte
+y no se atribuyen al job. Google conserva cero hidrataciones locales de OAuth.
+
+El job realiza bastantes comprobaciones SQL de identidad/ámbito, especialmente
+en la primera pasada. Las cifras en 99 separan primera preparación y sondeo de
+un recibo. Pool drenado al terminar y ningún I/O de proveedor bajo transacción;
+no demuestra capacidad con muchas estrategias/cuentas, carga concurrente real
+ni aislamiento de CPU. Las fases siguen secuenciales y el barrido histórico de
+estrategias activas necesita una medición con cardinalidad real.
+
+Antes de publicar: conservar gates/pausas actuales, verificar el esquema de todos
+los consumidores y publicar operaciones de ajustes/validate/status compatibles.
+Revisar la política Enhanced del binding, sus digests y autorizaciones originales:
+que el job complete su configuración local no habilita por sí solo identificadores
+en el broker. Continúan pendientes leads, identidad compartida, publicación AWS
+v19 de auditoría y aceptación con sesión/proveedor reales. Cero cohortes operativas
+migradas. Sin DDL nuevo ni variables nuevas en este tramo.
+
+Recuperación: una carrera deja explícito `stale_retry`/bloqueo/fallo; revisar el
+estado actual y solicitar otra conciliación solo cuando la causa esté resuelta.
+No restaurar una instantánea vieja de config/HMAC/estrategias para forzar éxito.
+Tras un eventual corte, cerrar la cohorte/job afectado conservando el último
+runtime compatible y todos los journals/recibos. No reactivar OAuth local ni
+usar rollback que omita las comprobaciones al guardar. Mientras no se despliegue,
+las releases operativas previas permanecen como baseline.
+
+Evidencia privada: `qa-evidence/security-resume-20260917/google-combined-diagnostics-20260919/`.

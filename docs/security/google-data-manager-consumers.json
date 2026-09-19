@@ -1,9 +1,9 @@
 {
-  "version": 15,
+  "version": 16,
   "reviewedAt": "2026-09-19",
-  "sourceBaseHead": "9d1e9c221139475b447251d78a219242e8b54cc0",
+  "sourceBaseHead": "bcb5c49472d18bbe8f95bb98f2a8ade1ec38b96c",
   "includesWorkingChanges": true,
-  "scope": "Bounded settings snapshot deduplication, preserving current grant/account/session/ACL checks before and after provider I/O and final bootstrap checks. Actual SQL/HTTP/signed broker, concurrent isolated burst and repeated Angular visual QA; no deployment or production load acceptance. Historical unreviewed rows retain prior hashes.",
+  "scope": "Bounded full Data Manager diagnostics job adaptation: inventory-only Enhanced/readiness, remote binding quota, current grants and configuration locked after provider I/O, same-timestamp HMAC/config races, ready=false on stale persistence. Twelve actual SQL/TLS job and Angular UI groups with fake providers; no deployment or operational acceptance. Shared bootstrap Meta credential consumer remains legacy; unreviewed rows retain previous hashes.",
   "runtimeConsumersMigrated": 0,
   "qa": {
     "broker": "621/621 full Node24 regression; fake providers, external network blocked",
@@ -59,7 +59,52 @@
     "bootstrapConcurrentRequests": 8,
     "bootstrapConcurrentStatements": 840,
     "bootstrapConcurrentP50Milliseconds": 641,
-    "bootstrapConcurrentMaxMilliseconds": 813
+    "bootstrapConcurrentMaxMilliseconds": 813,
+    "combinedJobIntegrated": {
+      "groups": 12,
+      "signedCommands": 70,
+      "validateOnly": 36,
+      "explicitFictitiousSeedIngests": 1,
+      "jobOrUiIngests": 0,
+      "actionWrites": 0,
+      "jobCredentialQueries": 0,
+      "googleCredentialQueries": 0,
+      "uiLegacyMetaCredentialQueries": 10,
+      "screenshots": 4,
+      "publicMfaOrProviderAcceptance": false,
+      "firstJob": {
+        "statements": 663,
+        "milliseconds": 824
+      },
+      "receiptPoll": {
+        "statements": 206,
+        "milliseconds": 197
+      },
+      "pool": {
+        "using": 0,
+        "waiting": 0
+      }
+    },
+    "combinedJobBootstrapRegression": {
+      "groups": 7,
+      "signedCommands": 22,
+      "screenshots": 4,
+      "initialBootstrap": {
+        "milliseconds": 178,
+        "statements": 105,
+        "accounts": 1
+      },
+      "burst": {
+        "requests": 8,
+        "providerDelayMilliseconds": 100,
+        "statements": 840,
+        "p50Milliseconds": 624,
+        "maxMilliseconds": 648,
+        "providerPeak": 8,
+        "poolUsingAfter": 0,
+        "poolWaitingAfter": 0
+      }
+    }
   },
   "rows": [
     {
@@ -94,10 +139,10 @@
     },
     {
       "file": "src/controllers/campaignOnboarding.controller.js",
-      "sha256": "7a27fc905fb4c6cea252f91fe140c8260b0aeff48f66f8361cda0071e2553bfd",
-      "role": "Bootstrap metadata-only, typed settings, managed capability gates, current session/scope rechecks and bounded concurrency; whole combined job and other identity consumers remain pending.",
-      "state": "bootstrap_settings_prepared_undeployed_load_pending",
-      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+      "sha256": "185d95a3f812c9c98a4b75f7139234e26752ba6c7f49a478e03dd3f5e93116e1",
+      "role": "Only the full diagnostics Enhanced/readiness phases and their shared persistence guards reviewed here; general Meta bootstrap and other credential consumers remain pending.",
+      "state": "combined_job_prepared_undeployed_real_acceptance_pending",
+      "reviewNote": "Bounded change/consumer review only; source hash does not assert all functions in the file are migrated or operational."
     },
     {
       "file": "src/services/campaignWorkspaceGoogleConversion.service.js",
@@ -126,8 +171,9 @@
     {
       "file": "src/jobs/sync.jobs.js",
       "sha256": "2c4ebc5cace33882c9ef986d354351007d4d7667ce0b942acaa5ce25cd54c7ac",
-      "role": "Entrada llama al lote adaptado pero combina otras reconciliaciones/activaciones; no ejecutar job completo como canary. Revisar el resto antes del corte.",
-      "state": "combined_job_review_pending"
+      "role": "Actual executeGoogleDataManagerDiagnostics tested through all four phases, cadence, errors and real SyncLog writes. No source change; other job families not covered by this bounded review.",
+      "state": "combined_job_prepared_undeployed_real_acceptance_pending",
+      "reviewNote": "Bounded change/consumer review only; source hash does not assert all functions in the file are migrated or operational."
     },
     {
       "file": "src/services/googleDataManagerBrokerClient.service.js",
@@ -229,10 +275,10 @@
     },
     {
       "file": "src/services/googleAdsOnboardingBroker.service.js",
-      "role": "Typed settings and shared deadline with post-read identity, scope, session and clinical guards; read/validate adapter.",
-      "state": "bootstrap_settings_prepared_undeployed_real_load_pending",
-      "sha256": "c77fe2ac88d49566727522a03a0932a6aebc0d4a6fe8b105e10906c192917b66",
-      "reviewNote": "Only fixed settings read shares freshly verified metadata at both I/O boundaries. No permission cache or change to paginated/other operations; final endpoint guard retained."
+      "role": "Managed final assertion accepts the SQL transaction and optional Data Manager gate requirement; locks current grants/scopes/clinics without remote I/O.",
+      "state": "combined_job_prepared_undeployed_real_acceptance_pending",
+      "sha256": "a7057ac4019ad61cb0db7e26a9147a7f4b54f305cddc5aadeccdd8b62f60f6ed",
+      "reviewNote": "Bounded change/consumer review only; source hash does not assert all functions in the file are migrated or operational."
     },
     {
       "file": "src/services/googleAdsConversionPreparation.service.js",
@@ -477,10 +523,17 @@
     },
     {
       "file": "src/scripts/tests/fixtures/google_bootstrap_e2e_visual.fixture.js",
-      "sha256": "dbb90e09c14b7956d8ffe752225602e812612740bce481667e4732aa8ef49262",
-      "role": "Real Angular stepper and exact Web status card against same local API, desktop/mobile, no writes.",
-      "state": "bootstrap_settings_prepared_undeployed_load_pending",
-      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+      "sha256": "733d777a28103d113f617efa692cb82553743497d97b891fa48386cd68c546ab",
+      "role": "Actual stepper/Web card with real header click, disabled-delivery and enabled validate-only paths; HTTP/SQL/TLS fixtures, no public MFA.",
+      "state": "combined_job_prepared_undeployed_real_acceptance_pending",
+      "reviewNote": "Bounded change/consumer review only; source hash does not assert all functions in the file are migrated or operational."
+    },
+    {
+      "file": "src/scripts/tests/google_combined_diagnostics_mysql.integration.js",
+      "sha256": "a80f96fbc782161e08cc8ead8533d4ac39839953a77d43997abfdafcc92ac145",
+      "role": "Own MySQL with real models/job, signed TLS broker/SQLite, provider-only fixtures, receipt polling, late revocations, same-timestamp configuration changes, atomic rollback and actual Angular UI.",
+      "state": "combined_job_prepared_undeployed_real_acceptance_pending",
+      "reviewNote": "Bounded change/consumer review only; source hash does not assert all functions in the file are migrated or operational."
     }
   ],
   "frontendSnapshot": {

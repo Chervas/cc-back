@@ -27,6 +27,7 @@ const {
   mergeProvisionedGoogleAdsConfig,
   normalizeMetaAdAccountId,
   normalizeMetaAdsConfig,
+  resolveEffectiveMarketingAssetInventory,
   resolveEffectiveMarketingState
 } = require('../services/effectiveMarketingAssets.service');
 const {
@@ -3101,7 +3102,7 @@ async function enrichGoogleAdsAccountsWithConversionTracking({
       if (runtime.deliveryMode === 'broker') {
         const managed = await onboardingBrokerForScope({ runtime, userId, scope, beforeExecute, deadlineAt });
         const response = await managed.settings();
-        finalGuards?.push(() => managed.assert());
+        finalGuards?.push(options => managed.assert(options));
         return {
           ...account, ...runtimeMetadata,
           ...readGoogleConversionTrackingSettings({ results: [response] }, customerId),
@@ -3906,20 +3907,25 @@ async function persistEnhancedConversionActivationPlan({
   intakeRecord,
   plan,
   now = new Date(),
-  dependencies = {}
+  dependencies = {},
+  beforePersist = null
 }) {
   if (!plan?.ready) {
     return { status: 'blocked', updated: false, idempotent: false, issues: plan?.issues || [] };
   }
   const reconciliationKey = plan.summary?.reconciliation_key || null;
-  if (isEnhancedConversionActivationApplied(intakeRecord?.config, reconciliationKey)) {
+  if (!beforePersist && isEnhancedConversionActivationApplied(intakeRecord?.config, reconciliationKey)) {
     return { status: 'already_active', updated: false, idempotent: true, reconciliation_key: reconciliationKey };
   }
 
   const sequelize = dependencies.sequelize || db.sequelize;
   const intakeConfigModel = dependencies.IntakeConfig || IntakeConfig;
   const preflightUpdatedAt = intakeRecord?.updated_at || intakeRecord?.updatedAt || null;
+  const preflightFingerprint = intakeRecordReadinessFingerprint(intakeRecord);
   return sequelize.transaction(async (transaction) => {
+    // Provider I/O has finished. Lock current managed grants before the config
+    // row so a late revocation cannot persist a ready activation.
+    await beforePersist?.({ transaction });
     const locked = await intakeConfigModel.findOne({
       where: {
         group_id: ENHANCED_CONVERSION_PROPDENTAL_GROUP_ID,
@@ -3931,12 +3937,10 @@ async function persistEnhancedConversionActivationPlan({
     if (!locked) {
       return { status: 'blocked', updated: false, idempotent: false, issues: [{ reason: 'intake_config_missing' }] };
     }
-    if (isEnhancedConversionActivationApplied(locked.config, reconciliationKey)) {
-      return { status: 'already_active', updated: false, idempotent: true, reconciliation_key: reconciliationKey };
-    }
     const lockedUpdatedAt = locked.updated_at || locked.updatedAt || null;
     if (
-      preflightUpdatedAt
+      intakeRecordReadinessFingerprint(locked) !== preflightFingerprint
+      || preflightUpdatedAt
       && lockedUpdatedAt
       && new Date(preflightUpdatedAt).getTime() !== new Date(lockedUpdatedAt).getTime()
     ) {
@@ -3946,6 +3950,9 @@ async function persistEnhancedConversionActivationPlan({
         idempotent: false,
         issues: [{ reason: 'intake_config_changed_during_reconciliation' }]
       };
+    }
+    if (isEnhancedConversionActivationApplied(locked.config, reconciliationKey)) {
+      return { status: 'already_active', updated: false, idempotent: true, reconciliation_key: reconciliationKey };
     }
     const authorizationIssues = validateEnhancedConversionActivationAllowlist(
       plan.nextConfig.google_ads?.enhanced_conversions,
@@ -3968,7 +3975,7 @@ async function reconcileEnhancedConversionsInternalActivation(options = {}) {
   const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
   const dependencies = options.dependencies || {};
   const resolveScope = dependencies.resolveScopeFromInput || resolveScopeFromInput;
-  const resolveMarketingState = dependencies.resolveEffectiveMarketingState || resolveEffectiveMarketingState;
+  const resolveMarketingState = dependencies.resolveEffectiveMarketingState || resolveEffectiveMarketingAssetInventory;
   const enrichAccounts = dependencies.enrichGoogleAdsAccountsWithConversionTracking
     || enrichGoogleAdsAccountsWithConversionTracking;
   const assessConsent = dependencies.assessConsentMeasurementReadiness || assessConsentMeasurementReadiness;
@@ -3991,9 +3998,11 @@ async function reconcileEnhancedConversionsInternalActivation(options = {}) {
     conversion_tracking_settings_available: false
   }));
   let dataManagerReady = false;
+  const finalGuards = [];
+  const assertCurrent = async options => { for (const guard of finalGuards) await guard(options); };
 
   try {
-    enrichedAccounts = await enrichAccounts({ userId: null, scope, accounts: scopedAccounts });
+    enrichedAccounts = await enrichAccounts({ userId: null, scope, accounts: scopedAccounts, finalGuards });
   } catch (_error) {
     // A transient per-mapping/provider failure keeps the Enhanced phase blocked.
     enrichedAccounts = scopedAccounts.map((account) => ({
@@ -4005,10 +4014,6 @@ async function reconcileEnhancedConversionsInternalActivation(options = {}) {
       connection_reason: 'google_account_enrichment_failed'
     }));
   }
-  const quotaProjectConfigured = Boolean(
-    process.env.GOOGLE_DATA_MANAGER_QUOTA_PROJECT
-      || process.env.GOOGLE_CLOUD_PROJECT
-  );
   const activationTargets = collectEnhancedConversionActivationTargets(
     asPlainObject(intakeRecord?.config).google_ads
   );
@@ -4017,12 +4022,13 @@ async function reconcileEnhancedConversionsInternalActivation(options = {}) {
     activationTargets.customer_ids
   );
   dataManagerReady = Boolean(
-    quotaProjectConfigured
+    activationAccess.has_data_manager_configuration
     && activationAccess.all_connected
     && activationAccess.has_ads_scope
     && activationAccess.has_data_manager_scope
   );
 
+  await assertCurrent();
   const plan = buildEnhancedConversionActivationPlan({
     scope,
     intakeRecord,
@@ -4106,11 +4112,12 @@ async function reconcileEnhancedConversionsInternalActivation(options = {}) {
     intakeRecord,
     plan,
     now,
-    dependencies
+    dependencies,
+    beforePersist: finalGuards.length ? options => assertCurrent({ ...options, requireDataManager: true }) : null,
   });
   return {
     ...persisted,
-    ready: true,
+    ready: persisted.status === 'activated' || persisted.status === 'already_active',
     customer_ids: plan.targets.customer_ids,
     event_names: plan.targets.event_names,
     ad_personalization_capability: {
@@ -6308,7 +6315,8 @@ async function evaluateGoogleConversionOnboardingReadiness({
   currency = 'EUR',
   createMissing = false,
   consentReadiness = null,
-  runtimeCache = null
+  runtimeCache = null,
+  finalGuards = null
 }) {
   const plan = buildRequiredConversionPlan(rawGoogleAdsConfig, fallbackCustomerId);
   const mappingsByCustomer = {};
@@ -6485,7 +6493,7 @@ async function evaluateGoogleConversionOnboardingReadiness({
   }
 
   for (const [customerId, managed] of Object.entries(managedByCustomer)) {
-    try { await managed.assert(); }
+    try { await managed.assert(); finalGuards?.push(options => managed.assert(options)); }
     catch (error) {
       for (const target of preValidation.targets.filter(row => row.customer_id === customerId)) {
         delete validationsByTarget[target.validation_key];
@@ -6802,6 +6810,7 @@ function intakeRecordReadinessFingerprint(record) {
     clinic_id: parseInteger(record?.clinic_id ?? record?.clinicId),
     group_id: parseInteger(record?.group_id ?? record?.groupId),
     domains: normalizeConsentDomains(record?.domains),
+    hmac_key_hash: crypto.createHash('sha256').update(String(record?.hmac_key || '')).digest('hex'),
     config: readIntakeRecordConfig(record),
     updated_at: String(record?.updated_at || record?.updatedAt || '') || null
   });
@@ -7053,7 +7062,7 @@ async function reconcileVerifiedConnectOnlyStrategyActivationReadiness(options =
   }
 
   const resolveScope = dependencies.resolveScopeFromInput || resolveScopeFromInput;
-  const resolveMarketingState = dependencies.resolveEffectiveMarketingState || resolveEffectiveMarketingState;
+  const resolveMarketingState = dependencies.resolveEffectiveMarketingState || resolveEffectiveMarketingAssetInventory;
   const assessConsent = dependencies.assessConsentMeasurementReadiness || assessConsentMeasurementReadiness;
   const evaluateReadiness = dependencies.evaluateGoogleConversionOnboardingReadiness
     || evaluateGoogleConversionOnboardingReadiness;
@@ -7101,6 +7110,7 @@ async function reconcileVerifiedConnectOnlyStrategyActivationReadiness(options =
     });
   };
   const evaluationCache = new Map();
+  const finalGuards = [];
   const validatedCandidates = [];
   const currentIds = [];
 
@@ -7228,7 +7238,8 @@ async function reconcileVerifiedConnectOnlyStrategyActivationReadiness(options =
         fallbackCustomerId,
         currency: normalizedGoogleAdsConfig.currency || 'EUR',
         createMissing: false,
-        consentReadiness
+        consentReadiness,
+        finalGuards,
       });
       const readinessCustomerIds = listToUniqueArray(
         (Array.isArray(readiness?.customer_ids) ? readiness.customer_ids : [])
@@ -7297,6 +7308,7 @@ async function reconcileVerifiedConnectOnlyStrategyActivationReadiness(options =
     };
   }
   return sequelize.transaction(async (transaction) => {
+    for (const guard of finalGuards) await guard({ transaction, requireDataManager: true });
     const sourceRecordIds = listToUniqueArray(validatedCandidates.map((candidate) => candidate.source_record_id))
       .map(Number);
     const lockedSourceRecords = await intakeConfigModel.findAll({
