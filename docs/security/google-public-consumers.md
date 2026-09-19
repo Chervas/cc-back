@@ -1,19 +1,36 @@
-# Consumidores Google públicos — candidata del API
+# Consumidores Google públicos — candidatas del API, gateway e interfaz
 
 > **Tipo:** runbook de preparación y validación.
 > **Fuente de verdad:** alcance de la candidata; no acredita publicación ni aceptación real de Google.
 > **Última revisión:** 2026-09-19.
 > **Relacionado con:** [contrato backend](../../src/Documentacion/13-backend.md#consumidores-google-publicados-en-dev-con-activación-pendiente), [esquema aplicado](google-clinical-cut.md), [estado central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
 
+Manifiesto de revisiones y límites: [google-public-consumers.json](google-public-consumers.json).
+
 ## Estado y alcance
 
-Candidata **no publicada** `dc8b80dcfd22d9068703210faec5861d83366d08`, rama
-`security/google-public-candidate-20260919`, sobre API público `48d69879`.
-164 archivos de producto y 71 de QA seleccionados desde DEV; correcciones de
-fixtures desarrolladas/pusheadas primero en `7c88991f`. Se preservan los cambios
-del API que no pertenecen a esta composición. No se ha actualizado staging,
-gateway, frontend ni ninguna release ejecutada; no hay nuevas DDL aplicadas,
-credenciales migradas, grants o flags activados.
+Tres candidatas guardadas en remoto, **ninguna publicada**:
+
+| Consumidor | Revisión candidata | Base pública | Rama |
+| --- | --- | --- | --- |
+| API | `6ee76c4f` | `48d69879` | `security/google-public-candidate-20260919` |
+| Gateway | `e6c6a618` | `fdb2636a` | `security/google-gateway-candidate-20260919` |
+| Frontend | `4fc44b6c` | `27afa85c` | `security/google-public-front-candidate-20260919` |
+
+El producto API sigue siendo la composición `dc8b80dc`: 164 archivos de producto
+y 71 de QA; el commit siguiente solo mejora tres fixtures visuales. Gateway toma
+esa selección desde su propia base, conserva su catálogo de errores WhatsApp y
+añade la utilidad de calendario que sus lectores necesitan. No reemplaza su
+autenticación, transporte TLS, entrada WhatsApp, workers ni configuración con los
+del API. Su cierre de dependencias encuentra 444 módulos sin imports relativos
+ausentes y verifica 14 archivos críticos intactos.
+
+Frontend selecciona controles de OAuth, altas, retirada, mapping y conversiones.
+Conserva las rutas públicas anteriores y añade «Revisar envíos a Google» en el
+asistente existente, reutilizando el diálogo de recibos. No necesita publicar el
+workspace general. Correcciones desarrolladas primero en DEV: backend `bb2b72cc`
+y `0571765e`; frontend `20f16dac`. Sin nuevas DDL, credenciales migradas, grants,
+flags, reinicios ni publicaciones. Las dependencias enlazadas son solo para QA.
 
 La composición contiene lectores GBP/SC/GA/Ads, OAuth, altas y revocaciones,
 conversiones, recibos y diarios de acciones/destinos. Los archivos compartidos de
@@ -49,17 +66,46 @@ pertenece a una composición distinta y no se impone a CRM para hacer pasar QA.
 - Preflight de solo lectura con fuente candidata ya commiteada: **49 tablas**,
   sin incidencias ni migraciones de seguridad pendientes; digest clínico
   `4a048c98f80fe991e10cf862b3c4c578df0bd7aebddd85a37ed5581cf02ed2d5`.
-- Cinco modelos adicionales contrastados solo contra `information_schema`:
-  inventario/días/estadísticas de anuncios y configuración/eventos de workspace.
-  Sus columnas existen. Se incluyen sus cinco migraciones históricas como fuente,
-  sin ejecutarlas. Esta comprobación de columnas no acredita todos sus índices,
-  permisos ni comportamiento con cardinalidad clínica real.
+- Gateway: **411 casos** en 57 archivos, sin fallos/skips/cancelaciones, incluidos
+  los contratos propios de alta WhatsApp. Ocho ensayos MySQL/HTTPS, **159 grupos**,
+  con cierre limpio. Se mantiene su TLS distinto del API durante esas pruebas.
+- Preflight de gateway ya commiteado `e6c6a618` con las configuraciones efectivas
+  de staging y gateway, contra metadata clínica: **49 tablas**
+  compatibles, sin migraciones de seguridad pendientes, mismo digest `4a048c98…`.
+- Cinco modelos auxiliares contrastados contra `information_schema`: **77 columnas
+  y 14 índices declarados, incluidos los primarios**, sin diferencias en tipos,
+  nulabilidad, defaults explícitos, autoincremento, orden/unicidad y prefijos de
+  índices. No lee filas clínicas ni ejecuta sus migraciones históricas. No acredita
+  cardinalidad, planes de consulta o rendimiento bajo carga real.
 
-No se han realizado pruebas visuales de una composición pública nueva en este
-corte: frontend y gateway todavía requieren sus propias candidatas. El login
-publicado verificado en el [corte de esquema](google-clinical-cut.md) es anónimo
-y corresponde al código público anterior. La aceptación MFA/Google real y la
-capacidad con carga real siguen pendientes.
+### Interfaz y pruebas integradas
+
+Frontend: **35 casos**, build de producción correcto `bfdf8ec38c401938`, inicial
+4,59 MB (advertencia del presupuesto 3 MB, por debajo del error de 5 MB). Cinco
+recorridos Chromium generan **115 capturas**: OAuth, servicios por ámbito, retirada,
+alta Ads, planes, permisos y recibos. Los diálogos incluyen 100 comprobaciones,
+resultados inciertos, pérdida de respuesta, cambio de ámbito, sesión caducada y
+ausencia de reenvío. Son componentes reales con respuestas HTTP ficticias.
+
+Otros cuatro ensayos unen frontend candidato → HTTP → sesión SQL → broker HTTPS y
+SQLite propios: **41 grupos y 21 capturas**, sin errores JS/red externa y con cuatro
+cierres MySQL limpios. Google/AWS y el titular siguen siendo ficticios. La prueba
+de recibos usa el fragmento y métodos reales de entrada del asistente; rechaza
+capacidad apagada, modo legacy, ámbito ausente, cuenta ajena y carga pendiente sin
+consultas. Después lista recibos retirados, consulta SUCCESS/PARTIAL_SUCCESS y
+limpia la pantalla tras revocar la sesión SQL, sin ingestiones adicionales.
+No representa todo el asistente autenticado de una clínica real.
+
+Build completo servido en preview propio: dos capturas de login1440/390 contra
+el API DEV real, sin respuestas API simuladas. `/auth/me` y estado Google devuelven
+401, formulario vacío no hace POST, sin JS/5xx/desbordamiento. El SDK externo Meta
+se bloquea expresamente. Preview y navegadores cerrados al terminar. Total de este
+corte: **138 capturas**; se inspeccionan estados de alta incierta, recibos, sesión
+revocada y pausa Meta. No son 138 pruebas de aceptación clínica.
+
+La aceptación MFA/Google real y la capacidad bajo carga siguen pendientes. Las
+136 capturas de componentes no sustituyen los dos del build completo ni
+ninguno acredita publicación de estas candidatas.
 
 ## Diagnóstico de la preparación
 
@@ -84,11 +130,36 @@ Incluye selección/hash por archivo, comparación de invariantes, logs de fallos
 correcciones, resultados finales, estado AWS y preflight. Las dependencias Node
 del worktree son enlaces de QA: no se deben publicar como dependencias del runtime.
 
+Continuación: `qa-evidence/security-resume-20260917/google-public-ui-gateway-20260919/`.
+El primer ensayo gateway falla por faltar el calendario compartido y por un fixture
+WhatsApp que empaquetaba errores sin su catálogo auxiliar; ambos se corrigen antes
+de los 411 casos finales. El ensayo nuevo de recibos detecta que el montaje del
+fixture crea el botón fuera de NgZone: se ejecutan sus cambios sintéticos dentro
+de Angular y se espera un estado terminal visible. El producto no pierde guards.
+La revisión SQL corrige el serializador ENUM de la herramienta y compara los
+defaults numéricos por valor (`0` y `0.000000`), conservando los resultados previos.
+
+## Consumidores que todavía impiden retirar la credencial compartida
+
+El inventario de fuente identifica cuatro escritores en
+`src/services/businessProfileLocal.service.js`: `updateReviewReply`,
+`deleteReviewReply`, `publishPhoto` y `updateSpecialHours`. Usan
+`ensureGoogleAccessToken`, que todavía carga tokens SQL y renueva con secreto
+local. El contrato `google-business-profile-contract.js` solo define lecturas y
+revocación de activo; faltan operaciones tipadas de escritura y su recuperación.
+
+Antes del primer marcador de cierre hay que migrar esos consumidores conservando
+permisos, validación de activo y automatizaciones; probar pérdida de ACK, resultado
+incierto y actualización local sin repetir la mutación. Deshabilitarlos para hacer
+pasar el corte no satisface la migración. El censo de búsqueda es parcial: también
+deben revisarse OAuth, sync, Ads, propiedades y la cuenta de servicio BigQuery
+independiente. Cero cohortes Google reales migradas en este corte.
+
 ## Siguiente publicación y recuperación
 
-1. Componer gateway desde su propia base y frontend desde el build público;
-   verificar sus dependencias, contratos e interfaz con las candidatas finales.
-2. Revisar toda la identidad Google compartida y todos sus consumidores antes
+1. Implementar los escritores Business Profile pendientes en DEV, promoverlos a
+   cada candidato que los consuma y repetir la QA afectada.
+2. Completar toda la identidad Google compartida y todos sus consumidores antes
    de crear el primer marcador que cierre credenciales legacy. La preparación
    de código no autoriza ampliar ámbitos ni reactivar históricos.
 3. Preparar dependencias reales desde locks y un plan de publicación nuevo,
@@ -98,7 +169,7 @@ del worktree son enlaces de QA: no se deben publicar como dependencias del runti
    esquema aditivo y releases anteriores; no ejecutar down ni restaurar filas
    antiguas sobre actividad posterior.
 
-AWS SSO se comprobó caducado a las 18:36 UTC; no hay login nuevo iniciado ni
+AWS SSO volvió a comprobarse caducado durante esta continuación; no hay login nuevo iniciado ni
 operación AWS pendiente en ejecución. Renovar con el titular disponible para
 continuar la configuración remota. Sigue pendiente el objetivo completo de
 WhatsApp, Google, Meta, IA, correo, auditoría y certificados. Rotación aplazada;

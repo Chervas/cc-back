@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "status": "candidates-prepared-not-deployed",
+  "candidates": [
+    {
+      "component": "security-google-public-candidate-20260919",
+      "base": "48d69879",
+      "revision": "6ee76c4f49d1d36d3c19d9c327b975c90c67356f",
+      "branch": "security/google-public-candidate-20260919",
+      "productFiles": 164,
+      "qaFiles": 71
+    },
+    {
+      "component": "security-google-gateway-candidate-20260919",
+      "base": "fdb2636abc040eea837973ec30a0416d3bb33696",
+      "revision": "e6c6a6180b6068ffa04534976fd5232b691037c6",
+      "branch": "security/google-gateway-candidate-20260919",
+      "productFiles": 165,
+      "qaFiles": 72
+    },
+    {
+      "component": "security-google-public-front-candidate-20260919",
+      "base": "27afa85ce45667091654f0c2a21cf5c9395d83b4",
+      "revision": "4fc44b6c4b94b3a1bed4872ce57e43983506c6f1",
+      "branch": "security/google-public-front-candidate-20260919",
+      "productFiles": 34,
+      "qaFiles": 11
+    }
+  ],
+  "canonicalChanges": {
+    "backend": [
+      "bb2b72cc",
+      "0571765e"
+    ],
+    "frontend": [
+      "20f16dac"
+    ]
+  },
+  "verification": {
+    "apiUnitCases": 379,
+    "gatewayUnitCases": 411,
+    "gatewayMysqlSuites": 8,
+    "gatewayMysqlGroups": 159,
+    "frontendUnitCases": 35,
+    "frontendBuildHash": "bfdf8ec38c401938",
+    "componentScreenshots": 136,
+    "fullBuildAnonymousScreenshots": 2,
+    "integratedMysqlVisualSuites": 4,
+    "integratedMysqlVisualGroups": 41,
+    "gatewaySqlTablesCompatible": 49,
+    "additionalModelTables": 5,
+    "additionalModelColumns": 77,
+    "additionalModelIndexesIncludingPrimary": 14,
+    "realProviderAcceptance": false,
+    "authenticatedClinicalUiAcceptance": false,
+    "realLoadAcceptance": false
+  },
+  "unchanged": {
+    "staging": "48d69879",
+    "gateway": "fdb2636a",
+    "frontend": "27afa85c",
+    "devBackend": "aeb87ce4",
+    "devFrontend": "95f55fe7",
+    "googleMigrationGatesOff": true,
+    "devClinicalJobsOff": true,
+    "mfaEnforced": true,
+    "ddlApplied": false,
+    "awsResourcesCreated": false
+  },
+  "blockingConsumers": [
+    "Business Profile review replies",
+    "Business Profile reply deletion",
+    "Business Profile public photos",
+    "Business Profile special hours"
+  ],
+  "pending": [
+    "Complete all Google credential consumers census",
+    "Typed Business Profile mutation contracts and callers",
+    "AWS session and configuration",
+    "Fresh publication and rollback plan",
+    "Clinical OAuth/MFA/provider and load acceptance"
+  ],
+  "evidenceDirectory": "qa-evidence/security-resume-20260917/google-public-ui-gateway-20260919/",
+  "runbook": "google-public-consumers.md"
+}

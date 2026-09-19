@@ -12001,11 +12001,20 @@ de colas publicados. Incorpora las dependencias completas de los consumidores
 Google y sus controles de credenciales, sin montar rutas nuevas del workspace
 general de campañas. El catálogo candidato conserva las 42 tareas públicas y
 añade cinco conciliadores Google sujetos a sus gates; no adopta automáticamente
-el catálogo completo de DEV. Además del contrato de seguridad, se comprueban las
-columnas de los modelos de caché y configuración ya existentes que utiliza.
-Una composición del API no acredita la del gateway ni la del frontend: los tres
-consumidores y el recorrido autenticado deben verificarse antes de cerrar la
-identidad Google compartida. Estado de preparación y recuperación en
+el catálogo completo de DEV. Además del contrato de seguridad, se contrastan tipos,
+nulabilidad, defaults y los índices declarados de cinco modelos auxiliares ya
+existentes. Gateway y frontend tienen candidatas separadas desde sus bases públicas,
+probadas con SQL/HTTPS y componentes reales aislados; siguen sin publicación.
+El asistente incorpora la entrada a recibos cuando el API habilita esa capacidad:
+selección explícita, cuenta gestionada, ámbito y carga actual se vuelven a comprobar
+antes de abrir el diálogo. Consultar no reenvía conversiones ni activa permisos.
+
+Antes de cerrar la identidad Google compartida deben migrarse también sus escritores
+existentes. La respuesta y retirada de respuestas a reseñas, publicación de fotos y
+horarios especiales de Business Profile aún leen credenciales SQL; el contrato del
+broker preparado solo cubre sus lecturas/revocación. No retirar la credencial local
+ni declarar esta identidad migrada mientras falten esos consumidores, el inventario
+completo y el recorrido autenticado. Estado de preparación y recuperación en
 `docs/security/google-public-consumers.md`.
 
 ### Esquema clínico Google: corte limitado y conservación de identidad compartida
