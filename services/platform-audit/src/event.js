@@ -11,6 +11,7 @@ function exact(value, keys) {
     || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) fail();
 }
 function event(value) {
+  if (value?.version === 25) return require('./business-profile-mutation-event').businessProfileMutationEvent(value);
   if (value?.version === 24) return require('./meta-enrollment-event').metaEnrollmentEvent(value);
   if (value?.version === 23) return require('./meta-discovery-event').metaDiscoveryEvent(value);
   if (value?.version === 22) return require('./meta-oauth-event').metaOAuthEvent(value);

@@ -84,6 +84,28 @@ test('four typed writers use exact resources, project outputs, persist receipts 
   assert(audit.includes('business_profile_mutation_applied'));
   for (const table of ['commands', 'google_business_profile_mutations']) assert(!JSON.stringify(f.store().db.prepare('SELECT * FROM ' + table).all()).includes(ACCESS));
 });
+test('shared photos require an explicit clinic allowlist and keep URL restrictions', async t => {
+  const f = setup(t);
+  const shared = PHOTO.replace('clinic-123', 'clinic-72');
+  await assert.rejects(f.execute(f.command('photo', { ...photo(), sourceUrl: shared })), { code: 'scope_denied' });
+  assert.equal(f.state.secrets, 0);
+  f.policy.connections[0].googleBusinessProfileWrites.locations[0].publicMediaClinicIds = [72]; f.reset();
+  const result = await f.execute(f.command('photo', { ...photo(), sourceUrl: shared }));
+  assert.equal(result.data.state, 'applied'); assert.equal(f.state.writes, 1);
+  const before = f.state.secrets;
+  for (const sourceUrl of [shared.replace('clinic-72', 'clinic-73'), shared + '?sig=x', shared.replace('marketing', 'clinical')]) {
+    await assert.rejects(f.execute(f.command('photo', { ...photo(), sourceUrl })), { code: 'scope_denied' });
+  }
+  assert.equal(f.state.secrets, before);
+  const binding = structuredClone(f.policy.connections[0]);
+  for (const ids of [[72, 72], [0], [2147483648], [], ['72']]) {
+    binding.googleBusinessProfileWrites.locations[0].publicMediaClinicIds = ids;
+    assert.throws(() => C.validateBinding(binding));
+  }
+  binding.googleBusinessProfileWrites.locations[0].publicMediaClinicIds = [72];
+  binding.googleBusinessProfileWrites.locations[0].allowPhotos = false;
+  assert.throws(() => C.validateBinding(binding));
+});
 test('invalid scope, capability, payload and private/cross-clinic photo URLs never read credentials', async t => {
   const f = setup(t);
   const commands = [f.command('replyUpdate', { ...reply(), method: 'PUT' }), f.command('replyUpdate', { ...reply(), reviewId: '../elsewhere' }),

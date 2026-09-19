@@ -1,0 +1,20 @@
+'use strict';
+module.exports = (sequelize, D) => sequelize.define('BusinessProfileMutation', {
+  operation_id: { type: D.UUID, primaryKey: true, allowNull: false },
+  actor_type: { type: D.ENUM('user', 'automation'), allowNull: false },
+  actor_user_id: { type: D.INTEGER, allowNull: false }, actor_key: { type: D.CHAR(64), allowNull: false },
+  session_ref: { type: D.UUID, allowNull: true }, session_expires_at: { type: D.DATE(3), allowNull: true },
+  execution_id: { type: D.INTEGER, allowNull: true }, node_id: { type: D.STRING(32), allowNull: true },
+  runtime_namespace: { type: D.STRING(32), allowNull: false },
+  requested_clinic_id: { type: D.INTEGER, allowNull: false }, mapping_id: { type: D.INTEGER, allowNull: false },
+  google_connection_id: { type: D.INTEGER, allowNull: false },
+  connection_ref: { type: D.STRING(128), allowNull: false }, asset_ref: { type: D.STRING(128), allowNull: false },
+  scope_digest: { type: D.CHAR(64), allowNull: false }, input_digest: { type: D.CHAR(64), allowNull: false },
+  kind: { type: D.ENUM('replyUpdate', 'replyDelete', 'photo', 'hours'), allowNull: false },
+  input: { type: D.JSON, allowNull: false }, local_input: { type: D.JSON, allowNull: false },
+  state: { type: D.ENUM('attempted', 'applied'), allowNull: false },
+  broker_receipt: { type: D.JSON, allowNull: true }, last_error: { type: D.STRING(64), allowNull: true },
+  created_at: { type: D.DATE(3), allowNull: false }, updated_at: { type: D.DATE(3), allowNull: false },
+  applied_at: { type: D.DATE(3), allowNull: true },
+}, { tableName: 'BusinessProfileMutations', timestamps: false,
+  indexes: [{ name: 'cc_gbp_mutation_actor', fields: ['actor_user_id', 'requested_clinic_id', 'state', 'created_at', 'operation_id'] }] });

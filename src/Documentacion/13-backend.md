@@ -12009,33 +12009,35 @@ El asistente incorpora la entrada a recibos cuando el API habilita esa capacidad
 selección explícita, cuenta gestionada, ámbito y carga actual se vuelven a comprobar
 antes de abrir el diálogo. Consultar no reenvía conversiones ni activa permisos.
 
-Antes de cerrar la identidad Google compartida deben migrarse también sus escritores
-existentes. La respuesta y retirada de respuestas a reseñas, publicación de fotos y
-horarios especiales de Business Profile aún leen credenciales SQL. El broker y
-adaptador de escritura ya están preparados en fuente DEV, todavía sin conectar
-esas funciones, su diario SQL, UI y automatizaciones. No retirar la credencial local
-ni declarar esta identidad migrada mientras falten esos consumidores, el inventario
-completo y el recorrido autenticado. Estado de preparación y recuperación en
-`docs/security/google-public-consumers.md`.
+Antes de cerrar la identidad Google compartida deben migrarse todos sus consumidores.
+Las cuatro escrituras manuales de Business Profile ya tienen recorrido gestionado
+en fuente DEV; siguen pendientes automatizaciones, censo, publicación y aceptación
+real. Las fichas no migradas conservan la vía anterior con guard de credenciales.
+No retirar su credencial compartida mientras falte cualquiera de esos recorridos.
 
 ### Escrituras tipadas Business Profile preparadas
 
-Cohorte explícita y apagada `google-business-profile-write-v1`: respuestas a
-reseñas, retirada de respuestas, fotos públicas y horarios especiales. Ubicación
-y capacidades salen de grants por clínica; escritores, lectores, OAuth y
-revocación usan claves distintas. El broker registra la frontera de envío y
-bloquea escrituras repetidas sobre un recurso incierto, incluso con otro UUID.
-Recibo confirmado y auditoría se guardan juntos. Consultar el recibo tras perder
-una respuesta no usa credenciales ni repite la mutación, conservando los controles
-de conexión/activo/permisos. Los locks sobreviven al reinicio y no caducan solos.
+Cohorte apagada `google-business-profile-write-v1`: respuestas a reseñas, retirada,
+fotos públicas y horarios especiales. Permisos y claves independientes por función.
+El archivo fotográfico no atraviesa el broker; se transmite una URL pública de la
+clínica propietaria o de otra clínica admitida expresamente para esa ficha.
 
-Solo se envían enlaces de marketing público de la clínica; los archivos no pasan
-por el broker. Los horarios viajan como hasta80 periodos compactos y conservan
-el límite previo de730 días. El adaptador exige identidad de intento persistida
-y autorización del llamante antes/después de la operación. Faltan diario SQL,
-orden de actualización local, rutas, nodo de horarios y UI: no acredita migración
-de los cuatro consumidores ni aceptación clínica. Contrato, límites, variables,
-QA HTTPS aislada y recuperación en
+Los cuatro consumidores manuales guardan el UUID y su autor en SQL antes del envío.
+El broker conserva su propio intento/recibo. La caché SQL, evento de auditoría v25,
+recibo y liberación de locks se confirman juntos; recuperar el resultado no repite
+la mutación ni aplica un recibo antiguo sobre una edición posterior. Sesión, ámbito,
+aliases y permisos de todas las clínicas se revalidan durante el recorrido.
+
+La UI distingue incertidumbre de éxito y permite «Consultar resultado». Conserva
+referencias de la pestaña por usuario/clínica; el servidor permite recuperar sus
+intentos con una sesión nueva. HTTP202 no significa publicación confirmada. El
+panel de actividad incorpora v25 con metadatos, sin texto de reseñas, fotos o URLs.
+
+Preparado y probado con MySQL/SQLite/HTTP y componentes Angular aislados; sin
+publicación, DDL real ni activación. Faltan nodo de horarios/lease, tratamiento
+operativo de incertidumbres, compatibilidad AWS v25, aceptación clínica y carga.
+La migración nueva añade dos tablas: el contrato de fuente pasa de49 a51; no se
+reutiliza ni amplía el corte clínico ya consumido de19 DDL. Contrato y recuperación:
 `docs/security/google-business-profile-writes.md`.
 
 ### Esquema clínico Google: corte limitado y conservación de identidad compartida

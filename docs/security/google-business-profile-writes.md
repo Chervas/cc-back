@@ -1,18 +1,19 @@
 # Escrituras Google Business Profile y recuperación de recibos
 
 > **Tipo:** contrato de implementación y validación.
-> **Fuente de verdad:** operaciones del broker y adaptador preparados en fuente DEV; no acredita migración de consumidores ni publicación.
+> **Fuente de verdad:** broker, diario SQL y consumidores manuales preparados en fuente DEV; no acredita publicación ni aceptación clínica.
 > **Última revisión:** 2026-09-19.
 > **Relacionado con:** [consumidores públicos](google-public-consumers.md), [contrato backend](../../src/Documentacion/13-backend.md#escrituras-tipadas-business-profile-preparadas), [estado central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
 
 ## Estado y frontera
 
-Preparados en DEV el contrato, transporte, diario SQLite, consulta de recibos y
-adaptador de backend. **Las cuatro funciones de `businessProfileLocal.service.js`
-todavía usan la vía anterior**: faltan diario SQL del consumidor, rutas, UI y
-automatizaciones. No retirar tokens compartidos ni activar la cohorte para dar
-por terminada esta migración. Ninguna candidata pública ni runtime incorpora
-esta preparación todavía; sin DDL clínica, flags, grants o recursos AWS nuevos.
+Preparados en fuente DEV el broker, diario SQLite, diario SQL, cuatro consumidores
+manuales, rutas de recuperación y UI. Las fichas gestionadas ya tienen un recorrido
+sin leer tokens locales; las no migradas conservan la vía anterior con el guard de
+credenciales legacy. **El nodo de automatización de horarios aún no está adaptado**.
+No retirar tokens compartidos ni activar la cohorte hasta completar ese consumidor,
+el censo y la aceptación autenticada. Ninguna candidata pública ni runtime incorpora
+este corte; las dos tablas SQL nuevas tampoco están aplicadas a DEV o CRM.
 
 La cohorte explícita `google-business-profile-write-v1` admite lectores y escritores
 con identidades distintas. La cohorte anterior de lectura rechaza tanto grants
@@ -44,7 +45,11 @@ internamente tiene hasta 192 KiB. No aumenta el límite de las otras operaciones
 
 Las fotos admiten únicamente objetos de `https://media.clinicaclick.com`, bajo
 `marketing/clinic-<id>/AAAA/MM/<UUID o identificador hexadecimal>.jpg|jpeg|png|webp`.
-Se rechazan otra clínica, query/fragmento, rutas privadas y destinos arbitrarios.
+Se admite la clínica propietaria o una clínica incluida explícitamente en
+`publicMediaClinicIds` de esa ubicación; permite publicar el activo público de la
+clínica solicitante cuando la ficha es compartida. El permiso no es global para
+esa clínica ni permite rutas clínicas. Se rechazan otras clínicas, query/fragmento,
+rutas privadas y destinos arbitrarios.
 **El archivo no atraviesa el broker**: Google recibe la URL pública. El consumidor
 debe seguir verificando `PublicMediaAsset`: activo, propietario, propósito,
 sensibilidad y declaración de ausencia de datos clínicos; el broker no consulta
@@ -91,46 +96,86 @@ consumidor conserva el mismo `operationId`. No se ha implementado una herramient
 para resolver manualmente intentos inciertos: requiere evidencia independiente y
 un contrato específico; no borrar tablas, locks ni recibos para desbloquearlos.
 
-## Adaptador y trabajo pendiente del consumidor
+## Consumidor SQL, autorización y recuperación
 
-`businessProfileBroker.write` exige contexto gestionado, cliente escritor propio,
-UUID y función de autorización del llamante. Comprueba mapping, registro y
-revocación antes/después de esperas; vuelve a comprobar permisos del llamante
-antes de aceptar una respuesta para actualizar SQL. Nunca usa el cliente lector
-ni devuelve tokens. Estas comprobaciones no sustituyen el diario/orden de las
-operaciones locales, que todavía falta.
+`BusinessProfileMutations` conserva UUID, autor y sesión original o ejecución/nodo,
+namespace, ámbito, hashes, entrada tipada y datos necesarios para actualizar la
+caché. `BusinessProfileMutationLocks` bloquea el recurso hasta confirmar también
+la aplicación local. El intento y su evento v25 se confirman antes de enviar;
+recibo, caché, auditoría de finalización y liberación se confirman en una sola
+transacción MySQL. No hay llamada de red dentro de esa transacción. La entrada
+puede incluir comentario público, URL pública y plan; S3 recibe solo metadatos.
 
-Variables nuevas, sin activar: `GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED`,
-`GOOGLE_BUSINESS_PROFILE_WRITER_KEY_ID` y `GOOGLE_BUSINESS_PROFILE_WRITER_KEY_FILE`.
-Requieren también el gate previo de GBP. No se han generado/admitido claves reales
-ni instalado esta cohorte en AWS.
+`businessProfileBroker.write/assert` y el diario vuelven a verificar sesión vigente,
+permisos, mapping, registro independiente, revocación y gates antes/después de las
+esperas. El ámbito usa la ficha concreta de la reseña, grupos que la comparten,
+asignaciones explícitas y otros mappings de la misma ubicación Google. No se limita
+a la primera ficha del inventario. Las consultas de autorización son de metadatos
+GBP; no cargan todo el inventario de marketing ni secretos. El listado de pendientes
+reutiliza la comprobación de cada mapping dentro de la petición y la repite antes
+de entregar la página. No se afirma que la búsqueda de aliases por sufijo esté
+indexada: requiere medición con el catálogo y la carga reales antes del corte.
+
+La recuperación humana requiere el mismo usuario original, clínica, namespace y
+ámbito íntegro, con una sesión vigente; puede recuperar un intento de ese usuario
+originado en una automatización sin simular que el job continúa activo. Una
+operación ya aplicada devuelve la caché actual, sin volver a aplicar su recibo.
+Cambiar la lista de clínicas o el mapping mantiene el resultado pendiente de
+revisión; no se eluden sus bloqueos ni se crean UUID alternativos.
+
+Rutas bajo `/api/local/clinica/:clinicaId`:
+
+- PUT/DELETE `reviews/:reviewId/reply`, POST `photos` y PUT `special-hours` aceptan
+  `operationId`; las fichas gestionadas lo exigen. DELETE también lo recibe en JSON.
+- GET `mutations/pending` devuelve hasta 100 referencias del propio usuario,
+  ordenadas por fecha/UUID, sin contenido de reseñas ni URLs. Gates cerrados:
+  lista vacía y `enabled:false`, sin consultar las tablas pendientes.
+- POST `mutations/:operationId/recover` consulta el recibo original. No envía una
+  mutación. Un resultado incierto usa HTTP202 y `success:false`; no es un guardado.
+
+La UI guarda solo identidad/tipo del intento en `sessionStorage`, separada por
+API, usuario y clínica, antes del HTTP gestionado. Mantiene el mismo UUID al
+resuscribirse al observable; una página nueva combina esas referencias con SQL.
+«Consultar resultado» no vuelve a publicar. Se conservan borradores y se bloquean
+nuevas escrituras de esa clínica mientras haya incertidumbre o falle su consulta.
+Una referencia guardada en el navegador antes de que SQL llegue a admitirla puede
+quedar sin recibo; todavía exige revisión. No hay acción para borrar pendientes
+ni resolución manual de `not_found/unknown`. El almacenamiento de pestaña no
+sustituye al diario SQL ni al procedimiento operativo pendiente.
+
+Variables sin activar: `GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED`,
+`GOOGLE_BUSINESS_PROFILE_WRITER_KEY_ID` y `GOOGLE_BUSINESS_PROFILE_WRITER_KEY_FILE`,
+además del gate lector GBP y `JOB_RUNTIME_NAMESPACE` explícito. No se han generado
+ni admitido claves reales de escritor ni instalado esta cohorte en AWS.
 
 Siguiente implementación necesaria:
 
-1. Diario SQL del intento y su resultado local, identidad estable de usuario/job,
-   permisos de todas las clínicas afectadas, sesión y validación de activo público.
-2. Adaptar las cuatro funciones y `applyScheduledSpecialHoursPeriod`/nodo del motor
-   de flujos. Conservar funcionamiento, gates, namespace y pausas; sin históricos.
-3. Reconciliar recibos sin nueva mutación y sin sobrescribir un cambio posterior
-   con el recibo de una operación anterior. Presentar incertidumbre y recuperación
-   en las pantallas existentes, con pruebas visuales reales.
-4. Ensayar SQL/HTTP/HTTPS integrados, promover selectivamente a candidatas propias
-   y completar el censo de toda la identidad Google antes del marcador de cierre.
-5. Configurar y aceptar cohorte real con titular, MFA, proveedor y carga. La sesión
-   SSO sigue caducada en la comprobación de esta continuación; renovar con el titular.
+1. Adaptar `applyScheduledSpecialHoursPeriod` y el nodo de flujos: identidad estable
+   por ejecución/nodo, comprobación de lease/plantilla/gates y recuperación sin
+   recomponer otro plan ni repetir una acción. Mantener DEV clínico apagado.
+2. Preparar corte SQL nuevo para la migración
+   `20260919200000-create-business-profile-mutation-journal.js` (dos tablas), primero
+   en DEV. El contrato de fuente requiere 51 tablas; el corte clínico anterior de 49
+   sigue consumido y no se amplía ni se ejecuta de nuevo.
+3. Publicar compatibilidad AWS de auditoría v25 —lector antes que escritor— antes
+   de emitir esos eventos. El panel y filtro v25 están preparados en fuente.
+4. Completar resolución/retención de incertidumbres, censo de identidad compartida,
+   promoción selectiva y pruebas autenticadas en las pantallas reales con titular,
+   proveedor y cardinalidad/carga reales. La preparación no autoriza el cierre legacy.
 
 ## Evidencia y recuperación
 
-Suite nueva: 16 grupos aislados, incluyendo HTTPS real con el adaptador actual,
-corte deliberado de socket después del commit, reinicio y consulta sin secretos
-ni segunda publicación. Cubre dos conexiones SQLite, concurrencia, otra cuenta,
-revocación, fallo de auditoría, respuesta tardía, scopes, cuerpos, URLs, gates y
-separación de claves. Backend: ocho grupos entre adaptador y contrato local previo.
-Los servicios Google, AWS y el titular son ficticios; no es aceptación clínica ni
-prueba visual de estas escrituras. Resultado de regresión global y revisiones en
-la [bitácora](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-escrituras-tipadas-gbp-y-recuperación-de-recibos-2026-09-19).
+Broker: 17 grupos específicos, incluyendo TLS real y corte de respuesta tras commit;
+MySQL 8/SQLite: consumidores manuales y recuperación con permisos/sesiones ficticios,
+fallos de auditoría, sesión revocada, aliases, grupos, fotos compartidas y caché
+posterior protegida. Auditoría: 97 pruebas, incluidas v25 y rechazo de referencia,
+digest o KMS distintos. El componente Angular y su servicio se prueban en Chromium
+con HTTP ficticio, en escritorio/móvil. Los proveedores, sesiones y datos de QA
+son ficticios: no es aceptación clínica autenticada. Resultado de regresión global y revisiones en
+la [bitácora](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-consumidores-manuales-gbp-diario-sql-y-pendientes-2026-09-19).
 
-Evidencia privada: `qa-evidence/security-resume-20260917/google-gbp-writers-20260919/`.
+Evidencia privada: `qa-evidence/security-resume-20260917/google-gbp-consumers-20260919/`
+y el corte previo `google-gbp-writers-20260919/`.
 No hay despliegue que revertir. Conservar las releases/grants actuales. Una futura
 recuperación debe mantener el diario y los intentos inciertos; volver a código
 que lea tokens o borrar bloqueos no es una recuperación válida de una cohorte

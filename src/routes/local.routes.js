@@ -9,6 +9,8 @@ const {
   resolveClinicGoogleReviewProfile,
 } = require('../services/googleLocalLinks.service');
 const businessProfileLocal = require('../services/businessProfileLocal.service');
+const businessProfileMutations = require('../services/businessProfileMutations.service');
+const { mutationScope } = require('../services/businessProfileMutationScope.service');
 const googleSpecialHoursAutomation = require('../services/googleSpecialHoursAutomation.service');
 
 const router = express.Router();
@@ -19,14 +21,18 @@ function toClinicId(value) {
 }
 
 function sendError(res, error, fallback = 'local_request_failed') {
-  const status = Number(error?.status || error?.response?.status || 500);
+  const status = Number(error?.status || error?.httpStatus || error?.response?.status || 500);
   if (status >= 500) {
-    console.error('❌ Google Business Profile local:', error);
+    console.error('❌ Google Business Profile local:', { status, code: fallback });
   }
   return res.status(status >= 400 && status < 600 ? status : 500).json({
     success: false,
     error: error?.message || fallback,
   });
+}
+
+function mutationResponse(res, value, status = 200) {
+  return res.status(value?.mutation?.state === 'unknown' ? 202 : status).json(value);
 }
 
 async function requireClinicMarketingAccess(req, res, next) {
@@ -61,22 +67,16 @@ async function requireClinicBusinessProfileWriteAccess(req, res, next) {
     if (!allowed) {
       return res.status(403).json({ success: false, error: 'scope_write_forbidden' });
     }
-    const affectedClinicIds = await businessProfileLocal.resolvePhotoMutationClinicIds(req.localResolved);
-    const sharedAssetAllowed = await hasMarketingClinicScopeAccess({
-      userId: req.userData?.userId,
-      clinicIds: affectedClinicIds,
-      access: 'write',
-    });
-    if (!sharedAssetAllowed) {
-      return res.status(409).json({
-        success: false,
-        error: 'business_profile_asset_in_use',
-        message: 'La ficha también se utiliza en otras clínicas sobre las que no tienes permisos de edición.',
-      });
-    }
-    req.localBusinessProfileMutationClinicIds = affectedClinicIds;
+    const location = req.params.reviewId
+      ? await businessProfileLocal.resolveReviewMutationLocation(req.localResolved, req.params.reviewId)
+      : req.localResolved.locations[0];
+    const scope = await mutationScope({ models: require('../../models'), clinicId: req.localClinicId,
+      mappingId: Number(location?.id), userId: Number(req.userData?.userId) });
+    req.localBusinessProfileMutationClinicIds = scope.clinicIds;
     return next();
   } catch (error) {
+    if (error?.code === 'scope_denied') return res.status(409).json({ success: false, error: 'business_profile_asset_in_use',
+      message: 'No se puede editar esta ficha con los permisos actuales de todas las clínicas que la utilizan.' });
     return sendError(res, error);
   }
 }
@@ -181,10 +181,11 @@ router.put(
   requireClinicBusinessProfileWriteAccess,
   async (req, res) => {
     try {
-      return res.json(await businessProfileLocal.updateReviewReply(
+      return mutationResponse(res, await businessProfileLocal.updateReviewReply(
         req.localResolved,
         req.params.reviewId,
-        req.body || {}
+        req.body || {},
+        { request: req }
       ));
     } catch (error) {
       return sendError(res, error, 'business_profile_review_reply_failed');
@@ -197,9 +198,11 @@ router.delete(
   requireClinicBusinessProfileWriteAccess,
   async (req, res) => {
     try {
-      return res.json(await businessProfileLocal.deleteReviewReply(
+      return mutationResponse(res, await businessProfileLocal.deleteReviewReply(
         req.localResolved,
-        req.params.reviewId
+        req.params.reviewId,
+        req.body || {},
+        { request: req }
       ));
     } catch (error) {
       return sendError(res, error, 'business_profile_review_reply_delete_failed');
@@ -256,10 +259,11 @@ router.post(
   requireClinicBusinessProfileWriteAccess,
   async (req, res) => {
     try {
-      return res.status(201).json(await businessProfileLocal.publishPhoto(
+      return mutationResponse(res, await businessProfileLocal.publishPhoto(
         req.localResolved,
-        req.body || {}
-      ));
+        req.body || {},
+        { request: req }
+      ), 201);
     } catch (error) {
       return sendError(res, error, 'business_profile_photo_publish_failed');
     }
@@ -286,15 +290,27 @@ router.put(
   requireClinicBusinessProfileWriteAccess,
   async (req, res) => {
     try {
-      return res.json(await businessProfileLocal.updateSpecialHours(
+      return mutationResponse(res, await businessProfileLocal.updateSpecialHours(
         req.localResolved,
-        req.body || {}
+        req.body || {},
+        { request: req }
       ));
     } catch (error) {
       return sendError(res, error, 'business_profile_special_hours_update_failed');
     }
   }
 );
+
+// POST only reconciles the original receipt; it never sends a provider mutation.
+router.get('/clinica/:clinicaId/mutations/pending', async (req, res) => {
+  try { return res.json(await businessProfileMutations.pending({ clinicId: req.localClinicId, request: req })); }
+  catch (error) { return sendError(res, error, 'business_profile_mutation_unavailable'); }
+});
+router.post('/clinica/:clinicaId/mutations/:operationId/recover', async (req, res) => {
+  try { return mutationResponse(res, await businessProfileMutations.recover({ clinicId: req.localClinicId,
+    operationId: req.params.operationId, request: req })); }
+  catch (error) { return sendError(res, error, 'business_profile_mutation_unavailable'); }
+});
 
 router.get('/clinica/:clinicaId/special-hours/automations', async (req, res) => {
   try {

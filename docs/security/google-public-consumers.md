@@ -141,14 +141,13 @@ defaults numéricos por valor (`0` y `0.000000`), conservando los resultados pre
 
 ## Consumidores que todavía impiden retirar la credencial compartida
 
-El inventario de fuente identifica cuatro escritores en
-`src/services/businessProfileLocal.service.js`: `updateReviewReply`,
-`deleteReviewReply`, `publishPhoto` y `updateSpecialHours`. Usan
-`ensureGoogleAccessToken`, que todavía carga tokens SQL y renueva con secreto
-local. El contrato de lectura/revocación permanece separado. Se han preparado en
-fuente DEV el contrato de escritura, diario del broker, recuperación de recibos y
-adaptador con identidad propia; todavía falta conectarlos al diario SQL, rutas,
-pantallas y automatizaciones. Estas candidatas aún no incorporan la preparación.
+El inventario identifica `updateReviewReply`, `deleteReviewReply`, `publishPhoto`
+y `updateSpecialHours` en `businessProfileLocal.service.js`. Fuente DEV ya conecta
+sus recorridos manuales gestionados al broker, diario SQL, auditoría v25, rutas de
+recuperación y UI. Las fichas no migradas conservan `ensureGoogleAccessToken` con
+el guard de credenciales legacy. Faltan automatización de horarios, resolución de
+incertidumbres, publicación/DDL y aceptación real. Las candidatas públicas de este
+documento aún no incorporan esa preparación.
 Contrato y límites en [escrituras GBP](google-business-profile-writes.md).
 
 Antes del primer marcador de cierre hay que migrar esos consumidores conservando
@@ -160,8 +159,9 @@ independiente. Cero cohortes Google reales migradas en este corte.
 
 ## Siguiente publicación y recuperación
 
-1. Implementar los escritores Business Profile pendientes en DEV, promoverlos a
-   cada candidato que los consuma y repetir la QA afectada.
+1. Completar la automatización de horarios, resolución operativa de incertidumbres,
+   corte SQL nuevo de dos tablas y compatibilidad de auditoría v25. Promover las
+   escrituras Business Profile y su UI a cada candidato que las consuma, con QA.
 2. Completar toda la identidad Google compartida y todos sus consumidores antes
    de crear el primer marcador que cierre credenciales legacy. La preparación
    de código no autoriza ampliar ámbitos ni reactivar históricos.

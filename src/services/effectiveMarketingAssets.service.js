@@ -952,6 +952,7 @@ async function listScopedGoogleProperties(scope, dependencies = {}) {
   const result = {};
 
   for (const [section, config] of Object.entries(GOOGLE_PROPERTY_ASSET_CONFIG)) {
+    if (dependencies.sections && !dependencies.sections.includes(section)) continue;
     const model = propertyModels[section] || config.model;
     if (!model) {
       result[section] = [];

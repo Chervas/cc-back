@@ -14,14 +14,16 @@ const OPERATIONS = Object.freeze(Object.fromEntries([
 const CATEGORIES = Object.freeze(['ADDITIONAL', 'COVER', 'PROFILE', 'LOGO', 'EXTERIOR', 'INTERIOR', 'PRODUCT', 'AT_WORK', 'TEAMS']);
 const PUBLIC_ORIGIN = 'https://media.clinicaclick.com';
 const uuid = { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' };
-const object = properties => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) });
+const object = (properties, required = Object.keys(properties)) => ({ type: 'object', additionalProperties: false, properties, required });
 const day = { type: 'string', pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' };
 const clock = { type: ['string', 'null'], pattern: '^(?:[01][0-9]|2[0-3]):[0-5][0-9]$' };
 const reviewId = { type: 'string', pattern: '^[A-Za-z0-9_-]{1,256}$' };
 const bindingSchema = object({ locations: { type: 'array', minItems: 1, maxItems: 1000, items: object({
   assetRef: ref, tenantRef: { type: 'string', pattern: '^clinic:[1-9][0-9]{0,9}$' },
   allowReviewReplies: { type: 'boolean' }, allowPhotos: { type: 'boolean' }, allowSpecialHours: { type: 'boolean' },
-}) } });
+  publicMediaClinicIds: { type: 'array', minItems: 1, maxItems: 1000, uniqueItems: true,
+    items: { type: 'integer', minimum: 1, maximum: 2147483647 } },
+}, ['assetRef', 'tenantRef', 'allowReviewReplies', 'allowPhotos', 'allowSpecialHours']) } });
 const bindingCheck = schema({ value: bindingSchema });
 const checks = {
   replyUpdate: schema({ operationId: uuid, reviewId, comment: { type: 'string', minLength: 1, maxLength: 4096 } }),
@@ -74,7 +76,8 @@ function validateBinding(binding) {
   for (const row of binding.googleBusinessProfileWrites.locations) {
     reads.asset(row.assetRef);
     const key = row.assetRef + ':' + row.tenantRef;
-    if (seen.has(key) || !row.allowReviewReplies && !row.allowPhotos && !row.allowSpecialHours) fail('invalid_request'); seen.add(key);
+    if (seen.has(key) || !row.allowReviewReplies && !row.allowPhotos && !row.allowSpecialHours
+      || row.publicMediaClinicIds && !row.allowPhotos) fail('invalid_request'); seen.add(key);
   }
 }
 function resource(binding, assetRef, tenantRef, kind, payload) {
@@ -85,9 +88,11 @@ function resource(binding, assetRef, tenantRef, kind, payload) {
   if (kind === 'photo') {
     // Only our public marketing objects for this clinic. No signed URL, caller
     // host, clinical path, redirects, binary upload or broker-side download.
-    const prefix = `${PUBLIC_ORIGIN}/marketing/clinic-${tenantRef.slice(7)}/`;
-    if (!payload.sourceUrl.startsWith(prefix)
-      || !/^[0-9]{4}\/(?:0[1-9]|1[0-2])\/(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:jpg|jpeg|png|webp)$/.test(payload.sourceUrl.slice(prefix.length))) fail('scope_denied');
+    const prefix = `${PUBLIC_ORIGIN}/marketing/clinic-`;
+    const match = payload.sourceUrl.startsWith(prefix) && /^([1-9][0-9]{0,9})\/[0-9]{4}\/(?:0[1-9]|1[0-2])\/(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:jpg|jpeg|png|webp)$/.exec(payload.sourceUrl.slice(prefix.length));
+    // A shared location may publish the requesting clinic's public asset, but
+    // only after that clinic is explicitly admitted in the location policy.
+    if (!match || ![Number(tenantRef.slice(7)), ...(policy.publicMediaClinicIds || [])].includes(Number(match[1]))) fail('scope_denied');
   }
   return { ...target, policy };
 }

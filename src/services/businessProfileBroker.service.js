@@ -33,9 +33,9 @@ function createBusinessProfileBroker({ client, writerClient, loadLocation, loadM
   writesEnabled = () => process.env.GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED === 'true' }) {
   const contexts = new WeakMap();
   const managed = (location, context) => marked(location) || !!(context && typeof context === 'object' && contexts.has(context));
-  async function recordedBinding(location) {
-    if (await loadRevocation(externalLocationId(location))) fail('asset_revoked');
-    const record = await loadManagedBinding(externalLocationId(location));
+  async function recordedBinding(location, options = {}) {
+    if (await loadRevocation(externalLocationId(location), options)) fail('asset_revoked');
+    const record = await loadManagedBinding(externalLocationId(location), options);
     if (!record && !marked(location)) return null;
     if (!record || !marked(location)) fail('broker_binding_invalid');
     const scope = binding(location);
@@ -43,19 +43,24 @@ function createBusinessProfileBroker({ client, writerClient, loadLocation, loadM
       || Number(record.clinica_id) !== Number(location.clinica_id) || Number(record.google_connection_id) !== Number(location.google_connection_id)) fail('broker_binding_invalid');
     return scope;
   }
-  async function currentWriteScope(location, context) {
+  async function currentWriteScope(location, context, options = {}) {
     if (!enabled() || !writesEnabled()) fail('broker_cohort_disabled');
     const captured = context && typeof context === 'object' && contexts.get(context);
     if (!captured || captured.id !== Number(location.id)) fail('broker_binding_invalid');
-    const current = await loadLocation(captured.id);
+    const current = await loadLocation(captured.id, options);
     if (!current || !current.is_active || !marked(current) || Number(current.google_connection_id) !== captured.googleConnectionId) fail('broker_binding_invalid');
-    const scope = await recordedBinding(current);
+    const scope = await recordedBinding(current, options);
     if (!scope || Object.entries(scope).some(([key, value]) => captured[key] !== value)) fail('broker_binding_invalid');
     if (!enabled() || !writesEnabled()) fail('broker_cohort_disabled');
     return scope;
   }
   return {
     managed,
+    async assert(location, context, options = {}) {
+      const scope = await currentWriteScope(location, context, options);
+      const captured = contexts.get(context);
+      return { ...scope, mappingId: captured.id, googleConnectionId: captured.googleConnectionId };
+    },
     async prepare(location, loadLegacyToken, legacyCache) {
       // Independent registry survives disconnect/cascade/recreation of the old mapping.
       const scope = await recordedBinding(location);
@@ -121,9 +126,9 @@ const writerClient = { execute(command, options) {
   return cachedWriterClient.execute(command, options);
 } };
 const service = createBusinessProfileBroker({ client, writerClient,
-  loadRevocation: id => require('../../models').BusinessProfileBrokerRevocation.findByPk(id, { attributes: ['external_location_id'], raw: true }),
-  loadManagedBinding: id => require('../../models').BusinessProfileBrokerBinding.findByPk(id, { raw: true }),
-  loadLocation: id => require('../../models').ClinicBusinessLocation.findByPk(id, {
+  loadRevocation: (id, options) => require('../../models').BusinessProfileBrokerRevocation.findByPk(id, { ...options, attributes: ['external_location_id'], raw: true, logging: false }),
+  loadManagedBinding: (id, options) => require('../../models').BusinessProfileBrokerBinding.findByPk(id, { ...options, raw: true, logging: false }),
+  loadLocation: (id, options) => require('../../models').ClinicBusinessLocation.findByPk(id, { ...options, logging: false,
   attributes: ['id', 'clinica_id', 'google_connection_id', 'location_id', 'is_active', 'broker_read_connection_ref', 'broker_read_asset_ref'], raw: true,
 }) });
 module.exports = { ...service, createBusinessProfileBroker, binding };

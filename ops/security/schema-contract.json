@@ -3,6 +3,402 @@
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
+    "BusinessProfileMutations": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {
+          "COLUMN_NAME": "operation_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "actor_type",
+          "COLUMN_TYPE": "enum('user','automation')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "actor_user_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "actor_key",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "session_ref",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "session_expires_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "execution_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "node_id",
+          "COLUMN_TYPE": "varchar(32)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "runtime_namespace",
+          "COLUMN_TYPE": "varchar(32)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "requested_clinic_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "mapping_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "google_connection_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "asset_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "input_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "kind",
+          "COLUMN_TYPE": "enum('replyUpdate','replyDelete','photo','hours')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "input",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "local_input",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "enum('attempted','applied')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "broker_receipt",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "last_error",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "created_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updated_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "applied_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "cc_gbp_mutation_actor",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_gbp_mutation_actor",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "actor_user_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_gbp_mutation_actor",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "requested_clinic_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_gbp_mutation_actor",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 3,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_gbp_mutation_actor",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 4,
+              "COLUMN_NAME": "created_at",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_gbp_mutation_actor",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 5,
+              "COLUMN_NAME": "operation_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "operation_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "CONSTRAINT_NAME": "cc_gbp_mutation_actor_shape",
+          "ENFORCED": "YES",
+          "CHECK_CLAUSE": "(((`actor_type` = _utf8mb4\\'user\\') and (`session_ref` is not null) and (`session_expires_at` is not null) and (`execution_id` is null) and (`node_id` is null)) or ((`actor_type` = _utf8mb4\\'automation\\') and (`session_ref` is null) and (`session_expires_at` is null) and (`execution_id` is not null) and (`node_id` is not null)))"
+        },
+        {
+          "CONSTRAINT_NAME": "cc_gbp_mutation_completion",
+          "ENFORCED": "YES",
+          "CHECK_CLAUSE": "(((`state` = _utf8mb4\\'attempted\\') and (`applied_at` is null) and (`broker_receipt` is null)) or ((`state` = _utf8mb4\\'applied\\') and (`applied_at` is not null) and (`broker_receipt` is not null)))"
+        }
+      ],
+      "foreignKeys": []
+    },
+    "BusinessProfileMutationLocks": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {
+          "COLUMN_NAME": "resource_key",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "operation_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "cc_gbp_mutation_lock_owner",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_gbp_mutation_lock_owner",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "operation_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "resource_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": [
+        {
+          "CONSTRAINT_NAME": "cc_gbp_mutation_lock_operation",
+          "ORDINAL_POSITION": 1,
+          "COLUMN_NAME": "operation_id",
+          "REFERENCED_TABLE_SCHEMA": "<self>",
+          "REFERENCED_TABLE_NAME": "BusinessProfileMutations",
+          "REFERENCED_COLUMN_NAME": "operation_id",
+          "UPDATE_RULE": "NO ACTION",
+          "DELETE_RULE": "NO ACTION"
+        }
+      ]
+    },
     "AuthSessions": {
       "ENGINE": "InnoDB",
       "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
@@ -3559,6 +3955,7 @@
     {"name":"20260919090000-meta-marketing-enrollment-binding-owner.js","sha256":"5ea51cff3eb6d7a0c0521e5516046d69ace876d320da6d08d56daacb600edda0"},
     {"name":"20260919100000-meta-marketing-enrollment-delivery-markers.js","sha256":"f6a41057f0271be81e1535f2418cf3edcb52a664c29c138fee5dd34672985218"},
     {"name":"20260919110000-meta-marketing-enrollment-due-index.js","sha256":"9dfa04628ef1ea25920c42168c9080f22a3abe763e527ad1a9b5a0c5490394e6"},
-    {"name":"20260919120000-meta-marketing-enrollment-scope-latest.js","sha256":"3daff36382d7f0c649bce200b6e901d2551ecd0a114c5dc78acf7f2b386d2a99"}
+    {"name":"20260919120000-meta-marketing-enrollment-scope-latest.js","sha256":"3daff36382d7f0c649bce200b6e901d2551ecd0a114c5dc78acf7f2b386d2a99"},
+    {"name": "20260919200000-create-business-profile-mutation-journal.js", "sha256": "3c13134c86ab24e753115e1292e473504ebbf6307f2b4a9582f0c79d08ab055b"}
   ]
 }

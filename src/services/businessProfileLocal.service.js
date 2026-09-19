@@ -3,6 +3,8 @@
 const axios = require('axios');
 const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../models');
+const mutations = require('./businessProfileMutations.service');
+const legacyCredentials = require('./googleLegacyCredentials.service');
 const {
   resolveEffectiveMarketingAssetInventory,
 } = require('./effectiveMarketingAssets.service');
@@ -16,7 +18,6 @@ const {
   BusinessProfileDailyMetric,
   BusinessProfileReview,
   BusinessProfilePost,
-  GoogleConnection,
   PublicMediaAsset,
   GroupAssetClinicAssignment,
   Clinica,
@@ -768,7 +769,7 @@ function serializeReviewRow(review) {
   return safe;
 }
 
-async function updateReviewReply(resolved, reviewIdRaw, payload = {}) {
+async function updateReviewReply(resolved, reviewIdRaw, payload = {}, options = {}) {
   const comment = cleanString(payload.comment);
   if (!comment) {
     const error = new Error('business_profile_review_reply_required');
@@ -788,14 +789,18 @@ async function updateReviewReply(resolved, reviewIdRaw, payload = {}) {
     throw error;
   }
 
-  const accessToken = await ensureGoogleAccessToken(location.google_connection_id);
+  const brokerContext = await mutations.prepare(location);
+  if (mutations.managed(location, brokerContext)) return mutations.execute({ resolved, location, brokerContext, ...options,
+    kind: 'replyUpdate', input: { operationId: payload.operationId, reviewId: reviewName.split('/').pop(), comment },
+    localInput: { reviewId: Number(review.id) } });
+  const { accessToken, connection } = await ensureGoogleAccessToken(location.google_connection_id);
   let response;
   try {
-    response = await axios.put(
+    response = await legacyCredentials.request(connection, () => axios.put(
       `${GOOGLE_MY_BUSINESS_API}/${reviewName}/reply`,
       { comment },
       { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 20000 }
-    );
+    ));
   } catch (providerError) {
     const error = new Error('business_profile_review_reply_sync_failed');
     error.status = providerError?.response?.status === 403 ? 403 : 502;
@@ -827,7 +832,7 @@ async function updateReviewReply(resolved, reviewIdRaw, payload = {}) {
   return { success: true, review: serializeReviewRow(review) };
 }
 
-async function deleteReviewReply(resolved, reviewIdRaw) {
+async function deleteReviewReply(resolved, reviewIdRaw, payload = {}, options = {}) {
   const { review, location } = await findReviewForMutation(resolved, reviewIdRaw);
   const reviewName = cleanString(review.review_name);
   if (!reviewName || !reviewName.includes('/reviews/')) {
@@ -836,12 +841,16 @@ async function deleteReviewReply(resolved, reviewIdRaw) {
     throw error;
   }
 
-  const accessToken = await ensureGoogleAccessToken(location.google_connection_id);
+  const brokerContext = await mutations.prepare(location);
+  if (mutations.managed(location, brokerContext)) return mutations.execute({ resolved, location, brokerContext, ...options,
+    kind: 'replyDelete', input: { operationId: payload.operationId, reviewId: reviewName.split('/').pop() },
+    localInput: { reviewId: Number(review.id) } });
+  const { accessToken, connection } = await ensureGoogleAccessToken(location.google_connection_id);
   try {
-    await axios.delete(
+    await legacyCredentials.request(connection, () => axios.delete(
       `${GOOGLE_MY_BUSINESS_API}/${reviewName}/reply`,
       { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 20000 }
-    );
+    ));
   } catch (providerError) {
     const error = new Error('business_profile_review_reply_delete_failed');
     error.status = providerError?.response?.status === 403 ? 403 : 502;
@@ -1258,7 +1267,7 @@ async function buildDashboard(resolved, query = {}) {
 }
 
 async function ensureGoogleAccessToken(connectionId) {
-  const connection = await GoogleConnection.findByPk(connectionId);
+  const connection = await legacyCredentials.load(connectionId);
   if (!connection) {
     const error = new Error('google_connection_not_found');
     error.status = 409;
@@ -1276,10 +1285,10 @@ async function ensureGoogleAccessToken(connectionId) {
       grant_type: 'refresh_token',
       refresh_token: connection.refreshToken,
     });
-    const response = await axios.post('https://oauth2.googleapis.com/token', params.toString(), {
+    const response = await legacyCredentials.request(connection, () => axios.post('https://oauth2.googleapis.com/token', params.toString(), {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       timeout: 15000,
-    });
+    }));
     const refreshedAccessToken = cleanString(response.data?.access_token);
     if (!refreshedAccessToken) {
       const error = new Error('google_access_token_refresh_failed');
@@ -1288,14 +1297,15 @@ async function ensureGoogleAccessToken(connectionId) {
     }
     accessToken = refreshedAccessToken;
     const expiresIn = Number(response.data?.expires_in || 3600);
-    await connection.update({ accessToken, expiresAt: new Date(Date.now() + (expiresIn * 1000)) });
+    await legacyCredentials.saveRefresh(connection, { accessToken, expiresAt: new Date(Date.now() + (expiresIn * 1000)) });
   }
   if (!accessToken || (mustRefresh && !connection.refreshToken)) {
     const error = new Error('google_access_token_unavailable');
     error.status = 409;
     throw error;
   }
-  return accessToken;
+  await legacyCredentials.assert(connection);
+  return { accessToken, connection };
 }
 
 function buildBusinessProfileV4LocationPath(location) {
@@ -1306,7 +1316,7 @@ function buildBusinessProfileV4LocationPath(location) {
   return `${accountName}/locations/${locationId}`;
 }
 
-async function publishPhoto(resolved, payload = {}) {
+async function publishPhoto(resolved, payload = {}, options = {}) {
   const location = resolved.locations[0] || null;
   if (!location) {
     const error = new Error('business_profile_location_not_configured');
@@ -1335,15 +1345,20 @@ async function publishPhoto(resolved, payload = {}) {
     error.status = 404;
     throw error;
   }
+  const requestedCategory = String(payload.category || 'ADDITIONAL').trim().toUpperCase();
+  const category = GBP_MEDIA_CATEGORIES.includes(requestedCategory) ? requestedCategory : 'ADDITIONAL';
+  const brokerContext = await mutations.prepare(location);
+  if (mutations.managed(location, brokerContext)) return mutations.execute({ resolved, location, brokerContext, ...options,
+    kind: 'photo', input: { operationId: payload.operationId, sourceUrl: asset.public_url, category,
+      description: category === 'COVER' ? null : (cleanString(payload.description) || '').slice(0, 1024) || null },
+    localInput: { publicMediaAssetId } });
   const resourceBase = buildBusinessProfileV4LocationPath(location);
   if (!resourceBase) {
     const error = new Error('business_profile_media_parent_unavailable');
     error.status = 409;
     throw error;
   }
-  const requestedCategory = String(payload.category || 'ADDITIONAL').trim().toUpperCase();
-  const category = GBP_MEDIA_CATEGORIES.includes(requestedCategory) ? requestedCategory : 'ADDITIONAL';
-  const accessToken = await ensureGoogleAccessToken(location.google_connection_id);
+  const { accessToken, connection } = await ensureGoogleAccessToken(location.google_connection_id);
   const body = {
     mediaFormat: 'PHOTO',
     locationAssociation: { category },
@@ -1351,11 +1366,11 @@ async function publishPhoto(resolved, payload = {}) {
   };
   const description = cleanString(payload.description);
   if (description && category !== 'COVER') body.description = description.slice(0, 1024);
-  const response = await axios.post(
+  const response = await legacyCredentials.request(connection, () => axios.post(
     `${GOOGLE_MY_BUSINESS_API}/${resourceBase}/media`,
     body,
     { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 20000 }
-  );
+  ));
   const media = response.data || {};
   const mediaName = media.name || null;
   await sequelize.transaction(async (transaction) => {
@@ -1529,7 +1544,7 @@ function buildGoogleSpecialHourPeriods(plan) {
   return result;
 }
 
-async function updateSpecialHours(resolved, payload = {}) {
+async function updateSpecialHours(resolved, payload = {}, options = {}) {
   const location = resolved?.locations?.[0] || null;
   if (!location) throw specialHoursError('business_profile_location_not_configured', 409);
   const raw = rawPayload(location);
@@ -1537,17 +1552,22 @@ async function updateSpecialHours(resolved, payload = {}) {
   if (!Array.isArray(regularPeriods) || !regularPeriods.length) {
     throw specialHoursError('business_profile_regular_hours_required', 409);
   }
+
+  const plan = normalizeSpecialHoursPlan(payload, resolved?.timeZone || DEFAULT_TIME_ZONE);
+  const specialHours = { specialHourPeriods: buildGoogleSpecialHourPeriods(plan) };
+  const brokerContext = await mutations.prepare(location);
+  if (mutations.managed(location, brokerContext)) return mutations.execute({ resolved, location, brokerContext, ...options,
+    kind: 'hours', input: { operationId: payload.operationId, periods: plan.periods.map(
+      ({ kind, startDate, endDate, openTime, closeTime }) => ({ kind, startDate, endDate, openTime, closeTime })) },
+    localInput: { plan } });
   const locationName = cleanString(location.location_id);
   if (!/^locations\/[^/]+$/.test(locationName)) {
     throw specialHoursError('business_profile_location_name_invalid', 409);
   }
-
-  const plan = normalizeSpecialHoursPlan(payload, resolved?.timeZone || DEFAULT_TIME_ZONE);
-  const specialHours = { specialHourPeriods: buildGoogleSpecialHourPeriods(plan) };
-  const accessToken = await ensureGoogleAccessToken(location.google_connection_id);
+  const { accessToken, connection } = await ensureGoogleAccessToken(location.google_connection_id);
   let response;
   try {
-    response = await axios.patch(
+    response = await legacyCredentials.request(connection, () => axios.patch(
       `${GOOGLE_BUSINESS_INFORMATION_API}/${locationName}`,
       { name: locationName, specialHours },
       {
@@ -1555,7 +1575,7 @@ async function updateSpecialHours(resolved, payload = {}) {
         headers: { Authorization: `Bearer ${accessToken}` },
         timeout: 20000,
       }
-    );
+    ));
   } catch (providerError) {
     const error = specialHoursError('business_profile_special_hours_sync_failed', 502);
     error.cause = providerError;
@@ -1853,6 +1873,7 @@ module.exports = {
   buildTimeseries,
   buildSeasonality,
   listReviews,
+  resolveReviewMutationLocation: async (resolved, reviewId) => (await findReviewForMutation(resolved, reviewId)).location,
   updateReviewReply,
   deleteReviewReply,
   listPosts,

@@ -5,7 +5,8 @@ const ACTIONS = ['auth.sign_in', 'auth.token_sign_in', 'auth.unlock', 'auth.emai
   ...require('./access-policy-contract').PERMISSION_ACTIONS, ...require('./realtime-contract').REALTIME_ACTIONS,
   ...require('./patient-read-contract').PATIENT_READ_ACTIONS, 'integration.asset.disconnect', 'integration.asset.map',
   'integration.oauth.authorize', 'integration.oauth.activate', 'integration.whatsapp.authorization_state', 'integration.asset.enrollment', 'integration.google_ads.action_plan', 'integration.google_ads.destinations', 'integration.google_ads.destination_list',
-  'integration.meta.access_check', 'integration.meta.asset_list', 'integration.meta.enrollment', 'integration.google_ads.receipt_list', 'integration.google_ads.receipt_check'];
+  'integration.meta.access_check', 'integration.meta.asset_list', 'integration.meta.enrollment', 'integration.google_ads.receipt_list', 'integration.google_ads.receipt_check',
+  'integration.google_business_profile.mutation'];
 function criteriaFor(v) {
   exact(v, ['from', 'to', 'action', 'userId']);
   const date = value => typeof value === 'string' && /^20\d\d-\d\d-\d\d$/.test(value) && Number.isFinite(Date.parse(value + 'T00:00:00Z'))

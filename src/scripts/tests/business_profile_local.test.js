@@ -340,7 +340,7 @@ function testSecurityAndSyncContracts() {
   const localService = fs.readFileSync(path.resolve(__dirname, '../../services/businessProfileLocal.service.js'), 'utf8');
   assert.match(routes, /router\.use\(authMiddleware\)/, 'all Local routes must require authentication');
   assert.match(routes, /hasMarketingClinicScopeAccess/, 'Local routes must enforce clinic marketing scope');
-  assert.match(routes, /resolvePhotoMutationClinicIds/, 'GBP writes must authorize every clinic affected by a shared location');
+  assert.match(routes, /mutationScope/, 'GBP writes must authorize the specific mapping and every clinic affected by its aliases');
   assert.match(routes, /business_profile_asset_in_use/, 'shared GBP writes must fail closed when another consumer is not writable');
   assert.match(routes, /router\.put\(\s*'\/clinica\/:clinicaId\/special-hours',[\s\S]*requireClinicBusinessProfileWriteAccess/,
     'special-hours writes must use shared-profile write authorization');

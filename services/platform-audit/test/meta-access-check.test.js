@@ -11,9 +11,9 @@ test('v20 rejects open fields, false success, foreign actor/scope, excessive car
   const e=make();for(const patch of [{payload:{}},{actor:{type:'job',id:'9'}},{scope:{type:'platform',id:null}},{version:21},{resultDigest:'a'.repeat(64)},{clinicCount:1001},{clinicSetDigest:['a'.repeat(64)]},{operation:'meta.marketing.asset.revoke.v1'},{assetRef:'meta-whatsapp_phone_number:301'},{mappingId:11},{outcome:'success'}])assert.throws(()=>pack({...e,...patch}));
   const done=make('asset_verified',{ok:true});for(const patch of [{reason:'credential_verified'},{resultDigest:null},{stage:'attempted'},{operation:'meta.marketing.connection.read.v1'},{outcome:'denied'}])assert.throws(()=>pack({...done,...patch}));
 });
-test('v20 exact S3 version, digest and KMS verification; v25 refs stay closed',async()=>{
+test('v20 exact S3 version, digest and KMS verification; v26 refs stay closed',async()=>{
   const row=pack(make('asset_verified',{id:'act_301'})),{KEY_ARN}=require('../src/s3');const ref={key:keyFor(row),digest:row.digest,versionId:'test20'};
-  assert.throws(()=>refFor({...ref,key:ref.key.replace('/v20/','/v25/')},'confirmed'));
+  assert.throws(()=>refFor({...ref,key:ref.key.replace('/v20/','/v26/')},'confirmed'));
   for(const wrong of [false,true]){
     const result=await require('../src/reader').readBatch({version:1,audience:'clinicaclick-audit-reader-v1',requestId:randomUUID(),nonce:randomUUID(),issuedAt:Date.now(),mode:'confirmed',actorId:'1',sessionRef:randomUUID(),refs:[ref]},{send:async command=>{assert.equal(command.input.VersionId,ref.versionId);return {ContentLength:Buffer.byteLength(row.body),ContentType:'application/json',ChecksumSHA256:Buffer.from(row.digest,'hex').toString('base64'),ServerSideEncryption:'aws:kms',SSEKMSKeyId:KEY_ARN,VersionId:wrong?'wrong':ref.versionId,Body:Readable.from([row.body])};}});
     assert.equal(result.results[0].status,wrong?'error':'verified');
