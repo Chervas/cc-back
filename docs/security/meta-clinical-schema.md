@@ -1,5 +1,9 @@
 # Preparación del corte Meta clínico — 19/09/2026
 
+Este documento conserva el intento de las 14:30 UTC. **El esquema clínico se
+aplicó después, a las 15:40 UTC**; estado vigente y recuperación en
+[meta-clinical-cut.md](meta-clinical-cut.md). No reutilizar el plan histórico.
+
 **Estado: corte cancelado antes de respaldo/DDL.** CRM y gateway ejecutan sus
 fuentes anteriores, con MFA enforce y gates Meta OFF. El esquema y las43 filas
 originales coinciden con las huellas previas. Las nueve migraciones siguen

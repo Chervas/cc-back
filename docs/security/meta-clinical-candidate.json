@@ -1,7 +1,7 @@
 {
   "back": {
     "candidateBase": "ac4703a38796a7ecf469cd91e6b9e2619d57a0cc",
-    "devSource": "7a0001dba01c6c46311854edbddbe53f97163932",
+    "devSource": "93fef229ede0faae802fa1d5ba7a7b62a238a45f",
     "files": [
       {
         "path": "migrations/20260919040000-meta-marketing-broker-registry.js",
@@ -559,8 +559,48 @@
         "exactDev": false
       },
       {
+        "path": "src/lib/clinicalBullmqCutGate.js",
+        "sha256": "7ff734ea5e90c3a03eccec746056fce06c0301352f85baad265a22020216c111",
+        "exactDev": true
+      },
+      {
+        "path": "src/lib/clinicalCutActivity.js",
+        "sha256": "b513a8241678525563ecc9c47c51aff93d88f95a09ebc6349529ec6100e3e8e6",
+        "exactDev": true
+      },
+      {
+        "path": "src/lib/clinicalCutDatabaseCheck.js",
+        "sha256": "f1949f731262f970b109964553def05c1b052d4509e877892e131d5aa13e038f",
+        "exactDev": true
+      },
+      {
+        "path": "src/lib/clinicalCutFailure.js",
+        "sha256": "600897b8ef68b7b76f3ca1628ec439cd3834896b4d31f11c5590c4c2854c073d",
+        "exactDev": true
+      },
+      {
+        "path": "src/lib/clinicalCutProcessIdentity.js",
+        "sha256": "592fb4c93bc34699e9991905c07303d3e20d0901dab0899130cc0837f1ad5267",
+        "exactDev": true
+      },
+      {
+        "path": "src/lib/clinicalCutSystemdIdentity.js",
+        "sha256": "1eb09116b7584a9b680ff2cc6b61cd822bc0c918cea6b7802cf1149bc19f1d37",
+        "exactDev": true
+      },
+      {
+        "path": "src/lib/clinicalJobRequestCutGate.js",
+        "sha256": "63336383ea894aa8cda5446d8f352c1069a0e057284dec113c4fb34d6b6b6720",
+        "exactDev": true
+      },
+      {
+        "path": "src/lib/clinicalSchemaCutCoordinator.js",
+        "sha256": "c015563f8755e1737a0afc2cb2afbc2fd2670247e45e677c70e572f3a2d54698",
+        "exactDev": true
+      },
+      {
         "path": "src/lib/metaClinicalCutRecovery.js",
-        "sha256": "fe7b450d2a0acd6a8b8b83ed28e164541a65480af1e69fdb56b9c024c44a2a28",
+        "sha256": "8b91f70504b053c47e7b24a847cd6226c34f1a9786dcd50a2e4bc5ea202f5ffb",
         "exactDev": true
       },
       {
@@ -599,6 +639,11 @@
         "exactDev": false
       },
       {
+        "path": "src/scripts/meta-clinical-cut.js",
+        "sha256": "6ae9e4be97b98b02b808c23aabd3edb6de2249b04ad04d7f6a3ce28304946c68",
+        "exactDev": true
+      },
+      {
         "path": "src/scripts/meta-clinical-schema-release.js",
         "sha256": "36160012460ad262dae2402bd9fe9ce98c6ab83aaa02111c611f9001729d2cfc",
         "exactDev": true
@@ -609,13 +654,43 @@
         "exactDev": true
       },
       {
+        "path": "src/scripts/tests/clinical_bullmq_cut_gate_redis.test.js",
+        "sha256": "38828598da3c892d4a2ef3b2ddf638b4ca874d898bb7300276471dd515d2e758",
+        "exactDev": true
+      },
+      {
+        "path": "src/scripts/tests/clinical_cut_bound_mysql.test.js",
+        "sha256": "f230e37a9bd311b3e39a17d9106aa168779d3a6a0ebfffe8b25c0dd1463e4d85",
+        "exactDev": true
+      },
+      {
+        "path": "src/scripts/tests/clinical_cut_pm2_identity.test.js",
+        "sha256": "cc23a5d822bc3914883abf1073397e8103056753b435dcef494a96f49a4cfc6b",
+        "exactDev": true
+      },
+      {
+        "path": "src/scripts/tests/clinical_cut_systemd_identity.test.js",
+        "sha256": "788b3ca5c2231c8879745606ceb0c58bd5561a46dbda7ce08141af1a62591e3b",
+        "exactDev": true
+      },
+      {
+        "path": "src/scripts/tests/clinical_job_request_cut_gate_mysql.test.js",
+        "sha256": "c7e9e339b21b635e933e94a6ac13334c0bf0463b2820d125d97bc442bf51f0ae",
+        "exactDev": true
+      },
+      {
+        "path": "src/scripts/tests/clinical_schema_cut_coordinator.test.js",
+        "sha256": "1d6febed4224f8ba4c83a7daffda32179be4da65cd115ca7a0c60e09f36ce370",
+        "exactDev": true
+      },
+      {
         "path": "src/scripts/tests/fixtures/business_profile_discovery.fixture.js",
         "sha256": "2dac732429cf8e7eac9ba1dadda1dcb40ca7a906907a9ceea41c2ee2489d2979",
         "exactDev": true
       },
       {
         "path": "src/scripts/tests/fixtures/isolated_campaign_mysql.fixture.js",
-        "sha256": "a5d8b65f168e61828754a0b7d63d662ac0b18093831635031d3c412abbce3bd0",
+        "sha256": "594ec449fe0cdacc32e37e3d41e3936fe428d36a443f48ae7a1ba5c139dd1ca0",
         "exactDev": true
       },
       {
@@ -689,8 +764,13 @@
         "exactDev": true
       },
       {
+        "path": "src/scripts/tests/meta_clinical_cut_operator.test.js",
+        "sha256": "30e6bc953c78e7f59cd1801fda70d188e2dd7f9b9a4febb1b258b31ea0bb272a",
+        "exactDev": true
+      },
+      {
         "path": "src/scripts/tests/meta_clinical_cut_recovery.test.js",
-        "sha256": "bc982baf285975b15a38174b788db2abc04eb9fac94d74382fcf202a4a876669",
+        "sha256": "0a9e92663699eb8765809d5ce4bc97f212adf1fb13533af9349052850266c55d",
         "exactDev": true
       },
       {
@@ -863,7 +943,7 @@
   },
   "front": {
     "candidateBase": "288ca987621a4ea7270e9831638f24feffd4a046",
-    "devSource": "d49d11d2a67e9640861f44216085ccbfdfab180c",
+    "devSource": "a32cce6bf4b5d81031ffb8692274f516de2ba27e",
     "files": [
       {
         "path": "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.html",
@@ -935,9 +1015,9 @@
   },
   "version": 1,
   "reviewedAt": "2026-09-19",
-  "scope": "Selective CRM Meta consumers and QA dependencies; not a deployed release or real-provider acceptance. DEV needs its own immutable composition preserving isolated-security-v2.",
+  "scope": "Selective CRM Meta consumers and QA dependencies; clinical schema applied, API/UI code not deployed or accepted with a real provider. DEV preserves its isolated-security-v2 composition.",
   "candidateCommits": {
-    "back": "1da9f5a74f9f1f718abdc762af56b3f71e853e4b",
+    "back": "48d69879fa529e657e19fd5cddb6e88623561be6",
     "front": "27afa85ce45667091654f0c2a21cf5c9395d83b4"
   },
   "deployed": false,
@@ -945,8 +1025,8 @@
   "publicMfa": false,
   "metaDdlApplied": {
     "dev": true,
-    "staging": false,
-    "gatewaySharedClinical": false
+    "staging": true,
+    "gatewaySharedClinical": true
   },
   "evidence": "qa-evidence/security-resume-20260917/meta-clinical-candidate-20260919/",
   "schemaPublication": {
@@ -971,7 +1051,7 @@
     "metaGatesEnabled": false,
     "manifest": "meta-dev-consumers.json"
   },
-  "clinicalPreflight": {
+  "historicalClinicalPreflight": {
     "status": "aborted_before_backup_and_ddl",
     "at": "2026-09-19T14:30:00.728Z",
     "originalConnections": 1,
@@ -987,5 +1067,21 @@
     "authenticatedMfa": false,
     "runbook": "meta-clinical-schema.md",
     "evidence": "qa-evidence/security-resume-20260917/meta-crm-preflight-20260919/"
+  },
+  "clinicalSchemaPublication": {
+    "status": "applied",
+    "at": "2026-09-19T15:40:54.041Z",
+    "candidate": "48d69879fa529e657e19fd5cddb6e88623561be6",
+    "migrations": 9,
+    "originalRowsPreserved": 43,
+    "pendingJobRowsPreservedDuringCut": 520,
+    "oldConsumersCompatible": true,
+    "publicSourcesUnchanged": true,
+    "publicConfigurationPreserved": true,
+    "devProcessesUnchanged": true,
+    "newTablesEmpty": 7,
+    "runbook": "meta-clinical-cut.md",
+    "manifest": "meta-clinical-cut.json",
+    "evidence": "qa-evidence/security-resume-20260917/meta-crm-cut-20260919-48d69879/"
   }
 }

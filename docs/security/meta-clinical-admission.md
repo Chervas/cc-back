@@ -1,6 +1,8 @@
 # Admisión del corte Meta y recuperación — 19/09/2026
 
-Estado: **cancelado antes de respaldo/DDL; estado operativo previo recuperado**.
+Estado de este intento a las 15:15 UTC: **cancelado antes de respaldo/DDL;
+estado operativo previo recuperado**. El esquema clínico se aplicó después a las
+15:40 UTC; acta vigente en [meta-clinical-cut.md](meta-clinical-cut.md).
 Complementa el primer intento documentado en `meta-clinical-schema.md`.
 
 Código primero en DEV `5e23a433`, candidata `0cbf9214`: barrera SQL de admisión,

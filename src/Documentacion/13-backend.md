@@ -11646,11 +11646,12 @@ la prueba fuerza la lectura, no habilita cron/notificaciones ni acredita su entr
 
 ### Candidata selectiva de consumidores Meta (19/09/2026)
 
-Preparada sobre las ramas públicas actuales: backend `1da9f5a74f9f1f718abdc762af56b3f71e853e4b`, frontend
+Preparada sobre las ramas públicas actuales: backend `48d69879fa529e657e19fd5cddb6e88623561be6`, frontend
 `27afa85ce45667091654f0c2a21cf5c9395d83b4`, rama `security/meta-clinical-candidate-20260919` en ambos repositorios.
 Incluye metadatos, OAuth, descubrimiento, selección/confirmación/retirada, auditoría
 v24 y tres jobs cerrados. API/UI de CRM todavía sin desplegar ni cohortes activadas;
-las nueve DDL Meta ya están aplicadas solo en DEV desde las 12:46 UTC.
+las nueve DDL Meta están aplicadas en DEV desde las 12:46 UTC y en la BD clínica
+compartida por staging/gateway desde las 15:40 UTC.
 Fuentes, adaptación de dependencias, comandos y recuperación en
 `docs/security/meta-clinical-candidate.md` y su manifiesto JSON.
 
@@ -11858,3 +11859,37 @@ de proceso y conservar el error primario que desencadenó el aborto, cuyo detall
 no quedó registrado. Las siete pruebas aisladas de la candidata `0cbf9214` no
 acreditan todavía este montaje público. Acta en
 `docs/security/meta-clinical-admission.md` y su JSON.
+
+### Esquema clínico Meta aplicado y operador verificado (19/09/2026, 15:40 UTC)
+
+`meta-clinical-cut.js` sustituye los ejecutores privados anteriores. Registra por
+separado PID/inicio/parentesco del gestor npm y del proceso Node, conserva el
+error primario aunque falle recuperar y trata un MainPID systemd desaparecido
+durante la parada como transición hasta confirmar `inactive` y PID cero.
+Los guards siguen rechazando jobs en ejecución, correo enviándose y flujos
+activos. Solo con admisión cerrada se permiten jobs pendientes; se calcula la
+huella completa de esas filas bajo la barrera y se exige igualdad antes de
+respaldo, DDL y recuperación. No se cambian estados ni intentos desde el operador.
+
+El intento de las 15:37 UTC detectó la carrera de lectura systemd, canceló antes
+de respaldo/DDL y recuperó automáticamente los participantes y sus pausas. La
+corrección se probó con una unidad systemd real, privada de red y retirada al
+terminar. El montaje aislado combina PM2/npm/Node, modelo y `claimNextJob` reales,
+MySQL, Redis, respaldo cifrado y las nueve DDL: cinco jobs nuevos sobreviven sin
+consumo y se completan una sola vez al reiniciar; conserva siete pausas previas.
+
+El corte válido terminó a las 15:40:54 UTC con candidata `48d69879`: nueve DDL,
+27 tablas del contrato candidato compatibles y consumidores públicos anteriores
+compatibles. Preservadas 43 filas originales y 520 jobs pendientes/esperando/
+encolados durante el corte; no son jobs ejecutados. Siete tablas nuevas vacías,
+siete pausas previas conservadas y cinco pausas propias retiradas. Respaldo local
+AES-GCM de solo las dos tablas anteriores, clave y recibos root0600, diario de
+los nueve pasos. No repetir el plan ni restaurar tablas automáticamente.
+
+API/gateway y dos consumidores WhatsApp reiniciados con sus fuentes y
+configuración previas. DEV no se reinició; MFA/session enforce y gates Meta OFF.
+Tras reiniciar se vuelven a comprobar esquema, huellas, cola histórica y barrera
+SQL liberada. Login anónimo real CRM/DEV comprobado visualmente en escritorio y
+móvil, sin errores JS/5xx ni POST del formulario vacío. No acredita MFA/OAuth
+autenticados: API/UI Meta públicas, ámbito del titular y aceptación real siguen
+pendientes. Acta vigente: `docs/security/meta-clinical-cut.md/json`.

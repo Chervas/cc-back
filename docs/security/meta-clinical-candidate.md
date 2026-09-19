@@ -1,8 +1,10 @@
 # Candidata selectiva CRM de consumidores Meta — 19/09/2026
 
-Estado CRM: candidata comprobada, API/UI sin publicar. **DDL04–12, consumidores
-backend e interfaz publicados solo en DEV**, con todos los gates Meta OFF; detalle en
-[la publicación DEV](meta-dev-consumers.md).
+Estado CRM: candidata comprobada, API/UI sin publicar. **DDL04–12 aplicadas en
+DEV y en la BD clínica staging/gateway**; consumidores backend e interfaz
+publicados solo en DEV, con todos los gates Meta OFF. Acta vigente del esquema
+clínico en [meta-clinical-cut.md](meta-clinical-cut.md); publicación DEV en
+[meta-dev-consumers.md](meta-dev-consumers.md).
 Contrato canónico en [13](../../src/Documentacion/13-backend.md#candidata-selectiva-de-consumidores-meta-19092026).
 Fuente y huellas en `meta-clinical-candidate.json`. El manifiesto enumera también
 fixtures y dependencias necesarias para probar; no autoriza ejecutar todos sus
@@ -10,7 +12,7 @@ entrypoints ni sustituir los servicios AWS.
 
 ## Fuente y alcance
 
-- Backend `1da9f5a74f9f1f718abdc762af56b3f71e853e4b`, desde staging `ac4703a3`, worktree
+- Backend `48d69879fa529e657e19fd5cddb6e88623561be6`, desde staging `ac4703a3`, worktree
   `/home/ubuntu/wt/security-meta-back-candidate-20260919`.
 - Frontend `27afa85ce45667091654f0c2a21cf5c9395d83b4`, desde staging `288ca987`, worktree
   `/home/ubuntu/wt/security-meta-front-candidate-20260919`.
