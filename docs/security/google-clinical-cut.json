@@ -1,0 +1,101 @@
+{
+  "reviewedAt": "2026-09-19T18:11:17.690611+00:00",
+  "status": "clinical_google_schema_applied_consumers_pending",
+  "sourceCommit": "21775536189a90afe501860f1aa6670d2d02fa04",
+  "completedAt": "2026-09-19T18:04:47.719Z",
+  "migrations": 19,
+  "schema": "4a048c98f80fe991e10cf862b3c4c578df0bd7aebddd85a37ed5581cf02ed2d5",
+  "compatibleTables": {
+    "prepared-schema-after.json": 49,
+    "staging-schema-after.json": 27,
+    "gateway-schema-after.json": 27
+  },
+  "rowsPreserved": {
+    "GoogleConnections": 1,
+    "ClinicBusinessLocations": 14,
+    "ClinicWebAssets": 6,
+    "ClinicAnalyticsProperties": 5,
+    "ClinicGoogleAdsAccounts": 6,
+    "GoogleConnectionAssignments": 17,
+    "GroupAssetClinicAssignments": 21,
+    "GoogleAdsConversionUploadAttempts": 364
+  },
+  "totalRows": 434,
+  "pendingJobsPreserved": 520,
+  "historicalGatewayJobsUnchanged": true,
+  "previousQueuePausesPreserved": 7,
+  "ownedQueuePausesRestored": 5,
+  "runtimes": [
+    {
+      "name": "staging",
+      "revision": "48d69879fa529e657e19fd5cddb6e88623561be6",
+      "pid": 1990956,
+      "managerPid": 1990944
+    },
+    {
+      "name": "gateway",
+      "revision": "fdb2636abc040eea837973ec30a0416d3bb33696",
+      "pid": 1991036,
+      "managerPid": 1991024
+    }
+  ],
+  "auxiliaryUnits": [
+    {
+      "name": "clinicaclick-whatsapp-fresh-inbound.service",
+      "pid": 1991078,
+      "active": "active",
+      "restarts": 0
+    },
+    {
+      "name": "clinicaclick-whatsapp-inbox-consumer.service",
+      "pid": 1991091,
+      "active": "active",
+      "restarts": 0
+    }
+  ],
+  "devProcessesUnchanged": true,
+  "mfaEnforced": true,
+  "integrationGatesUnchanged": true,
+  "sourcePublished": false,
+  "uiPublished": false,
+  "encryptedBackup": {
+    "bytes": 1768942,
+    "ciphertextSha256": "47ed808598ce2c4133fb51383021ae9522236af33df4a1ed056c9278c391a54a",
+    "owner": "root",
+    "fileMode": "0600",
+    "directoryMode": "0700",
+    "sameHostKey": true,
+    "generalExternalBackup": false
+  },
+  "tests": {
+    "operatorRegressions": 19,
+    "googlePolicyTests": 2,
+    "integrationSuites": 6,
+    "integrationGroups": 12,
+    "fictitiousGoogleRowsPreserved": 22,
+    "fictitiousGoogleTablesRestored": 8,
+    "partialDdlTestPassed": true,
+    "metaBoundCutMigrations": 9,
+    "googleForwardMigrations": 19,
+    "liveLogin": {
+      "authenticated": false,
+      "screenshots": 4,
+      "apiMocked": false,
+      "allPassed": true,
+      "minErrorContrast": 5.905927118870345
+    }
+  },
+  "recoveryDirectory": "/var/lib/clinicaclick-schema-recovery/google-crm-20260919-21775536/",
+  "evidenceDirectory": "/home/ubuntu/qa-evidence/security-resume-20260917/google-clinical-operator-20260919",
+  "cost": {
+    "newAwsResources": false,
+    "newCostExplorerCollection": false,
+    "incrementalBilledUsd": null
+  },
+  "pending": [
+    "public Google consumer composition and publication",
+    "complete shared Google identity and vault migration",
+    "real provider and authenticated UI acceptance",
+    "full authorized security goal remains active; rotation deferred; general backups last"
+  ]
+}

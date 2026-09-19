@@ -7,6 +7,10 @@
 
 ## Estado publicado
 
+Esta acta describe la publicación DEV de las 17:38–17:39 UTC. El esquema clínico
+se aplicó después a las 18:04 UTC: [corte Google](google-clinical-cut.md). Los
+consumidores públicos nuevos y la aceptación real siguen pendientes.
+
 El 19/09 a las 17:38–17:39 UTC se publicaron solo en DEV backend
 `aeb87ce46b33c064405522b738a0061e16beeb5b` y frontend
 `95f55fe728803b781119901e216da9e80f6ee5b5`, en sendas ramas
@@ -98,8 +102,8 @@ No volver a ejecutar los publicadores consumidos ni la preparación de esquema.
 
 ## Pendientes fuera de esta publicación
 
-Corte del esquema clínico Google, composición staging/gateway, identidad compartida
-completa y migración de credenciales/grants. Después, aceptación de proveedor y UI
+Composición staging/gateway, identidad compartida completa y migración de
+credenciales/grants; el esquema clínico ya se aplicó en el acta posterior. Después, aceptación de proveedor y UI
 autenticada; las pruebas ficticias no cierran esos puntos. AWS SSO requiere renovar
 sesión cuando el operador esté disponible. El objetivo completo conserva WhatsApp,
 Meta, IA, correo, auditoría y certificados; rotación aplazada y copias generales al

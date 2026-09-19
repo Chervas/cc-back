@@ -5,11 +5,12 @@
 > **Última revisión:** 2026-09-19.
 > **Relacionado con:** [contrato backend](../../src/Documentacion/13-backend.md#esquema-google-completo-y-publicación-por-entorno), [estado central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
 
-## Estado vigente — 19/09/2026, 17:06 UTC
+## Estado vigente — 19/09/2026, 18:04 UTC
 
-La aplicación SQL descrita aquí no debe repetirse. A las 17:38–17:39 UTC se
-publicaron después los [consumidores DEV](google-dev-consumers.md), manteniendo
-este esquema y gates cerrados. El acta siguiente conserva el alcance del corte SQL.
+Las aplicaciones SQL descritas aquí no deben repetirse. DEV recibió sus seis DDL
+restantes a las 17:06 UTC y los [consumidores DEV](google-dev-consumers.md) a las
+17:38–17:39. Las **19 DDL clínicas ya se aplicaron a las 18:04 UTC**, conservando
+434 filas, 520 jobs pendientes y pausas existentes; [acta y recuperación](google-clinical-cut.md).
 
 El contrato completo del código preparado exige **49 tablas y 43 migraciones**;
 Google aporta 22 tablas y 22 migraciones (tres históricas de julio y diecinueve
@@ -20,10 +21,11 @@ y `GoogleDestinationCommands`. El historial de intentos ya existía y se conserv
 La inspección de solo metadata encontró seis migraciones pendientes en DEV y
 19 en staging. **Las seis de DEV ya se aplicaron** con fuente `dea531ac`; no repetir
 el plan. DEV pasa ahora las 49 tablas del código preparado y las 43 exigidas por
-su release ejecutada `d07e9c85`. No se publicó código Google nuevo. El esquema
-clínico conserva exactamente su digest, 19 migraciones Google pendientes y
-compatibilidad con las 27 tablas exigidas por su release `48d69879`.
-La incompatibilidad era con el código futuro, no un fallo de las API operativas.
+la release anterior `d07e9c85`. DEV ejecuta ahora `aeb87ce4`, compatible con 49.
+El esquema clínico también pasa 49 y conserva compatibilidad con las 27 tablas de
+las releases públicas `48d69879`/`fdb2636a`, que se mantienen. Los consumidores
+Google nuevos aún no se han publicado ni activado en CRM/gateway. La incompatibilidad
+anterior era con el código futuro, no un fallo de las API operativas.
 
 ## Secuencia completa probada
 
@@ -85,10 +87,9 @@ Evidencia privada en `qa-evidence/security-resume-20260917/google-clinical-prefl
 
 ## Pendiente
 
-Los consumidores selectivos ya están publicados en DEV con activación pendiente.
-Preparar la composición pública y un operador clínico Google con recuperación y
-drenaje propios antes de las 19 DDL públicas; el operador Meta
-existente está limitado a su plan Meta y no debe reutilizarse para este lote.
+Los consumidores selectivos ya están publicados en DEV con activación pendiente;
+el esquema clínico también está aplicado. Preparar la composición pública y su
+publicación; no repetir el operador Google ni reutilizar el limitado a Meta.
 Faltan primera identidad Google y ámbitos de todas sus verticales, configuración
 AWS, aceptación del titular/proveedor y recorridos autenticados/carga real. Una
 identidad compartida no puede migrarse por partes sin considerar sus consumidores.

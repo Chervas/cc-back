@@ -11963,9 +11963,9 @@ metadata; rechaza fuente/cambio de esquema o replay. No habilita flags ni mueve
 credenciales. La secuencia real en MySQL aislado conserva datos anteriores y
 comprueba que las referencias incompletas o el borrado de recibos se rechazan.
 
-DEV ya dispone del esquema completo. Desde el corte siguiente ejecuta los
-consumidores preparados de Google, conservando sus gates cerrados. El corte
-clínico Google y la aceptación autenticada/de proveedor siguen pendientes.
+DEV y la BD clínica ya disponen del esquema completo. DEV ejecuta los
+consumidores preparados de Google, conservando sus gates cerrados. La publicación
+de consumidores públicos y la aceptación autenticada/de proveedor siguen pendientes.
 Requisitos, plan consumido, pruebas y recuperación en
 `docs/security/google-schema-readiness.md/json`; madurez central en19.
 
@@ -11984,8 +11984,9 @@ Publicar estas rutas no activa integraciones: DEV mantiene datos ficticios/vací
 MFA/session enforce, jobs/crons clínicos OFF y los gates Google/Meta anteriores.
 La promoción selecciona producto sobre la release realmente ejecutada y conserva
 dependencias root compatibles con sus locks; no publica enlaces de dependencias QA.
-CRM/gateway requieren su composición y las 19 DDL Google pendientes antes del corte.
-No se cambia el esquema clínico al publicar DEV ni se reutiliza el operador Meta.
+CRM/gateway requieren su composición antes del corte de consumidores. Las 19 DDL
+Google se aplicaron después, en el corte clínico descrito a continuación.
+Publicar DEV no cambió el esquema clínico ni reutilizó el operador Meta.
 
 Pruebas de concurrencia, pérdida de respuestas, auditoría transaccional, revocación
 y componentes Angular usan SQL/HTTPS reales aislados con proveedor/sesión ficticios.
@@ -11993,3 +11994,32 @@ El login anónimo se comprueba además contra las aplicaciones publicadas. Ningu
 sustituye OAuth, MFA autenticado, carga real o aceptación clínica de Google.
 Versiones, evidencia, diagnóstico y recuperación:
 `docs/security/google-dev-consumers.md/json`.
+
+### Esquema clínico Google: corte limitado y conservación de identidad compartida
+
+`google-clinical-schema-release.js` admite únicamente plan, copia cifrada y
+aplicación de las 19 DDL fijadas por `googleClinicalSchemaRelease`. Exige las tres
+migraciones históricas de conversiones, fuente limpia, hashes de archivos,
+metadata y huellas de filas sin extraer credenciales en claro. Rechaza planes Meta,
+estados parcialmente migrados y replay. El operador Meta conserva sus nueve DDL;
+la herramienta genérica sigue escribiendo solo en DEV.
+
+Se preservan las ocho tablas anteriores: conexión, cuatro tipos de mapping,
+asignaciones de conexión, asignaciones de activos a clínicas y todos los intentos
+de conversión. Esto incluye asignaciones Meta presentes en la tabla compartida.
+Las relaciones existentes permanecen; dieciséis registros/diarios nuevos quedan
+vacíos y las referencias broker de los mappings no se rellenan automáticamente.
+
+`google-clinical-cut.js` vincula esa política al coordinador compartido de admisión
+SQL, pausas BullMQ con propiedad y observación PM2/systemd. Detiene solo los cuatro
+participantes públicos identificados, mantiene DEV y recupera únicamente procesos
+cuya parada solicitó. No restaura pausas ajenas ni admite jobs durante la barrera.
+El aplicador Google comprueba además ambas unidades WhatsApp detenidas y ausencia
+de otras conexiones al esquema. Una DDL incierta mantiene el diario y exige revisión;
+un fallo al liberar el lock no sustituye la causa original.
+
+El esquema clínico ya pasa las 49 tablas del código preparado y las 27 de cada
+consumidor público anterior. Credenciales, configuración y código público se
+conservan: **no equivale a publicar ni aceptar los consumidores Google nuevos**.
+Acta, prueba de restauración ficticia y recuperación:
+`docs/security/google-clinical-cut.md/json`; madurez vigente en19.
