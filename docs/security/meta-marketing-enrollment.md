@@ -478,6 +478,8 @@ Proveedor ficticio y red exterior bloqueada. No acredita una cohorte real.
 
 Puertos previstos con identidades de certificado cerradas: DEV `8453`, staging
 `8454`. Preparar monitor, publicador y firmante compatibles antes de enrolarlas;
-son doce servidores más el cliente de mantenimiento. El modo vacío no sustituye
+serían doce servicios HTTPS en la misma EC2 de seguridad, cada uno con su
+certificado, más el certificado del cliente de mantenimiento. No son doce
+instancias EC2; los dos servicios Meta todavía no están instalados. El modo vacío no sustituye
 esa renovación ni la prueba de aislamiento. No tocar la CA ni claves existentes.
 Publicación, recursos efectivos y prueba TLS real pendientes de su acta propia.

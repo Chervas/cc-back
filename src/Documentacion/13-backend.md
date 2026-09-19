@@ -11599,7 +11599,8 @@ se registran separadamente en estado19/99; hasta entonces sigue preparado.
 
 
 El registro de renovación preparado admite además `meta-marketing-dev:8453` y
-`meta-marketing-staging:8454`, con máximo de doce servidores. Las parejas nombre/
+`meta-marketing-staging:8454`, con máximo de doce certificados de servicios HTTPS
+alojados en la misma EC2 de seguridad; no son doce máquinas. Las parejas nombre/
 puerto son fijas; no habilita otros destinos en ese rango. El monitor reconoce
 ambas identidades y conserva el rechazo de entradas desconocidas o incompletas.
 Publicar esos lectores antes de añadir los certificados al estado compartido;

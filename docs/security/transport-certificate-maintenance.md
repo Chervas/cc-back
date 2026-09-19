@@ -242,7 +242,8 @@ hook/módulo de recarga. Dependencias, grants, protocolos, claves y estado se
 conservan. Cada reinicio inicial y comprobación duró aproximadamente tres
 segundos. Posteriormente ambos renovaron realmente sin cambiar PID.
 
-El publicador/firmante tiene diez servidores y la identidad de mantenimiento:
+El publicador/firmante cubre los certificados de diez servicios HTTPS alojados en
+la misma EC2 de seguridad, más la identidad del cliente de mantenimiento:
 once estados sanos, unidad root `Result=success` y temporizador activo. Dos
 rechazos de login visuales en DEV, más el del ensayo cuyo capturador agotó el
 plazo esperando animaciones, produjeron tres eventos anónimos. El worker los
@@ -263,13 +264,16 @@ autofirmado. Los nuevos registros ya entregados se conservan siempre.
 
 ### Ampliación preparada para los propietarios Meta (19/09/2026)
 
-Firmante y publicador admiten hasta doce servidores. Añaden únicamente las parejas
+El código preparado de firmante y publicador admite certificados de hasta doce
+servicios HTTPS dentro de la misma EC2 de seguridad; no supone doce máquinas.
+Añade únicamente las parejas
 `meta-marketing-dev:8453` y `meta-marketing-staging:8454`; nombres ajenos o puertos
 intercambiados se rechazan. El monitor reconoce sus etiquetas por entorno y admite
-las trece filas completas (doce servidores y mantenimiento), sin relajar identidad,
+las trece filas completas (doce certificados de servicio y uno del cliente de
+mantenimiento), sin relajar identidad,
 permisos, vigencia o rechazo de ficheros incompletos.
 
-Orden: publicar primero monitor/validadores compatibles, instalar cada servidor y
+Orden: publicar primero monitor/validadores compatibles, instalar cada servicio y
 su clave local, firmar su CSR público conservando la CA, verificar TLS y recursos,
 y enrolar su hoja fijada en publicador/firmante. No registrar una identidad que aún
 no sirve su certificado. Preservar las diez entradas previas y sus pins; las claves
