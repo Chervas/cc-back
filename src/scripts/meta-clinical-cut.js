@@ -10,6 +10,7 @@ const schema=require('../lib/securitySchemaContract');
 const {clinicalCutDatabaseCheck,historicalSql}=require('../lib/clinicalCutDatabaseCheck');
 const {pendingJobFingerprint}=require('../lib/clinicalCutActivity');
 const {observePm2Application,processIdentity}=require('../lib/clinicalCutProcessIdentity');
+const {systemdProcessObservation}=require('../lib/clinicalCutSystemdIdentity');
 const {clinicalCutFailure}=require('../lib/clinicalCutFailure');
 const {runClinicalSchemaCut}=require('../lib/clinicalSchemaCutCoordinator');
 const {acquireClinicalJobRequestCutGate}=require('../lib/clinicalJobRequestCutGate');
@@ -31,16 +32,16 @@ function syncDir(dir){const fd=fs.openSync(dir,'r');try{fs.fsyncSync(fd);}finall
 function save(out,name,value){const fd=fs.openSync(path.join(out,name),'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fs.fsyncSync(fd);}finally{fs.closeSync(fd);}syncDir(out);}
 function secure(file,directory=false){const stat=fs.lstatSync(file);if(stat.isSymbolicLink()||stat.uid!==0||stat.mode&0o077||(directory?!stat.isDirectory():!stat.isFile()))throw Error('clinical_cut_private_artifact_invalid');}
 function valuesForUnit(name){return Object.fromEntries(command('systemctl',['show',name,'--property=MainPID,ActiveState,NRestarts,ExecMainStatus,FragmentPath,DropInPaths,EnvironmentFiles']).split('\n').map(line=>{const i=line.indexOf('=');return[line.slice(0,i),line.slice(i+1)];}));}
-function units(){return unitNames.map(name=>{
+function unitSnapshot(name){
  const v=valuesForUnit(name),files=[v.FragmentPath,...(v.DropInPaths||'').split(' ').filter(Boolean),...(v.EnvironmentFiles||'').split(' ').filter(x=>x.startsWith('/'))];
- const pid=Number(v.MainPID);assert(Number.isInteger(pid)&&pid>=0,'clinical_cut_unit_pid_invalid');
- return{name,pid,active:v.ActiveState,restarts:Number(v.NRestarts),exit:Number(v.ExecMainStatus),identity:pid?processIdentity(pid):null,configuration:files.map(file=>({file,sha256:digest(fs.readFileSync(file))}))};
-});}
+ const observation=systemdProcessObservation(v);
+ return{name,pid:observation.pid,active:v.ActiveState,restarts:Number(v.NRestarts),exit:Number(v.ExecMainStatus),identity:observation.identity,observation,configuration:files.map(file=>({file,sha256:digest(fs.readFileSync(file))}))};
+}
+const units=()=>unitNames.map(unitSnapshot);
 const pm2Rows=()=>JSON.parse(command('sudo',['-n','-u','ubuntu','-H','/usr/bin/pm2','jlist']));
 function inspect(id){
  if(id==='pm2-back-staging'||id==='pm2-gateway')return observePm2Application({rows:pm2Rows(),id,root:id==='pm2-back-staging'?'/home/ubuntu/wt/back-staging':'/home/ubuntu/wt/gateway'});
- const u=units().find(u=>u.name===id);assert(u,'clinical_cut_unknown_participant');
- return{state:u.active==='active'?'running':u.active==='inactive'?'stopped':u.active,pid:u.pid,identity:u.identity};
+ assert(unitNames.includes(id),'clinical_cut_unknown_participant');return unitSnapshot(id).observation;
 }
 function environmentDigest(env){return digest(JSON.stringify(Object.fromEntries(Object.entries(env).filter(([k])=>/^(AUTH_|WHATSAPP_|EMAIL_|META_|GOOGLE_|AI_|BEDROCK_|AWS_|JOBS_|JOB_|RUNTIME_|QUEUE_|REDIS_|DB_|CLINICACLICK_|CREDENTIAL_|INTEGRATION_|SECURITY_|PLATFORM_|SYSTEM_|PORT$)/.test(k)).sort(([a],[b])=>a.localeCompare(b)))));}
 function runtime(name){
@@ -76,7 +77,7 @@ async function run(argv){
  assert(!fs.existsSync(o.dir+'/journal.jsonl'),'clinical_cut_existing_ddl_journal');assert(!fs.existsSync(o.dir+'/control-journal.jsonl'),'clinical_cut_existing_control_journal');
  if(!fs.existsSync(o.out))fs.mkdirSync(o.out,{mode:0o700});assert.equal(fs.realpathSync(o.out),o.out);secure(o.out,true);
  const before={at:new Date().toISOString(),runtimes:['staging','gateway'].map(runtime),units:units(),dev:protectedDev()};
- assert.deepEqual(before.runtimes.map(r=>r.pid),plan.target.processes.map(p=>p.pid));assert(before.units.every(u=>u.active==='active'&&u.restarts===0));
+ assert.deepEqual(before.runtimes.map(r=>r.pid),plan.target.processes.map(p=>p.pid));assert(before.units.every(u=>u.observation.state==='running'&&u.identity&&u.restarts===0));
  assert.deepEqual(before.runtimes.map(r=>r.queuePrefix),['staging','gateway']);
  const db=()=>connect(plan.database),database=options=>clinicalCutDatabaseCheck({connect:db,plan,info,...options});before.database=await database();
  const api=observedEnvironment('staging').env,gateway=observedEnvironment('gateway').env;assert.equal(api.REDIS_URL,gateway.REDIS_URL);
