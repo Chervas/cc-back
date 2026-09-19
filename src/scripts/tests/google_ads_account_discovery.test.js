@@ -128,32 +128,41 @@ test('malformed, failed or incomplete discovery never returns a partial or false
   await assert.rejects(discover({ accessToken: 'scope', maxAccounts: 1, request: async () => ({ resourceNames: ['customers/1234567890', 'customers/2222222222'] }) }), /could not be completed/);
   await assert.rejects(discover({ accessToken: 'scope', maxRequests: 1, request: async () => ({ resourceNames: ['customers/1234567890'] }) }), /could not be completed/);
 });
-test('selection endpoint keeps scope authorization and tokens ahead of discovery, without loading mappings', async () => {
+test('selection endpoint uses guarded inventory and rechecks authorization after discovery', async () => {
   const source = fs.readFileSync(path.resolve(__dirname, '../../routes/oauth.routes.js'), 'utf8');
   const start = source.indexOf("router.get('/google/ads/accounts'");
   const end = source.indexOf('\n});', start) + 4;
   assert.ok(start > 0 && end > start);
-  for (const scenario of ['success', 'unauthenticated', 'no_connection', 'scope_denied', 'forbidden', 'provider_failed']) {
-    let handler; const calls = [];
-    vm.runInNewContext(source.slice(start, end), { router: { get: (path, fn) => { handler = fn; } }, console: { error() {} }, GOOGLE_ADS_SCOPE: 'ads',
-      resolveGoogleRequestConnection: async req => {
-        calls.push('authorize'); assert.equal(req.query.group_id, '28');
-        if (scenario === 'forbidden') throw new Error('forbidden');
-        return { userId: scenario === 'unauthenticated' ? null : 7, connection: scenario === 'no_connection' ? null : { scopes: 'ads' } };
-      }, hasScopeText: () => scenario !== 'scope_denied', ensureGoogleAdsAccess: async () => { calls.push('token'); return { accessToken: 'scope-token' }; },
+  const helper = name => {
+    const begin = source.indexOf('function ' + name + '(');
+    return source.slice(begin, source.indexOf('\n}', begin) + 2);
+  };
+  const discovery = require('../../services/googlePropertyDiscovery.service');
+  for (const scenario of ['success', 'unauthenticated', 'no_connection', 'scope_denied', 'provider_failed', 'revoked_after_read']) {
+    let handler; const calls = []; const guardedRequest = () => assert.fail('The picker stub owns provider dispatch');
+    vm.runInNewContext(helper('sendGooglePropertyDiscoveryError') + '\n' + helper('sendGoogleAdsDiscoveryError') + '\n' + source.slice(start, end), {
+      router: { get: (_path, fn) => { handler = fn; } }, googlePropertyDiscovery: discovery,
+      googleAdsInventory: async req => {
+        calls.push('inventory'); assert.equal(req.query.group_id, '28');
+        const code = { unauthenticated: 'google_discovery_session_required', no_connection: 'google_discovery_no_connection', scope_denied: 'google_discovery_scope_forbidden' }[scenario];
+        if (code) throw Object.assign(Error('FICTITIOUS_SECRET'), { code });
+        return { managed: null, resolved: { scope: {} }, accessToken: 'fictitious-scoped-token', request: guardedRequest,
+          check: async () => { calls.push('recheck'); if (scenario === 'revoked_after_read') throw Object.assign(Error('FICTITIOUS_SECRET'), { code: 'google_discovery_scope_forbidden' }); } };
+      },
       discoverGoogleAdsAccountSelection: async options => {
-        calls.push('discovery'); assert.equal(options.accessToken, 'scope-token');
-        if (scenario === 'provider_failed') throw new Error('sensitive provider response');
+        calls.push('discovery'); assert.equal(options.accessToken, 'fictitious-scoped-token'); assert.equal(options.request, guardedRequest);
+        if (scenario === 'provider_failed') throw Object.assign(Error('FICTITIOUS_SECRET'), { code: 'provider_failed' });
         return { accounts: [{ customerId: '1234567890', isManager: false }], unavailableAccountCount: 1 };
-      } });
-    let status = 200; let body;
-    const res = { status: value => { status = value; return res; }, json: value => { body = value; return res; } };
+      }
+    });
+    let status = 200, body; const headers = {};
+    const res = { set: (key, value) => { headers[key] = value; return res; }, status: value => { status = value; return res; }, json: value => { body = value; return res; } };
     await handler({ query: { view: 'selection', group_id: '28' } }, res);
-    assert.equal(body.success, scenario === 'success');
+    assert.equal(headers['Cache-Control'], 'private, no-store'); assert.equal(body.success, scenario === 'success');
+    assert.equal(status, { success: 200, unauthenticated: 401, no_connection: 404, scope_denied: 403, provider_failed: 503, revoked_after_read: 403 }[scenario]);
     if (scenario === 'success') { assert.equal(body.accounts.length, 1); assert.equal(body.unavailableAccountCount, 1); }
-    if (scenario === 'success' || scenario === 'provider_failed') assert.deepEqual(calls, ['authorize', 'token', 'discovery']);
-    else assert.deepEqual(calls, ['authorize']);
-    if (scenario === 'provider_failed') { assert.equal(status, 502); assert.equal(body.error, 'google_ads_discovery_incomplete'); }
-    assert.ok(!JSON.stringify(body).includes('sensitive'));
+    else { assert.equal(body.accounts, undefined); assert(!JSON.stringify(body).includes('FICTITIOUS_SECRET')); }
+    assert.deepEqual(calls, ['success', 'revoked_after_read'].includes(scenario) ? ['inventory', 'discovery', 'recheck']
+      : scenario === 'provider_failed' ? ['inventory', 'discovery'] : ['inventory']);
   }
 });

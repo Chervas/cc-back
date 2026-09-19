@@ -4,7 +4,7 @@ const http = require('node:http'); const express = require('express'); const jwt
 const { randomBytes } = require('node:crypto'); const sequelize = require('sequelize');
 const { createBusinessProfileDiscovery, ERROR_CODES, CONFLICT_CODES } = require('../../services/businessProfileDiscovery.service');
 const { createBusinessProfileBroker } = require('../../services/businessProfileBroker.service');
-const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.fixture');
+const { loadDiscoverySource, unusedMetaSurfaceDependencies } = require('./fixtures/business_profile_discovery.fixture');
 const { connectionForTestServer } = require('./fixtures/campaign_offline_runtime.cjs');
 const clone = value => JSON.parse(JSON.stringify(value));
 const record = { external_location_id: '456', connection_ref: 'connection:test', asset_ref: 'gbp:123:456', clinica_id: 71, google_connection_id: 81 };
@@ -90,6 +90,7 @@ async function routeFixture(t, options = {}) {
   sessionService.verify = token => { if (state.revoked) throw new jwt.JsonWebTokenError('revoked'); return verify(token); };
   const auth = loadDiscoverySource('routes/auth.middleware.js', { '../services/accessSession.service': sessionService });
   const router = loadDiscoverySource('routes/oauth.routes.js', {
+    ...unusedMetaSurfaceDependencies(),
     express, sequelize, '../../models': models, './auth.middleware': auth,
     '../services/accessSession.service': sessionService,
     // This fixture models an installation with no OAuth cohort binding.

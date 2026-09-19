@@ -48,12 +48,16 @@ test('captured subject cannot be replaced before loading credentials; unreadable
 });
 test('runtime preserves direct clinic grant selection and rejects ambiguity before credentials', async () => {
   const f = fixture(); const account = { googleConnectionId: 81, clinicaId: 71, customerId: '123', loginCustomerId: '456' };
+  let inspections = 0;
   const input = { clinicId: 71, groupId: 7, customerId: '123', credentials: f.credentials,
+    // This unit covers legacy selection; broker scope/registry validation has its
+    // own suite. Keep inspection explicit and avoid the process-wide SQL models.
+    broker: { prepare: async selected => { assert.equal(selected, account); inspections++; return null; } },
     accountModel: { findAll: async () => [{ googleConnectionId: 82, grupoClinicaId: 7 }, account] } };
   assert.equal((await runtime.resolveScopedGoogleAdsRuntime(input)).connection.id, 81);
   input.accountModel.findAll = async () => [account, { ...account, googleConnectionId: 82 }]; const reads = f.state.loads;
   await assert.rejects(runtime.resolveScopedGoogleAdsRuntime(input), { code: 'GOOGLE_ADS_ACCOUNT_MAPPING_AMBIGUOUS' });
-  assert.equal(f.state.loads, reads);
+  assert.equal(f.state.loads, reads); assert.equal(inspections, 1);
   f.mark(); input.accountModel.findAll = async () => [account];
   await assert.rejects(runtime.resolveScopedGoogleAdsRuntime(input), { code: 'google_oauth_legacy_closed' });
 });
