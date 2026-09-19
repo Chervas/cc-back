@@ -10864,6 +10864,29 @@ activos del ámbito exacto; consulta SQL, sin llamar al broker. La operación ma
 separada se describe abajo. Sin migración de credenciales ni cohorte habilitada. QA, carga y recuperación en
 `docs/security/meta-settings-metadata.md`; madurez en 19 y evidencia/corte en 99.
 
+El lector también admite las filas canónicas de grupo (`clinicaId=null`,
+`assignmentScope=group`): solo al solicitar explícitamente ese grupo y autorizar
+todas sus clínicas. Proyecta una tarjeta con `scope.type/key/id/clinicCount`,
+`grupo.id/nombre` y `clinica:null`. Cada activo aparece una vez, sin copiarlo por
+sede ni usar una clínica representativa. La consulta de clínica no se amplía a
+grupo. Los mapeos históricos por clínica conservan su tarjeta, incluso si tienen
+marcador de grupo coherente con la pertenencia de esa clínica; cada activo conserva
+`assignmentScope/groupId`. No se convierten en propiedad canónica ni se migran.
+
+El backend calcula `totalAssets`, `totalMappings`, `totalGroups` y la unión de
+clínicas cubiertas en `totalClinics`; son cantidades de metadatos guardados, no
+prueba de acceso remoto. Ajustes consume esa proyección, sin reagrupar por clínica
+ni descartar filas con `clinica:null`. La tarjeta canónica no usa el menú legacy
+de edición/borrado por clínica; los controles gestionados conservan su ámbito.
+Texto de grupo completo en ES/CAT/EN, comprobado en escritorio/móvil.
+
+Límite de 1.000 clínicas y 1.000 mappings por respuesta; consulta acotada y una
+lectura adicional del nombre de grupo, sin I/O externo. Cambios de ACL, miembros,
+sesión o conexión durante la consulta impiden devolver una mezcla. Campos de
+propiedad incoherentes rechazan toda la respuesta. Este contrato no cambia los
+guards de broker, la pausa, primarias, grants, DDL o planificación. Publicar API/UI
+juntas mediante candidato selectivo; el lector antiguo omite las filas canónicas.
+
 
 ### Comprobación manual Meta desde CRM y registro v20 (preparado, 19/09/2026)
 
@@ -11354,9 +11377,9 @@ legacy compartida nunca se convierte ni se vacía; requiere migración revisada.
 La reserva no crea mappings o grants clínicos. El servicio/worker y escritor final
 preparados se describen en el apartado siguiente: repiten la autoridad y comprueban
 primarias/shares al asignar IDs. Para grupos crean una fila canónica por activo,
-conservando su ámbito completo. Falta adaptar los lectores de metadatos a esa
-representación antes de publicar, sin multiplicar filas por sede ni elegir
-implícitamente una nueva primaria.
+conservando su ámbito completo. El lector local de metadatos y Ajustes ya admiten
+esa representación en fuente DEV; publicarlos juntos, sin multiplicar filas por
+sede ni elegir implícitamente una nueva primaria.
 
 La reserva y sus rechazos están probados en MySQL/HTTPS/SQLite aislados, con
 proveedores ficticios; dos solicitudes simultáneas conservan una solicitud,
@@ -11437,7 +11460,7 @@ entre procesos, controles de permisos antes/después del I/O y backoff hasta una
 hora. Preparado espera 30 s; activo se comprueba cada cinco minutos; incertidumbre
 de envío consulta a los 60 s. Estos son intervalos del diario, no un job ya instalado
 ni una garantía de recursos/latencia. Cifras y límites en39; pruebas y recuperación
-en el runbook Meta y99. Pendientes API/UI, metadatos de grupo, planificación,
+en el runbook Meta y99. Pendientes API/UI de selección, planificación,
 compatibilidad AWS v24 y aceptación con proveedor/titular reales.
 
 ### Compatibilidad de auditoría AWS v19 publicada (19/09/2026)

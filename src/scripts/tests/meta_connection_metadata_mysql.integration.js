@@ -25,6 +25,11 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
     await models.ClinicMetaAsset.create({id,metaConnectionId:id,clinicaId:id===1?59:71,assignmentScope:'clinic',assetType:'ad_account',metaAssetId:'act_'+(1000000+id),metaAssetName:'Cuenta ficticia '+(id===1?'A':'B'),pageAccessToken:'SENTINEL_PAGE',waAccessToken:'SENTINEL_WA',additionalData:{access_key:'SENTINEL_OTHER'}});
   }
   await models.MetaConnectionAssignment.create({scopeKey:'group:5',assignmentScope:'group',grupoClinicaId:5,metaConnectionId:1,status:'active'});
+  await models.GrupoClinica.create({id_grupo:6,nombre_grupo:'Grupo ajeno'});
+  await models.ClinicMetaAsset.bulkCreate([
+    {id:3,metaConnectionId:1,clinicaId:null,grupoClinicaId:5,assignmentScope:'group',assetType:'ad_account',metaAssetId:'3000003',metaAssetName:'Cuenta de grupo ficticia'},
+    {id:4,metaConnectionId:1,clinicaId:null,grupoClinicaId:6,assignmentScope:'group',assetType:'ad_account',metaAssetId:'3000004',metaAssetName:'SENTINEL_FOREIGN_GROUP'}
+  ]);
   let tokenReads=0, mappingReads=0, hook=null, failSql=false, queries=0;
   sql.addHook('beforeQuery',()=>queries++);
   models.MetaConnection.addHook('beforeFind',opts=>{ if (!opts.attributes || opts.attributes.includes('accessToken')) tokenReads++; });
@@ -68,6 +73,23 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
     await models.UsuarioClinica.update({estado_invitacion:'aceptada'},{where:{id_clinica:71}});
     assert.equal((await get('/oauth/meta/connection-status?group_id=5')).status,200);
     report.checks.push('Group read requires access to every clinic, not a representative clinic');
+    const groupPath='/oauth/meta/mappings?group_id=5',groupBaseline=queries,groupAt=Date.now(),groupAssets=await get(groupPath);
+    report.groupRead={queries:queries-groupBaseline,elapsedMs:Date.now()-groupAt};
+    assert.equal(groupAssets.status,200);assert.equal(groupAssets.body.totalMappings,2);assert.equal(groupAssets.body.totalClinics,2);assert.equal(groupAssets.body.totalGroups,1);
+    const card=groupAssets.body.mappings.find(v=>v.scope.type==='group');assert.equal(card.clinica,null);assert.deepEqual(card.grupo,{id:5,nombre:'Grupo ficticio'});
+    assert.deepEqual(card.scope,{type:'group',id:5,key:'group:5',clinicCount:2});assert.equal(card.totalAssets,1);assert.equal(card.assets.ad_accounts[0].id,3);
+    assert(!JSON.stringify(groupAssets).includes('SENTINEL'));assert(!(await get(mappings)).body.mappings.some(v=>v.scope.type==='group'));
+    hook=()=>models.UsuarioClinica.update({estado_invitacion:'pendiente'},{where:{id_clinica:71}});
+    const denied=await get(groupPath);assert.equal(denied.status,403);assert.equal(denied.body.mappings,undefined);
+    await models.UsuarioClinica.update({estado_invitacion:'aceptada'},{where:{id_clinica:71}});
+    hook=()=>models.Clinica.update({grupoClinicaId:6},{where:{id_clinica:71}});
+    assert.equal((await get(groupPath)).status,409);await models.Clinica.update({grupoClinicaId:5},{where:{id_clinica:71}});
+    await models.ClinicMetaAsset.update({clinicaId:59},{where:{id:3}});
+    const legacy=await get(mappings);assert.equal(legacy.status,200);assert.equal(legacy.body.totalMappings,2);
+    assert.equal(legacy.body.mappings[0].assets.ad_accounts.find(v=>v.id===3).assignmentScope,'group');
+    await models.ClinicMetaAsset.update({grupoClinicaId:6},{where:{id:3}});assert.equal((await get(groupPath)).status,503);
+    await models.ClinicMetaAsset.update({clinicaId:null,grupoClinicaId:5},{where:{id:3}});
+    report.checks.push('Canonical group mapping projected once with explicit group identity and whole-clinic count; clinic view never widens to group, foreign group excluded and ambiguous ownership or concurrent ACL/membership change discards all metadata');
     hook=()=>models.UsuarioClinica.update({estado_invitacion:'pendiente'},{where:{id_clinica:59}});
     assert.equal((await get(mappings)).status,403);await models.UsuarioClinica.update({estado_invitacion:'aceptada'},{where:{id_clinica:59}});
     report.checks.push('Membership revoked during mapping SELECT discards the entire response');
@@ -91,6 +113,19 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
     const durations=[],startQueries=queries;
     for(let i=0;i<8;i++){const t=Date.now();assert.equal((await get(status)).status,200);assert.equal((await get(mappings)).status,200);durations.push(Date.now()-t);}
     report.repeatedOpens={count:8,queries:queries-startQueries,minMs:Math.min(...durations),maxMs:Math.max(...durations)};
+    const extraClinics=Array.from({length:998},(_,i)=>1000+i);
+    await models.Clinica.bulkCreate(extraClinics.map(id=>({id_clinica:id,nombre_clinica:'Clínica de capacidad ficticia',grupoClinicaId:5,estado_clinica:true})));
+    await models.UsuarioClinica.bulkCreate(extraClinics.map(id_clinica=>({id_usuario:91002,id_clinica,rol_clinica:role,estado_invitacion:'aceptada'})));
+    await models.ClinicMetaAsset.bulkCreate(Array.from({length:99},(_,i)=>({id:1000+i,metaConnectionId:1,clinicaId:null,grupoClinicaId:5,assignmentScope:'group',assetType:'ad_account',metaAssetId:String(4000000+i),metaAssetName:'Cuenta de grupo de capacidad'})));
+    const capacityQueries=queries,capacityAt=Date.now(),capacity=await get(groupPath);
+    report.groupCapacity={clinics:1000,groupAssets:100,queries:queries-capacityQueries,elapsedMs:Date.now()-capacityAt,bytes:Buffer.byteLength(JSON.stringify(capacity.body))};
+    assert.equal(capacity.status,200);assert.equal(capacity.body.totalMappings,101);assert.equal(capacity.body.totalClinics,1000);
+    const groupCard=capacity.body.mappings.find(v=>v.scope.type==='group');assert.equal(groupCard.totalAssets,100);assert.equal(groupCard.scope.clinicCount,1000);
+    assert.equal(capacity.body.mappings.length,2);assert(report.groupCapacity.bytes<50000);
+    await models.UsuarioClinica.destroy({where:{id_clinica:{[require('sequelize').Op.in]:extraClinics}}});
+    await models.Clinica.destroy({where:{id_clinica:{[require('sequelize').Op.in]:extraClinics}}});
+    await models.ClinicMetaAsset.destroy({where:{id:{[require('sequelize').Op.gte]:1000}}});
+    report.checks.push('100 canonical group assets across 1,000 authorized clinics produce 100 group entries once, not 100,000 expanded assets; one bounded metadata response without provider I/O');
     if(process.env.META_METADATA_VISUAL==='1') await require('./fixtures/meta_connection_metadata_visual.fixture')({app,server,report,token:()=>token,reads:()=>mappingReads,models,gates});
     assert.equal(tokenReads,0);report.tokenSelects=tokenReads;report.mappingReads=mappingReads;
     report.pool={inUse:sql.connectionManager.pool.using,waiting:sql.connectionManager.pool.waiting};

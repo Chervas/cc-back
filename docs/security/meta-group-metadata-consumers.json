@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "71f9a8dbb18c03fdd5dd7319401ade8b6ef1c620",
+    "front": "5de0cc8df0a1a1ef782b12e3a4aa759c99fbf64c"
+  },
+  "includesWorkingChanges": true,
+  "scope": "Canonical group metadata and Settings group card without clinic expansion; whole explicit group authorization and preservation of legacy per-clinic metadata. No selection routes/UI, scheduling, provider activation, operational DDL or deployment. Changed-source inventory only.",
+  "back": {
+    "src/scripts/tests/fixtures/meta_connection_metadata_visual.fixture.js": "3a2744de193b279178c4eda1672a846ba45dd71d501d009948aec28bef220f54",
+    "src/scripts/tests/fixtures/meta_settings_visual_host.fixture.js": "d597a53a31b655b73262deb3990e5853948bd90d7325c6b8c442167e2396a4a5",
+    "src/scripts/tests/meta_connection_metadata_mysql.integration.js": "aa73ad7abe7e7d3985864be6d3d2c9cff78c371c3c163a75ffa0bfa042f8292f",
+    "src/services/metaConnectionMetadata.service.js": "3790c5edfe373334d0d3b312d408cf648ac7b106c37897a0e842b15dfa6ec829"
+  },
+  "front": {
+    "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.html": "986fed43ab9a2eac175520ccb0f1b151d332b5b25fcf41bcd138f7f580cb4b74",
+    "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.ts": "1e44c495e831e3db443ea50330825be93f61254360cfe72550f3116804eb802f",
+    "src/assets/i18n/cat.json": "400ce12dfb085d47cac073ab4c57fbd34dbbdd3de68ec1fb0153c5630602bf90",
+    "src/assets/i18n/en.json": "bc4f8b61df588e9e667079c1d9741fd5200bb41d96f06331fa7559eeba758833",
+    "src/assets/i18n/es.json": "67079f16ee4b76c87dc19762b9244a722c7ed829ae65cd36b43306a0786ade33"
+  },
+  "qa": {
+    "metadataGroups": 11,
+    "accessRegressionGroups": 10,
+    "httpTests": 6,
+    "visualScreenshots": 7,
+    "visualInspected": [
+      "desktop-group",
+      "mobile-group",
+      "permission-revoked"
+    ],
+    "angularBuild": "1afeabdaef386a63",
+    "angularBuildMs": 143824,
+    "syntaxFiles": 4,
+    "providerReal": false,
+    "deployed": false
+  },
+  "pending": [
+    "Selection/confirmation API/UI and singleton/scheduled worker",
+    "Selective audit v24 compatibility, exact enrollment migrations and selective publication",
+    "Real provider/titular and authenticated public acceptance"
+  ],
+  "evidence": "qa-evidence/security-resume-20260917/meta-group-metadata-20260919/"
+}

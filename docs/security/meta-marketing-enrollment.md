@@ -4,7 +4,7 @@ Preparado sobre backend `3f5d61f5`, 19/09/2026. No desplegado ni aceptado con
 proveedor real. Contrato canónico en
 [13-backend](../../src/Documentacion/13-backend.md#selección-y-activación-meta-dentro-del-broker-preparado-19092026).
 El consumidor SQL/worker y su evento humano v24 están preparados; alcance vigente
-en «Consumidor transaccional» al final. Faltan API/UI, metadatos de grupo y planificación.
+en «Consumidor transaccional» al final. Faltan API/UI de selección y planificación; metadatos de grupo preparados en el runbook de Ajustes.
 El inventario CRM ya incorpora una revisión local orientativa, descrita al final;
 no es ese escritor ni una reserva de activos.
 
@@ -260,8 +260,8 @@ El gate `META_MARKETING_ENROLLMENT_ENABLED` está apagado por defecto; todavía 
 rutas, bootstrap ni planificación del worker preparado. No activarlo por disponer
 de esta fuente. Confirmación, escritor y conciliación se detallan a continuación;
 la UI completa y su aceptación siguen pendientes.
-Para grupos, conservar una fila canónica por activo/grupo y adaptar sus lectores
-antes de publicar; no expandir a una fila por sede ni cambiar primarias implícitas.
+Para grupos, conservar una fila canónica por activo/grupo y publicar sus lectores
+compatibles preparados; no expandir a una fila por sede ni cambiar primarias implícitas.
 
 El codec v24 tiene fases durables separadas y `result_part` por fase. El visor
 muestra pendientes con etiqueta explícita y cantidades/IDs técnicos, sin tokens
@@ -332,8 +332,8 @@ de denegaciones de acceso, conservando el outcome técnico del evento v22.
 
 Publicación futura: DDL Meta04–08 y luego09 propietario,10 marcas,11 índice antes
 del código; incluso el lector/cancelación OAuth con altas OFF necesitan ese
-esquema. Publicar AWS compatible v24 antes del productor. Adaptar metadatos de grupo
-y completar API/UI/job; no publicar toda la rama DEV. Las migraciones09/10 rechazan
+esquema. Publicar AWS compatible v24 antes del productor. Incluir metadatos de grupo
+y UI de Ajustes preparados; completar API/UI/job de selección; no publicar toda la rama DEV. Las migraciones09/10 rechazan
 inversa con propiedad/marcas pobladas. La11 solo se retira después de detener o
 sustituir consumidores que consulten su columna; no elimina diario ni histórico.
 Mantener guard de propiedad mientras existan bindings nuevos. Preservar lectores,

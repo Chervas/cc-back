@@ -25,6 +25,15 @@ module.exports=async({app,server,report,token,reads,models,gates})=>{
       assert.equal(metaCalls.length,priorCalls);
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
       await page.screenshot({path:path.join(output,view.name+'-settings.png')});shots.push(view.name+'-settings');
+      await page.click('#group');await ready();await page.waitForSelector('[data-meta-scope="group:5"]');
+      assert.equal(await page.$$eval('[data-meta-scope="group:5"]',els=>els.length),1);
+      const group=await page.$('[data-meta-scope="group:5"]');await group.evaluate(e=>e.scrollIntoView({block:'center'}));
+      const groupText=await group.evaluate(e=>e.innerText);assert.match(groupText,/Grupo ficticio/);assert.match(groupText,/Grupo completo · 2 clínicas/);
+      assert.match(groupText,/Cuenta de grupo ficticia/);assert.equal(await group.$$eval('[mat-icon-button]',els=>els.length),0);
+      const dto=await page.evaluate(()=>window.QA_COMPONENT.settings.scopedMetaMappings.find(v=>v.scope.type==='group'));
+      assert.equal(dto.clinica,null);assert.equal(dto.totalAssets,1);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+      await page.screenshot({path:path.join(output,view.name+'-group.png')});shots.push(view.name+'-group');
+      await page.click('#clinic-a');await ready();assert.equal(await page.$('[data-meta-scope="group:5"]'),null);
     }
     await page.setViewport({width:1440,height:1000});await page.goto(base,{waitUntil:'networkidle0'});await ready();
     const gate={path:'/oauth/meta/connection-status',clinic:'59'};gates.push(gate);
@@ -50,8 +59,9 @@ module.exports=async({app,server,report,token,reads,models,gates})=>{
     assert(await page.$('[data-qa="meta-mapping-unavailable"]'));assert.equal(await page.$('mat-stepper'),null);
     await page.evaluate(()=>window.QA_COMPONENT.mapping.connectMeta());await page.screenshot({path:path.join(output,'selector-paused.png')});shots.push('selector-paused');
     const paused=await page.evaluate(()=>{try{window.QA_ACCOUNT_STEP({connected:true,reason:'meta_security_quarantine'});return null;}catch(e){return window.QA_WORKSPACE_MESSAGE(e);}});assert.match(paused,/Meta Ads está en pausa/);
-    assert(metaCalls.every(p=>/\/(connection-status|mappings)$/.test(p)));assert.deepEqual(writes,[]);assert.deepEqual(blocked,[]);assert.deepEqual(errors,[]);
+    assert(metaCalls.every(p=>/^\/(api\/)?oauth\/meta\/(connection-status|mappings|marketing-disconnection|marketing\/authorization)$/.test(p)),JSON.stringify([...new Set(metaCalls)]));
+    assert.deepEqual(writes,[]);assert.deepEqual(blocked,[]);assert.deepEqual(errors,[]);
     report.visual={shots,metaRequests:metaCalls.length,errors,writes,blocked,actualComponents:['SettingsConnectedAccountsComponent','AssetMappingComponent'],workspace:'actual decision model; no full workspace rendering'};
   } catch(error) {fs.writeFileSync(path.join(output,'failure.txt'),error.stack);if(browser){const pages=await browser.pages();await pages.at(-1)?.screenshot({path:path.join(output,'failure.png'),fullPage:true});}throw error;
-  } finally {if(browser)await browser.close();fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({shots,errors,writes,blocked},null,2));}
+  } finally {if(browser)await browser.close();fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({shots,errors,writes,blocked,metaCalls},null,2));}
 };
