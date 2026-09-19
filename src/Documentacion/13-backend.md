@@ -11995,6 +11995,19 @@ sustituye OAuth, MFA autenticado, carga real o aceptación clínica de Google.
 Versiones, evidencia, diagnóstico y recuperación:
 `docs/security/google-dev-consumers.md/json`.
 
+La composición para el API público toma su propia release como base. Conserva
+autenticación, sesiones, motor de flujos, WhatsApp, transporte TLS y configuración
+de colas publicados. Incorpora las dependencias completas de los consumidores
+Google y sus controles de credenciales, sin montar rutas nuevas del workspace
+general de campañas. El catálogo candidato conserva las 42 tareas públicas y
+añade cinco conciliadores Google sujetos a sus gates; no adopta automáticamente
+el catálogo completo de DEV. Además del contrato de seguridad, se comprueban las
+columnas de los modelos de caché y configuración ya existentes que utiliza.
+Una composición del API no acredita la del gateway ni la del frontend: los tres
+consumidores y el recorrido autenticado deben verificarse antes de cerrar la
+identidad Google compartida. Estado de preparación y recuperación en
+`docs/security/google-public-consumers.md`.
+
 ### Esquema clínico Google: corte limitado y conservación de identidad compartida
 
 `google-clinical-schema-release.js` admite únicamente plan, copia cifrada y
