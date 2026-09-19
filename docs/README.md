@@ -49,6 +49,12 @@ sincroniza el espejo frontend. Este índice no mantiene otro roadmap ni diario.
 - [Puente de alta WhatsApp: gateway, MFA y broker](security/whatsapp-onboarding-gateway.md).
 - [Interfaz de autorización exclusiva de WhatsApp](security/whatsapp-onboarding-ui.md).
 
+### Meta no WhatsApp
+
+- [Publicación selectiva de consumidores y recuperación](security/meta-clinical-publication.md).
+- [Identidades cliente, permiso de red DEV y recuperación](security/meta-client-identities.md).
+- [Autorización OAuth y límites del broker](security/meta-marketing-oauth.md).
+
 ### Auditoría y cifrado
 
 - [Incidente de login: causa y recuperación](security/login-mysql-cache-incident.md).

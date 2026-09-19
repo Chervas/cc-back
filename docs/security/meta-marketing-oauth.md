@@ -1,13 +1,14 @@
 # OAuth Meta: candidato de autorización nuevo
 
-> Estado 19/09/2026 10:15 UTC: compatibilidad de auditoría AWS v1–v24 publicada y
-> verificada; el consumidor de este documento sigue pendiente de publicación y
-> aceptación real. Conservar lector v24 en recuperación. Detalle y evidencia en
-> [runbook de auditoría](audit-reader-view-migration.md).
+> Estado vigente 19/09/2026: runtime AWS vacío instalado y consumidores publicados
+> en DEV/CRM/gateway con gates OFF. [Publicación](meta-clinical-publication.md) e
+> [identidades cliente preparadas](meta-client-identities.md). La autorización del
+> titular y aceptación real siguen pendientes. Conservar lector de auditoría v24
+> en recuperación; [runbook](audit-reader-view-migration.md).
 
 Preparación del 19/09/2026. Broker base `a1478095`; ampliación CRM/UI sobre
-ese backend y frontend `529b6017`, todavía sin despliegue.
-No desplegada. Contrato canónico primero en
+ese backend y frontend `529b6017`, sin despliegue en aquella preparación inicial.
+El corte publicado posterior se enlaza arriba. Contrato canónico primero en
 [13-backend](../../src/Documentacion/13-backend.md#oauth-meta-candidato-nuevo-dentro-del-broker-preparado-19092026).
 
 El callback legacy sigue intercambiando y guardando tokens en MySQL. Este corte

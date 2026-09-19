@@ -1,6 +1,10 @@
 # Lecturas Meta no WhatsApp desde el vault
 
-Preparado el 19/09/2026. No desplegado ni con cohorte real. El corte posterior
+Estado vigente: el runtime OAuth/selección está instalado vacío en AWS y los
+consumidores publicados con gates OFF; no hay cohorte clínica real. Ver
+[publicación](meta-clinical-publication.md) e [identidades cliente](meta-client-identities.md).
+El runtime de lectura estática descrito abajo no se desplegó como otro servicio;
+las lecturas se integran en el propietario OAuth/selección. El corte posterior
 [CRM y comprobación manual](meta-crm-broker.md) añade un consumidor preparado;
 este documento conserva el contrato y QA de la base del broker. Contrato canónico en [13-backend](../../src/Documentacion/13-backend.md#broker-de-lecturas-meta-no-whatsapp-preparado-19092026).
 La contención no WhatsApp y las pausas clínicas permanecen. WhatsApp conserva

@@ -11923,3 +11923,26 @@ al final; rutas y bundles anteriores conservados. Login anónimo real CRM/DEV
 en1440/390px, cuatro capturas revisadas, sin errores JS/5xx ni POST vacío.
 No equivale a MFA autenticado, conexión Meta real ni aceptación de Ajustes.
 Acta, manifiesto, diagnóstico y recuperación: `docs/security/meta-clinical-publication.md/json`.
+
+
+### Identidades cliente Meta y acceso de red DEV
+
+`prepare-meta-client-identities.cjs` prepara ocho principales Ed25519 distintos,
+cuatro por entorno: lector, OAuth/alta, control OAuth/alta y control de activos.
+DEV reparte claves entre API UID 998 y worker UID 996: la API no recibe control de
+activos y el worker no recibe lector. OAuth tiene dos copias del mismo principal,
+propiedad de cada consumidor. Staging/gateway comparten UID 1000 y las cuatro
+claves: no se afirma aislamiento entre esos procesos públicos.
+
+Archivos privados 0600, CA fijada por huella y verificación de propietario,
+permisos, enlaces y correspondencia criptográfica. El primer preparado es
+idempotente; estados parciales o alterados se conservan y rechazan sin regenerar.
+Borradores root separados del entorno activo, nueve gates OFF; preparar una
+identidad no le concede permisos en la política AWS ni migra una clínica.
+
+La API DEV tiene una excepción de salida exacta a 13.39.100.55:8453, junto a las
+anteriores de SQL/Redis DEV y WhatsApp. 8454 continúa rechazado. El worker conserva
+su red de correo/auditoría: su exclusión en esta fase es de archivos/firmas.
+Las sondas del cliente real validan TLS y rechazo de claves sin autoridad, no
+OAuth del titular ni carga de proveedor. Operación, evidencia y recuperación en
+`docs/security/meta-client-identities.md/json`; estado central 19 y arquitectura 31.

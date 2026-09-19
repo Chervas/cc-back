@@ -1,0 +1,356 @@
+{
+  "version": 1,
+  "status": "local_identities_and_dev_egress_prepared_not_activated",
+  "at": "2026-09-19T16:55:27.654098+00:00",
+  "sourceCommit": "06e4ccee",
+  "principals": 8,
+  "privateCopies": 10,
+  "unitTests": {
+    "observedAt": "2026-09-19T16:44:02.141490+00:00",
+    "command": "sudo env META_IDENTITY_ROOT_TEST=1 node24 --test ops/security/test-meta-client-identities.cjs",
+    "exitCode": 0,
+    "tests": 6,
+    "passed": 6,
+    "failed": 0,
+    "durationMs": 1902.333268,
+    "source": "Recorded from terminal tool result dacf44; no simulated result",
+    "scope": "Real local filesystem, distinct UIDs998/996/1000, real Ed25519 sign/verify, first install/idempotence/partial preservation and tamper rejection; own temporary fixture only",
+    "files": {
+      "ops/security/prepare-meta-client-identities.cjs": "eba15af8440f470f9492bf39fd99303d55d53fc37b7f4800dc162240aa322ea2",
+      "ops/security/test-meta-client-identities.cjs": "a0a8eed6dc8b1cd5e1e1492efd5d426008e5e8c259d4a5c09342b1d11244bff5",
+      "ops/security/clinicaclick-dev-firewall": "9061d6c62f02f4b75b2e3de8cc501c371cf94bb22013d6bdde4dd42e478a60f6"
+    }
+  },
+  "firewall": {
+    "at": "2026-09-19T16:50:37.188671+00:00",
+    "status": "applied",
+    "ipv4": "-N CC_DEV_EGRESS_V1\n-A CC_DEV_EGRESS_V1 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN\n-A CC_DEV_EGRESS_V1 -d 127.0.0.1/32 -p tcp -m tcp --dport 3306 -j RETURN\n-A CC_DEV_EGRESS_V1 -d 127.0.0.1/32 -p tcp -m tcp --dport 6384 -j RETURN\n-A CC_DEV_EGRESS_V1 -d 13.39.100.55/32 -p tcp -m tcp --dport 8447 -j RETURN\n-A CC_DEV_EGRESS_V1 -d 13.39.100.55/32 -p tcp -m tcp --dport 8453 -j RETURN\n-A CC_DEV_EGRESS_V1 -j REJECT --reject-with icmp-port-unreachable\n",
+    "ipv6Unchanged": true,
+    "outputUnchanged": true,
+    "scriptSha256": "9061d6c62f02f4b75b2e3de8cc501c371cf94bb22013d6bdde4dd42e478a60f6",
+    "restart": false,
+    "flush": false
+  },
+  "transportProbes": [
+    {
+      "at": "2026-09-19T16:50:47.805Z",
+      "actor": "dev-api",
+      "uid": 998,
+      "stage": "after",
+      "checks": [
+        {
+          "file": "/etc/clinicaclick-meta-clients-v1/dev-worker/asset-control.pem",
+          "result": "EACCES"
+        },
+        {
+          "file": "/etc/clinicaclick-meta-clients-v1/staging/reader.pem",
+          "result": "EACCES"
+        },
+        {
+          "file": "/etc/clinicaclick-meta-clients-v1/drafts/dev-api.env.pending",
+          "result": "EACCES"
+        },
+        {
+          "role": "reader",
+          "port": 8453,
+          "result": "invalid_signature",
+          "ms": 122
+        },
+        {
+          "role": "reader",
+          "port": 8454,
+          "result": "broker_unavailable",
+          "ms": 6
+        },
+        {
+          "host": "127.0.0.1",
+          "port": 6379,
+          "result": "ECONNREFUSED"
+        },
+        {
+          "host": "1.1.1.1",
+          "port": 443,
+          "result": "ECONNREFUSED"
+        },
+        {
+          "role": "reader",
+          "port": 8453,
+          "result": "invalid_signature",
+          "ms": 14
+        },
+        {
+          "role": "oauth-gateway",
+          "port": 8453,
+          "result": "invalid_signature",
+          "ms": 11
+        },
+        {
+          "role": "oauth-control",
+          "port": 8453,
+          "result": "invalid_signature",
+          "ms": 15
+        }
+      ],
+      "providerAcceptance": false,
+      "flagsConfigured": false
+    },
+    {
+      "at": "2026-09-19T16:50:47.778Z",
+      "actor": "dev-worker",
+      "uid": 996,
+      "stage": "after",
+      "checks": [
+        {
+          "file": "/etc/clinicaclick-meta-clients-v1/dev-api/reader.pem",
+          "result": "EACCES"
+        },
+        {
+          "file": "/etc/clinicaclick-meta-clients-v1/staging/reader.pem",
+          "result": "EACCES"
+        },
+        {
+          "file": "/etc/clinicaclick-meta-clients-v1/drafts/dev-worker.env.pending",
+          "result": "EACCES"
+        },
+        {
+          "role": "oauth-gateway",
+          "port": 8453,
+          "result": "invalid_signature",
+          "ms": 118
+        },
+        {
+          "role": "oauth-control",
+          "port": 8453,
+          "result": "invalid_signature",
+          "ms": 10
+        },
+        {
+          "role": "asset-control",
+          "port": 8453,
+          "result": "invalid_signature",
+          "ms": 12
+        }
+      ],
+      "providerAcceptance": false,
+      "flagsConfigured": false
+    },
+    {
+      "at": "2026-09-19T16:50:47.791Z",
+      "actor": "staging",
+      "uid": 1000,
+      "stage": "after",
+      "checks": [
+        {
+          "file": "/etc/clinicaclick-meta-clients-v1/dev-api/reader.pem",
+          "result": "EACCES"
+        },
+        {
+          "file": "/etc/clinicaclick-meta-clients-v1/dev-worker/asset-control.pem",
+          "result": "EACCES"
+        },
+        {
+          "file": "/etc/clinicaclick-meta-clients-v1/drafts/staging.env.pending",
+          "result": "EACCES"
+        },
+        {
+          "role": "reader",
+          "port": 8454,
+          "result": "invalid_signature",
+          "ms": 109
+        },
+        {
+          "role": "oauth-gateway",
+          "port": 8454,
+          "result": "invalid_signature",
+          "ms": 10
+        },
+        {
+          "role": "oauth-control",
+          "port": 8454,
+          "result": "invalid_signature",
+          "ms": 8
+        },
+        {
+          "role": "asset-control",
+          "port": 8454,
+          "result": "invalid_signature",
+          "ms": 11
+        }
+      ],
+      "providerAcceptance": false,
+      "flagsConfigured": false
+    }
+  ],
+  "runtimeUnchanged": true,
+  "runtimeConfigured": false,
+  "awsPrincipalsInstalled": false,
+  "visual": {
+    "at": "2026-09-19T16:51:09.205Z",
+    "scope": "Live CRM and DEV anonymous login after local Meta identity preparation and DEV firewall update; no authenticated session or provider acceptance",
+    "authenticated": false,
+    "results": [
+      {
+        "name": "crm",
+        "origin": "https://crm.clinicaclick.com",
+        "width": 1440,
+        "status": "passed",
+        "liveApplication": true,
+        "apiResponsesMocked": false,
+        "emptyFormBlocked": true,
+        "authStatus": 401,
+        "errors": [],
+        "failures": [],
+        "dimensions": {
+          "viewport": 1440,
+          "body": 1440
+        },
+        "contrast": {
+          "color": "rgb(185, 28, 28)",
+          "background": "rgb(255, 255, 255)",
+          "ratio": 6.4700447145121895
+        },
+        "screenshot": "crm-sign-in-stable-1440.png"
+      },
+      {
+        "name": "crm",
+        "origin": "https://crm.clinicaclick.com",
+        "width": 390,
+        "status": "passed",
+        "liveApplication": true,
+        "apiResponsesMocked": false,
+        "emptyFormBlocked": true,
+        "authStatus": 401,
+        "errors": [],
+        "failures": [],
+        "dimensions": {
+          "viewport": 390,
+          "body": 390
+        },
+        "contrast": {
+          "color": "rgb(185, 28, 28)",
+          "background": "rgb(241, 245, 249)",
+          "ratio": 5.905927118870345
+        },
+        "screenshot": "crm-sign-in-stable-390.png"
+      },
+      {
+        "name": "dev",
+        "origin": "http://127.0.0.1:4203",
+        "width": 1440,
+        "status": "passed",
+        "liveApplication": true,
+        "apiResponsesMocked": false,
+        "emptyFormBlocked": true,
+        "authStatus": 401,
+        "errors": [],
+        "failures": [],
+        "dimensions": {
+          "viewport": 1440,
+          "body": 1440
+        },
+        "contrast": {
+          "color": "rgb(185, 28, 28)",
+          "background": "rgb(255, 255, 255)",
+          "ratio": 6.4700447145121895
+        },
+        "screenshot": "dev-sign-in-stable-1440.png"
+      },
+      {
+        "name": "dev",
+        "origin": "http://127.0.0.1:4203",
+        "width": 390,
+        "status": "passed",
+        "liveApplication": true,
+        "apiResponsesMocked": false,
+        "emptyFormBlocked": true,
+        "authStatus": 401,
+        "errors": [],
+        "failures": [],
+        "dimensions": {
+          "viewport": 390,
+          "body": 390
+        },
+        "contrast": {
+          "color": "rgb(185, 28, 28)",
+          "background": "rgb(241, 245, 249)",
+          "ratio": 5.905927118870345
+        },
+        "screenshot": "dev-sign-in-stable-390.png"
+      }
+    ]
+  },
+  "awsOperator": {
+    "at": "2026-09-19T16:52:39.109175+00:00",
+    "exitCode": 255,
+    "authenticated": false,
+    "reason": "expired_sso"
+  },
+  "incrementalBilledCostUsd": null,
+  "priorCostSnapshot": {
+    "amountUsd": "4.6195124129",
+    "estimated": true,
+    "metric": "UnblendedCost",
+    "start": "2026-09-01",
+    "endExclusive": "2026-09-19",
+    "observedAt": "2026-09-19T08:22:00Z"
+  },
+  "limits": [
+    "No authenticated public MFA/Meta acceptance",
+    "No new AWS SQLite or policy inventory in this phase",
+    "Only UID998 has the DEV egress firewall; UID996 retains existing connectivity",
+    "Staging and gateway share UID1000",
+    "OAuth DEV copies share a principal",
+    "Probes verify signed transport using the reader client, not OAuth/control business logic",
+    "Real provider capacity remains unmeasured"
+  ],
+  "artifacts": {
+    "prepared.json": "b6a2f3250318b5de5467176538e96debc550f2f87047f83929bfff49f9601c56",
+    "tests.json": "a3360084ed3e80d9b4b050b1ecbf4a5985bc23b133d198a44f8fe9174b2de1e7",
+    "firewall-applied.json": "5fd6463959fe78b1e7dd3a9d7a1223534f67d09a845e691758526b0549ad7e47",
+    "probe-before.json": "3c609b265a496c344d9cdf0f6ec9491ce6e57ca9ee266ea4c034e0296570bd9d",
+    "probe-dev-api-after.json": "59585711a7b0f6c2230fd8065c45e46022b1966e0ce41b7d6cbcc8a4147ec36c",
+    "probe-dev-worker-after.json": "e9edb9302eab5e0ca83be80ff3edb2af1f4da42af39a33e739850847a7248c4a",
+    "probe-staging-after.json": "f13e675dca9e3f7eef7da54edc8dc0204d1193d9ee11b29a6b2755a0fe5d7265",
+    "runtime-before.json": "f74d70119f3d3e4ff6d0244a6d6ac6c6b07fd1716b1df98b4cd90ab75e1655ba",
+    "runtime-after.json": "f70ea7ccafa07fd9338b370848da54623e20a02cc0935948c9a1361dd44e8d4a",
+    "login-smoke.json": "9bbce7827b997e9ad376de8159f7db59911636f9e5ed536ed76f04f581fe96d7",
+    "aws-session-check.json": "36b22094649c639b2752bb6df490d29036b255d07f061d951055214382fc8262",
+    "runtime-final.json": "e41edc97a43d9c8c5c5332dc1e56fd71971d013276923921e6328e4800d589d1",
+    "verified-final.json": "b6a2f3250318b5de5467176538e96debc550f2f87047f83929bfff49f9601c56",
+    "apply-egress.py": "9544275c51912d2c6591089137d8ba1212cce90d7e482ae26f229b3f7b3a2e5d",
+    "probe.cjs": "e96488db900152d0fad6d476c4440de925265c7ae788592bf0604676ae183164",
+    "runtime-snapshot.py": "598ab4e9c6e83240e3304a32513778b5979b189540be9de0cf9915c9dec7d4fc",
+    "login-smoke.cjs": "20e707d4d68112af891a69339840a11157137d207a1edb6f03315e888ce80506"
+  },
+  "runtimeFileConfiguration": {
+    "/etc/clinicaclick-dev/runtime.env": {
+      "metaEntries": 0,
+      "authModes": {
+        "AUTH_SESSION_MODE": "enforce",
+        "AUTH_EMAIL_MFA_MODE": "enforce"
+      }
+    },
+    "/etc/clinicaclick-dev-security/runtime.env": {
+      "metaEntries": 0,
+      "authModes": {
+        "AUTH_SESSION_MODE": "enforce",
+        "AUTH_EMAIL_MFA_MODE": "enforce"
+      }
+    },
+    "/home/ubuntu/wt/back-staging/.env": {
+      "metaEntries": 0,
+      "authModes": {
+        "AUTH_SESSION_MODE": "enforce",
+        "AUTH_EMAIL_MFA_MODE": "enforce"
+      }
+    },
+    "/home/ubuntu/wt/gateway/.env": {
+      "metaEntries": 0,
+      "authModes": {
+        "AUTH_SESSION_MODE": "enforce",
+        "AUTH_EMAIL_MFA_MODE": "enforce"
+      }
+    }
+  },
+  "identityVerificationUnchanged": true
+}
