@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test'); const assert = require('node:assert/strict'); const http = require('node:http');
 const express = require('express'); const sequelize = require('sequelize'); const { randomUUID } = require('node:crypto');
-const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.fixture');
+const { loadDiscoverySource, unusedMetaSurfaceDependencies } = require('./fixtures/business_profile_discovery.fixture');
 const { connectionForTestServer } = require('./fixtures/campaign_offline_runtime.cjs');
 async function fixture(t) {
   const state = { allowed: true, managed: true, globalClosed: true, begin: 0, callbacks: 0, statuses: 0, provider: 0, redis: 0, metadata: 0, logs: [], selections: [] };
@@ -27,7 +27,7 @@ async function fixture(t) {
     status: async input => { assert.equal(input.scopeKey, 'clinic:71'); assert.equal(input.sessionRef, sessionRef); state.statuses++;
       return { mode: 'broker', connected: false, pending: true, authorization_status: 'activation_pending', enabled: true, activation_confirmed: false }; },
   };
-  const router = loadDiscoverySource('routes/oauth.routes.js', { express, sequelize, '../../models': models, './auth.middleware': auth,
+  const router = loadDiscoverySource('routes/oauth.routes.js', { ...unusedMetaSurfaceDependencies(), express, sequelize, '../../models': models, './auth.middleware': auth,
     '../services/accessSession.service': sessions, '../services/googleOAuthBroker.service': broker,
     '../lib/oauthRedirect': require('../../lib/oauthRedirect'), '../lib/oauthMarketingScopeAccess': require('../../lib/oauthMarketingScopeAccess'),
     '../lib/marketingScopeAccess': { hasMarketingClinicScopeAccess: async ({ clinicIds }) => state.allowed && clinicIds.every(id => id === 71) },

@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "a1478095b00c07494a2eefbe70d97cc343d3472c",
+    "front": "529b6017c6f6a31a4bc91936e53550d0a39a9359"
+  },
+  "includesWorkingChanges": true,
+  "scope": "Prepared CRM managed email MFA, whole-scope OAuth candidate authorization, callback, durable cancellation/reconciliation and human audit v22, Angular Settings; no asset activation or public deployment",
+  "files": {
+    "back": {
+      "migrations/20260919060000-meta-marketing-oauth.js": "023ee8974a2e9195d0dee4a981d0e364633bea61672589ae817e778610afd58a",
+      "models/metamarketingoauthrequest.js": "27560d74b004e0b37c0abb4806d64a71231fca1f275cec2904e51f628628467c",
+      "models/metamarketingoauthslot.js": "de98dc8b41658369466718515bdb85340d7436d0ac9e0429a7ee976b0359f0f9",
+      "services/platform-audit/src/event.js": "2ded09b7cf1d5d80ed82a9d190ca3b358ce1eac8b5fe54249f93ab39a8fbe4e0",
+      "services/platform-audit/src/meta-oauth-event.js": "2c642e38cbe17437841f653c2b2b99d61b5da14f54e8baf08f6cae18830a0b0a",
+      "services/platform-audit/src/reader-protocol.js": "e7ff319a6ce3161c320e945e25e9e9d4484d18197e0f9fbf993d60086b51c916",
+      "services/platform-audit/test/google-action-plan.test.js": "210d41714e5449220c715d1368230f607ab28c511d9d12c3a689d44e259679ce",
+      "services/platform-audit/test/google-ads-enrollment.test.js": "a4f2ffe3b53695e21f2ce2bf70c8ee0374d3598cd120471e2ab71e9f11ed4290",
+      "services/platform-audit/test/google-destination.test.js": "c471a21c3588f5f9263bb7efc2be3791e18ed0c9c4f2027e38d0eabdc86a5bd4",
+      "services/platform-audit/test/google-receipt-review.test.js": "0dd2f7d5744e82c99633b700acc9367f24ff4c988751ab6aa7a1a54a0ecb8b21",
+      "services/platform-audit/test/meta-access-check.test.js": "2c72a67ee97e8d417e72491b3fcf701321bb0a2dc0a1eb98c500d44767ddfced",
+      "services/platform-audit/test/meta-oauth.test.js": "27ed44b65e69688db2eb701756f5a90aa3dc0fadb9b6037061db040da2d41729",
+      "services/platform-audit/test/whatsapp-authorization-event.test.js": "acf56fa30bf1d68077038c25581af8255279fa356e8a9b9e98ed8d190603de6a",
+      "src/config/scheduledJobCatalog.js": "babe50d15ab158aabb248f41b8cc5d50e5a747f9e9837926b661d3d3bd7ccd14",
+      "src/jobs/sync.jobs.js": "7abe9061a65a1c41be342747d5dc7b98c422b35984fb52096188c5f7ae7f9c42",
+      "src/routes/metaMarketingOAuth.routes.js": "4870e1bb1c820ace9cb068f741b0fde26f0b21eadd95d194bc9a7e4983b559e6",
+      "src/routes/oauth.routes.js": "80c934ddedd7451c8e12417e1eecb2182bbb0c6bf47295fc1d7a3d151e6ceba6",
+      "src/scripts/tests/fixtures/business_profile_discovery.fixture.js": "2dac732429cf8e7eac9ba1dadda1dcb40ca7a906907a9ceea41c2ee2489d2979",
+      "src/scripts/tests/fixtures/meta_oauth_audit.fixture.js": "028dd7ac303b5930658fd63cea8a15d666a91ccbac188888d18d343376fdbb59",
+      "src/scripts/tests/fixtures/meta_oauth_crm_visual.fixture.js": "186365ee7ec68ccf5891b54b29c16f640421719186878e9ad971623cc154bd0b",
+      "src/scripts/tests/fixtures/meta_settings_visual_host.fixture.js": "094573106a9d7b07709fd73d086be124bb894a35abd59a6928af9d6341a1be6c",
+      "src/scripts/tests/google_oauth_broker_http.test.js": "5680ba0eb85544261f8c68fd5dccc1497300e311f8355a5cd2520f2b62c2f42b",
+      "src/scripts/tests/meta_marketing_oauth_http.test.js": "32af578953e400a6d74d9553d4b91497216c2b3757677a12f7179a07afd18ba7",
+      "src/scripts/tests/meta_marketing_oauth_mysql.integration.js": "30e656f81b1c7059505e0410db9a762aafcba15edc6ec29f36dddd8dfd6edcca",
+      "src/scripts/tests/scheduled_jobs_orchestration.test.js": "5b588483ae8867f6a64d944cd93b648f4bde4c0e3abdeeec3bf489df66a6384d",
+      "src/services/metaMarketingOAuth.contract.js": "c8902de108a6ea4ebac62fbe20ed79fd46d4601932f8de270724f2549b163e71",
+      "src/services/metaMarketingOAuth.service.js": "4fe2d558df3f3c5509ddd087a7b31eb10d12e311456a25377d40156e7fe2e11a",
+      "src/services/metaMarketingOAuthClient.service.js": "9ba563bb86f8f419b164cbca332e17add1d368f5309af9466b925382f9ca2a62",
+      "src/services/metaMarketingOAuthScope.service.js": "e0a5e750903ac2cf97e16ad2293ad6eedc88dd4cb17fbb4ae551ee42a6fa560e",
+      "src/services/platformAudit.repository.js": "e416177c3cee186ab6d49ceb02ccfa3abbeb75d61feeff2e08a4bb0b009ef920",
+      "src/services/platformAudit.view.js": "160baab03acc31c1a31df75ce44b0bc66f0859b1ab7b8d6f777ce346675165e0"
+    },
+    "front": {
+      "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.html": "08a3ab26c8a3b477d1de4a578b9c0f29772733a455d4dc3db7af6839a3a9df09",
+      "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.ts": "b7bf529a74e24b6b1c8457a5da3383ea95126d9ac4bdc243745a2815f9bcb345",
+      "src/app/modules/admin/pages/settings/connected-accounts/meta-oauth-status.component.ts": "fbf86271b7508e726cc811e5ad76d1de6d19da4dcca2c4d8f6ce021dbb0350e8",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.html": "62d5dcc6b8eb8328cf42b5ff5d53ca46f90eb7c71d27d36e13f53795815dc3f3",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.ts": "a75753c1a0e7dffd2f4107265fab0919d7ef2a9da2bc489a41fa1747c896db55",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.service.ts": "632aadec138cdb925ef1a005df7424f2c6981813d26cdff64ef1aabb59766f07",
+      "src/assets/i18n/cat.json": "13f8fb81fb3eb4be77c396c4356a9db0bf35ac5c0854034e4966ee6f31202482",
+      "src/assets/i18n/es.json": "aa6b2f8a066e07dca02e7d777a4d34ee54de5d739f0fe7e9e56a134036d81f16"
+    }
+  },
+  "qa": {
+    "mysqlGroups": 7,
+    "auditTests": 122,
+    "mountedOAuthAndRegressionTests": 7,
+    "schedulerCatalog": 51,
+    "auditSqlRegressionGroups": 8,
+    "patientAuditSqlRegressionGroups": 7,
+    "visualScreenshots": 8,
+    "visualProductComponents": true,
+    "fakeMetaSecretsS3": true,
+    "realSignedTLS": true,
+    "temporaryMysql": "8.0.42",
+    "publicMfa": false,
+    "deployed": false,
+    "angularBuildHash": "cf7d25b1fb5a1f74"
+  },
+  "costSample": {
+    "begin": {
+      "queries": 29,
+      "elapsedMs": 77
+    },
+    "openingMetaSecretsCalls": 0,
+    "cancellationMetaSecretsCalls": 0,
+    "testTotalQueries": 1011,
+    "pool": {
+      "inUse": 0,
+      "waiting": 0
+    },
+    "actualAwsCost": null
+  },
+  "pending": [
+    "asset discovery/selection and transactional binding/grant writer",
+    "activation preserving physical revocations and independent history",
+    "reader then writer v22 before new producer; frozen v19 canary unchanged",
+    "selective DDL/IAM/TLS/slots/gates/job owner release",
+    "public MFA, real provider acceptance and measured load"
+  ],
+  "evidence": "qa-evidence/security-resume-20260917/meta-oauth-crm-20260919/"
+}

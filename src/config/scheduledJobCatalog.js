@@ -17,6 +17,11 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     enabledEnv: 'META_MARKETING_REVOCATION_WORKER_ENABLED', timezone: 'Europe/Madrid',
     usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
   }),
+  metaMarketingOAuth: Object.freeze({
+    type: 'meta_marketing_oauth_reconciliation', priority: 'high', executorMethod: 'executeMetaMarketingOAuth',
+    enabledEnv: 'META_MARKETING_OAUTH_WORKER_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
   googleAdsRevocations: Object.freeze({
     type: 'google_ads_broker_revocations', priority: 'high', executorMethod: 'executeGoogleAdsRevocations',
     enabledEnv: 'GOOGLE_ADS_REVOCATION_WORKER_ENABLED', timezone: 'Europe/Madrid',

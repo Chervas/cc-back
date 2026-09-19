@@ -1320,6 +1320,7 @@ const EXPLICIT_SCOPE_REQUIRED_PATHS = new Set([
 const PUBLIC_OAUTH_PATHS = new Set([
     '/google/callback',
     '/meta/callback',
+    '/meta/marketing/callback',
     '/test'
 ]);
 
@@ -1335,6 +1336,11 @@ router.use((req, res, next) => {
 // This surface accepts only its canonical scope/body and handles errors without
 // logging provider or SQL details. Authentication above still applies first.
 let adsEnrollmentRoutes;
+let metaMarketingOAuthRoutes;
+router.use('/meta/marketing', (req, res, next) => {
+    metaMarketingOAuthRoutes ||= require('./metaMarketingOAuth.routes').createRouter({ sessions: accessSessions });
+    return metaMarketingOAuthRoutes(req, res, next);
+});
 router.use('/google/ads/enrollment', (req, res, next) => {
     adsEnrollmentRoutes ||= require('./googleAdsEnrollment.routes').createRouter({
         service: require('../services/googleAdsEnrollment.service'), sessions: accessSessions,

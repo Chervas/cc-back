@@ -11006,7 +11006,8 @@ explícito `meta-marketing-oauth-v1`, separado del lector. Proveedor
 Ed25519 distintas para gateway y control de cada entorno. Solo trabaja con slots
 vacíos preasignados del namespace Meta del entorno, aplicación/versiones fijadas,
 clínicas completas y callback HTTPS fijo `/oauth/meta/marketing/callback`.
-No se registra en el arranque genérico ni monta todavía ese callback en gateway.
+No se registra en el arranque genérico. El callback CRM preparado se describe en
+la sección siguiente; aún no está publicado en gateway.
 
 Begin liga state aleatorio, UUID, digest de autorización, conjunto ordenado de
 clínicas y caducidad máxima10 minutos a la política. Verifica slot/KMS/versiones y
@@ -11041,13 +11042,87 @@ una dependencia que lo ignore. Una sola instancia debe poseer el SQLite. Status
 confirmado y abort no consultan Meta/Secrets; status de staging revalida la versión
 pendiente. El outbox técnico usa el drain existente; no crea jobs clínicos o BullMQ.
 
-No publicado ni montado en la interfaz. Faltan inicio/callback CRM con MFA y sesión
-vigentes, auditoría humana y selección de activos; escritor transaccional de bindings,
+El corte inicial del broker no incluía CRM/UI; su ampliación preparada figura
+a continuación. Sigue sin publicar. Faltan selección y escritor transaccional de bindings,
 grants y activación que revalide bloqueos físicos/historial de bajas independiente.
 No reutilizar un candidato para borrar `MetaMarketingBrokerRevocations`, reactivar
 un binding ni compartir derechos fuera del conjunto autorizado. El OAuth legacy y
 su almacenamiento local siguen sin migrar; este módulo no acredita el alta final.
-Pruebas de interfaz/titular/proveedor/AWS y coste real siguen pendientes. Sin cambios
-de runtime, esquema MySQL, campañas, leads, WhatsApp o releases; canary v19 intacto.
+Aceptación pública/titular/proveedor/AWS y coste real siguen pendientes. El DDL
+candidato CRM de la sección siguiente no se ha aplicado a DEV/CRM. Sin cambios
+de runtime, campañas, leads, WhatsApp o releases; canary v19 intacto.
 Runbook: `docs/security/meta-marketing-oauth.md`; recursos39, configuración03,
 funcional20.17, madurez19, prioridades16 y evidencia/recuperación99.
+
+
+### OAuth Meta desde CRM: autorización candidata y conciliación (preparado, 19/09/2026)
+
+`/oauth/meta/marketing` monta un router propio: GET/POST `/authorization` consultan
+estado local/inician; DELETE `/authorization/:id` cancela y POST
+`/authorization/:id/reconcile` comprueba explícitamente el resultado en el broker.
+Scope canónico `assignment_scope=clinic&clinic_id=N` o
+`assignment_scope=group&group_id=N`, sin pivotes extra ni payload libre. Sesión
+JWT gestionada, prueba de correo MFA y permiso de escritura actual sobre **todas**
+las clínicas. El callback público GET `/callback` solo admite code/state/error
+cerrados y responde303 hacia el origin preconfigurado, con UUID de referencia.
+No toma destino de redirección del navegador, ni devuelve code/state/token.
+La excepción pública afecta solo a esa ruta; no abre el router OAuth legacy.
+
+DDL aditivo `20260919060000-meta-marketing-oauth.js`: `MetaMarketingOAuthSlots`
+contiene referencias opacas preasignadas, app, clínicas/scopes, callback y caducidad;
+`MetaMarketingOAuthRequests` conserva UUID, hashes state/code, snapshot de ámbito,
+sesión iniciadora, estado, metadatos candidatos, intentos y lease. No almacena
+ARN ni credenciales. Índices únicos de state/code, ámbito/estado y entrega; down
+rechaza cualquiera de las dos tablas poblada. Solo ensayado en MySQL propio temporal.
+El código nuevo requiere ese DDL y las dependencias de sesiones/MFA, auditoría,
+clínicas/permisos y bajas Meta antes de promoverlo; no ejecutar migraciones ajenas.
+
+Begin confirma primero solicitud y auditoría humana v22 en la misma transacción;
+solo entonces pide URL al broker. Liga la sesión, digest del slot y del historial
+independiente de bajas al conjunto completo de clínicas. Revalida autoridad antes
+y después del I/O; no mantiene locks SQL durante llamadas externas. State queda
+solo como hash en SQL y la URL únicamente en memoria del navegador. Una respuesta
+begin perdida se cancela/reconcilia: no se reconstruye la URL ni se recanjea code.
+Callback reclama una sola vez el código con hash único y lease. Un ACK perdido
+mantiene processing y permite consultar la versión original después del reinicio.
+Cambiar sesión, permiso, composición, slot, bloqueo o historial durante la operación
+impide aceptar el candidato y conserva o confirma la cancelación. La consulta local
+es una fotografía; la selección/activación futura deberá volver a validar todo.
+
+La cancelación humana exige sesión/MFA y permisos vigentes del mismo iniciador;
+una vez persistida, la confirmación de control puede continuar después del logout.
+Cancelación pendiente y confirmada tienen auditoría separada de la autorización:
+misma correlación UUID y `result_part=0` para autorización, `1` para cancelación.
+La salud de auditoría exige completar la misma parte cuando el intento tiene parte
+no cero; un candidato ya guardado no oculta una cancelación aún sin confirmar.
+Se conserva la semántica de eventos anteriores con intento en parte0. El candidato
+solo se declara staged con su auditoría en SQL; un fallo de confirmación conserva
+el estado pendiente. El panel humano existente verifica la copia S3 v22 y muestra
+la autorización y cancelación sin payload de proveedor. No es actividad clínica.
+
+`metaMarketingOAuth` añade el tipo `meta_marketing_oauth_reconciliation`, cada minuto,
+high/maxAttempts1, gate `META_MARKETING_OAUTH_WORKER_ENABLED`. Usa JobRequests y el
+outbox de solicitudes, sin BullMQ nuevo: SKIP LOCKED, lease120 s, hasta10 filas/30 s
+cooperativos, backoff hasta1 hora. Gateway no ejecuta este job. El worker de control
+no depende del flag de altas ni de una sesión vigente para terminar una retirada;
+sí revalida autoridad para aceptar un candidato. No se añade a los bucles DEV
+operativos ni se habilitan jobs clínicos. No promete reservas de CPU/SQL o límite
+duro de una consulta. El polling de estado no hace llamadas Meta por abrir Ajustes.
+
+En Ajustes, un slot habilitado ofrece iniciar, continuar en Meta, actualizar y
+cancelar. El resultado «Autorización guardada» indica expresamente que faltan
+selección/activación. La pantalla invalida respuestas y URL al cambiar ámbito/sesión;
+recargar no reconstruye el enlace perdido. El botón de comprobar realiza una acción
+explícita; no sondea periódicamente. ES/CAT y panel de Actividad integrados. La vía
+legacy permanece en su pausa y WhatsApp no cambia.
+
+Captura `META_MARKETING_OAUTH_ENABLED` y worker apagados por defecto. Cliente HTTPS
+con claves privadas distintas para gateway y control, sin fallback a credenciales.
+Preparado y probado con API/SQL/TLS/SQLite reales y Meta/Secrets/S3 ficticios; aceptación
+pública con MFA/titular/proveedor y carga real pendiente. Antes de abrir: publicar
+lector AWS compatible v22, luego escritor, luego productor; identidad/slots/grants,
+DDL exacto y candidato selectivo. El archivo y los seis eventos congelados v19
+permanecen intactos. Falta el escritor de selección/activación de activos y grants:
+un candidato nuevo no borra bajas ni restaura bindings históricos. Runbook
+`docs/security/meta-marketing-oauth.md`, inventario CRM separado, funcional20.17,
+variables03, jobs11, madurez19, costes39 y corte/evidencia/recuperación99.
