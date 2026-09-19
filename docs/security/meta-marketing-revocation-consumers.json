@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "cf1d8d09d06dc3cf4f02374f2d2e8bebfbf96557",
+    "front": "90244b2dbc69436b97158a501afe0785fa7a40ac"
+  },
+  "includesWorkingChanges": true,
+  "scope": "Prepared coordinated CRM Meta non-WhatsApp withdrawal, transactional independent outbox/audit v21/local block, typed control worker, read exclusion and Angular confirmation/status/panel. No deployment or real provider/AWS acceptance.",
+  "preparedFiles": {
+    "back": {
+      "migrations/20260919050000-meta-marketing-broker-revocations.js": "886828648b18a378da53ef8859fa2a67d6fa4f7323c8a3edf21b630a173f0efb",
+      "models/ClinicMetaAsset.js": "a7312e3e978ca0eb240a6c29a2710257e39dfe5588118c074ba66faeda0132b2",
+      "models/metamarketingbrokerbinding.js": "469e2f0ef045485a649dd220ec24b5f08154212f6e7f52054458f394de4fc611",
+      "models/metamarketingbrokerrevocation.js": "58d517d93e5f59cb3644b1894faa8d2279e1a2b85adeb17ca70819ee68f3faac",
+      "services/platform-audit/src/event.js": "3ac5ba6b6e0fed81eea0f4dafb27547180a0dd675063acab579ff6608129f122",
+      "services/platform-audit/src/meta-disconnect-event.js": "9e0a22ab5ba9a939e4552ddc5f91a4872a84823d0086b5746ec758a98f7d743d",
+      "services/platform-audit/src/reader-protocol.js": "dcec735b3020c4ea38763766163013d474729db53fd5d39c0fc30777b37798d3",
+      "services/platform-audit/test/google-action-plan.test.js": "2c961aaabf134724dfeec6e223e11f86d487f03341ec5e4e556f7f957a01f606",
+      "services/platform-audit/test/google-ads-enrollment.test.js": "0b3975e6b3e6f86dd2a249ceb5e7fcfd5a11b7bee4672ea4e13c47063a52814b",
+      "services/platform-audit/test/google-destination.test.js": "c06f0299414a9704fc49a96065d01f103011fd936ce264fc885c5219fd48fac3",
+      "services/platform-audit/test/google-receipt-review.test.js": "c5e3b8bb933c394e1a68d1bbf6b042585dcb0ca496af35c0424933ac12f24d67",
+      "services/platform-audit/test/meta-access-check.test.js": "b6d8837d730144987cc352097fff44f0e7540e8a1642386be1b5da4cbd6aa060",
+      "services/platform-audit/test/meta-disconnect.test.js": "5af3f7e656b4b66c8a5b22eb4bd8d7732f9e689d21b96aa9d60e1a4d36e15e25",
+      "services/platform-audit/test/whatsapp-authorization-event.test.js": "e26224fcd7567f9a90cc79dc715d81ce6b7386ac1315a66dc3673b260d05580e",
+      "src/config/scheduledJobCatalog.js": "b6aba16368b7805c85320789b30c015ce75e73b05614eb184d0e8b6cd7ee3de2",
+      "src/jobs/sync.jobs.js": "643abf654c0f02311e330de87b40a52810b3eaf3c0563b8dbe13df700311412a",
+      "src/routes/metaMarketingRevocation.routes.js": "a61d86171cc252e49841676494750b8aa8b97bb1a487d26a9a03e1aa37398f42",
+      "src/routes/oauth.routes.js": "91d9bfce5a2daedc9f618fba5642e6f37b1972e7f7e48820ed7a9a5f604cb030",
+      "src/scripts/tests/fixtures/meta_marketing_revocation_e2e.fixture.js": "c05197523b0d00a4dc5426c02abae21e1c7a89639326cf6333e2553b3dc2b099",
+      "src/scripts/tests/fixtures/meta_revocation_audit.fixture.js": "b9b3f2ce28859cd3fc516e3cfc39464484ce31aaf57a7620cc0e6c951a48c3bd",
+      "src/scripts/tests/meta_marketing_broker_mysql.integration.js": "b7d626ace459c294c4f5a3938b385930164d9139fb64a20ac457eb2f9afe2003",
+      "src/scripts/tests/scheduled_jobs_orchestration.test.js": "a6ec90153cf9379de573ed849a551bd49fd96bbd270358d15d451194342b11a0",
+      "src/services/metaMarketingBrokerScope.service.js": "8201ce3caebad902a1a679cc17225de189c0a29b3879a177fa810f72bc658a52",
+      "src/services/metaMarketingRevocation.contract.js": "2e4c82c520042b95117f74d4b4e5f6fc6c731c695538c9c9e20c18571867849f",
+      "src/services/metaMarketingRevocation.service.js": "ccc7fc8d224b9b05594b06200cf8c07db2a066c52da6e19ab2b173b237916794",
+      "src/services/metaMarketingRevocationClient.service.js": "bc5867fb7dbb92f6ad1137c1648aaaa58fd8e5432f19166b8463f2d11e3d9775",
+      "src/services/platformAudit.view.js": "b450889858b4e95ae3e0c58aa19dd2fe3cbba626b111eebfae901487ba3cfe78"
+    },
+    "front": {
+      "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.html": "14dded99ff76df2ef11b495229d7338800c89500697937c6585967fb4881ff60",
+      "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.ts": "db5e3487801ccb3f81f49dc9a11505f5bdc8f11d0328072a2a12fe29110273cd",
+      "src/app/modules/admin/pages/settings/connected-accounts/meta-revocation-status.component.ts": "2f3d14baac7dfa4fe681d8c42b306f9406c906eadcd05d59d7e361eb577bde0d",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.html": "45ed85a22455902d763cfc9cfc2829b29c06f6f4584bebb0734257f4407d7aa7",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.ts": "c2b1ee5e004b77b8b0fb4f2cea27a15cb8625de994e08e892bc7d7c7fb072911",
+      "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.service.ts": "c7f1d696197cf8822d7919b794a78b0c0d17fcb4f579d51a48a216ff7c560e6b",
+      "src/assets/i18n/cat.json": "1af39728b2f79c280376c130cf6a0c078145e44dcbffbe61ca57f143693a59c2",
+      "src/assets/i18n/es.json": "4adcdb062e9ab1def809710bc4ab92c971f42ab781b352ed7d38bad2b8d5822f"
+    }
+  },
+  "qa": {
+    "mysqlGroups": 10,
+    "visual": {
+      "shots": [
+        "read-only",
+        "desktop-confirm",
+        "mobile-confirm",
+        "mobile-pending",
+        "mobile-confirmed",
+        "desktop-confirmed",
+        "audit-confirmed"
+      ],
+      "errors": [],
+      "blocked": [],
+      "businessWrites": 0,
+      "withdrawalRequests": 1
+    },
+    "revocation": {
+      "pendingAfterLostReply": 3,
+      "confirmedAfterRestart": 3,
+      "controlRequests": 6,
+      "distinctIds": 3,
+      "auditEvents": 6,
+      "providerCallsDuringControl": 0,
+      "secretCallsDuringControl": 0,
+      "whatsappMappingsPreserved": 1
+    },
+    "firstWithdrawal": {
+      "queries": 31,
+      "elapsedMs": 134
+    },
+    "firstReads": {
+      "queries": 160,
+      "elapsedMs": 393
+    },
+    "queryCount": 1129,
+    "tokenSelects": 0,
+    "pool": {
+      "inUse": 0,
+      "waiting": 0
+    },
+    "auditTests": 87,
+    "regressionTests": 27,
+    "jobOrchestration": "passed; 50 catalog entries; gates, unique enqueue, executor and payload isolation",
+    "accessRegression": {
+      "mysqlGroups": 10,
+      "firstManualCheck": {
+        "queries": 68,
+        "elapsedMs": 109
+      },
+      "visual": {
+        "shots": [
+          "desktop-verified",
+          "mobile-verified",
+          "permission-revoked",
+          "audit-v20"
+        ],
+        "errors": [],
+        "writes": [],
+        "blocked": [],
+        "verificationRequests": 3
+      },
+      "pool": {
+        "inUse": 0,
+        "waiting": 0
+      }
+    },
+    "angularBuild": "development passed 2026-09-19T04:33:02Z; hash 4b8762036b7f37f5; existing debug CommonJS warning",
+    "syntaxFiles": 27,
+    "wholeOauthRouter": false,
+    "publicMfa": false,
+    "realProvider": false,
+    "realS3": false,
+    "deployed": false
+  },
+  "pending": [
+    "OAuth and registry/grant enrollment writer",
+    "AWS reader/writer v21 publication; frozen v19 candidate unchanged",
+    "Meta real credentials/permissions and public authenticated acceptance",
+    "selective release/schema/IAM/TLS and load preflight",
+    "remaining Meta discovery/campaign/CAPI/lead consumers"
+  ],
+  "cost": {
+    "incrementalBilledCost": null,
+    "billingRefreshed": false,
+    "providerCallsPerControl": 0,
+    "secretCallsPerControl": 0,
+    "humanAuditRowsPerAssetWithdrawal": 2,
+    "newInfrastructure": false
+  }
+}

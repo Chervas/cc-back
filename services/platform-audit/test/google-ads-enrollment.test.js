@@ -15,7 +15,7 @@ test('four v16 phases round trip with distinct parts, scopes and human/job attri
     assert.ok(Buffer.byteLength(packed.body) < 4096); assert.match(keyFor(packed), /^app\/platform\/v16\//);
     assert.equal(event.state, PHASES[reason][0]); assert.equal(event.actor.type, reason === 'enrollment_requested' ? 'user' : 'job');
     const receipt = { key: keyFor(packed), digest: packed.digest, versionId: 'fictitious-v16' }; refFor(receipt, 'confirmed');
-    assert.throws(() => refFor({ ...receipt, key: receipt.key.replace('/v16/', '/v21/') }, 'confirmed'));
+    assert.throws(() => refFor({ ...receipt, key: receipt.key.replace('/v16/', '/v22/') }, 'confirmed'));
   }
 });
 test('v16 rejects spoofed completion, unbounded content, mismatched phases, scope and unknown causes', () => {

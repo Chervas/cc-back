@@ -13,6 +13,7 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
       models[name]=require('../../../models/'+file)(sql,D);
       for(const attribute of Object.values(models[name].rawAttributes))delete attribute.references;
       if(name==='MetaConnection'){models[name].removeAttribute('credentials_external');models[name].removeAttribute('broker_app_id');models[name].rawAttributes.accessToken.allowNull=false;}
+      if(name==='ClinicMetaAsset'){models[name].options.indexes=models[name].options.indexes.filter(index=>index.name!=='cc_meta_asset_identity');models[name]._indexes=models[name]._indexes.filter(index=>index.name!=='cc_meta_asset_identity');}
       models[name].refreshAttributes();await models[name].sync();
     }
     const migration=require('../../../migrations/20260919040000-meta-marketing-broker-registry'),qi=sql.getQueryInterface();
@@ -20,6 +21,8 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     await migration.up(qi);await migration.down(qi);await migration.up(qi);
     models.MetaConnection=require('../../../models/MetaConecction')(sql,D);
     models.MetaMarketingBrokerBinding=require('../../../models/metamarketingbrokerbinding')(sql,D);
+    await require('../../../migrations/20260919050000-meta-marketing-broker-revocations').up(qi);
+    models.MetaMarketingBrokerRevocation=require('../../../models/metamarketingbrokerrevocation')(sql,D);
     await models.MetaConnection.create({id:2,metaUserId:'201',accessToken:null,credentials_external:true,broker_app_id:'101'});
     await assert.rejects(models.MetaConnection.update({accessToken:'FICTITIOUS_RESTORED_SECRET'},{where:{id:2}}));
     await assert.rejects(models.MetaConnection.create({id:3,metaUserId:'202',accessToken:null}));
@@ -53,7 +56,8 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     const create=require('../../lib/integrationsBrokerClient').createIntegrationsBrokerClient;
     const readerKey=path.join(f.dir,'reader.pem');fs.writeFileSync(readerKey,f.keys.privateKey.export({type:'pkcs8',format:'pem'}),{mode:0o600});
     const wire=require('../../services/metaMarketingBrokerReader.service').createConfiguredMetaMarketingClient({env:{META_MARKETING_BROKER_ORIGIN:'https://127.0.0.1:'+config.port,META_MARKETING_BROKER_AUDIENCE:f.policy.audience,META_MARKETING_BROKER_KEY_ID:'qa-read',META_MARKETING_BROKER_KEY_FILE:readerKey,META_MARKETING_BROKER_CA_FILE:config.tlsCertFile}});
-    const control=create({origin:'https://127.0.0.1:'+config.port,audience:f.policy.audience,keyId:'qa-control',privateKey:f.controlKeys.privateKey.export({type:'pkcs8',format:'pem'}),ca:fs.readFileSync(config.tlsCertFile)});
+    const controlKey=path.join(f.dir,'control.pem');fs.writeFileSync(controlKey,f.controlKeys.privateKey.export({type:'pkcs8',format:'pem'}),{mode:0o600});
+    const control=require('../../services/metaMarketingRevocationClient.service').createClient({env:{META_MARKETING_BROKER_ORIGIN:'https://127.0.0.1:'+config.port,META_MARKETING_BROKER_AUDIENCE:f.policy.audience,META_MARKETING_BROKER_CONTROL_KEY_ID:'qa-control',META_MARKETING_BROKER_CONTROL_KEY_FILE:controlKey,META_MARKETING_BROKER_CA_FILE:config.tlsCertFile}});
     let enabled=true,alterResponse=null,commands=0,queryCount=0;
     sql.addHook('beforeQuery',()=>queryCount++);
     const client={execute:async(...args)=>{commands++;const value=await wire.execute(...args);return alterResponse?alterResponse(value):value;}};
@@ -95,12 +99,17 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     report.checks.push('Unexpected broker response fields are rejected instead of passed through');
     if(process.env.META_ACCESS_E2E_TEST==='1')await require('./fixtures/meta_marketing_access_e2e.fixture')({models,report,registerOwnedLoopbackServer,broker:service,sessions,token:()=>token,f,queries:()=>queryCount,
       technicalEvents:()=>app.store.db.prepare('SELECT event FROM audit_outbox').all().map(row=>JSON.parse(row.event))});
+    if(process.env.META_REVOCATION_TEST==='1'){
+      await require('./fixtures/meta_marketing_revocation_e2e.fixture')({models,report,registerOwnedLoopbackServer,broker:service,sessions,token:()=>token,f,control,
+        restart:async()=>{await app.close();app=null;await start();},queries:()=>queryCount});
+    }else{
     await models.MetaMarketingBrokerBinding.update({state:'blocked'},{where:{mapping_id:11}});await models.ClinicMetaAsset.destroy({where:{id:11}});
     await rejectBefore(()=>read(),'asset_revoked');await rejectBefore(()=>service.prepare(11),'asset_revoked');
     report.checks.push('A blocked independent alias survives deletion and denies the surviving account mapping');
     let once=true;f.state.httpHook=async request=>{if(request.action==='inspect'&&once){once=false;assert.equal((await control.execute(f.command({assetRef:'meta-facebook_page:401',operation:C.REVOKE}))).data.revoked,true);}};
     await assert.rejects(()=>read(2),{code:'connection_blocked'});f.state.httpHook=null;await app.close();app=null;await start();await assert.rejects(()=>read(2),{code:'asset_revoked'});
     assert.equal((await read(3)).id,'501');report.checks.push('Independent broker control revokes during I/O, survives restart and preserves another asset');
+    }
     report.commands=commands;report.secretCalls=f.state.aws.length;report.providerCalls=f.state.http.length;report.queryCount=queryCount;report.pool={inUse:sql.connectionManager.pool.using,waiting:sql.connectionManager.pool.waiting};
     assert.equal(report.pool.inUse,0);assert.equal(report.pool.waiting,0);report.tokenSelects=0;
     for(const secret of [TOKEN,APP])assert(!JSON.stringify(events).includes(secret));

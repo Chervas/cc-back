@@ -3816,6 +3816,7 @@ const metaMarketingAccessCheck = require('../services/metaMarketingAccessCheck.s
     scopeInput: (_req, authorized) => `${authorized.assignmentScope}:${authorized.assignmentScope === 'group' ? authorized.groupId : authorized.clinicId}`
 });
 router.get('/meta/mappings/:mappingId/verification', metaMarketingAccessCheck.handler());
+router.use('/meta/marketing-disconnection', require('./metaMarketingRevocation.routes').createRouter({ models: db, sessions: accessSessions }));
 
 
 /**
@@ -4277,6 +4278,7 @@ router.delete('/meta/disconnect', async (req, res) => {
 
             const connectionId = connection?.id || assignment?.metaConnectionId || null;
             if (connectionId) {
+                await require('../services/metaMarketingRevocation.service').assertLegacyDisconnectAllowed(db, connectionId);
                 await db.sequelize.transaction(async (transaction) => {
                     await deactivateMetaMappingsForScope({
                         scope,
@@ -4340,6 +4342,7 @@ router.delete('/meta/disconnect', async (req, res) => {
             conflict.httpStatus = 409;
             throw conflict;
         }
+        await require('../services/metaMarketingRevocation.service').assertLegacyDisconnectAllowed(db, connection.id);
         await MetaConnectionAssignment.destroy({ where: { metaConnectionId: connection.id } });
         await connection.destroy();
 

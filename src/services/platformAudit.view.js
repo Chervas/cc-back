@@ -71,6 +71,7 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
           action: v.action, stage: v.stage, outcome: v.outcome, reason: v.reason, actorType: v.actor.type, actorId: v.actor.id,
           correlationId: v.correlationId,
           whatsappAuthorization: v.version === 15 ? { requestRef: v.requestRef } : null,
+          metaRevocation: v.version === 21 ? { assetRef: v.assetRef, clinicCount: v.affectedClinicCount } : null,
           metaAccessCheck: v.version === 20 ? { assetRef: v.assetRef, mappingId: v.mappingId, clinicCount: v.clinicCount, operation: v.operation } : null,
           googleReceiptReview: v.version === 19 ? { assetRef: v.assetRef, mappingId: v.mappingId, clinicCount: v.clinicCount,
             family: v.family, submissionRef: v.submissionRef, resultCount: v.resultCount, resultState: v.resultState } : null,

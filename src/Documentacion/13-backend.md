@@ -10823,8 +10823,8 @@ conserva referencias y códigos, no tokens, nombres o respuestas del proveedor.
 TLS/firmas/SQLite/reinicio y límites probados con AWS/Meta ficticios. El corte
 posterior añade MySQL, comprobación manual en Ajustes y auditoría humana v20,
 descritos abajo. No acredita permisos reales del proveedor ni MFA público.
-Continúan pendientes OAuth nuevo en vault, alta de registros/grants, revocación
-coordinada CRM→broker, consumidores restantes, despliegue y aceptación real. Meta Ads, CAPI y sincronizaciones siguen en pausa;
+Continúan pendientes OAuth nuevo en vault, alta de registros/grants, consumidores
+restantes, despliegue y aceptación real. La baja coordinada se prepara abajo. Meta Ads, CAPI y sincronizaciones siguen en pausa;
 WhatsApp conserva su transporte. Runbook en `docs/security/meta-marketing-broker.md`,
 estado en 19, costes en 39 y evidencia en 99.
 
@@ -10920,10 +10920,79 @@ readiness, campañas, CAPI, leads ni jobs. Activos sin etiqueta muestran su ID.
 Preparación probada con HTTP, MySQL, TLS, firmas, SQLite, componentes Angular y
 proveedores/Secrets/S3 ficticios. Router OAuth completo, MFA público, permisos Meta,
 cardinalidad real y publicación siguen pendientes. No existe todavía escritor
-OAuth/alta de este registro ni entrega durable coordinada de bajas CRM→broker.
+OAuth/alta de este registro. La baja durable coordinada se describe a continuación.
 Antes de habilitar el gate humano publicar soporte v20 en lector y escritor AWS,
 con preflight propio; el candidato/canary v19 congelado no se modifica. Recuperación:
 cerrar ambos gates y conservar registros, exclusiones y auditoría; no restaurar
 credenciales ni ejecutar down sobre registros poblados. Runbook e inventario en
 `docs/security/meta-crm-broker.md` y `meta-crm-broker-consumers.json`; funcionalidad
 en 20.17, variables en 03, madurez/prioridades en 19/16 y carga/corte en 39/99.
+
+
+### Baja coordinada Meta no WhatsApp (preparada, 19/09/2026)
+
+`GET` y `DELETE /oauth/meta/marketing-disconnection` forman una superficie separada
+para Ads, páginas e Instagram. Sesión SQL gestionada y permiso Marketing de escritura
+sobre todo el ámbito explícito, sin fallback de usuario. La ruta DELETE no admite
+payload de proveedor. Al confirmar bloquea usuario/sesión mediante verifyReference,
+clínicas y membresías en la transacción; vuelve a comparar el ámbito antes de escribir.
+La baja no necesita credenciales válidas ni un resultado previo de comprobación remota.
+
+`MetaMarketingBrokerRevocations` conserva por tuple de clínica pivote/conexión/activo
+identidad, alcance completo, mappings, actor, UUID original y estado pending/confirmed.
+No tiene credenciales ni FK de borrado en cascada. En la misma transacción guarda
+intenciones y auditoría humana v21, marca bindings blocked y desactiva los mappings
+no WhatsApp afectados. Comparte operación entre alias del mismo tuple y rechaza
+shares, grupos primarios, alias o historias de fuera del ámbito. Un fallo de auditoría
+revierte todo. DELETE devuelve 202 mientras haya pendientes, 200 al estar confirmado;
+repetir conserva UUID e intención. GET es local, con conteos cerrados, sin datos de
+credenciales o errores internos. Una sesión/permisos inválidos impiden devolverlos.
+
+Conserva MetaConnections y MetaConnectionAssignments, usados también por WhatsApp,
+y todos sus mappings WhatsApp. No usa el bloqueo universal de la desconexión antigua.
+Esta última rechaza conexiones con marcador externo para que no se elimine la
+conexión compartida por ese camino. No revoca el token en Meta ni borra credenciales
+AWS: retira el permiso operativo local del broker sobre esos activos. El lector
+comprueba además el historial independiente por activo y rechaza incluso si después
+se reactivan los mappings/bindings. Su borrado no elimina ese historial.
+
+El job `metaMarketingRevocations` / `meta_marketing_broker_revocations` reutiliza el
+scheduler JobRequests: programación de un lote cada minuto, prioridad high, maxAttempts1,
+gate de worker propio. No crea BullMQ ni usa jobs clínicos para transportar payloads.
+El outbox es la tabla SQL anterior, no otro servicio. Hasta 20 intenciones por ciclo,
+presupuesto cooperativo30 s, petición≤10 s, lease120 s y SKIP LOCKED. Misma UUID tras
+pérdida de ACK, error o reinicio; backoff exponencial hasta una hora. Solo confirma
+ante requestId exacto y `{revoked:true}` y guarda confirmación/auditoría juntas.
+La intención autorizada continúa aunque el usuario cierre sesión después. Un error
+o confirmación incierta permanece pendiente; no fabrica éxito ni otra solicitud.
+
+Firma de control independiente de lectura, misma frontera HTTPS/audience/CA del
+entorno. El cliente solo permite `meta.marketing.asset.revoke.v1` con payload vacío.
+La operación del broker es local: cero llamadas Meta/Secrets y sin modificación de
+campañas. La clave de control no se entrega al lector. El entrypoint del worker
+rechaza runtime gateway; no se activan jobs/cron clínicos DEV con esta preparación.
+Comparte los recursos del scheduler/proceso/MySQL; el límite del ciclo no cancela
+consultas SQL lentas ni garantiza aislamiento de latencia/CPU.
+
+Ajustes añade confirmación explícita, estado «Retirada de acceso en curso» y
+«Retirada de acceso confirmada», y actualización manual; aclara que WhatsApp conserva
+su conexión. No hace polling de proveedor. Permisos de solo lectura permiten ver los
+metadatos y ocultan la gestión de la baja. Cambio de ámbito/sesión invalida peticiones
+anteriores y la confirmación abierta. El panel de actividad existente muestra v21,
+actor humano y finalización por job con referencia común y verificación S3.
+
+La migración `20260919050000-meta-marketing-broker-revocations.js` crea tabla/índices
+por tuple, ámbito, activo y entrega, y añade índices a bindings(scope_key,state) y
+ClinicMetaAssets(assetType,metaAssetId). DDL previa al lector nuevo, incluso si solo
+se publica la comprobación manual anterior; faltando la tabla rechaza, sin fallback.
+DDL MySQL no transaccional: preflight de cada objeto y esquema parcial, sin rerun ciego.
+Down rechaza una tabla de revocaciones poblada; no es un procedimiento de recuperación.
+
+Preparación SQL/TLS/SQLite/Chromium con dobles Meta/Secrets/S3, no publicada. Requiere
+lector/escritor AWS v21 antes del productor; no modifica el archivo/canary v19 congelado.
+Gates separados `META_MARKETING_REVOCATION_ENABLED` y `_WORKER_ENABLED`, cerrados por
+defecto; no dependen del gate de lectura para completar bajas ya solicitadas. OAuth,
+escritor de altas/grants, aceptación pública/titular, carga real y publicación siguen
+pendientes. Contrato funcional20.17, variables03, jobs11, recursos/costes39 y estado19.
+Runbook e inventario: `docs/security/meta-marketing-revocation.md` y
+`meta-marketing-revocation-consumers.json`; corte/evidencia/recuperación en99.

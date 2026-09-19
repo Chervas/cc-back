@@ -395,6 +395,7 @@ class MetaSyncJobs {
       googleAdsEnrollment: 'Concilia altas Google Ads ya solicitadas y sus cancelaciones; conserva las cuentas actuales hasta guardar la asignación.',
       platformAuditDelivery: 'Entrega eventos de auditoría pendientes y conserva las confirmaciones externas verificadas.',
       businessProfileRevocations: 'Confirma revocaciones de accesos a fichas Google ya solicitadas; no consulta al proveedor ni envía mensajes.',
+      metaMarketingRevocations: 'Confirma bloqueos Meta Ads/páginas/Instagram ya solicitados; no llama al proveedor ni afecta WhatsApp.',
       googleAdsRevocations: 'Confirma bloqueos Ads solicitados mediante el broker; no llama a Google ni modifica campañas.',
       googlePropertyRevocations: 'Confirma bloqueos SC/GA ya solicitados mediante el broker; no llama a Google ni envía conversiones.',
       googleOAuthReconciliation: 'Concilia reautorizaciones Google solicitadas y confirma su activación mediante el broker.',
@@ -448,6 +449,7 @@ class MetaSyncJobs {
         googleAdsEnrollment: '* * * * *',
         platformAuditDelivery: '* * * * *',
         businessProfileRevocations: '* * * * *',
+        metaMarketingRevocations: '* * * * *',
         googleAdsRevocations: '* * * * *',
         googlePropertyRevocations: '* * * * *',
         googleOAuthReconciliation: '* * * * *',
@@ -4412,6 +4414,9 @@ try {
   }
   async executeBusinessProfileRevocations() {
     return require('../services/businessProfileRevocation.service').run();
+  }
+  async executeMetaMarketingRevocations() {
+    return require('../services/metaMarketingRevocation.service').run();
   }
   async executeGoogleAdsRevocations() {
     return require('../services/googleAdsRevocation.service').run();

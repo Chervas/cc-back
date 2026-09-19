@@ -52,7 +52,7 @@ test('signed v17 reader verifies the exact stored S3 version, digest and KMS obj
   const { readBatch } = require('../src/reader'), { KEY_ARN } = require('../src/s3');
   const row = pack(fixture('apply','result_recovered')), { privateKey } = generateKeyPairSync('ed25519');
   const ref = { key: keyFor(row), digest: row.digest, versionId: 'fictitious-v17' };
-  assert.throws(() => refFor({ ...ref, key: ref.key.replace('/v17/', '/v21/') }, 'confirmed'));
+  assert.throws(() => refFor({ ...ref, key: ref.key.replace('/v17/', '/v22/') }, 'confirmed'));
   const input = signRequest({ mode: 'confirmed', actorId: '1', sessionRef: randomUUID(), refs: [ref] },
     { keyId: 'fixture', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }) }).input;
   for (const wrong of [false, true]) {

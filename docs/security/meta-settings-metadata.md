@@ -31,7 +31,7 @@ El workspace interpreta el mismo motivo antes de descubrir cuentas.
 El resto de OAuth/Meta no está auditado íntegramente por este corte. El consumidor
 CRM del runtime `meta-marketing-*` avanza en [el corte posterior](meta-crm-broker.md):
 registro independiente, lector manual y auditoría humana preparados. Siguen
-pendientes escritor de alta/grants, OAuth nuevo en vault, baja coordinada,
+pendientes escritor de alta/grants, OAuth nuevo en vault, publicación de la baja coordinada,
 operaciones restantes y aceptación con el titular. No usar estas pantallas como
 prueba de que la migración de credenciales terminó. No cambia DDL, jobs, MFA,
 pausas clínicas, infraestructura ni configuración de proveedor.

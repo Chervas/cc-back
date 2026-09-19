@@ -101,9 +101,10 @@ y coste en 39. Evidencia privada: `qa-evidence/security-resume-20260917/meta-crm
 ## Publicación, recuperación y siguiente paso
 
 1. Completar escritor de alta/OAuth nuevo directamente a vault y grants por ámbito;
-   no reutilizar credenciales investigadas ni copiar tokens al CRM. Completar baja
-   coordinada durable CRM→broker. El lector ya respeta bloques, pero este corte no
-   instala un productor/worker para entregar revocaciones desde CRM.
+   no reutilizar credenciales investigadas ni copiar tokens al CRM. La baja
+   coordinada con productor/worker ya se prepara en
+   [el corte posterior](meta-marketing-revocation.md); publicación y aceptación real
+   siguen pendientes. Ese corte añade historial independiente e índices al lector.
 2. Preflight selectivo de modelos, DDL y consumidores. La DDL MySQL no es una sola
    transacción reversible: comprobar tabla/columnas/CHECK/índices y SequelizeMeta
    después de cada paso; si queda parcial, no arrancar el modelo ni repetir a ciegas.

@@ -25,7 +25,7 @@ test('v19 rejects open payload, wrong actor/scope/version, arrays as digests and
 });
 test('v19 reader verifies exact S3 version/digest/KMS and rejects future refs',async()=>{
   const row=pack(make('check','receipt_checked',{item:{state:'partial_success'}}));const {KEY_ARN}=require('../src/s3');
-  const ref={key:keyFor(row),digest:row.digest,versionId:'test19'};assert.throws(()=>refFor({...ref,key:ref.key.replace('/v19/','/v21/')},'confirmed'));
+  const ref={key:keyFor(row),digest:row.digest,versionId:'test19'};assert.throws(()=>refFor({...ref,key:ref.key.replace('/v19/','/v22/')},'confirmed'));
   for(const wrong of [false,true]){
     const result=await require('../src/reader').readBatch({version:1,audience:'clinicaclick-audit-reader-v1',requestId:randomUUID(),nonce:randomUUID(),issuedAt:Date.now(),mode:'confirmed',actorId:'1',sessionRef:randomUUID(),refs:[ref]},{send:async command=>{
       assert.equal(command.input.VersionId,ref.versionId);return {ContentLength:Buffer.byteLength(row.body),ContentType:'application/json',

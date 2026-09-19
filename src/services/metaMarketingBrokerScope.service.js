@@ -34,7 +34,7 @@ function mapping(value) {
   return { ...resource, mappingId:Number(value.id), connectionId:Number(value.metaConnectionId), assignmentScope:value.assignmentScope,
     clinicId:value.clinicaId === null ? null : Number(value.clinicaId), groupId:value.grupoClinicaId === null ? null : Number(value.grupoClinicaId), active:[true,1].includes(value.isActive) };
 }
-function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadMappings, loadClinics, loadShared, loadPrimaryGroups,
+function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocations, loadMappings, loadClinics, loadShared, loadPrimaryGroups,
   loadGrants, loadConnection, blocked, enabled = () => process.env.META_MARKETING_BROKER_ENABLED === 'true' }) {
   const contexts = new WeakMap();
   async function inspect(mappingId, expected) {
@@ -45,6 +45,8 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadMapping
     const ownedRecords = bounded(await loadBindings(null, Number(mappingId))).map(binding);
     if (ownedRecords.length !== 1 || ownedRecords[0].mapping_id !== Number(mappingId)) fail(); const selected = ownedRecords[0];
     if (selected.state === 'blocked') fail('asset_revoked');
+    // The independent delivery history remains an exclusion if a binding is recreated.
+    if (bounded(await loadRevocations(selected.asset_ref)).length) fail('asset_revoked');
     if (selected.state !== 'active') fail('meta_broker_not_active');
     if (!current) fail(); const requested = mapping(current);
     if (!requested.active || requested.assetRef !== selected.asset_ref || requested.connectionId !== selected.meta_connection_id) fail();
@@ -125,6 +127,7 @@ function createMetaMarketingScopeRepository(getModels) {
   const mappingOptions = { ...options, attributes:[...MAPPING_FIELDS,[literal('(pageAccessToken IS NULL AND waAccessToken IS NULL AND additionalData IS NULL)'),'credentials_absent']] };
   return {
     loadMapping:id => getModels().ClinicMetaAsset.findByPk(id,mappingOptions),
+    loadRevocations:assetRef => getModels().MetaMarketingBrokerRevocation.findAll({ ...options,attributes:['tuple_hash'],where:{asset_ref:assetRef} }),
     loadBindings:(assetRef,mappingId) => getModels().MetaMarketingBrokerBinding.findAll({ ...options,attributes:BINDING_FIELDS,
       where:assetRef ? { asset_ref:assetRef } : { mapping_id:mappingId },order:[['mapping_id','ASC']] }),
     loadMappings:resource => getModels().ClinicMetaAsset.findAll({ ...mappingOptions,where:{assetType:resource.kind,metaAssetId:{[Op.in]:resource.kind === 'ad_account' ? [resource.id,'act_'+resource.id] : [resource.id]}},order:[['id','ASC']] }),

@@ -13,6 +13,7 @@ module.exports = (sequelize, D) => sequelize.define('MetaMarketingBrokerBinding'
   state: { type: D.ENUM('staged', 'active', 'blocked'), allowNull: false, defaultValue: 'staged' },
 }, { tableName: 'MetaMarketingBrokerBindings', timestamps: false, charset: 'ascii', collate: 'ascii_bin', indexes: [
   { name: 'cc_meta_marketing_asset', fields: ['asset_ref'] },
+  { name: 'cc_meta_marketing_scope', fields: ['scope_key','state'] },
   { name: 'cc_meta_marketing_connection', fields: ['meta_connection_id'] },
   { name: 'cc_meta_marketing_subject', fields: ['meta_user_id', 'app_id'] },
 ] });

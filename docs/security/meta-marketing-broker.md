@@ -90,13 +90,14 @@ El corte inicial de esta base no cambiaba pantallas ni conectaba CRM. Las captur
 del asistente pausado no prueban por sí solas estas operaciones. La preparación posterior del
 estado local y Ajustes/selector está descrita en
 [lector local](meta-settings-metadata.md); no ejecuta este transporte. Continúan
-pendientes el escritor de alta del registro, OAuth, baja coordinada CRM→broker,
+pendientes el escritor de alta del registro, OAuth, publicación de la baja coordinada,
 discovery y consumidores restantes. El registro, lector manual y auditoría humana
 v20 ya están preparados y probados en [el corte posterior](meta-crm-broker.md),
 con proveedores ficticios. No se declara completo el bloque sin aceptación real.
 Antes de publicar:
 
-1. Completar escritores del registro y grants y baja coordinada desde CRM. El
+1. Completar escritores del registro/grants y publicar/aceptar la baja coordinada
+   preparada en [su runbook](meta-marketing-revocation.md). El
    lector preparado ya exige permisos de todas las clínicas, rechazo durante I/O
    y auditoría humana v20; falta desplegar y aceptar su recorrido real.
 2. Autorizar credenciales nuevas directamente en vault; no usar tokens
