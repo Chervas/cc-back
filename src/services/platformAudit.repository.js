@@ -11,7 +11,10 @@ function createRepository(model) {
       const row = pack(value);
       try {
         await model.create({ event_id: row.event.eventId, correlation_id: row.event.correlationId, stage: row.event.stage,
-          result_part: row.event.version === 6 ? row.event.batchIndex : row.event.version === 12 ? Number(row.event.mappingId) : 0,
+          result_part: row.event.version === 6 ? row.event.batchIndex : row.event.version === 12 ? Number(row.event.mappingId)
+            : row.event.version === 16 ? require('../../services/platform-audit/src/google-ads-enrollment-event').PHASES[row.event.reason][1]
+              : row.event.version === 22 ? require('../../services/platform-audit/src/meta-oauth-event').PHASES[row.event.reason]
+                : row.event.version === 24 ? require('../../services/platform-audit/src/meta-enrollment-event').PHASES[row.event.reason][1] : 0,
           occurred_at: new Date(row.event.occurredAt), body: row.body, digest: row.digest,
           next_attempt_at: new Date(row.event.occurredAt) }, { transaction });
       } catch (error) {
@@ -54,6 +57,7 @@ function createRepository(model) {
         model.count({ where: { state: 'reconcile' }, transaction }), includeUnresolved ? sql.query(
           'SELECT COUNT(*) AS count, MIN(a.occurred_at) AS oldest FROM PlatformAuditEvents a '
           + 'LEFT JOIN PlatformAuditEvents b ON b.correlation_id = a.correlation_id AND b.stage = \'completed\' '
+          + 'AND (a.result_part = 0 OR b.result_part = a.result_part) '
           + 'WHERE a.stage = \'attempted\' AND b.event_id IS NULL', { type: sql.constructor.QueryTypes.SELECT, logging: false, transaction }) : null]);
       const age = value => value ? Math.max(0, Math.floor((now - new Date(value)) / 1000)) : 0;
       return { pending, reconcile, oldestAgeSeconds: age(oldest), unresolvedAttempts: unresolved ? Number(unresolved[0].count) : null,

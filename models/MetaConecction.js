@@ -24,8 +24,10 @@ module.exports = (sequelize, DataTypes) => { // <-- Recibe sequelize y DataTypes
         },
         accessToken: { 
             type: DataTypes.STRING(512), 
-            allowNull: false,
+            allowNull: true, // Vault connections never carry a credential in CRM.
         },
+        credentials_external: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+        broker_app_id: { type: DataTypes.STRING(30), allowNull: true },
         expiresAt: { 
             type: DataTypes.DATE,
             allowNull: true,

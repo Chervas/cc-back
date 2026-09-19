@@ -31,7 +31,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 35, 'the canonical scheduler must retain email, web, report cache and campaign periodic jobs');
+  assert.equal(definitions.length, 42, 'the canonical scheduler retains the 39 public jobs and three gated Meta reconciliation jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -1262,7 +1262,51 @@ async function testNormalSettlementUsesCompareAndSetAndResolvesConflicts() {
   }
 }
 
+async function testPlatformAuditJobsRespectGates() {
+  const originalEnqueue = jobRequestsService.enqueueUniqueJobRequest;
+  try {
+    for (const [name, type, env, module, method, cron] of [
+      ['metaMarketingRevocations', 'meta_marketing_broker_revocations', 'META_MARKETING_REVOCATION_WORKER_ENABLED', '../../services/metaMarketingRevocation.service', 'executeMetaMarketingRevocations', '* * * * *'],
+      ['metaMarketingOAuth', 'meta_marketing_oauth_reconciliation', 'META_MARKETING_OAUTH_WORKER_ENABLED', '../../services/metaMarketingOAuth.service', 'executeMetaMarketingOAuth', '* * * * *'],
+      ['metaMarketingEnrollment', 'meta_marketing_enrollment_reconciliation', 'META_MARKETING_ENROLLMENT_WORKER_ENABLED', '../../services/metaMarketingEnrollment.service', 'executeMetaMarketingEnrollment', '* * * * *'],
+    ]) {
+      const previous = process.env[env]; const service = require(module); const originalRun = service.run; let queued = 0; let invoked = 0;
+      try {
+        jobRequestsService.enqueueUniqueJobRequest = async input => {
+          queued++; assert.equal(input.type, type); assert.equal(input.maxAttempts, 1); return { created: true, job: { id: 9010 } };
+        };
+        process.env[env] = 'false';
+        assert.equal((await metaSyncJobs.enqueueScheduledJob(name)).queued, false); assert.equal(queued, 0);
+        assert.equal((await service.run()).skipped, true);
+        process.env[env] = 'true'; assert.equal((await metaSyncJobs.enqueueScheduledJob(name)).queued, true);
+        service.run = async () => { invoked++; return { status: 'failed', error: 'audit_unavailable' }; };
+        const result = await jobExecutor.JOB_HANDLERS[type]({ mode: 'reader', arbitraryEndpoint: 'https://forbidden.invalid' });
+        assert.equal(result.retryable, false); assert.equal(invoked, 1);
+        assert.equal(metaSyncJobs.config.schedules[name], cron); assert.equal(SCHEDULED_JOB_DEFINITIONS[name].timezone, 'Europe/Madrid');
+        assert.equal(BACKGROUND_INTEGRATION_JOB_TYPES.includes(type), false);
+      } finally { service.run = originalRun; if (previous === undefined) delete process.env[env]; else process.env[env] = previous; }
+    }
+  } finally { jobRequestsService.enqueueUniqueJobRequest = originalEnqueue; }
+}
+
+async function testAuthSessionExpiryGate() {
+  const sessions = require('../../services/accessSession.service');
+  const before = sessions.expire; const previousFlag = process.env.AUTH_SESSION_EXPIRY_ENABLED;
+  let calls = 0;
+  try {
+    sessions.expire = async () => { calls++; return { expired: 2 }; };
+    process.env.AUTH_SESSION_EXPIRY_ENABLED = 'false';
+    assert.equal((await metaSyncJobs.executeAuthSessionExpiry()).disabled, true); assert.equal(calls, 0);
+    assert.equal((await metaSyncJobs.enqueueScheduledJob('authSessionExpiry')).queued, false);
+    process.env.AUTH_SESSION_EXPIRY_ENABLED = 'true';
+    await jobExecutor.JOB_HANDLERS.auth_session_expiry({ arbitraryUserId: 1 }); assert.equal(calls, 1);
+    assert.equal(metaSyncJobs.config.schedules.authSessionExpiry, '*/5 * * * *');
+    assert.equal(SCHEDULED_JOB_DEFINITIONS.authSessionExpiry.timezone, 'Europe/Madrid');
+  } finally { sessions.expire = before; if (previousFlag === undefined) delete process.env.AUTH_SESSION_EXPIRY_ENABLED; else process.env.AUTH_SESSION_EXPIRY_ENABLED = previousFlag; }
+}
+
 async function run() {
+  await testPlatformAuditJobsRespectGates();
   testCatalogCoversEveryCronAndExecutor();
   await testTargetedHandlersKeepTheirExactMappings();
   await testPublicationHealthMonitorUsesDurableScheduledHandler();

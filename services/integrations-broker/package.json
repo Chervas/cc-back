@@ -15,9 +15,11 @@
     "start": "node src/main.js"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "3.1131.0",
     "@aws-sdk/client-kms": "3.1131.0",
     "@aws-sdk/client-s3": "3.1131.0",
     "@aws-sdk/client-secrets-manager": "3.1131.0",
+    "@aws-sdk/client-sesv2": "3.1131.0",
     "@aws-sdk/client-sts": "3.1131.0",
     "@aws-sdk/credential-providers": "3.1131.0",
     "@smithy/node-http-handler": "4.12.1",
