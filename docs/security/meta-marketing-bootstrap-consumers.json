@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "scope": "Bounded shared Marketing bootstrap Meta metadata and existing containment UI. No broker Meta Ads migration or real provider/public MFA acceptance. Previous Google manifests retain their historical hashes.",
+  "runtimeConsumersMigrated": 0,
+  "includesWorkingChanges": true,
+  "backend": {
+    "sourceBaseHead": "e5c2514ad118c27add02f493813575c56c53e0f1",
+    "files": {
+      "src/controllers/campaignOnboarding.controller.js": "6ae1e89940578d1ca4783554dee9f1a46485400f43c49dd5d19367d34d25d101",
+      "src/services/effectiveMarketingAssets.service.js": "6a429a0e9f12d9ee6fbc10a102716d5864c86f2b53eeeaacc1265b7908c130da",
+      "src/services/scopeConnectionResolver.service.js": "c98959fa2c4c04ada2a4fcd874b55443142813af2f26c4de21c9dca895f78c59",
+      "src/scripts/tests/google_bootstrap_settings_mysql.integration.js": "8f1049b45592a982c712d7ea0b96b6f1c22248495d430d4f7db9f17ce46e791f",
+      "src/scripts/tests/fixtures/google_bootstrap_e2e_visual.fixture.js": "a579627ea18eb3927a34b1c65e4e48c9d5c21dac1eaa5f2e33b8c4dd2c6f81c6"
+    }
+  },
+  "frontend": {
+    "sourceBaseHead": "0ef598e184fb8341b49af64e4a122c336b68a607",
+    "files": {
+      "src/app/modules/admin/apps/marketing/campanas/campaign-onboarding.service.ts": "6edf2bb605de3eaaa025248f5cc4684af4638924f55f5df5588f8038d0b34f7d",
+      "src/app/modules/admin/apps/marketing/campanas/campaign-onboarding-stepper/campaign-onboarding-stepper.component.ts": "c4b08558b664e5881564bdab8c0ee58404cf3103ae0472d526db88440902a1c8",
+      "src/app/modules/admin/apps/marketing/campanas/campaign-onboarding-stepper/campaign-onboarding-stepper.component.html": "0948ec50d50bbb1783b0d17d2995016a7a9b52d377da0a98acd19b3a1abeccb8",
+      "src/assets/i18n/es.json": "56b4ca12d0a11331753989a9a1bab6795eac95d45ab7547d989809165c4b1e3f",
+      "src/assets/i18n/cat.json": "1cd0e39974dd8390a739cbea65dae351be77a90be718a64a80c5d4f35bdf8f8e"
+    }
+  },
+  "qa": {
+    "mysqlHttpTlsGroups": 10,
+    "angularChromiumScreenshots": 6,
+    "targetedRegressionTests": 10,
+    "angularCompile": "ngc --noEmit: pass",
+    "googleCredentialSelects": 0,
+    "metaCredentialSelects": 0,
+    "provider": "fictitious_isolated",
+    "i18n": "Global check still fails: 4 missing and 5 quality observations identical to sourceBaseHead; 3 added keys translated without new errors",
+    "deployment": false,
+    "publicMfaAcceptance": false
+  }
+}

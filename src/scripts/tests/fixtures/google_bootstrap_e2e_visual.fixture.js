@@ -2,7 +2,7 @@
 // Real stepper class/template plus the exact Web status card. Actual bootstrap
 // HTTP/SQL/signed broker; isolated provider and selection, never public MFA.
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),{createRequire}=require('node:module');
-module.exports=async({app,apiServer,report,token,reads,deliveryEnabled=false})=>{
+module.exports=async({app,apiServer,report,token,reads,deliveryEnabled=false,metaPaused=false})=>{
   const front=path.resolve(__dirname,'../../../../../front-dev'),req=createRequire(path.join(front,'package.json'));
   const ts=req('typescript'),buildReq=createRequire(req.resolve('@angular-devkit/build-angular/package.json'));
   const esbuild=buildReq('esbuild'),sass=buildReq('sass'),puppeteer=require('puppeteer-core');
@@ -21,7 +21,7 @@ module.exports=async({app,apiServer,report,token,reads,deliveryEnabled=false})=>
     ...material.map((p,i)=>"import {"+names[i]+"} from '@angular/material/"+p+"';"),
     "CampaignOnboardingService.ctorParameters=()=>[{type:HttpClient}];CampaignOnboardingStepperComponent.ctorParameters=()=>[HttpClient,FormBuilder,ChangeDetectorRef,MatDialog,CampaignOnboardingService,ClinicFilterService,TranslocoService].map(type=>({type}));",
     "class StepperModule{};NgModule({declarations:[CampaignOnboardingStepperComponent],exports:[CampaignOnboardingStepperComponent],imports:[CommonModule,FormsModule,ReactiveFormsModule,TranslocoModule,"+names.join(',')+"]})(StepperModule);",
-    "class Fixture{step; constructor(){const icons=inject(MatIconRegistry),safe=inject(DomSanitizer);for(const ns of ['heroicons_outline','heroicons_solid','brand'])icons.addSvgIconSetInNamespace(ns,safe.bypassSecurityTrustResourceUrl('/'+ns+'.svg'));window.QA_COMPONENT=this;}get googleAdsBootstrapLoaded(){return this.step?.bootstrapLoaded;}get googleAdsConnected(){return this.step?.googleAds?.connected;}get googleDataManagerReady(){return this.step?.googleAds?.capabilities?.data_manager_ready;}get googleDataManagerMissing(){return this.step?.googleAds?.capabilities?.data_manager_missing||[];}}",
+    "class Fixture{step; constructor(){const icons=inject(MatIconRegistry),safe=inject(DomSanitizer);for(const ns of ['heroicons_outline','heroicons_solid','brand','feather'])icons.addSvgIconSetInNamespace(ns,safe.bypassSecurityTrustResourceUrl('/'+ns+'.svg'));window.QA_COMPONENT=this;}get googleAdsBootstrapLoaded(){return this.step?.bootstrapLoaded;}get googleAdsConnected(){return this.step?.googleAds?.connected;}get googleDataManagerReady(){return this.step?.googleAds?.capabilities?.data_manager_ready;}get googleDataManagerMissing(){return this.step?.googleAds?.capabilities?.data_manager_missing||[];}}",
     "ViewChild(CampaignOnboardingStepperComponent)(Fixture.prototype,'step');Component({selector:'qa-root',standalone:true,imports:[StepperModule,CommonModule,TranslocoModule,MatIconModule],template:"+JSON.stringify('<main style="padding:16px;max-width:1000px;margin:auto"><p>QA · Grupo ficticio · API y broker locales</p><campaign-onboarding-stepper></campaign-onboarding-stepper><section id="web-card" style="margin-top:24px"><h2>Marketing Web · Estado de conversiones</h2>'+card+'</section></main>')+"})(Fixture);",
     "const filter={selectedClinicId$:of('59,71'),selectedGroupName$:of('Grupo ficticio'),filteredClinics$:of([]),getCurrentClinicFilter:()=> '59,71',getCurrentSelectedGroupName:()=> 'Grupo ficticio',getCurrentFilteredClinics:()=>[{id_clinica:59,grupoClinica:{id_grupo:5}},{id_clinica:71,grupoClinica:{id_grupo:5}}]};",
     "class Loader{http=inject(HttpClient);getTranslation(){return this.http.get('/es.json');}};bootstrapApplication(Fixture,{providers:[provideNoopAnimations(),provideHttpClient(withInterceptors([(req,next)=>next(req.url.startsWith('/api/')?req.clone({setHeaders:{authorization:'Bearer '+window.QA_TOKEN}}):req)])),{provide:ClinicFilterService,useValue:filter},provideTransloco({config:{availableLangs:['es'],defaultLang:'es',reRenderOnLangChange:true,prodMode:true},loader:Loader})]});"
@@ -37,15 +37,16 @@ module.exports=async({app,apiServer,report,token,reads,deliveryEnabled=false})=>
   app.get('/fixture.js',(_req,res)=>res.type('application/javascript').send(Buffer.from(bundle.outputFiles[0].contents)));
   app.get('/styles.css',(_req,res)=>res.type('text/css').send(fs.readFileSync(path.join(styles,cssName))));
   app.get('/es.json',(_req,res)=>res.type('application/json').send(fs.readFileSync(path.join(front,'src/assets/i18n/es.json'))));
-  for(const [name,file] of [['heroicons_outline','heroicons-outline'],['heroicons_solid','heroicons-solid'],['brand','brand']])app.get('/'+name+'.svg',(_req,res)=>res.type('image/svg+xml').send(fs.readFileSync(path.join(front,'src/assets/icons/'+file+'.svg'))));
+  for(const [name,file] of [['heroicons_outline','heroicons-outline'],['heroicons_solid','heroicons-solid'],['brand','brand'],['feather','feather']])app.get('/'+name+'.svg',(_req,res)=>res.type('image/svg+xml').send(fs.readFileSync(path.join(front,'src/assets/icons/'+file+'.svg'))));
   app.use('/assets',require('express').static(path.join(front,'src/assets')));
   app.get('/favicon.ico',(_req,res)=>res.sendStatus(204));
   app.get('/',(_req,res)=>res.set('Cache-Control','private, no-store').type('html').send('<!doctype html><html lang="es"><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body class="light theme-default"><qa-root></qa-root><script>window.QA_TOKEN='+JSON.stringify(token())+';</script><script src="/fixture.js"></script></body></html>'));
-  const output=path.join(report.root,'visual');fs.mkdirSync(output,{mode:0o700});let browser;const errors=[],blocked=[],shots=[],writes=[],validationRequests=[];
+  const output=path.join(report.root,'visual');fs.mkdirSync(output,{mode:0o700});let browser;const errors=[],blocked=[],shots=[],writes=[],validationRequests=[],pixelRequests=[];
   try{
     browser=await puppeteer.launch({executablePath:'/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell',headless:true,pipe:true,args:['--no-sandbox','--disable-dev-shm-usage']});
     const page=await browser.newPage(),base='http://127.0.0.1:'+apiServer.address().port;
     await page.setRequestInterception(true);page.on('request',r=>{
+      if(r.url().includes('/campaign-onboarding/meta-pixels'))pixelRequests.push(r.url().split('?')[0]);
       if(deliveryEnabled&&r.method()==='POST'&&r.url()===base+'/api/marketing/google-ads/conversions/data-manager/validate'){
         const body=JSON.parse(r.postData());assert.deepEqual(Object.keys(body).sort(),['assignment_scope','conversion_action_id','customer_id','event','group_id']);
         validationRequests.push({event:body.event,actionId:body.conversion_action_id});r.continue();
@@ -59,6 +60,20 @@ module.exports=async({app,apiServer,report,token,reads,deliveryEnabled=false})=>
       assert(reads()>prior);assert.equal(await page.evaluate(()=>window.QA_COMPONENT.step.googleAds.capabilities.data_manager_ready),deliveryEnabled);
       const headers=await page.$$('mat-step-header');assert(headers.length>=2);await headers[1].click();
       await page.waitForFunction(()=>document.querySelectorAll('mat-step-header')[1]?.getAttribute('aria-selected')==='true');
+      if(metaPaused){
+        if(!await page.evaluate(()=>window.QA_COMPONENT.step.isProviderSelected('meta_ads'))){const switchOn=await page.$('[aria-label="Usar Meta Ads"]');await switchOn.click();await page.waitForFunction(()=>window.QA_COMPONENT.step.isProviderSelected('meta_ads'));}
+        const banner=await page.$('[data-meta-paused]');assert(banner);await banner.evaluate(e=>e.scrollIntoView({block:'center'}));
+        assert.match(await banner.evaluate(e=>e.innerText),/Meta Ads en pausa/);assert.match(await banner.evaluate(e=>e.innerText),/No necesitas volver a conectar/);
+        assert.equal(await page.evaluate(()=>window.QA_COMPONENT.step.metaConnected),true);
+        assert.equal(await page.evaluate(()=>window.QA_COMPONENT.step.connectionsValid),false);
+        await page.evaluate(async()=>{const c=window.QA_COMPONENT.step;await c.connectMeta();c.openMetaAccountMapping();c.onMetaAccountChange();c._loadMetaPixels('act_1234567890','1234567892');});
+        assert.equal(await page.evaluate(()=>window.QA_COMPONENT.step.accountForm.get('meta_pixel_id').value),'1234567892');
+        assert.deepEqual(pixelRequests,[]);
+        await page.screenshot({path:path.join(output,v.name+'-meta-paused.png')});shots.push(v.name+'-meta-paused');
+        const toggle=await page.$('[aria-label="Usar Meta Ads"]');assert(toggle);await toggle.click();
+        await page.waitForFunction(()=>!window.QA_COMPONENT.step.isProviderSelected('meta_ads'));
+        assert.equal(await page.evaluate(()=>window.QA_COMPONENT.step.connectionsValid),true);
+      }
       if(deliveryEnabled){
         await page.waitForFunction(()=>window.QA_COMPONENT.step.conversionsValid===true);
         assert.equal(await page.evaluate(()=>window.QA_COMPONENT.step.conversionActions.length),4);
@@ -82,8 +97,8 @@ module.exports=async({app,apiServer,report,token,reads,deliveryEnabled=false})=>
     }
     assert.deepEqual(errors,[]);assert.deepEqual(blocked,[]);assert.deepEqual(writes,[]);
     assert.equal(validationRequests.length,deliveryEnabled?8:0);
-    fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({screenshots:shots,actualStepper:true,actualWebStatusCard:true,actualBootstrapHttp:true,actualSql:true,actualSignedTlsBroker:true,publicMfa:false,realProvider:false,errors,blocked,writes,validationRequests},null,2),{mode:0o600});
-    report.visual={screenshots:shots.length,errors,blocked,writes,validateOnlyRequests:validationRequests.length};
+    fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({screenshots:shots,actualStepper:true,actualWebStatusCard:true,actualBootstrapHttp:true,actualSql:true,actualSignedTlsBroker:true,publicMfa:false,realProvider:false,errors,blocked,writes,validationRequests,pixelRequests,metaPaused},null,2),{mode:0o600});
+    report.visual={screenshots:shots.length,errors,blocked,writes,pixelRequests,metaPaused,validateOnlyRequests:validationRequests.length};
     report.checks.push(deliveryEnabled
       ? 'real Angular stepper and exact Web status card, desktop/mobile, consume post-job configuration via actual HTTP/SQL/TLS; four fresh validate-only requests per viewport confirm readiness, no other POST or provider mutation'
       : 'real Angular stepper and exact Web status card, desktop/mobile, consume actual bootstrap HTTP; disabled delivery belongs to ClinicaClick, no reconnect request or validated state and no write attempted');

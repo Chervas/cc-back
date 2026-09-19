@@ -565,8 +565,10 @@ Chromium usa el asistente Angular real y la tarjeta exacta de Marketing Web con
 la misma API/sesión MySQL/broker. Cuatro capturas en 1440/390 px; ocho peticiones
 `validateOnly` nuevas en el navegador, sin otras escrituras ni llamadas externas.
 No es una prueba de toda la navegación Web ni aceptación de MFA/proveedor públicos.
-La UI del bootstrap mantiene consultas legacy de Meta; se contabilizan aparte
-y no se atribuyen al job. Google conserva cero hidrataciones locales de OAuth.
+En ese ensayo la UI del bootstrap mantenía consultas legacy de Meta, contabilizadas
+aparte del job. El corte posterior de [metadatos Meta](meta-marketing-metadata.md)
+elimina esa hidratación en el bootstrap y refleja su pausa sin migrar el proveedor.
+Google conserva cero hidrataciones locales de OAuth en estos recorridos.
 
 El job realiza bastantes comprobaciones SQL de identidad/ámbito, especialmente
 en la primera pasada. Las cifras en 99 separan primera preparación y sondeo de

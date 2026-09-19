@@ -1628,14 +1628,19 @@ async function resolveMetaCampaignMappingAccess({
   adAccountId,
   assetModel = ClinicMetaAsset,
   connectionModel = MetaConnection,
-  nowMs = Date.now()
+  nowMs = Date.now(),
+  metadataOnly = false
 }) {
   const normalizedAdAccountId = normalizeMetaAdAccountId(adAccountId);
   if (!normalizedAdAccountId) {
     return { adAccountId: null, asset: null, connection: null, reason: 'meta_ad_account_missing' };
   }
+  if (metadataOnly === true && await require('../services/metaScopeBlock.service').blocked({
+    assignmentScope: scope.assignment_scope, clinicId: scope.clinic_id, groupId: scope.group_id,
+  })) return { adAccountId: normalizedAdAccountId, asset: null, connection: null, reason: 'security_scope_blocked' };
   const rawAdAccountId = normalizedAdAccountId.replace(/^act_/, '');
   const rows = await assetModel.findAll({
+    ...(metadataOnly === true ? { attributes: require('../services/effectiveMarketingAssets.service').META_ASSET_METADATA_FIELDS } : {}),
     where: {
       isActive: true,
       assetType: 'ad_account',
@@ -1657,8 +1662,12 @@ async function resolveMetaCampaignMappingAccess({
         : 'meta_account_mapping_missing'
     };
   }
-  const connection = await connectionModel.findByPk(connectionIds[0]);
-  const health = metaConnectionUsability(connection, nowMs);
+  const connection = await connectionModel.findByPk(connectionIds[0], metadataOnly === true
+    ? { attributes: require('../services/scopeConnectionResolver.service').META_METADATA_FIELDS } : undefined);
+  // Metadata indicates a stored connection, never permission to call Meta.
+  const health = metadataOnly === true
+    ? { usable: Boolean(connection?.id && connection?.metaUserId), reason: 'meta_mapping_connection_missing' }
+    : metaConnectionUsability(connection, nowMs);
   if (!health.usable) {
     return {
       adAccountId: normalizedAdAccountId,
@@ -7474,6 +7483,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     groupIdRaw: scope.group_id,
     assignmentScopeRaw: scope.assignment_scope,
     googleMetadataOnly: true,
+    metaMetadataOnly: true,
   });
   const webMeasurementState = resolveWebMeasurementMarketingState(scope, marketingState);
   const intakeRecord = webMeasurementState.record;
@@ -7607,29 +7617,33 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
   const selectedMetaAdAccount = marketingState.meta.effective_assets?.ad_account
     || metaAssets.ad_accounts[0]
     || null;
-  const metaMappedAccess = selectedMetaAdAccount?.ad_account_id
-    ? await resolveMetaCampaignMappingAccess({ scope, adAccountId: selectedMetaAdAccount.ad_account_id })
-    : null;
   const scopedMetaConnection = await resolveMetaConnectionForScope({
     userId,
     clinicIdRaw: scope.clinic_id,
     groupIdRaw: scope.group_id,
     assignmentScopeRaw: scope.assignment_scope,
-    allowLegacyUserFallback: true
+    allowLegacyUserFallback: true,
+    metadataOnly: true,
   });
-  const usableMetaConnection = metaMappedAccess?.connection
+  const metaScopeBlocked = /^(?:security_scope_blocked|scope_assignment_.*_blocked)$/.test(scopedMetaConnection?.source || '');
+  const metaMappedAccess = !metaScopeBlocked && selectedMetaAdAccount?.ad_account_id
+    ? await resolveMetaCampaignMappingAccess({ scope, adAccountId: selectedMetaAdAccount.ad_account_id, metadataOnly: true })
+    : null;
+  const usableMetaConnection = metaScopeBlocked ? null : metaMappedAccess?.connection
     || marketingState.meta.connection
     || scopedMetaConnection?.connection
     || null;
   metaConnected = Boolean(usableMetaConnection);
   metaReason = metaConnected
     ? null
-    : (metaMappedAccess?.reason || (metaAssets.ad_accounts.length ? 'connection_unavailable' : 'no_connection'));
+    : (metaScopeBlocked ? 'security_scope_blocked' : metaMappedAccess?.reason || (metaAssets.ad_accounts.length ? 'connection_unavailable' : 'no_connection'));
   const metaConnectionSource = selectedMetaAdAccount?.assignment_origin
     ? `mapping_${selectedMetaAdAccount.assignment_origin}`
     : (marketingState.meta.connection_source || scopedMetaConnection?.source || null);
 
-  const capiMissing = [];
+  // Meta Ads/CAPI remains in containment; stored connection != live delivery.
+  const metaAvailability = { available: false, reason: 'meta_security_quarantine' };
+  const capiMissing = [metaAvailability.reason];
   if (!metaAssets.ad_accounts.length) capiMissing.push('ad_account_mapping');
   if (!marketingState.meta.effective_assets?.pixel?.pixel_id && !process.env.META_PIXEL_ID) capiMissing.push('pixel_id');
   if (!(intakeRecord?.hmac_key || '').trim()) capiMissing.push('intake_hmac_key');
@@ -7708,6 +7722,7 @@ exports.getCampaignOnboardingBootstrap = asyncHandler(async (req, res) => {
     },
     meta_ads: {
       connected: metaConnected,
+      availability: metaAvailability,
       reason: metaReason,
       connected_via: mapConnectionSourceToOrigin(metaConnectionSource),
       connection_source: metaConnectionSource,
@@ -8212,7 +8227,7 @@ exports.gateEnhancedConversionsActivation = asyncHandler(async (req, res) => {
   });
   if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'write'))) return;
 
-  const marketingState = await resolveEffectiveMarketingState({
+  const marketingState = await resolveEffectiveMarketingAssetInventory({
     clinicIdRaw: null,
     groupIdRaw: requestedGroupId,
     assignmentScopeRaw: 'group'
@@ -8847,6 +8862,9 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
     assignmentScopeRaw: req.body?.assignment_scope
   });
   if (!(await requireMarketingClinicScope(req, res, scope.clinic_ids, 'write'))) return;
+  if (usesExistingAdvertiserCampaigns(mode) && providers.includes('meta_ads')) {
+    require('../lib/metaQuarantineHttp').assertMetaAvailable();
+  }
   const previousMode = await resolveActiveModeForScope(scope);
   let modeTransition = null;
   try {
@@ -8864,7 +8882,7 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
       ...(error.details ? { details: error.details } : {}),
     });
   }
-  const marketingState = await resolveEffectiveMarketingState({
+  const marketingState = await resolveEffectiveMarketingAssetInventory({
     clinicIdRaw: scope.clinic_id,
     groupIdRaw: scope.group_id,
     assignmentScopeRaw: scope.assignment_scope
@@ -9828,7 +9846,7 @@ exports.transitionMarketingStrategyStatus = asyncHandler(async (req, res) => {
       ? rows[0].solicitud
       : {};
     const strategyScope = extractStrategyScopeFromPayload(strategyPayload, rows);
-    const marketingState = await resolveEffectiveMarketingState({
+    const marketingState = await resolveEffectiveMarketingAssetInventory({
       clinicIdRaw: strategyScope.clinic_id,
       groupIdRaw: strategyScope.group_id,
       assignmentScopeRaw: strategyScope.assignment_scope

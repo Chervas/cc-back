@@ -10689,9 +10689,9 @@ broker HTTPS firmado y SQLite, con proveedores ficticios y sin inicializar cron.
 Cubre las cuatro fases, fallos, revocación tras I/O, pausa clínica, cierre de gate,
 cambio de clave/configuración, rollback e idempotencia. El asistente Angular
 consulta esa misma API y realiza validaciones nuevas en escritorio/móvil.
-El job no selecciona credenciales generales; el bootstrap compartido conserva
-su consumidor legacy de Meta, pendiente de migrar, y eso no se presenta como
-eliminación de todas las credenciales del frontend/backend.
+El job no selecciona credenciales generales. El bootstrap compartido usa ahora
+metadatos de Meta según el contrato inferior; la operación Meta mediante vault
+sigue pendiente. Esto no elimina todas las credenciales del frontend/backend.
 
 Las mediciones y límites de carga, evidencia visual, corte y recuperación están
 en 19/39/99 y `docs/security/google-data-manager-broker.md`. Falta carga con
@@ -10739,3 +10739,43 @@ real y el controlador de listado muestran la clínica correcta en escritorio/mó
 no acredita la navegación completa, MFA público ni Google real. Contrato operativo,
 carga, prerrequisitos y recuperación en `docs/security/google-native-leads-broker.md`;
 variables en 03, estado en 19, planificación en 11 y evidencia de corte en 99.
+
+## Bootstrap Meta sin hidratación de credenciales (preparado, 19/09/2026)
+
+El arranque compartido del asistente solo selecciona metadatos de conexiones y
+activos Meta: excluye `accessToken`, `pageAccessToken` y `additionalData` en SQL,
+incluidos asociación, mapping y fallback inequívoco de usuario. El inventario
+compartido proyecta una lista cerrada de columnas; no devuelve modelos con
+credenciales para después ocultarlas. El resolver conserva su modo legacy para
+consumidores que todavía no se han adaptado; esta opción es interna, no un
+parámetro aceptado del navegador.
+
+Después del I/O Google se consulta de nuevo el ámbito Meta. Una asignación
+desconectada/revocada o bloqueo de seguridad impide usar la conexión conservada
+en el inventario inicial. `meta_ads.connected` describe una conexión guardada;
+`meta_ads.availability={available:false,reason:'meta_security_quarantine'}`
+expresa la contención operativa existente. CAPI incluye ese impedimento y no
+declara readiness por tener cuenta, píxel o clave configurados. Esto no acredita
+validez del token, acceso al proveedor ni migración Meta al vault.
+
+La UI conserva cuenta/píxel y explica «Meta Ads en pausa», sin sugerir reconectar.
+No consulta píxeles ni abre OAuth/mapping durante la pausa. Con Meta seleccionado
+no permite continuar; el usuario puede desmarcarlo y continuar con Google. La
+selección guardada no se elimina automáticamente. El campo de disponibilidad
+es aditivo; publicar API/UI compatibles para que la interfaz refleje la pausa.
+
+La consulta directa de píxeles falla antes de leer tokens. Un inicio que utiliza
+campañas existentes y selecciona Meta, solo o junto a Google, devuelve 503
+`meta_security_quarantine` después de comprobar permisos y antes de modificar
+configuración o `CampaignRequest`. El pedido de propuesta gestionada conserva
+su contrato. Inicio, transición de estrategia y gate Enhanced resuelven inventario
+cuando solo necesitan activos/configuración, sin cargar conexiones generales.
+
+Prueba integrada MySQL/HTTP/broker HTTPS/Chromium propios con proveedores
+ficticios: diez grupos, seis capturas en escritorio/móvil, cero SELECT de columnas
+de credenciales Google/Meta, cero peticiones de píxeles y cero envíos/acciones.
+Incluye desconexión, bloqueo durante la espera, fallback ambiguo y rechazo de
+inicio mixto sin cambios SQL. No es aceptación de MFA público, proveedor real
+ni todos los recorridos de campañas. Sin DDL, variable, cola, activación o
+despliegue nuevo. Contrato funcional en 20.17, carga/coste en 39, estado en 19,
+corte en 99 y recuperación en `docs/security/meta-marketing-metadata.md`.

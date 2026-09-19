@@ -107,6 +107,15 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     const B=require('../../services/googleAdsBroker.service');Object.assign(B,broker);
     Object.assign(require('../../services/accessSession.service'),sessions);
     // Inspect actual SQL, including eager-loaded connection associations.
+    const metaFixture=process.env.META_BOOTSTRAP_METADATA_TEST==='1';let metaCredentialQueries=0;
+    if(metaFixture){
+      await models.MetaConnection.create({id:80,userId:91002,metaUserId:'fictitious-meta-subject',accessToken:'NEVER_HYDRATE_META_OAUTH',expiresAt:new Date(Date.now()+86400000)});
+      await models.MetaConnectionAssignment.create({id:200,scopeKey:'group:5',assignmentScope:'group',grupoClinicaId:5,metaConnectionId:80,status:'active'});
+      await models.ClinicMetaAsset.bulkCreate([{id:501,clinicaId:59,grupoClinicaId:5,assignmentScope:'group',metaConnectionId:80,isActive:true,assetType:'ad_account',metaAssetId:'act_1234567890',metaAssetName:'Cuenta Meta ficticia',additionalData:{access_token:'NEVER_HYDRATE_EXTRA_SECRET'}},
+        {id:502,clinicaId:59,grupoClinicaId:5,assignmentScope:'group',metaConnectionId:80,isActive:true,assetType:'facebook_page',metaAssetId:'1234567891',metaAssetName:'Página Meta ficticia',pageAccessToken:'NEVER_HYDRATE_META_PAGE'}]);
+      const config=await models.IntakeConfig.findByPk(1);await config.update({config:{...config.config,meta_ads:{enabled:true,ad_account_id:'act_1234567890',pixel_id:'1234567892'}}});
+    }
+    sql.addHook('afterQuery',(_options,q)=>{if(/SELECT /i.test(q.sql||'')&&/`(?:MetaConnections|ClinicMetaAssets)`/.test(q.sql)&&/`(?:accessToken|pageAccessToken|additionalData)`/.test(q.sql))metaCredentialQueries++;});
     let queries=0;sql.addHook('afterQuery',(_options,query)=>{queries++;const text=query.sql||'';
       if(/SELECT /i.test(text)&&/`GoogleConnections`/.test(text)&&/`(?:accessToken|refreshToken)`/.test(text))tokenReads++;});
     const controller=require('../../controllers/campaignOnboarding.controller');
@@ -115,6 +124,7 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
       req.userData=await sessions.verify(sessions.bearer(req.headers.authorization));next();
     }catch(e){next(e);}};
     app.get('/api/marketing/campaign-onboarding/bootstrap',authenticate,controller.getCampaignOnboardingBootstrap);
+    app.post('/api/marketing/campaign-onboarding/start',authenticate,controller.startCampaignOnboarding);
     app.get('/api/marketing/google-ads/conversion-actions',authenticate,controller.listGoogleAdsConversionActions);
     app.use((error,_req,res,_next)=>res.status(error.status||error.httpStatus||500).json({success:false,error:error.code||'internal_error'}));
     apiServer=http.createServer(app);await new Promise(resolve=>apiServer.listen(0,'127.0.0.1',resolve));registerOwnedLoopbackServer(apiServer);
@@ -186,12 +196,48 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     assert.equal(noQuota.body.google_ads.capabilities.data_manager_ready,false);assert(noQuota.body.google_ads.capabilities.data_manager_missing.includes('quota_project'));
     process.env.GOOGLE_ADS_CONVERSIONS_BROKER_ENABLED='false';
     report.checks.push('after real broker restart into Ads read-only cohort, local quota env cannot override absence of remote Data Manager configuration');
+    if(metaFixture){
+      const stored=await call();assert.equal(stored.body.meta_ads.connected,true);assert.equal(stored.body.meta_ads.availability.available,false);
+      assert.equal(stored.body.meta_ads.capi_readiness.ready,false);assert(stored.body.meta_ads.capi_readiness.missing.includes('meta_security_quarantine'));
+      assert.equal(stored.body.meta_ads.effective_assets.pixel_id,'1234567892');assert.doesNotMatch(JSON.stringify(stored.body),/NEVER_HYDRATE/);
+      await models.MetaConnectionAssignment.update({status:'disconnected'},{where:{id:200}});
+      const disconnected=await call();assert.equal(disconnected.body.meta_ads.connected,false);assert.equal(disconnected.body.meta_ads.reason,'security_scope_blocked');
+      await models.MetaConnectionAssignment.update({status:'active'},{where:{id:200}});
+      providerHook=async()=>{providerHook=null;await models.MetaScopeBlock.create({scope_key:'meta:clinic:71',reason:'scope_disconnected',connection_id:80,actor_user_id:91002,created_at:new Date()});};
+      const blocked=await call();assert.equal(blocked.body.meta_ads.connected,false);assert.equal(blocked.body.meta_ads.reason,'security_scope_blocked');
+      await models.MetaScopeBlock.destroy({where:{scope_key:'meta:clinic:71'}});
+      const resolver=require('../../services/scopeConnectionResolver.service');
+      await models.MetaConnectionAssignment.destroy({where:{id:200}});
+      const fallback=await resolver.resolveMetaConnectionForScope({groupIdRaw:5,assignmentScopeRaw:'group',metadataOnly:true});
+      assert.equal(fallback.source,'legacy_mapping_group');assert.equal(fallback.connection.id,80);assert.equal(fallback.connection.accessToken,undefined);
+      await models.ClinicMetaAsset.update({isActive:false},{where:{metaConnectionId:80}});
+      const personal=await resolver.resolveMetaConnectionForScope({userId:91002,groupIdRaw:5,assignmentScopeRaw:'group',metadataOnly:true});
+      assert.equal(personal.source,'legacy_user');assert.equal(personal.connection.accessToken,undefined);
+      await models.MetaConnection.create({id:81,userId:91002,metaUserId:'fictitious-other-meta',accessToken:'NEVER_HYDRATE_OTHER',expiresAt:new Date(Date.now()+86400000)});
+      const ambiguous=await resolver.resolveMetaConnectionForScope({userId:91002,groupIdRaw:5,assignmentScopeRaw:'group',metadataOnly:true});
+      assert.equal(ambiguous.source,'legacy_user_ambiguous');assert.equal(ambiguous.connection,null);
+      await models.MetaConnection.destroy({where:{id:81}});await models.ClinicMetaAsset.update({isActive:true},{where:{metaConnectionId:80}});
+      await models.MetaConnectionAssignment.create({id:200,scopeKey:'group:5',assignmentScope:'group',grupoClinicaId:5,metaConnectionId:80,status:'active'});
+      const beforePixels=metaCredentialQueries;
+      await assert.rejects(require('../../services/effectiveMarketingAssets.service').listMetaPixelsForScopeAdAccount({scope:{assignment_scope:'group',group_id:5},adAccountId:'act_1234567890'}),{code:'meta_security_quarantine'});
+      assert.equal(metaCredentialQueries,beforePixels);
+      const requestCount=await models.CampaignRequest.count(),configBefore=JSON.stringify((await models.IntakeConfig.findByPk(1)).config);
+      const startResult=await new Promise((resolve,reject)=>{const req=http.request({host:'127.0.0.1',port:apiServer.address().port,path:'/api/marketing/campaign-onboarding/start',method:'POST',agent:false,
+        headers:{authorization:'Bearer '+token,'content-type':'application/json'}},res=>{const chunks=[];res.on('data',c=>chunks.push(c));res.on('end',()=>resolve({status:res.statusCode,body:JSON.parse(Buffer.concat(chunks))}));});req.on('error',reject);req.end(JSON.stringify({group_id:5,assignment_scope:'group',mode:'connect_only',providers:['google_ads','meta_ads']}));});
+      assert.equal(startResult.status,503);assert.equal(startResult.body.error,'meta_security_quarantine');
+      assert.equal(await models.CampaignRequest.count(),requestCount);assert.equal(JSON.stringify((await models.IntakeConfig.findByPk(1)).config),configBefore);
+      report.checks.push('mixed onboarding POST is refused under current Meta containment before CampaignRequest/config writes or credentials; stored setup remains intact');
+      report.checks.push('stored Meta connection/assets/pixel survive metadata-only bootstrap while availability/CAPI remain paused; disconnected assignment and sibling tombstone during Google I/O override stale inventory');
+      report.checks.push('actual SQL metadata scope, mapping fallback, unique user fallback and ambiguous user preserve resolution without OAuth/page token/additionalData selection; direct pixel request denies before secrets');
+    }
+
     if(process.env.GOOGLE_BOOTSTRAP_E2E_VISUAL==='1')await require('./fixtures/google_bootstrap_e2e_visual.fixture')({app,apiServer,report,token:()=>token,
-      fixture:initial.body,request,reads:()=>commands.length});
+      fixture:initial.body,request,metaPaused:metaFixture,reads:()=>commands.length});
     assert.equal(tokenReads,0);assert.equal(ingests,0);assert.equal(actionWrites,0);
     assert(commands.every(c=>['google.ads.conversion_settings.read.v1','google.ads.conversion_actions.read.v1'].includes(c.operation)));
     assert.equal(await models.GoogleConversionSubmission.count(),0);assert.equal(await models.GoogleAdsActionPlan.count(),0);
     report.queries=queries;report.signedCommands=commands.length;report.tokenReads=tokenReads;report.ingests=ingests;report.actionWrites=actionWrites;
+    if(metaFixture)assert.equal(metaCredentialQueries,0);report.metaCredentialQueries=metaCredentialQueries;
     report.realProvider=false;report.publicMfaAcceptance=false;
   }finally{
     if(apiServer?.listening)await new Promise(resolve=>{apiServer.close(resolve);apiServer.closeAllConnections();});
