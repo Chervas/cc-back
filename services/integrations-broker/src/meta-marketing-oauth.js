@@ -1,7 +1,7 @@
 'use strict';
 const { BrokerError, fail } = require('./errors'), { eventFor } = require('./audit');
 const C = require('./meta-marketing-oauth-contract'), D = require('./meta-marketing-discovery-contract'), { GRAPH_VERSION } = require('./meta-marketing-contract');
-function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Date.now(), assetDiscovery = false }) {
+function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Date.now(), assetDiscovery = false, onAbort = () => {} }) {
   // This table is installed only by the explicit onboarding runtime, not the generic broker.
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_oauth_flows (
     id TEXT PRIMARY KEY, principal TEXT NOT NULL, tenant TEXT NOT NULL, connection TEXT NOT NULL, asset TEXT NOT NULL,
@@ -49,7 +49,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
   }
   const service = {
     close() { closed = true; for (const controller of running.values()) controller.abort(); },
-    async execute({ request, principal, binding }) {
+    async execute({ request, principal, binding, policy: livePolicy = policy }) {
       C.authorize({ request, principal, binding }); const b = C.bindingFor(binding);
       const name = assetDiscovery && request.operation === D.OPERATION ? 'assets' : Object.keys(C.OPERATIONS).find(k => C.OPERATIONS[k] === request.operation);
       if (!name) fail('operation_denied'); (name === 'assets' ? D.validate : C.validators[name])(request.payload);
@@ -73,7 +73,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
           }
           return metadata(checked(request,binding,principal),binding);
         });
-        running.get(id)?.abort(); return { requestId: request.requestId, data: result, replayed: false };
+        running.get(id)?.abort(); onAbort(id); return { requestId: request.requestId, data: result, replayed: false };
       }
       if (name === 'status' && running.has(id)) return { requestId: request.requestId, data: metadata(checked(request,binding,principal),binding), replayed: false };
       if (running.has(id) || running.size >= 2) fail('oauth_flow_busy');
@@ -87,9 +87,11 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
         if (name === 'assets') {
           const authority=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey]));
           const assertCurrent = () => {
-            const configured=policy.principals.find(p=>p.id===principal.id);
+            const configured=livePolicy.principals.find(p=>p.id===principal.id);
             if(!configured?.enabled||C.hash(JSON.stringify([configured.id,configured.keyId,configured.publicKey]))!==authority)fail('scope_denied');
-            require('./auth').authorize(configured,request,policy);
+            require('./auth').authorize(configured,request,livePolicy);
+            const currentBinding=livePolicy.connections.find(c=>c.connectionRef===binding.connectionRef);
+            if(C.fingerprint(currentBinding)!==C.fingerprint(binding))fail('scope_denied');
             const row = checked(request,binding,principal); active(request,binding);
             if (signal.aborted) fail('provider_timeout');
             if (row.state !== 'staged' || row.scope_digest !== request.payload.scopeDigest) fail('scope_denied');

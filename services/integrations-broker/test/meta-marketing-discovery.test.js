@@ -91,7 +91,7 @@ test('abort during Graph prevents additional pages and result; borrowed token an
   assert.deepEqual(f.state.httpCalls.slice(h).map(v=>v.kind),['inspect','adaccounts']);assert(held.every(v=>v.every(b=>b===0)));
 });
 test('grant withdrawal between Graph pages stops the next page and preserves the original candidate',async t=>{
-  const {f,flow}=await ready(t);f.state.afterGraph=async(kind,value)=>{if(kind==='adaccounts')f.policy.grants[0].operations=f.policy.grants[0].operations.filter(v=>v!==D.OPERATION);return value;};
+  const {f,flow}=await ready(t);f.state.afterGraph=async(kind,value)=>{if(kind==='adaccounts')f.current.broker.policy.grants[0].operations=f.current.broker.policy.grants[0].operations.filter(v=>v!==D.OPERATION);return value;};
   const h=f.state.httpCalls.length;await assert.rejects(discover(f,flow),{code:'scope_denied'});assert.deepEqual(f.state.httpCalls.slice(h).map(v=>v.kind),['inspect','adaccounts']);
 });
 test('slot/app changes and final audit failure release no inventory; immutable candidate survives restart',async t=>{

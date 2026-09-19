@@ -57,11 +57,12 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
       try { if (!body.equals(encoded.body)) fail('secret_unavailable'); return encoded.metadata; } finally { encoded.body.fill(0); }
     } finally { token?.fill(0); if (parsed && typeof parsed === 'object') delete parsed.accessToken; }
   }
-  async function candidate(binding, flow, expectedDigest, signal, work) {
+  async function candidate(binding, flow, expectedDigest, signal, work, {requirePending=false}={}) {
+    if(typeof requirePending!=='boolean')fail('invalid_request');
     const b = await slot(binding, signal);
     const app = await describe(binding.clientSecretArn, signal);
     if (!app.VersionIdsToStages[b.appVersionId]?.includes('AWSCURRENT')) fail('secret_version_changed');
-    const r = await read(binding.secretArn, flow.id, null, signal);
+    const r = await read(binding.secretArn, flow.id, requirePending?'AWSPENDING':null, signal);
     // AWSPENDING is a convenience label, never the candidate identity: another
     // attempt may move it. Only the immutable version, digest and flow count.
     if (r.VersionStages.includes('AWSCURRENT') || r.VersionStages.includes('AWSPREVIOUS')) fail('secret_version_changed');
@@ -78,6 +79,11 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
       await slot(binding, signal);
       const currentApp = await describe(binding.clientSecretArn, signal);
       if (!currentApp.VersionIdsToStages[b.appVersionId]?.includes('AWSCURRENT')) fail('secret_version_changed');
+      // An active enrollment must not depend on an unlabelled version which AWS
+      // may garbage-collect. Version/digest remain its identity; this label pins
+      // retention and is never moved by enrollment.
+      if(requirePending){const current=await describe(binding.secretArn,signal);
+        if(!current.VersionIdsToStages[flow.id]?.includes('AWSPENDING'))fail('secret_version_changed');}
       return work ? result : { versionId: flow.id, digest: expectedDigest, metadata };
     } finally { if (abort) signal?.removeEventListener('abort', abort); borrowed?.fill(0); body.fill(0); }
   }
@@ -101,9 +107,9 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
   return {
     encode: envelope,
     withApplication: (binding, work, signal) => application(binding, work, signal, true),
-    async withCandidate(binding, flow, digest, work, signal) {
+    async withCandidate(binding, flow, digest, work, signal, options) {
       try { return await application(binding, appSecret => candidate(binding, flow, digest, signal,
-        (token, metadata) => work({ token, appSecret, metadata })), signal, false); }
+        (token, metadata) => work({ token, appSecret, metadata }),options), signal, false); }
       catch (e) { throw cleanError(e); }
     },
     async preflight(binding, signal) {

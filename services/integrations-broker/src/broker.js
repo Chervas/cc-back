@@ -66,7 +66,7 @@ class Broker {
       : createHash('sha256').update(canonical(identity)).digest('hex');
     const assetKey = JSON.stringify([request.tenantRef, request.connectionRef, request.assetRef]);
     if (['google_oauth', 'whatsapp_onboarding', 'meta_marketing_oauth'].includes(operation.control)) {
-      try { return await operation.execute({ request, principal, binding }); }
+      try { return await operation.execute({ request, principal, binding, policy: this.policy }); }
       catch (error) {
         if (this.store.backlog().pending >= this.policy.maxBacklog) fail('audit_unavailable');
         this.store.appendAudit(eventFor(request, principal, resolved, 'integration.failed', 'unknown',

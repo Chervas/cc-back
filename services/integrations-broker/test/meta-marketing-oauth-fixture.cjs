@@ -5,9 +5,11 @@ const { BrokerStore } = require('../src/store'); const { Broker } = require('../
 const { createMetaMarketingOAuth, createMetaMarketingOAuthOperations } = require('../src/meta-marketing-oauth'); const { createMetaMarketingOAuthSecrets } = require('../src/meta-marketing-oauth-secrets');
 const { createMetaMarketingOAuthHttp } = require('../src/meta-marketing-oauth-http'); const C = require('../src/meta-marketing-oauth-contract'); const { ACCOUNT, SECRET_KEY } = require('../src/google-main');
 const TOKEN = 'FICTITIOUS_META_OAUTH_TOKEN'; const APP = '0123456789abcdef'.repeat(2);
-function fixture(t, { discovery = false } = {}) {
+function fixture(t, { discovery = false, enrollment = false } = {}) {
+  discovery=discovery||enrollment;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-meta-oauth-qa-')); fs.chmodSync(dir, 0o700);
   const filename = path.join(dir, 'state.sqlite'); const gateway = generateKeyPairSync('ed25519'); const control = generateKeyPairSync('ed25519');
+  const reader=enrollment?generateKeyPairSync('ed25519'):null,assetControl=enrollment?generateKeyPairSync('ed25519'):null;
   const prefix = `arn:aws:secretsmanager:eu-west-3:${ACCOUNT}:secret:/clinicaclick/integrations/prod/meta-marketing/staging/`;
   const binding = { connectionRef: 'connection:meta-enroll-qa', provider: C.PROVIDER, initialState: 'active', expiresAt: Date.now() + 86400000,
     secretArn: prefix + 'qa-candidate-abcdef', clientSecretArn: prefix + 'qa-app-abcdef', metaMarketingOAuth: {
@@ -22,6 +24,11 @@ function fixture(t, { discovery = false } = {}) {
     connections: [binding], grants: [{ ...grant, principalId: 'gateway:staging:meta-marketing-oauth', operations: Object.values(C.OPERATIONS) },
       { ...grant, principalId: 'control:staging:meta-marketing-oauth', operations: [C.OPERATIONS.status, C.OPERATIONS.abort] }] };
   if(discovery)policy.grants[0].operations.push(require('../src/meta-marketing-discovery-contract').OPERATION);
+  if(enrollment){
+    const E=require('../src/meta-marketing-enrollment-contract');
+    policy.principals.push(principal('staging:meta-marketing','qa-reader',reader),principal('control:staging:meta-marketing','qa-asset-control',assetControl));
+    policy.grants[0].operations.push(...Object.values(E.OPERATIONS));policy.grants[1].operations.push(E.OPERATIONS.status,E.OPERATIONS.revoke);
+  }
   const records = new Map();
   const seed = (arn, version, value) => records.set(arn, new Map([[version, { body: JSON.stringify(value), stages: ['AWSCURRENT'] }]]));
   seed(binding.secretArn, binding.metaMarketingOAuth.slotVersionId, { version: 1, provider: 'meta-marketing-oauth-slot', connectionRef: binding.connectionRef, scopeKey: 'group:9', clinicSetDigest: C.clinicDigest(binding.metaMarketingOAuth), appId: '101' });
@@ -54,7 +61,9 @@ function fixture(t, { discovery = false } = {}) {
     const req = new EventEmitter(); let destroyed=false; req.destroy = () => {destroyed=true;}; req.end = () => {
       const url=new URL('https://graph.facebook.com'+settings.path);
       assert.equal(settings.hostname,'graph.facebook.com'); assert.equal(settings.method,'GET');
-      const kind=url.pathname.endsWith('/debug_token')?'inspect':url.pathname.endsWith('/adaccounts')?'adaccounts':url.pathname.endsWith('/accounts')?'accounts':url.searchParams.has('code')?'code':'extend';
+      const kind=url.pathname.endsWith('/debug_token')?'inspect':url.pathname.endsWith('/adaccounts')?'adaccounts':url.pathname.endsWith('/accounts')?'accounts':
+        url.pathname==='/v24.0/act_301'?'asset_ad_account':url.pathname==='/v24.0/501'?'asset_instagram_business':
+        url.pathname==='/v24.0/401'?(url.searchParams.get('fields').includes('instagram_business_account')?'asset_instagram_parent':'asset_facebook_page'):url.searchParams.has('code')?'code':'extend';
       state.httpCalls.push({kind}); if(kind==='code')state.codes++;
       queueMicrotask(async()=>{
         try {
@@ -71,6 +80,11 @@ function fixture(t, { discovery = false } = {}) {
             response=kind==='adaccounts'?{data:[{id:'act_301',account_id:'301',name:'Cuenta ficticia',account_status:1,currency:'EUR',timezone_name:'Europe/Madrid'}]}
               :{data:[{id:'401',name:'Página ficticia',instagram_business_account:{id:'501',name:'Instagram ficticio',username:'qa_ficticio'}}]};
             state.lastAfter=url.searchParams.get('after');
+          } else if(kind.startsWith('asset_')){
+            assert.equal(settings.headers.authorization,'Bearer '+TOKEN);assert.match(url.searchParams.get('appsecret_proof'),/^[a-f0-9]{64}$/);
+            response=kind==='asset_ad_account'?{id:'act_301',account_id:'301',name:'Cuenta ficticia',account_status:1,currency:'EUR',timezone_name:'Europe/Madrid'}:
+              kind==='asset_facebook_page'?{id:'401',name:'Página ficticia'}:kind==='asset_instagram_business'?{id:'501',name:'Instagram ficticio',username:'qa_ficticio'}:
+              {id:'401',instagram_business_account:{id:'501'}};
           } else {
             assert.equal(url.pathname,'/v24.0/oauth/access_token');assert.equal(url.searchParams.get('client_secret'),APP);
             if(kind==='code')assert.equal(url.searchParams.get('redirect_uri'),binding.metaMarketingOAuth.redirectUri);
@@ -87,12 +101,18 @@ function fixture(t, { discovery = false } = {}) {
   const secrets = createMetaMarketingOAuthSecrets({ client: aws, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/meta-marketing/staging/', kmsKeyArn: SECRET_KEY });
   const stores = []; const engines = [];
   function make(target = new BrokerStore(filename), chosenPolicy = policy) {
-    stores.push(target); const engine = createMetaMarketingOAuth({ store: target, policy: chosenPolicy, secrets, http, now, assetDiscovery:discovery }); engines.push(engine);
-    return { store: target, engine, broker: new Broker({ store: target, policy: chosenPolicy, secrets, operations: createMetaMarketingOAuthOperations(engine,{assetDiscovery:discovery}), now }) };
+    stores.push(target);let enroll;
+    const engine = createMetaMarketingOAuth({ store: target, policy: chosenPolicy, secrets, http, now, assetDiscovery:discovery,onAbort:id=>enroll?.abortFlow(id) }); engines.push(engine);
+    if(enrollment){enroll=require('../src/meta-marketing-enrollment').createMetaMarketingEnrollment({store:target,secrets,http,environment:'staging',now});engines.push(enroll);}
+    return { store: target, engine,enrollment:enroll, broker: new Broker({ store: target, policy: chosenPolicy, secrets,policyResolver:enroll,
+      operations: {...createMetaMarketingOAuthOperations(engine,{assetDiscovery:discovery}),...enroll?.operations}, now }) };
   }
   let current = make();
   const command = (operation, payload, overrides = {}) => ({ requestId: randomUUID(), ...grant, operation, payload, ...overrides });
-  const signed = (value, isControl = false) => signRequest(value, { keyId: isControl ? 'qa-control' : 'qa-gateway', privateKey: (isControl ? control : gateway).privateKey, audience: policy.audience, now: now() });
+  const signed = (value, isControl = false) => {
+    const pair=isControl==='reader'?['qa-reader',reader]:isControl==='assetControl'?['qa-asset-control',assetControl]:isControl?['qa-control',control]:['qa-gateway',gateway];
+    return signRequest(value, { keyId:pair[0],privateKey:pair[1].privateKey,audience:policy.audience,now:now() });
+  };
   const execute = (operation, payload, overrides = {}, isControl = false, instance = current) => { const s = signed(command(operation, payload, overrides), isControl); return instance.broker.execute(s.raw, s.headers); };
   const begin = async (overrides = {}, instance = current) => {
     const flowId = randomUUID(); const payload = { state: randomBytes(32).toString('base64url'), expiresAt: now() + 600000,
@@ -107,8 +127,9 @@ function fixture(t, { discovery = false } = {}) {
   const config={cohort:C.COHORT,enabled:true,environment:'staging',listenAddress:'127.0.0.1',port:19093,
     stateFile:path.join(dir,'runtime.sqlite'),tlsCertFile:path.join(dir,'tls.crt'),tlsKeyFile:path.join(dir,'tls.key'),policy};
   if(discovery)config.assetDiscovery=true;
+  if(enrollment)config.assetEnrollment=true;
   t.after(() => { for (const engine of engines) engine.close(); for (const store of stores) try { store.close(); } catch {} fs.rmSync(dir, { recursive: true, force: true }); });
   return { dir, filename, binding, policy, state, records, secrets, aws, http, request, config, now, make, command, signed, execute,
-    begin, finish, status, abort, snapshot, gateway, control, get current() { return current; }, restart() { current.engine.close(); current.store.close(); current = make(); return current; } };
+    begin, finish, status, abort, snapshot, gateway, control,reader,assetControl, get current() { return current; }, restart() { current.enrollment?.close();current.engine.close(); current.store.close(); current = make(); return current; } };
 }
 module.exports = { fixture, TOKEN, APP };

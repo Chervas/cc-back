@@ -77,7 +77,8 @@ Cerrar solo discovery retira las consultas nuevas; mantener status/abort y su
 recuperación. Una lectura fallida puede repetirse expresamente con UUID nueva,
 porque no escribe en el proveedor; no recanjear code, borrar diario/bajas, promover
 candidato ni reutilizar como permiso una lista previa. La selección/activación
-seguirá su propia transacción, identidad y conciliación. Copias/restauración al final.
+tiene ya [núcleo broker preparado](meta-marketing-enrollment.md); faltan su
+consumidor CRM, transacción de asignaciones, auditoría humana y UI. Copias/restauración al final.
 
 
 ## Resultado del ensayo aislado (19/09/2026, UTC)

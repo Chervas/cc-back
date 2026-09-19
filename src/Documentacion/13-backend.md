@@ -11194,3 +11194,82 @@ corte; usa los requisitos del OAuth candidato. Lector AWS v23, luego escritor y
 finalmente productor antes de habilitarlo. El archivo/canary v19 permanece intacto.
 Contrato operativo `docs/security/meta-marketing-discovery.md`; funcional 20.17,
 variables 03, recursos/costes 39, estado 19/prioridades 16 y evidencia/corte 99.
+
+
+### Selección y activación Meta dentro del broker (preparado, 19/09/2026)
+
+El runtime OAuth incorpora un gate opcional `assetEnrollment=true`, que exige
+`assetDiscovery=true`. Añade cuatro operaciones tipadas del proveedor
+`meta_marketing_onboarding`, sin desplegar ni crear consumidor SQL/UI de selección:
+
+| Operación | Payload cerrado y efecto |
+|---|---|
+| `meta.marketing.enrollment.prepare.v1` | `enrollmentId,flowId,scopeDigest,candidateDigest,assetRefs`; 1–100 referencias únicas. Descubre de nuevo y registra solo identidades verificadas. |
+| `meta.marketing.enrollment.activate.v1` | `enrollmentId,scopeDigest,selectionDigest`; vuelve a descubrir y exige la misma selección, incluida la relación Instagram→página. |
+| `meta.marketing.enrollment.status.v1` | `enrollmentId`; estado durable local, sin AWS/Meta. No encontrado devuelve estado explícito sin acceso. |
+| `meta.marketing.enrollment.revoke.v1` | `enrollmentId`; retirada durable, incluso antes de llegar prepare. No borra diario/claims ni llama a AWS/Meta. |
+
+El cliente gateway OAuth prepara/activa/consulta/retira, y su control separado solo
+consulta/retira. Se añaden dos claves Ed25519 distintas: lector
+`{environment}:meta-marketing` y control `control:{environment}:meta-marketing`.
+Ninguna tiene grants estáticos de activos. Solo una selección activa deriva en
+memoria el grant exacto de conexión/tenant/activo y operación: las dos lecturas
+existentes de Meta, o revocación para control. La política guardada no se amplía;
+no se aceptan permisos, URLs, identidad de Meta o secretos del llamador.
+
+El mismo proceso y SQLite que poseen OAuth guardan `meta_marketing_enrollments`,
+`meta_marketing_enrollment_assets` y `meta_marketing_enrollment_claims`. Una UUID
+por selección y un flujo por selección; conjunto inmutable, digest ligado a flujo,
+versión de secreto, ámbito, clínicas, configuración y activos. Claims físicos únicos
+incluyen el padre de Instagram, sin darle por eso un grant de lectura. Dos ámbitos
+no pueden reclamarlo simultáneamente. Faltas o conflictos del registro cierran el
+acceso; no se reconstruyen derechos por aproximación. Revocaciones se consultan
+por lotes con índice por asset, sin un escaneo de historial por cada activo.
+
+La reserva del comando guarda auditoría técnica v2 antes del I/O. Registro/grants
+lógicos, resultado y auditoría completada se confirman juntos. Un fallo revierte
+la selección/activación y conserva resultado incierto. Una respuesta perdida se
+consulta por enrollmentId; un comando completado puede recuperar su recibo con la
+UUID original, después de comprobar autoridad actual. Un comando incierto no se
+reenvía automáticamente: tras consultar estado, se puede hacer una nueva operación
+explícita sobre la misma selección. Nunca vuelve a canjear el código OAuth.
+
+Se usa el mismo candidato por VersionId/digest y etiqueta AWSPENDING comprobada
+antes/después: conservar una etiqueta impide depender de una versión obsoleta sin
+retención. El slot vacío sigue AWSCURRENT. No copia tokens, mueve etiquetas,
+crea/promueve/borra secretos o programa rotación. Si una etiqueta, pin, KMS,
+identidad, permiso o caducidad cambia, no activa ni devuelve datos. El inventario
+anterior conserva su contrato separado de diagnóstico por versión inmutable.
+
+Las lecturas activadas usan las operaciones `meta.marketing.connection.read.v1`
+y `meta.marketing.asset.read.v1` con payload vacío y DTOs del cliente CRM existente.
+Inspeccionan el token antes/después; la de estado no acredita acceso al activo.
+La de activo consulta solo su endpoint fijo (más el padre para Instagram), no el
+inventario completo. Revalida principal/clave/grant/configuración vigente, estado
+OAuth, claims y bloqueos durante la operación y antes de devolver/auditar.
+Broker entrega a estas operaciones su política vigente; la comprobación del
+inventario OAuth también dejó de depender de la copia inicial de configuración.
+
+La retirada física de un activo o padre invalida la selección atómica completa;
+no reactiva los restantes implícitamente. Retirar la selección registra las bajas
+físicas conocidas; una retirada que llega antes de prepare solo crea su tombstone,
+sin reservar ni bloquear activos desconocidos de otra clínica. Abortar OAuth
+interrumpe sus operaciones y deja todas sus selecciones sin acceso. Las bajas y
+claims se conservan tras reinicio, incluso si una fila se cambia a active.
+
+Un único propietario del SQLite; no abrir otra instancia sobre él. Se comparten
+las dos plazas ordinarias del runtime y una de control; una operación ordinaria
+por selección a la vez. Máximo 20 peticiones/minuto por principal, operación de
+25 s y HTTP de 8 s. No es aislamiento de CPU, disco, red o
+SQL. La respuesta queda ligada al estado local del broker: active no significa
+asignación clínica CRM completada ni aceptación de Meta real.
+
+Pendiente: consumidor CRM con sesión/MFA y permiso completo, snapshot de identidad,
+alias/primarias/shares y bajas SQL, escritor transaccional de bindings/asignaciones,
+auditoría humana y selección/activación en Ajustes; aceptación de proveedor/titular,
+publicación selectiva e inventario real de IAM/historial/retención/recursos. Sin
+nuevo DDL MySQL, jobs, cambio de runtime público ni activación. Pruebas del broker
+con TLS/SQLite reales y proveedor simulado; regresión visual del OAuth/inventario
+actual, no de una UI de selección inexistente. Runbook
+`docs/security/meta-marketing-enrollment.md`; variables03, funcional20.17, estado19,
+prioridades16, recursos/costes39 y evidencias/recuperación99. Canary v19 intacto.

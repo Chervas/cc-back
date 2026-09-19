@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "3f5d61f55958b2dbcd6c7e3ca444294a594c1976",
+    "front": "897740352cd5048efe10cba7eb0ffe2c50111b84"
+  },
+  "includesWorkingChanges": true,
+  "scope": "Prepared Meta broker enrollment with four independent roles, immutable selected assets, physical claims, activation, compatible typed reads and durable controls in the OAuth owner process. CRM SQL/API/UI selection consumer remains pending. Changed-source inventory, not a standalone release bundle.",
+  "files": {
+    "back": {
+      "services/integrations-broker/src/broker.js": "81163f91e5ad4418013df88c50c6c0ded9073be1a76fd73e6fe1e4f019d4f2da",
+      "services/integrations-broker/src/meta-marketing-candidate-read-http.js": "81fa7d2a072552286e5e91b2951ef835254d011456d856e2751a70e748221b27",
+      "services/integrations-broker/src/meta-marketing-discovery-contract.js": "5e3c660daf424a14638c78321bcf916a7e44f30a0975a064951a0671e755492a",
+      "services/integrations-broker/src/meta-marketing-enrollment-contract.js": "f9d4207df5915fb9736d18ddb1ed016cea5dd9824115824565dc327640fafe75",
+      "services/integrations-broker/src/meta-marketing-enrollment.js": "af80c63cca389c5dbf7111fa97aaf030156634a45b2f6310a0b82771e884b708",
+      "services/integrations-broker/src/meta-marketing-oauth-http.js": "360af0c399e8168a1d91f5737e24b6af4e6e73fb7885129b0b47dcf77a51b510",
+      "services/integrations-broker/src/meta-marketing-oauth-main.js": "34abd3179f187bf03e383163d287b0663a05a6f7f0a7ad57537728d33c1892e8",
+      "services/integrations-broker/src/meta-marketing-oauth-secrets.js": "0f711dfc63807693807aa44822a5feb1d28aa9c0a95011e25f57373257067c1c",
+      "services/integrations-broker/src/meta-marketing-oauth.js": "184a0d53a83b51011a98e4374c7b85dbbb43163b9812b41473b819a65ff40fb8",
+      "services/integrations-broker/test/meta-marketing-discovery.test.js": "1fd3986936cca8d59e5aa22dc4f8affacfaf2c8e3d9f916f22c7c8909fe93d0b",
+      "services/integrations-broker/test/meta-marketing-enrollment-runtime.test.js": "f1db04e458db2cfe202e8c0824148bc228c6026248be9d91075137fe96b0a3bb",
+      "services/integrations-broker/test/meta-marketing-enrollment.test.js": "66733dca84bcf8e2e6f0cae3400fcf4e2948e99d0b02cff6795b26805b7ce5e4",
+      "services/integrations-broker/test/meta-marketing-oauth-fixture.cjs": "f78df17423379318b8e6fb44280f1b4ea1240dd728995959d6a507ea7c9b900a",
+      "src/scripts/tests/meta_marketing_enrollment_capacity.test.js": "153d0c0ee1457e8cc99b3c99a6108c9ac5bfe15e9635560bd3262feddb0e9814"
+    },
+    "front": {}
+  },
+  "previousInventories": [
+    "meta-marketing-oauth-consumers.json",
+    "meta-marketing-oauth-crm-consumers.json",
+    "meta-marketing-discovery-consumers.json"
+  ],
+  "qa": {
+    "brokerTests": 734,
+    "brokerExitEvidence": "broker-exit.json",
+    "newEnrollmentTestsIncludedInBrokerTotal": 19,
+    "focusedEnrollmentOAuthDiscoveryTlsTestsIncludedInBrokerTotal": 65,
+    "capacityTestsSeparate": 1,
+    "mountedOAuthRegressionTests": 6,
+    "mysqlRegressionGroups": 8,
+    "visualRegressionScreenshots": 11,
+    "visualScope": "Existing OAuth and candidate inventory product components only; selection/activation UI not implemented",
+    "temporaryMysql": "8.0.42",
+    "realSignedTLSAndSqlite": true,
+    "fakeMetaSecretsS3": true,
+    "realCrmReaderClient": true,
+    "syntaxFiles": 14,
+    "newFrontendCode": false,
+    "publicMfa": false,
+    "deployed": false
+  },
+  "costSample": {
+    "sixOperationSample": {
+      "selected": 3,
+      "secretManagerCalls": 96,
+      "graphCalls": 20,
+      "secretWritesOrLists": 0
+    },
+    "capacity": {
+      "selected": 100,
+      "preexistingRevocations": 10000,
+      "prepareMs": 51,
+      "activateMs": 58,
+      "readMs": 60,
+      "secretManagerCalls": 48,
+      "graphCalls": 11
+    },
+    "existingCrmInventoryRegression": {
+      "queries": 57,
+      "elapsedMs": 94
+    },
+    "pool": {
+      "inUse": 0,
+      "waiting": 0
+    },
+    "actualAwsCost": null,
+    "costExplorerRefreshed": false
+  },
+  "pending": [
+    "CRM full-scope managed session/MFA and ownership/alias/primary/share checks",
+    "transactional SQL assignment and binding writer, durable reconciliation and human audit",
+    "Settings selection/activation and visual acceptance of that new flow",
+    "AWS IAM, version retention, exact scoped configuration, existing revocation history import/preflight and selective publication",
+    "real Meta/titular/public MFA and measured operational load; frozen v19 unchanged"
+  ],
+  "evidence": "qa-evidence/security-resume-20260917/meta-enrollment-20260919/"
+}

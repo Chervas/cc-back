@@ -56,4 +56,4 @@ function validateResult(value,{flowId,candidateDigest,scopeDigest,scopeKey,clini
     ||JSON.stringify(value.availableKinds)!==JSON.stringify(checkAssets(value.assets,metadata))||Buffer.byteLength(JSON.stringify(value))>MAX_RESULT_BYTES)fail('provider_failed');
   return structuredClone(value);
 }
-module.exports={OPERATION,validate,MAX_ASSETS,MAX_PAGES,MAX_BYTES,MAX_RESULT_BYTES,kinds,fresh,project,result,validateResult};
+module.exports={OPERATION,validate,MAX_ASSETS,MAX_PAGES,MAX_BYTES,MAX_RESULT_BYTES,kinds,fresh,project,checkAssets,result,validateResult};

@@ -93,8 +93,9 @@ entre begin y finish; corregido antes de aceptar42/42. Conservar ambos logs.
 
 1. Inicio/callback CRM y UI preparados según la sección siguiente; falta su
    publicación selectiva y aceptación pública con MFA y proveedor real.
-2. Inventario candidato preparado en [su contrato](meta-marketing-discovery.md);
-   faltan selección y escritor transaccional de bindings/grants. Validar
+2. Inventario candidato preparado en [su contrato](meta-marketing-discovery.md) y
+   [núcleo broker de selección/activación](meta-marketing-enrollment.md) preparado;
+   faltan consumidor SQL/API/UI y escritor transaccional de bindings/grants. Validar
    identidad/propiedad/alias/primarias/shares y toda baja física previa. Una UUID o
    conexión nuevas no permiten borrar historial ni restaurar acceso retirado.
 3. Activación independiente, idempotente y recuperable, con aceptación por el titular

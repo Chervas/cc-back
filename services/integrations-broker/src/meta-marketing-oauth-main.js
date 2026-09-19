@@ -6,6 +6,8 @@ const {BrokerStore}=require('./store'),{Broker}=require('./broker'),{createServe
 const {drainAudit}=require('./audit'),tlsReload=require('./tls-reload');
 const C=require('./meta-marketing-oauth-contract');
 const D=require('./meta-marketing-discovery-contract');
+const E=require('./meta-marketing-enrollment-contract');
+const {createMetaMarketingEnrollment}=require('./meta-marketing-enrollment');
 const {createMetaMarketingOAuthSecrets}=require('./meta-marketing-oauth-secrets');
 const {createMetaMarketingOAuthHttp}=require('./meta-marketing-oauth-http');
 const {createMetaMarketingOAuth,createMetaMarketingOAuthOperations}=require('./meta-marketing-oauth');
@@ -13,13 +15,15 @@ const prefix=environment=>`/clinicaclick/integrations/prod/meta-marketing/${envi
 function validateConfig(config) {
   const fields=['cohort','enabled','environment','listenAddress','policy','port','stateFile','tlsCertFile','tlsKeyFile'];
   if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
+  if (config && Object.hasOwn(config,'assetEnrollment')) { fields.push('assetEnrollment'); if(typeof config.assetEnrollment!=='boolean'||config.assetEnrollment&&!config.assetDiscovery)fail('invalid_request'); }
   if (config?.tlsRenewal) { fields.push('tlsRenewal');tlsReload.validateSettings(config.tlsRenewal); }
   if (!config || Object.keys(config).sort().join(',')!==fields.sort().join(',') || config.enabled!==true || config.cohort!==C.COHORT
     || !['dev','staging'].includes(config.environment) || !net.isIP(config.listenAddress) || !Number.isInteger(config.port)
     || config.port<1024 || config.port>65535 || typeof config.stateFile!=='string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   const policy=validatePolicy(config.policy),gateway=`gateway:${config.environment}:meta-marketing-oauth`,control=`control:${config.environment}:meta-marketing-oauth`;
-  if (!policy.connections.length || policy.connections.length>64 || policy.principals.length!==2
-    || ![gateway,control].every(id=>policy.principals.some(p=>p.id===id)) || policy.principals.some(p=>p.maxPerMinute>20)) fail('invalid_request');
+  const expected=config.assetEnrollment?Object.values(E.roles(config.environment)):[gateway,control];
+  if (!policy.connections.length || policy.connections.length>64 || policy.principals.length!==expected.length
+    || !expected.every(id=>policy.principals.some(p=>p.id===id)) || policy.principals.some(p=>p.maxPerMinute>20)) fail('invalid_request');
   const keys=policy.principals.map(p=>createPublicKey(p.publicKey).export({type:'spki',format:'der'}).toString('base64'));
   if (new Set(keys).size!==keys.length) fail('invalid_request');
   const slots=new Set(),apps=new Set(),scopes=new Set();
@@ -34,7 +38,7 @@ function validateConfig(config) {
     const grants=policy.grants.filter(g=>g.connectionRef===binding.connectionRef);
     if (grants.length!==2) fail('invalid_request');
     for (const principal of [gateway,control]) {
-      const grant=grants.find(g=>g.principalId===principal),operations=principal===gateway?[...Object.values(C.OPERATIONS),...(config.assetDiscovery?[D.OPERATION]:[])]:[C.OPERATIONS.status,C.OPERATIONS.abort];
+      const grant=grants.find(g=>g.principalId===principal),operations=principal===gateway?[...Object.values(C.OPERATIONS),...(config.assetDiscovery?[D.OPERATION]:[]),...(config.assetEnrollment?Object.values(E.OPERATIONS):[])]:[C.OPERATIONS.status,C.OPERATIONS.abort,...(config.assetEnrollment?[E.OPERATIONS.status,E.OPERATIONS.revoke]:[])];
       if (!grant || grant.tenantRef!=='clinic:'+b.clinicIds[0] || grant.assetRef!=='meta-enroll:'+b.scopeKey
         || JSON.stringify([...grant.operations].sort())!==JSON.stringify(operations.sort())) fail('invalid_request');
     }
@@ -44,16 +48,17 @@ function validateConfig(config) {
 }
 async function main(filename,{awsFactory=connectAws,http=createMetaMarketingOAuthHttp()}={}) {
   const config=validateConfig(JSON.parse(privateFile(filename))),cert=privateFile(config.tlsCertFile,65536),key=privateFile(config.tlsKeyFile,65536);
-  const store=new BrokerStore(config.stateFile);let aws,oauth,server,timer,draining;
+  const store=new BrokerStore(config.stateFile);let aws,oauth,enrollment,server,timer,draining;
   try {
     aws=await awsFactory();
     const secrets=createMetaMarketingOAuthSecrets({client:aws.secrets,accountId:ACCOUNT,prefix:prefix(config.environment),kmsKeyArn:SECRET_KEY});
-    oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true});
-    const broker=new Broker({store,policy:config.policy,secrets,operations:createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true})});
-    const controlKey=config.policy.principals.find(p=>p.id.startsWith('control:')).keyId;
+    oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id)});
+    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment});
+    const broker=new Broker({store,policy:config.policy,secrets,policyResolver:enrollment,operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations}});
+    const controlKeys=new Set(config.policy.principals.filter(p=>p.id.startsWith('control:')).map(p=>p.keyId));
     let ordinary=0,controls=0;
     server=createServer({async execute(...args) {
-      const control=args[1]?.['x-broker-key-id']===controlKey;
+      const control=controlKeys.has(args[1]?.['x-broker-key-id']);
       if (control?controls>=1:ordinary>=2) fail('rate_limited');
       if (control) controls++;else ordinary++;
       try {return await broker.execute(...args);} finally {if(control) controls--;else ordinary--;}
@@ -62,9 +67,9 @@ async function main(filename,{awsFactory=connectAws,http=createMetaMarketingOAut
     await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(config.port,config.listenAddress,resolve);});
     const tick=()=>{if(!draining)draining=drainAudit(store,aws.sink,{limit:20}).catch(()=>null).finally(()=>{draining=null;});};
     tick();timer=setInterval(tick,1000);timer.unref();let closing;
-    const close=()=>closing||=(async()=>{clearInterval(timer);oauth.close();await new Promise(resolve=>{server.close(resolve);server.closeIdleConnections?.();});await draining;aws.close();key.fill(0);store.close();})();
+    const close=()=>closing||=(async()=>{clearInterval(timer);enrollment?.close();oauth.close();await new Promise(resolve=>{server.close(resolve);server.closeIdleConnections?.();});await draining;aws.close();key.fill(0);store.close();})();
     return {server,store,broker,close};
-  } catch(error) {clearInterval(timer);oauth?.close();server?.close();aws?.close();key.fill(0);store.close();throw error;}
+  } catch(error) {clearInterval(timer);enrollment?.close();oauth?.close();server?.close();aws?.close();key.fill(0);store.close();throw error;}
 }
 if(require.main===module)main(process.argv[2]).then(runtime=>{
   const stop=()=>runtime.close().catch(()=>{process.exitCode=1;});process.once('SIGTERM',stop);process.once('SIGINT',stop);
