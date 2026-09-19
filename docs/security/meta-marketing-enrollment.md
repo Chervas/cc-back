@@ -476,10 +476,52 @@ reales locales, rechazo de solicitudes firmadas, ausencia de llamadas al proveed
 transición explícita al modo normal y rechazo posterior sin perder historia.
 Proveedor ficticio y red exterior bloqueada. No acredita una cohorte real.
 
-Puertos previstos con identidades de certificado cerradas: DEV `8453`, staging
+Puertos con identidades de certificado cerradas: DEV `8453`, staging
 `8454`. Preparar monitor, publicador y firmante compatibles antes de enrolarlas;
 serían doce servicios HTTPS en la misma EC2 de seguridad, cada uno con su
 certificado, más el certificado del cliente de mantenimiento. No son doce
-instancias EC2; los dos servicios Meta todavía no están instalados. El modo vacío no sustituye
+instancias EC2. El modo vacío no sustituye
 esa renovación ni la prueba de aislamiento. No tocar la CA ni claves existentes.
-Publicación, recursos efectivos y prueba TLS real pendientes de su acta propia.
+La instalación se acredita por el acta siguiente, separada de la aceptación clínica.
+
+### Instalación inicial publicada — 19/09/2026
+
+DEV y staging ejecutan `release-0627ae37` en la misma EC2, con las unidades
+`clinicaclick-meta-marketing@dev.service` y `@staging.service` habilitadas para
+arranque. Usuarios propios, `standby: true`, ninguna identidad de cliente, ningún
+slot ni grant. El archivo candidato y sus 65 fuentes coinciden con el manifiesto;
+42 dependencias instaladas desde su lock, sin scripts de paquetes. La primera
+preparación se detuvo antes de crear usuarios o arrancar por cargar `/dev/null`
+dos veces como configuración npm; se diagnosticó el resultado terminal y se
+continuó con dos archivos de configuración vacíos distintos. No se repitieron
+servicios ni operaciones de negocio.
+
+Las claves TLS se generaron en AWS y no salieron de allí. Solo los CSR públicos
+viajaron al firmante existente; su CA privada permaneció en el host de aplicación.
+Ingreso 8453/8454 limitado a `51.44.225.192/32`; reglas anteriores conservadas.
+Cuatro peticiones firmadas con una clave ficticia desconocida, usando ambos
+audiences, devuelven `invalid_signature` por TLS real. Los dos estados conservan
+veinte tablas sin filas. No equivale a probar roles clínicos configurados.
+
+Desde el espacio de montajes y el UID efectivo de cada unidad: puede leer su
+configuración/clave y escribir su estado; no puede modificar esa configuración
+ni leer configuración, clave o SQLite del otro entorno. Los límites de memoria,
+CPU/tareas y el consumo real están en `meta-standby-deployment.json`. No se afirma
+aislamiento IAM por proveedor: los dos procesos usan el rol EC2 existente.
+
+Publicador y firmante incorporan ambos certificados conservando sus diez destinos
+previos. Dos renovaciones reales, mismas claves/PID, trece certificados sanos y
+cero alertas en lectores DEV/CRM. No se configuraron credenciales Meta ni se
+publicaron consumidores clínicos/DDL o autorizaciones de una clínica. La medición
+vacía no acredita capacidad bajo tráfico de proveedor.
+
+Recuperación de esta instalación todavía vacía: comprobar ausencia de autoridad
+y filas, detener/inhabilitar únicamente la unidad afectada, y retirar solo su
+destino de los dos registros de certificados y su regla de ingreso. Conservar
+claves y SQLite para inspección. Si existe historia o autoridad clínica, seguir
+la conciliación y retirada de permisos del contrato; no vaciar la base ni intentar
+volver a `standby`. No bajar validadores/monitores anteriores al soporte Meta
+mientras queden destinos Meta enrolados.
+
+Acta versionada: `meta-standby-deployment.json`. Evidencia privada:
+`qa-evidence/security-resume-20260917/meta-transport-publication-20260919/`.

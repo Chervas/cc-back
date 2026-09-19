@@ -2,7 +2,7 @@
 
 > **Tipo:** runbook.
 > **Fuente de verdad:** preparación, verificación y recuperación de certificados de transporte; no tokens de Meta/Google.
-> **Última revisión:** 2026-09-18.
+> **Última revisión:** 2026-09-19.
 > **Estado y prioridad:** manual central [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones) y [16](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/16-roadmap.md#seguridad-de-acceso-e-integraciones).
 
 ## Límites
@@ -264,7 +264,7 @@ autofirmado. Los nuevos registros ya entregados se conservan siempre.
 
 ### Ampliación preparada para los propietarios Meta (19/09/2026)
 
-El código preparado de firmante y publicador admite certificados de hasta doce
+El código de firmante y publicador admite certificados de hasta doce
 servicios HTTPS dentro de la misma EC2 de seguridad; no supone doce máquinas.
 Añade únicamente las parejas
 `meta-marketing-dev:8453` y `meta-marketing-staging:8454`; nombres ajenos o puertos
@@ -284,3 +284,69 @@ QA: seis tests de publicador, cinco de firmante con mTLS/renovación reales loca
 y siete de salud/alertas; claves y CA ficticias. Ningún servicio o certificado fue
 modificado por esas pruebas. La publicación de soporte y altas Meta se documenta
 por separado en99; no confundir código preparado con renovación operativa.
+
+### Compatibilidad publicada, 19/09/2026 a las 11:15 UTC
+
+El monitor nuevo está publicado en DEV y CRM; staging incorpora los commits
+`0ab512d8` y `0627ae37` como `edfe7d20`/`ac4703a3`. DEV conserva su release
+aislada anterior y solo sustituye el lector de salud. Los preflights SQL son
+compatibles sin DDL. CRM se reinició tras comprobar trabajos/correos/flujos y
+colas activas vacíos; MFA, entorno, colas históricas y proceso gateway conservados.
+
+Firmante local y publicador AWS seleccionan
+`/opt/clinicaclick-server-certificates/release-0627ae37-meta-support`.
+Se preservaron configuración, certificados, claves y los diez destinos anteriores.
+La ejecución de la unidad endurecida de mantenimiento devuelve `Result=success`,
+once certificados `healthy` y cero alertas en ambos monitores. Timer activo.
+No se forzó ninguna renovación ni se añadieron identidades durante este corte.
+
+Recuperación antes de incorporar Meta: volver al enlace `release-0ab512d8` en el
+host afectado y reiniciar solo el publicador si es AWS; verificar mTLS y la unidad
+local. **Después de incorporar Meta**, esa release anterior no admite sus dos
+destinos: conservar validadores/lectores compatibles y las identidades enroladas;
+no restaurar código antiguo sin un procedimiento que contemple esos consumidores.
+No restaurar estado SQL/SQLite, certificados viejos ni configuraciones clínicas
+para revertir un cambio del monitor.
+
+Evidencia privada: `qa-evidence/security-resume-20260917/meta-transport-publication-20260919/`.
+Cuatro capturas reales de login DEV/CRM a 1440/390px, sin respuestas simuladas,
+errores JS/5xx, desbordamientos ni POST; inspeccionadas. No acreditan sesión MFA
+completada ni entrega de alertas dentro del panel autenticado.
+
+### Altas y renovaciones Meta verificadas, 19/09/2026 a las 11:33 UTC
+
+Los servicios Meta vacíos DEV8453/staging8454 ya están enrolados en ambos
+registros. Claves generadas en AWS, CSR públicos firmados por la CA existente;
+los destinos nuevos fijan SPKI, identidad, hostname y puerto. Tras comprobar TLS
+se incorporaron los dos destinos, sin cambiar los diez anteriores. Ambos renovaron
+realmente con `--force-id` por separado y se observó la nueva hoja desde el host
+de aplicación; PID y claves conservados. Ejecución final de la unidad endurecida:
+trece certificados `healthy`, timer activo y cero alertas en DEV/CRM. Las once
+filas de salud previas, incluido el cliente de mantenimiento, son idénticas.
+
+Esto acredita mantenimiento de estos dos servicios sin autoridad clínica, no
+OAuth del titular ni funcionamiento de una integración Meta real. Estado y acta
+en `meta-standby-deployment.json`; misma carpeta privada de evidencia del corte
+anterior. Con doce destinos ya enrolados, conservar el soporte de `0627ae37` al
+recuperar: `release-0ab512d8` no admite las dos identidades nuevas.
+
+### Lectura de metadata por el DEV aislado
+
+El directorio de salud es root `0750` y sus JSON root `0640`, con grupo del CRM.
+Una prueba como root puede ocultar que el UID aislado DEV no pueda leerlos. En el
+corte del 19/09 se detectó ese permiso ausente al ejecutar el lector con el UID,
+grupos y espacio de montajes reales de la API DEV. Sus flags de monitor no estaban
+configurados; no se observaron notificaciones DEV erróneas en ejecución automática.
+
+`sudo python3 ops/security/grant-transport-health-reader.py --apply` concede al
+usuario `clinicaclick-dev` únicamente tránsito del directorio y lectura de sus
+dos JSON. La ACL por defecto conserva esa lectura al crear/reemplazar los ficheros
+desde `atomic_write`, sin hacerlos escribibles ni añadir DEV al grupo del CRM.
+Este directorio contiene solo metadata saneada; nunca guardar claves allí.
+
+Verificación real: ejecutar ambas unidades de mantenimiento y volver a leer como
+los UID efectivos. En el corte pasaron ambos lectores, tres rechazos DEV de lectura
+privada (clave CA, clave mTLS y `.env` CRM) y dos rechazos de escritura de metadata.
+Los permisos de root/grupo se conservan. No se cambiaron flags, cron o grupos de
+procesos. La lectura forzada correcta no acredita que las notificaciones estén
+activadas en DEV ni entregadas dentro de una sesión autenticada.

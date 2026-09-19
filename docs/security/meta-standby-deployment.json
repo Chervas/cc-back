@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-19T11:34:20.529341+00:00",
+  "scope": "Two empty Meta HTTPS runtimes installed; no clinical connection or provider acceptance",
+  "instanceId": "i-0cf40cfe823f160fa",
+  "newEc2Instances": 0,
+  "runtimeRelease": "/opt/clinicaclick-meta-marketing/release-0627ae37",
+  "sourceCommit": "0627ae377908bd4a9ca2bb49ecae76fe945c949f",
+  "archiveSha256": "6a6a6696a3593790259172dc355234d894c748fa910bba104d1208cf81a57d3b",
+  "runtimeFilesVerified": 65,
+  "dependenciesFromOwnLock": 42,
+  "standby": true,
+  "principals": 0,
+  "connections": 0,
+  "grants": 0,
+  "runtime": [
+    {
+      "environment": "dev",
+      "port": 8453,
+      "user": "cc-meta-dev",
+      "pid": 333679,
+      "restarts": 0,
+      "stateTables": 20,
+      "stateRows": 0,
+      "memoryCurrentBytes": 33923072,
+      "memoryPeakBytes": 46809088,
+      "peerPrivateReadsDenied": 3,
+      "ownConfigurationReadOnlyInService": true,
+      "ownStateWritable": true,
+      "oomEvents": 0
+    },
+    {
+      "environment": "staging",
+      "port": 8454,
+      "user": "cc-meta-staging",
+      "pid": 333693,
+      "restarts": 0,
+      "stateTables": 20,
+      "stateRows": 0,
+      "memoryCurrentBytes": 34344960,
+      "memoryPeakBytes": 46710784,
+      "peerPrivateReadsDenied": 3,
+      "ownConfigurationReadOnlyInService": true,
+      "ownStateWritable": true,
+      "oomEvents": 0
+    }
+  ],
+  "certificateMaintenance": {
+    "release": "release-0627ae37-meta-support",
+    "httpsServices": 12,
+    "certificatesIncludingMaintenanceClient": 13,
+    "healthy": 13,
+    "newMetaCertificatesRenewedAndObserved": 2,
+    "newServicePidsUnchangedDuringRenewal": true,
+    "all11PriorCertificateRowsUnchanged": true
+  },
+  "monitorConsumers": {
+    "dev": "selective override transportCertificateHealth.js on prior isolated release",
+    "stagingCommit": "ac4703a38796a7ecf469cd91e6b9e2619d57a0cc",
+    "alerts": 0,
+    "effectiveUidReadsVerifiedAfterAtomicReplacement": true,
+    "devAutomaticMonitorFlagsConfigured": false,
+    "devMetadataReadAcl": "Named DEV UID, read-only; inherited by both maintenance writers"
+  },
+  "checks": {
+    "sourceMetaTestsPreviouslyPassed": 81,
+    "stagingMonitorTestsPassed": 7,
+    "schemaTablesDev": 34,
+    "schemaTablesStaging": 18,
+    "ddlApplied": false,
+    "signedUnknownClientRejections": 4,
+    "realLoginScreenshotsViewed": 4,
+    "visualResponsesMocked": false,
+    "visualLoginSubmitted": false,
+    "authenticatedUiAcceptance": false,
+    "realProviderAcceptance": false,
+    "devPrivateReadsDenied": 3,
+    "devMetadataWritesDenied": 2
+  },
+  "limits": {
+    "memoryHighMiB": 160,
+    "memoryMaxMiB": 192,
+    "heapMiB": 96,
+    "cpuQuotaPerProcessPercentOfOneCpu": 35,
+    "tasksMax": 48,
+    "maxOpenFiles": 256
+  },
+  "globalMemoryAvailableKiB": 764596,
+  "capacityScope": "empty services, denied probes and TLS renewal only; limits are not resource reservations",
+  "iamScope": "existing EC2 role shared; no proof of per-provider IAM isolation",
+  "incrementalAwsCostUsd": null,
+  "awsCostScope": "no new EC2; billing delta not yet attributed",
+  "privateEvidence": "qa-evidence/security-resume-20260917/meta-transport-publication-20260919",
+  "pending": [
+    "Real Meta app/slot/IAM/KMS configuration",
+    "Selective clinical consumers and required DDL",
+    "One reconciliation worker owner per environment",
+    "Authenticated public MFA, holder OAuth and provider acceptance"
+  ]
+}

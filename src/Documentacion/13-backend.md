@@ -11595,7 +11595,7 @@ ninguna petición del cliente modifica la política o habilita una conexión.
 
 Este modo sirve para verificar instalación, TLS, aislamiento y recursos. No prueba
 OAuth real, permisos de slots ni aceptación clínica. Su publicación y resultados
-se registran separadamente en estado19/99; hasta entonces sigue preparado.
+se registran separadamente en estado19/99.
 
 
 El registro de renovación preparado admite además `meta-marketing-dev:8453` y
@@ -11605,3 +11605,40 @@ puerto son fijas; no habilita otros destinos en ese rango. El monitor reconoce
 ambas identidades y conserva el rechazo de entradas desconocidas o incompletas.
 Publicar esos lectores antes de añadir los certificados al estado compartido;
 conservar las diez identidades actuales, la CA, las claves y sus permisos.
+
+Compatibilidad publicada el 19/09/2026: monitor DEV mediante una release selectiva
+que cambia únicamente `transportCertificateHealth.js`; staging `ac4703a3` promueve
+`0ab512d8` y `0627ae37`. Preflight compatible: 34 tablas DEV y 18 staging,
+siete pruebas del monitor en Node 18 y configuración/MFA conservados. Firmante
+local y publicador AWS ejecutan `release-0627ae37-meta-support`, con los diez
+destinos previos intactos. La unidad de mantenimiento comprobó once certificados
+sanos a las 11:15 UTC, incluido el cliente. Esto publica soporte para nuevas
+identidades; las altas de los servicios Meta se verifican por separado.
+
+**Instalación vacía publicada y verificada, 19/09/2026 a las 11:34 UTC:**
+`clinicaclick-meta-marketing@dev.service` y `@staging.service`, puertos 8453/8454,
+ejecutan `release-0627ae37` en la misma EC2. Son dos servicios, no nuevas máquinas.
+Fuente de 65 archivos y 42 dependencias instaladas desde su propio lock comprobadas.
+Usuarios `cc-meta-dev`/`cc-meta-staging`, estados independientes, cero principals,
+conexiones y grants; veinte tablas SQLite sin filas en cada entorno después de
+cuatro rechazos de firma reales. Configuración de solo lectura dentro de cada
+unidad y tres lecturas privadas del otro entorno rechazadas por servicio.
+
+Ambas hojas se renovaron y observaron por TLS desde el host de aplicación sin
+cambiar PID ni clave. Trece certificados sanos: doce servicios y cliente de
+mantenimiento; las once filas previas permanecen iguales. Heap 96 MiB,
+MemoryHigh 160/Max 192 MiB, CPU 35% de un núcleo y 48 tareas por unidad. Consumo
+observado 32,35/32,75 MiB, picos 44,64/44,55 MiB, sin OOM ni reinicios. No acredita
+carga de proveedor, reservas de recursos o aislamiento IAM por proveedor: sigue
+la identidad EC2 compartida. Contrato, límites y pendientes en
+`docs/security/meta-standby-deployment.json`; consumidores clínicos/DDL, slots y
+aceptación autenticada siguen pendientes. No se cambia ningún gate clínico.
+
+La comprobación con el UID real detectó que DEV no podía leer los metadatos
+compartidos. `ops/security/grant-transport-health-reader.py --apply` concede
+solo tránsito por su directorio y lectura de `status.json`/`servers.json`, con
+ACL heredable para los reemplazos atómicos. No añade DEV al grupo del CRM ni
+permite escribir metadata o leer claves/configuración clínica. Ambos escritores
+de mantenimiento se ejecutaron después: los lectores con UID/grupos/montajes
+reales devuelven cero incidencias. Los flags del monitor DEV siguen sin configurar;
+la prueba fuerza la lectura, no habilita cron/notificaciones ni acredita su entrega.
