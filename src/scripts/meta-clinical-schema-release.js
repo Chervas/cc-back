@@ -17,7 +17,13 @@ function secure(file, directory=false) {
   const s=fs.lstatSync(file);
   if (s.isSymbolicLink() || s.uid!==0 || s.mode&0o077 || (directory?!s.isDirectory():!s.isFile())) fail('meta_schema_private_artifact_invalid');
 }
-function write(file,value) { fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600}); }
+function syncDirectory(dir) { const fd=fs.openSync(dir,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);} }
+function persist(file,bytes) {
+  const fd=fs.openSync(file,'wx',0o600);
+  try { fs.writeFileSync(fd,bytes);fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  syncDirectory(path.dirname(file));
+}
+function write(file,value) { persist(file,JSON.stringify(value,null,2)+'\n'); }
 function args(argv) {
   const [action,sourceOption,source,dirOption,dir,...rest]=argv;
   if (!['plan','backup','apply'].includes(action) || sourceOption!=='--source' || dirOption!=='--dir'
@@ -87,7 +93,7 @@ async function verifyBackup(dir,plan) {
 async function backup(dir,plan,query) {
   noWriters();
   if (plan.beforeDigest!==digest(await snapshot(query)) || plan.rowsDigest!==digest(await meta.rowFingerprints(query,plan.columns))) fail('meta_schema_plan_stale_or_invalid');
-  const key=crypto.randomBytes(32);fs.writeFileSync(path.join(dir,'recovery.key'),key,{flag:'wx',mode:0o600});
+  const key=crypto.randomBytes(32);persist(path.join(dir,'recovery.key'),key);
   const child=spawn('/usr/bin/mysqldump',['--defaults-file=/etc/mysql/debian.cnf','--single-transaction','--skip-lock-tables',
     '--no-tablespaces','--set-gtid-purged=OFF','--hex-blob',plan.database,...meta.TABLES],{stdio:['ignore','pipe','ignore']});
   const exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
@@ -105,7 +111,7 @@ async function run(argv) {
   const o=args(argv),info=sourceInfo(o.source,true);
   if (!fs.existsSync(RECOVERY))fs.mkdirSync(RECOVERY,{mode:0o700});secure(RECOVERY,true);
   let plan,target;
-  if(o.action==='plan') { fs.mkdirSync(o.dir,{mode:0o700});target=publicTarget(); }
+  if(o.action==='plan') { fs.mkdirSync(o.dir,{mode:0o700});syncDirectory(RECOVERY);target=publicTarget(); }
   else { secure(o.dir,true);secure(path.join(o.dir,'plan.json'));plan=JSON.parse(fs.readFileSync(path.join(o.dir,'plan.json')));target=plan.target;verifyTarget(target);noWriters(); }
   const c=await connection(target.database),query=async(sql,values=[])=>(await c.query({sql,values,timeout:30000}))[0];
   let journal;
@@ -117,6 +123,7 @@ async function run(argv) {
     }
     if (o.action==='backup') { await backup(o.dir,plan,query);return {status:'clinical_meta_backup_verified'}; }
     journal=fs.openSync(path.join(o.dir,'journal.jsonl'),'wx',0o600);
+    syncDirectory(o.dir);
     const append=event=>{fs.writeSync(journal,JSON.stringify({at:new Date().toISOString(),...event})+'\n');fs.fsyncSync(journal);};
     try {
       return await meta.apply({connection:c,plan,info,database:target.database,verifyWritersStopped:async()=>{verifyTarget(target);noWriters();},
