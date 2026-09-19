@@ -1,18 +1,20 @@
 'use strict';
 const { schema } = require('./contracts');
 const { fail } = require('./errors');
+const leads = require('./google-leads-contract');
 const PROVIDER = 'google_ads';
 const PREFIX = 'google.ads.';
 const API_VERSION = 'v24';
 const SCOPES = Object.freeze(['https://www.googleapis.com/auth/adwords']);
 const FAMILIES = Object.freeze(['account', 'campaigns', 'campaign_metrics', 'adgroup_metrics',
-  'publishing_campaigns', 'landing_pages', 'ads', 'ad_metrics', 'discovery']);
+  'publishing_campaigns', 'landing_pages', 'ads', 'ad_metrics', 'discovery', 'conversion_actions', 'conversion_settings', 'leads']);
+const singleResult = name => ['account', 'discovery', 'conversion_settings'].includes(name);
 const OPERATIONS = Object.freeze(FAMILIES.map(name => PREFIX + name + '.read.v1'));
 const REVOKE_OPERATION = PREFIX + 'asset.revoke.v1';
 const PROVIDER_PAGE_SIZE = 10000;
 const PAGE_SIZE = 250;
 const MAX_ROWS = 100000;
-const rowLimit = name => ['account', 'discovery'].includes(name) ? 1 : ['campaigns', 'publishing_campaigns'].includes(name) ? 5000
+const rowLimit = name => singleResult(name) ? 1 : name === 'leads' ? leads.MAX_ROWS : ['campaigns', 'publishing_campaigns', 'conversion_actions'].includes(name) ? 5000
   : ['ads', 'ad_metrics'].includes(name) ? 200000 : MAX_ROWS;
 const RESOURCE_FIELDS = ['customer.id', 'campaign.id', 'campaign.name', 'campaign.status',
   'campaign.serving_status', 'campaign.primary_status', 'campaign.primary_status_reasons'];
@@ -37,7 +39,8 @@ function resource(binding, assetRef) {
 const cursor = { pageToken: { type: ['string', 'null'], maxLength: 4096 } };
 const windowFields = { startDate: { type: 'string' }, endDate: { type: 'string' } };
 const campaignFilter = { campaignId: { type: ['string', 'null'], pattern: '^[1-9][0-9]{0,19}$' } };
-const validators = { account: schema({}), discovery: schema({}), campaigns: schema(cursor),
+const validators = { account: schema({}), discovery: schema({}), conversion_settings: schema({}), campaigns: schema(cursor), conversion_actions: schema(cursor),
+  leads: schema({ ...cursor, sinceDate: { type: 'string' } }),
   campaign_metrics: schema({ ...cursor, ...windowFields }), adgroup_metrics: schema({ ...cursor, ...windowFields }),
   publishing_campaigns: schema(cursor), landing_pages: schema({ ...cursor, ...windowFields }),
   ads: schema({ ...cursor, ...campaignFilter }), ad_metrics: schema({ ...cursor, ...campaignFilter, ...windowFields }) };
@@ -46,6 +49,7 @@ function family(operation) {
 }
 function validate(operation, payload) {
   const name = family(operation); validators[name](payload);
+  if (name === 'leads' && !leads.date(payload.sinceDate)) fail('invalid_request');
   const maxDays = name === 'landing_pages' ? 30 : 15;
   if ((name.endsWith('_metrics') || name === 'landing_pages') && (!date(payload.startDate) || !date(payload.endDate)
     || payload.endDate < payload.startDate || Date.parse(payload.endDate) - Date.parse(payload.startDate) > (maxDays - 1) * 86400000)) fail('invalid_request');
@@ -54,8 +58,11 @@ function validate(operation, payload) {
 function query(name, payload) {
   if (!FAMILIES.includes(name)) fail('operation_denied');
   validate(PREFIX + name + '.read.v1', payload);
+  if (name === 'leads') return leads.query(payload);
   if (name === 'discovery') return 'SELECT customer.id, customer.descriptive_name, customer.manager, customer.currency_code, customer.time_zone, customer.status FROM customer LIMIT 2';
   if (name === 'account') return 'SELECT customer.id, customer.manager, customer.currency_code, customer.time_zone FROM customer LIMIT 2';
+  if (name === 'conversion_settings') return 'SELECT customer.id, customer.conversion_tracking_setting.accepted_customer_data_terms, customer.conversion_tracking_setting.enhanced_conversions_for_leads_enabled, customer.conversion_tracking_setting.google_ads_conversion_customer FROM customer LIMIT 2';
+  if (name === 'conversion_actions') return 'SELECT customer.id, conversion_action.id, conversion_action.resource_name, conversion_action.owner_customer, conversion_action.name, conversion_action.category, conversion_action.type, conversion_action.status, conversion_action.counting_type, conversion_action.include_in_conversions_metric, conversion_action.primary_for_goal FROM conversion_action LIMIT 5001';
   if (name === 'campaigns') return `SELECT ${RESOURCE_FIELDS.join(', ')} FROM campaign WHERE campaign.status IN ('ENABLED', 'PAUSED', 'REMOVED') LIMIT 5001`;
   if (name === 'publishing_campaigns') return `SELECT ${[...RESOURCE_FIELDS, 'campaign.advertising_channel_type',
     'campaign.final_url_suffix', 'campaign.asset_automation_settings'].join(', ')} FROM campaign WHERE campaign.status IN ('ENABLED', 'PAUSED') LIMIT 5001`;
@@ -123,6 +130,8 @@ function projectAd(row, payload, result, inventory) {
     policySummary: { approvalStatus: enumText(policy?.approvalStatus), reviewStatus: enumText(policy?.reviewStatus) } });
 }
 function rowKey(result) {
+  if (result.leadFormSubmissionData) return JSON.stringify([result.customer.id, 'lead', result.leadFormSubmissionData.id]);
+  if (result.conversionAction) return JSON.stringify([result.customer.id, 'conversion_action', result.conversionAction.id]);
   return JSON.stringify([result.customer.id, result.campaign?.id, result.adGroup?.id, result.adGroupAd?.ad?.id,
     result.landingPageView?.unexpandedFinalUrl, result.segments?.date, result.segments?.adNetworkType, result.segments?.device]);
 }
@@ -130,9 +139,44 @@ function projectPage(name, raw, payload, account) {
   if (!FAMILIES.includes(name) || !plain(raw) || raw.error || raw.errors || raw.partialFailureError || raw.partial_failure_error
     || raw.results !== undefined && !Array.isArray(raw.results)) fail('provider_failed');
   const rows = raw.results || [];
-  if (rows.length > PROVIDER_PAGE_SIZE || ['account', 'discovery'].includes(name) && rows.length !== 1) fail('provider_failed');
+  if (rows.length > PROVIDER_PAGE_SIZE || singleResult(name) && rows.length !== 1) fail('provider_failed');
   const results = rows.map(row => {
     if (!plain(row) || !plain(row.customer) || row.customer.id !== account.customerId) fail('provider_failed');
+    if (name === 'leads') return leads.project(row, payload, account);
+    if (name === 'conversion_settings') {
+      const settings = row.customer.conversionTrackingSetting;
+      if (settings !== undefined && !plain(settings)) fail('provider_failed');
+      const flag = value => {
+        if (value == null) return null;
+        if (typeof value !== 'boolean') fail('provider_failed'); return value;
+      };
+      const owner = settings?.googleAdsConversionCustomer;
+      if (owner != null && (typeof owner !== 'string' || !/^customers\/[0-9]{10}$/.test(owner)
+        || !customer(owner.slice('customers/'.length)))) fail('provider_failed');
+      return { customer: { id: account.customerId, conversionTrackingSetting: {
+        acceptedCustomerDataTerms: flag(settings?.acceptedCustomerDataTerms),
+        enhancedConversionsForLeadsEnabled: flag(settings?.enhancedConversionsForLeadsEnabled),
+        googleAdsConversionCustomer: owner ?? null,
+      } } };
+    }
+    if (name === 'conversion_actions') {
+      const action = row.conversionAction;
+      if (!plain(action) || !integerId(action.id) || typeof action.resourceName !== 'string'
+        || !new RegExp(`^customers/[0-9]{10}/conversionActions/${action.id}$`).test(action.resourceName || '')) fail('provider_failed');
+      const nullableBoolean = value => {
+        if (value === undefined || value === null) return null;
+        if (typeof value !== 'boolean') fail('provider_failed'); return value;
+      };
+      if (action.ownerCustomer != null && (typeof action.ownerCustomer !== 'string'
+        || !/^customers\/[0-9]{10}$/.test(action.ownerCustomer))) fail('provider_failed');
+      // Cross-account actions retain their actual resource owner. Preparation
+      // must reject a foreign owner, never reconstruct an apparently local ID.
+      return { customer: { id: account.customerId }, conversionAction: {
+        id: action.id, resourceName: action.resourceName, ownerCustomer: action.ownerCustomer ?? null, name: text(action.name, 1024),
+        category: enumText(action.category), type: enumText(action.type), status: enumText(action.status),
+        countingType: enumText(action.countingType), primaryForGoal: nullableBoolean(action.primaryForGoal),
+        includeInConversionsMetric: nullableBoolean(action.includeInConversionsMetric) } };
+    }
     if (['account', 'discovery'].includes(name)) {
       if (row.customer.manager !== undefined && (typeof row.customer.manager !== 'boolean' || name === 'account' && row.customer.manager !== false)
         || !/^[A-Z]{3}$/.test(row.customer.currencyCode || '')) fail('provider_failed');
@@ -193,9 +237,17 @@ function projectPage(name, raw, payload, account) {
   }
   const nextPageToken = raw.nextPageToken === undefined || raw.nextPageToken === '' ? null : raw.nextPageToken;
   if (nextPageToken !== null && (typeof nextPageToken !== 'string' || !/^[\x21-\x7e]{1,1536}$/.test(nextPageToken)
-    || !results.length || ['account', 'discovery'].includes(name))) fail('provider_failed');
+    || !results.length || singleResult(name))) fail('provider_failed');
   if (Buffer.byteLength(JSON.stringify(results)) > 16 * 1024 * 1024) fail('provider_failed');
   return { results, nextPageToken };
 }
+// This metadata is added by the broker from its validated binding, never read
+// from Google's response. Presence of configuration is not provider validation.
+function dataManagerConfiguration(value) {
+  if (!plain(value) || Object.keys(value).join(',') !== 'quotaProjectConfigured'
+    || typeof value.quotaProjectConfigured !== 'boolean') fail('provider_failed');
+  return { quotaProjectConfigured: value.quotaProjectConfigured };
+}
 module.exports = { PROVIDER, PREFIX, API_VERSION, SCOPES, FAMILIES, OPERATIONS, REVOKE_OPERATION,
-  PROVIDER_PAGE_SIZE, PAGE_SIZE, MAX_ROWS, resource, customer, family, validate, query, projectPage, rowKey, rowLimit };
+  PROVIDER_PAGE_SIZE, PAGE_SIZE, MAX_ROWS, resource, customer, family, validate, query, projectPage, rowKey, rowLimit,
+  singleResult, dataManagerConfiguration };

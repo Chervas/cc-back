@@ -476,13 +476,15 @@ async function resolveGoogleRequestConnection(req, {
 
 async function resolveMetaRequestConnection(req, {
     allowLegacyUserFallback = true,
-    scopeInput = null
+    scopeInput = null,
+    metadataOnly = false
 } = {}) {
     const userId = getUserIdFromToken(req);
     const resolved = await resolveMetaConnectionForScope({
         userId,
         ...(scopeInput || getScopeInputFromRequest(req)),
-        allowLegacyUserFallback
+        allowLegacyUserFallback,
+        metadataOnly
     });
     return { userId, ...resolved };
 }
@@ -1318,6 +1320,7 @@ const EXPLICIT_SCOPE_REQUIRED_PATHS = new Set([
 const PUBLIC_OAUTH_PATHS = new Set([
     '/google/callback',
     '/meta/callback',
+    '/meta/marketing/callback',
     '/test'
 ]);
 
@@ -1328,6 +1331,17 @@ router.use((req, res, next) => {
     const normalizedPath = req.path.replace(/\/+$/, '') || '/';
     if (PUBLIC_OAUTH_PATHS.has(normalizedPath)) return next();
     return authMiddleware(req, res, next);
+});
+
+let metaMarketingOAuthRoutes;
+let metaMarketingEnrollmentRoutes;
+router.use('/meta/marketing', (req, res, next) => {
+    metaMarketingOAuthRoutes ||= require('./metaMarketingOAuth.routes').createRouter({ sessions: accessSessions });
+    return metaMarketingOAuthRoutes(req, res, next);
+});
+router.use('/meta/marketing', (req, res, next) => {
+    metaMarketingEnrollmentRoutes ||= require('./metaMarketingEnrollment.routes').createRouter({ sessions: accessSessions });
+    return metaMarketingEnrollmentRoutes(req, res, next);
 });
 
 // Toda lectura o mutación scope-aware pasa por este guard antes de que los
@@ -3770,147 +3784,36 @@ router.delete('/google/disconnect', async (req, res) => {
  * GET /oauth/meta/connection-status
  * Endpoint para que el frontend consulte el estado de conexión de Meta para el usuario actual.
  */
-router.get('/meta/connection-status', async (req, res) => {
-    const scopedRequest = hasRequestedScope(req);
-    const { userId, connection, assignment, scope, source } = await resolveMetaRequestConnection(req, {
-        allowLegacyUserFallback: !scopedRequest
-    });
-    if (!userId) {
-        return res.status(401).json({ connected: false, message: 'Usuario no autenticado.' });
-    }
-
-    try {
-        if (connection) {
-            const storedHealth = evaluateMetaConnectionHealth(connection, { is_valid: true });
-            if (!storedHealth.connected) {
-                return res.json({
-                    ...storedHealth,
-                    message: 'La conexión Meta necesita volver a autorizarse.',
-                    scope: buildScopeResponse(scope, assignment),
-                    source
-                });
-            }
-            let scopes = [];
-            let missingScopes = [];
-            let debugData = null;
-            let validationCacheHit = false;
-            const cachedDebugData = readMetaDebugTokenStatusCache(connection);
-            if (cachedDebugData) {
-                debugData = cachedDebugData;
-                validationCacheHit = true;
-            } else {
-                const pauseUntil = await readMetaOAuthPauseUntil();
-                if (pauseUntil) {
-                    return res.json({
-                        connected: true,
-                        metaUserId: connection.metaUserId,
-                        userName: connection.userName,
-                        userEmail: connection.userEmail,
-                        authorizedByUserId: assignment?.authorizedByUserId || connection.userId || null,
-                        authorizedByName: assignment?.authorizedByName || connection.userName || null,
-                        authorizedByEmail: assignment?.authorizedByEmail || connection.userEmail || null,
-                        scopes,
-                        missingScopes,
-                        validationDeferred: true,
-                        validationPausedUntil: pauseUntil.toISOString(),
-                        reason: 'meta_validation_rate_limited',
-                        message: 'Conexión Meta activa. La validación en vivo está pausada temporalmente por límite de Meta.',
-                        scope: buildScopeResponse(scope, assignment),
-                        source
-                    });
-                }
-
-                try {
-                    const result = await getMetaDebugTokenStatus(connection);
-                    debugData = result.debugData;
-                    validationCacheHit = !!result.cacheHit;
-                } catch (err) {
-                    if (isMetaApplicationRateLimit(err)) {
-                        const pauseUntil = err.pauseUntil || await readMetaOAuthPauseUntil() || metaRateLimitPauseUntil();
-                        return res.json({
-                            connected: true,
-                            metaUserId: connection.metaUserId,
-                            userName: connection.userName,
-                            userEmail: connection.userEmail,
-                            authorizedByUserId: assignment?.authorizedByUserId || connection.userId || null,
-                            authorizedByName: assignment?.authorizedByName || connection.userName || null,
-                            authorizedByEmail: assignment?.authorizedByEmail || connection.userEmail || null,
-                            scopes,
-                            missingScopes,
-                            validationDeferred: true,
-                            validationPausedUntil: pauseUntil.toISOString(),
-                            reason: 'meta_validation_rate_limited',
-                            message: 'Conexión Meta activa. La validación en vivo está pausada temporalmente por límite de Meta.',
-                            scope: buildScopeResponse(scope, assignment),
-                            source
-                        });
-                    }
-                    console.warn('⚠️ No se pudo obtener scopes de Meta (debug_token):', err.response?.data || err.message);
-                    return res.json({
-                        connected: false,
-                        reason: 'token_validation_failed',
-                        reauthorizationRequired: true,
-                        message: 'La conexión Meta necesita volver a autorizarse.',
-                        scope: buildScopeResponse(scope, assignment),
-                        source
-                    });
-                }
-            }
-            scopes = Array.isArray(debugData?.scopes)
-                ? debugData.scopes.map((s) => String(s).toLowerCase())
-                : [];
-
-            const health = evaluateMetaConnectionHealth(connection, debugData, {
-                expectedAppId: META_APP_ID
-            });
-            if (!health.connected) {
-                return res.json({
-                    ...health,
-                    message: 'La conexión Meta necesita volver a autorizarse.',
-                    scope: buildScopeResponse(scope, assignment),
-                    source
-                });
-            }
-
-            const critical = ['pages_manage_ads', 'leads_retrieval'];
-            missingScopes = critical.filter((s) => !scopes.includes(s));
-
-            return res.json({
-                connected: true,
-                metaUserId: connection.metaUserId,
-                userName: connection.userName,
-                userEmail: connection.userEmail,
-                authorizedByUserId: assignment?.authorizedByUserId || connection.userId || null,
-                authorizedByName: assignment?.authorizedByName || connection.userName || null,
-                authorizedByEmail: assignment?.authorizedByEmail || connection.userEmail || null,
-                scopes,
-                missingScopes,
-                validationCacheHit,
-                message: 'Conexión Meta activa.',
-                scope: buildScopeResponse(scope, assignment),
-                source
-            });
-        } else {
-            return res.json({
-                connected: false,
-                reason: source === 'legacy_user_ambiguous' ? 'connection_scope_required' : null,
-                source,
-                message: source === 'legacy_user_ambiguous'
-                    ? 'Hay varias conexiones Meta; indica la clínica o el grupo.'
-                    : 'No hay conexión Meta para este usuario.'
-            });
-        }
-    } catch (error) {
-        console.error('Error al obtener estado de conexión Meta:', error);
-        return res.status(500).json({ connected: false, message: 'Error interno del servidor.' });
-    }
+const metaMetadataContract = require('../services/metaConnectionMetadata.service');
+const metaConnectionMetadata = metaMetadataContract.createMetaConnectionMetadata({
+    authorize: req => authorizeExplicitConnectionScope(req, 'read'),
+    resolve: req => resolveMetaRequestConnection(req, { allowLegacyUserFallback: false, metadataOnly: true }),
+    session: async req => {
+        try { return await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); }
+        catch { throw Object.assign(Error('meta_metadata_session_required'), { code: 'meta_metadata_session_required', httpStatus: 401 }); }
+    },
+    scopeResponse: buildScopeResponse,
+    loadMappings: metaMetadataContract.createMetaMetadataRepository(db)
 });
+router.get('/meta/connection-status', metaConnectionMetadata.handler());
+const metaMarketingAccessCheck = require('../services/metaMarketingAccessCheck.service').createMetaMarketingAccessCheck({
+    models: db, broker: require('../services/metaMarketingBrokerReader.service').forModels(db),
+    sessions: async req => {
+        try { return await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); }
+        catch { throw Object.assign(Error('meta_broker_session_required'), { code: 'meta_broker_session_required' }); }
+    },
+    authorizeScope: req => authorizeExplicitConnectionScope(req, 'read'),
+    scopeInput: (_req, authorized) => `${authorized.assignmentScope}:${authorized.assignmentScope === 'group' ? authorized.groupId : authorized.clinicId}`
+});
+router.get('/meta/mappings/:mappingId/verification', metaMarketingAccessCheck.handler());
+router.use('/meta/marketing-disconnection', require('./metaMarketingRevocation.routes').createRouter({ models: db, sessions: accessSessions }));
+
 
 /**
  * GET /oauth/meta/assets
  * Obtener todos los activos de Meta del usuario con paginación completa
  */
-router.get('/meta/assets', async (req, res) => {
+router.get('/meta/assets', metaHttp.middleware, async (req, res) => {
     try {
         console.log('📋 Obteniendo activos de Meta con paginación completa...');
         
@@ -4237,129 +4140,7 @@ const getUserIdFromToken = (req) => {
  * GET /oauth/meta/mappings
  * Obtiene los mapeos de activos Meta existentes para el usuario logueado
  */
-router.get('/meta/mappings', async (req, res) => {
-    try {
-        console.log('🔍 Obteniendo mapeos de activos Meta...');
-        
-        // Obtener el userId del token JWT
-        const { userId, connection: metaConnection } = await resolveMetaRequestConnection(req, {
-            allowLegacyUserFallback: true
-        });
-        
-        if (!userId) {
-            console.log('❌ No se pudo obtener userId del token JWT');
-            return res.status(401).json({
-                success: false,
-                error: 'Usuario no autenticado'
-            });
-        }
-        
-        console.log('🔍 Buscando mapeos para userId:', userId);
-        
-        if (!metaConnection) {
-            console.log('❌ No se encontró conexión Meta para este usuario');
-            return res.json({
-                success: false,
-                error: 'Usuario no conectado a Meta'
-            });
-        }
-        
-        // ✅ CORREGIDO: Obtener todos los mapeos activos del usuario con nombres de columna correctos
-        const allMappings = await ClinicMetaAsset.findAll({
-            where: {
-                metaConnectionId: metaConnection.id,
-                isActive: true
-            },
-            include: [
-                {
-                    model: db.Clinica,
-                    as: 'clinica',
-                    attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] // ✅ NOMBRES CORRECTOS
-                }
-            ],
-            order: [['clinicaId', 'ASC'], ['assetType', 'ASC']]
-        });
-        const mappings = await filterReadableClinicMappings(
-            req,
-            userId,
-            allMappings,
-            (mapping) => mapping.clinicaId
-        );
-        
-        // Agrupar mapeos por clínica
-        const mappingsByClinica = {};
-        
-        mappings.forEach(mapping => {
-            const clinicaId = mapping.clinicaId;
-            
-            if (!mappingsByClinica[clinicaId]) {
-                mappingsByClinica[clinicaId] = {
-                    clinica: {
-                        id: mapping.clinica?.id_clinica || clinicaId, // ✅ CORREGIDO: id_clinica
-                        nombre: mapping.clinica?.nombre_clinica || `Clínica ${clinicaId}`, // ✅ CORREGIDO: nombre_clinica
-                        avatar_url: mapping.clinica?.url_avatar || null // ✅ CORREGIDO: url_avatar
-                    },
-                    assets: {
-                        facebook_pages: [],
-                        instagram_business: [],
-                        ad_accounts: []
-                    },
-                    totalAssets: 0
-                };
-            }
-            
-            const assetData = withoutMetaAccessToken({
-                id: mapping.id,
-                metaAssetId: mapping.metaAssetId,
-                metaAssetName: mapping.metaAssetName,
-                assetType: mapping.assetType,
-                additionalData: mapping.additionalData,
-                createdAt: mapping.createdAt,
-                updatedAt: mapping.updatedAt
-            });
-            
-            // Agregar a la categoría correspondiente
-            switch (mapping.assetType) {
-                case 'facebook_page':
-                    mappingsByClinica[clinicaId].assets.facebook_pages.push(assetData);
-                    break;
-                case 'instagram_business':
-                    mappingsByClinica[clinicaId].assets.instagram_business.push(assetData);
-                    break;
-                case 'ad_account':
-                    mappingsByClinica[clinicaId].assets.ad_accounts.push(assetData);
-                    break;
-            }
-            
-            mappingsByClinica[clinicaId].totalAssets++;
-        });
-        
-        // Convertir objeto a array
-        const mappingsArray = Object.values(mappingsByClinica);
-        
-        console.log(`✅ Mapeos encontrados: ${mappings.length} activos en ${mappingsArray.length} clínicas`);
-        
-        res.json({
-            success: true,
-            mappings: mappingsArray,
-            totalMappings: mappings.length,
-            totalClinics: mappingsArray.length,
-            userInfo: {
-                metaUserId: metaConnection.metaUserId,
-                userName: metaConnection.userName,
-                userEmail: metaConnection.userEmail
-            }
-        });
-        
-    } catch (error) {
-        console.error('❌ Error obteniendo mapeos de Meta:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Error interno del servidor',
-            details: error.message
-        });
-    }
-});
+router.get('/meta/mappings', metaConnectionMetadata.handler(true));
 
 /**
  * DELETE /oauth/meta/mappings/:mappingId
@@ -4487,6 +4268,7 @@ router.delete('/meta/disconnect', async (req, res) => {
 
             const connectionId = connection?.id || assignment?.metaConnectionId || null;
             if (connectionId) {
+                await require('../services/metaMarketingRevocation.service').assertLegacyDisconnectAllowed(db, connectionId);
                 await db.sequelize.transaction(async (transaction) => {
                     await deactivateMetaMappingsForScope({
                         scope,
@@ -4550,6 +4332,7 @@ router.delete('/meta/disconnect', async (req, res) => {
             conflict.httpStatus = 409;
             throw conflict;
         }
+        await require('../services/metaMarketingRevocation.service').assertLegacyDisconnectAllowed(db, connection.id);
         await MetaConnectionAssignment.destroy({ where: { metaConnectionId: connection.id } });
         await connection.destroy();
 

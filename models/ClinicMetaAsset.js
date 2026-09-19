@@ -121,7 +121,8 @@ module.exports = (sequelize, DataTypes) => {
     }, {
         tableName: 'ClinicMetaAssets',
         timestamps: true,
-        indexes: [ 
+        indexes: [
+            { name: 'cc_meta_asset_identity', fields: ['assetType', 'metaAssetId'] },
             {
                 unique: true,
                 fields: ['clinicaId', 'assetType', 'metaAssetId'],

@@ -13,4 +13,15 @@ function loadDiscoverySource(relative, dependencies, { env = {}, logs = [] } = {
   }, { filename, timeout: 2000 });
   return module.exports;
 }
-module.exports = { loadDiscoverySource };
+// Explicit opt-in for tests of other OAuth surfaces: register unrelated Meta handlers,
+// but fail immediately if any such handler or repository is actually used.
+function unusedMetaSurfaceDependencies() {
+  const deny=()=>{throw Error('UNEXPECTED_META_SURFACE_IN_OAUTH_QA');};
+  return {
+    '../services/metaConnectionMetadata.service':{createMetaConnectionMetadata:()=>({handler:()=>deny}),createMetaMetadataRepository:()=>deny},
+    '../services/metaMarketingAccessCheck.service':{createMetaMarketingAccessCheck:()=>({handler:()=>deny})},
+    '../services/metaMarketingBrokerReader.service':{forModels:()=>({prepare:deny,read:deny})},
+    './metaMarketingRevocation.routes':{createRouter:()=>deny},
+  };
+}
+module.exports = { loadDiscoverySource, unusedMetaSurfaceDependencies };

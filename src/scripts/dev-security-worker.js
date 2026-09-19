@@ -13,12 +13,24 @@ function allowedEmail(row) {
   return row && ['auth.email_verification', 'auth.password_reset'].includes(row.template_key)
     && row.recipient_kind === 'user' && row.stream === 'transactional' && !row.clinica_id && !row.paciente_id;
 }
-function startSecurityLoops({ email, audit, reconcile, onError = () => {},
+const META_TASKS = [
+  ['metaRevocations', 'META_MARKETING_REVOCATION_WORKER_ENABLED', '../services/metaMarketingRevocation.service'],
+  ['metaOAuth', 'META_MARKETING_OAUTH_WORKER_ENABLED', '../services/metaMarketingOAuth.service'],
+  ['metaEnrollment', 'META_MARKETING_ENROLLMENT_WORKER_ENABLED', '../services/metaMarketingEnrollment.service'],
+];
+function createMetaPollers({ env = process.env, load = id => require(id) } = {}) {
+  return Object.fromEntries(META_TASKS.map(([name, flag, module]) => [name, async (closing = () => false) => {
+    // No model, transport, key or provider access while this lane is disabled.
+    if (closing() || env[flag] !== 'true') return { status: 'completed', skipped: true };
+    return load(module).run({ closing });
+  }]));
+}
+function startSecurityLoops({ email, audit, reconcile, meta = {}, onError = () => {},
   wait = (ms, signal) => require('node:timers/promises').setTimeout(ms, undefined, { signal }) }) {
   const controller = new AbortController(); const { signal } = controller;
   const loop = async (name, run, interval) => {
     while (!signal.aborted) {
-      try { if ((await run(() => signal.aborted))?.error) onError(name); }
+      try { const result = await run(() => signal.aborted); if (result?.error || result?.status === 'failed') onError(name); }
       catch { onError(name); }
       // Count from completion, without catch-up, overlap or abandoning an
       // uncertain provider call. Each lane waits independently of the others.
@@ -28,7 +40,8 @@ function startSecurityLoops({ email, audit, reconcile, onError = () => {},
       }
     }
   };
-  const tasks = [loop('email', email, 1000), loop('audit', audit, 10000), loop('reconcile', reconcile, 30000)]
+  const tasks = [loop('email', email, 1000), loop('audit', audit, 10000), loop('reconcile', reconcile, 30000),
+    ...META_TASKS.filter(([name]) => typeof meta[name] === 'function').map(([name]) => loop(name, meta[name], 60000))]
     .map(task => task.catch(error => { controller.abort(); throw error; }));
   const done = Promise.allSettled(tasks).then(results => {
     const failed = results.find(result => result.status === 'rejected');
@@ -94,8 +107,10 @@ async function main() {
   try {
     loops = startSecurityLoops({ email: createEmailPoller({ jobs, model: db.EmailMessage, delivery }),
       audit: () => audit.run(), reconcile: () => require('../services/platformAudit.reconciliation').run(),
-      onError: name => process.stderr.write(name === 'email' ? 'DEV_SECURITY_WORKER_TICK_FAILED\n'
-        : name === 'audit' ? 'DEV_AUDIT_DELIVERY_PENDING\n' : 'DEV_AUDIT_RECONCILIATION_PENDING\n') });
+      meta: createMetaPollers(),
+      onError: name => process.stderr.write({ email: 'DEV_SECURITY_WORKER_TICK_FAILED\n', audit: 'DEV_AUDIT_DELIVERY_PENDING\n',
+        reconcile: 'DEV_AUDIT_RECONCILIATION_PENDING\n', metaRevocations: 'DEV_META_REVOCATION_PENDING\n',
+        metaOAuth: 'DEV_META_OAUTH_PENDING\n', metaEnrollment: 'DEV_META_ENROLLMENT_PENDING\n' }[name]) });
     await loops.done;
   } finally {
     stop(); await Promise.allSettled([loops?.done, serverClosed]);
@@ -104,4 +119,4 @@ async function main() {
   }
 }
 if (require.main === module) main().catch(() => { process.stderr.write('DEV_SECURITY_WORKER_FAILED\n'); process.exitCode = 1; });
-module.exports = { assertRuntime, allowedEmail, startSecurityLoops, createEmailPoller };
+module.exports = { assertRuntime, allowedEmail, startSecurityLoops, createEmailPoller, createMetaPollers };

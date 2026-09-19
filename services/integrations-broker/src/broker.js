@@ -47,7 +47,7 @@ class Broker {
       operation.validate(request.payload);
       operation.authorize?.({ request, binding, principal });
       this.adsEnrollment?.assert(request, principal, this.policy);
-      if (!['revoke_asset','google_oauth','whatsapp_onboarding','google_ads_enrollment_status','google_ads_enrollment_revoke'].includes(operation.control)) {
+      if (!['revoke_asset','google_oauth','whatsapp_onboarding','meta_marketing_oauth','google_ads_enrollment_status','google_ads_enrollment_revoke'].includes(operation.control)) {
         this.store.connection(request.connectionRef, now);
         this.store.assertAssetActive(request);
       }
@@ -65,8 +65,8 @@ class Broker {
     const digest = this.transportProfile === 'ai' ? canonicalDigest(identity)
       : createHash('sha256').update(canonical(identity)).digest('hex');
     const assetKey = JSON.stringify([request.tenantRef, request.connectionRef, request.assetRef]);
-    if (['google_oauth', 'whatsapp_onboarding'].includes(operation.control)) {
-      try { return await operation.execute({ request, principal, binding }); }
+    if (['google_oauth', 'whatsapp_onboarding', 'meta_marketing_oauth'].includes(operation.control)) {
+      try { return await operation.execute({ request, principal, binding, policy: this.policy }); }
       catch (error) {
         if (this.store.backlog().pending >= this.policy.maxBacklog) fail('audit_unavailable');
         this.store.appendAudit(eventFor(request, principal, resolved, 'integration.failed', 'unknown',

@@ -28,6 +28,7 @@ function bindingFor(binding) {
   const cfg = binding?.oauth;
   if (!Object.hasOwn(PROVIDERS, binding?.provider)) fail('invalid_request');
   const required = [...SCOPES.slice(0, 3), PROVIDERS[binding.provider].scope];
+  if (binding.provider === 'google_ads' && binding.googleDataManager) required.push('https://www.googleapis.com/auth/datamanager');
   const allowed = binding.provider === 'google_business_profile' ? SCOPES : required;
   if (!cfg || !subject(cfg.subject) || !Array.isArray(cfg.scopes) || cfg.scopes.some(s => !allowed.includes(s))
     || new Set(cfg.scopes).size !== cfg.scopes.length || required.some(s => !cfg.scopes.includes(s))

@@ -14,7 +14,7 @@ test('WhatsApp authorization transitions roundtrip with versioned external recei
     assert.match(receipt.key, /^app\/platform\/v15\//); assert.deepEqual(receiptFor(p, receipt), receipt);
     assert.deepEqual(refFor(receipt, 'confirmed'), receipt);
     assert.equal(refFor({ ...receipt, versionId: null }, 'reconcile').key, receipt.key);
-    assert.throws(() => refFor({ ...receipt, key: receipt.key.replace('/v15/', '/v16/') }, 'confirmed'));
+    assert.throws(() => refFor({ ...receipt, key: receipt.key.replace('/v15/', '/v25/') }, 'confirmed'));
     assert.equal(criteriaFor({ from: '2026-09-13', to: '2026-09-13', action: v.action, userId: '501' }).action, v.action);
   }
 });

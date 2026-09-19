@@ -11,6 +11,15 @@ function exact(value, keys) {
     || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) fail();
 }
 function event(value) {
+  if (value?.version === 24) return require('./meta-enrollment-event').metaEnrollmentEvent(value);
+  if (value?.version === 23) return require('./meta-discovery-event').metaDiscoveryEvent(value);
+  if (value?.version === 22) return require('./meta-oauth-event').metaOAuthEvent(value);
+  if (value?.version === 21) return require('./meta-disconnect-event').metaDisconnectEvent(value);
+  if (value?.version === 20) return require('./meta-access-check-event').metaAccessCheckEvent(value);
+  if (value?.version === 19) return require('./google-receipt-review-event').receiptReviewEvent(value);
+  if (value?.version === 18) return require('./google-destination-event').destinationEvent(value);
+  if (value?.version === 17) return require('./google-action-plan-event').actionPlanEvent(value);
+  if (value?.version === 16) return require('./google-ads-enrollment-event').enrollmentEvent(value);
   if (value?.version === 15) return require('./whatsapp-authorization-event').whatsappAuthorizationEvent(value);
   if (value?.version === 14) return require('./meta-scope-block-event').metaScopeBlockEvent(value);
   if (value?.version === 13) return require('./email-auth-event').emailAuthEvent(value);

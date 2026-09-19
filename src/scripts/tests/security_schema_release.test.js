@@ -9,6 +9,7 @@ function baseline() {
     columns: Object.entries(schema.tables).flatMap(([TABLE_NAME,t]) => t.columns.map(c => ({TABLE_NAME,...c}))),
     indexes: Object.entries(schema.tables).flatMap(([TABLE_NAME,t]) => t.indexes.flatMap(i => i.columns.map(c => ({TABLE_NAME,...c})))),
     checks: Object.entries(schema.tables).flatMap(([TABLE_NAME,t]) => (t.checks || []).map(c => ({TABLE_NAME,...c}))),
+    foreignKeys: Object.entries(schema.tables).flatMap(([TABLE_NAME,t]) => (t.foreignKeys || []).map(c => ({TABLE_NAME,...c}))),
     migrations: schema.migrations.map(m => m.name) };
 }
 test('contract permits additive fields but rejects security type, default, index and history drift', () => {
@@ -20,6 +21,17 @@ test('contract permits additive fields but rejects security type, default, index
     s=>s.defaults.DEFAULT_COLLATION_NAME='utf8mb4_unicode_ci']) {
     const altered=baseline();change(altered);assert.equal(compare(altered,schema).compatible,false);
   }
+});
+test('generated delivery expressions and explicitly independent journals reject drift', () => {
+  const actual=baseline(), contract=structuredClone(schema), name=Object.keys(contract.tables)[0];
+  contract.tables[name].columns[0].GENERATION_EXPRESSION='case when state = \'revoked\' then NULL else next_attempt_at end';
+  actual.columns.find(c=>c.TABLE_NAME===name).GENERATION_EXPRESSION=contract.tables[name].columns[0].GENERATION_EXPRESSION;
+  contract.tables[name].foreignKeys=[];actual.foreignKeys=actual.foreignKeys.filter(k=>k.TABLE_NAME!==name);
+  assert.equal(compare(actual,contract).compatible,true);
+  const wrongExpression=structuredClone(actual);wrongExpression.columns.find(c=>c.TABLE_NAME===name).GENERATION_EXPRESSION='next_attempt_at';
+  assert.equal(compare(wrongExpression,contract).compatible,false);
+  actual.foreignKeys.push({TABLE_NAME:name,CONSTRAINT_NAME:'unexpected_cascade',DELETE_RULE:'CASCADE'});
+  assert.equal(compare(actual,contract).compatible,false);
 });
 test('required CHECK constraints must exist, be enforced and retain their expression', () => {
   const actual = baseline();

@@ -32,7 +32,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 48, 'the canonical scheduler retains existing jobs and gated AWS cost/audit/session/revocation/OAuth jobs');
+  assert.equal(definitions.length, 51, 'the canonical scheduler retains existing jobs and gated AWS cost/audit/session/revocation/OAuth jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -1423,6 +1423,9 @@ async function testPlatformAuditJobsRespectGates() {
   const originalEnqueue = jobRequestsService.enqueueUniqueJobRequest;
   try {
     for (const [name, type, env, module, method, cron] of [
+      ['metaMarketingRevocations', 'meta_marketing_broker_revocations', 'META_MARKETING_REVOCATION_WORKER_ENABLED', '../../services/metaMarketingRevocation.service', 'executeMetaMarketingRevocations', '* * * * *'],
+      ['metaMarketingOAuth', 'meta_marketing_oauth_reconciliation', 'META_MARKETING_OAUTH_WORKER_ENABLED', '../../services/metaMarketingOAuth.service', 'executeMetaMarketingOAuth', '* * * * *'],
+      ['metaMarketingEnrollment', 'meta_marketing_enrollment_reconciliation', 'META_MARKETING_ENROLLMENT_WORKER_ENABLED', '../../services/metaMarketingEnrollment.service', 'executeMetaMarketingEnrollment', '* * * * *'],
       ['googleOAuthReconciliation', 'google_oauth_broker_reconciliation', 'GOOGLE_OAUTH_BROKER_WORKER_ENABLED', '../../services/googleOAuthBroker.service', 'executeGoogleOAuthReconciliation', '* * * * *'],
       ['businessProfileRevocations', 'business_profile_broker_revocations', 'GOOGLE_BUSINESS_PROFILE_REVOCATION_WORKER_ENABLED', '../../services/businessProfileRevocation.service', 'executeBusinessProfileRevocations', '* * * * *'],
       ['googleAdsRevocations', 'google_ads_broker_revocations', 'GOOGLE_ADS_REVOCATION_WORKER_ENABLED', '../../services/googleAdsRevocation.service', 'executeGoogleAdsRevocations', '* * * * *'],
