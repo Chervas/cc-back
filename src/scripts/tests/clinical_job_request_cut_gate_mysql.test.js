@@ -3,6 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),path=requir
 const mysql=require('mysql2/promise');
 const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fixture');
 const {acquireClinicalJobRequestCutGate}=require('../../lib/clinicalJobRequestCutGate');
+const {clinicalCutActivity,pendingJobFingerprint}=require('../../lib/clinicalCutActivity');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 test('SQL cut gate blocks claims across the check/stop window, releases on rejection, and preserves rows when a blocked consumer exits',async()=>{
  await withIsolatedCampaignMysql(async({sql,report,models})=>{
@@ -68,5 +69,27 @@ test('SQL cut gate blocks claims across the check/stop window, releases on rejec
    }finally{await gate.release();await pending;}
   }
   report.checks.push('Actual application JobRequest model and both production claimNextJob/claimJobById paths are blocked before admission; original jobs claimed once after controlled release');
+  await sql.query('CREATE TABLE EmailMessages (id INT PRIMARY KEY,status VARCHAR(20))');
+  await sql.query('CREATE TABLE FlowExecutionsV2 (id INT PRIMARY KEY,status VARCHAR(20))');
+  const c=await connect(),query=async(s,v=[])=>(await c.query(s,v))[0];
+  try{
+   await clinicalCutActivity(query);
+   // The five security jobs observed at the failed cut became due during
+   // auxiliary stop. Pending work is not executing work under a verified gate.
+   await models.JobRequest.bulkCreate([201,202,203,204,205].map(id=>({id,type:'security_cut_fixture',status:'pending',payload:{__runtime_namespace:'staging'}})));
+   gate=await acquireClinicalJobRequestCutGate(options);
+   try{
+    await assert.rejects(clinicalCutActivity(query),/active_work_dueStaging/);
+    await gate.verify();const counts=await clinicalCutActivity(query,{admissionClosed:true});assert.equal(counts.dueStaging,5);assert.equal(counts.jobs,0);
+    const columns=(await query('SHOW COLUMNS FROM JobRequests')).map(c=>c.Field);
+    const pending=await pendingJobFingerprint(query,columns);assert.equal(pending.count,5);
+    await gate.release();assert.deepEqual(await pendingJobFingerprint(query,columns),pending);
+    await query("INSERT INTO FlowExecutionsV2 VALUES(1,'running')");
+    await assert.rejects(clinicalCutActivity(query,{admissionClosed:true}),/active_work_flows/);
+    await query('DELETE FROM FlowExecutionsV2');await query("INSERT INTO EmailMessages VALUES(1,'sending')");
+    await assert.rejects(clinicalCutActivity(query,{admissionClosed:true}),/active_work_emails/);
+   }finally{await gate.release();}
+   report.checks.push('Five newly due security jobs reproduce old guard rejection while running=0; held admission allows only pending work, preserves full pending-row fingerprints and still rejects sending mail/running flows');
+  }finally{await c.end();}
  });
 });
