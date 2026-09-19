@@ -2,7 +2,7 @@
 require('./fixtures/security_offline_runtime.cjs');
 const test = require('node:test'); const assert = require('node:assert/strict'); const http = require('node:http');
 const express = require('express'); const sequelize = require('sequelize');
-const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.fixture');
+const { loadDiscoverySource, unusedMetaSurfaceDependencies } = require('./fixtures/business_profile_discovery.fixture');
 const { adsDiscoveryFixture } = require('./fixtures/google_ads_discovery.fixture');
 const { credentialsFixture } = require('./fixtures/google_legacy_credentials.fixture');
 const { connectionForTestServer } = require('./fixtures/campaign_offline_runtime.cjs');
@@ -54,7 +54,7 @@ async function fixture(t) {
       if (state.auditFailed) throw Error('FICTITIOUS_SQL_SECRET'); state.mappingAudits.push(require('../../../services/platform-audit/src/event').pack(event));
     } } }) };
   const resolver = loadDiscoverySource('services/scopeConnectionResolver.service.js', { '../../models': models, sequelize });
-  const router = loadDiscoverySource('routes/oauth.routes.js', { express, sequelize, '../../models': models, './auth.middleware': auth,
+  const router = loadDiscoverySource('routes/oauth.routes.js', { ...unusedMetaSurfaceDependencies(), express, sequelize, '../../models': models, './auth.middleware': auth,
     '../services/accessSession.service': sessions, '../services/googleAdsDiscovery.service': f.service,
     '../services/googleAdsMapping.service': mapping,
     '../services/googlePropertyDiscovery.service': require('../../services/googleAdsDiscovery.service'),

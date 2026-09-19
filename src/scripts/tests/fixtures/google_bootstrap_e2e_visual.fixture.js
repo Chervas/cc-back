@@ -3,7 +3,7 @@
 // HTTP/SQL/signed broker; isolated provider and selection, never public MFA.
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),{createRequire}=require('node:module');
 module.exports=async({app,apiServer,report,token,reads,deliveryEnabled=false,metaPaused=false})=>{
-  const front=path.resolve(__dirname,'../../../../../front-dev'),req=createRequire(path.join(front,'package.json'));
+  const front=fs.realpathSync(process.env.GOOGLE_VISUAL_FRONTEND_SOURCE||path.resolve(__dirname,'../../../../../front-dev')),req=createRequire(path.join(front,'package.json'));
   const ts=req('typescript'),buildReq=createRequire(req.resolve('@angular-devkit/build-angular/package.json'));
   const esbuild=buildReq('esbuild'),sass=buildReq('sass'),puppeteer=require('puppeteer-core');
   const dir='src/app/modules/admin/apps/marketing/campanas/campaign-onboarding-stepper/';

@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test'); const assert = require('node:assert/strict'); const http = require('node:http');
 const express = require('express'); const sequelize = require('sequelize'); const jwt = require('jsonwebtoken'); const { randomBytes } = require('node:crypto');
-const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.fixture');
+const { loadDiscoverySource, unusedMetaSurfaceDependencies } = require('./fixtures/business_profile_discovery.fixture');
 const { connectionForTestServer } = require('./fixtures/campaign_offline_runtime.cjs');
 async function fixture(t, options = {}) {
   const state = { allowed: true, clinics: [71,72], pending: 1, writes: 0, attempts: 0, commits: 0, rolledBack: 0,
@@ -29,7 +29,7 @@ async function fixture(t, options = {}) {
   const verify = session.verify; session.verify = async token => { state.checks++; if (state.revoked) throw new jwt.JsonWebTokenError('revoked'); return verify(token); };
   const auth = loadDiscoverySource('routes/auth.middleware.js', { '../services/accessSession.service': session });
   const resolver = loadDiscoverySource('services/scopeConnectionResolver.service.js', { '../../models': models, sequelize });
-  const router = loadDiscoverySource('routes/oauth.routes.js', { express, sequelize, '../../models': models, './auth.middleware': auth,
+  const router = loadDiscoverySource('routes/oauth.routes.js', { ...unusedMetaSurfaceDependencies(), express, sequelize, '../../models': models, './auth.middleware': auth,
     '../services/accessSession.service': session,
     '../services/googleAdsEnrollment.service': { disconnectionStatus: async () => ({
       pending_enrollments: state.enrollmentPending || 0, cancelled_enrollments: state.enrollmentCancelled || 0 }) },
