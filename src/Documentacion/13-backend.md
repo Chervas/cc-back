@@ -11814,3 +11814,47 @@ de otro corte. Esquema,43 filas y cola histórica gateway verificados intactos;
 fuentes/configuración preservadas, DEV sin reiniciar y login anónimo real de ambos
 entornos comprobado en escritorio/móvil. No se repitió la migración ni se acredita
 aceptación MFA/OAuth. Planes anteriores históricos, sin dump ni diario.
+
+
+### Admisión coordinada para el corte Meta clínico (19/09/2026)
+
+El operador incorpora `clinicalJobRequestCutGate`, `clinicalBullmqCutGate` y
+`clinicalSchemaCutCoordinator`, sin cambiar los entrypoints de la aplicación.
+BullMQ usa la implementación instalada de pausa, fijada por hash, con recibo de
+propiedad persistente: conserva pausas previas y rechaza restaurar automáticamente
+tras una intervención ajena, historial insuficiente o una operación parcial.
+Terminan los jobs ya activos; los nuevos permanecen en la cola.
+
+Después de parar las unidades auxiliares se toma una conexión SQL exclusiva del
+operador con `LOCK TABLES JobRequests READ`, autocommit0 y esperas acotadas de
+adquisición. Comprueba cero running con la barrera ya tomada; `claimNextJob` y
+`claimJobById` no pueden atravesarla. No cambia estados ni intentos. No es un lock
+global de MySQL ni se aplica a la BD aislada DEV. Se rechazan triggers sobre esa
+tabla, destino incorrecto, otro propietario o trabajo activo. La barrera se
+mantiene hasta observar las API detenidas; después se libera y se comprueba que
+no queden conexiones clínicas ajenas antes del respaldo/DDL. Nunca espera a que
+termine un job reteniendo el lock que ese job necesitaría para guardar su resultado.
+
+El coordinador registra intentos de parada antes de actuar y conserva procesos
+que siguen activos con su PID original. Un fallo previo a DDL libera la barrera,
+recupera solo participantes realmente parados y restaura solo sus propias pausas.
+Un fallo parcial de DDL exige inspección explícita, sin reinicios ni replay.
+Recuperar un recibo perdido no repite pausa ni reanudación. La prueba aislada usa
+el modelo y ambos métodos de reclamación reales de la aplicación; también cubre
+la carrera que canceló el primer intento, parada parcial y fallo de DDL.
+El estado público y la evidencia se registran en el acta del corte, no se infieren
+del resultado de estas pruebas.
+
+El segundo intento público de las 15:09:58 UTC se canceló a las 15:10:00 antes
+de respaldo/DDL y de parar las API. La recuperación automática del ejecutor
+privado confundió el PID de `npm` supervisado por PM2 con el PID hijo de Node
+registrado en el plan; rechazó esa identidad y dejó dos consumidores detenidos
+y cinco pausas temporales. Recuperación explícita verificada a las 15:15:16:
+API/gateway con sus PID originales, consumidores activos, siete pausas previas
+conservadas y cinco pausas propias retiradas por recibo. Esquema y 43 filas
+originales intactos; barrera SQL liberada, DEV sin reiniciar, MFA conservado.
+No repetir el ejecutor ni reutilizar el plan: faltan distinguir ambas identidades
+de proceso y conservar el error primario que desencadenó el aborto, cuyo detalle
+no quedó registrado. Las siete pruebas aisladas de la candidata `0cbf9214` no
+acreditan todavía este montaje público. Acta en
+`docs/security/meta-clinical-admission.md` y su JSON.
