@@ -13,18 +13,48 @@ function allowedEmail(row) {
   return row && ['auth.email_verification', 'auth.password_reset'].includes(row.template_key)
     && row.recipient_kind === 'user' && row.stream === 'transactional' && !row.clinica_id && !row.paciente_id;
 }
-function createAuditPoller({ audit, reconcile, now = () => performance.now(), onError = () => {} }) {
-  let deliveryAt = -Infinity; let reconciliationAt = -Infinity;
-  return async () => {
-    if (now() >= deliveryAt) {
-      try { const result = await audit(); if (result.error) onError(); }
-      catch { onError(); }
-      finally { deliveryAt = now() + 10000; }
+function startSecurityLoops({ email, audit, reconcile, onError = () => {},
+  wait = (ms, signal) => require('node:timers/promises').setTimeout(ms, undefined, { signal }) }) {
+  const controller = new AbortController(); const { signal } = controller;
+  const loop = async (name, run, interval) => {
+    while (!signal.aborted) {
+      try { if ((await run(() => signal.aborted))?.error) onError(name); }
+      catch { onError(name); }
+      // Count from completion, without catch-up, overlap or abandoning an
+      // uncertain provider call. Each lane waits independently of the others.
+      if (!signal.aborted) {
+        try { await wait(interval, signal); }
+        catch (error) { if (!signal.aborted) throw error; }
+      }
     }
-    if (now() >= reconciliationAt) {
-      try { await reconcile(); }
-      catch { onError(); }
-      finally { reconciliationAt = now() + 30000; }
+  };
+  const tasks = [loop('email', email, 1000), loop('audit', audit, 10000), loop('reconcile', reconcile, 30000)]
+    .map(task => task.catch(error => { controller.abort(); throw error; }));
+  const done = Promise.allSettled(tasks).then(results => {
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  });
+  return { done, stop: () => controller.abort() };
+}
+function createEmailPoller({ jobs, model, delivery }) {
+  return async (closing = () => false) => {
+    for (let i = 0; i < 5 && !closing(); i++) {
+      const job = await jobs.claimNextJob(['critical', 'high', 'normal', 'low'], ['email_send']);
+      if (!job) break;
+      const row = await model.findByPk(job.payload?.email_message_id);
+      if (!allowedEmail(row) || row.job_request_id !== job.id || !['queued', 'sending'].includes(row.status)) {
+        await job.update({ status: 'failed', error_message: 'dev_security_email_scope_denied', next_run_at: null }); continue;
+      }
+      // A send interrupted after SES acceptance is never retried blindly.
+      if (row.status === 'sending') {
+        await job.update({ status: 'failed', error_message: 'email_delivery_outcome_unknown', next_run_at: null }); continue;
+      }
+      const outcome = await delivery.runEmailSendJob(job.payload, job);
+      const retry = outcome.status === 'failed' && outcome.retryable === true && job.attempts < job.max_attempts;
+      await job.update({ status: retry ? 'waiting' : outcome.status === 'completed' ? 'completed' : 'failed',
+        next_run_at: retry ? new Date(Date.now() + 15000) : null,
+        completed_at: retry ? null : new Date(),
+        result_summary: outcome.result || null, error_message: outcome.error ? 'dev_auth_email_delivery_failed' : null });
     }
   };
 }
@@ -34,17 +64,13 @@ async function main() {
   const delivery = require('../services/emailDelivery.service'); const audit = require('../services/platformAudit.delivery');
   const reader = require('../services/platformAudit.readerClient'); const relay = require('../lib/devAuditRelay');
   const session = require('../services/accessSession.service');
-  // Audit delivery/health need a heartbeat, not durable writes every second.
-  // Authentication email polling retains its one-second cadence.
-  const pollAudit = createAuditPoller({ audit: () => audit.run(),
-    reconcile: () => require('../services/platformAudit.reconciliation').run(),
-    onError: () => process.stderr.write('DEV_AUDIT_DELIVERY_PENDING\n') });
-  // No scheduler/cron/queue worker import: this process has exactly these two jobs.
-  let closing = false; let activeReads = 0;
+  // No scheduler/cron/business queue worker import. The unit's exclusive flock
+  // remains the process owner; each lane keeps its existing durable SQL claims.
+  let closing = false; let activeReads = 0; let loops; let serverClosed;
   const server = http.createServer(async (req, res) => {
     let admitted = false;
     try {
-      if (activeReads >= 2 || req.method !== 'POST' || req.url !== '/audit/read') throw Error();
+      if (closing || activeReads >= 2 || req.method !== 'POST' || req.url !== '/audit/read') throw Error();
       activeReads++; admitted = true;
       const chunks = []; let size = 0;
       for await (const b of req) { size += b.length; if (size > 65536) throw Error(); chunks.push(b); }
@@ -59,33 +85,23 @@ async function main() {
   if (fs.existsSync(relay.SOCKET)) { if (!fs.lstatSync(relay.SOCKET).isSocket()) throw Error('unexpected_socket_path'); fs.unlinkSync(relay.SOCKET); }
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(relay.SOCKET, resolve); });
   fs.chmodSync(relay.SOCKET, 0o660);
-  const stop = () => { closing = true; server.close(); server.closeIdleConnections?.(); };
+  const stop = () => {
+    if (closing) return;
+    closing = true; loops?.stop();
+    serverClosed = new Promise(resolve => server.close(resolve)); server.closeIdleConnections?.();
+  };
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
-  while (!closing) {
-    try {
-      await pollAudit();
-      for (let i = 0; i < 5 && !closing; i++) {
-        const job = await jobs.claimNextJob(['critical', 'high', 'normal', 'low'], ['email_send']);
-        if (!job) break;
-        const row = await db.EmailMessage.findByPk(job.payload?.email_message_id);
-        if (!allowedEmail(row) || row.job_request_id !== job.id || !['queued', 'sending'].includes(row.status)) {
-          await job.update({ status: 'failed', error_message: 'dev_security_email_scope_denied', next_run_at: null }); continue;
-        }
-        // A send interrupted after SES acceptance is never retried blindly.
-        if (row.status === 'sending') {
-          await job.update({ status: 'failed', error_message: 'email_delivery_outcome_unknown', next_run_at: null }); continue;
-        }
-        const outcome = await delivery.runEmailSendJob(job.payload, job);
-        const retry = outcome.status === 'failed' && outcome.retryable === true && job.attempts < job.max_attempts;
-        await job.update({ status: retry ? 'waiting' : outcome.status === 'completed' ? 'completed' : 'failed',
-          next_run_at: retry ? new Date(Date.now() + 15000) : null,
-          completed_at: retry ? null : new Date(),
-          result_summary: outcome.result || null, error_message: outcome.error ? 'dev_auth_email_delivery_failed' : null });
-      }
-    } catch { process.stderr.write('DEV_SECURITY_WORKER_TICK_FAILED\n'); }
-    if (!closing) await new Promise(resolve => setTimeout(resolve, 1000));
+  try {
+    loops = startSecurityLoops({ email: createEmailPoller({ jobs, model: db.EmailMessage, delivery }),
+      audit: () => audit.run(), reconcile: () => require('../services/platformAudit.reconciliation').run(),
+      onError: name => process.stderr.write(name === 'email' ? 'DEV_SECURITY_WORKER_TICK_FAILED\n'
+        : name === 'audit' ? 'DEV_AUDIT_DELIVERY_PENDING\n' : 'DEV_AUDIT_RECONCILIATION_PENDING\n') });
+    await loops.done;
+  } finally {
+    stop(); await Promise.allSettled([loops?.done, serverClosed]);
+    process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
+    await db.sequelize.close();
   }
-  await db.sequelize.close();
 }
 if (require.main === module) main().catch(() => { process.stderr.write('DEV_SECURITY_WORKER_FAILED\n'); process.exitCode = 1; });
-module.exports = { assertRuntime, allowedEmail, createAuditPoller };
+module.exports = { assertRuntime, allowedEmail, startSecurityLoops, createEmailPoller };
