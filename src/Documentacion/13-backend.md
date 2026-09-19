@@ -11649,7 +11649,7 @@ la prueba fuerza la lectura, no habilita cron/notificaciones ni acredita su entr
 Preparada sobre las ramas públicas actuales: backend `07e37fc77bc7c9a11fea0aeb757d8c7d5817aacd`, frontend
 `a8331d0d29b6f9410974b4c61add6b8ea5b2f7a2`, rama `security/meta-clinical-candidate-20260919` en ambos repositorios.
 Incluye metadatos, OAuth, descubrimiento, selección/confirmación/retirada, auditoría
-v24 y tres jobs cerrados. API/UI todavía sin desplegar ni cohortes activadas;
+v24 y tres jobs cerrados. API/UI de CRM todavía sin desplegar ni cohortes activadas;
 las nueve DDL Meta ya están aplicadas solo en DEV desde las 12:46 UTC.
 Fuentes, adaptación de dependencias, comandos y recuperación en
 `docs/security/meta-clinical-candidate.md` y su manifiesto JSON.
@@ -11678,8 +11678,8 @@ generada de vencimiento; la prueba MySQL rechaza alteraciones reales de esas
 restricciones y conserva tokens ficticios, pausas, Unicode e identidades legacy.
 
 El contrato fuente DEV pasa de 40 a 49 tablas; la candidata CRM, de 18 a 27.
-La release aislada ejecutada conserva su contrato de 34 tablas. Pasan tanto ese
-contrato como el de 27 tras el cambio: no aplicar migraciones ajenas para forzar
+En el corte SQL la release aislada conservó su contrato de 34 tablas. Pasaron
+ese contrato y el de 27; la publicación DEV posterior usa 43 tablas. Regla: no aplicar migraciones ajenas para forzar
 el contrato completo de la fuente DEV ni sustituir su runtime por la candidata
 CRM. API y worker DEV arrancan con la misma release/configuración, MFA enforce y
 cron/jobs clínicos OFF; CRM/gateway no se reinician. QA de login anónimo real en
@@ -11687,7 +11687,52 @@ ambos frontends, escritorio/móvil, sin mocks: no sustituye aceptación MFA.
 
 Staging conserva el mismo digest de esquema y sigue pendiente de las nueve DDL;
 la candidata no puede publicarse allí hasta un corte revisado con respaldo de sus
-datos. Falta componer los consumidores sobre DEV aislado y fijar el ejecutor único
-por entorno sin jobs clínicos DEV; app/slots/IAM, ámbito elegido y OAuth real del
-titular también siguen pendientes. Los servicios AWS permanecen como en el acta
+datos. La composición DEV y su ejecutor de seguridad se publican en el corte
+siguiente, con todos los gates Meta cerrados. App/slots/IAM, ámbito elegido y OAuth
+real del titular siguen pendientes. Los servicios AWS permanecen como en el acta
 anterior. Procedimiento, evidencias y recuperación en el runbook de la candidata.
+
+
+### Consumidores Meta publicados en DEV aislado (19/09/2026, 13:13 UTC)
+
+Release `d07e9c8579bafc446a0f86a283ec52a8fc733c90`, rama
+`security/meta-dev-consumers-20260919`, compuesta sobre el runtime aislado previo.
+Desarrollo primero en DEV `9c54f261`: tres bucles Meta independientes de correo,
+entrega y conciliación de auditoría. `META_MARKETING_REVOCATION_WORKER_ENABLED`,
+`META_MARKETING_OAUTH_WORKER_ENABLED` y `META_MARKETING_ENROLLMENT_WORKER_ENABLED`
+controlan sus importaciones y trabajo; todos permanecen sin configurar/apagados.
+Cada bucle espera 60 segundos desde completar su lote, sin solaparse ni recuperar
+ciclos atrasados. Una parada deja de reclamar filas nuevas y espera la operación
+ya reclamada, conservando sus marcas y recibos. Los fallos por fila se notifican
+con nombres fijos, sin detalles de proveedor ni SQL. No se importa el scheduler
+clínico para ejecutarlos; el flock de la unidad conserva un único propietario.
+
+Se preservan byte por byte las 25 rutas Google, autenticación/MFA, perfil aislado,
+configuración SQL, monitor/certificados y desconexión Google existentes. El
+catálogo conserva sus 48 jobs más tres Meta; ninguno habilita cron ni jobs clínicos
+DEV. Contrato SQL compuesto de 43 tablas = anterior de 34 + nueve Meta, comprobado
+antes y después de arrancar. No se arrastra el contrato fuente de 49 ni DDL ajena.
+La clausura compartida de contratos/fixtures no inicia servicios del broker en DEV.
+
+QA: 14 tests unitarios/HTTP/esquema en la candidata, regresión de catálogo y
+cancelación legacy; SQL real prueba MFA mientras Meta y auditoría esperan, y los
+bucles Meta completan preparación, confirmación, recuperación y retirada después
+de logout, preservando jobs clínicos y claims. Nueve capturas Angular con API,
+MySQL y HTTPS propios; proveedor y entrega MFA ficticios. No hubo repetición de
+activación tras respuesta perdida. Login anónimo CRM/DEV real comprobado tras
+publicar, escritorio/móvil. Esto no acredita OAuth ni MFA autenticado público.
+
+Observación posterior de 60,5 s: 98 SELECT de DEV (~1,62/s), cero errores,
+ocho sentencias preparadas en cuatro conexiones, sin lecturas/escrituras de las
+cinco tablas Meta observadas. No aparecieron consultas lentas ni esperas nuevas
+de bloqueo globales en esa ventana; no atribuir a DEV la actividad de otros
+usuarios SQL ni extrapolar esta muestra a capacidad con proveedor real.
+
+API/worker ejecutan la nueva release con hashes de configuración protegida
+idénticos, namespaces dev, MFA/sesiones enforce, jobs/cron clínicos false. No hay
+conexiones o solicitudes Meta; auditoría DEV conserva sus 62 eventos entregados.
+CRM/gateway no se reinician; frontend, AWS, firewall, claves, slots y grants no
+cambian. Pendientes: publicar UI compatible, identidades/transporte y primer ámbito
+con autorización del titular; revisar capacidad y parada con tráfico real antes
+de abrir gates. CRM todavía necesita su DDL y publicación coordinada. Detalle,
+manifest y recuperación en `docs/security/meta-dev-consumers.md`.

@@ -1,6 +1,8 @@
 # Candidata selectiva CRM de consumidores Meta — 19/09/2026
 
-Estado: candidata comprobada, **DDL04–12 aplicadas solo en DEV; API/UI sin publicar**.
+Estado CRM: candidata comprobada, API/UI sin publicar. **DDL04–12 y consumidores
+backend publicados solo en DEV**, con todos los gates Meta OFF; detalle en
+[la publicación DEV](meta-dev-consumers.md).
 Contrato canónico en [13](../../src/Documentacion/13-backend.md#candidata-selectiva-de-consumidores-meta-19092026).
 Fuente y huellas en `meta-clinical-candidate.json`. El manifiesto enumera también
 fixtures y dependencias necesarias para probar; no autoriza ejecutar todos sus
@@ -123,12 +125,14 @@ este corte. Los gates Meta siguen sin configurar; MFA permanece enforce.
    datos existentes, respaldo privado de recuperación y diario. La herramienta
    compartida sigue admitiendo escritura **solo en DEV**; su comprobación pública
    es de lectura. MySQL no ofrece rollback transaccional de DDL.
-2. Componer DEV sobre su release aislada actual, conservando su perfil,
-   credenciales, worker y restricciones. Esta candidata nace de CRM y no reemplaza
-   directamente el runtime DEV. No encender cron/jobs clínicos DEV.
-3. Fijar un único ejecutor de conciliación por entorno: cron/JobRequests de CRM;
-   integrar explícitamente en el worker de seguridad DEV sin activar negocio.
-   El catálogo preparado no demuestra planificación desplegada.
+2. DEV ya ejecuta una composición propia `d07e9c85` sobre su release aislada,
+   conservando perfil/credenciales y jobs clínicos OFF. Incorporar a la candidata
+   CRM los ajustes de cierre de los servicios Meta desarrollados en DEV 9c54f261
+   y volver a validar antes de su publicación; no intercambiar ambos runtimes.
+3. Un único ejecutor de conciliación por entorno: cron/JobRequests de CRM; DEV
+   ya dispone de sus tres bucles en el worker de seguridad, todavía OFF. Faltan
+   identidades/configuración y validación real para habilitarlos; publicar el
+   catálogo no autoriza activar ni ejecutar trabajo histórico.
 4. App/slots, cuatro identidades de firma, TLS, IAM/KMS exactos y ámbito de la
    primera clínica/grupo deben revisarse antes de habilitar el alta. Sigue
    pendiente que el titular indique ese ámbito y autorice un OAuth nuevo.

@@ -300,3 +300,22 @@ los ocho correos DEV completados, sin correo real nuevo. DEV/CRM tienen 62/299
 eventos entregados y cero pendientes en el corte de 00:29 UTC, con heartbeat sin
 error. La prueba pública fue anónima; el MFA con entrega SES simulada pertenece al
 MySQL aislado. No se desactivó MFA ni se crearon sesiones públicas de pruebas.
+
+
+## Consumo tras publicar consumidores Meta en DEV (19/09/2026, 13:13 UTC)
+
+Release `d07e9c85`: el mismo worker incluye tres bucles Meta adicionales,
+independientes y con gates OFF. Cada uno espera 60 segundos desde completar su
+lote; apagado no importa el servicio ni consulta SQL/transporte. Parada sin nuevas
+reclamaciones y operación en curso conservada. Ensayo SQL de MFA con Meta y
+ambos destinos de auditoría retenidos: ~1,02 s, con proveedores ficticios.
+Implementación, límites de parada y evidencia en [el runbook](meta-dev-consumers.md).
+
+Medición posterior de 60,5 s sobre el runtime publicado: 98 SELECT del usuario
+DEV (~1,62/s), cero errores SQL, ocho sentencias preparadas entre cuatro conexiones
+(máximo dos por conexión). Las cinco tablas Meta observadas presentan delta cero
+de lecturas y escrituras. Cero nuevas consultas lentas y esperas de fila globales
+en esa ventana. La instrumentación fue de lectura; no se alteró caché ni límites.
+El resto de contadores del servidor MySQL incluye otros usuarios: no imputar su
+actividad a DEV. La muestra con gates apagados no prueba capacidad Meta real.
+Evidencia `meta-dev-consumers-20260919/live-observation.json` y resumen adyacente.

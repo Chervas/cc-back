@@ -1,0 +1,821 @@
+{
+  "version": 1,
+  "sourceDev": "9c54f261a0da266f97610a4a637c35f97b1e4e0e",
+  "candidate": "d07e9c8579bafc446a0f86a283ec52a8fc733c90",
+  "candidateBranch": "security/meta-dev-consumers-20260919",
+  "preservedBaseCommit": "86d0a57e262677de6f80ebdde0df5639cadf052a",
+  "previousRuntime": "/opt/clinicaclick-dev/release-731084e580953916dcda37d325d4da6efacd38f4-meta-certificate-monitor",
+  "activeRuntime": "/opt/clinicaclick-dev/release-d07e9c8579bafc446a0f86a283ec52a8fc733c90-meta-consumers",
+  "files": [
+    {
+      "path": "services/integrations-broker/test/meta-marketing-fixture.cjs",
+      "sha256": "b56899ad25062378e2660c9d5baf296d0f6139ee25506224cd763b3368d971ac",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/test/meta-marketing-oauth-fixture.cjs",
+      "sha256": "f78df17423379318b8e6fb44280f1b4ea1240dd728995959d6a507ea7c9b900a",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-oauth-contract.js",
+      "sha256": "8e10ed6d04205bbcbf17f9551dc7dda634189995a364aa4755a4a8c327cbc022",
+      "previousSha256": "e71a23742149917a233d55cb6252ada04f6dfae0bf64b4fdb3e16b34b120bb33",
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/broker.js",
+      "sha256": "81163f91e5ad4418013df88c50c6c0ded9073be1a76fd73e6fe1e4f019d4f2da",
+      "previousSha256": "94d3146f5dc6b505f33b52b4be91aface8579e9bb35b232465a44e57d1558e68",
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-secrets.js",
+      "sha256": "c779b45955fd2b1d93741d74f991a989d0a3af48120cc7f2f9fbb016dd0a80b4",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-ads-contract.js",
+      "sha256": "844ee56e3e406097293e7cd608841f009e315c6e85fd58c7f03a098241982d1a",
+      "previousSha256": "6bfdcaa204be016d4e58f4f659cac8cf46938bf919dbd992fae274c70f1c8542",
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-enrollment.js",
+      "sha256": "af80c63cca389c5dbf7111fa97aaf030156634a45b2f6310a0b82771e884b708",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-ads-enrollment-contract.js",
+      "sha256": "357ccbfcccd09143541005ddeb1f853c67b63a8aed9561d0dc09b3f5daf0534d",
+      "previousSha256": "e18d5961c6dba424e88f06693d7a0068992d84b0bc6832eb0662cfe071f63d11",
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-destinations.js",
+      "sha256": "7530f069f26dc8d5e07fc3ecbb52e21bcf3551469da4711dd5048aef8d6fd99a",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-oauth-http.js",
+      "sha256": "360af0c399e8168a1d91f5737e24b6af4e6e73fb7885129b0b47dcf77a51b510",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-oauth.js",
+      "sha256": "184a0d53a83b51011a98e4374c7b85dbbb43163b9812b41473b819a65ff40fb8",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-candidate-read-http.js",
+      "sha256": "81fa7d2a072552286e5e91b2951ef835254d011456d856e2751a70e748221b27",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-discovery-contract.js",
+      "sha256": "5e3c660daf424a14638c78321bcf916a7e44f30a0975a064951a0671e755492a",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-destination-contract.js",
+      "sha256": "a8921803ca5731aa24b019b5feff2621b33d7f255884a640455231079861d3db",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-discovery-http.js",
+      "sha256": "616bbb76635cec032383cd6cfbb5d0baec91fe4d480d234d058116492dd9734b",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-http.js",
+      "sha256": "800cd5b4a021f89ddff27070690a53164eee3dcd7eed8c880fcedb9b123dd5a3",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-leads-contract.js",
+      "sha256": "e65b384cf313449fd94285af4368e342a961e1a65287e297d6ac436ffe7db776",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-operations.js",
+      "sha256": "004ff4030e6509965df01e6c63fe6231bcb04bf960889ffcc12960161764f710",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-oauth-main.js",
+      "sha256": "8bd26dc8872dfb1b9e3cbc0a7ea6318e2e35b846640530f8191bdc4b5d27dc94",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-data-manager-reasons.json",
+      "sha256": "c66354784d2cc94f123444bb9b63fbc164eca35bc9f80358a93ebee194566207",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-main.js",
+      "sha256": "9186251b4b708234324eb32e3099bfc3750d4440462a72d8a40878df2049fdc7",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-main.js",
+      "sha256": "4b2656678bc641bc370be84fa95ac58807b3ed93922657325a62cee3f2b54353",
+      "previousSha256": "fb9117fa5852ef0b10b317d48a6229c6267ef71d988705647c6bd282f7f3fb6c",
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/audit.js",
+      "sha256": "5e02b6326e731f028370b53905008ed2abe1047986faaa4a0b87c563cb9c919c",
+      "previousSha256": "3e8feed563199cee0ff0ee93163c2fe620c803a363149434fde464497b6b7072",
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/policy.js",
+      "sha256": "04cf3e90f92c74cf1b0fe7077f5d240126651fe0172bd985ad841964fc83841c",
+      "previousSha256": "6a45f04977eb6aca0b966d3ed0594f3644b58862beede68b34f0f57412fba3a7",
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-action-management.js",
+      "sha256": "df6f152330bc65e3ac42493d4c3a2295b47d04d0dfc6f06478c9119e35f300c6",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-contract.js",
+      "sha256": "901d57ab200cfe6b586431858393baf033bf2c3d631356721666879c4a724539",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-http.js",
+      "sha256": "8968aa791aa74c20238e641b8ae952597c4aee3d7bcf3b90cb3519eb4b68f298",
+      "previousSha256": "becd7d3ce4152fe1006824410729784ba6755b750b22f6157e18a5be6b053743",
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-oauth-secrets.js",
+      "sha256": "0f711dfc63807693807aa44822a5feb1d28aa9c0a95011e25f57373257067c1c",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-ads.js",
+      "sha256": "537214226ac230d5c20f329d2fa33c6a640d1b5b7592192f4da8a9d72e0f6f16",
+      "previousSha256": "166732b89deee59ea8da6b0cd8154063d7a3567ab6ca9f10d70a625a739a47d1",
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-action-management-contract.js",
+      "sha256": "65cada402b5b569d035345875dd9ab6bc755e8b22ac5a64fdc3d23a19c2581e5",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-oauth-contract.js",
+      "sha256": "973c9bfec92708528fdca2bb972f8cc9193dbc8ec6afb9be7f3165189b14f9ba",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-data-manager-contract.js",
+      "sha256": "f2bf59e282a63903c3e204be57cfeca26222f4d7a60d84bf5419f53675580aec",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/google-data-manager.js",
+      "sha256": "b64a5e739a228f69f77832174facf65a45bc68f506127f9a2e4f5b5cf2c96d7a",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/integrations-broker/src/meta-marketing-enrollment-contract.js",
+      "sha256": "f9d4207df5915fb9736d18ddb1ed016cea5dd9824115824565dc327640fafe75",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/test/google-action-plan.test.js",
+      "sha256": "55933f5ea6839300d00b29a5b9d7c30c6ed685bfff41e7a5ca806939f9ea4f03",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/test/google-receipt-review.test.js",
+      "sha256": "1b95228f0619b2d39b36b106a66d3a73b58e939b0850d872b552b2876847eb3b",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/test/whatsapp-authorization-event.test.js",
+      "sha256": "84c272c5e03af928156a741b4c10d19392a768aa6d22de3996fad42c53c4203c",
+      "previousSha256": "3a2a084d58fcc51128abd3d6830e563e9613c15a024604c93f230a0d63eb4f02",
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/test/meta-enrollment.test.js",
+      "sha256": "4645eee1d13ab73313cb80fc965f796d754e68cef603f51784fe8fcc5401c9e6",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/test/meta-access-check.test.js",
+      "sha256": "6879f409007b0d87cce49d0b5e197aa5485916c177d881678d1ad01ce61b3e41",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/test/google-ads-enrollment.test.js",
+      "sha256": "636faadca3b4101e84d1bd9224296d74ab41e9352d17b4dc427cecaa2c04b916",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/test/meta-discovery.test.js",
+      "sha256": "50f91acff1c641a175dbb9266f0f9465ce12b89fc905d172a14535685790d258",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/test/meta-disconnect.test.js",
+      "sha256": "5af3f7e656b4b66c8a5b22eb4bd8d7732f9e689d21b96aa9d60e1a4d36e15e25",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/test/google-destination.test.js",
+      "sha256": "8168dfa4a80b8efc78f4f1e8129e0088f04158b4e1b97f994355dface2b0bc75",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/test/meta-oauth.test.js",
+      "sha256": "27ed44b65e69688db2eb701756f5a90aa3dc0fadb9b6037061db040da2d41729",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/event.js",
+      "sha256": "01815a809a8842ba65c648b12ebdc2c33a5878a845d8b43395de82c82c007a0d",
+      "previousSha256": "e039e99955d81800cb8b57d7afbc60356cf69ecba7e955c98279528b48f50948",
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/google-receipt-review-event.js",
+      "sha256": "1254e4d2365f99b07314e0c17089d053f2e2979eee70a0bb1adeba713a199985",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/meta-enrollment-event.js",
+      "sha256": "28d9091454b951290629ca230e79621ec61c8f118fbc397d20a5db7421016799",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/google-action-plan-event.js",
+      "sha256": "be30d4ea210b1bb69e2eb033c8d47d0802024a2e24bf8cfb31035d89b688dc80",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/google-destination-event.js",
+      "sha256": "2a22eac74b25ac019bebfc903c527008e07da03bdd4bd3eb158baba138a1f5df",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/meta-discovery-event.js",
+      "sha256": "30e053ae5c27bccbdc3a64788bc91a4fb3fdbde282662ca9dd6602c989f0c638",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/reader-protocol.js",
+      "sha256": "b765f5cdff7fafc97d523474f9525d1c99865ad7f11dbd7d23e04aa7da810e1c",
+      "previousSha256": "d34ebd53b19153787616ad0caa4f6c4fca9b0354cd6601efa842d7459c18dba5",
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/meta-disconnect-event.js",
+      "sha256": "9e0a22ab5ba9a939e4552ddc5f91a4872a84823d0086b5746ec758a98f7d743d",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/meta-access-check-event.js",
+      "sha256": "5550eb68947f058060e27c26c9791134ce6d64f6e4f1bb51cfdc8f9a4e81a301",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/view-contract.js",
+      "sha256": "7d28802f953571fb3c7953a84772e760b6b2fe6474fa269068dc830f6abaf085",
+      "previousSha256": "7a4c484107b5633ae7a81edcae32d1b03116259c789c675dacd37213cadfc86a",
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/google-ads-enrollment-event.js",
+      "sha256": "d35151e7e67742c0ebbeb091ed92c175b7ce6b49b587c2887ade316ed33b91d8",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "services/platform-audit/src/meta-oauth-event.js",
+      "sha256": "2c642e38cbe17437841f653c2b2b99d61b5da14f54e8baf08f6cae18830a0b0a",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "models/MetaConecction.js",
+      "sha256": "1fab25ef5a3d558c3faf898a2dfb915dac2a9d8b338bb8973524cdc171124536",
+      "previousSha256": "90b5811f07a4586a0f1754088895179f59cfa612db468262b0216694a7332cb0",
+      "exactDev": true
+    },
+    {
+      "path": "models/metamarketingoauthrequest.js",
+      "sha256": "27560d74b004e0b37c0abb4806d64a71231fca1f275cec2904e51f628628467c",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "models/metamarketingoauthslot.js",
+      "sha256": "de98dc8b41658369466718515bdb85340d7436d0ac9e0429a7ee976b0359f0f9",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "models/metamarketingbrokerbinding.js",
+      "sha256": "73135a3a1a7a5616286865488caba1348922a1a60b187f0941c0bb58e9ec6c21",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "models/metamarketingenrollmentclaim.js",
+      "sha256": "a1756b22adc269dfc4144bba3334abe22de77c806b3ec91650ce633fde2dc3a2",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "models/ClinicMetaAsset.js",
+      "sha256": "a7312e3e978ca0eb240a6c29a2710257e39dfe5588118c074ba66faeda0132b2",
+      "previousSha256": "91bc995e17b16e0775d5058a8aa7649aff9a35248ea68d043ac2f7bf01be1a84",
+      "exactDev": true
+    },
+    {
+      "path": "models/metamarketingenrollmentrequest.js",
+      "sha256": "15b199417935ea60e4ffd15bc14aa72d6cbe08338b529353bd3a504d65e9d231",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "models/metamarketingbrokerrevocation.js",
+      "sha256": "54bdaca424f6eb90351140ca0e80c2d592f9545506bc1276bb889c0744a2a374",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "models/metamarketingenrollmentidentity.js",
+      "sha256": "51439525b201deae642fbcab591eacd54ec2c87983362dc6238b8420992c851e",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/routes/metaMarketingEnrollment.routes.js",
+      "sha256": "4cf5a8dccfcd428272a6d9cfa5ca19b908aeb0e38265ae56871c7a68267c3cb8",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/routes/oauth.routes.js",
+      "sha256": "6990d5391d57ebdfd7705cd89b6f321f5edf7777775fbb497500bc3fba65f691",
+      "previousSha256": "92123d3d079a7036a789622bc9574bdf7a2364122d8954f67a35ceb0da68f79c",
+      "exactDev": false
+    },
+    {
+      "path": "src/routes/metaMarketingRevocation.routes.js",
+      "sha256": "a61d86171cc252e49841676494750b8aa8b97bb1a487d26a9a03e1aa37398f42",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/routes/metaMarketingOAuth.routes.js",
+      "sha256": "f0ecc67d4e116ffa426bc24d991be8794d976f94f1b6c4cd6593e8871c4c6bde",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/lib/securitySchemaContract.js",
+      "sha256": "56b9331ab140f2348faaba8e669f0af6a36e7bb5d7e916519676d71e96f2ff57",
+      "previousSha256": "6779d1b1480b052b20082e61c9224a5b70a1f48cdd023ad5da876fa4409c5656",
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/dev-security-worker.js",
+      "sha256": "724c8151400420e7a57ffc19ad1e529959b307626f507d877743784300d3cd98",
+      "previousSha256": "57c114ae0ec6581cab2e8be8debfe810b0e22963f4b424478c2cb413b645881b",
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/meta_marketing_enrollment_journal_mysql.integration.js",
+      "sha256": "31bc61a15b32f1c64c24c83d13812277017e208e2369735a2b9bf6b46687654b",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/meta_marketing_oauth_mysql.integration.js",
+      "sha256": "22da3c2fadeeabdc79fa25b174855d5b3c5d54f411fe4566a13ff1195c27775c",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/meta_connection_metadata_mysql.integration.js",
+      "sha256": "aa73ad7abe7e7d3985864be6d3d2c9cff78c371c3c163a75ffa0bfa042f8292f",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/scheduled_jobs_orchestration.test.js",
+      "sha256": "f54f015650ea9080045b1b1a5bc2ad1963624e34dd4a3e52747e32fabd1852d6",
+      "previousSha256": "e17343c2069e441bc37a8f7b0607de16a91d428b72ef4023b9bff3db808c6397",
+      "exactDev": false
+    },
+    {
+      "path": "src/scripts/tests/meta_schema_release_mysql.test.js",
+      "sha256": "a298a850c26ea2daa96b95e551e56f77b8af4839ff7bddfee5e310e0fa2d288c",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/security_schema_release.test.js",
+      "sha256": "2eab1bf8c4e0284f6bfaefd6cd8b2d1e2c1f7548a1ad74371804190c608882a6",
+      "previousSha256": "cffdb0fd1ee6f0994d2705eef3a0fb4f61935b0357ee2773eebcc56e0a735872",
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/dev_security_worker_mysql.integration.js",
+      "sha256": "cacf97a46d9ae81e977dd01347f05095460defb1dc7436ab8f717fe8ca42d678",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/meta_marketing_enrollment_review_mysql.integration.js",
+      "sha256": "894999a0d8d9d629b75499f5db54a3a4ab0b62db76b9d7386bde73e9765c247d",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/meta_marketing_oauth_http.test.js",
+      "sha256": "ecfbd494299e1116d832ccb557a0eeda1c64103a865f72d9ab8d7f921bede48b",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/meta_marketing_broker_mysql.integration.js",
+      "sha256": "0d4e9ba413a9dd53ea9f47a02b2f748244801ba16966e62e8cada226f0c6ce4a",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/dev_security_worker.test.js",
+      "sha256": "faf0e4bb7caa578a9e75cc3d722220d1e3109882e115e04dc833f107e689430b",
+      "previousSha256": "7ef46727ac85785bb5a87172272a4df3fdac99522acc332000c21d17b67375e8",
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/isolated_campaign_mysql.fixture.js",
+      "sha256": "a5d8b65f168e61828754a0b7d63d662ac0b18093831635031d3c412abbce3bd0",
+      "previousSha256": "d96d87a5f403335eba4581354577f712fcf47c287d786855f0cf0551af8f34dc",
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_revocation_audit.fixture.js",
+      "sha256": "b9b3f2ce28859cd3fc516e3cfc39464484ce31aaf57a7620cc0e6c951a48c3bd",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_enrollment_runtime.fixture.js",
+      "sha256": "a935cda6e6cf709cc7fc6e6057c9e9641230fd210c5245044d10280d81927954",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_dev_worker.fixture.js",
+      "sha256": "6472b9b9f0eb54e38bf13f9adaf4399b87edde81797e5fa17db96ac509187418",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_settings_visual_host.fixture.js",
+      "sha256": "92e576e4db7c1a57056d00f2988ea5a7f637d1827b6e41ce1bb9112601c5c3d7",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_marketing_revocation_e2e.fixture.js",
+      "sha256": "c05197523b0d00a4dc5426c02abae21e1c7a89639326cf6333e2553b3dc2b099",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_pre_migration_schema.json",
+      "sha256": "e7bd4462d233f2f76d5224b3f91f7c1fd71557a7943fa66b7b9ef95936d44450",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/platform_audit_canary_export.fixture.js",
+      "sha256": "728baeb913ef7ef133bf1b40ca2f320784e5e03ceb965b13d30ed59a43ff6831",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_connection_metadata_visual.fixture.js",
+      "sha256": "98403a67192439e57f3b2a2c1d4f3096b67092659b9f5792935ea567528db528",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_oauth_crm_visual.fixture.js",
+      "sha256": "7de8d4b0e2b5f54efde22ebb080f090ec07a52bfcf24941634938e86b7c693f7",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_enrollment_authority.fixture.js",
+      "sha256": "74e6bd5f03724c7bf82e193d51b9d33dcc3a2f6ea99d892dc37af37f3d17341f",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_enrollment_selection_visual.fixture.js",
+      "sha256": "88bc7f9f39db20065e6b0483fcb0fbe27fd734af551465d54b9aa075a9a2637b",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/business_profile_discovery.fixture.js",
+      "sha256": "2dac732429cf8e7eac9ba1dadda1dcb40ca7a906907a9ceea41c2ee2489d2979",
+      "previousSha256": "291746b9c76f133b56aab084b19c61b0bfc53ff396ae734fb46c6a8ba32a1980",
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_oauth_audit.fixture.js",
+      "sha256": "2dfd0008c84fcff973a14918af0acea7a81dcc1297478716f9e9c1cf43861fc4",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_marketing_access_e2e.fixture.js",
+      "sha256": "786a7a6521a46635274e257024bfcac88562a0d59368c84d53db5ce923e09337",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/scripts/tests/fixtures/meta_enrollment_visual.fixture.js",
+      "sha256": "02e7cb8a2dea5b5ee524ec044f934f3cfa76065efbe65045763d823463c80dd0",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/jobs/sync.jobs.js",
+      "sha256": "1773fae0f96240a6bba2032d387b34f53b403715ad5b98f4e7df9c3e50947cd8",
+      "previousSha256": "fd5c8c4f8c44f6f474774466c10f83571465ebddca5d6db62d84bf6b8ccadc02",
+      "exactDev": false
+    },
+    {
+      "path": "src/services/scopeConnectionResolver.service.js",
+      "sha256": "c98959fa2c4c04ada2a4fcd874b55443142813af2f26c4de21c9dca895f78c59",
+      "previousSha256": "b6a81bef049204ffc9a7c4d26badd3aaa5c611591a4ed0c05319c62894d29205",
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingEnrollmentBinding.service.js",
+      "sha256": "ffc9582b9040077a4284de7df0689a275d7ff9cf3fa94715e65440dd9043cd85",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingEnrollment.contract.js",
+      "sha256": "3d3fae7b87f7f241355037941d1017d0fc8c8e1a00433d62ceb10321087a9fe9",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingRevocationClient.service.js",
+      "sha256": "bc5867fb7dbb92f6ad1137c1648aaaa58fd8e5432f19166b8463f2d11e3d9775",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingOAuthClient.service.js",
+      "sha256": "e7a7462f9b858cd105eaca8c4ac7d7866c72f6acc6d71ea75d1a3da2e0d8fe97",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaConnectionMetadata.service.js",
+      "sha256": "3790c5edfe373334d0d3b312d408cf648ac7b106c37897a0e842b15dfa6ec829",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/platformAudit.view.js",
+      "sha256": "1ae0c2e4148b4846798ed0fce60cedc4fb613c325b672aeabdc108e6393ecacc",
+      "previousSha256": "989b92cbebec405814ed0f07c8e097996ced2cd19966a402c87f68ad0ad079d3",
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingBrokerScope.service.js",
+      "sha256": "f465f397f22e6a9c9e93a9716b07d74ea9dbd78c6ba8676be651a9f0cd997abf",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingAccessCheck.service.js",
+      "sha256": "ee0fe0a92ff3692827f7eed2d35d8c4bcb5e8e344182fb861bc538157c3135ec",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingOAuthScope.service.js",
+      "sha256": "e614bffbff3b536a9f692315f5028f2c3587d5af4f3accb233b275ced499efc6",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingEnrollment.service.js",
+      "sha256": "d44ea62f0724704c5fa9cc0079913667aaa783d4f7b4d798717104bf756afe0d",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingRevocation.contract.js",
+      "sha256": "2e4c82c520042b95117f74d4b4e5f6fc6c731c695538c9c9e20c18571867849f",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingBrokerReader.service.js",
+      "sha256": "db922843625a9c6f62e88c6b2917b1b84450f972c2991e591adcd39eb2ae3839",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingEnrollmentReview.service.js",
+      "sha256": "17c71edc5142d80306334feb3073e90cb9512006c3f64c52cf39ce396c4899a0",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingOAuth.service.js",
+      "sha256": "d3ffd2a313d46ff62ccdf487f6260dbb0dc646bd1871690c02c2a8148e0c170c",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingEnrollmentAuthority.service.js",
+      "sha256": "472e4915f01aaf7057531dd632c9858240976d14fd08369c9bc57f67ab140e26",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/platformAudit.repository.js",
+      "sha256": "66e30a3f9e832a90299755cf7a459dfb09c116af683304864077b3684f7da84f",
+      "previousSha256": "ebca8716f0811bf7ce1050a20a8ea0026dd87c2e33fc88e4646155e17fda65d5",
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingRevocation.service.js",
+      "sha256": "8e6bec2305e0696cb4b91d465acc2d600fb718978db887084a0a765b501ecfda",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/services/metaMarketingOAuth.contract.js",
+      "sha256": "c8902de108a6ea4ebac62fbe20ed79fd46d4601932f8de270724f2549b163e71",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "src/config/scheduledJobCatalog.js",
+      "sha256": "df070feaddaf616527376108982d2b29b2df4fd57cbe0d92f8aaa07da8dafe09",
+      "previousSha256": "8aacf12c7c426554d98b761a66ae77b6216a6c5a41c4806b017b4656ce39ae23",
+      "exactDev": false
+    },
+    {
+      "path": "migrations/20260919070000-meta-marketing-parent-identity-indexes.js",
+      "sha256": "b563de4f6c221e6e9c3f063c81f2033c43516d8b76c0213e15ce9dce3937772f",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "migrations/20260919040000-meta-marketing-broker-registry.js",
+      "sha256": "375f6994beef8032bb69aaf5c39a1f8b525fcdcef774ea4d520850a78f573595",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "migrations/20260919080000-meta-marketing-enrollment-journal.js",
+      "sha256": "5d4b9fa1fa1347f8ab794a3cf4bd62178cb144a095cd5819a42233421a9d4408",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "migrations/20260919050000-meta-marketing-broker-revocations.js",
+      "sha256": "886828648b18a378da53ef8859fa2a67d6fa4f7323c8a3edf21b630a173f0efb",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "migrations/20260919100000-meta-marketing-enrollment-delivery-markers.js",
+      "sha256": "f6a41057f0271be81e1535f2418cf3edcb52a664c29c138fee5dd34672985218",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "migrations/20260919090000-meta-marketing-enrollment-binding-owner.js",
+      "sha256": "5ea51cff3eb6d7a0c0521e5516046d69ace876d320da6d08d56daacb600edda0",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "migrations/20260919110000-meta-marketing-enrollment-due-index.js",
+      "sha256": "9dfa04628ef1ea25920c42168c9080f22a3abe763e527ad1a9b5a0c5490394e6",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "migrations/20260919060000-meta-marketing-oauth.js",
+      "sha256": "023ee8974a2e9195d0dee4a981d0e364633bea61672589ae817e778610afd58a",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "migrations/20260919120000-meta-marketing-enrollment-scope-latest.js",
+      "sha256": "3daff36382d7f0c649bce200b6e901d2551ecd0a114c5dc78acf7f2b386d2a99",
+      "previousSha256": null,
+      "exactDev": true
+    },
+    {
+      "path": "ops/security/schema-contract.json",
+      "sha256": "de9e095d36e133f27d0eb8013314af0fe66215b5ddf175311656878f0828a830",
+      "previousSha256": "4fcde15737813913fc7ae30cde0877db1de1a9638ac45c748bcf0291c494408f",
+      "exactDev": false
+    }
+  ],
+  "dependencyLinks": [
+    {
+      "path": "node_modules",
+      "target": "/opt/clinicaclick-dev/release-68808b82047567e3f1b223ed4e24c16aaff61eb6/node_modules"
+    },
+    {
+      "path": "services/integrations-broker/node_modules",
+      "target": "/opt/clinicaclick-dev/release-68808b82047567e3f1b223ed4e24c16aaff61eb6/services/integrations-broker/node_modules"
+    },
+    {
+      "path": "services/platform-audit/node_modules",
+      "target": "/opt/clinicaclick-dev/release-68808b82047567e3f1b223ed4e24c16aaff61eb6/services/platform-audit/node_modules"
+    },
+    {
+      "path": "services/aws-cost-collector/node_modules",
+      "target": "/opt/clinicaclick-dev/release-68808b82047567e3f1b223ed4e24c16aaff61eb6/services/aws-cost-collector/node_modules"
+    }
+  ],
+  "publication": {
+    "at": "2026-09-19T13:13:44.175325+00:00",
+    "sourceCommit": "d07e9c8579bafc446a0f86a283ec52a8fc733c90",
+    "previous": "/opt/clinicaclick-dev/release-731084e580953916dcda37d325d4da6efacd38f4-meta-certificate-monitor",
+    "active": "/opt/clinicaclick-dev/release-d07e9c8579bafc446a0f86a283ec52a8fc733c90-meta-consumers",
+    "published": true,
+    "schemaTables": 43,
+    "schemaCompatible": true,
+    "privateEnvironmentUnchanged": true,
+    "runtimeFlagsChanged": false,
+    "publicProcessesUnchanged": true,
+    "ddlApplied": false,
+    "newRuntimeFiles": 129
+  },
+  "providerEnabled": false,
+  "publicMfaAcceptance": false,
+  "frontendPublished": false,
+  "evidence": "qa-evidence/security-resume-20260917/meta-dev-consumers-20260919"
+}

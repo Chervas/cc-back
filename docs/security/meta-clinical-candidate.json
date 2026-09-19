@@ -932,5 +932,11 @@
     "publicSchemaUnchanged": true,
     "realMfaAcceptance": false,
     "evidence": "qa-evidence/security-resume-20260917/meta-schema-publication-20260919/"
+  },
+  "isolatedDevPublication": {
+    "candidate": "d07e9c8579bafc446a0f86a283ec52a8fc733c90",
+    "published": true,
+    "metaGatesEnabled": false,
+    "manifest": "meta-dev-consumers.json"
   }
 }
