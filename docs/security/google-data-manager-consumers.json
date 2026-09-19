@@ -1,9 +1,9 @@
 {
-  "version": 12,
-  "reviewedAt": "2026-09-18",
-  "sourceBaseHead": "08b3cbd8b78e500a132f535cd14657db3c0e399f",
+  "version": 13,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHead": "d73c56319cdc0e2954cd347e6c8c870e7b3559d5",
   "includesWorkingChanges": true,
-  "scope": "Bounded managed human receipt-review API/service/index/audit v19 and UI review; automatic diagnostics unchanged. No real provider or public MFA acceptance, deployment or activation. Unchanged rows retain earlier evidence hashes.",
+  "scope": "Bounded integrated human receipt review and sanitized session-error correction. Actual Angular/HTTP/SQL managed session/signed TLS broker/SQLite, fake Google/AWS only. Previous inventory rows retain their earlier evidence hashes; no operational cut.",
   "runtimeConsumersMigrated": 0,
   "qa": {
     "broker": "617/617 full Node24 regression, including 33 destination/receipt scenarios; external network blocked",
@@ -32,7 +32,7 @@
     "destinationFrontUnitTests": 27,
     "destinationRecoveryIndex": "full-row EXPLAIN: forced scoped index, ref, Backward index scan, no filesort; isolated MySQL, not a load test",
     "previous_broker_607": "607/607 final full Node24 regression, including 23 destination registry scenarios; external network blocked",
-    "receiptReconciliationConsumer": "Prepared and undeployed: current managed session/all-account clinic ACL, durable intent, atomic receipt/audit completion, keyset list and explicit check; remote result fixture uses real projection, signed broker primitive tested separately; public MFA/provider integrated acceptance pending",
+    "receiptReconciliationConsumer": "Prepared and undeployed; integrated human consumer and UI tested against actual SQL/HTTP/signed broker with fictitious Google, including session revocation during SUCCESS and no local update; real acceptance pending",
     "receiptReconciliationClientRegression": 36,
     "receiptReviewAuditCodec": "82/82 full local platform-audit regression, v19 unpublished; AWS remains v17",
     "receiptReviewUiChecks": 100,
@@ -41,7 +41,9 @@
     "receiptReviewBackendClientScopeSchemaTests": 26,
     "receiptReviewFrontModelTests": 16,
     "receiptReviewAuditViewMysqlGroups": 14,
-    "receiptReviewIndex": "MySQL 8.0.42 EXPLAIN: ref, Backward index scan, no filesort; limit 21, metadata only; not load acceptance"
+    "receiptReviewIndex": "MySQL 8.0.42 EXPLAIN: ref, Backward index scan, no filesort; limit 21, metadata only; not load acceptance",
+    "receiptReconciliationIntegrated": "5 end-to-end groups with actual managed SQL session, HTTP routes, signed TLS broker/SQLite restart and real Angular desktop/mobile;4 fake ingests,1 fake action mutation,6 status reads,15 signed commands; no public MFA/provider acceptance",
+    "auditV19Candidates": "82/82 per role based on preserved v17 runtime sources;6 frozen SQL records (v18/v19,5587bytes) written/reconciled/confirmed over local TLS with fake S3; not published"
   },
   "rows": [
     {
@@ -347,9 +349,9 @@
     },
     {
       "file": "src/services/googleConversionReceiptReview.service.js",
-      "sha256": "a294d57b8a96c0395cbce764dc6850438a7091b53b76389c5fbfa5d5f3a14450",
-      "role": "Human read admission, current sessions/shared-account ACL, read-only reconcile and atomic SQL result/audit.",
-      "state": "human_receipt_review_prepared_undeployed"
+      "sha256": "ae2724f4f570a6612d5d8dd50f3abdbf8b28ae343082f18eafac60223a742064",
+      "role": "Revalidate current human authorization after sanitized transport failure; return current401/403 without retry.",
+      "state": "human_receipt_review_integrated_prepared_undeployed"
     },
     {
       "file": "src/routes/googleConversionReceipts.routes.js",
@@ -386,6 +388,24 @@
       "sha256": "232fe3df48a2c41e469d835d672e6132f78a12df33395f8159d44dbdea4e476e",
       "role": "Bounded v19 human receipt projection after exact S3 version verification.",
       "state": "human_receipt_review_prepared_undeployed"
+    },
+    {
+      "file": "src/scripts/tests/google_receipt_review_e2e_mysql.integration.js",
+      "role": "Actual HTTP/session SQL/scoped resolver/signed TLS broker and original withdrawn receipt, plus same-API Angular QA.",
+      "state": "human_receipt_review_integrated_prepared_undeployed",
+      "sha256": "c43cf57a3d3d963a3b6ba2a0ce87e1def422c284975b938496c76fa06f8dc0f1"
+    },
+    {
+      "file": "src/scripts/tests/fixtures/google_receipt_e2e_visual.fixture.js",
+      "role": "Actual receipt dialog/HTTP client consumes the owned integration API and signed broker, desktop/mobile; no public MFA.",
+      "state": "human_receipt_review_integrated_prepared_undeployed",
+      "sha256": "645c2f6413f1e788762581f6d10f5af13ef3f22e23d63d371d23f3947a114314"
+    },
+    {
+      "file": "src/scripts/tests/fixtures/isolated_campaign_mysql.fixture.js",
+      "role": "Own MySQL socket by default; explicit live loopback server registration for end-to-end HTTP/TLS, external sockets denied.",
+      "state": "human_receipt_review_integrated_prepared_undeployed",
+      "sha256": "7b344161e065eb09ab1a000ddd9f05b7cda251c77ebde51c71dad7f40ed6be8e"
     }
   ]
 }

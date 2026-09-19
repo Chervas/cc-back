@@ -104,8 +104,18 @@ function createGoogleConversionReceiptReview({ models, sessions, audit, now = Da
           await guard(transaction); return item;
         });
         // No SQL lock/connection is held during the provider call.
-        const remote = stored.canCheck ? await runtime.broker.conversion(runtime.account, runtime.brokerContext, 'reconcile', input,
-          { requestId, expectedActionId: stored.conversionActionId, beforeExecute: () => guard() }) : null;
+        let remote = null;
+        if (stored.canCheck) {
+          try {
+            remote = await runtime.broker.conversion(runtime.account, runtime.brokerContext, 'reconcile', input,
+              { requestId, expectedActionId: stored.conversionActionId, beforeExecute: () => guard() });
+          } catch (error) {
+            // The transport intentionally projects only broker error codes. A
+            // caller-side session revocation can therefore arrive sanitized.
+            // Recheck human access to return its current 401/403, without retry.
+            await guard(); throw error;
+          }
+        }
         result = await m.sequelize.transaction(async transaction => {
           await repository.inspectReview(identity, { transaction });
           await guard(transaction);

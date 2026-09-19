@@ -490,5 +490,13 @@ el contrato real Data Manager; la primitiva firmada/SQLite/HTTPS conserva su QA
 separada. Chromium ejecuta los componentes Angular y HTTP reales con API ficticia,
 escritorio/móvil, pérdida de acceso, respuesta sustituida y doble clic. El visor
 v19 se prueba además con SQL y lectura firmada/versionada de objetos ficticios.
-No demuestra aún el recorrido completo humano–CRM–broker–Google en AWS.
+No demuestra aún el recorrido con proveedor real y sesión pública en AWS.
+El 19/09 se añadió un recorrido unido de Angular, API HTTP, sesión SQL real y
+broker HTTPS/SQLite: autorización, cuatro ingestas ficticias, retirada, reinicio,
+consulta con sesión renovada y resultados SUCCESS/PARTIAL_SUCCESS. La UI consume
+esa misma API, no una API simulada. Un ACK perdido se recupera por otra lectura;
+revocar la sesión durante SUCCESS conserva la fila CRM y devuelve 401.
+El consumidor revalida acceso tras un error saneado del cliente, sin reintento.
+Cero tokens OAuth hidratados desde MySQL, proveedor/Secrets Manager/S3 ficticios.
+Evidencia adicional: `qa-evidence/security-resume-20260917/audit-v19-preparation/`.
 Evidencia privada: `qa-evidence/security-resume-20260917/google-receipt-review-20260918/`.

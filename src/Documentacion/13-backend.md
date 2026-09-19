@@ -10544,3 +10544,14 @@ en schema-contract. MySQL 8 reescribe los literales de CHECK a charset ASCII al
 añadir el índice: el contrato registra la metadata observada, sin relajar CHECKs.
 Rollback: cerrar el gate y conservar índice, intentos, recibos, auditoría y lector
 compatible. No borrar/recrear identidades ni volver a una ingesta legacy.
+
+
+Ampliación verificada el 19/09: la revisión humana revalida sesión/permisos también
+si el cliente firmado devuelve un error. Su contrato cerrado puede sanear un
+rechazo de sesión producido en el guard a error genérico; la nueva comprobación
+local devuelve el 401/403 vigente, sin otra consulta al proveedor. Se probó una
+revocación SQL durante una respuesta SUCCESS: no se devuelve resultado ni cambia
+la fila CRM, y el intento queda sin finalización. Angular → HTTP → sesión SQL →
+broker HTTPS/SQLite está probado en un mismo recorrido aislado con Google ficticio,
+incluida retirada, reinicio, sesión renovada, ACK perdido y UI escritorio/móvil.
+No sustituye publicación AWS ni aceptación con proveedor/sesión pública reales.

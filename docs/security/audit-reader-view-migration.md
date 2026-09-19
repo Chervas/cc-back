@@ -341,3 +341,30 @@ como v19 ni reusar ciegamente sus canarios. Preparar candidatas v19 por rol sobr
 fuentes vivas contrastadas, conservar v1–v18, publicar lector antes que escritor
 y verificar transporte/versiones/KMS antes de habilitar captura. Tras emitir v19,
 el rollback debe conservar un lector compatible y todas las evidencias.
+
+
+### Candidatas v19 preparadas sin publicación (19/09/2026)
+
+Cinco fuentes de auditoría de `d73c5631` superpuestas a las copias verificadas de
+cada rol v17; 82/82 pruebas por candidata. Archivo SHA256
+`4eac55669791511e3fb39fec50a057517595ada91ed716b5b23e0be4384cbec7`.
+Se conservan package/lock y fuentes ajenas. La base se contrasta con el manifiesto
+publicado del 18/09, no con una lectura AWS nueva: el preparador remoto rechaza
+cualquier deriva de fuentes, unidades, rutas o dependencias antes de instalar.
+
+Seis eventos SQL congelados (dos v18, cuatro v19; 5.587 bytes) proceden del recorrido
+unido HTTP/sesión MySQL/broker firmado. Ambos candidatos los escriben, concilian
+y leen con bytes exactos por HTTPS propio y S3 ficticio. No se han escrito en AWS
+ni añadido al índice operativo. UUID/bytes y sus fuentes se conservan; no regenerar
+tras una entrega incierta ni reutilizar a ciegas las candidatas/canarios v18 previos.
+
+Preparador, publicación por rol, guard remoto contra rollback tras entrega y
+transporte/verificación canario están listos, sin ejecutar en AWS. El transporte
+exige publicación real acreditada de ambos roles v19, guard remoto instalado,
+hash exacto y marcador local exclusivo. Tras pérdida de ACK, solo conciliación
+con las referencias originales. Verificar versión/bytes/KMS con el lector autorizado.
+
+Probe independiente del servicio vigente a las 00:08 UTC: 25/25 recibos verificados
+en ~471 ms; TLS válido y rechazo sin firma 400 en ambos roles. No acredita código
+v19, capacidad o aceptación humana. SSO expirado, sin desafío/SSM activos. Fuente
+operativa: `qa-evidence/security-resume-20260917/audit-v19-preparation/README.md`.

@@ -244,3 +244,12 @@ PROCESSING tardía. La UI no hace polling y las rutas limitan 30 peticiones/minu
 La autorización sigue comprobando todas las clínicas de la cuenta compartida:
 esa carga no se evita con una caché de permisos. Coste/capacidad operativos nuevos
 sin medir, índice y código todavía sin publicar.
+
+
+Comprobación 19/09, 00:08 UTC: selección acotada de 25 recibos operativos en ~30 ms
+y verificación remota 25/25 en ~471 ms, sin cuerpos devueltos a la aplicación.
+TLS lector/escritor correcto, solicitudes sin firma rechazadas. Es una muestra
+de salud del servicio vigente v17, no publicación del nuevo consumidor ni carga
+máxima. La prueba integrada nueva usa MySQL propio y servidores HTTP/HTTPS propios:
+la guardia permite únicamente servidores locales registrados y todavía vivos;
+ninguna conexión a BD ajena, Redis o proveedor real está permitida.

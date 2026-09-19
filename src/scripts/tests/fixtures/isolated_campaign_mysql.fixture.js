@@ -10,7 +10,8 @@ const { Sequelize } = require('sequelize');
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// This fixture owns its mysqld process and data directory. It cannot connect to TCP or the host socket.
+// This fixture owns its mysqld and Unix socket. TCP is denied unless a test
+// explicitly registers its own live loopback server; host DB/provider sockets remain denied.
 async function withIsolatedCampaignMysql(work) {
   if (process.env.CAMPAIGN_OPTIMIZATION_MYSQL_TEST !== '1') throw Error('Explicit CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 is required');
   const root = fs.mkdtempSync('/tmp/cc-campaign-opt-mysql-');
@@ -20,10 +21,23 @@ async function withIsolatedCampaignMysql(work) {
   const log = path.join(root, 'mysql-error.log');
   const originalConnect = net.Socket.prototype.connect;
   require('./campaign_offline_runtime.cjs');
-  const rejected = [];
+  const rejected = [], ownedServers = new Map(); let ownedHttpConnections = 0;
+  const registerOwnedLoopbackServer = server => {
+    if (!(server instanceof net.Server) || !server.listening) throw Error('TEST_SERVER_NOT_LISTENING');
+    const address = server.address();
+    if (!address || address.address !== '127.0.0.1' || !Number.isInteger(address.port)) throw Error('TEST_SERVER_NOT_LOOPBACK');
+    ownedServers.set(address.port, server);
+    server.once('close', () => { if (ownedServers.get(address.port) === server) ownedServers.delete(address.port); });
+  };
   net.Socket.prototype.connect = function (...args) {
     const input = Array.isArray(args[0]) ? args[0][0] : args[0];
     const socket = typeof input === 'string' ? input : input?.path;
+    const port = typeof input === 'object' ? Number(input?.port) : Number(input);
+    const host = typeof input === 'object' ? input?.host : args[1];
+    const server = ownedServers.get(port);
+    if (host === '127.0.0.1' && server?.listening && server.address()?.port === port) {
+      ownedHttpConnections++; return originalConnect.apply(this, args);
+    }
     if (socket !== socketPath || input?.port || input?.host) {
       rejected.push('non-test socket'); throw Error('NETWORK_FORBIDDEN_IN_MYSQL_CAMPAIGN_TEST');
     }
@@ -59,7 +73,8 @@ async function withIsolatedCampaignMysql(work) {
     sql = new Sequelize({ ...config, database: report.database, timezone: '+00:00' });
     sql.addHook('afterConnect', connection => new Promise((resolve, reject) => connection.query('SET SESSION innodb_lock_wait_timeout = 5', error => error ? reject(error) : resolve())));
     models.sequelize = sql;
-    await work({ sql, models, report });
+    await work({ sql, models, report, registerOwnedLoopbackServer });
+    if (ownedHttpConnections) report.ownedLoopbackConnections = ownedHttpConnections;
     assert.equal(rejected.length, 0, 'No other database, Redis or provider connection is allowed');
     report.success = true;
   } catch (error) {
