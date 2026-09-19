@@ -134,6 +134,21 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     assert.equal(initial.body.google_ads.capabilities.can_create_conversion_actions,false);
     assert.equal(initial.body.google_ads.capabilities.conversion_validation_status,'not_validated');
     assert.equal(commands.length,1);assert.equal(tokenReads,0);
+    // Bound request-level query work independently of provider latency. This is
+    // an isolated burst check, not production load or throughput acceptance.
+    assert(report.initialBootstrap.statements<150,'settings must not repeat the old 198-statement snapshot chain');
+    let providerActive=0,providerPeak=0;
+    providerHook=async()=>{providerActive++;providerPeak=Math.max(providerPeak,providerActive);
+      await new Promise(resolve=>setTimeout(resolve,100));providerActive--;};
+    const batchQueries=queries,batchCommands=commands.length;
+    const latencies=await Promise.all(Array.from({length:8},async()=>{const at=performance.now();
+      const result=await call();assert.equal(result.body.google_ads.connected,true);
+      assert.equal(result.body.google_ads.capabilities.data_manager_ready,false);return Math.round(performance.now()-at);}));
+    providerHook=null;latencies.sort((a,b)=>a-b);assert.equal(commands.length-batchCommands,8);
+    assert.equal(providerActive,0);assert.equal(sql.connectionManager.pool.using,0);assert.equal(sql.connectionManager.pool.waiting,0);
+    report.bootstrapBurst={requests:8,providerDelayMilliseconds:100,statements:queries-batchQueries,p50Milliseconds:latencies[3],maxMilliseconds:latencies[7],
+      providerPeak,poolUsingAfter:sql.connectionManager.pool.using,poolWaitingAfter:sql.connectionManager.pool.waiting};
+    report.checks.push('eight concurrent HTTP bootstrap reads with provider latency all finish, one signed read each, delivery disabled, SQL pool drained; isolated burst only');
     report.checks.push('actual inventory, metadata-only association, SQL ACL/session and signed HTTPS settings query return inherited owner and broker quota without local OAuth hydration or conversion activation');
     process.env.GOOGLE_ADS_CONVERSIONS_BROKER_ENABLED='true';
     const enabled=await call();assert.equal(enabled.body.google_ads.capabilities.data_manager_ready,true);

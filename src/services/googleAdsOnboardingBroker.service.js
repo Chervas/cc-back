@@ -25,10 +25,10 @@ function createGoogleAdsOnboardingBroker({ runtime, models, clinicIds, beforeExe
     if (value < 1) fail('broker_timeout');
     return value;
   };
-  const guard = async (dataManager = false) => {
+  const guard = async (dataManager = false, verifiedContext = null) => {
     remaining(15000);
     if (await beforeExecute() !== true) fail('scope_denied');
-    const current = await broker.assert(account, brokerContext);
+    const current = verifiedContext || await broker.assert(account, brokerContext);
     if (current.customerId !== customerId || (current.loginCustomerId || null) !== (loginCustomerId || null)
       || current.googleConnectionId !== connection.id || current.googleSubject !== connection.subject
       || selectedClinics.some(id => !current.clinicIds.includes(id))) fail('broker_binding_invalid');
@@ -50,10 +50,8 @@ function createGoogleAdsOnboardingBroker({ runtime, models, clinicIds, beforeExe
   };
   return {
     async settings() {
-      await guard();
       const rows = await broker.read(account, brokerContext, 'conversion_settings', {},
-        { timeoutMs: remaining(15000), beforeExecute: () => guard() });
-      await guard();
+        { timeoutMs: remaining(15000), beforeExecute: current => guard(false, current) });
       if (rows.length !== 1) fail('broker_response_invalid');
       return structuredClone(rows[0]);
     },

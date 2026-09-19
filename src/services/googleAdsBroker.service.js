@@ -47,6 +47,14 @@ function createGoogleAdsBroker(options) {
       await assertDiscovery(account, context); return rows;
     },
     async read(account, context, family, payload, budget) {
+      if (family === 'conversion_settings') {
+        if (budget?.beforeExecute !== undefined && typeof budget.beforeExecute !== 'function') fail('invalid_request');
+        return reader.read(context, family, payload, { ...budget, beforeExecute: async fresh => {
+          const requested = identity(account);
+          if (Object.keys(requested).some(key => requested[key] !== fresh[key])) fail('broker_binding_invalid');
+          await budget?.beforeExecute?.(fresh);
+        } });
+      }
       await assert(account, context);
       const rows = await reader.read(context, family, payload, budget);
       await assert(account, context); return rows;

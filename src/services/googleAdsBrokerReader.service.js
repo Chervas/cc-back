@@ -29,23 +29,30 @@ function createGoogleAdsBrokerReader({ client, assertContext, now = Date.now }) 
         || !contract.customer(captured.customerId) || captured.assetRef !== 'ads:' + captured.customerId) fail('broker_binding_invalid');
       const identity = { connectionRef: captured.connectionRef, tenantRef: captured.tenantRef,
         customerId: captured.customerId, assetRef: captured.assetRef, discoveryOnly: captured.discoveryOnly };
+      const singleSettings = family === 'conversion_settings';
       const verify = async () => {
         const fresh = await assertContext(context);
         if (!fresh || Object.keys(identity).some(key => fresh[key] !== identity[key])) fail('broker_binding_invalid');
         if (now() >= deadline) fail('broker_timeout');
+        return fresh;
       };
       const rows = []; const seen = new Set(); const tokens = new Set(); const resources = new Map();
       let pageToken = null; let bytes = 0;
       // Byte-adaptive broker slices may be smaller than 250 rows. Enforce the
       // row limit independently and cap total calls; never silently truncate.
       for (let page = 0; page < 2000; page++) {
-        await verify(); await beforeExecute?.();
+        // Settings has one result and no pagination. Its initial assertion is
+        // the pre-request snapshot; share that fresh metadata with the caller's
+        // session/ACL guard instead of querying the same binding again.
+        const before = singleSettings ? captured : await verify();
+        await beforeExecute?.(singleSettings ? structuredClone(before) : undefined);
         if (now() >= deadline) fail('broker_timeout');
         const payload = { ...basePayload, ...(contract.singleResult(family) ? {} : { pageToken }) };
         const requestId = randomUUID();
         const response = await client.execute({ requestId, operation, connectionRef: identity.connectionRef,
           tenantRef: identity.tenantRef, assetRef: identity.assetRef, payload }, { timeoutMs: Math.min(30000, deadline - now()) });
-        await verify(); await beforeExecute?.();
+        const after = await verify();
+        await beforeExecute?.(singleSettings ? structuredClone(after) : undefined);
         if (now() >= deadline) fail('broker_timeout');
         const data = response?.data;
         const settings = family === 'conversion_settings';
@@ -79,7 +86,12 @@ function createGoogleAdsBrokerReader({ client, assertContext, now = Date.now }) 
           }
           seen.add(key); rows.push(row);
         }
-        if (next === null) { await verify(); await beforeExecute?.(); if (now() >= deadline) fail('broker_timeout'); return rows; }
+        if (next === null) {
+          // Projection above is synchronous. The post-response snapshot and
+          // caller guard already cover the single settings result.
+          if (!singleSettings) { await verify(); await beforeExecute?.(); }
+          if (now() >= deadline) fail('broker_timeout'); return rows;
+        }
         if (rows.length === contract.rowLimit(family)) fail('broker_response_invalid');
         tokens.add(next); pageToken = next;
       }

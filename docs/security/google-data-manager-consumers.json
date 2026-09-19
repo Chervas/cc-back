@@ -1,9 +1,9 @@
 {
-  "version": 14,
+  "version": 15,
   "reviewedAt": "2026-09-19",
-  "sourceBaseHead": "b21205a193d0bda26be3a712b9853426040768d6",
+  "sourceBaseHead": "9d1e9c221139475b447251d78a219242e8b54cc0",
   "includesWorkingChanges": true,
-  "scope": "Bounded bootstrap/settings typed read and metadata-only inventory. Actual controller/inventory/SQL/session/HTTP/signed broker and Angular stepper/Web card with fictitious Google/AWS; no operational cohort. 198 SQL statements per initial bootstrap require optimization before deployment. Unreviewed historical rows retain their earlier hashes.",
+  "scope": "Bounded settings snapshot deduplication, preserving current grant/account/session/ACL checks before and after provider I/O and final bootstrap checks. Actual SQL/HTTP/signed broker, concurrent isolated burst and repeated Angular visual QA; no deployment or production load acceptance. Historical unreviewed rows retain prior hashes.",
   "runtimeConsumersMigrated": 0,
   "qa": {
     "broker": "621/621 full Node24 regression; fake providers, external network blocked",
@@ -45,14 +45,21 @@
     "receiptReconciliationIntegrated": "5 end-to-end groups with actual managed SQL session, HTTP routes, signed TLS broker/SQLite restart and real Angular desktop/mobile;4 fake ingests,1 fake action mutation,6 status reads,15 signed commands; no public MFA/provider acceptance",
     "auditV19Candidates": "82/82 per role based on preserved v17 runtime sources;6 frozen SQL records (v18/v19,5587bytes) written/reconciled/confirmed over local TLS with fake S3; not published",
     "previous_broker_617": "617/617 full Node24 regression, including 33 destination/receipt scenarios; external network blocked",
-    "bootstrapSettingsReaderAdapter": 34,
+    "bootstrapSettingsReaderAdapter": 49,
     "bootstrapRelatedBackend": 32,
-    "bootstrapIntegrated": "6 groups,14 signed reads,4 real Angular stepper/exact Web card screenshots,0 token hydration/ingests/action writes; owned MySQL/HTTP/HTTPS and fake providers",
-    "bootstrapInitialQueries": 198,
-    "bootstrapInitialMilliseconds": 539,
-    "bootstrapLoadAcceptance": "pending: reduce repeated authorization queries and test concurrency",
+    "bootstrapIntegrated": "7 groups,22 signed reads,4 actual Angular stepper/exact Web card screenshots,0 token hydration/ingests/action writes; own MySQL/HTTP/HTTPS, fake providers",
+    "bootstrapInitialQueries": 105,
+    "bootstrapInitialMilliseconds": 208,
+    "bootstrapLoadAcceptance": "isolated burst passes with100ms fake provider delay; real cardinality/provider/concurrency acceptance pending",
     "bootstrapBuild": "development pass ffeddace3a9b48f9",
-    "bootstrapCatalogParity": "pre-existing failure identical to HEAD:4 missing keys,5 quality mismatches"
+    "bootstrapCatalogParity": "pre-existing failure identical to HEAD:4 missing keys,5 quality mismatches",
+    "bootstrapWithScopeTests": 58,
+    "bootstrapPreparation": 23,
+    "bootstrapPriorQueries": 198,
+    "bootstrapConcurrentRequests": 8,
+    "bootstrapConcurrentStatements": 840,
+    "bootstrapConcurrentP50Milliseconds": 641,
+    "bootstrapConcurrentMaxMilliseconds": 813
   },
   "rows": [
     {
@@ -130,9 +137,10 @@
     },
     {
       "file": "src/services/googleAdsBroker.service.js",
-      "sha256": "dfaa8dcd02b4d959f52b97c1490f83364cf7fa9f684ebfd6417b59305a1f2499",
-      "role": "Fachada interna conserva contexto Ads actual y gate independiente de conciliación.",
-      "state": "receipt_reconciliation_primitive_prepared_undeployed"
+      "sha256": "93d8a24f04ff975ac4fa09f5bac86f92a1c8980ffb1f3d1be2e5fc106bbd8635",
+      "role": "Settings reader checks the exact caller mapping against each fresh opaque-context assertion, sharing it with server-owned caller guard.",
+      "state": "bootstrap_settings_prepared_undeployed_real_load_pending",
+      "reviewNote": "Only fixed settings read shares freshly verified metadata at both I/O boundaries. No permission cache or change to paginated/other operations; final endpoint guard retained."
     },
     {
       "file": "services/integrations-broker/src/google-data-manager-contract.js",
@@ -222,9 +230,9 @@
     {
       "file": "src/services/googleAdsOnboardingBroker.service.js",
       "role": "Typed settings and shared deadline with post-read identity, scope, session and clinical guards; read/validate adapter.",
-      "state": "bootstrap_settings_prepared_undeployed_load_pending",
-      "sha256": "426c26ef57872e20984d9592bdf9353d87a3a34ce18476f43b566bf683850108",
-      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+      "state": "bootstrap_settings_prepared_undeployed_real_load_pending",
+      "sha256": "c77fe2ac88d49566727522a03a0932a6aebc0d4a6fe8b105e10906c192917b66",
+      "reviewNote": "Only fixed settings read shares freshly verified metadata at both I/O boundaries. No permission cache or change to paginated/other operations; final endpoint guard retained."
     },
     {
       "file": "src/services/googleAdsConversionPreparation.service.js",
@@ -427,10 +435,10 @@
     },
     {
       "file": "src/services/googleAdsBrokerReader.service.js",
-      "sha256": "70c211af3c0eee5613ed25a06df98026ed53450d1b3335966ed97951300ff8e7",
+      "sha256": "efb84a09f78faba704bf4c31991db7c4e05cc700efe2002862f38b3cc2fe694d",
       "role": "Single result typed settings projection and broker-owned quota boolean; no arbitrary request fields.",
-      "state": "bootstrap_settings_prepared_undeployed_load_pending",
-      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+      "state": "bootstrap_settings_prepared_undeployed_real_load_pending",
+      "reviewNote": "Only fixed settings read shares freshly verified metadata at both I/O boundaries. No permission cache or change to paginated/other operations; final endpoint guard retained."
     },
     {
       "file": "services/integrations-broker/src/google-ads.js",
@@ -455,17 +463,17 @@
     },
     {
       "file": "src/scripts/tests/google_ads_onboarding_broker.test.js",
-      "sha256": "7ade0eac2890516d8b979fbf14e0faf662a93b42d5e644292307cd5b78a8321d",
+      "sha256": "7adf93b49ad58d50a740cfdab37088e9958b5f72808c3d8fea74521dcf0549d0",
       "role": "Settings guards, deadline, concurrency and existing onboarding behavior.",
-      "state": "bootstrap_settings_prepared_undeployed_load_pending",
-      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+      "state": "bootstrap_settings_prepared_undeployed_real_load_pending",
+      "reviewNote": "Only fixed settings read shares freshly verified metadata at both I/O boundaries. No permission cache or change to paginated/other operations; final endpoint guard retained."
     },
     {
       "file": "src/scripts/tests/google_bootstrap_settings_mysql.integration.js",
-      "sha256": "b4f911172b076b3cb13340565717a801a9f4c0a6e52b4d3c4c885031f7c55510",
+      "sha256": "60691b59120a8310dec02f1f1dd8c35622af7453572b042083a77382914d1251",
       "role": "Actual inventory/controller/SQL/session/HTTP/signed TLS broker, races/restart and per-request SQL measurement.",
-      "state": "bootstrap_settings_prepared_undeployed_load_pending",
-      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+      "state": "bootstrap_settings_prepared_undeployed_real_load_pending",
+      "reviewNote": "Only fixed settings read shares freshly verified metadata at both I/O boundaries. No permission cache or change to paginated/other operations; final endpoint guard retained."
     },
     {
       "file": "src/scripts/tests/fixtures/google_bootstrap_e2e_visual.fixture.js",

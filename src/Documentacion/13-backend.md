@@ -10633,7 +10633,17 @@ HTTP y broker HTTPS firmado, Google/AWS ficticios. Se comprueba revocación dura
 la respuesta, cambio del grupo, fallo remoto, reinicio sin cuota remota y ausencia
 de tokens locales. UI: asistente Angular y tarjeta exacta de Marketing Web en
 1440/390 px; se atribuye el envío desactivado a ClinicaClick y no pide reconexión.
-Medición inicial: 198 sentencias/539 ms para una cuenta y dos clínicas ficticias.
-Es evidencia de consultas repetidas, no aceptación de carga: reducir duplicación
-de revalidaciones sin debilitar revocación antes del corte real. Detalle operativo,
+La primera medición detectó 198 sentencias/539 ms para una cuenta y dos clínicas.
+La lectura de ajustes ahora comparte entre lector/adaptador dos comprobaciones
+frescas de binding (antes/después del proveedor), incluyendo la comparación con
+el mapping del llamador. La proyección es síncrona y no repite esas comprobaciones.
+Se conserva la revalidación final del bootstrap tras las demás esperas. No se
+cachean permisos entre peticiones ni se modifica el resto de familias de lectura.
+
+Medición final aislada: 105 sentencias/208 ms; ocho aperturas simultáneas, 840
+sentencias, mediana 641 ms y máximo 813 ms, con 100 ms de latencia de proveedor
+ficticia. Al finalizar no hay conexiones ocupadas ni esperas del pool. Catorce
+casos nuevos niegan cambios de ACL, grant, clínica, scopes, sujeto, cohorte y cuenta
+antes/durante la consulta. Sigue pendiente la aceptación de carga con datos,
+latencia y concurrencia reales; no equivale a salud global de MySQL. Detalle,
 pruebas y recuperación en `docs/security/google-data-manager-broker.md` y 19/99.

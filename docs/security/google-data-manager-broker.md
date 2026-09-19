@@ -513,23 +513,28 @@ La cuota es metadata del binding propio: una respuesta Google no puede activarla
 En cohorte Ads de solo lectura se devuelve false; un proyecto local no lo suple.
 No se ha añadido el permiso a ninguna política operativa ni migrado una cuenta.
 
-Pruebas: 621/621 broker Node24; 34/34 lector/adaptador Node18; scripts legacy
-Data Manager y activación mejorada offline. Seis grupos integrados MySQL/HTTP/TLS,
-14 comandos de lectura y cuatro capturas Chromium del asistente real/tarjeta Web;
+Pruebas: 621/621 broker Node24; 49/49 lector/adaptador Node18 (58/58 incluyendo ámbito); scripts legacy
+Data Manager y activación mejorada offline. Siete grupos integrados MySQL/HTTP/TLS,
+22 comandos de lectura y cuatro capturas Chromium del asistente real/tarjeta Web;
 cero ingestas, mutaciones Google, hidrataciones OAuth locales o accesos externos.
 La tarjeta Web usa la plantilla exacta y el resultado del asistente; no es una
 prueba de toda la navegación Web ni aceptación pública/MFA/Google real.
 Las comprobaciones de configuración no sustituyen validate-only ni autorización.
 
-Rendimiento: 198 sentencias SQL y 539 ms en la primera apertura de una cuenta
-con dos clínicas, en MySQL propio sin latencia real de Google. Las guardias
-repetidas son un pendiente explícito de optimización y carga antes del despliegue.
+Rendimiento: la primera apertura pasó de 198 a 105 sentencias SQL (−47 %),
+de 539 a 208 ms en MySQL propio. El lector comparte sus dos comprobaciones
+frescas por consulta de ajustes con el adaptador; conserva identidad del mapping,
+ACL/sesión/scopes/estado clínico y revalidación final, sin caché entre peticiones.
+Ocho aperturas simultáneas con 100 ms de latencia ficticia: 840 sentencias,
+mediana 641 ms, máximo 813 ms, ocho lecturas firmadas y pool sin ocupación/esperas
+al terminar. Casos de revocación y las cuatro capturas repetidos correctamente.
+No acredita carga sostenida, cardinalidad ni latencia de proveedor reales.
 El límite de concurrencia/plazo evita una ráfaga ilimitada al broker por petición;
 no garantiza CPU, aislamiento entre peticiones ni una cuota global de proveedor.
 
 Antes del corte: publicar operación y consumidor conjuntamente, revisar grants,
-reducir las revalidaciones SQL duplicadas manteniendo todos los rechazos, medir
-carga y latencia reales, completar leads/job combinado/identidad compartida y
+conservar las comprobaciones frescas compartidas, medir carga con cardinalidad
+y latencia reales, completar leads/job combinado/identidad compartida y
 aceptación autenticada. No activar envíos por el resultado de este GET. AWS v19
 para recibos sigue siendo otro requisito pendiente, con sus candidatos conservados.
 Rollback: conservar las releases actuales mientras no haya corte. Tras un corte,

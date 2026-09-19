@@ -42,7 +42,7 @@ async function fixture() {
     assert.equal(id, 2); return structuredClone(f.state.connection);
   } }, Clinica: { findByPk: async id => structuredClone(f.state.clinics.find(row => row.id_clinica === id)) } };
   const options = { runtime, models, clinicIds: [71], beforeExecute: async () => state.allowed, now: () => state.at };
-  return { ...f, state, calls, runtime, options, adapter: createGoogleAdsOnboardingBroker(options) };
+  return { ...f, scopeState: f.state, state, calls, runtime, options, adapter: createGoogleAdsOnboardingBroker(options) };
 }
 const validate = adapter => adapter.validate({ conversionActionId: '456', event: 'lead' });
 
@@ -213,3 +213,31 @@ test('a shared settings deadline denies queued work before another provider call
   await adapter.settings();assert.equal(f.calls.length,1);
   f.state.at=5;await assert.rejects(adapter.settings(),{code:'broker_timeout'});assert.equal(f.calls.length,1);
 });
+
+test('settings shares two fresh authorization snapshots per call and never caches them across reads', async () => {
+  const f=await fixture();f.scopeState.calls.length=0;
+  await f.adapter.settings();assert.equal(f.scopeState.calls.filter(c=>c.kind==='mapping').length,2);
+  await f.adapter.settings();assert.equal(f.scopeState.calls.filter(c=>c.kind==='mapping').length,4);
+  assert.equal(f.calls.length,2);
+  f.scopeState.bindings[0].state='blocked';await assert.rejects(f.adapter.settings());assert.equal(f.calls.length,2);
+});
+for(const change of ['acl','grant','clinic','scopes','subject','cohort','account'])for(const when of ['before','during'])
+  test('optimized settings rejects '+change+' change '+when+' provider read',async()=>{
+    const f=await fixture();
+    const revoke=()=>{
+      if(change==='acl')f.state.allowed=false;
+      if(change==='grant')f.scopeState.grants[0].status='revoked';
+      if(change==='clinic')f.options.models.Clinica.findByPk=async id=>({id_clinica:id,grupoClinicaId:5,estado_clinica:false});
+      if(change==='scopes')f.options.models.GoogleConnection.findByPk=async()=>({id:2,googleUserId:'fictitious-subject',scopes:DM});
+      if(change==='subject')f.scopeState.connection.googleUserId='changed-subject';
+      if(change==='cohort')f.scopeState.enabled=false;
+      if(change==='account')f.runtime.account={...f.runtime.account,customerId:'1111111111'};
+    };
+    // The adapter captures its account object at construction. Mutate that
+    // exact object to represent a changed mapping, never supply a forged snapshot.
+    if(change==='account') {
+      const original=f.runtime.account;const mutate=()=>{original.customerId='1111111111';};
+      if(when==='before')mutate();else f.state.afterCall=mutate;
+    }else if(when==='before')revoke();else f.state.afterCall=revoke;
+    await assert.rejects(f.adapter.settings());assert.equal(f.calls.length,when==='before'?0:1);
+  });
