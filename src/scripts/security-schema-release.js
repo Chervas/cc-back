@@ -43,7 +43,7 @@ function environment(runtime) {
   if (runtime !== 'dev') return observedEnvironment(runtime).env;
   const env = require('dotenv').parse(fs.readFileSync('/etc/clinicaclick-dev/runtime.env'));
   if (env.DB_NAME !== DEV_DATABASE || env.DB_USERNAME !== 'cc_dev_api'
-    || env.DEV_SECURITY_PROFILE !== 'isolated-v1') fail('schema_dev_boundary_invalid');
+    || !['isolated-v1','isolated-security-v2'].includes(env.DEV_SECURITY_PROFILE)) fail('schema_dev_boundary_invalid');
   return env;
 }
 function settings(env) {
