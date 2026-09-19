@@ -14,6 +14,7 @@ const {createMetaMarketingOAuth,createMetaMarketingOAuthOperations}=require('./m
 const prefix=environment=>`/clinicaclick/integrations/prod/meta-marketing/${environment}/`;
 function validateConfig(config) {
   const fields=['cohort','enabled','environment','listenAddress','policy','port','stateFile','tlsCertFile','tlsKeyFile'];
+  if (config && Object.hasOwn(config,'standby')) { fields.push('standby'); if(typeof config.standby!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetEnrollment')) { fields.push('assetEnrollment'); if(typeof config.assetEnrollment!=='boolean'||config.assetEnrollment&&!config.assetDiscovery)fail('invalid_request'); }
   if (config?.tlsRenewal) { fields.push('tlsRenewal');tlsReload.validateSettings(config.tlsRenewal); }
@@ -21,6 +22,10 @@ function validateConfig(config) {
     || !['dev','staging'].includes(config.environment) || !net.isIP(config.listenAddress) || !Number.isInteger(config.port)
     || config.port<1024 || config.port>65535 || typeof config.stateFile!=='string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   const policy=validatePolicy(config.policy),gateway=`gateway:${config.environment}:meta-marketing-oauth`,control=`control:${config.environment}:meta-marketing-oauth`;
+  if (config.standby) {
+    if (policy.principals.length || policy.connections.length || policy.grants.length) fail('invalid_request');
+    return config;
+  }
   const expected=config.assetEnrollment?Object.values(E.roles(config.environment)):[gateway,control];
   if (!policy.connections.length || policy.connections.length>64 || policy.principals.length!==expected.length
     || !expected.every(id=>policy.principals.some(p=>p.id===id)) || policy.principals.some(p=>p.maxPerMinute>20)) fail('invalid_request');
@@ -50,6 +55,14 @@ async function main(filename,{awsFactory=connectAws,http=createMetaMarketingOAut
   const config=validateConfig(JSON.parse(privateFile(filename))),cert=privateFile(config.tlsCertFile,65536),key=privateFile(config.tlsKeyFile,65536);
   const store=new BrokerStore(config.stateFile);let aws,oauth,enrollment,server,timer,draining;
   try {
+    if(config.standby) {
+      // This is installation before the first cohort, never a way to hide
+      // existing authority, revocations, uncertain commands or undelivered audit.
+      for(const {name} of store.db.prepare("SELECT name FROM sqlite_schema WHERE type='table'").all()) {
+        const quoted='"'+name.replace(/"/g,'""')+'"';
+        if(store.db.prepare(`SELECT 1 FROM ${quoted} LIMIT 1`).get())fail('invalid_request');
+      }
+    }
     aws=await awsFactory();
     const secrets=createMetaMarketingOAuthSecrets({client:aws.secrets,accountId:ACCOUNT,prefix:prefix(config.environment),kmsKeyArn:SECRET_KEY});
     oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id)});
