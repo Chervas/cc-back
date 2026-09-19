@@ -525,3 +525,8 @@ mientras queden destinos Meta enrolados.
 
 Acta versionada: `meta-standby-deployment.json`. Evidencia privada:
 `qa-evidence/security-resume-20260917/meta-transport-publication-20260919/`.
+
+
+Candidata clínica selectiva preparada y probada el19/09, sin publicación ni DDL:
+[fuentes, QA y requisitos de corte](meta-clinical-candidate.md). Los inventarios
+anteriores conservan su corte histórico; no sustituyen la candidata actual.

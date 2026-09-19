@@ -11642,3 +11642,35 @@ permite escribir metadata o leer claves/configuración clínica. Ambos escritore
 de mantenimiento se ejecutaron después: los lectores con UID/grupos/montajes
 reales devuelven cero incidencias. Los flags del monitor DEV siguen sin configurar;
 la prueba fuerza la lectura, no habilita cron/notificaciones ni acredita su entrega.
+
+
+### Candidata selectiva de consumidores Meta (19/09/2026)
+
+Preparada sobre las ramas públicas actuales: backend `ae49fedcbc0370511c518dbb71a59120d202542a`, frontend
+`a8331d0d29b6f9410974b4c61add6b8ea5b2f7a2`, rama `security/meta-clinical-candidate-20260919` en ambos repositorios.
+Incluye metadatos, OAuth, descubrimiento, selección/confirmación/retirada, auditoría
+v24 y tres jobs cerrados. No se ha desplegado, aplicado DDL ni activado cohortes.
+Fuentes, adaptación de dependencias, comandos y recuperación en
+`docs/security/meta-clinical-candidate.md` y su manifiesto JSON.
+
+La prueba del candidato completo detectó dependencias ausentes: import de sesión,
+comprobación `enabledEnv` al encolar y resolver de metadatos/tombstones. Se incluyen
+las implementaciones vigentes de DEV, conservando consumidores Google públicos,
+contrato WhatsApp y MFA. El catálogo candidato tiene39 jobs públicos más3 Meta.
+La interfaz omite afirmaciones de permisos legacy mientras Meta está pausado;
+no implica que el nuevo OAuth solicite leads, facturación o conversiones.
+
+QA de la candidata: build Angular completo,94 pruebas de auditoría,11 grupos SQL
+de metadatos sin leer tokens,7/10/9 grupos de diario/revisión/lectura y siete casos
+de ejecución con slots nuevos. Nueve capturas con frontend y estilos exactos del
+candidato; selección, respuesta perdida recuperada sin repetir activación y
+retirada tras nueva sesión/logout. Proveedores/entrega MFA ficticios: no acredita
+login público ni aceptación del titular. SQL de grupo:17 consultas/127 ms con100
+activos y1.000 clínicas; muestra aislada, no garantía de carga real.
+
+Metadata SQL operativa leída a las12:21 UTC: ninguna de las siete tablas Meta
+nuevas ni columnas de marcador de credencial existen todavía en DEV/staging.
+Antes del corte, ampliar el contrato de esquema (el actual18/34 no cubre Meta),
+revisar/aplicar DDL04–12 y componer DEV sobre su release aislada. Fijar ejecutor
+único por entorno sin jobs clínicos DEV; app/slots/IAM y cohorte de titular siguen
+pendientes. Los runtimes AWS vacíos permanecen como en el acta anterior.
