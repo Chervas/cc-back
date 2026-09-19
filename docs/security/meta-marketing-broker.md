@@ -85,9 +85,11 @@ demuestra la segunda y devuelve indisponibilidad sin bloquear duraderamente al
 usuario. La suite conserva las comprobaciones de los proveedores anteriores.
 
 No cambia una pantalla ni conecta la API CRM al runtime. Las capturas anteriores
-del asistente pausado no prueban estas operaciones. Continúan pendientes
-`/oauth/meta/connection-status`, `/oauth/meta/assets`, Ajustes, mapping compartido
-y workspace. No se declara completo el bloque sin su aceptación visual y real.
+del asistente pausado no prueban estas operaciones. La preparación posterior del
+estado local y Ajustes/selector está descrita en
+[lector local](meta-settings-metadata.md); no ejecuta este transporte. Continúan
+pendientes registro CRM, consumidores del broker y discovery de activos. No se
+declara completo el bloque sin su aceptación visual y real.
 Antes de publicar:
 
 1. Completar registro CRM de identidad/activos/grants, auditoría del actor humano,

@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19T03:26:04.538725+00:00",
+  "scope": "Local Meta status and mappings with current SQL session/scope. Browser pause and stale-response handling. Does not integrate the Meta broker or review every consumer in the listed whole files.",
+  "sourceBaseHeads": {
+    "backend": "767dcd5959d5735b9795a2a1c6281cdb638c0440",
+    "frontend": "d3d82233899d2b0e000d511a4fe6bc71d5eda322"
+  },
+  "includesWorkingChanges": true,
+  "files": {
+    "backend": {
+      "src/services/metaConnectionMetadata.service.js": "ccb4153079de14d0feefee20b24e00d72d78ff2f71370deaaae40f08990839ad",
+      "src/routes/oauth.routes.js": "84923c7148496cafcc2f608468c3d41b4b2c5b32557f9ae7ad220f6c64cd90a5",
+      "src/scripts/tests/meta_connection_metadata_mysql.integration.js": "a7d4932e085c28689f1aea4fe8b2fd2cf63ebb40feb87f97e4237ed2bd42bcbd",
+      "src/scripts/tests/fixtures/meta_connection_metadata_visual.fixture.js": "7aa3ceb30cad95875e7c8251fc48518cfda4fd91dc68d22d2d43e07cc40c42e7"
+    },
+    "frontend": {
+      "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.ts": "66123b356798610225af41a74d74074fd0a3139184151904b6e35766b3d109f4",
+      "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.html": "5d64a4f6410d716c212161aa571d9a9ed071b446df532dae3777c62e5d189e87",
+      "src/app/modules/admin/pages/settings/shared/asset-mapping.component.ts": "1324361e2e3efd36bd5f1cab7f47f0d6c96b91b66c2357d48947670c35d7f349",
+      "src/app/modules/admin/pages/settings/shared/asset-mapping.component.html": "5bc728e0b0856f6398667d6e755e81bb02084257817e1e9a731d2d8433f801bf",
+      "src/app/modules/admin/apps/marketing/campaign-workspace/campaign-account-selection.model.ts": "7111852fec4b26204038917faa0eac2bf17a42ecf3d98dc508ecedc865a7b05c",
+      "src/assets/i18n/es.json": "0a27b97ae95be530c9d4edd99b17c5e0d27fd32110003eb8cc67ccce200b4d1f",
+      "src/assets/i18n/cat.json": "6360cc4b03df41b2344f36cfcdff4222e2b42c300b3653b213c14cec04449b12"
+    }
+  },
+  "qa": {
+    "mysqlGroups": 9,
+    "regressionTests": 21,
+    "angularCompile": true,
+    "visual": {
+      "shots": [
+        "desktop-settings",
+        "mobile-settings",
+        "changed-clinic",
+        "permission-revoked",
+        "selector-paused"
+      ],
+      "metaRequests": 23,
+      "errors": [],
+      "writes": [],
+      "blocked": [],
+      "actualComponents": [
+        "SettingsConnectedAccountsComponent",
+        "AssetMappingComponent"
+      ],
+      "workspace": "actual decision model; no full workspace rendering"
+    },
+    "firstOpen": {
+      "queries": 29,
+      "elapsedMs": 81
+    },
+    "repeatedOpens": {
+      "count": 8,
+      "queries": 232,
+      "minMs": 28,
+      "maxMs": 53
+    },
+    "tokenSelects": 0,
+    "pool": {
+      "inUse": 0,
+      "waiting": 0
+    },
+    "publicMfa": false,
+    "realProvider": false,
+    "wholeOauthRouter": false,
+    "deployed": false,
+    "brokerConsumersMigrated": 0
+  },
+  "pending": [
+    "CRM Meta broker registry/grants and external credentials marker",
+    "new OAuth directly to vault",
+    "coordinated durable revocation and human actor audit",
+    "scoped broker consumer/API integration",
+    "public MFA and provider acceptance",
+    "selective release/schema preflight"
+  ],
+  "cost": {
+    "providerCallsFromTheseTwoReaders": 0,
+    "awsCallsFromTheseTwoReaders": 0,
+    "incrementalBilledCost": null,
+    "billingRefreshed": false
+  }
+}

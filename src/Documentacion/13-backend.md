@@ -10826,3 +10826,39 @@ CRM y revocación coordinada, OAuth nuevo en vault, consumidores/UI, despliegue,
 IAM/grants y aceptación real. Meta Ads, CAPI y sincronizaciones siguen en pausa;
 WhatsApp conserva su transporte. Runbook en `docs/security/meta-marketing-broker.md`,
 estado en 19, costes en 39 y evidencia en 99.
+
+### Estado y asignaciones Meta locales sin credenciales (preparado, 19/09/2026)
+
+`GET /oauth/meta/connection-status` y `/oauth/meta/mappings` usan
+`metaConnectionMetadata.service` con sesión SQL vigente y clínica/grupo explícito.
+No admiten fallback sin ámbito del usuario. Consultan columnas cerradas de conexión
+y activos; excluyen OAuth, tokens de página/WhatsApp y `additionalData`. Los activos
+son exclusivamente cuenta publicitaria, página e Instagram. El inventario limita
+la consulta a 1.001 filas y rechaza más de 1.000, sin devolver una lista incompleta.
+
+El contrato separa `connectionStored` de `connected`: durante la contención devuelve
+`connected:false`, `availability.available:false`, razón `meta_security_quarantine`,
+`validationDeferred:true` y `reauthorizationRequired:false`. Una fecha de token
+almacenada no prueba salud remota ni motivo para reconectar. La conexión guardada
+puede mostrarse con su autorizador; los bloqueos y assignments revocados prevalecen.
+La ausencia de tabla/lectura de seguridad no devuelve datos parciales. Las respuestas
+son privadas y sin caché. `GET /oauth/meta/assets` se rechaza antes de cargar tokens.
+
+La sesión y ACL se comprueban alrededor de la lectura, comparando identidad,
+asignación, ámbito y conjunto completo de clínicas. Cambio de conexión/bloqueo:
+409; sesión revocada: 401; pérdida de acceso: 403; fallo interno: código cerrado
+503. No es una transacción que bloquee SQL durante I/O externo: estas dos lecturas
+no hacen I/O de proveedor. No eliminan todas las credenciales existentes en SQL.
+
+Ajustes distingue guardado, pausa, carga e indisponibilidad; muestra inventario
+local sin badges de permisos remotos. No invita a reconectar/descubrir activos.
+Cancela lecturas anteriores y descarta respuestas de otro ámbito/sesión, incluidos
+ciclos A→B→A. El resumen de Marketing se invalida al cambiar de clínica. El selector
+compartido no intenta un estado sin ámbito tras un rechazo; el modelo del workspace
+traduce la pausa sin iniciar OAuth ni discovery. WhatsApp conserva su flujo separado.
+
+Preparación de consumidores locales, todavía sin conexión CRM→broker Meta ni
+migración de credenciales, registro/grants o revocación coordinada. La integración
+del runtime tipado de la sección anterior sigue pendiente. No se despliega ni
+habilita una cohorte con este corte. QA, carga y recuperación en
+`docs/security/meta-settings-metadata.md`; madurez en 19 y evidencia/corte en 99.
