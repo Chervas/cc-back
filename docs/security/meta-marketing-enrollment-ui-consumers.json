@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "063a2c2d8b154a11be85971e544243d812c73a80",
+    "front": "7e57c5607a66c56d6e09f4a57132321b85e8e193"
+  },
+  "scope": "Prepared authenticated enrollment API, singleton, gated JobRequests entry, indexed latest-scope read and actual Angular selection/confirmation/withdrawal. No runtime/DDL/gate activation or AWS publication. Changed-source inventory plus prior manifests; not a full DEV deployment bundle. AWS audit remains v19.",
+  "prerequisites": [
+    "meta-marketing-enrollment-runtime-consumers.json",
+    "meta-group-metadata-consumers.json"
+  ],
+  "verification": {
+    "visual": "9 selection, 7 metadata and 13 OAuth screenshots; owned MySQL/HTTP/TLS, fictitious providers/MFA delivery",
+    "runtime": "7 isolated scenarios, mounted authentication, 52-job catalog",
+    "angularBuild": "ceafed41ca5ff0ec",
+    "limitations": "Direct worker invocation; no deployed cron, public MFA or live provider/titular acceptance"
+  },
+  "back": {
+    "migrations/20260919120000-meta-marketing-enrollment-scope-latest.js": "3daff36382d7f0c649bce200b6e901d2551ecd0a114c5dc78acf7f2b386d2a99",
+    "models/metamarketingenrollmentrequest.js": "15b199417935ea60e4ffd15bc14aa72d6cbe08338b529353bd3a504d65e9d231",
+    "src/config/scheduledJobCatalog.js": "975de6dd60ddbfc3b3219fb0025b8f02231c64a4641085de0c0bb133fda9bcb7",
+    "src/jobs/sync.jobs.js": "cc4a6cb853146891c0953de2099a33e9bc9e6441097cd3fd1f5855e1856ddc03",
+    "src/routes/metaMarketingEnrollment.routes.js": "4cf5a8dccfcd428272a6d9cfa5ca19b908aeb0e38265ae56871c7a68267c3cb8",
+    "src/routes/oauth.routes.js": "1737eee0f434f35081197ec840df3fd24d12cdffa389b2f997db040b798159a2",
+    "src/scripts/tests/fixtures/meta_connection_metadata_visual.fixture.js": "98403a67192439e57f3b2a2c1d4f3096b67092659b9f5792935ea567528db528",
+    "src/scripts/tests/fixtures/meta_enrollment_runtime.fixture.js": "412b818e204a5835fdee2845ad5e1bbe974fee1e0d6e04650f5c8e57e70e16f9",
+    "src/scripts/tests/fixtures/meta_enrollment_selection_visual.fixture.js": "88bc7f9f39db20065e6b0483fcb0fbe27fd734af551465d54b9aa075a9a2637b",
+    "src/scripts/tests/fixtures/meta_settings_visual_host.fixture.js": "469c722a1582592a56c544e4b62dbc2a52f0f65e672567ad2b059d0e1a90d65b",
+    "src/scripts/tests/meta_marketing_oauth_http.test.js": "ecfbd494299e1116d832ccb557a0eeda1c64103a865f72d9ab8d7f921bede48b",
+    "src/scripts/tests/meta_marketing_oauth_mysql.integration.js": "22da3c2fadeeabdc79fa25b174855d5b3c5d54f411fe4566a13ff1195c27775c",
+    "src/scripts/tests/scheduled_jobs_orchestration.test.js": "8389f76e310b1e252149287c2953d7eee24f56f0d4e951dcd9b4e838a8dd51b7",
+    "src/services/metaMarketingEnrollment.service.js": "b985dd6e11d310850db832483ae2d4c28cb55b1d19b0ef9075702fe30826ad9e",
+    "src/services/metaMarketingOAuth.service.js": "d2701a2de89b17875ebec525e15c24336c514bd8041206f5760b4f35e95f5e30"
+  },
+  "front": {
+    "src/app/modules/admin/pages/settings/connected-accounts/connected-accounts.component.html": "413001173a6e0db313070e5c3c67ec7e157eb7dd4f17c7736abf0b70fd4dae21",
+    "src/app/modules/admin/pages/settings/connected-accounts/meta-enrollment-status.component.ts": "98c2ec4a7936c3e4febba8b767cca37023d85d93e330569e26ad68491b52ecec",
+    "src/app/modules/admin/pages/settings/connected-accounts/meta-oauth-status.component.ts": "52749dd416463b00fbf0d4a9894b8cad0ce7bf702cbc4cee6e2844c20075720e",
+    "src/assets/i18n/cat.json": "00f4869840a37dbffad94f6683b74a922f0b74b5a6ace33f6f09233420652535",
+    "src/assets/i18n/en.json": "e68a63e172f861d0cba21410ffac85c548232c9300cae24cefaf581935a2b92a",
+    "src/assets/i18n/es.json": "fa5f9d43f848ab12e4d86cd718a0711138f5ae337982e6bbfe51aeb1e6b4546c"
+  }
+}

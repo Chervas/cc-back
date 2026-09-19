@@ -1,24 +1,36 @@
 'use strict';
 const assert=require('node:assert/strict'),{randomUUID}=require('node:crypto'),{DataTypes:D}=require('sequelize'),fs=require('node:fs'),path=require('node:path');
 const C=require('../../../services/metaMarketingEnrollment.contract');
-module.exports=async({models,sql,sessions,service,callback,token,now,report,wire,f,mfa,advance,restart,auditView,app,server,base})=>{
+module.exports=async({models,sql,sessions,service,callback,request,token,now,report,wire,f,mfa,advance,restart,auditView,app,server,base})=>{
   const qi=sql.getQueryInterface();await require('../../../../migrations/20260919080000-meta-marketing-enrollment-journal').up(qi);
   const delivery=require('../../../../migrations/20260919100000-meta-marketing-enrollment-delivery-markers');await delivery.up(qi);await delivery.down(qi);await delivery.up(qi);
   const owner=require('../../../../migrations/20260919090000-meta-marketing-enrollment-binding-owner');await owner.down(qi);await owner.up(qi);
   const due=require('../../../../migrations/20260919110000-meta-marketing-enrollment-due-index');await due.up(qi);await due.down(qi);await due.up(qi);
+  const recent=require('../../../../migrations/20260919120000-meta-marketing-enrollment-scope-latest');await recent.up(qi);await recent.down(qi);await recent.up(qi);
   for(const [name,file] of [['MetaMarketingEnrollmentRequest','metamarketingenrollmentrequest'],['MetaMarketingEnrollmentClaim','metamarketingenrollmentclaim'],['MetaMarketingEnrollmentIdentity','metamarketingenrollmentidentity']])models[name]=require('../../../../models/'+file)(sql,D);
   const R=models.MetaMarketingEnrollmentRequest,inputFor=async()=>{const claims=await sessions.verify(token());return {scopeKey:'group:5',actorId:claims.userId,sessionRef:claims.jti,sessionExpiresAt:new Date(claims.exp*1000)};};
   let enabled=true,workerEnabled=true,lostReply=null,beforeWire=null,afterWire=null;const commands=[];
   const enrollment=require('../../../services/metaMarketingEnrollment.service').createService({models,sessions,oauth:service,now,enabled:()=>enabled,workerEnabled:()=>workerEnabled,
     client:{execute:async(command,budget)=>{commands.push({operation:command.operation,requestId:command.requestId});await beforeWire?.(command);const response=await wire.execute(command,budget);await afterWire?.(command);
       if(lostReply===command.operation){lostReply=null;throw Object.assign(Error('FICTITIOUS_LOST_RESPONSE'),{code:'broker_timeout'});}return response;}}});
+  app.use('/oauth/meta/marketing',require('../../../routes/metaMarketingEnrollment.routes').createRouter({service:enrollment,sessions}));
+  const endpoint='/oauth/meta/marketing/enrollment',query='?assignment_scope=group&group_id=5';
+  const api=async(method='GET',suffix='',body)=>{const response=await request(method,endpoint+suffix+query,body);assert.equal(response.status,200,JSON.stringify(response));return response.body;};
+  for(const body of [{flowId:[randomUUID()],assetRefs:['meta-ad_account:301']},{flowId:randomUUID(),assetRefs:[]},{flowId:randomUUID(),assetRefs:['meta-ad_account:301'],token:'FICTITIOUS_REJECTED'},
+    {flowId:randomUUID(),assetRefs:['meta-ad_account:301','meta-ad_account:301']}])assert.equal((await request('POST',endpoint+query,body)).status,400);
+  assert.equal((await request('GET',endpoint+'?assignment_scope=group&group_id=5&clinic_id=59')).status,400);
+  assert.equal((await request('GET',endpoint+'?assignment_scope=group&group_id=6')).status,403);
+  assert.equal((await api()).selection,null);assert.equal(commands.length,0);
   const input=await inputFor(),flow=await service.begin(input);await callback(flow);
-  const reserved=await enrollment.reserve(input,flow.requestId,['meta-ad_account:301','meta-instagram_business:501']);
+  if(process.env.META_ENROLLMENT_RUNTIME_CASE==='selection_ui')return require('./meta_enrollment_selection_visual.fixture')({models,sql,sessions,service,enrollment,flow,api,token,now,report,app,server,base,advance,restart,mfa,
+    loseActivationReply:()=>{lostReply=C.E.OPERATIONS.activate;},closeEnrollment:()=>{enabled=false;},commands});
+  const reserved=await api('POST','',{flowId:flow.requestId,assetRefs:['meta-ad_account:301','meta-instagram_business:501']});
   const id=reserved.requestId,latest=()=>R.findByPk(id,{raw:true}),run=()=>enrollment.run({enrollmentId:id});
   if(process.env.META_ENROLLMENT_RUNTIME_CASE==='query_health'){
     const original=await latest(),future=new Date(+now()+86400000);
     for(let offset=0;offset<11000;offset+=250)await R.bulkCreate(Array.from({length:250},(_,n)=>({...original,
       enrollment_id:randomUUID(),flow_id:randomUUID(),prepare_request_id:randomUUID(),activate_request_id:randomUUID(),revoke_request_id:randomUUID(),
+      requested_at:new Date(+original.requested_at-60000),
       state:offset+n<10000?'revoked':'prepared',revoked_at:offset+n<10000?now():null,next_attempt_at:offset+n<10000?now():future})));
     const transaction=await sql.transaction();
     try{
@@ -27,7 +39,11 @@ module.exports=async({models,sql,sessions,service,callback,token,now,report,wire
       const tree=JSON.parse(plan[0].EXPLAIN),text=JSON.stringify(tree);assert(text.includes('cc_meta_enroll_due'));assert(!text.includes('"using_filesort":true'));
       const at=Date.now(),[rows]=await sql.query(query,{bind,transaction});assert.deepEqual(rows.map(v=>v.enrollment_id),[id]);
       report.enrollmentQueue={terminalRows:10000,futureRows:1000,elapsedMs:Date.now()-at,plan:tree};
+      const [recentPlan]=await sql.query("EXPLAIN FORMAT=JSON SELECT * FROM MetaMarketingEnrollmentRequests WHERE scope_key='group:5' ORDER BY requested_at DESC,enrollment_id DESC LIMIT 1 FOR UPDATE",{transaction});
+      const recentTree=JSON.parse(recentPlan[0].EXPLAIN),recentText=JSON.stringify(recentTree);assert(recentText.includes('cc_meta_enroll_latest'));assert(!recentText.includes('"using_filesort":true'));
+      report.enrollmentQueue.latestPlan=recentTree;
     }finally{await transaction.rollback();}
+    assert.equal((await api()).selection.requestId,id);
   }
   assert.equal(reserved.connected,false);assert.equal(await models.MetaConnectionAssignment.count(),0);assert.equal(await models.ClinicMetaAsset.count(),0);
   workerEnabled=false;assert.equal((await run()).skipped,true);assert.equal(commands.length,0);workerEnabled=true;
@@ -39,8 +55,20 @@ module.exports=async({models,sql,sessions,service,callback,token,now,report,wire
   advance(31000);const locked=await sql.transaction();
   try{await R.findByPk(id,{transaction:locked,lock:locked.LOCK.UPDATE});const at=Date.now();assert.equal((await enrollment.run()).advanced,0);assert(Date.now()-at<1500,'Real FOR UPDATE SKIP LOCKED must skip another owner without waiting for its transaction');}
   finally{await locked.rollback();}
-  const confirmation=await enrollment.confirm(input,id,prepared.selection_digest);assert.equal(confirmation.state,'activate_pending');assert.equal(confirmation.connected,false);
-  assert.equal((await enrollment.confirm(input,id,prepared.selection_digest)).state,'activate_pending');
+  assert.equal((await api()).selection.canConfirm,true);
+  assert.equal((await request('POST',endpoint+'/'+id+'/confirmation'+query,{selectionDigest:[prepared.selection_digest]})).status,400);
+  assert.equal((await request('POST',endpoint+'/'+id+'/confirmation'+query,{selectionDigest:'0'.repeat(64)})).status,409);
+  if(process.env.META_ENROLLMENT_RUNTIME_CASE==='session_changed'){
+    await models.AuthSession.update({state:'revoked'},{where:{user_id:91002}});await mfa();
+    assert.equal((await api()).selection.canConfirm,false);assert.equal((await api()).selection.canCancel,true);
+    assert.equal((await request('POST',endpoint+'/'+id+'/confirmation'+query,{selectionDigest:prepared.selection_digest})).status,403);
+    enabled=false;await api('DELETE','/'+id);await models.AuthSession.update({state:'revoked'},{where:{user_id:91002}});
+    assert.equal((await run()).failed,0);assert.equal((await service.run()).failed,0);assert.equal((await latest()).state,'revoked');
+    assert.equal(commands.filter(v=>v.operation===C.E.OPERATIONS.activate).length,0);assert.equal(await models.ClinicMetaAsset.count(),0);
+    report.checks.push('New MFA session can read and withdraw, but cannot confirm the original prepared selection; no activate or mappings, withdrawal finishes with gate closed after logout');return;
+  }
+  const confirmation=await api('POST','/'+id+'/confirmation',{selectionDigest:prepared.selection_digest});assert.equal(confirmation.state,'activate_pending');assert.equal(confirmation.connected,false);
+  assert.equal((await api('POST','/'+id+'/confirmation',{selectionDigest:prepared.selection_digest})).state,'activate_pending');
   const events=async()=>models.PlatformAuditEvent.findAll({attributes:['body','result_part'],raw:true}).then(v=>v.map(r=>({...JSON.parse(r.body),part:r.result_part})).filter(v=>v.version===24));
   assert.deepEqual((await events()).map(v=>v.part).sort(),[1,2,3]);
   report.checks.push('Actual reserve/prepare/human confirmation with SQL session and broker HTTPS; durable send marker, three distinct human phases, no clinical grants before remote activation');
@@ -59,7 +87,7 @@ module.exports=async({models,sql,sessions,service,callback,token,now,report,wire
     assert.equal((await run()).failed,1);beforeWire=null;afterWire=null;advance(130000);
     if(mode==='uncertain'){
       assert.equal((await run()).failed,0);assert.equal((await latest()).state,'activate_pending');assert.equal((await latest()).last_error,'meta_enrollment_activation_uncertain');
-      assert.equal(commands.filter(v=>v.operation===C.E.OPERATIONS.activate).length,1);await enrollment.cancel(input,id);
+      assert.equal(commands.filter(v=>v.operation===C.E.OPERATIONS.activate).length,1);await api('DELETE','/'+id);
     }else assert.equal((await latest()).state,'revoke_pending');
     assert.equal(await models.ClinicMetaAsset.count(),mode==='wa_grant'?1:0);assert.equal(await models.MetaConnectionAssignment.count(),0);
     if(mode==='wa_grant'){const wa=await models.ClinicMetaAsset.findOne({where:{assetType:'whatsapp_phone_number'}});assert.equal(wa.isActive,true);assert.equal(wa.waAccessToken,'FICTITIOUS_SHARED_WA_CREDENTIAL');}
@@ -108,7 +136,8 @@ module.exports=async({models,sql,sessions,service,callback,token,now,report,wire
   assert.equal((await read()).id,'act_301');
   report.checks.push('Actual signed CRM asset read after final commit; new MFA session preserves confirmed connection, but added group member, sibling block, foreign share and missing IG parent claim deny the whole selection before broker access');
 
-  enabled=false;const cancelled=await enrollment.cancel(await inputFor(),id);assert.equal(cancelled.state,'revoke_pending');assert.equal(cancelled.connected,false);
+  enabled=false;const overview=await api();assert.equal(overview.enabled,false);assert.equal(overview.selection.connected,true);assert.equal(overview.selection.canCancel,true);
+  const cancelled=await api('DELETE','/'+id);assert.equal(cancelled.state,'revoke_pending');assert.equal(cancelled.connected,false);
   assert.equal(await models.ClinicMetaAsset.count({where:{isActive:true}}),0);assert.equal(await models.MetaConnectionAssignment.count(),1);
   await models.AuthSession.update({state:'revoked'},{where:{user_id:91002}});advance(1);const withdrawn=await run();assert.equal(withdrawn.failed,0,JSON.stringify(withdrawn));assert.equal((await latest()).state,'revoked');
   assert.equal((await models.MetaMarketingOAuthRequest.findByPk(flow.requestId)).state,'cancel_pending');assert.equal((await service.run()).failed,0);assert.equal((await models.MetaMarketingOAuthRequest.findByPk(flow.requestId)).state,'cancelled');

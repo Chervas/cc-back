@@ -397,6 +397,7 @@ class MetaSyncJobs {
       businessProfileRevocations: 'Confirma revocaciones de accesos a fichas Google ya solicitadas; no consulta al proveedor ni envía mensajes.',
       metaMarketingRevocations: 'Confirma bloqueos Meta Ads/páginas/Instagram ya solicitados; no llama al proveedor ni afecta WhatsApp.',
       metaMarketingOAuth: 'Concilia candidatos OAuth Meta y cancelaciones aceptadas, sin recanjear códigos ni activar activos.',
+      metaMarketingEnrollment: 'Concilia selecciones Meta confirmadas y retiradas mediante su diario, sin reactivar campañas ni repetir activaciones inciertas.',
       googleAdsRevocations: 'Confirma bloqueos Ads solicitados mediante el broker; no llama a Google ni modifica campañas.',
       googlePropertyRevocations: 'Confirma bloqueos SC/GA ya solicitados mediante el broker; no llama a Google ni envía conversiones.',
       googleOAuthReconciliation: 'Concilia reautorizaciones Google solicitadas y confirma su activación mediante el broker.',
@@ -452,6 +453,7 @@ class MetaSyncJobs {
         businessProfileRevocations: '* * * * *',
         metaMarketingRevocations: '* * * * *',
         metaMarketingOAuth: '* * * * *',
+        metaMarketingEnrollment: '* * * * *',
         googleAdsRevocations: '* * * * *',
         googlePropertyRevocations: '* * * * *',
         googleOAuthReconciliation: '* * * * *',
@@ -4422,6 +4424,9 @@ try {
   }
   async executeMetaMarketingOAuth() {
     return require('../services/metaMarketingOAuth.service').run();
+  }
+  async executeMetaMarketingEnrollment() {
+    return require('../services/metaMarketingEnrollment.service').run();
   }
   async executeGoogleAdsRevocations() {
     return require('../services/googleAdsRevocation.service').run();

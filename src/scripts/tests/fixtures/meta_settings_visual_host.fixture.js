@@ -57,5 +57,7 @@ provideTransloco({config:{availableLangs:['es'],defaultLang:'es',reRenderOnLangC
   app.use('/assets',require('express').static(path.join(front,'src/assets')));app.get('/favicon.ico',(_req,res)=>res.sendStatus(204));
   app.get('/',(_req,res)=>res.type('html').send('<!doctype html><html lang="es"><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body class="light theme-default"><qa-root></qa-root><script>window.QA_TOKEN='+JSON.stringify(token())+';</script><script src="/fixture.js"></script></body></html>'));
   // Unrelated providers have no real credentials or external calls in this harness.
+  // Enrollment suites mount the actual controller before this explicit fallback.
+  app.get('/oauth/meta/marketing/enrollment',(_req,res)=>res.json({enabled:false,canSelect:false,selection:null}));
   app.get('*',(req,res)=>res.json(req.path.includes('/phones')?{phones:[]}:req.path.includes('bootstrap')?{meta_ads:{connected:false}}:{connected:false,authorizations:[],groups:[],clinics:[],mappings:[]}));
 };

@@ -6,7 +6,7 @@ const C=require('../../services/metaMarketingOAuth.contract');
 test('Mounted OAuth router preserves authentication and uses the same configured origin for successful and rejected callbacks',async t=>{
   const previous=process.env.FRONTEND_URL;process.env.FRONTEND_URL='https://dev.example.invalid/configured/path';
   t.after(()=>{if(previous===undefined)delete process.env.FRONTEND_URL;else process.env.FRONTEND_URL=previous;});
-  const id=randomUUID(),sessionRef=randomUUID();let callbacks=0,statuses=0;
+  const id=randomUUID(),sessionRef=randomUUID();let callbacks=0,statuses=0,enrollmentReads=0;
   const sessions={bearer:v=>{if(v!=='Bearer FICTITIOUS_JWT')throw Object.assign(Error(),{name:'JsonWebTokenError'});return 'FICTITIOUS_JWT';},
     verify:async v=>{if(v!=='FICTITIOUS_JWT')throw Object.assign(Error(),{name:'JsonWebTokenError'});return {userId:91002,sessionVersion:1,jti:sessionRef,exp:Math.floor(Date.now()/1000)+600};}};
   const service={callback:async({state})=>{callbacks++;if(state!=='FICTITIOUS_STATE')throw Error('FICTITIOUS_PRIVATE_ERROR');return {requestId:id,returnOrigin:C.frontendOrigin()};},
@@ -16,7 +16,9 @@ test('Mounted OAuth router preserves authentication and uses the same configured
     '../services/accessSession.service':sessions,'./metaMarketingOAuth.routes':{createRouter:options=>{
       assert.equal(options.returnOrigin,undefined,'Legacy hardcoded frontend origin must not override the configured OAuth origin');
       return require('../../routes/metaMarketingOAuth.routes').createRouter({...options,service});
-    }}});
+    }},'./metaMarketingEnrollment.routes':{createRouter:options=>require('../../routes/metaMarketingEnrollment.routes').createRouter({...options,service:{overview:async input=>{
+      enrollmentReads++;assert.equal(input.scopeKey,'group:5');return {enabled:false,canSelect:false,selection:null};
+    }}})}});
   const app=express();app.use('/oauth',router);const server=http.createServer(app);await new Promise(r=>server.listen(0,'127.0.0.1',r));
   const agent=new http.Agent({keepAlive:false});agent.createConnection=connectionForTestServer(server);
   t.after(()=>new Promise(r=>{agent.destroy();server.close(r);server.closeAllConnections();}));
@@ -27,6 +29,9 @@ test('Mounted OAuth router preserves authentication and uses the same configured
   });
   const endpoint='/meta/marketing/authorization?assignment_scope=group&group_id=5';
   assert.equal((await request(endpoint)).status,401);assert.equal(statuses,0);assert.equal((await request(endpoint,true)).status,200);assert.equal(statuses,1);
+  const enrollmentEndpoint='/meta/marketing/enrollment?assignment_scope=group&group_id=5';
+  assert.equal((await request(enrollmentEndpoint)).status,401);assert.equal(enrollmentReads,0);
+  const selection=await request(enrollmentEndpoint,true);assert.equal(selection.status,200);assert.match(selection.headers['cache-control'],/no-store/);assert.equal(enrollmentReads,1);
   const good=await request('/meta/marketing/callback?state=FICTITIOUS_STATE&code=FICTITIOUS_CODE');
   assert.equal(good.status,303);assert.equal(good.headers.location,'https://dev.example.invalid/pages/settings?meta_authorization='+id);
   assert.match(good.headers['cache-control'],/no-store/);assert.equal(good.headers['referrer-policy'],'no-referrer');

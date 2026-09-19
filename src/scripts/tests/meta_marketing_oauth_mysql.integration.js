@@ -142,7 +142,7 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
       if(!discovery)throw Error('Discovery fixture required for enrollment authority');
       await mfa();
       let offset=0;clock=new Date();const tick=setInterval(()=>{clock=new Date(Date.now()+offset);},20);
-      try{await require(enrollmentRuntime?'./fixtures/meta_enrollment_runtime.fixture':'./fixtures/meta_enrollment_authority.fixture')({models,sql,sessions,service,begin,callback,cancel,latest,token:()=>token,now:()=>clock,
+      try{await require(enrollmentRuntime?'./fixtures/meta_enrollment_runtime.fixture':'./fixtures/meta_enrollment_authority.fixture')({models,sql,sessions,service,begin,callback,request,cancel,latest,token:()=>token,now:()=>clock,
         report,app,server,base,auditView,visualHostMounted:false,wire,f,mfa,advance:ms=>{offset+=ms;clock=new Date(Date.now()+offset);},
         restart:async()=>{await brokerApp.close();brokerApp=null;await start();}});}finally{clearInterval(tick);}
     }

@@ -32,7 +32,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 51, 'the canonical scheduler retains existing jobs and the gated AWS cost/audit/session/revocation/OAuth/enrollment jobs');
+  assert.equal(definitions.length, 52, 'the canonical scheduler retains existing jobs and the gated AWS cost/audit/session/revocation/OAuth/enrollment jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
@@ -1428,6 +1428,7 @@ async function testPlatformAuditJobsRespectGates() {
       ['businessProfileRevocations', 'business_profile_broker_revocations', 'GOOGLE_BUSINESS_PROFILE_REVOCATION_WORKER_ENABLED', '../../services/businessProfileRevocation.service', 'executeBusinessProfileRevocations', '* * * * *'],
       ['metaMarketingRevocations', 'meta_marketing_broker_revocations', 'META_MARKETING_REVOCATION_WORKER_ENABLED', '../../services/metaMarketingRevocation.service', 'executeMetaMarketingRevocations', '* * * * *'],
       ['metaMarketingOAuth', 'meta_marketing_oauth_reconciliation', 'META_MARKETING_OAUTH_WORKER_ENABLED', '../../services/metaMarketingOAuth.service', 'executeMetaMarketingOAuth', '* * * * *'],
+      ['metaMarketingEnrollment', 'meta_marketing_enrollment_reconciliation', 'META_MARKETING_ENROLLMENT_WORKER_ENABLED', '../../services/metaMarketingEnrollment.service', 'executeMetaMarketingEnrollment', '* * * * *'],
       ['googleAdsRevocations', 'google_ads_broker_revocations', 'GOOGLE_ADS_REVOCATION_WORKER_ENABLED', '../../services/googleAdsRevocation.service', 'executeGoogleAdsRevocations', '* * * * *'],
       ['googlePropertyRevocations', 'google_property_broker_revocations', 'GOOGLE_PROPERTY_REVOCATION_WORKER_ENABLED', '../../services/googlePropertyRevocation.service', 'executeGooglePropertyRevocations', '* * * * *'],
       ['platformAuditDelivery', 'platform_audit_delivery', 'PLATFORM_AUDIT_DELIVERY_ENABLED', '../../services/platformAudit.delivery', 'executePlatformAuditDelivery', '* * * * *'],

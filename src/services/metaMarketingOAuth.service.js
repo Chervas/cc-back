@@ -227,5 +227,5 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   return service;
 }
 let singleton;const instance=()=>singleton||=createService({models:require('../../models'),sessions:require('./accessSession.service'),client:require('./metaMarketingOAuthClient.service').createClient(),returnOrigin:C.frontendOrigin()});
-module.exports={createService,safe,...Object.fromEntries(['status','begin','callback','cancel','reconcile','assets'].map(k=>[k,(...args)=>instance()[k](...args)])),
+module.exports={createService,safe,...Object.fromEntries(['status','begin','callback','cancel','reconcile','assets','cancelAfterEnrollment'].map(k=>[k,(...args)=>instance()[k](...args)])),
   run:()=>process.env.RUNTIME_ROLE==='gateway'?Promise.resolve({status:'completed',skipped:true,reason:'gateway_runtime'}):process.env.META_MARKETING_OAUTH_WORKER_ENABLED==='true'?instance().run():Promise.resolve({status:'completed',skipped:true,reason:'meta_oauth_worker_disabled'})};

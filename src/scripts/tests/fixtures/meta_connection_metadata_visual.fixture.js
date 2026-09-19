@@ -59,7 +59,7 @@ module.exports=async({app,server,report,token,reads,models,gates})=>{
     assert(await page.$('[data-qa="meta-mapping-unavailable"]'));assert.equal(await page.$('mat-stepper'),null);
     await page.evaluate(()=>window.QA_COMPONENT.mapping.connectMeta());await page.screenshot({path:path.join(output,'selector-paused.png')});shots.push('selector-paused');
     const paused=await page.evaluate(()=>{try{window.QA_ACCOUNT_STEP({connected:true,reason:'meta_security_quarantine'});return null;}catch(e){return window.QA_WORKSPACE_MESSAGE(e);}});assert.match(paused,/Meta Ads está en pausa/);
-    assert(metaCalls.every(p=>/^\/(api\/)?oauth\/meta\/(connection-status|mappings|marketing-disconnection|marketing\/authorization)$/.test(p)),JSON.stringify([...new Set(metaCalls)]));
+    assert(metaCalls.every(p=>/^\/(api\/)?oauth\/meta\/(connection-status|mappings|marketing-disconnection|marketing\/(authorization|enrollment))$/.test(p)),JSON.stringify([...new Set(metaCalls)]));
     assert.deepEqual(writes,[]);assert.deepEqual(blocked,[]);assert.deepEqual(errors,[]);
     report.visual={shots,metaRequests:metaCalls.length,errors,writes,blocked,actualComponents:['SettingsConnectedAccountsComponent','AssetMappingComponent'],workspace:'actual decision model; no full workspace rendering'};
   } catch(error) {fs.writeFileSync(path.join(output,'failure.txt'),error.stack);if(browser){const pages=await browser.pages();await pages.at(-1)?.screenshot({path:path.join(output,'failure.png'),fullPage:true});}throw error;

@@ -1337,9 +1337,14 @@ router.use((req, res, next) => {
 // logging provider or SQL details. Authentication above still applies first.
 let adsEnrollmentRoutes;
 let metaMarketingOAuthRoutes;
+let metaMarketingEnrollmentRoutes;
 router.use('/meta/marketing', (req, res, next) => {
     metaMarketingOAuthRoutes ||= require('./metaMarketingOAuth.routes').createRouter({ sessions: accessSessions });
     return metaMarketingOAuthRoutes(req, res, next);
+});
+router.use('/meta/marketing', (req, res, next) => {
+    metaMarketingEnrollmentRoutes ||= require('./metaMarketingEnrollment.routes').createRouter({ sessions: accessSessions });
+    return metaMarketingEnrollmentRoutes(req, res, next);
 });
 router.use('/google/ads/enrollment', (req, res, next) => {
     adsEnrollmentRoutes ||= require('./googleAdsEnrollment.routes').createRouter({

@@ -233,7 +233,8 @@ sin clave ordinaria; la allowlist y configuración inválida fallan antes de la 
 No usa tablas, claves o proveedores operativos. Evidencia y conteos finales en99.
 
 Este corte estructural precede a la autoridad, escritor y worker descritos después.
-El esquema/cliente por sí solo no autoriza una conexión. Aún sin rutas ni despliegue.
+El esquema/cliente por sí solo no autoriza una conexión. API/UI preparadas en el
+corte posterior de este runbook; sigue sin despliegue operativo.
 Publicar mediante candidato selectivo cuando estén unidos y probados
 los consumidores y su lector/escritor de auditoría compatible. Preservar el canary
 AWSv19 congelado y registrar por separado su eventual publicación.
@@ -259,7 +260,8 @@ Ningún mapping/grant clínico se crea durante la reserva.
 El gate `META_MARKETING_ENROLLMENT_ENABLED` está apagado por defecto; todavía sin
 rutas, bootstrap ni planificación del worker preparado. No activarlo por disponer
 de esta fuente. Confirmación, escritor y conciliación se detallan a continuación;
-la UI completa y su aceptación siguen pendientes.
+la UI de selección se completa en el corte posterior de este runbook; su
+publicación y aceptación real siguen pendientes.
 Para grupos, conservar una fila canónica por activo/grupo y publicar sus lectores
 compatibles preparados; no expandir a una fila por sede ni cambiar primarias implícitas.
 
@@ -293,14 +295,15 @@ manifiesto de cambios, no un paquete listo para publicar toda la rama DEV.
 
 Factoría `metaMarketingEnrollment.service.js` y escritor
 `metaMarketingEnrollmentBinding.service.js`. Contrato canónico en13, apartado
-«Consumidor Meta: confirmación, asignación y retirada». Sin rutas, singleton o job
-instalado. Los gates de altas y `META_MARKETING_ENROLLMENT_WORKER_ENABLED` siguen
-OFF. Las nuevas migraciones09/10/11 solo se ejecutaron en MySQL temporal.
+«Consumidor Meta: confirmación, asignación y retirada» y «API y pantalla de
+selección Meta». API, singleton, job y UI preparados; no instalados en runtimes
+operativos. Gates de altas y `META_MARKETING_ENROLLMENT_WORKER_ENABLED` siguen
+OFF. Migraciones09/10/11/12 solo ejecutadas en MySQL temporal.
 
 El worker consulta estado antes de mutar y guarda marcas de posible envío. Una
 respuesta perdida recupera el recibo tras reinicio sin repetir activate. Si el
 estado remoto aún no permite saber qué ocurrió, deja pendiente explícito; la
-interfaz futura deberá ofrecer retirada, no un reintento automático ni éxito.
+interfaz ofrece consulta manual y retirada, sin reintento automático ni éxito.
 No existe todavía un comando humano para reintentar con otra UUID. Nunca borrar
 marcas/claims o modificar UUID para forzar ese recorrido.
 
@@ -308,7 +311,8 @@ Lease120 s, diez solicitudes por invocación y plazo de admisión30 s; no es un
 timeout total de la función. `SKIP LOCKED` real, fecha generada de trabajo y rango
 por índice excluyen retiradas/futuras. Las operaciones de red quedan fuera de SQL.
 Preparado revalida a30 s, incertidumbre a60 s, activo a cinco minutos; backoff hasta
-una hora. La planificación y capacidad bajo carga real permanecen pendientes.
+una hora. Job cada minuto preparado; planificación operativa y capacidad bajo
+carga real pendientes.
 
 El commit local exige recibo activo sin bloqueo y autoridad original vigente.
 Grant, mappings canónicos de grupo/clínica, bindings propietarios y evento humano
@@ -330,10 +334,12 @@ control. Auditoría v24 distingue las seis fases, sin guardar inventario ni toke
 muestra la cancelación OAuth confirmada como «Cancelada» y la excluye del contador
 de denegaciones de acceso, conservando el outcome técnico del evento v22.
 
-Publicación futura: DDL Meta04–08 y luego09 propietario,10 marcas,11 índice antes
+Publicación futura: DDL Meta04–08 y luego09 propietario,10 marcas,11 índice de
+trabajo y12 índice de última selección por ámbito antes
 del código; incluso el lector/cancelación OAuth con altas OFF necesitan ese
 esquema. Publicar AWS compatible v24 antes del productor. Incluir metadatos de grupo
-y UI de Ajustes preparados; completar API/UI/job de selección; no publicar toda la rama DEV. Las migraciones09/10 rechazan
+y API/UI/job de selección preparados; elegir dueño de ejecución sin activar jobs
+clínicos DEV. No publicar toda la rama DEV. Las migraciones09/10 rechazan
 inversa con propiedad/marcas pobladas. La11 solo se retira después de detener o
 sustituir consumidores que consulten su columna; no elimina diario ni histórico.
 Mantener guard de propiedad mientras existan bindings nuevos. Preservar lectores,
@@ -352,7 +358,8 @@ No compartir la BD/slot de pruebas ni relajar cuotas. Regresiones de autoridad,
 diario, lector y OAuth se ejecutan por separado. MySQL8/TLS/SQLite/cliente CRM y
 componentes Angular reales; Graph/Secrets/S3 ficticios, sin login público nuevo.
 La prueba visual muestra confirmación pendiente, conexión y retirada en Actividad;
-no sustituye el recorrido pendiente de selección desde Cuentas conectadas.
+la prueba `selection_ui` recorre también selección/confirmación/retirada desde
+Cuentas conectadas. Ambas usan proveedores ficticios y no acreditan aceptación real.
 
 Evidencia privada `qa-evidence/security-resume-20260917/meta-enrollment-runtime-20260919/`;
 conteos y límites en39/99. Manifiesto nuevo
@@ -360,3 +367,40 @@ conteos y límites en39/99. Manifiesto nuevo
 conservan las huellas históricas de sus cortes. Coste incremental real null, sin
 cambiar la última recogida etiquetada real. La fase sigue pendiente de aceptación
 con proveedor y titular; no activa campañas, leads, envíos ni jobs clínicos DEV.
+
+
+## API/job y selección desde Ajustes — 19/09/2026
+
+Contrato y endpoints cerrados en13; gate/configuración03 y JobRequests11. El GET
+recupera solo la última selección con índice12 y revalida sesión/MFA y permiso
+de todo el ámbito. Si una conexión activa pierde coherencia, muestra revisión
+sin afirmar acceso, conservando retirada autorizada. No hay llamadas Meta al
+abrir/refrescar el estado. Confirmación exige sesión original, digest y altas ON;
+retirada exige sesión actual autorizada y funciona con altas OFF. Una sesión nueva
+no hereda capacidad de confirmar la preparación anterior.
+
+UI ES/CAT/EN: checkbox para activos sin conflictos, preparación, confirmación y
+retirada con revisión de alcance. Solo actualización manual; cambios de sesión o
+ámbito descartan estado y callbacks antiguos. Una asignación sin nombre/correo Meta
+mantiene visible la tarjeta de activos. Sin nombres inventados ni primaria nueva.
+
+Prueba del recorrido humano preparado:
+
+```sh
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 META_OAUTH_DISCOVERY_TEST=1 META_ENROLLMENT_RUNTIME_TEST=1 META_ENROLLMENT_RUNTIME_CASE=selection_ui node src/scripts/tests/meta_marketing_oauth_mysql.integration.js
+```
+
+`session_changed` prueba negativa de confirmación con nuevo MFA y retirada posterior.
+`query_health` comprueba también el índice12 entre11.000 solicitudes históricas/futuras.
+No compartir runtime entre casos ni borrar cuotas/claims. La interfaz usa componentes
+producto sin modificar, HTTP y SQL reales aislados, TLS/broker con Graph/Secrets/S3
+ficticios. El worker se invoca directamente: no acredita ejecución de cron desplegado.
+Prueba del catálogo incluye gate, namespace y delegación al ejecutor; gateway omite.
+
+Para publicar, preparar candidato selectivo desde el inventario
+`meta-marketing-enrollment-ui-consumers.json` y dependencias anteriores. Instalar
+DDL04–12 y compatibilidad AWS v24 antes del productor; el servicio AWS actual sigue
+en v19. Mantener controles y lectores compatibles al cerrar altas. No revertir
+propiedad/marcas/diarios ni quitar índice12 bajo la API activa; ninguna recuperación
+restaura credenciales SQL o reproduce activación incierta. Evidencia privada en
+`qa-evidence/security-resume-20260917/meta-enrollment-ui-20260919/`, costes39 y corte99.

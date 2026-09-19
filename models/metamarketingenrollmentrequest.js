@@ -14,5 +14,6 @@ module.exports=(sequelize,D)=>{
   fields.attempts={type:D.INTEGER.UNSIGNED,allowNull:false,defaultValue:0};
   fields.state={type:D.ENUM('prepare_pending','prepared','activate_pending','active','revoke_pending','revoked'),allowNull:false};
   return sequelize.define('MetaMarketingEnrollmentRequest',fields,{tableName:'MetaMarketingEnrollmentRequests',timestamps:false,charset:'ascii',collate:'ascii_bin',indexes:[
-    {name:'cc_meta_enroll_delivery',fields:['state','next_attempt_at','lease_until']},{name:'cc_meta_enroll_scope',fields:['scope_key','state']},{name:'cc_meta_enroll_subject',fields:['meta_user_id']}]});
+    {name:'cc_meta_enroll_delivery',fields:['state','next_attempt_at','lease_until']},{name:'cc_meta_enroll_scope',fields:['scope_key','state']},
+    {name:'cc_meta_enroll_latest',fields:['scope_key','requested_at','enrollment_id']},{name:'cc_meta_enroll_subject',fields:['meta_user_id']}]});
 };

@@ -11398,9 +11398,10 @@ planificación, UI y pruebas completas; este contrato no acredita aceptación op
 ### Consumidor Meta: confirmación, asignación y retirada (preparado, 19/09/2026)
 
 `metaMarketingEnrollment.service.js` implementa reserva, estado, confirmación,
-cancelación y ejecución con leases. Es una factoría probada, todavía sin singleton,
-rutas públicas, planificación ni pantalla de selección. Ambos gates de altas y
-worker están apagados por defecto. No se aplicaron sus DDL a bases operativas.
+cancelación y ejecución con leases. Incluye singleton, API autenticada, catálogo
+de JobRequests y pantalla de selección en Ajustes, probados en aislamiento. Ambos
+gates de altas y worker están apagados por defecto; ni el job ni las DDL están
+instalados en runtimes operativos.
 
 La confirmación exige la sesión/MFA original, permiso vigente sobre todas las
 clínicas y el digest de la selección preparada. El worker usa transacciones cortas,
@@ -11447,6 +11448,9 @@ DDL aditivas, posteriores a las de Meta 04–08:
 - `20260919110000-meta-marketing-enrollment-due-index.js`: fecha de trabajo generada,
   null para retiradas, e índice `(delivery_due_at,enrollment_id)`. El ORM no escribe
   esa columna; la consulta toma solo el rango vencido y evita ordenar el histórico.
+- `20260919120000-meta-marketing-enrollment-scope-latest.js`: índice
+  `(scope_key,requested_at,enrollment_id)` para recuperar la última selección
+  del ámbito, con orden descendente por fecha/UUID y límite uno.
 
 Instalar el esquema antes de cargar estos consumidores, incluso con altas OFF:
 el lector incluye la columna de propietario y cancelar OAuth consulta el diario.
@@ -11458,10 +11462,48 @@ Ejecución acotada a diez solicitudes por invocación, con plazo de admisión 30
 una operación ya iniciada puede prolongarlo. Una sola ejecución local, leases SQL
 entre procesos, controles de permisos antes/después del I/O y backoff hasta una
 hora. Preparado espera 30 s; activo se comprueba cada cinco minutos; incertidumbre
-de envío consulta a los 60 s. Estos son intervalos del diario, no un job ya instalado
-ni una garantía de recursos/latencia. Cifras y límites en39; pruebas y recuperación
-en el runbook Meta y99. Pendientes API/UI de selección, planificación,
-compatibilidad AWS v24 y aceptación con proveedor/titular reales.
+de envío consulta a los 60 s. Son intervalos del diario; el job preparado corre
+cada minuto y no garantiza esa cadencia ni reserva recursos/latencia. Cifras y
+límites en39; pruebas y recuperación en el runbook Meta y99. Pendientes publicación
+selectiva, dueño de ejecución, capacidad real, compatibilidad AWS v24 y aceptación
+con proveedor/titular reales.
+
+### API y pantalla de selección Meta (preparadas, 19/09/2026)
+
+Bajo `/oauth/meta/marketing`, detrás del middleware de acceso gestionado:
+
+| Método/ruta | Contrato |
+|---|---|
+| `GET /enrollment` | Estado local de la última selección del ámbito, habilitación, posibilidad de seleccionar/confirmar/retirar. No llama al proveedor. |
+| `POST /enrollment` | Cuerpo cerrado `{flowId,assetRefs}`: 1–100 referencias tipadas únicas; reserva e inventario revalidados en backend. |
+| `POST /enrollment/:id/confirmation` | Cuerpo cerrado `{selectionDigest}`. Solo la sesión/MFA original puede confirmar, con altas habilitadas. |
+| `DELETE /enrollment/:id` | Cuerpo vacío; sesión/MFA actual y permisos sobre todo el ámbito. No exige mantener la sesión original ni altas abiertas. |
+
+Query canónica `assignment_scope` y exactamente `clinic_id` o `group_id`; sin
+pivotes ambiguos, campos extra ni credenciales. Respuestas privadas/no-store;
+fallos saneados. No hay endpoint humano que ejecute el worker. Lectura y retirada
+revalidan sesión y ACL en SQL; una asignación activa que pierde coherencia muestra
+revisión necesaria sin afirmar acceso. La retirada autorizada sigue disponible.
+
+Ajustes ofrece checkboxes solo para activos sin conflictos, preparación y
+confirmación separadas, cantidades/IDs y actualización manual. No hace polling HTTP
+ni repite mutaciones automáticamente. Cambiar ámbito/sesión descarta estado; los
+callbacks comprueban generación, URL y sesión. La retirada muestra primero su
+alcance y exige una segunda acción. Si existe selección del candidato, usa ese
+control en lugar del botón genérico de cancelar OAuth. El estado de selección
+permanece accesible con nuevas altas OFF y desde una sesión nueva. Confirmar
+requiere la original. Las tarjetas de activos se muestran aunque Meta no devuelva
+nombre o correo del titular; esos datos son opcionales.
+
+`metaMarketingEnrollment` programa `meta_marketing_enrollment_reconciliation`,
+`executeMetaMarketingEnrollment`, cada minuto/high/maxAttempts1 y gate
+`META_MARKETING_ENROLLMENT_WORKER_ENABLED`. JobRequests programa; el diario SQL
+conserva progreso, leases y reintentos. Gateway omite ejecución. No se incluye en
+los bucles DEV operativos ni autoriza reactivar su scheduler clínico. Publicar
+lectores/escritores AWS v24 antes de productores; instalar DDL04–12 antes del
+código y promover API/UI/dependencias como candidato selectivo. Un push no instala
+ni activa esta función. Prueba integrada en Chromium/HTTP/MySQL/TLS con Meta y
+entrega MFA ficticios; no sustituye aceptación pública con titular/proveedor.
 
 ### Compatibilidad de auditoría AWS v19 publicada (19/09/2026)
 
