@@ -368,3 +368,30 @@ Probe independiente del servicio vigente a las 00:08 UTC: 25/25 recibos verifica
 en ~471 ms; TLS válido y rechazo sin firma 400 en ambos roles. No acredita código
 v19, capacidad o aceptación humana. SSO expirado, sin desafío/SSM activos. Fuente
 operativa: `qa-evidence/security-resume-20260917/audit-v19-preparation/README.md`.
+
+## Publicación v19 verificada — 19/09/2026, 08:08 UTC
+
+Esta publicación sustituye el estado pendiente de las secciones de preparación
+anteriores. Sesión SSO/STS válida; fuentes vivas de ambos roles contrastadas antes
+de instalar. Cinco fuentes de `d73c5631` sobre sus propias bases v17, archivo
+SHA256 `4eac55669791511e3fb39fec50a057517595ada91ed716b5b23e0be4384cbec7`.
+Primero `release-reader-v19-d73c5631`, después `release-writer-v19-d73c5631`;
+configuración/TLS, package/lock, propietarios, diarios e identidades conservados.
+Ambos activos/running y NRestarts=0. No cambios IAM, DDL ni release clínica.
+
+Guard remoto y marcador local exclusivos antes de entregar una sola vez los
+seis eventos originales (dos v18, cuatro v19; 5.587 bytes). Recibos conciliados;
+GET con el rol lector contrasta VersionId, cuerpo exacto, digest y KMS de los seis
+objetos del bucket de auditoría existente. COUNT por sus UUID confirma cero filas
+en el índice operativo. No se simuló una sesión pública para esta entrega.
+Control ordinario posterior:25/25 recibos, ~318 ms y SQL~19 ms; TLS verificado,
+solicitudes sin firma rechazadas. No equivale a capacidad ni aceptación Google.
+
+**Recuperación:** no bajar lector a v17 tras esta entrega. Mantener los originales,
+marcadores y seis recibos; ante incertidumbre conciliar sus referencias, sin
+regenerar UUID, borrar el guard ni ejecutar otra vez la escritura. Cualquier corte
+futuro debe conservar compatibilidad v1–v19 y las fuentes propias de cada rol.
+Los productores Meta v20–v24 siguen apagados hasta su publicación compatible.
+Evidencia privada `qa-evidence/security-resume-20260917/audit-v19-preparation/`:
+`publication-result.json`, `deployed-aws.json`, resultados SSM, conciliación y
+verificación S3. Madurez19, costes39 y bitácora99 actualizados con este alcance.

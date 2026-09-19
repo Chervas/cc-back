@@ -3,7 +3,8 @@
 Preparado sobre backend `3f5d61f5`, 19/09/2026. No desplegado ni aceptado con
 proveedor real. Contrato canónico en
 [13-backend](../../src/Documentacion/13-backend.md#selección-y-activación-meta-dentro-del-broker-preparado-19092026).
-Este núcleo todavía necesita el consumidor SQL/API/UI de selección de CRM.
+Este núcleo todavía necesita completar el consumidor SQL/API/UI de selección de CRM.
+La reserva clínica y su evento humano v24 están preparados; alcance vigente al final.
 El inventario CRM ya incorpora una revisión local orientativa, descrita al final;
 no es ese escritor ni una reserva de activos.
 
@@ -237,3 +238,54 @@ No hay routes/gates nuevos ni despliegue; este esquema/cliente por sí solo no a
 una conexión. Publicar mediante candidato selectivo cuando estén unidos y probados
 los consumidores y su lector/escritor de auditoría compatible. Preservar el canary
 AWSv19 congelado y registrar por separado su eventual publicación.
+
+## Reserva clínica y actividad v24 preparadas — 19/09/2026
+
+`metaMarketingEnrollmentAuthority.service.js` admite selección de IDs tipados,
+nunca inventario o identidades aportados por el navegador. Consulta `oauth.assets`
+autenticado y después bloquea/revalida flujo, sesión/MFA, ACL de todas las clínicas,
+slot/candidato, asignaciones y bloqueos. Reserva sujeto y activos físicos, incluida
+página de IG, con las tres tablas del diario. Aliases inactivos, vínculo ajeno o
+baja independiente bloquean el alta. Identidad compartida legacy requiere revisión:
+no se transforma, vacía su token ni se altera WhatsApp.
+
+Una transacción conserva solicitud, claims y evento humano. Un fallo de auditoría
+revierte también una identidad externa nueva. Dos selecciones idénticas simultáneas
+convergen en una solicitud/evento; el conjunto no se reemplaza. `assertPending`
+revalida la sesión original, ámbito completo, identidad, política y claims. El futuro
+worker debe bloquear la solicitud y poseer su lease antes de usarla. Cancelar OAuth
+invalida la autoridad y conserva reservas; falta encolar/conciliar esa retirada en
+el nuevo diario. Ningún mapping/grant clínico se crea en esta fase.
+
+El gate `META_MARKETING_ENROLLMENT_ENABLED` está apagado por defecto; todavía sin
+rutas, bootstrap o worker del consumidor. No activarlo ni aplicar DDL operativa.
+Faltan confirmación humana, escritor final atómico (también primarias/shares),
+conciliación tras ACK perdido/commit fallido, retirada independiente y UI completa.
+Para grupos, conservar una fila canónica por activo/grupo y adaptar sus lectores
+antes de publicar; no expandir a una fila por sede ni cambiar primarias implícitas.
+
+El codec v24 tiene fases durables separadas y `result_part` por fase. El visor
+muestra pendientes con etiqueta explícita y cantidades/IDs técnicos, sin tokens
+ni inventario. La reserva verificada desde SQL atraviesa lector/escritor y S3
+ficticio antes de mostrarse en Angular real. Compatibilidad AWS actual **v19**;
+publicar v24 compatible antes del productor, manteniendo los seis canarios v19
+ya entregados y sus guards. No repetirlos ni volver a lector v17.
+
+Prueba de autoridad independiente, desde backend y Node24:
+
+```sh
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 META_OAUTH_DISCOVERY_TEST=1 META_OAUTH_CRM_VISUAL=1 META_ENROLLMENT_AUTHORITY_TEST=1 node src/scripts/tests/meta_marketing_oauth_mysql.integration.js
+```
+
+El flag selecciona esa suite con BD/runtime nuevos. Ejecutar la regresión OAuth
+anterior por separado, sin ese flag: no sumar ambas al mismo slot excediendo sus
+seis altas/hora. No limpiar cuotas ni reintentar una mutación rechazada para QA.
+Siete grupos autoridad y dos capturas; regresión ocho grupos/trece capturas.
+Protocolos94/94, contrato frontend8/8 y build Angular completo. Proveedores
+ficticios, sin login público ni aceptación real. Cifras de carga y límites en39;
+evidencia `qa-evidence/security-resume-20260917/meta-enrollment-authority-20260919/`.
+
+Recuperación: conservar gates cerrados y releases actuales; este corte está solo
+en fuente DEV. No bajar tablas con datos ni borrar claims/identidades/bajas.
+Inventario de fuentes `meta-marketing-enrollment-authority-consumers.json`; es un
+manifiesto de cambios, no un paquete listo para publicar toda la rama DEV.

@@ -11340,3 +11340,50 @@ disponible. Conserva TLS verificado, firmas Ed25519, presupuesto temporal y UUID
 del comando. No reenvía una activación al perder la respuesta: el consumidor debe
 conciliarla mediante status. Este adaptador no acredita todavía la escritura
 clínica, la auditoría humana ni el recorrido completo de selección.
+
+### Reserva clínica de selección Meta y registro de actividad (preparada, 19/09/2026)
+
+La selección manual vuelve a consultar el inventario por el consumidor OAuth
+autenticado. Antes de reservar, una transacción verifica sesión/MFA original,
+permisos de todas las clínicas, slot/candidato vigente, identidad externa única,
+asignaciones efectivas y bloqueos. Reserva sujeto, activos y padres de Instagram
+con exclusión SQL; guarda solicitud y evento humano v24 en la misma transacción.
+Un fallo de auditoría revierte también identidad nueva y reservas. Una identidad
+legacy compartida nunca se convierte ni se vacía; requiere migración revisada.
+
+La reserva aún no crea mappings o grants clínicos. El worker deberá repetir estas
+comprobaciones antes/después del broker y el escritor final comprobar también las
+primarias/shares de los IDs asignados. Para grupos se prevé una fila canónica por
+activo en el grupo, conservando su ámbito completo; adaptar los lectores de
+metadatos a esa representación antes de publicar, sin multiplicar filas por sede
+ni elegir implícitamente una nueva primaria.
+
+La reserva y sus rechazos están probados en MySQL/HTTPS/SQLite aislados, con
+proveedores ficticios; dos solicitudes simultáneas conservan una solicitud,
+tres claims para dos activos y un evento. El componente real de Actividad muestra
+«Selección guardada» y explica que conectar sigue pendiente, en escritorio/móvil.
+El gate `META_MARKETING_ENROLLMENT_ENABLED` es opt-in del servicio todavía sin
+ruta ni worker integrados; no basta habilitarlo para tener un recorrido operativo.
+
+V24 registra transiciones durables separadas: selección registrada, preparada,
+confirmación humana solicitada, activación local confirmada, retirada solicitada
+y confirmada. Cantidades/digests e IDs técnicos, sin nombres de activos ni tokens.
+Publicar lector/escritor compatible antes del productor; conservar el paquete
+v19 congelado. El nuevo consumidor permanece apagado hasta integrar servicio,
+worker, UI y pruebas completas; este contrato no acredita aceptación operativa.
+
+### Compatibilidad de auditoría AWS v19 publicada (19/09/2026)
+
+Lector y escritor ejecutan las candidatas por rol de `d73c5631`, compatibles con
+v1–v19. Se publicó primero el lector, verificando los recibos anteriores entre
+cambios; configuración, TLS, identidades, dependencias y diarios conservados.
+Seis eventos sintéticos congelados se entregaron una sola vez: recibos conciliados
+y VersionId, bytes, SHA256 y KMS contrastados directamente en S3. No se insertaron
+en el índice operativo. El control posterior verifica los 25 recibos consultados.
+
+Tras esa entrega, conservar un lector compatible con v19 incluso en recuperación;
+no volver a v17 ni regenerar/repetir el canario. Esto acredita compatibilidad del
+servicio de auditoría, no aceptación de consumidores Google ni de sus cohortes.
+Los productores Meta v20–v24 aún necesitan una publicación compatible posterior.
+No cambian las releases clínicas, DDL, gates o IAM. Evidencia, recursos/costes y
+recuperación en19/39/99 y `docs/security/audit-reader-view-migration.md`.

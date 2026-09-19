@@ -41,7 +41,7 @@ test('signed v18 reader checks the precise S3 version, body digest and KMS objec
   const {readBatch}=require('../src/reader'),{KEY_ARN}=require('../src/s3');
   const row=pack(fixture('authorize','authorization_withdrawn')),{privateKey}=generateKeyPairSync('ed25519');
   const ref={key:keyFor(row),digest:row.digest,versionId:'fictitious-v18'};
-  assert.throws(()=>refFor({...ref,key:ref.key.replace('/v18/','/v24/')},'confirmed'));
+  assert.throws(()=>refFor({...ref,key:ref.key.replace('/v18/','/v25/')},'confirmed'));
   const input=signRequest({mode:'confirmed',actorId:'1',sessionRef:randomUUID(),refs:[ref]},
     {keyId:'fixture',privateKey:privateKey.export({type:'pkcs8',format:'pem'})}).input;
   for(const wrong of [false,true]){

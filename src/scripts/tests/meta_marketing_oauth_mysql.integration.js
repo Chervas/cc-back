@@ -3,7 +3,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const {execFileSync}=require('node:child_process'),{randomUUID,randomBytes}=require('node:crypto'),{DataTypes:D}=require('sequelize');
 const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fixture');
 withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})=>{
-  const discovery=process.env.META_OAUTH_DISCOVERY_TEST==='1';
+  const discovery=process.env.META_OAUTH_DISCOVERY_TEST==='1',enrollmentAuthority=process.env.META_ENROLLMENT_AUTHORITY_TEST==='1';
   const cleanup=[],{fixture,TOKEN,APP}=require('../../../services/integrations-broker/test/meta-marketing-oauth-fixture.cjs'),f=fixture({after:fn=>cleanup.push(fn)},{discovery});
   const B=require('../../../services/integrations-broker/src/meta-marketing-oauth-contract'),C=require('../../services/metaMarketingOAuth.contract');
   let brokerApp,server,browser,clock=new Date(),queryCount=0;
@@ -61,6 +61,11 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     const cancel=flow=>request('DELETE',endpoint+'/'+flow.requestId+query);
     const latest=id=>Requests.findByPk(id,{raw:true});
     sql.addHook('beforeQuery',()=>queryCount++);
+    // Authority exercises its own authorization in a fresh database/runtime.
+    // Combining it with the OAuth visual suite would exceed the real six new
+    // flows/hour/slot limit. Keep both suites independent; never relax limits
+    // or erase persisted admission history to make a test fit.
+    if(!enrollmentAuthority){
     assert.equal((await request('POST')).status,401);assert.equal(await Requests.count(),0);await mfa();
     await models.UsuarioClinica.update({rol_clinica:'personaldeclinica'},{where:{id_clinica:71}});assert.equal((await request('POST')).status,403);assert.equal(commands,0);
     await models.UsuarioClinica.update({rol_clinica:role},{where:{id_clinica:71}});
@@ -132,6 +137,13 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
       let visualOffset=0;clock=new Date();const tick=setInterval(()=>{clock=new Date(Date.now()+visualOffset);},20);
       try{await require('./fixtures/meta_oauth_crm_visual.fixture')({models,app,server,base,token:()=>token,service,request,begin,callback,cancel,latest,report,auditView,f,
         advance:ms=>{visualOffset+=ms;clock=new Date(Date.now()+visualOffset);}});}finally{clearInterval(tick);}
+    }
+    }else{
+      if(!discovery)throw Error('Discovery fixture required for enrollment authority');
+      await mfa();
+      clock=new Date();const tick=setInterval(()=>{clock=new Date();},20);
+      try{await require('./fixtures/meta_enrollment_authority.fixture')({models,sql,sessions,service,begin,callback,cancel,latest,token:()=>token,now:()=>clock,
+        report,app,server,base,auditView,visualHostMounted:false});}finally{clearInterval(tick);}
     }
     report.commands=commands;report.metaCalls=f.state.httpCalls.length;report.secretCalls=f.state.awsCalls.length;report.queries=queryCount;
     report.pool={inUse:sql.connectionManager.pool.using,waiting:sql.connectionManager.pool.waiting};assert.equal(report.pool.inUse,0);assert.equal(report.pool.waiting,0);

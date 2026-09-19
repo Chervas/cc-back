@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-09-19",
+  "sourceBaseHeads": {
+    "back": "8a814715fb55c173464f7df4720b18bc23efbb51",
+    "front": "c8a9cc23362181842cdbe44eba3d750605b9b26a"
+  },
+  "includesWorkingChanges": true,
+  "scope": "Transactional clinical reservation authority and human audit v24 codec/repository/view. No binding/grant writer, lease worker, routes or selection/confirmation UI. Changed-source inventory, not a deployable full DEV bundle. AWS live audit is v19.",
+  "back": {
+    "services/platform-audit/src/event.js": "01815a809a8842ba65c648b12ebdc2c33a5878a845d8b43395de82c82c007a0d",
+    "services/platform-audit/src/meta-enrollment-event.js": "28d9091454b951290629ca230e79621ec61c8f118fbc397d20a5db7421016799",
+    "services/platform-audit/src/reader-protocol.js": "b765f5cdff7fafc97d523474f9525d1c99865ad7f11dbd7d23e04aa7da810e1c",
+    "services/platform-audit/src/view-contract.js": "7d28802f953571fb3c7953a84772e760b6b2fe6474fa269068dc830f6abaf085",
+    "services/platform-audit/test/google-action-plan.test.js": "55933f5ea6839300d00b29a5b9d7c30c6ed685bfff41e7a5ca806939f9ea4f03",
+    "services/platform-audit/test/google-ads-enrollment.test.js": "636faadca3b4101e84d1bd9224296d74ab41e9352d17b4dc427cecaa2c04b916",
+    "services/platform-audit/test/google-destination.test.js": "8168dfa4a80b8efc78f4f1e8129e0088f04158b4e1b97f994355dface2b0bc75",
+    "services/platform-audit/test/google-receipt-review.test.js": "1b95228f0619b2d39b36b106a66d3a73b58e939b0850d872b552b2876847eb3b",
+    "services/platform-audit/test/meta-access-check.test.js": "6879f409007b0d87cce49d0b5e197aa5485916c177d881678d1ad01ce61b3e41",
+    "services/platform-audit/test/meta-enrollment.test.js": "4645eee1d13ab73313cb80fc965f796d754e68cef603f51784fe8fcc5401c9e6",
+    "services/platform-audit/test/whatsapp-authorization-event.test.js": "84c272c5e03af928156a741b4c10d19392a768aa6d22de3996fad42c53c4203c",
+    "src/scripts/tests/fixtures/meta_enrollment_authority.fixture.js": "2f4c94f5da58f7efeb4c0d799c6e56f8cd26e8497ea809a4d2ed4691e9eb049d",
+    "src/scripts/tests/meta_marketing_oauth_mysql.integration.js": "b9fa4390d4ca86a334aec7e8618674998bf09ef546822deabfb95da7701c993a",
+    "src/services/metaMarketingEnrollmentAuthority.service.js": "472e4915f01aaf7057531dd632c9858240976d14fd08369c9bc57f67ab140e26",
+    "src/services/platformAudit.repository.js": "66e30a3f9e832a90299755cf7a459dfb09c116af683304864077b3684f7da84f",
+    "src/services/platformAudit.view.js": "1ae0c2e4148b4846798ed0fce60cedc4fb613c325b672aeabdc108e6393ecacc"
+  },
+  "front": {
+    "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.html": "4249f367ac2774359af6ac3128530d80f09fe2bb987205468a2822b2c8da4632",
+    "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.component.ts": "cb4ec71224f88cf4bd66a5b0cba28f8bc4569bb2934ebb5b6c21a4ad6b6037cc",
+    "src/app/modules/admin/pages/settings/jobs-monitoring/platform-audit.service.ts": "b65bb5d6ef074cbf98d52e81f7630fb8bdd7ad9766eba7f0261d84322180e5b4"
+  },
+  "qa": {
+    "authorityGroups": 7,
+    "oauthRegressionGroups": 8,
+    "auditTests": 94,
+    "frontendContractTests": 8,
+    "visualScreenshots": 15,
+    "visualInspected": [
+      "desktop-reservation-audit",
+      "mobile-reservation-audit"
+    ],
+    "angularBuild": "ffd352a330875a03",
+    "syntaxFiles": 16,
+    "providerReal": false,
+    "deployed": false
+  },
+  "pending": [
+    "Full transactional binding/assignment writer including group representation, primary and share validation",
+    "Leased worker, status-first recovery, human confirmation and cancellation integration",
+    "Selection/confirmation routes and UI, real provider/titular acceptance",
+    "Selective AWS audit compatibility v24 before production producer; current v19 publication is separate"
+  ],
+  "evidence": "qa-evidence/security-resume-20260917/meta-enrollment-authority-20260919/"
+}
