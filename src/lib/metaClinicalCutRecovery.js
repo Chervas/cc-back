@@ -12,6 +12,9 @@ async function recoverStoppedParticipants({ participants, inspect, start, verify
   for (const participant of participants) {
     const current = await inspect(participant.id);
     if (current.state === 'running' && current.pid === participant.originalPid) {
+      if (participant.originalIdentity && JSON.stringify(current.identity) !== JSON.stringify(participant.originalIdentity)) {
+        throw Error('meta_cut_recovery_process_identity_changed');
+      }
       await verify(participant.id, current);
       actions.push({ id: participant.id, action: 'preserved', pid: current.pid });
       continue;
