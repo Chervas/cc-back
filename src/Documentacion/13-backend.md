@@ -11544,3 +11544,35 @@ release clínica, gates, IAM ni conexiones de proveedor. Este corte acredita
 transporte/compatibilidad AWS; la aceptación con titular, UI pública y carga real
 sigue pendiente. Contrato/recuperación en `docs/security/audit-reader-view-migration.md`,
 estado 19, recursos/costes 39 y evidencia 99.
+
+
+### Candidata acotada del runtime Meta y preflight AWS (19/09/2026, 10:35 UTC)
+
+Preparado un paquete independiente del propietario OAuth/discovery/selección Meta,
+con fuentes de `3135db10`: 63 módulos transitivos y los dos archivos de dependencias.
+El arranque comparte utilidades de `google-main`, por lo que incluye 26 módulos
+Google; solo se invoca `meta-marketing-oauth-main.js`. No inicia consumidores Google
+ni publica toda la rama DEV. Inventario y hashes en
+`docs/security/meta-marketing-runtime-candidate.json`.
+
+Dependencias instaladas desde el lock con Node 24, sin scripts ni red; 78/78 pruebas
+focales pasan sobre la copia congelada. TLS/firmas/SQLite y reinicio reales locales,
+Meta/Secrets/S3 ficticios. El arranque carga sus 150 módulos desde la candidata con
+`NODE_PATH` vacío. Los tests que importan el lector CRM usan sus fuentes congeladas
+y Sequelize del entorno de pruebas; no forma parte del paquete AWS. Se mantiene la
+QA visual previa del mismo código de UI, sin equipararla a MFA público.
+
+Preflight AWS de solo lectura: no hay unidad Meta ni secretos en su namespace.
+La simulación permite Describe/Get en un ARN ficticio y devuelve denegación implícita
+para List/Put, con contexto ausente; los siete documentos IAM inline revisados
+limitan las escrituras existentes de candidatos a rutas IA/WhatsApp. Aún deben
+prepararse y verificarse permisos sobre recursos Meta exactos, app/slots, KMS,
+TLS/renovación, identidad Unix y límites de la nueva unidad. El rol EC2 existente
+puede leer el prefijo de integraciones prod; esto no acredita aislamiento IAM por
+proveedor. No se modificaron políticas, secretos, servicios, gates ni datos clínicos.
+
+La instancia tenía 819.900 KiB de memoria disponible, sin swap, a las 10:29 UTC;
+es una observación, no una prueba de capacidad. El paquete broker no incluye las
+DDL04–12 ni publica los consumidores clínicos. Estos necesitan candidatas propias,
+un único propietario de conciliación y aceptación con titular/proveedor. DEV
+conserva sus jobs clínicos apagados; auditoría AWS sigue compatible v1–v24.

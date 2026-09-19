@@ -4,7 +4,9 @@ Preparado sobre backend `3f5d61f5`, 19/09/2026. No desplegado ni aceptado con
 proveedor real. Contrato canónico en
 [13-backend](../../src/Documentacion/13-backend.md#selección-y-activación-meta-dentro-del-broker-preparado-19092026).
 El consumidor SQL/worker y su evento humano v24 están preparados; alcance vigente
-en «Consumidor transaccional» al final. Faltan API/UI de selección y planificación; metadatos de grupo preparados en el runbook de Ajustes.
+en «Consumidor transaccional» y «API/job y selección desde Ajustes» al final. API/UI y
+planificación están preparadas; publicación y aceptación real siguen pendientes.
+Los metadatos de grupo se describen en el runbook de Ajustes.
 El inventario CRM ya incorpora una revisión local orientativa, descrita al final;
 no es ese escritor ni una reserva de activos.
 
@@ -66,7 +68,8 @@ el código no puede conocer bajas de otro archivo/servidor no incorporado.
 El núcleo necesita el escritor CRM preparado al final: sesión/MFA, permiso de todas
 las clínicas, identidad, asignaciones, aliases/primarias/shares, historial independiente
 y commit local tras resultado del broker. Una activación solo en broker no confirma
-conexión clínica. La UI y la planificación siguen pendientes. No se migra el callback
+conexión clínica. La UI y la planificación están preparadas en el corte posterior,
+todavía sin publicar. No se migra el callback
 legacy ni se instala un job por publicar únicamente este núcleo.
 
 No desplegar todo DEV. Seleccionar dependencias, revisar migraciones anteriores,
@@ -410,3 +413,43 @@ en `audit-reader-view-migration.md`. Los 25 eventos ficticios nuevos cubren v20�
 no prueban Meta real ni autorizan abrir cohortes. Conservar lector v24 desde la
 primera entrega, además de los originales/guards v19. No repetir ninguno de los
 canarios. API/UI/DDL/job clínicos siguen sin publicación ni activación en este corte.
+
+
+## Candidata del servicio y preflight real — 19/09/2026, 10:35 UTC
+
+Paquete `meta-oauth-3135db10.tar.gz`, SHA256
+`9b74a9abbbbf98acd7cd872fd6c91a7aa5302182cab4fcb14d81fcad17b66ab6`:
+65 archivos, 104.736 bytes comprimidos; 63 fuentes transitivas más package/lock.
+No contiene configuración privada, credenciales, node_modules o fixtures.
+La lista exacta está en [manifiesto](meta-marketing-runtime-candidate.json).
+Es una candidata del broker, no una release clínica completa ni un servicio publicado.
+
+La dependencia compartida de `google-main` incorpora 26 módulos Google. No
+eliminarlos del paquete sin revisar el arranque; su inclusión no monta servicios
+Google. La unidad debe invocar `src/meta-marketing-oauth-main.js` explícitamente,
+no el `start` genérico del paquete. Instalar dependencias desde el lock en el
+runtime de destino. La copia local lo hizo con `npm ci --offline --ignore-scripts`:
+42 paquetes y 78/78 tests focales con red exterior bloqueada, incluyendo TLS,
+firmas, SQLite, reinicio, retirada e incertidumbre. El proveedor sigue siendo
+ficticio. Arranque sin `NODE_PATH`: 150 módulos, todos dentro de la candidata.
+
+Preflight real de solo lectura: no existe unidad Meta ni secretos en
+`/clinicaclick/integrations/prod/meta-marketing/`. La simulación IAM del rol actual
+permite Describe/Get para un ARN ficticio; List/Put devuelve `implicitDeny` con
+contexto ausente. Se revisaron también los siete documentos inline: las escrituras
+existentes son para namespaces IA/WhatsApp. Esto no sustituye la prueba de permisos
+sobre los slots reales. El permiso de lectura del rol EC2 abarca el prefijo prod;
+las comprobaciones del proceso no equivalen a una identidad IAM por proveedor.
+
+Antes de publicar faltan app/slots y ámbito autorizado por entorno, principales,
+permisos exactos/KMS, TLS con renovación, aislamiento del usuario y límites de
+recursos. Incorporar el historial físico previo; no inventar una configuración
+activa ni copiar credenciales investigadas para obtener un smoke positivo. Después,
+publicación selectiva de API/UI/DDL04–12 y propietario de conciliación, conservando
+los workers clínicos DEV apagados. Aceptar MFA público/proveedor con el titular
+antes de abrir cohortes. La auditoría v24 ya publicada conserva sus canarios.
+
+Evidencia privada `qa-evidence/security-resume-20260917/meta-runtime-preparation-20260919/`:
+archivo, manifiesto, instalación, tests, comprobación de módulos, inventario SSM,
+metadata de Secrets, políticas y simulación IAM. No hubo publicación, cambio IAM,
+secretos, DDL, gates o nuevo recurso AWS. Recursos/costes en39, estado19 y corte99.

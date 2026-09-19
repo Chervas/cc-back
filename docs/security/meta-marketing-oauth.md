@@ -100,14 +100,16 @@ entre begin y finish; corregido antes de aceptar42/42. Conservar ambos logs.
    publicación selectiva y aceptación pública con MFA y proveedor real.
 2. Inventario candidato preparado en [su contrato](meta-marketing-discovery.md) y
    [núcleo broker de selección/activación](meta-marketing-enrollment.md) preparado;
-   faltan consumidor SQL/API/UI y escritor transaccional de bindings/grants. Validar
+   consumidor SQL/API/UI y escritor transaccional de bindings/grants preparados en
+   el runbook de enrollment, todavía sin publicar. Validar
    identidad/propiedad/alias/primarias/shares y toda baja física previa. Una UUID o
    conexión nuevas no permiten borrar historial ni restaurar acceso retirado.
 3. Activación independiente, idempotente y recuperable, con aceptación por el titular
    y proveedor; lectores preparados no pueden consumir el envelope candidato.
 4. IAM/TLS/slots y servicio de entorno propios, publicación selectiva, lectura
-   AWS y verificación de recibos y carga. Autenticación AWS caducada, sin challenge
-   nuevo abierto en este corte. No promover toda DEV ni modificar canary v19.
+   AWS y verificación de recibos y carga. Sesión AWS comprobada el 19/09; candidata
+   del runtime y preflight en `meta-marketing-enrollment.md`, sin publicación.
+   No promover toda DEV ni repetir o modificar los canarios v19/v24.
 5. Retirar el callback/credenciales legacy solo con consumidores completos y corte
    aceptado. Mantener MFA, pausas, WhatsApp y DEV clínico apagado.
 
