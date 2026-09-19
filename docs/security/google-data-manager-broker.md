@@ -579,7 +579,8 @@ Antes de publicar: conservar gates/pausas actuales, verificar el esquema de todo
 los consumidores y publicar operaciones de ajustes/validate/status compatibles.
 Revisar la política Enhanced del binding, sus digests y autorizaciones originales:
 que el job complete su configuración local no habilita por sí solo identificadores
-en el broker. Continúan pendientes leads, identidad compartida, publicación AWS
+en el broker. Recepción de leads preparada en el [runbook específico](google-native-leads-broker.md);
+continúan pendientes su aceptación real, identidad compartida, publicación AWS
 v19 de auditoría y aceptación con sesión/proveedor reales. Cero cohortes operativas
 migradas. Sin DDL nuevo ni variables nuevas en este tramo.
 

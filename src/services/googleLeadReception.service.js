@@ -1,5 +1,5 @@
 'use strict';
-const { resolveGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
+const { resolveGoogleAdsGrantTransport, assertGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
 
 const crypto = require('node:crypto');
 const { Op } = require('sequelize');
@@ -80,7 +80,7 @@ function parseGoogleLead(row, accountId, now = new Date()) {
       email: validEmail, telefono: validPhone, email_hash: validEmail ? hash(validEmail) : null, phone_hash: validPhone ? hash(validPhone) : null } };
 }
 
-async function receptionAccount({ models, settingId, accountId, transaction = null, now = new Date() }) {
+async function receptionAccount({ models, settingId, accountId, transaction = null, now = new Date(), expectedBrokerGrant = null }) {
   if (typeof settingId !== 'string' || !settingId || settingId.length > 36 || !id(accountId)) fail('google_lead_job_invalid');
   const options = query(transaction);
   const setting = await models.CampaignWorkspaceSetting.findByPk(settingId, options);
@@ -100,7 +100,13 @@ async function receptionAccount({ models, settingId, accountId, transaction = nu
   const eligible = authorized.filter(account => members.some(clinic => covers(account, clinic)));
   if (!eligible.length || new Set(eligible.map(row => Number(row.googleConnectionId))).size !== 1
     || new Set(eligible.map(row => row.loginCustomerId || row.managerCustomerId || null)).size !== 1) fail('google_lead_account_access_required');
-  const { connection, brokerGrant } = await resolveGoogleAdsGrantTransport({ models, accounts: eligible, requiredScopes: [GOOGLE_ADS_SCOPE], transaction });
+  // Revalidate the original opaque authority instead of constructing another
+  // complete grant for every page/lead. Current mappings and the fingerprint
+  // below still detect added/removed owners; the assertion pins original refs.
+  const transport = expectedBrokerGrant
+    ? { ...await assertGoogleAdsGrantTransport(expectedBrokerGrant, { transaction }), brokerGrant: expectedBrokerGrant }
+    : await resolveGoogleAdsGrantTransport({ models, accounts: eligible, requiredScopes: [GOOGLE_ADS_SCOPE], transaction });
+  const { connection, brokerGrant } = transport;
   if (!brokerGrant && (!Number.isFinite(+new Date(connection.expiresAt)) || +new Date(connection.expiresAt) <= +now)
     && !connection.refreshToken) fail('google_lead_account_access_required');
   const loginCustomerId = eligible[0].loginCustomerId || eligible[0].managerCustomerId || null;
@@ -138,11 +144,16 @@ async function receivingClinic({ models, context, identity, transaction = null }
   return clinic;
 }
 
-async function persistGoogleLead({ models, context, parsed, now = new Date() }) {
+async function persistGoogleLead({ models, context, parsed, now = new Date(), beforePersist = null }) {
   return models.sequelize.transaction(async transaction => {
-    const fresh = await receptionAccount({ models, settingId: context.setting.id, accountId: parsed.identity.account_id, transaction, now });
+    await beforePersist?.();
+    const fresh = await receptionAccount({ models, settingId: context.setting.id, accountId: parsed.identity.account_id, transaction, now,
+      expectedBrokerGrant: context.brokerGrant });
     if (fresh.fingerprint !== context.fingerprint) fail('google_lead_authorization_changed');
     const clinic = await receivingClinic({ models, context: fresh, identity: parsed.identity, transaction });
+    // Compare the original opaque broker grant, not just another freshly
+    // resolved grant that could have changed while the provider was reading.
+    if (context.brokerGrant) await assertGoogleAdsGrantTransport(context.brokerGrant, { clinicId: Number(clinic.id_clinica), transaction });
     // Provider IDs are opaque and may exceed the historical varchar(128). A stable hash works for API and future webhooks.
     const externalId = hash(parsed.submissionId);
     const existing = await models.LeadIntake.findOne({ where: { external_source: 'google_lead_form', external_id: externalId },
@@ -151,6 +162,7 @@ async function persistGoogleLead({ models, context, parsed, now = new Date() }) 
       if (Number(existing.clinica_id) !== Number(clinic.id_clinica) || existing.google_ads_customer_id !== parsed.identity.account_id
         || existing.google_ads_campaign_id !== parsed.identity.campaign_id
         || existing.source_detail !== `leadgen_form:${parsed.identity.form_id}`) fail('google_lead_existing_scope_mismatch');
+      await beforePersist?.();
       return { lead: existing, duplicate: true };
     }
     const identity = { ...parsed.identity, clinic_id: Number(clinic.id_clinica) };
@@ -170,8 +182,38 @@ async function persistGoogleLead({ models, context, parsed, now = new Date() }) 
       attribution_steps: { advertising_identity: identity, google_native_received_at: now.toISOString(),
         google_reception_grant: fresh.fingerprint },
     }, { transaction });
+    await beforePersist?.();
     return { lead, duplicate: false };
   });
+}
+
+function managedReceptionGate(env, now) {
+  if (env.GOOGLE_ADS_LEADS_BROKER_ENABLED !== 'true' || String(env.RUNTIME_ROLE || '').toLowerCase() === 'gateway') fail('google_lead_broker_disabled');
+  const activeSince = env.GOOGLE_ADS_LEADS_ACTIVE_SINCE;
+  if (typeof activeSince !== 'string' || !Number.isFinite(Date.parse(activeSince))
+    || new Date(activeSince).toISOString() !== activeSince || Date.parse(activeSince) > +now) fail('google_lead_broker_configuration_invalid');
+  return activeSince;
+}
+
+async function readManagedGoogleLeads({ models, context, env, now, sinceDate }) {
+  const activeSince = managedReceptionGate(env, now);
+  const gate = () => {
+    if (!enabled(env)) fail('google_lead_sync_disabled');
+    if (managedReceptionGate(env, now) !== activeSince) fail('google_lead_authorization_changed');
+  };
+  const guard = async () => {
+    gate();
+    const fresh = await receptionAccount({ models, settingId: context.setting.id,
+      accountId: context.eligible[0].customerId, now, expectedBrokerGrant: context.brokerGrant });
+    if (fresh.fingerprint !== context.fingerprint) fail('google_lead_authorization_changed');
+    gate(); return true;
+  };
+  gate();
+  const runtime = await assertGoogleAdsGrantTransport(context.brokerGrant);
+  const rows = await runtime.broker.read(runtime.account, runtime.brokerContext, 'leads', { sinceDate },
+    { timeoutMs: 45000, beforeExecute: guard });
+  await guard();
+  return { rows, activeSince: Date.parse(activeSince), gate };
 }
 
 async function enqueueGoogleLeadSyncs({ models, env = process.env, enqueue } = {}) {
@@ -196,20 +238,25 @@ async function runGoogleLeadSync(payload, job, dependencies = {}) {
   if (job?.type !== JOB_TYPE || job.origin !== ORIGIN || job.requested_by != null) return { status: 'failed', retryable: false, error_message: 'google_lead_internal_job_required' };
   const models = dependencies.models || require('../../models');
   const now = (dependencies.now || (() => new Date()))();
-  const counts = { received: 0, duplicates: 0, excluded: 0, pending: 0, invalid_contacts: 0 };
+  const counts = { received: 0, duplicates: 0, excluded: 0, pending: 0, invalid_contacts: 0, historical_skipped: 0 };
   try {
     const context = await receptionAccount({ models, settingId: payload.setting_id, accountId: payload.account_id, now });
-    if (context.brokerGrant) fail('google_lead_broker_sync_pending');
-    const token = await (dependencies.ensureToken || ensureGoogleConnectionAccessToken)(context.connection, { requiredScopes: [GOOGLE_ADS_SCOPE] });
     const since = new Date(+now - LOOKBACK_DAYS * 86400000).toISOString().slice(0, 10);
-    const search = dependencies.search || googleAdsSearchRows;
-    const rows = await search({ customerId: payload.account_id, accessToken: token.accessToken, loginCustomerId: context.loginCustomerId,
+    let rows, managed;
+    if (context.brokerGrant) {
+      managed = await readManagedGoogleLeads({ models, context, env, now, sinceDate: since });
+      rows = managed.rows;
+    } else {
+      const token = await (dependencies.ensureToken || ensureGoogleConnectionAccessToken)(context.connection, { requiredScopes: [GOOGLE_ADS_SCOPE] });
+      const search = dependencies.search || googleAdsSearchRows;
+      rows = await search({ customerId: payload.account_id, accessToken: token.accessToken, loginCustomerId: context.loginCustomerId,
       maxPages: 10, timeoutMs: 45000, query: `SELECT lead_form_submission_data.id, lead_form_submission_data.resource_name,
         lead_form_submission_data.asset, lead_form_submission_data.campaign, lead_form_submission_data.ad_group,
         lead_form_submission_data.ad_group_ad, lead_form_submission_data.gclid,
         lead_form_submission_data.submission_date_time, lead_form_submission_data.lead_form_submission_fields
         FROM lead_form_submission_data WHERE lead_form_submission_data.submission_date_time >= '${since}'
         ORDER BY lead_form_submission_data.submission_date_time ASC, lead_form_submission_data.id ASC LIMIT ${MAX_ROWS + 1}` });
+    }
     if (!Array.isArray(rows) || rows.length > MAX_ROWS) fail('google_lead_response_incomplete');
     // Validate the whole response before writing: a malformed identity is not a partial successful import.
     const parsed = rows.map(row => parseGoogleLeadIdentity(row, payload.account_id, now));
@@ -221,6 +268,8 @@ async function runGoogleLeadSync(payload, job, dependencies = {}) {
     }
     for (const [index, identity] of parsed.entries()) {
       if (!enabled(env)) fail('google_lead_sync_disabled');
+      managed?.gate();
+      if (managed && +identity.occurredAt < managed.activeSince) { counts.historical_skipped++; continue; }
       if (!campaignIncluded(identity.identity, context.setting)) { counts.excluded++; continue; }
       let lead;
       try { lead = parseGoogleLead(rows[index], payload.account_id, now); }
@@ -229,7 +278,7 @@ async function runGoogleLeadSync(payload, job, dependencies = {}) {
         throw error;
       }
       let result;
-      try { result = await persistGoogleLead({ models, context, parsed: lead, now }); }
+      try { result = await persistGoogleLead({ models, context, parsed: lead, now, beforePersist: managed?.gate }); }
       catch (error) {
         if (['google_lead_clinic_assignment_required', 'google_lead_clinic_scope_mismatch', 'google_lead_campaign_not_selected'].includes(error.code)) { counts.pending++; continue; }
         throw error;
@@ -243,7 +292,8 @@ async function runGoogleLeadSync(payload, job, dependencies = {}) {
       : { status: 'completed', ...counts };
   } catch (error) {
     const code = /^google_lead_[a-z_]+$/.test(error.code || '') ? error.code : 'google_lead_sync_failed';
-    return { status: 'failed', retryable: !['google_lead_job_invalid', 'google_lead_sync_disabled'].includes(code), error_message: code, ...counts };
+    return { status: 'failed', retryable: !['google_lead_job_invalid', 'google_lead_sync_disabled',
+      'google_lead_broker_disabled', 'google_lead_broker_configuration_invalid'].includes(code), error_message: code, ...counts };
   }
 }
 

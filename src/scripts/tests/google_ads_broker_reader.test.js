@@ -74,6 +74,7 @@ test('all read families use the same complete-page validator and downstream erro
   for (const family of contract.FAMILIES) {
     const input = family === 'account' ? {} : family.endsWith('_metrics') || family === 'landing_pages' ? { ...payload } : {};
     if (['ads', 'ad_metrics'].includes(family)) input.campaignId = null;
+    if (family === 'leads') input.sinceDate = new Date().toISOString().slice(0, 10);
     f.state.response = { results: ['account', 'discovery'].includes(family)
       ? [{ customer: { id: account.customerId, manager: false, currencyCode: 'EUR', timeZone: 'Europe/Madrid', ...(family === 'discovery' ? { descriptiveName: 'Fictitious account', status: 'ENABLED' } : {}) } }] : [], nextPageToken: null };
     if (family === 'conversion_settings') f.state.response = { results: [{ customer: { id: account.customerId, conversionTrackingSetting: {} } }], nextPageToken: null, dataManagerConfiguration: { quotaProjectConfigured: true } };

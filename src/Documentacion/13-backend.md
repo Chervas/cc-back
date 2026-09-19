@@ -10696,3 +10696,46 @@ eliminación de todas las credenciales del frontend/backend.
 Las mediciones y límites de carga, evidencia visual, corte y recuperación están
 en 19/39/99 y `docs/security/google-data-manager-broker.md`. Falta carga con
 cardinalidad/proveedor reales y aceptación autenticada antes del despliegue.
+
+## Recepción nativa Google por broker preparada (19/09/2026)
+
+`campaign_google_leads_sync` admite una cuenta gestionada mediante
+`google.ads.leads.read.v1`. El grant de informes no concede esta operación.
+El payload cerrado solo lleva `sinceDate` y cursor opaco; cuenta y manager salen
+del binding. GAQL fijo, ventana de hasta siete días, máximo 10.000 filas,
+respuesta completa antes de importar y plazo compartido de 45 segundos para la
+lectura. Una página truncada, identidad ajena o cursor inválido impide importar
+ese conjunto. Solo salen identidad publicitaria, fecha, GCLID válido y contacto
+básico; las respuestas personalizadas del formulario se descartan.
+
+Además del gate Ads y `CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED`, requiere
+`GOOGLE_ADS_LEADS_BROKER_ENABLED=true` y `GOOGLE_ADS_LEADS_ACTIVE_SINCE` en ISO UTC
+canónico, no futuro; gateway rechazado. El corte es obligatorio para cuentas
+migradas: las filas anteriores se contabilizan en `historical_skipped` sin crear
+leads ni recuperar su auto-respuesta. Debe conservarse al reiniciar, nunca
+retroceder ni recalcularse en cada despliegue. Es común al runtime; una cohorte
+posterior con otro corte necesita planificación propia antes de abrirla.
+
+El consumidor conserva selección de campañas, asignación explícita a la clínica
+receptora, hash del ID opaco, deduplicación y transacción LeadIntake/auditoría
+mínima. No deriva una cuenta de grupo a su clínica representante. Revalida la
+capacidad opaca original y la configuración vigente en páginas y persistencia;
+no acepta una vinculación nueva aparecida durante el I/O. Reutiliza esa capacidad
+para evitar reconstrucciones SQL repetidas, sin cachear permisos entre jobs.
+Una revocación o pausa impide guardar. Contacto inválido se informa por fila;
+asignación pendiente conserva reintento. Un duplicado posterior al corte mantiene
+la recuperación idempotente de `leadAutoReply` sobre el mismo job por ejecución;
+no se envía ninguna conversión ni se inventa consentimiento al recibir.
+
+El broker no guarda resultados de esta lectura en SQLite ni contactos en recibos
+u outbox técnico. Memoria compartida limitada a 64 MiB/16 páginas, slices de hasta
+250 filas/780 kB y TTL de contacto de 60 segundos con temporizador incluso inactivo;
+al consumir la última parte, revocar o avanzar de página, libera las referencias.
+Esto no elimina el almacenamiento funcional del contacto en MySQL del CRM.
+
+Preparado y probado con MySQL/HTTPS/Chromium propios y Google ficticio; sin
+publicación, DDL nuevo, cambio de flags ni cohorte real activada. La tabla Angular
+real y el controlador de listado muestran la clínica correcta en escritorio/móvil;
+no acredita la navegación completa, MFA público ni Google real. Contrato operativo,
+carga, prerrequisitos y recuperación en `docs/security/google-native-leads-broker.md`;
+variables en 03, estado en 19, planificación en 11 y evidencia de corte en 99.

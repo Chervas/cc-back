@@ -8,13 +8,16 @@ function createGoogleAdsOperations({ http, cursor, withDeveloperSecret, now = Da
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1024 || maxBytes > 64 * 1024 * 1024
     || !Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 16) fail('invalid_request');
   const pages = new Map(); let bytes = 0;
-  const drop = id => { const entry = pages.get(id); if (entry) { bytes -= entry.bytes; pages.delete(id); } };
+  const drop = id => { const entry = pages.get(id); if (entry) { clearTimeout(entry.expiryTimer); bytes -= entry.bytes; pages.delete(id); } };
   const prune = () => { for (const [id, entry] of pages) if (entry.expiresAt <= now()) drop(id); };
   const scopeKey = (context, operation) => JSON.stringify([context.principalId, context.tenantRef, context.binding.connectionRef,
     context.assetRef, operation, context.policyVersion]);
   const operations = Object.fromEntries(contract.OPERATIONS.map(operation => [operation, Object.freeze({
     provider: contract.PROVIDER, effect: 'read', persistResult: false, requiredScopes: contract.SCOPES,
-    validate: payload => contract.validate(operation, payload),
+    validate: payload => {
+      contract.validate(operation, payload);
+      if (contract.family(operation) === 'leads') require('./google-leads-contract').validateWindow(payload, now());
+    },
     async execute(context) {
       const { payload, binding, assetRef, signal, secret } = context;
       const account = contract.resource(binding, assetRef); const name = contract.family(operation);
@@ -42,18 +45,26 @@ function createGoogleAdsOperations({ http, cursor, withDeveloperSecret, now = Da
             json: { query, ...(next ? { pageToken: next } : {}) } });
           if (signal?.aborted) fail('connection_blocked');
           const page = contract.projectPage(name, raw, payload, account);
+          if (name === 'leads' && page.results.some(row => Date.parse(row.leadFormSubmissionData.submissionDateTime) > now() + 300000)) fail('provider_failed');
           const count = (entry?.count || 0) + page.results.length;
           const maximum = contract.rowLimit(name);
           if (count > maximum || count === maximum && page.nextPageToken
             || page.nextPageToken && [...previous, next].includes(page.nextPageToken)) fail('provider_failed');
           const size = Buffer.byteLength(JSON.stringify(page.results));
           if (size > maxBytes) fail('rate_limited');
+          if (name === 'leads' && entry) drop(entry.id);
           while (pages.size && (pages.size >= maxEntries || bytes + size > maxBytes)) drop(pages.keys().next().value);
           entry = { id: randomUUID(), key, epoch, queryHash, connectionRef: binding.connectionRef,
             assetRef, tenantRef: context.tenantRef, rows: page.results,
             nextPageToken: page.nextPageToken, count, seenTokens: [...previous, ...(next ? [next] : [])],
-            bytes: size, expiresAt: now() + 600000 };
+            bytes: size, expiresAt: now() + (name === 'leads' ? 60000 : 600000) };
           pages.set(entry.id, entry); bytes += size; offset = 0;
+          // Lead contact data expires even when the broker becomes idle.
+          if (name === 'leads') {
+            const entryId = entry.id;
+            entry.expiryTimer = setTimeout(() => drop(entryId), 60000);
+            entry.expiryTimer.unref?.();
+          }
         }
         const results = []; let resultBytes = 2;
         for (const row of entry.rows.slice(offset, offset + contract.PAGE_SIZE)) {
@@ -65,6 +76,7 @@ function createGoogleAdsOperations({ http, cursor, withDeveloperSecret, now = Da
         const end = offset + results.length;
         const nextPageToken = end < entry.rows.length || entry.nextPageToken
           ? cursor.seal(JSON.stringify({ id: entry.id, offset: end }), scope) : null;
+        if (name === 'leads' && nextPageToken === null) drop(entry.id);
         return { results, nextPageToken, ...(name === 'conversion_settings' ? {
           dataManagerConfiguration: { quotaProjectConfigured: Boolean(binding.googleDataManager?.quotaProjectId) },
         } : {}) };

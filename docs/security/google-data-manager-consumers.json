@@ -1,9 +1,9 @@
 {
-  "version": 16,
+  "version": 17,
   "reviewedAt": "2026-09-19",
-  "sourceBaseHead": "bcb5c49472d18bbe8f95bb98f2a8ade1ec38b96c",
+  "sourceBaseHead": "50bb98048065c12ab877da779d2a46e78a3efe50",
   "includesWorkingChanges": true,
-  "scope": "Bounded full Data Manager diagnostics job adaptation: inventory-only Enhanced/readiness, remote binding quota, current grants and configuration locked after provider I/O, same-timestamp HMAC/config races, ready=false on stale persistence. Twelve actual SQL/TLS job and Angular UI groups with fake providers; no deployment or operational acceptance. Shared bootstrap Meta credential consumer remains legacy; unreviewed rows retain previous hashes.",
+  "scope": "Bounded native Google lead polling adaptation: typed minimal-contact read, explicit activation cut, original opaque grant and current clinic/campaign locks; actual isolated SQL/TLS and Angular lead table. No deployment, real provider/MFA or high-cardinality acceptance. Shared identity/Meta remains pending; untouched rows keep previous hashes.",
   "runtimeConsumersMigrated": 0,
   "qa": {
     "broker": "621/621 full Node24 regression; fake providers, external network blocked",
@@ -104,7 +104,11 @@
         "poolUsingAfter": 0,
         "poolWaitingAfter": 0
       }
-    }
+    },
+    "nativeLeadsBroker": "628/628 full offline suite; 8/8 final lead-specific tests including idle TTL",
+    "nativeLeadsBackend": 72,
+    "nativeLeadsIntegrated": "14 groups, actual MySQL/signed TLS/SQLite and 4 Angular table screenshots; 19 signed commands/18 fake Google reads; no sends, conversions, local OAuth reads or runtime changes",
+    "nativeLeadsLoad": "first=170 statements/233ms; 251 historical rows=183/237ms; 20 new=740/661ms; 20 retry=700/423ms; pool 0/0. Not production load acceptance"
   },
   "rows": [
     {
@@ -250,16 +254,17 @@
     },
     {
       "file": "src/services/googleLeadReception.service.js",
-      "role": "Resolutor usado por hitos nativos sin tokens; sync managed sigue rechazado hasta disponer de lectura tipada de leads.",
-      "state": "reception_metadata_prepared_lead_sync_pending",
-      "sha256": "a72f8a307cbca0cf9f2b9a259bb54f8a96d5aed4dba9a92a28724abce84239e0"
+      "role": "Managed native lead consumer with explicit gate/cut, complete typed read and original grant under SQL transaction; legacy and lifecycle behavior preserved.",
+      "state": "native_leads_prepared_undeployed_real_acceptance_pending",
+      "sha256": "b97e129b1b6ed0ccd4a4c7da0e86a87d868b22410165e96599e5a570339051e8",
+      "reviewNote": "Bounded native-lead change and tests only; does not certify unrelated functions or operational rollout."
     },
     {
       "file": "services/integrations-broker/src/google-ads-contract.js",
-      "role": "Fixed conversion settings query and strict one-customer projection, inherited owner preserved.",
-      "state": "bootstrap_settings_prepared_undeployed_load_pending",
-      "sha256": "0dec38131762ad706c8dbaf7a7a13ae18fa65a0323a1dc32125235f57bd2a1a9",
-      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+      "role": "Adds explicit lead family, fixed window payload, row identity and basic-contact projection.",
+      "state": "native_leads_prepared_undeployed_real_acceptance_pending",
+      "sha256": "844ee56e3e406097293e7cd608841f009e315c6e85fd58c7f03a098241982d1a",
+      "reviewNote": "Bounded native-lead change and tests only; does not certify unrelated functions or operational rollout."
     },
     {
       "file": "src/services/googleConversionDiagnosticsBroker.service.js",
@@ -488,10 +493,10 @@
     },
     {
       "file": "services/integrations-broker/src/google-ads.js",
-      "sha256": "95476b9dae1d5a5dcb33307f10bcdbccff1e7262d3cd63d763969ac4760156e2",
-      "role": "Adds configuration boolean from validated binding, never from provider payload.",
-      "state": "bootstrap_settings_prepared_undeployed_load_pending",
-      "reviewNote": "Bounded diff and related regression only; no operational migration or full identity/job audit."
+      "sha256": "537214226ac230d5c20f329d2fa33c6a640d1b5b7592192f4da8a9d72e0f6f16",
+      "role": "Lead-only short TTL including idle timer, release at end/advance and no durable result; existing other family limits preserved.",
+      "state": "native_leads_prepared_undeployed_real_acceptance_pending",
+      "reviewNote": "Bounded native-lead change and tests only; does not certify unrelated functions or operational rollout."
     },
     {
       "file": "services/integrations-broker/test/google-conversion-settings.test.js",
@@ -534,6 +539,34 @@
       "role": "Own MySQL with real models/job, signed TLS broker/SQLite, provider-only fixtures, receipt polling, late revocations, same-timestamp configuration changes, atomic rollback and actual Angular UI.",
       "state": "combined_job_prepared_undeployed_real_acceptance_pending",
       "reviewNote": "Bounded change/consumer review only; source hash does not assert all functions in the file are migrated or operational."
+    },
+    {
+      "file": "services/integrations-broker/src/google-leads-contract.js",
+      "sha256": "e65b384cf313449fd94285af4368e342a961e1a65287e297d6ac436ffe7db776",
+      "role": "Fixed native GAQL, scoped resource identity/time and basic contact only; no custom answers.",
+      "state": "native_leads_prepared_undeployed_real_acceptance_pending",
+      "reviewNote": "Bounded native-lead change and tests only; does not certify unrelated functions or operational rollout."
+    },
+    {
+      "file": "services/integrations-broker/test/google-leads.test.js",
+      "sha256": "4f217b2e8477093c09757d8555510c97ac4f554815854a9ee52f8dfed34547e6",
+      "role": "Eight offline broker cases including separate permission, projection, pagination, revocation and idle removal.",
+      "state": "native_leads_prepared_undeployed_real_acceptance_pending",
+      "reviewNote": "Bounded native-lead change and tests only; does not certify unrelated functions or operational rollout."
+    },
+    {
+      "file": "src/scripts/tests/google_native_leads_mysql.integration.js",
+      "sha256": "fc08837e28089696093975436486e2669acceed6212364ff44581a1c7af8a001",
+      "role": "Actual isolated SQL/TLS consumer, atomic import/dedupe, real paused automation and job dedupe, race/negative cases and load counters.",
+      "state": "native_leads_prepared_undeployed_real_acceptance_pending",
+      "reviewNote": "Bounded native-lead change and tests only; does not certify unrelated functions or operational rollout."
+    },
+    {
+      "file": "src/scripts/tests/fixtures/google_native_leads_visual.fixture.js",
+      "sha256": "e977c463913f7c6c84dc7bacc46fd9ac06ac82ddc8a047d07a852f714e63174d",
+      "role": "Exact Angular lead table/methods/service and production list controller with isolated SQL/session; desktop/mobile clinics and refresh.",
+      "state": "native_leads_prepared_undeployed_real_acceptance_pending",
+      "reviewNote": "Bounded native-lead change and tests only; does not certify unrelated functions or operational rollout."
     }
   ],
   "frontendSnapshot": {
