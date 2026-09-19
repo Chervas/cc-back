@@ -259,3 +259,24 @@ Restaurar también las listas del publicador/firmante para retirar exclusivament
 los destinos revertidos. No reemplazar SQLite, recibos, permisos ni claves. Una
 recuperación entre hojas firmadas por la misma CA no exige volver al certificado
 autofirmado. Los nuevos registros ya entregados se conservan siempre.
+
+
+### Ampliación preparada para los propietarios Meta (19/09/2026)
+
+Firmante y publicador admiten hasta doce servidores. Añaden únicamente las parejas
+`meta-marketing-dev:8453` y `meta-marketing-staging:8454`; nombres ajenos o puertos
+intercambiados se rechazan. El monitor reconoce sus etiquetas por entorno y admite
+las trece filas completas (doce servidores y mantenimiento), sin relajar identidad,
+permisos, vigencia o rechazo de ficheros incompletos.
+
+Orden: publicar primero monitor/validadores compatibles, instalar cada servidor y
+su clave local, firmar su CSR público conservando la CA, verificar TLS y recursos,
+y enrolar su hoja fijada en publicador/firmante. No registrar una identidad que aún
+no sirve su certificado. Preservar las diez entradas previas y sus pins; las claves
+privadas nuevas permanecen en AWS. La CA privada nunca sale de su host. La prueba
+y el estado publicados deben cubrir también las identidades nuevas.
+
+QA: seis tests de publicador, cinco de firmante con mTLS/renovación reales locales
+y siete de salud/alertas; claves y CA ficticias. Ningún servicio o certificado fue
+modificado por esas pruebas. La publicación de soporte y altas Meta se documenta
+por separado en99; no confundir código preparado con renovación operativa.

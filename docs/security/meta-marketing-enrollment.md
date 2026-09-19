@@ -453,3 +453,31 @@ Evidencia privada `qa-evidence/security-resume-20260917/meta-runtime-preparation
 archivo, manifiesto, instalación, tests, comprobación de módulos, inventario SSM,
 metadata de Secrets, políticas y simulación IAM. No hubo publicación, cambio IAM,
 secretos, DDL, gates o nuevo recurso AWS. Recursos/costes en39, estado19 y corte99.
+
+
+## Instalación inicial sin cohortes — preparada el 19/09/2026
+
+`standby: true` es explícito y solo admite `principals`, `connections` y `grants`
+vacíos. Permite instalar los propietarios DEV/staging y comprobar transporte y
+recursos antes de preparar un slot. No crea una autorización ficticia. El resto
+de la configuración mantiene su esquema estricto. Sin ese modo siguen siendo
+obligatorios los slots y las identidades separadas del contrato.
+
+Antes de obtener identidad AWS, revisa todas las tablas del SQLite propietario:
+cualquier fila impide el arranque vacío. Conexiones, bajas, comandos inciertos,
+selecciones y auditoría no se borran ni se ocultan. Todas las operaciones entrantes
+fallan en autenticación mientras no haya principales. Configuración completa y
+reinicio revisado son necesarios para pasar al modo normal; tras comenzar OAuth
+ya no se acepta volver al modo vacío. Cerrar altas en una instalación utilizada
+requiere conservar su configuración y los principales de control.
+
+81/81 pruebas Meta, incluidos tres casos de instalación: TLS/SQLite y reinicio
+reales locales, rechazo de solicitudes firmadas, ausencia de llamadas al proveedor,
+transición explícita al modo normal y rechazo posterior sin perder historia.
+Proveedor ficticio y red exterior bloqueada. No acredita una cohorte real.
+
+Puertos previstos con identidades de certificado cerradas: DEV `8453`, staging
+`8454`. Preparar monitor, publicador y firmante compatibles antes de enrolarlas;
+son doce servidores más el cliente de mantenimiento. El modo vacío no sustituye
+esa renovación ni la prueba de aislamiento. No tocar la CA ni claves existentes.
+Publicación, recursos efectivos y prueba TLS real pendientes de su acta propia.

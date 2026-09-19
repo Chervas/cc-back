@@ -11576,3 +11576,31 @@ es una observación, no una prueba de capacidad. El paquete broker no incluye la
 DDL04–12 ni publica los consumidores clínicos. Estos necesitan candidatas propias,
 un único propietario de conciliación y aceptación con titular/proveedor. DEV
 conserva sus jobs clínicos apagados; auditoría AWS sigue compatible v1–v24.
+
+
+### Arranque inicial vacío del propietario Meta (preparación, 19/09/2026)
+
+La opción explícita `standby: true` permite instalar el transporte antes de
+configurar una cohorte. Exige listas vacías de principales, conexiones y grants;
+conserva la validación estricta de entorno, TLS, política y capacidades. Todas las
+solicitudes de operación quedan rechazadas por autenticación. Sin la opción,
+continúan siendo obligatorios slots válidos y las identidades separadas del contrato.
+
+Antes de contactar AWS, el arranque vacío comprueba que ninguna tabla del SQLite
+propietario contiene filas. Rechaza historia de conexiones, comandos, bajas,
+selecciones, recibos o auditoría, sin borrarla. No es un modo de recuperación de
+un servicio utilizado: conservar su configuración y controles para poder conciliar.
+Pasar al modo operativo exige publicar una configuración completa y revisada;
+ninguna petición del cliente modifica la política o habilita una conexión.
+
+Este modo sirve para verificar instalación, TLS, aislamiento y recursos. No prueba
+OAuth real, permisos de slots ni aceptación clínica. Su publicación y resultados
+se registran separadamente en estado19/99; hasta entonces sigue preparado.
+
+
+El registro de renovación preparado admite además `meta-marketing-dev:8453` y
+`meta-marketing-staging:8454`, con máximo de doce servidores. Las parejas nombre/
+puerto son fijas; no habilita otros destinos en ese rango. El monitor reconoce
+ambas identidades y conserva el rechazo de entradas desconocidas o incompletas.
+Publicar esos lectores antes de añadir los certificados al estado compartido;
+conservar las diez identidades actuales, la CA, las claves y sus permisos.
