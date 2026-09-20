@@ -22,11 +22,13 @@ clínicas, inicializan modelos ni ejecutan DDL.
 | Tablespaces | 745 Single, uno General, uno System y dos Undo sin cifrado nativo | Instancia compartida completa, incluye DEV; no solo CRM |
 | Claves/réplicas | Componente keyring sin filas; cero canales de réplica | No acredita todos los posibles archivos de claves |
 | Sesiones | Once conexiones TCP observadas sin TLS | Fotografía de sesiones; no atribuirlas todas a un único proceso. Diagnóstico UNIX separado |
+| Identidad TLS | Certificado efectivo con cadena válida, sin nombre/IP válido para `localhost` ni `127.0.0.1` | Conexión real del driver con CA y validación de identidad rechazada: `HANDSHAKE_SSL_ERROR`; no desactivar esa validación |
 | Host | IMDSv2 identifica `i-0b2967e8de0866910`, cuenta `468355432137`, eu-west-3 | Identidad actual, ya no solo cloud-init cacheado |
 | Volumen | Cifrado del proveedor sin acreditar | El rol disponible pertenece a `137819318729`, cuenta del broker; no permite consultar esta instancia |
 
 Evidencia privada en `qa-evidence/security-close-20260920/`:
-`database-metadata.json`, `database-admin-metadata.json` y `host-identity.json`.
+`database-metadata.json`, `database-admin-metadata.json`, `host-identity.json`
+y `database-tls-preflight.json`.
 La consulta usa el documento de identidad de IMDS, no credenciales de un rol.
 Pendiente identificar al operador de la cuenta del host y obtener metadata del
 volumen. No se inicia investigación ni diseño de copias, hospedaje de backups o
@@ -37,6 +39,12 @@ El cifrado de volumen y el nativo son capas distintas: el segundo está ausente
 en los agregados revisados; el primero sigue desconocido. El helper TLS preparado
 no está activado en los consumidores. Antes de un corte hace falta comprobar
 CA/SAN/nombres, todos los clientes efectivos y compatibilidad de sus releases.
+`SHOW VARIABLES` confirma `ca.pem`/`server-cert.pem` en el datadir; no se presume
+que un fichero encontrado sea el certificado activo. OpenSSL valida su cadena
+pero rechaza ambas identidades locales. El intento real del driver conserva
+`rejectUnauthorized=true` y `verifyIdentity=true`, y falla en el handshake antes
+de ejecutar consultas. No basta con activar `DB_TLS_REQUIRED`: primero debe
+existir un certificado que valide los nombres acordados de los clientes.
 
 ## Evidencia histórica del 12/09
 
