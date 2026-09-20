@@ -1679,7 +1679,7 @@ router.get('/google/connect', async (req, res) => {
             scope: GOOGLE_SCOPES,
             access_type: 'offline',
             include_granted_scopes: 'true',
-            prompt: 'consent',
+            prompt: 'select_account consent',
             state
         });
         const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
