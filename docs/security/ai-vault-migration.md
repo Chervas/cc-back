@@ -41,10 +41,11 @@ monitor real. La API CRM ya usa este broker, con modelos/prompts conservados y
 sin claves Bedrock en su `.env`/arranque PM2 persistido. Las ocho configuraciones
 activas pasan 22/22 casos desde la interfaz autenticada con texto ficticio y
 acciones finales inocuas. Fresh-inbound se reinició ordenadamente y hereda
-Bedrock/SES/Groq de la API; gateway conserva copias pendientes de conciliación.
+Bedrock/SES/Groq/OpenAI de la API; gateway conserva copias pendientes de conciliación.
 Groq y OpenAI ya tienen activo el transporte broker en la API CRM. La clave
-Groq ya no está en `.env` ni arranque PM2 guardado; OpenAI conserva temporalmente
-su copia hasta completar aceptación. Gemini mantiene su transporte previo.
+Groq/OpenAI ya no están en `.env` ni arranque PM2 guardado. El OCR real fue
+aceptado en la UI CRM; quedan las otras superficies OpenAI. Gemini mantiene
+su transporte previo.
 No declarar «IA migrada» globalmente. El corte Bedrock y sus límites se
 describen en la matriz enlazada; comprobar un catálogo no acredita esa migración.
 
@@ -186,13 +187,21 @@ CRM autenticado correctos. OpenAI activado en API CRM tras recuperar saldo y
 aprobar OCR PDF, contenido web y visibilidad a través del broker; las tres
 pruebas privadas inyectan DB/pausa/telemetría y no acreditan todas las pantallas.
 La clínica92 rechaza el CMS con `scope_not_enabled`: se conserva ese despliegue
-gradual, sin abrir el editor para pasar QA. Copia OpenAI y gateway pendientes.
+gradual, sin abrir el editor para pasar QA. La aceptación OCR posterior usa
+UI/ACL/DB/telemetría/archivo y proveedor reales: una extracción de documento
+ficticio, propuesta correcta, sin confirmar factura. Se corrigió el porcentaje
+de IVA derivado en DEV y CRM; registros/activo/archivo propios retirados con
+archivo de recuperación privado. OpenAI API sin copia local y PM2 persistido,
+fresh-inbound actualizado con salida limpia; gateway y otras superficies pendientes.
 
 Gemini rechazaba la IP AWS (`API_KEY_IP_ADDRESS_BLOCKED`). Se añadió únicamente
 la IP del broker a la allowlist, conservando las IP anteriores y la restricción
 a Gemini API. GET del catálogo devuelve200; la generación existente devuelve
 402 por saldo prepagado agotado. AI Studio confirma0EUR y la cuenta autenticada
-no tiene edición del perfil de pagos. No rotar la clave ni cambiar modelo/API
+no tiene edición del perfil de pagos. La revisión posterior detecta perfil fiscal
+de un cliente; el titular confirma La Voz Medios Digitales y se prepara cuenta
+Cloud Billing dedicada, pendiente del medio de pago y vinculación. No solicitar
+el acceso del cliente ni recargar el perfil equivocado. No rotar la clave ni cambiar modelo/API
 para ocultar este bloqueo. No repetir llamadas sin corregir la causa.
 
 ### Secuencia operativa
