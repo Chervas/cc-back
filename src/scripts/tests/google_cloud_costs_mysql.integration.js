@@ -17,6 +17,25 @@ withIsolatedCampaignMysql(async ({ sql, report }) => {
   assert.equal((await service().getOverview({ userId: 44 })).snapshot.net, '0');
   await assert.rejects(model.create({ cache_key: keyFor('2026-09'), snapshot: value, collected_at: new Date(value.collectedAt) }));
   report.checks.push('idempotent additive migration, persistent JSON/credits, unique project/month and pending period');
+  const { persistSnapshots, splitRows } = require('../../services/googleWeeklyBilling.service');
+  const automatic = (day, amount) => splitRows([{ kind: 'billing', payload: JSON.stringify({ month: '2026-09',
+    service: 'Maps', currency: 'EUR', gross: amount, credits: '0', net: amount, latestUsageDay: day }) }],
+  { runKey: 'google-atc-es:2026-09-21', collectedAt: '2026-09-21T04:00:00Z' }).snapshots;
+  await sql.transaction(async transaction => {
+    const result = await persistSnapshots({ model, snapshots: automatic('2026-09-13', '1'), transaction });
+    assert.deepEqual(result.preserved, ['2026-09']);
+  });
+  assert.equal((await read(keyFor('2026-09'))).snapshot.source, 'google_cloud_billing_report');
+  await assert.rejects(sql.transaction(async transaction => {
+    await persistSnapshots({ model, snapshots: automatic('2026-09-20', '2.123456789'), transaction });
+    throw Error('later_ads_write_failed');
+  }));
+  assert.equal((await read(keyFor('2026-09'))).snapshot.gross, '1.53');
+  await sql.transaction(transaction => persistSnapshots({ model, snapshots: automatic('2026-09-20', '2.123456789'), transaction }));
+  assert.equal((await read(keyFor('2026-09'))).snapshot.gross, '2.123456789');
+  await sql.transaction(transaction => persistSnapshots({ model, snapshots: [], transaction }));
+  assert.equal((await read(keyFor('2026-09'))).snapshot.gross, '2.123456789');
+  report.checks.push('initial backfill preserves newer report; atomic rollback, precise decimals and empty export preservation');
   await migration.down(qi); assert(!(await qi.showAllTables()).includes('GoogleCloudCostCaches'));
   report.checks.push('isolated rollback removes only its own table');
 }).catch(() => { process.exitCode = 1; });
