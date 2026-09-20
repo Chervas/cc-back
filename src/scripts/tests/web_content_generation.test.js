@@ -1,6 +1,20 @@
 'use strict';
 
 const assert = require('assert');
+// These unit cases inject their functional models and HTTP provider. Keep the
+// security/telemetry collaborators local too; neither may reach a real database.
+const policyChecks = [];
+const telemetry = [];
+for (const [name, exports] of Object.entries({
+  securityMonitoring: { async assertAiAllowed(useCase) { policyChecks.push(useCase); } },
+  aiUsageTelemetry: {
+    async recordProviderResponse(value) { telemetry.push({ kind: 'response', useCase: value.useCase }); },
+    async recordProviderFailure(value) { telemetry.push({ kind: 'failure', useCase: value.useCase }); },
+  },
+})) {
+  const filename = require.resolve(`../../services/${name}.service`);
+  require.cache[filename] = { id: filename, filename, loaded: true, exports };
+}
 const service = require('../../services/webContentGeneration.service');
 
 function mutableRow(values) {
@@ -802,6 +816,8 @@ async function main() {
     assert.equal(service.providerConfiguration().application_state_store, false);
     assert.deepEqual(service.providerConfiguration().generatable_content_types, service.GENERATABLE_CONTENT_TYPES);
     assert.ok(service.providerConfiguration().objectives.some((item) => item.code === 'explain_clearly'));
+    assert(policyChecks.length > 0 && policyChecks.every(useCase => useCase === 'web_content'));
+    assert(telemetry.some(item => item.kind === 'response' && item.useCase === 'web_content'));
     console.log('✅ web_content_generation.test.js');
   } finally {
     for (const [key, value] of Object.entries(previous)) {
