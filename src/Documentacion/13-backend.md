@@ -1284,10 +1284,13 @@ vuelve a validar el ID global canónico antes de leer una fila de
 mes actual/anterior UTC. No hay proveedor, BigQuery, cron ni escritura en GET.
 
 Devuelve `month`, `availableMonths`, `status` (`pending/available/stale`),
-`collectionMode=manual`, `automaticCollectionEnabled=false` y `snapshot`.
+`collectionMode` (`manual/weekly_combined`), `automaticCollectionEnabled`,
+`schedule` y `snapshot`. La activación semanal exige ambos flags de costes y
+lote oficial; el indicador expresa configuración, no acredita una recogida.
 La proyección cerrada valida proyecto, moneda EUR, periodo, fuente, sumas de
 uso/ahorros/neto y servicios sin duplicados; elimina cualquier campo extra.
-Importes string, precisión de céntimos del informe; no son factura. Ausencia de
+Importes string: versión1 manual a céntimos, versión2 de BigQuery a nueve
+decimales (`NUMERIC`), con `provisional=true` y `latestUsageDay`. No son factura. Ausencia de
 fila: pendiente, snapshot null. Más de ocho días: atrasado. Fallo SQL o informe
 inválido: 503 categorizado, sin datos internos; mes inválido 400, acceso 401/403.
 Siempre `Cache-Control: private, no-store`.
@@ -1299,10 +1302,36 @@ conserva evidencia del filtro/fecha y comprueba `projectSnapshot` antes de la
 escritura. No existe endpoint público de importación. Revertir código conserva
 la tabla; `down` elimina su contenido y no se usa como rollback de publicación.
 
-El automatismo permanece pendiente de la exportación de facturación y de su
-integración en la consulta semanal global de competencia, sin nueva petición
-independiente. El GET nunca cambia los flags de ese job. Contrato de producto,
-interpretación y ámbito compartido: manual frontend 39, sección de costes.
+La recogida se incorpora a `reconcileOfficialGoogleAdsTransparency`, dentro del
+lote `competitionSync` existente, lunes06:00 `Europe/Madrid`. Activación conjunta:
+`GOOGLE_CLOUD_COSTS_WEEKLY_ENABLED=true` y
+`COMPETITION_GOOGLE_ADS_TRANSPARENCY_WEEKLY_ENABLED=true`, solo en el líder CRM.
+DEV no recibe la credencial ni activa jobs de negocio. El lector usa la cuenta
+de servicio existente y la vista autorizada fija
+`clinicaclick.clinicaclick_reporting.api_costs_v1` en US; no obtiene lectura de
+la exportación completa de la cuenta. El GET nunca cambia estos flags.
+
+Una única sentencia SQL devuelve filas etiquetadas de anuncios y facturación.
+Esta última agrega el mes de la semana y el anterior por fecha de uso UTC,
+excluyendo el día de corte (lunes) y los impuestos. Las dos fuentes deben estar
+en US. Se conservan costes/créditos con aritmética decimal, sin multiplicar el
+coste al desanidar créditos. La exportación es provisional: puede tener retraso,
+carga histórica incompleta o ajustes posteriores; no reconstruye una factura.
+
+`jobs.insert` fija `cc_google_weekly_YYYYMMDD`, estable por semana; el fingerprint
+de consulta/parámetros/límite detecta cambios de contrato. Un ACK perdido o un
+reinicio recupera ese mismo job; un conflicto no crea otro ni cambia su ámbito.
+Dry-run gratuito y techo de25GB para el lote completo; paginación hasta completar
+el resultado, con límites y rechazo de páginas repetidas o truncadas. El antiguo
+`requestId` de `jobs.query` no garantizaba esta deduplicación durable.
+
+Las cachés de anuncios y costes se escriben en la misma transacción SQL. Si no
+hay filas de facturación no se fabrica un cero ni se borra el informe anterior.
+La carga histórica inicial no sustituye una recogida posterior o con cobertura
+más reciente. Los fallos de proveedor/parser/SQL conservan ambas cachés. El
+reporte del job incluye `billing`, `bigquery_job_id`, bytes y meses conservados;
+no se añade cron, petición de facturación independiente ni ejecución por clínica.
+Estado de publicación en19; interpretación y ámbito compartido en39.
 
 ## 2026-09-12 - BD: TLS preparado, metadata y restauración ficticia
 
@@ -3373,7 +3402,7 @@ Principios:
   - No identificar una página no equivale a haber comprobado que tiene cero anuncios: se persiste `status=identity_unresolved` y `META_PAGE_IDENTITY_UNRESOLVED`. Si el Facebook público sí está localizado, la respuesta diferencia `identity_status=facebook_profile_found` y pide el enlace «Ver todos los anuncios»; si hay Page ID, `identity_status=resolved` y la API devuelve también `library_url`. Una página resuelta cuya consulta `ACTIVE` por ID vuelve vacía se considera `completed` con cero filas de API y expone `api_result_status=no_ads_returned`: esto confirma la identidad consultada, pero no debe presentarse como fallo de atribución ni como prueba absoluta de ausencia en la Biblioteca pública. Al leer snapshots antiguos, `completed/0 + fallback_filtered=true + page=null` se normaliza también como `identity_unresolved`.
 - Google Ads Transparency:
   - No existe una API de Google Ads de cuentas propias que permita leer anuncios de competidores no autorizados. El alta o refresco puntual usa un fast-path público acotado del Ads Transparency Center (`SearchService/SearchSuggestions` y `SearchService/SearchCreatives`): un dominio, dos términos y un máximo pequeño de creatividades. No se lanza navegador/headless ni scraping interactivo.
-  - La fuente autoritativa es el dataset público oficial de BigQuery `bigquery-public-data.google_ads_transparency_center.creative_stats`. Se consulta en un único lote global semanal para todos los competidores activos, nunca una vez por clínica/competidor ni al renderizar. El lote hace dry-run, usa cache, `requestId` semanal estable y `maximumBytesBilled` de 25 GB por defecto. Debe habilitarse exclusivamente en el worker líder de producción con `COMPETITION_GOOGLE_ADS_TRANSPARENCY_WEEKLY_ENABLED=true`.
+  - La fuente autoritativa es el dataset público oficial de BigQuery `bigquery-public-data.google_ads_transparency_center.creative_stats`. Se consulta en un único lote global semanal para todos los competidores activos, nunca una vez por clínica/competidor ni al renderizar. El lote hace dry-run, usa cache, `jobId` semanal durable y `maximumBytesBilled` de 25 GB por defecto; con costes habilitados el techo cubre ambas fuentes. Debe habilitarse exclusivamente en el worker líder de CRM con `COMPETITION_GOOGLE_ADS_TRANSPARENCY_WEEKLY_ENABLED=true`.
   - En la medición observada, el scan del dataset ronda 25 GB; cuatro ciclos semanales rondan 100 GB/mes aunque crezcan las clínicas, mientras los candidatos entren en la consulta global. Los gigabytes son bytes procesados dentro de BigQuery: el backend recibe solo filas agregadas pequeñas. La respuesta registra `dry_run_bytes`, `total_bytes_processed`, candidatos y filas para auditar el coste real.
   - Resolución rápida: primero se buscan creatividades por dominio confirmado; después, anunciantes por nombre/términos con score mínimo. La conciliación semanal revalida nombre/anunciante y recuento. Un lote correcto sustituye transaccionalmente la caché oficial anterior; si falla se conserva el último snapshot visible. No se acumula un histórico publicitario que el producto no consume ni se convierte un fallo temporal en cero anuncios.
   - Las creatividades se guardan en `MarketingCompetitorAdSnapshots` con `provider='google_ads_transparency'`. Se devuelven en `GET /competition` bajo `competitor.google_ads`.
