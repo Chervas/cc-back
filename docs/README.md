@@ -62,6 +62,9 @@ sincroniza el espejo frontend. Este índice no mantiene otro roadmap ni diario.
 - [Publicación selectiva de consumidores y recuperación](security/meta-clinical-publication.md).
 - [Identidades cliente, permiso de red DEV y recuperación](security/meta-client-identities.md).
 - [Autorización OAuth y límites del broker](security/meta-marketing-oauth.md).
+- [Lecturas tipadas, límites y recuperación Meta](security/meta-marketing-broker.md).
+- [Inventario candidato y diagnóstico de asignaciones](security/meta-marketing-discovery.md).
+- [Selección, activación, diario y recuperación](security/meta-marketing-enrollment.md).
 
 ### Auditoría y cifrado
 
