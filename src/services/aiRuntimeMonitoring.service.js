@@ -4,6 +4,7 @@ const axios = require('axios');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const bedrock = require('./bedrockAiProvider.service');
+const aiBroker = require('./aiBroker.service');
 const aiOrchestrator = require('./aiOrchestrator.service');
 
 const CACHE_TTL_MS = Math.max(
@@ -62,7 +63,7 @@ function configuredInventory() {
       purpose: 'Transcripción de audios de WhatsApp',
       data_scope: 'Audio de pacientes; pendiente de migración a proveedor UE',
       role: 'Transcripción',
-      configured: !!clean(process.env.GROQ_API_KEY),
+      configured: aiBroker.enabled('groq') || !!clean(process.env.GROQ_API_KEY),
     },
     {
       key: 'openai_accounting',
@@ -71,7 +72,7 @@ function configuredInventory() {
       purpose: 'Extracción de facturas y nóminas',
       data_scope: 'Documentos contables; fuera del runtime conversacional',
       role: 'OCR contable',
-      configured: !!clean(process.env.OPENAI_API_KEY),
+      configured: aiBroker.enabled('openai') || !!clean(process.env.OPENAI_API_KEY),
     },
     {
       key: 'openai_web',
@@ -80,7 +81,7 @@ function configuredInventory() {
       purpose: 'Generación de contenido web',
       data_scope: 'Contenido de marketing sin historia clínica',
       role: 'Contenido web',
-      configured: !!clean(process.env.OPENAI_API_KEY),
+      configured: aiBroker.enabled('openai') || !!clean(process.env.OPENAI_API_KEY),
     },
     {
       key: 'openai_visibility',
@@ -89,7 +90,7 @@ function configuredInventory() {
       purpose: 'Medición de presencia de la clínica en respuestas de asistentes (marketing)',
       data_scope: 'Búsquedas de marketing sin historia clínica',
       role: 'Visibilidad en asistentes',
-      configured: !!clean(process.env.OPENAI_API_KEY),
+      configured: aiBroker.enabled('openai') || !!clean(process.env.OPENAI_API_KEY),
     },
     {
       key: 'gemini_visibility',
@@ -98,17 +99,24 @@ function configuredInventory() {
       purpose: 'Medición de presencia de la clínica en respuestas de asistentes (marketing)',
       data_scope: 'Búsquedas de marketing sin historia clínica',
       role: 'Visibilidad en asistentes',
-      configured: !!clean(process.env.GEMINI_API_KEY),
+      configured: aiBroker.enabled('gemini') || !!clean(process.env.GEMINI_API_KEY),
     },
   ];
 }
 
 async function checkGroqAudio() {
   const checkedAt = new Date().toISOString();
-  const apiKey = clean(process.env.GROQ_API_KEY, 300);
+  const brokerEnabled = aiBroker.enabled('groq');
+  const apiKey = brokerEnabled ? '' : clean(process.env.GROQ_API_KEY, 300);
   const model = clean(process.env.GROQ_STT_MODEL) || 'whisper-large-v3-turbo';
-  if (!apiKey) return { ok: false, model, checked_at: checkedAt, detail: 'GROQ_API_KEY no configurada.' };
+  if (!brokerEnabled && !apiKey) return { ok: false, model, checked_at: checkedAt, detail: 'GROQ_API_KEY no configurada.' };
   try {
+    if (brokerEnabled) {
+      const { data } = await aiBroker.checkModel('groq', model);
+      if (data.model !== model || typeof data.available !== 'boolean') throw Object.assign(Error('provider_failed'), { code: 'provider_failed' });
+      return { ok: data.available, model, checked_at: checkedAt,
+        detail: data.available ? 'Clave válida y modelo de audio disponible.' : 'El modelo de audio no aparece disponible.' };
+    }
     const baseUrl = (clean(process.env.GROQ_API_BASE_URL) || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
     const response = await axios.get(`${baseUrl}/models`, {
       timeout: 5_000,
