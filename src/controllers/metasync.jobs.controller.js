@@ -988,3 +988,14 @@ exports.getAwsInfrastructureCosts = async (req, res) => {
     res.status(code === 'technical_admin_required' ? 403 : code === 'cost_period_invalid' ? 400 : 503).json({ error: { code } });
   }
 };
+
+exports.getGoogleCloudCosts = async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  try {
+    res.json(await require('../services/googleCloudCosts.service').getOverview({ userId: req.userData?.userId, month: req.query?.month }));
+  } catch (error) {
+    const code = ['technical_admin_required', 'cost_period_invalid'].includes(error.code) ? error.code : 'cost_cache_unavailable';
+    res.status(code === 'technical_admin_required' ? 403 : code === 'cost_period_invalid' ? 400 : 503).json({ error: { code } });
+  }
+};
+
