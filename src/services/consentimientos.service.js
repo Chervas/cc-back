@@ -486,13 +486,37 @@ function normalizeSignatureEvidence(payload = {}, requestMeta = {}) {
         representative_name: representativeName || null,
         representative_document: toCleanString(payload.representative_document ?? payload.documento_representante),
         relationship: toCleanString(payload.relationship ?? payload.parentesco),
-        accepted_statement: normalizeBoolean(payload.accepted_statement ?? payload.declaracion_aceptada, true),
+        accepted_statement: (payload.accepted_statement ?? payload.declaracion_aceptada) === true,
         signature_data_url: signatureDataUrl && signatureDataUrl.length < 250000 ? signatureDataUrl : null,
         signed_at: new Date().toISOString(),
         ip: toCleanString(requestMeta.ip),
         user_agent: toCleanString(requestMeta.userAgent),
         device_label: toCleanString(payload.device_label ?? payload.dispositivo),
     };
+}
+
+function requireSignatureEvidence(evidence, document) {
+    let code = null;
+    if (!evidence.accepted_statement) code = 'consent_signature_statement_required';
+    else if (!evidence.signer_name) code = 'consent_signature_name_required';
+    else if (!evidence.signature_data_url || !/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(evidence.signature_data_url)
+        || !Buffer.from(evidence.signature_data_url.slice(22), 'base64').subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) code = 'consent_drawn_signature_required';
+    else if (!['patient', 'representative'].includes(evidence.signer_role)) code = 'consent_signature_role_invalid';
+    else if (requiresRepresentative(document) && (evidence.signer_role !== 'representative' || !evidence.relationship)) code = 'representative_signature_required';
+    if (code) {
+        const error = new Error(code);
+        error.statusCode = 400;
+        throw error;
+    }
+}
+
+function requireActiveConsentPackage(packageLike) {
+    const item = getPlain(packageLike);
+    if (item.status === 'cancelled' || item.status === 'expired' || (item.expires_at && new Date(item.expires_at).getTime() <= Date.now())) {
+        const error = new Error('consent_package_unavailable');
+        error.statusCode = 410;
+        throw error;
+    }
 }
 
 function normalizeRevocationEvidence(payload = {}, requestMeta = {}) {
@@ -2413,6 +2437,7 @@ async function createTabletSession(packageIdRaw, payload = {}) {
         err.statusCode = 404;
         throw err;
     }
+    requireActiveConsentPackage(packageRow);
     const token = signPackageToken(packageRow, {
         channel: 'tablet',
         ttlHours: payload.ttl_hours ?? payload.validez_horas ?? 12,
@@ -2868,6 +2893,7 @@ async function getPublicPackage(tokenRaw, requestMeta = {}) {
         err.statusCode = 404;
         throw err;
     }
+    requireActiveConsentPackage(packageRow);
     const documents = Array.isArray(packageRow.documents) ? packageRow.documents : [];
     await Promise.all(documents.map(async (doc) => {
         const plainDoc = getPlain(doc);
@@ -2923,12 +2949,14 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
         throw err;
     }
     const plainDoc = getPlain(doc);
-    if (DOCUMENT_CLOSED_STATUSES.has(plainDoc.status)) {
+    if (DOCUMENT_CLOSED_STATUSES.has(plainDoc.status) || (plainDoc.expires_at && new Date(plainDoc.expires_at).getTime() <= Date.now())) {
         const err = new Error('consent_document_already_closed');
         err.statusCode = 409;
         throw err;
     }
     const evidence = normalizeSignatureEvidence(payload, requestMeta);
+    requireSignatureEvidence(evidence, plainDoc);
+    if (plainDoc.package) requireActiveConsentPackage(plainDoc.package);
     if (requiresRepresentative(plainDoc) && evidence.signer_role !== 'representative') {
         const err = new Error('representative_signature_required');
         err.statusCode = 400;
@@ -3099,11 +3127,29 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
         err.statusCode = 404;
         throw err;
     }
+    requireActiveConsentPackage(packageRow);
     const plain = getPlain(packageRow);
     const documents = Array.isArray(plain.documents) ? plain.documents : [];
     const requestedDocumentIds = Array.isArray(payload.document_ids)
         ? new Set(payload.document_ids.map((item) => String(item)))
         : null;
+    const pending = documents.filter((doc) => !DOCUMENT_CLOSED_STATUSES.has(doc.status)
+        && (!requestedDocumentIds || requestedDocumentIds.has(String(doc.id)) || requestedDocumentIds.has(String(doc.public_id))));
+    if (!pending.length) {
+        const error = new Error('consent_package_has_no_pending_documents');
+        error.statusCode = 409;
+        throw error;
+    }
+    // Validate the whole selected package before recording its first signature.
+    const evidence = normalizeSignatureEvidence(payload, requestMeta);
+    for (const doc of pending) {
+        requireSignatureEvidence(evidence, doc);
+        if (doc.expires_at && new Date(doc.expires_at).getTime() <= Date.now()) {
+            const error = new Error('consent_document_expired');
+            error.statusCode = 410;
+            throw error;
+        }
+    }
     const signed = [];
     for (const doc of documents) {
         if (requestedDocumentIds && !requestedDocumentIds.has(String(doc.id)) && !requestedDocumentIds.has(String(doc.public_id))) {
