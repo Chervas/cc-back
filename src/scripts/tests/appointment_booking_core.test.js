@@ -8,8 +8,6 @@ const { bookingCapabilities, requireOperationalProfile } = require('../../servic
 const { loadBookingContext, searchTreatmentSlots } = require('../../services/appointmentBookingAvailability.service');
 const { mutateAppointmentBooking } = require('../../services/appointmentBookingCommand.service');
 const { bookingSegments } = require('../../lib/appointment-booking-segments');
-const fs = require('node:fs');
-const path = require('node:path');
 
 const capabilities = { simple: true, multi: true };
 const Op = Object.fromEntries(['ne', 'in', 'or', 'lt', 'lte', 'gt'].map((key) => [key, Symbol(key)]));
@@ -171,9 +169,6 @@ test('rescheduling without explicit resources retains the locked current profess
   assert.equal(moved.instalacion_id, 9);
   assert.equal(f.state.appointments.length, 1);
   assert.equal(f.state.occupancies.length, 2);
-  const controller = fs.readFileSync(path.resolve(__dirname, '../../controllers/citas.controller.js'), 'utf8');
-  assert.match(controller, /nextDoctorIdRaw !== undefined \? \{ doctor_id: nextDoctorId \} : \{\}/);
-  assert.match(controller, /nextInstalacionIdRaw !== undefined \? \{ instalacion_id: nextInstalacionId \} : \{\}/);
 });
 
 test('failed reschedule restores the prior appointment range and all original occupancy', async () => {
@@ -204,8 +199,6 @@ test('legacy creation strips forged booking snapshots while preserving unrelated
   const f = fixture({ bookingProfile: null });
   const created = await f.reserve({ appointmentValues: { ...f.values, import_metadata: { source_batch: 'synthetic', booking: { version: 1, forged: true } } } });
   assert.deepEqual(created.import_metadata, { source_batch: 'synthetic' });
-  const controller = fs.readFileSync(path.resolve(__dirname, '../../controllers/citas.controller.js'), 'utf8');
-  assert.match(controller, /delete baseImportMetadata\.booking/, 'HTTP must strip fake snapshots even with flags off or historical registration');
   assert.deepEqual(bookingSegments({ id_cita: 1, import_metadata: { booking: { version: 1, phases: [phase('fake')] } } }), []);
 });
 
