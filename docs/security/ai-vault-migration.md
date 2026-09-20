@@ -23,6 +23,14 @@ clave. No es un proxy de URL/cabeceras arbitrarias.
 | `groqAudio.service` | `ai.groq.audio.transcribe.v1` | `whatsapp_audio` | Transcripción y uso/duración del proveedor |
 | `aiRuntimeMonitoring.service` | `ai.groq.model.check.v1` | `provider_health` | Disponibilidad del modelo; grant separado |
 
+La monitorización distingue configuración y disponibilidad: OpenAI/Gemini
+devuelven `health.ok=null` y `checked_at=null` mientras no haya comprobación.
+El resumen `unverified` y su contador no generan llamadas adicionales ni
+transforman un historial de uso en una prueba actual. Un fallo comprobado
+prevalece (`error`); `healthy` exige comprobar todos los modelos configurados.
+Groq rechaza respuestas de catálogo mal formadas. La prueba de catálogo no
+acredita una transcripción real ni resuelve saldo, cuotas o aceptación clínica.
+
 Bedrock tiene su propio runtime separado, operación `ai.bedrock.converse.v1`
 y credenciales AWS en el vault. No comparte plazas de ejecución con OCR/audio.
 La [matriz de automatizaciones y contexto](automation-ai-migration-acceptance.md)

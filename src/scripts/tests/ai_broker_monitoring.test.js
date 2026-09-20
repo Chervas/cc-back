@@ -6,12 +6,15 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createAiBroker } = require('../../services/aiBroker.service');
 const { MODEL_CHECK_OPERATION } = require('../../../services/integrations-broker/src/ai-limits');
-function monitoring({ env = {}, checkModel = async (_provider, model) => ({ data: { model, available: true } }) } = {}) {
+function monitoring({ env = {}, brokerEnabled = () => true, directGet = () => { throw Error('direct_provider_forbidden'); },
+  bedrockEnabled = false, checkModel = async (_provider, model) => ({ data: { model, available: true } }) } = {}) {
   const calls = []; const module = { exports: {} };
   const dependencies = {
-    axios: { get() { throw Error('direct_provider_forbidden'); } }, sequelize: { Op: {} }, '../../models': {},
-    './bedrockAiProvider.service': { enabled: () => false }, './aiOrchestrator.service': { models: () => ({}) },
-    './aiBroker.service': { enabled: () => true, checkModel: (...args) => { calls.push(args); return checkModel(...args); } },
+    axios: { get: directGet }, sequelize: { Op: {} }, '../../models': {},
+    './bedrockAiProvider.service': { enabled: () => bedrockEnabled, getConfig: () => ({ region: 'eu-south-2' }),
+      checkModel: async model => ({ model, ok: true, checked_at: '2026-09-20T00:00:00.000Z' }) },
+    './aiOrchestrator.service': { models: () => ({ fast: 'fast', complex: 'complex', assistant: 'assistant', fallback: 'complex' }) },
+    './aiBroker.service': { enabled: brokerEnabled, checkModel: (...args) => { calls.push(args); return checkModel(...args); } },
   };
   const filename = path.join(__dirname, '../../services/aiRuntimeMonitoring.service.js');
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports, process: { env },
@@ -30,6 +33,37 @@ test('health failure remains visible and never falls back to the still-present l
   const model = (await f.service.loadHealth()).models.find(row => row.key === 'groq_audio');
   assert.equal(model.configured, true); assert.equal(model.health.ok, false); assert.equal(model.health.error_code, 'provider_unauthorized');
   assert.equal(f.calls.length, 1); assert(!JSON.stringify(model).includes('FICTITIOUS_LEGACY_KEY'));
+});
+test('configured OpenAI and Gemini remain unverified without inventing a check or issuing provider calls', async () => {
+  const f = monitoring({ bedrockEnabled: true });
+  const overview = await f.service.getOverview();
+  for (const model of overview.models.filter(row => ['openai', 'gemini'].includes(row.provider))) {
+    assert.equal(model.configured, true); assert.equal(model.health.ok, null); assert.equal(model.health.checked_at, null);
+  }
+  assert.equal(overview.summary.status, 'unverified'); assert.equal(overview.summary.unverified_models, 4);
+  assert.equal(overview.summary.failing_models, 0); assert.equal(f.calls.length, 1);
+});
+test('verified failure takes precedence over unverified providers', async () => {
+  const f = monitoring({ checkModel: async () => { throw Error('provider_unauthorized'); } });
+  const overview = await f.service.getOverview();
+  assert.equal(overview.summary.status, 'error'); assert.equal(overview.summary.failing_models, 1);
+  assert.equal(overview.summary.unverified_models, 4);
+});
+test('healthy requires checks for every configured model; absence of configuration is not healthy', async () => {
+  const checked = monitoring({ bedrockEnabled: true, brokerEnabled: provider => provider === 'groq' });
+  const overview = await checked.service.getOverview();
+  assert.equal(overview.summary.status, 'healthy'); assert.equal(overview.summary.configured_models, 5);
+  assert.equal(overview.summary.unverified_models, 0);
+  const empty = await monitoring({ brokerEnabled: () => false }).service.getOverview();
+  assert.equal(empty.summary.configured_models, 0); assert.equal(empty.summary.status, 'unverified');
+});
+test('malformed direct Groq response cannot attest availability', async () => {
+  const f = monitoring({ env: { GROQ_API_KEY: 'FICTITIOUS_KEY' }, brokerEnabled: () => false,
+    directGet: async () => ({ data: {} }) });
+  const overview = await f.service.getOverview();
+  const audio = overview.models.find(model => model.key === 'groq_audio');
+  assert.equal(audio.health.ok, false); assert.equal(audio.health.error_code, 'provider_invalid_response');
+  assert.equal(overview.summary.status, 'error'); assert.equal(f.calls.length, 0);
 });
 test('the application signs a separate health scope and does not forward provider credentials', async () => {
   const calls = [];
