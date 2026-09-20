@@ -1,9 +1,75 @@
 # Automatizaciones con IA: conservación del contexto durante la migración
 
-Revisión 2026-09-18. Complementa [el runbook IA](ai-vault-migration.md).
-Los consumidores públicos todavía usan Bedrock directo. El runtime separado
-del broker está desplegado y probado en AWS, sin activar el corte ni dar por
-terminada la comprobación visual.
+> **Tipo:** runbook de aceptación y recuperación.
+> **Fuente de verdad:** alcance de pruebas, corte Bedrock y límites por consumidor.
+> **Última revisión:** 2026-09-20.
+> **Relacionado con:** [vault IA](ai-vault-migration.md).
+
+Revisión 2026-09-20. Complementa [el runbook IA](ai-vault-migration.md).
+**La API CRM ya usa Bedrock por el broker, con los mismos modelos y prompts.**
+Su clave de proveedor se retiró de `.env` y del arranque PM2 persistido.
+Gateway/fresh-inbound aún conservan copias anteriores; no se declara completada
+la custodia de todos los consumidores ni la migración de Groq/OpenAI/Gemini.
+
+## Corte CRM y aceptación del 20/09
+
+Inventario revalidado antes del corte: 1521 versiones/4470 nodos IA, 644 activos
+y ocho configuraciones activas, sin diferencias respecto de las definiciones
+anteriores. Candidata `08fc93a5` compuesta sobre CRM `20e7abe3`: adapta el transporte
+y su admisión sin promover todo DEV, cambiar dependencias, modelos ni esquema.
+Preflight de 27 tablas correcto. Solo se reinicia la API; se restituyen los
+estados previos de sus colas y se conservan MFA, pausas y demás procesos.
+`clinicaclick-bedrock-staging` queda habilitado al arranque sin reiniciarlo.
+
+Pruebas de esta entrega:
+
+- 23 casos unitarios del candidato. Matriz aislada firmada: 4470 resultados
+  esperados, incluidas 17 recetas retiradas; 1904 decisiones y 40 fallos,
+  sin diferencias de hash de petición/salida respecto del transporte anterior.
+- 22/22 casos contra AWS/Bedrock reales sin credenciales de proveedor locales
+  en el harness. No se cambian modelos para obtener este resultado.
+- Interfaz CRM con sesión/MFA existentes y backend real: tres controles del
+  mismo caso antes/después del corte y tras retirar las claves locales, todos
+  completados. Después, 22/22 casos sobre las ocho configuraciones activas;
+  22 decisiones posteriores evaluadas y cero errores JS.
+- La interfaz inicia los jobs reales. Solo para el borrador propio de QA se
+  añade `initial_context` ficticio al POST: no se simula backend ni proveedor,
+  ni se leen conversaciones de pacientes. Los nodos IA conservan el hash de
+  configuración original; sus condiciones posteriores se copian y sus acciones
+  finales se sustituyen por `control/end`. Esto prueba transporte, semántica y
+  evaluación de ramas; no prueba envíos ni modificaciones clínicas reales.
+- 92 recibos de 46 solicitudes Bedrock contrastados independientemente por
+  versión, SHA256 y KMS en S3. Backlog del broker vacío en esa lectura.
+- 18 regresiones WhatsApp con transporte ficticio y tres transiciones TLS de
+  auditoría con servidor local correcto. El primer lanzamiento de las tres
+  últimas usó un guard incompatible y bloqueó el loopback; se conserva ese
+  fallo del harness y se repite usando el guard local propio de la suite.
+
+Las 25 ejecuciones UI propias (3018–3042) y sus logs se exportaron a evidencia
+privada antes de borrar el único borrador temporal, nunca publicado ni activado.
+El borrado se verificó por API; no se borran flujos del usuario ni recibos S3.
+El resultado histórico 21/22 descrito más abajo permanece válido: evidencia
+variabilidad semántica también por vía directa. Las nuevas tandas correctas no
+demuestran clasificación infalible ni eliminan la derivación segura existente.
+
+Evidencia privada en `qa-evidence/security-close-20260920/`: inventario y matrices,
+`canary-matrix-ui.json`, capturas de escritorio/móvil, `canary-archive.private.json`,
+`canary-cleanup-result.json`, `broker-audit-final-receipts.json` y logs de pruebas.
+No subir snapshots de definiciones, claves, sesiones ni registros privados a Git.
+
+Recuperación del corte: conservar versión/configuración previa en
+`/var/lib/clinicaclick-consumer-recovery/bedrock-crm-20260920` y
+`/var/lib/clinicaclick-consumer-recovery/bedrock-local-copy-removal-20260920`,
+ambos privados. Los publicadores de esta entrega están consumidos: no repetirlos.
+Ante una incidencia, detener nuevas admisiones, conciliar jobs en curso y aplicar
+una recuperación acotada; no volver al proveedor directo automáticamente ni
+reproducir resultados inciertos. No detener el servicio AWS ya utilizado.
+
+DEV conserva el transporte desactivado y carece de claves Bedrock. Falta conciliar
+gateway/fresh-inbound y sus arranques antes de retirar sus copias; no rotar el par
+IAM ni afectar consumidores ajenos. El resto de este documento conserva la
+evidencia y secuencia histórica del 18/09; sus estados «sin activar» no describen
+el corte posterior de la API CRM.
 
 ## Recorridos que deben conservarse
 
@@ -86,7 +152,7 @@ y DEV aislado `1b74ab2d` (incluye la corrección `245f7c51`). Se comprobaron los
 los flags efectivos de MFA/jobs/IA y los 18 contratos SQL antes del reinicio.
 El importador pasivo de WhatsApp no se modificó ni reinició.
 
-## Transporte Bedrock preparado y probado, todavía sin activar
+## Preparación del 18/09: transporte Bedrock todavía sin activar
 
 La operación `ai.bedrock.converse.v1` usa un servicio independiente del de
 OCR/Groq: audiencia `clinicaclick:bedrock:<entorno>:v1`, clave de firma,
@@ -148,7 +214,7 @@ dependencias compartidas por servicios AWS anteriores. La aplicación mantiene
 su SDK existente. Inventariar workers/colas del gateway y fresh-inbound antes
 del corte; no deducir su inactividad únicamente de `JOBS_WORKER=false`.
 
-## AWS real: despliegue aislado y discrepancia semántica conservada
+## AWS real del 18/09: despliegue aislado y discrepancia semántica conservada
 
 Desplegada la release `1b74ab2d` en `clinicaclick-bedrock-staging`, UID987,
 puerto8449, heap128 MiB, MemoryMax256 MiB, MemoryHigh224 MiB, CPUQuota75%.
