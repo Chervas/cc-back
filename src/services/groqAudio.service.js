@@ -1,6 +1,7 @@
 'use strict';
 
 const axios = require('axios');
+const aiBroker = require('./aiBroker.service');
 
 function cleanString(value) {
   if (value === undefined || value === null) {
@@ -35,18 +36,20 @@ class GroqAudioService {
   }
 
   isConfigured() {
-    return !!cleanString(process.env.GROQ_API_KEY);
+    return aiBroker.enabled('groq') || !!cleanString(process.env.GROQ_API_KEY);
   }
 
   async transcribeAudioBuffer({ buffer, mimeType, fileName } = {}) {
-    const apiKey = cleanString(process.env.GROQ_API_KEY);
-    if (!apiKey) {
+    await require('./securityMonitoring.service').assertAiAllowed('whatsapp_audio');
+    const brokerEnabled = aiBroker.enabled('groq');
+    const apiKey = brokerEnabled ? '' : cleanString(process.env.GROQ_API_KEY);
+    if (!brokerEnabled && !apiKey) {
       throw new Error('groq_api_key_missing');
     }
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
       throw new Error('audio_buffer_empty');
     }
-    if (typeof FormData !== 'function' || typeof Blob !== 'function') {
+    if (!brokerEnabled && (typeof FormData !== 'function' || typeof Blob !== 'function')) {
       throw new Error('node_formdata_blob_unavailable');
     }
 
@@ -60,21 +63,31 @@ class GroqAudioService {
     const normalizedFileName =
       cleanString(fileName) || `whatsapp-audio.${extensionForMimeType(normalizedMimeType)}`;
 
-    const form = new FormData();
-    form.append('file', new Blob([buffer], { type: normalizedMimeType }), normalizedFileName);
-    form.append('model', model);
-    form.append('response_format', 'json');
+    let form;
+    if (!brokerEnabled) {
+      form = new FormData();
+      form.append('file', new Blob([buffer], { type: normalizedMimeType }), normalizedFileName);
+      form.append('model', model);
+      form.append('response_format', 'verbose_json');
+    }
 
-    const response = await axios.post(`${baseUrl}/audio/transcriptions`, form, {
+    const response = await (brokerEnabled ? require('./aiFileTransfer.service').withTransfer({ useCase: 'whatsapp_audio',
+      buffer, mimeType: normalizedMimeType, fileName: normalizedFileName }, ref => aiBroker.execute('groq', 'whatsapp_audio', {
+      model, response_format: 'verbose_json', fileRef: ref,
+    }, { timeoutMs: timeout, requestId: ref.requestId })) : axios.post(`${baseUrl}/audio/transcriptions`, form, {
       headers: {
         Authorization: `Bearer ${apiKey}`,
       },
       timeout,
       maxBodyLength: Infinity,
       maxContentLength: Infinity,
+    })).catch(async error => {
+      await require('./aiUsageTelemetry.service').recordProviderFailure({provider:'groq',model,useCase:'whatsapp_audio',error});
+      throw error;
     });
 
     const data = response?.data || {};
+    await require('./aiUsageTelemetry.service').recordProviderResponse({provider:'groq',model, useCase:'whatsapp_audio',response:data});
     const text = cleanString(data.text || data.transcription || data.output_text);
     if (!text) {
       throw new Error('groq_audio_transcription_empty');

@@ -1,0 +1,2 @@
+'use strict';
+module.exports=(s,D)=>s.define('SecurityMonitoringMeasure',{id:{type:D.INTEGER.UNSIGNED,autoIncrement:true,primaryKey:true},entity_type:D.STRING(40),entity_id:D.STRING(160),label:D.STRING(255),clinic_id:D.INTEGER,paused:{type:D.BOOLEAN,defaultValue:false},reason:D.STRING(500),updated_by:D.INTEGER},{tableName:'SecurityMonitoringMeasures',underscored:true,createdAt:'created_at',updatedAt:'updated_at',indexes:[{unique:true,fields:['entity_type','entity_id']}]});

@@ -70,7 +70,8 @@ function coerceByFormat(value, outputFormat = {}) {
 async function runCandidate({ candidate, fallbackUsed, route, request, tenant }) {
   const startedAt = Date.now();
   try {
-    const result = await bedrock.analyzeStructured({ ...request, model: candidate });
+    const result = await bedrock.analyzeStructured({ ...request, model: candidate, useCase: route.use_case,
+      beforeDispatch: () => require('./securityMonitoring.service').assertAiAllowed(route.use_case) });
     await aiUsageTelemetry.recordAiUsage({
       provider: 'bedrock',
       model: result.model,
@@ -91,6 +92,9 @@ async function runCandidate({ candidate, fallbackUsed, route, request, tenant })
       model: candidate,
       useCase: route.use_case,
       status: 'error',
+      inputTokens: error?.usage?.input_tokens,
+      outputTokens: error?.usage?.output_tokens,
+      usageKnown: !!error?.usage,
       latencyMs: Date.now() - startedAt,
       fallbackUsed,
       clinicId: tenant.clinicId,
@@ -114,6 +118,7 @@ async function analyzeStructured({
   groupId = null,
 } = {}) {
   const route = routeFor({ useCase, analysisMode, prompt, inputText, outputFormat });
+  await require('./securityMonitoring.service').assertAiAllowed(route.use_case);
   const request = { systemPrompt, prompt, inputText, outputFormat, maxTokens, temperature: 0 };
   const tenant = { clinicId, groupId };
   try {
