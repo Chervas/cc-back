@@ -40,9 +40,12 @@ modelo reproducida también por conexión directa. Micro/Lite/Pro pasan el
 monitor real. La API CRM ya usa este broker, con modelos/prompts conservados y
 sin claves Bedrock en su `.env`/arranque PM2 persistido. Las ocho configuraciones
 activas pasan 22/22 casos desde la interfaz autenticada con texto ficticio y
-acciones finales inocuas. Gateway/fresh-inbound mantienen copias anteriores
-pendientes de conciliación. OpenAI/Gemini/Groq y archivos conservan su transporte
-previo: no declarar «IA migrada» globalmente. El corte Bedrock y sus límites se
+acciones finales inocuas. Fresh-inbound se reinició ordenadamente y hereda
+Bedrock/SES/Groq de la API; gateway conserva copias pendientes de conciliación.
+Groq y OpenAI ya tienen activo el transporte broker en la API CRM. La clave
+Groq ya no está en `.env` ni arranque PM2 guardado; OpenAI conserva temporalmente
+su copia hasta completar aceptación. Gemini mantiene su transporte previo.
+No declarar «IA migrada» globalmente. El corte Bedrock y sus límites se
 describen en la matriz enlazada; comprobar un catálogo no acredita esa migración.
 
 Las claves de IA son de plataforma: los grants usan `platform:dev` o
@@ -176,9 +179,21 @@ Groq con consumidor exacto: audio ficticio299592bytes, payload531bytes, texto
 esperado y salud tipada correcta. Cero transferencias/reserva/spool al terminar;
 cuatro recibos externos S3 comprobados por versión/checksum/KMS y sin backlog.
 El harness inyecta DB/pausa/telemetría: no es prueba integrada ni visual.
-Flags CRM/gateway todavía apagados, claves locales presentes y servicios IA aún
-sin habilitación al arranque. OpenAI sigue sin saldo y Gemini403, igual que
-antes desde el host original. No repetir operaciones para disimular esos fallos.
+Ese corte histórico ha sido ampliado el20/09: servicios IA/transferencias
+habilitados al arranque, Groq activo en API CRM y fresh-inbound, clave local de
+la API retirada y PM2 persistido. Transcripción integrada sin mocks y monitor
+CRM autenticado correctos. OpenAI activado en API CRM tras recuperar saldo y
+aprobar OCR PDF, contenido web y visibilidad a través del broker; las tres
+pruebas privadas inyectan DB/pausa/telemetría y no acreditan todas las pantallas.
+La clínica92 rechaza el CMS con `scope_not_enabled`: se conserva ese despliegue
+gradual, sin abrir el editor para pasar QA. Copia OpenAI y gateway pendientes.
+
+Gemini rechazaba la IP AWS (`API_KEY_IP_ADDRESS_BLOCKED`). Se añadió únicamente
+la IP del broker a la allowlist, conservando las IP anteriores y la restricción
+a Gemini API. GET del catálogo devuelve200; la generación existente devuelve
+402 por saldo prepagado agotado. AI Studio confirma0EUR y la cuenta autenticada
+no tiene edición del perfil de pagos. No rotar la clave ni cambiar modelo/API
+para ocultar este bloqueo. No repetir llamadas sin corregir la causa.
 
 ### Secuencia operativa
 
@@ -257,7 +272,22 @@ separación de UID. Sin capacidades en seis logs NGINX ni journal del emisor.
 La comprobación de Groq solo lee el modelo permitido, limita la respuesta a
 16KiB y proyecta disponibilidad. Conserva la caché de cuatro horas, grant propio
 `ai:provider_health` y ausencia de fallback. Se ha probado por AWS y Groq reales;
-el recorrido autenticado en Ajustes consumiendo este broker sigue pendiente.
+el recorrido autenticado en Ajustes consumiendo este broker pasó el20/09.
+Un corte posterior verifica20 recibos de correo/IA contra S3, sin backlog;
+incluye el rechazo Gemini, no solo éxitos. Evidencia y límites en99.
+
+### Saldo de API y suscripciones
+
+La suscripción de ChatGPT y el saldo de OpenAI API son independientes. El
+`credit_balance_exhausted` observado se correspondía con saldo negativo y
+recarga automática desactivada; se recuperó mediante una recarga puntual
+autorizada. Una compra de crédito es un anticipo, no consumo de IA atribuible
+a una clínica: no sumarlo al consumo estimado ni duplicarlo como coste diario.
+El saldo del panel puede cambiar por otras aplicaciones de la organización.
+Gemini AI Studio tiene igualmente su propio saldo de prepago; tener una cuenta
+Google Cloud abierta no acredita crédito disponible ni permisos de pago.
+Documentación oficial de diagnóstico:
+[OpenAI](https://developers.openai.com/api/docs/guides/error-codes#429---credit-balance-exhausted).
 
 Evidencias bajo `qa-evidence/security-resume-20260917/ai-runtime/`:
 `private-groq-consumer-result.json`, `private-url-aws-verified.json`,

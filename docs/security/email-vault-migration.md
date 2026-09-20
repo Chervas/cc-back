@@ -3,8 +3,12 @@
 Estado 2026-09-20: transporte broker activo en la API CRM y en el worker de
 seguridad DEV; ambos servicios SES AWS habilitados al arranque. Un aviso autorizado
 desde la interfaz CRM queda entregado por SES y conciliado en el outbox. Sus dos
-recibos S3 se verifican por versión/SHA256/KMS. Siguen pendientes la aceptación
-MFA posterior al corte, el recorrido DEV y la retirada de copias locales.
+recibos S3 se verifican por versión/SHA256/KMS. El titular completó un nuevo
+login MFA: correo entregado, desafío usado una vez y sesión ligada al usuario.
+La copia SES se retiró de `.env`, entorno efectivo y arranque PM2 persistido de
+la API CRM; fresh-inbound se reinició limpiamente para heredar la configuración
+vigente. Los cuatro recibos de aviso y MFA están verificados en S3. Quedan el
+recorrido humano DEV y la copia local de su worker; no se rotó la clave IAM.
 Complementa [el contrato de acceso](meta-email-stage1.md).
 
 ## Transporte y separación
