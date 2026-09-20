@@ -247,5 +247,30 @@ correctas; ambos preflight SQL de27 tablas compatibles. Evidencia privada:
 `qa-evidence/security-finish-20260920/`. Diarios consumidos de publicación y DEV
 bajo `/var/lib/clinicaclick-consumer-recovery/email-{crm,gateway,dev}-20260920`.
 No volver a ejecutar esos publicadores ni reintentar el aviso ya entregado.
-Las credenciales locales aún se conservan hasta cerrar la aceptación pertinente;
-no hay fallback automático directo y no se ha rotado ninguna clave.
+### Aceptación y retirada de copias locales completadas (20/09)
+
+Tras el aviso, el titular completó MFA en CRM y DEV. En DEV, la sesión real
+usa `password_email`, desafío consumido una vez y cookie propia `HttpOnly` /
+`SameSite=Strict`. El visor muestra `code_verified` con `s3_version_verified`.
+Las tres entregas DEV de esta comprobación tienen seis recibos externos
+verificados independientemente por versión, SHA256 y KMS, sin backlog.
+
+La API CRM ya no conserva credenciales SES en `.env` ni PM2 persistido;
+fresh-inbound heredó el corte en una parada ordenada. Retiradas también
+`EMAIL_AWS_ACCESS_KEY_ID` y `EMAIL_AWS_SECRET_ACCESS_KEY` de la configuración
+y proceso efectivo del worker de seguridad DEV. La API DEV y los procesos
+públicos mantuvieron su identidad; jobs clínicos DEV continúan apagados.
+Recuperación privada del último corte en
+`/var/lib/clinicaclick-consumer-recovery/email-dev-local-copy-removal-20260920`;
+operador consumido, no repetirlo. No hay fallback directo ni rotación.
+
+Para el acceso humano DEV abrir `http://localhost:4203/sign-in`: `127.0.0.1`
+es otro origen y la opción de recordar navegador se rechaza antes de comprobar
+el código. La incidencia observada tenía cero intentos, aunque se había reenviado
+el correo. Se resolvió abriendo el origen configurado y completando un desafío
+nuevo; no se debilitó la validación. Evidencias privadas `dev-auth-ui-accepted.json`,
+`dev-mfa-db-accepted.json` y `dev-email-audit-receipts.json` en
+`qa-evidence/security-finish-20260920/`.
+
+La aceptación de acceso/correo no equivale a recuperación de contraseña posterior
+al corte, prueba de carga sostenida ni migración de proveedores Google/Meta.
