@@ -1,6 +1,7 @@
 'use strict';
 const C = require('../../services/integrations-broker/src/google-business-profile-write-contract');
 const { mutationScope } = require('./businessProfileMutationScope.service');
+const receiptWait = require('../lib/businessProfileReceiptWait');
 const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0;
 const fail = (code = 'business_profile_automation_required') => {
   throw Object.assign(Error(code), { code, preserveFlowState: true });
@@ -94,14 +95,17 @@ function createBusinessProfileAutomation({ models, local, mutations, namespace =
       if (!log || Number(log.flow_execution_id) !== executionId || log.node_id !== nodeId || log.status !== 'running') fail();
       const applied = result.success === true && result.mutation.state === 'applied' && current.intent?.state === 'applied';
       const at = new Date(now()), previous = current.execution.context || {}, outputs = previous.outputs || {};
+      const pending = applied ? null : receiptWait.nextReceiptWait({ previous: current.execution.waiting_meta,
+        operationId: id, createdAt: current.intent?.created_at, now: at.getTime() });
+      const review = pending?.review === true;
+      const waitUntil = pending?.waitUntil || null;
+      const waitingMeta = applied ? null : { resume_mode: 'retry_current_node', reason: receiptWait.PENDING_REASON,
+        operation_id: id, receipt_checks: pending.checks, manual_review_required: review, last_error: errorCode };
       const output = { status: applied ? 'success' : 'waiting', provider_status: applied ? 'synced' : 'outcome_unknown',
         operation_id: id, clinic_id: Number(clinicId), at: at.toISOString(),
-        ...(applied ? { synced_at: current.intent.applied_at, time_zone: current.intent.local_input.plan.timeZone } : { error_code: errorCode }) };
+        ...(applied ? { synced_at: current.intent.applied_at, time_zone: current.intent.local_input.plan.timeZone }
+          : { error_code: errorCode, manual_review_required: review }) };
       const next = applied ? (typeof node.outputs?.on_success === 'string' ? node.outputs.on_success.trim() || null : null) : nodeId;
-      const attempts = applied ? 0 : Math.min(30, Math.max(0, Number(current.execution.waiting_meta?.receipt_checks) || 0) + 1);
-      const waitUntil = applied ? null : new Date(now() + Math.min(3600000, 60000 * 2 ** Math.min(attempts - 1, 6)));
-      const waitingMeta = applied ? null : { resume_mode: 'retry_current_node', reason: 'business_profile_mutation_pending',
-        operation_id: id, receipt_checks: attempts, last_error: errorCode };
       await runtime.jobClaim.assert({ transaction, executionId });
       await log.update({ status: 'success', finished_at: at, audit_snapshot: {
         kind: applied ? 'success' : 'waiting', next_node_id: applied ? next : undefined,
@@ -110,7 +114,8 @@ function createBusinessProfileAutomation({ models, local, mutations, namespace =
       } }, { transaction });
       await current.execution.update({ status: applied ? (next ? 'running' : 'completed') : 'waiting',
         current_node_id: next, context: { ...previous, outputs: { ...outputs, [nodeId]: output } },
-        wait_until: waitUntil, waiting_meta: waitingMeta, last_error: applied ? null : errorCode }, { transaction });
+        wait_until: waitUntil, waiting_meta: waitingMeta,
+        last_error: applied ? null : review ? receiptWait.REVIEW_ERROR : errorCode }, { transaction });
       if (applied && node.config.auto_deactivate_after_execution === true) await current.template.update({
         is_active: false, trigger_config: { ...(current.template.trigger_config || {}), last_executed_at: at.toISOString() },
       }, { transaction });

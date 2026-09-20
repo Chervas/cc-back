@@ -237,6 +237,13 @@ async function runAutomationFlowV2Job(payload = {}, _job, jobClaim) {
   const updated = await flowEngineV2Service.runExecution(execution.id, options);
 
   if (updated.status === 'waiting') {
+    const receiptWait = require('../lib/businessProfileReceiptWait');
+    if (receiptWait.needsReview(updated)) {
+      return { status: 'failed', retryable: false, nextRunAt: null,
+        error: Object.assign(new Error(receiptWait.REVIEW_ERROR), { code: receiptWait.REVIEW_ERROR }),
+        result: { execution_id: updated.id, execution_status: updated.status,
+          current_node_id: updated.current_node_id, manual_review_required: true } };
+    }
     return {
       status: 'waiting',
       nextAllowedAt: updated.wait_until || new Date(Date.now() + DEFAULT_FLOW_WAITING_BACKOFF_MS),

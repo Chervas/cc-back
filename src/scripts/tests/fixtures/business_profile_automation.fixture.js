@@ -64,6 +64,14 @@ module.exports = async ({ sql, models, report, local, consumer, resolved, actor,
     assert.equal((await run(lost)).result.status, 'waiting');
     assert.equal(lost.execution.current_node_id, 'apply_hours'); assert.equal(lost.template.is_active, true);
     assert.equal(lost.execution.context.outputs.apply_hours.provider_status, 'outcome_unknown');
+    const waitingSnapshot = JSON.stringify(lost.execution.toJSON());
+    const logCount = await models.FlowExecutionLogV2.count({ where: { flow_execution_id: lost.execution.id } });
+    for (const resumeMode of ['timeout', 'response', 'form_submission', undefined]) {
+      await assert.rejects(engine.runExecution(lost.execution.id, { resumeMode }), { code: 'business_profile_receipt_required' });
+      await lost.execution.reload(); assert.equal(JSON.stringify(lost.execution.toJSON()), waitingSnapshot);
+    }
+    assert.equal(await models.FlowExecutionLogV2.count({ where: { flow_execution_id: lost.execution.id } }), logCount);
+    report.checks.push('generic timeout/response/form resume and absent mode reject before changing execution, receipt-check counter or logs');
     const immutable = (await models.BusinessProfileMutation.findByPk(lost.operationId)).input_digest, sent = writes();
     await retry(lost);
     assert.equal((await run(lost)).result.status, 'completed'); assert.equal(writes(), sent);
@@ -217,7 +225,7 @@ module.exports = async ({ sql, models, report, local, consumer, resolved, actor,
     finally { setBefore(null); }
     assert.equal(writes(), uncertainSent);
     const originalDigest = (await models.BusinessProfileMutation.findByPk(uncertain.operationId)).input_digest;
-    for (let checks = 2; checks <= 8; checks++) {
+    for (let checks = 2; checks < 8; checks++) {
       await retry(uncertain); assert.equal((await run(uncertain)).result.status, 'waiting');
       assert.equal(uncertain.execution.waiting_meta.receipt_checks, checks);
       const delay = +uncertain.execution.wait_until - Date.now();
@@ -226,7 +234,7 @@ module.exports = async ({ sql, models, report, local, consumer, resolved, actor,
     assert.equal(writes(), uncertainSent); assert.equal(uncertain.template.is_active, true);
     assert.equal(uncertain.execution.current_node_id, 'apply_hours');
     assert.equal((await models.BusinessProfileMutation.findByPk(uncertain.operationId)).input_digest, originalDigest);
-    report.checks.push('broker not_found stays waiting on original immutable operation; repeated receipt checks back off from one minute to at most hourly, never republish or deactivate template');
+    report.checks.push('broker not_found stays waiting on original immutable operation; bounded receipt checks back off from one minute to at most hourly, never republish or deactivate template');
     local.resolveEffectiveLocations = async () => { throw Error('FICTITIOUS_MAPPING_READ_OUTAGE'); };
     try {
       await retry(uncertain); assert.equal((await run(uncertain)).result.status, 'failed');
@@ -234,6 +242,29 @@ module.exports = async ({ sql, models, report, local, consumer, resolved, actor,
       assert.equal(writes(), uncertainSent);
     } finally { local.resolveEffectiveLocations = liveResolve; }
     report.checks.push('mapping lookup outage before discovering an existing intent preserves its node and never selects an error branch or republishes');
+
+    await retry(uncertain);
+    const exhausted = (await run(uncertain)).result;
+    assert.equal(exhausted.status, 'failed'); assert.equal(exhausted.retryable, false);
+    assert.equal(exhausted.error.code, 'business_profile_mutation_review_required');
+    assert.equal(uncertain.execution.status, 'waiting'); assert.equal(uncertain.execution.current_node_id, 'apply_hours');
+    assert.equal(uncertain.execution.waiting_meta.receipt_checks, 8);
+    assert.equal(uncertain.execution.waiting_meta.manual_review_required, true);
+    assert.equal(uncertain.execution.wait_until, null); assert.equal(uncertain.template.is_active, true);
+    assert.equal(uncertain.execution.context.outputs.apply_hours.manual_review_required, true);
+    assert.equal((await models.BusinessProfileMutation.findByPk(uncertain.operationId)).input_digest, originalDigest);
+    let furtherCalls = 0; setBefore(() => { furtherCalls++; });
+    try {
+      await retry(uncertain);
+      const held = (await run(uncertain)).result;
+      assert.equal(held.status, 'failed'); assert.equal(held.retryable, false);
+      for (const resumeMode of ['timeout', 'response', 'retry_current_node']) {
+        const heldExecution = await engine.runExecution(uncertain.execution.id, { resumeMode });
+        assert.equal(heldExecution.waiting_meta.manual_review_required, true);
+      }
+      assert.equal(furtherCalls, 0); assert.equal(writes(), uncertainSent);
+    } finally { setBefore(null); }
+    report.checks.push('eighth unconfirmed outcome holds flow for human review and returns nonretryable job failure; forced claims and generic resumes cannot query again, publish, advance or deactivate');
   } finally {
     local.resolveEffectiveLocations = savedResolve; setBefore(null); setAfter(null);
     if (previousEnv === undefined) delete process.env.JOB_RUNTIME_NAMESPACE; else process.env.JOB_RUNTIME_NAMESPACE = previousEnv;

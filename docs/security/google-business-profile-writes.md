@@ -206,7 +206,10 @@ idempotentes. Siguen sujetos a sus contratos propios.
 Si falta la confirmación, el flujo queda `waiting` en el mismo nodo, con
 `provider_status: outcome_unknown` y plantilla activa. Los siguientes intentos
 consultan únicamente el UUID original: espera de 1, 2, 4… minutos, con tope de
-una hora; `not_found` tampoco permite reenviar. Un recibo confirmado permite
+una hora; `not_found` tampoco permite reenviar. Hay un máximo de ocho resultados
+no confirmados, contando el envío inicial, o 24 horas desde la admisión SQL.
+Se conserva el contador entre intentos; la antigüedad se obtiene del diario,
+no de una fecha reiniciada por el job. Un recibo confirmado permite
 guardar juntos log, salida, siguiente nodo y desactivación opcional de la
 plantilla. Un fallo durante ese guardado revierte esos cuatro cambios, aunque el
 diario ya tenga el recibo aplicado; el siguiente intento acepta ese recibo sin
@@ -217,8 +220,31 @@ El timeout global del executor conserva su política existente: resultado fallid
 **sin reintento automático**. Tras él, el manejador tardío pierde su claim y no
 puede aceptar ni avanzar. La recuperación forzada del fixture demuestra seguridad
 ante otro intento autorizado; no implementa ni autoriza un botón de reejecución
-clínica. Continúan pendientes el tratamiento operativo de incertidumbres,
-agotamiento/revisión humana y su prueba autenticada. Tampoco se libera un lock
+clínica. Al agotar el presupuesto de consulta, la ejecución conserva `waiting`,
+el mismo nodo y `manual_review_required:true`, sin `wait_until`; su job finaliza
+`failed`, `retryable:false`. Es una incidencia de conciliación, no una declaración
+de que Google rechazó el cambio. El executor reconoce esta retención antes del
+backoff genérico, que de otro modo programaría otra consulta con fecha nula.
+Otro claim no vuelve a consultar ni escribir. La plantilla no se desactiva y no
+se toma `on_fail`. No hay un nuevo servicio de colas ni barrido global.
+
+El endpoint de reanudación genérica rechaza estas esperas con HTTP409 después
+de comprobar el ámbito; el motor también las protege aunque no se use ese
+endpoint. Timeout/respuesta/formulario no pueden borrar el contador ni saltarse
+la espera. Monitor y editor muestran el aviso correspondiente y ocultan la
+reanudación genérica; las esperas normales conservan su operación anterior.
+No genera automáticamente notificaciones externas.
+
+La revisión operativa empieza por el UUID original en Perfil de Empresa, con
+la sesión del autor y permisos vigentes. Esa acción solo recupera el recibo y
+su caché; **no reanuda una ejecución agotada**. Si continúa `unknown/not_found`,
+conservar diario, locks, ámbito y error, contrastar el cambio con el titular en
+Google y mantener la incidencia abierta. Una apariencia coincidente en Google
+no prueba qué intento la produjo. No existe aún una acción para certificar esa
+evidencia, resolver el bloqueo y aceptar atómicamente el nodo: esa resolución y
+su prueba autenticada siguen pendientes antes de activar la cohorte. No duplicar
+plantilla/ejecución, sustituir el UUID ni editar filas para desbloquearla.
+Tampoco se libera un lock
 por antigüedad. Los jobs clínicos de DEV permanecen apagados.
 
 Variables sin activar: `GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED`,
@@ -228,7 +254,7 @@ ni admitido claves reales de escritor ni instalado esta cohorte en AWS.
 
 Siguiente implementación necesaria:
 
-1. Completar el tratamiento operativo de incertidumbres y la aceptación real del
+1. Completar la resolución de incertidumbres retenidas para revisión y la aceptación real del
    nodo adaptado. Mantener apagados en DEV los jobs que actúan sobre pacientes,
    leads, campañas y automatizaciones; este corte no autoriza su activación.
 2. Las DDL `20260919200000-create-business-profile-mutation-journal.js`

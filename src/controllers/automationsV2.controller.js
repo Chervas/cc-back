@@ -6820,6 +6820,11 @@ exports.resumeExecution = async (req, res) => {
       });
     }
 
+    if (require('../lib/businessProfileReceiptWait').isReceiptWait(execution)) {
+      return res.status(409).json({ success: false, error: 'business_profile_receipt_required',
+        message: 'El resultado de Google sigue sin confirmarse. Consulta el intento original en Perfil de Empresa; esta espera no admite reanudación genérica.' });
+    }
+
     const mode = cleanString(req.body?.mode) || 'timeout';
     if (!['timeout', 'response'].includes(mode)) {
       return res.status(400).json({

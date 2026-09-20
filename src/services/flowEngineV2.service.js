@@ -7590,6 +7590,16 @@ async function runExecution(executionId, options = {}) {
   if (options.jobClaim) execution[executionJobClaim] = options.jobClaim;
   await assertExecutionJobClaim(execution);
 
+  const receiptWait = require('../lib/businessProfileReceiptWait');
+  if (receiptWait.isReceiptWait(execution)) {
+    if (receiptWait.needsReview(execution)) return execution;
+    if (resumeMode !== 'retry_current_node') {
+      throw Object.assign(new Error('business_profile_receipt_required'), {
+        code: 'business_profile_receipt_required', preserveFlowState: true,
+      });
+    }
+  }
+
   const clearResponseProcessingState = () => {
     const conversationId = toIntOrNull(getByPath(execution.context, 'conversation.id'));
     const responseMessageId = toIntOrNull(

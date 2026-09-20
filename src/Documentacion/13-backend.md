@@ -12039,7 +12039,11 @@ El nodo de horarios programados gestionado guarda un UUID estable por ejecución
 nodo y el plan original. Comprueba plantilla, permisos y claim vigente del job;
 una respuesta tardía no permite al intento vencido guardar el avance. Incertidumbre
 mantiene el mismo nodo en espera y consulta solo su recibo, con backoff hasta una
-hora. Log, salida, siguiente nodo y desactivación opcional se aceptan juntos.
+hora. Tras ocho resultados sin confirmar (incluido el envío) o 24 horas desde la
+admisión SQL, retiene la ejecución para revisión y finaliza su job sin reintento;
+conserva nodo, plantilla, UUID y locks. El endpoint y el motor impiden reanudar
+estas esperas con timeout/respuesta genéricos, y la UI muestra la revisión.
+Log, salida, siguiente nodo y desactivación opcional se aceptan juntos.
 El claim es un control por intento y vigencia del executor, no un lease renovable.
 La finalización/reparación del scheduler compara el intento esperado. El motor
 guarda su estado bajo esa comprobación; los efectos de otros nodos conservan sus
@@ -12052,8 +12056,9 @@ panel de actividad incorpora v25 con metadatos, sin texto de reseñas, fotos o U
 
 Preparado y probado con MySQL/SQLite/HTTP y componentes Angular aislados; sin
 publicación del consumidor ni activación. DDL aplicada solo en DEV el 20/09.
-Faltan aceptación real de horarios, tratamiento
-operativo de incertidumbres, aceptación clínica y carga. La compatibilidad AWS
+Faltan aceptación real de horarios, resolución de las incertidumbres retenidas
+para revisión, aceptación clínica y carga. Consultar el recibo como autor no
+reanuda automáticamente una ejecución agotada. La compatibilidad AWS
 v1–v25 ya está publicada y verificada desde el 20/09; no publica este consumidor.
 Las dos migraciones nuevas añaden tres tablas: fuente y esquema DEV pasan52,
 con la release anterior de49 aún compatible. CRM requiere su DDL nuevo, con
