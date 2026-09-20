@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "publishedAt": "2026-09-20T06:30:21.452205+00:00",
+  "scope": "AWS platform audit compatibility only; no clinical consumer/schema/gate deployment",
+  "sourceCommit": "f3698537",
+  "archive": "audit-v25-f3698537.tar.gz",
+  "archiveSha256": "da99433658b870f99f7410087b004e66b668a6ed9a0e745a2ee70820b7a4b784",
+  "payload": {
+    "event.js": "b0c5adc22454e873abdc547e85f2d01ef0bba3a4b2ce8ec64188ca3f4099a06d",
+    "reader-protocol.js": "dca84606c34e79dc141843c62e0375e2ea8e0690062b0503e27564418a890a86",
+    "view-contract.js": "905a060ab4258be33e5a25a6dfd269703e107565778256f74d3d2864e2c00194",
+    "business-profile-mutation-event.js": "be53db75d06f0af6f13308a1163dd5a2d0ef83414f0c05806e69cdcb9c296ee0"
+  },
+  "releases": {
+    "reader": "release-reader-v25-f3698537",
+    "writer": "release-writer-v25-f3698537"
+  },
+  "compatibility": {
+    "minimum": 1,
+    "maximum": 25,
+    "requiredReaderSupportThrough": 25
+  },
+  "checks": {
+    "offlineTestsPerRole": 97,
+    "sourceFilesVerifiedPerRole": 45,
+    "sqlGeneratedCanary": {
+      "count": 17,
+      "originalRecords": 71,
+      "integrationGroups": 31,
+      "bytes": 16287,
+      "versions": {
+        "25": 17
+      },
+      "sha256": "70f90006bfa09c53ea444775eb74723be754cb65e695995a6ff33895a1dd0971",
+      "delivered": 17,
+      "reconciled": 17,
+      "s3ExactVersionBodyDigestKms": 17,
+      "operationalIndexRows": 0
+    },
+    "existingReceiptsVerified": 25,
+    "existingReceiptsElapsedMs": 321.828703,
+    "priorCanaryVersionsUnchanged": 31,
+    "tlsValid": true,
+    "unsignedRejected": true,
+    "servicesActive": true,
+    "automaticRestarts": 0
+  },
+  "canarySource": {
+    "sourceBase": "f3698537ebf086a305c6a64e9363d36431bb373b",
+    "workingChanges": [
+      "src/scripts/tests/fixtures/platform_audit_canary_export.fixture.js"
+    ],
+    "files": {
+      "src/scripts/tests/fixtures/isolated_campaign_mysql.fixture.js": "594ec449fe0cdacc32e37e3d41e3936fe428d36a443f48ae7a1ba5c139dd1ca0",
+      "src/scripts/tests/fixtures/platform_audit_canary_export.fixture.js": "d1b78c81eceb936c372be39be320b9a56825ea8011ec9a43a070aee6864882ad",
+      "src/scripts/tests/business_profile_mutation_journal_mysql.integration.js": "9830fe599bfcae18aaa6f507bc9d886a97978c69300fe79fcea4fec2fb96658a",
+      "src/scripts/tests/fixtures/business_profile_consumers.fixture.js": "6e33d214479bd7ae0588b055c53c00674abc27cad41213674ae0ae2ed3c74997",
+      "src/scripts/tests/fixtures/business_profile_automation.fixture.js": "9966aefb042a9c126be74a883604ee2ad8bde5ace637a50d307710313262f18f",
+      "src/scripts/tests/fixtures/business_profile_flow_runtime.fixture.js": "9083d18bba2d6cd9f5ca3ea64e5dd6cc899dfb5c4469d759a5f8d88a7bc33fa2",
+      "src/services/businessProfileAutomation.service.js": "5affb449cf349e99261a97993553579a9dc3fd6c9aae91081d2e4f4dd56b297a",
+      "src/services/businessProfileMutationJournal.service.js": "9095ad1e264d320833684bcc6cd271dcf75eb25c337c93ed1ee03484a6166abe",
+      "src/services/businessProfileMutations.service.js": "928b3d78527a46ec3df5da5490e140e7c6505d1f95dd5f5c15ca74141ae08786",
+      "src/services/flowEngineV2.service.js": "3660e7da33303e9910e45178378742eb0f9a9f020cf3d2eb5cc00760d94e0f72",
+      "src/services/jobClaim.service.js": "456a9e64ecffa6f0baca645194fa21ef354a282bab3147393eb9de581cf409bb",
+      "src/services/jobExecutor.service.js": "84a87fc62343b9a4f869bd4b962c3dcce6dbadc79bd502dd14162abc076ea5fc"
+    }
+  },
+  "evidenceDirectory": "/home/ubuntu/qa-evidence/security-resume-20260917/audit-v25-publication-20260920",
+  "limitations": [
+    "Synthetic canary, no public MFA/provider acceptance",
+    "No sustained-capacity test",
+    "No attribution of incremental billed cost; refreshed tagged costs are a separate period snapshot"
+  ],
+  "recovery": "Keep v1-v25 compatible reader after delivery. Never replay canaries or remove ownership/delivery markers; reconcile original UUID/bytes on uncertainty."
+}

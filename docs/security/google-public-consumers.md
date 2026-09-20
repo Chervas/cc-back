@@ -2,7 +2,7 @@
 
 > **Tipo:** runbook de preparación y validación.
 > **Fuente de verdad:** alcance de la candidata; no acredita publicación ni aceptación real de Google.
-> **Última revisión:** 2026-09-19.
+> **Última revisión:** 2026-09-20.
 > **Relacionado con:** [contrato backend](../../src/Documentacion/13-backend.md#consumidores-google-publicados-en-dev-con-activación-pendiente), [esquema aplicado](google-clinical-cut.md), [estado central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
 
 Manifiesto de revisiones y límites: [google-public-consumers.json](google-public-consumers.json).
@@ -165,7 +165,8 @@ independiente. Cero cohortes Google reales migradas en este corte.
 ## Siguiente publicación y recuperación
 
 1. Completar la aceptación real de horarios y la resolución operativa de incertidumbres,
-   corte SQL nuevo de tres tablas y compatibilidad de auditoría v25. Promover las
+   corte SQL nuevo de tres tablas. Compatibilidad AWS de auditoría v25 publicada
+   y verificada el 20/09; conservarla. Promover las
    escrituras Business Profile y su UI a cada candidato que las consuma, con QA.
 2. Completar toda la identidad Google compartida y todos sus consumidores antes
    de crear el primer marcador que cierre credenciales legacy. La preparación
@@ -177,9 +178,10 @@ independiente. Cero cohortes Google reales migradas en este corte.
    esquema aditivo y releases anteriores; no ejecutar down ni restaurar filas
    antiguas sobre actividad posterior.
 
-AWS SSO volvió a comprobarse caducado durante esta continuación; no hay login nuevo iniciado ni
-operación AWS pendiente en ejecución. Renovar con el titular disponible para
-continuar la configuración remota. Sigue pendiente el objetivo completo de
-WhatsApp, Google, Meta, IA, correo, auditoría y certificados. Rotación aplazada;
-copias generales al final. Sin recursos AWS nuevos ni recogida CE en este corte;
-coste incremental facturado no atribuido.
+La sesión AWS se renovó el 20/09 con el titular y STS verificado. Se publicó
+únicamente la compatibilidad de auditoría v25 y se actualizó la caché de costes
+con la recogida etiquetada real (5,292227218 USD del 1–19/09, estimado). Las
+candidatas clínicas de este documento siguen sin publicar. Sigue pendiente el
+objetivo completo de WhatsApp, Google, Meta, IA, correo, auditoría y certificados.
+Copias generales y rotación esperan nueva instrucción expresa. Sin recursos AWS
+nuevos ni coste incremental facturado atribuible a este corte.

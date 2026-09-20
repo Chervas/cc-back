@@ -12052,7 +12052,8 @@ panel de actividad incorpora v25 con metadatos, sin texto de reseñas, fotos o U
 
 Preparado y probado con MySQL/SQLite/HTTP y componentes Angular aislados; sin
 publicación, DDL real ni activación. Faltan aceptación real de horarios, tratamiento
-operativo de incertidumbres, compatibilidad AWS v25, aceptación clínica y carga.
+operativo de incertidumbres, aceptación clínica y carga. La compatibilidad AWS
+v1–v25 ya está publicada y verificada desde el 20/09; no publica este consumidor.
 Las dos migraciones nuevas añaden tres tablas: el contrato de fuente pasa de49
 a52; primero se requiere DDL, con escritores/sync drenados y sin intentos inciertos,
 y después el código coordinado. No se reutiliza ni amplía el corte clínico de19 DDL. Contrato y recuperación:
@@ -12086,3 +12087,15 @@ consumidor público anterior. Credenciales, configuración y código público se
 conservan: **no equivale a publicar ni aceptar los consumidores Google nuevos**.
 Acta, prueba de restauración ficticia y recuperación:
 `docs/security/google-clinical-cut.md/json`; madurez vigente en19.
+
+### Compatibilidad de auditoría AWS v25 publicada (20/09/2026)
+
+Lector y escritor `release-{reader|writer}-v25-f3698537` publicados desde sus
+bases v24 propias, conservando configuración/TLS/dependencias/identidad/diarios.
+Lector primero; 45 hashes y 97 pruebas por rol. Diecisiete eventos v25 originales
+del MySQL aislado, 16.287 bytes, entregados una vez y verificados por conciliación
+y S3 (VersionId, bytes, SHA256 y KMS), sin insertar filas en índices DEV/CRM.
+Veinticinco recibos operativos correctos y 31 canarios anteriores preservados.
+Conservar lector v1–v25; no repetir canarios ni revertir a un lector inferior.
+No despliega consumidores/DDL Google ni prueba aceptación clínica autenticada.
+Runbook `docs/security/audit-reader-view-migration.md`; acta `audit-v25-publication.json`.

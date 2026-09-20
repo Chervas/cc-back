@@ -2,7 +2,7 @@
 
 > **Tipo:** contrato de implementación y validación.
 > **Fuente de verdad:** broker, diario SQL y consumidores manuales/automatizados preparados en fuente DEV; no acredita publicación ni aceptación clínica.
-> **Última revisión:** 2026-09-19.
+> **Última revisión:** 2026-09-20.
 > **Relacionado con:** [consumidores públicos](google-public-consumers.md), [contrato backend](../../src/Documentacion/13-backend.md#escrituras-tipadas-business-profile-preparadas), [estado central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
 
 ## Estado y frontera
@@ -15,7 +15,8 @@ comprueba el intento vigente del job antes de aceptar su resultado.
 No retirar tokens compartidos ni activar la cohorte hasta completar el censo,
 la resolución de incertidumbres y la aceptación autenticada. Ninguna candidata
 pública ni runtime incorpora este corte; las tres tablas SQL nuevas tampoco están
-aplicadas a DEV o CRM.
+aplicadas a DEV o CRM. La compatibilidad AWS de auditoría v25 sí está publicada
+y verificada desde el 20/09: [acta y recuperación](audit-reader-view-migration.md#publicación-aws-v25-20092026-06290634-utc).
 
 La cohorte explícita `google-business-profile-write-v1` admite lectores y escritores
 con identidades distintas. La cohorte anterior de lectura rechaza tanto grants
@@ -237,8 +238,9 @@ Siguiente implementación necesaria:
    migración de coordinación rechaza intentos inciertos existentes. No inicializar
    contadores a cero sobre actividad anterior ni mezclar escritores de versiones
    que no participan. El down rechaza borrar filas de coordinación existentes.
-3. Publicar compatibilidad AWS de auditoría v25 —lector antes que escritor— antes
-   de emitir esos eventos. El panel y filtro v25 están preparados en fuente.
+3. Conservar la compatibilidad AWS v1–v25 publicada el 20/09 y publicar el panel
+   y filtro v25 junto con los consumidores. El canario sintético real verifica
+   transporte S3; no sustituye la aceptación clínica del consumidor.
 4. Completar resolución/retención de incertidumbres, censo de identidad compartida,
    promoción selectiva y pruebas autenticadas en las pantallas reales con titular,
    proveedor y cardinalidad/carga reales. La preparación no autoriza el cierre legacy.
@@ -265,7 +267,8 @@ MySQL aislado. Se prueban ACK perdido, timeout real antes/después de aceptar Go
 ficticio, reemplazo/cancelación de claim, namespace/ejecución incorrectos, permisos
 y plantilla modificados durante la llamada, rollback del nodo, plan concurrente
 y consulta de incertidumbres sin reenvío. No prueba interfaz autenticada ni Google real.
-No hay despliegue que revertir. Conservar las releases/grants actuales. Una futura
+No hay despliegue del consumidor GBP que revertir. La publicación AWS de auditoría
+exige conservar un lector v1–v25. Conservar las releases/grants clínicos actuales. Una futura
 recuperación debe mantener el diario y los intentos inciertos; volver a código
 que lea tokens o borrar bloqueos no es una recuperación válida de una cohorte
 ya migrada. No trabajar en copias generales ni rotación hasta nueva instrucción

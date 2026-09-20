@@ -2,7 +2,7 @@
 
 > **Tipo:** runbook técnico.
 > **Fuente de verdad:** consulta verificada, proyección del visor y compatibilidad de despliegue.
-> **Última revisión:** 2026-09-18.
+> **Última revisión:** 2026-09-20.
 > **Relacionado con:** [manual central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md), [contrato 39](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md).
 
 Estado operativo y límites vigentes en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
@@ -23,11 +23,11 @@ Esto acredita las versiones comprobadas, **no la integridad ni exhaustividad
 del índice local**: quien pueda modificar la BD puede ocultar filas. Tampoco
 prueba inmutabilidad de S3; un administrador con permisos efectivos de borrado
 de versiones puede eliminarlas. Object Lock sigue apagado según la entrega.
-El lector publicado admite `app/platform/v1/` a `v24/` desde el 19/09 10:15 UTC.
-Las preparaciones históricas inferiores se conservan fechadas; el corte v24 al
+El lector publicado admite `app/platform/v1/` a `v25/` desde el 20/09 06:29 UTC.
+Las preparaciones históricas inferiores se conservan fechadas; el corte v25 al
 final de este runbook describe la recuperación vigente.
 El sobre v18 de comandos/permisos Google y consulta de listado conserva esquemas
-separados; su transporte AWS se verificó en el corte v19 y se conserva en v24.
+separados; su transporte AWS se verificó en el corte v19 y se conserva en v25.
 No incluye el contrato `app/v1` del broker, eventos aún pendientes de entrega ni acciones
 no instrumentadas. La lista cerrada de acciones está en `src/view-contract.js`
 del paquete de auditoría. Añadir un esquema al writer requiere probar también
@@ -111,7 +111,7 @@ estado del recibo) de `googleDestinationList` (cuenta, mapping, número de clín
 y registros). Solo una variante puede estar presente. El listado registra una
 página preparada, no una autorización ni la recepción por la persona. Ambos
 filtros están en el catálogo cerrado y sus rutas están incluidas en el lector
-AWS v24 actual. Contrato en [destinos Google](google-destinations-broker.md).
+AWS v25 actual. Contrato en [destinos Google](google-destinations-broker.md).
 
 ## Lectura firmada y límites
 
@@ -251,7 +251,7 @@ acredita autenticación humana, consulta HTTP `confirmed`, alta real de Google n
 aceptación del consumidor. No fabricar una sesión administrativa para la prueba.
 
 Después de entregar una versión, conservar un lector compatible con ella al
-revertir otros cambios. El mínimo después del corte 19/09 10:15 UTC es v24; desactivar un consumidor no
+revertir otros cambios. El mínimo después de la entrega del 20/09 06:32 UTC es v25; desactivar un consumidor no
 reduce ese requisito ni elimina eventos ya entregados. Retener los objetos
 de QA y su clasificación; no borrarlos para ocultar una incompatibilidad. La reversión de código no deshace eventos entregados.
 
@@ -436,3 +436,35 @@ verificación directa S3 y pruebas de recibos/TLS. Helpers de exportación de ca
 solo funcionan desde MySQL ficticio propiedad de la prueba, generan fichero exclusivo
 y no entregan ni insertan eventos operativos. Coste incremental real sin aislar;
 recursos/operaciones medidas en 39. El objetivo completo sigue activo.
+
+## Publicación AWS v25 (20/09/2026, 06:29–06:34 UTC)
+
+Compatibilidad publicada desde `f3698537`, primero lector y después escritor:
+`release-reader-v25-f3698537` y `release-writer-v25-f3698537`. Cada candidata parte
+de su propia release viva v24, conserva bootstrap, lock/dependencias, configuración,
+TLS, identidad y diarios. Cambian cuatro archivos de esquema/proyección; 45 hashes
+verificados por rol, 97 pruebas offline por candidata y codec bajo sus usuarios reales.
+No se publica código clínico ni se activan consumidores, claves o grants Google.
+
+El MySQL aislado ejecutó 31 grupos del diario/consumidores/motor reales con proveedor
+ficticio: 71 eventos originales exportados; 17 seleccionados y congelados, 16.287 bytes.
+Con guardas exclusivas locales/remotas se entregaron una única vez los originales:
+17/17 confirmados, conciliados y contrastados directamente en S3 por VersionId,
+bytes, SHA256 y KMS. Cero filas de estos UUID en los índices operativos DEV/CRM.
+No regenerar ni repetir la entrega; `canary-source.json` registra la preparación
+anterior al envío, mientras `publication-result.json` registra su conclusión.
+
+Control posterior: 25/25 recibos operativos (~322 ms lector, ~37 ms consulta SQL),
+31 canarios anteriores con versiones intactas, TLS válido y solicitudes sin firma
+rechazadas. Ambos servicios activos, sin reinicios automáticos. No es una prueba
+de carga sostenida, de interfaz pública autenticada ni de escritura real en Google.
+
+El primer preflight de preparación rechazó una comparación incorrecta entre el
+manifest candidato y el baseline vivo, antes de crear releases o mutar servicios.
+Se corrigió el generador y se contrastó con los hashes vivos antes de preparar.
+No hubo publicación parcial ni se omitió la guarda.
+
+Recuperación: conservar compatibilidad v1–v25 y los diarios/configuración vigentes;
+volver a v24 ya no es válido. Conciliar referencias originales si hay incertidumbre,
+sin borrar marcadores ni registros. Acta saneada: [audit-v25-publication.json](audit-v25-publication.json).
+Evidencia privada: `qa-evidence/security-resume-20260917/audit-v25-publication-20260920/`.
