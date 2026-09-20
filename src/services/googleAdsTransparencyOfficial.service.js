@@ -4,6 +4,7 @@ const fs = require('fs');
 const axios = require('axios');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const weeklyBilling = require('./googleWeeklyBilling.service');
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const BIGQUERY_API = 'https://bigquery.googleapis.com/bigquery/v2';
@@ -109,6 +110,7 @@ function configuration(env = process.env) {
     projectId: cleanString(env.GOOGLE_CLOUD_PROJECT) || credentials?.project_id || null,
     location: cleanString(env.COMPETITION_GOOGLE_ADS_TRANSPARENCY_BIGQUERY_LOCATION) || DEFAULT_LOCATION,
     credentials,
+    billingEnabled: env.GOOGLE_CLOUD_COSTS_WEEKLY_ENABLED === 'true',
   };
 }
 
@@ -259,74 +261,77 @@ async function runQuery({
       'Falta la credencial server-side de BigQuery para consultar el dataset público de Google Ads Transparency.',
     );
   }
+  if (config.billingEnabled && (config.projectId !== 'clinicaclick' || config.location !== 'US')) {
+    throw configurationError('GOOGLE_BILLING_LOCATION_INVALID', 'El lote conjunto requiere clinicaclick y región US.');
+  }
+  const cutoff = weeklyBilling.cutoffForRun(runKey);
+  if (cutoff > new Date().toISOString().slice(0, 10)) throw configurationError('GOOGLE_ATC_RUN_INVALID', 'La semana solicitada todavía no ha comenzado.');
   const token = await accessToken(config.credentials, http);
-  // El dataset oficial no está particionado. Primero se ejecuta un dry-run
-  // gratuito y luego la misma consulta con un techo duro de facturación.
   const bytesLimit = maximumBytesBilled();
-  const queryBody = {
-    query: buildQuery(),
-    useLegacySql: false,
-    parameterMode: 'NAMED',
-    queryParameters: queryParameters(candidateNames, candidateIds, regionCodes, lookbackDays, rowLimit),
-    timeoutMs: '30000',
-    maxResults: String(rowLimit),
-    labels: {
-      clinicaclick_module: 'competition',
-      clinicaclick_cadence: 'weekly',
-    },
-    location: config.location,
-  };
+  if (!Number.isSafeInteger(bytesLimit)) throw configurationError('GOOGLE_ATC_BIGQUERY_BYTES_LIMIT', 'Límite de consulta inválido.');
+  const parameters = queryParameters(candidateNames, candidateIds, regionCodes, lookbackDays, rowLimit);
+  if (config.billingEnabled) parameters.push({ name: 'billing_cutoff', parameterType: { type: 'DATE' }, parameterValue: { value: cutoff } });
+  const query = config.billingEnabled ? weeklyBilling.combinedQuery(buildQuery()) : buildQuery();
+  const queryConfig = { query, useLegacySql: false, parameterMode: 'NAMED', queryParameters: parameters,
+    useQueryCache: true, maximumBytesBilled: String(bytesLimit), priority: 'INTERACTIVE' };
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify(queryConfig)).digest('hex').slice(0, 40);
+  // A stable job ID survives lost acknowledgements and process restarts. The
+  // jobs.query requestId alone does not deduplicate read-only queries durably.
+  const jobId = 'cc_google_weekly_' + cutoff.replace(/-/g, '');
+  const root = `${BIGQUERY_API}/projects/${encodeURIComponent(config.projectId)}`;
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-  const endpoint = `${BIGQUERY_API}/projects/${encodeURIComponent(config.projectId)}/queries`;
-  const dryRunResponse = await http.post(endpoint, {
-    ...queryBody,
-    dryRun: true,
-    useQueryCache: false,
-  }, { timeout: 35_000, headers });
-  const dryRunBytes = Number(
-    dryRunResponse?.data?.totalBytesProcessed
-    || dryRunResponse?.data?.statistics?.query?.totalBytesProcessed
-    || 0
-  );
-  if (dryRunBytes > bytesLimit) {
-    const error = configurationError(
-      'GOOGLE_ATC_BIGQUERY_BYTES_LIMIT',
-      `La consulta oficial procesaría ${dryRunBytes} bytes y supera el límite seguro de ${bytesLimit}.`,
-    );
-    error.estimatedBytes = dryRunBytes;
-    error.maximumBytesBilled = bytesLimit;
-    throw error;
+  const readJob = async () => (await http.get(`${root}/jobs/${jobId}`, { timeout: 15000, headers, params: { location: config.location } })).data;
+  let job, dryRunBytes = null;
+  try { job = await readJob(); } catch (error) { if (error.response?.status !== 404) throw error; }
+  if (!job) {
+    const dry = await http.post(`${root}/queries`, { query, useLegacySql: false, parameterMode: 'NAMED',
+      queryParameters: parameters, location: config.location, maximumBytesBilled: String(bytesLimit),
+      dryRun: true, useQueryCache: false, timeoutMs: 30000 }, { timeout: 35000, headers });
+    dryRunBytes = Number(dry.data?.totalBytesProcessed ?? dry.data?.statistics?.query?.totalBytesProcessed);
+    if (!Number.isSafeInteger(dryRunBytes) || dryRunBytes < 0 || dryRunBytes > bytesLimit) {
+      throw configurationError('GOOGLE_ATC_BIGQUERY_BYTES_LIMIT', 'La consulta supera el límite de bytes o no aporta una estimación válida.');
+    }
+    try {
+      job = (await http.post(`${root}/jobs`, { jobReference: { projectId: config.projectId, jobId, location: config.location },
+        configuration: { query: queryConfig, labels: { clinicaclick_module: 'competition', clinicaclick_cadence: 'weekly',
+          clinicaclick_contract: fingerprint } } }, { timeout: 35000, headers })).data;
+    } catch (error) {
+      // A 409 or uncertain insert must read the same job, never invent another ID.
+      try { job = await readJob(); } catch { throw error; }
+    }
   }
-
-  let response = await http.post(endpoint, {
-    ...queryBody,
-    requestId: requestIdForRun(runKey),
-    useQueryCache: true,
-    maximumBytesBilled: String(bytesLimit),
-  }, { timeout: 35_000, headers });
-  let payload = response?.data || {};
-  const jobId = cleanString(payload?.jobReference?.jobId);
-  for (let attempt = 0; payload.jobComplete === false && jobId && attempt < 5; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 700 + attempt * 300));
-    response = await http.get(`${BIGQUERY_API}/projects/${encodeURIComponent(config.projectId)}/queries/${encodeURIComponent(jobId)}`, {
-      timeout: 15_000,
-      headers,
-      params: { location: config.location, maxResults: rowLimit },
-    });
-    payload = response?.data || {};
+  if (job?.jobReference?.jobId !== jobId || job?.configuration?.labels?.clinicaclick_contract !== fingerprint) {
+    throw configurationError('GOOGLE_ATC_WEEKLY_JOB_CONFLICT', 'Ya existe una consulta semanal con parámetros diferentes. No se repetirá.');
   }
-  if (payload.jobComplete === false) throw configurationError('GOOGLE_ATC_BIGQUERY_TIMEOUT', 'La consulta oficial de transparencia de Google continúa en proceso. Se reintentará desde la cola.');
-  if (Array.isArray(payload.errors) && payload.errors.length) {
-    const error = configurationError('GOOGLE_ATC_BIGQUERY_QUERY_ERROR', cleanString(payload.errors[0]?.message) || 'Google rechazó la consulta de transparencia.');
-    error.details = payload.errors.map((item) => ({ reason: item?.reason || null, location: item?.location || null }));
-    throw error;
-  }
-  return {
-    rows: simpleRows(payload),
-    dryRunBytes,
-    maximumBytesBilled: bytesLimit,
-    totalBytesProcessed: Number(payload.totalBytesProcessed || 0),
-  };
+  if (job.status?.errorResult) throw configurationError('GOOGLE_ATC_BIGQUERY_QUERY_ERROR', 'La consulta semanal de Google falló; se conserva la caché anterior.');
+  const rows = [], tokens = new Set(); let pageToken, schema, totalBytesProcessed = 0, declaredRows;
+  let waits = 0, pages = 0;
+  do {
+    const response = await http.get(`${root}/queries/${jobId}`, { timeout: 35000, headers,
+      params: { location: config.location, timeoutMs: 30000, maxResults: 1000, ...(pageToken ? { pageToken } : {}) } });
+    const payload = response.data || {};
+    if (payload.errors?.length) throw configurationError('GOOGLE_ATC_BIGQUERY_QUERY_ERROR', 'Google rechazó la consulta semanal.');
+    if (payload.jobComplete === false) {
+      if (++waits > 5) throw configurationError('GOOGLE_ATC_BIGQUERY_TIMEOUT', 'La consulta sigue ejecutándose; se recuperará el mismo job.');
+      continue;
+    }
+    if (payload.jobComplete !== true || ++pages > 20) throw configurationError('GOOGLE_ATC_BIGQUERY_RESULT_INVALID', 'Resultado incompleto de Google.');
+    schema ||= payload.schema;
+    if (!Array.isArray(schema?.fields)) throw configurationError('GOOGLE_ATC_BIGQUERY_RESULT_INVALID', 'Falta el esquema del resultado.');
+    declaredRows ??= Number(payload.totalRows);
+    totalBytesProcessed = Number(payload.totalBytesProcessed || job.statistics?.query?.totalBytesProcessed || 0);
+    rows.push(...simpleRows({ ...payload, schema }));
+    if (rows.length > rowLimit + 200) throw configurationError('GOOGLE_ATC_BIGQUERY_RESULT_INVALID', 'El resultado excede el límite previsto.');
+    pageToken = payload.pageToken;
+    if (pageToken && (typeof pageToken !== 'string' || tokens.has(pageToken))) throw configurationError('GOOGLE_ATC_BIGQUERY_RESULT_INVALID', 'Paginación inválida.');
+    if (pageToken) tokens.add(pageToken);
+    else break;
+  } while (true);
+  if (!Number.isSafeInteger(declaredRows) || rows.length !== declaredRows) throw configurationError('GOOGLE_ATC_BIGQUERY_RESULT_INVALID', 'El resultado está truncado.');
+  const collectedAt = new Date(Number(job.statistics?.creationTime)).toISOString();
+  const split = config.billingEnabled ? weeklyBilling.splitRows(rows, { runKey, collectedAt }) : { advertisers: rows, snapshots: [] };
+  return { rows: split.advertisers, billingSnapshots: split.snapshots, jobId, collectedAt,
+    dryRunBytes, maximumBytesBilled: bytesLimit, totalBytesProcessed };
 }
 
 function advertiserUrl(advertiserId) {
@@ -379,7 +384,7 @@ async function fetchForCompetitors(competitors = [], options = {}) {
     ads: [], total_ads_count: 0, resolved: null,
     raw: { clinicaclick_resolution: { mode: 'official_bigquery', matched: false } },
   }]));
-  if (!eligible.length) return result;
+  if (!eligible.length && !config.billingEnabled) return result;
 
   const candidateNames = [...new Set(eligible.flatMap(candidateNamesForCompetitor))].slice(0, 5_000);
   const candidateIds = [...new Set(eligible.flatMap(candidateAdvertiserIdsForCompetitor))].slice(0, 5_000);
@@ -397,7 +402,10 @@ async function fetchForCompetitors(competitors = [], options = {}) {
     runKey: options.runKey,
     http: options.http || axios,
   });
+  result.billingSnapshots = queryResult.billingSnapshots;
   result.metadata = {
+    job_id: queryResult.jobId,
+    collected_at: queryResult.collectedAt,
     run_key: cleanString(options.runKey),
     candidates: candidateNames.length,
     advertiser_ids: candidateIds.length,
@@ -472,5 +480,6 @@ module.exports = {
     parseJsonCredential,
     requestIdForRun,
     simpleRows,
+    runQuery,
   },
 };

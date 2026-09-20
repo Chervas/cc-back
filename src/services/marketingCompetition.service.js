@@ -4424,6 +4424,11 @@ async function reconcileOfficialGoogleAdsTransparency(competitors = [], options 
       },
       transaction,
     });
+    if (config.billingEnabled) {
+      metadata.billing = await require('./googleWeeklyBilling.service').persistSnapshots({
+        model: db.GoogleCloudCostCache, snapshots: batch.billingSnapshots || [], transaction,
+      });
+    }
     await transaction.commit();
   } catch (error) {
     await transaction.rollback();
@@ -4432,6 +4437,8 @@ async function reconcileOfficialGoogleAdsTransparency(competitors = [], options 
 
   return {
     status: 'completed',
+    billing: metadata.billing || null,
+    bigquery_job_id: metadata.job_id || null,
     run_key: runKey,
     competitors: competitors.length,
     matched,
@@ -5449,7 +5456,7 @@ async function refreshCompetition(scope, {
         message: 'El lote oficial está desactivado en este runtime. Solo debe habilitarse en el worker líder de producción.',
         run_key: runKey,
       };
-    } else if (!competitors.length) {
+    } else if (!competitors.length && !googleTransparencyConfig.billingEnabled) {
       report.provider.google_ads_transparency.official = {
         status: 'skipped',
         code: 'GOOGLE_ATC_NO_ACTIVE_COMPETITORS',
