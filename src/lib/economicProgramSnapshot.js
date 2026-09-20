@@ -108,7 +108,7 @@ async function resolveLines(rawLines, { previousLines = [], resolve, integration
   return result;
 }
 
-function programPlans({ budget, lines, events = [], vouchers = [] }) {
+function programPlans({ budget, lines, events = [], vouchers = [], sessions = null, appointments = [], timezone = null, now = new Date(), bookingEnabled = programBookingEnabled() }) {
   const accepted = ['accepted', 'partially_accepted'].includes(budget.status);
   const acceptance = [...events].reverse().find((e) => ['accepted', 'partially_accepted'].includes(e.event_type));
   const metadata = typeof acceptance?.metadata === 'string' ? JSON.parse(acceptance.metadata) : acceptance?.metadata;
@@ -116,13 +116,33 @@ function programPlans({ budget, lines, events = [], vouchers = [] }) {
   return lines.filter((l) => l.program_snapshot).map((line) => {
     const included = accepted && (budget.status === 'accepted' || acceptedKeys.has(line.key));
     const voucher = vouchers.find((v) => v.budget_line_key === line.key);
+    const planned = line.program_snapshot.appointments.map(a => {
+      const record = sessions?.find(s => String(s.voucher_id) === String(voucher?.id) && s.session_key === a.key);
+      const appointment = record?.appointment_id ? appointments.find(c => Number(c.id_cita) === Number(record.appointment_id)
+        && String(c.voucher_id) === String(voucher?.id)) : null;
+      const inconsistent = record && (record.snapshot_sha256 !== line.program_snapshot.sha256 || (record.appointment_id && !appointment));
+      const status = !included ? 'not_accepted' : sessions === null ? 'not_loaded' : inconsistent ? 'review_required'
+        : record?.consumption_movement_id ? 'completed' : appointment && appointment.estado !== 'cancelada' ? 'reserved' : 'pending_planning';
+      return { ...copy(a), scheduling_status: status,
+        appointment_id: !inconsistent && appointment ? Number(appointment.id_cita) : null,
+        start_at: !inconsistent && appointment && appointment.estado !== 'cancelada' ? new Date(appointment.inicio).toISOString() : null };
+    });
+    const counts = sessions === null ? null : planned.reduce((out, a) => {
+      if (a.scheduling_status === 'pending_planning') out.pending++;
+      if (a.scheduling_status === 'reserved') out.reserved++;
+      if (a.scheduling_status === 'completed') out.completed++;
+      if (a.scheduling_status === 'review_required') out.review_required++;
+      return out;
+    }, { pending: 0, reserved: 0, completed: 0, review_required: 0 });
     return { budget_line_key: line.key, program_id: line.program_id, program_version: line.program_version,
       name: line.program_snapshot.name, kind: line.program_snapshot.kind,
       snapshot_sha256: line.program_snapshot.sha256, appointment_count: line.program_snapshot.appointments.length,
       purchase_status: included ? 'accepted' : accepted ? 'not_accepted' : 'offered',
-      can_schedule: included && voucher?.status === 'active' && programBookingEnabled(), capability_reason: programBookingEnabled() ? null : 'program_batch_booking_pending',
-      // No synthetic reserved/completed state: no program-unit ledger exists yet.
-      appointments: line.program_snapshot.appointments.map((a) => ({ ...copy(a), scheduling_status: included ? 'pending_planning' : 'not_accepted' })),
+      can_schedule: Boolean(included && voucher?.status === 'active' && bookingEnabled && counts?.pending > 0 && !counts.review_required
+        && (!voucher.expires_at || new Date(voucher.expires_at) > now)),
+      can_view_schedule: Boolean(included && voucher && bookingEnabled), scheduling_counts: counts, timezone,
+      capability_reason: bookingEnabled ? null : 'program_batch_booking_pending',
+      appointments: planned,
       voucher_id: voucher?.public_id || null };
   });
 }

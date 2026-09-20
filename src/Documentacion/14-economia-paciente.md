@@ -206,8 +206,12 @@ La operación completa exige cuatro gates literales `true`: el económico y
 de programas permanecen bloqueadas. Los snapshots preparatorios schema 1 no se
 convierten implícitamente en compras operativas: hay que actualizar la referencia
 del borrador antes de presentarlo. Los borradores no admiten cobros ni saldo.
-En el runtime general siguen cerrados; la QA real aislada solo admite clínica
-sintética 82 y no habilita operación del cliente ni mensajes.
+En CRM/gateway siguen cerrados. La QA de septiembre usa la BD
+`clinicaclick_dev_isolated`, clínica 1 verificada como ficticia, no la antigua
+clínica DEMO82 de la BD compartida. El override opcional
+`ops/clinical/isolated-booking-qa.conf` carga exclusivamente cuatro flags desde
+`clinical-qa.env`; no cambia MFA, secretos ni jobs. Se retira su drop-in y se
+reinicia solo el servicio DEV para volver a la configuración de base.
 
 El presupuesto usa su idempotencia existente `source_reference` y una huella
 de solicitud: reintentos idénticos producen un solo presupuesto; otra persona,
@@ -221,8 +225,16 @@ la reserva vuelve a comprobar el evento canónico de aceptación parcial.
 Retirar una línea del borrador cancela su derecho pendiente conservando la fila.
 
 El workspace devuelve `program_plans`, composición congelada, aceptación y
-`voucher_id`; la UI ofrece `Ver citas incluidas` y, cuando las capacidades lo
-permiten, `Proponer fechas`. Desde Bonos del paciente, `Planificar citas` abre
+`voucher_id`. Con el runtime compatible, dos lecturas en bloque para todo el
+workspace consultan sesiones y citas del paciente/clínica. Backend proyecta
+`scheduling_counts` (pendientes, reservadas, completadas, por revisar), el estado
+y la fecha de cada cita; frontend no reconstruye agregados ni relaciones. Una
+cancelación vuelve a pendiente sin inventar una nueva reserva; consumo y
+reservas no se deducen del pago. Si no se consultó el ledger, los contadores son
+`null` y el estado `not_loaded`, nunca «pendiente» ficticio. Una relación rota
+se muestra `review_required`, sin habilitar reservas.
+La UI ofrece `Ver citas incluidas` y, según el estado real, `Planificar citas
+pendientes` o `Consultar citas`. Desde Bonos del paciente, `Planificar citas` abre
 el mismo diálogo operativo. El planificador antiguo y el descuento manual de
 bonos rechazan programas: no son una vía alternativa de reserva/consumo.
 
