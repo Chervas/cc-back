@@ -199,8 +199,14 @@ la IP del broker a la allowlist, conservando las IP anteriores y la restricción
 a Gemini API. GET del catálogo devuelve200; la generación existente devuelve
 402 por saldo prepagado agotado. AI Studio confirma0EUR y la cuenta autenticada
 no tiene edición del perfil de pagos. La revisión posterior detecta perfil fiscal
-de un cliente; el titular confirma La Voz Medios Digitales y se prepara cuenta
-Cloud Billing dedicada, pendiente del medio de pago y vinculación. No solicitar
+de un cliente; el titular confirma La Voz Medios Digitales. La cuenta Cloud Billing
+dedicada ya está activa, con Visa 3472 principal y proyecto `clinicaclick` vinculado;
+otros proyectos conservan sus vínculos. Places HTTP 200 después del traslado. El 402 de
+Gemini corresponde a la prueba anterior: quedan comprobar disponibilidad, límite
+mensual de 10 € y aceptación con la nueva cuenta. No se compró saldo Gemini ni se
+cambió su transporte. Al cierre solicitado por el titular, la exportación estándar
+de la cuenta nueva y la ampliación de `api_costs_v1` están pendientes; mantener el
+lote semanal existente, sin otra consulta de pago. No solicitar
 el acceso del cliente ni recargar el perfil equivocado. No rotar la clave ni cambiar modelo/API
 para ocultar este bloqueo. No repetir llamadas sin corregir la causa.
 
