@@ -11,6 +11,10 @@ const jwt = require('jsonwebtoken');
 const db = require('../../models');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
+// Keep PDFs self-contained: isolated runtimes cannot fetch frontend assets.
+const DOCUMENT_BRAND_LOGO = 'data:image/svg+xml;base64,' + require('fs').readFileSync(
+    path.join(__dirname, '../assets/nutrition/brand/clinicaclick-logo-text.svg')
+).toString('base64');
 
 const PURPOSE_VALUES = new Set([
     'clinical',
@@ -372,13 +376,6 @@ function getTabletBaseUrl() {
         || 'https://tablet.clinicaclick.com';
 }
 
-function getDocumentAssetBaseUrl() {
-    return (toCleanString(process.env.CONSENT_DOCUMENT_ASSET_BASE_URL)
-        || toCleanString(process.env.FRONTEND_PUBLIC_URL)
-        || toCleanString(process.env.FRONTEND_URL)
-        || 'http://localhost:4203').replace(/\/+$/, '');
-}
-
 function buildPublicConsentUrl(token, baseUrl = null) {
     const resolvedBaseUrl = toCleanString(baseUrl) || getTabletBaseUrl();
     return `${resolvedBaseUrl.replace(/\/+$/, '')}/tablet/consentimientos/${encodeURIComponent(token)}`;
@@ -578,7 +575,7 @@ function buildPrintableHtml(documentRow) {
         superseded: 'Sustituido',
         voided: 'Anulado',
     }[status] || status || 'Sin estado');
-    const brandLogo = `<img class="brand-logo" alt="ClinicaClick" src="${escapeHtml(getDocumentAssetBaseUrl())}/assets/images/logo/logo-text-on-dark.svg" />`;
+    const brandLogo = `<img class="brand-logo" alt="ClinicaClick" src="${DOCUMENT_BRAND_LOGO}" />`;
     const signatureBlock = evidence ? `
         <section class="evidence-panel">
             <div class="section-heading">

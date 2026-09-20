@@ -16,7 +16,7 @@ function harness({ document = {}, packageRow = {} } = {}) {
     const nativeRequire = createRequire(servicePath), module = { exports: {} };
     const localRequire = name => name === '../../models' ? db : name === 'jsonwebtoken'
         ? { verify: () => ({ type: 'consent_signature_package', package_public_id: 'qa_package' }) } : nativeRequire(name);
-    vm.runInNewContext(fs.readFileSync(servicePath, 'utf8'), { require: localRequire, module, exports: module.exports, process: { env: {} }, Buffer, console });
+    vm.runInNewContext(fs.readFileSync(servicePath, 'utf8'), { require: localRequire, module, exports: module.exports, __dirname: path.dirname(servicePath), process: { env: {} }, Buffer, console });
     return { service: module.exports, writes: () => writes };
 }
 const valid = { signer_name: 'Paciente ficticio QA', accepted_statement: true, signature_data_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aK1sAAAAASUVORK5CYII=' };
