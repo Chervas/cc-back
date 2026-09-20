@@ -106,9 +106,35 @@ test('acceptance shows pending composition without inferring payment or pretendi
   const lines = await contract.resolveLines([rawLine()], { resolve: async () => definition() });
   const [plan] = contract.programPlans({ budget: { status: 'accepted' }, lines });
   assert.equal(plan.purchase_status, 'accepted'); assert.equal(plan.can_schedule, false);
-  assert.equal(plan.appointments[0].scheduling_status, 'pending_planning'); assert.equal(plan.appointment_count, 4);
+  assert.equal(plan.appointments[0].scheduling_status, 'not_loaded'); assert.equal(plan.appointment_count, 4);
+  assert.equal(plan.scheduling_counts, null);
   assert.equal('paid' in plan, false); assert.equal('reserved_at' in plan.appointments[0], false);
   assert.equal(contract.programPlans({ budget: { status: 'partially_accepted' }, lines, events: [{ event_type: 'partially_accepted', metadata: { accepted_line_keys: ['other'] } }] })[0].purchase_status, 'not_accepted');
+});
+test('program composition projects canonical reservations and consumption, without inventing pending dates', async () => {
+  const lines = await contract.resolveLines([rawLine()], { resolve: async () => definition() });
+  const sha = lines[0].program_snapshot.sha256;
+  const args = { budget: { status: 'accepted' }, lines, bookingEnabled: true,
+    vouchers: [{ id: 10, public_id: 'voucher', budget_line_key: 'line-1', status: 'active' }],
+    sessions: [
+      { voucher_id: 10, session_key: 'visit-0', snapshot_sha256: sha, appointment_id: 1, consumption_movement_id: 50 },
+      { voucher_id: 10, session_key: 'visit-1', snapshot_sha256: sha, appointment_id: 2 },
+      { voucher_id: 10, session_key: 'visit-2', snapshot_sha256: sha, appointment_id: 3 },
+    ], appointments: [
+      { id_cita: 1, voucher_id: 10, estado: 'completada', inicio: '2030-01-01T09:00:00Z' },
+      { id_cita: 2, voucher_id: 10, estado: 'pendiente', inicio: '2030-01-08T09:00:00Z' },
+      { id_cita: 3, voucher_id: 10, estado: 'cancelada', inicio: '2030-01-15T09:00:00Z' },
+    ] };
+  const [plan] = contract.programPlans(args);
+  assert.deepEqual(plan.scheduling_counts, { pending: 2, reserved: 1, completed: 1, review_required: 0 });
+  assert.equal(plan.can_schedule, true); assert.equal(plan.can_view_schedule, true);
+  assert.equal(plan.appointments[1].start_at, '2030-01-08T09:00:00.000Z');
+  assert.equal(plan.appointments[2].start_at, null);
+  const broken = structuredClone(args); broken.appointments[1].voucher_id = 11;
+  assert.equal(contract.programPlans(broken)[0].scheduling_counts.review_required, 1);
+  assert.equal(contract.programPlans(broken)[0].can_schedule, false);
+  const expired = structuredClone(args); expired.vouchers[0].expires_at = '2000-01-01';
+  assert.equal(contract.programPlans(expired)[0].can_schedule, false);
 });
 test('request hash is order-stable but changed price or composition is a different request', () => {
   assert.equal(contract.requestHash({ lines: [rawLine()], notes: 'a' }), contract.requestHash({ notes: 'a', lines: [{ ...rawLine(), program_snapshot: { forged: true } }] }));

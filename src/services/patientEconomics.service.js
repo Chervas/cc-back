@@ -3397,7 +3397,7 @@ function serializeEvent(event) {
   };
 }
 
-function serializeBudget(budget, version, events, payments, walletApplied = 0, signatureRequests = [], programVouchers = []) {
+function serializeBudget(budget, version, events, payments, walletApplied = 0, signatureRequests = [], programVouchers = [], programLedger = {}) {
   const paid = roundMoney(payments
     .filter((payment) => payment.status === 'confirmed')
     .reduce((sum, payment) => sum + paymentAppliedToBudget(payment), 0) + walletApplied);
@@ -3427,7 +3427,7 @@ function serializeBudget(budget, version, events, payments, walletApplied = 0, s
     updated_at: budget.updated_at,
     current: serializedVersion,
     program_preparation_only: serializedVersion.lines.some((line) => !!line.program_snapshot) && !economicPrograms.integrationCapabilities().program_batch_booking,
-    program_plans: economicPrograms.programPlans({ budget, lines: serializedVersion.lines, events, vouchers: programVouchers }),
+    program_plans: economicPrograms.programPlans({ budget, lines: serializedVersion.lines, events, vouchers: programVouchers, ...programLedger }),
     events: events.map(serializeEvent),
     signature_requests: signatureRequests.map((request) => serializeBudgetSignatureRequest(request)),
     financial_summary: {
@@ -3571,6 +3571,19 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
     listTemplates({ clinicId: resolvedClinicId }),
   ]);
   const voucherIds = vouchers.map((voucher) => voucher.id);
+  const programVoucherIds = vouchers.filter(v => v.source_system === 'treatment_program').map(v => v.id);
+  // Two scoped bulk reads for the whole workspace, never a query per program
+  // or session. Old schemas remain untouched while the compatibility gate is off.
+  let programLedger = { timezone: require('../lib/availability-calendar').resolveClinicTimezone(clinic) };
+  if (programVoucherIds.length && require('../lib/program-booking').programBookingEnabled()) {
+    const [sessions, appointments] = await Promise.all([
+      db.PatientProgramSession.findAll({ where: { voucher_id: { [Op.in]: programVoucherIds } },
+        attributes: ['voucher_id', 'session_key', 'snapshot_sha256', 'appointment_id', 'consumption_movement_id'], raw: true }),
+      CitaPaciente.findAll({ where: { voucher_id: { [Op.in]: programVoucherIds }, clinica_id: resolvedClinicId, paciente_id: patient.id_paciente },
+        attributes: ['id_cita', 'voucher_id', 'estado', 'inicio'], raw: true }),
+    ]);
+    programLedger = { ...programLedger, sessions, appointments };
+  }
   const voucherMovements = voucherIds.length
     ? await PatientVoucherMovement.findAll({
       where: { voucher_id: { [Op.in]: voucherIds } },
@@ -3617,7 +3630,8 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
           paymentsByBudget.get(String(budget.id)) || [],
           walletAppliedByBudget.get(String(budget.id)) || 0,
           signatureRequestsByBudget.get(String(budget.id)) || [],
-          vouchers.filter(voucher => String(voucher.budget_id) === String(budget.id))
+          vouchers.filter(voucher => String(voucher.budget_id) === String(budget.id)),
+          programLedger
         )
         : null;
     })

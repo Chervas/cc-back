@@ -12,6 +12,11 @@ async function prepare(db) {
   const actor = await db.Usuario.findByPk(1);
   assert.equal(actor?.email_usuario, 'carlos@clinicaclick.com');
   return db.sequelize.transaction(async transaction => {
+    // The visual calendar also needs clinic opening hours. These are synthetic
+    // and scoped to the explicitly verified isolated fixture, never client hours.
+    for (let day = 1; day <= 5; day++) await db.ClinicaHorario.findOrCreate({
+      where: { clinica_id: 1, dia_semana: day, hora_inicio: '09:00', hora_fin: '20:00' },
+      defaults: { activo: true }, transaction });
     const [patient] = await db.Paciente.findOrCreate({ where: { public_id: PATIENT_ID },
       defaults: { nombre: 'Paciente ficticio', apellidos: 'Prueba BS Medical', clinica_id: 1,
         idioma_preferido: 'es', paciente_conocido: true, antecedentes: 'Ficha sintética para comprobar la aplicación. No contiene datos de una persona real.' }, transaction });
