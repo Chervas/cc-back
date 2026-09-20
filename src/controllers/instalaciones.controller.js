@@ -1,5 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
+const { withCalendarMutation, sendCalendarMutationError } = require('../services/appointmentCalendarMutation.service');
+const withInstallationCalendarMutation = (installationId, mutate) => withCalendarMutation({ db, installationId, mutate });
 const { Op } = db.Sequelize;
 const {
   assertUserCanAccessFeature,
@@ -251,9 +253,9 @@ exports.update = asyncHandler(async (req, res) => {
   const tipo = body.tipo !== undefined ? normalizeInstallationType(body.tipo) : item.tipo;
   if (!tipo) return res.status(400).json({ message: 'tipo de instalación inválido' });
 
-  const t = await db.sequelize.transaction();
   try {
-    await item.update({
+    await withInstallationCalendarMutation(id, async t => {
+      await item.update({
       // No permitimos cambiar de clínica por ahora (evita movimientos inesperados)
       nombre: body.nombre ?? item.nombre,
       tipo,
@@ -280,7 +282,7 @@ exports.update = asyncHandler(async (req, res) => {
       }
     }
 
-    await t.commit();
+    });
 
     const full = await db.Instalacion.findByPk(id, {
       include: [
@@ -291,7 +293,7 @@ exports.update = asyncHandler(async (req, res) => {
     });
     return res.json(full);
   } catch (e) {
-    await t.rollback();
+    if (sendCalendarMutationError(e, res)) return;
     console.error('Error update instalacion', e);
     return res.status(500).json({ message: 'Error actualizando instalación' });
   }
@@ -302,7 +304,7 @@ exports.remove = asyncHandler(async (req, res) => {
   if (!id) return res.status(400).json({ message: 'id inválido' });
   const item = await installationOr404(req, res, id, 'clinic.settings.edit');
   if (!item) return;
-  await item.update({ activo: false });
+  await withInstallationCalendarMutation(id, transaction => item.update({ activo: false }, { transaction }));
   res.status(204).send();
 });
 
@@ -322,8 +324,8 @@ exports.putHorarios = asyncHandler(async (req, res) => {
   if (!id) return res.status(400).json({ message: 'id inválido' });
   if (!await installationOr404(req, res, id, 'clinic.settings.edit')) return;
   const horarios = Array.isArray(req.body) ? req.body : [];
-  const t = await db.sequelize.transaction();
   try {
+    await withInstallationCalendarMutation(id, async t => {
     await db.InstalacionHorario.destroy({ where: { instalacion_id: id }, transaction: t });
     const rows = horarios
       .filter((h) => h && h.dia_semana !== undefined)
@@ -335,11 +337,11 @@ exports.putHorarios = asyncHandler(async (req, res) => {
         hora_fin: h.hora_fin || '20:00',
       }));
     if (rows.length) await db.InstalacionHorario.bulkCreate(rows, { transaction: t });
-    await t.commit();
+    });
     const out = await db.InstalacionHorario.findAll({ where: { instalacion_id: id }, order: [['dia_semana','ASC']] });
     res.json(out);
   } catch (e) {
-    await t.rollback();
+    if (sendCalendarMutationError(e, res)) return;
     console.error('Error putHorarios', e);
     res.status(500).json({ message: 'Error actualizando horarios' });
   }
@@ -363,14 +365,18 @@ exports.createBloqueo = asyncHandler(async (req, res) => {
   if (!await installationOr404(req, res, instalacionId, 'clinic.settings.edit')) return;
   if (!body.fecha_inicio || !body.fecha_fin) return res.status(400).json({ message: 'fecha_inicio y fecha_fin requeridos' });
 
-  const created = await db.InstalacionBloqueo.create({
+  const start = new Date(body.fecha_inicio), end = new Date(body.fecha_fin);
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) {
+    return res.status(400).json({ message: 'El fin del bloqueo debe ser posterior al inicio.' });
+  }
+  const created = await withInstallationCalendarMutation(instalacionId, transaction => db.InstalacionBloqueo.create({
     instalacion_id: instalacionId,
     fecha_inicio: new Date(body.fecha_inicio),
     fecha_fin: new Date(body.fecha_fin),
     motivo: body.motivo || null,
     recurrente: body.recurrente || 'none',
     creado_por: req.userData?.userId ? Number(req.userData.userId) : null,
-  });
+  }, { transaction }));
   res.status(201).json(created);
 });
 
@@ -380,7 +386,7 @@ exports.deleteBloqueo = asyncHandler(async (req, res) => {
   const item = await db.InstalacionBloqueo.findByPk(id);
   if (!item) return res.status(404).json({ message: 'Bloqueo no encontrado' });
   if (!await installationOr404(req, res, item.instalacion_id, 'clinic.settings.edit')) return;
-  await item.destroy();
+  await withInstallationCalendarMutation(item.instalacion_id, transaction => item.destroy({ transaction }));
   res.status(204).send();
 });
 

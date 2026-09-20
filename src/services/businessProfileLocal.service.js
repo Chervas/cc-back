@@ -1843,7 +1843,8 @@ async function importRegularHoursToClinic(resolved) {
     throw error;
   }
 
-  const horarios = await sequelize.transaction(async (transaction) => {
+  const horarios = await require('./appointmentCalendarMutation.service').withCalendarMutation({
+    db, clinicId: Number(resolved.clinicId), mutate: async transaction => {
     await ClinicaHorario.destroy({
       where: { clinica_id: resolved.clinicId },
       transaction,
@@ -1854,7 +1855,7 @@ async function importRegularHoursToClinic(resolved) {
       order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC'], ['id', 'ASC']],
       transaction,
     });
-  });
+  } });
 
   return {
     success: true,

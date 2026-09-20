@@ -20,4 +20,5 @@ router.get('/:id/bloqueos', controller.getBloqueos);
 router.post('/bloqueos', controller.createBloqueo);
 router.delete('/bloqueos/:id', controller.deleteBloqueo);
 
+router.use(require('../services/treatmentBookingProfile.service').bookingErrorMiddleware);
 module.exports = router;

@@ -12,6 +12,7 @@ const {
     PublicMediaAsset,
 } = require('../../models');
 const bcrypt = require('bcryptjs');
+const { withCalendarMutation, sendCalendarMutationError } = require('../services/appointmentCalendarMutation.service');
 const { Op } = require('sequelize');
 const { metaSyncJobs } = require('../jobs/sync.jobs');
 const jobRequestsService = require('../services/jobRequests.service');
@@ -481,34 +482,30 @@ exports.getHorarios = async (req, res) => {
 
 // Reemplazar horarios estructurados de clínica
 exports.putHorarios = async (req, res) => {
-    const t = await Clinica.sequelize.transaction();
     try {
         const clinicId = parseIntOrNull(req.params.id);
         if (!clinicId) {
-            await t.rollback();
             return res.status(400).json({ message: 'id inválido' });
         }
 
         const actorId = parseIntOrNull(req.userData?.userId);
         const canWrite = await canWriteClinicSchedule(actorId, clinicId);
         if (!canWrite) {
-            await t.rollback();
             return res.status(403).json({ message: 'Sin permisos para editar horarios de esta clínica' });
         }
 
-        const clinica = await Clinica.findByPk(clinicId, { attributes: ['id_clinica'], transaction: t });
+        const clinica = await Clinica.findByPk(clinicId, { attributes: ['id_clinica'] });
         if (!clinica) {
-            await t.rollback();
             return res.status(404).json({ message: 'Clínica no encontrada' });
         }
 
         const normalized = normalizeHorariosPayload(clinicId, req.body);
         if (normalized.error) {
-            await t.rollback();
             return res.status(400).json({ message: normalized.error });
         }
 
-        await ClinicaHorario.destroy({
+        await withCalendarMutation({ db: require('../../models'), clinicId, mutate: async t => {
+          await ClinicaHorario.destroy({
             where: { clinica_id: clinicId },
             transaction: t,
         });
@@ -517,7 +514,7 @@ exports.putHorarios = async (req, res) => {
             await ClinicaHorario.bulkCreate(normalized.rows, { transaction: t });
         }
 
-        await t.commit();
+        } });
 
         const horarios = await ClinicaHorario.findAll({
             where: { clinica_id: clinicId },
@@ -525,7 +522,7 @@ exports.putHorarios = async (req, res) => {
         });
         return res.json(horarios);
     } catch (error) {
-        await t.rollback();
+        if (sendCalendarMutationError(error, res)) return;
         console.error('Error putHorarios clínica:', error);
         return res.status(500).json({ message: 'Error al actualizar horarios de la clínica' });
     }

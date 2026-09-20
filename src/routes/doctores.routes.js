@@ -273,4 +273,5 @@ router.__agencyAccessContract = {
   scopeDoctorList,
 };
 
+router.use(require('../services/treatmentBookingProfile.service').bookingErrorMiddleware);
 module.exports = router;
