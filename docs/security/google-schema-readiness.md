@@ -2,17 +2,61 @@
 
 > **Tipo:** runbook de requisitos SQL y recuperación.
 > **Fuente de verdad:** compatibilidad de esquema Google; no certifica migración de credenciales ni acceso al proveedor.
-> **Última revisión:** 2026-09-19.
+> **Última revisión:** 2026-09-20.
 > **Relacionado con:** [contrato backend](../../src/Documentacion/13-backend.md#esquema-google-completo-y-publicación-por-entorno), [estado central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
 
-## Estado vigente — 19/09/2026, 18:04 UTC
+## Esquema GBP aplicado solo en DEV — 20/09/2026, 06:45 UTC
+
+Las dos DDL `20260919200000-create-business-profile-mutation-journal.js` y
+`20260919210000-create-business-profile-cache-coordination.js` ya están aplicadas
+una vez en la BD ficticia DEV. Añaden `BusinessProfileMutations`,
+`BusinessProfileMutationLocks` y `BusinessProfileCacheStates`, las tres vacías.
+DEV pasa el contrato nuevo de 52 tablas y mantiene el de 49 de la misma release
+`aeb87ce4`, que sigue ejecutándose. No se publicó el consumidor GBP nuevo.
+CRM conserva el esquema anterior de 49: allí estas dos DDL siguen pendientes.
+
+Plan nuevo sobre fuente limpia/pusheada `46a0c877`, con hashes de migraciones,
+contrato y metadata. Las definiciones de las tres tablas se contrastaron con
+el MySQL aislado del ensayo de 31 grupos. Antes de aplicar: cero conexiones,
+mappings, intentos, trabajos/correos/flujos en curso o pendientes en DEV. Se
+detuvieron solo API y worker de seguridad DEV, se volvió a comprobar el plan y
+se ejecutaron las dos DDL con diario durable. Sin reintento ni error parcial.
+Al excluir esas tablas y sus dos entradas de SequelizeMeta, la huella completa
+de metadata DEV es idéntica a la previa. No se modificaron tablas anteriores.
+
+La misma release arrancó con configuración/MFA/pausas intactas y sin reinicios
+automáticos; CRM/gateway/WhatsApp y ambos frontends conservaron sus huellas.
+El esquema clínico mantiene `4a048c98…`. Chromium contra login servido DEV/CRM,
+1440/390 px: cuatro capturas, formulario vacío bloqueado sin POST, auth/me401,
+cero errores JavaScript/5xx/desbordamiento. Se inspeccionaron CRM escritorio y
+DEV móvil. No acredita sesión autenticada ni Google real. Observación posterior
+50,4 s: 82 SELECT DEV, cero errores, ocho sentencias retenidas en cuatro conexiones;
+cero lecturas/escrituras en las tres tablas nuevas. Sin nuevas consultas lentas
+ni esperas de fila globales; no es prueba de capacidad máxima.
+
+Acta: [google-gbp-dev-schema.json](google-gbp-dev-schema.json). Evidencia privada:
+`qa-evidence/security-resume-20260917/google-gbp-dev-schema-20260920/`.
+Plan/diario root consumidos:
+`/var/lib/clinicaclick-schema-recovery/google-gbp-dev-20260920-46a0c877/`.
+Recuperación: conservar esquema aditivo y misma release compatible. No ejecutar
+`down` ni repetir planes anteriores. Ante cualquier DDL parcial, inspeccionar
+metadata/diario antes de reanudar; MySQL DDL no es una transacción reversible.
+El corte solo crea tablas vacías y conserva metadata: no requiere exportar datos
+clínicos ni aborda las copias generales. Rotación también excluida.
+
+Pendiente: tratamiento operativo de incertidumbres, publicación selectiva de
+consumidores GBP, nuevo corte clínico para estas dos DDL, censo compartido y
+aceptación autenticada/proveedor/carga. Compatibilidad AWS v1–v25 ya publicada;
+no abrir gates ni retirar tokens por haber completado únicamente el esquema DEV.
+
+## Corte anterior — 19/09/2026, 18:04 UTC
 
 Las aplicaciones SQL descritas aquí no deben repetirse. DEV recibió sus seis DDL
 restantes a las 17:06 UTC y los [consumidores DEV](google-dev-consumers.md) a las
 17:38–17:39. Las **19 DDL clínicas ya se aplicaron a las 18:04 UTC**, conservando
 434 filas, 520 jobs pendientes y pausas existentes; [acta y recuperación](google-clinical-cut.md).
 
-El contrato completo del código preparado exige **49 tablas y 43 migraciones**;
+En ese corte, el contrato del código preparado exigía **49 tablas y 43 migraciones**;
 Google aporta 22 tablas y 22 migraciones (tres históricas de julio y diecinueve
 posteriores). Las cinco tablas nuevas son `GoogleConversionSubmissions`,
 `GoogleAdsActionPlans`, `GoogleAdsActionCommands`, `GoogleDestinationAuthorizations`

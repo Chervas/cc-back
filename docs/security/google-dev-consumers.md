@@ -9,7 +9,10 @@
 
 Esta acta describe la publicación DEV de las 17:38–17:39 UTC. El esquema clínico
 se aplicó después a las 18:04 UTC: [corte Google](google-clinical-cut.md). Los
-consumidores públicos nuevos y la aceptación real siguen pendientes.
+consumidores públicos nuevos y la aceptación real siguen pendientes. El 20/09
+se añadieron tres tablas GBP solo a DEV, manteniendo la misma release: el
+[acta SQL vigente](google-schema-readiness.md) pasa 52 tablas; este documento
+conserva el alcance de la publicación de consumidores anterior.
 
 El 19/09 a las 17:38–17:39 UTC se publicaron solo en DEV backend
 `aeb87ce46b33c064405522b738a0061e16beeb5b` y frontend

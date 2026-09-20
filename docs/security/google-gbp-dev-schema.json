@@ -1,0 +1,46 @@
+{
+  "at": "2026-09-20T06:45:42.626636+00:00",
+  "sourceCommit": "46a0c877319cc36c1e9d5384889bf1fa0dd0028b",
+  "sameRelease": "/opt/clinicaclick-dev/release-aeb87ce46b33c064405522b738a0061e16beeb5b-google-consumers",
+  "appliedMigrations": [
+    "20260919200000-create-business-profile-mutation-journal.js",
+    "20260919210000-create-business-profile-cache-coordination.js"
+  ],
+  "requiredTables": 52,
+  "newTablesEmpty": {
+    "BusinessProfileMutations": 0,
+    "BusinessProfileMutationLocks": 0,
+    "BusinessProfileCacheStates": 0
+  },
+  "schemaCompatible": true,
+  "schemaBefore": "d139b2c676931c122a4f090795ffc15f33ea4dc95b5a33491f830d09749bbadc",
+  "schemaAfter": "74425d7c5d09119f9d295f6c7c50e42244086c449c31aeb7f16f23d03109bbfd",
+  "clinicalSchemaUnchanged": "4a048c98f80fe991e10cf862b3c4c578df0bd7aebddd85a37ed5581cf02ed2d5",
+  "configurationPreserved": true,
+  "publicProcessesPreserved": true,
+  "frontendsPreserved": true,
+  "clinicalGatesEnabled": false,
+  "recovery": "/var/lib/clinicaclick-schema-recovery/google-gbp-dev-20260920-46a0c877",
+  "evidenceDirectory": "/home/ubuntu/qa-evidence/security-resume-20260917/google-gbp-dev-schema-20260920",
+  "schemaOnly": true,
+  "clinicalSchemaApplied": false,
+  "consumerPublished": false,
+  "authenticatedAcceptance": false,
+  "qa": {
+    "mysqlIntegrationGroups": 31,
+    "observedTableDefinitionsMatched": 3,
+    "liveAnonymousLoginScreenshots": 4,
+    "loginJavascriptErrors": 0,
+    "loginHttp5xx": 0,
+    "minErrorTextContrast": 5.905927118870345,
+    "devObservationSeconds": 50.42117272224277,
+    "devSelects": 82,
+    "devSqlErrors": 0,
+    "devPreparedRetained": 8,
+    "devPreparedConnections": 4,
+    "globalNewSlowQueries": 0,
+    "globalNewRowLockWaits": 0,
+    "newTablesReadWriteDelta": 0
+  },
+  "recoveryPolicy": "Preserve additive schema and same compatible release. Never rerun consumed plan or down; inspect partial DDL before resume. Public schema and apps unchanged."
+}

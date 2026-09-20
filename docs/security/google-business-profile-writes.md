@@ -14,9 +14,10 @@ credenciales legacy. El nodo gestionado conserva un intento por ejecución/nodo 
 comprueba el intento vigente del job antes de aceptar su resultado.
 No retirar tokens compartidos ni activar la cohorte hasta completar el censo,
 la resolución de incertidumbres y la aceptación autenticada. Ninguna candidata
-pública ni runtime incorpora este corte; las tres tablas SQL nuevas tampoco están
-aplicadas a DEV o CRM. La compatibilidad AWS de auditoría v25 sí está publicada
-y verificada desde el 20/09: [acta y recuperación](audit-reader-view-migration.md#publicación-aws-v25-20092026-06290634-utc).
+pública ni runtime incorpora este consumidor. Las tres tablas SQL ya están
+aplicadas y vacías solo en DEV desde el 20/09; CRM conserva el esquema anterior.
+[Acta SQL y recuperación](google-schema-readiness.md). La compatibilidad AWS de auditoría v25 está publicada
+y verificada desde el 20/09: [acta y recuperación](audit-reader-view-migration.md).
 
 La cohorte explícita `google-business-profile-write-v1` admite lectores y escritores
 con identidades distintas. La cohorte anterior de lectura rechaza tanto grants
@@ -230,10 +231,11 @@ Siguiente implementación necesaria:
 1. Completar el tratamiento operativo de incertidumbres y la aceptación real del
    nodo adaptado. Mantener apagados en DEV los jobs que actúan sobre pacientes,
    leads, campañas y automatizaciones; este corte no autoriza su activación.
-2. Preparar corte SQL nuevo para `20260919200000-create-business-profile-mutation-journal.js`
-   y `20260919210000-create-business-profile-cache-coordination.js` (tres tablas),
-   primero en DEV y antes de publicar los consumidores/sync nuevos. El contrato de
-   fuente requiere 52 tablas; el corte clínico anterior de 49 sigue consumido y no
+2. Las DDL `20260919200000-create-business-profile-mutation-journal.js`
+   y `20260919210000-create-business-profile-cache-coordination.js` (tres tablas)
+   ya están aplicadas solo en DEV. Preparar su corte clínico nuevo antes de
+   publicar allí consumidores/sync. Fuente y esquema DEV pasan 52 tablas;
+   el corte clínico anterior de 49 sigue consumido y no
    se amplía ni se ejecuta de nuevo. Drenar escritores y sync para el corte; la
    migración de coordinación rechaza intentos inciertos existentes. No inicializar
    contadores a cero sobre actividad anterior ni mezclar escritores de versiones

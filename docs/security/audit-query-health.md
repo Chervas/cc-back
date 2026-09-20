@@ -1,8 +1,8 @@
 # Salud de las consultas de auditoría tras limitar la caché
 
 > **Tipo:** histórico técnico de verificación.
-> **Fuente de verdad:** mediciones y verificación del consumo SQL del corte del 18/09/2026; no redefine la arquitectura ni sustituye el estado central.
-> **Última revisión del alcance y referencias:** 2026-09-19.
+> **Fuente de verdad:** mediciones y verificación del consumo SQL de los cortes del 18–20/09/2026; no redefine la arquitectura ni sustituye el estado central.
+> **Última revisión del alcance y referencias:** 2026-09-20.
 > **Relacionado con:** [00-README](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md), [21: colas](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/21-arquitectura-colas-y-tiempo-real.md#persistencia-planificación-y-recursos), [31: entornos](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md#dev-con-datos-ficticios-y-proceso-aislado), [39: auditoría](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/39-seguridad-integraciones-cifrado-auditoria.md#cola-sql-y-conciliación).
 > **Estado vigente:** [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones); resumen del corte en [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#salud-sql-de-auditoría-y-revisión-documental-2026-09-18).
 
@@ -319,3 +319,18 @@ en esa ventana. La instrumentación fue de lectura; no se alteró caché ni lím
 El resto de contadores del servidor MySQL incluye otros usuarios: no imputar su
 actividad a DEV. La muestra con gates apagados no prueba capacidad Meta real.
 Evidencia `meta-dev-consumers-20260919/live-observation.json` y resumen adyacente.
+
+## Seguimiento tras DDL aditivo GBP solo en DEV (20/09/2026, 06:46 UTC)
+
+Misma release DEV `aeb87ce4`; tres tablas nuevas vacías, consumidores GBP todavía
+sin publicar ni activar. Ventana de 50,4 s, coincidente con comprobaciones anónimas
+de login: 82 SELECT del usuario DEV (~1,63/s), diez ejecuciones preparadas y cero
+errores. Ocho sentencias retenidas en cuatro conexiones; máximo global observado75.
+Cero lecturas/escrituras de las tablas GBP nuevas, cero nuevas consultas lentas,
+cierres de sentencias o esperas de fila globales. No se modifica la caché128.
+
+La actividad global incluye otros consumidores: 98 SELECT del usuario compartido
+`carlos` examinaron ~2,31 millones de filas y las ejecuciones de `cc_wa_inbox`,
+~205.000. No imputar esa carga a DEV ni presentar esta muestra como una prueba de
+capacidad del servidor completo. El corte de esquema, las mediciones y capturas
+están en `qa-evidence/security-resume-20260917/google-gbp-dev-schema-20260920/`.

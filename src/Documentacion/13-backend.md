@@ -12051,12 +12051,13 @@ intentos con una sesión nueva. HTTP202 no significa publicación confirmada. El
 panel de actividad incorpora v25 con metadatos, sin texto de reseñas, fotos o URLs.
 
 Preparado y probado con MySQL/SQLite/HTTP y componentes Angular aislados; sin
-publicación, DDL real ni activación. Faltan aceptación real de horarios, tratamiento
+publicación del consumidor ni activación. DDL aplicada solo en DEV el 20/09.
+Faltan aceptación real de horarios, tratamiento
 operativo de incertidumbres, aceptación clínica y carga. La compatibilidad AWS
 v1–v25 ya está publicada y verificada desde el 20/09; no publica este consumidor.
-Las dos migraciones nuevas añaden tres tablas: el contrato de fuente pasa de49
-a52; primero se requiere DDL, con escritores/sync drenados y sin intentos inciertos,
-y después el código coordinado. No se reutiliza ni amplía el corte clínico de19 DDL. Contrato y recuperación:
+Las dos migraciones nuevas añaden tres tablas: fuente y esquema DEV pasan52,
+con la release anterior de49 aún compatible. CRM requiere su DDL nuevo, con
+escritores/sync drenados y sin intentos inciertos, antes del código coordinado. No se reutiliza ni amplía el corte clínico de19 DDL. Contrato y recuperación:
 `docs/security/google-business-profile-writes.md`.
 
 ### Esquema clínico Google: corte limitado y conservación de identidad compartida
@@ -12099,3 +12100,15 @@ Veinticinco recibos operativos correctos y 31 canarios anteriores preservados.
 Conservar lector v1–v25; no repetir canarios ni revertir a un lector inferior.
 No despliega consumidores/DDL Google ni prueba aceptación clínica autenticada.
 Runbook `docs/security/audit-reader-view-migration.md`; acta `audit-v25-publication.json`.
+
+### Esquema GBP preparado en DEV, misma aplicación (20/09/2026)
+
+Dos DDL fijadas a fuente `46a0c877` aplicadas una vez a la BD ficticia: tres tablas
+vacías para diario, bloqueos y coordinación de caché. DEV pasa52 y conserva la
+release `aeb87ce4`/contrato49. CRM continúa49, sin DDL ni consumidor nuevo.
+Solo API/worker DEV detenidos y reanudados; misma configuración, MFA y gates,
+sin trabajos clínicos. Plan consumido y diario root; no repetir ni ejecutar down.
+Cuatro capturas del login anónimo servido DEV/CRM, cero JS/5xx/desbordamiento;
+50,4 s de observación:82 SELECT DEV, cero errores, ocho sentencias/cuatro conexiones.
+No sustituye aceptación de Google ni sesión autenticada. Acta/recuperación:
+`docs/security/google-schema-readiness.md`, `google-gbp-dev-schema.json`.

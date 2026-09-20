@@ -165,7 +165,8 @@ independiente. Cero cohortes Google reales migradas en este corte.
 ## Siguiente publicación y recuperación
 
 1. Completar la aceptación real de horarios y la resolución operativa de incertidumbres,
-   corte SQL nuevo de tres tablas. Compatibilidad AWS de auditoría v25 publicada
+   corte SQL clínico nuevo de tres tablas (aplicadas solo en DEV el 20/09).
+   Compatibilidad AWS de auditoría v25 publicada
    y verificada el 20/09; conservarla. Promover las
    escrituras Business Profile y su UI a cada candidato que las consuma, con QA.
 2. Completar toda la identidad Google compartida y todos sus consumidores antes
