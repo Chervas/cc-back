@@ -9,16 +9,13 @@ const { createNewPatientsStore } = require('../lib/cliniccloud-import/new-patien
 const { loadSources } = require('./cliniccloud-import-new-patients-apply');
 
 async function run(args) {
-  const keys = ['--source-dir', '--historical-dir', '--contacts-csv', '--appointments-csv', '--contacts-as-of', '--coverage-start', '--coverage-end', '--private-output', '--private-snapshot'];
+  const keys = ['--target', '--source-dir', '--historical-dir', '--contacts-csv', '--appointments-csv', '--contacts-as-of', '--coverage-start', '--coverage-end', '--private-output', '--private-snapshot'];
   const options = parseArgs(args, keys);
   if (keys.some(key => !options[key])) throw Error('ALL_AUDIT_INPUTS_REQUIRED');
   if (path.resolve(__dirname, '../..') !== '/home/ubuntu/wt/back-dev' || process.cwd() !== '/home/ubuntu/wt/back-dev'
     || execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim() !== 'dev') throw Error('DEV_WORKTREE_REQUIRED');
   const sources = loadSources(options);
-  require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), quiet: true });
-  const c = await require('mysql2/promise').createConnection({ host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306),
-    user: process.env.DB_USERNAME, password: process.env.DB_PASSWORD, database: process.env.DB_NAME, timezone: 'Z', dateStrings: true,
-    multipleStatements: false, ...require('../lib/databaseTlsConfig').buildDatabaseTlsOptions(process.env) });
+  const c = await require('../lib/cliniccloud-import/operator-database').connectOperatorDatabase(options['--target']);
   let snapshot;
   try {
     await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
@@ -27,7 +24,7 @@ async function run(args) {
     if (clinics.length !== 2 || !clinics[0].grupoClinicaId || clinics[0].grupoClinicaId !== clinics[1].grupoClinicaId) throw Error('CLINIC_GROUP_DRIFT');
     const store = await createNewPatientsStore(c, { groupId: Number(clinics[0].grupoClinicaId) });
     const live = await store.captureGroup();
-    snapshot = { ...live, database_group_id: live.group_id };
+    snapshot = { ...live, database_target: options['--target'], database_group_id: live.group_id };
     await c.rollback();
   } finally { await c.end(); }
   const audit = buildNewPatientsAudit({ sources, live: snapshot,

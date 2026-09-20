@@ -25,7 +25,7 @@ function canonicalImportedBaseline(rows, fieldName = 'fields') {
 }
 
 async function run(args) {
-  const options = parseArgs(args, ['--source-account', '--clinic-ids', '--coverage-start', '--coverage-end', '--historical-dir', '--private-output']);
+  const options = parseArgs(args, ['--target', '--source-account', '--clinic-ids', '--coverage-start', '--coverage-end', '--historical-dir', '--private-output']);
   for (const key of ['--source-account', '--clinic-ids', '--coverage-start', '--coverage-end', '--historical-dir', '--private-output']) if (!options[key]) throw new Error('MISSING_REQUIRED_CLI_ARGUMENT');
   const clinicIds = options['--clinic-ids'].split(',').map(Number);
   if (clinicIds.length > 20 || !clinicIds.length || clinicIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) throw new Error('INVALID_CLINIC_SCOPE');
@@ -38,10 +38,8 @@ async function run(args) {
   const serviceTypes = readCsv(path.join(directory, 'tiposervicio_1.csv'), 'historic_service_types').rows;
   const agendaIds = index(agendas, (r) => r.values.idAgenda);
   const serviceIds = index(services, (r) => r.values.idServicio);
-  // dotenv quiet avoids startup logging; credentials never enter the snapshot.
-  require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), quiet: true });
-  const mysql = require('mysql2/promise');
-  const connection = await mysql.createConnection({ host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), user: process.env.DB_USERNAME, password: process.env.DB_PASSWORD, database: process.env.DB_NAME, dateStrings: true, timezone: 'Z', multipleStatements: false, ...require('../lib/databaseTlsConfig').buildDatabaseTlsOptions(process.env) });
+  const target = options['--target'];
+  const connection = await require('../lib/cliniccloud-import/operator-database').connectOperatorDatabase(target);
   let snapshot;
   try {
     await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
@@ -67,7 +65,7 @@ async function run(args) {
       resourceAgendas.get(key).add(agenda);
     }
     snapshot = {
-      version: 1, source_account: options['--source-account'], captured_at: new Date().toISOString(), database_group_id: clinics[0].grupoClinicaId,
+      version: 1, database_target: target, source_account: options['--source-account'], captured_at: new Date().toISOString(), database_group_id: clinics[0].grupoClinicaId,
       complete_for: { clinic_ids: clinicIds, start, end, all_later_appointments_included: true },
       patients: patients.map((p) => ({ id: p.id_paciente, clinic_id: p.clinica_id, source_contact_ids: [...new Set([...(byPatient.get(String(p.id_paciente)) || []).map((r) => String(r.value).trim()), ...(rawByPatient.get(String(p.id_paciente)) || []).map((r) => r.source_contact_id).filter((v) => v && v !== 'null')])], source_history_numbers: [...new Set((rawByPatient.get(String(p.id_paciente)) || []).map((r) => r.history_number).filter((v) => v && v !== 'null'))], last_imported_fields: canonicalImportedBaseline(rawByPatient.get(String(p.id_paciente)) || []), last_imported_local_fields: canonicalImportedBaseline(rawByPatient.get(String(p.id_paciente)) || [], 'stored_fields'), fields: { name: p.nombre || '', surname: p.apellidos || '', email: p.email || '', phone: p.telefono_movil || '', national_id: p.dni || '', birth_date: dateOnly(p.fecha_nacimiento) || '' } })),
       appointments: rows.map((r) => {

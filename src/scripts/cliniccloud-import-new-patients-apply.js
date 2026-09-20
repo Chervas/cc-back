@@ -36,7 +36,9 @@ function validateReviewEvidence(review, filename, audit = null) {
   }
 }
 async function run(args) {
-  const options = parseArgs(args, ['--mode', '--audit', '--review', '--global-snapshot', '--source-dir', '--historical-dir', '--contacts-csv', '--appointments-csv', '--private-output', '--package', '--approval', '--backup-manifest', '--private-journal']);
+  const options = parseArgs(args, ['--target', '--mode', '--audit', '--review', '--global-snapshot', '--source-dir', '--historical-dir', '--contacts-csv', '--appointments-csv', '--private-output', '--package', '--approval', '--backup-manifest', '--private-journal']);
+  const target = options['--target'];
+  if (!['dev', 'crm'].includes(target)) throw Error('EXPLICIT_DATABASE_TARGET_REQUIRED');
   if (!['prepare', 'apply'].includes(options['--mode'])) throw new Error('EXPLICIT_PREPARE_OR_APPLY_REQUIRED');
   for (const key of ['--audit', '--review', '--source-dir', '--historical-dir']) if (!options[key]) throw new Error('AUDIT_REVIEW_AND_SOURCES_REQUIRED');
   if (path.resolve(__dirname, '../..') !== '/home/ubuntu/wt/back-dev' || process.cwd() !== '/home/ubuntu/wt/back-dev'
@@ -47,22 +49,23 @@ async function run(args) {
   if (options['--mode'] === 'prepare') {
     if (!options['--global-snapshot'] || !options['--private-output']) throw new Error('GLOBAL_SNAPSHOT_AND_PRIVATE_OUTPUT_REQUIRED');
     const snapshot = privateJson(options['--global-snapshot']);
+    if (snapshot.database_target !== target) throw Error('IDENTITY_SNAPSHOT_DATABASE_TARGET_MISMATCH');
     if (hash(snapshot) !== audit.manifest.local_snapshot_sha256) throw new Error('AUDIT_GLOBAL_SNAPSHOT_HASH_MISMATCH');
     groupId = Number(snapshot.database_group_id);
   } else {
     for (const key of ['--package', '--approval', '--backup-manifest', '--private-journal']) if (!options[key]) throw new Error('REVIEW_BACKUP_AND_JOURNAL_REQUIRED');
     pkg = privateJson(options['--package']); approval = privateJson(options['--approval']); verifyPackage(pkg);
+    if (pkg.database_target !== target) throw Error('PACKAGE_DATABASE_TARGET_MISMATCH');
     if (pkg.source_audit_sha256 !== audit.plan_sha256 || pkg.identity_review_sha256 !== hash(review)) throw new Error('APPROVED_SOURCE_REVIEW_CHANGED');
     const expected = operationsFromAudit(audit, sources, { sourceIds: reviewedSourceIds(audit, sources, review) });
     if (hash(expected) !== hash(pkg.operations)) throw new Error('PREPARED_OPERATIONS_CHANGED');
-    privateJson(options['--backup-manifest']);
+    const backup = privateJson(options['--backup-manifest']);
+    if (backup.database_target !== target || backup.full_gzip_verified !== true || backup.dump_completion_verified !== true) throw Error('VERIFIED_TARGET_BACKUP_REQUIRED');
     if (hash(readBytes(options['--backup-manifest'])) !== approval.backup_manifest_sha256) throw new Error('BACKUP_MANIFEST_HASH_MISMATCH');
     await validateBackup(options['--backup-manifest']); // Verifies physical .gz bytes, length, hash and freshness.
     groupId = Number(pkg.group_id);
   }
-  require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), quiet: true });
-  const connection = await require('mysql2/promise').createConnection({ host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), user: process.env.DB_USERNAME,
-    password: process.env.DB_PASSWORD, database: process.env.DB_NAME, timezone: 'Z', dateStrings: true, multipleStatements: false, ...require('../lib/databaseTlsConfig').buildDatabaseTlsOptions(process.env) });
+  const connection = await require('../lib/cliniccloud-import/operator-database').connectOperatorDatabase(target);
   let journal;
   try {
     await connection.query('SET SESSION innodb_lock_wait_timeout = 5');
@@ -72,6 +75,9 @@ async function run(args) {
       const store = await createNewPatientsStore(connection, { groupId });
       const live = await store.captureGroup();
       pkg = prepareNewPatients({ audit, sources, review, live });
+      const { package_sha256: unboundHash, ...body } = pkg;
+      const bound = { ...body, database_target: target };
+      pkg = { ...bound, package_sha256: hash(bound) };
       await connection.rollback();
       writePrivateJson(options['--private-output'], pkg);
       return { mode: 'read_only_prepare', package_sha256: pkg.package_sha256, created_patients: 0, proposed_patients: pkg.operations.length,

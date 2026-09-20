@@ -8,9 +8,8 @@ const { hash } = require('../lib/cliniccloud-import/adapter');
 const { buildCatalogPlan } = require('../lib/cliniccloud-import/catalog');
 const { clientReplies } = require('../lib/cliniccloud-import/catalog-replies');
 
-async function readLocalCatalog() {
-  require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), quiet: true });
-  const connection = await require('mysql2/promise').createConnection({ host: process.env.DB_HOST, port: Number(process.env.DB_PORT || 3306), user: process.env.DB_USERNAME, password: process.env.DB_PASSWORD, database: process.env.DB_NAME, dateStrings: true, multipleStatements: false, ...require('../lib/databaseTlsConfig').buildDatabaseTlsOptions(process.env) });
+async function readLocalCatalog(target) {
+  const connection = await require('../lib/cliniccloud-import/operator-database').connectOperatorDatabase(target);
   try {
     await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
     await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
@@ -24,13 +23,13 @@ async function readLocalCatalog() {
   } finally { await connection.end(); }
 }
 async function run(args) {
-  const options = parseArgs(args, ['--workbook', '--private-output', '--resource-map', '--read-local-catalog', '--client-replies']);
+  const options = parseArgs(args, ['--target', '--workbook', '--private-output', '--resource-map', '--read-local-catalog', '--client-replies']);
   if (!options['--workbook'] || !options['--private-output']) throw new Error('WORKBOOK_AND_PRIVATE_OUTPUT_REQUIRED');
   const bytes = readBytes(options['--workbook']);
   const parsed = spawnSync('python3', ['-B', path.resolve(__dirname, '../lib/cliniccloud-import/xlsx_catalog.py'), options['--workbook']], { encoding: 'utf8', timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
   if (parsed.status !== 0) throw new Error('CATALOG_WORKBOOK_READ_FAILED');
   if (options['--read-local-catalog'] && options['--read-local-catalog'] !== 'true') throw new Error('READ_LOCAL_CATALOG_MUST_BE_TRUE');
-  const local = options['--read-local-catalog'] === 'true' ? await readLocalCatalog() : { installations: [], professionals: [], treatments: [] };
+  const local = options['--read-local-catalog'] === 'true' ? await readLocalCatalog(options['--target']) : { installations: [], professionals: [], treatments: [] };
   const resourceMap = options['--resource-map'] ? JSON.parse(readBytes(options['--resource-map']).toString('utf8')) : {};
   let replies = []; let repliesHash = null;
   if (options['--client-replies']) {
