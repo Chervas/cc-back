@@ -1275,6 +1275,35 @@ La recogida inicial puede ser manual y nunca convierte `collectionEnabled` en
 true: ese indicador requiere publicar y habilitar el executor con identidad
 permanente. Estado operativo y mediciones en el manual 19/99.
 
+## Costes de las API de Google: informe cacheado
+
+`GET /api/metasync/jobs/usage/google-cloud/costs?month=YYYY-MM` requiere la
+sesión/MFA y el administrador técnico del router de monitorización. El servicio
+vuelve a validar el ID global canónico antes de leer una fila de
+`GoogleCloudCostCaches` por PK `google:clinicaclick:YYYY-MM`. Solo admite el
+mes actual/anterior UTC. No hay proveedor, BigQuery, cron ni escritura en GET.
+
+Devuelve `month`, `availableMonths`, `status` (`pending/available/stale`),
+`collectionMode=manual`, `automaticCollectionEnabled=false` y `snapshot`.
+La proyección cerrada valida proyecto, moneda EUR, periodo, fuente, sumas de
+uso/ahorros/neto y servicios sin duplicados; elimina cualquier campo extra.
+Importes string, precisión de céntimos del informe; no son factura. Ausencia de
+fila: pendiente, snapshot null. Más de ocho días: atrasado. Fallo SQL o informe
+inválido: 503 categorizado, sin datos internos; mes inválido 400, acceso 401/403.
+Siempre `Cache-Control: private, no-store`.
+
+Migración aditiva `20260920110000-create-google-cloud-cost-caches.js`: PK,
+JSON y fechas de recogida/creación/actualización, sin secretos ni datos clínicos.
+Importar solo el informe real validado y filtrado por proyecto; el operario
+conserva evidencia del filtro/fecha y comprueba `projectSnapshot` antes de la
+escritura. No existe endpoint público de importación. Revertir código conserva
+la tabla; `down` elimina su contenido y no se usa como rollback de publicación.
+
+El automatismo permanece pendiente de la exportación de facturación y de su
+integración en la consulta semanal global de competencia, sin nueva petición
+independiente. El GET nunca cambia los flags de ese job. Contrato de producto,
+interpretación y ámbito compartido: manual frontend 39, sección de costes.
+
 ## 2026-09-12 - BD: TLS preparado, metadata y restauración ficticia
 
 `DB_TLS_REQUIRED=true` exige CA absoluta `DB_TLS_CA_FILE` y configura
