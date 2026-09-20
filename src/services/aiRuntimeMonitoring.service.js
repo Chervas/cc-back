@@ -114,9 +114,10 @@ async function checkGroqAudio() {
       timeout: 5_000,
       headers: { Authorization: `Bearer ${apiKey}` },
     });
-    const available = Array.isArray(response?.data?.data)
-      ? response.data.data.some((item) => clean(item?.id) === model)
-      : true;
+    if (!Array.isArray(response?.data?.data)) {
+      throw Object.assign(Error('provider_invalid_response'), { code: 'provider_invalid_response' });
+    }
+    const available = response.data.data.some((item) => clean(item?.id) === model);
     return {
       ok: available,
       model,
@@ -160,10 +161,10 @@ async function loadHealth({ force = false } = {}) {
         return {
           ...item,
           health: {
-            ok: item.configured,
-            checked_at: new Date().toISOString(),
+            ok: null,
+            checked_at: null,
             detail: item.configured
-              ? 'Configurado; su módulo registra el resultado de cada ejecución.'
+              ? 'Configurado; disponibilidad sin comprobar. El uso registrado no acredita disponibilidad actual.'
               : 'No configurado en este runtime.',
           },
         };
@@ -432,6 +433,8 @@ async function getOverview({ force = false } = {}) {
   const today = new Date().toISOString().slice(0, 10);
   const todayUsage = usage.filter((row) => row.date === today);
   const failing = health.models.filter((item) => item.configured && item.health?.ok === false);
+  const configured = health.models.filter((item) => item.configured);
+  const unverified = configured.filter((item) => typeof item.health?.ok !== 'boolean');
   return {
     success: true,
     checked_at: health.checked_at,
@@ -440,9 +443,10 @@ async function getOverview({ force = false } = {}) {
     processing_scope: 'Unión Europea mediante perfiles geográficos EU de Amazon Bedrock',
     content_logging_enabled: false,
     summary: {
-      status: failing.length ? 'error' : 'healthy',
-      configured_models: health.models.filter((item) => item.configured).length,
+      status: failing.length ? 'error' : (unverified.length || !configured.length) ? 'unverified' : 'healthy',
+      configured_models: configured.length,
       failing_models: failing.length,
+      unverified_models: unverified.length,
       requests_today: sum(todayUsage, 'requests'),
       requests_30d: sum(usage, 'requests'),
       input_tokens_30d: sum(usage, 'input_tokens'),
