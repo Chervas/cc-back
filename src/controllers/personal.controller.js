@@ -35,6 +35,8 @@ const {
     getAccessibleClinicIdsForFeature,
 } = require('../lib/access-policy');
 const personalPresenceService = require('../services/personalPresence.service');
+const { withCalendarMutation, sendCalendarMutationError, assertDoctorIdentityMutable } = require('../services/appointmentCalendarMutation.service');
+const withDoctorCalendarMutation = (doctorId, mutate) => withCalendarMutation({ db: require('../../models'), doctorId, mutate });
 const {
     normalizeDateOnly,
     addDays,
@@ -563,11 +565,13 @@ async function ensureDoctorClinicaRow({
     recibeCitas = null,
 }) {
     const shouldUpdateActivo = typeof activo === 'boolean';
+    return withDoctorCalendarMutation(Number(userId), async transaction => {
     const doctorClinica = await DoctorClinica.findOne({
         where: {
             doctor_id: Number(userId),
             clinica_id: Number(clinicaId),
         },
+        transaction,
     });
 
     const defaultConfig = defaultDisponibilidadConfigFromSubrol(subrolClinica);
@@ -583,7 +587,7 @@ async function ensureDoctorClinicaRow({
             rol_en_clinica: rolEnClinica,
             recibe_citas: resolvedRecibeCitas,
             activo: shouldUpdateActivo ? !!activo : false,
-        });
+        }, { transaction });
         return;
     }
 
@@ -596,7 +600,8 @@ async function ensureDoctorClinicaRow({
     if (shouldUpdateActivo) {
         doctorClinica.activo = !!activo;
     }
-    await doctorClinica.save();
+    await doctorClinica.save({ transaction });
+    });
 }
 
 async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
@@ -1261,9 +1266,9 @@ exports.rejectMyInvitation = async (req, res) => {
             });
         }
 
+        await withDoctorCalendarMutation(actorId, async transaction => {
         pivot.estado_invitacion = 'rechazada';
-        await pivot.save({ fields: ['estado_invitacion', 'updated_at'] });
-
+        await pivot.save({ fields: ['estado_invitacion', 'updated_at'], transaction });
         const doctorClinica = await DoctorClinica.findOne({
             where: {
                 doctor_id: actorId,
@@ -1272,8 +1277,9 @@ exports.rejectMyInvitation = async (req, res) => {
         });
         if (doctorClinica) {
             doctorClinica.activo = false;
-            await doctorClinica.save({ fields: ['activo', 'updated_at'] });
+            await doctorClinica.save({ fields: ['activo', 'updated_at'], transaction });
         }
+        });
 
         return res.status(200).json({
             message: 'Invitation rejected',
@@ -1281,6 +1287,7 @@ exports.rejectMyInvitation = async (req, res) => {
             estado_invitacion: 'rechazada',
         });
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.rejectMyInvitation] Error:', error);
         return res.status(500).json({ message: 'Error rejecting invitation', error: error.message });
     }
@@ -1322,9 +1329,9 @@ exports.cancelInvitation = async (req, res) => {
             });
         }
 
+        await withDoctorCalendarMutation(targetUserId, async transaction => {
         pivot.estado_invitacion = 'cancelada';
-        await pivot.save({ fields: ['estado_invitacion', 'updated_at'] });
-
+        await pivot.save({ fields: ['estado_invitacion', 'updated_at'], transaction });
         const doctorClinica = await DoctorClinica.findOne({
             where: {
                 doctor_id: targetUserId,
@@ -1333,8 +1340,9 @@ exports.cancelInvitation = async (req, res) => {
         });
         if (doctorClinica) {
             doctorClinica.activo = false;
-            await doctorClinica.save({ fields: ['activo', 'updated_at'] });
+            await doctorClinica.save({ fields: ['activo', 'updated_at'], transaction });
         }
+        });
 
         return res.status(200).json({
             message: 'Invitation cancelled',
@@ -1343,13 +1351,14 @@ exports.cancelInvitation = async (req, res) => {
             estado_invitacion: 'cancelada',
         });
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.cancelInvitation] Error:', error);
         return res.status(500).json({ message: 'Error cancelling invitation', error: error.message });
     }
 };
 
 async function removeClinicCollaborationInternal({ actorId, targetUserId, clinicaId, allowSelf = false }) {
-    const transaction = await sequelize.transaction();
+    const transaction = await sequelize.transaction({ isolationLevel: 'READ COMMITTED' });
     try {
         if (!Number.isFinite(actorId)) {
             await transaction.rollback();
@@ -1406,6 +1415,7 @@ async function removeClinicCollaborationInternal({ actorId, targetUserId, clinic
             };
         }
 
+        await withCalendarMutation({ db: require('../../models'), doctorId: targetUserId, transaction, mutate: async () => {
         const doctorClinicaRows = await DoctorClinica.findAll({
             where: { doctor_id: targetUserId, clinica_id: clinicaId },
             attributes: ['id'],
@@ -1431,6 +1441,7 @@ async function removeClinicCollaborationInternal({ actorId, targetUserId, clinic
         });
 
         await pivot.destroy({ transaction });
+        } });
         await transaction.commit();
 
         return {
@@ -1443,6 +1454,7 @@ async function removeClinicCollaborationInternal({ actorId, targetUserId, clinic
         };
     } catch (error) {
         await transaction.rollback();
+        if (/^booking_calendar_/.test(error.code || '')) return { status: 409, body: { message: error.message, code: error.code, details: error.details } };
         console.error('[personal.removeClinicCollaboration] Error:', error);
         return {
             status: 500,
@@ -1477,7 +1489,7 @@ exports.leaveMyClinicCollaboration = async (req, res) => {
 };
 
 exports.mergePersonalAccounts = async (req, res) => {
-    const transaction = await sequelize.transaction();
+    const transaction = await sequelize.transaction({ isolationLevel: 'READ COMMITTED' });
     try {
         const actorId = Number(req.userData?.userId);
         if (!Number.isFinite(actorId)) {
@@ -1508,6 +1520,7 @@ exports.mergePersonalAccounts = async (req, res) => {
             return res.status(404).json({ message: 'One or both users not found' });
         }
 
+        await assertDoctorIdentityMutable({ db: require('../../models'), doctorIds: [principalUserId, secondaryUserId], transaction });
         const secondaryPivotRows = await UsuarioClinica.findAll({
             where: { id_usuario: secondaryUserId },
             transaction,
@@ -1631,6 +1644,7 @@ exports.mergePersonalAccounts = async (req, res) => {
         });
     } catch (error) {
         await transaction.rollback();
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.mergePersonalAccounts] Error:', error);
         return res.status(500).json({ message: 'Error merging accounts', error: error.message });
     }
@@ -1817,7 +1831,7 @@ exports.createPersonalBloqueo = async (req, res) => {
             });
         }
 
-        const bloqueo = await DoctorBloqueo.create({
+        const bloqueo = await withDoctorCalendarMutation(targetUserId, transaction => DoctorBloqueo.create({
             doctor_id: targetUserId,
             clinica_id: clinicaId,
             fecha_inicio: fechaInicio,
@@ -1827,12 +1841,13 @@ exports.createPersonalBloqueo = async (req, res) => {
             recurrente: req.body?.recurrente || 'none',
             aplica_a_todas_clinicas: clinicaId == null ? true : false,
             creado_por: actorId,
-        });
+        }, { transaction }));
 
         const serialized = serializeBloqueo(bloqueo, clinicTimezone);
 
         return res.status(201).json(serialized);
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.createPersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error creating personal bloqueo', error: error.message });
     }
@@ -1952,7 +1967,7 @@ exports.updatePersonalBloqueo = async (req, res) => {
             });
         }
 
-        await bloqueo.update({
+        await withDoctorCalendarMutation(targetUserId, transaction => bloqueo.update({
             clinica_id: clinicaId,
             fecha_inicio: fechaInicio,
             fecha_fin: fechaFin,
@@ -1960,10 +1975,11 @@ exports.updatePersonalBloqueo = async (req, res) => {
             motivo: (req.body?.motivo ?? bloqueo.motivo ?? '').toString().slice(0, 255),
             recurrente: req.body?.recurrente ?? bloqueo.recurrente ?? 'none',
             aplica_a_todas_clinicas: clinicaId == null ? true : false,
-        });
+        }, { transaction }));
 
         return res.json(serializeBloqueo(bloqueo, clinicTimezone));
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.updatePersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error updating personal bloqueo', error: error.message });
     }
@@ -1999,9 +2015,10 @@ exports.deletePersonalBloqueo = async (req, res) => {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
-        await bloqueo.destroy();
+        await withDoctorCalendarMutation(targetUserId, transaction => bloqueo.destroy({ transaction }));
         return res.status(204).end();
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.deletePersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error deleting personal bloqueo', error: error.message });
     }
@@ -2070,18 +2087,19 @@ exports.createPersonalBloqueoExcepcion = async (req, res) => {
         const payload = normalizeBloqueoExceptionInput(req.body || {});
         if (payload.error) return res.status(400).json({ message: payload.error });
 
-        const [row] = await DoctorBloqueoExcepcion.upsert({
+        const [row] = await withDoctorCalendarMutation(targetUserId, transaction => DoctorBloqueoExcepcion.upsert({
             doctor_bloqueo_id: bloqueoId,
             fecha: payload.fecha,
             cancelado: payload.cancelado,
             creado_por: actorId,
-        }, { returning: true });
+        }, { returning: true, transaction }));
 
         const persisted = row || await DoctorBloqueoExcepcion.findOne({
             where: { doctor_bloqueo_id: bloqueoId, fecha: payload.fecha },
         });
         return res.status(201).json(serializeBloqueoExceptionRow(persisted));
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.createPersonalBloqueoExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error creating bloqueo exception', error: error.message });
     }
@@ -2121,12 +2139,13 @@ exports.patchPersonalBloqueoExcepcion = async (req, res) => {
         });
         if (payload.error) return res.status(400).json({ message: payload.error });
 
-        await exception.update({
+        await withDoctorCalendarMutation(targetUserId, transaction => exception.update({
             fecha: payload.fecha,
             cancelado: payload.cancelado,
-        });
+        }, { transaction }));
         return res.json(serializeBloqueoExceptionRow(exception));
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.patchPersonalBloqueoExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error updating bloqueo exception', error: error.message });
     }
@@ -2155,12 +2174,14 @@ exports.deletePersonalBloqueoExcepcion = async (req, res) => {
         const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
         if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
 
-        const deleted = await DoctorBloqueoExcepcion.destroy({
+        const deleted = await withDoctorCalendarMutation(targetUserId, transaction => DoctorBloqueoExcepcion.destroy({
             where: { id: exceptionId, doctor_bloqueo_id: bloqueoId },
-        });
+            transaction,
+        }));
         if (!deleted) return res.status(404).json({ message: 'Bloqueo exception not found' });
         return res.status(204).end();
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.deletePersonalBloqueoExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error deleting bloqueo exception', error: error.message });
     }
@@ -3703,7 +3724,6 @@ exports.createHorarioClinica = async (req, res) => {
         }
         const candidate = horarios[0];
 
-        const dc = await getOrCreateDoctorClinica(targetUserId, clinicaId);
         const validationError = await validateSingleHorarioCandidate({
             targetUserId,
             clinicaId,
@@ -3713,7 +3733,9 @@ exports.createHorarioClinica = async (req, res) => {
             return res.status(validationError.status).json(validationError.body);
         }
 
-        const created = await DoctorHorario.create({
+        const created = await withDoctorCalendarMutation(targetUserId, async transaction => {
+          const dc = await getOrCreateDoctorClinica(targetUserId, clinicaId, { transaction });
+          return DoctorHorario.create({
             doctor_clinica_id: dc.id,
             dia_semana: candidate.dia_semana,
             hora_inicio: candidate.hora_inicio,
@@ -3722,10 +3744,12 @@ exports.createHorarioClinica = async (req, res) => {
             rrule: candidate.rrule,
             fecha_inicio_vigencia: candidate.fecha_inicio_vigencia,
             fecha_fin_vigencia: candidate.fecha_fin_vigencia,
+          }, { transaction });
         });
 
         return res.status(201).json(serializeHorarioRow(created));
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.createHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error creating horario', error: error.message });
     }
@@ -3803,10 +3827,11 @@ exports.patchHorarioClinica = async (req, res) => {
         existing.rrule = candidate.rrule;
         existing.fecha_inicio_vigencia = candidate.fecha_inicio_vigencia;
         existing.fecha_fin_vigencia = candidate.fecha_fin_vigencia;
-        await existing.save();
+        await withDoctorCalendarMutation(targetUserId, transaction => existing.save({ transaction }));
 
         return res.json(serializeHorarioRow(existing));
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.patchHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error patching horario', error: error.message });
     }
@@ -3851,10 +3876,11 @@ exports.deleteHorarioClinica = async (req, res) => {
             return res.status(404).json({ message: 'Horario not found' });
         }
 
-        await existing.destroy();
+        await withDoctorCalendarMutation(targetUserId, transaction => existing.destroy({ transaction }));
 
         return res.status(204).end();
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.deleteHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error deleting horario', error: error.message });
     }
@@ -3949,20 +3975,21 @@ exports.createHorarioExcepcion = async (req, res) => {
             return res.status(validationError.status).json(validationError.body);
         }
 
-        const [row] = await DoctorHorarioExcepcion.upsert({
+        const [row] = await withDoctorCalendarMutation(targetUserId, transaction => DoctorHorarioExcepcion.upsert({
             doctor_horario_id: horarioId,
             fecha: payload.fecha,
             cancelado: payload.cancelado,
             hora_inicio_override: payload.hora_inicio_override,
             hora_fin_override: payload.hora_fin_override,
             creado_por: actorId,
-        }, { returning: true });
+        }, { returning: true, transaction }));
 
         const persisted = row || await DoctorHorarioExcepcion.findOne({
             where: { doctor_horario_id: horarioId, fecha: payload.fecha },
         });
         return res.status(201).json(serializeHorarioExceptionRow(persisted));
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.createHorarioExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error creating horario exception', error: error.message });
     }
@@ -4029,14 +4056,15 @@ exports.patchHorarioExcepcion = async (req, res) => {
             return res.status(validationError.status).json(validationError.body);
         }
 
-        await exception.update({
+        await withDoctorCalendarMutation(targetUserId, transaction => exception.update({
             fecha: payload.fecha,
             cancelado: payload.cancelado,
             hora_inicio_override: payload.hora_inicio_override,
             hora_fin_override: payload.hora_fin_override,
-        });
+        }, { transaction }));
         return res.json(serializeHorarioExceptionRow(exception));
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.patchHorarioExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error updating horario exception', error: error.message });
     }
@@ -4060,12 +4088,18 @@ exports.deleteHorarioExcepcion = async (req, res) => {
         const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
         if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
 
-        const deleted = await DoctorHorarioExcepcion.destroy({
+        const ownedHorario = await DoctorHorario.findOne({ where: { id: horarioId },
+            include: [{ model: DoctorClinica, as: 'doctorClinica', required: true,
+                where: { doctor_id: targetUserId, clinica_id: clinicaId } }] });
+        if (!ownedHorario) return res.status(404).json({ message: 'Horario not found' });
+        const deleted = await withDoctorCalendarMutation(targetUserId, transaction => DoctorHorarioExcepcion.destroy({
             where: { id: exceptionId, doctor_horario_id: horarioId },
-        });
+            transaction,
+        }));
         if (!deleted) return res.status(404).json({ message: 'Horario exception not found' });
         return res.status(204).end();
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.deleteHorarioExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error deleting horario exception', error: error.message });
     }
@@ -4145,8 +4179,9 @@ exports.copyHorarioClinica = async (req, res) => {
             return res.status(validationError.status).json(validationError.body);
         }
 
-        const targetDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId);
-        const created = await DoctorHorario.create({
+        const created = await withDoctorCalendarMutation(targetUserId, async transaction => {
+          const targetDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId, { transaction });
+          return DoctorHorario.create({
             doctor_clinica_id: targetDc.id,
             dia_semana: candidate.dia_semana,
             hora_inicio: candidate.hora_inicio,
@@ -4155,6 +4190,7 @@ exports.copyHorarioClinica = async (req, res) => {
             rrule: candidate.rrule,
             fecha_inicio_vigencia: candidate.fecha_inicio_vigencia,
             fecha_fin_vigencia: candidate.fecha_fin_vigencia,
+          }, { transaction });
         });
 
         return res.status(201).json({
@@ -4169,13 +4205,13 @@ exports.copyHorarioClinica = async (req, res) => {
             },
         });
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.copyHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error copying horario', error: error.message });
     }
 };
 
 exports.moveHorarioClinica = async (req, res) => {
-    let tx;
     try {
         const actorId = Number(req.userData?.userId);
         if (!Number.isFinite(actorId)) {
@@ -4239,10 +4275,9 @@ exports.moveHorarioClinica = async (req, res) => {
             return res.status(validationError.status).json(validationError.body);
         }
 
-        tx = await sequelize.transaction();
-
-        const destinationDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId, { transaction: tx });
-        const created = await DoctorHorario.create({
+        const created = await withDoctorCalendarMutation(targetUserId, async tx => {
+          const destinationDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId, { transaction: tx });
+          const moved = await DoctorHorario.create({
             doctor_clinica_id: destinationDc.id,
             dia_semana: candidate.dia_semana,
             hora_inicio: candidate.hora_inicio,
@@ -4253,9 +4288,9 @@ exports.moveHorarioClinica = async (req, res) => {
             fecha_fin_vigencia: candidate.fecha_fin_vigencia,
         }, { transaction: tx });
 
-        await existing.destroy({ transaction: tx });
-        await tx.commit();
-        tx = null;
+          await existing.destroy({ transaction: tx });
+          return moved;
+        });
 
         return res.json({
             message: 'Horario movido correctamente.',
@@ -4267,13 +4302,7 @@ exports.moveHorarioClinica = async (req, res) => {
             },
         });
     } catch (error) {
-        if (tx) {
-            try {
-                await tx.rollback();
-            } catch (rollbackError) {
-                console.error('[personal.moveHorarioClinica] Rollback error:', rollbackError);
-            }
-        }
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.moveHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error moving horario', error: error.message });
     }
@@ -4442,28 +4471,17 @@ exports.updateHorariosClinica = async (req, res) => {
             }
         }
 
-        let dc = await DoctorClinica.findOne({
-            where: { doctor_id: targetUserId, clinica_id: clinicaId },
+        const created = await withDoctorCalendarMutation(targetUserId, async transaction => {
+            const dc = await getOrCreateDoctorClinica(targetUserId, clinicaId, { transaction });
+            await DoctorHorario.destroy({ where: { doctor_clinica_id: dc.id }, transaction });
+            return DoctorHorario.bulkCreate(
+                horarios.map((h) => ({ ...h, doctor_clinica_id: dc.id })), { transaction },
+            );
         });
-
-        if (!dc) {
-            dc = await DoctorClinica.create({
-                doctor_id: targetUserId,
-                clinica_id: clinicaId,
-                activo: true,
-            });
-        } else if (!dc.activo) {
-            dc.activo = true;
-            await dc.save();
-        }
-
-        await DoctorHorario.destroy({ where: { doctor_clinica_id: dc.id } });
-        const created = await DoctorHorario.bulkCreate(
-            horarios.map((h) => ({ ...h, doctor_clinica_id: dc.id })),
-        );
 
         return res.json(created.map((row) => serializeHorarioRow(row)));
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.updateHorariosClinica] Error:', error);
         return res.status(500).json({ message: 'Error updating horarios', error: error.message });
     }
@@ -4508,25 +4526,11 @@ exports.updateDisponibilidadConfigClinica = async (req, res) => {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
-        let dc = await DoctorClinica.findOne({
-            where: { doctor_id: targetUserId, clinica_id: clinicaId },
+        const dc = await withDoctorCalendarMutation(targetUserId, async transaction => {
+            const link = await getOrCreateDoctorClinica(targetUserId, clinicaId, { transaction });
+            await link.update({ recibe_citas: recibeCitas }, { transaction });
+            return link;
         });
-
-        if (!dc) {
-            const defaultConfig = defaultDisponibilidadConfigFromSubrol(null);
-            dc = await DoctorClinica.create({
-                doctor_id: targetUserId,
-                clinica_id: clinicaId,
-                activo: true,
-                recibe_citas: recibeCitas ?? defaultConfig.recibe_citas,
-            });
-        } else {
-            dc.recibe_citas = recibeCitas;
-            if (!dc.activo) {
-                dc.activo = true;
-            }
-            await dc.save();
-        }
 
         return res.json({
             id: dc.id,
@@ -4536,6 +4540,7 @@ exports.updateDisponibilidadConfigClinica = async (req, res) => {
             recibe_citas: normalizeRecibeCitas(dc.recibe_citas, false),
         });
     } catch (error) {
+        if (sendCalendarMutationError(error, res)) return;
         console.error('[personal.updateDisponibilidadConfigClinica] Error:', error);
         return res.status(500).json({ message: 'Error updating disponibilidad config', error: error.message });
     }

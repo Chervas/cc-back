@@ -33,7 +33,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     if (!voucher) fail('program_purchase_not_found', 'Programa comprado no encontrado.', null, 404);
     const [budget, clinic, records] = await Promise.all([
       db.EconomicBudget.findOne({ where: { id: voucher.budget_id, clinic_id: clinicId, patient_id: voucher.patient_id }, transaction }),
-      db.Clinica.findByPk(clinicId, { transaction }),
+      db.Clinica.findByPk(clinicId, { transaction, ...(lock ? { lock: transaction.LOCK.SHARE } : {}) }),
       db.PatientProgramSession.findAll({ where: { voucher_id: voucher.id }, order: [['position', 'ASC']], transaction }),
     ]);
     if (!budget || !clinic) fail('program_purchase_invalid', 'No se encuentra el presupuesto de este programa.');

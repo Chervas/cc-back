@@ -106,7 +106,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start || (end - start) > 1440 * 60000) {
       throw bookingError('booking_range_invalid', 'El intervalo de la cita no es válido.', null, 400);
     }
-    const clinic = await db.Clinica.findByPk(values.clinica_id, { transaction: tx });
+    const clinic = await db.Clinica.findByPk(values.clinica_id, { transaction: tx, lock: tx.LOCK.SHARE });
     if (!clinic) throw bookingError('clinic_not_found', 'Clínica no encontrada.', null, 404);
     const treatment = await loadScopedTreatment({ db, treatmentId: values.tratamiento_id, clinic, transaction: tx });
     const previousMetadata = metadataObject(previous.import_metadata);
