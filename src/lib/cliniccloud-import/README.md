@@ -94,6 +94,10 @@ tanto del contenido como del directorio.
 - IDCONTACTO es identidad externa; NUM es número de historia. Alertas usan NUM.
 - Una fila CSV sin IDCITA no adquiere un ID externo inventado. Coincidencias
   únicas recuperan el histórico; huella/fila permiten trazabilidad y repetición.
+- Una cita local candidata a un cambio de fecha/duplicado todavía sin resolver
+  se conserva como `SOURCE_LINK_UNDER_REVIEW`; no se declara ausente solo porque
+  el CSV no permita recuperar su ID histórico. Las ediciones locales se contrastan
+  también con `last_imported`, no solo con un booleano opcional de modificación.
 - Igual paciente/hora no basta: estado, agenda y servicio pueden distinguir citas.
   Exactas nativas se enlazan sin crear otra; duplicados nativa/importada y cambios
   de fecha quedan explícitos en la revisión.

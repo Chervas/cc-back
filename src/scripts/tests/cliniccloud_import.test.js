@@ -84,6 +84,9 @@ test('reschedule without IDCITA becomes a candidate, never blind create', () => 
   assert.equal(appointmentActions(p)[0].action, 'review');
   assert.ok(appointmentActions(p)[0].reasons.includes('POSSIBLE_RESCHEDULE_OR_NATIVE_DUPLICATE'));
   assert.deepEqual(appointmentActions(p)[0].candidate_local_ids, [101]);
+  const oldDecision = appointmentActions(p).find(row => !row.source && row.local_id === 101);
+  assert.equal(oldDecision.action, 'preserve_local');
+  assert.deepEqual(oldDecision.reasons, ['SOURCE_LINK_UNDER_REVIEW']);
 });
 test('source-ID reschedule can be proposed but local edits are protected', () => {
   const row = sourceAppointment({ IDCITA: 'old-1', 'HORA INICIO': '11:00', 'HORA FIN': '11:30' });
@@ -109,6 +112,13 @@ test('authoritative absence proposes supersession only inside interval; native a
   const p = plan({ appointments: [], snapshot: snapshot(local) });
   assert.deepEqual(appointmentActions(p).map((r) => [r.local_id, r.action]), [[101, 'supersede_candidate'], [102, 'preserve_local'], [103, 'preserve_local']]);
   assert.ok(appointmentActions(p).every((r) => r.physical_delete === false && r.preserve_clinical_evidence));
+});
+test('absence review detects a later local edit from the persisted baseline without an explicit boolean', () => {
+  const baseline = localAppointment();
+  const p = plan({ appointments: [], snapshot: snapshot([{ ...baseline, status: 'completada', last_imported: baseline }]) });
+  const row = appointmentActions(p)[0];
+  assert.equal(row.requires_review, true);
+  assert.deepEqual(row.reasons, ['LOCAL_EDIT_REQUIRES_REVIEW']);
 });
 test('incomplete snapshot never authorizes absence, unknown coverage/account fail closed', () => {
   const p = plan({ appointments: [], snapshot: snapshot([localAppointment()], { complete_for: { clinic_ids: [72], start: '2026-09-01', end: '2026-12-31' } }) });

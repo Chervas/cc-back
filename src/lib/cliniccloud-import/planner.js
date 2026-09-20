@@ -156,14 +156,22 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
     decisions.push(decision);
   }
   const absenceActions = [];
+  // A possible reschedule is not evidence that the old appointment disappeared.
+  // Keep every unresolved local candidate until that source row is reconciled,
+  // even when the CSV has no IDCITA and cannot recover its historical ID.
+  const unresolvedLocalIds = new Set(decisions.filter(row => row.reasons.length)
+    .flatMap(row => row.candidate_local_ids).map(String));
   const snapshotCovers = snapshot?.complete_for && snapshot.complete_for.start <= coverage.start && snapshot.complete_for.end >= coverage.end;
   for (const local of localAppointments) {
     if (claimedLocal.has(String(local.id))) continue;
     const inside = inCoverage(local, coverage);
     let action = 'preserve_local', reason = !isImported(local) ? 'NATIVE_APPOINTMENT_PRESERVED' : !inside ? 'OUTSIDE_SOURCE_COVERAGE' : 'SNAPSHOT_COVERAGE_NOT_CONFIRMED';
-    if (isImported(local) && inside && snapshotCovers && !recoveredHistoricalIds.has(sourceId(local))) {
-      action = 'supersede_candidate'; reason = local.local_modified ? 'LOCAL_EDIT_REQUIRES_REVIEW' : 'ABSENT_FROM_AUTHORITATIVE_INTERVAL';
-    } else if (isImported(local) && inside && recoveredHistoricalIds.has(sourceId(local))) reason = 'SOURCE_LINK_UNDER_REVIEW';
+    const linkUnderReview = recoveredHistoricalIds.has(sourceId(local)) || unresolvedLocalIds.has(String(local.id));
+    const localChanged = local.local_modified || (local.last_imported && Object.keys(comparable(local))
+      .some(key => local.last_imported[key] !== undefined && local[key] !== local.last_imported[key]));
+    if (isImported(local) && inside && snapshotCovers && !linkUnderReview) {
+      action = 'supersede_candidate'; reason = localChanged ? 'LOCAL_EDIT_REQUIRES_REVIEW' : 'ABSENT_FROM_AUTHORITATIVE_INTERVAL';
+    } else if (isImported(local) && inside && linkUnderReview) reason = 'SOURCE_LINK_UNDER_REVIEW';
     absenceActions.push({ entity: local.kind || 'appointment', local_id: local.id, action, reasons: [reason], requires_review: action === 'supersede_candidate', physical_delete: false, preserve_clinical_evidence: true, automation_policy: 'unchanged_until_explicit_apply', expected_local_hash: hash(local) });
   }
   const alertDecisions = alerts.map((row) => ({ entity: row.kind, action: row.validation_errors.length ? 'review' : row.kind === 'general_alert' ? 'preserve_general_alert_history' : row.status === 'pending' ? 'create_followup_candidate' : 'preserve_followup_history_candidate', source: row, provenance: row.provenance, source_external_id: row.source_external_id, reasons: row.validation_errors, requires_review: row.kind !== 'general_alert' || row.validation_errors.length > 0, automation_policy: 'hold', target_date: null, contact_due_at: row.contact_due_at, occupies_agenda: false }));
