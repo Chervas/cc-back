@@ -11,6 +11,7 @@ const {
 } = require('../lib/availability-calendar');
 
 const overlaps = (start, end, rowStart, rowEnd) => start < new Date(rowEnd) && new Date(rowStart) < end;
+const { resourceAppointments, resourceInstallationBlocks } = require('./appointmentResourceCalendar.service');
 
 // Matches the public agenda: a reprogramada/cambio_solicitado appointment still
 // occupies its real range. Cancellation is the only state that releases it.
@@ -26,7 +27,9 @@ async function inspectSeries({ db, slots, clinicId, doctorId, installationId, do
   const { Op } = db.Sequelize;
   const first = slots[0].start;
   const last = slots[slots.length - 1].end;
-  const [clinicHours, doctorBlocks, appointments] = await Promise.all([
+  const enabled = require('./treatmentBookingProfile.service').bookingCapabilities().simple;
+  const clinic = installationId ? (enabled ? await db.Clinica.findByPk(clinicId, { transaction }) : { id_clinica: clinicId }) : null;
+  const [clinicHours, doctorBlocks, appointments, installationBlocks] = await Promise.all([
     db.ClinicaHorario ? db.ClinicaHorario.findAll({
       where: { clinica_id: clinicId },
       attributes: ['dia_semana', 'activo', 'hora_inicio', 'hora_fin'],
@@ -43,20 +46,8 @@ async function inspectSeries({ db, slots, clinicId, doctorId, installationId, do
       include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
       transaction,
     }) : [],
-    (doctorId || installationId) ? db.CitaPaciente.findAll({
-      where: {
-        ...activeAppointmentWhere(Op),
-        inicio: { [Op.lt]: last },
-        fin: { [Op.gt]: first },
-        [Op.or]: [
-          ...(doctorId ? [{ doctor_id: doctorId }] : []),
-          ...(installationId ? [{ instalacion_id: installationId }] : []),
-        ],
-      },
-      // No patient/title/notes or foreign clinic details in this read model.
-      attributes: ['doctor_id', 'instalacion_id', 'inicio', 'fin'],
-      transaction,
-    }) : [],
+    (doctorId || installationId) ? resourceAppointments({ db, clinic, doctorId, installationId, start: first, end: last, transaction }) : [],
+    installationId ? (enabled ? resourceInstallationBlocks({ db, clinic, installationIds: [installationId], start: first, end: last, transaction }) : installation?.bloqueos || []) : [],
   ]);
   const clinicHasSchedule = hasActiveSchedule(clinicHours);
   return slots.map((slot) => {
@@ -70,7 +61,7 @@ async function inspectSeries({ db, slots, clinicId, doctorId, installationId, do
       if (!inAnyWindow(buildWindowsFromHorarios(installation?.horarios || [], dow, date, timeZone), slot.start, slot.end)) {
         conflicts.push(conflict(slot, 'INSTALLATION_OUT_OF_HOURS', 'installation', 'Instalación fuera de horario'));
       }
-      if ((installation?.bloqueos || []).some((row) => overlaps(slot.start, slot.end, row.fecha_inicio, row.fecha_fin))) {
+      if (installationBlocks.some((row) => overlaps(slot.start, slot.end, row.fecha_inicio, row.fecha_fin))) {
         conflicts.push(conflict(slot, 'INSTALLATION_BLOCKED', 'installation', 'Instalación bloqueada'));
       }
       if (appointments.some((row) => Number(row.instalacion_id) === installationId && overlaps(slot.start, slot.end, row.inicio, row.fin))) {

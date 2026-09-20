@@ -18,6 +18,18 @@ const definition = () => ({ id: 'd7bda3c1-a6c0-4882-88e7-f33ee77fa19b', version:
     treatments: [{ id: 20, name: 'Tratamiento prueba', duration_minutes: 30, booking_profile: { schema_version: 1, phases: [] } }] })) });
 const rawLine = () => ({ key: 'line-1', program_id: definition().id, program_version: 1, quantity: 1, unit_price: 620 });
 
+test('backend resolves the purchased program relation without duplicating its clinical service', () => {
+  const serialize = serviceFunction('serializeBudget', {
+    roundMoney: value => value, numberValue: value => Number(value) || 0, paymentAppliedToBudget: () => 0,
+    serializeVersion: () => ({ lines: [{ key: 'program', product_type: 'pack' }, { key: 'individual', product_type: 'treatment' }], totals: { total: 620 } }),
+    economicPrograms: { integrationCapabilities: () => ({}), programPlans: () => [] },
+    serializeEvent: value => value, serializeBudgetSignatureRequest: value => value,
+  });
+  const result = serialize({ id: 4, public_id: 'budget', clinic_id: 72, patient_id: 1 }, {}, [], [], 0, [], [{ budget_line_key: 'program', public_id: 'purchase' }]);
+  assert.equal(result.current.lines[0].fulfillment_voucher_id, 'purchase');
+  assert.equal(result.current.lines[1].fulfillment_voucher_id, null);
+});
+
 test('economic integration is closed by default; only an explicit true switch can prepare shared economic rows', async () => {
   assert.equal(disabledByDefault.economicsEnabled({}), false);
   for (const value of ['false', '1', 'TRUE', true, undefined]) assert.equal(disabledByDefault.economicsEnabled({ TREATMENT_PROGRAM_ECONOMICS_ENABLED: value }), false);
@@ -117,8 +129,12 @@ test('program draft is preparation only and cannot be presented, signed or sold 
 });
 
 function serviceFunction(name, bindings) {
-  const start = source.indexOf(`async function ${name}(`);
-  const end = source.indexOf('\nasync function ', start + 10);
+  const declaration = new RegExp(`(?:^|\\n)(?:async )?function ${name}\\(`).exec(source);
+  assert(declaration, `missing service function ${name}`);
+  const start = declaration.index;
+  const rest = source.slice(start + 1);
+  const next = rest.search(/\n(?:async )?function \w+/);
+  const end = next >= 0 ? start + 1 + next : source.length;
   return vm.runInNewContext(`${source.slice(start, end)}\n${name}`, { ...bindings, crypto });
 }
 test('existing voucher ledger receives four units once; removed draft entitlement stays as cancelled history', async () => {

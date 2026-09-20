@@ -8,6 +8,7 @@ const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
 const { solveBookingProfile } = require('../lib/booking-profile-solver');
 const { requiresMultiResourceBooking } = require('../lib/booking-profile');
 const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
+const { resourceAppointments, resourceInstallationBlocks } = require('../services/appointmentResourceCalendar.service');
 const {
   parseClinicConfig,
   isValidTimeZone,
@@ -621,7 +622,7 @@ exports.check = asyncHandler(async (req, res) => {
     }
 
     // Bloqueos instalación
-    (inst.bloqueos || []).forEach((b) => {
+    (await resourceInstallationBlocks({ db, clinic: clinica, installationIds: [instalacionId], start, end })).forEach((b) => {
       if (overlap(start, end, new Date(b.fecha_inicio), new Date(b.fecha_fin))) {
         conflicts.push({
           resource_type: 'installation',
@@ -635,14 +636,7 @@ exports.check = asyncHandler(async (req, res) => {
     });
 
     // Ocupación instalación (citas)
-    const citasInstWhere = {
-      ...ACTIVE_APPOINTMENT_WHERE,
-      instalacion_id: instalacionId,
-      inicio: { [Op.lt]: end },
-      fin: { [Op.gt]: start }
-    };
-    if (ignoreId) citasInstWhere.id_cita = { [Op.ne]: ignoreId };
-    const citasInst = await db.CitaPaciente.findAll({ where: citasInstWhere, attributes: ['id_cita'] });
+    const citasInst = await resourceAppointments({ db, clinic: clinica, installationId: instalacionId, start, end, ignoreAppointmentId: ignoreId });
     if (citasInst.length) {
       conflicts.push({
         resource_type: 'installation',
@@ -728,14 +722,7 @@ exports.check = asyncHandler(async (req, res) => {
       });
     }
 
-    const citasDocWhere = {
-      ...ACTIVE_APPOINTMENT_WHERE,
-      doctor_id: doctorId,
-      inicio: { [Op.lt]: end },
-      fin: { [Op.gt]: start }
-    };
-    if (ignoreId) citasDocWhere.id_cita = { [Op.ne]: ignoreId };
-    const citasDoc = await db.CitaPaciente.findAll({ where: citasDocWhere, attributes: ['id_cita', 'clinica_id'] });
+    const citasDoc = await resourceAppointments({ db, doctorId, start, end, ignoreAppointmentId: ignoreId });
     const citasDocSameClinic = citasDoc.filter((c) => Number(c.clinica_id) === clinicaId);
     const citasDocOtherClinics = citasDoc.filter((c) => Number(c.clinica_id) !== clinicaId);
 
@@ -1064,15 +1051,8 @@ exports.slots = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: 'instalacion_ids contiene ids inválidos para la clínica' });
     }
 
-    const instBloqRows = await db.InstalacionBloqueo.findAll({
-      where: { instalacion_id: { [Op.in]: instalacionIds }, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      // InstalacionBloqueos no tiene columnas `tipo`/`clinica_id` (a diferencia de DoctorBloqueos).
-      attributes: ['instalacion_id', 'fecha_inicio', 'fecha_fin', 'motivo']
-    });
-    const instCitasRows = await db.CitaPaciente.findAll({
-      where: { ...ACTIVE_APPOINTMENT_WHERE, instalacion_id: { [Op.in]: instalacionIds }, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
-      attributes: ['instalacion_id', 'inicio', 'fin']
-    });
+    const instBloqRows = await resourceInstallationBlocks({ db, clinic: clinica, installationIds: instalacionIds, start: baseStart, end: baseEnd });
+    const instCitasRows = await resourceAppointments({ db, clinic: clinica, installationIds: instalacionIds, start: baseStart, end: baseEnd });
 
     const instBloqById = new Map();
     instBloqRows.forEach((b) => {
@@ -1099,10 +1079,7 @@ exports.slots = asyncHandler(async (req, res) => {
       include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
     });
     const docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
-    const docCitasRows = await db.CitaPaciente.findAll({
-      where: { ...ACTIVE_APPOINTMENT_WHERE, doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
-      attributes: ['inicio', 'fin', 'clinica_id']
-    });
+    const docCitasRows = await resourceAppointments({ db, doctorId, start: baseStart, end: baseEnd });
 
     const slotsByInst = {};
     const unavailableByInst = {};
@@ -1164,15 +1141,8 @@ exports.slots = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: 'instalacion_id no pertenece a clinica_id' });
     }
 
-    const instBloqRows = await db.InstalacionBloqueo.findAll({
-      where: { instalacion_id: instalacionId, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      // InstalacionBloqueos no tiene columnas `tipo`/`clinica_id`.
-      attributes: ['fecha_inicio', 'fecha_fin', 'motivo']
-    });
-    const instCitasRows = await db.CitaPaciente.findAll({
-      where: { ...ACTIVE_APPOINTMENT_WHERE, instalacion_id: instalacionId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
-      attributes: ['inicio', 'fin']
-    });
+    const instBloqRows = await resourceInstallationBlocks({ db, clinic: clinica, installationIds: [instalacionId], start: baseStart, end: baseEnd });
+    const instCitasRows = await resourceAppointments({ db, clinic: clinica, installationId: instalacionId, start: baseStart, end: baseEnd });
 
     const dcRows = await db.DoctorClinica.findAll({
       where: { doctor_id: { [Op.in]: doctorIds }, clinica_id: clinicaId, activo: true },
@@ -1192,10 +1162,7 @@ exports.slots = asyncHandler(async (req, res) => {
       include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
     });
     const docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
-    const docCitasRows = await db.CitaPaciente.findAll({
-      where: { ...ACTIVE_APPOINTMENT_WHERE, doctor_id: { [Op.in]: doctorIds }, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
-      attributes: ['doctor_id', 'inicio', 'fin', 'clinica_id']
-    });
+    const docCitasRows = await resourceAppointments({ db, doctorIds, start: baseStart, end: baseEnd });
 
     const docBloqById = new Map();
     docBloqRows.forEach((b) => {
@@ -1284,15 +1251,8 @@ exports.slots = asyncHandler(async (req, res) => {
     if (!inst || !inst.activo) return res.status(404).json({ message: 'Instalación no encontrada' });
     if (inst.clinica_id !== clinicaId) return res.status(400).json({ message: 'instalacion_id no pertenece a clinica_id' });
 
-    instBloqRows = await db.InstalacionBloqueo.findAll({
-      where: { instalacion_id: instalacionId, fecha_inicio: { [Op.lt]: baseEnd }, fecha_fin: { [Op.gt]: baseStart } },
-      // InstalacionBloqueos no tiene columnas `tipo`/`clinica_id`.
-      attributes: ['fecha_inicio', 'fecha_fin', 'motivo']
-    });
-    instCitasRows = await db.CitaPaciente.findAll({
-      where: { ...ACTIVE_APPOINTMENT_WHERE, instalacion_id: instalacionId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
-      attributes: ['inicio', 'fin']
-    });
+    instBloqRows = await resourceInstallationBlocks({ db, clinic: clinica, installationIds: [instalacionId], start: baseStart, end: baseEnd });
+    instCitasRows = await resourceAppointments({ db, clinic: clinica, installationId: instalacionId, start: baseStart, end: baseEnd });
   }
 
   if (doctorId) {
@@ -1322,10 +1282,7 @@ exports.slots = asyncHandler(async (req, res) => {
       include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
     });
     docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
-    docCitasRows = await db.CitaPaciente.findAll({
-      where: { ...ACTIVE_APPOINTMENT_WHERE, doctor_id: doctorId, inicio: { [Op.lt]: baseEnd }, fin: { [Op.gt]: baseStart } },
-      attributes: ['inicio', 'fin', 'clinica_id']
-    });
+    docCitasRows = await resourceAppointments({ db, doctorId, start: baseStart, end: baseEnd });
   }
 
   const slots = buildSlots({

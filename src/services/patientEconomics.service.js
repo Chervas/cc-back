@@ -3402,6 +3402,11 @@ function serializeBudget(budget, version, events, payments, walletApplied = 0, s
     .filter((payment) => payment.status === 'confirmed')
     .reduce((sum, payment) => sum + paymentAppliedToBudget(payment), 0) + walletApplied);
   const serializedVersion = serializeVersion(version);
+  // Canonical purchase relation belongs to the backend. History must not show
+  // both the accepted program line and its issued entitlement as two services.
+  serializedVersion.lines = serializedVersion.lines.map(line => ({ ...line,
+    fulfillment_voucher_id: programVouchers.find(voucher => String(voucher.budget_line_key) === String(line.key))?.public_id || null,
+  }));
   const payable = numberValue(budget.accepted_amount) > 0
     ? numberValue(budget.accepted_amount)
     : numberValue(serializedVersion.totals.total);
@@ -3628,6 +3633,9 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
     patient: mapPatientSnapshot(patient),
     clinic: mapClinicSnapshot(clinic),
     budgets: serializedBudgets,
+    clinical_service_count: vouchers.length + serializedBudgets
+      .filter(budget => ['accepted', 'partially_accepted'].includes(budget.status))
+      .reduce((total, budget) => total + budget.current.lines.filter(line => line.accepted !== false && !line.fulfillment_voucher_id).length, 0),
     payments: payments.map((payment) => serializePayment(
       payment,
       payment.budget_id ? budgetPublicIds.get(String(payment.budget_id)) : null
