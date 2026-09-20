@@ -23,15 +23,17 @@ clínicas, inicializan modelos ni ejecutan DDL.
 | Claves/réplicas | Componente keyring sin filas; cero canales de réplica | No acredita todos los posibles archivos de claves |
 | Sesiones | Once conexiones TCP observadas sin TLS | Fotografía de sesiones; no atribuirlas todas a un único proceso. Diagnóstico UNIX separado |
 | Identidad TLS | Certificado efectivo con cadena válida, sin nombre/IP válido para `localhost` ni `127.0.0.1` | Conexión real del driver con CA y validación de identidad rechazada: `HANDSHAKE_SSL_ERROR`; no desactivar esa validación |
-| Host | IMDSv2 identifica `i-0b2967e8de0866910`, cuenta `468355432137`, eu-west-3 | Identidad actual, ya no solo cloud-init cacheado |
-| Volumen | Cifrado del proveedor sin acreditar | El rol disponible pertenece a `137819318729`, cuenta del broker; no permite consultar esta instancia |
+| Host | Lightsail `ClinicaClick16GB`, ARN en cuenta `137819318729`, eu-west-3; `supportCode` coincide con `468355432137/i-0b2967e8de0866910` de IMDS | La cuenta interna de soporte no es otra cuenta del titular |
+| Volumen | Disco de sistema Lightsail, 320 GiB, raíz que aloja MySQL; cifrado del proveedor sin acreditar | `GetInstances` no declara cifrado/KMS del disco de sistema; no extrapolar la garantía de discos adicionales |
 
 Evidencia privada en `qa-evidence/security-close-20260920/`:
 `database-metadata.json`, `database-admin-metadata.json`, `host-identity.json`
 y `database-tls-preflight.json`.
 La consulta usa el documento de identidad de IMDS, no credenciales de un rol.
-Pendiente identificar al operador de la cuenta del host y obtener metadata del
-volumen. No se inicia investigación ni diseño de copias, hospedaje de backups o
+La consulta autenticada de Lightsail identifica el recurso en la misma cuenta
+que el broker; corrige la interpretación anterior de IMDS como cuenta del titular.
+Evidencia: `security-finish-20260920/lightsail-instances.json`. Falta acreditar el
+cifrado del disco de sistema, cuyo API no expone `Encrypted`/KMS. No se inicia investigación ni diseño de copias, hospedaje de backups o
 rotación: están aplazados expresamente por el titular. Los lotes de esos temas
 más abajo son antecedentes, no autorización para ejecutarlos ahora.
 
@@ -132,10 +134,11 @@ backup externo cifrado y manifiesto de integridad con origen autenticado.
 
 ## Lotes de ejecución pendientes
 
-1. **Acreditar volumen, sin cambios.** Los cuatro agregados de BD y la identidad
-   actual del host ya se obtuvieron el 20/09. Falta acceso de lectura a su cuenta
-   para verificar volumen y custodia de su clave. El rol de integraciones no
-   acredita ese acceso. Copias y snapshots quedan en el bloque aplazado.
+1. **Acreditar volumen, sin cambios.** Identificado Lightsail en la misma cuenta
+   del broker mediante ARN y supportCode. El rol existente ya permite consultarlo;
+   no pedir acceso a la cuenta interna de soporte. Falta evidencia explícita del
+   cifrado del disco de sistema; `GetInstances` no lo declara. Copias y snapshots
+   quedan en el bloque aplazado.
 2. **TLS de aplicación.** Candidato incluye este helper y todos los clientes
    revisados, conservando hotfix y pausas. Confirmar CA, vigencia/SAN y nombre
    utilizado por cada cliente. Ventana propuesta: 20 minutos coordinados

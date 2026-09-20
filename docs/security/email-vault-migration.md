@@ -1,9 +1,10 @@
 # Correo SES mediante vault y operación tipada
 
-Estado 2026-09-18: dos servicios SES instalados en AWS para QA, credenciales
-actuales copiadas al vault y TLS renovado realmente. Consumidores desactivados;
-el correo de acceso sigue usando el transporte anterior y conserva su clave.
-No se ha enviado correo por estos servicios ni se ha acreditado entrega/UI.
+Estado 2026-09-20: transporte broker activo en la API CRM y en el worker de
+seguridad DEV; ambos servicios SES AWS habilitados al arranque. Un aviso autorizado
+desde la interfaz CRM queda entregado por SES y conciliado en el outbox. Sus dos
+recibos S3 se verifican por versión/SHA256/KMS. Siguen pendientes la aceptación
+MFA posterior al corte, el recorrido DEV y la retirada de copias locales.
 Complementa [el contrato de acceso](meta-email-stage1.md).
 
 ## Transporte y separación
@@ -124,7 +125,7 @@ fixture/transacción y se conservó el log fallido; no se cuenta como prueba rea
 
 Dos procesos sobre release `f74098ce`, con `npm ci` independiente: staging en
 8451/UID986 y DEV en8452/UID985, heap96 MiB y MemoryMax192 MiB cada uno. Las dos
-reglas SG solo admiten el host CRM/32. Todavía no están habilitados al arranque.
+reglas SG solo admiten el host CRM/32. Habilitados al arranque el20/09, sin reiniciar esos servicios.
 Estado, política, firma y certificado son propios de cada entorno. Staging
 permite autenticación y las dos plantillas operativas existentes; DEV solo
 autenticación. No se ha dado grant a `automation.generic` ni a marketing.
@@ -170,7 +171,7 @@ futuros. Los servicios nuevos consumen aproximadamente36/37 MiB en reposo; falta
 medir una carga autorizada completa. El host tiene memoria compartida con los
 demás servicios: los límites por proceso no prueban capacidad total.
 
-## Antes del corte
+## Secuencia y aceptación del corte
 
 1. Revalidar las unidades, vault, identidades, red restringida y TLS preparados;
    comprobar capacidad bajo carga autorizada. No usar SSO administrativo para SES.
@@ -187,7 +188,7 @@ demás servicios: los límites por proceso no prueban capacidad total.
    intentos directos/broker del mismo mensaje.
 4. Canary con buzón QA expresamente autorizado: contraseña→correo→código,
    reenvío, caducidad, reset, eventos/recibos S3, aislamiento y UI autenticada.
-   Sigue pendiente la cuenta de QA de la pregunta previa.
+   El titular autorizó su buzón el20/09; la prueba humana de MFA está solicitada.
 5. Solo tras corte verificado, retirar la clave de todos los procesos que la
    heredan, incluido fresh-inbound si conserva el entorno staging. No reenviar
    históricos/resultados inciertos. Sustitución y rotación de claves aplazadas.
@@ -218,3 +219,29 @@ de release, sin tocar PM2 público. Ante un problema de esta preparación con el
 broker todavía apagado, volver a la release aislada anterior preservando sus
 configuraciones; nunca restaurar el antiguo DEV compartido. Aceptación de envío
 y UI autenticada permanecen pendientes.
+
+
+## Corte de transporte del 20/09
+
+Gateway recibe primero la conciliación del resultado incierto; después la API
+CRM activa ocho parámetros `EMAIL_BROKER_*`, sin cambios de MFA, destinatarios,
+pausas o DDL. DEV cambia únicamente la configuración de su worker existente y
+lo reinicia con drenado; no se reinicia la API ni se habilitan jobs de negocio.
+La API DEV sigue sin claves de proveedor ni de firma SES.
+
+Aceptación parcial real: un clic en «Enviar prueba», con Email exclusivamente,
+produce un único aviso autorizado. Se fija el título/texto de prueba en su POST
+porque el formulario no ofrece esos campos; no se simula ninguna respuesta.
+SES devuelve aceptación y después eventos `send` y `delivery`, conciliados tanto
+en `EmailMessages` como en `SystemNotificationDeliveries`. Dos recibos externos
+S3 comprobados y cero pendientes del broker. No demuestra MFA, recuperación,
+carga sostenida ni el envío DEV; no se alteran las reglas globales de avisos.
+
+Fuente CRM `498c75ec`, gateway `4416da8c`; DEV conserva su release `23d34d95`.
+46 pruebas de correo,25 regresiones compartidas Bedrock/WhatsApp y dos de gateway
+correctas; ambos preflight SQL de27 tablas compatibles. Evidencia privada:
+`qa-evidence/security-finish-20260920/`. Diarios consumidos de publicación y DEV
+bajo `/var/lib/clinicaclick-consumer-recovery/email-{crm,gateway,dev}-20260920`.
+No volver a ejecutar esos publicadores ni reintentar el aviso ya entregado.
+Las credenciales locales aún se conservan hasta cerrar la aceptación pertinente;
+no hay fallback automático directo y no se ha rotado ninguna clave.
