@@ -5669,6 +5669,11 @@ Groq queda desacoplado y limitado al audio:
 - El output del nodo guarda además metadatos técnicos (`_ai_provider`, `_ai_model`, `_ai_analysis_mode`, `_ai_usage`) para auditoría y depuración.
 - `AiUsageDaily` agrega uso y coste sin guardar prompts, respuestas, pacientes ni teléfonos. `scope_key` separa clínica/grupo cuando el consumidor aporta ese contexto.
 - `/api/metasync/jobs/usage/ai-runtime` alimenta el estado administrativo y reutiliza sus checks durante cuatro horas.
+  `health.ok` es `true`, `false` o `null`; sin comprobación, `checked_at=null`.
+  OpenAI/Gemini configurados no se consideran disponibles por tener clave ni
+  por registrar uso pasado. `summary.status` admite `unverified`, incluye
+  `unverified_models` y prioriza fallos comprobados; `healthy` exige comprobar
+  todos los modelos configurados. No añade llamadas a proveedores.
 - `/api/metasync/jobs/usage/ai-runtime/costs` sirve el desglose global por periodo, proveedor, modelo, función y cliente. No aplica el scope seleccionado en frontend. Los nombres de clínica/grupo se resuelven en consultas separadas; no usa `LEFT JOIN`.
 - La comparativa de clientes se calcula en backend y devuelve ranking, cuota de coste, coste por solicitud, variación frente al periodo anterior, media por cliente y concentración del top 5. El frontend no recompone esos agregados.
 - Los agregados anteriores a `scope_key` conservan scope global, no se reasignan por inferencia y quedan fuera del ranking de clientes.

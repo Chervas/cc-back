@@ -38,7 +38,9 @@ incluye las 4470 definiciones, fallos y comparación de peticiones/salidas, adem
 de pruebas reales a través de AWS. Se conserva una discrepancia semántica del
 modelo reproducida también por conexión directa. Micro/Lite/Pro pasan el
 monitor real. Los consumidores públicos todavía usan claves locales; su corte
-y la prueba visual autenticada siguen pendientes. No declarar «IA migrada».
+y la prueba visual autenticada consumiendo el broker siguen pendientes. El panel
+con transporte directo se verificó con sesión CRM real el20/09, después de
+corregir el falso estado operativo de OpenAI/Gemini. No declarar «IA migrada».
 
 Las claves de IA son de plataforma: los grants usan `platform:dev` o
 `platform:staging`, y `ai:<finalidad>`. No representan por sí solos una ACL
@@ -252,7 +254,7 @@ separación de UID. Sin capacidades en seis logs NGINX ni journal del emisor.
 La comprobación de Groq solo lee el modelo permitido, limita la respuesta a
 16KiB y proyecta disponibilidad. Conserva la caché de cuatro horas, grant propio
 `ai:provider_health` y ausencia de fallback. Se ha probado por AWS y Groq reales;
-el recorrido autenticado en Ajustes sigue pendiente.
+el recorrido autenticado en Ajustes consumiendo este broker sigue pendiente.
 
 Evidencias bajo `qa-evidence/security-resume-20260917/ai-runtime/`:
 `private-groq-consumer-result.json`, `private-url-aws-verified.json`,
