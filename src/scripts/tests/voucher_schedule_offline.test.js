@@ -62,7 +62,8 @@ test('series preloads occupancy once across clinics, retaining every non-cancell
   assert.equal(query.where.clinica_id, undefined);
   assert.equal(query.where.estado[Op.ne], 'cancelada');
   assert.equal(f.calls.filter(([kind]) => kind === 'appointments').length, 1);
-  assert.deepEqual(query.attributes, ['doctor_id', 'instalacion_id', 'inicio', 'fin']);
+  // Internal IDs correlate phase occupancy; none are returned in the preview.
+  assert.deepEqual(query.attributes, ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin']);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE|999|clinica_id|appointment_id/);
 });
 

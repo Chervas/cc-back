@@ -495,14 +495,16 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     // Blocks
     const blockIntervals = [];
     if (instData) {
-      (instData.bloqueos || []).forEach(b => blockIntervals.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
-      const citasInst = await db.CitaPaciente.findAll({ where: { ...ACTIVE_APPOINTMENT_WHERE, instalacion_id, inicio: { [Op.lt]: timeStrToDate(fecha,'23:59') }, fin: { [Op.gt]: timeStrToDate(fecha,'00:00') } }, attributes: ['inicio','fin'] });
+      (await require('../services/appointmentResourceCalendar.service').resourceInstallationBlocks({ db, clinic: instData.clinica,
+        installationIds: [Number(instalacion_id)], start: timeStrToDate(fecha, '00:00'), end: timeStrToDate(fecha, '23:59') }))
+        .forEach(b => blockIntervals.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
+      const citasInst = await require('../services/appointmentResourceCalendar.service').resourceAppointments({ db, clinic: instData.clinica, installationId: instalacion_id, start: timeStrToDate(fecha, '00:00'), end: timeStrToDate(fecha, '23:59') });
       citasInst.forEach(c => blockIntervals.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
     }
     if (doctor_id) {
       const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: timeStrToDate(fecha,'23:59') }, fecha_fin: { [Op.gt]: timeStrToDate(fecha,'00:00') } } });
       bloqueos.forEach(b => blockIntervals.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
-      const citasDoc = await db.CitaPaciente.findAll({ where: { ...ACTIVE_APPOINTMENT_WHERE, doctor_id, inicio: { [Op.lt]: timeStrToDate(fecha,'23:59') }, fin: { [Op.gt]: timeStrToDate(fecha,'00:00') } }, attributes: ['inicio','fin'] });
+      const citasDoc = await require('../services/appointmentResourceCalendar.service').resourceAppointments({ db, doctorId: doctor_id, start: timeStrToDate(fecha, '00:00'), end: timeStrToDate(fecha, '23:59') });
       citasDoc.forEach(c => blockIntervals.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
     }
     const windowsFree = subtractIntervals(windows, blockIntervals);
@@ -526,10 +528,11 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     const h = (instData.horarios || []).find(h => h.dia_semana === dow);
     const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(effectiveEnd);
     if (!inRange) conflicts.push({ type: 'out_of_hours', message: 'Instalación fuera de horario' });
-    (instData.bloqueos || []).forEach(b => {
+    (await require('../services/appointmentResourceCalendar.service').resourceInstallationBlocks({ db, clinic: instData.clinica,
+      installationIds: [Number(instalacion_id)], start, end: effectiveEnd })).forEach(b => {
       if (overlap(start, effectiveEnd, b.fecha_inicio, b.fecha_fin)) conflicts.push({ type: 'blocked', message: b.motivo || 'Bloqueo instalación' });
     });
-    const citasInst = await db.CitaPaciente.findAll({ where: { ...ACTIVE_APPOINTMENT_WHERE, instalacion_id, inicio: { [Op.lt]: effectiveEnd }, fin: { [Op.gt]: start } }, attributes: ['id_cita','inicio','fin'] });
+    const citasInst = await require('../services/appointmentResourceCalendar.service').resourceAppointments({ db, clinic: instData.clinica, installationId: instalacion_id, start, end: effectiveEnd });
     if (citasInst.length) conflicts.push({ type: 'overlap', message: 'Instalación ocupada' });
   }
 
@@ -539,7 +542,7 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
     const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: effectiveEnd }, fecha_fin: { [Op.gt]: start } } });
     if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
-    const citasDoc = await db.CitaPaciente.findAll({ where: { ...ACTIVE_APPOINTMENT_WHERE, doctor_id, inicio: { [Op.lt]: effectiveEnd }, fin: { [Op.gt]: start } }, attributes: ['id_cita','inicio','fin'] });
+    const citasDoc = await require('../services/appointmentResourceCalendar.service').resourceAppointments({ db, doctorId: doctor_id, start, end: effectiveEnd });
     if (citasDoc.length) conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
   }
 

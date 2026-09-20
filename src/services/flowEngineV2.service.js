@@ -2372,7 +2372,7 @@ async function handleChangeStatus(node, context, runtime) {
     let appointment = null;
     let previousStatus = null;
     let skippedReason = null;
-    await db.sequelize.transaction(async (transaction) => {
+    await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
       appointment = await CitaPaciente.findByPk(targets.appointment_id, {
         transaction,
         lock: transaction.LOCK.UPDATE,
@@ -2396,7 +2396,15 @@ async function handleChangeStatus(node, context, runtime) {
       }
 
       if (previousStatus !== appointmentStatus) {
-        await appointment.update({ estado: appointmentStatus }, { transaction });
+        if (require('./treatmentBookingProfile.service').bookingCapabilities().simple) {
+          appointment = await require('./appointmentBookingCommand.service').mutateAppointmentBooking({
+            db, existingAppointmentId: appointment.id_cita, appointmentValues: { estado: appointmentStatus },
+            stateOnly: true, transaction,
+            persist: ({ existing, transaction: tx }) => existing.update({ estado: appointmentStatus }, { transaction: tx }),
+          });
+        } else {
+          await appointment.update({ estado: appointmentStatus }, { transaction });
+        }
         const templateVersion = runtime?.execution?.templateVersion || null;
         await recordAppointmentStatusChange({
           appointment,

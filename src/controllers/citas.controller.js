@@ -2852,7 +2852,7 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
     const nextStatus = action === 'cancel' ? 'cancelada' : previousStatus;
     const actorUserId = req.userData?.userId || null;
 
-    const cita = await db.sequelize.transaction(async (transaction) => {
+    const cita = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
         const locked = await CitaPaciente.findByPk(citaId, {
             transaction,
             lock: transaction.LOCK.UPDATE,
@@ -2863,7 +2863,15 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
             throw error;
         }
         const oldStatus = locked.estado;
-        await locked.update({ estado: nextStatus, updated_by: actorUserId }, { transaction });
+        if (bookingCapabilities().simple) {
+            await mutateAppointmentBooking({ db, existingAppointmentId: citaId,
+                appointmentValues: { estado: nextStatus, updated_by: actorUserId }, stateOnly: true, transaction,
+                persist: ({ existing, transaction: tx }) => existing.update({ estado: nextStatus, updated_by: actorUserId }, { transaction: tx }),
+            });
+            await locked.reload({ transaction });
+        } else {
+            await locked.update({ estado: nextStatus, updated_by: actorUserId }, { transaction });
+        }
         await recordAppointmentStatusChange({
             appointment: locked,
             previousStatus: oldStatus,

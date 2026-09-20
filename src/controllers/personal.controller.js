@@ -3242,17 +3242,24 @@ async function loadAppointmentsForScheduleRange({ doctorId, clinicIds, from, to 
     const utcFrom = new Date(`${addDays(from, -1)}T00:00:00.000Z`);
     const utcTo = new Date(`${addDays(to, 1)}T23:59:59.999Z`);
 
-    return CitaPaciente.findAll({
+    const segments = await require('../services/appointmentResourceCalendar.service').resourceAppointments({
+        db: require('../../models'), doctorId: Number(doctorId), start: utcFrom, end: utcTo,
+    });
+    const visible = segments.filter(row => ids.includes(Number(row.clinica_id)));
+    if (!visible.length) return [];
+    const appointments = await CitaPaciente.findAll({
         where: {
-            doctor_id: Number(doctorId),
+            id_cita: { [Op.in]: [...new Set(visible.map(row => row.id_cita))] },
             clinica_id: { [Op.in]: ids },
             ...ACTIVE_APPOINTMENT_WHERE,
-            inicio: { [Op.lt]: utcTo },
-            fin: { [Op.gt]: utcFrom },
         },
         include: appointmentInclude(),
         order: [['inicio', 'ASC']],
     });
+    return visible.map(segment => {
+        const appointment = appointments.find(row => Number(row.id_cita) === Number(segment.id_cita));
+        return appointment ? { ...(appointment.toJSON ? appointment.toJSON() : appointment), inicio: segment.inicio, fin: segment.fin } : null;
+    }).filter(Boolean);
 }
 
 function enrichExpandedShiftWithAppointments(shift, appointmentRows, timeZone = DEFAULT_TIMEZONE) {
@@ -3262,10 +3269,14 @@ function enrichExpandedShiftWithAppointments(shift, appointmentRows, timeZone = 
     const shiftEnd = buildDateTime(shift.fecha, shift.hora_fin, '23:59', timeZone);
     if (!shiftStart || !shiftEnd) return shift;
 
+    const seen = new Set();
     const matches = (appointmentRows || []).filter((row) => {
         const plain = row.toJSON ? row.toJSON() : row;
         if (clinicId && Number(plain.clinica_id) !== clinicId) return false;
         return overlapsDateRange(plain.inicio, plain.fin, shiftStart, shiftEnd);
+    }).filter(row => {
+        if (seen.has(Number(row.id_cita))) return false;
+        seen.add(Number(row.id_cita)); return true;
     });
 
     return {
