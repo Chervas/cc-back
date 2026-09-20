@@ -7,6 +7,7 @@ const AMBIGUOUS_PROVIDER_OUTCOMES = new Set([
   'email_provider_server_error_unknown_outcome',
   'email_provider_transport_unknown_outcome',
   'email_provider_response_missing_message_id',
+  'email_provider_broker_unknown_outcome',
 ]);
 
 function isPasswordResetMessage(message) {

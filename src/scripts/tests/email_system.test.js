@@ -813,7 +813,8 @@ test('recordProviderEvent concilia rebote y crea supresión sin persistir destin
   }
 });
 
-test('evento SES recupera un timeout ambiguo correlacionando por tag de outbox', async () => {
+for (const outcome of ['email_provider_timeout_unknown_outcome', 'email_provider_broker_unknown_outcome'])
+test(`evento SES recupera ${outcome} correlacionando por tag de outbox`, async () => {
   const outboxPublicId = 'em_87654321-4321-4321-4321-cba987654321';
   const message = {
     id: 506,
@@ -823,8 +824,8 @@ test('evento SES recupera un timeout ambiguo correlacionando por tag de outbox',
     related_type: 'password_reset_token',
     event_count: 0,
     status: 'failed',
-    last_error_code: 'email_provider_timeout_unknown_outcome',
-    last_error_message: 'email_provider_timeout_unknown_outcome',
+    last_error_code: outcome,
+    last_error_message: outcome,
     completed_at: new Date('2026-08-30T15:25:00Z'),
     async update(patch) {
       Object.assign(this, patch);

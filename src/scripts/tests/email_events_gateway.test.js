@@ -1,4 +1,5 @@
 'use strict';
+require('./fixtures/email_models.fixture.cjs');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -58,6 +59,7 @@ test('gateway recordProviderEvent concilia rebote y crea supresion sin destinata
   };
   let suppressionRequest = null;
   const restores = [
+    patchProperty(db.sequelize, 'transaction', async work => work({ LOCK: { UPDATE: 'UPDATE' } })),
     patchProperty(db.EmailMessage, 'findOne', async () => message),
     patchProperty(db.EmailProviderEvent, 'findOrCreate', async ({ defaults }) => ([
       { id: 606, ...defaults },

@@ -375,13 +375,30 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       from: message.from_email,
       replyTo: message.reply_to,
       outboxId: message.public_id,
+      deliveryAttempt: jobRequest?.attempts,
       stream: message.stream,
       configurationSet: message.configuration_set,
       templateKey: message.template_key,
       subject: rendered.subject,
       html: rendered.html,
       text: rendered.text,
-    });
+    }, { beforeDispatch: async () => {
+      const current = await db.EmailMessage.findByPk(message.id);
+      if (!current || current.status !== 'sending') {
+        throw Object.assign(Error('email_outbox_no_longer_sending'), { code: 'email_outbox_no_longer_sending', retryable: false });
+      }
+      if (await findActiveSuppression({ emailHash: current.recipient_hash, stream: current.stream, clinicaId: current.clinica_id })) {
+        await settleMessageIfActive(message, { status: 'suppressed', suppressed_at: new Date(), completed_at: new Date(),
+          last_error_code: 'email_recipient_suppressed', last_error_message: 'El destinatario está en lista de supresión.' });
+        await revokePendingPasswordResetToken(message);
+        throw Object.assign(Error('email_recipient_suppressed'), { code: 'email_recipient_suppressed', retryable: false });
+      }
+      if (!await require('./authEmailDeliveryGuard.service').mayDeliver(current, recipient, sendContext)) {
+        await settleMessageIfActive(message, { status: 'cancelled', completed_at: new Date(),
+          last_error_code: 'email_verification_no_longer_valid', last_error_message: 'Email verification is no longer valid.' });
+        throw Object.assign(Error('email_verification_no_longer_valid'), { code: 'email_verification_no_longer_valid', retryable: false });
+      }
+    } });
     const settlement = await settleMessageIfActive(message, {
       status: 'sent',
       provider: providerResult.provider,
