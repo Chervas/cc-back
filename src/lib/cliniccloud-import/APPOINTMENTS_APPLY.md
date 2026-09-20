@@ -88,3 +88,51 @@ comprobar que siguen siendo los valores escritos; si hubo actuaciones posteriore
 revisar. Nunca restaurar toda la base compartida ni borrar historia.
 
 Pruebas offline: `node --test src/scripts/tests/cliniccloud_import_appointments_apply.test.js`.
+
+## Altas semanales con identidad ya resuelta
+
+`cliniccloud-import-week-appointments.js` es un ejecutor distinto, solo para
+crear hasta 250 citas de una semana (máximo siete días) en clínicas 66/72 del
+mismo grupo. Exige `--target dev|crm`, plan y snapshot coincidentes, revisión
+de todas las filas semanales y paciente enlazado por ID externo. No acepta
+candidatos de reprogramación, colisiones de identidad, estados de asistencia
+inferidos ni duplicados conocidos. No modifica ninguna cita existente.
+
+Preparar con `--mode prepare --plan … --snapshot … --review … --private-output …`.
+La revisión contiene `plan_sha256`, `reviewed_by`, `reviewed_at`, `week` con
+`start/end` y una decisión por `action_key`: `disposition=create|defer` y `reason`.
+Cada alta exige `assignment` (`clinic_id`, `doctor_id`, `installation_id`,
+`treatment_id`, `appointment_type`), `evidence` y `pending_assignment` para cada
+asignación explícitamente desconocida (`null`). No convertir el nombre de una
+agenda/cabina en identidad del profesional ni equiparar cabinas por su número.
+
+Aplicar con los mismos inputs, `--mode apply --package … --approval …
+--backup-manifest … --private-journal …`. La aprobación contiene `package_sha256`,
+`reviewed_by`, `expires_at`, `backup_manifest_sha256`, `automation_policy=hold` y
+`confirm_create_only=true`. Exige backup del destino verificado completamente,
+creación desde el worktree operador DEV y diario durable. DEV aislado nunca
+recibe datos reales por este procedimiento.
+
+Cada fila revalida identidad/membresía, recursos operativos, scope del tratamiento
+y solapes actuales; clínica compartida, anchors ordenados y padre paciente
+bloqueado dentro de una transacción READ COMMITTED. Un conflicto se difiere, no
+se fuerza. La FK del paciente evita la carrera con inserciones legacy del mismo
+paciente durante el commit; no acredita coordinación de todos los escritores
+legacy de cabina/profesional. No comprueba horarios para alterar horas históricas
+exportadas; los tratamientos con perfil operativo exigen el comando canónico y
+se excluyen de este writer. Revisar también solapes y diferencias tras aplicar.
+
+La huella `delta:cliniccloud-5880:…` es una referencia técnica de importación,
+**no un IDCITA inventado**. Metadata conserva la línea base fuente; el lector de
+snapshots la valida y permite conciliar exportaciones posteriores aunque la
+persona haya editado la cita local. Repetir el mismo paquete reconoce su marca
+persistida y no restaura ediciones posteriores. SQL directo no carga modelos,
+jobs, eventos ni notificaciones; conserva HOLD y las tres supresiones.
+
+La API publica solo `import_review` con procedencia, recordatorios retenidos y
+asignaciones que aún faltan realmente; no devuelve evidencias privadas en el DTO
+ligero. Corregir manualmente la asignación elimina su aviso, no activa mensajes.
+Pruebas: `cliniccloud_week_appointments.test.js`,
+`cliniccloud_import_snapshot_baseline.test.js` y
+`appointment_import_review.test.js`; QA SQL aislada
+`src/scripts/qa/isolated-week-import.js` revierte toda su fixture ficticia.

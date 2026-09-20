@@ -16,6 +16,7 @@ Desde `back-dev`, primero el snapshot explícitamente acotado:
 
 ```sh
 node src/scripts/cliniccloud-import-snapshot.js \
+  --target crm \
   --source-account cliniccloud-5880 --clinic-ids 66,72 \
   --coverage-start 2026-08-01 --coverage-end 2026-12-31 \
   --historical-dir /home/ubuntu/secure-imports/clinic-real-20260722/review/backup_data \
@@ -67,6 +68,10 @@ requieren un modo de aplicación explícito y su propio paquete validado.
 - Citas: [APPOINTMENTS_APPLY](./APPOINTMENTS_APPLY.md). Únicamente metadata HOLD
   y trazabilidad de citas ya coincidentes. No crea ni mueve citas, no cancela
   ni completa estados; no equivale a haber actualizado la agenda.
+- Altas semanales: `cliniccloud-import-week-appointments.js`, descrito en
+  [APPOINTMENTS_APPLY](./APPOINTMENTS_APPLY.md#altas-semanales-con-identidad-ya-resuelta).
+  Creación separada, revisada e idempotente; no sustituye la conciliación de
+  cambios, anulaciones ni duplicados existentes.
 - `cliniccloud-import-protocol-draft.js`: manual aportado íntegro como un único
   borrador no asociado. Requiere la migración específica de actores técnicos;
   fuente y paquete inmutables, revisión canónica y reintento por huella.

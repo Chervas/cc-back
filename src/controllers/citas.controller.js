@@ -27,6 +27,7 @@ const appointmentAutomationV2Runtime = require('../services/appointmentAutomatio
 const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
 const { mutateAppointmentBooking } = require('../services/appointmentBookingCommand.service');
 const { bookingSegments } = require('../lib/appointment-booking-segments');
+const { appointmentImportReview } = require('../lib/appointment-import-review');
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const { getIO } = require('../services/socket.service');
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
@@ -164,6 +165,7 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
     if (!citaLike) return citaLike;
     const plain = citaLike?.toJSON ? citaLike.toJSON() : { ...citaLike };
     const protectedPayload = { ...plain };
+    protectedPayload.import_review = plain.import_review || appointmentImportReview(plain);
     if (bookingCapabilities().simple) {
         protectedPayload.booking_segments = (plain.booking_segments || bookingSegments(plain)).map((segment) => ({
             ...segment, label: capabilities.patientSensitive ? segment.label : '',
@@ -175,6 +177,7 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
         protectedPayload.nota = null;
         protectedPayload.motivo = null;
         protectedPayload.import_metadata = null;
+        protectedPayload.import_review = null;
         protectedPayload.tratamiento_id = null;
         protectedPayload.tratamiento = null;
         protectedPayload.conversation_id = null;
@@ -1188,6 +1191,7 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
         inicio_local: formatDateTimeLocal(plain.inicio, timeZone),
         fin_local: formatDateTimeLocal(plain.fin, timeZone),
         time_zone: timeZone,
+        import_review: appointmentImportReview(plain),
         ...(bookingCapabilities().simple ? { booking_segments: bookingSegments(plain).map((segment) => ({ ...segment,
             start_local: formatDateTimeLocal(segment.start_at, timeZone), end_local: formatDateTimeLocal(segment.end_at, timeZone) })) } : {}),
         precio_cita_resuelto: resolveCitaAppointmentPrice(plain),
@@ -2488,7 +2492,8 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
             'estado',
             'inicio',
             'fin',
-            ...(bookingCapabilities().simple ? ['import_metadata'] : []),
+            'source_system',
+            'import_metadata',
             'created_at',
             'updated_at',
         ],

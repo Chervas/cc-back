@@ -6,6 +6,21 @@
 const path = require('path');
 const { readCsv, writePrivateJson, parseArgs } = require('../lib/cliniccloud-import/io');
 const { dateOnly, localToUtc, utcToLocal, normalizeAppointments, norm, index, hash } = require('../lib/cliniccloud-import/adapter');
+const { sourceReference } = require('../lib/cliniccloud-import/week-appointments');
+
+function importedDeltaBaseline(row, metadata) {
+  const delta = metadata.cliniccloud_delta;
+  if (!delta) return null;
+  const source = delta.source;
+  if (row.source_system !== 'cliniccloud' || metadata.source_account !== 'cliniccloud-5880'
+    || delta.version !== 1 || delta.source_reference_kind !== 'import_fingerprint_not_source_appointment_id'
+    || !source || ['source_contact_id', 'start_local', 'end_local', 'agenda_key', 'service_key', 'status'].some(key => typeof source[key] !== 'string')
+    || !/^\d+$/.test(source.source_contact_id) || source.source_contact_id !== metadata.source_contact_id
+    || !['pendiente', 'cancelada'].includes(source.status)
+    || !localToUtc(source.start_local) || !localToUtc(source.end_local)
+    || source.end_local <= source.start_local || sourceReference(source) !== row.source_reference) throw Error('CANONICAL_APPOINTMENT_BASELINE_INVALID');
+  return source;
+}
 
 function canonicalImportedBaseline(rows, fieldName = 'fields') {
   if (!['fields', 'stored_fields'].includes(fieldName)) throw new Error('CANONICAL_CONTACT_BASELINE_KIND_INVALID');
@@ -70,13 +85,14 @@ async function run(args) {
       patients: patients.map((p) => ({ id: p.id_paciente, clinic_id: p.clinica_id, source_contact_ids: [...new Set([...(byPatient.get(String(p.id_paciente)) || []).map((r) => String(r.value).trim()), ...(rawByPatient.get(String(p.id_paciente)) || []).map((r) => r.source_contact_id).filter((v) => v && v !== 'null')])], source_history_numbers: [...new Set((rawByPatient.get(String(p.id_paciente)) || []).map((r) => r.history_number).filter((v) => v && v !== 'null'))], last_imported_fields: canonicalImportedBaseline(rawByPatient.get(String(p.id_paciente)) || []), last_imported_local_fields: canonicalImportedBaseline(rawByPatient.get(String(p.id_paciente)) || [], 'stored_fields'), fields: { name: p.nombre || '', surname: p.apellidos || '', email: p.email || '', phone: p.telefono_movil || '', national_id: p.dni || '', birth_date: dateOnly(p.fecha_nacimiento) || '' } })),
       appointments: rows.map((r) => {
         const metadata = metadataOf(r);
-        const baseline = metadata.raw ? normalizeAppointments([{ source_row: 0, values: metadata.raw }], 'historic_db_metadata', { historical: true, agendas, services, serviceTypes })[0] : null;
-        const sourceAgenda = norm(agendaIds.get(String(metadata.source_agenda_id))?.[0]?.values.nombre);
+        const delta = importedDeltaBaseline(r, metadata);
+        const baseline = delta || (metadata.raw ? normalizeAppointments([{ source_row: 0, values: metadata.raw }], 'historic_db_metadata', { historical: true, agendas, services, serviceTypes })[0] : null);
+        const sourceAgenda = delta?.agenda_key || norm(agendaIds.get(String(metadata.source_agenda_id))?.[0]?.values.nombre);
         const resources = resourceAgendas.get(`${r.clinica_id}:${r.doctor_id}:${r.instalacion_id}`);
         const mappedAgenda = !sourceAgenda && !r.source_system && resources?.size === 1 ? [...resources][0] : '';
         return { id: r.id_cita, patient_id: r.paciente_id, clinic_id: r.clinica_id, kind: 'appointment', source_system: r.source_system, source_reference: r.source_reference, source_external_id: metadata.source_appointment_id || null, source_contact_id: metadata.source_contact_id || null,
           start_local: utcToLocal(`${r.inicio.replace(' ', 'T')}Z`), end_local: utcToLocal(`${r.fin.replace(' ', 'T')}Z`), status: r.estado,
-          agenda_key: sourceAgenda || mappedAgenda, agenda_evidence: sourceAgenda ? 'historic_source_agenda_id' : mappedAgenda ? 'unique_same_clinic_doctor_and_installation' : null, service_key: norm(serviceIds.get(String(metadata.source_service_id))?.[0]?.values.nombre) || treatmentNames.get(r.tratamiento_id) || '',
+          agenda_key: sourceAgenda || mappedAgenda, agenda_evidence: delta ? 'validated_delta_source_baseline' : sourceAgenda ? 'historic_source_agenda_id' : mappedAgenda ? 'unique_same_clinic_doctor_and_installation' : null, service_key: delta?.service_key || norm(serviceIds.get(String(metadata.source_service_id))?.[0]?.values.nombre) || treatmentNames.get(r.tratamiento_id) || '',
           doctor_id: r.doctor_id, installation_id: r.instalacion_id, treatment_id: r.tratamiento_id, updated_at: r.updated_at,
           last_imported: baseline ? { start_local: baseline.start_local, end_local: baseline.end_local, status: baseline.status, agenda_key: baseline.agenda_key } : null,
         };
@@ -91,4 +107,4 @@ if (require.main === module) run(process.argv.slice(2)).then((summary) => proces
   process.stderr.write(`${/^[A-Z][A-Z0-9_:]+$/.test(error.message) ? error.message : 'CLINICCLOUD_SNAPSHOT_FAILED'}\n`);
   process.exitCode = 1;
 });
-module.exports = { run, canonicalImportedBaseline };
+module.exports = { run, canonicalImportedBaseline, importedDeltaBaseline };
