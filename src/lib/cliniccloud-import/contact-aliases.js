@@ -1,6 +1,7 @@
 'use strict';
 const { hash, norm, dateOnly } = require('./adapter');
 const { instant } = require('./appointments-apply');
+const { phoneKey: reviewedContactPhoneKey } = require('./new-patients-apply');
 const phoneKey = value => {
   const digits=String(value||'').replace(/\D/g,'');
   const key=/^0034\d{9}$/.test(digits)?digits.slice(4):/^34\d{9}$/.test(digits)?digits.slice(2):digits;
@@ -31,8 +32,11 @@ function confirmedIdentityCandidate(source, patientId, live, evidence) {
     ||evidence.patient_id!==patientId||!/^[a-f0-9]{64}$/.test(evidence.confirmation_sha256||'')
     ||!String(evidence.confirmation_reference||'').trim()
     ||evidence.source_full_name!==fullName(source.fields)) throw Error('CONTACT_ALIAS_CONFIRMATION_INVALID');
-  const phone=phoneKey(source.fields.phone);
-  const candidates=live.patients.filter(p=>phone&&[p.telefono_movil,p.telefono_secundario].some(v=>phoneKey(v)===phone)
+  // Explicit confirmation uses the same exact identity-phone normalization
+  // as the contact audit, including recorded eight-digit foreign numbers.
+  // Never add a country prefix or compare only the suffix of a longer number.
+  const phone=reviewedContactPhoneKey(source.fields.phone);
+  const candidates=live.patients.filter(p=>phone&&[p.telefono_movil,p.telefono_secundario].some(v=>reviewedContactPhoneKey(v)===phone)
     &&fullName({name:p.nombre,surname:p.apellidos})===evidence.patient_full_name);
   if(candidates.length!==1||Number(candidates[0].id_paciente)!==patientId) throw Error('CONTACT_ALIAS_CONFIRMED_PAIR_CHANGED');
   // The human confirmation is bounded to the exact pair, not permission for

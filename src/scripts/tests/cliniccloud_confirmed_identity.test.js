@@ -37,6 +37,12 @@ test('even explicit confirmation requires matching phone and a meaningful given-
  const f=fixture();f.live.patients[0].nombre='Alex';f.confirmation.pairs[0].patient_full_name='Alex Captación';
  const e=prepareConfirmedIdentity(f);assert.throws(()=>validateContactAlias(f.source,9,f.live,e),/NAME_NOT_CORROBORATED/);
 });
+test('confirmed eight-digit source phones match exactly without guessing a country or truncating numbers',()=>{
+ const f=fixture();f.source.fields.phone='21876543';f.live.patients[0].telefono_movil='21876543';
+ const e=prepareConfirmedIdentity(f);assert.equal(validateContactAlias(f.source,9,f.live,e).patient.id_paciente,9);
+ f.live.patients[0].telefono_movil='+47 21876543';
+ assert.throws(()=>validateContactAlias(f.source,9,f.live,e),/PAIR_CHANGED/);
+});
 test('missing, expired, future, duplicated or mixed confirmation is rejected before SQL',()=>{
  for(const change of [
   f=>f.link.confirmed_identity=false,f=>f.link.native_history_visit={},
