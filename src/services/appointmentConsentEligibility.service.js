@@ -75,6 +75,9 @@ async function assessAppointmentClinicalConsent({ db, appointment, transaction, 
   if (!transaction) throw Error('consent_completion_transaction_required');
   const cita = plain(appointment);
   if (!positive(cita?.paciente_id) || !positive(cita?.clinica_id)) throw consentError('appointment_consent_configuration_required', 'Falta el ámbito de paciente y clínica de la cita.');
+  if (require('../lib/appointment-import-review').importTreatmentPending(cita)) {
+    throw consentError('appointment_consent_import_review_required', 'Completa el tratamiento importado o confirma que es una visita sin tratamiento antes de marcarla como realizada.');
+  }
   let treatmentIds = positive(cita.tratamiento_id) ? [Number(cita.tratamiento_id)] : [];
   if (cita.source_system === 'treatment_program' && cita.voucher_id) {
     const context = await require('../lib/program-appointment-context').programAppointmentContext(db, cita, transaction);

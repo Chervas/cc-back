@@ -6,6 +6,7 @@ const { PatientOperationalEvent } = db;
 
 const APPOINTMENT_STATUS_EVENT_TYPE = 'appointment.status_changed';
 const APPOINTMENT_STAFF_EVENT_TYPE = 'appointment.staff_changed';
+const APPOINTMENT_IMPORT_EVENT_TYPE = 'appointment.import_resolved';
 
 const APPOINTMENT_STATUS_LABELS = Object.freeze({
   pendiente: 'Pendiente',
@@ -101,6 +102,17 @@ function buildAppointmentStatusDescription(event) {
 
 function serializeAppointmentStatusActivity(event, { patientId = null, leadId = null, actorName = 'Sistema' } = {}) {
   const metadata = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
+  if (event.event_type === APPOINTMENT_IMPORT_EVENT_TYPE) {
+    return { id: `appointment-import-event-${event.id}`,
+      ...(patientId !== null ? { pacienteId: String(patientId) } : {}), ...(leadId !== null ? { leadId: String(leadId) } : {}),
+      fecha: event.occurred_at || event.created_at, tipo: 'appointment_import_resolved', titulo: 'Tratamiento importado revisado',
+      descripcion: metadata.mode === 'no_treatment'
+        ? 'Se ha confirmado una visita sin tratamiento. Se conservan el horario y la configuración de avisos.'
+        : 'Se ha vinculado un tratamiento del catálogo. Se conservan el horario y la configuración de avisos.',
+      icono: 'heroicons_outline:clipboard-document-check', color: 'info', citaId: String(metadata.appointment_id),
+      usuarioId: event.actor_user_id ? String(event.actor_user_id) : 'system', usuarioNombre: actorName || 'Sistema',
+      detalles: { ...metadata, source: event.source || null } };
+  }
   if (event.event_type === APPOINTMENT_STAFF_EVENT_TYPE) {
     const names = (metadata.additional_staff || []).map(person => cleanString(person.name)).filter(Boolean);
     return { id: `appointment-staff-event-${event.id}`,
@@ -185,6 +197,7 @@ async function recordAppointmentStatusChange({
 module.exports = {
   APPOINTMENT_STATUS_EVENT_TYPE,
   APPOINTMENT_STAFF_EVENT_TYPE,
+  APPOINTMENT_IMPORT_EVENT_TYPE,
   appointmentStatusLabel,
   serializeAppointmentStatusActivity,
   recordAppointmentStatusChange,

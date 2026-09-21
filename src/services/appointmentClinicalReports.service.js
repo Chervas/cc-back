@@ -89,7 +89,9 @@ function serialize(report, related = {}) {
 async function loadAppointment(appointmentId, transaction = null) {
   const id = positiveInteger(appointmentId);
   if (!id) throw domainError(400, 'appointment_id_invalid', 'La cita no es válida.');
-  const appointment = await CitaPaciente.findByPk(id, { transaction });
+  // Serialize the report's treatment snapshot with explicit import resolution.
+  // Read-only callers outside a transaction do not acquire a write lock.
+  const appointment = await CitaPaciente.findByPk(id, { transaction, ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}) });
   if (!appointment) throw domainError(404, 'appointment_not_found', 'Cita no encontrada.');
   return appointment;
 }

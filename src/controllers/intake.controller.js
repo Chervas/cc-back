@@ -73,6 +73,7 @@ const { resolveLeadCompetitionPeerScope } = require('../lib/leadCompetitionScope
 const {
   APPOINTMENT_STATUS_EVENT_TYPE,
   APPOINTMENT_STAFF_EVENT_TYPE,
+  APPOINTMENT_IMPORT_EVENT_TYPE,
   serializeAppointmentStatusActivity,
 } = require('../services/appointmentActivity.service');
 const { isGlobalAdmin } = require('../lib/role-helpers');
@@ -6918,7 +6919,7 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
         where: {
           patient_id: { [Op.in]: appointmentPatientIds },
           clinic_id: lead.clinica_id,
-          event_type: { [Op.in]: [APPOINTMENT_STATUS_EVENT_TYPE, APPOINTMENT_STAFF_EVENT_TYPE] },
+          event_type: { [Op.in]: [APPOINTMENT_STATUS_EVENT_TYPE, APPOINTMENT_STAFF_EVENT_TYPE, APPOINTMENT_IMPORT_EVENT_TYPE] },
         },
         order: [['occurred_at', 'ASC'], ['id', 'ASC']],
         raw: true,
