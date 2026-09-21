@@ -28,6 +28,7 @@ function mergeClinicalConfig(previous, patch) {
     }
   }
   if (result.catalog_status != null && !STATUSES.has(result.catalog_status)) throw catalogError('Estado de catálogo no válido.');
+  if (result.price_profile != null) result.price_profile = require('./economicPriceProfile').normalizeProfile(result.price_profile);
   if (result.booking_profile != null) {
     result.booking_profile = normalizeBookingProfile(result.booking_profile, { allowIncomplete: result.catalog_status === 'draft' });
   }
@@ -56,6 +57,11 @@ function catalogPrice(treatment) {
     const source = config.source_price || {};
     return { amount: source.mode === 'fixed' && typeof source.gross_amount === 'number' && Number.isFinite(source.gross_amount) ? source.gross_amount : null,
       label: 'IVA incluido · fiscalidad pendiente', semantics: 'gross_tax_included', review_required: true };
+  }
+  if (config.price_profile) {
+    const profile = require('./economicPriceProfile').normalizeProfile(config.price_profile);
+    return { amount: treatment.precio_base == null ? null : Number(treatment.precio_base),
+      label: profile.tax_percent ? `IVA ${profile.tax_percent}% incluido` : 'Exento de IVA', semantics: profile.price_semantics, review_required: false };
   }
   return { amount: treatment.precio_base == null ? null : Number(treatment.precio_base), label: 'habitual', semantics: 'existing_catalog_price', review_required: false };
 }

@@ -164,6 +164,39 @@ Contabilidad transversal y portal:
 
 ## Invariantes
 
+### Precio final y desglose explícito de IVA
+
+Preparación backend en DEV, todavía no publicada ni terminada en el editor
+fiscal: `clinical_config.price_profile` admite `schema_version: 1`,
+`price_semantics: gross_tax_included`, `tax_percent` numérico y
+`exemption_reason` obligatorio cuando el porcentaje es cero. No se infiere
+exención ni porcentaje a partir del área clínica. Un catálogo antiguo sin
+perfil mantiene su significado previo, explícitamente no clasificado.
+
+Al guardar un presupuesto, el backend ignora perfiles/snapshots fiscales del
+request y resuelve las nuevas referencias con una lectura acotada del catálogo
+del ámbito autorizado. Congela `lines[].price_snapshot`. Cambiar posteriormente
+el catálogo no altera el desglose de las versiones anteriores ni de una línea
+conservada al editar el borrador. Una línea histórica sin perfil tampoco recibe
+automáticamente el impuesto actual. La comparación de referencias no depende
+del orden de claves de JSON/MySQL. Máximo: 500 conceptos por presupuesto.
+
+El precio unitario explícito sigue siendo final: 145 € al 21 % son 119,83 € de
+base y 25,17 € de impuesto, no 175,45 € a cobrar. El backend distribuye primero
+el descuento global y los céntimos residuales entre líneas y después desglosa
+el impuesto. `totals.tax_breakdown` conserva esa distribución;
+`tax_breakdown_status` distingue `complete`, `partial` y `unclassified`.
+Los conceptos sin perfil no se certifican como exentos. Los importes anteriores
+sin clasificación conservan sus totales históricos.
+
+Los snapshots de programa pueden conservar un perfil común únicamente cuando
+todos los tratamientos incluidos tienen exactamente la misma configuración
+explícita. Una composición mixta o incompleta no recibe un porcentaje supuesto.
+Esto **no abre todavía la emisión fiscal de programas**: el guard existente se
+mantiene hasta adaptar y probar documento fiscal, anticipos, interfaz y PDF.
+La revisión fiscal pendiente de tratamientos importados sigue bloqueando su
+venta. Sin DDL ni cambios en gates, importación, recordatorios o precios reales.
+
 ### Programas y bonos versionados
 
 El catálogo de presupuestos admite `include_programs=1`, pero la integración
