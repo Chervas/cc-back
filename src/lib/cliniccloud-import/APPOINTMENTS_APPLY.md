@@ -151,6 +151,11 @@ procedimiento ni reparto de fases. Revalida identidad, dependencias y ausencia
 de solapes bajo los locks comunes, con backup, simulación revertida, diario y
 lectura independiente. Cambia únicamente inicio/fin, metadata y fecha técnica.
 
+Una nota vacía del CSV puede estar almacenada como `NULL`: esa equivalencia
+limitada no acredita una edición ni autoriza escribir la nota. Se conserva su
+representación almacenada; texto añadido o incluso espacios locales distintos
+siguen exigiendo revisión.
+
 El recibo `cliniccloud_delta_source_reconciliation` conserva ambos horarios,
 evidencia, ID fuente real y HOLD. Snapshot/plan lo reconocen igual que la
 conciliación histórica: un replay del ZIP conserva la fecha nueva aunque esté
