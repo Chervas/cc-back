@@ -3272,8 +3272,15 @@ async function createFiscalDocument({ publicId, actorId, payload }) {
 
 async function updateFiscalDocument({ publicId, actorId, payload }) {
   return sequelize.transaction(async (transaction) => {
+    const located = await PatientFiscalDocument.findOne({
+      where: { public_id: cleanString(publicId, 36) }, attributes: ['id', 'budget_id'], transaction,
+    });
+    if (!located) throw domainError(404, 'fiscal_document_not_found', 'Documento fiscal no encontrado.');
+    // Same lock order as creation: parent budget before fiscal documents.
+    // Re-read the document after waiting, so another issuance cannot be edited.
+    if (located.budget_id) await EconomicBudget.findByPk(located.budget_id, { transaction, lock: transaction.LOCK.UPDATE });
     const document = await PatientFiscalDocument.findOne({
-      where: { public_id: cleanString(publicId, 36) },
+      where: { id: located.id },
       transaction,
       lock: transaction.LOCK.UPDATE,
     });

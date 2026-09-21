@@ -120,3 +120,13 @@ test('real PDF renderer uses persisted totals, labels gross prices, escapes exem
   const legacy = structuredClone(document); delete legacy.lines[0].price_semantics;
   assert(!fiscalHtml(legacy).includes('IVA incluido')); assert(!fiscalHtml(legacy).includes('Precio final'));
 });
+
+test('creation/edit lock budget before documents; preview explicitly remains non-locking', () => {
+  const source = fs.readFileSync(require.resolve('../../services/patientEconomics.service'), 'utf8');
+  const edit = source.slice(source.indexOf('async function updateFiscalDocument('), source.indexOf('async function saveTemplate('));
+  assert(edit.indexOf('EconomicBudget.findByPk(located.budget_id') < edit.indexOf('const document ='));
+  assert(edit.indexOf('const document =') < edit.indexOf("document.status !== 'draft'"));
+  const preview = source.slice(source.indexOf('async function previewPatientFiscalDocument('), source.indexOf('async function createPatientFiscalDocument('));
+  assert.match(preview, /lockSource: false/);
+  assert.doesNotMatch(preview, /\.create\(|\.update\(|LOCK\.UPDATE/);
+});
