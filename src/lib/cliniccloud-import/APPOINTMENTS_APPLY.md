@@ -124,6 +124,32 @@ campos concretos del diario si no hubo actuaciones posteriores; nunca restaurar
 la base completa. Evidencia de aplicación y versión del operador en la bitácora
 central. Pruebas: `cliniccloud_legacy_source_reconciliation.test.js`.
 
+### Cambio posterior de una cita ya importada del delta
+
+`delta-source-reconciliation.js` cubre otra procedencia: la referencia inicial
+es una huella de CSV, no un ID de cita ClinicCloud. Exige una observación anterior
+autenticada que identifique inequívocamente el mismo contacto, agenda, intervalo,
+acto, estado y nota, y una historia reciente que confirme ese ID fuente con el
+nuevo horario. El operador conserva el documento anterior y su hash; no inventa
+un ID a partir del parecido entre filas. Ambos documentos deben pertenecer a la
+cuenta revisada. Una copia anulada en otra agenda no sustituye ese vínculo.
+
+Solo admite una cita simple pendiente, futura, sin ediciones locales ni relaciones
+posteriores. Mantiene paciente, clínica, tratamiento, profesional, sala, notas,
+estado, referencia y línea base CSV completas. El cambio de duración requiere
+revisión explícita de los minutos anteriores y actuales; no se deduce un nuevo
+procedimiento ni reparto de fases. Revalida identidad, dependencias y ausencia
+de solapes bajo los locks comunes, con backup, simulación revertida, diario y
+lectura independiente. Cambia únicamente inicio/fin, metadata y fecha técnica.
+
+El recibo `cliniccloud_delta_source_reconciliation` conserva ambos horarios,
+evidencia, ID fuente real y HOLD. Snapshot/plan lo reconocen igual que la
+conciliación histórica: un replay del ZIP conserva la fecha nueva aunque esté
+fuera de la semana importada, sin crear otra cita. Una edición posterior exige
+revisión. No se traslada a DEV ningún paciente real ni se reinician runtimes:
+es una herramienta offline del operador. Pruebas:
+`cliniccloud_delta_source_reconciliation.test.js`.
+
 ## Altas semanales con identidad ya resuelta
 
 `cliniccloud-import-week-appointments.js` es un ejecutor distinto, solo para

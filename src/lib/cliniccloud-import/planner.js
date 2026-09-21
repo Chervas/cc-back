@@ -101,7 +101,7 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
   const revisionReferences = index(localAppointments.filter(local => isImported(local) && local.source_revision),
     local => sourceReference(local.source_revision.original));
   const reconciledReferences = index(localAppointments.filter(isImported).flatMap(local =>
-    (local.legacy_source_reconciliation?.entries || []).map(entry => ({ local, entry }))), item => item.entry.source_reference);
+    ((local.source_reconciliation || local.legacy_source_reconciliation)?.entries || []).map(entry => ({ local, entry }))), item => item.entry.source_reference);
   const claimedLocal = new Set();
   const recoveredHistoricalIds = new Set();
   const decisions = [];
@@ -126,7 +126,7 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
       decision.candidate_local_ids = reconciled.map(item => item.local.id);
       if (reconciled.length !== 1) decision.reasons.push('RECONCILED_SOURCE_MULTIPLE_LOCAL_MATCHES');
       else {
-        const { local, entry } = reconciled[0], current = local.legacy_source_reconciliation.current;
+        const { local, entry } = reconciled[0], current = (local.source_reconciliation || local.legacy_source_reconciliation).current;
         decision.local_id = local.id; decision.expected_local_hash = hash(local);
         decision.source_external_id = entry.source_appointment_id;
         if (!patient || String(local.patient_id) !== String(patient.id)) decision.reasons.push('LOCAL_PATIENT_IDENTITY_CONFLICT');

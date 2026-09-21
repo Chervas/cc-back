@@ -9,6 +9,7 @@ const { dateOnly, localToUtc, utcToLocal, normalizeAppointments, norm, index, ha
 const { sourceReference } = require('../lib/cliniccloud-import/week-appointments');
 const { validatedParallelSources, parallelLocalNoteChanged } = require('../lib/cliniccloud-import/parallel-sources');
 const { storedLegacyReconciliation, reconciliationChanged } = require('../lib/cliniccloud-import/legacy-source-reconciliation');
+const { storedDeltaReconciliation } = require('../lib/cliniccloud-import/delta-source-reconciliation');
 const { validatedStoredRevision } = require('../lib/cliniccloud-import/source-revisions');
 
 function importedDeltaBaseline(row, metadata) {
@@ -96,6 +97,8 @@ async function run(args) {
         const parallelSources = validatedParallelSources(r, metadata);
         const sourceRevision = validatedStoredRevision(r, metadata);
         const legacyReconciliation = storedLegacyReconciliation(r, metadata);
+        const sourceReconciliation = storedDeltaReconciliation(r, metadata);
+        if (legacyReconciliation && sourceReconciliation) throw Error('CONFLICTING_SOURCE_RECONCILIATION_RECEIPTS');
         return { id: r.id_cita, patient_id: r.paciente_id, clinic_id: r.clinica_id, kind: 'appointment', source_system: r.source_system, source_reference: r.source_reference, source_external_id: metadata.source_appointment_id || null, source_contact_id: metadata.source_contact_id || null,
           ...(parallelSources.length ? { parallel_sources: parallelSources,
             parallel_local_note_changed: parallelLocalNoteChanged(r, parallelSources) } : {}),
@@ -103,6 +106,8 @@ async function run(args) {
             revision_local_note_changed: norm(r.nota || '') !== norm(sourceRevision.current.details) } : {}),
           ...(legacyReconciliation ? { legacy_source_reconciliation: legacyReconciliation,
             reconciliation_local_changed: reconciliationChanged(r, legacyReconciliation) } : {}),
+          ...(sourceReconciliation ? { source_reconciliation: sourceReconciliation,
+            reconciliation_local_changed: reconciliationChanged(r, sourceReconciliation) } : {}),
           start_local: utcToLocal(`${r.inicio.replace(' ', 'T')}Z`), end_local: utcToLocal(`${r.fin.replace(' ', 'T')}Z`), status: r.estado,
           agenda_key: sourceAgenda || mappedAgenda, agenda_evidence: delta ? 'validated_delta_source_baseline' : sourceAgenda ? 'historic_source_agenda_id' : mappedAgenda ? 'unique_same_clinic_doctor_and_installation' : null, service_key: delta?.service_key || norm(serviceIds.get(String(metadata.source_service_id))?.[0]?.values.nombre) || treatmentNames.get(r.tratamiento_id) || '',
           doctor_id: r.doctor_id, installation_id: r.instalacion_id, treatment_id: r.tratamiento_id, updated_at: r.updated_at,
