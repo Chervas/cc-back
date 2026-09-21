@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {hash}=require('../../lib/cliniccloud-import/adapter');
-const {prepareNativeCorroboration}=require('../../lib/cliniccloud-import/contact-alias-evidence');
+const {prepareNativeCorroboration,prepareHistoryCorroboration}=require('../../lib/cliniccloud-import/contact-alias-evidence');
 const now=Date.parse('2026-09-21T04:00:00Z');
 function fixture(){
  const source={source_contact_id:'456',fields:{name:'Persona',surname:'Origen',phone:'600000001'}};
@@ -60,4 +60,37 @@ test('multiple live IDs, missing/duplicate row and non-pending source cannot con
 test('source phone must belong to just this external contact, not another record or relative',()=>{
  const f=fixture();f.contacts.push({...f.source,source_contact_id:'789'});
  assert.throws(()=>prepareNativeCorroboration(f),/SOURCE_PHONE_NOT_UNIQUE/);
+});
+function historyFixture(){
+ const f=fixture();f.link={native_history_visit:{reason:'Primera visita histórica revisada; no cambiar su estado',appointment_id:71,created_by:44,clinic_id:72,source_appointment_id:'8765'}};
+ f.histories={version:1,captured_at:'2026-09-21T03:30:00Z',origin:'https://app.clinic-cloud.com',
+  source_endpoint:'/apps/contacto/pestanas-contacto-ficha/php/citas/citas.api.php/get-citas',policy:'read_only_no_clinical_or_economic_mutations',
+  patients:[{contact_id:'456',rows:[{idCita:8765,idContacto:456,agenda:{idEmpresa:5880},fechaIni:'2026-07-28',fechaFin:'2026-07-28',horaIni:'18:30:00',horaFin:'19:00:00',estado:3}]}]};
+ return f;
+}
+test('observed source history corroborates an earlier visit without importing its clinical or financial state',()=>{
+ const f=historyFixture(),before=JSON.stringify(f),e=prepareHistoryCorroboration(f);
+ assert.equal(e.start_utc,'2026-07-28T16:30:00.000Z');assert.equal(e.source_state,3);assert.equal(e.identity_only,true);
+ assert.equal(e.source_contact_id,'456');assert.equal(e.kind,'unique_phone_given_name_and_observed_history');
+ assert.match(e.source_appointment_sha256,/^[a-f0-9]{64}$/);assert.equal(JSON.stringify(f),before);
+});
+test('history rejects stale, foreign, duplicate, mixed-patient or unidentified data',()=>{
+ for(const mutate of [
+  f=>f.histories.captured_at='2026-09-20T00:00:00Z',
+  f=>f.histories.origin='https://example.com',
+  f=>f.histories.source_endpoint='/other',
+  f=>f.histories.patients.push({...f.histories.patients[0]}),
+  f=>f.histories.patients[0].rows[0].idContacto=789,
+  f=>f.histories.patients[0].rows[0].agenda.idEmpresa=123,
+  f=>f.histories.patients[0].rows[0].idCita=999,
+  f=>f.histories.patients[0].rows[0].estado=99,
+  f=>f.histories.patients[0].rows[0].horaFin='18:00:00',
+  f=>f.histories.patients[0].rows.push({...f.histories.patients[0].rows[0]}),
+  f=>f.contacts.push({...f.source,source_contact_id:'789'}),
+ ]){const f=historyFixture();mutate(f);assert.throws(()=>prepareHistoryCorroboration(f));}
+});
+test('operator must choose one explicit corroboration method, not silently override one with another',()=>{
+ const f=historyFixture();f.link.native_first_visit=fixture().link.native_first_visit;
+ assert.throws(()=>prepareHistoryCorroboration(f),/NATIVE_REVIEW_REQUIRED/);
+ assert.throws(()=>prepareNativeCorroboration(f),/NATIVE_REVIEW_REQUIRED/);
 });

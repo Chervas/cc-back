@@ -1,5 +1,5 @@
 'use strict';
-const {hash}=require('./adapter');
+const {hash,localDateTime,localToUtc}=require('./adapter');
 const {phoneKey}=require('./contact-aliases');
 
 // Operator-only, explicitly reviewed exception for native intake names that
@@ -7,7 +7,7 @@ const {phoneKey}=require('./contact-aliases');
 // never deduplicates or changes the corroborating appointment.
 function prepareNativeCorroboration({link,source,contacts,appointments,plan,comparison,now=Date.now()}) {
   const review=link.native_first_visit;
-  if(!review||!String(review.reason||'').trim()||!Number.isSafeInteger(review.source_row)
+  if(!review||link.native_history_visit||!String(review.reason||'').trim()||!Number.isSafeInteger(review.source_row)
     ||!Number.isSafeInteger(review.appointment_id)||review.appointment_id<=0
     ||!Number.isSafeInteger(review.created_by)||review.created_by<=0
     ||![66,72].includes(review.clinic_id)) throw Error('CONTACT_ALIAS_NATIVE_REVIEW_REQUIRED');
@@ -35,4 +35,27 @@ function prepareNativeCorroboration({link,source,contacts,appointments,plan,comp
     start_utc:appointment.start_utc,source_row:review.source_row,source_provenance:appointment.provenance,
     live_appointment_id:rows[0].live_ids[0],comparison_sha256,reason:review.reason.trim()};
 }
-module.exports={prepareNativeCorroboration};
+function prepareHistoryCorroboration({link,source,contacts,histories,now=Date.now()}) {
+  const review=link.native_history_visit,captured=Date.parse(histories.captured_at);
+  if(!review||!String(review.reason||'').trim()||!Number.isSafeInteger(review.appointment_id)||review.appointment_id<=0
+    ||!Number.isSafeInteger(review.created_by)||review.created_by<=0||![66,72].includes(review.clinic_id)
+    ||!/^[1-9]\d*$/.test(review.source_appointment_id||'')||link.native_first_visit) throw Error('CONTACT_ALIAS_NATIVE_REVIEW_REQUIRED');
+  if(histories.version!==1||histories.origin!=='https://app.clinic-cloud.com'
+    ||histories.source_endpoint!=='/apps/contacto/pestanas-contacto-ficha/php/citas/citas.api.php/get-citas'
+    ||histories.policy!=='read_only_no_clinical_or_economic_mutations'||!Number.isFinite(captured)
+    ||captured>now||now-captured>2*3600000||!Array.isArray(histories.patients)) throw Error('CONTACT_ALIAS_LIVE_EVIDENCE_INVALID_OR_EXPIRED');
+  const patients=histories.patients.filter(p=>p.contact_id===source.source_contact_id);
+  if(patients.length!==1||!Array.isArray(patients[0].rows)||patients[0].rows.length>5000
+    ||patients[0].rows.some(r=>String(r.idContacto)!==source.source_contact_id||Number(r.agenda?.idEmpresa)!==5880)) throw Error('CONTACT_ALIAS_HISTORY_SCOPE_INVALID');
+  const rows=patients[0].rows.filter(r=>String(r.idCita)===review.source_appointment_id),appointment=rows[0];
+  const start=appointment&&localToUtc(localDateTime(appointment.fechaIni,appointment.horaIni));
+  const end=appointment&&localToUtc(localDateTime(appointment.fechaFin,appointment.horaFin));
+  if(rows.length!==1||!start||!end||end<=start||![0,1,3,-1,-2].includes(Number(appointment.estado))) throw Error('CONTACT_ALIAS_LIVE_APPOINTMENT_NOT_UNIQUE');
+  const phone=phoneKey(source.fields.phone),owners=new Set(contacts.filter(c=>phone&&phoneKey(c.fields.phone)===phone).map(c=>c.source_contact_id));
+  if(owners.size!==1||!owners.has(source.source_contact_id)) throw Error('CONTACT_ALIAS_SOURCE_PHONE_NOT_UNIQUE');
+  return {kind:'unique_phone_given_name_and_observed_history',source_contact_id:source.source_contact_id,source_phone_unique:true,
+    clinic_id:review.clinic_id,native_appointment_id:review.appointment_id,native_created_by:review.created_by,
+    start_utc:start,live_appointment_id:review.source_appointment_id,comparison_sha256:hash(histories),source_appointment_sha256:hash(appointment),
+    source_state:appointment.estado,reason:review.reason.trim(),identity_only:true};
+}
+module.exports={prepareNativeCorroboration,prepareHistoryCorroboration};

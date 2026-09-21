@@ -5,14 +5,14 @@ const {execFileSync}=require('node:child_process');
 const {hash,normalizeContacts,normalizeAppointments}=require('../lib/cliniccloud-import/adapter');
 const {readCsv,readBytes,parseArgs,writePrivateJson}=require('../lib/cliniccloud-import/io');
 const {validateContactAlias}=require('../lib/cliniccloud-import/contact-aliases');
-const {prepareNativeCorroboration}=require('../lib/cliniccloud-import/contact-alias-evidence');
+const {prepareNativeCorroboration,prepareHistoryCorroboration}=require('../lib/cliniccloud-import/contact-alias-evidence');
 const {connectOperatorDatabase}=require('../lib/cliniccloud-import/operator-database');
 const {createNewPatientsStore}=require('../lib/cliniccloud-import/new-patients-store');
 const {privateJson,openJournal,acquireExecutorLocks}=require('./cliniccloud-import-appointments-apply');
 const {validateBackup}=require('./cliniccloud-import-contacts-apply');
 const VERSION='cliniccloud-contact-aliases/2';
 async function run(args){
- const o=parseArgs(args,['--mode','--target','--contacts','--review','--private-output','--package','--approved-sha256','--backup-manifest','--private-journal','--appointments','--plan','--live-comparison']);
+ const o=parseArgs(args,['--mode','--target','--contacts','--review','--private-output','--package','--approved-sha256','--backup-manifest','--private-journal','--appointments','--plan','--live-comparison','--live-histories']);
  if(o['--target']!=='crm'||!['prepare','apply'].includes(o['--mode']))throw Error('EXPLICIT_CRM_ALIAS_MODE_REQUIRED');
  if(process.cwd()!=='/home/ubuntu/wt/back-dev'||execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim()!=='dev')throw Error('DEV_OPERATOR_WORKTREE_REQUIRED');
  const review=privateJson(o['--review']);
@@ -21,19 +21,22 @@ async function run(args){
    ||new Set(review.links.map(r=>r.patient_id)).size!==review.links.length)throw Error('BOUNDED_EXPLICIT_ALIAS_REVIEW_REQUIRED');
  const input=readCsv(o['--contacts'],'contacts',['IDCONTACTO','NOMBRE','APELLIDOS']);
  const sourceRows=normalizeContacts(input.rows,input.file.sha256);
- const needsNative=review.links.some(link=>link.native_first_visit);
- let nativeContext;
- if(needsNative){
+ const needsCurrent=review.links.some(link=>link.native_first_visit),needsHistory=review.links.some(link=>link.native_history_visit);
+ const needsNative=needsCurrent||needsHistory;
+ let nativeContext,histories;
+ if(needsCurrent){
   if(!o['--appointments']||!o['--plan']||!o['--live-comparison'])throw Error('CONTACT_ALIAS_NATIVE_SOURCE_FILES_REQUIRED');
   const appointmentFile=readCsv(o['--appointments'],'appointments',['IDCONTACTO','FECHA','HORA INICIO','HORA FIN']);
   nativeContext={contacts:sourceRows,appointments:normalizeAppointments(appointmentFile.rows,appointmentFile.file.sha256),
    plan:privateJson(o['--plan']),comparison:privateJson(o['--live-comparison'])};
  }
+ if(needsHistory){if(!o['--live-histories'])throw Error('CONTACT_ALIAS_NATIVE_SOURCE_FILES_REQUIRED');histories=privateJson(o['--live-histories']);}
  const selected=review.links.map(link=>{
   const matches=sourceRows.filter(s=>s.source_contact_id===link.source_contact_id);
   if(matches.length!==1)throw Error('ALIAS_SOURCE_ID_NOT_UNIQUE');
   return {source:matches[0],patient_id:link.patient_id,...(link.native_first_visit
-   ? {corroboration:prepareNativeCorroboration({...nativeContext,link,source:matches[0]})} : {})};
+   ? {corroboration:prepareNativeCorroboration({...nativeContext,link,source:matches[0]})}
+   : link.native_history_visit?{corroboration:prepareHistoryCorroboration({link,source:matches[0],contacts:sourceRows,histories})}:{})};
  });
  let pkg,backup;
  if(o['--mode']==='apply'){

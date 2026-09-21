@@ -82,3 +82,12 @@ test('native evidence is stable on replay but records any appointment change for
  l.native_appointments[0].fin='2026-09-22 16:00:00';
  assert.notEqual(validateContactAlias(s,9,l,e).native_appointment_sha256,before.native_appointment_sha256);
 });
+test('a reviewed observed-history identity can use a completed or cancelled first visit without changing its state',()=>{
+ for(const status of ['completada','cancelada','no_asistio']){
+  const {s,l,e}=nativeFixture();l.native_appointments[0].estado=status;
+  assert.throws(()=>validateContactAlias(s,9,l,e),/NOT_CORROBORATED/);
+  Object.assign(e,{kind:'unique_phone_given_name_and_observed_history',identity_only:true,source_appointment_sha256:'f'.repeat(64)});
+  const before=JSON.stringify(l);assert.equal(validateContactAlias(s,9,l,e).patient.id_paciente,9);assert.equal(JSON.stringify(l),before);
+  e.identity_only=false;assert.throws(()=>validateContactAlias(s,9,l,e),/CORROBORATION_INVALID/);
+ }
+});

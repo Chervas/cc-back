@@ -68,6 +68,14 @@ requieren un modo de aplicación explícito y su propio paquete validado.
   escribir. No transforma esa prueba de identidad en una decisión de sustituir
   o duplicar citas. Los paquetes nuevos usan versión 2; replay de versión 1
   mantiene su comprobación estricta original.
+  Si la primera visita es anterior al delta, `native_history_visit` sustituye
+  a `native_first_visit`, con `source_appointment_id` en lugar de `source_row`;
+  requiere `--live-histories`, captura privada reciente del endpoint de lectura
+  observado en la ficha de ClinicCloud. Verifica contacto/empresa, ID y hora
+  exactos y los mismos controles de identidad. Una primera visita completada,
+  cancelada o no asistida puede corroborar **identidad**, nunca instruir una
+  transición de estado: ambas citas quedan intactas y su discrepancia se revisa
+  aparte. No reinterpretar con este operador los códigos clínicos históricos.
 - `cliniccloud-import-physical-installations.js`: mapa físico documental BS,
   distinto de las antiguas agendas virtuales. `--target crm --mode prepare
   --sources … --private-output …` recibe una lista privada de archivos y hashes.

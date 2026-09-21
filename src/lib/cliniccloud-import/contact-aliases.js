@@ -14,7 +14,8 @@ function corroboratedCandidates(source, patients) {
     && [p.telefono_movil,p.telefono_secundario].some(v=>phoneKey(v)===phone));
 }
 function nativeAppointmentCandidate(source, patientId, live, evidence) {
-  if (evidence?.kind !== 'unique_phone_given_name_and_native_first_visit'
+  const history=evidence?.kind==='unique_phone_given_name_and_observed_history';
+  if ((!history&&evidence?.kind !== 'unique_phone_given_name_and_native_first_visit')
     || evidence.source_contact_id !== source.source_contact_id || evidence.source_phone_unique !== true
     || ![66,72].includes(evidence.clinic_id) || !Number.isSafeInteger(evidence.native_appointment_id)
     || !Number.isSafeInteger(evidence.native_created_by) || evidence.native_created_by <= 0
@@ -26,13 +27,15 @@ function nativeAppointmentCandidate(source, patientId, live, evidence) {
   // when only one of its owners has this given name. No fuzzy-name matching.
   if(name.length<3||candidates.length!==1||Number(candidates[0].id_paciente)!==patientId
     ||norm(candidates[0].nombre)!==name) throw Error('CONTACT_ALIAS_IDENTITY_NOT_UNIQUE');
+  if(history&&(evidence.identity_only!==true||!/^[a-f0-9]{64}$/.test(evidence.source_appointment_sha256||''))) throw Error('CONTACT_ALIAS_CORROBORATION_INVALID');
   const sameStart=(live.native_appointments||[]).filter(a=>Number(a.paciente_id)===patientId
     &&instant(a.inicio)===instant(evidence.start_utc));
   const appointment=sameStart[0];
   if(sameStart.length!==1||Number(appointment.id_cita)!==evidence.native_appointment_id
     ||Number(appointment.clinica_id)!==evidence.clinic_id||Number(appointment.created_by)!==evidence.native_created_by
     ||appointment.source_system!=null||appointment.source_reference!=null||appointment.tipo_cita!=='primera_sin_trat'
-    ||!['pendiente','info_enviada','info_confirmada','recordatorio_enviado','confirmada'].includes(appointment.estado)) throw Error('CONTACT_ALIAS_NATIVE_FIRST_VISIT_NOT_CORROBORATED');
+    ||!['pendiente','info_enviada','info_confirmada','recordatorio_enviado','confirmada',
+      ...(history?['completada','cancelada','no_asistio']:[])].includes(appointment.estado)) throw Error('CONTACT_ALIAS_NATIVE_FIRST_VISIT_NOT_CORROBORATED');
   return {patient:candidates[0],appointment_sha256:hash(appointment)};
 }
 function validateContactAlias(source, patientId, live, corroboration = null) {
