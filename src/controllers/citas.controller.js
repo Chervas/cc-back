@@ -2222,7 +2222,12 @@ exports.createCita = asyncHandler(async (req, res) => {
             },
             patient: paciente,
             requestedLanguage: datosPaciente.idioma_preferido,
-            afterPersist: (appointment, transaction) => enqueueCreatedAppointmentCrmSignals({ lead, appointment, transaction }),
+            afterPersist: async (appointment, transaction) => {
+                if (!bookingEnabled || pastHistoryOnly) {
+                    await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, appointment, transaction });
+                }
+                await enqueueCreatedAppointmentCrmSignals({ lead, appointment, transaction });
+            },
         };
         const cita = bookingEnabled && !pastHistoryOnly
             ? await mutateAppointmentBooking({
@@ -2347,7 +2352,7 @@ exports.createCita = asyncHandler(async (req, res) => {
 
         return res.status(201).json(await protectAppointmentsForRequest(req, citaCreada));
     } catch (err) {
-        if (/^(booking_|treatment_not_)/.test(String(err?.code || ''))) {
+        if (/^(booking_|appointment_consent_|treatment_not_)/.test(String(err?.code || ''))) {
             return res.status(err.statusCode || 409).json(bookingErrorPayload(err));
         }
         if (err.status === 400 && err.message === 'unsupported_patient_language') {
@@ -2690,7 +2695,6 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     let previousStatus = cita.estado;
-    cita.estado = estadoRaw;
     if (cita.source_system === 'treatment_program' && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
     }
@@ -2705,12 +2709,19 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
             },
         });
     } else {
-        if (previousStatus === 'cancelada' && estadoRaw !== 'cancelada' && cita.tratamiento_id) {
-            const clinic = await Clinica.findByPk(cita.clinica_id);
-            const treatment = await loadScopedTreatment({ db, treatmentId: cita.tratamiento_id, clinic });
-            requireOperationalProfile(treatment, { allowObsolete: true });
-        }
-        await cita.save();
+        cita = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
+            const locked = await CitaPaciente.findByPk(citaId, { transaction, lock: transaction.LOCK.UPDATE });
+            if (!locked) throw Object.assign(new Error('Cita no encontrada.'), { statusCode: 404 });
+            previousStatus = locked.estado;
+            if (previousStatus === 'cancelada' && estadoRaw !== 'cancelada' && locked.tratamiento_id) {
+                const clinic = await Clinica.findByPk(locked.clinica_id, { transaction });
+                const treatment = await loadScopedTreatment({ db, treatmentId: locked.tratamiento_id, clinic, transaction });
+                requireOperationalProfile(treatment, { allowObsolete: true });
+            }
+            await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: locked,
+                appointment: { ...locked.toJSON(), estado: estadoRaw }, transaction });
+            return locked.update({ estado: estadoRaw, updated_by: req.userData?.userId || null }, { transaction });
+        });
     }
     try {
         await recordAppointmentStatusChange({
@@ -2876,6 +2887,8 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
             });
             await locked.reload({ transaction });
         } else {
+            await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: locked,
+                appointment: { ...locked.toJSON(), estado: nextStatus }, transaction });
             await locked.update({ estado: nextStatus, updated_by: actorUserId }, { transaction });
         }
         await recordAppointmentStatusChange({
@@ -2892,7 +2905,7 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
         });
         return locked;
     }).catch((error) => {
-        if (error?.statusCode === 409) return null;
+        if (error?.statusCode === 409 && !String(error.code || '').startsWith('appointment_consent_')) return null;
         throw error;
     });
     if (!cita) {
@@ -3109,7 +3122,17 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             },
         });
     } else {
-        await cita.save();
+        const changes = { inicio, fin, estado: cita.estado, reschedule_reason: rescheduleReason, updated_by: cita.updated_by,
+            ...(nextDoctorIdRaw !== undefined ? { doctor_id: nextDoctorId } : {}),
+            ...(nextInstalacionIdRaw !== undefined ? { instalacion_id: nextInstalacionId } : {}) };
+        cita = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
+            const locked = await CitaPaciente.findByPk(citaId, { transaction, lock: transaction.LOCK.UPDATE });
+            if (!locked) throw Object.assign(new Error('Cita no encontrada.'), { statusCode: 404 });
+            previousStatus = locked.estado;
+            await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: locked,
+                appointment: { ...locked.toJSON(), ...changes }, transaction });
+            return locked.update(changes, { transaction });
+        });
     }
     try {
         await recordAppointmentStatusChange({

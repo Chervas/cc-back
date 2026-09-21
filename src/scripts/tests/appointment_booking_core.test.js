@@ -72,6 +72,7 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
       finally { tx.release.forEach((release) => release()); }
     } },
     Clinica: { findByPk: async (value) => clinics.find((row) => row.id_clinica === Number(value)) },
+    TreatmentConsentRequirement: { findAll: async () => [] },
     Tratamiento: { findByPk: async () => ({ id_tratamiento: 3, clinica_id: 72, origen: 'clinica', activo: true, clinical_config: { booking_profile: bookingProfile } }) },
     DoctorClinica: { findAll: async (options) => query('doctors', [5, 6].map((doctorId) => ({ doctor_id: doctorId, clinica_id: 72, activo: true, recibe_citas: true, horarios: hours })), options) },
     DoctorHorario: {}, DoctorHorarioExcepcion: {}, InstalacionHorario: {}, DoctorBloqueoExcepcion: {},
@@ -164,6 +165,20 @@ test('occupancy failure rolls the canonical appointment back too; no partial res
   assert.equal(f.state.appointments.length, 0);
   assert.equal(f.state.occupancies.length, 0);
   assert.equal(f.state.rollbacks, 1);
+});
+
+test('unsigned clinical completion fails before appointment persistence or occupancy mutation', async () => {
+  const f = fixture();
+  const original = await f.reserve();
+  f.db.TreatmentConsentRequirement.findAll = async () => [{ tratamiento_id: 3, clinic_template_id: 7,
+    required: true, blocking_policy: 'hard', clinicTemplate: { purpose: 'clinical', status: 'active', validity_mode: 'single_act' } }];
+  f.db.PatientConsentDocument = { findAll: async () => [] };
+  const persists = f.state.persists;
+  await assert.rejects(f.reserve({ existingAppointmentId: original.id_cita, stateOnly: true,
+    appointmentValues: { estado: 'completada' }, force: true }), { code: 'appointment_consent_required' });
+  assert.equal(f.state.persists, persists);
+  assert.equal(f.state.appointments[0].estado, 'pendiente');
+  assert.equal(f.state.occupancies.length, 2);
 });
 
 test('ordinary overlap requires confirmation and remains forceable after occupancy is written', async () => {

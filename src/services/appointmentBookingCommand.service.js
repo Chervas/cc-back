@@ -92,6 +92,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     } else if (existing && metadataObject(previous.import_metadata).program_session) {
       throw bookingError('program_session_replaced', 'Esta cita pertenece al historial de una sesión que ya tiene otra reserva.');
     }
+    await require('./appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous,
+      appointment: values, transaction: tx });
     // Decide under the appointment row lock, not a stale controller read. An
     // active-to-active status update does not rebook or change its professionals.
     if (stateOnly && existing && previous.estado !== 'cancelada' && values.estado !== 'cancelada') {
