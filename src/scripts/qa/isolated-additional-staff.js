@@ -3,16 +3,19 @@
 // Real SQL, synthetic DEV only, rolled back including append-only events.
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
+const path = require('node:path');
 const { MARKER, PATIENT_ID } = require('./prepare-isolated-clinical-fixture');
 async function main() {
   assert.equal(process.env.QA_ISOLATED_CLINICAL_WRITES, MARKER);
-  require('dotenv').config({ quiet: true });
+  require('dotenv').config({ path: path.resolve(__dirname, '../../../.env'), quiet: true });
   assert.equal(process.env.DB_NAME, 'clinicaclick_dev_isolated');
   assert.equal(process.env.DB_USERNAME, 'cc_dev_api');
+  const source = path.resolve(process.argv[2] || path.resolve(__dirname, '../../..'));
+  assert(source.startsWith('/home/ubuntu/wt/back-'));
   const db = require('../../../models');
-  const { mutateAppointmentBooking } = require('../../services/appointmentBookingCommand.service');
-  const { changeAppointmentSupport } = require('../../services/appointmentSupport.service');
-  const { resourceAppointments } = require('../../services/appointmentResourceCalendar.service');
+  const { mutateAppointmentBooking } = require(path.join(source, 'src/services/appointmentBookingCommand.service'));
+  const { changeAppointmentSupport } = require(path.join(source, 'src/services/appointmentSupport.service'));
+  const { resourceAppointments } = require(path.join(source, 'src/services/appointmentResourceCalendar.service'));
   const capabilities = { simple: true, multi: true }, marker = `qa-support-${randomUUID()}`;
   const rollback = Error('QA_SUPPORT_ROLLBACK'), ids = [];
   try {
@@ -65,7 +68,7 @@ async function main() {
     const events = await db.PatientOperationalEvent.findAll({ where: { patient_id: patient.id_paciente,
       event_type: 'appointment.staff_changed' }, attributes: ['metadata'], raw: true });
     assert(!events.some(event => ids.includes(event.metadata?.appointment_id)));
-    console.log(JSON.stringify({ status: 'passed', database: 'isolated_dev', real_sql: true,
+    console.log(JSON.stringify({ status: 'passed', database: 'isolated_dev', source, real_sql: true,
       one_appointment_two_people: true, same_status_and_hold: true, support_busy_for_others: true,
       support_survives_move: true, stale_edit_rejected: true, removal_releases_capacity: true,
       event_transactional: true, rolled_back: true, public_database_touched: false }));
