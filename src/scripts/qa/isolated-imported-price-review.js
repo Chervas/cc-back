@@ -43,6 +43,8 @@ async function main() {
       assert.equal(dto.catalog_price.review_required, false); assert.equal(dto.clinical_config.imported_price_review.reviewed_by, 1);
       assert.equal(dto.clinical_config.imported_price_review.gross_amount, 150);
       await assert.rejects(update({ precio_base: 150, confirm_imported_price: true }), { code: 'imported_price_not_pending' });
+      await assert.rejects(update({ clinical_config: { price_profile: null } }), { code: 'imported_price_profile_required' });
+      await assert.rejects(update({ precio_base: null }), { code: 'imported_price_amount_invalid' });
       const persisted = await find.call(db.Tratamiento, treatment.id_tratamiento, { transaction });
       assert.deepEqual(persisted.clinical_config.imported_price_review, dto.clinical_config.imported_price_review);
       throw rollback;

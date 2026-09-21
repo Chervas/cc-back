@@ -18,6 +18,9 @@ test('import price review is explicit, preserves source and records only the aut
   assert.deepEqual(reviewed.source_price, previous.source_price); assert.equal(previous.fiscal_mapping_pending, true);
   assert.deepEqual(mergeClinicalConfig(reviewed, { imported_price_review: null, fiscal_mapping_pending: true }).imported_price_review, reviewed.imported_price_review);
   assert.throws(() => applyImportedPriceReview(reviewed, reviewed, { confirm: true }), { code: 'imported_price_not_pending' });
+  assert.throws(() => applyImportedPriceReview(reviewed, { ...reviewed, price_profile: null }, { confirm: false }), { code: 'imported_price_profile_required' });
+  assert.throws(() => applyImportedPriceReview(reviewed, reviewed, { amount: null }), { code: 'imported_price_amount_invalid' });
+  assert.equal(applyImportedPriceReview(reviewed, reviewed), reviewed);
 });
 
 test('review rejects implicit, unclassified, missing, rounded or unauthenticated prices; explicit free/exempt is valid', () => {
