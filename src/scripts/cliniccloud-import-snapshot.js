@@ -7,7 +7,7 @@ const path = require('path');
 const { readCsv, writePrivateJson, parseArgs } = require('../lib/cliniccloud-import/io');
 const { dateOnly, localToUtc, utcToLocal, normalizeAppointments, norm, index, hash } = require('../lib/cliniccloud-import/adapter');
 const { sourceReference } = require('../lib/cliniccloud-import/week-appointments');
-const { validatedParallelSources } = require('../lib/cliniccloud-import/parallel-sources');
+const { validatedParallelSources, parallelLocalNoteChanged } = require('../lib/cliniccloud-import/parallel-sources');
 const { validatedStoredRevision } = require('../lib/cliniccloud-import/source-revisions');
 
 function importedDeltaBaseline(row, metadata) {
@@ -96,7 +96,7 @@ async function run(args) {
         const sourceRevision = validatedStoredRevision(r, metadata);
         return { id: r.id_cita, patient_id: r.paciente_id, clinic_id: r.clinica_id, kind: 'appointment', source_system: r.source_system, source_reference: r.source_reference, source_external_id: metadata.source_appointment_id || null, source_contact_id: metadata.source_contact_id || null,
           ...(parallelSources.length ? { parallel_sources: parallelSources,
-            parallel_local_note_changed: norm(r.nota || '') !== norm(parallelSources[0].source.details) } : {}),
+            parallel_local_note_changed: parallelLocalNoteChanged(r, parallelSources) } : {}),
           ...(sourceRevision ? { source_revision: sourceRevision,
             revision_local_note_changed: norm(r.nota || '') !== norm(sourceRevision.current.details) } : {}),
           start_local: utcToLocal(`${r.inicio.replace(' ', 'T')}Z`), end_local: utcToLocal(`${r.fin.replace(' ', 'T')}Z`), status: r.estado,

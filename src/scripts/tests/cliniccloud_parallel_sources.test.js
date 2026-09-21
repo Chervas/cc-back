@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { hash } = require('../../lib/cliniccloud-import/adapter');
 const { sourceReference } = require('../../lib/cliniccloud-import/week-appointments');
-const { prepareParallelBinding, validatedParallelSources } = require('../../lib/cliniccloud-import/parallel-sources');
+const { prepareParallelBinding, validatedParallelSources, parallelLocalNoteChanged } = require('../../lib/cliniccloud-import/parallel-sources');
 const { buildPlan } = require('../../lib/cliniccloud-import/planner');
 function fixture() {
   const source = { kind: 'appointment', source_contact_id: '123', start_local: '2026-09-21T18:00:00',
@@ -106,4 +106,75 @@ test('contradictory input rows in the same calendar still require review even wi
   const rows = planWithBinding(f, { appointments: [a, cancelled] }).actions.filter(action => action.source);
   assert.equal(rows.length, 2);
   assert(rows.every(action => action.action === 'review' && action.reasons.includes('MULTIPLE_DISTINCT_SOURCE_ROWS_SAME_SLOT')));
+});
+
+function jointFixture() {
+  const f = fixture();
+  f.actions[1].source.details = 'Additional source note: joint assessment with two staff';
+  f.live.rows[1].details = f.actions[1].source.details;
+  f.jointVisitConfirmation = { version: 'cliniccloud-joint-visit/1', decision: 'one_joint_visit',
+    patient_id: 7, source_contact_id: '123', start_local: f.actions[0].source.start_local,
+    end_local: f.actions[0].source.end_local, source_row_keys: f.actions.map(a => a.provenance.row_key),
+    source_appointment_ids: ['200', '201'], confirmed_by: 'Synthetic user',
+    confirmation_reference: 'Synthetic explicit response: one joint assessment',
+    recorded_at: '2026-09-21T13:05:00Z', reason: 'Two source entries explicitly confirmed as one joint assessment, not two treatments.' };
+  return f;
+}
+test('explicit source-bound joint confirmation preserves differing notes without assigning staff', () => {
+  const f = jointFixture(), before = structuredClone(f.row), op = prepareParallelBinding(f);
+  const entries = validatedParallelSources(f.row, op.after_metadata);
+  assert.deepEqual(f.row, before);
+  assert.equal(op.after_metadata.cliniccloud_parallel_sources.version, 'cliniccloud-parallel-agendas/2');
+  assert.deepEqual(entries.map(e => e.source.details).sort(), f.actions.map(a => a.source.details).sort());
+  const { cliniccloud_parallel_sources, ...unchanged } = op.after_metadata;
+  assert.deepEqual(unchanged, f.row.import_metadata);
+  f.jointVisitConfirmation.confirmed_by = 'Changed after preparation';
+  assert.equal(cliniccloud_parallel_sources.joint_visit_confirmation.confirmed_by, 'Synthetic user');
+  assert.equal(Object.hasOwn(op, 'doctor_id'), false);
+  assert.equal(Object.hasOwn(op, 'additional_staff_ids'), false);
+});
+test('joint confirmation cannot be omitted, reused for different identities, rows, IDs or intervals', () => {
+  const changes = [f => { delete f.jointVisitConfirmation; }, f => { f.jointVisitConfirmation = {}; },
+    f => { f.jointVisitConfirmation.patient_id = 8; }, f => { f.jointVisitConfirmation.source_contact_id = '124'; },
+    f => { f.jointVisitConfirmation.start_local = '2026-09-21T18:05:00'; },
+    f => { f.jointVisitConfirmation.end_local = '2026-09-21T18:45:00'; },
+    f => { f.jointVisitConfirmation.source_row_keys[1] = 'other-row'; },
+    f => { f.jointVisitConfirmation.source_appointment_ids = ['200', '200']; },
+    f => { f.jointVisitConfirmation.source_appointment_ids = ['200', '202']; },
+    f => { f.jointVisitConfirmation.confirmed_by = ''; }, f => { f.jointVisitConfirmation.confirmation_reference = ''; },
+    f => { f.jointVisitConfirmation.reason = ''; }, f => { f.jointVisitConfirmation.decision = 'two_visits'; },
+    f => { f.jointVisitConfirmation.recorded_at = '2026-09-21T11:00:00Z'; },
+    f => { f.jointVisitConfirmation.recorded_at = '2026-09-21T14:00:00Z'; },
+    f => { f.jointVisitConfirmation.recorded_at = 'invalid'; }];
+  for (const change of changes) { const f = jointFixture(); change(f); assert.throws(() => prepareParallelBinding(f), /BINDING_INVALID/); }
+});
+test('joint confirmation still refuses different treatments, source changes and edited canonical notes', () => {
+  for (const change of [f => { f.actions[1].source.service_key = 'OTHER'; f.live.rows[1].service = 'OTHER'; },
+    f => { f.row.nota = f.actions[1].source.details; }, f => { f.live.rows[1].details = 'Changed source'; },
+    f => { f.live.rows[1].state = 3; }, f => { f.live.captured_at = '2026-09-21T11:00:00Z'; },
+    f => { f.actions[1].patient_id = 8; }]) {
+    const f = jointFixture(); change(f); assert.throws(() => prepareParallelBinding(f), /BINDING_INVALID/);
+  }
+});
+test('canonical note comparison does not depend on lexical ordering of parallel references', () => {
+  const f = jointFixture(), entries = validatedParallelSources(f.row, prepareParallelBinding(f).after_metadata);
+  entries.sort((a, b) => a.source_reference === f.row.source_reference ? 1 : -1);
+  assert.notEqual(entries[0].source_reference, f.row.source_reference);
+  assert.equal(parallelLocalNoteChanged(f.row, entries), false);
+  assert.equal(parallelLocalNoteChanged({ ...f.row, nota: 'Edited locally' }, entries), true);
+  assert.equal(parallelLocalNoteChanged(f.row, []), false);
+  assert.throws(() => parallelLocalNoteChanged({ ...f.row, source_reference: 'unknown' }, entries), /BINDING_INVALID/);
+});
+test('joint provenance is durable, fail-closed and recognized idempotently by the next delta', () => {
+  const f = jointFixture(), metadata = prepareParallelBinding(f).after_metadata;
+  assert.equal(validatedParallelSources(f.row, metadata).length, 2);
+  for (const change of [b => { delete b.joint_visit_confirmation; },
+    b => { b.joint_visit_confirmation.source_appointment_ids[1] = '999'; },
+    b => { b.version = 'cliniccloud-parallel-agendas/1'; }, b => { b.version = 'unknown'; }]) {
+    const bad = structuredClone(metadata), b = bad.cliniccloud_parallel_sources; change(b);
+    const { binding_sha256, ...body } = b; b.binding_sha256 = hash(body);
+    assert.throws(() => validatedParallelSources(f.row, bad), /BINDING_INVALID/);
+  }
+  const rows = planWithBinding(f).actions.filter(a => a.entity === 'appointment');
+  assert.equal(rows.length, 2); assert(rows.every(a => a.action === 'preserve_parallel_source_link' && !a.requires_review));
 });

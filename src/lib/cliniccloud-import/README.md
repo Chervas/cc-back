@@ -150,6 +150,19 @@ Aliases `--mode dry-run` usa el mismo paquete/revisión/backup y camino SQL que
 `apply`, pero revierte toda la transacción y comprueba fichas/campos restaurados.
 Usar diarios distintos para ensayo y aplicación; conservar ambos para replay.
 
+`parallel-sources.js` valida las copias de una visita en agendas distintas.
+La versión 1 exige también notas normalizadas iguales. La versión 2 admite
+dos notas distintas solo con `jointVisitConfirmation`: respuesta expresa de
+una única visita conjunta, autor/referencia/motivo, fecha de registro reciente
+y scope exacto de paciente, contacto, intervalo, dos IDs reales y dos claves de
+fila. Las notas originales permanecen en sus entradas; la nota local se coteja
+con la referencia canónica, no con la primera entrada ordenada. Ambas variantes
+exigen lectura reciente del origen e igualdad de servicio, estado e intervalo.
+No asignan personal, cabinas ni fases y no autorizan solapes: la participación
+de profesionales se valida aparte mediante la reserva canónica. Aplicar en
+una transacción con respaldo, diario, bloqueos y comprobación de reimportación;
+el cambio de metadatos no equivale a una autorización para alterar notas locales.
+
 Secuenciar los ejecutores y re-preparar si cambia el snapshot de sus guardas.
 No ejecutar en paralelo el importador antiguo/manual ni seeds. Los locks de
 filas y del propio importador no constituyen una garantía de unicidad frente

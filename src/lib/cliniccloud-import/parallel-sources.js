@@ -6,6 +6,7 @@ const { hash, norm, localToUtc } = require('./adapter');
 const { sourceReference, ACCOUNT } = require('./week-appointments');
 const { normalizedRow } = require('./appointments-apply');
 const VERSION = 'cliniccloud-parallel-agendas/1';
+const JOINT_VERSION = 'cliniccloud-parallel-agendas/2';
 const keys = ['source_contact_id', 'start_local', 'end_local', 'agenda_key', 'service_key', 'status'];
 const sameKeys = keys.filter(key => key !== 'agenda_key');
 const digest = value => { const { binding_sha256, ...body } = value; return hash(body); };
@@ -13,10 +14,32 @@ const fail = () => { throw Error('PARALLEL_SOURCE_BINDING_INVALID'); };
 const positive = value => /^[1-9]\d*$/.test(String(value)) && Number.isSafeInteger(Number(value));
 const sha = value => /^[a-f0-9]{64}$/.test(value || '');
 
+// An explicit, source-bound confirmation of ONE visit may reconcile two notes.
+// It does not assign the mentioned staff or authorize any resource overlap.
+function validateJointVisit(confirmation, entries, binding) {
+  const first = entries[0]?.source;
+  const sameSet = (values, expected) => Array.isArray(values) && values.length === 2
+    && values.every(v => typeof v === 'string' && v) && new Set(values).size === 2
+    && hash([...values].sort()) === hash([...expected].sort());
+  if (!confirmation || confirmation.version !== 'cliniccloud-joint-visit/1'
+    || confirmation.decision !== 'one_joint_visit' || entries.length !== 2
+    || confirmation.patient_id !== binding.patient_id
+    || confirmation.source_contact_id !== binding.source_contact_id
+    || confirmation.start_local !== first?.start_local || confirmation.end_local !== first?.end_local
+    || !String(confirmation.confirmed_by || '').trim()
+    || !String(confirmation.confirmation_reference || '').trim()
+    || String(confirmation.reason || '').trim().length < 20
+    || !Number.isFinite(Date.parse(confirmation.recorded_at))
+    || Date.parse(confirmation.recorded_at) > Date.parse(binding.reviewed_at)
+    || Date.parse(binding.reviewed_at) - Date.parse(confirmation.recorded_at) > 3600000
+    || !sameSet(confirmation.source_row_keys, entries.map(e => e.provenance.row_key))
+    || !sameSet(confirmation.source_appointment_ids, entries.map(e => e.source_appointment_id))) fail();
+}
+
 function validatedParallelSources(row, metadata) {
   const binding = metadata?.cliniccloud_parallel_sources;
   if (!binding) return [];
-  if (binding.version !== VERSION || binding.source_account !== ACCOUNT || binding.binding_sha256 !== digest(binding)
+  if (![VERSION, JOINT_VERSION].includes(binding.version) || binding.source_account !== ACCOUNT || binding.binding_sha256 !== digest(binding)
     || row.source_system !== 'cliniccloud' || metadata.source_account !== ACCOUNT
     || Number(row.paciente_id) !== binding.patient_id || binding.canonical_reference !== row.source_reference
     || binding.source_contact_id !== metadata.source_contact_id || !positive(binding.patient_id)
@@ -31,7 +54,8 @@ function validatedParallelSources(row, metadata) {
       || typeof source.details !== 'string' || source.source_contact_id !== binding.source_contact_id
       || !positive(source.source_contact_id) || source.status !== 'pendiente'
       || !localToUtc(source.start_local) || !localToUtc(source.end_local) || source.end_local <= source.start_local
-      || sameKeys.some(key => source[key] !== first[key]) || norm(source.details) !== norm(first.details)
+      || sameKeys.some(key => source[key] !== first[key])
+      || (binding.version === VERSION && norm(source.details) !== norm(first.details))
       || sourceReference(source) !== entry.source_reference || refs.has(entry.source_reference)
       || typeof entry.source_appointment_id !== 'string' || !positive(entry.source_appointment_id)
       || ids.has(entry.source_appointment_id) || agendas.has(source.agenda_key)
@@ -39,6 +63,8 @@ function validatedParallelSources(row, metadata) {
       || !String(provenance?.row_key || '').trim()) fail();
     refs.add(entry.source_reference); ids.add(entry.source_appointment_id); agendas.add(source.agenda_key);
   }
+  if (binding.version === JOINT_VERSION) validateJointVisit(binding.joint_visit_confirmation, binding.entries, binding);
+  else if (binding.joint_visit_confirmation !== undefined) fail();
   const canonical = binding.entries.find(entry => entry.source_reference === binding.canonical_reference)?.source;
   const original = metadata.cliniccloud_delta?.source;
   if (!canonical || !original || metadata.cliniccloud_delta.version !== 1
@@ -47,7 +73,7 @@ function validatedParallelSources(row, metadata) {
   return binding.entries;
 }
 
-function prepareParallelBinding({ row: raw, actions, live, liveEvidenceSha256, reviewedBy, now = Date.now() }) {
+function prepareParallelBinding({ row: raw, actions, live, liveEvidenceSha256, reviewedBy, jointVisitConfirmation, now = Date.now() }) {
   const row = normalizedRow(raw), metadata = row.import_metadata;
   if (metadata.cliniccloud_parallel_sources) throw Error('PARALLEL_SOURCE_ALREADY_BOUND');
   if (!Array.isArray(actions) || actions.length < 2 || actions.length > 8 || !sha(liveEvidenceSha256)
@@ -59,7 +85,9 @@ function prepareParallelBinding({ row: raw, actions, live, liveEvidenceSha256, r
     if (action.entity !== 'appointment' || !source || source.validation_errors?.length
       || Number(action.patient_id) !== Number(row.paciente_id)
       || localToUtc(source.start_local) !== row.inicio || localToUtc(source.end_local) !== row.fin
-      || row.estado !== source.status || norm(row.nota || '') !== norm(source.details || '')) fail();
+      || row.estado !== source.status
+      || ((!jointVisitConfirmation || sourceReference(source) === row.source_reference)
+        && norm(row.nota || '') !== norm(source.details || ''))) fail();
     const matches = live.rows.filter(observed => String(observed.contact_id) === source.source_contact_id
       && String(observed.start).replace(' ', 'T') === source.start_local && String(observed.end).replace(' ', 'T') === source.end_local
       && norm(observed.agenda) === source.agenda_key && norm(observed.service) === source.service_key
@@ -69,10 +97,11 @@ function prepareParallelBinding({ row: raw, actions, live, liveEvidenceSha256, r
       source: { ...Object.fromEntries(keys.map(key => [key, source[key]])), details: source.details || '' },
       provenance: action.provenance };
   }).sort((a, b) => a.source_reference.localeCompare(b.source_reference));
-  const body = { version: VERSION, source_account: ACCOUNT, canonical_reference: row.source_reference,
+  const body = { version: jointVisitConfirmation ? JOINT_VERSION : VERSION, source_account: ACCOUNT, canonical_reference: row.source_reference,
     patient_id: Number(row.paciente_id), source_contact_id: metadata.source_contact_id,
     reviewed_by: reviewedBy, reviewed_at: new Date(now).toISOString(),
-    live_captured_at: live.captured_at, live_evidence_sha256: liveEvidenceSha256, entries };
+    live_captured_at: live.captured_at, live_evidence_sha256: liveEvidenceSha256, entries,
+    ...(jointVisitConfirmation ? { joint_visit_confirmation: structuredClone(jointVisitConfirmation) } : {}) };
   const binding = { ...body, binding_sha256: hash(body) };
   const after = { ...metadata, cliniccloud_parallel_sources: binding };
   validatedParallelSources(row, after);
@@ -80,4 +109,11 @@ function prepareParallelBinding({ row: raw, actions, live, liveEvidenceSha256, r
     after_metadata: after, binding_sha256: binding.binding_sha256 };
 }
 
-module.exports = { VERSION, prepareParallelBinding, validatedParallelSources };
+function parallelLocalNoteChanged(row, entries) {
+  if (!entries.length) return false;
+  const canonical = entries.find(e => e.source_reference === row.source_reference);
+  if (!canonical) fail();
+  return norm(row.nota || '') !== norm(canonical.source.details);
+}
+
+module.exports = { VERSION, JOINT_VERSION, prepareParallelBinding, validatedParallelSources, parallelLocalNoteChanged };
