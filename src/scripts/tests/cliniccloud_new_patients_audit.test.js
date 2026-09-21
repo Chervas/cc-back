@@ -26,6 +26,25 @@ function fixture(count = 1) {
   return { sources, live, contacts, appointments, build, review };
 }
 
+test('two given-name + PV intake labels with distinct contacts are not full-name identity evidence', () => {
+  const f=fixture(2);
+  for (const row of f.contacts) {row.values.NOMBRE='Francisco';row.values.APELLIDOS='PV';}
+  const audit=f.build();
+  assert.equal(audit.summary.actions.safe_candidate_for_reviewed_creation,2);
+  const pkg=apply.prepareNewPatients({audit,sources:f.sources,review:f.review(audit),live:f.live});
+  assert.equal(pkg.operations.length,2);
+  assert(!auditCore.nearName('FRANCISCO PV','FRANCISCA PV'));
+  // Phone, email and national identity still prevent creation even with PV.
+  for (const field of ['TELF. MOVIL','EMAIL','DNI']) {
+    const g=fixture(2);
+    for (const row of g.contacts) {row.values.NOMBRE='Francisco';row.values.APELLIDOS='PV';row.values[field]=field==='DNI'?'12345678Z':g.contacts[0].values[field];}
+    assert.equal(g.build().summary.actions.safe_candidate_for_reviewed_creation||0,0);
+  }
+  const longer=fixture(2);
+  for (const row of longer.contacts) {row.values.NOMBRE='Francisco Garcia';row.values.APELLIDOS='PV';}
+  assert.equal(longer.build().summary.actions.safe_candidate_for_reviewed_creation||0,0);
+});
+
 test('latest explicitly dated source prepares a new patient with source proof and no clinical/consent fields', () => {
   const f = fixture(), audit = f.build();
   assert.equal(audit.summary.actions.safe_candidate_for_reviewed_creation, 1);

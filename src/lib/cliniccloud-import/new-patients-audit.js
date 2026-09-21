@@ -5,6 +5,7 @@
 const { hash, norm, dateOnly, normalizeContacts, index } = require('./adapter');
 const { newEvidence } = require('./primary-clinics');
 const { choosePrimaryClinic } = require('./planner');
+const { isIntakePlaceholderName } = require('./intake-placeholder-name');
 const VERSION = 'cliniccloud-new-patients-audit/2';
 
 function sourceWindow(manifest) {
@@ -48,6 +49,7 @@ function creationWithProof(raw,manifest,proof){
 // Deliberately conservative: one insertion, deletion or replacement in a long
 // normalized name, or an omitted given/surname token, requires manual review.
 function nearName(left, right) {
+  if (isIntakePlaceholderName(left) || isIntakePlaceholderName(right)) return false;
   const a = String(left || ''), b = String(right || '');
   if (Math.min(a.replace(/ /g, '').length, b.replace(/ /g, '').length) < 10) return false;
   const at = a.split(' '), bt = b.split(' ');

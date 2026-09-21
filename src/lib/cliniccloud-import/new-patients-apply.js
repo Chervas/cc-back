@@ -2,6 +2,7 @@
 const crypto = require('node:crypto');
 const { hash, norm, dateOnly, localDateTime, localToUtc, normalizeContacts } = require('./adapter');
 const { normalizeHumanName } = require('../name');
+const { isIntakePlaceholderName } = require('./intake-placeholder-name');
 const VERSION = 'cliniccloud-new-patients/1';
 const ACCOUNT = 'cliniccloud-5880';
 const fail = code => { throw new Error(code); };
@@ -22,7 +23,8 @@ function sourceIdentity(raw) { return identityKeys({ name: raw.NOMBRE, surname: 
 function localIdentity(raw) { return identityKeys({ name: raw.nombre, surname: raw.apellidos, phones: [raw.telefono_movil, raw.telefono_secundario], email: raw.email, national_id: raw.dni }); }
 function intersects(a, b) {
   return a.phones.some(phone => b.phones.includes(phone)) || Boolean(a.email && a.email === b.email)
-    || Boolean(a.national_id && a.national_id === b.national_id) || Boolean(a.name.split(' ').length > 1 && (a.name === b.name || a.name.replace(/ /g, '') === b.name.replace(/ /g, '')));
+    || Boolean(a.national_id && a.national_id === b.national_id) || Boolean(!isIntakePlaceholderName(a.name) && !isIntakePlaceholderName(b.name)
+      && a.name.split(' ').length > 1 && (a.name === b.name || a.name.replace(/ /g, '') === b.name.replace(/ /g, '')));
 }
 function sourceCreated(raw, coverage = { start: '2026-08-01', end: '2026-09-05' }) {
   if (dateOnly(coverage.start) !== coverage.start || dateOnly(coverage.end) !== coverage.end || coverage.start > coverage.end) fail('SOURCE_CREATION_COVERAGE_INVALID');
