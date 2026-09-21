@@ -131,6 +131,24 @@ test('creation/edit lock budget before documents; preview explicitly remains non
   assert.doesNotMatch(preview, /\.create\(|\.update\(|LOCK\.UPDATE/);
 });
 
+test('fiscal source selects acceptance transitions, never later signature activity with the same status', async () => {
+  const source = fs.readFileSync(require.resolve('../../services/patientEconomics.service'), 'utf8');
+  const code = source.slice(source.indexOf('async function fiscalPriceProjection('), source.indexOf('async function nextFiscalNumber('));
+  const input = args(), queries = [], inKey = Symbol('in');
+  const run = vm.runInNewContext(`${code}; fiscalPriceProjection`, {
+    parseJson: (v, fallback) => v ?? fallback, Op: { in: inKey, ne: Symbol('ne') }, fiscalPrices: fiscal,
+    EconomicBudgetEvent: { findOne: async query => { queries.push(query);
+      return query.where.event_type?.[inKey]?.includes('accepted') ? input.acceptance
+        : { version_number: 2, metadata: { activity: true } }; } },
+    PatientFiscalDocument: { findAll: async () => [] },
+    roundMoney: n => Math.round(n * 100) / 100, numberValue: n => Number(n || 0),
+  });
+  const result = await run({ budget: { id: 7, clinic_id: 1, patient_id: 3 }, version: input.version,
+    payment: payment([{ target_type: 'budget', amount: 50 }]), payload: { document_type: 'receipt' }, lockSource: false });
+  assert.equal(result.totals.total, 50); assert.equal(queries.length, 2);
+  for (const query of queries) assert.deepEqual([...query.where.event_type[inKey]], ['accepted', 'partially_accepted']);
+});
+
 test('economic PDF respects the isolated Chromium override used by clinical PDF consumers', async () => {
   const source = fs.readFileSync(require.resolve('../../services/economicDocumentPdf.service'), 'utf8');
   const code = source.slice(source.indexOf('async function render('), source.indexOf('async function budgetPdf('));

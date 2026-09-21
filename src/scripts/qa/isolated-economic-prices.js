@@ -79,6 +79,11 @@ async function main() {
       assert.equal(await db.PatientVoucher.count({ where: { budget_id: budget.id }, transaction }), 0);
       await service.transitionBudget({ publicId: first.id, actorId: 1, action: 'present' });
       await service.transitionBudget({ publicId: first.id, actorId: 1, action: 'accept', payload: { send_channel: 'none', signature_channel: 'not_required' } });
+      // Activity keeps the parent's current status but is not a financial
+      // acceptance. It must not supersede the accepted lines/amount.
+      await db.EconomicBudgetEvent.create({ budget_id: budget.id, version_number: 2,
+        event_type: 'signature_request_viewed', from_status: 'accepted', to_status: 'accepted',
+        metadata: { qa_activity_only: true }, actor_id: 1, created_at: new Date() }, { transaction });
       const fiscalPayload = { source_type: 'budget', source_id: first.id, document_type: 'receipt', status: 'draft',
         lines: [{ key: 'forged', description: 'No usar este impuesto', quantity: 99, unit_price: 999, tax_percent: 100 }],
         payment_data: { fiscal_price_source: { forged: true } } };
@@ -123,7 +128,8 @@ async function main() {
         'service-edit-preserves-fiscal-snapshot', 'new-budget-sees-explicit-catalog-change',
         'pending-and-unavailable-reject-with-savepoint-rollback', 'server-fiscal-preview-no-write',
         'partial-receipts-exact-vat', 'fiscal-source-forgery-rejected', 'issued-document-immutable',
-        'both-create-routes-enforce-source-limit', 'actual-payment-exempt-preview', 'full-rollback'] }));
+        'both-create-routes-enforce-source-limit', 'signature-activity-cannot-replace-acceptance',
+        'actual-payment-exempt-preview', 'full-rollback'] }));
   } finally { db.sequelize.transaction = nativeTransaction; await db.sequelize.close(); }
 }
 main().catch(error => { console.error('ISOLATED_ECONOMIC_PRICES_FAILED', error.code || error.name,
