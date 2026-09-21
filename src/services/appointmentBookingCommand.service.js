@@ -54,7 +54,7 @@ function solveLegacy(values, context, force = false) {
 async function mutateAppointmentBooking({ db, appointmentValues, existingAppointmentId = null, persist,
   priorityAcknowledged = false, selections = {}, transaction = null, capabilities = bookingCapabilities(),
   allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false,
-  additionalStaffIds = undefined }) {
+  additionalStaffIds = undefined, supportOnly = false, expectedRange = null }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
   const requestedStaff = normalizeAdditionalStaff(additionalStaffIds);
   const execute = async (tx) => {
@@ -65,6 +65,20 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     if (existingAppointmentId && !existing) throw bookingError('appointment_not_found', 'Cita no encontrada.', null, 404);
     const previous = existing?.toJSON ? existing.toJSON() : (existing || {});
     const values = { ...previous, ...appointmentValues };
+    if (supportOnly) {
+      if (!existing || !expectedRange
+        || !Number.isFinite(new Date(expectedRange.start).getTime()) || !Number.isFinite(new Date(expectedRange.end).getTime())
+        || new Date(previous.inicio).getTime() !== new Date(expectedRange.start).getTime()
+        || new Date(previous.fin).getTime() !== new Date(expectedRange.end).getTime()) {
+        throw bookingError('booking_appointment_changed', 'La cita ha cambiado. Actualízala antes de cambiar el personal.');
+      }
+      if (['cancelada', 'completada', 'no_asistio'].includes(previous.estado)) {
+        throw bookingError('booking_additional_staff_closed', 'Solo puedes cambiar el apoyo en citas abiertas.');
+      }
+      if (requestedStaff === undefined || Object.keys(appointmentValues).some(key => key !== 'updated_by')) {
+        throw bookingError('booking_additional_staff_invalid', 'El cambio de apoyo no puede modificar otros datos de la cita.', null, 400);
+      }
+    }
     const previousStaff = additionalStaffSnapshot(previous);
     if (metadataObject(previous.import_metadata).additional_staff && !previousStaff) {
       throw bookingError('booking_additional_staff_invalid', 'Revisa el personal de apoyo de esta cita antes de modificarla.');
@@ -197,12 +211,13 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
         const canForce = !extraStaff.length && !configuredProfile && !patientConflict && !!solveLegacy(values, context, true);
         throw bookingError('booking_unavailable', 'El hueco ya no está disponible o no cumple el perfil del tratamiento. Actualiza las propuestas.', { can_force: canForce });
       }
-      assertPriorityAcknowledgement(solution, priorityAcknowledged);
+      const acknowledged = priorityAcknowledged || (supportOnly && previousMetadata.booking?.priority_acknowledged === true);
+      assertPriorityAcknowledgement(solution, acknowledged);
       if (configuredProfile) {
         values.doctor_id = solution.phases[0].doctor_ids[0];
         values.instalacion_id = solution.phases[0].installation_id;
         importMetadata.booking = { version: 1, profile: configuredProfile, phases: solution.phases,
-          warnings: solution.warnings, priority_acknowledged: priorityAcknowledged === true };
+          warnings: solution.warnings, priority_acknowledged: acknowledged === true };
         values.import_metadata = importMetadata;
       }
       if (extraStaff.length) {

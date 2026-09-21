@@ -38,6 +38,7 @@ const {
 } = require('../services/patientContact.service');
 const {
   APPOINTMENT_STATUS_EVENT_TYPE,
+  APPOINTMENT_STAFF_EVENT_TYPE,
   serializeAppointmentStatusActivity,
 } = require('../services/appointmentActivity.service');
 const {
@@ -1267,7 +1268,7 @@ exports.getPacienteActivity = async (req, res) => {
             where: {
               patient_id: pacienteId,
               clinic_id: { [Op.in]: readableClinicIds },
-              event_type: { [Op.in]: [...Object.values(PATIENT_EVENT_TYPES), APPOINTMENT_STATUS_EVENT_TYPE] },
+              event_type: { [Op.in]: [...Object.values(PATIENT_EVENT_TYPES), APPOINTMENT_STATUS_EVENT_TYPE, APPOINTMENT_STAFF_EVENT_TYPE] },
             },
             attributes: [
               'id',
@@ -1335,7 +1336,7 @@ exports.getPacienteActivity = async (req, res) => {
     };
 
     for (const event of operationalEvents) {
-      if (event.event_type === APPOINTMENT_STATUS_EVENT_TYPE) {
+      if (event.event_type === APPOINTMENT_STATUS_EVENT_TYPE || event.event_type === APPOINTMENT_STAFF_EVENT_TYPE) {
         const actor = usuariosById.get(Number(event.actor_user_id));
         items.push(serializeAppointmentStatusActivity(event, {
           patientId: pacienteId,

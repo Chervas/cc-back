@@ -17,6 +17,7 @@ router.patch('/:id/estado', authMiddleware, citasController.updateCitaEstado);
 router.patch('/:id/cambio-solicitado/resolver', authMiddleware, citasController.resolveRequestedAppointmentChange);
 router.patch('/:id/nota', authMiddleware, citasController.updateCitaNota);
 router.patch('/:id/reagendar', authMiddleware, citasController.reagendarCita);
+router.patch('/:id/personal-apoyo', authMiddleware, citasController.updateCitaSupport);
 router.delete('/:id', authMiddleware, citasController.deleteCita);
 router.get('/:id', authMiddleware, citasController.getCitaById);
 router.get('/', authMiddleware, citasController.getCitas);
