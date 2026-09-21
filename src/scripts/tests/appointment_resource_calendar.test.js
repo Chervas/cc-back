@@ -4,8 +4,19 @@ const assert = require('node:assert/strict');
 const { resourceAppointments, resourceInstallationBlocks } = require('../../services/appointmentResourceCalendar.service');
 const Op = { ne: Symbol('ne'), lt: Symbol('lt'), gt: Symbol('gt'), in: Symbol('in'), or: Symbol('or') };
 const start = '2026-10-05T09:00:00Z', end = '2026-10-05T10:00:00Z';
+test('SQL profile marker preserves JSON paths without opening a database connection', async () => {
+  const Sequelize = require('sequelize');
+  const sequelize = new Sequelize('offline', 'offline', 'offline', { dialect: 'mysql', logging: false });
+  try {
+    const attribute = require('../../services/appointmentBookingAvailability.service').protectedBookingAttribute({ Sequelize }, 'appointment');
+    const sql = sequelize.getQueryInterface().queryGenerator.handleSequelizeMethod(attribute[0]);
+    assert.match(sql, /'\$\.booking'/);
+    assert.match(sql, /'\$\.program_session'/);
+    assert.doesNotMatch(sql, /\$\$/);
+  } finally { await sequelize.close(); }
+});
 function fixture() {
-  return { Sequelize: { Op, fn: (name, ...args) => ({ name, args }), col: name => ({ col: name }) }, CitaPaciente: { findAll: async () => [
+  return { Sequelize: { Op, fn: (name, ...args) => ({ name, args }), col: name => ({ col: name }), literal: value => ({ literal: value }) }, CitaPaciente: { findAll: async () => [
     { id_cita: 1, clinica_id: 72, doctor_id: 5, inicio: start, fin: end },
     { id_cita: 2, clinica_id: 72, doctor_id: 5, inicio: start, fin: end },
   ] }, AppointmentBookingOccupancy: { findAll: async () => [
