@@ -313,6 +313,15 @@ exports.createPatientFiscalDocument = asyncHandler(async (req, res) => {
   res.status(201).json(document);
 });
 
+exports.previewPatientFiscalDocument = asyncHandler(async (req, res) => {
+  const clinicId = await requireClinicFeature(req, 'billing.documents.manage', req.body.clinic_id ?? req.body.clinica_id);
+  const preview = await economics.previewPatientFiscalDocument({
+    patientIdentifier: req.params.patientId, clinicId, payload: req.body,
+  });
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json(preview);
+});
+
 exports.downloadBudgetPdf = asyncHandler(async (req, res) => {
   await requireBudgetFeature(req, 'patients.view');
   const result = await economicDocumentPdf.budgetPdf({ publicId: req.params.budgetId });

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 // Exercise actual service writes and MySQL JSON serialization using only the
-// existing isolated, fictitious clinic. Every write is rolled back. No HTTP,
-// signature request, payment, PDF, message or clinical appointment is created.
+// existing isolated, fictitious clinic. Every write is rolled back, including
+// synthetic payments and fiscal documents. No HTTP, signature request, stored
+// PDF, message or clinical appointment is created.
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
@@ -29,9 +30,11 @@ async function main() {
     const patient = await db.Paciente.findOne({ where: { public_id: PATIENT_ID, clinica_id: 1 } });
     assert(patient);
     const before = await db.EconomicBudget.count({ where: { clinic_id: 1 } });
+    const fiscalBefore = await db.PatientFiscalDocument.count({ where: { clinic_id: 1 } });
+    const paymentsBefore = await db.EconomicPayment.count({ where: { clinic_id: 1 } });
     await assert.rejects(nativeTransaction(async transaction => {
       // Keep the service's own transactions and rollback semantics as real
-      // savepoints under one outer transaction that can never commit.
+// savepoints under one outer transaction that can never commit.
       db.sequelize.transaction = (options, callback) => {
         if (typeof options === 'function') { callback = options; options = {}; }
         return nativeTransaction({ ...options, transaction }, callback);
@@ -74,15 +77,53 @@ async function main() {
       assert.equal(await db.EconomicBudget.count({ where: { clinic_id: 1 }, transaction }), count);
       assert.equal(await db.EconomicPayment.count({ where: { budget_id: budget.id }, transaction }), 0);
       assert.equal(await db.PatientVoucher.count({ where: { budget_id: budget.id }, transaction }), 0);
+      await service.transitionBudget({ publicId: first.id, actorId: 1, action: 'present' });
+      await service.transitionBudget({ publicId: first.id, actorId: 1, action: 'accept', payload: { send_channel: 'none', signature_channel: 'not_required' } });
+      const fiscalPayload = { source_type: 'budget', source_id: first.id, document_type: 'receipt', status: 'draft',
+        lines: [{ key: 'forged', description: 'No usar este impuesto', quantity: 99, unit_price: 999, tax_percent: 100 }],
+        payment_data: { fiscal_price_source: { forged: true } } };
+      const fiscalArgs = { patientIdentifier: PATIENT_ID, clinicId: 1, actorId: 1, payload: fiscalPayload };
+      const preview = await service.previewPatientFiscalDocument(fiscalArgs);
+      assert.equal(preview.totals.total, 234.9); assert.equal(preview.totals.taxes, 40.77); assert.equal(preview.lines_locked, true);
+      assert.equal(await db.PatientFiscalDocument.count({ where: { budget_id: budget.id }, transaction }), 0);
+      const receipt = await service.createPatientFiscalDocument({ ...fiscalArgs, payload: { ...fiscalPayload, source_amount: 100 } });
+      assert.equal(receipt.totals.total, 100); assert.equal(receipt.totals.taxes, 17.36);
+      assert.equal(receipt.lines[0].price_semantics, 'gross_tax_included');
+      assert.equal(receipt.payment_data.fiscal_price_source.schema_version, 1);
+      const persistedReceipt = await db.PatientFiscalDocument.findOne({ where: { public_id: receipt.id }, transaction });
+      assert.equal(persistedReceipt.payment_data.fiscal_price_source.budget_version, 2);
+      // Both creation endpoints share the source limits. Updating a draft cannot
+      // forge its frozen source or reinterpret the gross price as a net amount.
+      const editedReceipt = await service.updateFiscalDocument({ publicId: receipt.id, actorId: 1,
+        payload: { status: 'issued', lines: fiscalPayload.lines, payment_data: { fiscal_price_source: { forged: true } } } });
+      assert.equal(editedReceipt.totals.total, 100); assert.equal(editedReceipt.totals.taxes, 17.36);
+      await assert.rejects(service.createFiscalDocument({ publicId: first.id, actorId: 1,
+        payload: { ...fiscalPayload, source_amount: 135 } }), { code: 'fiscal_source_amount_exceeded' });
+      const remainder = await service.createFiscalDocument({ publicId: first.id, actorId: 1, payload: { ...fiscalPayload, source_amount: 134.9 } });
+      assert.equal(Math.round((remainder.totals.taxes + receipt.totals.taxes) * 100), 4077);
+      await assert.rejects(service.updateFiscalDocument({ publicId: receipt.id, actorId: 1, payload: { status: 'draft' } }), { code: 'fiscal_document_not_editable' });
+      // A separate accepted offer demonstrates a real payment, all rolled back.
+      await service.transitionBudget({ publicId: next.id, actorId: 1, action: 'present' });
+      await service.transitionBudget({ publicId: next.id, actorId: 1, action: 'accept', payload: { send_channel: 'none', signature_channel: 'not_required' } });
+      const paid = await service.createPayment({ publicId: next.id, actorId: 1, payload: { amount: 50, method: 'cash',
+        allocations: [{ target_type: 'budget', amount: 50 }] } });
+      const paymentPreview = await service.previewPatientFiscalDocument({ ...fiscalArgs,
+        payload: { source_type: 'payment', source_id: paid.id, document_type: 'receipt' } });
+      assert.equal(paymentPreview.totals.total, 50); assert.equal(paymentPreview.totals.taxes, 0);
+      assert(paymentPreview.lines[0].exemption_reason);
       throw rollback;
     }), error => error === rollback);
     db.sequelize.transaction = nativeTransaction;
     assert.equal(await db.EconomicBudget.count({ where: { clinic_id: 1 } }), before);
     assert.equal(await db.Tratamiento.count({ where: { codigo: marker } }), 0);
+    assert.equal(await db.PatientFiscalDocument.count({ where: { clinic_id: 1 } }), fiscalBefore);
+    assert.equal(await db.EconomicPayment.count({ where: { clinic_id: 1 } }), paymentsBefore);
     log(JSON.stringify({ status: 'passed', database: 'isolated-dev-only', persistedRows: 0,
       checks: ['service-create-gross-budget', 'real-json-roundtrip', 'global-discount-tax-reconciliation',
         'service-edit-preserves-fiscal-snapshot', 'new-budget-sees-explicit-catalog-change',
-        'pending-and-unavailable-reject-with-savepoint-rollback', 'no-payments-or-vouchers', 'full-rollback'] }));
+        'pending-and-unavailable-reject-with-savepoint-rollback', 'server-fiscal-preview-no-write',
+        'partial-receipts-exact-vat', 'fiscal-source-forgery-rejected', 'issued-document-immutable',
+        'both-create-routes-enforce-source-limit', 'actual-payment-exempt-preview', 'full-rollback'] }));
   } finally { db.sequelize.transaction = nativeTransaction; await db.sequelize.close(); }
 }
 main().catch(error => { console.error('ISOLATED_ECONOMIC_PRICES_FAILED', error.code || error.name,
