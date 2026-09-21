@@ -69,7 +69,11 @@ function assertPriorityAcknowledgement(solution, acknowledged) {
   if (solution?.requires_priority_acknowledgement && acknowledged !== true) {
     throw bookingError('booking_priority_confirmation_required',
       'La cita la atenderá un profesional que no es el prioritario. Confirma si deseas agendarla de todos modos.',
-      { warnings: solution.warnings, can_force: false });
+      { warnings: (solution.warnings || []).map(warning => {
+        const phase = solution.phases?.find(item => item.key === warning.phase_key);
+        const index = phase?.doctor_ids?.indexOf(warning.doctor_id) ?? -1;
+        return { ...warning, ...(index >= 0 && phase.doctor_names?.[index] ? { doctor_name: phase.doctor_names[index] } : {}) };
+      }), can_force: false });
   }
 }
 
