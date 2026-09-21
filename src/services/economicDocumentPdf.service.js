@@ -378,12 +378,16 @@ async function render(html) {
     || process.env.CHROME_PATH
     || process.env.CHROMIUM_PATH
     || '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
-  const browser = await puppeteer.launch({
-    executablePath,
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
+  let browser;
   try {
+    browser = await puppeteer.launch({
+      executablePath,
+      headless: true,
+      // Private IPC avoids a random localhost debugging port, which the
+      // isolated service correctly cannot reach under its egress policy.
+      pipe: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    });
     const page = await browser.newPage();
     await page.setRequestInterception(true);
     page.on('request', (request) => {
@@ -397,8 +401,10 @@ async function render(html) {
       printBackground: true,
       preferCSSPageSize: true,
     }));
+  } catch {
+    throw domainError(503, 'economic_pdf_generation_failed', 'No se ha podido generar el PDF. Inténtalo de nuevo o avisa al administrador.');
   } finally {
-    await browser.close();
+    if (browser) await browser.close();
   }
 }
 

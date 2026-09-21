@@ -142,6 +142,12 @@ test('economic PDF respects the isolated Chromium override used by clinical PDF 
       puppeteer: { launch: async options => { launched = options; return { newPage: async () => page, close: async () => { closed = true; } }; } } });
     assert.equal((await render('<p>Ficticio</p>')).toString(), '%PDF-test');
     assert.equal(launched.executablePath, env.CHROMIUM_EXECUTABLE_PATH || env.CHROME_PATH || env.CHROMIUM_PATH);
+    assert.equal(launched.pipe, true);
     assert.equal(closed, true);
   }
+  const failing = vm.runInNewContext(`${code}; render`, { process: { env: {} },
+    puppeteer: { launch: async () => { throw Error('Internal private browser path'); } },
+    domainError: (statusCode, code, message) => Object.assign(Error(message), { statusCode, code }),
+  });
+  await assert.rejects(failing('<p>QA</p>'), { statusCode: 503, code: 'economic_pdf_generation_failed' });
 });
