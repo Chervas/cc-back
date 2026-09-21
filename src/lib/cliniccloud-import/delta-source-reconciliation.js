@@ -10,7 +10,20 @@ const keys=['source_contact_id','start_local','end_local','agenda_key','service_
 const clinical=r=>({patient:r.paciente_id,clinic:r.clinica_id,doctor:r.doctor_id,room:r.instalacion_id,treatment:r.tratamiento_id,note:r.nota,type:r.tipo_cita});
 const fail=()=>{throw Error('DELTA_SOURCE_RECONCILIATION_INVALID')};
 const mins=(start,end)=>(Date.parse(localToUtc(end))-Date.parse(localToUtc(start)))/60000;
-function prepareDeltaReconciliation({before:raw,source,originalLive,history,reviewedBy,reason,reviewedMinutes,now=Date.now()}){
+// A source's virtual cabin can change without moving the already documented
+// physical room. This never authorizes a change of professional/source clinic.
+function virtualAgendaChange(previous,current,review,assignment){
+ if(previous===current){if(review!==undefined)fail();return null;}
+ if(!review||review.previous!==previous||review.current!==current
+  ||![previous,current].every(name=>/^CABINA [1-9]\d*\b/.test(name))
+  ||!Number.isSafeInteger(review.installation_id)||review.installation_id<=0
+  ||!String(review.reason||'').trim()||assignment?.version!==1
+  ||assignment.installation_id!==review.installation_id||assignment.automation_policy!=='hold'
+  ||!['package_sha256','operation_sha256'].every(key=>/^[a-f0-9]{64}$/.test(assignment[key]||'')))fail();
+ return {previous,current,installation_id:review.installation_id,reason:review.reason,
+  physical_assignment:assignment,physical_assignment_sha256:hash(assignment)};
+}
+function prepareDeltaReconciliation({before:raw,source,originalLive,history,reviewedBy,reason,reviewedMinutes,reviewedAgenda,now=Date.now()}){
  const before=normalizedRow(raw),m=before.import_metadata,baseline=m.cliniccloud_delta?.source;
  if(before.source_system!=='cliniccloud'||![66,72].includes(before.clinica_id)||before.estado!=='pendiente'
   ||before.updated_by||before.voucher_id||before.lead_intake_id||before.es_provisional||before.hold_expires_at
@@ -36,9 +49,10 @@ function prepareDeltaReconciliation({before:raw,source,originalLive,history,revi
  if(patients.length!==1||!Array.isArray(patients[0].rows))fail();
  const found=patients[0].rows.filter(r=>String(r.idCita)===id);if(found.length!==1)fail();const r=found[0];
  if(Number(r.idEmpresa)!==5880||String(r.idContacto)!==source.source_contact_id||Number(r.estado)!==0
-  ||r.conceptos?.length!==1||norm(r.conceptos[0].asunto)!==source.service_key||norm(r.detalles)!==norm(source.details)
-  ||norm(r.agenda?.nombre)!==source.agenda_key)fail();
- const current={...baseline,start_local:localDateTime(r.fechaIni,r.horaIni),end_local:localDateTime(r.fechaFin,r.horaFin),details:source.details};
+  ||r.conceptos?.length!==1||norm(r.conceptos[0].asunto)!==source.service_key||norm(r.detalles)!==norm(source.details))fail();
+ const agenda=norm(r.agenda?.nombre),agendaChange=virtualAgendaChange(source.agenda_key,agenda,reviewedAgenda,m.cliniccloud_cabin_assignment);
+ if(agendaChange&&before.instalacion_id!==agendaChange.installation_id)fail();
+ const current={...baseline,start_local:localDateTime(r.fechaIni,r.horaIni),end_local:localDateTime(r.fechaFin,r.horaFin),agenda_key:agenda,details:source.details};
  if(!localToUtc(current.start_local)||!localToUtc(current.end_local)||current.start_local<'2026-09-01'||current.end_local>='2027-01-01'
   ||current.end_local<=current.start_local||Date.parse(localToUtc(current.start_local))<now
   ||current.start_local===source.start_local||mins(current.start_local,current.end_local)>1440
@@ -49,7 +63,8 @@ function prepareDeltaReconciliation({before:raw,source,originalLive,history,revi
   original_observation_sha256:hash(originalLive),source_history_row_sha256:hash(r),live_evidence_sha256:hash(history),
   original_observed_at:originalLive.captured_at,live_captured_at:history.captured_at,reviewed_at:new Date(now).toISOString(),reviewed_by:reviewedBy,reason,
   reviewed_minutes:reviewedMinutes,previous:{start_utc:before.inicio,end_utc:before.fin,status:before.estado},current,
-  entries:[{source_reference:before.source_reference,source_appointment_id:id,source:{...baseline,details:source.details},provenance:source.provenance}],automation_policy:'hold'};
+  entries:[{source_reference:before.source_reference,source_appointment_id:id,source:{...baseline,details:source.details},provenance:source.provenance}],automation_policy:'hold',
+  ...(agendaChange?{source_agenda_change:agendaChange}:{})};
  return {...body,receipt_sha256:hash(body)};
 }
 function storedDeltaReconciliation(row,m){
@@ -59,9 +74,12 @@ function storedDeltaReconciliation(row,m){
   ||m.source_appointment_id!==r.source_appointment_id||m.source_contact_id!==r.source_contact_id||m.source_account!==ACCOUNT
   ||hash(m.cliniccloud_delta)!==r.original_delta_sha256||r.entries.length!==1||!entry
   ||sourceReference(entry.source)!==r.source_reference||entry.source_appointment_id!==r.source_appointment_id
-  ||r.automation_policy!=='hold'||keys.filter(k=>!['start_local','end_local'].includes(k)).some(k=>r.current[k]!==entry.source[k])
+  ||r.automation_policy!=='hold'||keys.filter(k=>!['start_local','end_local','agenda_key'].includes(k)).some(k=>r.current[k]!==entry.source[k])
   ||r.current.status!=='pendiente'||r.current.details!==entry.source.details||!localToUtc(r.current.start_local)||!localToUtc(r.current.end_local)
   ||r.reviewed_minutes.previous!==mins(entry.source.start_local,entry.source.end_local)||r.reviewed_minutes.current!==mins(r.current.start_local,r.current.end_local))fail();
+ const change=r.source_agenda_change;
+ const rebuilt=virtualAgendaChange(entry.source.agenda_key,r.current.agenda_key,change,change?.physical_assignment);
+ if(change&&hash(rebuilt)!==hash(change))fail();
  return r;
 }
 function patchDeltaReconciliation(before,receipt,now=Date.now()){

@@ -37,6 +37,50 @@ test('empty source notes do not permit a local note or whitespace edit',()=>{
   assert.throws(()=>prepareDeltaReconciliation(f),/INVALID/);
  }
 });
+function virtualCabinFixture(){
+ const f=fixture();f.source.agenda_key='CABINA 4 (PRESOTERAPIA)';
+ f.before.import_metadata.cliniccloud_delta.source.agenda_key=f.source.agenda_key;
+ f.before.source_reference=sourceReference(f.source);f.originalLive.rows[0].agenda=f.source.agenda_key;
+ f.history.patients[0].rows[0].agenda.nombre='Cabina 3 (Carboxiterapia)';
+ f.before.instalacion_id=84;f.before.import_metadata.cliniccloud_cabin_assignment={version:1,installation_id:84,
+  package_sha256:'c'.repeat(64),operation_sha256:'d'.repeat(64),automation_policy:'hold'};
+ f.reviewedAgenda={previous:f.source.agenda_key,current:'CABINA 3 (CARBOXITERAPIA)',installation_id:84,reason:'Source virtual lanes differ; written physical room unchanged'};
+ return f;
+}
+test('reviewed virtual cabin change preserves the documented physical room and original CSV identity',()=>{
+ const f=virtualCabinFixture(),receipt=prepareDeltaReconciliation(f),after=patchDeltaReconciliation(f.before,receipt,f.now);
+ assert.equal(after.instalacion_id,84);assert.equal(after.doctor_id,f.before.doctor_id);
+ assert.equal(receipt.current.agenda_key,f.reviewedAgenda.current);assert.equal(receipt.entries[0].source.agenda_key,f.source.agenda_key);
+ assert.deepEqual(receipt.source_agenda_change.physical_assignment,f.before.import_metadata.cliniccloud_cabin_assignment);
+ assert.equal(reconciliationChanged(after,receipt),false);assert.equal(storedDeltaReconciliation(after,after.import_metadata),receipt);
+});
+for(const[name,mutate]of[
+ ['unreviewed virtual lane',f=>delete f.reviewedAgenda],
+ ['different previous lane',f=>f.reviewedAgenda.previous='CABINA 8'],
+ ['different current lane',f=>f.reviewedAgenda.current='CABINA 8'],
+ ['undocumented physical room',f=>delete f.before.import_metadata.cliniccloud_cabin_assignment],
+ ['different physical room',f=>f.before.instalacion_id=85],
+ ['missing documentary assignment receipt',f=>delete f.before.import_metadata.cliniccloud_cabin_assignment.operation_sha256],
+ ['doctor agenda is not a virtual cabin',f=>{f.history.patients[0].rows[0].agenda.nombre='Doctor';f.reviewedAgenda.current='DOCTOR'}],
+ ['unexplained source lane change',f=>f.reviewedAgenda.reason=''],
+])test('rejects '+name,()=>{const f=virtualCabinFixture();mutate(f);assert.throws(()=>prepareDeltaReconciliation(f),/INVALID/)});
+test('virtual lane receipt cannot silently lose or alter its documented physical evidence',()=>{
+ const f=virtualCabinFixture(),receipt=prepareDeltaReconciliation(f),after=patchDeltaReconciliation(f.before,receipt,f.now);
+ for(const mutate of [r=>delete r.source_agenda_change,r=>r.source_agenda_change.physical_assignment_sha256='e'.repeat(64),r=>r.source_agenda_change.installation_id=85]){
+  const m=structuredClone(after.import_metadata);mutate(m.cliniccloud_delta_source_reconciliation);
+  const {receipt_sha256,...body}=m.cliniccloud_delta_source_reconciliation;m.cliniccloud_delta_source_reconciliation.receipt_sha256=hash(body);
+  assert.throws(()=>storedDeltaReconciliation(after,m),/INVALID/);
+ }
+ const edited={...after,instalacion_id:85};assert.equal(reconciliationChanged(edited,receipt),true);
+});
+test('CSV replay with the old virtual cabin preserves the reconciled date and physical room',()=>{
+ const f=virtualCabinFixture(),receipt=prepareDeltaReconciliation(f),after=patchDeltaReconciliation(f.before,receipt,f.now);
+ const local={id:9,patient_id:7,clinic_id:66,source_system:'cliniccloud',...receipt.current,source_reconciliation:receipt,reconciliation_local_changed:reconciliationChanged(after,receipt)};
+ const plan=buildPlan({sourceAccount:'cliniccloud-5880',coverage:{start:'2026-09-01',end:'2026-12-31'},contacts:[{source_contact_id:'77',fields:{}}],appointments:[f.source],snapshot:{source_account:'cliniccloud-5880',complete_for:{clinic_ids:[66,72]},patients:[{id:7,source_contact_ids:['77'],fields:{}}],appointments:[local]}});
+ const decision=plan.actions.find(a=>a.source?.kind==='appointment');
+ assert.equal(decision.action,'preserve_reconciled_legacy_source');assert.equal(decision.local_id,9);
+ assert.equal(after.instalacion_id,84);assert.deepEqual(after.import_metadata.cliniccloud_delta,f.before.import_metadata.cliniccloud_delta);
+});
 for(const [name,mutate]of [
  ['wrong old source ID',f=>f.originalLive.rows[0].appointment_id=901],['absent older observation',f=>f.originalLive.rows=[]],
  ['ambiguous old source',f=>f.originalLive.rows.push(structuredClone(f.originalLive.rows[0]))],['old observation newer than current',f=>f.originalLive.captured_at='2026-09-21T21:01:00Z'],
