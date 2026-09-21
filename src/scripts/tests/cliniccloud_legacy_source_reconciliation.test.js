@@ -38,6 +38,63 @@ test('explicit source cancellation retains date, source ID, notes and history', 
   assert.equal(after.estado, 'cancelada'); assert.equal(after.inicio, f.before.inicio); assert.equal(after.nota, f.before.nota);
 });
 
+function durationFixture() {
+  const f = fixture();
+  f.sources = [f.sources[0]];
+  const raw = f.before.import_metadata.raw;
+  Object.assign(raw, { fechaIni: '2026-09-22', fechaFin: '2026-09-22', horaIni: '16:00:00', horaFin: '17:00:00' });
+  f.before.inicio = localToUtc('2026-09-22T16:00:00');
+  f.before.fin = localToUtc('2026-09-22T17:00:00');
+  Object.assign(f.sources[0], { start_local: '2026-09-22T16:00:00', end_local: '2026-09-22T17:00:00' });
+  f.history.patients[0].rows = [{ ...f.history.patients[0].rows[0], fechaIni: '2026-09-22', fechaFin: '2026-09-22', horaIni: '16:00:00', horaFin: '16:30:00' }];
+  f.originalLive = { source_account: 'cliniccloud-5880', captured_at: '2026-09-21T10:00:00Z', rows: [{
+    appointment_id: '900', contact_id: '901', state: 0, start: '2026-09-22 16:00:00', end: '2026-09-22 17:00:00',
+    agenda: 'Room A', service: 'Service', details: 'Synthetic note',
+  }] };
+  f.reviewedMinutes = { previous: 60, current: 30, reason: 'Explicitly reviewed source-only duration change; do not infer another procedure.' };
+  return f;
+}
+test('reviewed duration-only change binds the unchanged CSV to the same ID and preserves clinical data and HOLD', () => {
+  const f = durationFixture(), receipt = prepareLegacyReconciliation(f), after = patchForLegacyReconciliation(f.before, receipt, f.now);
+  assert.equal(after.inicio, f.before.inicio);
+  assert.equal(after.fin, localToUtc('2026-09-22T16:30:00'));
+  assert.equal(receipt.entries[0].source.end_local, '2026-09-22T17:00:00');
+  assert.equal(receipt.current.end_local, '2026-09-22T16:30:00');
+  for (const key of ['id_cita', 'paciente_id', 'clinica_id', 'doctor_id', 'instalacion_id', 'tratamiento_id', 'nota', 'tipo_cita', 'estado']) assert.equal(after[key], f.before[key]);
+  assert.deepEqual(storedLegacyReconciliation(after, after.import_metadata), receipt);
+  assert.equal(reconciliationChanged(after, receipt), false);
+  assert.equal(after.import_metadata.notification_suppression.day_before, true);
+});
+for (const [name, alter] of [
+  ['missing old observation', f => { delete f.originalLive; }],
+  ['missing duration review', f => { delete f.reviewedMinutes; }],
+  ['wrong previous minutes', f => { f.reviewedMinutes.previous = 45; }],
+  ['wrong new minutes', f => { f.reviewedMinutes.current = 25; }],
+  ['missing reason', f => { f.reviewedMinutes.reason = ''; }],
+  ['old observation not prior', f => { f.originalLive.captured_at = f.history.captured_at; }],
+  ['old observation another account', f => { f.originalLive.source_account = 'other'; }],
+  ['old observation another source ID', f => { f.originalLive.rows[0].appointment_id = '999'; }],
+  ['ambiguous old observation', f => { f.originalLive.rows.push(structuredClone(f.originalLive.rows[0])); }],
+  ['old observation another note', f => { f.originalLive.rows[0].details = 'Another'; }],
+  ['old observation another state', f => { f.originalLive.rows[0].state = -2; }],
+  ['same start is required', f => { f.history.patients[0].rows[0].horaIni = '16:05:00'; }],
+  ['source agenda change', f => { f.history.patients[0].rows[0].agenda.nombre = 'Room C'; }],
+  ['source cancellation', f => { f.history.patients[0].rows[0].estado = -2; }],
+  ['source procedure change', f => { f.history.patients[0].rows[0].conceptos[0].asunto = 'Another'; }],
+  ['ambiguous parallel source', f => { f.sources.push(structuredClone(f.sources[0])); }],
+  ['zero duration', f => { f.history.patients[0].rows[0].horaFin = '16:00:00'; f.reviewedMinutes.current = 0; }],
+]) test(`duration revision rejects ${name}`, () => { const f = durationFixture(); alter(f); assert.throws(() => prepareLegacyReconciliation(f), /INVALID/); });
+test('rehashed duration receipt cannot invent minutes, baseline, observation order or a changed clinical act', () => {
+  const f = durationFixture(), after = patchForLegacyReconciliation(f.before, prepareLegacyReconciliation(f), f.now);
+  for (const alter of [r => { r.duration_revision.current_minutes = 31; }, r => { r.duration_revision.reason = ''; },
+    r => { r.duration_revision.original_row_sha256 = ''; }, r => { r.current.agenda_key = 'ROOM C'; },
+    r => { r.duration_revision.original_observed_at = r.live_captured_at; }, r => { r.previous.end_utc = '2026-09-22T14:59:00.000Z'; }]) {
+    const m = structuredClone(after.import_metadata), r = m.cliniccloud_legacy_source_reconciliation;
+    alter(r); delete r.receipt_sha256; r.receipt_sha256 = hash(r);
+    assert.throws(() => storedLegacyReconciliation(after, m), /INVALID/);
+  }
+});
+
 function movedOutFixture(date = '2026-10-27') {
   const f = fixture();
   Object.assign(f.before.import_metadata.raw, { fechaIni: '2026-09-22', fechaFin: '2026-09-22' });
@@ -113,7 +170,7 @@ test('receipt corruption and changed stored identity are rejected; later clinica
   assert.equal(reconciliationChanged({ ...after, nota: 'Later note' }, r), true);
   assert.throws(() => patchForLegacyReconciliation(f.before, r, f.now + 3600000), /INVALID/);
 });
-for (const [direction, factory] of [['into week', fixture], ['out of week', movedOutFixture]])
+for (const [direction, factory] of [['into week', fixture], ['out of week', movedOutFixture], ['duration-only revision', durationFixture]])
 test(`CSV replay ${direction} preserves a single local ID for both aliases and detects later local/source changes`, () => {
   const f = factory(), r = prepareLegacyReconciliation(f);
   const local = { id: 9, patient_id: 7, clinic_id: 66, source_system: 'cliniccloud', ...r.current,
@@ -122,7 +179,7 @@ test(`CSV replay ${direction} preserves a single local ID for both aliases and d
     contacts: [{ source_contact_id: '901', fields: {} }], appointments: sources,
     snapshot: { source_account: 'cliniccloud-5880', complete_for: { clinic_ids: [66,72] },
       patients: [{ id: 7, source_contact_ids: ['901'], fields: {} }], appointments: [local] } }).actions.filter(a => a.source?.kind === 'appointment');
-  assert.deepEqual(build(f.sources).map(a => [a.action, a.local_id]), [['preserve_reconciled_legacy_source', 9], ['preserve_reconciled_legacy_source', 9]]);
+  assert.deepEqual(build(f.sources).map(a => [a.action, a.local_id]), f.sources.map(() => ['preserve_reconciled_legacy_source', 9]));
   local.reconciliation_local_changed = true;
   assert(build(f.sources).every(a => a.action === 'review' && a.reasons.includes('LOCAL_EDIT_REQUIRES_REVIEW')));
   local.reconciliation_local_changed = false;

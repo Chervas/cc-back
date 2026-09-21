@@ -108,6 +108,15 @@ conserva hashes de antes, fuente y contenido clínico, procedencias CSV, ID fuen
 canónico y aliases comprobados; las tres supresiones de notificaciones permanecen
 activas. No activa salas ni convierte una asignación antigua en validación clínica.
 
+Excepción revisada de duración: una única fila pendiente puede cambiar solo su
+fin si una observación anterior vincula exactamente el CSV original al mismo ID
+que la historia reciente. `originalLive` y `reviewedMinutes` son obligatorios:
+minutos anteriores/nuevos explícitos y motivo. Inicio, estado, agenda, acto y nota
+no cambian. El recibo `duration_revision` conserva hashes de ambas observaciones
+y la procedencia CSV sin reescribirla; replay mantiene el fin actualizado. No
+autoriza dividir sesiones, deducir otro tratamiento de una nota ni modificar una
+reserva compleja. Sin esa evidencia, todo cambio de duración sigue rechazado.
+
 Una reprogramación pendiente puede entrar o salir de la semana prioritaria
 21–27/09: al menos el hueco original o el nuevo debe pertenecer a ella. Ambos
 siguen siendo futuros al revisar; el destino debe estar dentro de la cobertura

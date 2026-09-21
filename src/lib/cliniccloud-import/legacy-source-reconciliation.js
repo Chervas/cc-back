@@ -24,7 +24,31 @@ function observed(row) {
     agenda_key: norm(row.agenda.nombre), service_key: norm(row.conceptos[0].asunto),
     status: Number(row.estado) === -2 ? 'cancelada' : 'pendiente', details: String(row.detalles || '') };
 }
-function prepareLegacyReconciliation({ before: raw, history, sources, reviewedBy, reason, now = Date.now() }) {
+function minutes(start, end) { return (Date.parse(localToUtc(end)) - Date.parse(localToUtc(start))) / 60000; }
+// A duration-only correction needs both the old calendar observation (binding
+// the unchanged CSV to a real ID) and the recent history of that same ID. It
+// does not permit a date, state, agenda or procedure change through this path.
+function durationRevision({ before, current, currentRow, source, originalLive, history, reviewedMinutes }) {
+  if (!originalLive || originalLive.source_account !== ACCOUNT || !Array.isArray(originalLive.rows)
+    || !Number.isFinite(Date.parse(originalLive.captured_at))
+    || Date.parse(originalLive.captured_at) >= Date.parse(history.captured_at)
+    || !reviewedMinutes || String(reviewedMinutes.reason || '').trim().length < 20
+    || current.status !== 'pendiente' || source.status !== 'pendiente'
+    || localToUtc(source.start_local) !== before.inicio || localToUtc(source.end_local) !== before.fin
+    || fields.filter(k => k !== 'end_local').some(k => source[k] !== current[k])) fail();
+  const previous = minutes(source.start_local, source.end_local), next = minutes(current.start_local, current.end_local);
+  if (![previous, next].every(n => Number.isSafeInteger(n) && n > 0 && n <= 1440)
+    || previous === next || reviewedMinutes.previous !== previous || reviewedMinutes.current !== next) fail();
+  const found = originalLive.rows.filter(r => String(r.contact_id) === source.source_contact_id
+    && r.state === 0 && String(r.start).replace(' ', 'T') === source.start_local
+    && String(r.end).replace(' ', 'T') === source.end_local && norm(r.agenda) === source.agenda_key
+    && norm(r.service) === source.service_key && norm(r.details) === norm(source.details));
+  if (found.length !== 1 || String(found[0].appointment_id) !== String(currentRow.idCita)) fail();
+  return { previous_minutes: previous, current_minutes: next, reason: reviewedMinutes.reason.trim(),
+    original_observed_at: originalLive.captured_at, original_observation_sha256: hash(originalLive),
+    original_row_sha256: hash(found[0]), current_row_sha256: hash(currentRow) };
+}
+function prepareLegacyReconciliation({ before: raw, history, sources, reviewedBy, reason, originalLive, reviewedMinutes, now = Date.now() }) {
   const before = normalizedRow(raw), m = before.import_metadata, old = m.raw;
   if (before.source_system !== 'cliniccloud' || ![66, 72].includes(before.clinica_id)
     || before.estado !== 'pendiente' || before.source_reference !== `appointment:${m.source_appointment_id}`
@@ -45,7 +69,6 @@ function prepareLegacyReconciliation({ before: raw, history, sources, reviewedBy
   if (current.source_contact_id !== String(m.source_contact_id)
     || String(exact[0].conceptos[0].idServicio) !== String(m.source_service_id)
     || norm(current.details) !== norm(old.detalles || '')
-    || Date.parse(localToUtc(current.end_local)) - Date.parse(localToUtc(current.start_local)) !== Date.parse(before.fin) - Date.parse(before.inicio)
     || current.start_local < '2026-09-01' || current.start_local >= '2027-01-01'
     || current.end_local > '2027-01-01T00:00:00'
     // An existing appointment moved OUT of the priority week must leave its old
@@ -54,9 +77,19 @@ function prepareLegacyReconciliation({ before: raw, history, sources, reviewedBy
       && !inReviewedWeek(localDateTime(old.fechaIni, old.horaIni)))
     || Date.parse(before.inicio) < now || Date.parse(localToUtc(current.start_local)) < now) fail();
   if (!Array.isArray(sources) || !sources.length || sources.length > 2) fail();
+  let duration = null;
+  if (originalLive !== undefined || reviewedMinutes !== undefined) {
+    if (sources.length !== 1) fail();
+    duration = durationRevision({ before, current, currentRow: exact[0], source: sources[0], originalLive, history, reviewedMinutes });
+  } else if (Date.parse(localToUtc(current.end_local)) - Date.parse(localToUtc(current.start_local)) !== Date.parse(before.fin) - Date.parse(before.inicio)) fail();
   const entries = sources.map(source => {
     if (source.kind !== 'appointment' || source.validation_errors?.length || !sha(source.provenance?.row_sha256)
       || !sha(source.provenance?.file_sha256) || !positive(source.provenance?.source_row)) fail();
+    if (duration) {
+      if (source.source_external_id && String(source.source_external_id) !== String(exact[0].idCita)) fail();
+      return { source_reference: sourceReference(source), source_appointment_id: String(exact[0].idCita),
+        source: pick(source), provenance: source.provenance };
+    }
     const found = patients[0].rows.filter(r => {
       try { return hash(pick(source)) === hash(observed(r)); } catch { return false; }
     });
@@ -76,7 +109,7 @@ function prepareLegacyReconciliation({ before: raw, history, sources, reviewedBy
     live_captured_at: history.captured_at, live_evidence_sha256: hash(history),
     before_sha256: hash(before), original_raw_sha256: hash(old), clinical_sha256: hash(clinical(before)),
     previous: { start_utc: before.inicio, end_utc: before.fin, status: before.estado }, current, entries,
-    automation_policy: 'hold' };
+    automation_policy: 'hold', ...(duration ? { duration_revision: duration } : {}) };
   return { ...body, receipt_sha256: hash(body) };
 }
 function storedLegacyReconciliation(row, metadata) {
@@ -97,10 +130,27 @@ function storedLegacyReconciliation(row, metadata) {
     || new Set(r.entries.map(e => e.source_appointment_id)).size !== r.entries.length
     || new Set(r.entries.map(e => e.source_reference)).size !== r.entries.length
     || r.automation_policy !== 'hold') fail();
+  const duration = r.duration_revision;
+  if (duration) {
+    const source = r.entries[0].source;
+    if (r.entries.length !== 1 || r.current.status !== 'pendiente'
+      || source.status !== 'pendiente' || String(duration.reason || '').trim().length < 20
+      || !['original_observation_sha256', 'original_row_sha256', 'current_row_sha256'].every(k => sha(duration[k]))
+      || !Number.isFinite(Date.parse(duration.original_observed_at))
+      || !Number.isFinite(Date.parse(r.live_captured_at)) || Date.parse(duration.original_observed_at) >= Date.parse(r.live_captured_at)
+      || ![duration.previous_minutes, duration.current_minutes].every(n => Number.isSafeInteger(n) && n > 0 && n <= 1440)
+      || duration.previous_minutes === duration.current_minutes
+      || duration.previous_minutes !== minutes(source.start_local, source.end_local)
+      || duration.current_minutes !== minutes(r.current.start_local, r.current.end_local)
+      || localToUtc(source.start_local) !== r.previous?.start_utc || localToUtc(source.end_local) !== r.previous?.end_utc
+      || r.previous.start_utc !== localToUtc(localDateTime(metadata.raw.fechaIni, metadata.raw.horaIni))
+      || r.previous.end_utc !== localToUtc(localDateTime(metadata.raw.fechaFin, metadata.raw.horaFin))
+      || fields.filter(k => k !== 'end_local').some(k => source[k] !== r.current[k])) fail();
+  }
   for (const e of r.entries) if (sourceReference(e.source) !== e.source_reference
     || !positive(e.source_appointment_id) || !sha(e.provenance?.file_sha256) || !sha(e.provenance?.row_sha256)
     || !positive(e.provenance?.source_row)
-    || fields.filter(k => k !== 'agenda_key').some(k => e.source[k] !== r.current[k])) fail();
+    || fields.filter(k => duration ? k !== 'end_local' : k !== 'agenda_key').some(k => e.source[k] !== r.current[k])) fail();
   return r;
 }
 function reconciliationChanged(row, receipt) {
