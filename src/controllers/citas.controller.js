@@ -2102,6 +2102,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         delete baseImportMetadata.booking;
         delete baseImportMetadata.program_session;
         delete baseImportMetadata.additional_staff;
+        delete baseImportMetadata.import_treatment_resolution;
         const appointmentImportMetadata = {
             ...baseImportMetadata,
             ...(isHistoricalRegistration ? {
@@ -3158,6 +3159,28 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     await consentimientosService.attachConsentSummaryToCitas(citaActualizada);
     emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
     return res.json(await protectAppointmentsForRequest(req, citaActualizada));
+});
+
+exports.resolveImportedTreatment = asyncHandler(async (req, res) => {
+    const citaId = Number(req.params.id);
+    if (!Number.isSafeInteger(citaId) || citaId < 1) return res.status(400).json({ message: 'Cita inválida' });
+    const existing = await CitaPaciente.findByPk(citaId);
+    if (!existing) return res.status(404).json({ message: 'Cita no encontrada' });
+    if (await denyAppointmentManageAccessIfNeeded(req, res, existing.clinica_id)) return;
+    const actorId = Number(req.userData?.userId);
+    if (!await canUserAccessFeature({ actorId, featureKey: 'patients.sensitive.view', clinicId: existing.clinica_id })) {
+        return res.status(403).json({ message: 'No tienes acceso a los datos clínicos de esta cita.' });
+    }
+    const result = await require('../services/appointmentImportResolution.service').resolveImportedTreatment({ db,
+        appointmentId: citaId, clinicId: Number(existing.clinica_id), actorId, input: req.body });
+    const updated = await CitaPaciente.findByPk(citaId, { include: [
+        { model: Paciente, as: 'paciente' }, { model: Clinica, as: 'clinica' },
+        { model: Instalacion, as: 'instalacion', required: false },
+        { model: Tratamiento, as: 'tratamiento', required: false },
+        { model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'] },
+    ] });
+    if (!result.replayed) emitAppointmentSocketEvent('appointment:updated', updated.toJSON());
+    return res.json(await protectAppointmentsForRequest(req, updated));
 });
 
 exports.updateCitaSupport = asyncHandler(async (req, res) => {
