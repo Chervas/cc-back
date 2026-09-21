@@ -2511,7 +2511,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
                 model: Instalacion,
                 as: 'instalacion',
                 required: false,
-                attributes: ['id', 'nombre', 'color'],
+                attributes: ['id', 'nombre', 'color', 'activo'],
             },
             {
                 model: Tratamiento,
