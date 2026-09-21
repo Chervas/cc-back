@@ -95,8 +95,26 @@ Pruebas offline: `node --test src/scripts/tests/cliniccloud_import_appointments_
 crear hasta 250 citas de una semana (máximo siete días) en clínicas 66/72 del
 mismo grupo. Exige `--target dev|crm`, plan y snapshot coincidentes, revisión
 de todas las filas semanales y paciente enlazado por ID externo. No acepta
-candidatos de reprogramación, colisiones de identidad, estados de asistencia
+reprogramaciones sin resolver, colisiones de identidad, estados de asistencia
 inferidos ni duplicados conocidos. No modifica ninguna cita existente.
+
+Una decisión `distinct_visit` permite revisar un caso estrecho: el único
+candidato es una primera visita nativa anterior y la historia fuente reciente
+acredita actuaciones posteriores realizadas, distintas de la nueva visita
+pendiente. `distinct-visits.js` exige revisión explícita con motivo/autor,
+acción original y evidencia ligadas por hashes, ID real único y contacto/empresa
+concordantes. No basta paciente/fecha ni estado «Pagada» sin marca de realización.
+La primera visita conserva su estado (también `info_enviada`), horario y todos
+sus campos: no se convierte en completada por analogía con ClinicCloud.
+
+Solo crea `continuacion`, sin combinar una revisión de horario. Al escribir,
+revalida la fila nativa completa bajo lock, la ausencia de otro propietario del
+ID fuente, la identidad actual y los solapes normales. Evidencia de menos de
+una hora; un cambio posterior difiere la operación. El recibo queda en
+`cliniccloud_distinct_visit`, no se cambian el plan ni sus candidatos para
+eludir una revisión. La copia en varias agendas se enlaza mediante el contrato
+de procedencia paralelo, no creando otra reserva. Pruebas focales:
+`cliniccloud_distinct_visits.test.js`.
 
 Preparar con `--mode prepare --plan … --snapshot … --review … --private-output …`.
 La revisión contiene `plan_sha256`, `reviewed_by`, `reviewed_at`, `week` con
