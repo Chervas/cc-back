@@ -26,10 +26,13 @@ async function main() {
     assert.equal((await db.Clinica.findByPk(1))?.nombre_clinica, 'Clinica ficticia DEV');
     const patient = await db.Paciente.findOne({ where: { public_id: PATIENT_ID, clinica_id: 1 } });
     assert(patient);
-    const treatment = await db.Tratamiento.findOne({ where: { codigo: 'QA-BS-20260920-0', clinica_id: 1 } });
-    assert(treatment);
     const before = await db.CitaPaciente.count({ where: { clinica_id: 1 } });
     await assert.rejects(db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+      // The visual fixture can acquire real test requirements over time. Keep
+      // this rolled-back SQL test independent of those persistent QA settings.
+      const treatment = await db.Tratamiento.create({ nombre: 'Tratamiento ficticio — rollback',
+        codigo: marker, disciplina: 'estetica', clinica_id: 1, duracion_min: 30,
+        precio_base: 0 }, { transaction });
       const template = await db.ClinicConsentTemplate.create({ public_id: marker, clinic_id: 1,
         name: 'Consentimiento ficticio QA — rollback', purpose: 'clinical', status: 'active', validity_mode: 'single_act' }, { transaction });
       await db.TreatmentConsentRequirement.create({ clinica_id: 1, tratamiento_id: treatment.id_tratamiento,
