@@ -19,7 +19,8 @@ rutas; sus respuestas no se almacenan en caché y usan `no-referrer`.
 El login público tiene límite Nginx de 5 peticiones/minuto/IP, ráfaga de 5 y
 rechazo 429. Este límite por IP afecta también a dispositivos tras la misma NAT.
 
-La cola de firmas es una lectura acotada de SQL por clínica, actualizada por la
+La cola de firmas es una lectura acotada de SQL por clínica (o grupo autorizado
+expresamente para consentimientos), actualizada por la
 tablet cada 10 segundos. No es una cola BullMQ ni un transporte por el broker.
 Consentimientos y presupuestos comparten la pantalla, pero conservan tablas,
 estados y evidencias propios. No se acredita una prueba de carga masiva.
@@ -45,8 +46,26 @@ la prueba del PDF al sustituirlo.
 
 Desde la clínica, editar → tablets → añadir tablet. Entregar la contraseña
 generada únicamente al responsable del dispositivo; se muestra una vez.
-No regenerar claves existentes para una prueba. Cada dispositivo queda limitado
-a su clínica; su token no concede una sesión del personal ni cruza DEV/CRM.
+No regenerar claves existentes para una prueba. Por defecto cada dispositivo
+queda limitado a su clínica; su token no concede una sesión del personal ni cruza DEV/CRM.
+
+«Mostrar consentimientos de todo el grupo» se activa por dispositivo desde esa
+misma sección, inicialmente desmarcado. Requiere `consents.manage` en todas las
+clínicas del grupo. El servidor resuelve la pertenencia y conserva el ID de grupo
+autorizado en `ClinicTabletKiosks.consent_group_id`, nullable; no acepta un grupo
+arbitrario del cliente. Cola y apertura consultan el alcance vigente en cada
+petición. Si la clínica cambia de grupo, el permiso anterior no se transfiere.
+Los presupuestos permanecen en la clínica base. Desactivar no revoca enlaces
+de firma ya emitidos: conservan su caducidad y el estado de su paquete.
+
+Esquema aditivo: `20260921080000-add-tablet-consent-group-scope.js`, probado primero
+en DEV. Operador acotado `src/scripts/cliniccloud-tablet-scope-schema.js`: exige
+target explícito, hash revisado de esta única migración, checkout DEV limpio,
+diario privado y backup CRM completo/verificado para el target público. No
+ejecuta otras migraciones ni amplía ningún acceso. Publicar esquema antes del
+modelo; ante rollback de código, conservar la columna aditiva y no restaurar
+la BD. La API de alcance solo está en rutas autenticadas de personal, no se
+amplía la allowlist Nginx de tablet.
 
 La firma requiere declaración explícita (checkbox inicialmente desmarcado),
 nombre, rol y firma PNG. Para menores exige representación y relación. El
