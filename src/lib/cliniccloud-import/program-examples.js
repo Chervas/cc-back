@@ -26,6 +26,7 @@ function prepareProgramExamples(plan) {
         clinical_config: { ...treatment.proposed_clinical_config, catalog_status: 'draft', medical_area_code: 'estetica', product_type: 'treatment',
           import_batch: 'cliniccloud-program-examples-20260914', source_cabin: 'C11', source_professional: 'Aux. Piedad', fiscal_mapping_pending: true } },
       program: { name: spec.name, kind: 'program', status: 'draft', total_price: spec.totalPrice,
+        cadence: { mode: 'weekly', sessions_per_week: 2, min_days_between: 2 },
         notes: `6 citas de 30 minutos en C11 con Piedad. Pauta del cliente: 2 citas por semana en días no consecutivos. Los intervalos fijos quedan sin rellenar: esta pauta no obliga a lunes/jueves. Precio del programa completo: ${spec.totalPrice} EUR, impuestos incluidos. Borrador pendiente de configuración de cabina, profesional, fiscalidad y reserva conjunta. Fuente: ${program.sheet}, fila ${program.source_row}; archivo SHA256 ${plan.workbook_sha256}.`,
         appointments: Array.from({ length: 6 }, (_, index) => ({ key: `appointment_${index + 1}`, label: `Sesión ${index + 1} · ${treatment.name}`, offset_days: index === 0 ? 0 : null, treatment_code: treatment.proposed_code })) },
       provenance: program.provenance,

@@ -109,6 +109,21 @@ test('normal human save retains its managed transaction and revision behavior', 
   assert.equal(h.rows()[0].created_by, 7); assert.equal(h.revisions()[0].actor_id, 7);
 });
 
+test('facial source can create only a traceable actorless unassociated draft inside an operator transaction', async () => {
+  const h = harness();
+  const payload = { ...h.plan.payload, source: h.plan.payload.source.replace('manual-corporal', 'manual-facial') };
+  const importedSource = { actor_kind: 'system_import', source_system: 'cliniccloud', source_sha256: h.plan.source_sha256 };
+  await h.db.sequelize.transaction(transaction => h.service.save({ clinicId: 72, actorId: null, payload, transaction, importedSource }));
+  assert.equal(h.rows()[0].status, 'draft'); assert.equal(h.rows()[0].created_by, null);
+  assert.equal(h.revisions()[0].actor_id, null); assert.deepEqual(h.rows()[0].treatment_ids, []);
+  for (const update of [{ status: 'approved' }, { kind: 'aftercare' }, { treatment_ids: [1] },
+    { source: payload.source.replace('manual-facial', 'arbitrary-import') },
+    { source: payload.source.replace(h.plan.source_sha256, 'a'.repeat(64)) }]) {
+    await assert.rejects(h.service.save({ clinicId: 72, actorId: null, payload: { ...payload, ...update }, transaction: { LOCK: {} }, importedSource }), { code: 'protocol_import_actor_required' });
+  }
+  await assert.rejects(h.service.save({ clinicId: 72, actorId: null, payload, importedSource }), { code: 'protocol_import_actor_required' });
+});
+
 test('nullable actor migration is scoped and its rollback cannot erase system audit', async () => {
   const changes = []; const q = { changeColumn: async (...args) => changes.push(args), sequelize: { query: async () => [[{ pending: 1 }]] } };
   await migration.up(q, { INTEGER: 'INTEGER' }); assert.equal(changes.length, 3);

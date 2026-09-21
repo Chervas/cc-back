@@ -13,7 +13,13 @@ function fixture() {
 }
 test('real examples preserve gross source prices, two six-session drafts and unresolved resources/tax', () => {
   const examples = prepareProgramExamples(fixture()); assert.equal(examples.length, 2);
+  for (const e of examples) assert.deepEqual(e.program.cadence, { mode: 'weekly', sessions_per_week: 2, min_days_between: 2 });
   for (const e of examples) { assert.equal(e.treatment.activo, false); assert.equal(e.treatment.precio_base, null); assert.equal(e.program.status, 'draft'); assert.equal(e.program.appointments.length, 6); assert.equal(e.program.appointments[0].offset_days, 0); assert(e.program.appointments.slice(1).every(a => a.offset_days === null)); assert.equal(e.treatment.clinical_config.booking_profile, undefined); }
+});
+test('weekly rule cannot be inferred when the source no longer states nonconsecutive days', () => {
+  const { plan_sha256, ...body } = fixture();
+  body.rows.find(r => r.kind === 'program').detail = '6 citas, 2 por semana.';
+  assert.throws(() => prepareProgramExamples({ ...body, plan_sha256: hash(body) }), /SOURCE_CHANGED/);
 });
 test('tampered plan and changed clinical/commercial evidence stop before writes', () => {
   const p = fixture(); p.rows[0].source_price.gross_amount = 999; assert.throws(() => prepareProgramExamples(p), /INTEGRITY/);
