@@ -219,6 +219,12 @@ comprobación con el presupuesto y los documentos existentes. Cantidad fiscal
 1 representa el importe documentado de cada concepto, no sesiones clínicas.
 Vista previa/PDF indican «Precio final», «IVA incluido» o el motivo de exención.
 
+El renderer económico respeta `CHROMIUM_EXECUTABLE_PATH`, `CHROME_PATH` y
+`CHROMIUM_PATH` (en ese orden), conservando el fallback anterior. Chromium usa
+IPC por pipe, sin abrir un puerto de depuración TCP. Esto permite generar PDFs
+en DEV aislado sin abrir `/home` ni relajar su política de salida. Los errores
+de generación devuelven un 503 controlado, no trazas/rutas internas al cliente.
+
 Un cobro guarda su versión de presupuesto. Se admite aplicación a conceptos
 identificados o al presupuesto completo cuando todos comparten perfil fiscal.
 Si mezcla impuestos sin aplicación por concepto, o incluye saldo sin asignación,
