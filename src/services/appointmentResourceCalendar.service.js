@@ -1,7 +1,7 @@
 'use strict';
 
 const { bookingCapabilities } = require('./treatmentBookingProfile.service');
-const { resolveInstallationKeys } = require('./appointmentBookingAvailability.service');
+const { resolveInstallationKeys, permitsLegacyOverlap, protectedBookingAttribute } = require('./appointmentBookingAvailability.service');
 
 /** One bounded resource read for old availability screens and schedule impact.
  * A segmented appointment occupies each resource only for its actual phase.
@@ -31,7 +31,8 @@ async function resourceAppointments({ db, clinic = null, doctorId = null, instal
     inicio: { [Op.lt]: end }, fin: { [Op.gt]: start },
     ...(ignoreAppointmentId ? { id_cita: { [Op.ne]: ignoreAppointmentId } } : {}),
     [Op.or]: [...(doctors.length ? [{ doctor_id: { [Op.in]: doctors } }] : []), ...(physicalIds.length ? [{ instalacion_id: { [Op.in]: physicalIds } }] : [])],
-  }, attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin'], transaction, raw: true });
+  }, attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin',
+    ...(enabled ? ['source_system', protectedBookingAttribute(db, 'CitaPaciente')] : [])], transaction, raw: true });
   if (!enabled) return legacy;
   const occupancy = await db.AppointmentBookingOccupancy.findAll({ where: {
     ...(ignoreAppointmentId ? { appointment_id: { [Op.ne]: ignoreAppointmentId } } : {}),
@@ -40,13 +41,16 @@ async function resourceAppointments({ db, clinic = null, doctorId = null, instal
       ...(legacy.length ? [{ appointment_id: { [Op.in]: legacy.map(r => r.id_cita) } }] : []),
     ],
   }, include: [{ model: db.CitaPaciente, as: 'appointment', required: true,
-    attributes: ['id_cita', 'clinica_id'], where: { estado: { [Op.ne]: 'cancelada' } } }], transaction });
+    attributes: ['id_cita', 'clinica_id', 'source_system', protectedBookingAttribute(db, 'appointment')], where: { estado: { [Op.ne]: 'cancelada' } } }], transaction });
   const segmented = new Set(occupancy.map(r => Number(r.appointment_id)));
   const project = row => {
     const targets = row.instalacion_id && mapping ? installations.filter(id => mapping.keys.get(id) === mapping.keys.get(Number(row.instalacion_id))) : [];
     return targets.length ? targets.map(id => ({ ...row, instalacion_id: id })) : [row];
   };
-  const result = legacy.filter(r => !segmented.has(Number(r.id_cita))).flatMap(project);
+  const result = legacy.filter(r => !segmented.has(Number(r.id_cita))).flatMap(row => {
+    const { source_system, booking_protected, ...safe } = row;
+    return project({ ...safe, can_force_legacy: permitsLegacyOverlap(row, row.clinica_id) });
+  });
   const seen = new Set();
   for (const row of occupancy) {
     if (!keys.includes(row.resource_key) || new Date(row.start_at) >= new Date(end) || new Date(row.end_at) <= new Date(start)) continue;
@@ -54,7 +58,8 @@ async function resourceAppointments({ db, clinic = null, doctorId = null, instal
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(...project({ id_cita: Number(row.appointment_id), clinica_id: Number(row.appointment.clinica_id),
-      doctor_id: row.doctor_id, instalacion_id: row.installation_id, inicio: row.start_at, fin: row.end_at, segmented: true }));
+      doctor_id: row.doctor_id, instalacion_id: row.installation_id, inicio: row.start_at, fin: row.end_at, segmented: true,
+      can_force_legacy: permitsLegacyOverlap(row.appointment, row.appointment.clinica_id) }));
   }
   return result;
 }
