@@ -1,5 +1,5 @@
 'use strict';
-const {hash,localDateTime,localToUtc}=require('./adapter');
+const {hash,norm,localDateTime,localToUtc}=require('./adapter');
 const {phoneKey}=require('./contact-aliases');
 
 // Operator-only, explicitly reviewed exception for native intake names that
@@ -58,4 +58,20 @@ function prepareHistoryCorroboration({link,source,contacts,histories,now=Date.no
     start_utc:start,live_appointment_id:review.source_appointment_id,comparison_sha256:hash(histories),source_appointment_sha256:hash(appointment),
     source_state:appointment.estado,reason:review.reason.trim(),identity_only:true};
 }
-module.exports={prepareNativeCorroboration,prepareHistoryCorroboration};
+function prepareConfirmedIdentity({link,source,confirmation,now=Date.now()}) {
+  const captured=Date.parse(confirmation?.confirmed_at);
+  if(link.confirmed_identity!==true||link.native_first_visit||link.native_history_visit
+    ||confirmation?.version!==1||confirmation.source!=='user_conversation'
+    ||!String(confirmation.confirmation_reference||'').trim()||!String(confirmation.answer||'').trim()
+    ||!Number.isFinite(captured)||captured>now||now-captured>2*3600000
+    ||!Array.isArray(confirmation.pairs)||!confirmation.pairs.length||confirmation.pairs.length>20
+    ||new Set(confirmation.pairs.map(p=>p.source_contact_id)).size!==confirmation.pairs.length
+    ||new Set(confirmation.pairs.map(p=>p.patient_id)).size!==confirmation.pairs.length) throw Error('CONTACT_ALIAS_USER_CONFIRMATION_REQUIRED');
+  const pairs=confirmation.pairs.filter(p=>p.source_contact_id===source.source_contact_id&&p.patient_id===link.patient_id);
+  const pair=pairs[0],sourceName=norm(`${source.fields.name||''} ${source.fields.surname||''}`);
+  if(pairs.length!==1||norm(pair.source_full_name)!==sourceName||!norm(pair.patient_full_name)) throw Error('CONTACT_ALIAS_CONFIRMED_PAIR_NOT_IN_EVIDENCE');
+  return {kind:'user_confirmed_identity_pair',source_contact_id:source.source_contact_id,patient_id:link.patient_id,
+    source_full_name:sourceName,patient_full_name:norm(pair.patient_full_name),confirmation_reference:confirmation.confirmation_reference,
+    confirmation_sha256:hash(confirmation)};
+}
+module.exports={prepareNativeCorroboration,prepareHistoryCorroboration,prepareConfirmedIdentity};

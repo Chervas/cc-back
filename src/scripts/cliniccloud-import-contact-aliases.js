@@ -5,14 +5,14 @@ const {execFileSync}=require('node:child_process');
 const {hash,normalizeContacts,normalizeAppointments}=require('../lib/cliniccloud-import/adapter');
 const {readCsv,readBytes,parseArgs,writePrivateJson}=require('../lib/cliniccloud-import/io');
 const {validateContactAlias}=require('../lib/cliniccloud-import/contact-aliases');
-const {prepareNativeCorroboration,prepareHistoryCorroboration}=require('../lib/cliniccloud-import/contact-alias-evidence');
+const {prepareNativeCorroboration,prepareHistoryCorroboration,prepareConfirmedIdentity}=require('../lib/cliniccloud-import/contact-alias-evidence');
 const {connectOperatorDatabase}=require('../lib/cliniccloud-import/operator-database');
 const {createNewPatientsStore}=require('../lib/cliniccloud-import/new-patients-store');
 const {privateJson,openJournal,acquireExecutorLocks}=require('./cliniccloud-import-appointments-apply');
 const {validateBackup}=require('./cliniccloud-import-contacts-apply');
-const VERSION='cliniccloud-contact-aliases/2';
+const VERSION='cliniccloud-contact-aliases/3';
 async function run(args){
- const o=parseArgs(args,['--mode','--target','--contacts','--review','--private-output','--package','--approved-sha256','--backup-manifest','--private-journal','--appointments','--plan','--live-comparison','--live-histories']);
+ const o=parseArgs(args,['--mode','--target','--contacts','--review','--private-output','--package','--approved-sha256','--backup-manifest','--private-journal','--appointments','--plan','--live-comparison','--live-histories','--identity-confirmation']);
  if(o['--target']!=='crm'||!['prepare','apply'].includes(o['--mode']))throw Error('EXPLICIT_CRM_ALIAS_MODE_REQUIRED');
  if(process.cwd()!=='/home/ubuntu/wt/back-dev'||execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim()!=='dev')throw Error('DEV_OPERATOR_WORKTREE_REQUIRED');
  const review=privateJson(o['--review']);
@@ -23,7 +23,11 @@ async function run(args){
  const sourceRows=normalizeContacts(input.rows,input.file.sha256);
  const needsCurrent=review.links.some(link=>link.native_first_visit),needsHistory=review.links.some(link=>link.native_history_visit);
  const needsNative=needsCurrent||needsHistory;
- let nativeContext,histories;
+ let nativeContext,histories,confirmation;
+ if(review.links.some(link=>link.confirmed_identity)){
+  if(!o['--identity-confirmation'])throw Error('CONTACT_ALIAS_USER_CONFIRMATION_REQUIRED');
+  confirmation=privateJson(o['--identity-confirmation']);
+ }
  if(needsCurrent){
   if(!o['--appointments']||!o['--plan']||!o['--live-comparison'])throw Error('CONTACT_ALIAS_NATIVE_SOURCE_FILES_REQUIRED');
   const appointmentFile=readCsv(o['--appointments'],'appointments',['IDCONTACTO','FECHA','HORA INICIO','HORA FIN']);
@@ -34,14 +38,17 @@ async function run(args){
  const selected=review.links.map(link=>{
   const matches=sourceRows.filter(s=>s.source_contact_id===link.source_contact_id);
   if(matches.length!==1)throw Error('ALIAS_SOURCE_ID_NOT_UNIQUE');
-  return {source:matches[0],patient_id:link.patient_id,...(link.native_first_visit
+  if([link.native_first_visit,link.native_history_visit,link.confirmed_identity].filter(Boolean).length>1)throw Error('CONTACT_ALIAS_ONE_EVIDENCE_METHOD_REQUIRED');
+  return {source:matches[0],patient_id:link.patient_id,...(link.confirmed_identity
+   ? {corroboration:prepareConfirmedIdentity({link,source:matches[0],confirmation})}
+   :link.native_first_visit
    ? {corroboration:prepareNativeCorroboration({...nativeContext,link,source:matches[0]})}
    : link.native_history_visit?{corroboration:prepareHistoryCorroboration({link,source:matches[0],contacts:sourceRows,histories})}:{})};
  });
  let pkg,backup;
  if(o['--mode']==='apply'){
   pkg=privateJson(o['--package']);const {package_sha256,...body}=pkg;
-  if(![VERSION,'cliniccloud-contact-aliases/1'].includes(pkg.version)||hash(body)!==package_sha256||o['--approved-sha256']!==package_sha256||pkg.target!=='crm'
+  if(![VERSION,'cliniccloud-contact-aliases/2','cliniccloud-contact-aliases/1'].includes(pkg.version)||hash(body)!==package_sha256||o['--approved-sha256']!==package_sha256||pkg.target!=='crm'
     ||pkg.review_sha256!==hash(review)||pkg.contacts_sha256!==input.file.sha256||hash(pkg.selected)!==hash(selected)
     ||pkg.policy!=='add_external_alias_only_no_patient_or_history_mutation')throw Error('ALIAS_PACKAGE_REVIEW_MISMATCH');
   if(!Array.isArray(pkg.operations)||pkg.operations.length!==selected.length
@@ -56,8 +63,9 @@ async function run(args){
   const capture=async(lock=false)=>{
    const live=await store.captureGroup();
    if(needsNative){
-    const patients=selected.filter(r=>r.corroboration).map(r=>r.patient_id);
-    const starts=[...new Set(selected.filter(r=>r.corroboration).map(r=>r.corroboration.start_utc.replace('T',' ').replace('.000Z','')))];
+    const nativeSelected=selected.filter(r=>r.corroboration?.native_appointment_id);
+    const patients=nativeSelected.map(r=>r.patient_id);
+    const starts=[...new Set(nativeSelected.map(r=>r.corroboration.start_utc.replace('T',' ').replace('.000Z','')))];
     [live.native_appointments]=await c.query(`SELECT id_cita,paciente_id,clinica_id,inicio,fin,estado,tipo_cita,source_system,source_reference,created_by,updated_at FROM CitasPacientes WHERE paciente_id IN (?) AND inicio IN (?) ORDER BY id_cita${lock?' FOR UPDATE':''}`,[patients,starts]);
    }
    return live;
@@ -66,7 +74,7 @@ async function run(args){
    await c.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const live=await capture();
    const operations=selected.map(({source,patient_id,corroboration})=>{
     const match=validateContactAlias(source,patient_id,live,corroboration);if(match.already_linked)throw Error('ALIAS_ALREADY_LINKED_NOT_A_NEW_OPERATION');
-    return {source,patient_id,...(corroboration?{corroboration,native_appointment_sha256:match.native_appointment_sha256}:{}),patient_before:match.patient,patient_before_sha256:match.before_sha256,field_key:match.field_key,evidence:match.evidence};
+    return {source,patient_id,...(corroboration?{corroboration}:{}),...(match.native_appointment_sha256?{native_appointment_sha256:match.native_appointment_sha256}:{}),patient_before:match.patient,patient_before_sha256:match.before_sha256,field_key:match.field_key,evidence:match.evidence};
    });await c.rollback();
    const body={version:VERSION,target:'crm',created_at:new Date().toISOString(),contacts_sha256:input.file.sha256,review_sha256:hash(review),selected,operations,policy:'add_external_alias_only_no_patient_or_history_mutation'};
    pkg={...body,package_sha256:hash(body)};writePrivateJson(o['--private-output'],pkg);

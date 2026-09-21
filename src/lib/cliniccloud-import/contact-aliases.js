@@ -26,6 +26,22 @@ function corroboratedCandidates(source, patients) {
   return patients.filter(p=>fullName({name:p.nombre,surname:p.apellidos})===name
     && [p.telefono_movil,p.telefono_secundario].some(v=>phoneKey(v)===phone));
 }
+function confirmedIdentityCandidate(source, patientId, live, evidence) {
+  if(evidence.kind!=='user_confirmed_identity_pair'||evidence.source_contact_id!==source.source_contact_id
+    ||evidence.patient_id!==patientId||!/^[a-f0-9]{64}$/.test(evidence.confirmation_sha256||'')
+    ||!String(evidence.confirmation_reference||'').trim()
+    ||evidence.source_full_name!==fullName(source.fields)) throw Error('CONTACT_ALIAS_CONFIRMATION_INVALID');
+  const phone=phoneKey(source.fields.phone);
+  const candidates=live.patients.filter(p=>phone&&[p.telefono_movil,p.telefono_secundario].some(v=>phoneKey(v)===phone)
+    &&fullName({name:p.nombre,surname:p.apellidos})===evidence.patient_full_name);
+  if(candidates.length!==1||Number(candidates[0].id_paciente)!==patientId) throw Error('CONTACT_ALIAS_CONFIRMED_PAIR_CHANGED');
+  // The human confirmation is bounded to the exact pair, not permission for
+  // phone-only matching of other relatives. At least the given-name prefix
+  // must agree; this covers the explicitly confirmed Dani/Daniel nickname.
+  const first=norm(source.fields.name).split(' ')[0],other=norm(candidates[0].nombre).split(' ')[0];
+  if(Math.min(first.length,other.length)<4||!(first.startsWith(other)||other.startsWith(first))) throw Error('CONTACT_ALIAS_CONFIRMED_NAME_NOT_CORROBORATED');
+  return candidates[0];
+}
 function nativeAppointmentCandidate(source, patientId, live, evidence) {
   const history=evidence?.kind==='unique_phone_given_name_and_observed_history';
   if ((!history&&evidence?.kind !== 'unique_phone_given_name_and_native_first_visit')
@@ -54,7 +70,9 @@ function nativeAppointmentCandidate(source, patientId, live, evidence) {
 function validateContactAlias(source, patientId, live, corroboration = null) {
   if(!source||!/^[1-9]\d*$/.test(source.source_contact_id)||!Number.isSafeInteger(patientId)||patientId<=0)throw Error('CONTACT_ALIAS_INPUT_INVALID');
   let patient,appointmentHash;
-  if(corroboration){
+  if(corroboration?.kind==='user_confirmed_identity_pair'){
+    patient=confirmedIdentityCandidate(source,patientId,live,corroboration);
+  }else if(corroboration){
     const result=nativeAppointmentCandidate(source,patientId,live,corroboration);
     patient=result.patient;appointmentHash=result.appointment_sha256;
   }else{
@@ -71,6 +89,6 @@ function validateContactAlias(source, patientId, live, corroboration = null) {
   if(linked.some(id=>id!==patientId))throw Error('CONTACT_ALIAS_SOURCE_ALREADY_OWNED');
   return {patient,already_linked:linked.includes(patientId),field_key:`cliniccloud_contact_alias_${source.source_contact_id}`,
     evidence:corroboration ? corroboration.kind : 'unique_full_name_and_phone_without_document_or_birth_conflict',
-    ...(corroboration ? {native_appointment_sha256:appointmentHash} : {}),before_sha256:hash(patient)};
+    ...(appointmentHash ? {native_appointment_sha256:appointmentHash} : {}),before_sha256:hash(patient)};
 }
 module.exports={phoneKey,corroboratedCandidates,corroboratedGivenName,validateContactAlias};

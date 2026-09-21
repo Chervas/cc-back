@@ -70,8 +70,8 @@ requieren un modo de aplicación explícito y su propio paquete validado.
   No admite iniciales, apodos, omisiones, cambios de orden ni similitud fonética.
   DNI/nacimiento contradictorios, otro propietario o cualquier deriva impiden
   escribir. No transforma esa prueba de identidad en una decisión de sustituir
-  o duplicar citas. Los paquetes nuevos usan versión 2; replay de versión 1
-  mantiene su comprobación estricta original.
+  o duplicar citas. Este método se introdujo en los paquetes versión 2; replay
+  de versión 1 mantiene su comprobación estricta original.
   Si la primera visita es anterior al delta, `native_history_visit` sustituye
   a `native_first_visit`, con `source_appointment_id` en lugar de `source_row`;
   requiere `--live-histories`, captura privada reciente del endpoint de lectura
@@ -80,6 +80,16 @@ requieren un modo de aplicación explícito y su propio paquete validado.
   cancelada o no asistida puede corroborar **identidad**, nunca instruir una
   transición de estado: ambas citas quedan intactas y su discrepancia se revisa
   aparte. No reinterpretar con este operador los códigos clínicos históricos.
+  Una correspondencia confirmada expresamente por el titular puede usar
+  `confirmed_identity=true` y `--identity-confirmation` (parejas concretas,
+  nombres fuente/local, referencia y respuesta reales, captura de menos de dos
+  horas). No es una regla de fusión por parecido: exige el mismo teléfono,
+  prefijo de nombre corroborante y una sola ficha con el nombre confirmado;
+  mantiene los rechazos por DNI, nacimiento o propietario externo distintos.
+  Permite distinguir a la persona confirmada de otro familiar con ese teléfono.
+  No se combinan métodos de evidencia en un mismo enlace. Paquetes v3;
+  compatibilidad de replay v1/v2 conservada. Diario, backup y CAS siguen siendo
+  obligatorios; no modifica nombre, clínica ni citas de ninguna de las fichas.
 - `cliniccloud-import-physical-installations.js`: mapa físico documental BS,
   distinto de las antiguas agendas virtuales. `--target crm --mode prepare
   --sources … --private-output …` recibe una lista privada de archivos y hashes.
