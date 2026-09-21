@@ -108,6 +108,15 @@ conserva hashes de antes, fuente y contenido clínico, procedencias CSV, ID fuen
 canónico y aliases comprobados; las tres supresiones de notificaciones permanecen
 activas. No activa salas ni convierte una asignación antigua en validación clínica.
 
+Una reprogramación pendiente puede entrar o salir de la semana prioritaria
+21–27/09: al menos el hueco original o el nuevo debe pertenecer a ella. Ambos
+siguen siendo futuros al revisar; el destino debe estar dentro de la cobertura
+del export (septiembre–diciembre de 2026). No habilita cambios entre dos fechas
+ajenas a esa semana. Convertir horario local a UTC con `Europe/Madrid`, también
+si el traslado cruza el cambio de hora de octubre. El estado fuente `-1`
+(No Acude) no equivale a `-2` (Anulada) ni permite marcar una cita futura como
+no asistida; estos casos permanecen en revisión.
+
 El operador debe verificar backup, registrar antes/después en diario durable,
 bloquear citas y anclas comunes de paciente/profesional/sala, revalidar identidad,
 solapes y ausencia de relaciones clínicas/económicas/automatizaciones. Solo puede
