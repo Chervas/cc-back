@@ -2,8 +2,9 @@
 
 // Operator-only SQL. No models, application bootstrap, hooks or message jobs.
 const { ACCOUNT, sourceReference } = require('./week-appointments');
-const { instant } = require('./appointments-apply');
-const { localToUtc } = require('./adapter');
+const { instant, normalizedRow } = require('./appointments-apply');
+const { localToUtc, hash } = require('./adapter');
+const { validateDistinctVisit, assertFreshDistinctVisit } = require('./distinct-visits');
 const sqlDate = value => instant(value).replace('T', ' ').replace('Z', '');
 async function createWeekAppointmentsStore(connection, { groupId, readOnly = true }) {
   const query = async (sql, values = []) => (await connection.query(sql, values))[0];
@@ -43,6 +44,15 @@ async function createWeekAppointmentsStore(connection, { groupId, readOnly = tru
     const patients = await query(`SELECT id_paciente,clinica_id FROM Pacientes WHERE id_paciente = ?${writing ? ' FOR UPDATE' : ''}`, [operation.patient_id]);
     const patient = patients[0];
     if (!patient) reasons.push('PATIENT_NO_LONGER_EXISTS');
+    if (operation.distinct_visit) {
+      const review = validateDistinctVisit(operation.distinct_visit);
+      if (writing) assertFreshDistinctVisit(review);
+      const preserved = await query(`SELECT * FROM CitasPacientes WHERE id_cita=?${writing ? ' FOR UPDATE' : ''}`, [review.preserved_native.id_cita]);
+      if (preserved.length !== 1 || hash(normalizedRow(preserved[0])) !== hash(review.preserved_native)) reasons.push('PRESERVED_NATIVE_VISIT_CHANGED');
+      const owners = await query("SELECT id_cita FROM CitasPacientes WHERE source_system='cliniccloud' AND (source_reference=? OR JSON_UNQUOTE(JSON_EXTRACT(import_metadata,'$.source_appointment_id'))=? OR JSON_UNQUOTE(JSON_EXTRACT(import_metadata,'$.cliniccloud_distinct_visit.current.appointment_id'))=? OR JSON_SEARCH(import_metadata,'one',?,NULL,'$.cliniccloud_parallel_sources.entries[*].source_appointment_id') IS NOT NULL) LIMIT 1",
+        [`appointment:${review.current.appointment_id}`, review.current.appointment_id, review.current.appointment_id, review.current.appointment_id]);
+      if (owners.length) reasons.push('DISTINCT_SOURCE_ALREADY_LINKED');
+    }
     if (operation.source_revision) {
       const revision = operation.source_revision;
       if (writing) await query('SELECT id_cita FROM CitasPacientes WHERE paciente_id=? FOR UPDATE', [operation.patient_id]);
