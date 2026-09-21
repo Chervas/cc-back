@@ -31,7 +31,9 @@ async function run(args) {
       await c.rollback();
       const pkg = preparePhysicalInstallations({ sources, ...current, groupId: 29, target: 'crm' });
       writePrivateJson(o['--private-output'], pkg);
-      return { mode: 'prepared', logical_installations: pkg.rows.length, physical_locations: new Set(pkg.rows.map(r=>r.key)).size, package_sha256: pkg.package_sha256 };
+      return { mode: 'prepared', logical_installations: pkg.rows.length, physical_locations: new Set(pkg.rows.map(r=>r.key)).size,
+        installations_to_create: pkg.additions.length, installations_preserved: pkg.preserved.length,
+        aliases_to_create: pkg.alias_additions.length, package_sha256: pkg.package_sha256 };
     }
     const pkg = privateJson(o['--package']); verifyPhysicalPackage(pkg);
     if (o['--approved-sha256'] !== pkg.package_sha256 || !Number.isFinite(Date.parse(pkg.created_at)) || Date.now()-Date.parse(pkg.created_at)>2*3600000 || Date.parse(pkg.created_at)>Date.now()) throw Error('FRESH_PHYSICAL_PACKAGE_APPROVAL_REQUIRED');
@@ -46,23 +48,25 @@ async function run(args) {
     // Replay is intentionally fail-closed: new IDs or changed old rows require
     // reading the durable journal, never creating another set automatically.
     if (hash(before) !== pkg.before_sha256) throw Error('PHYSICAL_RESOURCE_STATE_DRIFT_REVIEW_JOURNAL');
-    await journal.append({ stage: 'prepared', backup, before, proposed: pkg.rows, operator: 'codex-authorized-cliniccloud-import' });
+    await journal.append({ stage: 'prepared', backup, before, proposed: pkg.additions, preserved:pkg.preserved, operator: 'codex-authorized-cliniccloud-import' });
     const inserted = [];
-    for (const row of pkg.rows) {
+    for (const row of pkg.additions) {
       const [result] = await c.query('INSERT INTO Instalaciones (clinica_id,nombre,tipo,descripcion,color,capacidad,activo,requiere_preparacion,tiempo_preparacion_minutos,es_exclusiva,default_duracion_minutos,especialidades_permitidas,tratamientos_exclusivos,equipamiento,orden_visualizacion,created_at,updated_at) VALUES (?,?,?,?,?,1,0,0,0,0,30,?,?,?, ?,UTC_TIMESTAMP(),UTC_TIMESTAMP())',
         [row.clinic_id,row.name,row.type,`Mapa físico documental BS 2026. ${row.key}. Pendiente de activación tras conciliar agenda. Paquete ${pkg.package_sha256}.`,'#64748b','[]','[]','[]',row.key==='Hospital'?90:Number(row.key.slice(1))]);
       if (result.affectedRows!==1 || !Number.isSafeInteger(Number(result.insertId))) throw Error('PHYSICAL_INSERT_FAILED');
       inserted.push({ ...row, id: Number(result.insertId) });
     }
     const insertedAliases = [];
-    for (const row of inserted.filter(r=>r.clinic_id!==r.canonical_clinic_id)) {
-      const canonical = inserted.find(r=>r.key===row.key&&r.clinic_id===row.canonical_clinic_id);
+    for (const addition of pkg.alias_additions) {
+      const row = inserted.find(r=>r.key===addition.key&&r.clinic_id===addition.clinic_id);
+      const canonical = [...inserted,...pkg.preserved].find(r=>r.key===addition.key&&r.clinic_id===addition.canonical_clinic_id);
       if (!canonical) throw Error('PHYSICAL_CANONICAL_ROW_MISSING');
       await c.query('INSERT INTO InstallationPhysicalAliases (installation_id,canonical_installation_id,group_id,created_at,updated_at) VALUES (?,?,29,UTC_TIMESTAMP(),UTC_TIMESTAMP())',[row.id,canonical.id]);
       insertedAliases.push({ installation_id:row.id,canonical_installation_id:canonical.id,group_id:29 });
     }
     const after = await capture(c);
     if (hash(after.installations.filter(r=>!inserted.some(i=>i.id===r.id)))!==hash(before.installations)
+      || hash(after.aliases.filter(r=>!insertedAliases.some(a=>a.installation_id===r.installation_id)))!==hash(before.aliases)
       || inserted.some(i=>!after.installations.some(r=>r.id===i.id&&r.clinica_id===i.clinic_id&&r.nombre===i.name&&Number(r.activo)===0))
       || insertedAliases.some(a=>!after.aliases.some(r=>r.installation_id===a.installation_id&&r.canonical_installation_id===a.canonical_installation_id))) throw Error('PHYSICAL_POST_WRITE_VERIFICATION_FAILED');
     await journal.append({ stage:'written_before_commit', inserted, inserted_aliases:insertedAliases, after_sha256:hash(after) });

@@ -86,6 +86,13 @@ requieren un modo de aplicación explícito y su propio paquete validado.
   conciliado. Si se repite un paquete ya aplicado, el cambio de estado exige
   revisar el diario en lugar de crear duplicados. El plan de catálogo acepta
   `cabins_by_clinic` para resolver cada sala compartida al ID de su clínica.
+  La versión 2 permite completar un mapa parcial: conserva las filas inactivas,
+  de una plaza y con procedencia del mapa documental; rechaza homónimos ajenos,
+  capacidad distinta, duplicados y aliases cruzados. C2 y C6 también tienen
+  registro Medical por curas y cirugía del Excel, enlazado al ID físico Capilar
+  existente. Nunca invierte un alias anterior, renombra la sala ni suma capacidad.
+  Un mapa completo prepara cero altas; una nueva preparación no sustituye la
+  revisión del diario si se desconoce el resultado del paquete anterior.
 - `cliniccloud-import-contacts-apply.js`: solo parches no vacíos de contactos
   enlazados inequívocamente y sin conflictos de comparación a tres versiones.
   `--mode prepare --plan … --snapshot … --private-output …` captura antes e
