@@ -5,6 +5,7 @@
 // program, invent a professional, send events or turn reminders on.
 const { hash, dateOnly, localToUtc } = require('./adapter');
 const { verifyPlan, instant } = require('./appointments-apply');
+const { revisedSource, validateSourceRevision, assertFreshRevision } = require('./source-revisions');
 const VERSION = 'cliniccloud-week-appointments/1';
 const ACCOUNT = 'cliniccloud-5880';
 const positive = value => Number.isSafeInteger(value) && value > 0;
@@ -33,14 +34,16 @@ function prepareWeekAppointments({ plan, snapshot, review, target, capturedAt = 
     || review.decisions.some(d => !byKey.has(d.action_key) || !String(d.reason || '').trim())) fail('COMPLETE_WEEK_REVIEW_REQUIRED');
   const operations = [], deferred = [], references = new Set();
   for (const decision of review.decisions) {
-    const action = byKey.get(decision.action_key), source = action.source;
+    const action = byKey.get(decision.action_key);
     if (decision.disposition === 'defer') { deferred.push({ action_key: action.action_key, reason: decision.reason }); continue; }
+    const source = decision.source_revision ? revisedSource(action.source, decision.source_revision) : action.source;
     if (decision.disposition !== 'create' || action.action !== 'create_appointment_candidate'
       || action.candidate_local_ids.length || action.reasons.some(r => r !== 'RESOURCE_AND_SERVICE_MAP_REQUIRED')
       || source.validation_errors.length || !positive(action.patient_id)) fail('WEEK_CREATION_NOT_UNAMBIGUOUS');
     if (!['pendiente', 'cancelada'].includes(source.status)) fail('WEEK_CLINICAL_STATUS_REQUIRES_REVIEW');
     if (localToUtc(source.start_local) !== source.start_utc || localToUtc(source.end_local) !== source.end_utc
       || source.end_utc <= source.start_utc || new Date(source.end_utc) - new Date(source.start_utc) > 86400000) fail('WEEK_SOURCE_INTERVAL_INVALID');
+    if (source.start_local.slice(0, 10) < review.week.start || source.end_local.slice(0, 10) > review.week.end) fail('WEEK_REVISED_INTERVAL_OUTSIDE_WEEK');
     const patients = snapshot.patients.filter(p => p.source_contact_ids.includes(source.source_contact_id));
     if (patients.length !== 1 || patients[0].id !== action.patient_id) fail('WEEK_PATIENT_LINK_AMBIGUOUS');
     const assignment = decision.assignment || {};
@@ -59,6 +62,7 @@ function prepareWeekAppointments({ plan, snapshot, review, target, capturedAt = 
       patient_id: action.patient_id, assignment, pending_assignment: decision.pending_assignment || [], evidence: decision.evidence,
       source: sourceBaseline, provenance: action.provenance, title: String(source.service_key || 'Cita importada').slice(0, 255),
       note: source.details || null, start_utc: source.start_utc, end_utc: source.end_utc, status: source.status };
+    if (decision.source_revision) body.source_revision = decision.source_revision;
     operations.push({ ...body, operation_sha256: hash(body) });
   }
   if (!operations.length || operations.length > 250) fail('WEEK_BATCH_SIZE_INVALID');
@@ -78,6 +82,13 @@ function verifyWeekPackage(pkg) {
   for (const operation of pkg.operations) {
     const { operation_sha256, ...body } = operation;
     if (hash(body) !== operation_sha256 || sourceReference(operation.source) !== operation.source_reference) fail('WEEK_OPERATION_CHANGED');
+    if (operation.source_revision) {
+      const revision = validateSourceRevision(operation.source_revision);
+      if (Object.keys(operation.source).some(key => operation.source[key] !== revision.current[key])
+        || operation.note !== (revision.current.details || null) || hash(operation.provenance) !== hash(revision.provenance)
+        || operation.start_utc !== localToUtc(revision.current.start_local) || operation.end_utc !== localToUtc(revision.current.end_local)
+        || operation.source_contact_id !== revision.current.source_contact_id || operation.status !== revision.current.status) fail('WEEK_OPERATION_CHANGED');
+    }
   }
 }
 function appointmentPayload(operation, pkg, approval, now) {
@@ -89,6 +100,8 @@ function appointmentPayload(operation, pkg, approval, now) {
     inicio: operation.start_utc, fin: operation.end_utc, source_system: 'cliniccloud', source_reference: operation.source_reference,
     es_provisional: 0, created_at: timestamp, updated_at: timestamp,
     import_metadata: { source_account: ACCOUNT, source_contact_id: operation.source_contact_id,
+      ...(operation.source_revision ? { source_appointment_id: operation.source_revision.source_appointment_id,
+        cliniccloud_source_revision: operation.source_revision } : {}),
       notification_suppression: { appointment_details: true, day_before: true, same_day: true },
       cliniccloud_delta: { version: 1, source: operation.source, provenance: operation.provenance,
         source_reference_kind: 'import_fingerprint_not_source_appointment_id', pending_assignment: operation.pending_assignment,
@@ -124,6 +137,7 @@ async function executeWeekAppointments({ pkg, approval, store, journal, now = ()
         outcome = { phase: 'week_deferred', action_key: operation.action_key, reasons: checked.reasons };
         return;
       }
+      if (operation.source_revision) assertFreshRevision(operation.source_revision, now());
       const payload = appointmentPayload(operation, pkg, approval, now());
       await journal.append({ phase: 'week_prepared', package_sha256: pkg.package_sha256,
         action_key: operation.action_key, operation_sha256: operation.operation_sha256, payload,

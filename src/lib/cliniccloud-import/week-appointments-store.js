@@ -1,8 +1,9 @@
 'use strict';
 
 // Operator-only SQL. No models, application bootstrap, hooks or message jobs.
-const { ACCOUNT } = require('./week-appointments');
+const { ACCOUNT, sourceReference } = require('./week-appointments');
 const { instant } = require('./appointments-apply');
+const { localToUtc } = require('./adapter');
 const sqlDate = value => instant(value).replace('T', ' ').replace('Z', '');
 async function createWeekAppointmentsStore(connection, { groupId, readOnly = true }) {
   const query = async (sql, values = []) => (await connection.query(sql, values))[0];
@@ -42,6 +43,14 @@ async function createWeekAppointmentsStore(connection, { groupId, readOnly = tru
     const patients = await query(`SELECT id_paciente,clinica_id FROM Pacientes WHERE id_paciente = ?${writing ? ' FOR UPDATE' : ''}`, [operation.patient_id]);
     const patient = patients[0];
     if (!patient) reasons.push('PATIENT_NO_LONGER_EXISTS');
+    if (operation.source_revision) {
+      const revision = operation.source_revision;
+      if (writing) await query('SELECT id_cita FROM CitasPacientes WHERE paciente_id=? FOR UPDATE', [operation.patient_id]);
+      const oldSlots = await query("SELECT id_cita FROM CitasPacientes WHERE (source_system='cliniccloud' AND (source_reference IN (?,?) OR JSON_UNQUOTE(JSON_EXTRACT(import_metadata,'$.source_appointment_id'))=?)) OR (paciente_id=? AND inicio < ? AND fin > ?) LIMIT 1",
+        [sourceReference(revision.original), `appointment:${revision.source_appointment_id}`, revision.source_appointment_id,
+          operation.patient_id, sqlDate(localToUtc(revision.original.end_local)), sqlDate(localToUtc(revision.original.start_local))]);
+      if (oldSlots.length) reasons.push('REVISED_SOURCE_ALREADY_HAS_LOCAL_VISIT');
+    }
     const links = await query("SELECT DISTINCT pc.paciente_id FROM PatientCustomFields pc JOIN Clinicas c ON c.id_clinica=pc.clinica_id WHERE c.grupoClinicaId = ? AND pc.source='cliniccloud' AND (((pc.source_column='idContacto' OR pc.field_key='cliniccloud_source_contact_id') AND TRIM(pc.value)=?) OR (pc.source_column IN ('contacto_1.csv','cliniccloud_contact_snapshot') AND JSON_UNQUOTE(JSON_EXTRACT(CASE WHEN JSON_VALID(pc.value) THEN pc.value ELSE '{}' END,'$.contact.idContacto'))=?))", [groupId, operation.source_contact_id, operation.source_contact_id]);
     if (links.length !== 1 || Number(links[0].paciente_id) !== operation.patient_id) reasons.push('SOURCE_PATIENT_IDENTITY_CHANGED');
     const membership = await query('SELECT id FROM PacienteClinicas WHERE paciente_id=? AND clinica_id=?', [operation.patient_id, assignment.clinic_id]);

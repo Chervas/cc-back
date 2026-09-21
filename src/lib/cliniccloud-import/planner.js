@@ -98,6 +98,8 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
   // from simultaneous times or allow it to rewrite the shared appointment.
   const parallelReferences = index(localAppointments.filter(isImported).flatMap(local =>
     (local.parallel_sources || []).map(entry => ({ local, entry }))), item => item.entry.source_reference);
+  const revisionReferences = index(localAppointments.filter(local => isImported(local) && local.source_revision),
+    local => sourceReference(local.source_revision.original));
   const claimedLocal = new Set();
   const recoveredHistoricalIds = new Set();
   const decisions = [];
@@ -117,6 +119,25 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
     if (row.source_external_id && sourceExternalIds.get(row.source_external_id).length > 1) decision.reasons.push('DUPLICATE_SOURCE_APPOINTMENT_ID');
     const sameIdentity = sourceExact.get(appointmentKey(row)) || [];
     if (new Set(sameIdentity.map((r) => r.provenance.row_sha256)).size > 1) decision.reasons.push('MULTIPLE_DISTINCT_SOURCE_ROWS_SAME_SLOT');
+    const revised = revisionReferences.get(sourceReference(row)) || [];
+    if (revised.length) {
+      decision.candidate_local_ids = revised.map(local => local.id);
+      if (revised.length !== 1) decision.reasons.push('SOURCE_REVISION_MULTIPLE_LOCAL_MATCHES');
+      else {
+        const local = revised[0], revision = local.source_revision;
+        decision.local_id = local.id; decision.expected_local_hash = hash(local);
+        decision.source_external_id = revision.source_appointment_id;
+        if (!patient || String(local.patient_id) !== String(patient.id)) decision.reasons.push('LOCAL_PATIENT_IDENTITY_CONFLICT');
+        if (row.status !== revision.original.status || norm(row.details || '') !== norm(revision.original.details)
+          || (row.source_external_id && String(row.source_external_id) !== revision.source_appointment_id)) decision.reasons.push('REVISED_SOURCE_CHANGED_REQUIRES_REVIEW');
+        if (local.local_modified || local.revision_local_note_changed
+          || ['start_local', 'end_local', 'status'].some(key => local[key] !== revision.current[key])) decision.reasons.push('LOCAL_EDIT_REQUIRES_REVIEW');
+        const overlaps = patient ? localTime.get(patientTimeKey({ ...revision.current, patient_id: patient.id })) || [] : [];
+        if (overlaps.some(other => String(other.id) !== String(local.id))) decision.reasons.push('REVISED_SOURCE_LOCAL_OVERLAP');
+        if (!decision.reasons.length) { decision.action = 'preserve_verified_source_revision'; decision.requires_review = false; claimedLocal.add(String(local.id)); }
+      }
+      decisions.push(decision); continue;
+    }
     const parallelMatches = row.kind === 'appointment' ? parallelReferences.get(sourceReference(row)) || [] : [];
     if (parallelMatches.length) {
       const ids = [...new Set(parallelMatches.map(item => item.local.id))];
