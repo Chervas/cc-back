@@ -418,6 +418,17 @@ exports.regenerateClinicKioskAccess = asyncHandler(async (req, res) => {
     }
 });
 
+exports.updateClinicKioskScope = asyncHandler(async (req, res) => {
+    try {
+        await requireConsentFeature(req, 'consents.manage', req.params.clinicId);
+        return res.json(await consentimientosService.updateClinicKioskScope(
+            req.params.clinicId, req.params.kioskId, getUserId(req), req.body || {}
+        ));
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
 exports.loginTabletKiosk = asyncHandler(async (req, res) => {
     try {
         const item = await consentimientosService.loginTabletKiosk(req.body || {});

@@ -28,6 +28,7 @@ router.get('/clinic/:clinicId/tablet-kiosk', consentimientosController.getClinic
 router.post('/clinic/:clinicId/tablet-kiosk', consentimientosController.createClinicKioskAccess);
 router.post('/clinic/:clinicId/tablet-kiosk/reset', consentimientosController.resetClinicKioskAccess);
 router.post('/clinic/:clinicId/tablet-kiosk/:kioskId/reset', consentimientosController.regenerateClinicKioskAccess);
+router.patch('/clinic/:clinicId/tablet-kiosk/:kioskId/scope', consentimientosController.updateClinicKioskScope);
 
 router.get('/treatments/:id/requirements', consentimientosController.getTreatmentRequirements);
 router.put('/treatments/:id/requirements', consentimientosController.saveTreatmentRequirements);
