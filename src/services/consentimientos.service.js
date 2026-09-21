@@ -1597,7 +1597,7 @@ async function saveTreatmentRequirements(tratamientoIdRaw, payload = {}) {
     if (normalized.length) {
         await db.TreatmentConsentRequirement.bulkCreate(normalized);
     }
-    return getTreatmentRequirements({ tratamientoId, clinicaId });
+    return getTreatmentRequirements({ tratamientoId, clinicaId: clinicId });
 }
 
 async function findAppointment(citaIdRaw) {
