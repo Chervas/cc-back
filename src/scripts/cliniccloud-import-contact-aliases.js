@@ -1,0 +1,87 @@
+#!/usr/bin/env node
+'use strict';
+const path=require('node:path');
+const {execFileSync}=require('node:child_process');
+const {hash,normalizeContacts}=require('../lib/cliniccloud-import/adapter');
+const {readCsv,readBytes,parseArgs,writePrivateJson}=require('../lib/cliniccloud-import/io');
+const {validateContactAlias}=require('../lib/cliniccloud-import/contact-aliases');
+const {connectOperatorDatabase}=require('../lib/cliniccloud-import/operator-database');
+const {createNewPatientsStore}=require('../lib/cliniccloud-import/new-patients-store');
+const {privateJson,openJournal,acquireExecutorLocks}=require('./cliniccloud-import-appointments-apply');
+const {validateBackup}=require('./cliniccloud-import-contacts-apply');
+const VERSION='cliniccloud-contact-aliases/1';
+async function run(args){
+ const o=parseArgs(args,['--mode','--target','--contacts','--review','--private-output','--package','--approved-sha256','--backup-manifest','--private-journal']);
+ if(o['--target']!=='crm'||!['prepare','apply'].includes(o['--mode']))throw Error('EXPLICIT_CRM_ALIAS_MODE_REQUIRED');
+ if(process.cwd()!=='/home/ubuntu/wt/back-dev'||execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim()!=='dev')throw Error('DEV_OPERATOR_WORKTREE_REQUIRED');
+ const review=privateJson(o['--review']);
+ if(!review.reviewed_by||!Array.isArray(review.links)||!review.links.length||review.links.length>50
+   ||new Set(review.links.map(r=>r.source_contact_id)).size!==review.links.length
+   ||new Set(review.links.map(r=>r.patient_id)).size!==review.links.length)throw Error('BOUNDED_EXPLICIT_ALIAS_REVIEW_REQUIRED');
+ const input=readCsv(o['--contacts'],'contacts',['IDCONTACTO','NOMBRE','APELLIDOS']);
+ const sourceRows=normalizeContacts(input.rows,input.file.sha256);
+ const selected=review.links.map(link=>{
+  const matches=sourceRows.filter(s=>s.source_contact_id===link.source_contact_id);
+  if(matches.length!==1)throw Error('ALIAS_SOURCE_ID_NOT_UNIQUE');
+  return {source:matches[0],patient_id:link.patient_id};
+ });
+ let pkg,backup;
+ if(o['--mode']==='apply'){
+  pkg=privateJson(o['--package']);const {package_sha256,...body}=pkg;
+  if(pkg.version!==VERSION||hash(body)!==package_sha256||o['--approved-sha256']!==package_sha256||pkg.target!=='crm'
+    ||pkg.review_sha256!==hash(review)||pkg.contacts_sha256!==input.file.sha256||hash(pkg.selected)!==hash(selected)
+    ||pkg.policy!=='add_external_alias_only_no_patient_or_history_mutation')throw Error('ALIAS_PACKAGE_REVIEW_MISMATCH');
+  if(!Array.isArray(pkg.operations)||pkg.operations.length!==selected.length
+    ||pkg.operations.some((op,i)=>hash({source:op.source,patient_id:op.patient_id})!==hash(selected[i])))throw Error('ALIAS_OPERATION_NOT_IN_REVIEWED_SOURCE');
+  if(!Number.isFinite(Date.parse(pkg.created_at))||Date.parse(pkg.created_at)>Date.now()||Date.now()-Date.parse(pkg.created_at)>2*3600000)throw Error('ALIAS_PACKAGE_EXPIRED');
+  const manifest=privateJson(o['--backup-manifest']);if(manifest.database_target!=='crm'||!manifest.full_gzip_verified||!manifest.dump_completion_verified)throw Error('ALIAS_VERIFIED_CRM_BACKUP_REQUIRED');
+  backup=await validateBackup(o['--backup-manifest']);
+ }
+ const c=await connectOperatorDatabase('crm');let journal,commitAttempted=false;
+ try{
+  const store=await createNewPatientsStore(c,{groupId:29});
+  if(o['--mode']==='prepare'){
+   await c.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const live=await store.captureGroup();
+   const operations=selected.map(({source,patient_id})=>{
+    const match=validateContactAlias(source,patient_id,live);if(match.already_linked)throw Error('ALIAS_ALREADY_LINKED_NOT_A_NEW_OPERATION');
+    return {source,patient_id,patient_before:match.patient,patient_before_sha256:match.before_sha256,field_key:match.field_key,evidence:match.evidence};
+   });await c.rollback();
+   const body={version:VERSION,target:'crm',created_at:new Date().toISOString(),contacts_sha256:input.file.sha256,review_sha256:hash(review),selected,operations,policy:'add_external_alias_only_no_patient_or_history_mutation'};
+   pkg={...body,package_sha256:hash(body)};writePrivateJson(o['--private-output'],pkg);
+   return {status:'prepared',aliases:operations.length,patients_created:0,package_sha256:pkg.package_sha256};
+  }
+  const [lock]=await c.query('SELECT GET_LOCK(?,0) acquired',['cc-contact-aliases:cliniccloud-5880']);if(Number(lock[0].acquired)!==1)throw Error('ALIAS_OPERATOR_ALREADY_RUNNING');
+  await acquireExecutorLocks(c,pkg.package_sha256,path.resolve(o['--private-journal']));journal=openJournal(o['--private-journal'],pkg.package_sha256);
+  await c.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');await c.beginTransaction();
+  const ids=pkg.operations.map(op=>op.patient_id).sort((a,b)=>a-b);
+  const [locked]=await c.query('SELECT id_paciente FROM Pacientes WHERE id_paciente IN (?) ORDER BY id_paciente FOR UPDATE',[ids]);
+  if(locked.length!==ids.length)throw Error('ALIAS_PATIENT_DISAPPEARED');
+  const [fieldsBefore]=await c.query('SELECT * FROM PatientCustomFields WHERE paciente_id IN (?) ORDER BY id FOR UPDATE',[ids]);
+  const live=await store.captureGroup();const decisions=[];
+  for(const op of pkg.operations){
+   const checked=validateContactAlias(op.source,op.patient_id,live);
+   if(hash(op.patient_before)!==op.patient_before_sha256||checked.before_sha256!==op.patient_before_sha256||checked.field_key!==op.field_key)throw Error('ALIAS_PATIENT_STATE_DRIFT');
+   const ownField=fieldsBefore.find(f=>f.paciente_id===op.patient_id&&f.field_key===op.field_key);
+   if(ownField&&(ownField.source!=='cliniccloud'||ownField.source_column!=='idContacto'||ownField.value!==op.source.source_contact_id))throw Error('ALIAS_FIELD_COLLISION');
+   if(checked.already_linked&&!ownField)throw Error('ALIAS_NEWLY_LINKED_ELSEWHERE_REVIEW');
+   decisions.push({...op,preserve:Boolean(ownField)});
+  }
+  await journal.append({stage:'prepared',operator:review.reviewed_by,backup,decisions,fields_before:fieldsBefore});
+  const inserted=[];
+  for(const op of decisions.filter(d=>!d.preserve)){
+   const [r]=await c.query('INSERT INTO PatientCustomFields (paciente_id,clinica_id,field_key,label,value,value_type,source,source_column,last_imported_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,UTC_TIMESTAMP(),UTC_TIMESTAMP(),UTC_TIMESTAMP())',
+    [op.patient_id,op.patient_before.clinica_id,op.field_key,'ID ClinicCloud adicional',op.source.source_contact_id,'text','cliniccloud','idContacto']);
+   if(r.affectedRows!==1)throw Error('ALIAS_INSERT_COUNT_INVALID');inserted.push(Number(r.insertId));
+  }
+  const after=await store.captureGroup();
+  for(const op of decisions){const match=validateContactAlias(op.source,op.patient_id,after);if(!match.already_linked||match.before_sha256!==op.patient_before_sha256)throw Error('ALIAS_POST_WRITE_IDENTITY_DRIFT');}
+  const [fieldsAfter]=await c.query('SELECT * FROM PatientCustomFields WHERE paciente_id IN (?) ORDER BY id',[ids]);
+  if(hash(fieldsAfter.filter(r=>!inserted.includes(r.id)))!==hash(fieldsBefore))throw Error('ALIAS_EXISTING_FIELDS_CHANGED');
+  await journal.append({stage:'written_before_commit',inserted_ids:inserted,fields_after:fieldsAfter});commitAttempted=true;await c.commit();
+  await journal.append({stage:'committed',inserted_ids:inserted,preserved:decisions.filter(d=>d.preserve).length,patient_ids:ids});
+  return {status:'committed',aliases_created:inserted.length,aliases_preserved:decisions.filter(d=>d.preserve).length,patients_created:0,patient_fields_changed:0,appointments_changed:0,messages_sent:0};
+ }catch(e){await c.rollback().catch(()=>{});if(commitAttempted)throw Error('ALIAS_COMMIT_RESULT_REQUIRES_JOURNAL_REVIEW');throw e;}
+ finally{journal?.close();await c.end();}
+}
+if(require.main===module)run(process.argv.slice(2)).then(r=>console.log(JSON.stringify(r))).catch(e=>{console.error(/^[A-Z_]+$/.test(e.message)?e.message:'ALIAS_IMPORT_FAILED_REVIEW_PRIVATE_JOURNAL');process.exitCode=1;});
+module.exports={run};
