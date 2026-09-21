@@ -206,7 +206,9 @@ Máximo 500 conceptos. Las dos rutas de alta fiscal usan la misma operación.
 
 Para un presupuesto clasificado se usan exclusivamente la versión persistida y
 su aceptación: claves de conceptos e importe realmente aceptado, incluidos sus
-descuentos. Se ignoran importes/impuestos de `payload.lines`. El documento
+descuentos. Solo se seleccionan transiciones `accepted`/`partially_accepted` de
+esa versión; actividad posterior de firma con el mismo `to_status` no sustituye
+la aceptación financiera. Se ignoran importes/impuestos de `payload.lines`. El documento
 congela `payment_data.fiscal_price_source`; actualizar un borrador no consulta el
 catálogo actual ni acepta ese snapshot del cliente. Los documentos anteriores
 sin este campo conservan sus reglas; los emitidos siguen ineditables y su PDF
