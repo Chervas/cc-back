@@ -130,8 +130,11 @@ persistida y no restaura ediciones posteriores. SQL directo no carga modelos,
 jobs, eventos ni notificaciones; conserva HOLD y las tres supresiones.
 
 La API publica solo `import_review` con procedencia, recordatorios retenidos y
-asignaciones que aún faltan realmente; no devuelve evidencias privadas en el DTO
-ligero. Corregir manualmente la asignación elimina su aviso, no activa mensajes.
+asignaciones que aún faltan realmente. `source_service` añade únicamente el
+nombre del servicio de la línea base, limitado a 255 caracteres; no expone notas,
+identidad ni evidencias privadas. Es texto de procedencia, no una equivalencia de
+catálogo, precio o consentimiento. Sin permiso de datos sensibles se retira todo
+`import_review`. Corregir manualmente la asignación elimina su aviso, no activa mensajes.
 Pruebas: `cliniccloud_week_appointments.test.js`,
 `cliniccloud_import_snapshot_baseline.test.js` y
 `appointment_import_review.test.js`; QA SQL aislada
