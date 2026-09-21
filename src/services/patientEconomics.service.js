@@ -6,6 +6,7 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const whatsappService = require('./whatsapp.service');
 const economicPrograms = require('../lib/economicProgramSnapshot');
+const economicPrices = require('../lib/economicPriceProfile');
 const treatmentPrograms = require('./treatmentPrograms.service');
 
 const {
@@ -446,6 +447,8 @@ function mapCatalogItem(treatment) {
     category: treatment.categoria || null,
     product_type: normalizeProductType(treatment),
     base_price: roundMoney(treatment.precio_base),
+    price_profile: economicPrices.profileFromTreatment(treatment),
+    price_semantics: config.price_profile ? 'gross_tax_included' : 'existing_catalog_price',
     default_units: Math.max(1, Number(treatment.sesiones_defecto) || 1),
     unit_label: cleanString(config.commercial?.unit_label || config.unit_label, 40)
       || (Number(treatment.sesiones_defecto) > 1 ? 'sesiones' : 'unidad'),
@@ -624,6 +627,7 @@ function normalizeLine(raw, index) {
     activation_rule: cleanString(raw.activation_rule, 30) || 'on_first_payment',
     expires_in_months: optionalPositiveInteger(raw.expires_in_months),
     notes: cleanString(raw.notes || raw.notas, 500) || null,
+    ...(raw.price_snapshot ? { price_snapshot: cloneJson(raw.price_snapshot) } : {}),
     ...(raw.program_id ? { program_id: raw.program_id, program_version: Number(raw.program_version),
       program_snapshot: raw.program_snapshot, entitlement_units: raw.entitlement_units } : {}),
   };
@@ -645,6 +649,7 @@ function calculateBudgetPayload(payload) {
   }
   const discountAmount = roundMoney(subtotal * discountPercent / 100);
   const total = roundMoney(Math.max(0, subtotal - discountAmount));
+  const fiscal = economicPrices.budgetBreakdown(lines, total);
   return {
     lines,
     totals: {
@@ -652,8 +657,10 @@ function calculateBudgetPayload(payload) {
       subtotal,
       global_discount_percent: roundMoney(discountPercent),
       global_discount_amount: discountAmount,
-      tax_base: total,
-      taxes: 0,
+      tax_base: fiscal.tax_base,
+      taxes: fiscal.taxes,
+      tax_breakdown_status: fiscal.tax_breakdown_status,
+      tax_breakdown: fiscal.lines,
       total,
     },
   };
@@ -887,9 +894,19 @@ async function createVersion({ budget, payload, patient, clinic, actorId, versio
   const previous = versionNumber > 1 ? await EconomicBudgetVersion.findOne({
     where: { budget_id: budget.id, version_number: versionNumber - 1 }, transaction,
   }) : null;
-  const lines = await economicPrograms.resolveLines(payload.lines || payload.lineas || [], {
+  const programLines = await economicPrograms.resolveLines(payload.lines || payload.lineas || [], {
     previousLines: parseJson(previous?.lines, []),
     resolve: (id, version) => treatmentPrograms.resolveForBudget({ id, version, clinicId: clinic.id_clinica, transaction }),
+  });
+  const lines = await economicPrices.resolveBudgetPriceProfiles(programLines, {
+    previousLines: parseJson(previous?.lines, []),
+    resolveTreatments: async ids => {
+      const scopes = [{ origen: 'sistema' }, { origen: 'clinica', clinica_id: clinic.id_clinica }];
+      if (clinic.grupoClinicaId) scopes.push({ origen: 'grupo', grupo_clinica_id: clinic.grupoClinicaId });
+      const rows = await Tratamiento.findAll({ where: { id_tratamiento: { [Op.in]: ids }, [Op.or]: scopes, activo: true }, transaction });
+      return new Map(rows.filter(row => treatmentIsAvailableForClinic(row, { clinicId: clinic.id_clinica, clinic }))
+        .map(row => [Number(row.id_tratamiento), row]));
+    },
   });
   const calculated = calculateBudgetPayload({ ...payload, lines });
   const template = await resolveTemplate({

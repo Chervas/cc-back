@@ -5,7 +5,7 @@ const { domainError } = require('./treatmentPrograms.contract');
 const copy = (value) => JSON.parse(JSON.stringify(value));
 const hash = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const stable = (value) => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
-  ? Object.fromEntries(Object.keys(value).sort().filter((key) => !['program_snapshot', 'entitlement_units', 'base', 'total', 'expected_version', 'source_reference'].includes(key)).map((key) => [key, stable(value[key])])) : value;
+  ? Object.fromEntries(Object.keys(value).sort().filter((key) => !['program_snapshot', 'price_snapshot', 'entitlement_units', 'base', 'total', 'expected_version', 'source_reference'].includes(key)).map((key) => [key, stable(value[key])])) : value;
 const requestHash = (payload) => hash(stable(payload));
 const economicsEnabled = (environment = process.env) => environment.TREATMENT_PROGRAM_ECONOMICS_ENABLED === 'true';
 const { programBookingEnabled, composeAppointmentProfile, normalizeCadence } = require('./program-booking');
@@ -44,6 +44,7 @@ function snapshot(program) {
     schema_version: 2, program_id: program.id, program_version: program.version, cadence: normalizeCadence(program.cadence),
     kind: program.kind, name: program.name, currency: 'EUR',
     catalog_total_price: program.total_price, price_semantics: 'gross_tax_included',
+    price_profile: require('./economicPriceProfile').commonProfile(program.appointments.flatMap(a => a.treatments.map(t => t.price_profile))),
     appointments: program.appointments.map((a) => ({
       key: a.key, label: a.label, offset_days: a.offset_days,
       treatment_ids: [...a.treatment_ids], duration_minutes: a.duration_minutes,
