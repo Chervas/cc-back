@@ -12,6 +12,7 @@ test('SQL profile marker preserves JSON paths without opening a database connect
     const sql = sequelize.getQueryInterface().queryGenerator.handleSequelizeMethod(attribute[0]);
     assert.match(sql, /'\$\.booking'/);
     assert.match(sql, /'\$\.program_session'/);
+    assert.match(sql, /'\$\.additional_staff'/);
     assert.doesNotMatch(sql, /\$\$/);
   } finally { await sequelize.close(); }
 });

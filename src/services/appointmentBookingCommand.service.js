@@ -4,6 +4,7 @@ const { solveBookingProfile, occupancyForSolution, isFree } = require('../lib/bo
 const { normalizeBookingProfile } = require('../lib/booking-profile');
 const { resolveInstallationKeys, loadBookingContext } = require('./appointmentBookingAvailability.service');
 const { bookingError, bookingCapabilities, requireOperationalProfile, loadScopedTreatment, assertPriorityAcknowledgement } = require('./treatmentBookingProfile.service');
+const { normalizeAdditionalStaff, additionalStaffSnapshot } = require('../lib/appointment-additional-staff');
 
 function metadataObject(value) {
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = null; } }
@@ -52,8 +53,10 @@ function solveLegacy(values, context, force = false) {
  */
 async function mutateAppointmentBooking({ db, appointmentValues, existingAppointmentId = null, persist,
   priorityAcknowledged = false, selections = {}, transaction = null, capabilities = bookingCapabilities(),
-  allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false }) {
+  allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false,
+  additionalStaffIds = undefined }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
+  const requestedStaff = normalizeAdditionalStaff(additionalStaffIds);
   const execute = async (tx) => {
     if (tx.options?.isolationLevel !== 'READ COMMITTED') {
       throw new Error('booking_requires_read_committed');
@@ -62,6 +65,15 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     if (existingAppointmentId && !existing) throw bookingError('appointment_not_found', 'Cita no encontrada.', null, 404);
     const previous = existing?.toJSON ? existing.toJSON() : (existing || {});
     const values = { ...previous, ...appointmentValues };
+    const previousStaff = additionalStaffSnapshot(previous);
+    if (metadataObject(previous.import_metadata).additional_staff && !previousStaff) {
+      throw bookingError('booking_additional_staff_invalid', 'Revisa el personal de apoyo de esta cita antes de modificarla.');
+    }
+    const extraStaff = requestedStaff ?? previousStaff?.ids ?? [];
+    if (extraStaff.length && !capabilities.multi) throw bookingError('booking_profile_runtime_unavailable',
+      'La reserva con personal de apoyo todavía no está activada.');
+    if (stateOnly && requestedStaff !== undefined) throw bookingError('booking_additional_staff_invalid',
+      'Cambia el personal desde la edición de la cita, no desde su estado.', null, 400);
     // Only the server-owned session ledger can supply a combined profile. An
     // ordinary appointment request cannot forge a purchase or change its owner.
     const session = existing && db.PatientProgramSession && previous.voucher_id
@@ -117,6 +129,15 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const importMetadata = { ...previousMetadata, ...metadataObject(values.import_metadata) };
     delete importMetadata.booking; // A request cannot author a trusted booking snapshot.
     delete importMetadata.program_session;
+    delete importMetadata.additional_staff;
+    if (values.estado === 'cancelada' && previousStaff) {
+      if (requestedStaff !== undefined && JSON.stringify(requestedStaff) !== JSON.stringify(previousStaff.ids)) {
+        throw bookingError('booking_additional_staff_invalid', 'Reabre la cita para cambiar su personal de apoyo.', null, 400);
+      }
+      importMetadata.additional_staff = { ...previousStaff, start_at: start.toISOString(), end_at: end.toISOString() };
+    } else if (values.estado === 'cancelada' && extraStaff.length) {
+      throw bookingError('booking_additional_staff_invalid', 'No se puede añadir personal a una cita cancelada.', null, 400);
+    }
     if (session) importMetadata.program_session = previousMetadata.program_session;
     if (trustedProgramSession) {
       if (existing || !transaction || Number(trustedProgramSession.voucher_id) !== Number(values.voucher_id)) throw new Error('program_booking_trusted_context_invalid');
@@ -145,14 +166,16 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const mapping = await resolveInstallationKeys({ db, clinic, installationIds, transaction: tx, enabled: true });
     const keys = [
       ...profile.phases.flatMap((phase) => phase.professionals.ids.map((id) => `doctor:${id}`)),
+      ...extraStaff.map((id) => `doctor:${id}`),
       ...installationIds.map((id) => mapping.keys.get(id)), ...previousRows.map((row) => row.resource_key),
       ...(values.paciente_id ? [`patient:${values.paciente_id}`] : []),
     ];
     await lockBookingResources({ db, resourceKeys: keys, transaction: tx });
     let solution = null;
     if (values.estado !== 'cancelada') {
-      const context = preparedContext || await loadBookingContext({ db, clinic, profile, start, end, transaction: tx,
-        ignoreAppointmentId: existing?.id_cita, occupancyEnabled: true, installationMapping: mapping, patientId: values.paciente_id });
+      const context = (!extraStaff.length && preparedContext) || await loadBookingContext({ db, clinic, profile, start, end, transaction: tx,
+        ignoreAppointmentId: existing?.id_cita, occupancyEnabled: true, installationMapping: mapping, patientId: values.paciente_id,
+        additionalStaffIds: extraStaff });
       const existingSelections = previousMetadata.booking?.phases && configuredProfile
         ? Object.fromEntries(previousMetadata.booking.phases.map((phase) => [phase.key, {
           installation_id: phase.installation_id,
@@ -163,13 +186,15 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
         : (configuredProfile?.phases.length === 1 && configuredProfile.phases[0].professionals.mode === 'any'
           ? { [configuredProfile.phases[0].key]: { doctor_id: values.doctor_id, installation_id: values.instalacion_id } }
           : existingSelections || {});
-      solution = configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen }) : solveLegacy(values, context, force === true);
+      const supportFree = extraStaff.every(id => isFree(context.doctors.get(id), start, end));
+      solution = supportFree ? (configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen })
+        : solveLegacy(values, context, !extraStaff.length && force === true)) : null;
       const patientConflict = (context.patientBusy || []).some(busy => new Date(busy.start) < end && new Date(busy.end) > start);
       if (!solution || patientConflict || new Date(solution.end_at).getTime() !== end.getTime()) {
         // Re-evaluated under the same resource locks. Force is only available
         // between ordinary appointments in this clinic, never for a profile,
         // mandatory team, blocked schedule, foreign clinic or patient overlap.
-        const canForce = !configuredProfile && !patientConflict && !!solveLegacy(values, context, true);
+        const canForce = !extraStaff.length && !configuredProfile && !patientConflict && !!solveLegacy(values, context, true);
         throw bookingError('booking_unavailable', 'El hueco ya no está disponible o no cumple el perfil del tratamiento. Actualiza las propuestas.', { can_force: canForce });
       }
       assertPriorityAcknowledgement(solution, priorityAcknowledged);
@@ -178,6 +203,12 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
         values.instalacion_id = solution.phases[0].installation_id;
         importMetadata.booking = { version: 1, profile: configuredProfile, phases: solution.phases,
           warnings: solution.warnings, priority_acknowledged: priorityAcknowledged === true };
+        values.import_metadata = importMetadata;
+      }
+      if (extraStaff.length) {
+        importMetadata.additional_staff = { version: 1, ids: extraStaff,
+          names: extraStaff.map(id => context.doctors.get(id)?.name || ''),
+          start_at: start.toISOString(), end_at: end.toISOString() };
         values.import_metadata = importMetadata;
       }
     }
@@ -190,6 +221,13 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     }
     if (solution) {
       const rows = occupancyForSolution(solution, mapping.keys).filter((row) => row.installation_id || row.doctor_id);
+      for (const id of extraStaff) {
+        // Full-appointment support replaces a shorter reservation for the same
+        // person. One participant never consumes capacity twice in a phase.
+        for (let index = rows.length - 1; index >= 0; index--) if (rows[index].doctor_id === id) rows.splice(index, 1);
+        rows.push({ phase_key: 'additional_staff', resource_kind: 'doctor', resource_key: `doctor:${id}`,
+          doctor_id: id, installation_id: null, start_at: start.toISOString(), end_at: end.toISOString() });
+      }
       if (rows.length) await db.AppointmentBookingOccupancy.bulkCreate(rows.map((row) => ({ ...row, appointment_id: appointment.id_cita })), { transaction: tx });
     }
     return appointment;

@@ -5,7 +5,8 @@ const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
 const { resolveClinicTimezone, formatDateLocal, formatLocal, dayIndexFromLocalDate,
   buildWindowsFromHorarios, buildDoctorAvailabilityContext, buildDoctorBloqueoRowsForDate,
   hasActiveSchedule } = require('../lib/availability-calendar');
-const { solveBookingProfile } = require('../lib/booking-profile-solver');
+const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
+const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staff');
 const { bookingError, bookingCapabilities, requireOperationalProfile, loadScopedTreatment } = require('./treatmentBookingProfile.service');
 
 function uniqueIds(values) { return [...new Set(values.map(Number))].sort((a, b) => a - b); }
@@ -18,7 +19,8 @@ function permitsLegacyOverlap(appointment, clinicId) {
 }
 
 const protectedBookingAttribute = (db, alias) => [db.Sequelize.fn('COALESCE', db.Sequelize.fn('JSON_CONTAINS_PATH',
-  db.Sequelize.col(`${alias}.import_metadata`), 'one', db.Sequelize.literal("'$.booking'"), db.Sequelize.literal("'$.program_session'")), 0), 'booking_protected'];
+  db.Sequelize.col(`${alias}.import_metadata`), 'one', db.Sequelize.literal("'$.booking'"), db.Sequelize.literal("'$.program_session'"),
+  db.Sequelize.literal("'$.additional_staff'")), 0), 'booking_protected'];
 
 /** Alias reads only exist behind the explicit migration/deployment gate. */
 async function resolveInstallationKeys({ db, clinic, installationIds, transaction, enabled }) {
@@ -53,7 +55,7 @@ async function resolveInstallationKeys({ db, clinic, installationIds, transactio
 
 /** Bounded, bulk read model. No patient names, notes, foreign clinic IDs or SQL per candidate. */
 async function loadBookingContext({ db, clinic, profile, start, end, transaction = null, ignoreAppointmentId = null,
-  occupancyEnabled = false, installationMapping = null, dates = null, patientId = null }) {
+  occupancyEnabled = false, installationMapping = null, dates = null, patientId = null, additionalStaffIds = [] }) {
   const { Op } = db.Sequelize;
   const clinicId = Number(clinic.id_clinica);
   const timeZone = resolveClinicTimezone(clinic);
@@ -61,7 +63,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     || end <= start || (end - start) > 367 * 86400000) {
     throw bookingError('booking_range_invalid', 'La consulta de disponibilidad no puede superar un año.', null, 400);
   }
-  const doctorIds = uniqueIds(profile.phases.flatMap((phase) => phase.professionals.ids));
+  const doctorIds = uniqueIds([...profile.phases.flatMap((phase) => phase.professionals.ids), ...normalizeAdditionalStaff(additionalStaffIds)]);
   const installationIds = uniqueIds(profile.phases.flatMap((phase) => phase.installation_ids));
   const mapping = installationMapping || await resolveInstallationKeys({ db, clinic, installationIds, transaction, enabled: occupancyEnabled });
   const resources = [...doctorIds.map((id) => `doctor:${id}`), ...new Set(installationIds.map((id) => mapping.keys.get(id)))];
@@ -136,7 +138,9 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
 }
 
 async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, stepMinutes = 15, limit = 100,
-  doctorId = null, installationId = null, capabilities = bookingCapabilities(), now = new Date() }) {
+  doctorId = null, installationId = null, capabilities = bookingCapabilities(), now = new Date(), additionalStaffIds = [] }) {
+  additionalStaffIds = normalizeAdditionalStaff(additionalStaffIds);
+  if (additionalStaffIds.length && !capabilities.multi) throw bookingError('booking_profile_runtime_unavailable', 'El personal de apoyo todavía no está activado.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date)) || !Number.isInteger(days) || days < 1 || days > 7
     || !Number.isInteger(stepMinutes) || stepMinutes < 5 || stepMinutes > 120
     || !Number.isInteger(limit) || limit < 1 || limit > 500) {
@@ -148,19 +152,20 @@ async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, s
   const timeZone = resolveClinicTimezone(clinic);
   const start = resolveLocalInstant(date, '00:00:00', timeZone);
   const end = resolveLocalInstant(addDays(date, days), '00:00:00', timeZone);
-  const context = await loadBookingContext({ db, clinic, profile, start, end, occupancyEnabled: capabilities.simple });
+  const context = await loadBookingContext({ db, clinic, profile, start, end, occupancyEnabled: capabilities.simple, additionalStaffIds });
   if (profile.phases.length > 1 && (doctorId || installationId)) {
     throw bookingError('booking_search_invalid', 'En una cita por fases elige los profesionales y cabinas por fase.', null, 400);
   }
   const selections = profile.phases.length === 1 ? { [profile.phases[0].key]: {
     ...(doctorId ? { doctor_id: doctorId } : {}), ...(installationId ? { installation_id: installationId } : {}),
   } } : {};
-  const slots = solutionsForCalendar({ profile, context, date, days, stepMinutes, limit, selections, now });
+  const slots = solutionsForCalendar({ profile, context, date, days, stepMinutes, limit, selections, now, additionalStaffIds });
   return { clinic_id: Number(clinic.id_clinica), treatment_id: Number(treatmentId), timezone: timeZone,
     duration_minutes: profile.phases.reduce((sum, phase) => sum + phase.duration_minutes, 0), capabilities, slots };
 }
 
-function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 15, limit = 500, selections = {}, now = new Date(), fromLocal = '00:00', toLocal = null }) {
+function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 15, limit = 500, selections = {}, now = new Date(), fromLocal = '00:00', toLocal = null, additionalStaffIds = [] }) {
+  additionalStaffIds = normalizeAdditionalStaff(additionalStaffIds);
   const timeZone = context.timeZone;
   const end = resolveLocalInstant(addDays(date, days), '00:00:00', timeZone);
   const slots = [];
@@ -175,7 +180,8 @@ function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 
       const solution = solveBookingProfile({ profile, start: candidate, ...context, selections });
       const localEnd = solution ? formatLocal(new Date(solution.end_at), timeZone) : '';
       const patientFree = solution && !(context.patientBusy || []).some(busy => new Date(busy.start) < new Date(solution.end_at) && new Date(busy.end) > candidate);
-      if (patientFree && new Date(solution.end_at) <= end && (!toLocal || localEnd <= `${localDate}T${toLocal}`)) slots.push({ ...solution,
+      const supportFree = solution && additionalStaffIds.every(id => isFree(context.doctors.get(id), candidate, new Date(solution.end_at)));
+      if (patientFree && supportFree && new Date(solution.end_at) <= end && (!toLocal || localEnd <= `${localDate}T${toLocal}`)) slots.push({ ...solution,
         doctor_id: solution.phases[0].doctor_ids[0], installation_id: solution.phases[0].installation_id,
         start_local: formatLocal(new Date(solution.start_at), timeZone), end_local: formatLocal(new Date(solution.end_at), timeZone),
         start_utc: solution.start_at, end_utc: solution.end_at });
