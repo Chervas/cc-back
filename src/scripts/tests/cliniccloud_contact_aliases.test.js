@@ -91,3 +91,23 @@ test('a reviewed observed-history identity can use a completed or cancelled firs
   e.identity_only=false;assert.throws(()=>validateContactAlias(s,9,l,e),/CORROBORATION_INVALID/);
  }
 });
+test('an exact compound given-name boundary shift needs the same unique-phone and native-visit proof',()=>{
+ const {s,l,e}=nativeFixture();s.fields.name='Ana María';s.fields.surname='Ejemplo';
+ l.patients[0].nombre='Ana';l.patients[0].apellidos='Maria Ejemplo Captación';
+ assert.throws(()=>validateContactAlias(s,9,l),/NOT_UNIQUE/);
+ const before=JSON.stringify(l);assert.equal(validateContactAlias(s,9,l,e).patient.id_paciente,9);
+ assert.equal(JSON.stringify(l),before);
+ l.patients.push({...patient(),id_paciente:10});
+ assert.throws(()=>validateContactAlias(s,9,l,e),/NOT_UNIQUE/);
+});
+test('compound-name handling does not permit fuzzy names, initials, omitted tokens or changed native evidence',()=>{
+ for(const [first,last] of [['Ana','M Ejemplo'],['Anita','Maria Ejemplo'],['Ana','Marina Ejemplo'],['Maria','Ana Ejemplo'],['Ana','Ejemplo']]){
+  const {s,l,e}=nativeFixture();s.fields.name='Ana María';Object.assign(l.patients[0],{nombre:first,apellidos:last});
+  assert.throws(()=>validateContactAlias(s,9,l,e),/NOT_UNIQUE/);
+ }
+ const {s,l,e}=nativeFixture();s.fields.name='Ana María';Object.assign(l.patients[0],{nombre:'Ana',apellidos:'Maria Ejemplo'});
+ l.native_appointments[0].inicio='2026-09-22 15:46:00';
+ assert.throws(()=>validateContactAlias(s,9,l,e),/NOT_CORROBORATED/);
+ const initial=nativeFixture();initial.s.fields.name='A B';Object.assign(initial.l.patients[0],{nombre:'A',apellidos:'B Ejemplo'});
+ assert.throws(()=>validateContactAlias(initial.s,9,initial.l,initial.e),/NOT_UNIQUE/);
+});

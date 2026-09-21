@@ -64,6 +64,10 @@ requieren un modo de aplicación explícito y su propio paquete validado.
   exclusivo en el export. Además exige nombre de pila exacto, teléfono exclusivo
   en el grupo y una sola primera visita nativa en esa clínica e instante,
   creada por la persona revisada. Bloquea y coteja también la cita, sin editarla.
+  Un nombre compuesto puede estar repartido entre `nombre` y el principio de
+  `apellidos` en captación: se admite únicamente esa partición exacta de todas
+  sus palabras, manteniendo teléfono exclusivo y primera visita corroborada.
+  No admite iniciales, apodos, omisiones, cambios de orden ni similitud fonética.
   DNI/nacimiento contradictorios, otro propietario o cualquier deriva impiden
   escribir. No transforma esa prueba de identidad en una decisión de sustituir
   o duplicar citas. Los paquetes nuevos usan versión 2; replay de versión 1

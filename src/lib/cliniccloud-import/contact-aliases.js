@@ -7,6 +7,19 @@ const phoneKey = value => {
   return /^\d{9,15}$/.test(key)?key:'';
 };
 const fullName = fields => norm(`${fields.name||''} ${fields.surname||''}`);
+// Intake sometimes stores the second given name at the beginning of surname.
+// This only recognizes an exact boundary shift, not initials, nicknames,
+// omitted given names or fuzzy spelling. Native-visit corroboration and unique
+// source/local phones remain mandatory in the only caller below.
+function corroboratedGivenName(sourceFields, patient) {
+  const sourceName=norm(sourceFields.name),localName=norm(patient.nombre);
+  if(sourceName===localName) return true;
+  const sourceTokens=sourceName.split(' '),localTokens=localName.split(' ');
+  if(sourceTokens.length<2||sourceTokens.some(token=>!/^\p{L}{2,}$/u.test(token))||!localName||localTokens.length>=sourceTokens.length
+    ||localTokens.some((token,i)=>token!==sourceTokens[i])) return false;
+  const localFull=norm(`${patient.nombre||''} ${patient.apellidos||''}`).split(' ');
+  return sourceTokens.every((token,i)=>token===localFull[i]);
+}
 function corroboratedCandidates(source, patients) {
   const name=fullName(source.fields),phone=phoneKey(source.fields.phone);
   if(!phone||name.split(' ').length<2||name.length<8)return [];
@@ -26,7 +39,7 @@ function nativeAppointmentCandidate(source, patientId, live, evidence) {
   // Unlike the full-name path, a shared phone is never accepted here, even
   // when only one of its owners has this given name. No fuzzy-name matching.
   if(name.length<3||candidates.length!==1||Number(candidates[0].id_paciente)!==patientId
-    ||norm(candidates[0].nombre)!==name) throw Error('CONTACT_ALIAS_IDENTITY_NOT_UNIQUE');
+    ||!corroboratedGivenName(source.fields,candidates[0])) throw Error('CONTACT_ALIAS_IDENTITY_NOT_UNIQUE');
   if(history&&(evidence.identity_only!==true||!/^[a-f0-9]{64}$/.test(evidence.source_appointment_sha256||''))) throw Error('CONTACT_ALIAS_CORROBORATION_INVALID');
   const sameStart=(live.native_appointments||[]).filter(a=>Number(a.paciente_id)===patientId
     &&instant(a.inicio)===instant(evidence.start_utc));
@@ -60,4 +73,4 @@ function validateContactAlias(source, patientId, live, corroboration = null) {
     evidence:corroboration ? corroboration.kind : 'unique_full_name_and_phone_without_document_or_birth_conflict',
     ...(corroboration ? {native_appointment_sha256:appointmentHash} : {}),before_sha256:hash(patient)};
 }
-module.exports={phoneKey,corroboratedCandidates,validateContactAlias};
+module.exports={phoneKey,corroboratedCandidates,corroboratedGivenName,validateContactAlias};
