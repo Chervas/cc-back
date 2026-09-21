@@ -5,7 +5,7 @@ const { resourceAppointments, resourceInstallationBlocks } = require('../../serv
 const Op = { ne: Symbol('ne'), lt: Symbol('lt'), gt: Symbol('gt'), in: Symbol('in'), or: Symbol('or') };
 const start = '2026-10-05T09:00:00Z', end = '2026-10-05T10:00:00Z';
 function fixture() {
-  return { Sequelize: { Op }, CitaPaciente: { findAll: async () => [
+  return { Sequelize: { Op, fn: (name, ...args) => ({ name, args }), col: name => ({ col: name }) }, CitaPaciente: { findAll: async () => [
     { id_cita: 1, clinica_id: 72, doctor_id: 5, inicio: start, fin: end },
     { id_cita: 2, clinica_id: 72, doctor_id: 5, inicio: start, fin: end },
   ] }, AppointmentBookingOccupancy: { findAll: async () => [
@@ -24,6 +24,19 @@ test('legacy resource search includes secondary professionals and does not doubl
 test('disabled gate never reads occupancy schema', async () => {
   const db = fixture(); db.AppointmentBookingOccupancy.findAll = () => { throw Error('must not read'); };
   assert.equal((await resourceAppointments({ db, doctorId: 5, start, end, enabled: false })).length, 2);
+});
+test('overlap policy distinguishes ordinary occupancy from protected profiles without leaking metadata', async () => {
+  const db = fixture();
+  db.CitaPaciente.findAll = async () => [{ id_cita: 2, clinica_id: 72, doctor_id: 5,
+    inicio: start, fin: end, booking_protected: 0, source_system: null }];
+  const original = db.AppointmentBookingOccupancy.findAll;
+  db.AppointmentBookingOccupancy.findAll = async () => (await original()).map(row => ({ ...row,
+    appointment: { ...row.appointment, booking_protected: row.appointment_id === 1 ? 1 : 0, source_system: null } }));
+  const rows = await resourceAppointments({ db, doctorId: 5, start, end, enabled: true });
+  assert.equal(rows.find(row => row.id_cita === 1).can_force_legacy, false);
+  assert.equal(rows.find(row => row.id_cita === 2).can_force_legacy, true);
+  assert.equal(rows.find(row => row.id_cita === 3).can_force_legacy, true);
+  assert(rows.every(row => !Object.hasOwn(row, 'source_system') && !Object.hasOwn(row, 'booking_protected')));
 });
 test('ignores non-overlapping segments and deduplicates same appointment/team interval', async () => {
   const db = fixture(); const original = db.AppointmentBookingOccupancy.findAll;
