@@ -59,7 +59,7 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
   const allAppointments = (tx) => [...state.appointments.filter((row) => !tx?.replacements.has(row.id_cita)), ...(tx?.pending || [])];
   const allOccupancies = (tx) => [...state.occupancies.filter((row) => !tx?.deleted.has(row.appointment_id)), ...(tx?.occupancies || [])];
   const db = {
-    Sequelize: { Op, fn: (name, ...args) => ({ name, args }), col: name => ({ col: name }) },
+    Sequelize: { Op, fn: (name, ...args) => ({ name, args }), col: name => ({ col: name }), literal: value => ({ literal: value }) },
     sequelize: { transaction: async (options, callback) => {
       const tx = { id: ++txId, options, LOCK: { UPDATE: 'UPDATE' }, pending: [], occupancies: [], deleted: new Set(), replacements: new Set(), release: new Map() };
       try {

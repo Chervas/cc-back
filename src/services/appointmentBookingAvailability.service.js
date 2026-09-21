@@ -18,7 +18,7 @@ function permitsLegacyOverlap(appointment, clinicId) {
 }
 
 const protectedBookingAttribute = (db, alias) => [db.Sequelize.fn('COALESCE', db.Sequelize.fn('JSON_CONTAINS_PATH',
-  db.Sequelize.col(`${alias}.import_metadata`), 'one', '$.booking', '$.program_session'), 0), 'booking_protected'];
+  db.Sequelize.col(`${alias}.import_metadata`), 'one', db.Sequelize.literal("'$.booking'"), db.Sequelize.literal("'$.program_session'")), 0), 'booking_protected'];
 
 /** Alias reads only exist behind the explicit migration/deployment gate. */
 async function resolveInstallationKeys({ db, clinic, installationIds, transaction, enabled }) {
