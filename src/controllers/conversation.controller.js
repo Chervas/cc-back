@@ -2211,22 +2211,35 @@ exports.postMessage = async (req, res) => {
           await transaction.rollback();
           return res.status(404).json({ error: 'whatsapp_template_not_available' });
         }
-        const templateJson = resolvedTemplate.get
+        const requestedTemplateJson = resolvedTemplate.get
           ? resolvedTemplate.get({ plain: true })
           : resolvedTemplate;
-        if (!canUserSelectWhatsappTemplate(templateJson, userId)) {
+        if (!canUserSelectWhatsappTemplate(requestedTemplateJson, userId)) {
           await transaction.rollback();
           return res.status(403).json({
             error: 'whatsapp_template_owner_forbidden',
             message: 'Esta plantilla pertenece a otro usuario.',
           });
         }
-        if (isReviewWorkflowWhatsappTemplate(templateJson)) {
+        if (isReviewWorkflowWhatsappTemplate(requestedTemplateJson)) {
           await transaction.rollback();
           return res.status(409).json({
             error: 'whatsapp_template_requires_workflow',
             message: 'Esta plantilla inicia un flujo de reseñas y debe enviarse desde Campañas.',
           });
+        }
+        resolvedTemplate = await require('../services/whatsappTemplateScope.service').resolveTemplateInWaba({
+          template: resolvedTemplate, wabaId: effectiveWabaId, clinicId: conversation.clinic_id, transaction, userId,
+        });
+        if (!resolvedTemplate) {
+          await transaction.rollback();
+          return res.status(409).json({ error: 'whatsapp_template_waba_mismatch',
+            message: 'La plantilla seleccionada no está disponible para la cuenta de WhatsApp del remitente. Actualiza las plantillas y vuelve a seleccionarla.' });
+        }
+        const templateJson = resolvedTemplate.get ? resolvedTemplate.get({ plain: true }) : resolvedTemplate;
+        if (!canUserSelectWhatsappTemplate(templateJson, userId)) {
+          await transaction.rollback();
+          return res.status(403).json({ error: 'whatsapp_template_owner_forbidden' });
         }
         canonicalTemplateName = String(templateJson.name || '').trim();
         canonicalTemplateLanguage = String(templateJson.language || '').trim() || 'es';

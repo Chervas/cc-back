@@ -693,6 +693,12 @@ async function loadEffectiveWhatsappTemplatesForClinic({
     effective.set(key, pickPreferredTemplate(effective.get(key), template, clinicId));
   });
   visibleOverrides.forEach((template) => {
+    if (String(template.status || '').toUpperCase() === 'APPROVED') {
+      // Local clinic references cannot override the sender's real catalog.
+      template = require('../lib/whatsapp-template-scope').selectTemplateInWaba(
+        template, visibleConnectedTemplates, { clinicId, wabaId: asset.wabaId });
+      if (!template) return;
+    }
     const key = getTemplateIdentityKey(template);
     effective.set(key, pickPreferredTemplate(effective.get(key), template, clinicId));
   });

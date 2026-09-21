@@ -233,3 +233,18 @@ test('isolated DEV uses separate signing paths and idempotency while preserving 
   await assert.rejects(f.client.send(input()), { code: 'whatsapp_authorized_configuration_invalid' });
   assert.equal(f.calls.length, 2);
 });
+
+test('explicit Meta rejection reaches CRM with its numeric reason and never auto-retries', async () => {
+  for (const code of ['whatsapp_provider_132001','whatsapp_provider_130429','whatsapp_provider_131049']) {
+    let calls=0;
+    const f=fixture({createTransport:()=>({execute:async()=>{calls++;throw Object.assign(Error('PRIVATE_PROVIDER_DETAIL'),{code});}})});
+    await assert.rejects(f.client.send(input()),error=>{
+      assert.equal(error.code,code);assert.equal(error.retryable,false);assert.equal(error.delivery_unknown,undefined);
+      assert.equal(error.response.data.error.code,Number(code.split('_').pop()));
+      assert(!JSON.stringify(error).includes('PRIVATE_PROVIDER_DETAIL'));
+      assert.equal(buildWhatsappOutboundRetryDecision({error,retryOnFailure:true,attemptsMade:0,maxAttempts:3}).should_retry,false);
+      return true;
+    });
+    assert.equal(calls,1);
+  }
+});

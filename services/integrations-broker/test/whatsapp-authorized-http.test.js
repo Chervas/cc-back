@@ -25,3 +25,23 @@ for(const setup of [{status:302,headers:{location:'https://other.invalid'}},{hea
 test('Authorized transport rejects redirect/compression/provider revocation without retry or secret disclosure',async()=>{
   const f=fixture(setup);await assert.rejects(createWhatsappAuthorizedHttp({request:f.request})(input()),e=>!e.stack.includes(TOKEN)&&['provider_failed','credential_revoked'].includes(e.code));assert.equal(f.calls.length,1);
 });
+
+test('explicit template rejection keeps only its bounded code, with one provider request', async () => {
+  const f=fixture({status:400,response:{error:{code:132001,message:'PRIVATE_PROVIDER_DIAGNOSTIC '+TOKEN,error_data:{details:'PRIVATE_RECIPIENT'}}}});
+  await assert.rejects(createWhatsappAuthorizedHttp({request:f.request})(input()), error => {
+    assert.equal(error.code,'whatsapp_provider_132001');
+    assert(!error.stack.includes(TOKEN)); assert(!error.stack.includes('PRIVATE_RECIPIENT'));
+    const output=require('../src/errors').publicError(error);
+    assert.deepEqual(output.body,{error:{code:'whatsapp_provider_132001'}});
+    return true;
+  });
+  assert.equal(f.calls.length,1);
+});
+
+test('unknown and ambiguous responses never claim an explicit provider rejection', async () => {
+  const {fromGraphError}=require('../src/whatsapp-provider-errors');
+  for(const [value,status] of [[{error:{code:132001}},500],[{error:{code:987654}},400],
+    [{error:{code:132001},messages:[{id:'wamid.ACCEPTED'}]},400],[{error:{code:'132001'}},400]]) {
+    assert.equal(fromGraphError(value,status),null);
+  }
+});

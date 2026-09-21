@@ -6605,48 +6605,20 @@ function scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId = '') {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
   const clinicId = Number(plain.clinic_id || 0);
   const wabaId = getTemplateWabaId(plain);
+  if (!targetWabaId || wabaId !== targetWabaId) return 0;
+  if (clinicId && !clinicIds.includes(clinicId)) return 0;
   if (clinicId && clinicIds.includes(clinicId)) return 3;
-  if (targetWabaId && wabaId && wabaId === targetWabaId) return 2;
-  if (!targetWabaId) return 1;
+  if (wabaId === targetWabaId) return 2;
   return 0;
 }
 
 async function resolveWhatsappTemplateForClinic(template, clinicId, clinicConfig = null) {
   const safeClinicId = Number(clinicId || 0);
-  const plain = template?.get ? template.get({ plain: true }) : (template || {});
-  if (!template || !safeClinicId) return template || null;
-
-  const templateClinicId = Number(plain.clinic_id || 0);
-  const templateWabaId = getTemplateWabaId(plain);
-  const targetWabaId = normalizeText(clinicConfig?.wabaId || '');
-  const catalogTemplateId = Number(plain.catalog_template_id || plain.catalog?.id || 0) || null;
-
-  const sameClinic = !templateClinicId || templateClinicId === safeClinicId;
-  const sameWaba = !targetWabaId || !templateWabaId || templateWabaId === targetWabaId;
-  if (sameClinic && sameWaba) return template;
-
-  if (!catalogTemplateId || !WhatsappTemplate) return null;
-
-  const replacement = await WhatsappTemplate.findOne({
-    where: {
-      is_active: true,
-      status: 'APPROVED',
-      catalog_template_id: catalogTemplateId,
-      [Op.or]: [
-        { clinic_id: safeClinicId },
-        ...(targetWabaId ? [{ waba_id: targetWabaId }] : []),
-        { clinic_id: null },
-      ],
-    },
-    include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
-    order: [
-      ['clinic_id', 'DESC'],
-      ['updatedAt', 'DESC'],
-      ['id', 'DESC'],
-    ],
+  if (!template || !safeClinicId) return null;
+  const config = clinicConfig || await whatsappService.getClinicConfig(safeClinicId);
+  return require('./whatsappTemplateScope.service').resolveTemplateInWaba({
+    template, clinicId: safeClinicId, wabaId: config?.wabaId,
   });
-
-  return replacement || null;
 }
 
 function resolveReviewDisplayClinicName(list, clinic) {
@@ -10026,6 +9998,8 @@ module.exports = {
   removeCampaign,
   reconcileDispatchJobState,
   __testing: {
+    resolveWhatsappTemplateForClinic,
+    scoreWhatsappTemplateForScope,
     computeCounters,
     mapReviewItemsFromImportedList,
     parseReviewImportListId,

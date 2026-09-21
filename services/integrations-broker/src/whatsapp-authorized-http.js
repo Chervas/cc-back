@@ -59,6 +59,8 @@ function createWhatsappAuthorizedHttp({ request = https.request, timeoutMs = 800
             try {
               const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
               if (!value || typeof value !== 'object' || Array.isArray(value)) fail('provider_failed');
+              const providerError = require('./whatsapp-provider-errors').fromGraphError(value, res.statusCode);
+              if (providerError) fail(providerError);
               if ([190, 102].includes(value.error?.code)) fail('credential_revoked');
               if ([401, 403].includes(res.statusCode) || [10, 200].includes(value.error?.code)) fail('provider_unauthorized');
               if (res.statusCode !== 200 || value.error) fail('provider_failed');

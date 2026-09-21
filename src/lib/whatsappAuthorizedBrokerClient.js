@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const { createHash, randomUUID } = require('node:crypto');
 const TM = require('../../services/integrations-broker/src/whatsapp-template-management');
 const C = require('../../services/integrations-broker/src/whatsapp-authorized-contract');
+const providerErrors = require('../../services/integrations-broker/src/whatsapp-provider-errors');
 const runtime = require('./whatsappAuthorizedRuntime');
 const { createIntegrationsBrokerClient } = require('./integrationsBrokerClient');
 const ROOT = runtime.ROOTS.staging;
@@ -257,6 +258,11 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       } catch (error) {
         if (PREFLIGHT_CODES.has(error?.code) || error?.code === 'broker_configuration_invalid') fail(error.code);
         if (NO_SEND_CODES.has(error?.code)) fail(error.code);
+        const provider = providerErrors.diagnostic(error?.code);
+        if (provider) {
+          throw Object.assign(Error(error.code), { code: error.code, retryable: false,
+            response: { data: { error: provider } } });
+        }
         fail('whatsapp_delivery_unknown', true);
       }
       try {

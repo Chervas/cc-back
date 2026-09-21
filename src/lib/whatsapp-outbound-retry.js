@@ -51,6 +51,7 @@ function classifyRetryableWhatsappFailure(error) {
   if (error?.delivery_unknown === true) {
     return { retryable: false, reason: 'delivery_unknown', delivery_unknown: true, ...details };
   }
+  if (error?.retryable === false) return { retryable: false, reason: 'non_retryable', ...details };
   if (
     (details.network_code && AMBIGUOUS_DELIVERY_NETWORK_ERROR_CODES.has(details.network_code))
     || (
