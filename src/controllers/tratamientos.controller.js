@@ -2,7 +2,7 @@
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op } = db.Sequelize;
-const { mergeClinicalConfig, assertCatalogEditable, catalogDto } = require('../lib/treatment-catalog-contract');
+const { mergeClinicalConfig, applyImportedPriceReview, assertCatalogEditable, catalogDto } = require('../lib/treatment-catalog-contract');
 const { validateCatalogResources } = require('../lib/treatment-catalog-resources');
 const { createTreatmentAutomationScope } = require('../lib/treatment-automation-scope');
 const treatmentAutomationScope = createTreatmentAutomationScope(db);
@@ -280,7 +280,7 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         ? normalizeInstallationIds(instalaciones_habilitadas)
         : null;
 
-    const normalizedClinicalConfig = mergeClinicalConfig(null, clinical_config);
+    const normalizedClinicalConfig = applyImportedPriceReview(null, mergeClinicalConfig(null, clinical_config), { confirm: req.body.confirm_imported_price });
     await validateCatalogResources({ origen, clinica_id: clinicaIdNum, grupo_clinica_id, clinical_config: normalizedClinicalConfig }, db);
     await treatmentAutomationScope.assertReferenceScope({ origen, clinica_id: clinicaIdNum, grupo_clinica_id, appointment_automation_template_key });
     const tratamiento = await Tratamiento.create({
@@ -291,7 +291,7 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         categoria: categoria || null,
         descripcion: descripcion || null,
         duracion_min: duracion_min || null,
-        precio_base: precio_base ?? 0,
+        precio_base: precio_base === undefined ? 0 : precio_base,
         color: color || null,
         origen,
         id_tratamiento_base,
@@ -325,6 +325,7 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
         return res.status(404).json({ message: 'Tratamiento no encontrado' });
     }
     assertCatalogEditable(tratamiento);
+    const previousClinicalConfig = tratamiento.clinical_config;
     const updatableFields = [
         'nombre',
         'codigo',
@@ -398,6 +399,9 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
             tratamiento.tipo_instalacion_requerida = null;
         }
     }
+    tratamiento.clinical_config = applyImportedPriceReview(previousClinicalConfig, tratamiento.clinical_config, {
+        confirm: req.body.confirm_imported_price, amount: req.body.precio_base, actorId: req.userData?.userId,
+    });
     if (['draft', 'obsolete'].includes(tratamiento.clinical_config?.catalog_status)) tratamiento.activo = false;
     await validateCatalogResources(tratamiento, db);
     if (['appointment_automation_template_key', 'origen', 'clinica_id', 'grupo_clinica_id'].some(field => req.body[field] !== undefined)) {
