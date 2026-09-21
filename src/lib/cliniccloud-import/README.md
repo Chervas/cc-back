@@ -46,6 +46,26 @@ requieren un modo de aplicación explícito y su propio paquete validado.
 
 ## Ejecutores acotados
 
+- `cliniccloud-import-contact-aliases.js`: `--target crm --mode prepare`
+  con `--contacts`, `--review` y `--private-output`. La revisión privada contiene
+  `reviewed_by` y `links` con `source_contact_id`/`patient_id`. Exige coincidencia
+  única de nombre completo y teléfono, sin contradicción de DNI/nacimiento;
+  ID fuente único y sin otro propietario en el grupo. `--mode apply` añade
+  `--package`, `--approved-sha256`, `--backup-manifest` y `--private-journal`.
+  Solo inserta un campo adicional `source_column=idContacto`, conservando IDs,
+  datos, clínica principal, historia y snapshots previos. Paquete de dos horas,
+  backup CRM verificado, bloqueo/CAS, diario durable y replay sin nuevas filas.
+  No es un fusor de pacientes ni acepta parecidos de nombre como identificación.
+- `cliniccloud-import-physical-installations.js`: mapa físico documental BS,
+  distinto de las antiguas agendas virtuales. `--target crm --mode prepare
+  --sources … --private-output …` recibe una lista privada de archivos y hashes.
+  `--mode apply --package … --approved-sha256 … --backup-manifest …
+  --private-journal …` crea cabinas inactivas y aliases físicos entre clínicas.
+  No cambia instalaciones antiguas, horarios, citas ni flags; Hospital queda
+  pendiente de capacidad externa. Requiere activar después únicamente el mapa
+  conciliado. Si se repite un paquete ya aplicado, el cambio de estado exige
+  revisar el diario en lugar de crear duplicados. El plan de catálogo acepta
+  `cabins_by_clinic` para resolver cada sala compartida al ID de su clínica.
 - `cliniccloud-import-contacts-apply.js`: solo parches no vacíos de contactos
   enlazados inequívocamente y sin conflictos de comparación a tres versiones.
   `--mode prepare --plan … --snapshot … --private-output …` captura antes e
