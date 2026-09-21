@@ -113,6 +113,7 @@ la clinica o su grupo.
 Fiscal y plantillas:
 
 - `POST /patients/:patientId/fiscal-documents`
+- `POST /patients/:patientId/fiscal-documents/preview` (cálculo sin escritura)
 - `POST /budgets/:budgetId/fiscal-documents`
 - `GET /budgets/:budgetId/pdf`
 - `GET /fiscal-documents/:documentId/pdf`
@@ -166,8 +167,8 @@ Contabilidad transversal y portal:
 
 ### Precio final y desglose explícito de IVA
 
-Preparación backend en DEV, todavía no publicada ni terminada en el editor
-fiscal: `clinical_config.price_profile` admite `schema_version: 1`,
+Contrato preparado y probado en DEV aislado; aún no promovido a CRM.
+`clinical_config.price_profile` admite `schema_version: 1`,
 `price_semantics: gross_tax_included`, `tax_percent` numérico y
 `exemption_reason` obligatorio cuando el porcentaje es cero. No se infiere
 exención ni porcentaje a partir del área clínica. Un catálogo antiguo sin
@@ -192,10 +193,39 @@ sin clasificación conservan sus totales históricos.
 Los snapshots de programa pueden conservar un perfil común únicamente cuando
 todos los tratamientos incluidos tienen exactamente la misma configuración
 explícita. Una composición mixta o incompleta no recibe un porcentaje supuesto.
-Esto **no abre todavía la emisión fiscal de programas**: el guard existente se
-mantiene hasta adaptar y probar documento fiscal, anticipos, interfaz y PDF.
-La revisión fiscal pendiente de tratamientos importados sigue bloqueando su
-venta. Sin DDL ni cambios en gates, importación, recordatorios o precios reales.
+La emisión automática exige que todos los conceptos aceptados tengan perfil
+explícito. Programas sin perfil común siguen bloqueados; no se activa ningún
+gate público. La revisión fiscal pendiente de tratamientos importados sigue
+bloqueando su venta.
+
+La previsualización fiscal exige `billing.documents.manage`, valida paciente y
+clínica, devuelve `private, no-store` y no escribe ni bloquea filas. El servidor
+devuelve conceptos, bases, impuestos, total y `lines_locked`. El editor cancela
+peticiones obsoletas y espera 250 ms entre cambios; no recompone agregados.
+Máximo 500 conceptos. Las dos rutas de alta fiscal usan la misma operación.
+
+Para un presupuesto clasificado se usan exclusivamente la versión persistida y
+su aceptación: claves de conceptos e importe realmente aceptado, incluidos sus
+descuentos. Se ignoran importes/impuestos de `payload.lines`. El documento
+congela `payment_data.fiscal_price_source`; actualizar un borrador no consulta el
+catálogo actual ni acepta ese snapshot del cliente. Los documentos anteriores
+sin este campo conservan sus reglas; los emitidos siguen ineditables y su PDF
+privado no se regenera por este cambio.
+
+`source_amount` permite documentar una parte. Se prorratean conceptos y céntimos
+pendientes en backend sin añadir otra vez IVA; los parciales del mismo origen
+consumen exactamente su total/base/impuesto. Las escrituras serializan la
+comprobación con el presupuesto y los documentos existentes. Cantidad fiscal
+1 representa el importe documentado de cada concepto, no sesiones clínicas.
+Vista previa/PDF indican «Precio final», «IVA incluido» o el motivo de exención.
+
+Un cobro guarda su versión de presupuesto. Se admite aplicación a conceptos
+identificados o al presupuesto completo cuando todos comparten perfil fiscal.
+Si mezcla impuestos sin aplicación por concepto, o incluye saldo sin asignación,
+se solicita revisión: no se infiere el desglose. No se duplica un documento
+global facturando otra vez sus cobros. Documentos anteriores incompatibles o
+rectificativas automáticas de precios finales requieren revisión explícita.
+No hay DDL, cambios en gates, recordatorios ni clasificación fiscal masiva.
 
 ### Programas y bonos versionados
 
@@ -311,11 +341,10 @@ confirmar se prepara el paquete canónico de consentimientos, sin enviarlo ni
 firmarlo. Un fallo documental posterior al commit devuelve las citas y
 `documentation_pending`, nunca un falso fallo total que induzca otra reserva.
 
-El precio del catálogo nuevo es IVA incluido. La emisión fiscal de un
-presupuesto que contiene `program_snapshot` queda explícitamente bloqueada hasta
-configurar el desglose aprobado; no se añade un 21% supuesto ni se cambia el
-normalizador fiscal del resto de conceptos. Se permite conservar un borrador
-fiscal sin añadir IVA al precio final.
+El precio del catálogo nuevo es IVA incluido. Un programa con desglose explícito
+congelado sigue el contrato de precios finales anterior; uno incompleto o mixto
+sin perfil común mantiene el bloqueo de emisión. No se añade un 21 % supuesto
+ni se cambia el normalizador fiscal histórico de conceptos sin perfil.
 
 Pruebas sin DB: `economic_program_snapshot.test.js` y `program_booking.test.js`.
 QA SQL/HTTP sintética: `src/scripts/program-booking-dev-qa.js`; exige directorio
