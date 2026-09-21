@@ -278,3 +278,22 @@ borradores **no acredita** que esos tratamientos estén listos para el arranque.
 Pruebas focales: `cliniccloud_catalog_drafts.test.js` junto a parser/respuestas
 y contrato del catálogo. Rollback de datos siempre cotejando diario y uso
 posterior; no borrar registros utilizados ni restaurar la BD completa.
+
+Para completar asignaciones documentales posteriores sin recrear tratamientos,
+`cliniccloud-import-catalog-resource-refresh.js` usa los mismos argumentos de
+fuentes y modos, además de `--initial-package …` (paquete de la carga original).
+Solo completa un `booking_profile` ausente en borradores importados, inactivos
+y sin modificaciones respecto a esa evidencia inicial. Conserva perfiles
+existentes y ediciones humanas; valida clínica, procedencia y recursos reales.
+Actualiza únicamente `clinical_config` y `updatedAt`, con procedencia del
+paquete. No activa tratamientos/cabinas ni cambia precios, duración del
+tratamiento, citas, programas, horarios, fiscalidad o automatizaciones.
+
+El máximo es 30 actualizaciones por paquete. `apply` exige paquete reciente,
+backup CRM verificado, comparación completa bajo lock, transacción, diario
+antes/después y lectura de comprobación. El replay exacto no escribe; si el
+estado cambió, no restaura automáticamente datos anteriores. Un resultado de
+commit ambiguo exige conciliar el diario antes de reintentar. Pruebas focales:
+`cliniccloud_catalog_resource_refresh.test.js`. Una eventual reversión debe
+comparar cada fila con el estado posterior del diario y preservar su uso o
+edición posterior; nunca restaurar toda la BD por esta operación.
