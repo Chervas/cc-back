@@ -27,6 +27,7 @@ const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile, boo
 const { mutateAppointmentBooking } = require('../services/appointmentBookingCommand.service');
 const { normalizeAdditionalStaff, additionalStaffPayload } = require('../lib/appointment-additional-staff');
 const { bookingSegments } = require('../lib/appointment-booking-segments');
+const { attachAppointmentProgramContexts } = require('../services/appointmentProgramRead.service');
 const { appointmentImportReview } = require('../lib/appointment-import-review');
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const { getIO } = require('../services/socket.service');
@@ -181,6 +182,8 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
         protectedPayload.import_review = null;
         protectedPayload.tratamiento_id = null;
         protectedPayload.tratamiento = null;
+        protectedPayload.program_context = null;
+        protectedPayload.precio_cita_resuelto = null;
         protectedPayload.conversation_id = null;
         protectedPayload.unread_count = 0;
         protectedPayload.appointment_flow = null;
@@ -352,6 +355,7 @@ function appointmentTypePriceCode(tipoCita) {
 
 function resolveCitaAppointmentPrice(cita) {
     const plain = plainCita(cita);
+    if (plain?.source_system === 'treatment_program' || plain?.program_context?.kind === 'program') return null;
     const tratamiento = plain?.tratamiento;
     if (!tratamiento) {
         return null;
@@ -1160,6 +1164,7 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
         fin_local: formatDateTimeLocal(plain.fin, timeZone),
         time_zone: timeZone,
         import_review: appointmentImportReview(plain),
+        program_context: plain.program_context || null,
         ...(bookingCapabilities().simple ? { additional_staff: additionalStaffPayload(plain) } : {}),
         ...(bookingCapabilities().simple ? { booking_segments: bookingSegments(plain).map((segment) => ({ ...segment,
             start_local: formatDateTimeLocal(segment.start_at, timeZone), end_local: formatDateTimeLocal(segment.end_at, timeZone) })) } : {}),
@@ -2291,6 +2296,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         await attachFlowSummaryToCitas(citaCreada);
         await attachUnreadCountsToCitas(citaCreada, req.userData?.userId || null);
         await consentimientosService.attachConsentSummaryToCitas(citaCreada);
+        await attachAppointmentProgramContexts(db, citaCreada);
         attachResolvedAppointmentPricesToCitas(citaCreada);
         emitAppointmentSocketEvent('appointment:created', citaCreada?.toJSON ? citaCreada.toJSON() : citaCreada);
 
@@ -2364,6 +2370,7 @@ exports.getCitas = asyncHandler(async (req, res) => {
     await attachFlowSummaryToCitas(citas);
     await attachUnreadCountsToCitas(citas, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citas);
+    await attachAppointmentProgramContexts(db, citas);
     attachResolvedAppointmentPricesToCitas(citas);
     res.json(await protectAppointmentsForRequest(req, citas));
 });
@@ -2447,6 +2454,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
             'inicio',
             'fin',
             'source_system',
+            'voucher_id',
             'import_metadata',
             'created_at',
             'updated_at',
@@ -2481,6 +2489,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
 
     await attachCalendarUnreadCountsToCitas(citas, req.userData?.userId || null);
     await attachNutritionLatestMeasurementsToCitas(citas);
+    await attachAppointmentProgramContexts(db, citas);
 
     res.set('X-Agenda-Endpoint', 'calendar-lite');
     const calendarRows = citas
@@ -2521,6 +2530,7 @@ exports.getCitaById = asyncHandler(async (req, res) => {
     await attachUnreadCountsToCitas(cita, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(cita);
     await attachNutritionLatestMeasurementsToCitas(cita);
+    await attachAppointmentProgramContexts(db, cita);
     attachResolvedAppointmentPricesToCitas(cita);
 
     let conversation_id = null;
