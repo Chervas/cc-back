@@ -38,7 +38,6 @@ const {
   UsuarioClinica,
   Paciente,
   LeadIntake,
-  LeadContactAttempt,
   ConversationRead,
   Clinica,
   FormSubmissionEvent,
@@ -49,7 +48,7 @@ const {
 } = db;
 
 const ROLE_AGGREGATE = ['propietario', 'admin'];
-const LEAD_CONTACT_PROTECTED_STATUSES = new Set(['cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado']);
+const { registerLeadWhatsappContactAttempt } = require('../services/manualLeadWhatsappContact.service');
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .split(',')
   .map((v) => parseInt(v.trim(), 10))
@@ -259,53 +258,6 @@ async function resolveLeadWhatsappPhone(lead, { transaction = null } = {}) {
   return fallbackPhone;
 }
 
-async function registerLeadWhatsappContactAttempt({ leadId, userId, isTemplate, body }) {
-  const safeLeadId = Number(leadId);
-  if (!Number.isInteger(safeLeadId) || safeLeadId <= 0) {
-    return null;
-  }
-
-  const lead = await LeadIntake.findByPk(safeLeadId);
-  if (!lead) {
-    return null;
-  }
-
-  const now = new Date();
-  const historial = Array.isArray(lead.historial_contactos)
-    ? [...lead.historial_contactos]
-    : [];
-  const motivo = isTemplate ? 'whatsapp_template_sent' : 'whatsapp_message_sent';
-  const notas = isTemplate ? 'Plantilla WhatsApp enviada' : 'WhatsApp enviado';
-
-  historial.push({
-    fecha: now.toISOString(),
-    motivo,
-    notas,
-    canal: 'whatsapp',
-    usuario_id: userId || null,
-  });
-
-  await lead.update({
-    historial_contactos: historial,
-    num_contactos: (Number(lead.num_contactos || 0) || 0) + 1,
-    ultimo_contacto: now,
-    status_lead: LEAD_CONTACT_PROTECTED_STATUSES.has(String(lead.status_lead || '').trim().toLowerCase())
-      ? lead.status_lead
-      : 'contactado',
-  });
-
-  if (LeadContactAttempt) {
-    await LeadContactAttempt.create({
-      lead_intake_id: lead.id,
-      usuario_id: userId || null,
-      canal: 'whatsapp',
-      motivo,
-      notas: cleanText(body).slice(0, 500) || notas,
-    });
-  }
-
-  return lead;
-}
 
 function isTechnicalWhatsappFailureNotice(message) {
   if (!message || typeof message !== 'object') {
@@ -2430,6 +2382,7 @@ exports.postMessage = async (req, res) => {
     if (outboundWhatsappQueued && conversation.lead_id) {
       try {
         await registerLeadWhatsappContactAttempt({
+          models: db,
           leadId: conversation.lead_id,
           userId,
           isTemplate,
