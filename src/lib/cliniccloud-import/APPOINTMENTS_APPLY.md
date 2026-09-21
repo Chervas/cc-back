@@ -156,6 +156,16 @@ limitada no acredita una edición ni autoriza escribir la nota. Se conserva su
 representación almacenada; texto añadido o incluso espacios locales distintos
 siguen exigiendo revisión.
 
+Si el mismo ID cambia entre dos agendas virtuales `CABINA n` del origen, el
+operador puede revisar explícitamente ambos nombres y conservar una cabina
+física que ya tenga recibo documental. Esa excepción exige ID, acto, contacto,
+nota, estado y sala física intactos; no admite un cambio de agenda profesional
+ni inventa una nueva asignación. `source_agenda_change` conserva los nombres
+anterior/actual, motivo y el recibo físico original con su hash. La línea CSV
+original permanece intacta, y su replay sigue enlazando a la misma cita.
+Se comprueban solapes en la sala y todos sus aliases de grupo bajo los locks
+comunes. Esto no convierte la cabina virtual de ClinicCloud en ubicación física.
+
 El recibo `cliniccloud_delta_source_reconciliation` conserva ambos horarios,
 evidencia, ID fuente real y HOLD. Snapshot/plan lo reconocen igual que la
 conciliación histórica: un replay del ZIP conserva la fecha nueva aunque esté
