@@ -74,4 +74,18 @@ function prepareConfirmedIdentity({link,source,confirmation,now=Date.now()}) {
     source_full_name:sourceName,patient_full_name:norm(pair.patient_full_name),confirmation_reference:confirmation.confirmation_reference,
     confirmation_sha256:hash(confirmation)};
 }
-module.exports={prepareNativeCorroboration,prepareHistoryCorroboration,prepareConfirmedIdentity};
+function preparePartialIdentityReview({link,source,contacts,reviewedBy,now=Date.now()}) {
+  const review=link.reviewed_partial_identity,captured=Date.parse(review?.reviewed_at);
+  if(!review||link.native_first_visit||link.native_history_visit||link.confirmed_identity
+    ||review.policy!=='phone_and_clear_partial_name'||!String(review.policy_reference||'').trim()
+    ||!String(reviewedBy||'').trim()||String(review.reason||'').trim().length<20
+    ||!norm(review.patient_full_name)||!Number.isFinite(captured)||captured>now||now-captured>2*3600000
+    ||!Number.isSafeInteger(link.patient_id)||link.patient_id<=0)throw Error('CONTACT_ALIAS_PARTIAL_REVIEW_REQUIRED');
+  const phone=phoneKey(source.fields.phone),owners=new Set(contacts.filter(c=>phone&&phoneKey(c.fields.phone)===phone).map(c=>c.source_contact_id));
+  if(owners.size!==1||!owners.has(source.source_contact_id))throw Error('CONTACT_ALIAS_SOURCE_PHONE_NOT_UNIQUE');
+  return {kind:'operator_reviewed_unique_phone_name_prefix',source_contact_id:source.source_contact_id,patient_id:link.patient_id,
+    source_phone_unique:true,source_full_name:norm(`${source.fields.name||''} ${source.fields.surname||''}`),
+    patient_full_name:norm(review.patient_full_name),policy:review.policy,policy_reference:review.policy_reference,
+    reviewed_by:reviewedBy,reviewed_at:review.reviewed_at,reason:review.reason.trim(),review_sha256:hash({review,reviewedBy})};
+}
+module.exports={prepareNativeCorroboration,prepareHistoryCorroboration,prepareConfirmedIdentity,preparePartialIdentityReview};

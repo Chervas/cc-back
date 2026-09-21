@@ -137,6 +137,19 @@ requieren un modo de aplicación explícito y su propio paquete validado.
   borrador no asociado. Requiere la migración específica de actores técnicos;
   fuente y paquete inmutables, revisión canónica y reintento por huella.
 
+El ejecutor de aliases admite además `reviewed_partial_identity` bajo la regla
+autorizada de teléfono y parte clara del nombre: revisión del operador (no
+confirmación inventada del titular), motivo, fecha reciente y referencia a la
+regla. Exige teléfono exclusivo en origen y grupo, al menos dos palabras exactas
+y ordenadas que sean prefijo del nombre completo, nombre inicial de cuatro
+letras o más y ninguna contradicción documental/nacimiento/propietario. Puede
+ignorar una inicial final de recepción, nunca una palabra completa discordante.
+No modifica el matcher automático ni permite inferir citas duplicadas.
+
+Aliases `--mode dry-run` usa el mismo paquete/revisión/backup y camino SQL que
+`apply`, pero revierte toda la transacción y comprueba fichas/campos restaurados.
+Usar diarios distintos para ensayo y aplicación; conservar ambos para replay.
+
 Secuenciar los ejecutores y re-preparar si cambia el snapshot de sus guardas.
 No ejecutar en paralelo el importador antiguo/manual ni seeds. Los locks de
 filas y del propio importador no constituyen una garantía de unicidad frente

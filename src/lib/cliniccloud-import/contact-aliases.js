@@ -46,6 +46,31 @@ function confirmedIdentityCandidate(source, patientId, live, evidence) {
   if(Math.min(first.length,other.length)<4||!(first.startsWith(other)||other.startsWith(first))) throw Error('CONTACT_ALIAS_CONFIRMED_NAME_NOT_CORROBORATED');
   return candidates[0];
 }
+// Explicit operator review under the owner's partial-name policy, not a
+// general fuzzy matcher. A unique phone alone never suffices. Reception may
+// have recorded only a prefix of the full name and a trailing initial; a
+// fully spelled conflicting token still stops the alias.
+function partialIdentityCandidate(source, patientId, live, evidence) {
+  if(evidence.kind!=='operator_reviewed_unique_phone_name_prefix'
+    ||evidence.source_contact_id!==source.source_contact_id||evidence.patient_id!==patientId
+    ||evidence.source_phone_unique!==true||evidence.policy!=='phone_and_clear_partial_name'
+    ||evidence.source_full_name!==fullName(source.fields)||!String(evidence.reason||'').trim()
+    ||!String(evidence.reviewed_by||'').trim()||!/^[a-f0-9]{64}$/.test(evidence.review_sha256||'')) {
+    throw Error('CONTACT_ALIAS_PARTIAL_REVIEW_INVALID');
+  }
+  const phone=phoneKey(source.fields.phone);
+  const candidates=live.patients.filter(p=>phone&&[p.telefono_movil,p.telefono_secundario].some(v=>phoneKey(v)===phone));
+  if(candidates.length!==1||Number(candidates[0].id_paciente)!==patientId)throw Error('CONTACT_ALIAS_PARTIAL_PHONE_NOT_UNIQUE');
+  const patient=candidates[0],name=fullName({name:patient.nombre,surname:patient.apellidos});
+  if(name!==evidence.patient_full_name)throw Error('CONTACT_ALIAS_PARTIAL_NAME_CHANGED');
+  const tokens=name.split(' '),sourceTokens=evidence.source_full_name.split(' ');
+  if(tokens.length>=3&&/^\p{L}$/u.test(tokens.at(-1)))tokens.pop();
+  if(tokens.length<2||tokens[0].length<4||tokens.some(t=>!/^\p{L}{2,}$/u.test(t))
+    ||tokens.length>=sourceTokens.length||tokens.some((t,i)=>t!==sourceTokens[i])) {
+    throw Error('CONTACT_ALIAS_PARTIAL_NAME_NOT_CORROBORATED');
+  }
+  return patient;
+}
 function nativeAppointmentCandidate(source, patientId, live, evidence) {
   const history=evidence?.kind==='unique_phone_given_name_and_observed_history';
   if ((!history&&evidence?.kind !== 'unique_phone_given_name_and_native_first_visit')
@@ -74,7 +99,9 @@ function nativeAppointmentCandidate(source, patientId, live, evidence) {
 function validateContactAlias(source, patientId, live, corroboration = null) {
   if(!source||!/^[1-9]\d*$/.test(source.source_contact_id)||!Number.isSafeInteger(patientId)||patientId<=0)throw Error('CONTACT_ALIAS_INPUT_INVALID');
   let patient,appointmentHash;
-  if(corroboration?.kind==='user_confirmed_identity_pair'){
+  if(corroboration?.kind==='operator_reviewed_unique_phone_name_prefix'){
+    patient=partialIdentityCandidate(source,patientId,live,corroboration);
+  }else if(corroboration?.kind==='user_confirmed_identity_pair'){
     patient=confirmedIdentityCandidate(source,patientId,live,corroboration);
   }else if(corroboration){
     const result=nativeAppointmentCandidate(source,patientId,live,corroboration);
