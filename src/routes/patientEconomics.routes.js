@@ -21,6 +21,7 @@ router.post('/budgets/:budgetId/signature-requests', controller.createBudgetSign
 router.post('/budgets/:budgetId/payments', controller.createPayment);
 router.post('/patients/:patientId/wallet-deposits', controller.createWalletDeposit);
 router.post('/patients/:patientId/fiscal-documents', controller.createPatientFiscalDocument);
+router.post('/patients/:patientId/fiscal-documents/preview', controller.previewPatientFiscalDocument);
 router.post('/payments/:paymentId/void', controller.voidPayment);
 router.post('/budgets/:budgetId/wallet-allocations', controller.applyWallet);
 router.post('/budgets/:budgetId/fiscal-documents', controller.createFiscalDocument);
@@ -33,6 +34,9 @@ router.post('/vouchers/:voucherId/consume', controller.consumeVoucher);
 router.get('/vouchers/:voucherId/appointment-resources', controller.getVoucherAppointmentResources);
 router.post('/vouchers/:voucherId/appointment-plan', controller.previewVoucherAppointments);
 router.post('/vouchers/:voucherId/appointments', controller.createVoucherAppointments);
+router.get('/vouchers/:voucherId/program-plan', controller.getProgramPlan);
+router.post('/vouchers/:voucherId/program-proposals', controller.proposeProgramPlan);
+router.post('/vouchers/:voucherId/program-appointments', controller.reserveProgramPlan);
 router.get('/templates', controller.listTemplates);
 router.post('/templates', controller.createTemplate);
 router.patch('/templates/:templateId', controller.updateTemplate);
