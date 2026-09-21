@@ -17,6 +17,8 @@ function sourceWindow(manifest) {
 }
 
 function primaryProof(sources, sourceId) {
+  const observed=require('./observed-history-primary').observedHistoryPrimary(sources,sourceId);
+  if(observed) return observed;
   const rows = sources.appointments.rows.filter(row => String(row.values.IDCONTACTO) === String(sourceId)).map(row => ({
     ...row, provenance: { file_sha256: sources.appointments.file.sha256, source_row: row.source_row, row_sha256: hash(row.values) },
   }));
@@ -31,6 +33,16 @@ function primaryProof(sources, sourceId) {
     membership_clinic_ids: [...new Set(evidence.map(row => row.clinic_id).filter(id => [66, 72].includes(id)))].sort((a, b) => a - b),
     primary_rule: choice.rule, primary_evidence: choice.evidence || [], reasons,
     first_evidence_date: evidence.map(row => row.treatment_date).sort()[0] || null };
+}
+
+function creationWithProof(raw,manifest,proof){
+  const core=require('./new-patients-apply'),window=sourceWindow(manifest);
+  if(manifest.version==='cliniccloud-new-patients-audit/3'&&proof.coverage_basis&&!proof.reasons.length){
+    const created=core.sourceCreated(raw,{start:'1900-01-01',end:window.end});
+    if(!proof.first_evidence_date||proof.first_evidence_date<created.local.slice(0,10)) throw Error('TREATMENT_PRECEDES_SOURCE_CREATION');
+    return {...created,coverage_basis:proof.coverage_basis};
+  }
+  return core.sourceCreated(raw,window);
 }
 
 // Deliberately conservative: one insertion, deletion or replacement in a long
@@ -54,9 +66,11 @@ function nearName(left, right) {
 
 function buildNewPatientsAudit({ sources, live, coverage, contactsAsOf, now = new Date().toISOString() }) {
   const core = require('./new-patients-apply');
-  const manifest = { version: VERSION, source_account: core.ACCOUNT, coverage, contacts_as_of: contactsAsOf,
+  const observed=Boolean(sources.live_histories);
+  const manifest = { version: observed?'cliniccloud-new-patients-audit/3':VERSION, source_account: core.ACCOUNT, coverage, contacts_as_of: contactsAsOf,
     generated_at: now, local_snapshot_sha256: hash(live), source_files: Object.values(sources).map(source => source.file),
-    policy: { whatsapp_ignored: true, primary_requires_source_creation_inside_export_coverage: true,
+    policy: { whatsapp_ignored: true, primary_requires_source_creation_inside_export_coverage: !observed,
+      ...(observed?{primary_requires_export_or_observed_history_coverage:true}:{}),
       identity_collisions_are_deferrals: true, no_automatic_merges: true, max_batch: 70 } };
   const window = sourceWindow(manifest);
   if (!live.group_id || !live.clinic_ids.includes(66) || !live.clinic_ids.includes(72)) throw Error('NEW_PATIENT_GROUP_SCOPE_CHANGED');
@@ -78,18 +92,18 @@ function buildNewPatientsAudit({ sources, live, coverage, contactsAsOf, now = ne
     const reasons = [];
     if (!/^[1-9]\d*$/.test(id) || ids.get(id)?.length !== 1 || historicIds.has(id)) reasons.push('SOURCE_ID_NOT_NEW_UNIQUE');
     if (!/^[1-9]\d*$/.test(String(raw.NUM)) || nums.get(raw.NUM)?.length !== 1 || historicNums.has(String(raw.NUM)) || linkedNums.has(String(raw.NUM))) reasons.push('HISTORY_NUMBER_NOT_NEW_UNIQUE');
+    const proof = primaryProof(sources, id);
     let created;
-    try { created = core.sourceCreated(raw, window); } catch { reasons.push('SOURCE_CREATION_NOT_WITHIN_CONFIRMED_COVERAGE'); }
+    try { created = creationWithProof(raw,manifest,proof); } catch { reasons.push('SOURCE_CREATION_NOT_WITHIN_CONFIRMED_COVERAGE'); }
     if (norm(raw.ESTADO) !== 'ACTIVO' || /BLOQUEO AGENDA|VISITA COMERCIAL/.test(norm(`${raw.NOMBRE} ${raw.APELLIDOS}`))) reasons.push('CONTACT_NOT_ACTIVE_PERSON');
     if (!String(raw.NOMBRE || '').trim() || !String(raw.APELLIDOS || '').trim()) reasons.push('PATIENT_NAME_INCOMPLETE');
     if (String(raw['F. NACIMIENTO'] || '').trim() && !row.fields.birth_date) reasons.push('SOURCE_BIRTH_DATE_INVALID');
     if (created && row.fields.birth_date > created.local.slice(0, 10)) reasons.push('BIRTH_DATE_AFTER_SOURCE_CREATION');
     const keys = core.sourceIdentity(raw);
     if (!keys.phones.length && !keys.email) reasons.push('CONTACT_CHANNEL_OR_GUARDIAN_REQUIRED');
-    const proof = primaryProof(sources, id);
     reasons.push(...proof.reasons);
     if (created && proof.first_evidence_date && proof.first_evidence_date < created.local.slice(0, 10)) reasons.push('TREATMENT_PRECEDES_SOURCE_CREATION');
-    if (proof.primary_evidence.some(item => item.treatment_date < coverage.start || item.treatment_date > coverage.end)) reasons.push('PRIMARY_EVIDENCE_OUTSIDE_COVERAGE');
+    if (!proof.coverage_basis&&proof.primary_evidence.some(item => item.treatment_date < coverage.start || item.treatment_date > coverage.end)) reasons.push('PRIMARY_EVIDENCE_OUTSIDE_COVERAGE');
     // Do the relatively expensive variant sweep only for otherwise eligible
     // new people. The writer repeats exact collisions against every identity.
     if (!reasons.length) {
@@ -108,4 +122,4 @@ function buildNewPatientsAudit({ sources, live, coverage, contactsAsOf, now = ne
   return { ...result, plan_sha256: hash(result) };
 }
 
-module.exports = { VERSION, sourceWindow, primaryProof, nearName, buildNewPatientsAudit };
+module.exports = { VERSION, sourceWindow, primaryProof, creationWithProof, nearName, buildNewPatientsAudit };

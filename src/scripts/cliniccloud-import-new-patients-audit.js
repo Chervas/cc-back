@@ -10,7 +10,7 @@ const { loadSources } = require('./cliniccloud-import-new-patients-apply');
 
 async function run(args) {
   const keys = ['--target', '--source-dir', '--historical-dir', '--contacts-csv', '--appointments-csv', '--contacts-as-of', '--coverage-start', '--coverage-end', '--private-output', '--private-snapshot'];
-  const options = parseArgs(args, keys);
+  const options = parseArgs(args, [...keys,'--live-histories','--live-state-labels']);
   if (keys.some(key => !options[key])) throw Error('ALL_AUDIT_INPUTS_REQUIRED');
   if (path.resolve(__dirname, '../..') !== '/home/ubuntu/wt/back-dev' || process.cwd() !== '/home/ubuntu/wt/back-dev'
     || execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim() !== 'dev') throw Error('DEV_WORKTREE_REQUIRED');

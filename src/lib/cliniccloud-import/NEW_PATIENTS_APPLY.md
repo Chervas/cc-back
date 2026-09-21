@@ -2,7 +2,7 @@
 
 Ejecutor independiente de `app.js`, modelos, hooks, Redis y workers. No es un
 importador general: consume únicamente las altas inequívocas de la auditoría
-privada `cliniccloud-new-patients-audit/1` o `/2`, más una decisión explícita para cada
+privada `cliniccloud-new-patients-audit/1`, `/2` o `/3`, más una decisión explícita para cada
 candidato. Las exclusiones **no prueban duplicidad** y nunca autorizan fusionar.
 
 El corte inicial v1 contenía 70 candidatos, 58 retenidos y 12 diferidos:
@@ -61,6 +61,30 @@ Al preparar/aplicar una v2, añadir los mismos `--contacts-csv` y
 v2 correspondientes. Un `defer` no significa «paciente duplicado», y el número
 de diferidos del paquete solo incluye decisiones de ese lote, no todas las
 filas pendientes de la auditoría general.
+
+## Cobertura individual mediante historia observada (v3)
+
+Cuando ALTA precede al intervalo del delta, no ampliar artificialmente la
+cobertura del CSV. Auditoría, preparación y aplicación pueden recibir además
+`--live-histories` y `--live-state-labels`, archivos privados recogidos mediante
+la sesión fuente autorizada. El manifiesto v3 vincula siete fuentes: las cuatro
+anteriores, `servicio_1.csv`, la historia y las etiquetas de estado observadas.
+Las nuevas fuentes deben ser recientes (máximo dos horas), del endpoint de
+lectura sin filtro observado en la ficha y de la misma cuenta/contacto.
+
+La cobertura adicional es **individual**: no convierte el delta mensual en un
+histórico completo de todos los pacientes. Se valida cada cita/concepto, el
+mapa de áreas por servicio (nunca por nombre de agenda virtual) y la fecha de
+alta original. Se recalcula la primera atención pagada o, en su defecto, la
+primera registrada; área decisiva desconocida, empate o conceptos ausentes
+impiden el alta. El snapshot guarda fuente, hashes y fundamento de cobertura.
+
+Los códigos de estado de esta lectura necesitan etiquetas verificadas en el
+visor actual; no se extrapolan a los ZIP anteriores. «Pagada» es evidencia del
+estado fuente, no un cobro, factura ni importe histórico que se escriba en CRM.
+Se conservan todos los controles de identidad/NUM, variantes, deriva, backup,
+transacción, diario y revisión por candidato. La revisión v3 usa el mismo
+contrato de `operator_evidence` que v2; no exige una aprobación humana ficticia.
 
 ## Preparación solo lectura
 

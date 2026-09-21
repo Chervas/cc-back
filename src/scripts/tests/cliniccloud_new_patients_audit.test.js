@@ -122,3 +122,70 @@ test('CLI requires actual operator evidence for v2 while retaining the v1 peer r
   assert.throws(() => validateReviewEvidence(review, '/unused', current), /OPERATOR_REVIEW_EVIDENCE_PATH_INVALID/);
   assert.throws(() => loadSources({ '--source-dir': '/unused', '--contacts-csv': '../escape.csv' }), /SOURCE_FILENAME_MUST_BE_BASENAME/);
 });
+
+function withObservedHistory(f){
+  const id=f.contacts[0].values.IDCONTACTO,now=new Date().toISOString();
+  f.contacts[0].values.ALTA='07-07-2026 10:00:00';
+  const row={idCita:800,idContacto:id,agenda:{idEmpresa:5880},fechaIni:'2026-07-08',estado:3,pagado:0,
+    conceptos:[{idCitaConcepto:900,idCita:800,idContacto:id,idServicio:500,pagado:0}]};
+  f.sources.historic_services={file:{role:'historic_services',sha256:hash('services')},rows:[
+    {values:{idServicio:500,idTipoServicio:'90521',nombre:'Servicio corporal ficticio'}},
+    {values:{idServicio:501,idTipoServicio:'260902',nombre:'Servicio capilar ficticio'}}]};
+  f.sources.live_histories={file:{role:'live_histories',sha256:hash('histories')},data:{version:1,captured_at:now,
+    origin:'https://app.clinic-cloud.com',source_endpoint:'/apps/contacto/pestanas-contacto-ficha/php/citas/citas.api.php/get-citas',
+    policy:'read_only_no_clinical_or_economic_mutations',patients:[{contact_id:id,rows:[row]}]}};
+  f.sources.live_state_labels={file:{role:'live_state_labels',sha256:hash('labels')},data:{captured_at:now,
+    source:'patient_appointments_table_display_renderer',observations:[[0,'Pendiente'],[1,'Realizada'],[3,'Pagada'],[-1,'No Acude'],[-2,'Anulada']].map(([code,label])=>({code,label}))}};
+  return row;
+}
+test('v3 observed history resolves the export-date gap but preserves identity checks and zero economic writes',()=>{
+  const f=fixture();withObservedHistory(f);const audit=f.build();
+  assert.equal(audit.manifest.version,'cliniccloud-new-patients-audit/3');assert.equal(audit.rows[0].status,'safe_candidate_for_reviewed_creation');
+  const pkg=apply.prepareNewPatients({audit,sources:f.sources,review:f.review(audit),live:f.live});
+  assert.equal(pkg.operations[0].payload.clinica_id,72);assert.equal(pkg.operations[0].source_created.local,'2026-07-07T10:00:00');
+  assert.equal(pkg.operations[0].source_created.coverage_basis.kind,'observed_patient_history_unfiltered_read_endpoint');
+  assert.equal(pkg.operations[0].primary_evidence[0].payment_evidence_kind,'observed_source_state_pagada_not_money');
+  assert.equal(pkg.appointments_created,false);assert.equal(pkg.messages_enabled,false);
+  assert.doesNotMatch(JSON.stringify(pkg.operations[0].payload),/pagado|paid|payment|WHATSAPP|ALERGIAS/);
+  f.live.patients.push({id_paciente:1,nombre:'Otra',apellidos:'Persona',telefono_movil:'600100000'});
+  assert.equal(f.build().rows[0].status,'defer');
+});
+test('observed history never extends the date coverage of an unrelated contact',()=>{
+  const f=fixture(2);withObservedHistory(f);f.contacts[1].values.ALTA='07-07-2026 10:00:00';
+  const audit=f.build();assert.equal(audit.rows[0].status,'safe_candidate_for_reviewed_creation');
+  assert(audit.rows[1].reasons.includes('SOURCE_CREATION_NOT_WITHIN_CONFIRMED_COVERAGE'));
+});
+test('source-observed paid clinic precedes registration fallback and never follows an old virtual agenda name',()=>{
+  const f=fixture(),row=withObservedHistory(f);row.estado=1;row.agenda.nombre='CAPILARES';
+  const later={...row,idCita:801,fechaIni:'2026-07-10',estado:3,conceptos:[{...row.conceptos[0],idCita:801,idServicio:501,idCitaConcepto:901}]};
+  f.sources.live_histories.data.patients[0].rows.push(later);
+  const audit=f.build();assert.equal(audit.rows[0].proposed_primary_clinic_id,66);assert.deepEqual(audit.rows[0].membership_clinic_ids,[66,72]);
+  row.estado=3;assert.equal(f.build().rows[0].proposed_primary_clinic_id,72);
+  later.fechaIni=row.fechaIni;assert(f.build().rows[0].reasons.includes('OLDEST_TREATMENT_CLINIC_TIE'));
+});
+test('unknown earlier paid service, missing acts and reversed payment cannot fabricate clinic evidence',()=>{
+  const f=fixture(),row=withObservedHistory(f);row.conceptos[0].idServicio=999;
+  assert.equal(f.build().rows[0].status,'defer');
+  row.conceptos=[];assert(f.build().rows[0].reasons.includes('OBSERVED_HISTORY_CONCEPTS_MISSING'));
+  row.conceptos=[{idCitaConcepto:900,idCita:800,idContacto:f.contacts[0].values.IDCONTACTO,idServicio:500,pagado:-10}];
+  const audit=f.build();assert.equal(audit.rows[0].primary_rule,'oldest_recorded_treatment');
+});
+test('invalid source labels, foreign history, duplicate appointments or concepts from someone else reject before SQL',()=>{
+  for(const mutate of [
+    f=>f.sources.live_state_labels.data.observations.find(o=>o.code===3).label='No Acude',
+    f=>f.sources.live_histories.data.captured_at='2020-01-01T00:00:00Z',
+    f=>f.sources.live_histories.data.origin='https://example.com',
+    f=>f.sources.live_histories.data.patients[0].rows[0].agenda.idEmpresa=123,
+    f=>f.sources.live_histories.data.patients[0].rows[0].conceptos[0].idContacto='wrong',
+    f=>f.sources.live_histories.data.patients[0].rows.push(f.sources.live_histories.data.patients[0].rows[0]),
+    f=>f.sources.live_histories.data.patients[0].rows[0].estado=99,
+  ]){const f=fixture();withObservedHistory(f);mutate(f);assert.throws(()=>f.build(),/OBSERVED_HISTORY/);}
+});
+test('observed-history manifest binds all seven sources and revalidates primary proof at prepare/apply',()=>{
+  const f=fixture();withObservedHistory(f);const audit=f.build();assert.equal(audit.manifest.source_files.length,7);
+  audit.rows[0].proposed_primary_clinic_id=66;audit.rows[0].membership_clinic_ids=[66];
+  const {plan_sha256,...body}=audit;audit.plan_sha256=hash(body);
+  assert.throws(()=>apply.operationsFromAudit(audit,f.sources),/SOURCE_PROOF_MISMATCH/);
+  audit.manifest.source_files.pop();const {plan_sha256:old,...next}=audit;audit.plan_sha256=hash(next);
+  assert.throws(()=>apply.operationsFromAudit(audit,f.sources),/MANIFEST_INCOMPLETE/);
+});

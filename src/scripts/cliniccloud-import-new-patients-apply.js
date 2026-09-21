@@ -10,7 +10,7 @@ const { createNewPatientsStore } = require('../lib/cliniccloud-import/new-patien
 const { privateJson, openJournal, acquireExecutorLocks } = require('./cliniccloud-import-appointments-apply');
 const { validateBackup } = require('./cliniccloud-import-contacts-apply');
 function loadSources(options) {
-  return Object.fromEntries([
+  const sources=Object.fromEntries([
     ['contacts', options['--source-dir'], options['--contacts-csv'] || 'BACKUP_CONTACTOS_2026-09-05.csv'],
     ['appointments', options['--source-dir'], options['--appointments-csv'] || 'BACKUP_CITAS_2026-08-01_2026-12-31.csv'],
     ['historic_contacts', options['--historical-dir'], 'contacto_1.csv'],
@@ -19,9 +19,19 @@ function loadSources(options) {
     if (path.basename(name) !== name) throw Error('SOURCE_FILENAME_MUST_BE_BASENAME');
     return [role, readCsv(path.join(directory, name), role)];
   }));
+  if(options['--live-histories']||options['--live-state-labels']){
+    if(!options['--live-histories']||!options['--live-state-labels']) throw Error('OBSERVED_HISTORY_AND_STATE_LABELS_REQUIRED');
+    sources.historic_services=readCsv(path.join(options['--historical-dir'],'servicio_1.csv'),'historic_services');
+    for(const [role,key] of [['live_histories','--live-histories'],['live_state_labels','--live-state-labels']]){
+      const data=privateJson(options[key]),bytes=readBytes(options[key]);
+      if(hash(JSON.parse(bytes.toString('utf8')))!==hash(data)) throw Error('OBSERVED_HISTORY_FILE_CHANGED_WHILE_READING');
+      sources[role]={file:{role,name:path.basename(options[key]),sha256:hash(bytes)},data};
+    }
+  }
+  return sources;
 }
 function validateReviewEvidence(review, filename, audit = null) {
-  const current = audit?.manifest?.version === 'cliniccloud-new-patients-audit/2';
+  const current = ['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3'].includes(audit?.manifest?.version);
   // V1 retains its original peer-review requirement. V2 records the actual
   // operator review method; it does not label an automated audit as a peer.
   if (current && review.review_method !== 'deterministic_source_and_live_identity_checks') throw Error('IDENTITY_REVIEW_METHOD_REQUIRED');
@@ -36,7 +46,7 @@ function validateReviewEvidence(review, filename, audit = null) {
   }
 }
 async function run(args) {
-  const options = parseArgs(args, ['--target', '--mode', '--audit', '--review', '--global-snapshot', '--source-dir', '--historical-dir', '--contacts-csv', '--appointments-csv', '--private-output', '--package', '--approval', '--backup-manifest', '--private-journal']);
+  const options = parseArgs(args, ['--target', '--mode', '--audit', '--review', '--global-snapshot', '--source-dir', '--historical-dir', '--contacts-csv', '--appointments-csv', '--private-output', '--package', '--approval', '--backup-manifest', '--private-journal','--live-histories','--live-state-labels']);
   const target = options['--target'];
   if (!['dev', 'crm'].includes(target)) throw Error('EXPLICIT_DATABASE_TARGET_REQUIRED');
   if (!['prepare', 'apply'].includes(options['--mode'])) throw new Error('EXPLICIT_PREPARE_OR_APPLY_REQUIRED');

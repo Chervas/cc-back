@@ -34,11 +34,15 @@ function sourceCreated(raw, coverage = { start: '2026-08-01', end: '2026-09-05' 
 }
 function verifyAudit(audit, sources) {
   const { plan_sha256, ...body } = audit;
-  if (hash(body) !== plan_sha256 || !['cliniccloud-new-patients-audit/1', 'cliniccloud-new-patients-audit/2'].includes(audit.manifest.version) || audit.manifest.source_account !== ACCOUNT
-    || audit.manifest.policy.whatsapp_ignored !== true || audit.manifest.policy.primary_requires_source_creation_inside_export_coverage !== true) fail('NEW_PATIENT_AUDIT_INTEGRITY_MISMATCH');
-  if (audit.manifest.version === 'cliniccloud-new-patients-audit/2') {
+  const observed=audit.manifest.version==='cliniccloud-new-patients-audit/3';
+  if (hash(body) !== plan_sha256 || !['cliniccloud-new-patients-audit/1', 'cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3'].includes(audit.manifest.version) || audit.manifest.source_account !== ACCOUNT
+    || audit.manifest.policy.whatsapp_ignored !== true || (observed
+      ?audit.manifest.policy.primary_requires_export_or_observed_history_coverage!==true
+      :audit.manifest.policy.primary_requires_source_creation_inside_export_coverage!==true)) fail('NEW_PATIENT_AUDIT_INTEGRITY_MISMATCH');
+  if (['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3'].includes(audit.manifest.version)) {
     const roles = audit.manifest.source_files.map(file => file.role).sort();
-    if (hash(roles) !== hash(['appointments', 'contacts', 'historic_contacts', 'historic_types'])) fail('NEW_PATIENT_SOURCE_MANIFEST_INCOMPLETE');
+    const expected=['appointments','contacts','historic_contacts','historic_types',...(observed?['historic_services','live_histories','live_state_labels']:[])].sort();
+    if (hash(roles) !== hash(expected)) fail('NEW_PATIENT_SOURCE_MANIFEST_INCOMPLETE');
     require('./new-patients-audit').sourceWindow(audit.manifest);
   }
   for (const file of audit.manifest.source_files) if (sources[file.role]?.file.sha256 !== file.sha256) fail('SOURCE_FILE_HASH_MISMATCH');
@@ -48,7 +52,7 @@ function verifyAudit(audit, sources) {
 }
 function operationsFromAudit(audit, sources, { sourceIds = null } = {}) {
   const audited = verifyAudit(audit, sources);
-  const currentAudit = audit.manifest.version === 'cliniccloud-new-patients-audit/2';
+  const currentAudit = ['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3'].includes(audit.manifest.version);
   const coverage = currentAudit ? require('./new-patients-audit').sourceWindow(audit.manifest) : undefined;
   if (sourceIds && sourceIds.some(id => !audited.some(row => row.source_contact_id === id))) fail('REVIEWED_SOURCE_ID_OUTSIDE_AUDIT');
   const safe = sourceIds ? audited.filter(row => sourceIds.includes(row.source_contact_id)) : audited;
@@ -58,7 +62,9 @@ function operationsFromAudit(audit, sources, { sourceIds = null } = {}) {
   return safe.map(row => {
     const matches = sources.contacts.rows.filter(contact => contact.values.IDCONTACTO === row.source_contact_id);
     if (matches.length !== 1 || row.reasons.length || historic.some(contact => contact.idContacto === row.source_contact_id)) fail('SOURCE_ID_NOT_NEW_UNIQUE');
-    const record = matches[0], raw = record.values, keys = sourceIdentity(raw), created = sourceCreated(raw, coverage);
+    const record = matches[0], raw = record.values, keys = sourceIdentity(raw);
+    const proof=currentAudit?require('./new-patients-audit').primaryProof(sources,row.source_contact_id):null;
+    const created=currentAudit?require('./new-patients-audit').creationWithProof(raw,audit.manifest,proof):sourceCreated(raw,coverage);
     if (!/^[1-9]\d*$/.test(String(raw.NUM)) || String(raw.NUM) !== String(row.history_number)
       || contacts.some(other => other.IDCONTACTO !== raw.IDCONTACTO && String(other.NUM) === String(raw.NUM))
       || historic.some(other => String(other.num) === String(raw.NUM))) fail('HISTORY_NUMBER_NOT_NEW_UNIQUE');
@@ -69,9 +75,8 @@ function operationsFromAudit(audit, sources, { sourceIds = null } = {}) {
       || row.membership_clinic_ids.some(id => ![66, 72].includes(id)) || !row.primary_evidence.length
       || !['oldest_paid_treatment', 'oldest_recorded_treatment'].includes(row.primary_rule)) fail('PRIMARY_CLINIC_EVIDENCE_REQUIRED');
     if (currentAudit) {
-      const proof = require('./new-patients-audit').primaryProof(sources, row.source_contact_id);
       if (proof.reasons.length || proof.first_evidence_date < created.local.slice(0, 10)
-        || proof.primary_evidence.some(item => item.treatment_date < audit.manifest.coverage.start || item.treatment_date > audit.manifest.coverage.end)
+        || (!proof.coverage_basis&&proof.primary_evidence.some(item => item.treatment_date < audit.manifest.coverage.start || item.treatment_date > audit.manifest.coverage.end))
         || ['proposed_primary_clinic_id', 'membership_clinic_ids', 'primary_rule', 'primary_evidence'].some(key => hash(proof[key]) !== hash(row[key]))) fail('PRIMARY_CLINIC_SOURCE_PROOF_MISMATCH');
       const otherNames = [...allIdentities.filter(other => other.id !== row.source_contact_id), ...historicIdentities];
       if (otherNames.some(other => require('./new-patients-audit').nearName(keys.name, other.keys.name))) fail('POSSIBLE_SOURCE_NAME_VARIANT_REQUIRES_REVIEW');
@@ -124,7 +129,7 @@ function prepareNewPatients({ audit, sources, review, live, now = new Date().toI
     if (sourceMatches(live, operation.source_contact_id).length) fail('NEW_PATIENT_SOURCE_NOW_EXISTS');
     if (historyMatches(live, operation.history_number).length) fail('NEW_PATIENT_HISTORY_NUMBER_NOW_EXISTS');
     if (collisions(operation, live).length) fail('NEW_PATIENT_LOCAL_IDENTITY_COLLISION');
-    if (audit.manifest.version === 'cliniccloud-new-patients-audit/2'
+    if (['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3'].includes(audit.manifest.version)
       && live.patients.some(row => require('./new-patients-audit').nearName(operation.identity.name, localIdentity(row).name))) fail('POSSIBLE_LOCAL_NAME_VARIANT_REQUIRES_REVIEW');
   }
   const value = { version: VERSION, source_account: ACCOUNT, source_audit_sha256: audit.plan_sha256, source_files: audit.manifest.source_files,
