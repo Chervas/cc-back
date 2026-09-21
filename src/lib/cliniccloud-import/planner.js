@@ -100,6 +100,8 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
     (local.parallel_sources || []).map(entry => ({ local, entry }))), item => item.entry.source_reference);
   const revisionReferences = index(localAppointments.filter(local => isImported(local) && local.source_revision),
     local => sourceReference(local.source_revision.original));
+  const reconciledReferences = index(localAppointments.filter(isImported).flatMap(local =>
+    (local.legacy_source_reconciliation?.entries || []).map(entry => ({ local, entry }))), item => item.entry.source_reference);
   const claimedLocal = new Set();
   const recoveredHistoricalIds = new Set();
   const decisions = [];
@@ -119,6 +121,25 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
     if (row.source_external_id && sourceExternalIds.get(row.source_external_id).length > 1) decision.reasons.push('DUPLICATE_SOURCE_APPOINTMENT_ID');
     const sameIdentity = sourceExact.get(appointmentKey(row)) || [];
     if (new Set(sameIdentity.map((r) => r.provenance.row_sha256)).size > 1) decision.reasons.push('MULTIPLE_DISTINCT_SOURCE_ROWS_SAME_SLOT');
+    const reconciled = row.kind === 'appointment' ? reconciledReferences.get(sourceReference(row)) || [] : [];
+    if (reconciled.length) {
+      decision.candidate_local_ids = reconciled.map(item => item.local.id);
+      if (reconciled.length !== 1) decision.reasons.push('RECONCILED_SOURCE_MULTIPLE_LOCAL_MATCHES');
+      else {
+        const { local, entry } = reconciled[0], current = local.legacy_source_reconciliation.current;
+        decision.local_id = local.id; decision.expected_local_hash = hash(local);
+        decision.source_external_id = entry.source_appointment_id;
+        if (!patient || String(local.patient_id) !== String(patient.id)) decision.reasons.push('LOCAL_PATIENT_IDENTITY_CONFLICT');
+        if (row.status !== entry.source.status || norm(row.details || '') !== norm(entry.source.details)
+          || (row.source_external_id && String(row.source_external_id) !== entry.source_appointment_id)) decision.reasons.push('RECONCILED_SOURCE_CHANGED_REQUIRES_REVIEW');
+        if (local.local_modified || local.reconciliation_local_changed
+          || ['start_local', 'end_local', 'status'].some(key => local[key] !== current[key])) decision.reasons.push('LOCAL_EDIT_REQUIRES_REVIEW');
+        const overlaps = current.status !== 'cancelada' && patient ? localTime.get(patientTimeKey({ ...current, patient_id: patient.id })) || [] : [];
+        if (overlaps.some(other => String(other.id) !== String(local.id) && other.status !== 'cancelada')) decision.reasons.push('RECONCILED_SOURCE_LOCAL_OVERLAP');
+        if (!decision.reasons.length) { decision.action = 'preserve_reconciled_legacy_source'; decision.requires_review = false; claimedLocal.add(String(local.id)); }
+      }
+      decisions.push(decision); continue;
+    }
     const revised = revisionReferences.get(sourceReference(row)) || [];
     if (revised.length) {
       decision.candidate_local_ids = revised.map(local => local.id);

@@ -89,6 +89,41 @@ revisar. Nunca restaurar toda la base compartida ni borrar historia.
 
 Pruebas offline: `node --test src/scripts/tests/cliniccloud_import_appointments_apply.test.js`.
 
+## Conciliación de una cita histórica por ID fuente observado
+
+`legacy-source-reconciliation.js` no amplía el ejecutor HOLD anterior ni expone
+un endpoint de escritura. Define un recibo verificable para un operador revisado
+separadamente: una cita histórica simple conserva su ID local y toda su historia
+cuando la lectura autenticada de ClinicCloud confirma el mismo ID fuente con
+otro horario o una anulación explícita. La ausencia en el ZIP nunca equivale a
+anulación; dos filas de agendas paralelas solo se vinculan con contacto, intervalo,
+estado, acto único y nota coincidentes, además del ID canónico observado.
+
+La preparación exige origen ClinicCloud, clínica 66/72, fecha/estado locales aún
+iguales al histórico original, sin edición humana identificada, bono, lead,
+reserva avanzada ni programa. Mantiene procedimiento, duración, profesional,
+instalación, notas y tipo de cita. Rechaza actos compuestos, cambios clínicos,
+evidencia de más de una hora y transiciones a realizada/no acudió. El recibo
+conserva hashes de antes, fuente y contenido clínico, procedencias CSV, ID fuente
+canónico y aliases comprobados; las tres supresiones de notificaciones permanecen
+activas. No activa salas ni convierte una asignación antigua en validación clínica.
+
+El operador debe verificar backup, registrar antes/después en diario durable,
+bloquear citas y anclas comunes de paciente/profesional/sala, revalidar identidad,
+solapes y ausencia de relaciones clínicas/económicas/automatizaciones. Solo puede
+actualizar fecha, estado, metadata y fecha técnica, sin crear otra cita ni emitir
+mensajes. Las relaciones existentes o nuevas dependencias requieren otro análisis;
+este contrato no permite descartarlas ni saltarse el escritor canónico de reservas
+complejas. Simular con rollback y comprobar después desde otra conexión y CRM.
+
+Snapshot y plan reconocen el recibo como `preserve_reconciled_legacy_source`:
+reprocesar las filas revisadas no mueve la cita atrás ni crea sus copias paralelas.
+Un cambio posterior local o de estado/notas fuente devuelve el caso a revisión.
+Rollback exclusivamente por comparación del después actual, restaurando los
+campos concretos del diario si no hubo actuaciones posteriores; nunca restaurar
+la base completa. Evidencia de aplicación y versión del operador en la bitácora
+central. Pruebas: `cliniccloud_legacy_source_reconciliation.test.js`.
+
 ## Altas semanales con identidad ya resuelta
 
 `cliniccloud-import-week-appointments.js` es un ejecutor distinto, solo para
