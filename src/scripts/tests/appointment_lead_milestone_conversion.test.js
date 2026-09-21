@@ -291,16 +291,17 @@ function testControllerUsesCommonHelperForEveryCompletionWritePath() {
     /const\s*\{[^}]*processAppointmentLeadMilestones[^}]*\}\s*=\s*require\('\.\.\/services\/appointmentLeadMilestone\.service'\);/
   );
   assert.match(controller, /if \(estadoRaw === 'completada'\) \{\s*await processAppointmentLeadMilestones\(\{\s*cita,\s*previousStatus: null,/s);
-  assert.match(controller, /if \(!\['convertido', 'descartado', 'acudio_cita'\]\.includes\(currentLeadStatus\)\) \{\s*const leadUpdatePayload = \{\s*status_lead: 'citado'/s);
+  // Status protection is now exercised against MySQL in appointment_lead_link_mysql.
+  assert.match(controller, /lead = await recordCreatedAppointmentLead\(\{ models: db, lead, appointment, transaction,/);
 
   const updateSection = controller.slice(
     controller.indexOf('exports.updateCitaEstado ='),
     controller.indexOf('exports.reagendarCita =')
   );
-  assert.match(updateSection, /(?:const|let) previousStatus = cita\.estado;[\s\S]*await cita\.save\(\);[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
+  assert.match(updateSection, /(?:const|let) previousStatus = cita\.estado;[\s\S]*(?:await cita\.save\(\);|return locked\.update\([^;]+;)[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
 
   const rescheduleSection = controller.slice(controller.indexOf('exports.reagendarCita ='));
-  assert.match(rescheduleSection, /(?:const|let) previousStatus = cita\.estado;[\s\S]*await cita\.save\(\);[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
+  assert.match(rescheduleSection, /(?:const|let) previousStatus = cita\.estado;[\s\S]*(?:await cita\.save\(\);|return locked\.update\([^;]+;)[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
 }
 
 async function run() {

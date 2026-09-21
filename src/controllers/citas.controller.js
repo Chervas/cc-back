@@ -5,7 +5,6 @@ const crypto = require('crypto');
 
 const CitaPaciente = db.CitaPaciente;
 const LeadIntake = db.LeadIntake;
-const LeadAttributionAudit = db.LeadAttributionAudit;
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const Paciente = db.Paciente;
 const Clinica = db.Clinica;
@@ -54,6 +53,7 @@ const {
     uploadScheduleForLinkedAppointment,
 } = require('../services/leadQualificationMilestone.service');
 const { enqueueCreatedAppointmentCrmSignals } = require('../services/leadCrmSignalPersistence.service');
+const { findUniqueAppointmentLead, recordCreatedAppointmentLead } = require('../services/appointmentLeadLink.service');
 const {
     assertUserCanAccessFeature,
     canUserAccessFeature,
@@ -569,38 +569,6 @@ function normalizePhone(value) {
     return normalizePhoneDigits(value);
 }
 
-async function findPendingCallLeadForAppointment({ clinica_id, telefono }) {
-    const clinicId = parsePositiveInt(clinica_id);
-    const normalizedPhone = normalizePhone(telefono);
-    if (!clinicId || !normalizedPhone) return null;
-
-    const localPhone = normalizedPhone.length > 9 ? normalizedPhone.slice(-9) : normalizedPhone;
-    const phoneWhere = [
-        { telefono: normalizedPhone },
-        { telefono: { [Op.like]: `%${normalizedPhone}` } },
-    ];
-    if (localPhone && localPhone !== normalizedPhone) {
-        phoneWhere.push({ telefono: localPhone });
-        phoneWhere.push({ telefono: { [Op.like]: `%${localPhone}` } });
-    }
-
-    const candidates = await LeadIntake.findAll({
-        where: {
-            clinica_id: clinicId,
-            call_initiated: true,
-            call_outcome: { [Op.is]: null },
-            call_outcome_appointment_id: { [Op.is]: null },
-            [Op.or]: phoneWhere,
-        },
-        order: [['call_initiated_at', 'DESC'], ['created_at', 'DESC'], ['id', 'DESC']],
-        limit: 20,
-    });
-
-    return candidates.find((lead) => {
-        const candidatePhone = normalizePhone(lead?.telefono);
-        return !!candidatePhone && (candidatePhone === normalizedPhone || candidatePhone.endsWith(localPhone));
-    }) || null;
-}
 
 async function findHistoricalAttributedLeadForPatient({ clinica_id, telefono, email }) {
     const clinicId = parsePositiveInt(clinica_id);
@@ -741,9 +709,8 @@ exports.getManualAttributionPreview = asyncHandler(async (req, res) => {
         });
     }
 
-    const pendingLead = await findPendingCallLeadForAppointment({
-        clinica_id: clinicaId,
-        telefono,
+    const pendingLead = await findUniqueAppointmentLead({
+        models: db, clinicId: clinicaId, phone: telefono, patientId,
     });
     if (pendingLead) {
         const hydratedLead = await LeadIntake.findByPk(pendingLead.id, {
@@ -2190,12 +2157,12 @@ exports.createCita = asyncHandler(async (req, res) => {
             id_paciente: datosPaciente.id_paciente || datosPaciente.id,
         });
 
-        const shouldAutoLinkPendingCallLead = !lead
+        const shouldAutoLinkLead = !lead
             && String(tipo_cita || '').trim().toLowerCase() !== 'continuacion';
-        if (shouldAutoLinkPendingCallLead) {
-            lead = await findPendingCallLeadForAppointment({
-                clinica_id,
-                telefono: datosPaciente.telefono || paciente?.telefono_movil || null,
+        const autoLinkPhone = datosPaciente.telefono || paciente?.telefono_movil || null;
+        if (shouldAutoLinkLead) {
+            lead = await findUniqueAppointmentLead({
+                models: db, clinicId: clinica_id, phone: autoLinkPhone, patientId: paciente.id_paciente,
             });
             resolvedLeadIntakeId = parsePositiveInt(lead?.id) || null;
         }
@@ -2235,6 +2202,10 @@ exports.createCita = asyncHandler(async (req, res) => {
                 if (!bookingEnabled || pastHistoryOnly) {
                     await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, appointment, transaction });
                 }
+                lead = await recordCreatedAppointmentLead({ models: db, lead, appointment, transaction,
+                    autoLinkPhone: !explicitLeadIntakeId && lead ? autoLinkPhone : null,
+                    actorId: req.userData?.userId,
+                });
                 await enqueueCreatedAppointmentCrmSignals({ lead, appointment, transaction });
             },
         };
@@ -2274,7 +2245,7 @@ exports.createCita = asyncHandler(async (req, res) => {
 
         await ensureConsentPackageAndAutomation(cita, req, 'appointment_created');
 
-        // Marcar lead como citado si aplica
+        // La cita y el estado del lead ya están confirmados juntos; publicar sus hitos.
         if (lead) {
             // Una cita real implica que el contacto ya era un Lead válido. Este
             // hito se envía antes de Schedule y comparte un eventId estable con
@@ -2284,42 +2255,6 @@ exports.createCita = asyncHandler(async (req, res) => {
                 occurredAt: cita.created_at || new Date(),
                 logger: console,
             });
-
-            const currentLeadStatus = String(lead.status_lead || '').trim().toLowerCase();
-            if (!['convertido', 'descartado', 'acudio_cita'].includes(currentLeadStatus)) {
-                const leadUpdatePayload = {
-                    status_lead: 'citado',
-                    call_outcome_appointment_id: cita.id_cita,
-                };
-                if (lead.call_initiated && !lead.call_outcome) {
-                    leadUpdatePayload.call_outcome = 'citado';
-                    leadUpdatePayload.call_outcome_at = new Date();
-                    leadUpdatePayload.call_outcome_notes = lead.call_outcome_notes
-                        || 'Lead vinculado automáticamente al crear una cita manual con el mismo teléfono.';
-                }
-                await lead.update(leadUpdatePayload);
-            }
-
-            if (!explicitLeadIntakeId && resolvedLeadIntakeId && LeadAttributionAudit) {
-                try {
-                    await LeadAttributionAudit.create({
-                        lead_intake_id: resolvedLeadIntakeId,
-                        raw_payload: {
-                            appointment_id: cita.id_cita,
-                            patient_id: paciente.id_paciente,
-                            matched_by: 'phone',
-                            source: 'manual_appointment_auto_link',
-                        },
-                        attribution_steps: {
-                            action: 'auto_link_manual_appointment_from_pending_call',
-                            userId: req.userData?.userId || null,
-                            clinic_id: clinica_id,
-                        }
-                    });
-                } catch (auditErr) {
-                    console.warn('⚠️ No se pudo registrar auditoría de auto-link de cita manual:', auditErr.message || auditErr);
-                }
-            }
 
             await uploadScheduleForLinkedAppointment({
                 lead,
@@ -2362,6 +2297,9 @@ exports.createCita = asyncHandler(async (req, res) => {
 
         return res.status(201).json(await protectAppointmentsForRequest(req, citaCreada));
     } catch (err) {
+        if (err?.code === 'appointment_lead_link_changed') {
+            return res.status(409).json({ code: err.code, message: err.message });
+        }
         if (/^(booking_|appointment_consent_|treatment_not_)/.test(String(err?.code || ''))) {
             return res.status(err.statusCode || 409).json(bookingErrorPayload(err));
         }
