@@ -1,6 +1,7 @@
 'use strict';
 
 const { ADAPTER_VERSION, TIMEZONE, hash, stableJson, index, norm, dateOnly } = require('./adapter');
+const { sourceReference } = require('./week-appointments');
 
 const appointmentKey = (r) => stableJson([r.kind || 'appointment', r.source_contact_id, r.start_local, r.end_local, r.agenda_key]);
 const patientTimeKey = (r) => r.patient_id ? stableJson([r.kind || 'appointment', String(r.patient_id), r.start_local, r.end_local]) : null;
@@ -93,6 +94,10 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
   const localSourceIds = index(localAppointments.filter(isImported), sourceId);
   const localTime = index(localAppointments, patientTimeKey);
   const localPatient = index(localAppointments, (r) => String(r.patient_id || ''));
+  // Persisted, validated aliases only. Never infer a parallel visit merely
+  // from simultaneous times or allow it to rewrite the shared appointment.
+  const parallelReferences = index(localAppointments.filter(isImported).flatMap(local =>
+    (local.parallel_sources || []).map(entry => ({ local, entry }))), item => item.entry.source_reference);
   const claimedLocal = new Set();
   const recoveredHistoricalIds = new Set();
   const decisions = [];
@@ -110,11 +115,34 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
     if (!inCoverage(row, coverage)) decision.reasons.push('SOURCE_ROW_OUTSIDE_DECLARED_COVERAGE');
     if (row.kind !== 'block' && (contactIds.get(row.source_contact_id)?.length || 0) !== 1) decision.reasons.push('SOURCE_PATIENT_NOT_UNIQUE');
     if (row.source_external_id && sourceExternalIds.get(row.source_external_id).length > 1) decision.reasons.push('DUPLICATE_SOURCE_APPOINTMENT_ID');
+    const sameIdentity = sourceExact.get(appointmentKey(row)) || [];
+    if (new Set(sameIdentity.map((r) => r.provenance.row_sha256)).size > 1) decision.reasons.push('MULTIPLE_DISTINCT_SOURCE_ROWS_SAME_SLOT');
+    const parallelMatches = row.kind === 'appointment' ? parallelReferences.get(sourceReference(row)) || [] : [];
+    if (parallelMatches.length) {
+      const ids = [...new Set(parallelMatches.map(item => item.local.id))];
+      decision.candidate_local_ids = ids;
+      if (parallelMatches.length !== 1) decision.reasons.push('PARALLEL_SOURCE_MULTIPLE_LOCAL_MATCHES');
+      else {
+        const { local, entry } = parallelMatches[0], baseline = entry.source;
+        decision.local_id = local.id; decision.expected_local_hash = hash(local);
+        decision.source_external_id = entry.source_appointment_id;
+        if (!patient || String(local.patient_id) !== String(patient.id)) decision.reasons.push('LOCAL_PATIENT_IDENTITY_CONFLICT');
+        if (row.status !== baseline.status || norm(row.details || '') !== norm(baseline.details || '')
+          || (row.source_external_id && String(row.source_external_id) !== entry.source_appointment_id)) decision.reasons.push('PARALLEL_SOURCE_CHANGED_REQUIRES_REVIEW');
+        if (local.local_modified === true || local.parallel_local_note_changed === true
+          || ['start_local', 'end_local', 'status'].some(key => local[key] !== baseline[key])) decision.reasons.push('LOCAL_EDIT_REQUIRES_REVIEW');
+        const overlaps = patient ? localTime.get(patientTimeKey({ ...row, patient_id: patient.id })) || [] : [];
+        if (overlaps.some(other => String(other.id) !== String(local.id))) decision.reasons.push('PARALLEL_LOCAL_OVERLAP_REQUIRES_REVIEW');
+        if (!decision.reasons.length) {
+          decision.action = 'preserve_parallel_source_link'; decision.requires_review = false;
+          claimedLocal.add(String(local.id));
+        }
+      }
+      decisions.push(decision); continue;
+    }
     let oldMatches = row.source_external_id ? historicalIds.get(row.source_external_id) || [] : historicalExact.get(appointmentKey(row)) || [];
     // Distinct statuses/clinical records at the same instant are not duplicate
     // rows. Do not recover an old ID for more than one non-identical input row.
-    const sameIdentity = sourceExact.get(appointmentKey(row)) || [];
-    if (new Set(sameIdentity.map((r) => r.provenance.row_sha256)).size > 1) decision.reasons.push('MULTIPLE_DISTINCT_SOURCE_ROWS_SAME_SLOT');
     if (oldMatches.length > 1) decision.reasons.push('AMBIGUOUS_HISTORIC_IDENTITY');
     const old = oldMatches.length === 1 && !decision.reasons.includes('MULTIPLE_DISTINCT_SOURCE_ROWS_SAME_SLOT') ? oldMatches[0] : null;
     if (!decision.source_external_id && old) decision.source_external_id = sourceId(old);
