@@ -31,12 +31,14 @@ function legacyProfile(values, duration) {
     professionals: { mode: 'any', ids: values.doctor_id ? [Number(values.doctor_id)] : [], preferred_id: values.doctor_id ? Number(values.doctor_id) : null } }] };
 }
 
-function solveLegacy(values, context) {
+function solveLegacy(values, context, force = false) {
   const start = new Date(values.inicio);
   const end = new Date(values.fin);
+  const checked = resource => resource && ({ ...resource,
+    busy: force ? (resource.busy || []).filter(interval => interval.can_force_legacy !== true) : resource.busy });
   if ((context.clinicWindows && !isFree({ windows: context.clinicWindows }, start, end))
-    || (values.doctor_id && !isFree(context.doctors.get(Number(values.doctor_id)), start, end))
-    || (values.instalacion_id && !isFree(context.installations.get(Number(values.instalacion_id)), start, end))) return null;
+    || (values.doctor_id && !isFree(checked(context.doctors.get(Number(values.doctor_id))), start, end))
+    || (values.instalacion_id && !isFree(checked(context.installations.get(Number(values.instalacion_id))), start, end))) return null;
   return { start_at: start.toISOString(), end_at: end.toISOString(), warnings: [], requires_priority_acknowledgement: false,
     phases: [{ key: 'appointment', label: '', start_at: start.toISOString(), end_at: end.toISOString(),
       installation_id: values.instalacion_id ? Number(values.instalacion_id) : null,
@@ -50,7 +52,7 @@ function solveLegacy(values, context) {
  */
 async function mutateAppointmentBooking({ db, appointmentValues, existingAppointmentId = null, persist,
   priorityAcknowledged = false, selections = {}, transaction = null, capabilities = bookingCapabilities(),
-  allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null }) {
+  allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
   const execute = async (tx) => {
     if (tx.options?.isolationLevel !== 'READ COMMITTED') {
@@ -159,10 +161,14 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
         : (configuredProfile?.phases.length === 1 && configuredProfile.phases[0].professionals.mode === 'any'
           ? { [configuredProfile.phases[0].key]: { doctor_id: values.doctor_id, installation_id: values.instalacion_id } }
           : existingSelections || {});
-      solution = configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen }) : solveLegacy(values, context);
+      solution = configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen }) : solveLegacy(values, context, force === true);
       const patientConflict = (context.patientBusy || []).some(busy => new Date(busy.start) < end && new Date(busy.end) > start);
       if (!solution || patientConflict || new Date(solution.end_at).getTime() !== end.getTime()) {
-        throw bookingError('booking_unavailable', 'El hueco ya no está disponible o no cumple el perfil del tratamiento. Actualiza las propuestas.', { can_force: false });
+        // Re-evaluated under the same resource locks. Force is only available
+        // between ordinary appointments in this clinic, never for a profile,
+        // mandatory team, blocked schedule, foreign clinic or patient overlap.
+        const canForce = !configuredProfile && !patientConflict && !!solveLegacy(values, context, true);
+        throw bookingError('booking_unavailable', 'El hueco ya no está disponible o no cumple el perfil del tratamiento. Actualiza las propuestas.', { can_force: canForce });
       }
       assertPriorityAcknowledgement(solution, priorityAcknowledged);
       if (configuredProfile) {

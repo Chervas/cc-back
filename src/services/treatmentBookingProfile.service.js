@@ -75,8 +75,14 @@ function assertPriorityAcknowledgement(solution, acknowledged) {
 
 function bookingErrorMiddleware(error, req, res, next) {
   if (!/^(booking_|program_|treatment_not_|treatment_not_found)/.test(String(error?.code || ''))) return next(error);
-  return res.status(error.statusCode || 409).json({ code: error.code, message: error.message, details: error.details || null, can_force: false });
+  return res.status(error.statusCode || 409).json(bookingErrorPayload(error));
+}
+
+function bookingErrorPayload(error) {
+  const canForce = error?.code === 'booking_unavailable' && error?.details?.can_force === true;
+  return { code: error.code, message: error.message, details: error.details || null, can_force: canForce,
+    ...(canForce ? { reason: 'overlap', conflicts: [{ type: 'overlap', message: 'Recurso ocupado por otra cita de esta clínica' }] } : {}) };
 }
 
 module.exports = { bookingError, bookingCapabilities, parseClinicalConfig, requireOperationalProfile,
-  loadScopedTreatment, assertPriorityAcknowledgement, bookingErrorMiddleware };
+  loadScopedTreatment, assertPriorityAcknowledgement, bookingErrorMiddleware, bookingErrorPayload };

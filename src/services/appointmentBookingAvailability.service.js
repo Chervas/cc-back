@@ -10,6 +10,16 @@ const { bookingError, bookingCapabilities, requireOperationalProfile, loadScoped
 
 function uniqueIds(values) { return [...new Set(values.map(Number))].sort((a, b) => a - b); }
 
+// Internal policy marker only; never expose the source metadata or foreign IDs.
+function permitsLegacyOverlap(appointment, clinicId) {
+  return Number(appointment?.clinica_id) === Number(clinicId)
+    && appointment?.source_system !== 'treatment_program'
+    && (appointment?.get ? appointment.get('booking_protected') : appointment?.booking_protected) === 0;
+}
+
+const protectedBookingAttribute = (db, alias) => [db.Sequelize.fn('COALESCE', db.Sequelize.fn('JSON_CONTAINS_PATH',
+  db.Sequelize.col(`${alias}.import_metadata`), 'one', '$.booking', '$.program_session'), 0), 'booking_protected'];
+
 /** Alias reads only exist behind the explicit migration/deployment gate. */
 async function resolveInstallationKeys({ db, clinic, installationIds, transaction, enabled }) {
   const keys = new Map(installationIds.map((id) => [id, `installation:${id}`]));
@@ -71,7 +81,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     db.CitaPaciente.findAll({ where: { estado: { [Op.ne]: 'cancelada' }, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start },
       ...(ignoreAppointmentId ? { id_cita: { [Op.ne]: ignoreAppointmentId } } : {}),
       [Op.or]: [{ doctor_id: { [Op.in]: doctorIds } }, { instalacion_id: { [Op.in]: mapping.physicalInstallationIds } }],
-    }, attributes: ['id_cita', 'doctor_id', 'instalacion_id', 'inicio', 'fin'], transaction }),
+    }, attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin', 'source_system', protectedBookingAttribute(db, 'CitaPaciente')], transaction }),
   ]);
   const occupancies = occupancyEnabled ? await db.AppointmentBookingOccupancy.findAll({ where: {
     ...(ignoreAppointmentId ? { appointment_id: { [Op.ne]: ignoreAppointmentId } } : {}),
@@ -81,16 +91,17 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
       // legacy primary cabin/doctor for the entire appointment as well.
       ...(legacyAppointments.length ? [{ appointment_id: { [Op.in]: legacyAppointments.map((row) => row.id_cita) } }] : []),
     ],
-  }, include: [{ model: db.CitaPaciente, as: 'appointment', attributes: [], required: true, where: { estado: { [Op.ne]: 'cancelada' } } }], transaction }) : [];
+  }, include: [{ model: db.CitaPaciente, as: 'appointment', attributes: ['clinica_id', 'source_system', protectedBookingAttribute(db, 'appointment')], required: true, where: { estado: { [Op.ne]: 'cancelada' } } }], transaction }) : [];
   const segmented = new Set(occupancies.map((row) => Number(row.appointment_id)));
   const busy = new Map(resources.map((key) => [key, []]));
   const addBusy = (key, interval) => { if (busy.has(key)) busy.get(key).push(interval); };
   legacyAppointments.filter((row) => !segmented.has(Number(row.id_cita))).forEach((row) => {
-    const interval = { start: row.inicio, end: row.fin };
+    const interval = { start: row.inicio, end: row.fin, can_force_legacy: permitsLegacyOverlap(row, clinicId) };
     addBusy(`doctor:${row.doctor_id}`, interval);
     addBusy(mapping.keys.get(Number(row.instalacion_id)), interval);
   });
-  occupancies.forEach((row) => addBusy(row.resource_key, { start: row.start_at, end: row.end_at }));
+  occupancies.forEach((row) => addBusy(row.resource_key, { start: row.start_at, end: row.end_at,
+    can_force_legacy: permitsLegacyOverlap(row.appointment, clinicId) }));
   installationBlocks.forEach((row) => addBusy(mapping.keys.get(Number(row.instalacion_id)), { start: row.fecha_inicio, end: row.fecha_fin }));
   const doctors = new Map();
   const cabins = new Map();

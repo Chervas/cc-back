@@ -44,6 +44,11 @@ function matches(row, where = {}) {
 }
 
 function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false, appointments = [], occupancies = [], aliases = [] } = {}) {
+  const withBookingMarker = row => {
+    let metadata = row.import_metadata;
+    if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = { booking: true }; } }
+    return { ...row, booking_protected: metadata && ('booking' in metadata || 'program_session' in metadata) ? 1 : 0 };
+  };
   const state = { appointments: [...appointments], occupancies: [...occupancies], commits: 0, rollbacks: 0, calls: [], locks: [], persists: 0 };
   let id = 100;
   let txId = 0;
@@ -56,7 +61,7 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
   const allAppointments = (tx) => [...state.appointments.filter((row) => !tx?.replacements.has(row.id_cita)), ...(tx?.pending || [])];
   const allOccupancies = (tx) => [...state.occupancies.filter((row) => !tx?.deleted.has(row.appointment_id)), ...(tx?.occupancies || [])];
   const db = {
-    Sequelize: { Op },
+    Sequelize: { Op, fn: (name, ...args) => ({ name, args }), col: name => ({ col: name }) },
     sequelize: { transaction: async (options, callback) => {
       const tx = { id: ++txId, options, LOCK: { UPDATE: 'UPDATE' }, pending: [], occupancies: [], deleted: new Set(), replacements: new Set(), release: new Map() };
       try {
@@ -91,12 +96,13 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
       findByPk: async () => ({}),
     },
     CitaPaciente: {
-      findAll: async (options) => query('appointments', allAppointments(options.transaction), options),
+      findAll: async (options) => query('appointments', allAppointments(options.transaction).map(withBookingMarker), options),
       findByPk: async (appointmentId, options = {}) => allAppointments(options.transaction).find((row) => row.id_cita === Number(appointmentId)),
     },
     AppointmentBookingOccupancy: {
       findAll: async (options) => query('occupancies', allOccupancies(options.transaction).filter((row) => !options.include
-        || allAppointments(options.transaction).some((appointment) => appointment.id_cita === row.appointment_id && appointment.estado !== 'cancelada')), options),
+        || allAppointments(options.transaction).some((appointment) => appointment.id_cita === row.appointment_id && appointment.estado !== 'cancelada'))
+        .map(row => ({ ...row, appointment: withBookingMarker(allAppointments(options.transaction).find(appointment => appointment.id_cita === row.appointment_id)) })), options),
       destroy: async ({ where, transaction: tx }) => { tx.deleted.add(Number(where.appointment_id)); tx.occupancies = tx.occupancies.filter((row) => row.appointment_id !== Number(where.appointment_id)); },
       bulkCreate: async (rows, { transaction: tx }) => { if (failOccupancy) throw new Error('offline simulated occupancy failure'); tx.occupancies.push(...rows); },
     },
@@ -160,6 +166,45 @@ test('occupancy failure rolls the canonical appointment back too; no partial res
   assert.equal(f.state.appointments.length, 0);
   assert.equal(f.state.occupancies.length, 0);
   assert.equal(f.state.rollbacks, 1);
+});
+
+test('ordinary overlap requires confirmation and remains forceable after occupancy is written', async () => {
+  const f = fixture({ bookingProfile: null });
+  await f.reserve();
+  const values = { ...f.values, paciente_id: 2 };
+  await assert.rejects(f.reserve({ appointmentValues: values }), error => error.code === 'booking_unavailable' && error.details.can_force === true);
+  await assert.rejects(f.reserve({ appointmentValues: values, force: 'true' }), { code: 'booking_unavailable' });
+  await f.reserve({ appointmentValues: values, force: true });
+  assert.equal(f.state.appointments.length, 2);
+  assert.equal(f.state.occupancies.length, 4);
+});
+
+test('force never bypasses a profiled reservation, another clinic, a patient overlap or a calendar block', async () => {
+  const ordinary = { id_cita: 88, clinica_id: 72, paciente_id: 2, doctor_id: 5, instalacion_id: 9,
+    inicio: start, fin: end, estado: 'pendiente' };
+  for (const change of [ { clinica_id: 73 }, { paciente_id: 1 }, { import_metadata: { booking: { profile: profile(phase('one')) } } },
+    { source_system: 'treatment_program' }, { import_metadata: '{invalid' } ]) {
+    const f = fixture({ bookingProfile: null, appointments: [{ ...ordinary, ...change }] });
+    await assert.rejects(f.reserve({ force: true }), error => error.code === 'booking_unavailable' && error.details.can_force === false);
+    assert.equal(f.state.persists, 0);
+  }
+  const f = fixture({ bookingProfile: null });
+  f.db.InstalacionBloqueo.findAll = async () => [{ instalacion_id: 9, fecha_inicio: start, fecha_fin: end }];
+  await assert.rejects(f.reserve({ force: true }), error => error.code === 'booking_unavailable' && error.details.can_force === false);
+  const profiled = fixture({ appointments: [ordinary] });
+  await assert.rejects(profiled.reserve({ force: true }), error => error.code === 'booking_unavailable' && error.details.can_force === false);
+});
+
+test('force retains opening hours and does not leak conflict identities in HTTP', async () => {
+  const f = fixture({ bookingProfile: null });
+  await assert.rejects(f.reserve({ force: true, appointmentValues: { ...f.values,
+    inicio: '2030-01-07T03:00:00Z', fin: '2030-01-07T03:30:00Z' } }), error => error.details.can_force === false);
+  const { bookingErrorPayload, bookingError } = require('../../services/treatmentBookingProfile.service');
+  const payload = bookingErrorPayload(bookingError('booking_unavailable', 'Ocupado', { can_force: true }));
+  assert.equal(payload.reason, 'overlap');
+  assert.equal(payload.can_force, true);
+  assert.deepEqual(payload.conflicts, [{ type: 'overlap', message: 'Recurso ocupado por otra cita de esta clínica' }]);
+  assert.equal(bookingErrorPayload(bookingError('booking_priority_confirmation_required', 'Confirmar', { can_force: true })).can_force, false);
 });
 
 test('rescheduling without explicit resources retains the locked current professional, not a stale controller copy', async () => {
