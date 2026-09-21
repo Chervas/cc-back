@@ -2014,14 +2014,16 @@ async function listPatientTreatmentsWithoutConsentRequirements(identifier, filte
     });
 }
 
-function summarizeDocuments(documents = [], missingRequired = 0, missingOptional = 0) {
+function summarizeDocuments(documents = [], missingRequired = 0, missingOptional = 0, missingBlocking = missingRequired) {
     const items = documents.map(getPlain);
+    const now = new Date();
+    const signed = item => require('./appointmentConsentEligibility.service').isCurrentSignedDocument(item, {}, now);
     const requiredItems = items.filter((item) => item.required);
     const optionalItems = items.filter((item) => !item.required);
-    const signedRequired = requiredItems.filter((item) => item.status === 'signed').length;
-    const pendingRequired = requiredItems.filter((item) => DOCUMENT_PENDING_STATUSES.has(item.status)).length + missingRequired;
+    const signedRequired = requiredItems.filter(signed).length;
+    const pendingRequired = requiredItems.filter((item) => !signed(item)).length + missingRequired;
     const pendingOptional = optionalItems.filter((item) => DOCUMENT_PENDING_STATUSES.has(item.status)).length + missingOptional;
-    const blockingPending = requiredItems.filter((item) => item.blocking_policy === 'hard' && DOCUMENT_PENDING_STATUSES.has(item.status)).length + missingRequired;
+    const blockingPending = requiredItems.filter((item) => item.purpose === 'clinical' && item.blocking_policy === 'hard' && !signed(item)).length + missingBlocking;
     return {
         status: pendingRequired > 0 ? 'pending' : 'ok',
         required_total: requiredItems.length + missingRequired,
@@ -2085,6 +2087,7 @@ async function getConsentSummaryForAppointment(citaLike) {
     }));
     let missingRequired = 0;
     let missingOptional = 0;
+    let missingBlocking = 0;
     const signingPolicies = [];
     for (const requirement of requirements) {
         const plain = getPlain(requirement);
@@ -2094,10 +2097,25 @@ async function getConsentSummaryForAppointment(citaLike) {
             signingPolicies.push(getSigningPolicyFromVersion(resolved.version, resolved.template));
         }
         if (existingKeys.has(key)) continue;
-        if (plain.required) missingRequired += 1;
+        if (plain.required) {
+            missingRequired += 1;
+            if (plain.blocking_policy === 'hard' && resolved?.template?.purpose === 'clinical') missingBlocking += 1;
+        }
         else missingOptional += 1;
     }
-    const summary = summarizeDocuments(documents, missingRequired, missingOptional);
+    // A rejected/revoked earlier attempt must not hide a later valid signature,
+    // nor make it count twice. This grouping is for the appointment summary;
+    // individual packages retain every document and their own history.
+    const latest = new Map();
+    const now = new Date();
+    const signed = item => require('./appointmentConsentEligibility.service').isCurrentSignedDocument(item, {}, now);
+    for (const row of documents) {
+        const item = getPlain(row);
+        const key = `${item.tratamiento_id}:` + (item.clinic_template_id ? `clinic:${item.clinic_template_id}` : `catalog:${item.catalog_template_id}`);
+        const previous = latest.get(key);
+        if (!previous || (signed(item) && !signed(previous)) || (signed(item) === signed(previous) && item.id > previous.id)) latest.set(key, item);
+    }
+    const summary = summarizeDocuments([...latest.values()], missingRequired, missingOptional, missingBlocking);
     const packageRow = documents.map((doc) => getPlain(doc).package).find(Boolean) || null;
     const signingPolicy = pickSigningPolicy(signingPolicies);
     return {
