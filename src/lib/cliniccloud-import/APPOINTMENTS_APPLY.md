@@ -182,6 +182,19 @@ persona haya editado la cita local. Repetir el mismo paquete reconoce su marca
 persistida y no restaura ediciones posteriores. SQL directo no carga modelos,
 jobs, eventos ni notificaciones; conserva HOLD y las tres supresiones.
 
+La vista semanal de ClinicCloud puede devolver únicamente el último servicio
+de una cita con varios actos. `compound-source-evidence.js` contrasta el ID real,
+contacto, empresa, agenda, intervalo, estado y nota con la historia fuente completa
+y reconstruye la etiqueta CSV a partir de todos sus conceptos, conservando orden
+e IDs de origen. No son IDs de catálogo ClinicaClick. Solo permite enlazar agendas
+paralelas si coinciden todos los conceptos de ambas; una PRP simple y una visita
+PRP más otro acto no son intercambiables. Se conserva la evidencia original, sin
+inventar fases, minutos por acto, precio, programa comprado ni consentimiento.
+La normalización de comas/espacios de notas no permite omitir contenido clínico.
+Cabinas, catálogo y reparto de fases pendientes permanecen explícitos. Un nombre
+de profesional en la nota requiere además identidad/ámbito operativos y ausencia
+de solapes locales y fuente antes de asignarlo; no basta la etiqueta de agenda.
+
 La API publica solo `import_review` con procedencia, recordatorios retenidos y
 asignaciones que aún faltan realmente. `source_service` añade únicamente el
 nombre del servicio de la línea base, limitado a 255 caracteres; no expone notas,
