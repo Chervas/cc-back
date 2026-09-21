@@ -14,7 +14,7 @@ function fixture() {
     config: { version: 1, origin: 'https://broker.example.invalid:8445', keyId: 'staging-whatsapp', audience: 'authorized-wa',
       messageNotBefore: '2026-09-15T00:00:00Z',
       privateKeyFile: '/etc/clinicaclick-whatsapp-authorized/staging/private.pem', caFile: '/etc/clinicaclick-whatsapp-authorized/staging/ca.pem', bindings: [binding()] } };
-  const calls = { graph: [], broker: [], health: [], optOut: [], failures: [], queries: [] };
+  const calls = { graph: [], broker: [], health: [], optOut: [], failures: [], queries: [], templateScope: [] };
   const match = (asset, where) => Reflect.ownKeys(where).every(key => {
     if (key === Op.or) return where[key].some(condition => match(asset, condition));
     if (where[key] && typeof where[key] === 'object' && where[key][Op.in]) return where[key][Op.in].includes(asset[key]);
@@ -33,7 +33,11 @@ function fixture() {
     loadConversation: async id => ({ id, clinic_id: 123 }),
     createTransport: () => ({ execute: async command => { calls.broker.push(command); return { requestId: command.requestId, replayed: false,
       data: { messages: [{ id: 'wamid.SYNTHETIC_ACCEPTED', message_status: 'accepted' }] } }; } }) });
-  const modules = { './securityMonitoring.service': { assertTemplateAllowed: async () => {} }, '../lib/metaQuarantineHttp': { post: async (...args) => { calls.graph.push(args); throw Object.assign(Error('meta_integration_quarantined'), { code: 'META_INTEGRATION_QUARANTINED' }); } },
+  const modules = { './whatsappTemplateScope.service': { assertTemplateInWaba: async input => {
+      calls.templateScope.push(input);
+      assert.equal(input.wabaId, '501'); assert.equal(input.clinicId, 123);
+      assert.equal(input.name, 'synthetic_confirmation'); assert.equal(input.language, 'es');
+    } }, './securityMonitoring.service': { assertTemplateAllowed: async () => {} }, '../lib/metaQuarantineHttp': { post: async (...args) => { calls.graph.push(args); throw Object.assign(Error('meta_integration_quarantined'), { code: 'META_INTEGRATION_QUARANTINED' }); } },
     '../../models': db, '../lib/phone': require('../../lib/phone'), '../lib/whatsapp-channel-role': roles, sequelize: { Op },
     '../lib/whatsappAuthorizedBrokerClient': broker,
     './whatsappChannelBindings.service': { applyClinicBindings: async (_id, assets) => assets },
@@ -79,6 +83,7 @@ test('common send preserves text, template and CTA payloads plus status and dura
     assert.equal(f.calls.health[i].messageId, 123 + i);
   }
   assert.equal(f.calls.graph.length, 0); assert.equal(f.calls.optOut.length, 3);
+  assert.equal(f.calls.templateScope.length, 1);
 });
 test('template explicit components, including header and quick reply, remain unchanged', async () => {
   const f = fixture(); const clinicConfig = await f.service.getClinicConfig(123);

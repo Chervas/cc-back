@@ -10,6 +10,7 @@ const SAFE_CODES = new Set(['invalid_request', 'invalid_signature', 'scope_denie
   'provider_timeout', 'provider_unauthorized', 'credential_revoked', 'secret_unavailable', 'audit_unavailable', 'internal_error',
   'secret_version_changed', 'oauth_state_invalid', 'oauth_identity_mismatch', 'oauth_credentials_incomplete',
   'oauth_flow_busy', 'oauth_flow_interrupted',
+  ...Object.values(require('../../services/integrations-broker/src/whatsapp-provider-errors').PROVIDER_ERRORS),
   ...Object.values(require('../../services/integrations-broker/src/bedrock-errors').PROVIDER_ERRORS)]);
 const error = code => Object.assign(new Error(code), { code });
 function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, ca, timeoutMs = 15000, transportProfile = 'default' }) {

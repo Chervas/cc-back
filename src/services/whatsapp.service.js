@@ -473,6 +473,10 @@ class WhatsAppService {
 
     async dispatchMessage(payload, clinicConfig = {}, healthContext = {}) {
         if (payload.type === 'template') {
+            await require('./whatsappTemplateScope.service').assertTemplateInWaba({
+                wabaId: clinicConfig.wabaId, clinicId: clinicConfig.clinicId || clinicConfig.clinicaId,
+                name: payload.template.name, language: payload.template.language.code,
+            });
             await require('./securityMonitoring.service').assertTemplateAllowed(clinicConfig.wabaId, payload.template.name, payload.template.language.code);
         }
         if (clinicConfig.authorizedBroker) {

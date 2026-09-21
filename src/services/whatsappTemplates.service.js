@@ -540,7 +540,7 @@ async function findConnectedTemplateForCatalogInWaba({ wabaId, template }) {
     .sort(compareConnectedTemplatePreference)[0] || null;
 }
 
-async function resolveTargetClinicIdsForTemplateProvisioning({ clinicId, groupId, assignmentScope }) {
+async function resolveTargetClinicIdsForTemplateProvisioning({ clinicId, groupId, assignmentScope, wabaId }) {
   const ids = new Set();
   const safeClinicId = Number(clinicId || 0);
   const safeGroupId = Number(groupId || 0);
@@ -562,7 +562,9 @@ async function resolveTargetClinicIdsForTemplateProvisioning({ clinicId, groupId
     ids.add(safeClinicId);
   }
 
-  return Array.from(ids);
+  return wabaId
+    ? require('./whatsappTemplateScope.service').filterClinicsForWaba(Array.from(ids), wabaId)
+    : Array.from(ids);
 }
 
 function findSameContractRemoteTemplate({ familyRows, wabaId, template }) {
@@ -1348,41 +1350,9 @@ async function resolveClinicOverrideIdsForWaba({ source, catalog }) {
   ));
   if (!clinicIds.length) return [];
 
-  const [clinics, assets] = await Promise.all([
-    Clinica.findAll({
-      where: { id_clinica: { [Op.in]: clinicIds } },
-      attributes: ['id_clinica', 'grupoClinicaId'],
-      raw: true,
-    }),
-    ClinicMetaAsset.findAll({
-      where: {
-        isActive: true,
-        assetType: { [Op.in]: ['whatsapp_phone_number', 'whatsapp_business_account'] },
-        wabaId: { [Op.ne]: null },
-      },
-      attributes: [
-        'id',
-        'assetType',
-        'assignmentScope',
-        'clinicaId',
-        'grupoClinicaId',
-        'wabaId',
-        'phoneNumberId',
-        'waAccessToken',
-        'isActive',
-        'updatedAt',
-      ],
-      raw: true,
-    }),
-  ]);
-  const clinicById = new Map(clinics.map((clinic) => [Number(clinic.id_clinica), clinic]));
-
-  return overrides
-    .filter((override) => {
-      const clinic = clinicById.get(Number(override.clinic_id));
-      return clinic && String(resolveEffectiveWabaForClinic({ clinic, assets }) || '') === String(source.waba_id);
-    })
-    .map((override) => Number(override.id));
+  const scopedIds = new Set(await require('./whatsappTemplateScope.service')
+    .filterClinicsForWaba(clinicIds, source.waba_id));
+  return overrides.filter(row => scopedIds.has(Number(row.clinic_id))).map(row => Number(row.id));
 }
 
 async function enqueueStalePendingTemplateResubmissions({ wabaId, now = new Date(), logger = console }) {
@@ -2490,6 +2460,7 @@ async function createTemplatesFromCatalogWithLease({
     clinicId,
     groupId,
     assignmentScope,
+    wabaId,
   });
   const result = {
     wabaId,
@@ -3132,7 +3103,8 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     });
   }
 
-  const clinicIdList = Array.from(clinicIds).filter(Number.isFinite);
+  const clinicIdList = await require('./whatsappTemplateScope.service')
+    .filterClinicsForWaba(Array.from(clinicIds).filter(Number.isFinite), wabaId);
   if (!clinicIdList.length) {
     await enqueueStalePendingTemplateResubmissions({ wabaId, now });
     return;
