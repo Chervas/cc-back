@@ -88,6 +88,32 @@ test('reschedule without IDCITA becomes a candidate, never blind create', () => 
   assert.equal(oldDecision.action, 'preserve_local');
   assert.deepEqual(oldDecision.reasons, ['SOURCE_LINK_UNDER_REVIEW']);
 });
+test('a claimed local visit still blocks a second source row with a partially overlapping interval', () => {
+  for (const extra of [
+    { 'HORA INICIO': '10:15', 'HORA FIN': '10:45' },
+    { 'HORA INICIO': '10:00', 'HORA FIN': '11:00' },
+    { 'HORA INICIO': '09:45', 'HORA FIN': '10:15' },
+  ]) {
+    const rows = [sourceAppointment(), sourceAppointment({ AGENDA: 'Otra agenda', ...extra }, 3)];
+    const decisions = appointmentActions(plan({ appointments: rows, snapshot: snapshot([localAppointment()]) }));
+    assert.equal(decisions[0].action, 'update_imported_candidate');
+    assert.equal(decisions[1].action, 'review');
+    assert(decisions[1].reasons.includes('CLAIMED_PATIENT_INTERVAL_OVERLAP'));
+    assert.deepEqual(decisions[1].candidate_local_ids, [101]);
+  }
+});
+test('adjacent intervals do not create a false overlap with an already matched visit', () => {
+  const rows = [sourceAppointment(), sourceAppointment({ AGENDA: 'Otra agenda', 'HORA INICIO': '10:30', 'HORA FIN': '11:00' }, 3)];
+  const decisions = appointmentActions(plan({ appointments: rows, snapshot: snapshot([localAppointment()]) }));
+  assert.equal(decisions[1].action, 'create_appointment_candidate');
+  assert.deepEqual(decisions[1].candidate_local_ids, []);
+});
+test('a matched cancellation does not occupy a partially overlapping replacement', () => {
+  const rows = [sourceAppointment({ ESTADO: 'Anulada (Clínica)' }), sourceAppointment({ AGENDA: 'Otra agenda', 'HORA INICIO': '10:15', 'HORA FIN': '10:45' }, 3)];
+  const decisions = appointmentActions(plan({ appointments: rows, snapshot: snapshot([localAppointment({ status: 'cancelada' })]) }));
+  assert.equal(decisions[0].action, 'update_imported_candidate');
+  assert.equal(decisions[1].action, 'create_appointment_candidate');
+});
 test('source-ID reschedule can be proposed but local edits are protected', () => {
   const row = sourceAppointment({ IDCITA: 'old-1', 'HORA INICIO': '11:00', 'HORA FIN': '11:30' });
   const baseline = localAppointment();

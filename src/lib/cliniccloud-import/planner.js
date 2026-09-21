@@ -193,8 +193,17 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
       if (!decision.reasons.length) { claimedLocal.add(String(target.id)); decision.requires_review = decision.action !== 'link_native_preserve'; }
       decision.candidate_local_ids = [...targets, ...competingNative].map((r) => r.id);
     } else {
+      // Matching one source row does not make its patient interval disappear.
+      // Another agenda may describe the same visit with a longer or shifted
+      // interval. Surface that ambiguity before SQL, without picking a winner
+      // or treating an adjacent session as a duplicate.
+      const claimedOverlaps = patient && row.kind === 'appointment'
+        ? (localPatient.get(String(patient.id)) || []).filter(r => claimedLocal.has(String(r.id))
+          && r.kind !== 'block' && r.status !== 'cancelada'
+          && r.start_local < row.end_local && r.end_local > row.start_local) : [];
       const possibleMoves = patient ? (localPatient.get(String(patient.id)) || []).filter((r) => inCoverage(r, coverage) && !claimedLocal.has(String(r.id))) : [];
-      decision.candidate_local_ids = [...new Set([...targets, ...atSameTime, ...possibleMoves].map((r) => r.id))];
+      decision.candidate_local_ids = [...new Set([...targets, ...atSameTime, ...possibleMoves, ...claimedOverlaps].map((r) => r.id))];
+      if (claimedOverlaps.length) decision.reasons.push('CLAIMED_PATIENT_INTERVAL_OVERLAP');
       if (decision.candidate_local_ids.length) decision.reasons.push('POSSIBLE_RESCHEDULE_OR_NATIVE_DUPLICATE');
       if (row.kind !== 'block' && !patient) decision.reasons.push('PATIENT_LINK_NOT_RESOLVED');
       if (!decision.reasons.length) decision.action = row.kind === 'block' ? 'create_block_candidate' : 'create_appointment_candidate';
