@@ -643,8 +643,8 @@ exports.check = asyncHandler(async (req, res) => {
         resource_id: instalacionId,
         clinica_id: clinicaId,
         code: 'INSTALLATION_OVERLAP',
-        can_force: true,
-        details: { cita_ids: citasInst.map((c) => c.id_cita), message: 'Instalación ocupada' }
+        can_force: citasInst.every(c => Number(c.clinica_id) === clinicaId && c.can_force_legacy !== false),
+        details: { cita_ids: [...new Set(citasInst.filter(c => Number(c.clinica_id) === clinicaId).map(c => c.id_cita))], message: 'Instalación ocupada' }
       });
     }
   }
@@ -734,19 +734,12 @@ exports.check = asyncHandler(async (req, res) => {
         clinica_id: clinicaId,
         code: 'STAFF_OVERLAP',
         // Overbooking doctor permitido -> forzable
-        can_force: true,
+        can_force: citasDocSameClinic.every(c => c.can_force_legacy !== false),
         details: { cita_ids: citasDocSameClinic.map((c) => c.id_cita), message: 'Doctor ocupado' }
       });
     }
 
     if (citasDocOtherClinics.length) {
-      const otherClinicIds = Array.from(
-        new Set(
-          citasDocOtherClinics
-            .map((c) => Number(c.clinica_id))
-            .filter((id) => Number.isFinite(id))
-        )
-      );
       conflicts.push({
         resource_type: 'staff',
         resource_role: 'doctor',
@@ -756,8 +749,6 @@ exports.check = asyncHandler(async (req, res) => {
         // No se permite forzar cuando el choque es en otra clínica.
         can_force: false,
         details: {
-          cita_ids: citasDocOtherClinics.map((c) => c.id_cita),
-          clinica_ids: otherClinicIds,
           message: 'Doctor ocupado en otra clínica'
         }
       });

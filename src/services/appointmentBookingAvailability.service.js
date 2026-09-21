@@ -184,4 +184,5 @@ function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 
   return slots;
 }
 
-module.exports = { resolveInstallationKeys, loadBookingContext, searchTreatmentSlots, solutionsForCalendar };
+module.exports = { resolveInstallationKeys, loadBookingContext, searchTreatmentSlots, solutionsForCalendar,
+  permitsLegacyOverlap, protectedBookingAttribute };
