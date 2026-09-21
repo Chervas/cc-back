@@ -136,3 +136,37 @@ Pruebas: `cliniccloud_week_appointments.test.js`,
 `cliniccloud_import_snapshot_baseline.test.js` y
 `appointment_import_review.test.js`; QA SQL aislada
 `src/scripts/qa/isolated-week-import.js` revierte toda su fixture ficticia.
+
+## Concretar la cabina física sin cambiar la cita
+
+`cliniccloud-import-cabin-assignments.js` es el paso posterior al alta semanal.
+No sirve para reagendar, cambiar estado/paciente/procedimiento/profesional ni
+activar instalaciones. Admite solo citas importadas pendientes, sin programa
+ni reserva avanzada, con referencia y línea base del delta coincidentes y HOLD.
+La sala documental debe pertenecer a la misma clínica, tener una plaza y seguir
+inactiva. Cada operación refiere una fila del catálogo con una única cabina;
+la equivalencia del acto debe revisarse explícitamente, no inferirse del número
+de la antigua agenda virtual. Revisar también colisiones proyectadas del delta
+que todavía no figuren en la agenda local, incluidos bloqueos y otras clínicas.
+
+Revisión privada: `plan_sha256`, `catalog_plan_sha256`, `reviewed_by` y `targets`.
+Cada target: `action_key`, `appointment_id`, `installation_id`,
+`catalog_source_key`, `reason` y `projected_conflicts` (vacío solo tras revisar).
+Preparar desde back-dev con `--target crm --mode prepare --plan …
+--catalog-plan … --review … --private-output …`. Aplicar esos mismos inputs
+con `--mode apply --package … --approved-sha256 … --backup-manifest …
+--private-journal …`. Paquete de dos horas y backup CRM verificado.
+
+El escritor bloquea la cita, compara todas sus columnas y conserva los aliases
+físicos. Revalida cabina, identidad y solapes locales de paciente/sala, incluidos
+aliases y ocupación por fases; adquiere los anchors de sala/paciente. Persiste
+solo `instalacion_id`, metadata de procedencia y `updated_at`, con antes/después
+durables y marca idempotente. Un replay no restaura ediciones posteriores.
+No carga eventos, modelos, colas ni recordatorios. **La colocación de citas en
+salas inactivas no habilita aún nuevas reservas ni acredita toda la agenda**;
+activación, horarios, asignaciones restantes y compatibilidad de escritores se
+validan por separado. No cambiar un tratamiento para lograr que encaje en una sala.
+
+Pruebas: `cliniccloud_cabin_assignments.test.js` y QA SQL DEV aislada
+`QA_ISOLATED_CLINICAL_WRITES=bs-startup-isolated-20260920 node
+src/scripts/qa/isolated-cabin-assignments.js` (fixtures ficticias y rollback exterior).
