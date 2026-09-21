@@ -11,7 +11,7 @@ const end = rest.search(/\n(?:async )?function \w+/);
 assert(end > 0);
 for (const enabled of [true, false]) test(`automation status writer uses canonical booking only with gate ${enabled}`, async () => {
   let mutations = 0, events = 0, writes = 0; const completed = Error('END_TRANSACTION_TEST');
-  const appointment = { id_cita: 1, estado: 'pendiente', async update(values) { Object.assign(this, values); writes++; return this; } };
+  const appointment = { id_cita: 1, estado: 'pendiente', toJSON() { return { id_cita: this.id_cita, estado: this.estado }; }, async update(values) { Object.assign(this, values); writes++; return this; } };
   const tx = { options: { isolationLevel: 'READ COMMITTED' }, LOCK: { UPDATE: 'UPDATE' } };
   const sandbox = { cleanString: value => value || '', resolveRuntimeTargets: () => ({ appointment_id: 1 }), backfillRuntimeTargets: async (_, targets) => targets,
     resolveTemplateValue: value => value, normalizeCitaStatus: value => value, normalizeLeadStatus: value => value,
@@ -19,6 +19,9 @@ for (const enabled of [true, false]) test(`automation status writer uses canonic
     CitaPaciente: { findByPk: async () => appointment }, recordAppointmentStatusChange: async () => { events++; },
     db: { sequelize: { transaction: async (options, callback) => { assert.equal(options.isolationLevel, 'READ COMMITTED'); await callback(tx); throw completed; } } },
     require: name => name.endsWith('treatmentBookingProfile.service') ? { bookingCapabilities: () => ({ simple: enabled }) }
+      : name.endsWith('appointmentConsentEligibility.service') ? { assertClinicalCompletion: async options => {
+        assert.equal(options.previous.estado, 'pendiente'); assert.equal(options.appointment.estado, 'completada'); assert.equal(options.transaction, tx);
+      } }
       : { mutateAppointmentBooking: async options => { mutations++; assert.equal(options.existingAppointmentId, 1); assert.equal(options.stateOnly, true);
         assert.equal(options.transaction, tx); return options.persist({ existing: appointment, transaction: tx }); } },
   };

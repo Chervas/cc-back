@@ -11,6 +11,10 @@ const jwt = require('jsonwebtoken');
 const db = require('../../models');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
+// Keep PDFs self-contained: isolated runtimes cannot fetch frontend assets.
+const DOCUMENT_BRAND_LOGO = 'data:image/svg+xml;base64,' + require('fs').readFileSync(
+    path.join(__dirname, '../assets/nutrition/brand/clinicaclick-logo-text.svg')
+).toString('base64');
 
 const PURPOSE_VALUES = new Set([
     'clinical',
@@ -372,13 +376,6 @@ function getTabletBaseUrl() {
         || 'https://tablet.clinicaclick.com';
 }
 
-function getDocumentAssetBaseUrl() {
-    return (toCleanString(process.env.CONSENT_DOCUMENT_ASSET_BASE_URL)
-        || toCleanString(process.env.FRONTEND_PUBLIC_URL)
-        || toCleanString(process.env.FRONTEND_URL)
-        || 'http://localhost:4203').replace(/\/+$/, '');
-}
-
 function buildPublicConsentUrl(token, baseUrl = null) {
     const resolvedBaseUrl = toCleanString(baseUrl) || getTabletBaseUrl();
     return `${resolvedBaseUrl.replace(/\/+$/, '')}/tablet/consentimientos/${encodeURIComponent(token)}`;
@@ -486,13 +483,37 @@ function normalizeSignatureEvidence(payload = {}, requestMeta = {}) {
         representative_name: representativeName || null,
         representative_document: toCleanString(payload.representative_document ?? payload.documento_representante),
         relationship: toCleanString(payload.relationship ?? payload.parentesco),
-        accepted_statement: normalizeBoolean(payload.accepted_statement ?? payload.declaracion_aceptada, true),
+        accepted_statement: (payload.accepted_statement ?? payload.declaracion_aceptada) === true,
         signature_data_url: signatureDataUrl && signatureDataUrl.length < 250000 ? signatureDataUrl : null,
         signed_at: new Date().toISOString(),
         ip: toCleanString(requestMeta.ip),
         user_agent: toCleanString(requestMeta.userAgent),
         device_label: toCleanString(payload.device_label ?? payload.dispositivo),
     };
+}
+
+function requireSignatureEvidence(evidence, document) {
+    let code = null;
+    if (!evidence.accepted_statement) code = 'consent_signature_statement_required';
+    else if (!evidence.signer_name) code = 'consent_signature_name_required';
+    else if (!evidence.signature_data_url || !/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(evidence.signature_data_url)
+        || !Buffer.from(evidence.signature_data_url.slice(22), 'base64').subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) code = 'consent_drawn_signature_required';
+    else if (!['patient', 'representative'].includes(evidence.signer_role)) code = 'consent_signature_role_invalid';
+    else if (requiresRepresentative(document) && (evidence.signer_role !== 'representative' || !evidence.relationship)) code = 'representative_signature_required';
+    if (code) {
+        const error = new Error(code);
+        error.statusCode = 400;
+        throw error;
+    }
+}
+
+function requireActiveConsentPackage(packageLike) {
+    const item = getPlain(packageLike);
+    if (item.status === 'cancelled' || item.status === 'expired' || (item.expires_at && new Date(item.expires_at).getTime() <= Date.now())) {
+        const error = new Error('consent_package_unavailable');
+        error.statusCode = 410;
+        throw error;
+    }
 }
 
 function normalizeRevocationEvidence(payload = {}, requestMeta = {}) {
@@ -554,7 +575,7 @@ function buildPrintableHtml(documentRow) {
         superseded: 'Sustituido',
         voided: 'Anulado',
     }[status] || status || 'Sin estado');
-    const brandLogo = `<img class="brand-logo" alt="ClinicaClick" src="${escapeHtml(getDocumentAssetBaseUrl())}/assets/images/logo/logo-text-on-dark.svg" />`;
+    const brandLogo = `<img class="brand-logo" alt="ClinicaClick" src="${DOCUMENT_BRAND_LOGO}" />`;
     const signatureBlock = evidence ? `
         <section class="evidence-panel">
             <div class="section-heading">
@@ -1525,10 +1546,11 @@ async function propagateAdminTemplateToClinics(catalogIdRaw, options = {}) {
     };
 }
 
-async function getTreatmentRequirements({ tratamientoId, clinicaId = null }) {
+async function getTreatmentRequirements({ tratamientoId, tratamientoIds = null, clinicaId = null }) {
     const parsedTreatmentId = toIntOrNull(tratamientoId);
-    if (!parsedTreatmentId) return [];
-    const where = { tratamiento_id: parsedTreatmentId };
+    const ids = Array.isArray(tratamientoIds) ? [...new Set(tratamientoIds.map(toIntOrNull).filter(Boolean))] : [];
+    if (!parsedTreatmentId && !ids.length) return [];
+    const where = { tratamiento_id: ids.length ? { [Op.in]: ids } : parsedTreatmentId };
     const parsedClinicId = toIntOrNull(clinicaId);
     if (parsedClinicId) {
         where[Op.or] = [{ clinica_id: parsedClinicId }, { clinica_id: null }];
@@ -1728,7 +1750,14 @@ async function resolveRequirementsForAppointment(citaLike) {
     const tratamientoId = toIntOrNull(plain?.tratamiento_id || plain?.tratamiento?.id_tratamiento);
     const clinicId = toIntOrNull(plain?.clinica_id || plain?.clinica?.id_clinica);
     if (!tratamientoId || !clinicId) return [];
-    const directRequirements = await getTreatmentRequirements({ tratamientoId, clinicaId: clinicId });
+    let tratamientoIds = [tratamientoId];
+    // Look up the canonical purchased unit, never take treatment IDs from HTTP
+    // metadata. Ordinary appointments retain their existing single-treatment path.
+    if (plain.source_system === 'treatment_program' && plain.voucher_id) {
+        const frozen = await require('../lib/program-appointment-context').programAppointmentContext(db, plain);
+        tratamientoIds = frozen.treatment_ids;
+    }
+    const directRequirements = await getTreatmentRequirements({ tratamientoIds, clinicaId: clinicId });
     return directRequirements.filter((requirement) => {
         const plainRequirement = getPlain(requirement);
         const clinicTemplate = plainRequirement.clinicTemplate;
@@ -1985,14 +2014,16 @@ async function listPatientTreatmentsWithoutConsentRequirements(identifier, filte
     });
 }
 
-function summarizeDocuments(documents = [], missingRequired = 0, missingOptional = 0) {
+function summarizeDocuments(documents = [], missingRequired = 0, missingOptional = 0, missingBlocking = missingRequired) {
     const items = documents.map(getPlain);
+    const now = new Date();
+    const signed = item => require('./appointmentConsentEligibility.service').isCurrentSignedDocument(item, {}, now);
     const requiredItems = items.filter((item) => item.required);
     const optionalItems = items.filter((item) => !item.required);
-    const signedRequired = requiredItems.filter((item) => item.status === 'signed').length;
-    const pendingRequired = requiredItems.filter((item) => DOCUMENT_PENDING_STATUSES.has(item.status)).length + missingRequired;
+    const signedRequired = requiredItems.filter(signed).length;
+    const pendingRequired = requiredItems.filter((item) => !signed(item)).length + missingRequired;
     const pendingOptional = optionalItems.filter((item) => DOCUMENT_PENDING_STATUSES.has(item.status)).length + missingOptional;
-    const blockingPending = requiredItems.filter((item) => item.blocking_policy === 'hard' && DOCUMENT_PENDING_STATUSES.has(item.status)).length + missingRequired;
+    const blockingPending = requiredItems.filter((item) => item.purpose === 'clinical' && item.blocking_policy === 'hard' && !signed(item)).length + missingBlocking;
     return {
         status: pendingRequired > 0 ? 'pending' : 'ok',
         required_total: requiredItems.length + missingRequired,
@@ -2044,7 +2075,7 @@ async function getConsentSummaryForAppointment(citaLike) {
             paciente_id: cita.paciente_id,
             clinica_id: cita.clinica_id,
             cita_id: cita.id_cita,
-            tratamiento_id: cita.tratamiento_id,
+            tratamiento_id: { [Op.in]: [...new Set(requirements.map(row => Number(getPlain(row).tratamiento_id)).filter(Boolean))] },
             status: { [Op.notIn]: ['cancelled', 'voided', 'superseded'] },
         },
         include: [{ model: db.ConsentSignaturePackage, as: 'package', required: false }],
@@ -2052,23 +2083,39 @@ async function getConsentSummaryForAppointment(citaLike) {
 
     const existingKeys = new Set(documents.map((doc) => {
         const plain = getPlain(doc);
-        return plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`;
+        return `${plain.tratamiento_id}:` + (plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`);
     }));
     let missingRequired = 0;
     let missingOptional = 0;
+    let missingBlocking = 0;
     const signingPolicies = [];
     for (const requirement of requirements) {
         const plain = getPlain(requirement);
-        const key = plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`;
+        const key = `${plain.tratamiento_id}:` + (plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`);
         const resolved = await resolveRequirementTemplate(requirement);
         if (resolved?.template && resolved?.version) {
             signingPolicies.push(getSigningPolicyFromVersion(resolved.version, resolved.template));
         }
         if (existingKeys.has(key)) continue;
-        if (plain.required) missingRequired += 1;
+        if (plain.required) {
+            missingRequired += 1;
+            if (plain.blocking_policy === 'hard' && resolved?.template?.purpose === 'clinical') missingBlocking += 1;
+        }
         else missingOptional += 1;
     }
-    const summary = summarizeDocuments(documents, missingRequired, missingOptional);
+    // A rejected/revoked earlier attempt must not hide a later valid signature,
+    // nor make it count twice. This grouping is for the appointment summary;
+    // individual packages retain every document and their own history.
+    const latest = new Map();
+    const now = new Date();
+    const signed = item => require('./appointmentConsentEligibility.service').isCurrentSignedDocument(item, {}, now);
+    for (const row of documents) {
+        const item = getPlain(row);
+        const key = `${item.tratamiento_id}:` + (item.clinic_template_id ? `clinic:${item.clinic_template_id}` : `catalog:${item.catalog_template_id}`);
+        const previous = latest.get(key);
+        if (!previous || (signed(item) && !signed(previous)) || (signed(item) === signed(previous) && item.id > previous.id)) latest.set(key, item);
+    }
+    const summary = summarizeDocuments([...latest.values()], missingRequired, missingOptional, missingBlocking);
     const packageRow = documents.map((doc) => getPlain(doc).package).find(Boolean) || null;
     const signingPolicy = pickSigningPolicy(signingPolicies);
     return {
@@ -2162,8 +2209,25 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
         profesional: plainCita.doctor,
     });
 
+    const requirementTreatmentIds = [...new Set(requirements.map(row => Number(getPlain(row).tratamiento_id)).filter(Boolean))];
+    const requirementTreatments = requirementTreatmentIds.some(id => id !== Number(plainCita.tratamiento_id)) ? await db.Tratamiento.findAll({ where: { id_tratamiento: { [Op.in]: requirementTreatmentIds } } }) : [];
+    const programContext = plainCita.source_system === 'treatment_program' && plainCita.voucher_id
+        ? await require('../lib/program-appointment-context').programAppointmentContext(db, plainCita) : null;
+    const doctorsByTreatment = new Map(programContext ? requirementTreatmentIds.map(id => [id,
+        require('../lib/program-appointment-context').programTreatmentDoctorIds(programContext, plainCita, id)]) : []);
+    const programDoctorIds = [...new Set([...doctorsByTreatment.values()].flat())];
+    const programDoctors = programDoctorIds.length ? await db.Usuario.findAll({ where: { id_usuario: { [Op.in]: programDoctorIds } }, attributes: ['id_usuario', 'nombre', 'apellidos'] }) : [];
+
     for (const requirement of requirements) {
         const plainRequirement = getPlain(requirement);
+        const requirementTreatmentId = toIntOrNull(plainRequirement.tratamiento_id) || plainCita.tratamiento_id;
+        const requirementTreatment = requirementTreatments.find(row => Number(row.id_tratamiento) === Number(requirementTreatmentId));
+        const assignedDoctors = doctorsByTreatment.get(requirementTreatmentId) || [];
+        // A multi-professional team cannot be represented by a guessed singular
+        // signer. Keep that placeholder empty instead of naming another phase's doctor.
+        const professional = programContext ? (assignedDoctors.length === 1 ? getPlain(programDoctors.find(row => row.id_usuario === assignedDoctors[0])) : null) : plainCita.doctor;
+        const documentContext = requirementTreatment || programContext ? buildTemplateContext({ paciente: plainCita.paciente, clinica: plainCita.clinica,
+            tratamiento: getPlain(requirementTreatment) || plainCita.tratamiento, cita: { ...plainCita, tratamiento_id: requirementTreatmentId }, profesional: professional }) : context;
         const resolved = await resolveRequirementTemplate(requirement);
         if (!resolved?.template || !resolved?.version) continue;
 
@@ -2186,7 +2250,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
             package_id: packageRow.id,
             paciente_id: plainCita.paciente_id,
             cita_id: plainCita.id_cita,
-            tratamiento_id: plainCita.tratamiento_id,
+            tratamiento_id: requirementTreatmentId,
             status: { [Op.notIn]: ['cancelled', 'voided', 'superseded'] },
         };
         if (plainRequirement.clinic_template_id) {
@@ -2198,7 +2262,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
         if (existing && !DOCUMENT_CLOSED_STATUSES.has(existing.status)) continue;
 
         const title = resolved.version.title || resolved.template.name;
-        const renderedHtml = renderTemplateHtml(resolved.version.body_html || buildDefaultBodyHtml(title), context);
+        const renderedHtml = renderTemplateHtml(resolved.version.body_html || buildDefaultBodyHtml(title), documentContext);
         const signingPolicy = getSigningPolicyFromVersion(resolved.version, resolved.template);
         const snapshot = {
             template_source: resolved.source,
@@ -2221,7 +2285,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
                 body_json: resolved.version.body_json || null,
                 variable_schema: resolved.version.variable_schema || null,
             },
-            context,
+            context: documentContext,
             patient_flags: {
                 is_minor: isMinorPatient(plainCita.paciente),
                 representatives: getRepresentativeSnapshot(plainCita.paciente),
@@ -2242,7 +2306,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
             paciente_id: plainCita.paciente_id,
             clinica_id: plainCita.clinica_id,
             cita_id: plainCita.id_cita,
-            tratamiento_id: plainCita.tratamiento_id,
+            tratamiento_id: requirementTreatmentId,
             clinic_template_id: resolved.source === 'clinic' ? resolved.template.id : null,
             clinic_template_version_id: resolved.source === 'clinic' ? resolved.version.id : null,
             catalog_template_id: resolved.source === 'catalog' ? resolved.template.id : null,
@@ -2388,6 +2452,7 @@ async function createTabletSession(packageIdRaw, payload = {}) {
         err.statusCode = 404;
         throw err;
     }
+    requireActiveConsentPackage(packageRow);
     const token = signPackageToken(packageRow, {
         channel: 'tablet',
         ttlHours: payload.ttl_hours ?? payload.validez_horas ?? 12,
@@ -2843,6 +2908,7 @@ async function getPublicPackage(tokenRaw, requestMeta = {}) {
         err.statusCode = 404;
         throw err;
     }
+    requireActiveConsentPackage(packageRow);
     const documents = Array.isArray(packageRow.documents) ? packageRow.documents : [];
     await Promise.all(documents.map(async (doc) => {
         const plainDoc = getPlain(doc);
@@ -2898,12 +2964,14 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
         throw err;
     }
     const plainDoc = getPlain(doc);
-    if (DOCUMENT_CLOSED_STATUSES.has(plainDoc.status)) {
+    if (DOCUMENT_CLOSED_STATUSES.has(plainDoc.status) || (plainDoc.expires_at && new Date(plainDoc.expires_at).getTime() <= Date.now())) {
         const err = new Error('consent_document_already_closed');
         err.statusCode = 409;
         throw err;
     }
     const evidence = normalizeSignatureEvidence(payload, requestMeta);
+    requireSignatureEvidence(evidence, plainDoc);
+    if (plainDoc.package) requireActiveConsentPackage(plainDoc.package);
     if (requiresRepresentative(plainDoc) && evidence.signer_role !== 'representative') {
         const err = new Error('representative_signature_required');
         err.statusCode = 400;
@@ -3074,11 +3142,29 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
         err.statusCode = 404;
         throw err;
     }
+    requireActiveConsentPackage(packageRow);
     const plain = getPlain(packageRow);
     const documents = Array.isArray(plain.documents) ? plain.documents : [];
     const requestedDocumentIds = Array.isArray(payload.document_ids)
         ? new Set(payload.document_ids.map((item) => String(item)))
         : null;
+    const pending = documents.filter((doc) => !DOCUMENT_CLOSED_STATUSES.has(doc.status)
+        && (!requestedDocumentIds || requestedDocumentIds.has(String(doc.id)) || requestedDocumentIds.has(String(doc.public_id))));
+    if (!pending.length) {
+        const error = new Error('consent_package_has_no_pending_documents');
+        error.statusCode = 409;
+        throw error;
+    }
+    // Validate the whole selected package before recording its first signature.
+    const evidence = normalizeSignatureEvidence(payload, requestMeta);
+    for (const doc of pending) {
+        requireSignatureEvidence(evidence, doc);
+        if (doc.expires_at && new Date(doc.expires_at).getTime() <= Date.now()) {
+            const error = new Error('consent_document_expired');
+            error.statusCode = 410;
+            throw error;
+        }
+    }
     const signed = [];
     for (const doc of documents) {
         if (requestedDocumentIds && !requestedDocumentIds.has(String(doc.id)) && !requestedDocumentIds.has(String(doc.public_id))) {

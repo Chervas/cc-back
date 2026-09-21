@@ -2377,6 +2377,8 @@ async function handleChangeStatus(node, context, runtime) {
             persist: ({ existing, transaction: tx }) => existing.update({ estado: appointmentStatus }, { transaction: tx }),
           });
         } else {
+          await require('./appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: appointment,
+            appointment: { ...appointment.toJSON(), estado: appointmentStatus }, transaction });
           await appointment.update({ estado: appointmentStatus }, { transaction });
         }
         const templateVersion = runtime?.execution?.templateVersion || null;
