@@ -325,6 +325,7 @@ function fiscalHtml(document) {
   const issuer = parse(document.issuer_snapshot, {});
   const recipient = parse(document.recipient_snapshot, {});
   const lines = parse(document.lines, []);
+  const grossPrices = lines.length > 0 && lines.every(line => line.price_semantics === 'gross_tax_included');
   const totals = parse(document.totals, {});
   const template = parse(document.template_snapshot, {});
   const config = template.config || {};
@@ -364,8 +365,8 @@ function fiscalHtml(document) {
   return `<!doctype html><html><head><meta charset="utf-8"><style>${baseStyles()}</style></head><body>
     <main class="page invoice-doc">
       ${renderer === 'compact' ? compactHeader : modernHeader}
-      <section class="invoice-lines"><table><thead><tr><th>Concepto</th><th class="right">Precio</th><th class="right">Cant.</th><th class="right">IVA</th><th class="right">Total</th></tr></thead>
-      <tbody>${lines.map((line) => `<tr><td><strong>${escapeHtml(line.description)}</strong>${line.discount_percent ? `<small class="muted">${escapeHtml(line.discount_percent)}% de descuento</small>` : ''}</td><td class="right">${escapeHtml(money(line.unit_price))}</td><td class="right">${escapeHtml(line.quantity)}</td><td class="right">${escapeHtml(line.tax_percent)}%</td><td class="right"><strong>${escapeHtml(money(line.total))}</strong></td></tr>`).join('')}</tbody></table></section>
+      <section class="invoice-lines"><table><thead><tr><th>Concepto</th><th class="right">${grossPrices ? 'Precio final' : 'Precio'}</th><th class="right">Cant.</th><th class="right">IVA</th><th class="right">Total</th></tr></thead>
+      <tbody>${lines.map((line) => `<tr><td><strong>${escapeHtml(line.description)}</strong>${line.discount_percent ? `<small class="muted">${escapeHtml(line.discount_percent)}% de descuento</small>` : ''}${line.price_semantics === 'gross_tax_included' ? `<small class="muted">${line.exemption_reason ? `Exento: ${escapeHtml(line.exemption_reason)}` : 'IVA incluido'}</small>` : ''}</td><td class="right">${escapeHtml(money(line.unit_price))}</td><td class="right">${escapeHtml(line.quantity)}</td><td class="right">${escapeHtml(line.tax_percent)}%</td><td class="right"><strong>${escapeHtml(money(line.total))}</strong></td></tr>`).join('')}</tbody></table></section>
       <section class="invoice-total"><dl><div><dt>Base imponible</dt><dd>${escapeHtml(money(totals.taxable_base))}</dd></div><div><dt>Impuestos</dt><dd>${escapeHtml(money(totals.taxes))}</dd></div><div class="grand-total"><dt>Total</dt><dd>${escapeHtml(money(totals.total))}</dd></div></dl></section>
       ${config.show_payment_details !== false && issuer.bank_account ? `<section class="invoice-payment"><span class="kicker">Datos de pago</span><p>Cuenta: <strong>${escapeHtml(issuer.bank_account)}</strong></p></section>` : ''}
       ${document.notes || config.show_legal_footer !== false ? `<footer class="footer">${document.notes ? `<div>${escapeHtml(document.notes)}</div>` : ''}${config.show_legal_footer !== false ? `<div>Documento emitido por ${escapeHtml(issuerName)}. Conserva este documento para tus registros.</div>` : ''}</footer>` : ''}

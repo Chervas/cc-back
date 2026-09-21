@@ -7,6 +7,7 @@ const db = require('../../models');
 const whatsappService = require('./whatsapp.service');
 const economicPrograms = require('../lib/economicProgramSnapshot');
 const economicPrices = require('../lib/economicPriceProfile');
+const fiscalPrices = require('../lib/economicFiscalPriceSource');
 const treatmentPrograms = require('./treatmentPrograms.service');
 
 const {
@@ -2921,6 +2922,7 @@ function normalizeFiscalParty(raw, fallback = {}) {
 function normalizeFiscalLines(rawLines, budgetVersion) {
   const source = Array.isArray(rawLines) && rawLines.length ? rawLines : parseJson(budgetVersion?.lines, []);
   if (!source.length) throw domainError(400, 'fiscal_lines_required', 'El documento necesita al menos un concepto.');
+  if (source.length > 500) throw domainError(400, 'fiscal_lines_limit', 'El documento admite un máximo de 500 conceptos.');
   return source.map((line, index) => {
     const quantity = Number(line.quantity ?? line.cantidad ?? 1);
     const unitPrice = Number(line.unit_price ?? line.precio_unitario ?? line.unitPrice ?? line.total);
@@ -2955,6 +2957,58 @@ function normalizeFiscalLines(rawLines, budgetVersion) {
       total: roundMoney(taxableBase + taxAmount),
     };
   });
+}
+
+// For configured prices the budget version/acceptance is authoritative, never
+// payload.lines or today's catalog. Old drafts retain their original semantics.
+async function fiscalPriceProjection({ budget, version, payment, payload, document = null, transaction, lockSource = true }) {
+  const savedData = parseJson(document?.payment_data, {});
+  let source = savedData.fiscal_price_source || null;
+  if (document && !source) return null;
+  if (!source && !parseJson(version?.lines, []).some(line => line.price_snapshot)) return null;
+  if (!budget || !version) throw domainError(422, 'fiscal_source_snapshot_invalid', 'No se puede verificar el presupuesto de origen.');
+  // Serialize the read/check/write with other fiscal creations for this budget.
+  if (lockSource) {
+    await EconomicBudget.findByPk(budget.id, { transaction, lock: transaction.LOCK.UPDATE });
+    if (payment) {
+      const currentPayment = await EconomicPayment.findByPk(payment.id, { transaction, lock: transaction.LOCK.UPDATE });
+      if (currentPayment?.status !== 'confirmed') throw domainError(409, 'payment_not_confirmed', 'El cobro de origen ya no está confirmado.');
+    }
+  }
+  if (!source) {
+    const acceptance = await EconomicBudgetEvent.findOne({ where: {
+      budget_id: budget.id, version_number: version.version_number,
+      to_status: { [Op.in]: ['accepted', 'partially_accepted'] },
+    }, order: [['id', 'DESC']], transaction });
+    source = fiscalPrices.buildSource({ version, acceptance, payment });
+  }
+  const previous = await PatientFiscalDocument.findAll({ where: {
+    clinic_id: budget.clinic_id, patient_id: budget.patient_id, budget_id: budget.id,
+    status: { [Op.ne]: 'voided' }, document_type: { [Op.in]: ['invoice', 'receipt'] },
+    ...(document ? { id: { [Op.ne]: document.id } } : {}),
+  }, attributes: ['id', 'payment_id', 'lines', 'totals', 'payment_data'], transaction,
+  ...(lockSource ? { lock: transaction.LOCK.UPDATE } : {}) });
+  if (payment && previous.some(row => !row.payment_id)) {
+    throw domainError(409, 'fiscal_payment_already_documented_by_budget', 'Este presupuesto ya tiene un documento global. Revísalo antes de documentar el cobro por separado.');
+  }
+  const relevant = payment ? previous.filter(row => Number(row.payment_id) === Number(payment.id)) : previous;
+  const projection = fiscalPrices.project(source, payload.source_amount ?? parseJson(document?.totals, {}).total,
+    relevant.flatMap(row => parseJson(row.lines, [])));
+  if (payment) {
+    // Payments have their own limit as well as the budget's aggregate limit.
+    const acceptance = await EconomicBudgetEvent.findOne({ where: {
+      budget_id: budget.id, version_number: version.version_number,
+      to_status: { [Op.in]: ['accepted', 'partially_accepted'] },
+    }, order: [['id', 'DESC']], transaction });
+    const accepted = numberValue(parseJson(acceptance?.metadata, {}).accepted_amount);
+    const already = previous.reduce((total, row) => total + numberValue(parseJson(row.totals, {}).total), 0);
+    if (roundMoney(already + projection.totals.total) > accepted) throw domainError(409,
+      'fiscal_source_amount_exceeded', 'El importe supera la parte del presupuesto pendiente de documentar.');
+  }
+  if ((document?.document_type || payload.document_type) === 'credit_note') {
+    throw domainError(422, 'fiscal_gross_credit_note_review_required', 'La rectificación de este precio final requiere revisar el documento original. No se genera una rectificativa automática.');
+  }
+  return { ...projection, snapshot: source };
 }
 
 async function nextFiscalNumber({ clinicId, documentType, series, transaction }) {
@@ -2999,58 +3053,99 @@ function assertFiscalParties({ documentType, status, issuer, recipient }) {
   }
 }
 
+async function loadFiscalSource({ patient, clinicId, payload, transaction }) {
+  const sourceType = cleanString(payload.source_type || payload.source?.type || 'manual', 20).toLowerCase();
+  if (!['manual', 'budget', 'payment'].includes(sourceType)) {
+    throw domainError(400, 'fiscal_source_invalid', 'El origen del documento no es válido.');
+  }
+  let budget = null;
+  let payment = null;
+  let version = null;
+  if (sourceType === 'budget') {
+    const budgetId = cleanString(payload.source_id || payload.source?.id, 36);
+    budget = await EconomicBudget.findOne({
+      where: {
+        public_id: budgetId,
+        clinic_id: clinicId,
+        patient_id: patient.id_paciente,
+      },
+      transaction,
+    });
+    if (!budget) throw domainError(404, 'budget_not_found', 'Presupuesto no encontrado.');
+    version = await EconomicBudgetVersion.findOne({
+      where: { budget_id: budget.id, version_number: budget.current_version },
+      transaction,
+    });
+  } else if (sourceType === 'payment') {
+    const paymentId = cleanString(payload.source_id || payload.source?.id, 36);
+    payment = await EconomicPayment.findOne({
+      where: {
+        public_id: paymentId,
+        clinic_id: clinicId,
+        patient_id: patient.id_paciente,
+        status: 'confirmed',
+      },
+      transaction,
+    });
+    if (!payment) throw domainError(404, 'payment_not_found', 'Cobro no encontrado.');
+    if (payment.budget_id) {
+      budget = await EconomicBudget.findByPk(payment.budget_id, { transaction });
+      version = budget
+        ? await EconomicBudgetVersion.findOne({
+          where: { budget_id: budget.id, version_number: payment.budget_version || budget.current_version },
+          transaction,
+        })
+        : null;
+    }
+  }
+  return { sourceType, budget, payment, version };
+}
+
+async function previewPatientFiscalDocument({ patientIdentifier, clinicId, payload }) {
+  return sequelize.transaction(async transaction => {
+    const { patient } = await loadContext(patientIdentifier, clinicId);
+    let document = null, budget, payment, version;
+    if (payload.document_id) {
+      document = await PatientFiscalDocument.findOne({ where: {
+        public_id: cleanString(payload.document_id, 36), clinic_id: clinicId, patient_id: patient.id_paciente,
+      }, transaction });
+      if (!document) throw domainError(404, 'fiscal_document_not_found', 'Documento fiscal no encontrado.');
+      if (document.status !== 'draft') throw domainError(409, 'fiscal_document_not_editable', 'Solo se pueden editar documentos en borrador.');
+      budget = document.budget_id ? await EconomicBudget.findByPk(document.budget_id, { transaction }) : null;
+      payment = document.payment_id ? await EconomicPayment.findByPk(document.payment_id, { transaction }) : null;
+      const saved = parseJson(document.payment_data, {}).fiscal_price_source;
+      version = budget ? await EconomicBudgetVersion.findOne({ where: {
+        budget_id: budget.id, version_number: saved?.budget_version || budget.current_version,
+      }, transaction }) : null;
+      if (saved && payment && payment.status !== 'confirmed') throw domainError(409, 'payment_not_confirmed', 'El cobro de origen ya no está confirmado.');
+    } else ({ budget, payment, version } = await loadFiscalSource({ patient, clinicId, payload, transaction }));
+    const projection = await fiscalPriceProjection({ budget, version, payment, payload, document, transaction, lockSource: false });
+    if (projection) {
+      const { snapshot, ...result } = projection;
+      return { ...result, lines_locked: true };
+    }
+    economicPrograms.assertFiscalReady({ lines: parseJson(version?.lines, []), status: 'draft', fiscalLines: payload.lines || [] });
+    const lines = normalizeFiscalLines(payload.lines || parseJson(document?.lines, []), version);
+    return { lines, totals: { currency: 'EUR',
+      taxable_base: roundMoney(lines.reduce((sum, line) => sum + line.taxable_base, 0)),
+      taxes: roundMoney(lines.reduce((sum, line) => sum + line.tax_amount, 0)),
+      total: roundMoney(lines.reduce((sum, line) => sum + line.total, 0)),
+    }, lines_locked: false, price_semantics: 'legacy_net',
+    issuance_blocked: parseJson(version?.lines, []).some(line => line.program_snapshot)
+      ? 'Falta confirmar el desglose fiscal del programa.' : null };
+  });
+}
+
 async function createPatientFiscalDocument({
   patientIdentifier,
   clinicId,
   actorId,
   payload,
+  transaction: parentTransaction = null,
 }) {
-  return sequelize.transaction(async (transaction) => {
+  return sequelize.transaction(parentTransaction ? { transaction: parentTransaction } : {}, async (transaction) => {
     const { patient, clinic } = await loadContext(patientIdentifier, clinicId);
-    const sourceType = cleanString(payload.source_type || payload.source?.type || 'manual', 20).toLowerCase();
-    if (!['manual', 'budget', 'payment'].includes(sourceType)) {
-      throw domainError(400, 'fiscal_source_invalid', 'El origen del documento no es válido.');
-    }
-    let budget = null;
-    let payment = null;
-    let version = null;
-    if (sourceType === 'budget') {
-      const budgetId = cleanString(payload.source_id || payload.source?.id, 36);
-      budget = await EconomicBudget.findOne({
-        where: {
-          public_id: budgetId,
-          clinic_id: clinicId,
-          patient_id: patient.id_paciente,
-        },
-        transaction,
-      });
-      if (!budget) throw domainError(404, 'budget_not_found', 'Presupuesto no encontrado.');
-      version = await EconomicBudgetVersion.findOne({
-        where: { budget_id: budget.id, version_number: budget.current_version },
-        transaction,
-      });
-    } else if (sourceType === 'payment') {
-      const paymentId = cleanString(payload.source_id || payload.source?.id, 36);
-      payment = await EconomicPayment.findOne({
-        where: {
-          public_id: paymentId,
-          clinic_id: clinicId,
-          patient_id: patient.id_paciente,
-          status: 'confirmed',
-        },
-        transaction,
-      });
-      if (!payment) throw domainError(404, 'payment_not_found', 'Cobro no encontrado.');
-      if (payment.budget_id) {
-        budget = await EconomicBudget.findByPk(payment.budget_id, { transaction });
-        version = budget
-          ? await EconomicBudgetVersion.findOne({
-            where: { budget_id: budget.id, version_number: payment.budget_version || budget.current_version },
-            transaction,
-          })
-          : null;
-      }
-    }
+    const { sourceType, budget, payment, version } = await loadFiscalSource({ patient, clinicId, payload, transaction });
     const documentType = cleanString(payload.document_type, 20).toLowerCase();
     if (!FISCAL_DOCUMENT_TYPES.has(documentType)) {
       throw domainError(400, 'fiscal_document_type_invalid', 'El tipo de documento no es válido.');
@@ -3061,10 +3156,11 @@ async function createPatientFiscalDocument({
     }
     const issuer = normalizeFiscalParty(payload.issuer, mapClinicSnapshot(clinic));
     const recipient = normalizeFiscalParty(payload.recipient, mapPatientSnapshot(patient));
-    economicPrograms.assertFiscalReady({ lines: parseJson(version?.lines, []), status, fiscalLines: payload.lines || [] });
+    const fiscalProjection = await fiscalPriceProjection({ budget, version, payment, payload, transaction });
+    if (!fiscalProjection) economicPrograms.assertFiscalReady({ lines: parseJson(version?.lines, []), status, fiscalLines: payload.lines || [] });
     assertFiscalParties({ documentType, status, issuer, recipient });
-    const lines = normalizeFiscalLines(payload.lines, version);
-    const totals = {
+    const lines = fiscalProjection?.lines || normalizeFiscalLines(payload.lines, version);
+    const totals = fiscalProjection?.totals || {
       currency: 'EUR',
       taxable_base: roundMoney(lines.reduce((sum, line) => sum + line.taxable_base, 0)),
       taxes: roundMoney(lines.reduce((sum, line) => sum + line.tax_amount, 0)),
@@ -3115,6 +3211,8 @@ async function createPatientFiscalDocument({
       || await nextFiscalNumber({ clinicId, documentType, series, transaction });
     const sourceData = {
       ...(payload.payment_data && typeof payload.payment_data === 'object' ? payload.payment_data : {}),
+      // Reserved server-owned field: never accept a client fiscal snapshot.
+      fiscal_price_source: fiscalProjection?.snapshot || null,
       source: {
         type: sourceType,
         id: sourceType === 'budget'
@@ -3163,98 +3261,12 @@ async function createPatientFiscalDocument({
 }
 
 async function createFiscalDocument({ publicId, actorId, payload }) {
-  return sequelize.transaction(async (transaction) => {
+  return sequelize.transaction(async transaction => {
     const budget = await loadBudgetByPublicId(publicId, transaction);
-    const [clinic, patient, version] = await Promise.all([
-      Clinica.findByPk(budget.clinic_id, { transaction }),
-      Paciente.findByPk(budget.patient_id, { transaction }),
-      EconomicBudgetVersion.findOne({
-        where: { budget_id: budget.id, version_number: budget.current_version },
-        transaction,
-      }),
-    ]);
-    economicPrograms.assertFiscalReady({ lines: parseJson(version?.lines, []), status: payload.status || 'draft', fiscalLines: payload.lines || [] });
-    const documentType = cleanString(payload.document_type, 20).toLowerCase();
-    if (!FISCAL_DOCUMENT_TYPES.has(documentType)) {
-      throw domainError(400, 'fiscal_document_type_invalid', 'El tipo de documento no es válido.');
-    }
-    const issuer = normalizeFiscalParty(payload.issuer, mapClinicSnapshot(clinic));
-    const recipient = normalizeFiscalParty(payload.recipient, mapPatientSnapshot(patient));
-    if (documentType !== 'receipt') {
-      const required = ['legal_name', 'tax_id', 'address', 'postal_code', 'city', 'country'];
-      const missing = required.filter((field) => !recipient[field]);
-      if (missing.length) {
-        throw domainError(400, 'invoice_recipient_incomplete', 'Completa los datos fiscales del destinatario.', { missing });
-      }
-      const issuerMissing = required.filter((field) => !issuer[field]);
-      if (issuerMissing.length) {
-        throw domainError(400, 'invoice_issuer_incomplete', 'Completa los datos fiscales de la clínica.', { missing: issuerMissing });
-      }
-    }
-    const lines = normalizeFiscalLines(payload.lines, version);
-    const totals = {
-      currency: 'EUR',
-      taxable_base: roundMoney(lines.reduce((sum, line) => sum + line.taxable_base, 0)),
-      taxes: roundMoney(lines.reduce((sum, line) => sum + line.tax_amount, 0)),
-      total: roundMoney(lines.reduce((sum, line) => sum + line.total, 0)),
-    };
-    const template = await resolveTemplate({
-      clinicId: budget.clinic_id,
-      templateId: payload.template_id,
-      templateType: 'invoice',
+    return createPatientFiscalDocument({
+      patientIdentifier: budget.patient_id, clinicId: budget.clinic_id, actorId, transaction,
+      payload: { ...payload, source_type: 'budget', source_id: budget.public_id },
     });
-    const series = cleanString(payload.series, 30) || (documentType === 'receipt' ? 'REC' : 'FAC');
-    await Clinica.findByPk(budget.clinic_id, {
-      attributes: ['id_clinica'],
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-    const year = new Date().getFullYear();
-    const numberPrefix = `${series}-${year}-`;
-    const existingDocuments = await PatientFiscalDocument.findAll({
-      where: {
-        clinic_id: budget.clinic_id,
-        document_type: documentType,
-        series,
-        number: { [Op.like]: `${numberPrefix}%` },
-      },
-      attributes: ['number'],
-      transaction,
-    });
-    const lastSequence = existingDocuments.reduce((max, existingDocument) => {
-      const sequence = Number.parseInt(String(existingDocument.number).slice(numberPrefix.length), 10);
-      return Number.isInteger(sequence) ? Math.max(max, sequence) : max;
-    }, 0);
-    const number = cleanString(payload.number, 60)
-      || `${numberPrefix}${String(lastSequence + 1).padStart(4, '0')}`;
-    const status = cleanString(payload.status || 'draft', 20);
-    if (!['draft', 'issued'].includes(status)) throw domainError(400, 'fiscal_document_status_invalid', 'Estado fiscal no válido.');
-    const document = await PatientFiscalDocument.create({
-      public_id: crypto.randomUUID(),
-      clinic_id: budget.clinic_id,
-      patient_id: budget.patient_id,
-      budget_id: budget.id,
-      payment_id: null,
-      document_type: documentType,
-      series,
-      number,
-      status,
-      issue_date: dateOrNull(payload.issue_date) || new Date(),
-      due_date: dateOrNull(payload.due_date),
-      issuer_snapshot: issuer,
-      recipient_snapshot: recipient,
-      lines,
-      totals,
-      payment_data: payload.payment_data || null,
-      template_snapshot: { id: template.public_id, name: template.name, config: cloneJson(template.config) },
-      verifactu_status: documentType === 'receipt'
-        ? 'not_applicable'
-        : (status === 'issued' ? 'ready' : 'mock_pending'),
-      notes: cleanString(payload.notes, 5000) || null,
-      created_by: actorId,
-      updated_by: actorId,
-    }, { transaction });
-    return serializeFiscalDocument(document, budget.public_id);
   });
 }
 
@@ -3263,6 +3275,7 @@ async function updateFiscalDocument({ publicId, actorId, payload }) {
     const document = await PatientFiscalDocument.findOne({
       where: { public_id: cleanString(publicId, 36) },
       transaction,
+      lock: transaction.LOCK.UPDATE,
     });
     if (!document) throw domainError(404, 'fiscal_document_not_found', 'Documento fiscal no encontrado.');
     if (document.status !== 'draft') {
@@ -3273,9 +3286,10 @@ async function updateFiscalDocument({ publicId, actorId, payload }) {
       Clinica.findByPk(document.clinic_id, { transaction }),
       Paciente.findByPk(document.patient_id, { transaction }),
     ]);
+    const savedSource = parseJson(document.payment_data, {}).fiscal_price_source;
     const version = budget
       ? await EconomicBudgetVersion.findOne({
-        where: { budget_id: budget.id, version_number: budget.current_version },
+        where: { budget_id: budget.id, version_number: savedSource?.budget_version || budget.current_version },
         transaction,
       })
       : null;
@@ -3287,8 +3301,11 @@ async function updateFiscalDocument({ publicId, actorId, payload }) {
       payload.recipient,
       parseJson(document.recipient_snapshot, mapPatientSnapshot(patient))
     );
-    economicPrograms.assertFiscalReady({ lines: parseJson(version?.lines, []), status: payload.status || 'draft', fiscalLines: payload.lines || parseJson(document.lines, []) });
-    const lines = normalizeFiscalLines(payload.lines || parseJson(document.lines, []), version);
+    const payment = document.payment_id ? await EconomicPayment.findByPk(document.payment_id, { transaction }) : null;
+    if (savedSource && payment && payment.status !== 'confirmed') throw domainError(409, 'payment_not_confirmed', 'El cobro de origen ya no está confirmado.');
+    const fiscalProjection = await fiscalPriceProjection({ budget, version, payment, payload, document, transaction });
+    if (!fiscalProjection) economicPrograms.assertFiscalReady({ lines: parseJson(version?.lines, []), status: payload.status || 'draft', fiscalLines: payload.lines || parseJson(document.lines, []) });
+    const lines = fiscalProjection?.lines || normalizeFiscalLines(payload.lines || parseJson(document.lines, []), version);
     const requestedStatus = cleanString(payload.status || 'draft', 20);
     if (!['draft', 'issued'].includes(requestedStatus)) {
       throw domainError(400, 'fiscal_document_status_invalid', 'Estado fiscal no válido.');
@@ -3308,7 +3325,7 @@ async function updateFiscalDocument({ publicId, actorId, payload }) {
         });
       }
     }
-    const totals = {
+    const totals = fiscalProjection?.totals || {
       currency: 'EUR',
       taxable_base: roundMoney(lines.reduce((sum, line) => sum + line.taxable_base, 0)),
       taxes: roundMoney(lines.reduce((sum, line) => sum + line.tax_amount, 0)),
@@ -3327,7 +3344,13 @@ async function updateFiscalDocument({ publicId, actorId, payload }) {
       recipient_snapshot: recipient,
       lines,
       totals,
-      payment_data: payload.payment_data ?? document.payment_data,
+      payment_data: {
+        ...parseJson(document.payment_data, {}),
+        ...(payload.payment_data && typeof payload.payment_data === 'object' ? payload.payment_data : {}),
+        source: parseJson(document.payment_data, {}).source
+          ? { ...parseJson(document.payment_data, {}).source, applied_amount: totals.total } : null,
+        fiscal_price_source: fiscalProjection?.snapshot || null,
+      },
       template_snapshot: { id: template.public_id, name: template.name, config: cloneJson(template.config) },
       verifactu_status: document.document_type === 'receipt'
         ? 'not_applicable'
@@ -3715,5 +3738,6 @@ module.exports = {
   consumeVoucherForCompletedAppointment,
   createFiscalDocument,
   createPatientFiscalDocument,
+  previewPatientFiscalDocument,
   updateFiscalDocument,
 };

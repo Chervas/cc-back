@@ -21,6 +21,7 @@ router.post('/budgets/:budgetId/signature-requests', controller.createBudgetSign
 router.post('/budgets/:budgetId/payments', controller.createPayment);
 router.post('/patients/:patientId/wallet-deposits', controller.createWalletDeposit);
 router.post('/patients/:patientId/fiscal-documents', controller.createPatientFiscalDocument);
+router.post('/patients/:patientId/fiscal-documents/preview', controller.previewPatientFiscalDocument);
 router.post('/payments/:paymentId/void', controller.voidPayment);
 router.post('/budgets/:budgetId/wallet-allocations', controller.applyWallet);
 router.post('/budgets/:budgetId/fiscal-documents', controller.createFiscalDocument);
