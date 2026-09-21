@@ -50,7 +50,7 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
     if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = { booking: true }; } }
     return { ...row, booking_protected: metadata && ('booking' in metadata || 'program_session' in metadata || 'additional_staff' in metadata) ? 1 : 0 };
   };
-  const state = { appointments: [...appointments], occupancies: [...occupancies], commits: 0, rollbacks: 0, calls: [], locks: [], persists: 0 };
+  const state = { appointments: [...appointments], occupancies: [...occupancies], events: [], commits: 0, rollbacks: 0, calls: [], locks: [], persists: 0 };
   let id = 100;
   let txId = 0;
   const mutexes = new Map();
@@ -62,13 +62,15 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
   const allAppointments = (tx) => [...state.appointments.filter((row) => !tx?.replacements.has(row.id_cita)), ...(tx?.pending || [])];
   const allOccupancies = (tx) => [...state.occupancies.filter((row) => !tx?.deleted.has(row.appointment_id)), ...(tx?.occupancies || [])];
   const db = {
+    PatientOperationalEvent: { create: async (event, { transaction }) => { transaction.events.push(event); } },
     Sequelize: { Op, fn: (name, ...args) => ({ name, args }), col: name => ({ col: name }), literal: value => ({ literal: value }) },
     sequelize: { transaction: async (options, callback) => {
-      const tx = { id: ++txId, options, LOCK: { UPDATE: 'UPDATE' }, pending: [], occupancies: [], deleted: new Set(), replacements: new Set(), release: new Map() };
+      const tx = { id: ++txId, options, LOCK: { UPDATE: 'UPDATE' }, pending: [], events: [], occupancies: [], deleted: new Set(), replacements: new Set(), release: new Map() };
       try {
         const result = await callback(tx);
         state.appointments = [...state.appointments.filter((row) => !tx.replacements.has(row.id_cita)), ...tx.pending];
         state.occupancies = [...state.occupancies.filter((row) => !tx.deleted.has(row.appointment_id)), ...tx.occupancies];
+        state.events.push(...tx.events);
         state.commits++;
         return result;
       } catch (error) { state.rollbacks++; throw error; }
@@ -271,6 +273,57 @@ test('failed support rebooking rolls the prior team and occupancy back together'
   await assert.rejects(f.reserve({ existingAppointmentId: saved.id_cita,
     appointmentValues: { inicio: end, fin: '2030-01-07T10:00:00Z' }, additionalStaffIds: [99] }),
   { code: 'booking_unavailable' });
+  assert.equal(JSON.stringify({ appointments: f.state.appointments, occupancies: f.state.occupancies }), before);
+});
+
+test('support-only command preserves status, time, primary resources and reminder suppression', async () => {
+  const { changeAppointmentSupport } = require('../../services/appointmentSupport.service');
+  const f = fixture({ bookingProfile: null });
+  const saved = await f.reserve({ appointmentValues: { ...f.values, estado: 'recordatorio_confirmado',
+    import_metadata: { notification_suppression: { day_before: true, same_day: true } } } });
+  const find = f.db.CitaPaciente.findByPk;
+  f.db.CitaPaciente.findByPk = async (...args) => {
+    const row = await find(...args);
+    return row && { ...row, toJSON: () => row,
+      update: (values, { transaction }) => f.persist({ values, existing: row, transaction }) };
+  };
+  const changed = await changeAppointmentSupport({ db: f.db, appointmentId: saved.id_cita, actorId: 42,
+    ids: [6], expectedRange: { start, end }, capabilities });
+  for (const key of ['estado', 'inicio', 'fin', 'doctor_id', 'instalacion_id', 'paciente_id']) assert.equal(changed[key], saved[key]);
+  assert.deepEqual(changed.import_metadata.notification_suppression, saved.import_metadata.notification_suppression);
+  assert.equal(f.state.events.length, 1);
+  assert.equal(f.state.events[0].event_type, 'appointment.staff_changed');
+  assert.equal(f.state.events[0].actor_user_id, 42);
+  assert.deepEqual(f.state.events[0].metadata.additional_staff, [{ id: 6, name: '' }]);
+  await changeAppointmentSupport({ db: f.db, appointmentId: saved.id_cita, actorId: 42,
+    ids: [6], expectedRange: { start, end }, capabilities });
+  assert.equal(f.state.events.length, 1, 'same team does not create another clinical event');
+});
+
+test('support-only change rejects stale intervals, closed appointments and mixed payloads', async () => {
+  const f = fixture({ bookingProfile: null });
+  const saved = await f.reserve();
+  const base = { existingAppointmentId: saved.id_cita, additionalStaffIds: [6], supportOnly: true,
+    expectedRange: { start, end }, appointmentValues: { updated_by: 42 } };
+  await assert.rejects(f.reserve({ ...base, expectedRange: { start: end, end } }), { code: 'booking_appointment_changed' });
+  await assert.rejects(f.reserve({ ...base, appointmentValues: { estado: 'reprogramada' } }), { code: 'booking_additional_staff_invalid' });
+  await f.reserve({ existingAppointmentId: saved.id_cita, stateOnly: true, appointmentValues: { estado: 'cancelada' } });
+  await assert.rejects(f.reserve(base), { code: 'booking_additional_staff_closed' });
+});
+
+test('support event failure rolls back the team and the canonical appointment together', async () => {
+  const { changeAppointmentSupport } = require('../../services/appointmentSupport.service');
+  const f = fixture({ bookingProfile: null });
+  const saved = await f.reserve();
+  const before = JSON.stringify({ appointments: f.state.appointments, occupancies: f.state.occupancies });
+  const find = f.db.CitaPaciente.findByPk;
+  f.db.CitaPaciente.findByPk = async (...args) => {
+    const row = await find(...args);
+    return row && { ...row, toJSON: () => row, update: (values, { transaction }) => f.persist({ values, existing: row, transaction }) };
+  };
+  f.db.PatientOperationalEvent.create = async () => { throw Error('audit unavailable'); };
+  await assert.rejects(changeAppointmentSupport({ db: f.db, appointmentId: saved.id_cita, actorId: 42,
+    ids: [6], expectedRange: { start, end }, capabilities }), /audit unavailable/);
   assert.equal(JSON.stringify({ appointments: f.state.appointments, occupancies: f.state.occupancies }), before);
 });
 

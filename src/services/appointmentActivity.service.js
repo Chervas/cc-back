@@ -5,6 +5,7 @@ const db = require('../../models');
 const { PatientOperationalEvent } = db;
 
 const APPOINTMENT_STATUS_EVENT_TYPE = 'appointment.status_changed';
+const APPOINTMENT_STAFF_EVENT_TYPE = 'appointment.staff_changed';
 
 const APPOINTMENT_STATUS_LABELS = Object.freeze({
   pendiente: 'Pendiente',
@@ -100,6 +101,17 @@ function buildAppointmentStatusDescription(event) {
 
 function serializeAppointmentStatusActivity(event, { patientId = null, leadId = null, actorName = 'Sistema' } = {}) {
   const metadata = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
+  if (event.event_type === APPOINTMENT_STAFF_EVENT_TYPE) {
+    const names = (metadata.additional_staff || []).map(person => cleanString(person.name)).filter(Boolean);
+    return { id: `appointment-staff-event-${event.id}`,
+      ...(patientId !== null ? { pacienteId: String(patientId) } : {}), ...(leadId !== null ? { leadId: String(leadId) } : {}),
+      fecha: event.occurred_at || event.created_at, tipo: 'appointment_staff_changed', titulo: 'Personal de apoyo actualizado',
+      descripcion: names.length ? `Apoyo: ${names.join(', ')}. Se conservan el horario y el estado de la cita.`
+        : 'Se ha actualizado el apoyo de la cita, sin cambiar su horario ni estado.',
+      icono: 'heroicons_outline:user-group', color: 'info', citaId: String(metadata.appointment_id),
+      usuarioId: event.actor_user_id ? String(event.actor_user_id) : 'system', usuarioNombre: actorName || 'Sistema',
+      detalles: { ...metadata, source: event.source || null } };
+  }
   const newStatus = cleanString(metadata.new_status)?.toLowerCase() || null;
   const appointmentId = toPositiveInt(metadata.appointment_id);
   const typeByStatus = {
@@ -172,6 +184,7 @@ async function recordAppointmentStatusChange({
 
 module.exports = {
   APPOINTMENT_STATUS_EVENT_TYPE,
+  APPOINTMENT_STAFF_EVENT_TYPE,
   appointmentStatusLabel,
   serializeAppointmentStatusActivity,
   recordAppointmentStatusChange,
