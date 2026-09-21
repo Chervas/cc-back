@@ -228,3 +228,32 @@ capilar requiere Loza y Ainhoa. Plexr/C7 y bariátrica/Hospital aplican decision
 expresas del usuario. Los perfiles candidatos permanecen draft y el importe bruto
 se conserva como metadato: `do_not_write_price_base: true` hasta resolver el campo
 económico canónico. No cambia ninguna instalación, profesional o tratamiento.
+
+### Carga de tratamientos individuales preparados
+
+`cliniccloud-import-catalog-drafts.js` consume el plan anterior, no reinterpreta
+el Excel durante la escritura. Solo `kind=treatment`: programas, bonos,
+complementos, productos y honorarios siguen separados. Ejecutar desde back-dev
+con `--target crm --mode prepare --plan … --workbook … --client-replies …
+--resource-map … --private-output …`. Verifica hashes de las fuentes y prepara
+el estado completo antes de tocar la BD clínica.
+
+El modo `apply` requiere además `--package … --approved-sha256 …
+--backup-manifest … --private-journal …`: paquete de menos de dos horas,
+backup CRM verificado, comparación de estado, transacción y diario durable.
+Importa hasta 250 tratamientos inactivos/borrador; mantiene precio final en
+`source_price`, `precio_base=null` y fiscalidad pendiente. Solo prepara un perfil
+de agenda cuando constan una cabina, duración fija y profesionales vinculados
+al ámbito, sin dudas clínicas pendientes. Cabinas inactivas son válidas para
+preparación, nunca prueba de agenda operativa. No convierte varias cabinas en
+alternativas ni inventa fases, horarios, capacidad o habilitación profesional.
+
+Las referencias fuente ya presentes se conservan sin modificar; otra clínica,
+fuente distinta o código duplicado detienen el lote. El replay reconoce la
+marca del paquete y preserva también ediciones humanas posteriores, sin crear
+otra copia ni restaurar campos. No hay borrados, Obsoleto masivo, citas, ventas,
+publicación de protocolos, enlaces de consentimientos o mensajes. Una carga de
+borradores **no acredita** que esos tratamientos estén listos para el arranque.
+Pruebas focales: `cliniccloud_catalog_drafts.test.js` junto a parser/respuestas
+y contrato del catálogo. Rollback de datos siempre cotejando diario y uso
+posterior; no borrar registros utilizados ni restaurar la BD completa.
