@@ -43,20 +43,32 @@ function mergeClinicalConfig(previous, patch) {
 }
 
 function applyImportedPriceReview(previous, next, { confirm, amount, actorId, now = new Date() } = {}) {
-  if (confirm == null || confirm === false) return next;
+  if (confirm == null || confirm === false) {
+    // Later edits must not turn an approved gross price back into an ambiguous
+    // legacy net amount, or silently coerce a cleared amount into a free service.
+    if (previous?.imported_price_review && previous.fiscal_mapping_pending === false) {
+      if (!next?.price_profile) throw catalogError('Conserva el IVA incluido o un motivo de exención para este precio final.', 'imported_price_profile_required', 422);
+      if (amount !== undefined) assertImportedPriceAmount(amount);
+    }
+    return next;
+  }
   if (confirm !== true) throw catalogError('La confirmación del precio debe ser explícita.', 'imported_price_confirmation_invalid', 422);
   if (previous?.fiscal_mapping_pending !== true) throw catalogError('Este precio no tiene una revisión pendiente. Actualiza el tratamiento.', 'imported_price_not_pending', 409);
   const priceProfile = require('./economicPriceProfile').normalizeProfile(next?.price_profile);
   if (!priceProfile) throw catalogError('Indica el IVA incluido o el motivo de exención antes de confirmar.', 'imported_price_profile_required', 422);
-  // Match DECIMAL(10,2). In particular, null/empty must never become free.
-  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0 || amount > 99999999.99 || Math.round(amount * 100) / 100 !== amount) {
-    throw catalogError('Indica un precio final válido, con un máximo de dos decimales.', 'imported_price_amount_invalid', 422);
-  }
+  assertImportedPriceAmount(amount);
   if (!Number.isSafeInteger(Number(actorId)) || Number(actorId) <= 0) throw catalogError('Falta el usuario que confirma el precio.', 'imported_price_actor_required', 401);
   return { ...next, fiscal_mapping_pending: false, imported_price_review: {
     version: 1, reviewed_at: now.toISOString(), reviewed_by: Number(actorId),
     gross_amount: amount, price_profile: priceProfile,
   } };
+}
+
+function assertImportedPriceAmount(amount) {
+  // Match DECIMAL(10,2). In particular, null/empty must never become free.
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0 || amount > 99999999.99 || Math.round(amount * 100) / 100 !== amount) {
+    throw catalogError('Indica un precio final válido, con un máximo de dos decimales.', 'imported_price_amount_invalid', 422);
+  }
 }
 
 function catalogState(treatment) {
