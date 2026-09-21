@@ -32,6 +32,14 @@ async function main() {
     const doctor = await db.Usuario.findOne({ where: { email_usuario: 'qa.bs.prioritario.20260920@example.invalid', notas_usuario: MARKER } });
     const room = await db.Instalacion.findOne({ where: { clinica_id: 1, nombre: 'Cabina ficticia 1 · QA BS', descripcion: MARKER } });
     assert(doctor && room);
+    // Non-null JSON must be covered too: a null legacy row short-circuits MySQL
+    // JSON evaluation and cannot catch malformed path generation by the ORM.
+    const program = await db.CitaPaciente.findOne({ where: { paciente_id: patient.id_paciente, clinica_id: 1,
+      source_system: 'treatment_program', estado: { [db.Sequelize.Op.ne]: 'cancelada' } }, order: [['id_cita', 'DESC']] });
+    assert(program);
+    const protectedRows = await resourceAppointments({ db, clinic, doctorId: program.doctor_id, installationId: program.instalacion_id,
+      start: program.inicio, end: program.fin });
+    assert(protectedRows.some(row => row.id_cita === program.id_cita && row.can_force_legacy === false));
     const before = await db.CitaPaciente.count({ where: { clinica_id: 1 } });
     await assert.rejects(db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
       const other = await db.Paciente.create({ public_id: `pac_qa_${randomUUID()}`, nombre: 'QA temporal', apellidos: 'Solo rollback', clinica_id: 1 }, { transaction });
@@ -57,7 +65,7 @@ async function main() {
     assert.equal(await db.CitaPaciente.count({ where: { source_reference: marker } }), 0);
     assert.equal(await db.AppointmentBookingOccupancy.count({ where: { appointment_id: createdIds } }), 0);
     assert.equal(await db.InstalacionBloqueo.count({ where: { motivo: marker } }), 0);
-    log(JSON.stringify({ status: 'passed', database: 'isolated-dev-only', source, checks: ['ordinary-overlap-confirmation', 'occupancy-force', 'patient-conflict', 'segmented-calendar-read', 'calendar-mutation-protection', 'full-rollback'], persistedAppointments: 0 }));
+    log(JSON.stringify({ status: 'passed', database: 'isolated-dev-only', source, checks: ['protected-non-null-json-profile', 'ordinary-overlap-confirmation', 'occupancy-force', 'patient-conflict', 'segmented-calendar-read', 'calendar-mutation-protection', 'full-rollback'], persistedAppointments: 0 }));
   } finally { await db.sequelize.close(); }
 }
 main().catch(error => { console.error('ISOLATED_BOOKING_COMPATIBILITY_FAILED', error.code || error.name,
