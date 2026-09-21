@@ -92,7 +92,7 @@ function buildCatalogPlan({ sheets, workbookHash, local = { installations: [], p
           requires_membership_review: memberships.length > 1 ? true : undefined };
       });
       row.installation_resolution = cabins.map((key) => {
-        const mappedId = resourceMap.cabins?.[key];
+        const mappedId = resourceMap.cabins_by_clinic?.[row.clinic_id]?.[key] ?? resourceMap.cabins?.[key];
         const confirmed = local.installations.find((i) => i.id === mappedId);
         const number = /^C(\d+)$/.exec(key)?.[1];
         const candidates = local.installations.filter((i) => key === 'Hospital' ? norm(i.name) === 'HOSPITAL' : new RegExp(`^(CABINA|CONSULTA|BOX) ${number}(?:\\b|$)`).test(norm(i.name)));

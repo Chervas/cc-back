@@ -65,3 +65,12 @@ test('duplicate operational memberships require review, not a third membership o
   assert(row.issues.includes('PROFESSIONAL_MEMBERSHIP_AMBIGUOUS'));
   assert.equal(row.ready_for_booking, false);
 });
+test('shared physical cabin resolves the clinic-owned record, not another clinic ID', () => {
+  const sheets = [{ name: 'Capilar · sesiones y bonos', rows: [{ source_row: 2, cells: { A: 'Capilar', B: 'Consulta sintética', C: '30 min', D: '100 €', G: '7', H: 'Dr. Sintético' } }] }];
+  const local = { installations: [{ id: 8, clinic_id: 72, name: 'C7 · Consulta', active: true }, { id: 9, clinic_id: 66, name: 'C7 · Consulta', active: true }], professionals: [{ id: 7, clinic_id: 66, name: 'Sintético', active: true, receives_appointments: true }], treatments: [] };
+  const resourceMap = { cabins: { C7: 8 }, cabins_by_clinic: { 66: { C7: 9 }, 72: { C7: 8 } }, professionals: { 'Dr. Sintético': 7 } };
+  const row = buildCatalogPlan({ sheets, workbookHash: 'synthetic', local, resourceMap }).rows[0];
+  assert.equal(row.installation_resolution[0].confirmed_id, 9);
+  assert.equal(row.ready_for_booking, true);
+  assert.deepEqual(row.proposed_clinical_config.booking_profile.phases[0].installation_ids, [9]);
+});
