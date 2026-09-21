@@ -375,6 +375,8 @@ function fiscalHtml(document) {
 
 async function render(html) {
   const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH
+    || process.env.CHROME_PATH
+    || process.env.CHROMIUM_PATH
     || '/home/ubuntu/.cache/clinicaclick-browsers/chrome-headless-shell/linux-148.0.7778.56/chrome-headless-shell-linux64/chrome-headless-shell';
   const browser = await puppeteer.launch({
     executablePath,
