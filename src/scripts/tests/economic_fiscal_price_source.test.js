@@ -130,3 +130,18 @@ test('creation/edit lock budget before documents; preview explicitly remains non
   assert.match(preview, /lockSource: false/);
   assert.doesNotMatch(preview, /\.create\(|\.update\(|LOCK\.UPDATE/);
 });
+
+test('economic PDF respects the isolated Chromium override used by clinical PDF consumers', async () => {
+  const source = fs.readFileSync(require.resolve('../../services/economicDocumentPdf.service'), 'utf8');
+  const code = source.slice(source.indexOf('async function render('), source.indexOf('async function budgetPdf('));
+  for (const env of [{ CHROME_PATH: '/opt/isolated/chrome' }, { CHROMIUM_PATH: '/opt/isolated/chromium' },
+    { CHROMIUM_EXECUTABLE_PATH: '/opt/explicit/chrome', CHROME_PATH: '/opt/isolated/chrome' }]) {
+    let launched, closed = false;
+    const page = { setRequestInterception: async () => {}, on: () => {}, setContent: async () => {}, pdf: async () => Buffer.from('%PDF-test') };
+    const render = vm.runInNewContext(`${code}; render`, { process: { env }, Buffer, isAllowedAssetUrl: () => false,
+      puppeteer: { launch: async options => { launched = options; return { newPage: async () => page, close: async () => { closed = true; } }; } } });
+    assert.equal((await render('<p>Ficticio</p>')).toString(), '%PDF-test');
+    assert.equal(launched.executablePath, env.CHROMIUM_EXECUTABLE_PATH || env.CHROME_PATH || env.CHROMIUM_PATH);
+    assert.equal(closed, true);
+  }
+});
