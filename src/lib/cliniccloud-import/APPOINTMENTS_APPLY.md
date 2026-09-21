@@ -88,3 +88,10 @@ comprobar que siguen siendo los valores escritos; si hubo actuaciones posteriore
 revisar. Nunca restaurar toda la base compartida ni borrar historia.
 
 Pruebas offline: `node --test src/scripts/tests/cliniccloud_import_appointments_apply.test.js`.
+
+## Resumen público de la importación
+
+`import_review.source_service` muestra únicamente el servicio de la línea base,
+limitado a 255 caracteres. No expone notas, identidad ni evidencias privadas;
+no equivale a un tratamiento de catálogo, precio ni consentimiento. Sin permiso
+de datos sensibles se retira todo el resumen. Su lectura no activa recordatorios.

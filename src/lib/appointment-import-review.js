@@ -19,8 +19,14 @@ function appointmentImportReview(appointment) {
   const pendingAssignment = Object.keys(fields).filter(key => Array.isArray(pending) && pending.includes(key)
     && !appointment[columns[key]]).map(key => fields[key]);
   if (installationInactive && !pendingAssignment.includes('installation')) pendingAssignment.push('installation');
+  // A display label only, never a catalog link or a reason to infer a price,
+  // protocol or consent. Do not copy notes, patient identity or the raw import
+  // payload. The controller removes the whole summary without clinical access.
+  const sourceService = typeof metadata?.cliniccloud_delta?.source?.service_key === 'string'
+    ? metadata.cliniccloud_delta.source.service_key.trim().slice(0, 255) : '';
   return { source: 'cliniccloud', reminders_held: true,
     pending_assignment: pendingAssignment,
+    ...(sourceService ? { source_service: sourceService } : {}),
     ...(installationInactive ? { installation_inactive: true } : {}) };
 }
 module.exports = { appointmentImportReview };
