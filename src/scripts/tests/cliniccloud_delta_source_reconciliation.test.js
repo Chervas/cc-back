@@ -23,6 +23,20 @@ test('same observed source ID changes date/duration in place and preserves origi
  assert.deepEqual(after.import_metadata.notification_suppression,f.before.import_metadata.notification_suppression);
  assert.equal(after.import_metadata.source_appointment_id,'900');assert.deepEqual(storedDeltaReconciliation(after,after.import_metadata),receipt);assert.equal(reconciliationChanged(after,receipt),false);
 });
+test('SQL NULL represents an imported empty note without changing it during reconciliation',()=>{
+ const f=fixture();f.source.details='';f.before.nota=null;
+ f.originalLive.rows[0].details='';f.history.patients[0].rows[0].detalles='';
+ const receipt=prepareDeltaReconciliation(f),after=patchDeltaReconciliation(f.before,receipt,f.now);
+ assert.equal(after.nota,null);assert.equal(receipt.current.details,'');
+ assert.equal(reconciliationChanged(after,receipt),false);
+});
+test('empty source notes do not permit a local note or whitespace edit',()=>{
+ for(const note of ['Added locally',' ']){
+  const f=fixture();f.source.details='';f.before.nota=note;
+  f.originalLive.rows[0].details='';f.history.patients[0].rows[0].detalles='';
+  assert.throws(()=>prepareDeltaReconciliation(f),/INVALID/);
+ }
+});
 for(const [name,mutate]of [
  ['wrong old source ID',f=>f.originalLive.rows[0].appointment_id=901],['absent older observation',f=>f.originalLive.rows=[]],
  ['ambiguous old source',f=>f.originalLive.rows.push(structuredClone(f.originalLive.rows[0]))],['old observation newer than current',f=>f.originalLive.captured_at='2026-09-21T21:01:00Z'],

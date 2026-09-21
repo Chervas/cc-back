@@ -19,7 +19,7 @@ function prepareDeltaReconciliation({before:raw,source,originalLive,history,revi
   ||!source||source.kind!=='appointment'||source.validation_errors?.length||!baseline
   ||before.source_reference!==sourceReference(source)||keys.some(k=>baseline[k]!==source[k])
   ||hash(m.cliniccloud_delta.provenance)!==hash(source.provenance)||String(m.source_contact_id)!==source.source_contact_id
-  ||before.inicio!==source.start_utc||before.fin!==source.end_utc||before.nota!==source.details
+  ||before.inicio!==source.start_utc||before.fin!==source.end_utc||(before.nota??'')!==source.details
   ||before.estado!==source.status||m.cliniccloud_reconciliation?.automation_policy!=='hold'
   ||!['appointment_details','day_before','same_day'].every(k=>m.notification_suppression?.[k]===true)
   ||source.start_local<'2026-09-21'||source.start_local>='2026-09-28'||Date.parse(before.inicio)<now
