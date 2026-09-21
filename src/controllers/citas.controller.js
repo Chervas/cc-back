@@ -24,7 +24,7 @@ const Conversation = db.Conversation;
 const Message = db.Message;
 const ConversationRead = db.ConversationRead;
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
-const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
+const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile, bookingErrorPayload } = require('../services/treatmentBookingProfile.service');
 const { mutateAppointmentBooking } = require('../services/appointmentBookingCommand.service');
 const { bookingSegments } = require('../lib/appointment-booking-segments');
 const { appointmentImportReview } = require('../lib/appointment-import-review');
@@ -2228,6 +2228,7 @@ exports.createCita = asyncHandler(async (req, res) => {
             ? await mutateAppointmentBooking({
                 db,
                 appointmentValues: createOptions.appointmentValues,
+                force: parseBool(force),
                 selections: req.body?.booking_selection || {},
                 priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
                 persist: async ({ values, transaction }) => {
@@ -2347,7 +2348,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         return res.status(201).json(await protectAppointmentsForRequest(req, citaCreada));
     } catch (err) {
         if (/^(booking_|treatment_not_)/.test(String(err?.code || ''))) {
-            return res.status(err.statusCode || 409).json({ code: err.code, message: err.message, details: err.details || null, can_force: false });
+            return res.status(err.statusCode || 409).json(bookingErrorPayload(err));
         }
         if (err.status === 400 && err.message === 'unsupported_patient_language') {
             return res.status(400).json({
@@ -3101,6 +3102,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
                 estado: cita.estado, reschedule_reason: rescheduleReason, updated_by: cita.updated_by },
             selections: req.body?.booking_selection || {}, priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
             allowObsolete: true,
+            force: wantsForce,
             persist: async ({ values, existing, transaction }) => {
                 previousStatus = existing.estado;
                 return existing.update(values, { transaction });
