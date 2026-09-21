@@ -56,6 +56,18 @@ requieren un modo de aplicación explícito y su propio paquete validado.
   datos, clínica principal, historia y snapshots previos. Paquete de dos horas,
   backup CRM verificado, bloqueo/CAS, diario durable y replay sin nuevas filas.
   No es un fusor de pacientes ni acepta parecidos de nombre como identificación.
+  Para un apellido de captación abreviado/distinto, cada enlace puede llevar una
+  revisión explícita `native_first_visit` (`source_row`, `appointment_id`,
+  `created_by`, `clinic_id`, `reason`). Añadir `--appointments`, `--plan` y
+  `--live-comparison`: CSV normalizado idéntico al plan, comparación íntegra de
+  menos de dos horas con un único ID real observado en ClinicCloud y teléfono
+  exclusivo en el export. Además exige nombre de pila exacto, teléfono exclusivo
+  en el grupo y una sola primera visita nativa en esa clínica e instante,
+  creada por la persona revisada. Bloquea y coteja también la cita, sin editarla.
+  DNI/nacimiento contradictorios, otro propietario o cualquier deriva impiden
+  escribir. No transforma esa prueba de identidad en una decisión de sustituir
+  o duplicar citas. Los paquetes nuevos usan versión 2; replay de versión 1
+  mantiene su comprobación estricta original.
 - `cliniccloud-import-physical-installations.js`: mapa físico documental BS,
   distinto de las antiguas agendas virtuales. `--target crm --mode prepare
   --sources … --private-output …` recibe una lista privada de archivos y hashes.
