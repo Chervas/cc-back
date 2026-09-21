@@ -5,9 +5,10 @@ const { assertUserCanAccessFeature } = require('../lib/access-policy');
 const { searchTreatmentSlots, loadBookingContext, solutionsForCalendar } = require('../services/appointmentBookingAvailability.service');
 const { addDays } = require('../lib/personal-schedule-recurring');
 const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
-const { solveBookingProfile } = require('../lib/booking-profile-solver');
+const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
+const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staff');
 const { requiresMultiResourceBooking } = require('../lib/booking-profile');
-const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
+const { bookingCapabilities, bookingError, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
 const { resourceAppointments, resourceInstallationBlocks } = require('../services/appointmentResourceCalendar.service');
 const {
   parseClinicConfig,
@@ -34,6 +35,12 @@ const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
 
 exports.bookingCapabilities = asyncHandler(async (req, res) => res.json(bookingCapabilities()));
 
+function requestedAdditionalStaff(req) {
+  const ids = normalizeAdditionalStaff(req.query?.additional_staff_ids ?? req.query?.['additional_staff_ids[]']) || [];
+  if (ids.length && !bookingCapabilities().multi) throw bookingError('booking_profile_runtime_unavailable', 'El personal de apoyo todavía no está activado.');
+  return ids;
+}
+
 exports.treatmentSlots = asyncHandler(async (req, res) => {
   const clinicId = Number(req.query?.clinica_id);
   if (!Number.isSafeInteger(clinicId) || clinicId <= 0) return res.status(400).json({ message: 'clinica_id requerido' });
@@ -43,7 +50,8 @@ exports.treatmentSlots = asyncHandler(async (req, res) => {
   return res.json(await searchTreatmentSlots({ db, clinic, treatmentId: req.query?.tratamiento_id,
     date: req.query?.fecha_local, days: Number(req.query?.days || 1), stepMinutes: Number(req.query?.granularity_min || 15),
     limit: Number(req.query?.limit || 100), doctorId: req.query?.doctor_id ? Number(req.query.doctor_id) : null,
-    installationId: req.query?.instalacion_id ? Number(req.query.instalacion_id) : null }));
+    installationId: req.query?.instalacion_id ? Number(req.query.instalacion_id) : null,
+    additionalStaffIds: requestedAdditionalStaff(req) }));
 });
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
@@ -200,6 +208,7 @@ const intersectWindows = (a, b) => {
 
 
 const build409 = ({ message, conflicts }) => {
+  if (additionalStaffIds.length) conflicts.forEach(conflict => { conflict.can_force = false; });
   const canForce = conflicts.length > 0 && conflicts.every((c) => !!c.can_force);
   return {
     available: false,
@@ -505,7 +514,6 @@ exports.check = asyncHandler(async (req, res) => {
     duracion_min,
     instalacion_id,
     doctor_id,
-    // personal_ids[] (futuro)
     ignore_cita_id,
     force
   } = req.query || {};
@@ -548,6 +556,21 @@ exports.check = asyncHandler(async (req, res) => {
 
   if (end <= start) {
     return res.status(400).json({ message: 'rango inválido (fin <= inicio)' });
+  }
+
+  const additionalStaffIds = requestedAdditionalStaff(req);
+  if (additionalStaffIds.length) {
+    await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
+    if (ignore_cita_id) {
+      const ignored = await db.CitaPaciente.findByPk(Number(ignore_cita_id), { attributes: ['id_cita', 'clinica_id'] });
+      if (!ignored || Number(ignored.clinica_id) !== clinicaId) return res.status(404).json({ message: 'Cita no encontrada' });
+    }
+    const support = await loadBookingContext({ db, clinic: clinica, profile: { phases: [] }, start, end,
+      additionalStaffIds, ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, occupancyEnabled: true });
+    if (!additionalStaffIds.every(id => isFree(support.doctors.get(id), start, end))) return res.status(409).json({ available: false,
+      reason: 'blocked', message: 'El personal de apoyo no está disponible durante toda la cita.', can_force: false,
+      resource_conflicts: [{ resource_type: 'staff_pool', code: 'BOOKING_UNAVAILABLE', can_force: false,
+        details: { message: 'Cambia la hora o selecciona otro personal de apoyo.' } }] });
   }
 
   if (bookingProfile) {
@@ -824,6 +847,8 @@ exports.slots = asyncHandler(async (req, res) => {
 
   const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion', 'grupoClinicaId'] });
   if (!clinica) return res.status(404).json({ message: 'Clínica no encontrada' });
+  const additionalStaffIds = requestedAdditionalStaff(req);
+  if (additionalStaffIds.length) await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
   if (req.query?.tratamiento_id) {
     await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
     const treatment = await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic: clinica });
@@ -843,9 +868,9 @@ exports.slots = asyncHandler(async (req, res) => {
       const timezone = resolveClinicTimezone(clinica);
       const context = await loadBookingContext({ db, clinic: clinica, profile,
         start: resolveLocalInstant(fecha_local, '00:00:00', timezone),
-        end: resolveLocalInstant(addDays(fecha_local, 1), '00:00:00', timezone), occupancyEnabled: true });
+        end: resolveLocalInstant(addDays(fecha_local, 1), '00:00:00', timezone), occupancyEnabled: true, additionalStaffIds });
       const getSolutions = (doctor, installation) => solutionsForCalendar({ profile, context, date: fecha_local,
-        stepMinutes: stepMin, limit: Math.min(requestedLimit > 0 ? requestedLimit : 500, 500),
+        stepMinutes: stepMin, limit: Math.min(requestedLimit > 0 ? requestedLimit : 500, 500), additionalStaffIds,
         selections: { [profile.phases[0].key]: { doctor_id: doctor, installation_id: installation } },
         fromLocal: typeof from_local === 'string' ? from_local : '00:00', toLocal: typeof to_local === 'string' ? to_local : null });
       const response = { timezone, clinica_id: clinicaId, fecha_local, duracion_min: profile.phases[0].duration_minutes, granularity_min: stepMin };
@@ -922,6 +947,10 @@ exports.slots = asyncHandler(async (req, res) => {
   if (doctorId) doctorIdsForGlobal.push(doctorId);
   if (doctorIds.length) doctorIdsForGlobal.push(...doctorIds);
 
+  // One bulk read per date/request, never SQL per suggested slot or participant.
+  const supportContext = additionalStaffIds.length ? await loadBookingContext({ db, clinic: clinica,
+    profile: { phases: [] }, start: baseStart, end: baseEnd, additionalStaffIds, occupancyEnabled: true }) : null;
+
   const buildSlots = ({
     inst,
     doctorCtx,
@@ -948,6 +977,11 @@ exports.slots = asyncHandler(async (req, res) => {
     }
 
     const blocks = [];
+    for (const id of additionalStaffIds) {
+      const person = supportContext.doctors.get(id);
+      windows = intersectWindows(windows, person?.windows || []);
+      blocks.push(...(person?.busy || []).map(row => ({ start: new Date(row.start), end: new Date(row.end) })));
+    }
     (instBlocksRows || []).forEach((b) => blocks.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
     (instCitasRows || []).forEach((c) => blocks.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
     (docBlocksRows || []).forEach((b) => blocks.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
@@ -1395,6 +1429,8 @@ exports.grid = asyncHandler(async (req, res) => {
   if (from_local) baseQuery.from_local = from_local;
   if (to_local) baseQuery.to_local = to_local;
   if (tratamiento_id) baseQuery.tratamiento_id = tratamiento_id;
+  const additionalStaffIds = requestedAdditionalStaff(req);
+  if (additionalStaffIds.length) baseQuery.additional_staff_ids = additionalStaffIds;
 
   const tasks = [];
   dateList.forEach((dateIso) => {

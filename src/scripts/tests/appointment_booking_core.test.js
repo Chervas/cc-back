@@ -10,6 +10,7 @@ const { mutateAppointmentBooking } = require('../../services/appointmentBookingC
 const { bookingSegments } = require('../../lib/appointment-booking-segments');
 const fs = require('node:fs');
 const path = require('node:path');
+const { normalizeAdditionalStaff, additionalStaffPayload } = require('../../lib/appointment-additional-staff');
 
 const capabilities = { simple: true, multi: true };
 const Op = Object.fromEntries(['ne', 'in', 'or', 'lt', 'lte', 'gt'].map((key) => [key, Symbol(key)]));
@@ -47,7 +48,7 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
   const withBookingMarker = row => {
     let metadata = row.import_metadata;
     if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = { booking: true }; } }
-    return { ...row, booking_protected: metadata && ('booking' in metadata || 'program_session' in metadata) ? 1 : 0 };
+    return { ...row, booking_protected: metadata && ('booking' in metadata || 'program_session' in metadata || 'additional_staff' in metadata) ? 1 : 0 };
   };
   const state = { appointments: [...appointments], occupancies: [...occupancies], commits: 0, rollbacks: 0, calls: [], locks: [], persists: 0 };
   let id = 100;
@@ -159,6 +160,118 @@ test('two simultaneous writers for an empty slot serialize on anchors, then one 
   assert.equal(f.state.commits, 1);
   assert.equal(f.state.rollbacks, 1);
   assert.deepEqual(f.state.locks.filter(([tx]) => tx === 1).map(([, key]) => key), ['doctor:5', 'installation:9', 'patient:1']);
+});
+
+test('one-off support reserves one appointment and both people, without changing the treatment', async () => {
+  const f = fixture({ bookingProfile: null });
+  const saved = await f.reserve({ additionalStaffIds: [6, '6'] });
+  assert.equal(f.state.appointments.length, 1);
+  assert.equal(saved.doctor_id, 5);
+  assert.deepEqual(saved.import_metadata.additional_staff.ids, [6]);
+  assert.equal(saved.import_metadata.booking, undefined);
+  assert.deepEqual(f.state.occupancies.filter(r => r.doctor_id).map(r => r.doctor_id), [5, 6]);
+  assert.equal(f.state.occupancies.filter(r => r.installation_id).length, 1);
+  assert(f.state.locks.some(([, key]) => key === 'doctor:6'));
+});
+
+test('support requires compatible gates and active scheduled clinic membership', async () => {
+  for (const ids of [[99], [true], null, Array(11).fill(6)]) {
+    const f = fixture();
+    await assert.rejects(f.reserve({ additionalStaffIds: ids }));
+    assert.equal(f.state.persists, 0);
+  }
+  const f = fixture();
+  await assert.rejects(f.reserve({ additionalStaffIds: [6], capabilities: { simple: true, multi: false } }),
+    { code: 'booking_profile_runtime_unavailable' });
+  assert.equal(f.state.persists, 0);
+});
+
+test('busy support cannot be forced, even when primary doctor and room are free', async () => {
+  const f = fixture({ bookingProfile: null, appointments: [{ id_cita: 1, clinica_id: 72, paciente_id: 2,
+    doctor_id: 6, instalacion_id: 12, inicio: start, fin: end, estado: 'pendiente' }] });
+  await assert.rejects(f.reserve({ additionalStaffIds: [6], force: true }), error =>
+    error.code === 'booking_unavailable' && error.details.can_force === false);
+  assert.equal(f.state.persists, 0);
+});
+
+test('a support reservation blocks a concurrent ordinary booking for that person', async () => {
+  const f = fixture({ bookingProfile: null });
+  const results = await Promise.allSettled([
+    f.reserve({ additionalStaffIds: [6] }),
+    f.reserve({ appointmentValues: { ...f.values, paciente_id: 2, doctor_id: 6, instalacion_id: 12 }, force: true }),
+  ]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  assert.equal(f.state.appointments.length, 1);
+});
+
+test('support survives rescheduling, explicit removal releases it, cancellation releases capacity', async () => {
+  const f = fixture({ bookingProfile: null });
+  const original = await f.reserve({ additionalStaffIds: [6] });
+  const nextStart = end, nextEnd = '2030-01-07T10:00:00.000Z';
+  const moved = await f.reserve({ existingAppointmentId: original.id_cita,
+    appointmentValues: { inicio: nextStart, fin: nextEnd } });
+  assert.deepEqual(moved.import_metadata.additional_staff.ids, [6]);
+  assert.equal(moved.import_metadata.additional_staff.start_at, nextStart);
+  assert.equal(f.state.occupancies.find(r => r.doctor_id === 6).end_at, nextEnd);
+  await f.reserve({ existingAppointmentId: original.id_cita, appointmentValues: { estado: 'cancelada' }, stateOnly: true });
+  await f.reserve({ appointmentValues: { ...f.values, paciente_id: 2, doctor_id: 6, instalacion_id: 12, inicio: nextStart, fin: nextEnd } });
+  await assert.rejects(f.reserve({ existingAppointmentId: original.id_cita, appointmentValues: { estado: 'pendiente' } }),
+    { code: 'booking_unavailable' });
+  const restored = await f.reserve({ existingAppointmentId: original.id_cita,
+    appointmentValues: { estado: 'pendiente' }, additionalStaffIds: [] });
+  assert.equal(restored.import_metadata?.additional_staff, undefined);
+  assert(!f.state.occupancies.some(r => r.appointment_id === original.id_cita && r.doctor_id === 6));
+});
+
+test('support in a later treatment phase occupies the whole appointment without double counting', async () => {
+  const f = fixture({ bookingProfile: profile(phase('one', [9], [5]), phase('two', [12], [6])) });
+  await f.reserve({ additionalStaffIds: [6], appointmentValues: { ...f.values, fin: '2030-01-07T10:00:00.000Z' } });
+  const support = f.state.occupancies.filter(r => r.doctor_id === 6);
+  assert.equal(support.length, 1);
+  assert.equal(support[0].start_at, start);
+  assert.equal(support[0].end_at, '2030-01-07T10:00:00.000Z');
+});
+
+test('client metadata cannot forge support and a status-only call cannot replace it', async () => {
+  const f = fixture({ bookingProfile: null });
+  const saved = await f.reserve({ appointmentValues: { ...f.values,
+    import_metadata: { additional_staff: { version: 1, ids: [99] } } } });
+  assert.equal(saved.import_metadata?.additional_staff, undefined);
+  await assert.rejects(f.reserve({ existingAppointmentId: saved.id_cita, stateOnly: true,
+    additionalStaffIds: [6], appointmentValues: { estado: 'confirmada' } }), { code: 'booking_additional_staff_invalid' });
+});
+
+test('support DTO is bounded, date-bound and excludes metadata, history and patient fields', async () => {
+  assert.equal(normalizeAdditionalStaff(undefined), undefined);
+  assert.deepEqual(normalizeAdditionalStaff([]), []);
+  const f = fixture({ bookingProfile: null });
+  const saved = await f.reserve({ additionalStaffIds: [6] });
+  assert.deepEqual(additionalStaffPayload(saved), [{ id: 6, name: '' }]);
+  assert.deepEqual(additionalStaffPayload({ ...saved, inicio: end }), []);
+  assert.deepEqual(additionalStaffPayload({ ...saved, import_metadata: '{invalid' }), []);
+  assert.deepEqual(additionalStaffPayload({ ...saved, import_metadata: { additional_staff: { version: 1, ids: [true], names: ['x'], start_at: start, end_at: end } } }), []);
+});
+
+test('treatment slot search excludes busy support using one bulk context, not queries per candidate', async () => {
+  const f = fixture({ appointments: [{ id_cita: 1, clinica_id: 73, paciente_id: 99,
+    doctor_id: 6, inicio: start, fin: end, estado: 'pendiente' }] });
+  const slots = await searchTreatmentSlots({ db: f.db, clinic: f.clinic, treatmentId: 3,
+    date: '2030-01-07', capabilities, now: new Date(start), limit: 20, additionalStaffIds: [6] });
+  assert(slots.slots.length > 1);
+  assert(slots.slots.every(slot => new Date(slot.start_at) >= new Date(end)));
+  assert.equal(f.state.calls.filter(([kind]) => kind === 'doctors').length, 1);
+  assert.equal(f.state.calls.filter(([kind]) => kind === 'appointments').length, 1);
+  assert.equal(f.state.calls.filter(([kind]) => kind === 'occupancies').length, 1);
+});
+
+test('failed support rebooking rolls the prior team and occupancy back together', async () => {
+  const f = fixture({ bookingProfile: null });
+  const saved = await f.reserve({ additionalStaffIds: [6] });
+  const before = JSON.stringify({ appointments: f.state.appointments, occupancies: f.state.occupancies });
+  await assert.rejects(f.reserve({ existingAppointmentId: saved.id_cita,
+    appointmentValues: { inicio: end, fin: '2030-01-07T10:00:00Z' }, additionalStaffIds: [99] }),
+  { code: 'booking_unavailable' });
+  assert.equal(JSON.stringify({ appointments: f.state.appointments, occupancies: f.state.occupancies }), before);
 });
 
 test('occupancy failure rolls the canonical appointment back too; no partial reservation', async () => {

@@ -25,6 +25,7 @@ const ConversationRead = db.ConversationRead;
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
 const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile, bookingErrorPayload } = require('../services/treatmentBookingProfile.service');
 const { mutateAppointmentBooking } = require('../services/appointmentBookingCommand.service');
+const { normalizeAdditionalStaff, additionalStaffPayload } = require('../lib/appointment-additional-staff');
 const { bookingSegments } = require('../lib/appointment-booking-segments');
 const { appointmentImportReview } = require('../lib/appointment-import-review');
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
@@ -166,6 +167,7 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
     const protectedPayload = { ...plain };
     protectedPayload.import_review = plain.import_review || appointmentImportReview(plain);
     if (bookingCapabilities().simple) {
+        protectedPayload.additional_staff = plain.additional_staff || additionalStaffPayload(plain);
         protectedPayload.booking_segments = (plain.booking_segments || bookingSegments(plain)).map((segment) => ({
             ...segment, label: capabilities.patientSensitive ? segment.label : '',
         }));
@@ -1158,6 +1160,7 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
         fin_local: formatDateTimeLocal(plain.fin, timeZone),
         time_zone: timeZone,
         import_review: appointmentImportReview(plain),
+        ...(bookingCapabilities().simple ? { additional_staff: additionalStaffPayload(plain) } : {}),
         ...(bookingCapabilities().simple ? { booking_segments: bookingSegments(plain).map((segment) => ({ ...segment,
             start_local: formatDateTimeLocal(segment.start_at, timeZone), end_local: formatDateTimeLocal(segment.end_at, timeZone) })) } : {}),
         precio_cita_resuelto: resolveCitaAppointmentPrice(plain),
@@ -2081,6 +2084,11 @@ exports.createCita = asyncHandler(async (req, res) => {
         const bookingEnabled = bookingCapabilities().simple;
         // A historical label alone cannot bypass the booking gate for future work.
         const pastHistoryOnly = isHistoricalRegistration && finDate <= new Date();
+        const additionalStaffIds = normalizeAdditionalStaff(req.body?.additional_staff_ids);
+        if (additionalStaffIds?.length && (!bookingCapabilities().multi || pastHistoryOnly)) {
+            return res.status(409).json({ code: 'booking_profile_runtime_unavailable', can_force: false,
+                message: 'La reserva con personal de apoyo no está disponible en este recorrido.' });
+        }
         if (!pastHistoryOnly && tratamiento_id) {
             const bookingTreatment = await loadScopedTreatment({ db, treatmentId: tratamiento_id, clinic: clinica });
             requireOperationalProfile(bookingTreatment);
@@ -2093,6 +2101,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         // booking runtime is disabled or when recording past clinical activity.
         delete baseImportMetadata.booking;
         delete baseImportMetadata.program_session;
+        delete baseImportMetadata.additional_staff;
         const appointmentImportMetadata = {
             ...baseImportMetadata,
             ...(isHistoricalRegistration ? {
@@ -2202,6 +2211,7 @@ exports.createCita = asyncHandler(async (req, res) => {
             ? await mutateAppointmentBooking({
                 db,
                 appointmentValues: createOptions.appointmentValues,
+                additionalStaffIds,
                 force: parseBool(force),
                 selections: req.body?.booking_selection || {},
                 priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
@@ -2402,15 +2412,16 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
             const plain = plainCita(cita);
             const timeZone = calendarScope.timeZones.get(Number(plain.clinica_id)) || DEFAULT_TIMEZONE;
             const segments = bookingCapabilities().simple ? bookingSegments(plain) : [];
+            const support = bookingCapabilities().simple ? additionalStaffPayload(plain) : [];
             return {
                 clinica_id: plain.clinica_id,
                 doctor_id: plain.doctor_id,
                 instalacion_id: plain.instalacion_id,
                 inicio: plain.inicio,
                 inicio_local: formatDateTimeLocal(plain.inicio, timeZone),
-                ...(segments.length ? { booking_resource_ids: {
-                    doctor_ids: [...new Set(segments.flatMap((segment) => segment.doctor_ids))],
-                    installation_ids: [...new Set(segments.map((segment) => segment.installation_id))],
+                ...(segments.length || support.length ? { booking_resource_ids: {
+                    doctor_ids: [...new Set([...(segments.length ? segments.flatMap(segment => segment.doctor_ids) : [plain.doctor_id]), ...support.map(person => person.id)].filter(Boolean))],
+                    installation_ids: [...new Set((segments.length ? segments.map(segment => segment.installation_id) : [plain.instalacion_id]).filter(Boolean))],
                 } } : {}),
             };
         }));
@@ -2989,6 +3000,11 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     }
 
     const bookingEnabled = bookingCapabilities().simple;
+    const additionalStaffIds = normalizeAdditionalStaff(req.body?.additional_staff_ids);
+    if (!bookingCapabilities().multi && (additionalStaffIds?.length || additionalStaffPayload(cita).length)) {
+        return res.status(409).json({ code: 'booking_profile_runtime_unavailable', can_force: false,
+            message: 'Esta cita requiere reserva compatible con personal de apoyo.' });
+    }
     if (!bookingEnabled && cita.tratamiento_id) {
         const clinic = await Clinica.findByPk(cita.clinica_id);
         const treatment = await loadScopedTreatment({ db, treatmentId: cita.tratamiento_id, clinic });
@@ -3045,6 +3061,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     if (bookingEnabled) {
         cita = await mutateAppointmentBooking({
             db, existingAppointmentId: cita.id_cita,
+            additionalStaffIds,
             appointmentValues: { inicio, fin,
                 ...(nextDoctorIdRaw !== undefined ? { doctor_id: nextDoctorId } : {}),
                 ...(nextInstalacionIdRaw !== undefined ? { instalacion_id: nextInstalacionId } : {}),
