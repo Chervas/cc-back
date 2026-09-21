@@ -1,5 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
+const { withCalendarMutation, sendCalendarMutationError } = require('../services/appointmentCalendarMutation.service');
+const withInstallationCalendarMutation = (installationId, mutate) => withCalendarMutation({ db, installationId, mutate });
 const { Op } = db.Sequelize;
 const {
   assertUserCanAccessFeature,
@@ -251,9 +253,9 @@ exports.update = asyncHandler(async (req, res) => {
   const tipo = body.tipo !== undefined ? normalizeInstallationType(body.tipo) : item.tipo;
   if (!tipo) return res.status(400).json({ message: 'tipo de instalación inválido' });
 
-  const t = await db.sequelize.transaction();
   try {
-    await item.update({
+    await withInstallationCalendarMutation(id, async t => {
+      await item.update({
       // No permitimos cambiar de clínica por ahora (evita movimientos inesperados)
       nombre: body.nombre ?? item.nombre,
       tipo,
@@ -280,7 +282,7 @@ exports.update = asyncHandler(async (req, res) => {
       }
     }
 
-    await t.commit();
+    });
 
     const full = await db.Instalacion.findByPk(id, {
       include: [
@@ -291,7 +293,7 @@ exports.update = asyncHandler(async (req, res) => {
     });
     return res.json(full);
   } catch (e) {
-    await t.rollback();
+    if (sendCalendarMutationError(e, res)) return;
     console.error('Error update instalacion', e);
     return res.status(500).json({ message: 'Error actualizando instalación' });
   }
@@ -302,7 +304,7 @@ exports.remove = asyncHandler(async (req, res) => {
   if (!id) return res.status(400).json({ message: 'id inválido' });
   const item = await installationOr404(req, res, id, 'clinic.settings.edit');
   if (!item) return;
-  await item.update({ activo: false });
+  await withInstallationCalendarMutation(id, transaction => item.update({ activo: false }, { transaction }));
   res.status(204).send();
 });
 
@@ -322,8 +324,8 @@ exports.putHorarios = asyncHandler(async (req, res) => {
   if (!id) return res.status(400).json({ message: 'id inválido' });
   if (!await installationOr404(req, res, id, 'clinic.settings.edit')) return;
   const horarios = Array.isArray(req.body) ? req.body : [];
-  const t = await db.sequelize.transaction();
   try {
+    await withInstallationCalendarMutation(id, async t => {
     await db.InstalacionHorario.destroy({ where: { instalacion_id: id }, transaction: t });
     const rows = horarios
       .filter((h) => h && h.dia_semana !== undefined)
@@ -335,11 +337,11 @@ exports.putHorarios = asyncHandler(async (req, res) => {
         hora_fin: h.hora_fin || '20:00',
       }));
     if (rows.length) await db.InstalacionHorario.bulkCreate(rows, { transaction: t });
-    await t.commit();
+    });
     const out = await db.InstalacionHorario.findAll({ where: { instalacion_id: id }, order: [['dia_semana','ASC']] });
     res.json(out);
   } catch (e) {
-    await t.rollback();
+    if (sendCalendarMutationError(e, res)) return;
     console.error('Error putHorarios', e);
     res.status(500).json({ message: 'Error actualizando horarios' });
   }
@@ -363,14 +365,18 @@ exports.createBloqueo = asyncHandler(async (req, res) => {
   if (!await installationOr404(req, res, instalacionId, 'clinic.settings.edit')) return;
   if (!body.fecha_inicio || !body.fecha_fin) return res.status(400).json({ message: 'fecha_inicio y fecha_fin requeridos' });
 
-  const created = await db.InstalacionBloqueo.create({
+  const start = new Date(body.fecha_inicio), end = new Date(body.fecha_fin);
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) {
+    return res.status(400).json({ message: 'El fin del bloqueo debe ser posterior al inicio.' });
+  }
+  const created = await withInstallationCalendarMutation(instalacionId, transaction => db.InstalacionBloqueo.create({
     instalacion_id: instalacionId,
     fecha_inicio: new Date(body.fecha_inicio),
     fecha_fin: new Date(body.fecha_fin),
     motivo: body.motivo || null,
     recurrente: body.recurrente || 'none',
     creado_por: req.userData?.userId ? Number(req.userData.userId) : null,
-  });
+  }, { transaction }));
   res.status(201).json(created);
 });
 
@@ -380,7 +386,7 @@ exports.deleteBloqueo = asyncHandler(async (req, res) => {
   const item = await db.InstalacionBloqueo.findByPk(id);
   if (!item) return res.status(404).json({ message: 'Bloqueo no encontrado' });
   if (!await installationOr404(req, res, item.instalacion_id, 'clinic.settings.edit')) return;
-  await item.destroy();
+  await withInstallationCalendarMutation(item.instalacion_id, transaction => item.destroy({ transaction }));
   res.status(204).send();
 });
 
@@ -495,14 +501,16 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     // Blocks
     const blockIntervals = [];
     if (instData) {
-      (instData.bloqueos || []).forEach(b => blockIntervals.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
-      const citasInst = await db.CitaPaciente.findAll({ where: { ...ACTIVE_APPOINTMENT_WHERE, instalacion_id, inicio: { [Op.lt]: timeStrToDate(fecha,'23:59') }, fin: { [Op.gt]: timeStrToDate(fecha,'00:00') } }, attributes: ['inicio','fin'] });
+      (await require('../services/appointmentResourceCalendar.service').resourceInstallationBlocks({ db, clinic: instData.clinica,
+        installationIds: [Number(instalacion_id)], start: timeStrToDate(fecha, '00:00'), end: timeStrToDate(fecha, '23:59') }))
+        .forEach(b => blockIntervals.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
+      const citasInst = await require('../services/appointmentResourceCalendar.service').resourceAppointments({ db, clinic: instData.clinica, installationId: instalacion_id, start: timeStrToDate(fecha, '00:00'), end: timeStrToDate(fecha, '23:59') });
       citasInst.forEach(c => blockIntervals.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
     }
     if (doctor_id) {
       const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: timeStrToDate(fecha,'23:59') }, fecha_fin: { [Op.gt]: timeStrToDate(fecha,'00:00') } } });
       bloqueos.forEach(b => blockIntervals.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
-      const citasDoc = await db.CitaPaciente.findAll({ where: { ...ACTIVE_APPOINTMENT_WHERE, doctor_id, inicio: { [Op.lt]: timeStrToDate(fecha,'23:59') }, fin: { [Op.gt]: timeStrToDate(fecha,'00:00') } }, attributes: ['inicio','fin'] });
+      const citasDoc = await require('../services/appointmentResourceCalendar.service').resourceAppointments({ db, doctorId: doctor_id, start: timeStrToDate(fecha, '00:00'), end: timeStrToDate(fecha, '23:59') });
       citasDoc.forEach(c => blockIntervals.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
     }
     const windowsFree = subtractIntervals(windows, blockIntervals);
@@ -526,10 +534,11 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     const h = (instData.horarios || []).find(h => h.dia_semana === dow);
     const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(effectiveEnd);
     if (!inRange) conflicts.push({ type: 'out_of_hours', message: 'Instalación fuera de horario' });
-    (instData.bloqueos || []).forEach(b => {
+    (await require('../services/appointmentResourceCalendar.service').resourceInstallationBlocks({ db, clinic: instData.clinica,
+      installationIds: [Number(instalacion_id)], start, end: effectiveEnd })).forEach(b => {
       if (overlap(start, effectiveEnd, b.fecha_inicio, b.fecha_fin)) conflicts.push({ type: 'blocked', message: b.motivo || 'Bloqueo instalación' });
     });
-    const citasInst = await db.CitaPaciente.findAll({ where: { ...ACTIVE_APPOINTMENT_WHERE, instalacion_id, inicio: { [Op.lt]: effectiveEnd }, fin: { [Op.gt]: start } }, attributes: ['id_cita','inicio','fin'] });
+    const citasInst = await require('../services/appointmentResourceCalendar.service').resourceAppointments({ db, clinic: instData.clinica, installationId: instalacion_id, start, end: effectiveEnd });
     if (citasInst.length) conflicts.push({ type: 'overlap', message: 'Instalación ocupada' });
   }
 
@@ -539,7 +548,7 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
     const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: effectiveEnd }, fecha_fin: { [Op.gt]: start } } });
     if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
-    const citasDoc = await db.CitaPaciente.findAll({ where: { ...ACTIVE_APPOINTMENT_WHERE, doctor_id, inicio: { [Op.lt]: effectiveEnd }, fin: { [Op.gt]: start } }, attributes: ['id_cita','inicio','fin'] });
+    const citasDoc = await require('../services/appointmentResourceCalendar.service').resourceAppointments({ db, doctorId: doctor_id, start, end: effectiveEnd });
     if (citasDoc.length) conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
   }
 
