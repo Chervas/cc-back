@@ -3224,6 +3224,25 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     return res.json(await protectAppointmentsForRequest(req, citaActualizada));
 });
 
+exports.updateCitaSupport = asyncHandler(async (req, res) => {
+    const citaId = Number(req.params.id);
+    if (!Number.isSafeInteger(citaId) || citaId < 1) return res.status(400).json({ message: 'Cita inválida' });
+    const existing = await CitaPaciente.findByPk(citaId);
+    if (!existing) return res.status(404).json({ message: 'Cita no encontrada' });
+    if (await denyAppointmentManageAccessIfNeeded(req, res, existing.clinica_id)) return;
+    await require('../services/appointmentSupport.service').changeAppointmentSupport({ db, appointmentId: citaId,
+        actorId: req.userData?.userId || null, ids: req.body?.additional_staff_ids,
+        expectedRange: { start: req.body?.expected_start, end: req.body?.expected_end } });
+    const updated = await CitaPaciente.findByPk(citaId, { include: [
+        { model: Paciente, as: 'paciente' }, { model: Clinica, as: 'clinica' },
+        { model: Instalacion, as: 'instalacion', required: false },
+        { model: Tratamiento, as: 'tratamiento', required: false },
+        { model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'] },
+    ] });
+    emitAppointmentSocketEvent('appointment:updated', updated.toJSON());
+    return res.json(await protectAppointmentsForRequest(req, updated));
+});
+
 exports.__testing = Object.freeze({
     calendarBoundaryInTimeZone,
     buildCalendarRangeForTimeZone,
