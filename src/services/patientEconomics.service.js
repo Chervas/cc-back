@@ -2978,6 +2978,7 @@ async function fiscalPriceProjection({ budget, version, payment, payload, docume
   if (!source) {
     const acceptance = await EconomicBudgetEvent.findOne({ where: {
       budget_id: budget.id, version_number: version.version_number,
+      event_type: { [Op.in]: ['accepted', 'partially_accepted'] },
       to_status: { [Op.in]: ['accepted', 'partially_accepted'] },
     }, order: [['id', 'DESC']], transaction });
     source = fiscalPrices.buildSource({ version, acceptance, payment });
@@ -2998,6 +2999,7 @@ async function fiscalPriceProjection({ budget, version, payment, payload, docume
     // Payments have their own limit as well as the budget's aggregate limit.
     const acceptance = await EconomicBudgetEvent.findOne({ where: {
       budget_id: budget.id, version_number: version.version_number,
+      event_type: { [Op.in]: ['accepted', 'partially_accepted'] },
       to_status: { [Op.in]: ['accepted', 'partially_accepted'] },
     }, order: [['id', 'DESC']], transaction });
     const accepted = numberValue(parseJson(acceptance?.metadata, {}).accepted_amount);
