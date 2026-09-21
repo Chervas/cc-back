@@ -6,10 +6,10 @@ const { additionalStaffPayload } = require('../lib/appointment-additional-staff'
 // Deliberately no automation, milestone, notification or economic dependencies.
 // The event and the reservation commit together; the controller emits only the
 // normal calendar refresh after that commit.
-async function changeAppointmentSupport({ db, appointmentId, actorId, ids, expectedRange, capabilities }) {
+async function changeAppointmentSupport({ db, appointmentId, actorId, ids, expectedRange, capabilities, transaction = null }) {
   return mutateAppointmentBooking({ db, existingAppointmentId: appointmentId,
     appointmentValues: { updated_by: actorId }, additionalStaffIds: ids,
-    supportOnly: true, expectedRange, capabilities, allowObsolete: true,
+    supportOnly: true, expectedRange, capabilities, transaction, allowObsolete: true,
     persist: async ({ values, existing, transaction }) => {
       const before = additionalStaffPayload(existing);
       const saved = await existing.update(values, { transaction });
