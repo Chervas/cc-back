@@ -14,6 +14,7 @@ const clinical = r => ({ patient: r.paciente_id, clinic: r.clinica_id, doctor: r
   room: r.instalacion_id, treatment: r.tratamiento_id, note: r.nota, type: r.tipo_cita });
 const positive = n => /^[1-9]\d*$/.test(String(n)) && Number.isSafeInteger(Number(n));
 const sha = s => /^[a-f0-9]{64}$/.test(s || '');
+const inReviewedWeek = local => local >= '2026-09-21' && local < '2026-09-28';
 function observed(row) {
   if (!positive(row?.idCita) || !positive(row.idContacto) || Number(row.idEmpresa) !== 5880
     || ![0, -2].includes(Number(row.estado)) || row.conceptos?.length !== 1
@@ -46,7 +47,11 @@ function prepareLegacyReconciliation({ before: raw, history, sources, reviewedBy
     || norm(current.details) !== norm(old.detalles || '')
     || Date.parse(localToUtc(current.end_local)) - Date.parse(localToUtc(current.start_local)) !== Date.parse(before.fin) - Date.parse(before.inicio)
     || current.start_local < '2026-09-01' || current.start_local >= '2027-01-01'
-    || (current.status === 'pendiente' && (current.start_local < '2026-09-21' || current.start_local >= '2026-09-28'))
+    || current.end_local > '2027-01-01T00:00:00'
+    // An existing appointment moved OUT of the priority week must leave its old
+    // slot too. This does not permit unrelated future-to-future reconciliation.
+    || (current.status === 'pendiente' && !inReviewedWeek(current.start_local)
+      && !inReviewedWeek(localDateTime(old.fechaIni, old.horaIni)))
     || Date.parse(before.inicio) < now || Date.parse(localToUtc(current.start_local)) < now) fail();
   if (!Array.isArray(sources) || !sources.length || sources.length > 2) fail();
   const entries = sources.map(source => {
