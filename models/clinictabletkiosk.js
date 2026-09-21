@@ -16,6 +16,7 @@ module.exports = (sequelize, DataTypes) => {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     public_id: { type: DataTypes.STRING(80), allowNull: false, unique: true },
     clinic_id: { type: DataTypes.INTEGER, allowNull: false },
+    consent_group_id: { type: DataTypes.INTEGER, allowNull: true, defaultValue: null },
     username: { type: DataTypes.STRING(160), allowNull: false, unique: true },
     password_hash: { type: DataTypes.STRING(255), allowNull: false },
     display_name: { type: DataTypes.STRING(160), allowNull: true },

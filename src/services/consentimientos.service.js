@@ -9,6 +9,7 @@ const { promisify } = require('util');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const db = require('../../models');
+const { consentClinicIds, setConsentGroupScope } = require('../lib/tablet-kiosk-scope');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 // Keep PDFs self-contained: isolated runtimes cannot fetch frontend assets.
@@ -2510,6 +2511,7 @@ function serializeKioskAccess(kiosk, includePassword = null) {
         id: plain.id,
         public_id: plain.public_id,
         clinic_id: plain.clinic_id,
+        include_group_consents: !!plain.consent_group_id,
         username: plain.username,
         display_name: plain.display_name || 'Tablet recepción',
         status: plain.status,
@@ -2560,6 +2562,12 @@ async function buildUniqueKioskUsername(clinicId, clinicName, preferred = null) 
         candidate = `${base}-${index}`;
     }
     return candidate;
+}
+
+async function updateClinicKioskScope(clinicId, kioskId, actorId, payload = {}) {
+    await setConsentGroupScope({ db, assertAccess: require('../lib/access-policy').assertUserCanAccessFeature,
+        clinicId, kioskId, actorId, enabled: payload.include_group_consents });
+    return getClinicKioskAccess(clinicId);
 }
 
 async function createClinicKioskAccess(clinicIdRaw, userId = null, payload = {}) {
@@ -2736,6 +2744,7 @@ function serializeKioskPackage(packageRow) {
         signed_count: plain.signed_count,
         pending_count: pendingDocuments.length,
         blocking_pending: blockingPending,
+        clinic: { id_clinica: plain.clinica_id, nombre_clinica: plain.clinica?.nombre_clinica || '' },
         paciente: {
             id_paciente: plain.paciente?.id_paciente || null,
             public_id: plain.paciente?.public_id || null,
@@ -2784,11 +2793,12 @@ function publicSignatureEvidenceForDocument(doc) {
 
 async function listTabletKioskPackages(tokenRaw, filters = {}) {
     const kiosk = await requireKioskSession(tokenRaw);
+    const clinicIds = await consentClinicIds(db, kiosk);
     const limit = Math.min(toIntOrNull(filters.limit) || 80, 150);
     const q = toCleanString(filters.q)?.toLowerCase() || null;
     const packageRows = await db.ConsentSignaturePackage.findAll({
         where: {
-            clinica_id: kiosk.clinic_id,
+            clinica_id: { [Op.in]: clinicIds },
             status: { [Op.in]: ['pending', 'sent', 'viewed'] },
             [Op.or]: [
                 { expires_at: null },
@@ -2797,6 +2807,7 @@ async function listTabletKioskPackages(tokenRaw, filters = {}) {
         },
         include: [
             { model: db.PatientConsentDocument, as: 'documents', required: true },
+            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
             { model: db.Paciente, as: 'paciente', required: false },
             { model: db.CitaPaciente, as: 'cita', required: false },
             { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] },
@@ -2828,6 +2839,7 @@ async function listTabletKioskPackages(tokenRaw, filters = {}) {
         .sort((a, b) => new Date(a.due_at || a.created_at || 0).getTime() - new Date(b.due_at || b.created_at || 0).getTime());
     return {
         clinic_id: kiosk.clinic_id,
+        include_group_consents: clinicIds.length > 1,
         items: mergedItems,
         total: mergedItems.length,
     };
@@ -2841,7 +2853,8 @@ async function createTabletSessionForKiosk(packageIdRaw, tokenRaw, payload = {})
         err.statusCode = 404;
         throw err;
     }
-    if (Number(packageRow.clinica_id) !== Number(kiosk.clinic_id)) {
+    const clinicIds = await consentClinicIds(db, kiosk);
+    if (!clinicIds.includes(Number(packageRow.clinica_id))) {
         const err = new Error('tablet_kiosk_package_forbidden');
         err.statusCode = 403;
         throw err;
@@ -3332,6 +3345,7 @@ module.exports = {
     getClinicKioskAccess,
     createClinicKioskAccess,
     regenerateClinicKioskAccess,
+    updateClinicKioskScope,
     resetClinicKioskAccess,
     loginTabletKiosk,
     getTabletKioskSession,
