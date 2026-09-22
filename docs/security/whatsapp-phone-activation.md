@@ -47,6 +47,29 @@ sin confirmar se conserva. Desmontar el iframe después del éxito no cancela el
 recibo ni cierra la ventana de pago. La autorización no acredita que exista una
 tarjeta válida ni que el teléfono esté operativo.
 
+## Plazos y preparación de plantillas
+
+El registro en Meta dispone de 60 segundos (antes 8). La activación completa
+está limitada a 90 segundos, con lease de 120; el cliente del gateway espera
+hasta 100 y el servidor del broker hasta 110. Las consultas ordinarias conservan
+sus plazos cortos. Solo el perfil de transporte de alta puede ampliar el límite
+y exclusivamente para `meta.whatsapp.onboarding.activate.v1`.
+
+El frontend concede 150 segundos a `complete`, que incluye perfil y activación.
+Nginx debe usar una ubicación exacta `/api/whatsapp/onboarding/complete` con
+`proxy_read_timeout 180s`, conservando límites de cuerpo, cabeceras y ausencia de
+logs del bloque de alta. El resto de ese bloque mantiene 35 segundos. Ningún
+plazo amplía los 30 minutos de autorización ni permite repetir un registro incierto.
+
+La proyección activa y un `JobRequest` de creación de plantillas se guardan en
+la misma transacción SQL. La clave estable depende del recibo de activación:
+reabrirlo no duplica trabajos terminados, fallidos o cancelados. El gateway dirige
+ese trabajo al namespace de negocio configurado (staging en el público actual),
+no inicia un worker propio. El worker existente concilia y prepara el catálogo
+por WABA con su lease; Meta decide la aprobación. El alta conectada no garantiza
+que sus plantillas ya estén aprobadas. Los fallos del job conservan su recuperación
+habitual y no desencadenan envíos de prueba.
+
 ## Identidades, recepción y enrutamiento
 
 - AWS: `/var/lib/clinicaclick-whatsapp-capture-scopes/scopes.json` contiene solo

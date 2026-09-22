@@ -31,7 +31,9 @@ function createTemplateMedia({request=https.request,lookup=dns.lookup}={}){
     const addresses=await lookup(hostname,{all:true,verbatim:true});
     if(!addresses.length||addresses.some(a=>!publicAddress(a.address)))fail('invalid_request');
     assertActive();
-    const image=await transfer(url,{address:addresses[0],signal});
+    // Public CDN/WAF policies may reject anonymous clients without User-Agent.
+    // Identify this downloader without forwarding any Meta credential.
+    const image=await transfer(url,{address:addresses[0],signal,headers:{'user-agent':'Clinicaclick-Template-Media/1.0'}});
     try{
       if(!image.length)fail('invalid_request');
       const type=image.subarray(0,3).equals(Buffer.from([255,216,255]))?'image/jpeg':image.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))?'image/png':image.subarray(0,4).toString()==='RIFF'&&image.subarray(8,12).toString()==='WEBP'?'image/webp':null;
