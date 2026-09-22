@@ -360,3 +360,43 @@ La revisión del profesional y la adecuación del texto siguen siendo necesarias
 Pruebas: `cliniccloud_catalog_consent_links.test.js`. Recuperación selectiva solo
 de los IDs insertados del diario, tras comprobar que no hubo edición o uso clínico
 posterior; nunca restaurar la base completa ni borrar documentación del paciente.
+
+### Precio final de modalidades estéticas explícitamente revisadas
+
+`cliniccloud-import-catalog-cosmetic-prices.js` configura solo importes fijos
+positivos, EUR e IVA incluido, en borradores Medical sin citas. No es una política
+por especialidad ni un clasificador de actos sanitarios. La revisión privada
+identifica cada fila, su finalidad estética no terapéutica mediante texto del
+documento entregado, su motivo, la regla fiscal contrastada y dos configuraciones
+estéticas previamente revisadas en la clínica. Toda modificación de esas fuentes,
+anclas, importe o borrador exige otra revisión. El operador está limitado al
+perfil bruto/IVA 21 %: no permite inferir exenciones, precios gratuitos,
+«incluido»/«desde», finalidad mixta o tipos reducidos.
+
+Argumentos comunes: `--target crm --plan … --workbook … --purpose-document …`.
+Modos `prepare --review … --private-output …`, `dry-run/apply --package …
+--approved-sha256 … --backup-manifest … --private-journal …` y
+`verify --package … --private-output …`. Solo desde back-dev/dev; paquete de menos
+de dos horas, respaldo CRM íntegro y diario diferente por ejecución. Máximo 30
+tratamientos; ensayo con rollback comprobado, locks/comparación exacta, lectura
+independiente tras commit y replay sin escrituras. Si el commit resulta ambiguo,
+conciliar el diario antes de reintentar.
+
+Actualiza únicamente `precio_base` (importe **final**, no neto), `clinical_config`
+y timestamp. Usa el contrato fiscal canónico y conserva todas las demás claves,
+procedencia, perfiles de agenda, asociaciones y estados. Los primeros ejemplos
+de programa, anteriores a `source_catalog_key`, solo son compatibles si el
+preparador original puede reconstruir sus dos definiciones exactas a partir del
+plan; no se añade una identidad fuente inventada ni se duplica el tratamiento.
+
+La procedencia se registra como `imported_price_review.review_method =
+documentary_import`, `reviewed_by = null`, con hash de paquete/revisión/documento:
+**no simula una confirmación humana ni una sesión autenticada**. La ruta HTTP
+existente sigue exigiendo su usuario real; el JSON del cliente no puede fabricar
+ni eliminar esta revisión. No cambia presupuestos/ventas previos, programas,
+cabinas, activación o recordatorios. La finalidad sanitaria o un cambio de
+modalidad exige revisión antes de usar esa configuración para un nuevo acto.
+Pruebas: `cliniccloud_catalog_cosmetic_prices.test.js`,
+`treatment_catalog_contract.test.js`, `economic_price_profile.test.js` y
+`economic_fiscal_price_source.test.js`. Recuperación selectiva de esas columnas,
+comparando el estado posterior y el uso económico, no restauración global.
