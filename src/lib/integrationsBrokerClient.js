@@ -3,24 +3,30 @@
 // No models, .env loading, AWS SDK, bootstrap or provider tokens in this consumer adapter.
 const https = require('node:https');
 const { createHash, createPrivateKey, randomUUID, sign } = require('node:crypto');
+const activationLimits = require('../../services/integrations-broker/src/whatsapp-activation-limits');
 const SAFE_CODES = new Set(['invalid_request', 'invalid_signature', 'scope_denied', 'operation_denied', 'connection_blocked', 'asset_revoked',
   'request_replayed', 'idempotency_conflict', 'outcome_unknown', 'rate_limited', 'provider_disabled', 'provider_failed',
   'provider_timeout', 'provider_unauthorized', 'credential_revoked', 'secret_unavailable', 'audit_unavailable', 'internal_error',
   'secret_version_changed', 'oauth_state_invalid', 'oauth_identity_mismatch', 'oauth_credentials_incomplete',
   'oauth_flow_busy', 'oauth_flow_interrupted']);
 const error = code => Object.assign(new Error(code), { code });
-function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, ca, timeoutMs = 15000 }) {
+function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, ca, timeoutMs = 15000, transportProfile = 'default' }) {
+  const onboarding = transportProfile === 'whatsapp-onboarding';
+  const maxTimeout = onboarding ? activationLimits.CLIENT_TIMEOUT_MS : 30000;
   let base; let key;
   try {
     base = new URL(origin); key = createPrivateKey(privateKey);
     if (base.protocol !== 'https:' || base.username || base.password || base.pathname !== '/' || base.search || base.hash
       || key.asymmetricKeyType !== 'ed25519' || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(keyId)
-      || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(audience) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw Error();
+      || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(audience) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > maxTimeout
+      || !['default', 'whatsapp-onboarding'].includes(transportProfile)) throw Error();
   } catch { throw error('broker_configuration_invalid'); }
   return {
     execute(command, options = {}) {
-      const budget = options.timeoutMs === undefined ? timeoutMs : options.timeoutMs;
-      if (!Number.isInteger(budget) || budget < 1 || budget > 30000) return Promise.reject(error('invalid_request'));
+      const operationLimit = onboarding && command.operation !== activationLimits.ACTIVATE ? 30000 : maxTimeout;
+      const budget = options.timeoutMs === undefined ? Math.min(timeoutMs, operationLimit) : options.timeoutMs;
+      if (!Number.isInteger(budget) || budget < 1 || budget > operationLimit
+        || onboarding && !/^meta\.whatsapp\.onboarding\.(?:prepare|begin|finish|status|abort|profile|activate|activation-status)\.v1$/.test(command.operation)) return Promise.reject(error('invalid_request'));
       const requestId = command.requestId || randomUUID();
       const body = Buffer.from(JSON.stringify({ ...command, requestId, version: 1, audience, issuedAt: Date.now(), nonce: randomUUID() }));
       if (body.length > 32768) return Promise.reject(error('invalid_request'));
