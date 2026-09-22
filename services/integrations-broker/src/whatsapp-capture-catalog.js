@@ -17,7 +17,7 @@ function publish(filename,appId,scopes){
   const before=read(filename,appId);for(const old of before)if(JSON.stringify(scopes.find(s=>s.phoneId===old.phoneId))!==JSON.stringify(old))fail('scope_denied');
   const dir=path.dirname(filename),s=fs.statSync(dir);if(!s.isDirectory()||s.mode&0o027||fs.realpathSync(dir)!==dir)fail('invalid_request');
   const temp=filename+'.'+randomUUID();let fd;
-  try{fd=fs.openSync(temp,'wx',0o640);fs.writeFileSync(fd,JSON.stringify(value));fs.fsyncSync(fd);fs.closeSync(fd);fd=null;
+  try{fd=fs.openSync(temp,'wx',0o640);fs.fchmodSync(fd,0o640);fs.writeFileSync(fd,JSON.stringify(value));fs.fsyncSync(fd);fs.closeSync(fd);fd=null;
     fs.renameSync(temp,filename);const d=fs.openSync(dir,'r');try{fs.fsyncSync(d)}finally{fs.closeSync(d)}}
   finally{if(fd!==null&&fd!==undefined)fs.closeSync(fd);if(fs.existsSync(temp))fs.unlinkSync(temp);}
 }

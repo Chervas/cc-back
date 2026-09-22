@@ -34,7 +34,7 @@ function write(value,filename=FILE){
   validate(value);const dir=require('node:path').dirname(filename),stat=fs.statSync(dir);
   if(!stat.isDirectory()||stat.mode&0o027||fs.realpathSync(dir)!==dir)fail();
   const temp=filename+'.'+randomUUID();let fd;
-  try{fd=fs.openSync(temp,'wx',0o640);fs.writeFileSync(fd,JSON.stringify(value));fs.fsyncSync(fd);fs.closeSync(fd);fd=null;
+  try{fd=fs.openSync(temp,'wx',0o640);fs.fchmodSync(fd,0o640);fs.writeFileSync(fd,JSON.stringify(value));fs.fsyncSync(fd);fs.closeSync(fd);fd=null;
     fs.renameSync(temp,filename);const d=fs.openSync(dir,'r');try{fs.fsyncSync(d)}finally{fs.closeSync(d)}}
   finally{if(fd!==null&&fd!==undefined)fs.closeSync(fd);if(fs.existsSync(temp))fs.unlinkSync(temp);}
 }
