@@ -96,6 +96,58 @@ por el titular según [reconexión](whatsapp-reconnection-readiness.md). El runt
 arrancado o un test offline correcto no acreditan entrega real ni permiten
 reanudar automáticamente las colas históricas.
 
+## Recepción atascada y recuperación de confirmaciones
+
+El inbox cifra cada evento antes de acusar su recepción a Meta. Esto no prueba
+su importación en CRM. El consumidor confirma únicamente después del commit SQL.
+Un evento no resoluble conserva su cuerpo y recibo; `/defer`, exclusivo del
+principal consumidor mTLS, registra una razón acotada y espera exponencial de
+1 a 60 minutos. La selección gira por último intento, de modo que un evento
+antiguo tampoco acapara el turno si el consumidor cae antes de diferirlo.
+La tabla aditiva `whatsapp_inbox_retry` no altera ciphertext, AAD ni recibos.
+
+`GET /pending` incorpora salud por ámbito, sin texto ni contactos. El consumidor
+publica atómicamente `/run/clinicaclick-whatsapp-inbox-health/health.json` en su
+`RuntimeDirectory`: solo él escribe; la API lee. Una muestra ausente o mayor de
+90 segundos, una entrada ordinaria con más de 120 segundos de demora o una revisión
+de contenido/ámbito impiden inferir que el paciente no respondió. Los eventos
+administrativos conocidos (`played`, `edit`, `revoke`) y estados sin mensaje local
+se conservan para revisión sin bloquear todos los recordatorios. Un lote mixto
+que también contiene una respuesta real sí bloquea hasta resolverse.
+
+Los timeouts de citas con WhatsApp autorizado vuelven a una espera durable de
+un minuto mientras falla la recepción; no mandan el segundo mensaje ni cancelan
+la cita por silencio. Al recuperarse comprueban la cita actual y las respuestas
+ya importadas, incluso las pasivas. Las peticiones de recuperación solo se permiten
+para una cita de hoy aún futura, sin petición ya materializada hoy para esa misma
+cita/hora. Una clave única compartida entre ejecuciones evita dos recuperaciones
+concurrentes. Se descartan los timeouts obsoletos y las cancelaciones nocturnas
+atrasadas, sin cancelar la cita. El flujo futuro conserva sus plazos configurados.
+Los mensajes de texto generados por timeout también vuelven a comprobar vigencia
+de la cita y salud inmediatamente antes del envío.
+
+Recuperación operativa: publicar primero la barrera de timeouts y el filtro del
+dispatcher. Arrancar después el importador con `WHATSAPP_INBOX_RECOVERY_HOLD=true`
+y un corte UTC `WHATSAPP_INBOX_RECOVERY_NOT_BEFORE`. Los mensajes recuperados
+guardan `recovery_without_automation:true`; el dispatcher los excluye tanto en
+SQL como al validar cada fila. Los estados de entrega y las conversaciones sí
+se actualizan. Antes de retirar el hold comprobar backlog, conflictos y citas;
+fijar el corte al instante de reapertura y conservarlo en reinicios. No vaciar
+colas de envío ni crear mensajes nuevos a partir de un check pendiente.
+
+Un placeholder `unsupported` puede recibir después contenido real con el mismo
+WAMID. Se completa exclusivamente la fila pasiva del mismo teléfono, clínica,
+contacto y dirección; nunca se sobrescribe contenido real contradictorio ni se
+duplica el mensaje. La recuperación queda excluida de automatizaciones y conserva
+las claves de idempotencia y recibos originales.
+
+Pruebas: `whatsapp-inbox.test.js` y `whatsapp-inbox-runtime.test.js` (SQLite/mTLS
+aislados), `whatsapp_inbox_{import,scopes}_mysql.test.js` (MySQL temporal sin red),
+`whatsapp_timeout_{recovery,engine}.test.js`, `whatsapp_fresh_inbound.test.js` y
+`whatsapp_appointment_eligibility.test.js` (sin proveedores). Al desplegar actualizar
+por separado broker AWS, API, dispatcher y release del importador; un push a
+staging no actualiza los procesos dedicados.
+
 ## Contrato y autoridad
 
 Runtime `services/integrations-broker/src/whatsapp-main.js`, Node 24, cohorte

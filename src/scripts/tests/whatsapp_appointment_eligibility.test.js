@@ -40,3 +40,8 @@ test('appointment details also reject cancelled, past or rescheduled instances',
   v.now=Date.parse('2026-09-16T10:00Z');assert.throws(()=>check(v));
  }
 });
+test('a text followup after timeout has the same current-appointment protection as a template',()=>{
+ const v=base();v.templateName=null;v.confirmationTimeout=true;assert.equal(check(v),true);
+ v.now=Date.parse('2026-09-16T10:00Z');assert.throws(()=>check(v));
+ v.now=now;v.appointment.estado='recordatorio_confirmado';assert.throws(()=>check(v));
+});

@@ -3,7 +3,7 @@ const { createHash, randomUUID } = require('node:crypto');
 const D = require('./whatsappInboundDetails');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
-function held() { throw Error('whatsapp_inbox_review_required'); }
+function held(inboxReason = 'review_required') { throw Object.assign(Error('whatsapp_inbox_review_required'), { inboxReason }); }
 function contact(value) { if (typeof value !== 'string' || !/^[1-9][0-9]{6,14}$/.test(value)) held(); return value; }
 function normalize(raw, scope, now = Date.now()) {
   if (!Buffer.isBuffer(raw) || raw.length > 3 * 1024 * 1024 || !Number.isSafeInteger(scope.clinicId)
@@ -24,7 +24,7 @@ function normalize(raw, scope, now = Date.now()) {
     else if (['image','video','audio','document','sticker','location','contacts','reaction','unsupported','system'].includes(m.type)) {
       type = D.messageType(m.type); content = '[' + m.type + ']';
       if (['image','video','document'].includes(m.type) && m[m.type]?.caption) content += ' ' + m[m.type].caption;
-    } else held();
+    } else held(['edit','revoke'].includes(m.type) ? 'unsupported_event' : 'review_required');
     if (typeof content !== 'string' || Buffer.byteLength(content) > 50000) held();
     const key = hash(JSON.stringify([scope.wabaId,scope.phoneId,m.id]));
     const digest = hash(JSON.stringify([peer,direction,m.type,content,at]));
@@ -40,8 +40,8 @@ function normalize(raw, scope, now = Date.now()) {
         if (!Array.isArray(value.messages) && !Array.isArray(value.statuses)) held();
         for (const m of value.messages || []) add(m,m.from,'inbound',false);
         for (const s of value.statuses || []) {
-          if (typeof s?.id !== 'string' || !/^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(s.id)
-            || !['sent','delivered','read','failed'].includes(s.status)) held();
+          if (typeof s?.id !== 'string' || !/^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(s.id)) held();
+          if (!['sent','delivered','read','failed'].includes(s.status)) held(s.status === 'played' ? 'unsupported_event' : 'review_required');
           statuses.push({ wamid:s.id,status:s.status,errors:D.errors(s) }); if (statuses.length > 2000) held();
         }
       } else if (change.field === 'smb_message_echoes') {
@@ -82,6 +82,21 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
   const lock = 'wa-inbox:' + hash(JSON.stringify([scope.clinicId,scope.phoneId])).slice(0,48);
   let locked = false; let tx = false;
   const query = async (sql, values=[]) => (await connection.execute(sql,values))[0];
+  const recoverPlaceholder = async (messageId, m) => {
+    const rows = await query("SELECT m.id,m.content,m.message_type,m.metadata FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE m.id=? AND m.direction=? AND c.clinic_id=? AND c.channel='whatsapp' AND c.contact_id IN (?,?) AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wamid'))=? AND JSON_EXTRACT(m.metadata,'$.passive_recovery')=CAST('true' AS JSON) AND JSON_EXTRACT(m.metadata,'$.fresh_inbound_dispatched_at') IS NULL FOR UPDATE",
+      [messageId,m.direction,scope.clinicId,m.peer,'+'+m.peer,m.wamid]);
+    if (rows.length !== 1) return false;
+    const previous = typeof rows[0].metadata === 'string' ? JSON.parse(rows[0].metadata) : rows[0].metadata;
+    if (rows[0].content === m.content && rows[0].message_type === m.type && previous.provider_type === m.providerType) return true;
+    if (m.providerType === 'unsupported' && previous.provider_type !== 'unsupported') return true; // Late placeholder never downgrades content.
+    if (rows[0].message_type !== 'event' || previous.provider_type !== 'unsupported') return false;
+    // Meta can first report an unsupported placeholder and later provide its
+    // actual content under the same WAMID. Upgrade that row, never duplicate it
+    // or treat historical materialization as a new automation response.
+    await query('UPDATE Messages SET content=?,message_type=?,metadata=JSON_MERGE_PATCH(metadata,CAST(? AS JSON)),updatedAt=NOW(3) WHERE id=?',
+      [m.content,m.type,JSON.stringify({provider_type:m.providerType,...m.details,recovery_without_automation:true,automatic_actions_allowed:false}),messageId]);
+    return true;
+  };
   try {
     const result = await query('SELECT GET_LOCK(?,2) AS acquired',[lock]); if (result[0]?.acquired !== 1) held(); locked = true;
     await connection.beginTransaction(); tx = true;
@@ -95,8 +110,13 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
     if ((await query('SELECT id_clinica FROM Clinicas WHERE id_clinica=?',[scope.clinicId])).length !== 1) held();
     let inserted=0;
     for (const m of batch.messages) {
-      const seen=await query('SELECT digest FROM WhatsappInboxMessageKeys WHERE message_key=?',[m.key]);
-      if (seen.length) { if (seen[0].digest !== m.digest) held(); continue; }
+      const seen=await query('SELECT digest,message_id FROM WhatsappInboxMessageKeys WHERE message_key=?',[m.key]);
+      if (seen.length) {
+        if (seen[0].digest !== m.digest) {
+          if (!await recoverPlaceholder(seen[0].message_id,m)) held();
+        }
+        continue;
+      }
       const contactKey=hash(JSON.stringify([scope.clinicId,scope.phoneId,m.peer]));
       const bound=await query('SELECT conversation_id FROM WhatsappInboxContactKeys WHERE contact_key=?',[contactKey]);
       let conversationId=bound[0]?.conversation_id;
@@ -113,11 +133,13 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
       // Legacy messages lack the new unique key. Adopt only one matching WAMID
       // in this exact conversation; never import it twice on a history replay.
       const legacy=await query("SELECT id,direction,content FROM Messages WHERE conversation_id=? AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.wamid'))=? LIMIT 2",[conversationId,m.wamid]);
-      if (legacy.length > 1 || legacy.length && (legacy[0].direction !== m.direction || legacy[0].content !== m.content)) held();
+      if (legacy.length > 1 || legacy.length && (legacy[0].direction !== m.direction
+        || legacy[0].content !== m.content && !await recoverPlaceholder(legacy[0].id,m))) held();
       let messageId=legacy[0]?.id;
       if (!messageId) {
         const metadata=JSON.stringify({ wamid:m.wamid,phone_number_id:scope.phoneId,waba_id:scope.wabaId,passive_recovery:true,
-          historical:m.historical,provider_type:m.providerType,automatic_actions_allowed:false,inbox_receipt:lease.receipt,...m.details });
+          historical:m.historical,provider_type:m.providerType,automatic_actions_allowed:false,inbox_receipt:lease.receipt,
+          recovery_without_automation: lease.recoveryWithoutAutomation === true, ...m.details });
         const row=await query("INSERT INTO Messages(conversation_id,direction,content,message_type,status,metadata,sent_at,createdAt,updatedAt) VALUES(?,?,?,?,'sent',?,?,?,NOW(3))",[conversationId,m.direction,m.content,m.type,metadata,new Date(m.at),new Date(m.at)]);
         messageId=row.insertId; inserted++;
         await query('UPDATE Conversations SET unread_count=unread_count+?,last_message_at=IF(last_message_at IS NULL OR last_message_at<?,?,last_message_at),last_inbound_at=IF(? AND (last_inbound_at IS NULL OR last_inbound_at<?),?,last_inbound_at),updatedAt=NOW(3) WHERE id=?',
@@ -127,7 +149,7 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
     }
     for (const s of batch.statuses) {
       const rows=await query("SELECT m.id,m.status FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE c.clinic_id=? AND c.channel='whatsapp' AND m.direction='outbound' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wamid'))=? LIMIT 2 FOR UPDATE",[scope.clinicId,s.wamid]);
-      if (rows.length !== 1) held();
+      if (rows.length !== 1) held(rows.length === 0 ? 'unmatched_status' : 'review_required');
       const rank={pending:0,sending:0,failed:0,sent:1,delivered:2,read:3}; const old=rows[0];
       if (s.status==='failed' ? rank[old.status]<2 : rank[s.status]>rank[old.status]) {
         const extra=s.status==='failed'?{wa_error:s.errors,wa_status:{status:s.status,errors:s.errors},error_code:s.errors[0]?.code||null,delivery_failed:true}:{};
@@ -138,7 +160,7 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
     await query('INSERT INTO WhatsappInboxImports VALUES(?,?,?,?,?,?,NOW(3))',[lease.receipt,digest,importReceipt,scope.clinicId,scope.phoneId,inserted]);
     await validateScope?.(connection);
     await connection.commit();tx=false;return { importReceipt,replayed:false };
-  } catch { if(tx) await connection.rollback().catch(()=>{}); held(); }
+  } catch (error) { if(tx) await connection.rollback().catch(()=>{}); held(error.inboxReason || 'import_retry'); }
   finally { if(locked) await query('SELECT RELEASE_LOCK(?)',[lock]).catch(()=>{}); }
 }
 module.exports={ normalize,importLease,SCHEMA };

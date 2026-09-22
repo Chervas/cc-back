@@ -30,7 +30,18 @@ test('passive importer commits complete batches once, preserves contacts, rolls 
    await assert.rejects(importLease(c,lease([m('new','19995550109')],[{field:'messages',value:{messaging_product:'whatsapp',metadata:{phone_number_id:'999'},messages:[m('new','19995550109')]}}]),scope),/review_required/);
    await sql.query('DELETE FROM Messages WHERE id=1'); await importLease(c,lease([m('one','19995550101')]),scope);
    assert.equal((await sql.query('SELECT COUNT(*) n FROM Messages'))[0][0].n,2);
+   const unsupported={...m('placeholder','19995550103'),type:'unsupported'};
+   await importLease(c,lease([unsupported]),scope);
+   const [[beforeUpgrade]]=await sql.query("SELECT id FROM Messages WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.wamid'))='wamid.placeholder'");
+   await importLease(c,lease([m('placeholder','19995550103','synthetic recovered content')]),scope);
+   const [[afterUpgrade]]=await sql.query("SELECT id,message_type,content,metadata FROM Messages WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.wamid'))='wamid.placeholder'");
+   assert.equal(afterUpgrade.id,beforeUpgrade.id);assert.equal(afterUpgrade.message_type,'text');
+   assert.equal(afterUpgrade.metadata.recovery_without_automation,true);
+   await assert.rejects(importLease(c,lease([m('placeholder','19995550103','different real content')]),scope),/review_required/);
    report.checks.push('batch two contacts','receipt replay','WAMID replay across batches/history','atomic conflict rollback','clinic/phone isolation','monotonic statuses','deleted message tombstone');
+   await importLease(c,{...lease([m('recovery','19995550104')]),recoveryWithoutAutomation:true},scope);
+   const [[recovery]]=await sql.query("SELECT metadata FROM Messages WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.wamid'))='wamid.recovery'");
+   assert.equal(recovery.metadata.recovery_without_automation,true);assert.equal(recovery.metadata.automatic_actions_allowed,false);
    await importLease(c,lease([{...m('audio','19995550101'),type:'audio',audio:{id:'501',mime_type:'audio/ogg',voice:true}}]),scope);
    const [[audio]]=await sql.query("SELECT message_type,metadata FROM Messages WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.provider_type'))='audio'");
    assert.equal(audio.message_type,'text'); // Ordinary bubble keeps playback controls.

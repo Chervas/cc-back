@@ -109,7 +109,14 @@ async function importScopedLease(connection, lease, config, { importer = importL
     for (let i=0;i<parts.length;i++) {
       const part = parts[i]; const clinicId = await routeClinic(connection,part); const raw = Buffer.from(JSON.stringify(part.packet));
       const scope = {clinicId,wabaId:part.scope.wabaId,phoneId:part.scope.phoneId};
-      try { normalize(raw,scope,now); } catch { raw.fill(0); throw Error('whatsapp_inbox_review_required'); }
+      try { normalize(raw,scope,now); } catch (error) {
+        raw.fill(0);
+        // A mixed batch containing an actual reply must remain a blocking
+        // review, even if another child is an administrative event.
+        if (error.inboxReason === 'unsupported_event' && parts.some(p => p.packet.entry.some(e => e.changes.some(ch =>
+          (ch.value.messages || []).some(m => !['edit','revoke'].includes(m.type)))))) error.inboxReason = 'review_required';
+        throw error;
+      }
       prepared.push({scope:part.scope,importScope:scope,lease:{...lease,raw,receipt:childId(lease.receipt,i)}});
     }
     for (const part of prepared) {

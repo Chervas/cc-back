@@ -52,6 +52,16 @@ test('multiclinic passive importer preserves parent on partial failure, retries 
     for(const r of media){assert.equal(r.metadata.automatic_actions_allowed,false);assert.equal(r.metadata.passive_recovery,true);}
     assert.equal(media[1].metadata.audio_transcribed,false);assert.equal(media[1].metadata.media.playable,true);
     report.checks.push('scoped image and mobile audio preserve media IDs under consumer grants without duplicate import');
+    const placeholder=make([config.scopes[0]],'19995550120');const placeholderBody=JSON.parse(placeholder.raw);
+    placeholderBody.entry[0].changes[0].value.messages=[{...m('placeholder_upgrade','19995550120'),type:'unsupported'}];
+    placeholder.raw=Buffer.from(JSON.stringify(placeholderBody));await S.importScopedLease(restricted,placeholder,config);
+    const upgraded={...placeholder,receipt:randomUUID()};placeholderBody.entry[0].changes[0].value.messages=[m('placeholder_upgrade','19995550120')];
+    upgraded.raw=Buffer.from(JSON.stringify(placeholderBody));await S.importScopedLease(restricted,upgraded,config);
+    await S.importScopedLease(restricted,{...upgraded,receipt:randomUUID()},config);
+    await S.importScopedLease(restricted,{...placeholder,receipt:randomUUID()},config);
+    assert.equal(await count('Messages'),6);
+    const [[upgradedRow]]=await sql.query("SELECT message_type,metadata FROM Messages WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.wamid'))='wamid.placeholder_upgrade'");
+    assert.equal(upgradedRow.message_type,'text');assert.equal(upgradedRow.metadata.recovery_without_automation,true);
    }finally{await restricted.end();}
    // The rest exercises failure/replay independently of the privilege check.
    for(const table of ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys','Messages','Conversations'])await sql.query('DELETE FROM '+table);
