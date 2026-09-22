@@ -117,3 +117,23 @@ La UI distingue metadatos de Meta no facilitados de fallos confirmados: los
 primeros no son acciones pendientes y no generan una barra porcentual engañosa.
 El estado de registro comprobado se conserva. Aceptación real y límites actuales
 en el manual central, documento 19; capturas y publicaciones en 99.
+
+
+## Secundario común sin sustituir primarios
+
+`PUT /api/whatsapp/routing/secondary` recibe ámbito, activo secundario, usos y
+conducta ante fallo. Exige sesión, permisos sobre todas las clínicas y grants
+actuales para el teléfono. En ámbito grupo actualiza los bindings secundarios de
+sus miembros en una sola transacción con la auditoría v26; en ámbito clínica
+solo modifica esa sede. No acepta `primaryAssetId`: conserva explícitamente los
+primarios actuales, incluidos los heredados y la ausencia de primario.
+
+Si el activo elegido ya es primario explícito o efectivo por herencia, rechaza
+la operación antes de escribir. Los candidatos se contrastan bajo bloqueo SQL.
+Una repetición actualiza las mismas selecciones sin duplicarlas. No cambia OAuth,
+registro de Meta, corte temporal, pausas clínicas ni colas. El contrato completo
+`PUT /routing` sigue permitiendo cambiar primario y secundario juntos.
+
+Prueba aislada de la API pública: `WHATSAPP_ROUTING_ONLY_TEST=true CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/whatsapp_activation_mysql.integration.js`. El modo completo
+se ejecuta en DEV, donde está disponible el servicio de activación. Ninguna
+modalidad utiliza la BD clínica real ni carga workers del runtime público.
