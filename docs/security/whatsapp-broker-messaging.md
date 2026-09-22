@@ -124,7 +124,10 @@ dispatcher. Arrancar después el importador con `WHATSAPP_INBOX_RECOVERY_HOLD=tr
 y un corte UTC `WHATSAPP_INBOX_RECOVERY_NOT_BEFORE`. Los mensajes recuperados
 guardan `recovery_without_automation:true`; el dispatcher los excluye tanto en
 SQL como al validar cada fila. Los estados de entrega y las conversaciones sí
-se actualizan. Antes de retirar el hold comprobar backlog, conflictos y citas;
+se actualizan. El corte también se aplica al despachar filas ya existentes;
+una recepción retenida más de dos minutos se importa de forma pasiva incluso
+en una parada posterior. Cualquier recibo ordinario pendiente aplaza el timeout,
+aunque aún no alcance el umbral de incidencia. Antes de retirar el hold comprobar backlog, conflictos y citas;
 fijar el corte al instante de reapertura y conservarlo en reinicios. No vaciar
 colas de envío ni crear mensajes nuevos a partir de un check pendiente.
 
