@@ -2,6 +2,7 @@
 
 const { ADAPTER_VERSION, TIMEZONE, hash, stableJson, index, norm, dateOnly } = require('./adapter');
 const { sourceReference } = require('./week-appointments');
+const { dispositionForReviewedPair } = require('./reviewed-source-pairs');
 
 const appointmentKey = (r) => stableJson([r.kind || 'appointment', r.source_contact_id, r.start_local, r.end_local, r.agenda_key]);
 const patientTimeKey = (r) => r.patient_id ? stableJson([r.kind || 'appointment', String(r.patient_id), r.start_local, r.end_local]) : null;
@@ -102,6 +103,8 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
     local => sourceReference(local.source_revision.original));
   const reconciledReferences = index(localAppointments.filter(isImported).flatMap(local =>
     ((local.source_reconciliation || local.legacy_source_reconciliation)?.entries || []).map(entry => ({ local, entry }))), item => item.entry.source_reference);
+  const reviewedPairReferences = index(localAppointments.filter(local => isImported(local) && local.reviewed_source_pair),
+    local => local.reviewed_source_pair.source_reference);
   const claimedLocal = new Set();
   const recoveredHistoricalIds = new Set();
   const decisions = [];
@@ -121,6 +124,34 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
     if (row.source_external_id && sourceExternalIds.get(row.source_external_id).length > 1) decision.reasons.push('DUPLICATE_SOURCE_APPOINTMENT_ID');
     const sameIdentity = sourceExact.get(appointmentKey(row)) || [];
     if (new Set(sameIdentity.map((r) => r.provenance.row_sha256)).size > 1) decision.reasons.push('MULTIPLE_DISTINCT_SOURCE_ROWS_SAME_SLOT');
+    const reviewedPairs = row.kind === 'appointment' ? reviewedPairReferences.get(sourceReference(row)) || [] : [];
+    if (reviewedPairs.length) {
+      decision.candidate_local_ids = reviewedPairs.map(local => local.id);
+      if (reviewedPairs.length !== 1) decision.reasons.push('REVIEWED_PAIR_MULTIPLE_LOCAL_MATCHES');
+      else {
+        const local = reviewedPairs[0], pair = local.reviewed_source_pair;
+        const disposition = dispositionForReviewedPair(row, pair);
+        decision.local_id = local.id; decision.expected_local_hash = hash(local);
+        // Only the exact bytes of both previously reviewed rows can discharge
+        // their same-slot ambiguity. A third row or a new export is reviewed.
+        if (!disposition || sameIdentity.some(other => !dispositionForReviewedPair(other, pair))) {
+          decision.reasons.push('REVIEWED_PAIR_SOURCE_CHANGED_REQUIRES_REVIEW');
+        } else decision.reasons = decision.reasons.filter(reason => reason !== 'MULTIPLE_DISTINCT_SOURCE_ROWS_SAME_SLOT');
+        if (!patient || String(local.patient_id) !== String(patient.id)) decision.reasons.push('LOCAL_PATIENT_IDENTITY_CONFLICT');
+        if (local.local_modified || ['start_local', 'end_local', 'status', 'agenda_key', 'service_key']
+          .some(key => local[key] !== pair.source[key])) decision.reasons.push('LOCAL_EDIT_REQUIRES_REVIEW');
+        const overlaps = patient ? (localPatient.get(String(patient.id)) || []).filter(other => String(other.id) !== String(local.id)
+          && other.kind !== 'block' && other.status !== 'cancelada'
+          && other.start_local < pair.source.end_local && other.end_local > pair.source.start_local) : [];
+        if (overlaps.length) decision.reasons.push('REVIEWED_PAIR_LOCAL_OVERLAP');
+        if (!decision.reasons.length) {
+          decision.action = disposition === 'retained' ? 'preserve_reviewed_source_pair' : 'preserve_superseded_source_row';
+          decision.source_external_id = disposition === 'retained' ? pair.source_appointment_id : null;
+          decision.requires_review = false; claimedLocal.add(String(local.id));
+        }
+      }
+      decisions.push(decision); continue;
+    }
     const reconciled = row.kind === 'appointment' ? reconciledReferences.get(sourceReference(row)) || [] : [];
     if (reconciled.length) {
       decision.candidate_local_ids = reconciled.map(item => item.local.id);

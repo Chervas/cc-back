@@ -273,6 +273,22 @@ Pruebas: `cliniccloud_week_appointments.test.js`,
 `appointment_import_review.test.js`; QA SQL aislada
 `src/scripts/qa/isolated-week-import.js` revierte toda su fixture ficticia.
 
+## Reconocer pares anulada/activa ya revisados
+
+El snapshot y el plan reconocen `cliniccloud_reviewed_additional_visit` cuando
+su decisión ya se aplicó y conserva las huellas exactas de la fila activa y la
+anulada excluida. `reviewed-source-pairs.js` comprueba la línea base, cuenta,
+paquete aplicado, revisión con observación fuente y procedencia. No vuelve a
+escribir ninguna cita: el plan distingue `preserve_reviewed_source_pair` de
+`preserve_superseded_source_row`, ambas en HOLD.
+
+No es una regla «activa gana a anulada»: solo descarga la ambigüedad de esas
+filas exactas. Un tercer registro, otro archivo, bytes/estado/nota/ID diferentes,
+edición local, identidad conflictiva o solape local siguen en revisión. La fila
+anulada no recibe el ID fuente de la activa. Repetir el ZIP no crea antecedentes
+duplicados ni propone cancelar la reserva conservada. Pruebas ficticias en
+`cliniccloud_reviewed_source_pairs.test.js`; no añade SQL al runtime de agenda.
+
 ## Concretar la cabina física sin cambiar la cita
 
 `cliniccloud-import-cabin-assignments.js` es el paso posterior al alta semanal.
