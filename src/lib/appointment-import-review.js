@@ -46,6 +46,37 @@ function importTreatmentPending(appointment) {
     && !hasReviewedNoTreatment(appointment);
 }
 
+function importResourcesInScope(appointment) {
+  const metadata = object(appointment.import_metadata);
+  return appointment.source_system === 'cliniccloud'
+    && Array.isArray(metadata.cliniccloud_delta?.pending_assignment)
+    && !appointment.voucher_id && !metadata.program_session && !appointment.es_provisional && !appointment.hold_expires_at;
+}
+
+// Approval belongs to this reservation, not merely the latest editor. Notes do
+// not invalidate it; moving, changing treatment, participants or phases does.
+function importResourceFingerprint(appointment) {
+  const metadata = object(appointment.import_metadata);
+  const values = Object.fromEntries(['id_cita', 'paciente_id', 'clinica_id', 'doctor_id', 'instalacion_id', 'tratamiento_id']
+    .map(key => [key, appointment[key] == null ? null : Number(appointment[key])]));
+  for (const field of ['inicio', 'fin']) {
+    const date = new Date(appointment[field]);
+    if (!Number.isFinite(date.getTime())) return null;
+    values[field] = date.toISOString();
+  }
+  values.booking = metadata.booking || null;
+  values.additional_staff = metadata.additional_staff || null;
+  return createHash('sha256').update(JSON.stringify(canonical(values))).digest('hex');
+}
+
+function hasReviewedImportResources(appointment) {
+  const resolution = object(appointment.import_metadata).import_resource_resolution;
+  return importResourcesInScope(appointment) && !!appointment.doctor_id && !!appointment.instalacion_id
+    && resolution?.version === 1 && Number.isSafeInteger(resolution.actor_id) && resolution.actor_id > 0
+    && /^[a-f0-9]{64}$/.test(resolution.request_hash || '')
+    && !!resolution.reservation_fingerprint && resolution.reservation_fingerprint === importResourceFingerprint(appointment);
+}
+
 // Small server-owned operational summary. Never expose import evidence, patient
 // identity snapshots or raw source notes through the calendar's lightweight DTO.
 function appointmentImportReview(appointment) {
@@ -65,6 +96,11 @@ function appointmentImportReview(appointment) {
   const pendingAssignment = Object.keys(fields).filter(key => Array.isArray(pending) && pending.includes(key)
     && !appointment[columns[key]] && !(key === 'treatment_id' && hasReviewedNoTreatment(appointment))).map(key => fields[key]);
   if (installationInactive && !pendingAssignment.includes('installation')) pendingAssignment.push('installation');
+  const resourcesNeedReview = importResourcesInScope(appointment)
+    && !['cancelada', 'completada', 'no_asistio'].includes(appointment.estado) && !hasReviewedImportResources(appointment);
+  if (resourcesNeedReview) {
+    for (const field of ['professional', 'installation']) if (!pendingAssignment.includes(field)) pendingAssignment.push(field);
+  }
   // A display label only, never a catalog link or a reason to infer a price,
   // protocol or consent. Do not copy notes, patient identity or the raw import
   // payload. The controller removes the whole summary without clinical access.
@@ -75,7 +111,12 @@ function appointmentImportReview(appointment) {
     ...(importTreatmentPending(appointment) && importReviewVersion(appointment)
       ? { review_version: importReviewVersion(appointment) } : {}),
     ...(hasReviewedNoTreatment(appointment) ? { treatment_resolution: 'no_treatment' } : {}),
+    ...(resourcesNeedReview ? { resources_need_review: true } : {}),
+    ...(resourcesNeedReview && appointment.doctor_id && appointment.instalacion_id && !installationInactive
+      && !['cancelada', 'completada', 'no_asistio'].includes(appointment.estado) && importReviewVersion(appointment)
+      ? { resource_review_version: importReviewVersion(appointment) } : {}),
     ...(sourceService ? { source_service: sourceService } : {}),
     ...(installationInactive ? { installation_inactive: true } : {}) };
 }
-module.exports = { appointmentImportReview, importReviewVersion, hasReviewedNoTreatment, importTreatmentPending };
+module.exports = { appointmentImportReview, importReviewVersion, hasReviewedNoTreatment, importTreatmentPending,
+  importResourcesInScope, importResourceFingerprint, hasReviewedImportResources };

@@ -1,7 +1,7 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
-const { importReviewVersion, importTreatmentPending } = require('../lib/appointment-import-review');
+const { importReviewVersion, importTreatmentPending, importResourcesInScope, importResourceFingerprint } = require('../lib/appointment-import-review');
 const { bookingError, bookingCapabilities } = require('./treatmentBookingProfile.service');
 const { mutateAppointmentBooking } = require('./appointmentBookingCommand.service');
 
@@ -9,8 +9,15 @@ const plain = row => row?.toJSON ? row.toJSON() : row;
 const metadata = row => typeof row.import_metadata === 'string' ? JSON.parse(row.import_metadata) : (row.import_metadata || {});
 const fail = (suffix, message, status = 409) => { throw bookingError(`booking_import_${suffix}`, message, null, status); };
 
+function resourceUse(row) {
+  const phases = metadata(row).booking?.phases || [{ start_at: row.inicio, end_at: row.fin,
+    installation_id: row.instalacion_id, doctor_ids: row.doctor_id ? [row.doctor_id] : [] }];
+  return JSON.stringify(phases.map(phase => [new Date(phase.start_at).toISOString(), new Date(phase.end_at).toISOString(),
+    Number(phase.installation_id), phase.doctor_ids.map(Number).sort((a,b)=>a-b)]));
+}
+
 function normalizeResolution(input) {
-  if (!input || !['treatment', 'no_treatment'].includes(input.mode)
+  if (!input || !['treatment', 'no_treatment', 'resources'].includes(input.mode)
     || !/^[a-f0-9]{64}$/.test(input.expected_version || '')
     || typeof input.reason !== 'string' || input.reason.trim().length < 3 || input.reason.trim().length > 500) {
     fail('invalid', 'Selecciona cómo resolver la cita y explica brevemente la decisión.', 400);
@@ -21,16 +28,18 @@ function normalizeResolution(input) {
       fail('invalid', 'Selecciona un tratamiento del catálogo.', 400);
     }
     result.treatment_id = input.treatment_id;
-  } else {
+  } else if (input.mode === 'no_treatment') {
     if (input.treatment_id != null || !['revision', 'primera_sin_trat'].includes(input.visit_type)) {
       fail('invalid', 'Confirma si es una primera visita sin tratamiento o una revisión.', 400);
     }
     result.visit_type = input.visit_type;
+  } else if (input.treatment_id != null || input.visit_type != null || input.doctor_id != null || input.instalacion_id != null) {
+    fail('invalid', 'Esta confirmación no cambia los recursos. Corrígelos desde Editar y vuelve a revisarlos.', 400);
   }
   return result;
 }
 
-// One explicit clinical classification, never a generic appointment patch.
+// One explicit clinical classification or resource review, never a generic patch.
 // No notifications, signatures, charges, program consumption or automation hooks.
 async function resolveImportedTreatment({ db, appointmentId, clinicId, actorId, input,
   capabilities = bookingCapabilities(), transaction = null }) {
@@ -46,21 +55,26 @@ async function resolveImportedTreatment({ db, appointmentId, clinicId, actorId, 
     const original = metadata(before);
     // A lost HTTP response may be retried. Do not rebook or overwrite subsequent
     // edits, and never append a second operational event for the same decision.
-    if (original.import_treatment_resolution?.request_hash === requestHash) return { appointment: row, replayed: true };
-    if (!importTreatmentPending(before) || original.import_treatment_resolution || before.voucher_id
+    const resourcesOnly = decision.mode === 'resources';
+    const markerKey = resourcesOnly ? 'import_resource_resolution' : 'import_treatment_resolution';
+    if (original[markerKey]?.request_hash === requestHash) return { appointment: row, replayed: true };
+    if ((resourcesOnly ? !importResourcesInScope(before) || !before.doctor_id || !before.instalacion_id
+      : !importTreatmentPending(before) || original.import_treatment_resolution) || before.voucher_id
       || original.program_session || before.es_provisional || before.hold_expires_at
       || ['cancelada', 'completada', 'no_asistio'].includes(before.estado)) {
-      fail('not_resolvable', 'Esta acción solo completa citas importadas abiertas, sin tratamiento ni programa ya vinculado.');
+      fail('not_resolvable', resourcesOnly
+        ? 'Primero asigna una cabina y un profesional a esta cita importada abierta. Las sesiones de programas se revisan desde su plan.'
+        : 'Esta acción solo completa citas importadas abiertas, sin tratamiento ni programa ya vinculado.');
     }
     if (decision.expected_version !== importReviewVersion(before)) {
       fail('changed', 'La cita ha cambiado. Ciérrala y vuelve a abrirla antes de confirmar.');
     }
     // Existing clinical/economic/documentary links must be reviewed through their
     // own correction workflows, never reinterpreted by an import assignment.
-    for (const [model, field] of [['AppointmentClinicalReport', 'appointment_id'],
+    for (const [model, field] of (resourcesOnly ? [] : [['AppointmentClinicalReport', 'appointment_id'],
       ['PatientNutritionMeasurement', 'appointment_id'], ['PatientNutritionReport', 'appointment_id'],
       ['PatientConsentDocument', 'cita_id'], ['PatientVoucherMovement', 'appointment_id'],
-      ['PatientProgramSession', 'appointment_id']]) {
+      ['PatientProgramSession', 'appointment_id']])) {
       if (await db[model].findOne({ where: { [field]: appointmentId }, attributes: ['id'],
         transaction: tx, lock: tx.LOCK.SHARE })) {
         fail('history_exists', 'La cita ya tiene documentación clínica o económica. Revisa esa documentación antes de cambiar su clasificación.');
@@ -68,13 +82,32 @@ async function resolveImportedTreatment({ db, appointmentId, clinicId, actorId, 
     }
     const appointment = await mutateAppointmentBooking({ db, existingAppointmentId: appointmentId, transaction: tx,
       capabilities, priorityAcknowledged: input.priority_acknowledged === true,
-      appointmentValues: { updated_by: actorId, ...(decision.mode === 'treatment'
+      ...(resourcesOnly ? { allowObsolete: true } : {}),
+      appointmentValues: { updated_by: actorId, ...(resourcesOnly ? {} : decision.mode === 'treatment'
         ? { tratamiento_id: decision.treatment_id } : { tipo_cita: decision.visit_type }) },
       persist: async ({ values, existing, transaction: bookingTx }) => {
         for (const field of ['doctor_id', 'instalacion_id']) {
           if (before[field] && Number(before[field]) !== Number(values[field])) {
             fail('resource_change', 'El tratamiento necesita otros recursos. Revisa el profesional y la cabina desde Editar antes de vincularlo.');
           }
+        }
+        if (resourcesOnly) {
+          if (resourceUse(before) !== resourceUse(values)) {
+            fail('resource_change', 'La reserva necesita revisar sus fases o su equipo. Abre Editar antes de confirmar.');
+          }
+          const resolution = { version: 1, actor_id: actorId, reason: decision.reason,
+            reviewed_at: new Date().toISOString(), request_hash: requestHash,
+            reservation_fingerprint: importResourceFingerprint(values) };
+          if (!resolution.reservation_fingerprint) fail('invalid', 'No se ha podido comprobar la reserva.', 400);
+          const saved = await existing.update({ updated_by: actorId,
+            import_metadata: { ...metadata(values), import_resource_resolution: resolution } }, { transaction: bookingTx });
+          await db.PatientOperationalEvent.create({ patient_id: before.paciente_id, clinic_id: before.clinica_id,
+            actor_user_id: actorId, event_type: 'appointment.import_resolved', source: 'agenda', channel: null,
+            metadata: { appointment_id: appointmentId, mode: 'resources', reason: decision.reason,
+              doctor_id: before.doctor_id, installation_id: before.instalacion_id,
+              preserves_status_and_schedule: true, preserves_notification_suppression: true }, occurred_at: new Date() },
+          { transaction: bookingTx });
+          return saved;
         }
         // Only this authenticated resolution service authors the marker. Generic
         // booking requests cannot supply it, even when the booking gate is off.

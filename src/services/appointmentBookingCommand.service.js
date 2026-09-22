@@ -146,6 +146,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     delete importMetadata.additional_staff;
     delete importMetadata.import_treatment_resolution;
     if (previousMetadata.import_treatment_resolution) importMetadata.import_treatment_resolution = previousMetadata.import_treatment_resolution;
+    delete importMetadata.import_resource_resolution;
+    if (previousMetadata.import_resource_resolution) importMetadata.import_resource_resolution = previousMetadata.import_resource_resolution;
     if (values.estado === 'cancelada' && previousStaff) {
       if (requestedStaff !== undefined && JSON.stringify(requestedStaff) !== JSON.stringify(previousStaff.ids)) {
         throw bookingError('booking_additional_staff_invalid', 'Reabre la cita para cambiar su personal de apoyo.', null, 400);

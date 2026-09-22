@@ -47,4 +47,9 @@ test('import resolution uses a distinct operational activity, not a reschedule o
     actor_user_id: 7, metadata: { appointment_id: 51, mode: 'no_treatment', reason: 'Only a review' } }, { patientId: 8 });
   assert.equal(value.tipo, 'appointment_import_resolved'); assert.equal(value.citaId, '51');
   assert.equal(value.detalles.new_status, undefined); assert.match(value.descripcion, /sin tratamiento/);
+  const resources = exported.exports.serializeAppointmentStatusActivity({id:3,event_type:'appointment.import_resolved',
+    actor_user_id:7,metadata:{appointment_id:51,mode:'resources',reason:'Checked'}},{patientId:8});
+  assert.equal(resources.titulo,'Cabina y profesional revisados');
+  assert.match(resources.descripcion,/cabina y el profesional/);
+  assert.doesNotMatch(resources.descripcion,/vinculado un tratamiento/);
 });

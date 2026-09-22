@@ -105,8 +105,11 @@ function serializeAppointmentStatusActivity(event, { patientId = null, leadId = 
   if (event.event_type === APPOINTMENT_IMPORT_EVENT_TYPE) {
     return { id: `appointment-import-event-${event.id}`,
       ...(patientId !== null ? { pacienteId: String(patientId) } : {}), ...(leadId !== null ? { leadId: String(leadId) } : {}),
-      fecha: event.occurred_at || event.created_at, tipo: 'appointment_import_resolved', titulo: 'Tratamiento importado revisado',
-      descripcion: metadata.mode === 'no_treatment'
+      fecha: event.occurred_at || event.created_at, tipo: 'appointment_import_resolved',
+      titulo: metadata.mode === 'resources' ? 'Cabina y profesional revisados' : 'Tratamiento importado revisado',
+      descripcion: metadata.mode === 'resources'
+        ? 'Se han confirmado la cabina y el profesional de la cita importada. Se conservan el horario y la configuración de avisos.'
+        : metadata.mode === 'no_treatment'
         ? 'Se ha confirmado una visita sin tratamiento. Se conservan el horario y la configuración de avisos.'
         : 'Se ha vinculado un tratamiento del catálogo. Se conservan el horario y la configuración de avisos.',
       icono: 'heroicons_outline:clipboard-document-check', color: 'info', citaId: String(metadata.appointment_id),

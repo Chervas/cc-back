@@ -14,7 +14,7 @@ async function main() {
   let db; const log = console.log;
   try { console.log = () => {}; db = require('../../../models'); } finally { console.log = log; }
   const { resolveImportedTreatment } = require('../../services/appointmentImportResolution.service');
-  const { importReviewVersion, importTreatmentPending } = require('../../lib/appointment-import-review');
+  const { importReviewVersion, importTreatmentPending, hasReviewedImportResources, appointmentImportReview } = require('../../lib/appointment-import-review');
   const { assessAppointmentClinicalConsent } = require('../../services/appointmentConsentEligibility.service');
   const capabilities = { simple: true, multi: true }, marker = `qa-import-${randomUUID()}`, checks = [], ids = [];
   const run = async callback => {
@@ -83,6 +83,61 @@ async function main() {
       await row.reload({ transaction }); assert.deepEqual(row.toJSON(), before);
       assert.equal(await db.AppointmentBookingOccupancy.count({ where: { appointment_id: row.id_cita }, transaction }), 0);
       checks.push('A mismatched treatment duration is rejected without stretching or moving the appointment');
+    });
+    await run(async transaction => {
+      const row=await make(transaction), before=row.toJSON();
+      const args={db,appointmentId:row.id_cita,clinicId:1,actorId:1,capabilities,transaction,
+        input:{mode:'resources',reason:'Synthetic room and professional checked',expected_version:importReviewVersion(before)}};
+      await resolveImportedTreatment(args); await row.reload({transaction});
+      assert.equal(hasReviewedImportResources(row.toJSON()),true);
+      assert.deepEqual(appointmentImportReview(row.toJSON()).pending_assignment,['treatment']);
+      for(const key of Object.keys(before).filter(k=>!['updated_by','updated_at','import_metadata'].includes(k)))
+        assert.deepEqual(row[key],before[key]);
+      for(const key of Object.keys(before.import_metadata)) assert.deepEqual(row.import_metadata[key],before.import_metadata[key]);
+      assert.equal(await db.AppointmentBookingOccupancy.count({where:{appointment_id:row.id_cita},transaction}),2);
+      assert.equal((await resolveImportedTreatment(args)).replayed,true);
+      const events=await db.PatientOperationalEvent.findAll({where:{patient_id:patient.id_paciente,event_type:'appointment.import_resolved'},transaction});
+      assert.equal(events.filter(e=>e.metadata.appointment_id===row.id_cita && e.metadata.mode==='resources').length,1);
+      await row.update({nota:'Edited note only'},{transaction});
+      assert.equal(hasReviewedImportResources(row.toJSON()),true);
+      checks.push('Explicit resource confirmation writes canonical occupancy, preserves source/HOLD and emits once; note edits keep approval');
+    });
+    await run(async transaction => {
+      const row=await make(transaction), catalog=await treatment(transaction);
+      await catalog.update({clinical_config:{catalog_status:'active',booking_profile:{version:1,phases:[
+        {key:'first',label:'Synthetic first room',duration_minutes:15,installation_ids:[rooms[0].id],professionals:{mode:'any',ids:[staff[0].id_usuario],preferred_id:staff[0].id_usuario}},
+        {key:'second',label:'Synthetic second room',duration_minutes:15,installation_ids:[rooms[1].id],professionals:{mode:'any',ids:[staff[0].id_usuario],preferred_id:staff[0].id_usuario}},
+      ]}}},{transaction});
+      await resolveImportedTreatment({db,appointmentId:row.id_cita,clinicId:1,actorId:1,capabilities,transaction,
+        input:{mode:'treatment',treatment_id:catalog.id_tratamiento,reason:'Synthetic two-phase treatment',expected_version:importReviewVersion(row.toJSON())}});
+      await row.reload({transaction}); const before=row.toJSON();
+      await resolveImportedTreatment({db,appointmentId:row.id_cita,clinicId:1,actorId:1,capabilities,transaction,
+        input:{mode:'resources',reason:'Both synthetic phases checked',expected_version:importReviewVersion(before)}});
+      await row.reload({transaction});
+      assert.deepEqual(row.import_metadata.booking.phases,before.import_metadata.booking.phases);
+      assert.equal(hasReviewedImportResources(row.toJSON()),true);
+      const occupancy=await db.AppointmentBookingOccupancy.findAll({where:{appointment_id:row.id_cita},transaction});
+      assert(occupancy.some(o=>o.installation_id===rooms[0].id)); assert(occupancy.some(o=>o.installation_id===rooms[1].id));
+      checks.push('Explicit review of an existing two-phase reservation preserves both cabin/time segments and their occupancy');
+    });
+    await run(async transaction => {
+      const row=await make(transaction), before=row.toJSON();
+      await db.Instalacion.update({activo:false},{where:{id:rooms[0].id},transaction});
+      await assert.rejects(resolveImportedTreatment({db,appointmentId:row.id_cita,clinicId:1,actorId:1,capabilities,transaction,
+        input:{mode:'resources',reason:'Cannot approve inactive room',expected_version:importReviewVersion(before)}}));
+      await row.reload({transaction}); assert.deepEqual(row.toJSON(),before);
+      assert.equal(await db.AppointmentBookingOccupancy.count({where:{appointment_id:row.id_cita},transaction}),0);
+      checks.push('An inactive cabin cannot be approved; all synthetic room and appointment changes roll back');
+    });
+    await run(async transaction => {
+      const row=await make(transaction), before=row.toJSON();
+      const conflict=await db.CitaPaciente.create({clinica_id:1,paciente_id:patient.id_paciente,doctor_id:staff[0].id_usuario,
+        instalacion_id:rooms[0].id,inicio:before.inicio,fin:before.fin,estado:'pendiente',tipo_cita:'revision',source_reference:marker},{transaction});
+      ids.push(conflict.id_cita);
+      await assert.rejects(resolveImportedTreatment({db,appointmentId:row.id_cita,clinicId:1,actorId:1,capabilities,transaction,
+        input:{mode:'resources',reason:'Cannot force a conflict',expected_version:importReviewVersion(before),force:true}}),{code:'booking_unavailable'});
+      await row.reload({transaction}); assert.deepEqual(row.toJSON(),before);
+      checks.push('A real SQL overlap is rejected even if a forged force flag is submitted');
     });
     // A real report writer must wait for the appointment lock before choosing
     // its treatment snapshot. The uncommitted synthetic appointment disappears

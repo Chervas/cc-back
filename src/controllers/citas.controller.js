@@ -2136,6 +2136,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         delete baseImportMetadata.program_session;
         delete baseImportMetadata.additional_staff;
         delete baseImportMetadata.import_treatment_resolution;
+        delete baseImportMetadata.import_resource_resolution;
         const appointmentImportMetadata = {
             ...baseImportMetadata,
             ...(isHistoricalRegistration ? {
