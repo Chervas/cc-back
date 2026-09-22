@@ -241,6 +241,16 @@ test('client metadata cannot forge support and a status-only call cannot replace
     additionalStaffIds: [6], appointmentValues: { estado: 'confirmada' } }), { code: 'booking_additional_staff_invalid' });
 });
 
+test('canonical booking rejects forged import-resource approval and preserves only the stored marker', async () => {
+  const f=fixture({bookingProfile:null}), forged={version:1,actor_id:999,request_hash:'a'.repeat(64)};
+  const saved=await f.reserve({appointmentValues:{...f.values,import_metadata:{import_resource_resolution:forged}}});
+  assert.equal(saved.import_metadata?.import_resource_resolution,undefined);
+  const stored={version:1,actor_id:7,request_hash:'b'.repeat(64)};
+  f.state.appointments.find(row=>row.id_cita===saved.id_cita).import_metadata={import_resource_resolution:stored};
+  const revised=await f.reserve({existingAppointmentId:saved.id_cita,appointmentValues:{import_metadata:{import_resource_resolution:forged}}});
+  assert.deepEqual(revised.import_metadata.import_resource_resolution,stored);
+});
+
 test('support DTO is bounded, date-bound and excludes metadata, history and patient fields', async () => {
   assert.equal(normalizeAdditionalStaff(undefined), undefined);
   assert.deepEqual(normalizeAdditionalStaff([]), []);

@@ -9,24 +9,26 @@ const { appointmentImportReview } = require('../../lib/appointment-import-review
 test('inactive assigned cabin stays in review even when its original pending list was empty', () => {
   for (const activo of [false,0]) {
     const row={source_system:'cliniccloud',instalacion_id:80,instalacion:{activo},import_metadata:{cliniccloud_delta:{pending_assignment:[]}}};
-    assert.deepEqual(appointmentImportReview(row),{source:'cliniccloud',reminders_held:true,pending_assignment:['installation'],installation_inactive:true});
+    assert.deepEqual(appointmentImportReview(row),{source:'cliniccloud',reminders_held:true,pending_assignment:['installation','professional'],installation_inactive:true,resources_need_review:true});
     row.instalacion.activo=true;
-    assert.deepEqual(appointmentImportReview(row).pending_assignment,[]);
+    assert.deepEqual(appointmentImportReview(row).pending_assignment,['professional','installation']);
+    assert.equal(appointmentImportReview(row).installation_inactive,undefined);
   }
 });
 test('inactive room review is derived from current data, not a stale metadata assertion', () => {
   const row={source_system:'cliniccloud',instalacion_id:80,instalacion:{activo:true},import_metadata:{installation_inactive:true,cliniccloud_delta:{pending_assignment:['installation_id']}}};
-  assert.deepEqual(appointmentImportReview(row).pending_assignment,[]);
+  assert.deepEqual(appointmentImportReview(row).pending_assignment,['professional','installation']);
+  assert.equal(appointmentImportReview(row).installation_inactive,undefined);
   assert.equal(appointmentImportReview({...row,source_system:null}),null);
   delete row.instalacion;
-  assert.deepEqual(appointmentImportReview(row).pending_assignment,[]);
+  assert.deepEqual(appointmentImportReview(row).pending_assignment,['professional','installation']);
 });
-test('import summary excludes raw source evidence and removes resolved assignments', () => {
+test('IDs alone do not count as explicit resource review; clinical source evidence remains private', () => {
   const row = { source_system: 'cliniccloud', doctor_id: 53, instalacion_id: null, tratamiento_id: 7,
     import_metadata: { source_contact_id: 'private', raw: 'private', cliniccloud_delta: { pending_assignment: ['doctor_id','installation_id','treatment_id','untrusted'] } } };
-  assert.deepEqual(appointmentImportReview(row), { source: 'cliniccloud', reminders_held: true, pending_assignment: ['installation'] });
+  assert.deepEqual(appointmentImportReview(row), { source: 'cliniccloud', reminders_held: true, pending_assignment: ['installation','professional'], resources_need_review:true });
   row.instalacion_id = 13;
-  assert.deepEqual(appointmentImportReview(row).pending_assignment, []);
+  assert.deepEqual(appointmentImportReview(row).pending_assignment, ['professional','installation']);
 });
 test('native visits never acquire import warnings and malformed metadata fails closed without raw disclosure', () => {
   assert.equal(appointmentImportReview({}), null);
@@ -38,7 +40,7 @@ test('source service is an explicitly bounded display label, not raw source evid
   }) };
   const result = appointmentImportReview(row);
   assert.equal(result.source_service, 'CYCLONE CORPORAL 1 SESION');
-  assert.deepEqual(result.pending_assignment, ['treatment']);
+  assert.deepEqual(result.pending_assignment, ['treatment','professional','installation']);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE|source_contact_id|details|treatment_id/);
   assert.equal(row.tratamiento_id, null);
   assert.equal(appointmentImportReview({...row, source_system: null}), null);

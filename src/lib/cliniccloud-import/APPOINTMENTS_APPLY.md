@@ -259,7 +259,15 @@ asignaciones que aún faltan realmente. `source_service` añade únicamente el
 nombre del servicio de la línea base, limitado a 255 caracteres; no expone notas,
 identidad ni evidencias privadas. Es texto de procedencia, no una equivalencia de
 catálogo, precio o consentimiento. Sin permiso de datos sensibles se retira todo
-`import_review`. Corregir manualmente la asignación elimina su aviso, no activa mensajes.
+`import_review`. Completar un ID no equivale a validar su asignación. La extensión
+preparada en DEV mantiene `resources_need_review` en las citas abiertas del delta
+sin bono/programa ni reserva provisional. La acción explícita `mode: resources`
+de la ruta de resolución comprueba disponibilidad canónica y registra actor/motivo
+sin cambiar recursos, horas ni HOLD; las salas inactivas se rechazan. El marcador
+servidor queda ligado a la reserva y se invalida al cambiar intervalo, tratamiento,
+cabina, equipo o fases, no por editar notas. No añade consultas por tarjeta.
+Contrato de UI, permisos y alcance en
+[17: confirmación de recursos](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/17-agenda-citas.md#confirmar-cabina-y-profesional-importados).
 Pruebas: `cliniccloud_week_appointments.test.js`,
 `cliniccloud_import_snapshot_baseline.test.js` y
 `appointment_import_review.test.js`; QA SQL aislada
