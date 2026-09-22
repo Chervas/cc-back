@@ -34,6 +34,7 @@ router.get('/treatments/:id/requirements', consentimientosController.getTreatmen
 router.put('/treatments/:id/requirements', consentimientosController.saveTreatmentRequirements);
 
 router.get('/patients/:id/documents', consentimientosController.listPatientDocuments);
+router.post('/patients/:id/intake-package', consentimientosController.createPatientIntakePackage);
 router.get('/patients/:id/external-attestations', consentimientosController.listPatientExternalAttestations);
 router.post('/patients/:id/external-attestations', consentimientosController.createPatientExternalAttestation);
 router.get('/patients/:id/treatments-without-consent', consentimientosController.listPatientTreatmentsWithoutConsentRequirements);

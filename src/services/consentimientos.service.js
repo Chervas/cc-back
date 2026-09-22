@@ -2154,6 +2154,29 @@ async function attachConsentSummaryToCitas(citas) {
     return citas;
 }
 
+async function createPatientIntakePackage(identifier, options = {}) {
+    const patient = await findPacienteByIdentifier(identifier);
+    if (!patient) throw Object.assign(new Error('patient_not_found'), { statusCode: 404 });
+    return require('../lib/patient-intake-consents').preparePatientIntake({
+        db, patientId: patient.id_paciente, clinicId: options.clinicId, actorId: options.createdBy,
+        snapshot: ({ template: templateRow, version: versionRow, patient: patientRow, clinic: clinicRow }) => {
+            const template = getPlain(templateRow), version = getPlain(versionRow), paciente = getPlain(patientRow);
+            const context = buildTemplateContext({ paciente, clinica: getPlain(clinicRow) });
+            const html = renderTemplateHtml(version.body_html, context);
+            const policy = getSigningPolicyFromVersion(version, template);
+            const snapshot = {
+                template_source: 'clinic', template,
+                version: { id: version.id, version: version.version, locale: version.locale,
+                    title: version.title, body_json: version.body_json || null, variable_schema: version.variable_schema || null },
+                context, patient_flags: { is_minor: isMinorPatient(paciente), representatives: getRepresentativeSnapshot(paciente) },
+                clinical_policy: { ...policy, pdf_strategy: 'json_snapshot_printable_on_demand' },
+                generated_at: new Date().toISOString(),
+            };
+            return { snapshot_json: snapshot, snapshot_html: html, snapshot_hash: hashSnapshot({ ...snapshot, rendered_html: html }) };
+        },
+    });
+}
+
 async function createPackageForAppointment(citaIdRaw, options = {}) {
     const cita = await findAppointment(citaIdRaw);
     if (!cita) {
@@ -3339,6 +3362,7 @@ module.exports = {
     getConsentSummaryForAppointment,
     attachConsentSummaryToCitas,
     createPackageForAppointment,
+    createPatientIntakePackage,
     ensurePackageForAppointment,
     sendPackageMock,
     createTabletSession,
