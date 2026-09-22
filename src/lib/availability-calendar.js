@@ -284,6 +284,7 @@ const buildDoctorAvailabilityContext = ({
 
   return {
     docWins: mergeWindows(clinicWins),
+    doctorId: Number(doctorId),
     dcMissing: false,
     outOfHoursMessage: message
   };

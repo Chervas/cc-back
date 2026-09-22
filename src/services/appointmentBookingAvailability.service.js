@@ -7,6 +7,7 @@ const { resolveClinicTimezone, formatDateLocal, formatLocal, dayIndexFromLocalDa
   hasActiveSchedule } = require('../lib/availability-calendar');
 const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
 const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staff');
+const { installationAllowsStaff } = require('../lib/installation-professionals');
 const { bookingError, bookingCapabilities, requireOperationalProfile, loadScopedTreatment } = require('./treatmentBookingProfile.service');
 
 function uniqueIds(values) { return [...new Set(values.map(Number))].sort((a, b) => a - b); }
@@ -126,8 +127,12 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     });
     installations.forEach((installation) => {
       const id = Number(installation.id);
-      if (!cabins.has(id)) cabins.set(id, { name: installation.nombre || '', windows: [], busy: busy.get(mapping.keys.get(id)) || [] });
-      cabins.get(id).windows.push(...buildWindowsFromHorarios(installation.horarios || [], dow, date, timeZone));
+      if (!cabins.has(id)) cabins.set(id, { name: installation.nombre || '',
+        profesionales_permitidos: installation.profesionales_permitidos,
+        windows: [], busy: busy.get(mapping.keys.get(id)) || [] });
+      if (!additionalStaffIds.length || installationAllowsStaff(installation, additionalStaffIds)) {
+        cabins.get(id).windows.push(...buildWindowsFromHorarios(installation.horarios || [], dow, date, timeZone));
+      }
     });
   }
   const patientBusy = patientId ? await db.CitaPaciente.findAll({ where: {
