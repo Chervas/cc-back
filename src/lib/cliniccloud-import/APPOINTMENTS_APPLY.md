@@ -289,6 +289,28 @@ anulada no recibe el ID fuente de la activa. Repetir el ZIP no crea antecedentes
 duplicados ni propone cancelar la reserva conservada. Pruebas ficticias en
 `cliniccloud_reviewed_source_pairs.test.js`; no añade SQL al runtime de agenda.
 
+## Conservar una elección expresa ya aplicada
+
+`confirmed-source-selection.js` registra una elección del titular cuando la
+visita elegida ya existe y su alta conservó la referencia de esa confirmación.
+Exige las dos acciones originales, sus huellas, misma identidad/acto/día,
+la elección expresa y la marca del alta aplicada en HOLD. Admite cambio entre
+dos agendas virtuales `Cabina n`, no un cambio inferido de profesional. No decide
+qué hora es mejor, no crea/mueve/anula citas y no modifica recursos ni economía.
+
+El operador de metadatos debe contrastar el registro completo bajo bloqueo,
+respaldo, diario antes/después, ensayo revertido y lectura independiente. Solo
+añade `cliniccloud_confirmed_source_selection` y actualiza el timestamp; el
+recibo liga las dos filas fuente, la confirmación y la línea base importada.
+La ejecución de este registro no equivale a resolver cabina o profesional.
+
+Snapshot/plan distinguen `preserve_confirmed_source_selection` para la elegida
+y `preserve_superseded_source_row` para la sustituida. La segunda no vuelve a
+ser candidata a alta al repetir el mismo ZIP. Otra exportación, nuevos bytes,
+nota/estado/ID distintos o cambios locales exigen revisión; una visita nativa
+en cualquiera de los dos intervalos permanece protegida. Pruebas:
+`cliniccloud_confirmed_source_selection.test.js`.
+
 ## Concretar la cabina física sin cambiar la cita
 
 `cliniccloud-import-cabin-assignments.js` es el paso posterior al alta semanal.

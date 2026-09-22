@@ -3,6 +3,7 @@
 const { ADAPTER_VERSION, TIMEZONE, hash, stableJson, index, norm, dateOnly } = require('./adapter');
 const { sourceReference } = require('./week-appointments');
 const { dispositionForReviewedPair } = require('./reviewed-source-pairs');
+const { matchesSelectionEntry } = require('./confirmed-source-selection');
 
 const appointmentKey = (r) => stableJson([r.kind || 'appointment', r.source_contact_id, r.start_local, r.end_local, r.agenda_key]);
 const patientTimeKey = (r) => r.patient_id ? stableJson([r.kind || 'appointment', String(r.patient_id), r.start_local, r.end_local]) : null;
@@ -105,6 +106,9 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
     ((local.source_reconciliation || local.legacy_source_reconciliation)?.entries || []).map(entry => ({ local, entry }))), item => item.entry.source_reference);
   const reviewedPairReferences = index(localAppointments.filter(local => isImported(local) && local.reviewed_source_pair),
     local => local.reviewed_source_pair.source_reference);
+  const confirmedSelections = index(localAppointments.filter(local => isImported(local) && local.confirmed_source_selection)
+    .flatMap(local => ['retained', 'superseded'].map(disposition => ({ local, disposition,
+      entry: local.confirmed_source_selection[disposition] }))), item => item.entry.source_reference);
   const claimedLocal = new Set();
   const recoveredHistoricalIds = new Set();
   const decisions = [];
@@ -124,6 +128,31 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
     if (row.source_external_id && sourceExternalIds.get(row.source_external_id).length > 1) decision.reasons.push('DUPLICATE_SOURCE_APPOINTMENT_ID');
     const sameIdentity = sourceExact.get(appointmentKey(row)) || [];
     if (new Set(sameIdentity.map((r) => r.provenance.row_sha256)).size > 1) decision.reasons.push('MULTIPLE_DISTINCT_SOURCE_ROWS_SAME_SLOT');
+    const selections = row.kind === 'appointment' ? confirmedSelections.get(sourceReference(row)) || [] : [];
+    if (selections.length) {
+      decision.candidate_local_ids = selections.map(item => item.local.id);
+      if (selections.length !== 1) decision.reasons.push('CONFIRMED_SELECTION_MULTIPLE_LOCAL_MATCHES');
+      else {
+        const { local, entry, disposition } = selections[0], receipt = local.confirmed_source_selection;
+        decision.local_id = local.id; decision.expected_local_hash = hash(local);
+        if (!matchesSelectionEntry(row, entry)) decision.reasons.push('CONFIRMED_SELECTION_SOURCE_CHANGED_REQUIRES_REVIEW');
+        if (!patient || String(patient.id) !== String(local.patient_id)) decision.reasons.push('LOCAL_PATIENT_IDENTITY_CONFLICT');
+        if (local.local_modified || local.selection_local_changed
+          || ['start_local', 'end_local', 'status'].some(k => local[k] !== receipt.retained.source[k])) decision.reasons.push('LOCAL_EDIT_REQUIRES_REVIEW');
+        const conflicts = patient ? (localPatient.get(String(patient.id)) || []).filter(other => String(other.id) !== String(local.id)
+          && other.kind !== 'block' && other.status !== 'cancelada' && [receipt.retained.source, receipt.superseded.source]
+            .some(s => other.start_local < s.end_local && other.end_local > s.start_local)) : [];
+        if (conflicts.length) {
+          decision.candidate_local_ids.push(...conflicts.map(other => other.id));
+          decision.reasons.push('CONFIRMED_SELECTION_LOCAL_OVERLAP');
+        }
+        if (!decision.reasons.length) {
+          decision.action = disposition === 'retained' ? 'preserve_confirmed_source_selection' : 'preserve_superseded_source_row';
+          decision.requires_review = false; claimedLocal.add(String(local.id));
+        }
+      }
+      decisions.push(decision); continue;
+    }
     const reviewedPairs = row.kind === 'appointment' ? reviewedPairReferences.get(sourceReference(row)) || [] : [];
     if (reviewedPairs.length) {
       decision.candidate_local_ids = reviewedPairs.map(local => local.id);
