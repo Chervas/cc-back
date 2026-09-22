@@ -1,0 +1,73 @@
+'use strict';
+const assert = require('node:assert/strict');
+const { DataTypes: D } = require('sequelize');
+const bcrypt = require('bcryptjs'), jwt = require('jsonwebtoken');
+const { randomUUID } = require('node:crypto');
+const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
+withIsolatedCampaignMysql(async ({ sql, models, report }) => {
+  await sql.getQueryInterface().createTable('Clinicas', { id_clinica: { type: D.INTEGER, primaryKey: true } });
+  await sql.getQueryInterface().createTable('ClinicMetaAssets', { id: { type: D.INTEGER, primaryKey: true } });
+  for (const [name, file] of Object.entries({ Usuario:'usuario', AuthSession:'authsession', AuthEmailChallenge:'authemailchallenge',
+    AuthTrustedDevice:'authtrusteddevice', PasswordResetToken:'passwordresettoken', PlatformAuditEvent:'platformauditevent', SyncLog:'synclog' })) {
+    models[name] = require('../../../models/' + file)(sql, D); await models[name].sync();
+  }
+  const api = require('../../services/accessSession.service');
+  const audit = require('../../services/platformAudit.repository').createRepository(models.PlatformAuditEvent);
+  let clock = Date.now(); const now = () => new Date(clock);
+  const env = { JWT_SECRET:'FICTITIOUS_SESSION_SECRET_20260922',AUTH_SESSION_MODE:'enforce',AUTH_EMAIL_MFA_MODE:'enforce',
+    PLATFORM_AUDIT_AUTH_ENABLED:'true', PLATFORM_AUDIT_AUTH_POLICY:'auth-durable-v1' };
+  const sessions = api.createService({ models, audit, now, config: () => api.settings(env) });
+  const mails=[];
+  const challenge = require('../../services/authEmailChallenge.service').createService({ models, sessions, audit, now,
+    config: () => ({ mode:'enforce',key:Buffer.alloc(32,5) }), queueEmail:async input => {mails.push(input);return {emailMessage:{id:mails.length,status:'queued'}};} });
+  const login = async user => {const r=await challenge.begin(user);return challenge.verify(r.challengeToken,mails.at(-1).templateContext.verification_code);};
+  const password='FICTITIOUS_INITIAL_PASSWORD';
+  const admin=await models.Usuario.create({id_usuario:1,nombre:'Admin QA',email_usuario:'admin@example.invalid',password_usuario:await bcrypt.hash(password,4)});
+  const target=await models.Usuario.create({id_usuario:44,nombre:'Target QA',email_usuario:'target@example.invalid',password_usuario:await bcrypt.hash(password,4)});
+  const loginAdmin=jwt.decode((await login(admin)).token);
+  const actor={userId:1,sessionRef:loginAdmin.jti,expiresAt:new Date(loginAdmin.exp*1000)};
+  const oldLogin=await login(target);
+  const make = (extra={}) => require('../../services/adminPasswordChange.service').createService({models,sessions,audit,mode:()=> 'enforce',now,...extra});
+  const body={password:'FICTITIOUS_NEW_PASSWORD',administratorPassword:password};
+  const run=(input={})=>make()({actor,targetId:44,body,...input});
+  await assert.rejects(run({actor:{...actor,userId:2}}),{code:'admin_password_forbidden'});
+  for(const bad of [{...body,password:'short'},{...body,password:'ñ'.repeat(37)},{...body,email_usuario:'x@example.invalid'},{...body,administratorPassword:''}]) await assert.rejects(run({body:bad}),{code:'admin_password_request_invalid'});
+  await assert.rejects(make({mode:()=> 'off'})({actor,targetId:44,body}),{code:'admin_password_unavailable'});
+  report.checks.push('Only canonical admins; malformed/short/truncated bcrypt inputs and unsupported fields fail without mutation');
+  for(let i=0;i<5;i++)await assert.rejects(run({body:{...body,administratorPassword:'WRONG_FICTITIOUS_PASSWORD'}}),{code:'admin_password_proof_rejected'});
+  await assert.rejects(run(),{code:'admin_password_rate_limited'});
+  assert.equal(await models.SyncLog.count({where:{status:'failed'}}),5);
+  assert(await bcrypt.compare(password,(await target.reload()).password_usuario));
+  clock+=16*60000;
+  report.checks.push('Wrong administrator password persists failed attempts; fifth attempt blocks further changes for 15 minutes');
+  await challenge.begin(target);
+  const reset=await models.PasswordResetToken.create({user_id:44,token_hash:'a'.repeat(64),token_prefix:'fictitious',email_hash:'b'.repeat(64),expires_at:new Date(clock+600000)});
+  const device=await models.AuthTrustedDevice.create({device_id:randomUUID(),user_id:44,token_hash:'c'.repeat(64),key_binding:'d'.repeat(64),credential_binding:'e'.repeat(64),creation_session_id:jwt.decode(oldLogin.token).jti,email_verified_at:now(),created_at:now(),expires_at:new Date(clock+600000)});
+  const beforeHash=target.password_usuario;
+  await assert.rejects(make({audit:{...audit,append:async()=>{throw Error('FICTITIOUS_AUDIT_FAILURE')}}})({actor,targetId:44,body}));
+  assert.equal((await target.reload()).password_usuario,beforeHash);
+  assert.equal((await reset.reload()).status,'pending');
+  assert.equal((await device.reload()).revoked_at,null);
+  assert.equal(await models.AuthSession.count({where:{user_id:44,state:'active'}}),1);
+  report.checks.push('Audit failure rolls back password, session revocation, pending code and recovery links together');
+  const result=await run();assert.equal(result.changed,true);assert.equal(result.requiresSignIn,false);
+  assert(await bcrypt.compare(body.password,(await target.reload()).password_usuario));
+  assert.equal(target.email_usuario,'target@example.invalid');assert.equal(target.nombre,'Target QA');
+  assert.equal((await reset.reload()).status,'revoked');
+  assert((await device.reload()).revoked_at);
+  assert.equal(await models.AuthEmailChallenge.count({where:{user_id:44,state:'pending'}}),0);
+  assert.equal(await models.AuthSession.count({where:{user_id:44,state:'active'}}),0);
+  await assert.rejects(sessions.verify(oldLogin.token));
+  await sessions.verifyReference(actor);
+  const successful=await models.SyncLog.findOne({where:{status:'completed'}});
+  assert.equal(successful.status_report.actor_id,1);assert.equal(successful.status_report.target_id,44);
+  for(const m of await models.SyncLog.findAll())for(const secret of [password,body.password,beforeHash])assert(!JSON.stringify(m).includes(secret));
+  report.checks.push('Password accepted; old sessions/codes/reset links rejected; actor stays signed in; operational actor/target audit contains no credentials');
+  clock+=61000;
+  const newLogin=await login(target);assert.equal((await sessions.verify(newLogin.token)).userId,44);
+  const adminHash=(await admin.reload()).password_usuario;
+  await assert.rejects(run({actor:{...actor,sessionRef:randomUUID()}}));assert.equal((await admin.reload()).password_usuario,adminHash);
+  await target.update({estado_cuenta:'suspendido'});await assert.rejects(run(),{code:'admin_password_user_inactive'});
+  const selfResult=await run({targetId:1});assert.equal(selfResult.requiresSignIn,true);await assert.rejects(sessions.verifyReference(actor));
+  report.checks.push('New target login still requires a one-use email code; invalid actor session and inactive targets cannot reset');
+}).catch(error=>{console.error(error);process.exitCode=1});
