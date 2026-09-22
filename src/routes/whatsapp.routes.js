@@ -19,7 +19,7 @@ router.use((req, res, next) => {
     || (['PUT','DELETE'].includes(req.method) && /^\/template-catalog\/[1-9][0-9]*$/.test(path))
     || (req.method === 'PUT' && /^\/template-catalog\/[1-9][0-9]*\/toggle$/.test(path))
     || (req.method === 'POST' && /^\/template-catalog\/[1-9][0-9]*\/(duplicate|translations|disciplines|propagate)$/.test(path));
-  if (templateRoute || req.method === 'PUT' && path === '/routing') return next();
+  if (templateRoute || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
   return authMiddleware(req, res, () => metaQuarantine.middleware(req, res));
 });
 
@@ -60,11 +60,12 @@ router.get('/templates/summary', authMiddleware, whatsappController.templatesSum
 
 // Listado de números de WhatsApp (con estado de asignación)
 router.get('/phones', authMiddleware, whatsappController.listPhones);
-router.put('/routing',authMiddleware,async(req,res)=>{
-  try { res.json(await require('../services/whatsappRouting.service').save(req.body,{userId:req.userData?.userId,
+for(const [path,method] of [['/routing','save'],['/routing/secondary','saveSecondary']])router.put(path,authMiddleware,async(req,res)=>{
+  try { res.json(await require('../services/whatsappRouting.service')[method](req.body,{userId:req.userData?.userId,
     sessionRef:req.authSession?.id,sessionExpiresAt:req.authSession?.expiresAt})); }
-  catch(error){const forbidden=error?.code==='whatsapp_authorization_forbidden';res.status(forbidden?403:error?.code==='whatsapp_authorization_invalid'?400:503)
-    .json({error:forbidden?'whatsapp_routing_forbidden':'whatsapp_routing_unavailable'});}
+  catch(error){const forbidden=error?.code==='whatsapp_authorization_forbidden',conflict=error?.code==='whatsapp_authorization_conflict';
+    res.status(forbidden?403:conflict?409:error?.code==='whatsapp_authorization_invalid'?400:503)
+      .json({error:forbidden?'whatsapp_routing_forbidden':conflict?'whatsapp_routing_primary_conflict':'whatsapp_routing_unavailable'});}
 });
 
 // Cumplimiento de políticas y suspensiones de WhatsApp
