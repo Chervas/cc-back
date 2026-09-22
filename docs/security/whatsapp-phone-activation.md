@@ -70,6 +70,13 @@ por WABA con su lease; Meta decide la aprobación. El alta conectada no garantiz
 que sus plantillas ya estén aprobadas. Los fallos del job conservan su recuperación
 habitual y no desencadenan envíos de prueba.
 
+Las imágenes públicas de ejemplo se descargan en AWS con el identificador HTTP
+`Clinicaclick-Template-Media/1.0`. El CDN de medios devuelve 403 si falta esa
+cabecera. No se reenvían tokens al origen de la imagen ni se relajan HTTPS,
+fijación DNS, destinos públicos, tamaño o rechazo de redirecciones. Tras un fallo
+se concilian las versiones Meta antes de preparar las familias aún ausentes;
+los placeholders fallidos se conservan sin fingir aprobación.
+
 ## Identidades, recepción y enrutamiento
 
 - AWS: `/var/lib/clinicaclick-whatsapp-capture-scopes/scopes.json` contiene solo
