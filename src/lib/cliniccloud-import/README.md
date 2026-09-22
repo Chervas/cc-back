@@ -400,3 +400,29 @@ Pruebas: `cliniccloud_catalog_cosmetic_prices.test.js`,
 `treatment_catalog_contract.test.js`, `economic_price_profile.test.js` y
 `economic_fiscal_price_source.test.js`. Recuperación selectiva de esas columnas,
 comparando el estado posterior y el uso económico, no restauración global.
+
+## Vincular maquinaria a borradores individuales
+
+`cliniccloud-import-catalog-equipment.js` incorpora un requisito explícito v2 a
+un borrador individual importado, con una fase y una cabina ya documentadas.
+Revisión privada: `confirmation_reference`, `confirmed_on`, `reviewed_by` y
+`targets` con `treatment_id`, `equipment_id`, `family_key` y la huella
+`source_catalog_sha256`. La vía inicial está acotada a EXION/EMShape de BS;
+combinaciones, ondas BTL con cabina contradictoria y maquinaria fija quedan fuera.
+
+Ejecutar desde back-dev/dev, `--target crm --mode prepare --review …
+--private-output …`; después `--mode rehearse|apply --review … --package …
+--approved-sha256 … --backup-manifest … --private-journal …`. Revisar el ensayo
+revertido antes de aplicar. Paquete de dos horas, backup CRM íntegro, transacción,
+diario durable, comparación íntegra de filas/recursos y lectura posterior.
+El replay conserva el resultado sin sobrescribir cambios posteriores. Si el
+commit es ambiguo, revisar el diario antes de reintentar.
+
+Comprueba opt-in, unidad física, clínica compartida, estado, política de la sala
+canónica y capacidad. Mantiene minutos, cabina, profesionales y precio; solo
+cambia `clinical_config` y `updatedAt`. Retira `INSTALLATION_INACTIVE` únicamente
+tras comprobar que la sala ya está activa; conserva los demás pendientes.
+La procedencia guarda perfil anterior, revisión y paquete. **No activa catálogo,
+reserva máquinas para citas antiguas ni modifica programas o recordatorios**.
+La preparación de un borrador no acredita la conciliación de ocupaciones reales.
+Pruebas: `cliniccloud_catalog_equipment.test.js` y ensayo SQL con rollback.
