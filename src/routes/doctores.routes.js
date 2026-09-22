@@ -252,6 +252,7 @@ const scopeAvailability = asyncAccess(async (req, res, next) => {
 
 router.use(authMiddleware);
 router.get('/', scopeDoctorList, controller.list);
+router.get('/agenda-visibility', (req, res, next) => { req.query.agenda_context = 'true'; next(); }, scopeDoctorList, controller.agendaVisibility);
 router.get('/:doctorClinicaId/horarios', scopeDoctorClinica('team.view'), controller.getHorarios);
 router.put('/:doctorClinicaId/horarios', scopeDoctorClinica('team.manage'), controller.updateHorarios);
 router.get('/:doctorId/bloqueos', scopeDoctor('team.view'), controller.listBloqueos);

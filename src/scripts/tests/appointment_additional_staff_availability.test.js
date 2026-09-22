@@ -14,6 +14,8 @@ function fixture({ busy = false, denied = false, enabled = true, foreignIgnore =
   const calls = { acl: 0, context: 0, writes: 0 };
   const clinic = { id_clinica: 72, grupoClinicaId: 29, configuracion: { timezone: 'Europe/Madrid' } };
   const db = { Sequelize: { Op: {} }, Clinica: { findByPk: async () => clinic },
+    Instalacion: { findByPk: async () => ({ id: 9, clinica_id: 72, activo: true, profesionales_permitidos: [5],
+      horarios: [{ dia_semana: 1, activo: true, hora_inicio: '09:00', hora_fin: '18:00' }], bloqueos: [] }) },
     CitaPaciente: { findByPk: async () => ({ id_cita: 2, clinica_id: foreignIgnore ? 99 : 72 }) },
     ClinicaHorario: { findAll: async () => [] } };
   const context = { doctors: new Map([[6, { windows: [{ start: new Date('2030-01-07T07:00:00Z'), end: new Date('2030-01-07T19:00:00Z') }],
@@ -22,6 +24,9 @@ function fixture({ busy = false, denied = false, enabled = true, foreignIgnore =
   vm.runInNewContext(code, { exports: exported, console, Date, Map, Set, Promise,
     require: name => {
       if (name === '../../models') return db;
+      if (name === '../services/appointmentResourceCalendar.service') return {
+        resourceAppointments: async () => [], resourceInstallationBlocks: async () => [],
+      };
       if (name === 'express-async-handler') return fn => fn;
       if (name === '../lib/access-policy') return { assertUserCanAccessFeature: async args => {
         calls.acl++; assert.equal(args.clinicId, 72);
@@ -50,6 +55,14 @@ test('HTTP check blocks occupied support without disclosing another appointment'
   assert.equal(f.response.body.can_force, false);
   assert.equal(f.calls.acl, 1); assert.equal(f.calls.context, 1);
   assert.doesNotMatch(JSON.stringify(f.response.body), /paciente_id|cita_ids|patient_id|source_reference/);
+});
+
+test('HTTP rejects a disallowed installation/support pairing with 409, including force, without a ReferenceError', async () => {
+  const f = fixture();
+  await f.check({ instalacion_id: '9', force: 'true' });
+  assert.equal(f.response.statusCode, 409);
+  assert.equal(f.response.body.can_force, false);
+  assert(f.response.body.resource_conflicts.some(row => row.code === 'INSTALLATION_PROFESSIONAL_NOT_ALLOWED'));
 });
 
 test('HTTP check authorizes clinic before reading supporting staff availability', async () => {

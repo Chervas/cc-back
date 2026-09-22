@@ -208,7 +208,6 @@ const intersectWindows = (a, b) => {
 
 
 const build409 = ({ message, conflicts }) => {
-  if (additionalStaffIds.length) conflicts.forEach(conflict => { conflict.can_force = false; });
   const canForce = conflicts.length > 0 && conflicts.every((c) => !!c.can_force);
   return {
     available: false,
@@ -402,6 +401,8 @@ const conflictSetKey = (conflicts) => {
     .join(';');
 };
 
+const { installationAllowsStaff } = require('../lib/installation-professionals');
+
 const buildUnavailableIntervals = ({
   clinicaId,
   timeZone,
@@ -465,6 +466,11 @@ const buildUnavailableIntervals = ({
       start,
       end
     });
+    if (inst && !installationAllowsStaff(inst, doctorId ? [doctorId] : [])) {
+      conflicts.push({ resource_type: 'installation', resource_id: instalacionId, clinica_id: clinicaId,
+        code: 'INSTALLATION_PROFESSIONAL_NOT_ALLOWED', can_force: false,
+        details: { message: 'Este profesional no está autorizado para utilizar esta instalación.' } });
+    }
 
     if (!conflicts.length) {
       if (current) {
@@ -579,7 +585,7 @@ exports.check = asyncHandler(async (req, res) => {
       if (!ignored || Number(ignored.clinica_id) !== clinicaId) return res.status(404).json({ message: 'Cita no encontrada' });
     }
     const context = await loadBookingContext({ db, clinic: clinica, profile: bookingProfile, start, end,
-      ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, occupancyEnabled: true });
+      ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, occupancyEnabled: true, additionalStaffIds });
     const selections = bookingProfile.phases.length === 1 && bookingProfile.phases[0].professionals.mode === 'any'
       ? { [bookingProfile.phases[0].key]: { doctor_id, installation_id: instalacion_id } } : {};
     const solution = solveBookingProfile({ profile: bookingProfile, start, ...context, selections });
@@ -632,6 +638,11 @@ exports.check = asyncHandler(async (req, res) => {
     }
 
     const instWins = buildWindowsFromHorarios(inst.horarios || [], dow, fechaLocalCheck, clinicTimezone);
+    if (!installationAllowsStaff(inst, [doctor_id, ...(additionalStaffIds || [])].filter(Boolean).map(Number))) {
+      conflicts.push({ resource_type: 'installation', resource_id: instalacionId, clinica_id: clinicaId,
+        code: 'INSTALLATION_PROFESSIONAL_NOT_ALLOWED', can_force: false,
+        details: { message: 'Selecciona profesionales autorizados para utilizar esta instalación.' } });
+    }
     const inRange = inAnyWindow(instWins, start, end);
     if (!inRange) {
       conflicts.push({
@@ -778,6 +789,7 @@ exports.check = asyncHandler(async (req, res) => {
     }
   }
 
+  if (additionalStaffIds.length) conflicts.forEach(conflict => { conflict.can_force = false; });
   const canForce = conflicts.length > 0 && conflicts.every((c) => !!c.can_force);
   const wantsForce = parseBool(force);
 
@@ -959,6 +971,7 @@ exports.slots = asyncHandler(async (req, res) => {
     docBlocksRows,
     docCitasRows
   }) => {
+    if (inst && !installationAllowsStaff(inst, [doctorCtx?.doctorId, ...additionalStaffIds].filter(Boolean))) return [];
     let windows = [...baseWindows];
 
     if (clinicHasSchedule) {
