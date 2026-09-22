@@ -1,5 +1,7 @@
 'use strict';
 
+const { normalizeEquipmentRequirements, equipmentIds } = require('./booking-equipment');
+
 function invalid(field, message) {
   const error = new Error(message);
   error.statusCode = 400;
@@ -21,7 +23,7 @@ function ids(value, field) {
 /** Normalizes only the booking_profile subtree; callers retain clinical_config. */
 function normalizeBookingProfile(value, { allowIncomplete = false } = {}) {
   if (value == null) return null;
-  if (typeof value !== 'object' || Array.isArray(value) || value.version !== 1) {
+  if (typeof value !== 'object' || Array.isArray(value) || ![1, 2].includes(value.version)) {
     invalid('version', 'La versión del perfil de agenda no es válida.');
   }
   if (!Array.isArray(value.phases) || !value.phases.length || value.phases.length > 12) {
@@ -40,6 +42,9 @@ function normalizeBookingProfile(value, { allowIncomplete = false } = {}) {
     }
     if (duration === null && !allowIncomplete) invalid(`${field}.duration_minutes`, 'Indica la duración de cada fase.');
     const installationIds = ids(phase.installation_ids, `${field}.installation_ids`);
+    // v2 is deliberate: old writers must reject, never silently strip a machine.
+    const equipmentRequirements = normalizeEquipmentRequirements(phase.equipment_requirements);
+    if (equipmentRequirements.length && value.version !== 2) invalid('version', 'Los equipos requieren la versión 2 del perfil de agenda.');
     const staff = phase.professionals || { mode: 'any', ids: [] };
     if (typeof staff !== 'object' || !['any', 'all'].includes(staff.mode)) invalid(`${field}.professionals.mode`, 'Elige si puede atender cualquiera o deben estar todos.');
     const professionalIds = ids(staff.ids, `${field}.professionals.ids`);
@@ -60,20 +65,22 @@ function normalizeBookingProfile(value, { allowIncomplete = false } = {}) {
       key, label: String(phase.label || '').trim().slice(0, 120), duration_minutes: duration,
       installation_ids: installationIds,
       professionals: { mode: staff.mode, ids: professionalIds, preferred_id: preferredId },
+      ...(equipmentRequirements.length ? { equipment_requirements: equipmentRequirements } : {}),
     };
   });
   if (phases.reduce((sum, phase) => sum + (phase.duration_minutes || 0), 0) > 1440) {
     invalid('phases', 'Una cita no puede superar 24 horas; divide las jornadas en citas.');
   }
   if (new Set(phases.flatMap((phase) => phase.installation_ids.map((id) => `i:${id}`)
-    .concat(phase.professionals.ids.map((id) => `d:${id}`)))).size > 100) {
+    .concat(phase.professionals.ids.map((id) => `d:${id}`))).concat(equipmentIds({ phases }).map(id => `e:${id}`))).size > 100) {
     invalid('phases', 'El perfil admite como máximo 100 cabinas y profesionales distintos.');
   }
-  return { version: 1, phases };
+  return { version: value.version, phases };
 }
 
 function requiresMultiResourceBooking(profile) {
   return !!profile && (profile.phases.length > 1
+    || equipmentIds(profile).length > 0
     || profile.phases.some((phase) => phase.professionals.mode === 'all' && phase.professionals.ids.length > 1));
 }
 

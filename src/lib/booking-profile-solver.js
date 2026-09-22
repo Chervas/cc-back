@@ -15,7 +15,7 @@ function isFree(resource, start, end) {
  * ALL staff are required for the entire appointment, not merely their phase.
  * Inputs contain only schedules/occupancy, never patients or clinical notes.
  */
-function solveBookingProfile({ profile: input, start, doctors, installations, clinicWindows = null, selections = {} }) {
+function solveBookingProfile({ profile: input, start, doctors, installations, equipment = null, clinicWindows = null, selections = {} }) {
   const profile = normalizeBookingProfile(input);
   const appointmentStart = new Date(start);
   const appointmentEnd = new Date(appointmentStart.getTime()
@@ -25,12 +25,34 @@ function solveBookingProfile({ profile: input, start, doctors, installations, cl
   let phaseStart = appointmentStart;
   const phases = [];
   const warnings = [];
+  const usedEquipment = new Map();
   for (const phase of profile.phases) {
     const phaseEnd = new Date(phaseStart.getTime() + phase.duration_minutes * 60000);
     const selection = selections[phase.key] || {};
     const installationIds = selection.installation_id == null ? phase.installation_ids
       : phase.installation_ids.filter((id) => id === Number(selection.installation_id));
-    const freeInstallations = installationIds.filter((id) => isFree(installations.get(id), phaseStart, phaseEnd));
+    const equipmentChoices = new Map();
+    const requirements = phase.equipment_requirements || [];
+    const freeInstallations = installationIds.filter((id) => {
+      if (!isFree(installations.get(id), phaseStart, phaseEnd)) return false;
+      if (!requirements.length) return true;
+      if (!equipment) return false;
+      const chosen = [];
+      for (const group of requirements) {
+        const unit = group.equipment_ids.map(eid => equipment.get(eid)).find(candidate => {
+          if (!candidate || candidate.status !== 'available' || !candidate.installation_ids.has(id)) return false;
+          const bufferedEnd = new Date(phaseEnd.getTime() + candidate.turnaround_minutes * 60000);
+          if (candidate.busy.some(interval => overlap(phaseStart, bufferedEnd, interval))) return false;
+          const previous = usedEquipment.get(candidate.id);
+          return !previous || previous.resource_key === installations.get(id).resource_key
+            || previous.end + candidate.turnaround_minutes * 60000 <= phaseStart.getTime();
+        });
+        if (!unit) return false;
+        chosen.push(unit);
+      }
+      equipmentChoices.set(id, chosen);
+      return true;
+    });
     let installationId;
     const staff = phase.professionals;
     let doctorIds;
@@ -63,7 +85,13 @@ function solveBookingProfile({ profile: input, start, doctors, installations, cl
     phases.push({ key: phase.key, label: phase.label, start_at: phaseStart.toISOString(), end_at: phaseEnd.toISOString(),
       installation_id: installationId, installation_name: installations.get(installationId)?.name || '',
       doctor_ids: doctorIds, doctor_names: doctorIds.map((id) => doctors.get(id)?.name || ''),
-      staff_time_scope: staff.mode === 'all' ? 'appointment' : 'phase' });
+      staff_time_scope: staff.mode === 'all' ? 'appointment' : 'phase',
+      ...(requirements.length ? { equipment: equipmentChoices.get(installationId).map(unit => ({
+        id: unit.id, name: unit.name, turnaround_minutes: unit.turnaround_minutes,
+      })) } : {}) });
+    for (const unit of equipmentChoices.get(installationId) || []) usedEquipment.set(unit.id, {
+      resource_key: installations.get(installationId).resource_key, end: phaseEnd.getTime(),
+    });
     phaseStart = phaseEnd;
   }
   return { start_at: appointmentStart.toISOString(), end_at: appointmentEnd.toISOString(), phases, warnings,
@@ -79,6 +107,9 @@ function occupancyForSolution(solution, installationKeys = new Map()) {
       doctor_id: doctorId, installation_id: null,
       start_at: phase.staff_time_scope === 'appointment' ? solution.start_at : phase.start_at,
       end_at: phase.staff_time_scope === 'appointment' ? solution.end_at : phase.end_at }));
+    (phase.equipment || []).forEach(unit => rows.push({ phase_key: phase.key, resource_kind: 'equipment', resource_key: `equipment:${unit.id}`,
+      installation_id: null, doctor_id: null, start_at: phase.start_at,
+      end_at: new Date(new Date(phase.end_at).getTime() + unit.turnaround_minutes * 60000).toISOString() }));
   });
   // Retain phase references in the DTO; duplicate team rows need not occupy twice.
   return rows.filter((row, index) => rows.findIndex((candidate) => candidate.resource_key === row.resource_key

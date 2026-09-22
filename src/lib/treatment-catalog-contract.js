@@ -18,6 +18,9 @@ function assertCatalogEditable(treatment) {
 // Omitted keys are preserved for older clients. Explicit null removes an individual key.
 // Never clear the full JSON because a client does not know newer configuration fields.
 function mergeClinicalConfig(previous, patch) {
+  if (previous?.booking_profile?.version === 2 && patch && Object.hasOwn(patch, 'booking_profile') && patch.booking_profile?.version !== 2) {
+    throw catalogError('Este tratamiento utiliza el configurador de equipos. Actualiza la aplicación antes de modificar su reserva.', 'booking_equipment_client_outdated', 409);
+  }
   const result = previous && typeof previous === 'object' && !Array.isArray(previous) ? { ...previous } : {};
   if (patch != null) {
     if (typeof patch !== 'object' || Array.isArray(patch)) throw catalogError('clinical_config debe ser un objeto.');

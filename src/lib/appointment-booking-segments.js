@@ -22,6 +22,11 @@ function bookingSegments(appointment, { includeClinicalLabels = true } = {}) {
       || new Set(phase.doctor_ids.map(Number)).size !== phase.doctor_ids.length
       || phase.staff_time_scope !== (requirement.professionals.mode === 'all' ? 'appointment' : 'phase')) return [];
     previousEnd = end;
+    const requirements = requirement.equipment_requirements || [];
+    if ((phase.equipment != null && !Array.isArray(phase.equipment))
+      || (phase.equipment?.length || 0) !== requirements.length
+      || (phase.equipment || []).some((unit, i) => !unit || !requirements[i].equipment_ids.includes(unit.id)
+        || !Number.isInteger(unit.turnaround_minutes) || unit.turnaround_minutes < 0 || unit.turnaround_minutes > 120)) return [];
   }
   if (appointment.fin && previousEnd !== new Date(appointment.fin).getTime()) return [];
   return booking.phases.map((phase, index) => ({
@@ -38,6 +43,7 @@ function bookingSegments(appointment, { includeClinicalLabels = true } = {}) {
     doctor_ids: phase.doctor_ids,
     doctor_names: phase.doctor_names || [],
     staff_time_scope: phase.staff_time_scope,
+    ...(phase.equipment?.length ? { equipment: phase.equipment.map(unit => ({ id: unit.id, name: includeClinicalLabels ? unit.name || '' : '' })) } : {}),
   }));
 }
 

@@ -75,6 +75,7 @@ module.exports = (sequelize, DataTypes) => {
     },
     
     // ✅ AÑADIDO: Campo de configuración que faltaba
+    equipment_booking_enabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     configuracion: {
       type: DataTypes.JSON,
       allowNull: true

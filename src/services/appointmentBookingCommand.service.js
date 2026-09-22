@@ -6,6 +6,7 @@ const { resolveInstallationKeys, loadBookingContext } = require('./appointmentBo
 const { bookingError, bookingCapabilities, requireOperationalProfile, loadScopedTreatment, assertPriorityAcknowledgement } = require('./treatmentBookingProfile.service');
 const { normalizeAdditionalStaff, additionalStaffSnapshot } = require('../lib/appointment-additional-staff');
 const { installationAllowsStaff } = require('../lib/installation-professionals');
+const { equipmentIds } = require('../lib/booking-equipment');
 
 function metadataObject(value) {
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = null; } }
@@ -20,7 +21,7 @@ function metadataObject(value) {
 async function lockBookingResources({ db, resourceKeys, transaction }) {
   if (!transaction) throw new Error('booking_transaction_required');
   for (const key of [...new Set(resourceKeys)].sort()) {
-    if (!/^(doctor|installation|patient):[1-9]\d*$/.test(key)) throw new Error('booking_resource_key_invalid');
+    if (!/^(doctor|installation|patient|equipment):[1-9]\d*$/.test(key)) throw new Error('booking_resource_key_invalid');
     // Upsert obtains the same unique-key lock even when the anchor is new.
     await db.AppointmentBookingResource.upsert({ resource_key: key, resource_kind: key.split(':')[0] }, { transaction });
     await db.AppointmentBookingResource.findByPk(key, { transaction, lock: transaction.LOCK.UPDATE });
@@ -189,6 +190,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       ...profile.phases.flatMap((phase) => phase.professionals.ids.map((id) => `doctor:${id}`)),
       ...extraStaff.map((id) => `doctor:${id}`),
       ...installationIds.map((id) => mapping.keys.get(id)), ...previousRows.map((row) => row.resource_key),
+      ...equipmentIds(profile).map(id => `equipment:${id}`),
       ...(values.paciente_id ? [`patient:${values.paciente_id}`] : []),
     ];
     await lockBookingResources({ db, resourceKeys: keys, transaction: tx });
@@ -196,7 +198,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     if (values.estado !== 'cancelada') {
       const context = (!extraStaff.length && preparedContext) || await loadBookingContext({ db, clinic, profile, start, end, transaction: tx,
         ignoreAppointmentId: existing?.id_cita, occupancyEnabled: true, installationMapping: mapping, patientId: values.paciente_id,
-        additionalStaffIds: extraStaff });
+        additionalStaffIds: extraStaff, equipmentEnabled: capabilities.equipment });
       const existingSelections = previousMetadata.booking?.phases && configuredProfile
         ? Object.fromEntries(previousMetadata.booking.phases.map((phase) => [phase.key, {
           installation_id: phase.installation_id,
@@ -242,7 +244,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       await db.AppointmentBookingOccupancy.destroy({ where: { appointment_id: appointment.id_cita }, transaction: tx });
     }
     if (solution) {
-      const rows = occupancyForSolution(solution, mapping.keys).filter((row) => row.installation_id || row.doctor_id);
+      const rows = occupancyForSolution(solution, mapping.keys).filter((row) => row.installation_id || row.doctor_id || row.resource_kind === 'equipment');
       for (const id of extraStaff) {
         // Full-appointment support replaces a shorter reservation for the same
         // person. One participant never consumes capacity twice in a phase.

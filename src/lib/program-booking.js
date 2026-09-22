@@ -38,7 +38,7 @@ function composeAppointmentProfile(appointment) {
       treatment_id: treatment.id, treatment_name: treatment.name,
     }));
   });
-  const profile = normalizeBookingProfile({ version: 1, phases });
+  const profile = normalizeBookingProfile({ version: phases.some(p => p.equipment_requirements?.length) ? 2 : 1, phases });
   return { profile, treatment_ids: treatmentIds,
     phase_treatments: phases.map(({ key, treatment_id, treatment_name }) => ({ key, treatment_id, treatment_name })),
     duration_minutes: profile.phases.reduce((total, phase) => total + phase.duration_minutes, 0) };
