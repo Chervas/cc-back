@@ -44,8 +44,8 @@ function createActivationHttp({ request = https.request, timeoutMs = 8000 } = {}
             if([401,403].includes(res.statusCode)||[10,200].includes(value?.error?.code))fail('provider_unauthorized');
             if(res.statusCode!==200||value?.error){
               // Only a received provider rejection is known not to have applied.
-              const error=new BrokerError('provider_failed'); error.providerRejected=true;
-              error.pinRequired=action==='register_phone' && [133005,133006].includes(value?.error?.code); throw error;
+              const error=new BrokerError('provider_failed'); error.providerRejected=res.statusCode>=400&&res.statusCode<500&&!!value?.error;
+              throw error;
             }
             if(!value||typeof value!=='object'||Array.isArray(value))fail('provider_failed');
             finish(null,value);

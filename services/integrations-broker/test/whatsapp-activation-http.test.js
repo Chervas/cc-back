@@ -10,6 +10,7 @@ test('registration uses fixed Graph phone endpoint and redacts provider errors a
   assert.deepEqual(JSON.parse(body),{messaging_product:'whatsapp',pin:'123456'});assert(held.every(n=>n===0));
   status=400;response={error:{code:133005,message:'FICTITIOUS_SECRET_123456'}};
   await assert.rejects(http(input),e=>e.code==='provider_failed'&&!JSON.stringify(e).includes('123456'));
+  status=500;await assert.rejects(http(input),e=>e.code==='provider_failed'&&e.providerRejected===false);
   status=302;await assert.rejects(http(input),/provider_failed/);
   await assert.rejects(http({...input,id:'401/other'}),/invalid_request/);
   await assert.rejects(http({...input,url:'https://else.invalid'}),/invalid_request/);
