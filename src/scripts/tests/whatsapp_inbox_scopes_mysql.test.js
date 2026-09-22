@@ -84,6 +84,20 @@ test('multiclinic passive importer preserves parent on partial failure, retries 
    await assert.rejects(S.importScopedLease(c,make(grouped.scopes,'19995550109'),grouped),/review_required/); // No arbitrary first-clinic routing.
    await sql.query("INSERT INTO Conversations(clinic_id,channel,contact_id,unread_count,createdAt,updatedAt) VALUES(72,'whatsapp','19995550109',0,NOW(3),NOW(3))");
    await S.importScopedLease(c,make(grouped.scopes,'19995550109'),grouped);assert.equal(await count('Messages'),3);
+   // Phone-specific attribution survives a second conversation for this
+   // contact at another clinic, without selecting the most recent arbitrarily.
+   const [shared]=await sql.query("SELECT id,clinic_id FROM Conversations WHERE contact_id='19995550101' ORDER BY clinic_id");
+   await sql.query("INSERT INTO Messages(conversation_id,direction,content,message_type,status,metadata) VALUES(?,'outbound','FICTITIOUS','text','sent',?)",{replacements:[shared[0].id,JSON.stringify({phoneNumberId:'203'})]});
+   const part={scope:grouped.scopes[0],route:{peer:'19995550101'}};
+   assert.equal(await S.routeClinic(c,part),71);
+   await sql.query("INSERT INTO Messages(conversation_id,direction,content,message_type,status,metadata) VALUES(?,'outbound','FICTITIOUS','text','sent',?)",{replacements:[shared[1].id,JSON.stringify({phoneNumberId:'203'})]});
+   await assert.rejects(S.routeClinic(c,part),e=>e.inboxReason==='review_required');
+   const key=clinic=>require('node:crypto').createHash('sha256').update(JSON.stringify([clinic,'203','19995550101'])).digest('hex');
+   await sql.query('INSERT INTO WhatsappInboxContactKeys VALUES(?,?,NOW(3))',{replacements:[key(72),shared[1].id]});
+   assert.equal(await S.routeClinic(c,part),72);
+   await sql.query('INSERT INTO WhatsappInboxContactKeys VALUES(?,?,NOW(3))',{replacements:[key(71),shared[0].id]});
+   await assert.rejects(S.routeClinic(c,part),e=>e.inboxReason==='review_required');
+   report.checks.push('group routing uses receiving-phone binding or unique sender evidence; conflicting bindings remain held');
    report.checks.push('metadata-only ownership queries','exact clinic/group membership','durable group block','child receipts after partial failure','parent only after all children','retry idempotency','unknown events held','shared-phone unique conversation routing','configuration snapshot drift');
   }finally{await sql.connectionManager.releaseConnection(rawConnection);}
  });

@@ -5,7 +5,7 @@ const CONFIG_FILE = '/etc/clinicaclick-whatsapp-inbox/staging/scopes.json';
 const id = v => Number.isInteger(v) && v > 0 && v <= 2147483647;
 const providerId = v => typeof v === 'string' && /^[1-9][0-9]{0,29}$/.test(v);
 const exact = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === keys;
-function held() { throw Error('whatsapp_inbox_review_required'); }
+function held(inboxReason = 'review_required') { throw Object.assign(Error('whatsapp_inbox_review_required'), {inboxReason}); }
 function validateConfiguration(c) {
   if (!exact(c,'scopes,version') || c.version !== 1 || !Array.isArray(c.scopes) || !c.scopes.length || c.scopes.length > 1000) held();
   const phones = new Set(); const assets = new Set();
@@ -28,7 +28,7 @@ function configuration(env = process.env) {
     const catalog=require('./whatsappActivationCatalog');
     value.scopes=[...value.scopes,...catalog.scopes(catalog.read())];
     return validateConfiguration(value);
-  } catch { held(); } finally { raw?.fill(0); }
+  } catch { held('import_retry'); } finally { raw?.fill(0); }
 }
 const ownership = s => JSON.stringify({wabaId:s.wabaId,phoneId:s.phoneId,clinicIds:s.clinicIds});
 async function assertScope(connection, scope, { lock = false } = {}) {
@@ -99,13 +99,28 @@ async function routeClinic(connection, part) {
     [rows] = await connection.execute("SELECT DISTINCT c.clinic_id FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE c.clinic_id IN ("+marks+") AND c.channel='whatsapp' AND m.direction='outbound' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wamid'))=? LIMIT 2",[...ids,part.route.wamid]);
   } else {
     if (typeof part.route.peer !== 'string' || !/^[1-9][0-9]{6,14}$/.test(part.route.peer)) held();
+    // A durable binding is specific to receiving phone AND contact. The same
+    // person may legitimately have conversations at several member clinics.
+    const keys = ids.map(clinicId=>createHash('sha256').update(JSON.stringify([clinicId,part.scope.phoneId,part.route.peer])).digest('hex'));
+    const [bound] = await connection.execute("SELECT k.contact_key,c.clinic_id FROM WhatsappInboxContactKeys k JOIN Conversations c ON c.id=k.conversation_id WHERE k.contact_key IN ("+keys.map(()=>'?').join(',')+") AND c.channel='whatsapp' AND c.contact_id IN (?,?) LIMIT 2",[...keys,part.route.peer,'+'+part.route.peer]);
+    if(bound.length) {
+      if(bound.length!==1 || ids[keys.indexOf(bound[0].contact_key)]!==bound[0].clinic_id)held();
+      return bound[0].clinic_id;
+    }
+    // Before a binding exists, use one unambiguous prior exchange from this
+    // physical sender. A conversation with another clinic phone is not evidence.
+    [rows] = await connection.execute("SELECT DISTINCT c.clinic_id FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE c.clinic_id IN ("+marks+") AND c.channel='whatsapp' AND c.contact_id IN (?,?) AND m.direction='outbound' AND m.status IN ('sent','delivered','read') AND (JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.phone_number_id'))=? OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.phoneNumberId'))=? OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.whatsapp_sender_asset_id'))=? OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.sender_origin_id'))=?) LIMIT 2",[...ids,part.route.peer,'+'+part.route.peer,part.scope.phoneId,part.scope.phoneId,String(part.scope.assetId),String(part.scope.assetId)]);
+    if(rows.length) {
+      if(rows.length!==1)held();
+      return rows[0].clinic_id;
+    }
     [rows] = await connection.execute("SELECT DISTINCT clinic_id FROM Conversations WHERE clinic_id IN ("+marks+") AND channel='whatsapp' AND contact_id IN (?,?) LIMIT 2",[...ids,part.route.peer,'+'+part.route.peer]);
   }
   if (rows.length !== 1 || !ids.includes(rows[0].clinic_id)) held(); return rows[0].clinic_id;
 }
 async function importScopedLease(connection, lease, config, { importer = importLease, loadConfiguration = () => config, now = Date.now() } = {}) {
   config = validateConfiguration(config); const parts = splitLease(lease, config); const prepared = [];
-  const checkConfig = () => { if (JSON.stringify(validateConfiguration(loadConfiguration())) !== JSON.stringify(config)) held(); };
+  const checkConfig = () => { if (JSON.stringify(validateConfiguration(loadConfiguration())) !== JSON.stringify(config)) held('import_retry'); };
   try {
     // Resolve and validate the ENTIRE batch before the first clinical write.
     for (const scope of [...new Map(parts.map(p=>[p.scope.phoneId,p.scope])).values()]) await assertScope(connection, scope);
