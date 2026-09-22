@@ -5,6 +5,7 @@ const { normalizeBookingProfile } = require('../lib/booking-profile');
 const { resolveInstallationKeys, loadBookingContext } = require('./appointmentBookingAvailability.service');
 const { bookingError, bookingCapabilities, requireOperationalProfile, loadScopedTreatment, assertPriorityAcknowledgement } = require('./treatmentBookingProfile.service');
 const { normalizeAdditionalStaff, additionalStaffSnapshot } = require('../lib/appointment-additional-staff');
+const { installationAllowsStaff } = require('../lib/installation-professionals');
 
 function metadataObject(value) {
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = null; } }
@@ -35,6 +36,8 @@ function legacyProfile(values, duration) {
 function solveLegacy(values, context, force = false) {
   const start = new Date(values.inicio);
   const end = new Date(values.fin);
+  if (values.instalacion_id && !installationAllowsStaff(context.installations.get(Number(values.instalacion_id)),
+    values.doctor_id ? [Number(values.doctor_id)] : [])) return null;
   const checked = resource => resource && ({ ...resource,
     busy: force ? (resource.busy || []).filter(interval => interval.can_force_legacy !== true) : resource.busy });
   if ((context.clinicWindows && !isFree({ windows: context.clinicWindows }, start, end))

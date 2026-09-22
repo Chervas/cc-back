@@ -495,6 +495,17 @@ test('batch search is bounded, includes chosen doctor/cabin and runs no DB query
   await assert.rejects(searchTreatmentSlots({ db: f.db, clinic: f.clinic, treatmentId: 3, date: '2030-01-07', days: 8, capabilities }), { code: 'booking_search_invalid' });
 });
 
+test('installation restriction blocks legacy/profile/support writes and force cannot bypass it', async () => {
+  for (const kind of ['legacy', 'profile', 'support']) {
+    const f = fixture({ bookingProfile: kind === 'profile' ? profile(phase('one')) : null });
+    const read = f.db.Instalacion.findAll;
+    f.db.Instalacion.findAll = async args => (await read(args)).map(room => ({ ...room,
+      profesionales_permitidos: kind === 'support' ? [5] : [6] }));
+    await assert.rejects(f.reserve({ force: true, ...(kind === 'support' ? { additionalStaffIds: [6] } : {}) }), { code: 'booking_unavailable' });
+    assert.equal(f.state.persists, 0); assert.equal(f.state.occupancies.length, 0);
+  }
+});
+
 test('one appointment produces phase DTOs without duplicating identity or clinical labels for redacted users', () => {
   const bookingProfile = profile(phase('one'), phase('two', [12]));
   const solution = solveBookingProfile({ profile: bookingProfile, start,

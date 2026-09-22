@@ -8,6 +8,25 @@ const {
   getAccessibleClinicIdsForFeature,
 } = require('../lib/access-policy');
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
+const { normalizeInstallationProfessionals, installationAllowsStaff } = require('../lib/installation-professionals');
+
+async function validateProfessionals(value, clinicId, transaction) {
+  const ids = normalizeInstallationProfessionals(value);
+  if (ids.length) {
+    const staff = await db.DoctorClinica.findAll({ where: { clinica_id: clinicId, activo: true,
+      recibe_citas: true, doctor_id: { [Op.in]: ids } }, attributes: ['doctor_id'], transaction });
+    if (new Set(staff.map(row => Number(row.doctor_id))).size !== ids.length) {
+      const error = new Error('Solo puedes seleccionar profesionales activos que reciben citas en esta clínica.');
+      error.status = 400; error.code = 'installation_professionals_invalid'; throw error;
+    }
+  }
+  return ids;
+}
+
+function sendProfessionalError(error, res) {
+  if (error.code !== 'installation_professionals_invalid') return false;
+  res.status(400).json({ message: error.message, code: error.code }); return true;
+}
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
 const dayIndex = (date) => new Date(date).getDay();
@@ -216,6 +235,7 @@ exports.create = asyncHandler(async (req, res) => {
       es_exclusiva: Boolean(body.es_exclusiva),
       default_duracion_minutos: body.default_duracion_minutos != null ? Number(body.default_duracion_minutos) : 30,
       especialidades_permitidas: body.especialidades_permitidas ?? [],
+      profesionales_permitidos: await validateProfessionals(body.profesionales_permitidos, clinicaId, t),
       tratamientos_exclusivos: body.tratamientos_exclusivos ?? [],
       equipamiento: body.equipamiento ?? [],
       orden_visualizacion: body.orden_visualizacion != null ? Number(body.orden_visualizacion) : null,
@@ -238,6 +258,7 @@ exports.create = asyncHandler(async (req, res) => {
     return res.status(201).json(item);
   } catch (e) {
     await t.rollback();
+    if (sendProfessionalError(e, res)) return;
     console.error('Error create instalacion', e);
     return res.status(500).json({ message: 'Error creando instalación' });
   }
@@ -269,6 +290,9 @@ exports.update = asyncHandler(async (req, res) => {
       es_exclusiva: body.es_exclusiva !== undefined ? Boolean(body.es_exclusiva) : item.es_exclusiva,
       default_duracion_minutos: body.default_duracion_minutos != null ? Number(body.default_duracion_minutos) : item.default_duracion_minutos,
       especialidades_permitidas: body.especialidades_permitidas ?? item.especialidades_permitidas,
+      ...(body.profesionales_permitidos !== undefined ? {
+        profesionales_permitidos: await validateProfessionals(body.profesionales_permitidos, item.clinica_id, t),
+      } : {}),
       tratamientos_exclusivos: body.tratamientos_exclusivos ?? item.tratamientos_exclusivos,
       equipamiento: body.equipamiento ?? item.equipamiento,
       orden_visualizacion: body.orden_visualizacion != null ? Number(body.orden_visualizacion) : item.orden_visualizacion,
@@ -294,6 +318,7 @@ exports.update = asyncHandler(async (req, res) => {
     return res.json(full);
   } catch (e) {
     if (sendCalendarMutationError(e, res)) return;
+    if (sendProfessionalError(e, res)) return;
     console.error('Error update instalacion', e);
     return res.status(500).json({ message: 'Error actualizando instalación' });
   }
@@ -464,6 +489,10 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     accessClinicId = installationClinicId;
     if (group_id && instData.clinica?.grupoClinicaId && instData.clinica.grupoClinicaId !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Instalación fuera del grupo' });
     if (!durMinParam && instData.default_duracion_minutos) durMinParam = instData.default_duracion_minutos;
+    if (!installationAllowsStaff(instData, doctor_id ? [Number(doctor_id)] : [])) {
+      return res.status(wantsSlots ? 200 : 409).json({ available: false, can_force: false, slots: [],
+        conflicts: [{ type: 'doctor_unavailable', message: 'Selecciona un profesional autorizado para esta instalación.' }] });
+    }
   }
 
   // Doctor checks

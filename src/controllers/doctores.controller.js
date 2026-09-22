@@ -32,6 +32,14 @@ const subtractIntervals = (windows, blocks) => {
   return res;
 };
 
+exports.agendaVisibility = asyncHandler(async (req, res) => {
+  const { visibilityDates, agendaVisibility } = require('../services/agendaVisibility.service');
+  let dates;
+  try { dates = visibilityDates(req.query.dates); }
+  catch (error) { return res.status(400).json({ message: error.message }); }
+  res.json(await agendaVisibility({ db, clinicIds: req.authorizedDoctorClinicIds || [], dates }));
+});
+
 exports.list = asyncHandler(async (req, res) => {
   const { agenda_context } = req.query;
   const agendaContext = parseBool(agenda_context);
@@ -310,6 +318,10 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
   let inst = null;
   if (instalacion_id) {
     inst = await db.Instalacion.findByPk(instalacion_id, { include: [{ model: db.InstalacionHorario, as: 'horarios' }, { model: db.InstalacionBloqueo, as: 'bloqueos' }] });
+    if (inst && !require('../lib/installation-professionals').installationAllowsStaff(inst, [Number(doctor_id)])) {
+      return res.status(wantsSlots ? 200 : 409).json({ available: false, can_force: false, slots: [],
+        conflicts: [{ type: 'doctor_unavailable', message: 'Este profesional no está autorizado para esta instalación.' }] });
+    }
     if (!inst || !inst.activo) return res.status(404).json({ message: 'Instalación no encontrada' });
     if (clinica_id && inst.clinica_id !== parseInt(clinica_id,10)) conflicts.push({ type: 'not_in_clinic', message: 'Instalación fuera de la clínica' });
     if (group_id && inst.clinica_id && inst.clinica?.grupoClinicaId && inst.clinica.grupoClinicaId !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Instalación fuera del grupo' });

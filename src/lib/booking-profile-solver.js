@@ -1,6 +1,7 @@
 'use strict';
 
 const { normalizeBookingProfile } = require('./booking-profile');
+const { installationAllowsStaff } = require('./installation-professionals');
 
 const overlap = (start, end, interval) => start < new Date(interval.end) && new Date(interval.start) < end;
 
@@ -29,28 +30,33 @@ function solveBookingProfile({ profile: input, start, doctors, installations, cl
     const selection = selections[phase.key] || {};
     const installationIds = selection.installation_id == null ? phase.installation_ids
       : phase.installation_ids.filter((id) => id === Number(selection.installation_id));
-    const installationId = installationIds.find((id) => isFree(installations.get(id), phaseStart, phaseEnd));
-    if (!installationId) return null;
+    const freeInstallations = installationIds.filter((id) => isFree(installations.get(id), phaseStart, phaseEnd));
+    let installationId;
     const staff = phase.professionals;
     let doctorIds;
     if (staff.mode === 'all') {
       if ((selection.doctor_id != null && (staff.ids.length !== 1 || Number(selection.doctor_id) !== staff.ids[0]))
         || !staff.ids.every((id) => isFree(doctors.get(id), appointmentStart, appointmentEnd))) return null;
       doctorIds = [...staff.ids];
+      installationId = freeInstallations.find(id => installationAllowsStaff(installations.get(id), doctorIds));
+      if (!installationId) return null;
     } else {
       const preferredFirst = [staff.preferred_id, ...staff.ids.filter((id) => id !== staff.preferred_id)].filter(Boolean);
       const eligible = selection.doctor_id == null ? preferredFirst
         : preferredFirst.filter((id) => id === Number(selection.doctor_id));
-      const doctorId = eligible.find((id) => isFree(doctors.get(id), phaseStart, phaseEnd));
+      const fits = id => isFree(doctors.get(id), phaseStart, phaseEnd)
+        && freeInstallations.some(roomId => installationAllowsStaff(installations.get(roomId), [id]));
+      const doctorId = eligible.find(fits);
       if (!doctorId) return null;
       doctorIds = [doctorId];
+      installationId = freeInstallations.find(id => installationAllowsStaff(installations.get(id), doctorIds));
       if (staff.preferred_id && doctorId !== staff.preferred_id) {
         warnings.push({
           code: 'NON_PREFERRED_PROFESSIONAL', phase_key: phase.key, doctor_id: doctorId,
           preferred_doctor_id: staff.preferred_id,
-          preferred_available: isFree(doctors.get(staff.preferred_id), phaseStart, phaseEnd),
+          preferred_available: fits(staff.preferred_id),
           // Do not say "the only one" if several alternatives actually fit.
-          only_available_alternative: staff.ids.filter((id) => isFree(doctors.get(id), phaseStart, phaseEnd)).length === 1,
+          only_available_alternative: staff.ids.filter(fits).length === 1,
         });
       }
     }
