@@ -5,7 +5,9 @@ const E = require('./whatsapp-onboarding-contract');
 const { tokenText } = require('./whatsapp-secrets');
 const { GRAPH_VERSION } = require('./whatsapp-contract');
 const { createWhatsappHttp } = require('./whatsapp-http');
-function createActivationHttp({ request = https.request, timeoutMs = 8000 } = {}) {
+const limits = require('./whatsapp-activation-limits');
+function createActivationHttp({ request = https.request, timeoutMs = 8000, registrationTimeoutMs = limits.REGISTER_TIMEOUT_MS } = {}) {
+  if (!Number.isInteger(registrationTimeoutMs) || registrationTimeoutMs < 1 || registrationTimeoutMs > limits.REGISTER_TIMEOUT_MS) fail('invalid_request');
   const verification = createWhatsappHttp({ request, timeoutMs });
   return async input => {
     if (['inspect','phones','phone_state','waba_owner'].includes(input?.action)) return verification(input);
@@ -25,7 +27,7 @@ function createActivationHttp({ request = https.request, timeoutMs = 8000 } = {}
       let req, timer, done = false;
       const finish = (error, value) => { if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); body?.fill(0); error ? reject(error) : resolve(value); };
       const abort = () => { finish(new BrokerError('provider_timeout')); req?.destroy(); };
-      timer = setTimeout(abort, timeoutMs); timer.unref?.();
+      timer = setTimeout(abort, action === 'register_phone' ? registrationTimeoutMs : timeoutMs); timer.unref?.();
       try {
         req = request({ protocol:'https:', hostname:'graph.facebook.com', port:443, method:body ? 'POST' : 'GET',
           path:`/${GRAPH_VERSION}/${id}${suffix}?${query}`, agent:false, rejectUnauthorized:true, minVersion:'TLSv1.2',

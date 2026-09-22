@@ -76,7 +76,7 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappHt
         try { prepare = !!provisioner && JSON.parse(args[0].toString('utf8')).operation === P.PREPARE; } catch {}
         return await (prepare ? provisioner.prepare(...args) : broker.execute(...args));
       } finally { inFlight--; } } }, { cert, key });
-    server.maxConnections = 64; server.timeout = 35000;
+    server.maxConnections = 64; server.timeout = require('./whatsapp-activation-limits').SERVER_TIMEOUT_MS;
     tlsReload.install(server, config, { cert, key });
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.listenAddress, resolve); });
     const tick = () => { if (!draining) draining = drainAudit(store, aws.sink, { limit: 20 }).catch(() => null).finally(() => { draining = null; }); };

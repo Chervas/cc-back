@@ -88,7 +88,7 @@
         if (done) return;
         try {
           win.FB.init({ appId: input.authorization.appId, version: 'v24.0', cookie: false, xfbml: false, status: false, autoLogAppEvents: false });
-          button.disabled = false; text('Autoriza solo la cuenta de WhatsApp que quieres vincular.');
+          button.disabled = false; text('Se abrirá una ventana de Meta para elegir tu número.');
         } catch { send('cc.wa.error', { reason: 'sdk_unavailable' }); }
       };
       doc.head.appendChild(script); return;
@@ -117,7 +117,7 @@
   }
   button.addEventListener('click', () => {
     if (!input || started || done || button.disabled) return;
-    started = true; button.disabled = true; text('Completa la autorización en la ventana de Meta.');
+    started = true; button.hidden = true; button.disabled = true; cancel.hidden = false; text('Continúa en la ventana de Meta. La conexión se completará al terminar.');
     try {
       trackPopup();
       win.FB.login(response => {

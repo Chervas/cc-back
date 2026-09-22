@@ -15,3 +15,24 @@ test('registration uses fixed Graph phone endpoint and redacts provider errors a
   await assert.rejects(http({...input,id:'401/other'}),/invalid_request/);
   await assert.rejects(http({...input,url:'https://else.invalid'}),/invalid_request/);
 });
+
+test('slow registration survives the former eight-second deadline while ordinary reads remain bounded',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  let reply,closed=false,held;
+  const http=createActivationHttp({request:(_options,callback)=>{reply=callback;const req=new EventEmitter();req.destroy=()=>{closed=true;};req.end=v=>{held=v;};return req;}});
+  const input={action:'register_phone',id:'401',token:Buffer.from('FICTITIOUS_TOKEN'),proof:'a'.repeat(64),signal:new AbortController().signal,pin:'123456'};
+  let settled=false;const pending=http(input).finally(()=>{settled=true;});
+  t.mock.timers.tick(45000);await Promise.resolve();assert.equal(settled,false);assert.equal(closed,false);
+  const res=new PassThrough();res.statusCode=200;res.headers={'content-type':'application/json'};reply(res);res.end('{"success":true}');
+  assert.deepEqual(await pending,{success:true});assert(held.every(v=>v===0));
+  const read=http({action:'profile',id:input.id,token:input.token,proof:input.proof,signal:input.signal});
+  const rejected=assert.rejects(read,{code:'provider_timeout'});t.mock.timers.tick(8000);await rejected;assert.equal(closed,true);
+});
+test('registration still expires at sixty seconds and caller cancellation stops it earlier',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  let destroyed=0;const http=createActivationHttp({request:()=>{const req=new EventEmitter();req.destroy=()=>{destroyed++;};req.end=()=>{};return req;}});
+  const controller=new AbortController();const input={action:'register_phone',id:'401',token:Buffer.from('FICTITIOUS_TOKEN'),proof:'a'.repeat(64),signal:controller.signal,pin:'123456'};
+  const first=assert.rejects(http(input),{code:'provider_timeout'});t.mock.timers.tick(60000);await first;
+  const next=assert.rejects(http(input),{code:'provider_timeout'});controller.abort();await next;assert.equal(destroyed,2);
+  for(const registrationTimeoutMs of [0,-1,60001,Infinity,'60000'])assert.throws(()=>createActivationHttp({registrationTimeoutMs}),/invalid_request/);
+});

@@ -125,7 +125,7 @@ function createWhatsappOnboardingBrokerClient({ client, loadBinding, prepareBind
     const payload={flowId:row.requestId,scopeDigest:row.scopeDigest,clinicSetDigest:row.clinicSetDigest,...(operation===A.ACTIVATE?{assetId}:{})};
     A.validate(payload,operation);
     const result=await client.execute({requestId,tenantRef:'clinic:'+row.clinicIds[0],assetRef:'wa-enroll:'+selected.scopeKey,
-      connectionRef:selected.connectionRef,operation,payload});
+      connectionRef:selected.connectionRef,operation,payload},{timeoutMs:operation===A.ACTIVATE?100000:30000});
     guard();if(JSON.stringify(binding(await loadBinding(row.scope),row))!==JSON.stringify(selected))fail('whatsapp_onboarding_binding_invalid');
     S.exact(result,['requestId','data','replayed']);
     const d=result.data;S.exact(d,['flowId','connectionRef','scopeKey','clinicIds','phoneId','wabaId','channelRole','assetId','state','profile','observedAt','activatedAt']);
@@ -170,7 +170,8 @@ function configuredClient({ environment = () => process.env } = {}) {
     assertGateway(environment()); const cfg = configuration(environment()); let key; let ca;
     try {
       key = privateFile(cfg.privateKeyFile, 8192); ca = privateFile(cfg.caFile, 65536);
-      const client = createIntegrationsBrokerClient({ origin: cfg.origin, keyId: cfg.keyId, audience: cfg.audience, privateKey: key, ca, timeoutMs: 30000 });
+      const client = createIntegrationsBrokerClient({ origin: cfg.origin, keyId: cfg.keyId, audience: cfg.audience, privateKey: key, ca,
+        timeoutMs: 100000, transportProfile: 'whatsapp-onboarding' });
       const api = createWhatsappOnboardingBrokerClient({ client, guard: () => assertGateway(environment()), loadBinding: async scope => {
         const current = configuration(environment());
         if (JSON.stringify(current) !== JSON.stringify(cfg)) fail('whatsapp_onboarding_binding_invalid');

@@ -15,6 +15,7 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   await migration.up(qi,D);await migration.up(qi,D);await migration.down(qi);await migration.up(qi,D);
   models.ClinicMetaAsset=require('../../../models/ClinicMetaAsset')(sql,D);
   models.WhatsappPhoneActivation=require('../../../models/whatsappphoneactivation')(sql,D);
+  await table('ActivationTestJob','ActivationTestJobs',{authorization_id:{type:D.STRING(36),primaryKey:true},waba_id:D.STRING(30)});
   if(process.env.WHATSAPP_ACTIVATION_SCHEMA_OUTPUT){
     const snapshot=await require('../../lib/securitySchemaContract').snapshot(async(q,p)=>(await sql.query(q,{replacements:p}))[0]);
     const table=name=>{const metadata=snapshot.tables.find(t=>t.TABLE_NAME===name);return {
@@ -34,22 +35,24 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   const A=require('../../../services/integrations-broker/src/whatsapp-activation-contract');
   const remote={flowId:context.requestId,connectionRef:A.connectionRef(context.requestId),scopeKey:'group:9',clinicIds:[71,72],phoneId:'401',wabaId:'301',
     channelRole:'primary',assetId:null,state:'prepared',observedAt:Date.now(),activatedAt:null,profile:{phoneId:'401',displayPhoneNumber:'+34000000000',verifiedName:'QA',status:'PENDING',codeVerificationStatus:'VERIFIED',qualityRating:'UNKNOWN',platformType:'NOT_APPLICABLE',isOnBizApp:false}};
-  let activations=0,published=null,denyAudit=false;
+  let activations=0,published=null,denyAudit=false,denyTemplateJob=false;
   const audit=require('../../services/platformAudit.repository').createRepository(models.PlatformAuditEvent);
   const injectedAudit={health:(...a)=>audit.health(...a),append:(...a)=>{if(denyAudit)throw Error('AUDIT_OFFLINE');return audit.append(...a)}};
   const make=()=>require('../../services/whatsappPhoneActivation.service').createService({models,audit:injectedAudit,guard:()=>{},enabled:()=>true,
-    states:{resume:async()=>context},publish:value=>{published=value},broker:{profile:async()=>({...remote}),activate:async(c,assetId)=>{
+    states:{resume:async()=>context},publish:value=>{published=value},enqueueTemplates:async({activation,transaction})=>{if(denyTemplateJob)throw Error('TEMPLATE_JOB_UNAVAILABLE');await models.ActivationTestJob.findOrCreate({where:{authorization_id:activation.authorization_id},defaults:{waba_id:activation.waba_id},transaction});},broker:{profile:async()=>({...remote}),activate:async(c,assetId)=>{
       activations++;remote.assetId=assetId;remote.state='active';remote.activatedAt=Date.now();remote.profile={...remote.profile,status:'CONNECTED',platformType:'CLOUD_API'};return {...remote};}}});
   let asset;
   if(process.env.WHATSAPP_ROUTING_ONLY_TEST==='true'){
     asset=await models.ClinicMetaAsset.create({metaConnectionId:1,assetType:'whatsapp_phone_number',metaAssetId:'401',phoneNumberId:'401',wabaId:'301',assignmentScope:'group',grupoClinicaId:9,isActive:true,additionalData:{requireClinicSelection:true}});
     report.checks.push('Routing-only cohort: gateway activation acceptance is not exercised');
   }else{
+  denyTemplateJob=true;await assert.rejects(make().complete({...actor,requestId:context.requestId}),/TEMPLATE_JOB_UNAVAILABLE/);
+  assert.equal((await models.WhatsappPhoneActivation.findByPk(context.requestId)).state,'prepared');assert.equal(await models.ActivationTestJob.count(),0);denyTemplateJob=false;
   const result=await make().complete({...actor,requestId:context.requestId});assert.equal(result.connected,true);assert.equal(activations,1);
   asset=await models.ClinicMetaAsset.findByPk(result.assetId);assert.equal(asset.metaConnectionId,null);assert.equal(asset.waAccessToken,null);assert.equal(asset.additionalData.requireClinicSelection,true);
   const cutoff=published.connections[0].messageNotBefore;
   await make().complete({...actor,requestId:context.requestId});assert.equal(activations,1);assert.equal(await models.WhatsappPhoneActivation.count(),1);assert.equal(published.connections[0].messageNotBefore,cutoff);
-  assert.equal(await models.PlatformAuditEvent.count(),2);
+  assert.equal(await models.PlatformAuditEvent.count(),2);assert.equal(await models.ActivationTestJob.count(),1);
   await assert.rejects(models.ClinicMetaAsset.create({assetType:'ad_account',metaAssetId:'701',metaConnectionId:null}));
   await assert.rejects(migration.down(qi),/Preserve WhatsApp/);
   report.checks.push('Migration up/up/down/up, independent catalog identity, restart recovery without provider reactivation, immutable cutoff, no secrets, audit and rollback guard');

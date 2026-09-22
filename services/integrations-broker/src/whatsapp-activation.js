@@ -2,6 +2,7 @@
 const {randomUUID}=require('node:crypto');
 const E=require('./whatsapp-onboarding-contract');
 const A=require('./whatsapp-activation-contract');
+const limits=require('./whatsapp-activation-limits');
 const C=require('./whatsapp-authorized-contract');
 const {fail}=require('./errors');
 const {eventFor}=require('./audit');
@@ -62,11 +63,11 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
         if(saved.lease_until>now())fail('rate_limited');
         if(request.operation===A.ACTIVATE && !saved.profile)fail('invalid_request');
         store.db.prepare('UPDATE whatsapp_activations SET lease_owner=?,lease_until=?,asset_id=COALESCE(asset_id,?) WHERE flow_id=?')
-          .run(owner,now()+45000,request.operation===A.ACTIVATE?request.payload.assetId:null,id);
+          .run(owner,now()+(request.operation===A.ACTIVATE?limits.LEASE_MS:45000),request.operation===A.ACTIVATE?request.payload.assetId:null,id);
         return row(id);
       });
       if(saved.state==='active')return {requestId:request.requestId,data:projection(saved,ctx),replayed:true};
-      const signal=AbortSignal.timeout(26000);
+      const signal=AbortSignal.timeout(request.operation===A.ACTIVATE?limits.EXECUTE_TIMEOUT_MS:26000);
       secrets=secretsFactory({client,accountId,prefix:'/clinicaclick/integrations/prod/',kmsKeyArn,
         registry:{assert:()=>{active();return registry.review(ctx.operational);}},http,verifyProvider:true,now});
       await secrets.withSecret(ctx.operational,async token=>{

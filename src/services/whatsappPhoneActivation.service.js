@@ -5,7 +5,8 @@ const catalog=require('../lib/whatsappActivationCatalog');
 const {configuredClient,assertGateway}=require('../lib/whatsappOnboardingBrokerClient');
 const {buildWhatsappRoutingAdditionalData}=require('../lib/whatsapp-channel-role');
 function createService({models,audit,states=require('./whatsappAuthorizationState.service'),broker=configuredClient(),
-  guard=assertGateway,enabled=()=>process.env.WHATSAPP_ACTIVATION_ENABLED==='true',publish=catalog.write,now=()=>new Date()}={}){
+  guard=assertGateway,enabled=()=>process.env.WHATSAPP_ACTIVATION_ENABLED==='true',publish=catalog.write,now=()=>new Date(),
+  enqueueTemplates=require('./whatsappActivationTemplates.service').enqueue}={}){
   const db=()=>typeof models==='function'?models():models||require('../../models');
   async function locked(work){
     const sequelize=db().sequelize,connection=await sequelize.connectionManager.getConnection({type:'WRITE'});
@@ -71,6 +72,7 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
       if(!existing||newlyActive)await require('./whatsappConnectionAudit').append({db:db(),audit,actor,scope:context.scope,
         requestId:context.requestId,assetIds:[asset.id],action:'integration.whatsapp.activate',reason:newlyActive?'connection_activated':'catalog_prepared',transaction,now:now()});
       if(existing)await existing.update(values,{transaction});else await db().WhatsappPhoneActivation.create(values,{transaction});
+      if(state==='active')await enqueueTemplates({activation:values,actor,transaction,models:db()});
       return {assetId:asset.id,state};
     }));
   }
