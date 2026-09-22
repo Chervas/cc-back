@@ -5,7 +5,7 @@ const {createWhatsappActivation}=require('../src/whatsapp-activation');
 const {createActivationReader}=require('../src/whatsapp-activation-reader');
 const A=require('../src/whatsapp-activation-contract');
 const {ACCOUNT,SECRET_KEY}=require('../src/google-main');
-async function setup(t){
+async function setup(t,{legacyCaller=false}={}){
   const f=fixture(t,{customer:{selectionOnly:true}}),flow=await f.begin();await f.finish(flow);
   const state={calls:[],subscribed:false,registerError:null,afterRegister:null,profile:{id:'401',status:'PENDING',
     platform_type:'NOT_APPLICABLE',is_on_biz_app:false,code_verification_status:'VERIFIED',quality_rating:'UNKNOWN',
@@ -27,7 +27,7 @@ async function setup(t){
   let engine=make();
   const execute=(operation=A.ACTIVATE,changes={})=>engine.operations[operation].execute({request:f.command(operation,
     {flowId:flow.flowId,scopeDigest:flow.payload.scopeDigest,clinicSetDigest:flow.payload.clinicSetDigest,
-      ...(operation===A.ACTIVATE?{assetId:991}:{}),...changes}),principal:f.policy.principals[0],binding:f.binding,policy:f.policy});
+      ...(operation===A.ACTIVATE?{assetId:991}:{}),...changes}),principal:f.policy.principals[0],binding:f.binding,policy:legacyCaller?undefined:f.policy});
   return {f,flow,state,execute,async prepare(){return execute(A.PROFILE)},restart(){f.restart();engine=make();},
     row:()=>f.current.store.db.prepare('SELECT * FROM whatsapp_activations WHERE flow_id=?').get(flow.flowId)};
 }
@@ -72,4 +72,10 @@ test('connected on-premise and unfinished Business App numbers are never automat
   for(const profile of [{status:'CONNECTED',platform_type:'NOT_APPLICABLE'},{status:'PENDING',is_on_biz_app:true}]){
     const f=await setup(t);Object.assign(f.state.profile,profile);await f.prepare();assert.equal((await f.execute()).data.state,'registration_required');assert(!f.state.calls.includes('register_phone'));assert(!f.state.calls.includes('subscribe'));
   }
+});
+
+test('activation audit uses its configured policy with the deployed legacy control caller',async t=>{
+  const f=await setup(t,{legacyCaller:true});await f.prepare();assert.equal((await f.execute()).data.state,'active');
+  const events=f.f.current.store.db.prepare('SELECT event FROM audit_outbox').all().map(r=>JSON.parse(r.event));
+  assert(events.some(e=>e.reason==='whatsapp_activation_completed'&&e.operation===A.ACTIVATE));
 });

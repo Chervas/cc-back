@@ -35,7 +35,7 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
       state:saved?.state||'prepared',profile:saved?.profile?JSON.parse(saved.profile):null,
       observedAt:saved?.updated_at||null,activatedAt:saved?.activated_at||null};
   }
-  async function execute({request,principal,binding,policy:originalPolicy}) {
+  async function execute({request,principal,binding,policy:originalPolicy=policy}) {
     const ctx=context(request,principal,binding);
     const registry=registryFactory({filename,authorizations:[ctx.definition],loadEnrollmentBinding:enrollment,now});
     let secrets;const owner=randomUUID();const id=ctx.flow.id;
