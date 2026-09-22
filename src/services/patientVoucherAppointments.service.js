@@ -95,7 +95,7 @@ async function resources({ publicId }) {
 async function buildPlan({ publicId, payload, transaction = null, lockVoucher = false }) {
   const voucher = await loadVoucher(publicId, transaction, lockVoucher);
   const clinic = await db.Clinica.findByPk(voucher.clinic_id, {
-    attributes: ['id_clinica', 'configuracion', 'grupoClinicaId'], transaction,
+    attributes: ['id_clinica', 'configuracion', 'grupoClinicaId', 'equipment_booking_enabled'], transaction,
   });
   if (!clinic) throw domainError(404, 'voucher_schedule_clinic_not_found', 'Clínica no encontrada.');
   const timeZone = resolveClinicTimezone(clinic);
