@@ -2,7 +2,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 require('./fixtures/campaign_offline_runtime.cjs');
 const { decide, deliveryKey } = require('../../lib/whatsappAppointmentTimeout');
-const { state } = require('../../lib/whatsappInboxHealth');
+const { state, issues } = require('../../lib/whatsappInboxHealth');
 const now = Date.parse('2026-09-22T12:00:00Z');
 function input() {
   const appointment = { id_cita: 1, clinica_id: 2, inicio: '2026-09-22T17:00:00Z', estado: 'info_enviada' };
@@ -44,6 +44,11 @@ test('recovery allows at most one request today and never catches up yesterday o
 test('explicit recovery cut survives restart and catches a recently due timer', async () => {
   const i=input(); i.snapshot.recoveryNotBefore=new Date(now+1).toISOString();
   assert.ok((await decide(i)).recovery);
+});
+test('existing automation health sweep receives redacted scoped alerts, including a stopped consumer',()=>{
+ assert.equal(issues(input().snapshot,[2],now).length,0);
+ const alerts=issues(null,[2,2,3],now);assert.equal(alerts.length,2);
+ assert.deepEqual(alerts.map(a=>a.data.clinic_id),[2,3]);assert.equal(alerts[0].severity,'critical');
 });
 test('cancelled, moved, completed and past appointments never cause a timeout side effect', async () => {
   for (const change of [{ estado: 'cancelada' }, { estado: 'completada' }, { estado: 'cambio_solicitado' },

@@ -34,4 +34,12 @@ function publish(health, scopes, { recoveryNotBefore = null, recoveryHold = fals
   fs.chmodSync(FILE + '.next', 0o644); fs.renameSync(FILE + '.next', FILE);
   return snapshot;
 }
-module.exports = { FILE, read, state, publish };
+function issues(snapshot, clinicIds, now = Date.now()) {
+  return [...new Set(clinicIds)].filter(id => !state(snapshot, id, now).healthy).map(clinicId => ({
+    severity: 'critical', type: 'whatsapp_inbox_reception_delayed',
+    title: 'Recepción de WhatsApp pendiente de recuperación',
+    detail: 'Los recordatorios y cancelaciones por falta de respuesta están retenidos hasta comprobar la recepción.',
+    data: { clinic_id: clinicId, reason: state(snapshot, clinicId, now).reason },
+  }));
+}
+module.exports = { FILE, read, state, publish, issues };
