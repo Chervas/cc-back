@@ -24,7 +24,10 @@ function configuration(env = process.env) {
   try {
     const stat = fs.statSync(CONFIG_FILE);
     if (fs.realpathSync(CONFIG_FILE) !== CONFIG_FILE || !stat.isFile() || stat.mode & 0o077 || stat.size > 1048576) held();
-    raw = fs.readFileSync(CONFIG_FILE); return validateConfiguration(JSON.parse(raw));
+    raw = fs.readFileSync(CONFIG_FILE);const value=JSON.parse(raw);
+    const catalog=require('./whatsappActivationCatalog');
+    value.scopes=[...value.scopes,...catalog.scopes(catalog.read())];
+    return validateConfiguration(value);
   } catch { held(); } finally { raw?.fill(0); }
 }
 const ownership = s => JSON.stringify({wabaId:s.wabaId,phoneId:s.phoneId,clinicIds:s.clinicIds});

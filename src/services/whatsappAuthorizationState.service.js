@@ -148,6 +148,26 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
       C.fail('whatsapp_authorization_unavailable', 503);
     } finally { if (Buffer.isBuffer(cfg?.key)) cfg.key.fill(0); }
   }
-  return Object.fromEntries(['issue', 'claim', 'assertClaimActive', 'status', 'cancel'].map(op => [op, input => run(op, input)]));
+  async function resume(raw) {
+    let cfg;
+    try {
+      const input=C.request(raw,'status');cfg=config();
+      if(!Buffer.isBuffer(cfg?.key)||cfg.key.length!==32)C.fail('whatsapp_onboarding_configuration_invalid',503);
+      return await db().sequelize.transaction({isolationLevel:Transaction.ISOLATION_LEVELS.REPEATABLE_READ},async transaction=>{
+        await sessionApi().verifyReference({userId:input.userId,sessionRef:input.sessionRef,expiresAt:new Date(input.sessionExpiresAt*1000)},
+          {transaction,requireEmail:true});
+        const hint=await db().WhatsappAuthorizationState.findByPk(input.requestId,{transaction,raw:true});
+        if(!hint)C.fail('whatsapp_authorization_forbidden',403);
+        const current=await snapshot({type:hint.scope_type,id:hint.scope_id},input.userId,transaction);
+        const row=await db().WhatsappAuthorizationState.findByPk(input.requestId,{...locked(transaction)});
+        if(!row)C.fail('whatsapp_authorization_forbidden',403);
+        validateRow(row,{userId:row.user_id,sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at.getTime()/1000},cfg.key);
+        if(row.state!=='claimed'||current.digest!==row.scope_digest||JSON.stringify(current.ids)!==JSON.stringify(row.original_clinic_ids))C.fail('whatsapp_authorization_forbidden',403);
+        // Completion uses a current MFA session, never the expired OAuth code.
+        return projection(row);
+      });
+    }finally{cfg?.key?.fill(0);}
+  }
+  return {...Object.fromEntries(['issue', 'claim', 'assertClaimActive', 'status', 'cancel'].map(op => [op, input => run(op, input)])),resume};
 }
 module.exports = { createService, ...createService() };

@@ -10,6 +10,9 @@ const P = require('./whatsapp-provisioning-contract'); const { createWhatsappPro
 function validateConfig(config) {
   if (config?.tlsRenewal) tlsReload.validateSettings(config.tlsRenewal);
   const configKeys = [...(Object.hasOwn(config || {}, 'tlsRenewal') ? ['tlsRenewal'] : []),'cohort','enabled','listenAddress','policy','port','stateFile','tlsCertFile','tlsKeyFile', ...(Object.hasOwn(config || {}, 'provisioning') ? ['provisioning'] : [])];
+  if (Object.hasOwn(config || {}, 'activationEnabled')) { configKeys.push('activationEnabled'); if (typeof config.activationEnabled !== 'boolean') fail('invalid_request'); }
+  if (Object.hasOwn(config || {}, 'activationScopesFile')) {configKeys.push('activationScopesFile');if(typeof config.activationScopesFile!=='string'||!path.isAbsolute(config.activationScopesFile))fail('invalid_request');}
+  if(config?.activationEnabled&&!config.activationScopesFile)fail('invalid_request');
   if (!config || Object.keys(config).sort().join(',') !== configKeys.sort().join(',')
     || config.enabled !== true || config.cohort !== C.COHORT || !net.isIP(config.listenAddress)
     || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535 || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
@@ -42,7 +45,7 @@ function validateConfig(config) {
   if ([...slots].some(arn => apps.has(arn))) fail('invalid_request');
   return config;
 }
-async function main(filename, { awsFactory = connectAws, http = createWhatsappHttp(), exchangeFactory } = {}) {
+async function main(filename, { awsFactory = connectAws, http = createWhatsappHttp(), activationHttp = require('./whatsapp-activation-http').createActivationHttp(), exchangeFactory } = {}) {
   const config = validateConfig(JSON.parse(privateFile(filename)));
   const cert = privateFile(config.tlsCertFile, 65536); const key = privateFile(config.tlsKeyFile, 65536);
   const store = new BrokerStore(config.stateFile); let aws; let engine; let server; let timer; let draining;
@@ -51,7 +54,22 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappHt
     const secrets = createWhatsappOnboardingSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY });
     const provisioner = config.provisioning ? createWhatsappProvisioning({ store, policy: config.policy, settings: config.provisioning, client: aws.secrets }) : null;
     engine = createWhatsappOnboarding({ store, policy: config.policy, secrets, http, resolveBinding: provisioner?.resolveBinding, ...(exchangeFactory ? { exchangeFactory } : {}) });
-    const broker = new Broker({ store, policy: config.policy, secrets, operations: engine.operations, policyResolver: provisioner }); let inFlight = 0;
+    const A = require('./whatsapp-activation-contract');
+    const activation = config.activationEnabled ? require('./whatsapp-activation').createWhatsappActivation({
+      store, filename:config.stateFile, policy:config.policy, resolveBinding:provisioner?.resolveBinding,
+      client:aws.secrets, accountId:ACCOUNT, kmsKeyArn:SECRET_KEY, http:activationHttp,
+      publishCapture:appId=>{const reader=require('./whatsapp-activation-reader').createActivationReader(config.stateFile);
+        try{require('./whatsapp-capture-catalog').publish(config.activationScopesFile,appId,reader.scopes(appId));}finally{reader.close();}},
+    }) : null;
+    const resolver = { resolve(request, principal, policy) {
+      if (!activation || !A.OPERATIONS.includes(request.operation)) return provisioner?.resolve(request,principal,policy) || policy;
+      const binding=policy.connections.find(b=>b.connectionRef===request.connectionRef)||provisioner?.resolveBinding(request.connectionRef);
+      if (!binding || principal.id!=='gateway:whatsapp-onboarding') fail('scope_denied');
+      C.authorize({request,principal,binding});
+      return {...policy,connections:policy.connections.some(b=>b.connectionRef===binding.connectionRef)?policy.connections:[...policy.connections,binding],
+        grants:[...policy.grants,{principalId:principal.id,connectionRef:binding.connectionRef,tenantRef:request.tenantRef,assetRef:request.assetRef,operations:[request.operation]}]};
+    } };
+    const broker = new Broker({ store, policy: config.policy, secrets, operations: {...engine.operations,...activation?.operations}, policyResolver: resolver }); let inFlight = 0;
     server = createServer({ async execute(...args) { if (inFlight >= 12) fail('rate_limited'); inFlight++;
       try {
         let prepare = false;

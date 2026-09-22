@@ -18,7 +18,7 @@ function validateAuthorization(value) {
     || new Set((value.templates || []).map(t => t.name + ':' + t.language)).size !== (value.templates || []).length) fail('invalid_request');
   return { ...structuredClone(value), enabled: value.enabled === true };
 }
-function createWhatsappAuthorizedRegistry({ filename, authorizations, loadEnrollmentBinding, now = () => Date.now() }) {
+function createWhatsappAuthorizedRegistry({ filename, authorizations, loadEnrollmentBinding, loadAuthorizations = () => [], now = () => Date.now() }) {
   if (typeof filename !== 'string' || !path.isAbsolute(filename) || !Array.isArray(authorizations) || !authorizations.length
     || authorizations.length > 1000 || typeof loadEnrollmentBinding !== 'function' || typeof now !== 'function') fail('invalid_request');
   const entries = authorizations.map(validateAuthorization);
@@ -27,7 +27,15 @@ function createWhatsappAuthorizedRegistry({ filename, authorizations, loadEnroll
   const db = new DatabaseSync(filename, { readOnly: true }); db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=2000'); let closed = false;
   function inspect(binding, review = false) {
     if (closed || binding?.provider !== C.PROVIDER) fail('scope_denied');
-    const definition = entries.find(v => v.connectionRef === binding.connectionRef);
+    // Existing pinned connections remain independent of a new enrollment.
+    // A conflicting dynamic identity is rejected for that new connection only.
+    let definition = entries.find(v => v.connectionRef === binding.connectionRef);
+    if(!definition){
+      const dynamic=loadAuthorizations().map(validateAuthorization);
+      definition=dynamic.find(v=>v.connectionRef===binding.connectionRef);
+      if(definition)for(const key of ['connectionRef','authorizationId','phoneId'])
+        if([...entries,...dynamic].filter(v=>v[key]===definition[key]).length!==1)fail('scope_denied');
+    }
     if (!definition || !review && !definition.enabled || definition.expiresAt !== null && definition.expiresAt <= now()) fail('connection_blocked');
     const enrollmentBinding = definition.enrollmentBinding; const b = E.bindingFor(enrollmentBinding);
     const current = loadEnrollmentBinding(enrollmentBinding.connectionRef);

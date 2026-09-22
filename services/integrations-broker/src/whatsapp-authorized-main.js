@@ -18,6 +18,7 @@ const absolute = value => typeof value === 'string' && path.isAbsolute(value) &&
 function validateConfig(config) {
   if (config?.tlsRenewal) tlsReload.validateSettings(config.tlsRenewal);
   const configKeys = [...CONFIG_KEYS, ...(Object.hasOwn(config || {}, 'tlsRenewal') ? ['tlsRenewal'] : [])];
+  if(Object.hasOwn(config||{},'activationEnabled')) {configKeys.push('activationEnabled');if(typeof config.activationEnabled!=='boolean')fail('invalid_request');}
   if (!C.keys(config, configKeys) || config.enabled !== true || config.cohort !== C.COHORT || !net.isIP(config.listenAddress)
     || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535
     || !['stateFile','tlsCertFile','tlsKeyFile','enrollmentConfigFile','enrollmentStateFile'].every(k => absolute(config[k]))
@@ -88,7 +89,7 @@ function validateFiles(config) {
   }
 }
 async function main(filename, { awsFactory = connectAws, http = createWhatsappAuthorizedHttp() } = {}) {
-  let raw; let key; let cert; let store; let registry; let aws; let secrets; let broker; let server; let timer; let draining; let closing;
+  let raw; let key; let cert; let store; let registry; let aws; let secrets; let broker; let server; let timer; let draining; let closing; let activations;
   let accepting = true;
   const pending = new Set();
   const shutdown = () => closing ||= (async () => {
@@ -97,7 +98,7 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappAu
     if (server) await new Promise(resolve => { server.close(resolve); server.closeIdleConnections?.(); });
     await Promise.allSettled([...pending]); await draining;
     if (store && aws) await drainAudit(store, aws.sink, { limit: 20 }).catch(() => null);
-    try { registry?.close(); } finally { try { aws?.close(); } finally { key?.fill(0); cert?.fill(0); store?.close(); } }
+    try { registry?.close(); activations?.close(); } finally { try { aws?.close(); } finally { key?.fill(0); cert?.fill(0); store?.close(); } }
   })();
   try {
     raw = privateFile(filename); const config = validateConfig(JSON.parse(raw.toString('utf8'))); raw.fill(0); raw = null;
@@ -109,11 +110,14 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappAu
     validateFiles(config);
     cert = privateFile(config.tlsCertFile, 65536); key = privateFile(config.tlsKeyFile, 65536);
     try { tls.createSecureContext({ cert, key, minVersion: 'TLSv1.2' }); } catch { fail('invalid_request'); }
-    registry = createWhatsappAuthorizedRegistry({ filename: config.enrollmentStateFile, authorizations: config.authorizations, loadEnrollmentBinding });
+    if(config.activationEnabled)activations=require('./whatsapp-activation-reader').createActivationReader(config.enrollmentStateFile);
+    registry = createWhatsappAuthorizedRegistry({ filename: config.enrollmentStateFile, authorizations: config.authorizations, loadEnrollmentBinding,
+      loadAuthorizations:()=>activations?.definitions()||[] });
     store = new BrokerStore(config.stateFile);
     aws = await awsFactory();
     secrets = createWhatsappAuthorizedSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY, registry, http });
-    broker = new Broker({ store, policy: config.policy, secrets, operations: createWhatsappAuthorizedOperations({ http, secrets, registry }), timeoutMs: 25000 });
+    broker = new Broker({ store, policy: config.policy, secrets, operations: createWhatsappAuthorizedOperations({ http, secrets, registry }), timeoutMs: 25000,
+      policyResolver:activations?{resolve:(request,principal,policy)=>activations.resolve(request,principal,policy,store)}:undefined });
     server = createServer({ execute(...args) {
       if (!accepting || pending.size >= 8) fail('rate_limited');
       const work = broker.execute(...args); pending.add(work);

@@ -64,7 +64,7 @@ function scopeOf(raw, bindings) {
 }
 
 function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now = () => Date.now(),
-  maxRows = 100000, maxBytes = 1024 * 1024 * 1024, maxAuditBacklog = 10000, scopeBindings }) {
+  maxRows = 100000, maxBytes = 1024 * 1024 * 1024, maxAuditBacklog = 10000, scopeBindings, loadScopeBindings }) {
   if (!store?.db || !cipher || !id(appId) || !Array.isArray(bindings) || !bindings.length
     || bindings.length > 64 || new Set(bindings.map(b => b.wabaId)).size !== bindings.length
     || bindings.some(b => !id(b.wabaId) || !Array.isArray(b.phoneIds) || !b.phoneIds.length || b.phoneIds.some(p => !id(p)))
@@ -76,6 +76,12 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
     const contract = require('./whatsapp-inbox-scopes');
     scopeBindings = contract.validateScopes(scopeBindings); contract.validateBindings(bindings, scopeBindings);
   }
+  const refreshScopes=()=>{
+    if(!loadScopeBindings)return;
+    const contract=require('./whatsapp-inbox-scopes'),next=contract.validateScopes(loadScopeBindings());
+    for(const old of scopeBindings||[])if(JSON.stringify(next.find(s=>s.phoneId===old.phoneId))!==JSON.stringify(old))fail('scope_denied');
+    scopeBindings=next;bindings=contract.bindingsFor(next);
+  };
   const scopesFor = rowScopes => scopeBindings?.filter(s => rowScopes.includes(s.wabaId + ':' + s.phoneId) || rowScopes.includes(s.wabaId + ':account'));
   const contextsFor = rowScopes => {
     if (!scopeBindings) return [auditContext];
@@ -107,6 +113,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
   const clean = error => new BrokerError(error instanceof BrokerError ? error.code : 'audit_unavailable');
   return {
     accept({ raw, signature, appSecret }) {
+      refreshScopes();
       if (!Buffer.isBuffer(raw) || !raw.length || raw.length > MAX_BYTES) fail('invalid_request');
       if (!Buffer.isBuffer(appSecret) || appSecret.length < 16) fail('secret_unavailable');
       if (typeof signature !== 'string' || !/^sha256=[a-f0-9]{64}$/.test(signature)) fail('invalid_signature');
@@ -139,6 +146,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
       } catch (error) { throw clean(error); }
     },
     pending(limit = 20) {
+      refreshScopes();
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid_request');
       try {
         return store.db.prepare("SELECT i.receipt,i.received_at FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND (i.state='held' OR (i.state='leased' AND i.lease_until<=?)) AND COALESCE(r.next_attempt_at,0)<=? ORDER BY COALESCE(r.last_attempt_at,i.received_at),i.received_at,i.receipt LIMIT ?")
@@ -146,12 +154,14 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
       } catch (error) { throw clean(error); }
     },
     health() {
+      refreshScopes();
       const groups = store.db.prepare("SELECT i.scopes,COUNT(*) pending,MIN(CASE WHEN r.reason IS NULL OR r.reason='import_retry' THEN i.received_at END) oldestPendingAt,SUM(CASE WHEN r.reason='review_required' THEN 1 ELSE 0 END) blockingReview,SUM(CASE WHEN r.reason IN ('unsupported_event','unmatched_status') THEN 1 ELSE 0 END) review FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' GROUP BY i.scopes").all(appId);
       return { observedAt: now(), groups: groups.map(row => ({ ...row, scopes: JSON.parse(row.scopes) })) };
     },
     // No automatic consumer. The caller must have a separately authenticated,
     // approved import grant and commit the business transaction before confirm.
     lease(receipt) {
+      refreshScopes();
       if (!uuid(receipt)) fail('invalid_request');
       try {
         return store.transaction(() => {
@@ -174,6 +184,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
       } catch (error) { throw clean(error); }
     },
     defer({ receipt, lease, reason }) {
+      refreshScopes();
       if (!uuid(receipt) || !uuid(lease) || !['unsupported_event','unmatched_status','review_required','import_retry'].includes(reason)) fail('invalid_request');
       return store.transaction(() => {
         const row = store.db.prepare('SELECT state,lease,lease_until FROM whatsapp_inbox WHERE app_id=? AND receipt=?').get(appId, receipt);
@@ -185,6 +196,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
       });
     },
     confirm({ receipt, lease, importReceipt }) {
+      refreshScopes();
       if (!uuid(receipt) || !uuid(lease) || !uuid(importReceipt)) fail('invalid_request');
       try {
         return store.transaction(() => {

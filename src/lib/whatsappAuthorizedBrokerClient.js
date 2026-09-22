@@ -89,7 +89,14 @@ function configuration(env = process.env) {
   const namespace = runtime.namespace(env), file = runtime.ROOTS[namespace] + '/config.json';
   if (env.WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE !== file) fail('whatsapp_authorized_configuration_invalid');
   const raw = privateFile(file, 1048576);
-  try { return validateConfiguration(JSON.parse(raw.toString('utf8')), namespace); }
+  try {
+    const value=JSON.parse(raw.toString('utf8'));
+    if(namespace==='staging'){
+      const catalog=require('./whatsappActivationCatalog');
+      value.bindings=[...value.bindings,...catalog.sendBindings(catalog.read())];
+    }
+    return validateConfiguration(value, namespace);
+  }
   catch { fail('whatsapp_authorized_configuration_invalid'); }
   finally { raw.fill(0); }
 }

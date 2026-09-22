@@ -3,6 +3,239 @@
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
+    "WhatsappPhoneActivations": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {
+          "COLUMN_NAME": "authorization_id",
+          "COLUMN_TYPE": "varchar(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "asset_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_type",
+          "COLUMN_TYPE": "varchar(16)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clinic_ids",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "phone_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "waba_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "varchar(32)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "profile",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "message_not_before",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updated_by",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "created_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updated_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "asset_id",
+          "columns": [
+            {
+              "INDEX_NAME": "asset_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "asset_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "connection_ref",
+          "columns": [
+            {
+              "INDEX_NAME": "connection_ref",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "connection_ref",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_whatsapp_activation_scope",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_whatsapp_activation_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "scope_type",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "idx_whatsapp_activation_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "scope_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "phone_id",
+          "columns": [
+            {
+              "INDEX_NAME": "phone_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "phone_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "authorization_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": [
+        {
+          "CONSTRAINT_NAME": "WhatsappPhoneActivations_ibfk_1",
+          "ORDINAL_POSITION": 1,
+          "COLUMN_NAME": "asset_id",
+          "REFERENCED_TABLE_SCHEMA": "<self>",
+          "REFERENCED_TABLE_NAME": "ClinicMetaAssets",
+          "REFERENCED_COLUMN_NAME": "id",
+          "UPDATE_RULE": "CASCADE",
+          "DELETE_RULE": "RESTRICT"
+        }
+      ]
+    },
     "BusinessProfileCacheStates": {
       "ENGINE": "InnoDB",
       "TABLE_COLLATION": "ascii_bin",
@@ -1686,7 +1919,7 @@
         {
           "COLUMN_NAME": "metaConnectionId",
           "COLUMN_TYPE": "int",
-          "IS_NULLABLE": "NO",
+          "IS_NULLABLE": "YES",
           "COLUMN_DEFAULT": null,
           "EXTRA": "",
           "CHARACTER_SET_NAME": null,
@@ -1921,6 +2154,16 @@
           "EXTRA": "",
           "CHARACTER_SET_NAME": null,
           "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "whatsappAuthorizationId",
+          "COLUMN_TYPE": "varchar(36)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
           "GENERATION_EXPRESSION": ""
         }
       ],
@@ -2174,6 +2417,19 @@
               "NON_UNIQUE": 0,
               "SEQ_IN_INDEX": 3,
               "COLUMN_NAME": "metaAssetId",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "uniq_whatsapp_authorization_asset",
+          "columns": [
+            {
+              "INDEX_NAME": "uniq_whatsapp_authorization_asset",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "whatsappAuthorizationId",
               "SUB_PART": null,
               "INDEX_TYPE": "BTREE"
             }
@@ -4026,6 +4282,7 @@
     {"name":"20260919110000-meta-marketing-enrollment-due-index.js","sha256":"9dfa04628ef1ea25920c42168c9080f22a3abe763e527ad1a9b5a0c5490394e6"},
     {"name":"20260919120000-meta-marketing-enrollment-scope-latest.js","sha256":"3daff36382d7f0c649bce200b6e901d2551ecd0a114c5dc78acf7f2b386d2a99"},
     {"name": "20260919200000-create-business-profile-mutation-journal.js", "sha256": "3c13134c86ab24e753115e1292e473504ebbf6307f2b4a9582f0c79d08ab055b"},
-    {"name": "20260919210000-create-business-profile-cache-coordination.js", "sha256": "d05ec2f4efb1deea3a9c8a5aeb889d5202d0bcd45f915458f2f709adc34e6825"}
+    {"name": "20260919210000-create-business-profile-cache-coordination.js", "sha256": "d05ec2f4efb1deea3a9c8a5aeb889d5202d0bcd45f915458f2f709adc34e6825"},
+    {"name": "20260922153000-create-whatsapp-phone-activations.js", "sha256": "243e65409413549b47a1befc2570d1f2164235324592b93465ff12c2ad003d12"}
   ]
 }

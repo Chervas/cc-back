@@ -31,13 +31,19 @@ for (const customer of [undefined, { businessId: '501', wabaIds: ['301','302'] }
 test('Actual TLS broker exposes authenticated candidate flow only, survives restart and preserves cancellation/audit: ' + (customer?.selectionOnly ? 'selected phone' : customer ? 'business' : 'single WABA'), async t => {
   const f = fixture(t, { customer, ...(customer?.selectionOnly ? { scopes: ['public_profile','whatsapp_business_manage_events','whatsapp_business_management','whatsapp_business_messaging'] } : {}) }); const c = config(f);
   if (customer?.selectionOnly) c.policy.connections[0].expiresAt = null;
+  if(customer?.selectionOnly){c.activationEnabled=true;c.activationScopesFile=path.join(f.dir,'receive-scopes.json');
+    fs.writeFileSync(c.activationScopesFile,JSON.stringify({version:1,appId:'101',scopes:[]}),{mode:0o640});}
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', c.tlsKeyFile, '-out', c.tlsCertFile,
     '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
   fs.chmodSync(c.tlsKeyFile, 0o600); fs.chmodSync(c.tlsCertFile, 0o600);
   const probe = net.createServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve)); c.port = probe.address().port; await new Promise(resolve => probe.close(resolve));
   const filename = path.join(f.dir, 'config.json'); fs.writeFileSync(filename, JSON.stringify(c), { mode: 0o600 }); const events = []; let closed = 0;
   const sink = { async write(row) { events.push(JSON.parse(row.event)); return { versionId: 'FICTITIOUS_AUDIT_VERSION', digest: row.digest }; } };
-  const start = () => runtime.main(filename, { awsFactory: async () => ({ secrets: f.aws, sink, close() { closed++; } }), http: f.http, exchangeFactory: f.exchangeFactory });
+  let subscriptions=0;
+  const start = () => runtime.main(filename, { awsFactory: async () => ({ secrets: f.aws, sink, close() { closed++; } }), http: f.http, exchangeFactory: f.exchangeFactory,
+    activationHttp:async r=>r.action==='profile'?{id:'401',status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true,code_verification_status:'VERIFIED'}:
+      r.action==='subscriptions'?{data:subscriptions?[{whatsapp_business_api_data:{id:'101'}}]:[]}:
+      r.action==='subscribe'?(subscriptions++,{success:true}):f.http(r) });
   let app = await start(); allowPort(c.port); t.after(async () => { if (app) await app.close(); removePort(c.port); });
   const client = (control = false) => createIntegrationsBrokerClient({ origin: `https://127.0.0.1:${c.port}`, audience: f.policy.audience,
     keyId: control ? 'qa-control' : 'qa-gateway', privateKey: (control ? f.control : f.gateway).privateKey.export({ type: 'pkcs8', format: 'pem' }), ca: fs.readFileSync(c.tlsCertFile) });
@@ -53,6 +59,15 @@ test('Actual TLS broker exposes authenticated candidate flow only, survives rest
   await assert.rejects(caller.execute({ ...finish, requestId: randomUUID(), operation: 'meta.whatsapp.text.send.v1', payload: {} }));
   assert.equal(f.state.codes, 1); assert.equal(f.state.puts, 1); await app.close(); app = await start();
   assert.equal((await caller.execute({ ...finish, requestId: randomUUID() })).data.status, 'staged'); assert.equal(f.state.codes, 1);
+  if(customer?.selectionOnly){
+    const A=require('../src/whatsapp-activation-contract');const payload={flowId:id,scopeDigest:begin.payload.scopeDigest,clinicSetDigest:begin.payload.clinicSetDigest};
+    const call=(operation,payload)=>caller.execute({requestId:randomUUID(),...scope,operation,payload});
+    assert.equal((await call(A.PROFILE,payload)).data.state,'prepared');
+    assert.equal((await call(A.ACTIVATE,{...payload,assetId:991})).data.state,'active');
+    assert.equal((await call(A.ACTIVATE,{...payload,assetId:991})).data.state,'active');assert.equal(subscriptions,1);
+    assert.deepEqual(JSON.parse(fs.readFileSync(c.activationScopesFile)).scopes,[{wabaId:'301',phoneId:'401',clinicIds:[71,72]}]);
+    await assert.rejects(client(true).execute({requestId:randomUUID(),...scope,operation:A.ACTIVATE,payload:{...payload,assetId:991}}));
+  }
   assert.equal((await client(true).execute({ requestId: randomUUID(), ...scope, operation: C.OPERATIONS.abort, payload: { flowId: id } })).data.status, 'aborted');
   await assert.rejects(caller.execute({ ...finish, requestId: randomUUID() })); assert.equal(f.state.codes, 1);
   await drainAudit(app.store, sink); assert.equal(app.store.backlog().pending, 0);

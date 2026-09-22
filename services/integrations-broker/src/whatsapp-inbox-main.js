@@ -15,6 +15,7 @@ function validateConfig(c) {
   const keys = 'application,auditContext,bindings,cohort,consumerEnabled,enabled,keyManifestFile,limits,listenAddress,port,principals,stateFile,tlsCaFile,tlsCertFile,tlsKeyFile'.split(',');
   if (c && Object.hasOwn(c, 'tlsRenewal')) { tlsReload.validateSettings(c.tlsRenewal); keys.push('tlsRenewal'); }
   if (c && Object.hasOwn(c, 'scopes')) keys.push('scopes', 'previousScopesDigest');
+  if(c&&Object.hasOwn(c,'activationScopesFile')) {keys.push('activationScopesFile');if(typeof c.activationScopesFile!=='string'||!path.isAbsolute(c.activationScopesFile)||!c.scopes)fail('invalid_request');}
   if (!c || Object.keys(c).sort().join(',') !== keys.sort().join(',')
     || c.cohort !== COHORT || c.enabled !== true || typeof c.consumerEnabled !== 'boolean' || !net.isIP(c.listenAddress)
     || !Number.isInteger(c.port) || c.port < 1024 || c.port > 65535) fail('invalid_request');
@@ -72,16 +73,30 @@ async function main(filename, { awsFactory = connectInboxAws } = {}) {
   const config = validateConfig(JSON.parse(privateFile(filename)));
   const cert = privateFile(config.tlsCertFile, 65536); const key = privateFile(config.tlsKeyFile, 65536);
   const ca = privateFile(config.tlsCaFile, 65536); const manifest = JSON.parse(privateFile(config.keyManifestFile, 16384));
-  let aws; let cipher; let store; let secret; let server; let timer; let draining;
+  let aws; let cipher; let store; let secret; let server; let timer; let draining; let activations;
   try {
     aws = await awsFactory(); cipher = await createInboxKeyProvider(aws.kms).open(manifest, config.application.appId);
     // No key bootstrap or implicit migration on startup. Preserve files on a
     // missing key, incompatible scope, corrupt ciphertext or unavailable AWS.
     fs.mkdirSync(path.dirname(config.stateFile), { recursive: true, mode: 0o700 });
     if (fs.realpathSync(path.dirname(config.stateFile)) !== path.dirname(config.stateFile)) fail('invalid_request');
-    store = new BrokerStore(config.stateFile); pinIdentity(store, config, cipher);
+    store = new BrokerStore(config.stateFile);
+    if(config.activationScopesFile)activations={scopes:appId=>require('./whatsapp-capture-catalog').read(config.activationScopesFile,appId),close:()=>{}};
+    const loadScopes=()=>{
+      const map=new Map(config.scopes.map(s=>[s.phoneId,s]));
+      for(const s of activations.scopes(config.application.appId)) {
+        if(map.has(s.phoneId)&&JSON.stringify(map.get(s.phoneId))!==JSON.stringify(s))fail('scope_denied');
+        map.set(s.phoneId,s);
+      }
+      const scopes=scopesContract.validateScopes([...map.values()]);
+      const hasIdentity=store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='whatsapp_inbox_scope_identity'").get();
+      const current=hasIdentity&&store.db.prepare('SELECT digest FROM whatsapp_inbox_scope_identity WHERE id=1').get();
+      pinIdentity(store,{...config,scopes,bindings:scopesContract.bindingsFor(scopes),previousScopesDigest:current?.digest||config.previousScopesDigest},cipher);
+      return scopes;
+    };
+    if(activations)loadScopes();else pinIdentity(store, config, cipher);
     const inbox = createWhatsappInbox({ store, cipher, appId: config.application.appId, bindings: config.bindings,
-      auditContext: config.auditContext, scopeBindings: config.scopes, ...config.limits });
+      auditContext: config.auditContext, scopeBindings: config.scopes, ...config.limits,loadScopeBindings:activations?loadScopes:undefined });
     secret = createInboxApplicationSecret(aws.secrets, config.application);
     server = createInboxServer({ inbox, withApplicationSecret: work => secret.withSecret(work), principals: config.principals,
       cert, key, ca, consumerEnabled: config.consumerEnabled });
@@ -92,11 +107,11 @@ async function main(filename, { awsFactory = connectInboxAws } = {}) {
     const close = () => closing ||= (async () => {
       clearInterval(timer); secret.close();
       await new Promise(resolve => { server.close(resolve); server.closeIdleConnections?.(); });
-      await draining; cipher.close(); store.close(); aws.close(); key.fill(0);
+      await draining; activations?.close();cipher.close(); store.close(); aws.close(); key.fill(0);
     })();
     return { server, store, inbox, close };
   } catch (error) {
-    clearInterval(timer); server?.close(); secret?.close(); cipher?.close(); store?.close(); aws?.close(); key.fill(0); throw error;
+    clearInterval(timer); server?.close(); secret?.close();activations?.close(); cipher?.close(); store?.close(); aws?.close(); key.fill(0); throw error;
   }
 }
 if (require.main === module) main(process.argv[2]).then(runtime => {

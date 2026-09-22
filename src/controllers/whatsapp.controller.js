@@ -1858,7 +1858,7 @@ exports.listPhones = async (req, res) => {
     }
 
     const where = {
-      isActive: true,
+      [Op.and]:[{[Op.or]:[{isActive:true},{whatsappAuthorizationId:{[Op.ne]:null}}]}],
       assetType: 'whatsapp_phone_number',
     };
 
@@ -1998,6 +1998,11 @@ exports.listPhones = async (req, res) => {
         assignmentScope: p.assignmentScope,
         base_whatsapp_channel_role: baseChannelRouting.role,
         whatsapp_channel_role: channelRouting.role,
+        authorization_id: p.whatsappAuthorizationId || null,
+        sending_enabled: p.whatsappAuthorizationId ? !!p.isActive : undefined,
+        requires_clinic_selection: additionalData.requireClinicSelection === true,
+        routing_disabled: additionalData.routing_disabled === true,
+        activation_state: additionalData.activationState || null,
         routing_purposes: channelRouting.purposes,
         secondary_unavailable_action: channelRouting.unavailableAction,
         routing_binding: scopeBinding ? {
@@ -2072,7 +2077,7 @@ exports.listPhones = async (req, res) => {
       });
     }
 
-    return res.json({ phones: payload, preverified_enabled: PREVERIFIED_ENABLED });
+    return res.json({ phones: payload, preverified_enabled: PREVERIFIED_ENABLED, routing_enabled: true });
   } catch (err) {
     if (err?.statusCode === 403) return res.status(403).json({ error: 'whatsapp_clinic_scope_forbidden' });
     return res.status(503).json({ error: 'whatsapp_phones_unavailable' });

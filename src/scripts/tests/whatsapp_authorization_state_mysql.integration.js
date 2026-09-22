@@ -148,6 +148,13 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await assert.rejects(service.assertClaimActive(inputFor(refreshWho, refreshFlow)), codeIs('whatsapp_authorization_expired'));
   await assert.rejects(claim(expiryWho, expiryFlow), codeIs('whatsapp_authorization_expired'));
   assert.equal((await service.status(inputFor(expiryWho, expiryFlow))).status, 'expired');
+  assert.equal((await service.resume(inputFor({...refreshWho,sessionRef:otherRef},refreshFlow))).requestId,refreshFlow.requestId);
+  await assert.rejects(service.resume(inputFor(expiryWho,expiryFlow)),codeIs('whatsapp_authorization_forbidden'));
+  await assert.rejects(rotating.resume(inputFor(refreshWho,refreshFlow)),codeIs('whatsapp_authorization_unavailable'));
+  await models.UsuarioClinica.update({rol_clinica:'paciente'},{where:{id_usuario:refreshWho.userId,id_clinica:72}});
+  await assert.rejects(service.resume(inputFor(refreshWho,refreshFlow)),codeIs('whatsapp_authorization_forbidden'));
+  await models.UsuarioClinica.update({rol_clinica:'propietario'},{where:{id_usuario:refreshWho.userId,id_clinica:72}});
+  report.checks.push('Completion resumes a claimed receipt after OAuth expiry using a current MFA session; unclaimed, tampered and scope-permission changes denied');
   await assert.rejects(claim(shortWho, shortFlow), codeIs('auth_invalid'));
   report.checks.push('State lifetime is capped by original JWT expiry and thirty minutes; status projects expiration without reissuing');
   const limitWho = await actor(); const limits = await Promise.allSettled(Array.from({ length: 6 }, () => issue(limitWho)));

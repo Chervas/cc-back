@@ -4,6 +4,7 @@ const fs = require('node:fs'); const path = require('node:path'); const { random
 const S = require('../services/whatsappAuthorizationState.contract');
 const C = require('../../services/integrations-broker/src/whatsapp-onboarding-contract');
 const P = require('../../services/integrations-broker/src/whatsapp-provisioning-contract');
+const A = require('../../services/integrations-broker/src/whatsapp-activation-contract');
 const { createIntegrationsBrokerClient } = require('./integrationsBrokerClient');
 const fail = (code = 'whatsapp_onboarding_broker_unavailable', unknown = false) => {
   throw Object.assign(Error(code), { code, status: 503, httpStatus: 503, outcomeUnknown: unknown });
@@ -119,7 +120,27 @@ function createWhatsappOnboardingBrokerClient({ client, loadBinding, prepareBind
       fail('whatsapp_onboarding_result_unknown', true);
     }
   }
-  return Object.freeze({ begin: row => call('begin', row), finish: (row, input) => call('finish', row, input),
+  async function completion(operation,raw,assetId) {
+    guard();const row=context(raw),selected=binding(await loadBinding(row.scope),row),requestId=randomUUID();
+    const payload={flowId:row.requestId,scopeDigest:row.scopeDigest,clinicSetDigest:row.clinicSetDigest,...(operation===A.ACTIVATE?{assetId}:{})};
+    A.validate(payload,operation);
+    const result=await client.execute({requestId,tenantRef:'clinic:'+row.clinicIds[0],assetRef:'wa-enroll:'+selected.scopeKey,
+      connectionRef:selected.connectionRef,operation,payload});
+    guard();if(JSON.stringify(binding(await loadBinding(row.scope),row))!==JSON.stringify(selected))fail('whatsapp_onboarding_binding_invalid');
+    S.exact(result,['requestId','data','replayed']);
+    const d=result.data;S.exact(d,['flowId','connectionRef','scopeKey','clinicIds','phoneId','wabaId','channelRole','assetId','state','profile','observedAt','activatedAt']);
+    if(result.requestId!==requestId||typeof result.replayed!=='boolean'||d.flowId!==row.requestId||d.connectionRef!==A.connectionRef(row.requestId)
+      ||d.scopeKey!==selected.scopeKey||JSON.stringify(d.clinicIds)!==JSON.stringify(row.clinicIds)||!C.id(d.phoneId)||!C.id(d.wabaId)
+      ||d.channelRole!==row.channelRole||!A.phases.includes(d.state)||!(d.assetId===null||A.positive(d.assetId))
+      ||assetId&&d.assetId!==assetId||![d.observedAt,d.activatedAt].every(v=>v===null||Number.isSafeInteger(v)&&v>0))fail('whatsapp_onboarding_binding_invalid');
+    if(d.profile){S.exact(d.profile,['phoneId','displayPhoneNumber','verifiedName','status','codeVerificationStatus','qualityRating','platformType','isOnBizApp']);
+      if(d.profile.phoneId!==d.phoneId||![d.profile.displayPhoneNumber,d.profile.verifiedName].every(v=>v===null||typeof v==='string'&&v.length<=255&&!/[\u0000-\u001f]/.test(v))
+        ||![true,false,null].includes(d.profile.isOnBizApp))fail('whatsapp_onboarding_binding_invalid');}
+    if(d.state==='active'&&(!d.activatedAt||d.profile?.status!=='CONNECTED'||d.profile?.platformType!=='CLOUD_API'))fail('whatsapp_onboarding_binding_invalid');
+    return structuredClone(d);
+  }
+  return Object.freeze({ profile:row=>completion(A.PROFILE,row), activate:(row,assetId)=>completion(A.ACTIVATE,row,assetId),
+    activationStatus:row=>completion(A.STATUS,row),begin: row => call('begin', row), finish: (row, input) => call('finish', row, input),
     status: row => call('status', row), statusReadOnly: row => call('status', row, { readOnly: true }),
     abort: row => call('abort', row) });
 }
@@ -177,6 +198,6 @@ function configuredClient({ environment = () => process.env } = {}) {
       fail('whatsapp_onboarding_configuration_invalid');
     } finally { key?.fill(0); ca?.fill(0); }
   }
-  return Object.freeze(Object.fromEntries(['begin','finish','status','statusReadOnly','abort'].map(name => [name, (row, input) => execute(name, row, input)])));
+  return Object.freeze(Object.fromEntries(['begin','finish','status','statusReadOnly','abort','profile','activate','activationStatus'].map(name => [name, (row, input) => execute(name, row, input)])));
 }
 module.exports = { createWhatsappOnboardingBrokerClient, configuredClient, assertGateway, configuration };
