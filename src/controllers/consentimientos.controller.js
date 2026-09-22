@@ -339,6 +339,16 @@ exports.getAppointmentSummary = asyncHandler(async (req, res) => {
     }
 });
 
+exports.createPatientIntakePackage = asyncHandler(async (req, res) => {
+    try {
+        // Deliberately ignore caller-supplied clinic IDs: this package belongs
+        // to the patient's primary clinic and uses only that clinic's versions.
+        const clinicId = await requireConsentFeature(req, 'consents.manage', await resolvePatientClinicId(req.params.id));
+        const result = await consentimientosService.createPatientIntakePackage(req.params.id, { clinicId, createdBy: getUserId(req) });
+        return res.status(result.created_count ? 201 : 200).json(result);
+    } catch (error) { return sendError(res, error); }
+});
+
 exports.createAppointmentPackage = asyncHandler(async (req, res) => {
     try {
         await requireConsentFeature(req, 'consents.manage', await resolveAppointmentClinicId(req.params.id));
