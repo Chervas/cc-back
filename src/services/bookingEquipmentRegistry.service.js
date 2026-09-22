@@ -10,6 +10,13 @@ const numeric = values => [...new Set(values.map(Number))].sort((a, b) => a - b)
 function createBookingEquipmentRegistry({ db, authorize, enabled = equipmentRuntimeEnabled, now = () => new Date() }) {
   const { Op } = db.Sequelize;
   const transaction = work => db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, work);
+  async function canEdit(clinicId) {
+    try { await authorize('clinic.settings.edit', clinicId); return true; }
+    catch (error) {
+      if (error.status === 403 || error.statusCode === 403 || error.message === 'access_policy_forbidden') return false;
+      throw error;
+    }
+  }
   async function scope(ids, feature = 'clinic.settings.edit', tx = null, lock = false) {
     ids = positiveIds(numeric(ids), 50);
     if (!ids.length) throw equipmentError('scope', 'Selecciona una clínica.', 400);
@@ -33,9 +40,23 @@ function createBookingEquipmentRegistry({ db, authorize, enabled = equipmentRunt
   async function read(clinicId) {
     const [clinic] = await scope([clinicId], 'clinic.settings.view');
     const feature = clinicUsesEquipment(clinic);
-    const result = { clinic_id: clinicId, enabled: feature, runtime_available: enabled(), units: [], rooms: [] };
+    const result = { clinic_id: clinicId, enabled: feature, runtime_available: enabled(), can_edit: await canEdit(clinicId),
+      units: [], rooms: [], sharing_clinics: [] };
     // No inventory or compatibility query for clinics without this feature.
     if (!feature || !enabled()) return result;
+    // Configuration screen only: never called by the availability/slot search path.
+    const peers = clinic.grupoClinicaId ? await db.Clinica.findAll({
+      where: { grupoClinicaId: clinic.grupoClinicaId },
+      attributes: ['id_clinica', 'nombre_clinica', 'equipment_booking_enabled'], limit: 51,
+    }) : [clinic];
+    const editable = new Set(result.can_edit ? [clinicId] : []);
+    for (const peer of peers.slice(0, 50)) {
+      const peerId = Number(peer.id_clinica);
+      if (peerId === clinicId ? result.can_edit : await canEdit(peerId)) {
+        editable.add(peerId);
+        result.sharing_clinics.push({ id: peerId, name: peer.nombre_clinica, enabled: clinicUsesEquipment(peer) });
+      }
+    }
     const shares = await db.BookingEquipmentClinic.findAll({ where: { clinic_id: clinicId }, limit: 201 });
     if (shares.length > 200) throw equipmentError('limit', 'Revisa el inventario por partes.');
     const units = shares.length ? await db.BookingEquipment.findAll({ where: { id: { [Op.in]: shares.map(s => s.equipment_id) } },
@@ -64,6 +85,8 @@ function createBookingEquipmentRegistry({ db, authorize, enabled = equipmentRunt
       return { id: unit.id, name: u.name, family_key: u.family_key, aliases: u.aliases || [], mobility: u.mobility, status: u.status,
         home_installation_id: u.home_installation_id, turnaround_minutes: u.turnaround_minutes, revision: u.revision,
         owned_here: Number(u.owner_clinic_id) === clinicId,
+        can_edit: Number(u.owner_clinic_id) === clinicId && result.can_edit
+          && ownedShares.filter(s => Number(s.equipment_id) === unit.id).every(s => editable.has(Number(s.clinic_id))),
         ...(Number(u.owner_clinic_id) === clinicId ? { clinic_ids: numeric(ownedShares.filter(s => Number(s.equipment_id) === unit.id).map(s => s.clinic_id)) } : {}),
         permitted_rooms: result.rooms.filter(r => equipmentFitsRoom({ ...unit, status: 'available' }, r)).map(r => ({ id: r.id, name: r.name })) };
     });
@@ -83,10 +106,13 @@ function createBookingEquipmentRegistry({ db, authorize, enabled = equipmentRunt
     });
   }
   async function saveUnit(clinicId, id, payload) {
-    const data = normalizeEquipmentUnit(payload);
     await scope([clinicId]);
     const initial = id ? await db.BookingEquipment.findByPk(id) : null;
     if (id && (!initial || Number(initial.owner_clinic_id) !== clinicId)) throw equipmentError('not_found', 'Equipo no encontrado en esta clínica.', 404);
+    // Keep technical family identifiers out of the basic editor; preserve on rename.
+    const family = initial?.family_key || String(payload?.name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+    const data = normalizeEquipmentUnit({ ...payload, family_key: payload.family_key ?? family });
     const priorShares = initial ? await db.BookingEquipmentClinic.findAll({ where: { equipment_id: id } }) : [];
     const requestedClinics = positiveIds(payload.clinic_ids ?? (priorShares.length ? numeric(priorShares.map(s => s.clinic_id)) : [clinicId]));
     if (!requestedClinics.includes(clinicId)) throw equipmentError('scope', 'Conserva la clínica propietaria del equipo.');
