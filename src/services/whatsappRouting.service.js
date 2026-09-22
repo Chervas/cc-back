@@ -6,10 +6,11 @@ const roles=require('../lib/whatsapp-channel-role');
 function createService({models,sessions,audit,broker=require('../lib/whatsappAuthorizedBrokerClient'),
   scopeBlocks=require('./metaScopeBlock.service'),now=()=>new Date()}={}){
   const db=()=>typeof models==='function'?models():models||require('../../models');
-  async function save(raw,actor){
-    S.exact(raw,['scope','primaryAssetId','secondaryAssetId','purposes','unavailableAction']);S.exact(raw.scope,['type','id']);
-    if(!['clinic','group'].includes(raw.scope.type)||!S.id(raw.scope.id)||!S.id(raw.primaryAssetId)
-      ||raw.secondaryAssetId!==null&&!S.id(raw.secondaryAssetId)||raw.primaryAssetId===raw.secondaryAssetId
+  async function save(raw,actor,{secondaryOnly=false}={}){
+    S.exact(raw,secondaryOnly?['scope','secondaryAssetId','purposes','unavailableAction']:['scope','primaryAssetId','secondaryAssetId','purposes','unavailableAction']);S.exact(raw.scope,['type','id']);
+    if(!['clinic','group'].includes(raw.scope.type)||!S.id(raw.scope.id)||!secondaryOnly&&!S.id(raw.primaryAssetId)
+      ||raw.secondaryAssetId!==null&&!S.id(raw.secondaryAssetId)||!secondaryOnly&&raw.primaryAssetId===raw.secondaryAssetId
+      ||secondaryOnly&&!S.id(raw.secondaryAssetId)
       ||!Array.isArray(raw.purposes)||raw.purposes.length>3||raw.purposes.some(p=>!roles.WHATSAPP_SECONDARY_PURPOSES.includes(p))
       ||new Set(raw.purposes).size!==raw.purposes.length||!roles.WHATSAPP_SECONDARY_UNAVAILABLE_ACTIONS.includes(raw.unavailableAction)
       ||raw.secondaryAssetId===null&&raw.purposes.length)S.fail();
@@ -38,7 +39,23 @@ function createService({models,sessions,audit,broker=require('../lib/whatsappAut
           a.assignmentScope==='clinic'&&Number(a.clinicaId)===raw.scope.id||a.assignmentScope==='group'&&Number(a.grupoClinicaId)===Number(clinics[0].grupoClinicaId));
         if(!own||ids.some(clinicId=>!broker.bindingsForClinic(clinicId).some(b=>b.assetId===id&&b.phoneId===a.phoneNumberId&&b.wabaId===a.wabaId&&b.sendEnabled===true)))S.fail('whatsapp_authorization_forbidden',403);
       }
-      if(raw.scope.type==='clinic'){
+      if(secondaryOnly){
+        // A group-wide secondary is an explicit per-clinic choice. Preserve
+        // every primary, including an absent primary or an inherited one.
+        const existing=await db().WhatsappChannelBinding.findAll({...locked,where:{clinic_id:{[Op.in]:ids}},order:[['clinic_id','ASC'],['id','ASC']]});
+        if(existing.some(b=>Number(b.asset_id)===raw.secondaryAssetId&&b.role!=='secondary'))S.fail('whatsapp_authorization_conflict',409);
+        for(const clinicId of ids){
+          const previous=existing.find(b=>b.clinic_id===clinicId&&b.role==='secondary');
+          const values={asset_id:raw.secondaryAssetId,purposes:raw.purposes,unavailable_action:raw.unavailableAction,is_active:true,updated_by:actor.userId};
+          if(previous)await previous.update(values,{transaction});
+          else await db().WhatsappChannelBinding.create({...values,clinic_id:clinicId,role:'secondary',created_by:actor.userId},{transaction});
+        }
+        if(raw.scope.type==='group'){
+          const asset=assets.find(a=>a.id===raw.secondaryAssetId);
+          await asset.update({additionalData:{...roles.buildWhatsappRoutingAdditionalData(asset.additionalData||{},
+            {role:'secondary',purposes:raw.purposes,unavailableAction:raw.unavailableAction}),routing_disabled:false}},{transaction});
+        }
+      }else if(raw.scope.type==='clinic'){
         // Replacing the complete selection is atomic, including disabling the
         // secondary. Assets themselves keep their group/clinic assignment.
         await db().WhatsappChannelBinding.destroy({where:{clinic_id:raw.scope.id},transaction});
@@ -56,9 +73,10 @@ function createService({models,sessions,audit,broker=require('../lib/whatsappAut
       }
       await require('./whatsappConnectionAudit').append({db:db(),audit,actor,scope:raw.scope,requestId:randomUUID(),assetIds:selected,
         action:'integration.whatsapp.routing',reason:'routing_saved',transaction,now:now()});
-      return {success:true,primaryAssetId:raw.primaryAssetId,secondaryAssetId:raw.secondaryAssetId};
+      return secondaryOnly?{success:true,secondaryAssetId:raw.secondaryAssetId,clinicIds:ids,preservesPrimaries:true}:
+        {success:true,primaryAssetId:raw.primaryAssetId,secondaryAssetId:raw.secondaryAssetId};
     });
   }
-  return {save};
+  return {save,saveSecondary:(raw,actor)=>save(raw,actor,{secondaryOnly:true})};
 }
 module.exports={createService,...createService()};
