@@ -323,3 +323,40 @@ commit ambiguo exige conciliar el diario antes de reintentar. Pruebas focales:
 `cliniccloud_catalog_resource_refresh.test.js`. Una eventual reversión debe
 comparar cada fila con el estado posterior del diario y preservar su uso o
 edición posterior; nunca restaurar toda la BD por esta operación.
+
+### Asociar consentimientos a borradores individuales
+
+`cliniccloud-import-catalog-consent-links.js` añade relaciones canónicas
+`TreatmentConsentRequirements` a tratamientos individuales importados de BS.
+No busca por similitud: consume una revisión privada con referencia exacta de
+origen, huellas del tratamiento/plantilla/versión, citas literales del procedimiento
+en Excel y documento, y motivo de cada correspondencia. Tener una técnica en
+el nombre no demuestra cobertura de otra zona, finalidad o procedimiento.
+
+Desde `back-dev`/rama `dev`, indicar `--target crm`, `--plan`, `--workbook` y:
+
+- `--mode prepare --review … --private-output …`: captura READ ONLY y paquete;
+- `--mode dry-run --package … --approved-sha256 … --backup-manifest …
+  --private-journal …`: inserta dentro de transacción, verifica y revierte;
+- `--mode apply` con esos mismos argumentos y **otro diario**: guarda y verifica
+  desde una conexión independiente;
+- `--mode verify --package … --private-output …`: lectura posterior sin escrituras.
+
+El paquete debe tener menos de dos horas y el respaldo completo CRM debe estar
+verificado. Máximo 75 tratamientos/150 vínculos; misma clínica del grupo BS,
+borrador inactivo con procedencia intacta y sin citas que lo utilicen. La plantilla
+debe ser clínica, activa, no DEMO, con su última versión publicada en castellano.
+Conserva la política de bloqueo ya configurada en la biblioteca. Rechaza versiones
+posteriores, asociaciones distintas/condicionales, cambios de tratamiento o scope.
+La ejecución usa locks, comparación completa antes/después y diario durable;
+replay exacto no inserta y nunca restaura ediciones humanas posteriores.
+
+No borra/reemplaza relaciones, modifica tratamientos/precios, publica documentos,
+firma consentimientos ni activa agenda, mensajes o recordatorios. **Asociación
+documental preparada no equivale a aprobación clínica/legal ni cobertura total**
+de un programa o procedimiento combinado. No usar un consentimiento quirúrgico
+para un acto no quirúrgico, ni generalizar a cuerpo uno limitado a cara/cuello.
+La revisión del profesional y la adecuación del texto siguen siendo necesarias.
+Pruebas: `cliniccloud_catalog_consent_links.test.js`. Recuperación selectiva solo
+de los IDs insertados del diario, tras comprobar que no hubo edición o uso clínico
+posterior; nunca restaurar la base completa ni borrar documentación del paciente.
