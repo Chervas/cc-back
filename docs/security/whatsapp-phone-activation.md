@@ -88,3 +88,32 @@ Chromium con componentes reales: diálogo en escritorio/móvil, reanudación y
 selección del número de grupo conservando el propio. Las pruebas sintéticas no
 acreditan entrega externa. Registrar por separado aceptación Meta real, lectura
 de la tarjeta y prueba de envío/recepción con un destinatario de pruebas autorizado.
+
+## Actualización del catálogo y destino compartido
+
+El importador lee la configuración y el catálogo al comienzo de cada ciclo. Una
+nueva activación no requiere reiniciar el proceso. Si esa configuración deja de
+ser legible, no se reutiliza una copia antigua ni se vuelve al piloto. La misma
+instantánea se contrasta antes de guardar cada hijo del lote; si cambia, se aplaza
+sin ACK y el siguiente ciclo parte de la configuración vigente.
+
+El número compartido resuelve el contacto mediante una vinculación existente en
+`WhatsappInboxContactKeys`, específica de teléfono receptor, contacto y clínica.
+Si no existe, admite evidencia de una única clínica que haya enviado desde ese
+mismo número; después, una única conversación coincidente. Múltiples candidatos,
+vinculaciones contradictorias o ausencia de destino quedan como `review_required`.
+No elegir la clínica más reciente ni crear vinculaciones para hacer pasar una prueba.
+Un destino explícito requiere decisión del titular y validación de pertenencia;
+la resolución manual desde interfaz todavía no está aceptada. Los eventos
+retenidos siguen participando en la salud de recepción y pueden retener acciones
+por falta de respuesta en sus clínicas; nunca confirmar un recibo para ocultarlos.
+
+La proyección de captura usa `fchmod(0640)` antes del rename, también bajo UMask
+0077. La auditoría de la activación acepta el ejecutor de control anterior que
+no pasa política por invocación, utilizando su política validada al construirlo.
+Pruebas específicas verifican ambos contratos de despliegue.
+
+La UI distingue metadatos de Meta no facilitados de fallos confirmados: los
+primeros no son acciones pendientes y no generan una barra porcentual engañosa.
+El estado de registro comprobado se conserva. Aceptación real y límites actuales
+en el manual central, documento 19; capturas y publicaciones en 99.
