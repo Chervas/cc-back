@@ -109,6 +109,8 @@ router.get('/:id', resolveDirectoryAccess, allowDirectoryTarget, userController.
 
 router.patch('/:id', resolveDirectoryAccess, allowDirectoryTarget, userController.updateUser);
 
+router.post('/:id/password', requireAdmin, require('../services/adminPasswordChange.service').handler);
+
 // Ruta para eliminar un usuario (solo admin)
 router.delete('/:id', requireAdmin, userController.deleteUser);
 
