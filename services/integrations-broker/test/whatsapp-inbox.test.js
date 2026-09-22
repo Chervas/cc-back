@@ -117,3 +117,29 @@ test('Additive onboarding role upgrade preserves held inbox ciphertext and passi
   const lease=f.inbox.lease(first.receipt);assert.equal(lease.automaticActionsAllowed,false);assert(lease.raw.equals(input.raw));lease.raw.fill(0);
   assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM commands').get().n,0);
 });
+test('poison backlog cannot starve new receipts, survives restart, and never fakes an import ACK', t => {
+  const f=fixture(t); const old=[];
+  for(let n=0;n<240;n++) {
+    const r=f.inbox.accept(packet(body({field:'synthetic_'+String(n).replace(/\d/g,c=>String.fromCharCode(97+Number(c)))})));
+    const lease=f.inbox.lease(r.receipt);lease.raw.fill(0);
+    f.inbox.defer({receipt:lease.receipt,lease:lease.lease,reason:'unsupported_event'});old.push(lease);
+  }
+  f.advance(1000);const fresh=f.inbox.accept(packet());
+  assert.equal(f.inbox.pending(20)[0].receipt,fresh.receipt);
+  assert.equal(f.inbox.health().groups[0].review,240);
+  f.restart();assert.equal(f.inbox.pending(20)[0].receipt,fresh.receipt);
+  const taken=f.inbox.lease(fresh.receipt);taken.raw.fill(0);
+  f.inbox.confirm({receipt:taken.receipt,lease:taken.lease,importReceipt:randomUUID()});
+  f.advance(60001);
+  const retry=f.inbox.lease(old[0].receipt);retry.raw.fill(0);
+  assert.throws(()=>f.inbox.defer({receipt:retry.receipt,lease:old[0].lease,reason:'unsupported_event'}),{code:'scope_denied'});
+  assert.equal(f.inbox.defer({receipt:retry.receipt,lease:retry.lease,reason:'unsupported_event'}).businessProcessed,false);
+  assert.throws(()=>f.inbox.lease(retry.receipt),{code:'scope_denied'});
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n,1);
+});
+test('a crashed consumer rotates failed leases behind newly arrived work',t=>{
+ const f=fixture(t),a=f.inbox.accept(packet());f.advance(1);
+ const b=f.inbox.accept(packet(body({field:'history'})));f.advance(1);
+ f.inbox.lease(a.receipt).raw.fill(0);f.advance(60001);f.restart();
+ assert.equal(f.inbox.pending()[0].receipt,b.receipt);
+});

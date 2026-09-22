@@ -97,7 +97,11 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
     received_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('held','leased','imported')),
     lease TEXT, lease_until INTEGER, imported_at INTEGER, import_receipt TEXT,
     UNIQUE(app_id,digest));
-    CREATE INDEX IF NOT EXISTS whatsapp_inbox_pending ON whatsapp_inbox(state,received_at);`);
+    CREATE INDEX IF NOT EXISTS whatsapp_inbox_pending ON whatsapp_inbox(state,received_at);
+    CREATE TABLE IF NOT EXISTS whatsapp_inbox_retry (
+      receipt TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER NOT NULL DEFAULT 0, reason TEXT,
+      last_attempt_at INTEGER NOT NULL DEFAULT 0);`);
   const aad = row => JSON.stringify(['cc-wa-inbox-v1', row.app_id, row.receipt, row.key_id, row.digest, row.scopes, row.kinds, row.received_at]);
   const receiptFor = row => ({ receipt: row.receipt, persisted: true, businessProcessed: row.state === 'imported' });
   const clean = error => new BrokerError(error instanceof BrokerError ? error.code : 'audit_unavailable');
@@ -137,9 +141,13 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
     pending(limit = 20) {
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid_request');
       try {
-        return store.db.prepare("SELECT receipt,received_at FROM whatsapp_inbox WHERE app_id=? AND (state='held' OR (state='leased' AND lease_until<=?)) ORDER BY received_at,receipt LIMIT ?")
-          .all(appId, now(), limit).map(row => ({ receipt: row.receipt, receivedAt: row.received_at }));
+        return store.db.prepare("SELECT i.receipt,i.received_at FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND (i.state='held' OR (i.state='leased' AND i.lease_until<=?)) AND COALESCE(r.next_attempt_at,0)<=? ORDER BY COALESCE(r.last_attempt_at,i.received_at),i.received_at,i.receipt LIMIT ?")
+          .all(appId, now(), now(), limit).map(row => ({ receipt: row.receipt, receivedAt: row.received_at }));
       } catch (error) { throw clean(error); }
+    },
+    health() {
+      const groups = store.db.prepare("SELECT i.scopes,COUNT(*) pending,MIN(CASE WHEN r.reason IS NULL OR r.reason='import_retry' THEN i.received_at END) oldestPendingAt,SUM(CASE WHEN r.reason='review_required' THEN 1 ELSE 0 END) blockingReview,SUM(CASE WHEN r.reason IN ('unsupported_event','unmatched_status') THEN 1 ELSE 0 END) review FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' GROUP BY i.scopes").all(appId);
+      return { observedAt: now(), groups: groups.map(row => ({ ...row, scopes: JSON.parse(row.scopes) })) };
     },
     // No automatic consumer. The caller must have a separately authenticated,
     // approved import grant and commit the business transaction before confirm.
@@ -149,10 +157,14 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
         return store.transaction(() => {
           const row = store.db.prepare('SELECT * FROM whatsapp_inbox WHERE app_id=? AND receipt=?').get(appId, receipt);
           if (!row || row.state === 'imported' || row.lease_until > now()) fail('scope_denied');
+          const retry = store.db.prepare('SELECT * FROM whatsapp_inbox_retry WHERE receipt=?').get(receipt);
+          if (retry?.next_attempt_at > now()) fail('scope_denied');
           const raw = cipher.open(row.body, aad(row)); let committed = false;
           try {
             const lease = randomUUID(); const until = now() + 60000;
             store.db.prepare("UPDATE whatsapp_inbox SET state='leased',lease=?,lease_until=? WHERE receipt=?").run(lease, until, receipt);
+            // Fairness also survives a consumer crash before it can report an error.
+            store.db.prepare('INSERT INTO whatsapp_inbox_retry(receipt,attempts,last_attempt_at) VALUES(?,1,?) ON CONFLICT(receipt) DO UPDATE SET attempts=attempts+1,last_attempt_at=excluded.last_attempt_at').run(receipt, now());
             committed = true;
             return { receipt, lease, leaseUntil: until, raw, receivedAt: row.received_at,
               scopes: JSON.parse(row.scopes), kinds: JSON.parse(row.kinds), automaticActionsAllowed: false,
@@ -160,6 +172,17 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
           } finally { if (!committed) raw.fill(0); }
         });
       } catch (error) { throw clean(error); }
+    },
+    defer({ receipt, lease, reason }) {
+      if (!uuid(receipt) || !uuid(lease) || !['unsupported_event','unmatched_status','review_required','import_retry'].includes(reason)) fail('invalid_request');
+      return store.transaction(() => {
+        const row = store.db.prepare('SELECT state,lease,lease_until FROM whatsapp_inbox WHERE app_id=? AND receipt=?').get(appId, receipt);
+        if (!row || row.state !== 'leased' || row.lease !== lease || row.lease_until <= now()) fail('scope_denied');
+        const retry = store.db.prepare('SELECT attempts FROM whatsapp_inbox_retry WHERE receipt=?').get(receipt);
+        const delay = Math.min(3600000, 60000 * 2 ** Math.min(6, retry.attempts - 1));
+        store.db.prepare('UPDATE whatsapp_inbox_retry SET reason=?,next_attempt_at=? WHERE receipt=?').run(reason, now() + delay, receipt);
+        return { receipt, deferred: true, businessProcessed: false };
+      });
     },
     confirm({ receipt, lease, importReceipt }) {
       if (!uuid(receipt) || !uuid(lease) || !uuid(importReceipt)) fail('invalid_request');

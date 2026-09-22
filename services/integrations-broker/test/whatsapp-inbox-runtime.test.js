@@ -85,9 +85,20 @@ test('mTLS rejects absent/unlisted certificates and cross-role routes before any
   await assert.rejects(f.send(null, BASE, packet(f.raw)));
   assert.equal((await f.send('unlisted', BASE, packet(f.raw))).status, 403);
   assert.equal((await f.send('gateway', BASE + '/pending', { method: 'GET' })).status, 403);
+  assert.equal((await f.send('gateway', BASE + '/defer', { body: { receipt: randomUUID(), lease: randomUUID(), reason: 'unsupported_event' } })).status, 403);
   assert.equal((await f.send('staging', BASE, packet(f.raw))).status, 403);
   assert.equal((await f.send('gateway', BASE + '?export=true', packet(f.raw))).status, 403);
   assert.equal(f.awsCalls.length, baseline); assert.equal(f.app.inbox.pending().length, 0);
+});
+test('consumer can defer its live lease without acknowledging clinical processing',async t=>{
+ const f=await fixture(t);await f.send('gateway',BASE,packet(f.raw));
+ const pending=await f.send('staging',BASE+'/pending',{method:'GET'});
+ assert.ok(pending.body.health.observedAt);const receipt=pending.body.receipts[0].receipt;
+ const leased=await f.send('staging',BASE+'/lease',{body:{receipt}});
+ const rejected=await f.send('staging',BASE+'/defer',{body:{receipt,lease:randomUUID(),reason:'unsupported_event'}});assert.equal(rejected.status,403);
+ const deferred=await f.send('staging',BASE+'/defer',{body:{receipt,lease:leased.body.lease,reason:'unsupported_event'}});
+ assert.equal(deferred.status,200);assert.equal(deferred.body.businessProcessed,false);
+ const health=await f.send('staging',BASE+'/pending',{method:'GET'});assert.equal(health.body.receipts.length,0);assert.equal(health.body.health.groups[0].review,1);
 });
 test('TLS receive, durable restart, lease/import confirmation and duplicate preserve one passive message', async t => {
   const f = await fixture(t);
