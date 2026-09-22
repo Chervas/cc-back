@@ -24,7 +24,8 @@ function fixture({ allowed = [72, 66, 99], feature = true, busy = false } = {}) 
   const query = (name, rows, args) => { calls.push(name); return rows.filter(r => matches(r, args?.where)); };
   const db = {
     Sequelize: { Op }, sequelize: { transaction: async (options, work) => work(tx) },
-    Clinica: { findByPk: async id => { calls.push('clinic'); return clinics.find(c => c.id_clinica === id); } },
+    Clinica: { findByPk: async id => { calls.push('clinic'); return clinics.find(c => c.id_clinica === id); },
+      findAll: async args => query('clinics', clinics, args) },
     Instalacion: { findByPk: async id => rooms.find(r => r.id === id), findAll: async args => query('rooms', rooms, args) },
     InstallationPhysicalAlias: { findAll: async () => [] },
     BookingEquipment: { findByPk: async id => units.find(u => u.id === id), findAll: async args => query('units', units, args),
@@ -47,7 +48,7 @@ const payload = { name: 'EXION', family_key: 'exion', mobility: 'mobile', status
 
 test('disabled clinic read returns no inventory query or UI equipment data', async () => {
   const f = fixture({ feature: false });
-  assert.deepEqual(await f.service.read(72), { clinic_id: 72, enabled: false, runtime_available: true, units: [], rooms: [] });
+  assert.deepEqual(await f.service.read(72), { clinic_id: 72, enabled: false, runtime_available: true, can_edit: true, units: [], rooms: [], sharing_clinics: [] });
   assert.deepEqual(f.calls, ['clinic']);
 });
 test('unauthorized users cannot inspect or change machinery', async () => {
@@ -124,4 +125,22 @@ test('inventory DTO and ordinary edits preserve the explicit sharing list', asyn
   const edit = { ...payload, name: 'EXION 1' }; delete edit.clinic_ids;
   await f.service.saveUnit(72, 1, edit);
   assert.deepEqual((await f.service.read(72)).units[0].clinic_ids, [66, 72]);
+});
+
+test('inventory exposes only authorized same-group sharing choices and edit capability', async () => {
+  const all = await fixture().service.read(72);
+  assert.deepEqual(all.sharing_clinics.map(c => c.id), [72, 66]);
+  assert.equal(all.units[0].can_edit, true);
+  const restricted = await fixture({ allowed: [72] }).service.read(72);
+  assert.deepEqual(restricted.sharing_clinics.map(c => c.id), [72]);
+  assert.equal(restricted.units[0].can_edit, false);
+});
+test('basic editor derives a family on creation and preserves it on rename', async () => {
+  const f = fixture();
+  const creation = { ...payload, name: 'Ondas acústicas BTL' }; delete creation.family_key;
+  await f.service.saveUnit(72, null, creation);
+  assert.equal(f.units[1].family_key, 'ondas-acusticas-btl');
+  const edit = { ...payload, name: 'EXION renovado' }; delete edit.family_key;
+  await f.service.saveUnit(72, 1, edit);
+  assert.equal(f.units[0].family_key, 'exion');
 });
