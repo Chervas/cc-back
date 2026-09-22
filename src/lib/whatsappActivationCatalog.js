@@ -2,8 +2,11 @@
 // Non-secret runtime projection. Written by the authenticated gateway after
 // the SQL receipt commits; read by the public sender and dedicated importer.
 const fs=require('node:fs');const {randomUUID}=require('node:crypto');
-const A=require('../../services/integrations-broker/src/whatsapp-activation-contract');
-const E=require('../../services/integrations-broker/src/whatsapp-onboarding-contract');
+// Keep the importer projection independent of broker/provider dependencies.
+const E={exact:(v,keys)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).length===keys.length&&keys.every(k=>Object.hasOwn(v,k)),
+  uuid:v=>typeof v==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v),
+  id:v=>typeof v==='string'&&/^[1-9][0-9]{0,29}$/.test(v)};
+const A={positive:n=>Number.isSafeInteger(n)&&n>0&&n<=2147483647,connectionRef:id=>'whatsapp-live-'+id};
 const FILE='/var/lib/clinicaclick-whatsapp-catalog/connections.json';
 const fail=()=>{throw Object.assign(Error('whatsapp_activation_catalog_invalid'),{code:'whatsapp_activation_catalog_invalid'});};
 function validate(value){
