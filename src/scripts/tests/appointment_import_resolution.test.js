@@ -16,7 +16,7 @@ function appointment() {
       cliniccloud_delta: { pending_assignment: ['doctor_id', 'installation_id', 'treatment_id'], source: { service_key: 'SOURCE' } },
       cliniccloud_reconciliation: { automation_policy: 'hold' } } };
 }
-function fixture({ failEvent = false, dependency = null, bookingError = null } = {}) {
+function fixture({ failEvent = false, dependency = null, bookingError = null, bookingValues = {} } = {}) {
   let state = appointment();
   const events = [], bookings = [];
   const db = { CitaPaciente: { findByPk: async (id, { transaction, lock }) => {
@@ -41,7 +41,7 @@ function fixture({ failEvent = false, dependency = null, bookingError = null } =
     require: name => name === './appointmentBookingCommand.service' ? { mutateAppointmentBooking: async args => {
       bookings.push(args); if (bookingError) throw Object.assign(Error(bookingError), { code: bookingError });
       const existing = await db.CitaPaciente.findByPk(51, { transaction: args.transaction, lock: 'UPDATE' });
-      return args.persist({ values: { ...existing.toJSON(), ...args.appointmentValues }, existing, transaction: args.transaction });
+      return args.persist({ values: { ...existing.toJSON(), ...args.appointmentValues, ...bookingValues }, existing, transaction: args.transaction });
     } } : name === 'node:crypto' ? require(name)
       : name === '../lib/appointment-import-review' ? review : require('../../services/treatmentBookingProfile.service'),
   });
@@ -81,7 +81,7 @@ test('treatment resolution preserves identity, source, HOLD, notes and interval 
   assert.equal(f.events.length, 1); assert.equal(f.events[0].event_type, 'appointment.import_resolved');
   assert.equal(f.bookings[0].force, undefined); assert.equal(f.bookings[0].allowObsolete, undefined);
   assert.equal(f.bookings[0].transaction.options.isolationLevel, 'READ COMMITTED');
-  assert.deepEqual(review.appointmentImportReview(f.row).pending_assignment, []);
+  assert.deepEqual(review.appointmentImportReview(f.row).pending_assignment, ['professional','installation']);
   f.row = { ...f.row, nota: 'A later clinical note', updated_at: '2026-09-22T00:00Z' };
   assert.equal((await f.run(input)).replayed, true);
   assert.equal(f.row.nota, 'A later clinical note'); assert.equal(f.events.length, 1); assert.equal(f.bookings.length, 1);
@@ -92,7 +92,7 @@ test('an explicit review without treatment is recorded and no longer mistaken fo
   assert.equal(f.row.tratamiento_id, null); assert.equal(f.row.tipo_cita, 'revision');
   assert.equal(review.hasReviewedNoTreatment(f.row), true);
   assert.equal(review.appointmentImportReview(f.row).treatment_resolution, 'no_treatment');
-  assert.deepEqual(review.appointmentImportReview(f.row).pending_assignment, []);
+  assert.deepEqual(review.appointmentImportReview(f.row).pending_assignment, ['professional','installation']);
   assert.equal((await assessAppointmentClinicalConsent({ db: {}, appointment: f.row, transaction: {} })).allowed, true);
   assert.equal(review.hasReviewedNoTreatment({ ...f.row, paciente_id: 1234 }), false);
   assert.equal(review.hasReviewedNoTreatment({ ...f.row, tipo_cita: 'continuacion' }), false);
@@ -135,4 +135,75 @@ test('ordinary HTTP and booking paths cannot forge a no-treatment review marker'
   const command = fs.readFileSync(require.resolve('../../services/appointmentBookingCommand.service'), 'utf8');
   assert.match(controller, /delete baseImportMetadata\.import_treatment_resolution/);
   assert.match(command, /delete importMetadata\.import_treatment_resolution/);
+  assert.match(controller, /delete baseImportMetadata\.import_resource_resolution/);
+  assert.match(command, /delete importMetadata\.import_resource_resolution/);
+});
+
+test('explicit resource confirmation preserves all appointment data and clears only resource warnings', async () => {
+  const f = fixture(), before = structuredClone(f.row);
+  const input = { mode: 'resources', expected_version: review.importReviewVersion(f.row), reason: 'Cabina y profesional comprobados' };
+  await f.run({ ...input, force: true, inicio: '2099-01-01', estado: 'completada', actor_id: 999 });
+  for (const key of Object.keys(before).filter(k => !['updated_by','import_metadata'].includes(k))) assert.deepEqual(f.row[key],before[key]);
+  for (const key of Object.keys(before.import_metadata)) assert.deepEqual(f.row.import_metadata[key],before.import_metadata[key]);
+  assert.equal(f.row.import_metadata.import_resource_resolution.actor_id,7);
+  assert.equal(review.hasReviewedImportResources(f.row),true);
+  assert.deepEqual(review.appointmentImportReview(f.row).pending_assignment,['treatment']);
+  assert.equal(review.appointmentImportReview(f.row).resource_review_version,undefined);
+  assert.equal(f.events.length,1); assert.equal(f.events[0].metadata.mode,'resources');
+  assert.equal(f.bookings[0].force,undefined);
+  assert.equal((await f.run(input)).replayed,true); assert.equal(f.bookings.length,1); assert.equal(f.events.length,1);
+});
+
+test('resource review remains valid after notes, but not after changing any reservation requirement', async () => {
+  const f=fixture(); f.row.tratamiento_id=3;
+  await f.run({mode:'resources',expected_version:review.importReviewVersion(f.row),reason:'Checked reservation'});
+  assert.deepEqual(review.appointmentImportReview(f.row).pending_assignment,[]);
+  assert.equal(review.hasReviewedImportResources({...f.row,nota:'later note',updated_by:99,updated_at:'2030-01-08'}),true);
+  // Lightweight calendar rows omit source_reference: their review must agree.
+  const calendarRow={...f.row}; delete calendarRow.source_reference;
+  assert.equal(review.hasReviewedImportResources(calendarRow),true);
+  for(const patch of [{id_cita:999},{paciente_id:99},{clinica_id:99},{doctor_id:8},{instalacion_id:8},{tratamiento_id:9},
+    {inicio:'2030-01-07T11:00:00Z'},{fin:'2030-01-07T11:30:00Z'},
+    {import_metadata:{...f.row.import_metadata,additional_staff:{version:1,ids:[10]}}},
+    {import_metadata:{...f.row.import_metadata,booking:{version:1,phases:[{key:'new'}]}}}]) {
+    const changed={...f.row,...patch}; assert.equal(review.hasReviewedImportResources(changed),false);
+    assert.equal(review.appointmentImportReview(changed).resources_need_review,true);
+  }
+  assert.equal(review.appointmentImportReview({...f.row,instalacion:{activo:false}}).installation_inactive,true);
+});
+
+test('resource confirmation rejects missing, closed, purchased and native appointments, invalid actors and stale versions', async () => {
+  for (const patch of [{doctor_id:null},{instalacion_id:null},{estado:'completada'},{estado:'cancelada'},
+    {estado:'no_asistio'},{voucher_id:1},{source_system:null},{es_provisional:true},{hold_expires_at:'2030-01-07'}]) {
+    const f=fixture(); f.row={...f.row,...patch};
+    await assert.rejects(f.run({mode:'resources',reason:'Checked',expected_version:review.importReviewVersion(f.row)}),{code:'booking_import_not_resolvable'});
+    assert.equal(f.bookings.length,0);
+  }
+  const f=fixture(),input={mode:'resources',reason:'Checked',expected_version:review.importReviewVersion(f.row)};
+  await assert.rejects(f.run(input,{actorId:0}),{code:'booking_import_actor_required'});
+  f.row.nota='Concurrent edit';
+  await assert.rejects(f.run(input),{code:'booking_import_changed'});
+  for(const patch of [{doctor_id:8},{instalacion_id:8},{treatment_id:1},{visit_type:'revision'}])
+    assert.throws(()=>normalizeResolution({...input,...patch}),{code:'booking_import_invalid'});
+});
+
+test('failed availability or event persistence does not leave a resource approval', async () => {
+  for(const options of [{failEvent:true},{bookingError:'booking_unavailable'},{bookingError:'booking_priority_confirmation_required'}]) {
+    const f=fixture(options),before=structuredClone(f.row);
+    await assert.rejects(f.run({mode:'resources',reason:'Checked',expected_version:review.importReviewVersion(f.row)}));
+    assert.deepEqual(f.row,before); assert.equal(f.events.length,0);
+  }
+});
+
+test('resource confirmation cannot silently add a later cabin or another mandatory professional', async () => {
+  const original=appointment();
+  for(const phases of [
+    [{start_at:original.inicio,end_at:'2030-01-07T10:15:00Z',installation_id:9,doctor_ids:[5]},
+     {start_at:'2030-01-07T10:15:00Z',end_at:original.fin,installation_id:10,doctor_ids:[5]}],
+    [{start_at:original.inicio,end_at:original.fin,installation_id:9,doctor_ids:[5,8]}],
+  ]) {
+    const f=fixture({bookingValues:{import_metadata:{...original.import_metadata,booking:{version:1,phases}}}}),before=structuredClone(f.row);
+    await assert.rejects(f.run({mode:'resources',reason:'Checked',expected_version:review.importReviewVersion(f.row)}),{code:'booking_import_resource_change'});
+    assert.deepEqual(f.row,before); assert.equal(f.events.length,0);
+  }
 });
