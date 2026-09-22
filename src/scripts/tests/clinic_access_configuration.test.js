@@ -261,6 +261,7 @@ function testControllerWiringUsesCapabilitiesAndRowLock() {
   assert.match(updateSource, /lock:\s*transaction\.LOCK\.UPDATE/);
   assert.match(updateSource, /mergeClinicConfiguration/);
   assert.match(updateSource, /assertAccessGuidanceAsset/);
+  assert.match(updateSource, /assertClinicEquipmentMembershipChangeSafe/);
   assert.match(controllerSource, /exports\.createClinica[\s\S]*?isGlobalAdmin\(req\.userData\?\.userId\)/);
   assert.match(controllerSource, /exports\.deleteClinica[\s\S]*?Solo un administrador global puede eliminar clínicas/);
   assert.match(routesSource, /router\.get\('\/'\s*,\s*authMiddleware/);
@@ -383,17 +384,25 @@ async function testPatchControllerPersistsMergedConfigurationUnderRowLock() {
     publicMediaFindOne: db.PublicMediaAsset.findOne,
     transaction: db.Clinica.sequelize.transaction,
     userClinicFindOne: db.UsuarioClinica.findOne,
+    directionProfileFindOne: db.PatientDirectionProfile.findOne,
+    equipmentAssignmentFindOne: db.BookingEquipmentClinic.findOne,
   };
   const transaction = { LOCK: { UPDATE: 'UPDATE' } };
   let persisted = currentConfiguration();
   let rowLockSeen = false;
   let assetScopeSeen = false;
+  let equipmentEnabled = false;
+  let equipmentReads = 0;
 
   db.UsuarioClinica.findOne = async () => ({
     rol_clinica: 'propietario',
     subrol_clinica: null,
   });
   db.AccessPolicyOverride.findAll = async () => [];
+  // The access policy now reads patient-direction membership too. Keep this
+  // controller fixture fully offline, rather than opening a real SQL connection.
+  db.PatientDirectionProfile.findOne = async () => null;
+  db.BookingEquipmentClinic.findOne = async () => { equipmentReads++; return { equipment_id: 1 }; };
   db.ClinicMetaAsset.findOne = async () => null;
   db.PublicMediaAsset.findOne = async ({ where, transaction: queryTransaction }) => {
     assetScopeSeen = queryTransaction === transaction
@@ -411,6 +420,9 @@ async function testPatchControllerPersistsMergedConfigurationUnderRowLock() {
     if (options.transaction) {
       rowLockSeen = options.transaction === transaction && options.lock === 'UPDATE';
       return {
+        id_clinica: 66,
+        estado_clinica: true,
+        equipment_booking_enabled: equipmentEnabled,
         configuracion: persisted,
         grupoClinicaId: 29,
         update: async (values, updateOptions) => {
@@ -469,6 +481,12 @@ async function testPatchControllerPersistsMergedConfigurationUnderRowLock() {
     assert.deepEqual(persisted.disciplinas, ['capilar']);
     assert.deepEqual(persisted.future_server_key, { keep: true });
     assert.equal(persisted.access_guidance.enabled, true);
+    assert.equal(equipmentReads, 0, 'ordinary clinic edits do not query machinery');
+    equipmentEnabled = true;
+    await clinicController.updateClinica({ params: { id: '66' },
+      body: { estado_clinica: false }, userData: { userId: 99001 } }, response);
+    assert.equal(response.statusCode, 409, 'cannot deactivate a clinic while equipment remains assigned');
+    assert.equal(equipmentReads, 1);
   } finally {
     db.AccessPolicyOverride.findAll = originals.accessOverrideFindAll;
     db.Clinica.findByPk = originals.clinicFindByPk;
@@ -476,6 +494,8 @@ async function testPatchControllerPersistsMergedConfigurationUnderRowLock() {
     db.PublicMediaAsset.findOne = originals.publicMediaFindOne;
     db.Clinica.sequelize.transaction = originals.transaction;
     db.UsuarioClinica.findOne = originals.userClinicFindOne;
+    db.PatientDirectionProfile.findOne = originals.directionProfileFindOne;
+    db.BookingEquipmentClinic.findOne = originals.equipmentAssignmentFindOne;
   }
 }
 

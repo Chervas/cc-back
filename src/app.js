@@ -311,6 +311,7 @@ app.use('/api/patient-follow-ups', patientFollowUpsRoutes);
 app.use('/api/treatment-programs', treatmentProgramsRoutes);
 console.log('Ruta /api/citas configurada');
 app.use('/api/instalaciones', instalacionesRoutes);
+app.use('/api/booking-equipment', require('./routes/bookingEquipment.routes'));
 console.log('Ruta /api/instalaciones configurada');
 app.use('/api/doctores', doctoresRoutes);
 console.log('Ruta /api/doctores configurada');

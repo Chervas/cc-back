@@ -10,6 +10,7 @@ const {
     UsuarioClinica,
     ClinicaHorario,
     PublicMediaAsset,
+    BookingEquipmentClinic,
 } = require('../../models');
 const bcrypt = require('bcryptjs');
 const { withCalendarMutation, sendCalendarMutationError } = require('../services/appointmentCalendarMutation.service');
@@ -770,6 +771,9 @@ exports.updateClinica = async (req, res) => {
                 requestedGroupId !== previousGroupId
                 || (previousActive && !requestedActive)
             ) {
+                await require('../services/bookingEquipmentMembership.service').assertClinicEquipmentMembershipChangeSafe({
+                    db: { BookingEquipmentClinic }, clinic: clinicaExistente, transaction,
+                });
                 await assertClinicWordpressMembershipChangeSafe({
                     clinicId: id_clinica,
                     previousGroupId,

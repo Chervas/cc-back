@@ -8,6 +8,7 @@ const { resolveClinicTimezone, formatDateLocal, formatLocal, dayIndexFromLocalDa
 const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
 const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staff');
 const { installationAllowsStaff } = require('../lib/installation-professionals');
+const { loadEquipmentContext, attachEquipmentContext } = require('./bookingEquipmentAvailability.service');
 const { bookingError, bookingCapabilities, requireOperationalProfile, loadScopedTreatment } = require('./treatmentBookingProfile.service');
 
 function uniqueIds(values) { return [...new Set(values.map(Number))].sort((a, b) => a - b); }
@@ -56,7 +57,7 @@ async function resolveInstallationKeys({ db, clinic, installationIds, transactio
 
 /** Bounded, bulk read model. No patient names, notes, foreign clinic IDs or SQL per candidate. */
 async function loadBookingContext({ db, clinic, profile, start, end, transaction = null, ignoreAppointmentId = null,
-  occupancyEnabled = false, installationMapping = null, dates = null, patientId = null, additionalStaffIds = [] }) {
+  occupancyEnabled = false, installationMapping = null, dates = null, patientId = null, additionalStaffIds = [], equipmentEnabled = undefined }) {
   const { Op } = db.Sequelize;
   const clinicId = Number(clinic.id_clinica);
   const timeZone = resolveClinicTimezone(clinic);
@@ -67,7 +68,9 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
   const doctorIds = uniqueIds([...profile.phases.flatMap((phase) => phase.professionals.ids), ...normalizeAdditionalStaff(additionalStaffIds)]);
   const installationIds = uniqueIds(profile.phases.flatMap((phase) => phase.installation_ids));
   const mapping = installationMapping || await resolveInstallationKeys({ db, clinic, installationIds, transaction, enabled: occupancyEnabled });
-  const resources = [...doctorIds.map((id) => `doctor:${id}`), ...new Set(installationIds.map((id) => mapping.keys.get(id)))];
+  const equipmentContext = await loadEquipmentContext({ db, clinic, profile, mapping, transaction, enabled: equipmentEnabled });
+  const resources = [...doctorIds.map((id) => `doctor:${id}`), ...new Set(installationIds.map((id) => mapping.keys.get(id))), ...(equipmentContext?.keys || [])];
+  const occupancyEnd = equipmentContext ? new Date(new Date(end).getTime() + 120 * 60000) : end;
   const [doctorLinks, installations, clinicHours, doctorBlocks, installationBlocks, legacyAppointments] = await Promise.all([
     db.DoctorClinica.findAll({ where: { clinica_id: clinicId, activo: true, recibe_citas: true, doctor_id: { [Op.in]: doctorIds } },
       include: [{ model: db.DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] },
@@ -89,7 +92,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
   const occupancies = occupancyEnabled ? await db.AppointmentBookingOccupancy.findAll({ where: {
     ...(ignoreAppointmentId ? { appointment_id: { [Op.ne]: ignoreAppointmentId } } : {}),
     [Op.or]: [
-      { resource_key: { [Op.in]: resources }, start_at: { [Op.lt]: end }, end_at: { [Op.gt]: start } },
+      { resource_key: { [Op.in]: resources }, start_at: { [Op.lt]: occupancyEnd }, end_at: { [Op.gt]: start } },
       // Any occupancy marks this appointment as segmented: do not count the
       // legacy primary cabin/doctor for the entire appointment as well.
       ...(legacyAppointments.length ? [{ appointment_id: { [Op.in]: legacyAppointments.map((row) => row.id_cita) } }] : []),
@@ -139,7 +142,8 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     paciente_id: patientId, estado: { [Op.ne]: 'cancelada' }, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start },
     ...(ignoreAppointmentId ? { id_cita: { [Op.ne]: ignoreAppointmentId } } : {}),
   }, attributes: ['inicio', 'fin'], transaction }).then(rows => rows.map(row => ({ start: row.inicio, end: row.fin }))) : [];
-  return { doctors, installations: cabins, clinicWindows, installationKeys: mapping.keys, mapping, timeZone, patientBusy };
+  return { doctors, installations: cabins, clinicWindows, installationKeys: mapping.keys, mapping, timeZone, patientBusy,
+    ...attachEquipmentContext(equipmentContext, cabins, mapping, busy) };
 }
 
 async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, stepMinutes = 15, limit = 100,
@@ -157,7 +161,7 @@ async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, s
   const timeZone = resolveClinicTimezone(clinic);
   const start = resolveLocalInstant(date, '00:00:00', timeZone);
   const end = resolveLocalInstant(addDays(date, days), '00:00:00', timeZone);
-  const context = await loadBookingContext({ db, clinic, profile, start, end, occupancyEnabled: capabilities.simple, additionalStaffIds });
+  const context = await loadBookingContext({ db, clinic, profile, start, end, occupancyEnabled: capabilities.simple, additionalStaffIds, equipmentEnabled: capabilities.equipment });
   if (profile.phases.length > 1 && (doctorId || installationId)) {
     throw bookingError('booking_search_invalid', 'En una cita por fases elige los profesionales y cabinas por fase.', null, 400);
   }

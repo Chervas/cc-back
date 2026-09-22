@@ -31,10 +31,32 @@ function createTreatmentProgramsService({ db, now = () => new Date(), newId = ()
     ]);
     const availableInstallations = new Set(installations.map((i) => Number(i.id)));
     const availableProfessionals = new Set(professionals.map((p) => Number(p.doctor_id)));
+    const withEquipment = values.filter(t => require('../lib/booking-equipment').equipmentIds(t.booking_profile).length);
+    let machines = null, mapping = null, machineIssue = null;
+    if (withEquipment.length) {
+      try {
+        const clinic = await Clinica.findByPk(clinicId, { transaction });
+        mapping = await require('./appointmentBookingAvailability.service').resolveInstallationKeys({ db, clinic, installationIds, transaction, enabled: true });
+        machines = await require('./bookingEquipmentAvailability.service').loadEquipmentContext({ db, clinic,
+          profile: { phases: withEquipment.flatMap(t => t.booking_profile.phases) }, mapping, transaction });
+      } catch (error) {
+        if (!error.code?.startsWith('booking_equipment_')) throw error;
+        machineIssue = { code: error.code, message: error.message };
+      }
+    }
     for (const treatment of values) {
       const phases = treatment.booking_profile?.phases || [];
       if (phases.some((p) => p.installation_ids.some((id) => !availableInstallations.has(id)))) treatment.issues.push({ code: 'installation_unavailable', message: 'Una cabina del tratamiento no está activa o disponible en esta clínica.' });
       if (phases.some((p) => p.professionals.ids.some((id) => !availableProfessionals.has(id)))) treatment.issues.push({ code: 'professional_unavailable', message: 'Un profesional del tratamiento no recibe citas en esta clínica.' });
+      if (withEquipment.includes(treatment)) {
+        if (machineIssue) treatment.issues.push(machineIssue);
+        else if (phases.some(phase => !phase.installation_ids.some(id => {
+          const resource_key = mapping.keys.get(id);
+          const room = { resource_key, equipment_policy: machines.roomPolicies.get(Number(resource_key.split(':')[1])) };
+          return (phase.equipment_requirements || []).every(group => group.equipment_ids.some(eid =>
+            require('../lib/booking-equipment').equipmentFitsRoom(machines.equipment.get(eid), room)));
+        }))) treatment.issues.push({ code: 'equipment_unavailable', message: 'Revisa los equipos y las cabinas permitidas del tratamiento.' });
+      }
       treatment.booking_ready = treatment.issues.length === 0;
     }
     return values;
