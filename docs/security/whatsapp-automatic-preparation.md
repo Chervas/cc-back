@@ -145,3 +145,7 @@ reconoce bindings estáticos puede interrumpir conexiones automáticas.
 
 Referencias de permisos: [CreateSecret](https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_CreateSecret.html)
 y [acciones/condiciones Secrets Manager](https://docs.aws.amazon.com/service-authorization/latest/reference/list_secretsmanager.html).
+
+## Completar la conexión
+
+La preparación del almacén continúa en el [contrato de activación operativa](whatsapp-phone-activation.md): registro, suscripción, catálogo, recepción y elección del remitente, recuperables desde el mismo recibo.
