@@ -33,6 +33,20 @@ esperada en el WABA. Solo después se publica el estado activo y el remitente lo
 La interfaz intenta completar el alta tras OAuth y permite retomarla mediante
 «Completar conexión», sin repetir el consentimiento.
 
+Si el registro agotó el plazo local, `registration_uncertain` no significa que
+Meta lo haya rechazado: el proveedor puede haberlo completado. La consulta del
+perfil permite distinguir `CONNECTED` del registro todavía pendiente. Retomar
+el mismo recibo completa la suscripción y la proyección local, sin otro registro
+cuando Meta ya lo da por conectado. Confirmar el rol elegido antes de activar un
+alta clínica que pueda cambiar el primario efectivo.
+
+El iframe libera su referencia a la ventana de Meta al recibir una autorización
+completa, pero no la cierra: el usuario puede estar terminando pasos opcionales
+de facturación. El cierre por cancelación, error o abandono de un intento aún
+sin confirmar se conserva. Desmontar el iframe después del éxito no cancela el
+recibo ni cierra la ventana de pago. La autorización no acredita que exista una
+tarjeta válida ni que el teléfono esté operativo.
+
 ## Identidades, recepción y enrutamiento
 
 - AWS: `/var/lib/clinicaclick-whatsapp-capture-scopes/scopes.json` contiene solo

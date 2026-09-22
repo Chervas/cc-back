@@ -12,12 +12,15 @@
   let popup; let nativeOpen; let trackedOpen;
   const text = value => { doc.getElementById('status').textContent = value; };
   const button = doc.getElementById('authorize'); const cancel = doc.getElementById('cancel');
-  function cleanup() {
+  function cleanup({ closePopup = true } = {}) {
     for (const value of [timer, returnTimer]) clearTimeout(value);
     if (trackedOpen && win.open === trackedOpen) win.open = nativeOpen;
     // This reference is captured only in this isolated signup frame. Never
     // inspect popup documents, cookies or URLs after opening it.
-    try { popup?.close(); } catch {}
+    // Meta can deliver the complete authorization before the user finishes
+    // optional provider steps (for example adding a payment card). On success
+    // relinquish our handle instead of closing that still-useful window.
+    if (closePopup) try { popup?.close(); } catch {}
     popup = null; win.removeEventListener('message', receive); win.removeEventListener('pagehide', dispose);
   }
   function dispose() {
@@ -45,7 +48,7 @@
     win.open = trackedOpen;
   }
   function send(type, extra = {}) {
-    if (!input || done) return; done = true; cleanup(); button.disabled = true; cancel.disabled = true;
+    if (!input || done) return; done = true; cleanup({ closePopup: type !== 'cc.wa.result' }); button.disabled = true; cancel.disabled = true;
     win.parent.postMessage({ type, nonce, requestId: input.requestId, ...extra }, parentOrigin);
     code = null; selection = null; input.authorization.state = '';
   }
