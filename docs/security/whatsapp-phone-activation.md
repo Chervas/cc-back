@@ -1,0 +1,90 @@
+# Alta operativa de WhatsApp a partir de un recibo
+
+Contrato del 22/09/2026. Complementa [preparación automática](whatsapp-automatic-preparation.md),
+[alta autenticada](whatsapp-onboarding-gateway.md) y [transporte](whatsapp-broker-messaging.md).
+El consentimiento de Meta, por sí solo, no acredita registro del teléfono ni recepción.
+
+## Recorrido y límites
+
+`POST /api/whatsapp/onboarding/complete` recibe únicamente `requestId`. El gateway
+verifica la sesión MFA actual, propietario del recibo, permisos sobre el ámbito,
+conjunto completo de clínicas y ausencia de bloqueo. Puede retomar un recibo ya
+confirmado aunque su ventana OAuth haya terminado; no convierte un intento sin
+confirmar en una autorización válida. No acepta teléfonos, tokens, PIN ni ámbitos
+nuevos desde el navegador.
+
+El broker vuelve a comprobar identidad Meta, concesión, propietario y pertenencia
+WABA/teléfono. El gateway crea una identidad independiente en `ClinicMetaAssets`
+con `whatsappAuthorizationId`, sin fingir que pertenece al OAuth general de Meta.
+`WhatsappPhoneActivations` conserva su estado y el corte temporal por número.
+Los secretos permanecen en AWS.
+
+Antes de suscribir el WABA, el broker registra la pertenencia de recepción y
+publica una proyección sin secretos para el receptor. Registra el teléfono si
+Meta confirma que está verificado y requiere registro; un teléfono ya conectado
+con Cloud API no se vuelve a registrar. El PIN nuevo se conserva en una versión
+inmutable separada de Secrets Manager, sin cambiar la versión de la credencial.
+No se reinicia un PIN preexistente para forzar la conexión.
+
+Una lease durable serializa la activación. Tras un timeout o error servidor de
+resultado incierto se consulta el estado de Meta antes de decidir el siguiente
+paso; no se repite ciegamente el registro. Se suscribe y verifica la aplicación
+esperada en el WABA. Solo después se publica el estado activo y el remitente local.
+La interfaz intenta completar el alta tras OAuth y permite retomarla mediante
+«Completar conexión», sin repetir el consentimiento.
+
+## Identidades, recepción y enrutamiento
+
+- AWS: `/var/lib/clinicaclick-whatsapp-capture-scopes/scopes.json` contiene solo
+  aplicación, teléfono, WABA y pertenencias. Escritor `cc-wa-onboarding`, lector
+  `cc-whatsapp-inbox`; directorio 2750 y fichero 0640. El receptor no obtiene
+  acceso a la base privada de altas ni a Secrets Manager por esta proyección.
+- Servidor: `/var/lib/clinicaclick-whatsapp-catalog/connections.json`, directorio
+  `ubuntu:cc-wa-importer` 2750 y fichero 0640. Escritura atómica bajo lock SQL;
+  CRM e importador leen el catálogo, DEV no obtiene grants operativos.
+- La proyección se reconstruye desde SQL al retomar el alta. Una fila preparada
+  permite identificar recepción, pero no autoriza envío. El corte de un activo
+  ya aceptado no se mueve al reabrir el formulario.
+- Un número nuevo de grupo queda disponible para sus clínicas. No sustituye sus
+  números propios ni activa remitentes por herencia implícita. La clínica elige
+  en `PUT /api/whatsapp/routing` su primario y secundario; una selección guardada
+  es completa, por lo que secundario vacío significa ninguno.
+- El guardado verifica sesión, permisos, pertenencia y grants antes de modificar
+  bindings. Una transacción engloba selección y auditoría; un fallo revierte
+  ambos. No cambia la adscripción del activo propio. En ámbito grupo se conserva
+  la configuración particular de las clínicas.
+- Auditoría v26: `integration.whatsapp.activate` y `integration.whatsapp.routing`,
+  solo referencias de actor, sesión, ámbito, activos y motivo permitido.
+
+La activación no libera comunicaciones retenidas ni modifica el corte de
+recuperación del 22/09 a las 14:00:37.706955Z. No reproduce mensajes históricos,
+no genera mensajes a pacientes y no cambia los flujos de confirmación de citas.
+
+## Publicación y recuperación
+
+Publicar lectores de auditoría antes de escritores v26; después recepción y
+transporte, esquema/catálogo, importador y gateway. Flags: broker de alta y envío
+`activationEnabled`; gateway `WHATSAPP_ACTIVATION_ENABLED=true`.
+
+Migración `20260922153000-create-whatsapp-phone-activations.js`: columna nullable
+para la conexión general, autorización única, triggers de identidad y journal.
+MySQL con binary log requiere identidad de mantenimiento para crear esos triggers.
+Usar la credencial administrativa local, sin dar SUPER a la aplicación ni cambiar
+`log_bin_trust_function_creators`. La DDL no es transaccional: ante un fallo
+conservar evidencia del punto alcanzado y retomar únicamente la misma migración
+revisada. DEV usa plan, checksum y journal del operador, con su servicio detenido.
+
+Rollback de código conserva catálogos, secretos y recepción. La migración rechaza
+su retirada si hay activos independientes o activaciones; no desregistrar el
+número ni eliminar la candidata como rollback. Si la publicación del catálogo
+falla después del commit SQL, retomar el mismo recibo para reconstruirla.
+
+## Verificación
+
+Pruebas aisladas: SQL real propio, restricciones de identidad, reanudación sin
+segunda activación, corte inmutable, atomicidad del enrutamiento, fallo de auditoría,
+sesión/pertenencias; broker TLS y PIN separado; rechazo de registro incierto.
+Chromium con componentes reales: diálogo en escritorio/móvil, reanudación y
+selección del número de grupo conservando el propio. Las pruebas sintéticas no
+acreditan entrega externa. Registrar por separado aceptación Meta real, lectura
+de la tarjeta y prueba de envío/recepción con un destinatario de pruebas autorizado.
