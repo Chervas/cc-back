@@ -57,7 +57,7 @@ test('header upload pins public DNS and never passes Graph credentials to the im
   const upload=media.createTemplateMedia({request,lookup:async()=>[{address:'8.8.8.8',family:4}]});
   const result=await upload({source:'https://media.example.invalid/image.png',appId:'123',token:Buffer.from('SYNTHETIC_TOKEN'),proof:'a'.repeat(64),assertActive:()=>{}});
   assert.equal(result.handle,'synthetic-handle');assert.equal(calls.length,3);
-  assert.deepEqual(calls[0].options.headers,{});assert.equal(typeof calls[0].options.lookup,'function');
+  assert.deepEqual(calls[0].options.headers,{'user-agent':'Clinicaclick-Template-Media/1.0'});assert.equal(typeof calls[0].options.lookup,'function');
   assert(calls.slice(1).every(c=>c.url.hostname==='graph.facebook.com'&&c.options.headers.authorization==='OAuth SYNTHETIC_TOKEN'));
   assert(calls.slice(1).every(c=>c.url.searchParams.get('appsecret_proof')==='a'.repeat(64)));
 });
