@@ -120,3 +120,41 @@ test('coverage predicate model alias/table identifiers match local Sequelize mod
   assert(sql.includes(`FROM ${catalog.getTableName()} c`));
   assert.doesNotMatch(sql, /LEFT (?:OUTER )?JOIN/);
 });
+
+test('draft visibility is an explicit, bounded server filter and never changes booking state', async () => {
+  const { service, state, calls } = fixture();
+  state.treatments = [
+    { id_tratamiento: 9, nombre: 'Borrador', activo: false, clinical_config: { catalog_status: 'draft' } },
+    { id_tratamiento: 10, nombre: 'Inactivo', activo: false, clinical_config: { catalog_status: 'active' } },
+    { id_tratamiento: 11, nombre: 'Activo', activo: true },
+  ];
+  const result = await service.coverage({ clinicId: 72, query: { treatment_status: 'all', page: 2, page_size: 10 } });
+  assert.deepEqual(result.items.map(t => t.availability), ['draft', 'inactive', 'active']);
+  const options = calls.find(c => c.name === 'treatmentsPage').options;
+  assert.equal(options.limit, 10); assert.equal(options.offset, 20);
+  assert.equal(options.where.activo, undefined);
+  assert.equal(options.where[Sequelize.Op.or][0].clinica_id, 72);
+  const predicate = options.where[Sequelize.Op.and].at(-1);
+  assert.match(predicate.attribute.val, /CASE WHEN JSON_UNQUOTE/);
+  assert.equal(predicate.logic[Sequelize.Op.ne], 'obsolete');
+  for (const status of ['active','draft','inactive']) {
+    await service.coverage({ clinicId: 72, query: { treatment_status: status } });
+    assert.equal(calls.filter(c => c.name === 'treatmentsPage').at(-1).options.where[Sequelize.Op.and].at(-1).logic, status);
+  }
+  await service.coverage({ clinicId: 72 });
+  assert.equal(calls.filter(c => c.name === 'treatmentsPage').at(-1).options.where[Sequelize.Op.and].at(-1).logic, 'active');
+  const found = await service.options({ clinicId: 72, query: { treatment_status: 'all', q: 'Borrador' } });
+  assert.equal(found.items[0].availability, 'draft');
+  const search = calls.filter(c => c.name === 'treatmentNames').at(-1).options;
+  assert.equal(search.limit, 50); assert.equal(search.where.nombre[Sequelize.Op.like], '%Borrador%');
+  assert.equal(search.where[Sequelize.Op.and].at(-1).logic[Sequelize.Op.ne], 'obsolete');
+  assert.equal(state.treatments[0].activo, false);
+});
+
+test('bad treatment states fail before scope queries for both documentation endpoints', async () => {
+  const { service, calls } = fixture();
+  for (const value of ['obsolete', "draft' OR 1=1", 'other', ['draft'], { status: 'draft' }]) {
+    for (const method of ['coverage', 'options']) await assert.rejects(service[method]({ clinicId: 72, query: { treatment_status: value } }), { code: 'invalid_documentation_treatment_status' });
+  }
+  assert.equal(calls.length, 0);
+});

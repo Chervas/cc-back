@@ -23,6 +23,21 @@ function choice(value, allowed, code) {
   return value;
 }
 const array = value => Array.isArray(value) ? value : [];
+function treatmentFilter(query) {
+  const value = query.treatment_status || 'active';
+  if (!['active', 'draft', 'inactive', 'all'].includes(value)) throw fail(400, 'invalid_documentation_treatment_status', 'Estado de tratamiento no válido.');
+  return value;
+}
+function treatmentAvailability(row) {
+  const status = row.clinical_config?.catalog_status;
+  return ['draft', 'obsolete'].includes(status) ? status : row.activo ? 'active' : 'inactive';
+}
+function applyTreatmentFilter(where, value, db) {
+  // One server-side predicate before count/pagination. Never expose obsolete
+  // treatments as candidates for a new association; no activation is implied.
+  const state = db.Sequelize.literal("CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(`Tratamiento`.`clinical_config`, '$.catalog_status')) IN ('draft','obsolete') THEN JSON_UNQUOTE(JSON_EXTRACT(`Tratamiento`.`clinical_config`, '$.catalog_status')) WHEN `Tratamiento`.`activo` = 1 THEN 'active' ELSE 'inactive' END");
+  where[db.Sequelize.Op.and].push(db.Sequelize.where(state, value === 'all' ? { [db.Sequelize.Op.ne]: 'obsolete' } : value));
+}
 function normalizeProtocol(payload, previous = null) {
   const title = String(payload.title ?? previous?.title ?? '').trim();
   const kind = payload.kind ?? previous?.kind ?? 'protocol';
@@ -139,16 +154,20 @@ function createTreatmentDocumentationService(db = require('../../models')) {
         has_more: (page + 1) * pageSize < Number(count) };
     },
     async options({ clinicId, query = {} }) {
-      const where = { ...(await scope(clinicId)), activo: true };
+      const filter = treatmentFilter(query);
+      const where = { ...(await scope(clinicId)) };
+      applyTreatmentFilter(where, filter, db);
       if (query.q) where.nombre = { [Op.like]: `%${String(query.q).slice(0, 120)}%` };
-      const rows = await db.Tratamiento.findAll({ where, attributes: ['id_tratamiento', 'nombre'], limit: 50, order: [['nombre', 'ASC'], ['id_tratamiento', 'ASC']], raw: true });
-      return { items: rows.map(row => ({ id: row.id_tratamiento, name: row.nombre })) };
+      const rows = await db.Tratamiento.findAll({ where, attributes: ['id_tratamiento', 'nombre', 'activo', 'clinical_config'], limit: 50, order: [['nombre', 'ASC'], ['id_tratamiento', 'ASC']], raw: true });
+      return { items: rows.map(row => ({ id: row.id_tratamiento, name: row.nombre, availability: treatmentAvailability(row) })) };
     },
     async coverage({ clinicId, query = {} }) {
       const { page, size } = pagination(query);
       const order = sorting(query, 'coverage');
       const missing = choice(query.missing, ['clinical_consent', 'protocol', 'aftercare'], 'invalid_documentation_filter');
-      const where = { ...(await scope(clinicId)), activo: true };
+      const filter = treatmentFilter(query);
+      const where = { ...(await scope(clinicId)) };
+      applyTreatmentFilter(where, filter, db);
       if (query.q) where.nombre = { [Op.like]: `%${String(query.q).slice(0, 120)}%` };
       if (missing === 'clinical_consent') {
         // Both scope IDs are validated integers; every SQL identifier is static.
@@ -183,7 +202,7 @@ function createTreatmentDocumentationService(db = require('../../models')) {
         }).filter(Boolean);
         const linked = protocols.filter(doc => (doc.treatment_ids || []).map(Number).includes(Number(row.id_tratamiento))).map(({ treatment_ids, ...doc }) => doc);
         const protocolDocs = linked.filter(p => p.kind === 'protocol'), aftercare = linked.filter(p => p.kind === 'aftercare');
-        return { id: row.id_tratamiento, name: row.nombre, discipline: row.disciplina, ...catalogState(row), consents,
+        return { id: row.id_tratamiento, name: row.nombre, discipline: row.disciplina, ...catalogState(row), availability: treatmentAvailability(row), consents,
           has_active_clinical_consent: consents.some(c => c.purpose === 'clinical' && c.status === 'active'),
           protocols: protocolDocs, aftercare, consents_preview: consents.slice(0, 3), consents_more_count: Math.max(0, consents.length - 3),
           protocols_preview: protocolDocs.slice(0, 3), protocols_more_count: Math.max(0, protocolDocs.length - 3),
