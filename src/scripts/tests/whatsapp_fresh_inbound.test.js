@@ -25,3 +25,7 @@ test('a newly connected number never automates replies from before its own cutov
   assert.equal(eligible(message(),c,b,cut,now),true);
   assert.equal(eligible({...message(),sent_at:'2026-09-15T16:59:00Z'},c,{...b,messageNotBefore:'2026-09-14T00:00:00Z'},cut,now),false);
 });
+test('fresh-looking replies imported during outage recovery stay visible without replaying automations',()=>{
+  const m=message(); m.metadata.recovery_without_automation=true;
+  assert.equal(eligible(m,c,b,cut,now),false);
+});

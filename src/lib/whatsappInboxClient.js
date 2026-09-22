@@ -60,7 +60,7 @@ function createInboxClient({ origin, ca, cert, key, timeout = 8000, readCertific
   }
   return {
     async request(method, path, body, headers = {}) {
-      if (!['GET', 'POST'].includes(method) || !['', '/pending', '/lease', '/confirm'].includes(path)) throw Error('inbox_request_invalid');
+      if (!['GET', 'POST'].includes(method) || !['', '/pending', '/lease', '/confirm', '/defer'].includes(path)) throw Error('inbox_request_invalid');
       const raw = body === undefined ? undefined : Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
       const active = acquire();
       try {

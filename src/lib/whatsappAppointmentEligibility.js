@@ -12,17 +12,19 @@ function importHeld(value) {
     || m.historical_registration === true || m.kind === 'lead_resolution_historical'
     || ['import', 'cliniccloud_reconciliation'].some(key => m[key] && importHeld(m[key]));
 }
-function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, patientId, templateName, now = Date.now() }) {
+function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, patientId, templateName, confirmationTimeout = false, now = Date.now() }) {
   if (!a || Number(a.id_cita) !== Number(e.trigger_entity_id) || Number(a.clinica_id) !== Number(clinicId)
     || patientId && Number(a.paciente_id) !== Number(patientId)) fail('whatsapp_appointment_scope_changed');
   if (a.source_system || a.source_reference || importHeld(a.import_metadata)) fail('whatsapp_appointment_import_held');
   const reminder = /^clinicaclick_recordatorio_(dia_antes|mismo_dia)(?:_|$)/.exec(templateName || '');
   const appointmentData = /^clinicaclick_confirmacion_datos_cita_(?:reprogramada_)?(?:hoy|24|48)(?:_|$)/.test(templateName || '');
-  if (!reminder && !appointmentData) return true; // Cancellation acknowledgements retain their existing flow.
+  if (!reminder && !appointmentData && !confirmationTimeout) return true; // Cancellation acknowledgements retain their existing flow.
   const start = date(a.inicio), previous = date(e.context?.appointment?.inicio);
   if (!Number.isFinite(start) || !Number.isFinite(previous) || start !== previous) fail('whatsapp_appointment_rescheduled');
   if (start <= now || a.es_provisional || !['pendiente','info_enviada','info_confirmada','recordatorio_enviado','recordatorio_confirmado','reprogramada'].includes(a.estado)) fail('whatsapp_appointment_ineligible');
-  if (appointmentData) return true; // The current future appointment, without a reminder-day constraint.
+  if (confirmationTimeout && a.estado === 'recordatorio_confirmado') fail('whatsapp_appointment_already_confirmed');
+  if (confirmationTimeout && e.context?.whatsapp_timeout_recovery && day(start) !== day(now)) fail('whatsapp_appointment_wrong_day');
+  if (appointmentData || !reminder) return true; // The current future appointment, without a reminder-day constraint.
   const before = reminder[1] === 'dia_antes';
   // info_confirmada only confirms appointment details. Attendance is a separate state.
   if (before && a.estado === 'recordatorio_confirmado') fail('whatsapp_appointment_already_confirmed');
@@ -43,8 +45,13 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
   if (execution.trigger_entity_type !== 'appointment') return true;
   const appointment = await loadAppointment(execution.trigger_entity_id);
   if (!patientId && appointment?.paciente_id && await patientHeld(Number(appointment.paciente_id))) fail('whatsapp_patient_import_held');
+  if (m.appointment_timeout === true) {
+    const health = require('./whatsappInboxHealth');
+    if (!health.state(health.read(), conversation.clinic_id).healthy) fail('whatsapp_inbox_reception_delayed');
+  }
   return assertAppointmentEligibility({ appointment, execution, clinicId: conversation.clinic_id, patientId,
-    templateName: payload?.type === 'template' ? payload.template?.name : null });
+    confirmationTimeout: m.appointment_timeout === true,
+    templateName: payload?.type === 'template' ? payload.template?.name : m.template_name || m.fallback_template_name });
 }
 async function patientImportHeld(patientId, db = require('../../models')) {
   const [rows] = await db.sequelize.query("SELECT 1 AS held FROM PatientCustomFields WHERE paciente_id=:patientId AND source='cliniccloud' AND JSON_VALID(value) AND (JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(value),value,'{}'),'$.import.automation_policy'))='hold' OR JSON_EXTRACT(IF(JSON_VALID(value),value,'{}'),'$.import.messages_enabled')=CAST('false' AS JSON)) LIMIT 1", { replacements: { patientId } });

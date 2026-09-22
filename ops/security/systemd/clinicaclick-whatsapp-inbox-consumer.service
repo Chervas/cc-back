@@ -1,0 +1,32 @@
+[Unit]
+Description=ClinicaClick staging passive WhatsApp importer
+Requires=clinicaclick-wa-importer-network.service
+After=network.target mysql.service clinicaclick-wa-importer-network.service
+[Service]
+User=cc-wa-importer
+Group=cc-wa-importer
+WorkingDirectory=/opt/clinicaclick-whatsapp-inbox-consumer
+EnvironmentFile=/etc/clinicaclick-whatsapp-inbox/staging/runtime.env
+ExecStart=/usr/bin/node src/scripts/whatsapp-inbox-consumer.js
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+PrivateDevices=true
+RuntimeDirectory=clinicaclick-whatsapp-inbox-health
+RuntimeDirectoryMode=0755
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+InaccessiblePaths=-/run/mysqld -/run/redis -/etc/clinicaclick-security-mfa-20260914 -/etc/clinicaclick-whatsapp-inbox/gateway -/etc/clinicaclick-whatsapp-inbox/authority
+UMask=0077
+LimitCORE=0
+Restart=on-failure
+RestartSec=10
+MemoryMax=192M
+TasksMax=32
+[Install]
+WantedBy=multi-user.target

@@ -3395,6 +3395,8 @@ async function loadConfiguredWhatsappTemplate(
 }
 
 function buildAutomationWhatsappDeliveryKey(execution, node) {
+  const recoveryKey = require('../lib/whatsappAppointmentTimeout').deliveryKey(execution);
+  if (recoveryKey) return recoveryKey;
   const executionId = toIntOrNull(execution?.id);
   const nodeId = cleanString(node?.id);
   const deliverySlot = cleanString(node?.config?.delivery_slot)
@@ -4261,6 +4263,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     source: 'automations_v2',
     kind: 'flow_send_whatsapp',
     execution_id: execution?.id || null,
+    appointment_timeout: context.whatsapp_no_response_timeout === true,
     node_id: cleanString(node?.id),
     flow_name: flowName || null,
     flow_reason: 'flow_send_whatsapp',
@@ -7018,7 +7021,50 @@ async function resumeWaitingNode(execution, node, context, {
       ? readOutputTarget(node, 'on_response')
       : readOutputTarget(node, 'on_timeout');
 
-    let nextContext = context;
+    if (!useResponse && nextNode && execution.trigger_entity_type === 'appointment'
+      && whatsappAuthorizedBroker.bindingsForClinic(Number(execution.clinic_id)).some(b => b.sendEnabled)) {
+      const policy = require('../lib/whatsappAppointmentTimeout');
+      const health = require('../lib/whatsappInboxHealth');
+      const anchor = resolveWaitResponseAnchor(context, node.config || {});
+      const conversationId = toIntOrNull(anchor.listened_output?.conversation_id || anchor.listened_output?.chat_conversation_id);
+      const since = parseDateValueOrNull(execution.waiting_meta?.wait_starts_at || anchor.anchor_at);
+      const next = execution.templateVersion?.nodes?.find(n => n.id === nextNode);
+      const decision = await policy.decide({ execution, context, nextNode: next, snapshot: health.read(),
+        loadAppointment: id => CitaPaciente.findByPk(id, { raw: true }),
+        hasReply: async () => {
+          // Missing or foreign anchors cannot establish that nobody replied.
+          if (!conversationId || !since) return true;
+          const c = await Conversation.findByPk(conversationId, { attributes: ['id','clinic_id'], raw: true });
+          if (Number(c?.clinic_id) !== Number(execution.clinic_id)) return true;
+          return !!await Message.findOne({ where: { conversation_id: conversationId, direction: 'inbound',
+            sent_at: { [Op.gte]: since } }, attributes: ['id'], raw: true });
+        },
+        hasAskedToday: async appointment => {
+          const [rows] = await db.sequelize.query("SELECT /*+ MAX_EXECUTION_TIME(3000) */ m.sent_at,m.createdAt,JSON_UNQUOTE(JSON_EXTRACT(e.context,'$.appointment.inicio')) appointment_start FROM FlowExecutionsV2 e JOIN Messages m ON JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.execution_id'))=CAST(e.id AS CHAR) JOIN Conversations c ON c.id=m.conversation_id WHERE e.clinic_id=:clinicId AND c.clinic_id=:clinicId AND e.trigger_entity_type='appointment' AND e.trigger_entity_id=:appointmentId AND m.direction='outbound' AND m.message_type<>'event' AND m.createdAt>=:since AND (m.status IN ('pending','sending','sent','delivered','read') OR JSON_EXTRACT(m.metadata,'$.wamid') IS NOT NULL) LIMIT 100", {
+            replacements: { clinicId: execution.clinic_id, appointmentId: appointment.id_cita, since: new Date(Date.now() - 26 * 3600000) },
+          });
+          return rows.length >= 100 || rows.some(row => {
+            return new Date(row.appointment_start).getTime() === new Date(appointment.inicio).getTime()
+              && policy.day(row.sent_at || row.createdAt) === policy.day(Date.now());
+          });
+        },
+      });
+      if (decision.action === 'wait') {
+        await updateExecutionAndEmit(execution, { status: 'waiting', wait_until: new Date(Date.now() + 60000),
+          waiting_meta: { ...execution.waiting_meta, inbox_original_due_at: execution.waiting_meta?.inbox_original_due_at || execution.wait_until,
+            inbox_held_since: execution.waiting_meta?.inbox_held_since || new Date().toISOString() }, last_error: decision.reason });
+        return { resumed: false, context };
+      }
+      if (decision.action === 'stop') {
+        await updateExecutionAndEmit(execution, { status: 'cancelled', current_node_id: null, wait_until: null,
+          waiting_meta: null, last_error: decision.reason }, 'flow_execution:cancelled');
+        return { resumed: false, context };
+      }
+      if (decision.recovery) context = { ...context, whatsapp_timeout_recovery: decision.recovery };
+    }
+
+    let nextContext = { ...context, whatsapp_no_response_timeout: !useResponse,
+      ...(useResponse ? { whatsapp_timeout_recovery: null } : {}) };
     let forcedConversationId = null;
     if (useResponse) {
       const waitingMeta = execution?.waiting_meta && typeof execution.waiting_meta === 'object'
