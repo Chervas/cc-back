@@ -4120,6 +4120,12 @@ async executeAutomationHealthCheck() {
         });
       });
 
+    const inboxBindings = require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings || [];
+    if (inboxBindings.some(b => b.sendEnabled)) {
+      const inboxHealth = require('../lib/whatsappInboxHealth');
+      inboxHealth.issues(inboxHealth.read(), inboxBindings.filter(b => b.sendEnabled).map(b => b.clinicId), now.getTime()).forEach(addIssue);
+    }
+
     const counts = issues.reduce((acc, issue) => {
       acc[issue.type] = (acc[issue.type] || 0) + 1;
       return acc;
