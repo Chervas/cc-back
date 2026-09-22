@@ -16,7 +16,8 @@ function state(snapshot, clinicId, now = Date.now()) {
   if (!clinic) return { healthy: false, reason: 'inbox_health_scope_missing' };
   const healthy = !snapshot.recoveryHold && clinic.blockingReview === 0
     && (clinic.oldestPendingAt === null || now - clinic.oldestPendingAt <= 120000);
-  return { healthy, reason: healthy ? null : 'inbox_reception_delayed', recoveryNotBefore: snapshot.recoveryNotBefore || null };
+  return { healthy, readyForTimeout: healthy && clinic.oldestPendingAt === null,
+    reason: healthy ? null : 'inbox_reception_delayed', recoveryNotBefore: snapshot.recoveryNotBefore || null };
 }
 function publish(health, scopes, { recoveryNotBefore = null, recoveryHold = false } = {}) {
   if (!health || !Number.isFinite(health.observedAt) || !Array.isArray(health.groups)) throw Error('inbox_health_invalid');

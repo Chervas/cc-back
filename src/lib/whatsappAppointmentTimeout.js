@@ -5,7 +5,8 @@ const day = value => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid
 // evidence of silence, and recovering a timer is not permission to replay it.
 async function decide({ execution, context, nextNode, snapshot, loadAppointment, hasReply, hasAskedToday, now = Date.now() }) {
   const health = state(snapshot, execution.clinic_id, now);
-  if (!health.healthy) return { action: 'wait', reason: health.reason };
+  if (!health.healthy) return { action: 'wait', reason: health.reason, recovery: true };
+  if (!health.readyForTimeout) return { action: 'wait', reason: 'inbox_reception_pending' };
   const appointment = await loadAppointment(execution.trigger_entity_id);
   const start = new Date(appointment?.inicio || '').getTime();
   if (!appointment || Number(appointment.clinica_id) !== Number(execution.clinic_id)

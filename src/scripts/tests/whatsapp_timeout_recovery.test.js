@@ -28,6 +28,10 @@ test('receiver outage or stale heartbeat cannot send or cancel; clinic health re
 test('reply already imported suppresses timeout even when passive recovery did not dispatch IA', async () => {
   assert.deepEqual(await decide({ ...input(), hasReply: async () => true }), { action: 'stop', reason: 'reply_already_received' });
 });
+test('even a recent pending receipt postpones a no-response decision without treating normal short latency as an outage',async()=>{
+ const i=input();i.snapshot.clinics[0].oldestPendingAt=now-1000;
+ const d=await decide(i);assert.equal(d.action,'wait');assert.equal(d.recovery,undefined);
+});
 test('recovery allows at most one request today and never catches up yesterday or tomorrow', async () => {
   for (const date of ['2026-09-21T17:00:00Z', '2026-09-23T17:00:00Z']) {
     const i = input(); i.context.appointment.inicio = date; i.execution.waiting_meta.inbox_held_since = new Date(now-60000).toISOString();
