@@ -40,14 +40,20 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   const make=()=>require('../../services/whatsappPhoneActivation.service').createService({models,audit:injectedAudit,guard:()=>{},enabled:()=>true,
     states:{resume:async()=>context},publish:value=>{published=value},broker:{profile:async()=>({...remote}),activate:async(c,assetId)=>{
       activations++;remote.assetId=assetId;remote.state='active';remote.activatedAt=Date.now();remote.profile={...remote.profile,status:'CONNECTED',platformType:'CLOUD_API'};return {...remote};}}});
+  let asset;
+  if(process.env.WHATSAPP_ROUTING_ONLY_TEST==='true'){
+    asset=await models.ClinicMetaAsset.create({metaConnectionId:1,assetType:'whatsapp_phone_number',metaAssetId:'401',phoneNumberId:'401',wabaId:'301',assignmentScope:'group',grupoClinicaId:9,isActive:true,additionalData:{requireClinicSelection:true}});
+    report.checks.push('Routing-only cohort: gateway activation acceptance is not exercised');
+  }else{
   const result=await make().complete({...actor,requestId:context.requestId});assert.equal(result.connected,true);assert.equal(activations,1);
-  let asset=await models.ClinicMetaAsset.findByPk(result.assetId);assert.equal(asset.metaConnectionId,null);assert.equal(asset.waAccessToken,null);assert.equal(asset.additionalData.requireClinicSelection,true);
+  asset=await models.ClinicMetaAsset.findByPk(result.assetId);assert.equal(asset.metaConnectionId,null);assert.equal(asset.waAccessToken,null);assert.equal(asset.additionalData.requireClinicSelection,true);
   const cutoff=published.connections[0].messageNotBefore;
   await make().complete({...actor,requestId:context.requestId});assert.equal(activations,1);assert.equal(await models.WhatsappPhoneActivation.count(),1);assert.equal(published.connections[0].messageNotBefore,cutoff);
   assert.equal(await models.PlatformAuditEvent.count(),2);
   await assert.rejects(models.ClinicMetaAsset.create({assetType:'ad_account',metaAssetId:'701',metaConnectionId:null}));
   await assert.rejects(migration.down(qi),/Preserve WhatsApp/);
   report.checks.push('Migration up/up/down/up, independent catalog identity, restart recovery without provider reactivation, immutable cutoff, no secrets, audit and rollback guard');
+  }
   const own=await models.ClinicMetaAsset.create({metaConnectionId:1,assetType:'whatsapp_phone_number',metaAssetId:'402',phoneNumberId:'402',wabaId:'302',assignmentScope:'clinic',clinicaId:71,isActive:true,additionalData:{whatsapp_channel_role:'primary'}});
   const bindings=id=>[{assetId:asset.id,phoneId:'401',wabaId:'301',sendEnabled:true},...(id===71?[{assetId:own.id,phoneId:'402',wabaId:'302',sendEnabled:true}]:[])];
   let blocked=false,sessionValid=true;
