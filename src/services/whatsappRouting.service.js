@@ -44,6 +44,19 @@ function createService({models,sessions,audit,broker=require('../lib/whatsappAut
         // every primary, including an absent primary or an inherited one.
         const existing=await db().WhatsappChannelBinding.findAll({...locked,where:{clinic_id:{[Op.in]:ids}},order:[['clinic_id','ASC'],['id','ASC']]});
         if(existing.some(b=>Number(b.asset_id)===raw.secondaryAssetId&&b.role!=='secondary'))S.fail('whatsapp_authorization_conflict',409);
+        const groupIds=[...new Set(clinics.map(c=>c.grupoClinicaId).filter(S.id))];
+        const candidates=await db().ClinicMetaAsset.findAll({...locked,where:{assetType:'whatsapp_phone_number',isActive:true,[Op.or]:[
+          {assignmentScope:'clinic',clinicaId:{[Op.in]:ids}},
+          {assignmentScope:'group',grupoClinicaId:{[Op.in]:groupIds}}]},
+          attributes:['id','assignmentScope','clinicaId','grupoClinicaId','additionalData'],order:[['id','ASC']],raw:true});
+        for(const clinic of clinics){
+          const project=a=>{const binding=existing.find(b=>b.is_active&&b.clinic_id===clinic.id_clinica&&b.asset_id===a.id);
+            return binding?{...a,additionalData:roles.buildWhatsappRoutingAdditionalData(a.additionalData,{role:binding.role,purposes:binding.purposes,unavailableAction:binding.unavailable_action}),routing_binding_id:binding.id,routing_binding_role:binding.role}:a;};
+          const primary=roles.selectWhatsappPhoneAsset({clinicAssets:candidates.filter(a=>a.assignmentScope==='clinic'&&a.clinicaId===clinic.id_clinica).map(project),
+            groupAssets:candidates.filter(a=>a.assignmentScope==='group'&&a.grupoClinicaId===clinic.grupoClinicaId).map(project)});
+          if(primary?.id===raw.secondaryAssetId)S.fail('whatsapp_authorization_conflict',409);
+        }
+
         for(const clinicId of ids){
           const previous=existing.find(b=>b.clinic_id===clinicId&&b.role==='secondary');
           const values={asset_id:raw.secondaryAssetId,purposes:raw.purposes,unavailable_action:raw.unavailableAction,is_active:true,updated_by:actor.userId};
