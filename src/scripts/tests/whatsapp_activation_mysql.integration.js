@@ -97,6 +97,10 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   await models.WhatsappChannelBinding.destroy({where:{clinic_id:72,role:'secondary'}});
   await models.WhatsappChannelBinding.create({clinic_id:72,asset_id:asset.id,role:'primary'});
   await assert.rejects(routing.saveSecondary(secondaryInput,actor),/conflict/);
+  await models.WhatsappChannelBinding.destroy({where:{clinic_id:72}});
+  await asset.update({additionalData:{whatsapp_channel_role:'primary'}});
+  await assert.rejects(routing.saveSecondary(secondaryInput,actor),/conflict/);
+  assert.equal((await asset.reload()).additionalData.whatsapp_channel_role,'primary','an inherited primary cannot be silently demoted');
   report.checks.push('Group secondary is atomic and idempotent, preserves existing and absent primaries, routes only selected purposes, rejects primary conflict and missing member permission, audit failure rolls back');
   report.checks.push('Atomic clinic route selects group over own, keeps own asset available, explicit secondary removal, unselected new group does not send; rollback on audit failure, scope/session/duplicate rejection');
 }).catch(error=>{console.error(error.message);process.exitCode=1});
