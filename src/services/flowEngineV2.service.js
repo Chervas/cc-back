@@ -7079,7 +7079,7 @@ async function resumeWaitingNode(execution, node, context, {
       if (decision.action === 'wait') {
         await updateExecutionAndEmit(execution, { status: 'waiting', wait_until: new Date(Date.now() + 60000),
           waiting_meta: { ...execution.waiting_meta, inbox_original_due_at: execution.waiting_meta?.inbox_original_due_at || execution.wait_until,
-            inbox_held_since: execution.waiting_meta?.inbox_held_since || new Date().toISOString() }, last_error: decision.reason });
+            ...(decision.recovery ? { inbox_held_since: execution.waiting_meta?.inbox_held_since || new Date().toISOString() } : {}) }, last_error: decision.reason });
         return { resumed: false, context };
       }
       if (decision.action === 'stop') {
