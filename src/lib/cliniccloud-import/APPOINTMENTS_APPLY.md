@@ -259,8 +259,8 @@ asignaciones que aún faltan realmente. `source_service` añade únicamente el
 nombre del servicio de la línea base, limitado a 255 caracteres; no expone notas,
 identidad ni evidencias privadas. Es texto de procedencia, no una equivalencia de
 catálogo, precio o consentimiento. Sin permiso de datos sensibles se retira todo
-`import_review`. Completar un ID no equivale a validar su asignación. La extensión
-preparada en DEV mantiene `resources_need_review` en las citas abiertas del delta
+`import_review`. Completar un ID no equivale a validar su asignación. La proyección
+mantiene `resources_need_review` en las citas abiertas del delta
 sin bono/programa ni reserva provisional. La acción explícita `mode: resources`
 de la ruta de resolución comprueba disponibilidad canónica y registra actor/motivo
 sin cambiar recursos, horas ni HOLD; las salas inactivas se rechazan. El marcador
