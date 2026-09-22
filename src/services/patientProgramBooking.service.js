@@ -10,13 +10,15 @@ const { loadBookingContext, resolveInstallationKeys, solutionsForCalendar } = re
 const { lockBookingResources, mutateAppointmentBooking } = require('./appointmentBookingCommand.service');
 const { solveBookingProfile, occupancyForSolution } = require('../lib/booking-profile-solver');
 const { assertPriorityAcknowledgement, loadScopedTreatment } = require('./treatmentBookingProfile.service');
+const { equipmentIds } = require('../lib/booking-equipment');
 const json = value => typeof value === 'string' ? JSON.parse(value) : value;
 const fail = (code, message, details, status = 409) => { throw domainError(status, code, message, details); };
 
 function addVirtualBusy(context, solution) {
   const occupancy = occupancyForSolution(solution, context.installationKeys);
   for (const row of occupancy) {
-    const targets = row.doctor_id ? [context.doctors.get(row.doctor_id)]
+    const targets = row.resource_kind === 'equipment' ? [context.equipment?.get(Number(row.resource_key.split(':')[1]))]
+      : row.doctor_id ? [context.doctors.get(row.doctor_id)]
       : [...context.installations].filter(([id]) => context.installationKeys.get(id) === row.resource_key).map(([, target]) => target);
     for (const target of new Set(targets)) if (target) target.busy.push({ start: row.start_at, end: row.end_at });
   }
@@ -81,12 +83,15 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const profile = { version: 1, phases: sessions.flatMap(row => row.booking_profile.phases) };
     const installationIds = [...new Set(profile.phases.flatMap(row => row.installation_ids))];
     const doctorIds = [...new Set(profile.phases.flatMap(row => row.professionals.ids))];
-    if (installationIds.length + doctorIds.length > 100) fail('program_search_resources_too_many', 'Este conjunto utiliza demasiadas cabinas y profesionales. Planifica menos sesiones a la vez.', null, 400);
+    const machineIds = equipmentIds(profile);
+    profile.version = machineIds.length ? 2 : 1;
+    if (installationIds.length + doctorIds.length + machineIds.length > 100) fail('program_search_resources_too_many', 'Este conjunto utiliza demasiados recursos. Planifica menos sesiones a la vez.', null, 400);
     const mapping = await resolveInstallationKeys({ db, clinic: plan.clinic, installationIds, transaction, enabled: true });
     if (lock) {
       await lockBookingResources({ db, transaction, resourceKeys: [
         `patient:${plan.voucher.patient_id}`, ...profile.phases.flatMap(row => row.professionals.ids.map(id => `doctor:${id}`)),
         ...installationIds.map(id => mapping.keys.get(id)),
+        ...machineIds.map(id => `equipment:${id}`),
       ] });
     }
     // One bounded bulk context per proposal/confirmation, never queries inside

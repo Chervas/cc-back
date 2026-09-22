@@ -40,6 +40,9 @@ async function uncoveredPhases({ db, rows, transaction, installationMapping = nu
     const clinicId = Number(row.appointment.clinica_id), timeZone = resolveClinicTimezone(clinics.find(c => Number(c.id_clinica) === clinicId));
     const date = formatDateLocal(new Date(row.start_at), timeZone), dow = dayIndexFromLocalDate(date);
     const resourceKey = row.resource_key, key = `${resourceKey}:${clinicId}:${date}`;
+    // Equipment rows include turnaround beyond the clinical visit; room/staff
+    // phase rows already validate the clinic opening hours for the actual care.
+    if (resourceKey.startsWith('equipment:')) continue;
     const clinicKey = `clinic:${clinicId}:${date}`;
     if (!cache.has(clinicKey)) {
       const hours = clinicHours.filter(h => Number(h.clinica_id) === clinicId);

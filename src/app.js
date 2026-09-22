@@ -310,6 +310,7 @@ console.log('Rutas /api/templates y /api/message-log configuradas');
 app.use('/api/citas', citasRoutes);
 console.log('Ruta /api/citas configurada');
 app.use('/api/instalaciones', instalacionesRoutes);
+app.use('/api/booking-equipment', require('./routes/bookingEquipment.routes'));
 console.log('Ruta /api/instalaciones configurada');
 app.use('/api/doctores', doctoresRoutes);
 console.log('Ruta /api/doctores configurada');

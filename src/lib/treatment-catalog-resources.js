@@ -31,5 +31,21 @@ async function validateCatalogResources(treatment, db, { transaction, environmen
   ]);
   if (installationIds.some(id => !installations.some(row => Number(row.id) === id))) throw catalogError('Alguna cabina no pertenece al ámbito del tratamiento o no está activa.', 'treatment_installation_scope', 403);
   if (doctorIds.some(id => !doctors.some(row => Number(row.doctor_id) === id))) throw catalogError('Algún profesional no pertenece al ámbito del tratamiento o no recibe citas.', 'treatment_professional_scope', 403);
+  if (require('./booking-equipment').equipmentIds(profile).length) {
+    if (treatment.origen !== 'clinica') throw catalogError('Personaliza este tratamiento para cada clínica antes de asignarle máquinas físicas.', 'booking_equipment_clinic_required', 422);
+    const { loadEquipmentContext, equipmentRuntimeEnabled } = require('../services/bookingEquipmentAvailability.service');
+    if (!dormant && !equipmentRuntimeEnabled(environment)) throw catalogError('Conserva el tratamiento en borrador hasta publicar la reserva de maquinaria.', 'booking_equipment_preparation_only', 409);
+    const clinic = await db.Clinica.findByPk(clinicIds[0], { transaction });
+    const mapping = await require('../services/appointmentBookingAvailability.service').resolveInstallationKeys({ db, clinic, installationIds, transaction, enabled: true });
+    const context = await loadEquipmentContext({ db, clinic, profile, mapping, transaction, enabled: true });
+    if (!dormant) {
+      const { equipmentFitsRoom } = require('./booking-equipment');
+      for (const phase of profile.phases) if (!phase.installation_ids.some(id => {
+        const resource_key = mapping.keys.get(id);
+        const room = { resource_key, equipment_policy: context.roomPolicies.get(Number(resource_key.split(':')[1])) };
+        return (phase.equipment_requirements || []).every(group => group.equipment_ids.some(eid => equipmentFitsRoom(context.equipment.get(eid), room)));
+      })) throw catalogError('Alguna fase no tiene una cabina compatible con sus equipos. Puedes conservar el borrador.', 'booking_equipment_room_incompatible', 422);
+    }
+  }
 }
 module.exports = { validateCatalogResources };

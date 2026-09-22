@@ -42,7 +42,8 @@ function matches(row, where = {}) {
   });
 }
 
-function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false, appointments = [], occupancies = [], aliases = [] } = {}) {
+function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false, appointments = [], occupancies = [], aliases = [],
+  equipment = [], equipmentClinics = [], roomPolicies = [], equipmentEnabled = false } = {}) {
   const withBookingMarker = row => {
     let metadata = row.import_metadata;
     if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = { booking: true }; } }
@@ -52,8 +53,8 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
   let id = 100;
   let txId = 0;
   const mutexes = new Map();
-  const clinic = { id_clinica: 72, grupoClinicaId: 2, configuracion: { timezone: 'Europe/Madrid' } };
-  const clinics = [clinic, { id_clinica: 73, grupoClinicaId: 2 }];
+  const clinic = { id_clinica: 72, grupoClinicaId: 2, configuracion: { timezone: 'Europe/Madrid' }, equipment_booking_enabled: equipmentEnabled };
+  const clinics = [clinic, { id_clinica: 73, grupoClinicaId: 2, equipment_booking_enabled: equipmentEnabled }];
   const installations = [9, 10, 12].map((installationId) => ({ id: installationId, clinica_id: 72, activo: true, horarios: hours, clinica: clinic }));
   installations.push({ id: 19, clinica_id: 73, activo: true, horarios: hours, clinica: clinics[1] });
   const query = (name, rows, options) => { state.calls.push([name, options]); return rows.filter((row) => matches(row, options.where)); };
@@ -76,14 +77,17 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
     } },
     Clinica: { findByPk: async (value) => clinics.find((row) => row.id_clinica === Number(value)) },
     TreatmentConsentRequirement: { findAll: async () => [] },
-    Tratamiento: { findByPk: async () => ({ id_tratamiento: 3, clinica_id: 72, origen: 'clinica', activo: true, clinical_config: { booking_profile: bookingProfile } }) },
-    DoctorClinica: { findAll: async (options) => query('doctors', [5, 6].map((doctorId) => ({ doctor_id: doctorId, clinica_id: 72, activo: true, recibe_citas: true, horarios: hours })), options) },
+    Tratamiento: { findByPk: async () => ({ id_tratamiento: 3, clinica_id: 72, grupo_clinica_id: 2, origen: equipmentEnabled ? 'grupo' : 'clinica', activo: true, clinical_config: { booking_profile: bookingProfile } }) },
+    DoctorClinica: { findAll: async (options) => query('doctors', (equipmentEnabled ? [72, 73] : [72]).flatMap(clinicId => [5, 6].map((doctorId) => ({ doctor_id: doctorId, clinica_id: clinicId, activo: true, recibe_citas: true, horarios: hours }))), options) },
     DoctorHorario: {}, DoctorHorarioExcepcion: {}, InstalacionHorario: {}, DoctorBloqueoExcepcion: {},
     Instalacion: { findAll: async (options) => query('installations', installations, options) },
     ClinicaHorario: { findAll: async (options) => { state.calls.push(['hours', options]); return hours; } },
     DoctorBloqueo: { findAll: async (options) => { state.calls.push(['blocks', options]); return []; } },
     InstalacionBloqueo: { findAll: async (options) => { state.calls.push(['cab-blocks', options]); return []; } },
     InstallationPhysicalAlias: { findAll: async (options) => query('aliases', aliases, options) },
+    BookingEquipment: { findAll: async options => query('equipment', equipment.map(unit => ({ ...unit, owner_clinic: clinics.find(c => c.id_clinica === unit.owner_clinic_id) })), options) },
+    BookingEquipmentClinic: { findAll: async options => query('equipment-clinics', equipmentClinics, options) },
+    BookingEquipmentRoomPolicy: { findAll: async options => query('equipment-policies', roomPolicies, options) },
     AppointmentBookingResource: {
       upsert: async (row, { transaction: tx }) => {
         if (tx.release.has(row.resource_key)) return;
@@ -508,4 +512,117 @@ test('one appointment produces phase DTOs without duplicating identity or clinic
   assert.deepEqual(segments.map((segment) => segment.appointment_id), [77, 77]);
   assert.deepEqual(segments.map((segment) => segment.phase_index), [1, 2]);
   assert(!JSON.stringify(segments).includes('PRIVATE'));
+});
+
+const eqCaps = { ...capabilities, equipment: true };
+const machinePhase = (room = 9, doctor = 5, id = 1) => ({ ...phase('machine', [room], [doctor]), equipment_requirements: [{ equipment_ids: [id] }] });
+const machine = (id = 1, extra = {}) => ({ id, owner_clinic_id: 72, group_id: 2, name: `Equipo ${id}`, family_key: 'exion',
+  mobility: 'mobile', status: 'available', turnaround_minutes: 0, home_installation_id: 9, ...extra });
+function equipmentFixture(overrides = {}) {
+  return fixture({ bookingProfile: { version: 2, phases: [machinePhase()] }, equipmentEnabled: true,
+    equipment: [machine()], equipmentClinics: [{ equipment_id: 1, clinic_id: 72 }],
+    roomPolicies: [{ installation_id: 9, mode: 'all' }], ...overrides });
+}
+
+test('equipment is opt-in: no machine SQL for psychology, even in an equipped clinic', async () => {
+  for (const enabled of [false, true]) {
+    const f = fixture({ equipmentEnabled: enabled });
+    await f.reserve({ capabilities: eqCaps });
+    assert.equal(f.state.calls.filter(([name]) => name.startsWith('equipment')).length, 0);
+    assert(!f.state.locks.some(([, key]) => key.startsWith('equipment:')));
+  }
+});
+
+test('a required machine cannot silently disappear when clinic or runtime is disabled', async () => {
+  for (const override of [{ equipmentEnabled: false }, {}]) {
+    const f = equipmentFixture(override);
+    await assert.rejects(f.reserve({ capabilities: { ...capabilities, equipment: false } }), { code: 'booking_equipment_disabled' });
+    assert.equal(f.state.calls.filter(([name]) => name.startsWith('equipment')).length, 0);
+    assert.equal(f.state.persists, 0);
+  }
+  const f = equipmentFixture({ equipmentEnabled: false });
+  await assert.rejects(f.reserve({ capabilities: eqCaps }), { code: 'booking_equipment_disabled' });
+});
+
+test('v2 reserves a physical unit and returns its name in the canonical phase DTO', async () => {
+  const f = equipmentFixture();
+  const saved = await f.reserve({ capabilities: eqCaps });
+  assert.equal(saved.import_metadata.booking.profile.version, 2);
+  assert.equal(f.state.occupancies.length, 3);
+  assert(f.state.locks.some(([, key]) => key === 'equipment:1'));
+  const segments = bookingSegments(saved);
+  assert.deepEqual(segments[0].equipment, [{ id: 1, name: 'Equipo 1' }]);
+  assert.equal(f.state.calls.filter(([name]) => name.startsWith('equipment')).length, 3);
+});
+
+test('presotherapy and carbo reject mobile machines; fixed machines remain usable', async () => {
+  for (const policy of [[], [{ installation_id: 9, mode: 'none' }], [{ installation_id: 9, mode: 'selected', equipment_ids: [2] }]]) {
+    const f = equipmentFixture({ roomPolicies: policy });
+    await assert.rejects(f.reserve({ capabilities: eqCaps, force: true }), error => error.code === 'booking_unavailable' && !error.details.can_force);
+    assert.equal(f.state.persists, 0);
+  }
+  const f = equipmentFixture({ roomPolicies: [], equipment: [machine(1, { mobility: 'fixed' })] });
+  assert(await f.reserve({ capabilities: eqCaps }));
+});
+
+test('fixed machine cannot be reserved in another physical room; shared alias is the same room', async () => {
+  const wrong = equipmentFixture({ equipment: [machine(1, { mobility: 'fixed', home_installation_id: 12 })] });
+  await assert.rejects(wrong.reserve({ capabilities: eqCaps }), { code: 'booking_unavailable' });
+  const alias = equipmentFixture({ equipment: [machine(1, { mobility: 'fixed', home_installation_id: 19 })],
+    aliases: [{ installation_id: 19, canonical_installation_id: 9, group_id: 2 }] });
+  assert(await alias.reserve({ capabilities: eqCaps }));
+});
+
+test('sharing one unit never creates capacity for two patients in different clinics', async () => {
+  const f = equipmentFixture({ equipmentClinics: [{ equipment_id: 1, clinic_id: 72 }, { equipment_id: 1, clinic_id: 73 }],
+    roomPolicies: [{ installation_id: 9, mode: 'all' }, { installation_id: 19, mode: 'all' }] });
+  f.db.Tratamiento.findByPk = async id => ({ id_tratamiento: id, origen: 'clinica', clinica_id: id === 3 ? 72 : 73, activo: true,
+    clinical_config: { booking_profile: { version: 2, phases: [machinePhase(id === 3 ? 9 : 19, id === 3 ? 5 : 6)] } } });
+  const results = await Promise.allSettled([f.reserve({ capabilities: eqCaps }), f.reserve({ capabilities: eqCaps,
+    appointmentValues: { ...f.values, clinica_id: 73, tratamiento_id: 4, doctor_id: 6, instalacion_id: 19, paciente_id: 2 } })]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  assert.equal(results.find(r => r.status === 'rejected').reason.code, 'booking_unavailable');
+  assert.equal(f.state.occupancies.filter(r => r.resource_kind === 'equipment').length, 1);
+});
+
+test('a missing share, foreign group or maintenance state never offers the device', async () => {
+  for (const changes of [{ equipmentClinics: [] }, { equipment: [machine(1, { owner_clinic_id: 73, group_id: 55 })] }]) {
+    const f = equipmentFixture(changes);
+    await assert.rejects(f.reserve({ capabilities: eqCaps }), { code: 'booking_equipment_scope' });
+  }
+  const f = equipmentFixture({ equipment: [machine(1, { status: 'maintenance' })] });
+  await assert.rejects(f.reserve({ capabilities: eqCaps, force: true }), { code: 'booking_unavailable' });
+});
+
+test('turnaround protects both sides of the reservation, without lengthening the patient visit', async () => {
+  const f = equipmentFixture({ equipment: [machine(1, { turnaround_minutes: 10 })] });
+  const saved = await f.reserve({ capabilities: eqCaps });
+  assert.equal(saved.fin, end);
+  assert.equal(f.state.occupancies.find(r => r.resource_kind === 'equipment').end_at, '2030-01-07T09:40:00.000Z');
+  await assert.rejects(f.reserve({ capabilities: eqCaps, appointmentValues: { ...f.values, paciente_id: 2,
+    inicio: '2030-01-07T09:30:00Z', fin: '2030-01-07T10:00:00Z' } }), { code: 'booking_unavailable' });
+  await assert.rejects(f.reserve({ capabilities: eqCaps, appointmentValues: { ...f.values, paciente_id: 2,
+    inicio: '2030-01-07T08:30:00Z', fin: start } }), { code: 'booking_unavailable' });
+});
+
+test('cancellation releases machinery and reopening rechecks occupation', async () => {
+  const f = equipmentFixture();
+  const first = await f.reserve({ capabilities: eqCaps });
+  await f.reserve({ capabilities: eqCaps, existingAppointmentId: first.id_cita, appointmentValues: { estado: 'cancelada' }, stateOnly: true });
+  await f.reserve({ capabilities: eqCaps, appointmentValues: { ...f.values, paciente_id: 2 } });
+  await assert.rejects(f.reserve({ capabilities: eqCaps, existingAppointmentId: first.id_cita, appointmentValues: { estado: 'pendiente' }, stateOnly: true }), { code: 'booking_unavailable' });
+  assert.equal(f.state.appointments.find(a => a.id_cita === first.id_cita).estado, 'cancelada');
+});
+
+test('slot query count is constant across days and candidates with equipment', async () => {
+  const counts = [];
+  for (const days of [1, 7]) {
+    const f = equipmentFixture();
+    const result = await searchTreatmentSlots({ db: f.db, clinic: f.clinic, treatmentId: 3, date: '2030-01-07', days,
+      stepMinutes: 5, limit: 500, capabilities: eqCaps, now: new Date('2029-01-01') });
+    assert(result.slots.length > 0);
+    counts.push(f.state.calls.length);
+    assert.equal(f.state.calls.filter(([name]) => name.startsWith('equipment')).length, 3);
+  }
+  assert.equal(counts[0], counts[1]);
 });
