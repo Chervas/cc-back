@@ -533,7 +533,7 @@ exports.check = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'inicio_local requerido (YYYY-MM-DDTHH:mm)' });
   }
 
-  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion', 'grupoClinicaId'] });
+  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion', 'grupoClinicaId', 'equipment_booking_enabled'] });
   if (!clinica) return res.status(404).json({ message: 'Clínica no encontrada' });
 
   let bookingProfile = null;
@@ -857,7 +857,7 @@ exports.slots = asyncHandler(async (req, res) => {
   const requestedLimit = parseIntSafe(limit);
   const includeUnavailable = parseBool(include_unavailable);
 
-  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion', 'grupoClinicaId'] });
+  const clinica = await db.Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion', 'grupoClinicaId', 'equipment_booking_enabled'] });
   if (!clinica) return res.status(404).json({ message: 'Clínica no encontrada' });
   const additionalStaffIds = requestedAdditionalStaff(req);
   if (additionalStaffIds.length) await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
