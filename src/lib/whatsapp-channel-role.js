@@ -108,10 +108,16 @@ function selectWhatsappPhoneAsset({
   purpose = null,
   summarizeHealth = () => ({ can_send: true }),
 } = {}) {
+  const all=[...clinicAssets,...groupAssets];
+  const explicit=role=>all.find(asset=>asset.routing_binding_role===role&&asset.routing_binding_id)||null;
   const findRole = (assets, role) => (Array.isArray(assets) ? assets : [])
-    .find((asset) => resolveWhatsappRouting(asset).role === role) || null;
-  const primary = findRole(clinicAssets, 'primary') || findRole(groupAssets, 'primary');
-  const secondary = findRole(clinicAssets, 'secondary') || findRole(groupAssets, 'secondary');
+    .find((asset) => !asset.additionalData?.routing_disabled && !asset.additionalData?.requireClinicSelection
+      && !asset.routing_binding_id && resolveWhatsappRouting(asset).role === role) || null;
+  const boundPrimary=explicit('primary');
+  const primary = boundPrimary || findRole(clinicAssets, 'primary') || findRole(groupAssets, 'primary');
+  // A saved primary binding denotes a complete clinic routing selection;
+  // no secondary binding then means the user explicitly chose none.
+  const secondary = explicit('secondary') || (!boundPrimary && (findRole(clinicAssets, 'secondary') || findRole(groupAssets, 'secondary')));
   const normalizedPurpose = String(purpose || '').trim().toLowerCase();
 
   if (!secondary || !normalizedPurpose) return primary;

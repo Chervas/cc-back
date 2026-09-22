@@ -1,7 +1,7 @@
 'use strict';
 const { createHmac, timingSafeEqual } = require('node:crypto');
 const { exact, fail } = require('./reader-protocol'); const { UUID } = require('./event');
-const ACTIONS = ['auth.sign_in', 'auth.token_sign_in', 'auth.unlock', 'auth.email_code', 'auth.password_reset', 'integration.meta.scope_block', 'session.issued', 'session.renewed', 'session.revoked', 'session.expired', 'audit.records.read',
+const ACTIONS = ['integration.whatsapp.activate','integration.whatsapp.routing', 'auth.sign_in', 'auth.token_sign_in', 'auth.unlock', 'auth.email_code', 'auth.password_reset', 'integration.meta.scope_block', 'session.issued', 'session.renewed', 'session.revoked', 'session.expired', 'audit.records.read',
   ...require('./access-policy-contract').PERMISSION_ACTIONS, ...require('./realtime-contract').REALTIME_ACTIONS,
   ...require('./patient-read-contract').PATIENT_READ_ACTIONS, 'integration.asset.disconnect', 'integration.asset.map',
   'integration.oauth.authorize', 'integration.oauth.activate', 'integration.whatsapp.authorization_state', 'integration.asset.enrollment', 'integration.google_ads.action_plan', 'integration.google_ads.destinations', 'integration.google_ads.destination_list',

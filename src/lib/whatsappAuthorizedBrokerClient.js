@@ -85,7 +85,7 @@ function configuration(env = process.env) {
   assertStaging(env);
   if (env.WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE !== CONFIG_FILE) fail('whatsapp_authorized_configuration_invalid');
   const raw = privateFile(CONFIG_FILE, 1048576);
-  try { return validateConfiguration(JSON.parse(raw.toString('utf8'))); }
+  try { const value=JSON.parse(raw.toString('utf8'));const catalog=require('./whatsappActivationCatalog');value.bindings=[...value.bindings,...catalog.sendBindings(catalog.read())];return validateConfiguration(value); }
   catch { fail('whatsapp_authorized_configuration_invalid'); }
   finally { raw.fill(0); }
 }

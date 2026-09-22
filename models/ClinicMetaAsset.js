@@ -61,7 +61,7 @@ module.exports = (sequelize, DataTypes) => {
         },
         metaConnectionId: { 
             type: DataTypes.INTEGER,
-            allowNull: false,
+            allowNull: true, // Dedicated WhatsApp receipts are independent of general Meta OAuth.
             references: {
                 model: 'MetaConnections',
                 key: 'id',
@@ -69,6 +69,7 @@ module.exports = (sequelize, DataTypes) => {
             onUpdate: 'CASCADE',
             onDelete: 'CASCADE',
         },
+        whatsappAuthorizationId: { type: DataTypes.STRING(36), allowNull: true },
         assetType: { 
             type: DataTypes.ENUM('facebook_page', 'instagram_business', 'ad_account', 'whatsapp_business_account', 'whatsapp_phone_number'),
             allowNull: false,
