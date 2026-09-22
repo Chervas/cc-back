@@ -49,6 +49,21 @@ test('Only this SDK callback plus validated Meta selection can produce one resul
   assert.equal(f.messages[1].data.code, 'FICTITIOUS_CODE'); assert(!Object.hasOwn(f.messages[1].data, 'state'));
   f.meta(); f.code({ authResponse: { code: 'FICTITIOUS_CODE_2' } }); assert.equal(f.messages.length, 2); assert.equal(f.listeners.size, 0);
 });
+test('Successful authorization leaves Meta payment steps open and releases the window after either callback order', t => {
+  for (const first of ['code', 'selection']) {
+    const f = fixture(t); f.start(); const popup = f.opened[0].popup;
+    const pagehide = f.listeners.get('pagehide');
+    if (first === 'code') f.code({ authResponse: { code: 'FICTITIOUS_CODE' } }); else f.meta();
+    assert.equal(popup.closeCalls, 0);
+    if (first === 'code') f.meta(); else f.code({ authResponse: { code: 'FICTITIOUS_CODE' } });
+    assert.equal(f.messages.at(-1).data.type, 'cc.wa.result');
+    assert.equal(popup.closed, false); assert.equal(popup.closeCalls, 0);
+    assert.equal(f.win.open, f.nativeOpen); assert.equal(f.listeners.size, 0);
+    // Removing the successful iframe must not close Meta or cancel its receipt.
+    pagehide(); f.meta(); f.elements.cancel.click();
+    assert.equal(popup.closeCalls, 0); assert.equal(f.messages.length, 2);
+  }
+});
 test('Bearer responses, conflicting selections and provider errors emit only fixed failure codes', t => {
   const bearer = fixture(t); bearer.start(); bearer.code({ authResponse: { accessToken: 'FICTITIOUS_SECRET', code: 'FICTITIOUS_CODE' } });
   assert.equal(bearer.messages.at(-1).data.reason, 'authorization_incomplete'); assert(!JSON.stringify(bearer.messages).includes('FICTITIOUS'));
