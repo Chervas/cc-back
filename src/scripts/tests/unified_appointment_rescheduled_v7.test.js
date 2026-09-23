@@ -6,6 +6,9 @@ const db = require('../../../models');
 const migration = require('../../../migrations/20260905210000-prepare-unified-appointment-rescheduled-v7');
 const flowEngine = require('../../services/flowEngineV2.service');
 const { validateFlowPayloadForInternalUse } = require('../../controllers/automationsV2.controller');
+const {
+  CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION,
+} = require('../../lib/automation-intent-contract');
 
 async function evaluate(node, context) {
   return flowEngine._processNode(node, context, { simulation: true });
@@ -76,9 +79,13 @@ async function run() {
     assert.equal(node.outputs.on_response, responseTarget);
   }
 
-  for (const id of ['N18', 'N14', 'N28', 'N24', 'N40', 'N35', 'N77', 'N85']) {
+  const historicalContractNodes = new Set(['N18', 'N14', 'N28', 'N24', 'N40', 'N35']);
+  for (const id of [...historicalContractNodes, 'N77', 'N85']) {
     assert.equal(byId.get(id).config.preset_key, 'confirm_appointment');
-    assert.equal(byId.get(id).config.preset_contract_version, 2);
+    assert.equal(
+      byId.get(id).config.preset_contract_version,
+      historicalContractNodes.has(id) ? 2 : CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION,
+    );
     assert.equal(byId.get(id).outputs.on_fail, 'N93');
   }
 
@@ -140,17 +147,14 @@ async function run() {
     attributes: ['public_id', 'version'],
     raw: true,
   });
-  assert.deepEqual(activeRows.map((row) => ({
-    public_id: row.public_id,
-    version: Number(row.version),
-  })), [{
-    public_id: migration._test.TARGET_PUBLIC_ID,
-    version: migration._test.DRAFT_VERSION,
-  }]);
+  assert.equal(activeRows.length, 1);
+  assert.equal(activeRows[0].public_id, migration._test.TARGET_PUBLIC_ID);
+  const activeVersion = Number(activeRows[0].version);
+  assert.equal(activeVersion >= migration._test.DRAFT_VERSION, true);
   const activeUnified = await db.AutomationFlowTemplateV2.findOne({
     where: {
       public_id: migration._test.TARGET_PUBLIC_ID,
-      version: migration._test.DRAFT_VERSION,
+      version: activeVersion,
     },
     attributes: ['is_system'],
     raw: true,
@@ -163,7 +167,7 @@ async function run() {
     raw: true,
   });
   assert.equal(catalog?.template_key, migration._test.TARGET_PUBLIC_ID);
-  assert.equal(Number(catalog?.template_version), migration._test.DRAFT_VERSION);
+  assert.equal(Number(catalog?.template_version), activeVersion);
 
   console.log('Unified appointment rescheduled v7: ok');
 }

@@ -2,31 +2,51 @@
 
 const CLASSIFY_INTENT_PRESET_KEY = 'classify_intent';
 const CONFIRM_APPOINTMENT_PRESET_KEY = 'confirm_appointment';
-const CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION = 3;
+const CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION = 4;
 const CONFIRM_APPOINTMENT_DECISION_TEMPLATE_KEY = 'confirm_appointment_v2';
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.85;
 const RESPONSE_NEED_CONFIDENCE_THRESHOLD = 0.75;
 
+const CONFIRM_APPOINTMENT_ANALYSIS_FIELDS = Object.freeze([
+  {
+    name: 'respuesta_afirmativa_a_la_clinica',
+    type: 'boolean',
+    description: 'Devuelve true solo si alguna parte del lote contiene una afirmación o acuse que responde a la petición concreta de confirmación de la clínica. Una pregunta o petición sin afirmación explícita devuelve false aunque presuponga la cita o sea compatible con asistir',
+    include_confidence: true,
+  },
+  {
+    name: 'negacion_explicita_de_la_confirmacion',
+    type: 'boolean',
+    description: 'Devuelve true solo si el lote contiene una negación explícita dirigida a esa misma confirmación, por ejemplo no lo he recibido o al final no puedo ir. Devuelve false ante pero, una pregunta, una queja o un asunto pendiente diferente sin una negación de la confirmación',
+    include_confidence: true,
+  },
+  {
+    name: 'requiere_respuesta',
+    type: 'boolean',
+    description: 'Devuelve true si el lote contiene una pregunta, petición, comentario que exige actuación o contenido no interpretable que recepción debe revisar',
+    include_confidence: true,
+  },
+  {
+    name: 'motivo',
+    type: 'string',
+    description: 'Explica brevemente la evidencia de cada señal sin convertir un asunto pendiente diferente en una contradicción de la confirmación',
+    include_confidence: true,
+  },
+]);
+
 const CONFIRM_APPOINTMENT_PRESET_CONFIG = Object.freeze({
   preset_contract_version: CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION,
   instruction: [
-    'Analiza exclusivamente patient_message_batch como la respuesta nueva del paciente a la petición de confirmación del último mensaje de la clínica sobre una cita.',
-    'El propio patient_message_batch incluye el mensaje concreto de la clínica al que responde el paciente; usa appointment y trigger únicamente como contexto de esa cita.',
-    'No uses mensajes anteriores, ejemplos de estas instrucciones ni datos de contexto como si fueran palabras del paciente.',
-    'El motivo solo puede atribuir una pregunta, petición, comentario o decisión al paciente si aparece en response_text, response_lines, response_items o reaction_emoji del lote actual; listened_message_preview y reaction_target_message_preview son referencias de la clínica.',
-    'Primero identifica qué pidió confirmar la clínica. Si preguntó si el paciente asistirá, confirma_asistencia=true significa que acepta asistir. Si preguntó si recibió el mensaje o los datos de la cita enviados al agendarla, confirma_asistencia=true significa que confirma esa recepción, sin afirmar por ello que asistirá.',
-    'Evalúa confirma_asistencia y requiere_respuesta de forma independiente recorriendo todo el lote: una pregunta o petición real posterior no borra una confirmación explícita anterior, salvo que exista una contradicción posterior.',
-    'Una respuesta afirmativa o de acuse breve como "sí", "sí lo es", "confirmo", "sí podré ir", "puedo ir", "allí estaré", "ok", "vale", "recibido" o un agradecimiento confirma cuando responde directamente a una petición clara de confirmación y no existe contradicción.',
-    'La expresión "sí podré ir" es una afirmación declarativa y no una pregunta.',
-    'Si patient_message_batch indica response_message_type=reaction y contiene una reacción positiva vinculada al mensaje de confirmación, devuelve confirma_asistencia=true y requiere_respuesta=false: la reacción es el acuse, no una pregunta ni una petición.',
-    'Devuelve confirma_asistencia=false cuando el paciente rechaza lo preguntado, solicita cambiar o cancelar la cita, expresa que todavía no puede confirmar, solo plantea otro asunto o no aporta una confirmación.',
-    'Devuelve requiere_respuesta=true únicamente cuando el lote actual contiene una pregunta, una petición concreta, un comentario que exige actuación de la clínica o contenido no interpretable que recepción deba revisar.',
-    'Para marcar requiere_respuesta=true debes poder señalar la evidencia presente en el lote actual. No inventes ni recuperes una pregunta o petición de otro mensaje, del contexto o de estas instrucciones.',
-    'Devuelve requiere_respuesta=false para saludos, confirmaciones, agradecimientos, acuses y reacciones positivas sin ninguna petición real pendiente, aunque una persona pudiera contestar por cortesía.',
-    'Si el lote confirma y además contiene realmente una pregunta o petición, devuelve confirma_asistencia=true y requiere_respuesta=true.',
-    'Expresa cualquier duda sobre la clasificación mediante una confianza menor; no conviertas esa duda en una necesidad de respuesta inexistente.',
-    'La confianza de cada campo mide la certeza de que el valor concreto devuelto es correcto: si un booleano es false y estás seguro de ese false, su confianza debe ser alta. No uses la confianza como probabilidad de que el booleano sea true.',
-    'No clasifiques el tipo de cancelación o cambio ni ejecutes acciones. Devuelve exactamente los campos solicitados, la confianza individual de cada campo y un motivo breve basado solo en la evidencia recibida.',
+    'Analiza exclusivamente patient_message_batch respecto al mensaje concreto de la clínica incluido como listened_message_preview o reaction_target_message_preview.',
+    'Evalúa por separado: (1) si existe una respuesta afirmativa a lo que la clínica pidió confirmar, (2) si existe una negación explícita posterior de esa misma confirmación y (3) si queda una pregunta, petición o actuación pendiente.',
+    'Un sí, confirmo, podré ir, allí estaré, ok, vale, recibido o agradecimiento breve cuenta como respuesta afirmativa cuando responde directamente a una petición clara de confirmación.',
+    'Una reacción positiva vinculada al mensaje de confirmación también cuenta como respuesta afirmativa.',
+    'No confundas contexto compatible con confirmación: una pregunta o petición aislada, como preguntar qué debe llevar, dónde acudir o a qué hora es la cita, no afirma lo preguntado y debe devolver respuesta_afirmativa_a_la_clinica=false.',
+    'Solo una negación o revocación expresa de esa misma confirmación marca negacion_explicita_de_la_confirmacion=true y exige requiere_respuesta=true. Pero o además seguidos de otro asunto, pregunta, queja o petición deben dejar esa señal en false.',
+    'Si existe una respuesta afirmativa y después otro asunto pendiente, conserva la señal afirmativa, marca negacion_explicita_de_la_confirmacion=false y requiere_respuesta=true.',
+    'Si el paciente rechaza lo preguntado, pide cancelar o cambiar, todavía no puede confirmar o no aporta confirmación, no marques respuesta afirmativa.',
+    'Marca requiere_respuesta=true solo por contenido real del lote que exija actuación o por un adjunto no interpretable; no lo marques para una confirmación, acuse, saludo o agradecimiento sin nada pendiente.',
+    'No uses mensajes históricos, appointment, trigger ni ejemplos como palabras del paciente. Devuelve exactamente las señales solicitadas y un motivo breve basado en el lote actual.',
   ].join(' '),
   context_sources: [
     { key: 'patient_message_batch', path: '{{last_response_context}}' },
@@ -223,6 +243,7 @@ module.exports = {
   CLASSIFY_INTENT_PRESET_KEY,
   CONFIRM_APPOINTMENT_DECISION_TEMPLATE,
   CONFIRM_APPOINTMENT_DECISION_TEMPLATE_KEY,
+  CONFIRM_APPOINTMENT_ANALYSIS_FIELDS,
   CONFIRM_APPOINTMENT_PRESET_CONFIG,
   CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION,
   CONFIRM_APPOINTMENT_PRESET_KEY,

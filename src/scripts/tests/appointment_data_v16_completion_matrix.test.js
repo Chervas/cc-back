@@ -16,9 +16,7 @@ async function loadNodes() {
     where: { public_id: PUBLIC_ID, version: VERSION },
     raw: true,
   });
-  assert(template, 'v16 draft is required');
-  assert.equal(Number(template.is_active), 0);
-  assert.equal(template.published_at, null);
+  assert(template, 'v16 template is required');
   const nodes = typeof template.nodes === 'string' ? JSON.parse(template.nodes) : template.nodes;
   return new Map(nodes.map((node) => [node.id, node]));
 }

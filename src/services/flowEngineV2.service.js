@@ -80,7 +80,11 @@ const {
   formatInboundResponseText,
   isRevokedMessage,
 } = require('../lib/automation-conversation-context');
-const { AUTO_APPLY_CONFIDENCE_THRESHOLD } = require('../lib/automation-intent-contract');
+const {
+  AUTO_APPLY_CONFIDENCE_THRESHOLD,
+  CONFIRM_APPOINTMENT_ANALYSIS_FIELDS,
+  CONFIRM_APPOINTMENT_PRESET_CONFIG,
+} = require('../lib/automation-intent-contract');
 const {
   emitAutomationResponseProcessing,
   findHumanReplyAfterMessage,
@@ -1846,6 +1850,103 @@ function buildScopedClassifyIntentConversation(context = {}) {
       text: cleanString(recentPatientTextFromConversation(context)),
       items: Array.isArray(responseContext.response_items) ? responseContext.response_items : [],
     },
+  };
+}
+
+function buildScopedConfirmAppointmentBatch(context = {}) {
+  const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
+  const responseItems = Array.isArray(responseContext.response_items)
+    ? responseContext.response_items
+    : [];
+  const textMessages = responseItems
+    .filter((item) => normalizeKey(item?.content_type) === 'text')
+    .map((item) => cleanString(item?.text))
+    .filter(Boolean);
+  const responseLines = Array.isArray(responseContext.response_lines)
+    ? responseContext.response_lines.map((line) => cleanString(line)).filter(Boolean)
+    : [];
+  const messageBatch = textMessages.length > 1
+    ? textMessages
+    : responseLines.length > 1
+      ? responseLines
+      : [];
+  const nonTextItems = responseItems
+    .filter((item) => normalizeKey(item?.content_type) !== 'text');
+  const responseText = cleanString(responseContext.response_text || context?.last_response) || null;
+  const messageType = cleanString(responseContext.response_message_type) || null;
+  const mediaKind = cleanString(responseContext.response_media_kind) || null;
+  const reactionEmoji = cleanString(responseContext.reaction_emoji) || null;
+  const batch = {
+    response_items: nonTextItems,
+    listened_message_preview: cleanString(
+      responseContext.listened_message_preview
+      || context?.last_prompt
+      || latestClinicPromptFromConversation(context)
+    ) || null,
+  };
+  if (messageBatch.length > 1) {
+    batch.response_messages = messageBatch.map((text) => ({ text }));
+  } else {
+    batch.response_text = responseText;
+  }
+  if (messageType && messageType !== 'text') batch.response_message_type = messageType;
+  if (mediaKind) batch.response_media_kind = mediaKind;
+  if (reactionEmoji) batch.reaction_emoji = reactionEmoji;
+  if (reactionEmoji && cleanString(responseContext.reaction_target_message_id)) {
+    batch.reaction_target_message_id = cleanString(responseContext.reaction_target_message_id);
+  }
+  if (reactionEmoji && cleanString(responseContext.reaction_target_message_type)) {
+    batch.reaction_target_message_type = cleanString(responseContext.reaction_target_message_type);
+  }
+  if (reactionEmoji && cleanString(responseContext.reaction_target_message_preview)) {
+    batch.reaction_target_message_preview = cleanString(responseContext.reaction_target_message_preview);
+  }
+  return batch;
+}
+
+function deriveConfirmAppointmentOutput(signalOutput = {}) {
+  const affirmative = signalOutput.respuesta_afirmativa_a_la_clinica === true;
+  const contradiction = signalOutput.negacion_explicita_de_la_confirmacion === true;
+  const confirms = affirmative && !contradiction;
+  const requiresReply = contradiction || signalOutput.requiere_respuesta === true;
+  const affirmativeConfidence = Math.max(
+    0,
+    Math.min(1, Number(signalOutput.confianza_respuesta_afirmativa_a_la_clinica) || 0),
+  );
+  const contradictionConfidence = Math.max(
+    0,
+    Math.min(1, Number(signalOutput.confianza_negacion_explicita_de_la_confirmacion) || 0),
+  );
+  const confirmationConfidence = confirms
+    ? Math.min(affirmativeConfidence, contradictionConfidence)
+    : contradiction
+      ? contradictionConfidence
+      : affirmativeConfidence;
+
+  return {
+    confirma_asistencia: confirms,
+    requiere_respuesta: requiresReply,
+    motivo: cleanString(signalOutput.motivo),
+    confianza_confirma_asistencia: confirmationConfidence,
+    confianza_requiere_respuesta: contradiction
+      ? Math.max(
+          contradictionConfidence,
+          Math.max(0, Math.min(1, Number(signalOutput.confianza_requiere_respuesta) || 0)),
+        )
+      : Math.max(0, Math.min(1, Number(signalOutput.confianza_requiere_respuesta) || 0)),
+    confianza_motivo: Math.max(
+      0,
+      Math.min(1, Number(signalOutput.confianza_motivo) || 0),
+    ),
+    _ai_confirmation_signals: {
+      affirmative,
+      contradiction,
+      affirmative_confidence: affirmativeConfidence,
+      contradiction_confidence: contradictionConfidence,
+    },
+    ...Object.fromEntries(
+      Object.entries(signalOutput).filter(([key]) => key.startsWith('_ai_'))
+    ),
   };
 }
 
@@ -6784,8 +6885,13 @@ async function processNode(node, context, runtime = {}) {
       if (RETIRED_APPOINTMENT_INTENT_PRESETS.has(presetKey)) {
         throw new Error(`retired_ai_preset_not_supported:${presetKey}`);
       }
+      const usesConfirmSignalContract = presetKey === 'confirm_appointment'
+        && usesStructuredConfirmAppointmentContract(config);
 
       const resolvedSources = sourceEntries
+        .filter((source) => !usesConfirmSignalContract
+          || cleanString(source?.key) === 'patient_message_batch'
+          || cleanString(source?.path).replace(/\s+/g, '') === '{{last_response_context}}')
         .map((source) => {
           const key = cleanString(source?.key) || 'input';
           const path = cleanString(source?.path);
@@ -6795,7 +6901,10 @@ async function processNode(node, context, runtime = {}) {
             value: presetKey === 'classify_intent'
               && (key === 'conversation_today' || path.replace(/\s+/g, '') === '{{conversation_today}}')
               ? buildScopedClassifyIntentConversation(aiContext)
-              : resolveTemplateValue(path, aiContext),
+              : presetKey === 'confirm_appointment'
+                && (key === 'patient_message_batch' || path.replace(/\s+/g, '') === '{{last_response_context}}')
+                ? buildScopedConfirmAppointmentBatch(aiContext)
+                : resolveTemplateValue(path, aiContext),
           };
         })
         .filter((source) => source && source.value !== undefined && source.value !== null);
@@ -6859,8 +6968,14 @@ async function processNode(node, context, runtime = {}) {
         };
       }
 
+      const analysisOutputFields = usesConfirmSignalContract
+        ? normalizeOutputFieldEntries(CONFIRM_APPOINTMENT_ANALYSIS_FIELDS)
+        : normalizedOutputFields;
       const outputFormat = normalizeOutputFieldsToFormat(normalizedOutputFields);
       const outputFormatSimple = normalizeAiOutputFormat(outputFormat);
+      const analysisOutputFormatSimple = usesConfirmSignalContract
+        ? normalizeAiOutputFormat(normalizeOutputFieldsToFormat(analysisOutputFields))
+        : outputFormatSimple;
       const analysisMode = normalizeAiAnalysisMode(resolveTemplateValue(config?.mode, context));
       if (simulation) {
         const configuredSimulationOutput = getByPath(
@@ -6908,10 +7023,12 @@ async function processNode(node, context, runtime = {}) {
       try {
         aiOutput = await aiOrchestrator.analyzeStructured({
           useCase: presetKey || 'automation_v2_analysis',
-          systemPrompt: buildAiSystemPrompt(outputFormatSimple, normalizedOutputFields),
-          prompt: resolvedInstruction,
+          systemPrompt: buildAiSystemPrompt(analysisOutputFormatSimple, analysisOutputFields),
+          prompt: usesConfirmSignalContract
+            ? CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction
+            : resolvedInstruction,
           inputText,
-          outputFormat: outputFormatSimple,
+          outputFormat: analysisOutputFormatSimple,
           analysisMode,
           maxTokens: resolveTemplateValue(config?.max_tokens, context),
           clinicId: runtimeTargets.clinic_id,
@@ -6927,6 +7044,8 @@ async function processNode(node, context, runtime = {}) {
 
       if (presetKey === 'classify_intent') {
         aiOutput = normalizeClassifyIntentOutput(aiOutput, aiContext);
+      } else if (usesConfirmSignalContract) {
+        aiOutput = deriveConfirmAppointmentOutput(aiOutput);
       }
       aiOutput = normalizeConfiguredAiOutput(aiOutput, normalizedOutputFields);
       if (presetKey === 'classify_intent') {
@@ -7130,6 +7249,7 @@ async function resumeWaitingNode(execution, node, context, {
         reaction_target_message_id: cleanString(
           inboundReaction.target_message_id
           || inboundReaction.targetMessageId
+          || inboundReaction.message_id
         ) || null,
         reaction_target_message_type: cleanString(
           inboundReaction.target_message_type
@@ -7165,6 +7285,7 @@ async function resumeWaitingNode(execution, node, context, {
           reaction_target_message_id: cleanString(
             inboundReaction.target_message_id
             || inboundReaction.targetMessageId
+            || inboundReaction.message_id
           ) || null,
           reaction_target_message_type: cleanString(
             inboundReaction.target_message_type
@@ -8017,6 +8138,8 @@ module.exports = {
   buildDeterministicConfirmAppointmentOutput,
   buildDeterministicClassifyIntentOutput,
   buildScopedClassifyIntentConversation,
+  buildScopedConfirmAppointmentBatch,
+  deriveConfirmAppointmentOutput,
   hasAppliedAppointmentIntent,
   isAppointmentIntentAlreadyResolved,
   hasExternallyResolvedAppointmentIntent,

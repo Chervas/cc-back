@@ -12,6 +12,7 @@ const {
 
 function buildContext({ text, clinicText, reactionEmoji = null }) {
   const isReaction = Boolean(reactionEmoji);
+  const responseLines = isReaction ? [] : String(text || '').split(/\r?\n/).filter(Boolean);
   return {
     appointment: {
       id: 990101,
@@ -28,7 +29,12 @@ function buildContext({ text, clinicText, reactionEmoji = null }) {
     last_response: isReaction ? null : text,
     last_response_context: {
       response_text: isReaction ? null : text,
-      response_lines: isReaction ? [] : [text],
+      response_lines: responseLines,
+      response_items: responseLines.map((line, index) => ({
+        message_id: 990102 + index,
+        content_type: 'text',
+        text: line,
+      })),
       response_message_id: 990102,
       response_message_type: isReaction ? 'reaction' : 'text',
       reaction_emoji: reactionEmoji,
@@ -61,6 +67,17 @@ async function run() {
       needsReply: false,
     },
     { text: 'Sí lo he recibido, ¿tengo que llevar mi propio orinal?', confirms: true, needsReply: true },
+    {
+      text: 'Si\nPero me teniais que confirmar lo del tema brakets',
+      confirms: true,
+      needsReply: true,
+    },
+    {
+      text: 'Sí\nPerdona, al final no puedo ir',
+      clinicText: '¿Nos confirmas tu asistencia a la cita de mañana?',
+      confirms: false,
+      needsReply: true,
+    },
     { text: 'No lo he recibido, ¿puedes enviármelo otra vez?', confirms: false, needsReply: true },
     { text: '¿Tengo que llevar algo?', confirms: false, needsReply: true },
     { text: 'Gracias', confirms: true, needsReply: false },
@@ -86,6 +103,12 @@ async function run() {
     );
     assert.equal(result.kind, 'success', `${scenario.text}: execution`);
     assert.equal(result.output._ai_provider, 'bedrock', `${scenario.text}: provider`);
+    if (
+      result.output.confirma_asistencia !== scenario.confirms
+      || result.output.requiere_respuesta !== scenario.needsReply
+    ) {
+      console.error(JSON.stringify({ scenario, output: result.output }, null, 2));
+    }
     assert.equal(result.output.confirma_asistencia, scenario.confirms, `${scenario.text}: confirmation`);
     assert.equal(result.output.requiere_respuesta, scenario.needsReply, `${scenario.text}: needs reply`);
     assert(result.output.confianza_confirma_asistencia > 0.85, `${scenario.text}: confirmation confidence`);

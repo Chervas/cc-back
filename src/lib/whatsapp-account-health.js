@@ -146,6 +146,17 @@ function deriveHealthCandidate(input = {}) {
     };
   }
 
+  if (providerErrorCode === 131042) {
+    return {
+      state: 'blocked',
+      can_send: false,
+      severity: 'critical',
+      reason_code: 'meta_error_131042_payment_missing',
+      provider_status: providerStatus || null,
+      provider_error_code: providerErrorCode,
+    };
+  }
+
   if (input.assetActive === false) {
     return {
       state: 'disconnected',

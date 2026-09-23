@@ -79,7 +79,7 @@ async function main() {
   assert.equal(ai.config.preset_key, 'classify_intent');
   assert.equal(ai.config.output_fields.some((field) => field.name === 'accion_inequivoca'), false);
   assert.equal(ai.config.output_fields.find((field) => field.name === 'intencion_principal').include_confidence, true);
-  assert.match(ai.config.instruction, /todavia no puede confirmar/);
+  assert.match(ai.config.instruction, /todav[ií]a no puede confirmar/);
   assert.equal(ai.outputs.on_fail, null);
   assert.equal(ai.outputs.on_success, 'N10');
   assert.equal(ai.config.output_fields.some((field) => field.name === 'posible_urgencia'), false);

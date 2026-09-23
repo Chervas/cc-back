@@ -11,7 +11,7 @@ function normalize(raw, scope, now = Date.now()) {
   let body; try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)); } catch { held(); }
   if (body?.object !== 'whatsapp_business_account' || !Array.isArray(body.entry) || !body.entry.length || body.entry.length > 100) held();
   const messages = []; const statuses = [];
-  const add = (m, peer, direction, historical) => {
+  const add = (m, peer, direction, historical, sourceEvent) => {
     contact(peer);
     if (!m || typeof m.id !== 'string' || !/^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(m.id)
       || typeof m.timestamp !== 'string' || !/^[0-9]{1,12}$/.test(m.timestamp)) held();
@@ -28,7 +28,7 @@ function normalize(raw, scope, now = Date.now()) {
     if (typeof content !== 'string' || Buffer.byteLength(content) > 50000) held();
     const key = hash(JSON.stringify([scope.wabaId,scope.phoneId,m.id]));
     const digest = hash(JSON.stringify([peer,direction,m.type,content,at]));
-    messages.push({ key,digest,peer,direction,at,content,type,wamid:m.id,providerType:m.type,historical,details:D.details(m) });
+    messages.push({ key,digest,peer,direction,at,content,type,wamid:m.id,providerType:m.type,historical,sourceEvent,details:D.details(m) });
     if (messages.length > 2000) held();
   };
   for (const entry of body.entry) {
@@ -38,7 +38,7 @@ function normalize(raw, scope, now = Date.now()) {
       if (value?.metadata?.phone_number_id !== scope.phoneId || value.messaging_product !== 'whatsapp') held();
       if (change.field === 'messages') {
         if (!Array.isArray(value.messages) && !Array.isArray(value.statuses)) held();
-        for (const m of value.messages || []) add(m,m.from,'inbound',false);
+        for (const m of value.messages || []) add(m,m.from,'inbound',false,'messages');
         for (const s of value.statuses || []) {
           if (typeof s?.id !== 'string' || !/^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(s.id)) held();
           if (!['sent','delivered','read','failed'].includes(s.status)) held(s.status === 'played' ? 'unsupported_event' : 'review_required');
@@ -46,7 +46,7 @@ function normalize(raw, scope, now = Date.now()) {
         }
       } else if (change.field === 'smb_message_echoes') {
         if (!Array.isArray(value.message_echoes)) held();
-        for (const m of value.message_echoes) add(m,m.to,'outbound',false);
+        for (const m of value.message_echoes) add(m,m.to,'outbound',false,'smb_message_echoes');
       } else if (change.field === 'history') {
         if (!Array.isArray(value.history)) held();
         for (const h of value.history) {
@@ -55,7 +55,7 @@ function normalize(raw, scope, now = Date.now()) {
             contact(thread.id); if (!Array.isArray(thread.messages)) held();
             for (const m of thread.messages) {
               const direction = m.from === thread.id ? 'inbound' : m.to === thread.id ? 'outbound' : null;
-              if (!direction) held(); add(m,thread.id,direction,true);
+              if (!direction) held(); add(m,thread.id,direction,true,'history');
             }
           }
         }
@@ -94,7 +94,7 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
     // actual content under the same WAMID. Upgrade that row, never duplicate it
     // or treat historical materialization as a new automation response.
     await query('UPDATE Messages SET content=?,message_type=?,metadata=JSON_MERGE_PATCH(metadata,CAST(? AS JSON)),updatedAt=NOW(3) WHERE id=?',
-      [m.content,m.type,JSON.stringify({provider_type:m.providerType,...m.details,recovery_without_automation:true,automatic_actions_allowed:false}),messageId]);
+      [m.content,m.type,JSON.stringify({provider_type:m.providerType,source_event:m.sourceEvent,coexistence:{source_event:m.sourceEvent},...m.details,recovery_without_automation:true,automatic_actions_allowed:false}),messageId]);
     return true;
   };
   try {
@@ -139,6 +139,7 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
       if (!messageId) {
         const metadata=JSON.stringify({ wamid:m.wamid,phone_number_id:scope.phoneId,waba_id:scope.wabaId,passive_recovery:true,
           historical:m.historical,provider_type:m.providerType,automatic_actions_allowed:false,inbox_receipt:lease.receipt,
+          source_event:m.sourceEvent,coexistence:{source_event:m.sourceEvent},
           recovery_without_automation: lease.recoveryWithoutAutomation === true, ...m.details });
         const row=await query("INSERT INTO Messages(conversation_id,direction,content,message_type,status,metadata,sent_at,createdAt,updatedAt) VALUES(?,?,?,?,'sent',?,?,?,NOW(3))",[conversationId,m.direction,m.content,m.type,metadata,new Date(m.at),new Date(m.at)]);
         messageId=row.insertId; inserted++;

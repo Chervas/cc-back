@@ -47,7 +47,7 @@ async function main() {
     ai.config.output_fields.map((field) => field.name),
     ['intencion_principal', 'intencion_secundaria', 'posible_urgencia', 'necesita_respuesta', 'motivo'],
   );
-  assert.match(ai.config.instruction, /Marca posible urgencia/);
+  assert.match(ai.config.instruction, /Marca posible_urgencia=true/);
   assert.equal(JSON.stringify(ai.config).includes('posible_urgencia'), true);
   assert.equal(JSON.stringify(ai.config).includes('urgencia_posible'), true);
 

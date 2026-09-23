@@ -392,15 +392,20 @@ async function run() {
   });
   assert.equal(validation.ok, true, JSON.stringify(validation.errors));
 
-  const active = await db.AutomationFlowTemplateV2.findOne({
+  const activeRows = await db.AutomationFlowTemplateV2.findAll({
     where: {
       public_id: migration._test.TARGET_PUBLIC_ID,
-      version: migration._test.ACTIVE_VERSION,
       is_active: true,
     },
+    attributes: ['version'],
     raw: true,
   });
-  assert(active, 'active v6 must remain untouched');
+  assert.equal(activeRows.length, 1, 'the flow family must have exactly one active version');
+  assert.equal(
+    [migration._test.ACTIVE_VERSION, migration._test.DRAFT_VERSION].includes(Number(activeRows[0].version)),
+    true,
+    'the active version must be the previous publication or the validated v7 publication',
+  );
 
   console.log('Cancel unconfirmed appointment night before v7: ok');
 }

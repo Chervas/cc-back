@@ -719,82 +719,22 @@ function findWhatsappPaymentMissingError(status) {
 async function notifyWhatsappPaymentMissing({ status, message, clinicId }) {
     const paymentError = findWhatsappPaymentMissingError(status);
     if (!paymentError || !message) {
-        return;
+        return { handled: false };
     }
-
-    const metadata = message.metadata || {};
-    const resolvedClinicId = Number(clinicId || 0) || null;
-    const phoneId = metadata.phoneId || metadata.phoneNumberId || null;
-    const wabaId = metadata.wabaId || null;
-    const href = cleanString(paymentError.href);
-    const providerErrorMessage = cleanString(paymentError?.error_data?.details)
-        || cleanString(paymentError.message)
-        || null;
-    const errorMessage = 'WhatsApp no ha podido cobrar este envío. Añade o revisa el método de pago de la cuenta en WhatsApp Manager antes de volver a intentarlo.';
-
     try {
-        const asset = await findWhatsappPhoneAssetForMetadata({
-            phoneId,
-            wabaId,
-            clinicId: resolvedClinicId,
+        return await whatsappPaymentStatusService.reconcileProviderStatus({
+            status,
+            message,
+            clinicId: Number(clinicId || 0) || null,
+            source: 'message_status_webhook',
         });
-        if (asset) {
-            const additionalData = asset.additionalData || {};
-            asset.additionalData = {
-                ...additionalData,
-                payment: {
-                    ...(additionalData.payment || {}),
-                    status: 'missing_payment_method',
-                    last_error_code: WHATSAPP_PAYMENT_MISSING_ERROR_CODE,
-                    last_error_message: errorMessage,
-                    last_provider_error_message: providerErrorMessage,
-                    last_error_href: href || null,
-                    last_detected_at: new Date().toISOString(),
-                    last_message_id: message.id,
-                    last_wamid: cleanString(metadata.wamid),
-                },
-            };
-            await asset.save();
-        }
-    } catch (assetError) {
-        console.warn('[whatsapp] No se pudo marcar falta de método de pago en el asset', {
-            clinicId: resolvedClinicId,
-            phoneId,
-            wabaId,
-            error: serializeError(assetError),
-        });
-    }
-
-    try {
-        const clinic = resolvedClinicId && Clinica
-            ? await Clinica.findByPk(resolvedClinicId, {
-                attributes: ['id_clinica', 'nombre_clinica'],
-                raw: true,
-            })
-            : null;
-
-        await notificationService.dispatchEvent({
-            event: 'whatsapp.payment_missing',
-            clinicId: resolvedClinicId,
-            data: {
-                clinicId: resolvedClinicId,
-                clinicName: cleanString(clinic?.nombre_clinica),
-                phoneNumber: cleanString(metadata.recipient) || cleanString(status?.recipient_id),
-                phoneNumberId: phoneId,
-                wabaId,
-                messageId: message.id,
-                wamid: cleanString(metadata.wamid),
-                errorCode: WHATSAPP_PAYMENT_MISSING_ERROR_CODE,
-                errorMessage,
-                href: href || null,
-            },
-        });
-    } catch (notificationError) {
-        console.warn('[whatsapp] No se pudo crear notificación por método de pago ausente', {
-            clinicId: resolvedClinicId,
+    } catch (paymentErrorReconciliation) {
+        console.warn('[whatsapp] No se pudo conciliar la falta de método de pago', {
+            clinicId: Number(clinicId || 0) || null,
             messageId: message.id,
-            error: serializeError(notificationError),
+            error: serializeError(paymentErrorReconciliation),
         });
+        return { handled: false };
     }
 }
 
@@ -2002,13 +1942,11 @@ createWorker('webhook_whatsapp', async (job) => {
 
         if (['sent', 'delivered', 'read'].includes(nextStatus)) {
             try {
-                await whatsappPaymentStatusService.clearMissingPaymentAfterSuccessfulStatus({
+                await whatsappPaymentStatusService.reconcileProviderStatus({
+                    status,
+                    message,
                     clinicId: messageRef.clinic_id || clinicId,
-                    phoneId: message.metadata?.phoneId || message.metadata?.phoneNumberId || null,
-                    wabaId: message.metadata?.wabaId || null,
-                    messageId: message.id,
-                    wamid,
-                    status: nextStatus,
+                    source: 'message_status_webhook',
                 });
             } catch (paymentClearError) {
                 console.warn('[whatsapp] No se pudo limpiar estado de pago tras status correcto', {
@@ -2037,12 +1975,12 @@ createWorker('webhook_whatsapp', async (job) => {
         }
 
         if (nextStatus === 'failed') {
-            await notifyWhatsappPaymentMissing({
+            const paymentResult = await notifyWhatsappPaymentMissing({
                 status,
                 message,
                 clinicId: messageRef.clinic_id || clinicId,
             });
-            await whatsappAccountHealthService.recordProviderFailure({
+            if (paymentResult?.handled !== true) await whatsappAccountHealthService.recordProviderFailure({
                 clinicConfig: {
                     originId: message.metadata?.sender_origin_id || message.metadata?.whatsapp_sender_asset_id || null,
                     phoneNumberId: message.metadata?.phoneNumberId || message.metadata?.phoneId || null,

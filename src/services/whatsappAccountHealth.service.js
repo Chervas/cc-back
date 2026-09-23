@@ -425,14 +425,16 @@ async function assertCanSend({ clinicConfig = {}, source = 'send_preflight', mes
 
 async function recordProviderFailure({ clinicConfig = {}, error, source = 'provider_error', messageId = null, jobId = null } = {}) {
   const providerErrorCode = extractProviderErrorCode(error);
-  if (providerErrorCode !== 131031) return { recorded: false, provider_error_code: providerErrorCode };
+  if (![131031, 131042].includes(providerErrorCode)) {
+    return { recorded: false, provider_error_code: providerErrorCode };
+  }
   const asset = await findAssetForConfig(clinicConfig);
   if (!asset) return { recorded: false, provider_error_code: providerErrorCode, reason: 'asset_not_found' };
   const result = await recordObservationForAsset({
     assetId: asset.id,
     signal: { providerErrorCode },
     source,
-    dedupeIdentity: messageId ? `message:${messageId}:131031` : null,
+    dedupeIdentity: messageId ? `message:${messageId}:${providerErrorCode}` : null,
     details: { messageId, jobId },
   });
   return { recorded: true, provider_error_code: providerErrorCode, result };

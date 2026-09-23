@@ -33,7 +33,7 @@ function normalizeStatus(value, stage) {
 function buildStatePatch({
   clinicId,
   stage,
-  status = null,
+  status,
   sourceMessageId = undefined,
   firstMessageAt = undefined,
   deadlineAt = undefined,
@@ -48,11 +48,13 @@ function buildStatePatch({
   failureCode = undefined,
   completedAt = undefined,
 }) {
-  const normalizedStage = normalizeStage(stage);
+  const hasStage = stage !== undefined;
+  const hasStatus = status !== undefined;
+  const normalizedStage = hasStage ? normalizeStage(stage) : null;
   return {
     clinic_id: positiveInt(clinicId),
-    stage: normalizedStage,
-    status: normalizeStatus(status, normalizedStage),
+    ...(hasStage ? { stage: normalizedStage } : {}),
+    ...(hasStage || hasStatus ? { status: normalizeStatus(status, normalizedStage) } : {}),
     ...(sourceMessageId !== undefined ? { source_message_id: positiveInt(sourceMessageId) } : {}),
     ...(firstMessageAt !== undefined ? { first_message_at: firstMessageAt || null } : {}),
     ...(deadlineAt !== undefined ? { deadline_at: deadlineAt || null } : {}),

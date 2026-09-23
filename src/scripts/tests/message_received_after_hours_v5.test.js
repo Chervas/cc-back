@@ -143,7 +143,7 @@ async function main() {
   assert.equal(validation.ok, true, JSON.stringify(validation.errors));
 
   const mainDecision = byId.get('N3');
-  assert.match(byId.get('N2').config.instruction, /ya esta en la puerta y no puede entrar/);
+  assert.match(byId.get('N2').config.instruction, /incidencias de acceso o espera en la clínica/);
   assert.equal(
     byId.get('N60').config.message_text,
     '¡Hola! La clínica no está abierta ahora mismo y no te puedo responder, pero te contestaremos cuanto antes.',
