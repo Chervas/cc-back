@@ -136,6 +136,19 @@ requieren un modo de aplicación explícito y su propio paquete validado.
 - `cliniccloud-import-protocol-draft.js`: manual aportado íntegro como un único
   borrador no asociado. Requiere la migración específica de actores técnicos;
   fuente y paquete inmutables, revisión canónica y reintento por huella.
+- `cliniccloud_extract_protocol_pdf.py`: extractor de texto literal paginado
+  mediante Poppler, para los PDF aportados posteriormente. Recibe bytes por
+  stdin y nombre de archivo como argumento; devuelve JSON, sin escribir archivos
+  ni acceder a la BD. Máximo 10 MiB y 250 páginas; partes de hasta 90.000 unidades
+  UTF-16, separadas solo entre páginas completas. No hace OCR ni infiere tablas,
+  ni elimina pies o trunca instrucciones. Conserva hashes por fuente/parte/página
+  y declara que no reproduce imágenes, firmas gráficas o diseño. El lector
+  `pdf-text` debe estar publicado antes de introducir esos bloques en la
+  biblioteca. El operador privado fija ZIP y cuatro PDF por huella, clínica por
+  volumen, backup, ensayo revertido, diario, revisión canónica y replay. Crea
+  solo borradores nuevos sin asociaciones ni aprobación; conserva los manuales
+  anteriores. Los orígenes internos admitidos son corporal/facial/capilar/obesidad;
+  la ampliación no habilita importaciones actorless desde HTTP.
 
 El ejecutor de aliases admite además `reviewed_partial_identity` bajo la regla
 autorizada de teléfono y parte clara del nombre: revisión del operador (no
