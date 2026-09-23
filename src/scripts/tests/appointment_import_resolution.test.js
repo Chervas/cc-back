@@ -207,3 +207,17 @@ test('resource confirmation cannot silently add a later cabin or another mandato
     assert.deepEqual(f.row,before); assert.equal(f.events.length,0);
   }
 });
+
+test('resource confirmation cannot add, replace or change the turnaround of a reserved machine', async () => {
+  const original=appointment(),base={start_at:original.inicio,end_at:original.fin,installation_id:9,doctor_ids:[5]};
+  for(const [beforeEquipment,afterEquipment] of [[[],[{id:1,turnaround_minutes:0}]],
+    [[{id:1,turnaround_minutes:0}],[{id:2,turnaround_minutes:0}]],
+    [[{id:1,turnaround_minutes:0}],[{id:1,turnaround_minutes:5}]],
+    [[{id:1,turnaround_minutes:0}],[]]]) {
+    const metadata={...original.import_metadata,booking:{version:1,phases:[{...base,equipment:beforeEquipment}]}};
+    const f=fixture({bookingValues:{import_metadata:{...metadata,booking:{version:1,phases:[{...base,equipment:afterEquipment}]}}}});
+    f.row={...original,import_metadata:metadata};const before=structuredClone(f.row);
+    await assert.rejects(f.run({mode:'resources',reason:'Checked',expected_version:review.importReviewVersion(f.row)}),{code:'booking_import_resource_change'});
+    assert.deepEqual(f.row,before);assert.equal(f.events.length,0);
+  }
+});
