@@ -102,6 +102,49 @@ async function main() {
       await loadBookingContext({ db, clinic: owner, profile: noEquipmentProfile, start: new Date('2031-01-07T10:00:00Z'), end: new Date('2031-01-07T11:00:00Z'), transaction: tx, occupancyEnabled: true });
     } finally { db.BookingEquipment.findAll = priorRead; }
     checks.push('no-machine-query-for-ordinary-treatment');
+    // Existing ClinicCloud bookings use their actual duration/resources, not a
+    // newly imported tariff. This fixture is synthetic and always rolled back.
+    await machine.update({ status: 'available', mobility: 'mobile' }, { transaction: tx });
+    await policy.update({ mode: 'all' }, { transaction: tx });
+    const legacyTreatment = await db.Tratamiento.create({ nombre: marker, disciplina: 'estetica', origen: 'clinica',
+      clinica_id: 1, activo: true, duracion_min: 45, clinical_config: {} }, { transaction: tx });
+    const imported = await db.CitaPaciente.create({ ...values(0), tratamiento_id: legacyTreatment.id_tratamiento,
+      inicio: '2031-01-06T14:00:00Z', fin: '2031-01-06T14:20:00Z',
+      source_system: 'cliniccloud', source_reference: `${marker}-imported`, nota: 'Fictitious imported booking' }, { transaction: tx });
+    await imported.reload({ transaction: tx });
+    const originalImported = imported.toJSON();
+    const { importReviewVersion } = require('../../lib/appointment-import-review');
+    const reconciled = await mutateAppointmentBooking({ db, existingAppointmentId: imported.id_cita, appointmentValues: {},
+      capabilities: { simple: true, multi: true, equipment: true }, transaction: tx, persist,
+      importEquipmentAssignment: { expected_version: importReviewVersion(originalImported), source_sha256: 'a'.repeat(64), equipment_ids: [machine.id] } });
+    await reconciled.reload({ transaction: tx });
+    const reconciledRow = reconciled.toJSON();
+    assert.deepEqual({ ...reconciledRow, import_metadata: originalImported.import_metadata, updated_at: originalImported.updated_at }, originalImported);
+    assert.equal(reconciledRow.import_metadata.booking.profile.phases[0].duration_minutes, 20);
+    const importedOccupancy = await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: imported.id_cita }, transaction: tx });
+    assert.equal(importedOccupancy.length, 3);
+    assert.equal(importedOccupancy.find(r => r.resource_kind === 'equipment').end_at.toISOString(), '2031-01-06T14:25:00.000Z');
+    checks.push('documentary-import-reserves-unit-without-changing-source-clinical-data');
+    await assert.rejects(reserve(1, { appointmentValues: { ...values(1), inicio: '2031-01-06T14:00:00Z', fin: '2031-01-06T14:30:00Z' }, force: true }),
+      e => e.code === 'booking_unavailable' && !e.details.can_force);
+    checks.push('imported-machine-reservation-blocks-another-clinic');
+    // Current deployed reader/writers must understand the existing v2 snapshot;
+    // no deployment is needed merely to run this operator-only reconciliation.
+    if (process.env.QA_PUBLISHED_BOOKING_COMPAT === 'crm') {
+      const published = require('/home/ubuntu/wt/back-staging/src/services/appointmentBookingCommand.service');
+      await published.mutateAppointmentBooking({ db, existingAppointmentId: imported.id_cita, appointmentValues: { nota: originalImported.nota },
+        capabilities: { simple: true, multi: true, equipment: true }, transaction: tx, persist });
+      await reconciled.reload({ transaction: tx });
+      assert.deepEqual(reconciled.import_metadata.booking.profile, reconciledRow.import_metadata.booking.profile);
+      await published.mutateAppointmentBooking({ db, existingAppointmentId: imported.id_cita, appointmentValues: { estado: 'cancelada' },
+        capabilities: { simple: true, multi: true, equipment: true }, transaction: tx, persist, stateOnly: true });
+      await published.mutateAppointmentBooking({ db, existingAppointmentId: imported.id_cita, appointmentValues: { estado: 'pendiente' },
+        capabilities: { simple: true, multi: true, equipment: true }, transaction: tx, persist, stateOnly: true });
+      await reconciled.reload({ transaction: tx });
+      assert.deepEqual(reconciled.import_metadata.notification_suppression, originalImported.import_metadata.notification_suppression);
+      assert.equal((await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: imported.id_cita, resource_kind: 'equipment' }, transaction: tx })).length, 1);
+      checks.push('published-crm-command-preserves-imported-snapshot-and-revalidates-reopening-on-isolated-db');
+    }
     await tx.rollback(); tx = null;
     await owner.reload();
     assert.equal(owner.equipment_booking_enabled, originalFeature); assert.equal(owner.grupoClinicaId, originalGroup);

@@ -9,6 +9,8 @@ const { loadBookingContext, searchTreatmentSlots } = require('../../services/app
 const { mutateAppointmentBooking } = require('../../services/appointmentBookingCommand.service');
 const { bookingSegments } = require('../../lib/appointment-booking-segments');
 const { normalizeAdditionalStaff, additionalStaffPayload } = require('../../lib/appointment-additional-staff');
+const { importReviewVersion, hasReviewedImportResources, importResourceFingerprint } = require('../../lib/appointment-import-review');
+const { importedEquipmentProfile } = require('../../lib/appointment-import-equipment');
 
 const capabilities = { simple: true, multi: true };
 const Op = Object.fromEntries(['ne', 'in', 'or', 'lt', 'lte', 'gt'].map((key) => [key, Symbol(key)]));
@@ -625,4 +627,162 @@ test('slot query count is constant across days and candidates with equipment', a
     assert.equal(f.state.calls.filter(([name]) => name.startsWith('equipment')).length, 3);
   }
   assert.equal(counts[0], counts[1]);
+});
+
+function importedEquipmentFixture(options = {}, changes = {}) {
+  const f = equipmentFixture({ bookingProfile: null, ...options });
+  const row = { ...f.values, id_cita: 80, source_system: 'cliniccloud', source_reference: 'source-id-80',
+    updated_at: '2029-01-01T00:00:00.000Z', nota: 'Original',
+    import_metadata: { cliniccloud_delta: { pending_assignment: ['doctor_id', 'installation_id'] },
+      notification_suppression: { appointment_details: true, day_before: true, same_day: true } }, ...changes };
+  f.state.appointments.push(row);
+  const assignment = { expected_version: importReviewVersion(row), source_sha256: 'a'.repeat(64), equipment_ids: [1] };
+  const reconcile = (overrides = {}) => f.db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, transaction =>
+    f.reserve({ capabilities: eqCaps, appointmentValues: {}, existingAppointmentId: row.id_cita,
+      transaction, importEquipmentAssignment: assignment, ...overrides }));
+  return { ...f, row, assignment, reconcile };
+}
+
+test('documentary equipment reconciliation preserves the appointment and occupies the unit canonically', async () => {
+  const f = importedEquipmentFixture();
+  const before = structuredClone(f.row);
+  const saved = await f.reconcile();
+  assert.deepEqual({ ...saved, import_metadata: before.import_metadata }, before);
+  assert.deepEqual({ ...saved.import_metadata, booking: undefined }, { ...before.import_metadata, booking: undefined });
+  assert.equal(saved.import_metadata.booking.profile.version, 2);
+  assert.deepEqual(saved.import_metadata.booking.profile.phases[0].equipment_requirements, [{ equipment_ids: [1] }]);
+  assert.deepEqual(f.state.occupancies.map(r => r.resource_key).sort(), ['doctor:5', 'equipment:1', 'installation:9']);
+  assert.equal(f.state.events.length, 0);
+  assert.equal(f.state.calls.filter(([name]) => name.startsWith('equipment')).length, 3);
+  assert.deepEqual(bookingSegments(saved)[0].equipment, [{ id: 1, name: 'Equipo 1' }]);
+});
+
+test('documentary equipment profile is derived, bounded, and cannot choose new clinical resources', () => {
+  const f = importedEquipmentFixture();
+  const expected = importedEquipmentProfile(f.row, { ...f.assignment, equipment_ids: [3, 1] });
+  assert.deepEqual(expected.phases[0].installation_ids, [9]);
+  assert.deepEqual(expected.phases[0].professionals.ids, [5]);
+  assert.equal(expected.phases[0].duration_minutes, 30);
+  assert.deepEqual(expected.phases[0].equipment_requirements, [{ equipment_ids: [1] }, { equipment_ids: [3] }]);
+  for (const changes of [{ equipment_ids: [] }, { equipment_ids: [1, 1] }, { equipment_ids: ['1'] },
+    { equipment_ids: [0] }, { equipment_ids: Array.from({ length: 9 }, (_, i) => i + 1) },
+    { source_sha256: 'unknown' }, { expected_version: 'b'.repeat(64) }, { profile: expected },
+    { duration_minutes: 10 }, { doctor_id: 6 }, { installation_id: 10 }]) {
+    assert.throws(() => importedEquipmentProfile(f.row, { ...f.assignment, ...changes }), { code: 'booking_import_equipment_invalid' });
+  }
+});
+
+test('only complete, unchanged, open ClinicCloud appointments in HOLD can receive documentary machines', async () => {
+  for (const changes of [{ source_system: 'native' }, { source_reference: null }, { doctor_id: null },
+    { instalacion_id: null }, { tratamiento_id: null }, { estado: 'completada' }, { estado: 'no_asistio' },
+    { estado: 'cancelada' }, { estado: 'reprogramada' }, { voucher_id: 9 }, { lead_intake_id: 9 },
+    { es_provisional: true }, { hold_expires_at: start }, { updated_at: null }, { fin: '2030-01-07T09:30:01.000Z' }]) {
+    const f = importedEquipmentFixture({}, changes);
+    await assert.rejects(f.reconcile(), { code: 'booking_import_equipment_invalid' });
+    assert.equal(f.state.persists, 0);
+  }
+  for (const change of [{ booking: {} }, { program_session: {} }, { additional_staff: { version: 1, ids: [6] } },
+    { notification_suppression: { appointment_details: true, same_day: true, day_before: false } }]) {
+    const f = importedEquipmentFixture();
+    Object.assign(f.row.import_metadata, change);
+    f.assignment.expected_version = importReviewVersion(f.row);
+    await assert.rejects(f.reconcile());
+    assert.equal(f.state.persists, 0);
+  }
+  const f = importedEquipmentFixture();
+  f.row.nota = 'A concurrent clinical edit';
+  await assert.rejects(f.reconcile(), { code: 'booking_import_equipment_invalid' });
+  assert.equal(f.state.persists, 0);
+});
+
+test('documentary reconciliation requires explicit transaction and cannot piggyback another mutation', async () => {
+  const overrides = [{ transaction: null }, { existingAppointmentId: null }, { stateOnly: true }, { supportOnly: true },
+    { force: true }, { trustedProgramSession: {} }, { preparedContext: {} }, { additionalStaffIds: [] },
+    { appointmentValues: { estado: 'completada' } }, { appointmentValues: { doctor_id: 6 } },
+    { selections: { appointment: { doctor_id: 6 } } }, { capabilities: { ...eqCaps, multi: false } },
+    { capabilities: { ...eqCaps, equipment: false } }];
+  for (const override of overrides) {
+    const f = importedEquipmentFixture();
+    await assert.rejects(f.reconcile(override), { code: 'booking_import_equipment_invalid' });
+    assert.equal(f.state.persists, 0);
+    assert.equal(f.state.occupancies.length, 0);
+  }
+  const f = importedEquipmentFixture({ bookingProfile: profile(phase('existing')) });
+  await assert.rejects(f.reconcile(), { code: 'booking_import_equipment_invalid' });
+  assert.equal(f.state.persists, 0);
+});
+
+test('ordinary payload fields cannot opt into the operator-only equipment reconciliation', async () => {
+  const f = importedEquipmentFixture();
+  const saved = await f.reserve({ capabilities: eqCaps, existingAppointmentId: f.row.id_cita,
+    appointmentValues: { importEquipmentAssignment: f.assignment, import_metadata: { ...f.row.import_metadata,
+      booking: { profile: importedEquipmentProfile(f.row, f.assignment) } } } });
+  assert.equal(saved.import_metadata.booking, undefined);
+  assert.equal(f.state.occupancies.filter(r => r.resource_kind === 'equipment').length, 0);
+  assert.equal(f.state.calls.filter(([name]) => name.startsWith('equipment')).length, 0);
+});
+
+test('documentary machine assignment respects mobile restrictions, fixed rooms, authorization and maintenance', async () => {
+  for (const options of [{ roomPolicies: [] }, { equipmentClinics: [] }, { equipmentEnabled: false },
+    { equipment: [machine(1, { status: 'maintenance' })] },
+    { equipment: [machine(1, { mobility: 'fixed', home_installation_id: 12 })] }]) {
+    const f = importedEquipmentFixture(options);
+    await assert.rejects(f.reconcile());
+    assert.equal(f.state.persists, 0);
+    assert.equal(f.state.occupancies.length, 0);
+  }
+  const fixed = importedEquipmentFixture({ roomPolicies: [], equipment: [machine(1, { mobility: 'fixed' })] });
+  assert(await fixed.reconcile());
+});
+
+test('an occupied unit or patient prevents reconciliation without changing the imported row', async () => {
+  for (const patient of [false, true]) {
+    const other = { id_cita: 99, clinica_id: 73, paciente_id: patient ? 1 : 2, doctor_id: 6, instalacion_id: 19,
+      inicio: start, fin: end, estado: 'pendiente' };
+    const f = importedEquipmentFixture({ appointments: [other], occupancies: patient ? [] : [{
+      appointment_id: 99, resource_kind: 'equipment', resource_key: 'equipment:1',
+      start_at: start, end_at: end, phase_key: 'other', equipment_id: 1,
+    }] });
+    const before = structuredClone(f.row);
+    await assert.rejects(f.reconcile(), e => e.code === 'booking_unavailable' && !e.details.can_force);
+    assert.deepEqual(f.state.appointments.find(a => a.id_cita === 80), before);
+    assert.equal(f.state.persists, 0);
+  }
+});
+
+test('adding documentary equipment invalidates previous resource review without erasing its evidence', async () => {
+  const f = importedEquipmentFixture();
+  f.row.import_metadata.import_resource_resolution = { version: 1, actor_id: 7, request_hash: 'c'.repeat(64),
+    reservation_fingerprint: importResourceFingerprint(f.row) };
+  assert(hasReviewedImportResources(f.row));
+  f.assignment.expected_version = importReviewVersion(f.row);
+  const saved = await f.reconcile();
+  assert(!hasReviewedImportResources(saved));
+  assert.deepEqual(saved.import_metadata.import_resource_resolution, f.row.import_metadata.import_resource_resolution);
+});
+
+test('documentary equipment survives normal editing and cancellation; reopening revalidates the same unit', async () => {
+  const f = importedEquipmentFixture();
+  const first = await f.reconcile();
+  const edited = await f.reserve({ capabilities: eqCaps, existingAppointmentId: first.id_cita,
+    appointmentValues: { nota: 'An edited note', import_metadata: { booking: null } } });
+  assert.deepEqual(edited.import_metadata.booking.profile, first.import_metadata.booking.profile);
+  assert.deepEqual(edited.import_metadata.notification_suppression, first.import_metadata.notification_suppression);
+  await f.reserve({ capabilities: eqCaps, existingAppointmentId: first.id_cita, appointmentValues: { estado: 'cancelada' }, stateOnly: true });
+  const reopened = await f.reserve({ capabilities: eqCaps, existingAppointmentId: first.id_cita, appointmentValues: { estado: 'pendiente' }, stateOnly: true });
+  assert.deepEqual(reopened.import_metadata.booking.profile, first.import_metadata.booking.profile);
+  assert.equal(f.state.occupancies.filter(r => r.resource_kind === 'equipment').length, 1);
+  await f.db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+    await assert.rejects(f.reserve({ capabilities: eqCaps, existingAppointmentId: first.id_cita, appointmentValues: {}, transaction,
+      importEquipmentAssignment: { ...f.assignment, expected_version: importReviewVersion(reopened) } }), { code: 'booking_import_equipment_invalid' });
+  });
+});
+
+test('failed documentary occupancy write rolls back the row and does not leave a partial machine reservation', async () => {
+  const f = importedEquipmentFixture({ failOccupancy: true });
+  const before = structuredClone(f.row);
+  await assert.rejects(f.reconcile(), /offline simulated occupancy failure/);
+  assert.deepEqual(f.state.appointments.find(a => a.id_cita === 80), before);
+  assert.equal(f.state.occupancies.length, 0);
+  assert.equal(f.state.events.length, 0);
 });

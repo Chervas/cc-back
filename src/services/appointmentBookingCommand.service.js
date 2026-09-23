@@ -58,8 +58,17 @@ function solveLegacy(values, context, force = false) {
 async function mutateAppointmentBooking({ db, appointmentValues, existingAppointmentId = null, persist,
   priorityAcknowledged = false, selections = {}, transaction = null, capabilities = bookingCapabilities(),
   allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false,
-  additionalStaffIds = undefined, supportOnly = false, expectedRange = null }) {
+  additionalStaffIds = undefined, supportOnly = false, expectedRange = null, importEquipmentAssignment = null }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
+  // Internal documentary reconciliation only, never forwarded from an HTTP
+  // payload. Same command/locks/occupancy as normal booking; no extra read on
+  // ordinary appointments. Derive the profile from the locked source row.
+  if (importEquipmentAssignment && (!transaction || !existingAppointmentId || stateOnly || supportOnly || force
+    || trustedProgramSession || preparedContext || additionalStaffIds !== undefined
+    || Object.keys(appointmentValues || {}).length || Object.keys(selections || {}).length
+    || !capabilities.multi || capabilities.equipment !== true)) {
+    throw bookingError('booking_import_equipment_invalid', 'La conciliación de maquinaria no puede modificar otros datos de la cita.');
+  }
   const requestedStaff = normalizeAdditionalStaff(additionalStaffIds);
   const execute = async (tx) => {
     if (tx.options?.isolationLevel !== 'READ COMMITTED') {
@@ -172,7 +181,12 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     // Existing reservations keep their original booking requirements when the
     // catalog evolves. Editing clinical/history data cannot rewrite that snapshot.
     const snapshot = previousMetadata.booking?.profile;
-    if (trustedProgramSession || session) {
+    if (importEquipmentAssignment) {
+      const catalogProfile = requireOperationalProfile(treatment, { capabilities, allowObsolete });
+      if (catalogProfile || session) throw bookingError('booking_import_equipment_invalid',
+        'Esta cita ya utiliza un perfil de tratamiento o programa; revisa su reserva sin sustituirla.');
+      configuredProfile = require('../lib/appointment-import-equipment').importedEquipmentProfile(previous, importEquipmentAssignment);
+    } else if (trustedProgramSession || session) {
       const frozen = metadataObject((trustedProgramSession || session).snapshot);
       configuredProfile = normalizeBookingProfile(frozen.booking_profile);
       if (!configuredProfile) throw bookingError('program_profile_missing', 'Falta el perfil de la sesión comprada.');

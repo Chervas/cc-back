@@ -16,3 +16,6 @@ test('HTTP forwards force only to the authoritative transaction and uses its saf
   assert.match(controller, /force: wantsForce/);
   assert.match(controller, /json\(bookingErrorPayload\(err\)\)/);
 });
+test('HTTP has no adapter for operator-only documentary machinery assignment', () => {
+  assert.doesNotMatch(controller, /importEquipmentAssignment|importedEquipmentProfile/);
+});
