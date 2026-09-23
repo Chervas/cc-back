@@ -240,7 +240,7 @@ function createTreatmentDocumentationService(db = require('../../models')) {
       if (actorId == null) {
         const validSystemImport = !id && positive(clinicId) && externalTransaction && importedSource?.actor_kind === 'system_import'
           && importedSource.source_system === 'cliniccloud' && /^[a-f0-9]{64}$/.test(importedSource.source_sha256 || '')
-          && typeof payload?.source === 'string' && ['manual-corporal', 'manual-facial'].some(kind =>
+          && typeof payload?.source === 'string' && ['manual-corporal', 'manual-facial', 'manual-capilar', 'manual-obesidad'].some(kind =>
             payload.source.startsWith(`cliniccloud:${kind}:sha256:${importedSource.source_sha256};`))
           && payload?.kind === 'protocol' && payload?.status === 'draft'
           && Array.isArray(payload?.treatment_ids) && payload.treatment_ids.length === 0;
