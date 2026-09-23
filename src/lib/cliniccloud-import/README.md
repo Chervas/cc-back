@@ -416,6 +416,32 @@ comparando el estado posterior y el uso económico, no restauración global.
 
 ## Vincular maquinaria a borradores individuales
 
+La ocupación de citas heredadas es una operación distinta. El comando
+`mutateAppointmentBooking` admite `importEquipmentAssignment` **solo como
+argumento interno**, nunca desde el payload HTTP. El operador proporciona
+`expected_version`, `source_sha256` y `equipment_ids`; el perfil de una sola fase
+se deriva de la fila bloqueada. La precondición debe calcularse sobre la
+representación ORM actual, incluidos booleanos/fechas, no sobre una mezcla de
+tipos SQL y JSON. No acepta cambiar otros campos, apoyos, programas ni un perfil
+previo. Exige transacción externa y los tres gates de reserva.
+
+Preparar un paquete inmutable con fila/ocupaciones antes, evidencia de unidad y
+ubicación, y casos fuente todavía sin conciliar. El operador valida respaldo,
+ensaya con rollback, aplica con diario y verifica independientemente estado y
+replay. La persistencia se limita al snapshot canónico y `updated_at`, sin
+atribuir una decisión clínica a un usuario. Revisa de nuevo los recursos desde
+la interfaz autenticada: la revisión antigua pierde vigencia al añadir equipo,
+sin borrar su recibo. No extrapolar este lote a combinaciones o drenajes manuales.
+QA SQL ficticia, siempre revertida:
+
+```bash
+QA_EQUIPMENT_SQL=isolated-dev-rollback QA_PUBLISHED_BOOKING_COMPAT=crm \
+  node src/scripts/qa/isolated-booking-equipment.js
+```
+
+La opción de compatibilidad lee el comando del worktree CRM pero le inyecta
+exclusivamente modelos/BD ficticios DEV; no carga su aplicación o entorno CRM.
+
 `cliniccloud-import-catalog-equipment.js` incorpora un requisito explícito v2 a
 un borrador individual importado, con una fase y una cabina ya documentadas.
 Revisión privada: `confirmation_reference`, `confirmed_on`, `reviewed_by` y
