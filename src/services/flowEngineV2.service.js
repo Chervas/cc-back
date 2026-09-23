@@ -2050,11 +2050,14 @@ function resolveAutomationCommunicationScope(config, context) {
   return 'care';
 }
 
-function resolveWhatsappRoutingPurpose(config, context, { leadId = null } = {}) {
+function resolveWhatsappRoutingPurpose(config, context, { leadId = null, appointmentId = null } = {}) {
   const templateUsage = (cleanString(resolveTemplateValue(config?.template_usage, context)) || '').toLowerCase();
   if (['solicitud_resena', 'resena', 'review_request', 'reviews'].includes(templateUsage)) {
     return 'review_requests';
   }
+  // A booked appointment can retain its originating lead. That link must not
+  // route care messages through the secondary reserved for first contact.
+  if (appointmentId) return 'appointment_automation';
   if (leadId || ['lead_auto_reply', 'lead_primera_visita'].includes(templateUsage)) {
     return 'lead_first_contact';
   }
@@ -2882,7 +2885,7 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
     || context?.recipient?.phone
   );
   const domain = toLowerSafe(config?.domain || context?.runtime?.domain);
-  const routingPurpose = resolveWhatsappRoutingPurpose(config, context, { leadId });
+  const routingPurpose = resolveWhatsappRoutingPurpose(config, context, { leadId, appointmentId });
   const purpose = domain.includes('consent')
     ? 'consent'
     : (routingPurpose || (appointmentId ? 'appointment_automation' : 'automation'));
