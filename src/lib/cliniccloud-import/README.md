@@ -414,6 +414,23 @@ Pruebas: `cliniccloud_catalog_cosmetic_prices.test.js`,
 `economic_fiscal_price_source.test.js`. Recuperación selectiva de esas columnas,
 comparando el estado posterior y el uso económico, no restauración global.
 
+## Completar personal con reservas simultáneas documentadas
+
+Una cita sin profesional no demuestra que todos los profesionales de la clínica
+estén ocupados. Tampoco autoriza ignorarla. Para excluirla de una conciliación
+puntual, conservar su fila completa y aportar una asignación inequívoca a otra
+persona mediante agenda fuente o procedencia documental ya contrastada. Revisar
+también las filas fuente aún sin conciliar, aunque no tengan una cita local.
+
+El paquete debe fijar el conjunto exacto de visitas simultáneas y sus huellas.
+Releerlas bajo lock en la transacción: cualquier alta, cambio de nota, recurso
+o tratamiento invalida el ensayo. La reserva canónica vuelve a comprobar turnos,
+bloqueos y ocupaciones, sin `force`; esta exclusión no crea turnos ni resuelve
+la otra visita. Conservar hora, acto, estado y HOLD. Respaldar, ensayar con
+rollback, verificar lectura/replay y confirmar después desde la interfaz
+autenticada. Si dos actos requieren la misma persona, pedir la pauta de presencia
+real; no inventar tramos sin personal porque una máquina pueda funcionar sola.
+
 ## Vincular maquinaria a borradores individuales
 
 La ocupación de citas heredadas es una operación distinta. El comando
