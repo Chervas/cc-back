@@ -13,6 +13,7 @@ const {
 } = require('../../lib/whatsapp-account-health');
 const db = require('../../../models');
 const whatsappAccountHealthService = require('../../services/whatsappAccountHealth.service');
+const whatsappPaymentStatusService = require('../../services/whatsappPaymentStatus.service');
 const whatsappService = require('../../services/whatsapp.service');
 
 function patchProperty(object, key, value) {
@@ -41,6 +42,121 @@ test('BANNED y 131031 prevalecen sobre registro y calidad GREEN', () => {
   assert.equal(locked.state, 'blocked');
   assert.equal(locked.reason_code, 'meta_error_131031_account_locked');
   assert.equal(extractProviderErrorCode({ errors: [{ code: 131031 }] }), 131031);
+});
+
+test('el error 131042 pausa el remitente y explica las consecuencias por propósito', () => {
+  const paymentBlocked = deriveHealthCandidate({
+    providerStatus: 'CONNECTED',
+    registrationStatus: 'registered',
+    providerErrorCode: 131042,
+  });
+  assert.equal(paymentBlocked.state, 'blocked');
+  assert.equal(paymentBlocked.can_send, false);
+  assert.equal(paymentBlocked.reason_code, 'meta_error_131042_payment_missing');
+  assert.match(
+    whatsappPaymentStatusService.formatPurposeConsequences(
+      ['lead_first_contact', 'review_requests'],
+      'pause'
+    ),
+    /no se enviarán los primeros contactos automáticos a leads y las solicitudes de reseña/i
+  );
+  assert.match(
+    whatsappPaymentStatusService.formatPurposeConsequences(['bulk_campaigns'], 'fallback_primary'),
+    /WhatsApp principal/i
+  );
+});
+
+test('131042 persiste el bloqueo, notifica el ámbito secundario y una entrega posterior lo recupera', async () => {
+  const notificationsService = require('../../services/notifications.service');
+  const asset = {
+    id: 396,
+    clinicaId: null,
+    phoneNumberId: '1373925869132435',
+    wabaId: '1005040135934907',
+    metaAssetName: '+34 600 000 002',
+    additionalData: {},
+    saves: 0,
+    async save() { this.saves += 1; return this; },
+  };
+  const dispatched = [];
+  const failures = [];
+  const recoveries = [];
+  const restorers = [
+    patchProperty(db.ClinicMetaAsset, 'findOne', async () => asset),
+    patchProperty(db.ClinicMetaAsset, 'findByPk', async () => asset),
+    patchProperty(db.WhatsappChannelBinding, 'findAll', async () => [{
+      clinic_id: 56,
+      role: 'secondary',
+      purposes: ['lead_first_contact', 'review_requests'],
+      unavailable_action: 'pause',
+    }]),
+    patchProperty(db.Clinica, 'findByPk', async () => ({ nombre_clinica: 'Clínica de prueba' })),
+    patchProperty(notificationsService, 'dispatchEvent', async (payload) => {
+      dispatched.push(payload);
+      return { dispatched: true };
+    }),
+    patchProperty(whatsappAccountHealthService, 'recordProviderFailure', async (payload) => {
+      failures.push(payload);
+      return { state: 'blocked' };
+    }),
+    patchProperty(whatsappAccountHealthService, 'recordObservationForAsset', async (payload) => {
+      recoveries.push(payload);
+      return { state: 'healthy' };
+    }),
+  ];
+
+  const message = {
+    id: 991,
+    status: 'failed',
+    metadata: {
+      phoneNumberId: asset.phoneNumberId,
+      wabaId: asset.wabaId,
+      wamid: 'wamid.TEST_PAYMENT',
+    },
+  };
+
+  try {
+    const failed = await whatsappPaymentStatusService.reconcileProviderStatus({
+      status: { status: 'failed', errors: [{ code: 131042 }] },
+      message,
+      clinicId: 56,
+      source: 'test_secure_status',
+    });
+    assert.equal(failed.handled, true);
+    assert.equal(asset.additionalData.payment.status, 'missing_payment_method');
+    assert.equal(failures.length, 1);
+    assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0].data.channelRole, 'secondary');
+    assert.match(dispatched[0].data.consequence, /primeros contactos automáticos a leads/i);
+    assert.match(dispatched[0].data.consequence, /solicitudes de reseña/i);
+
+    message.status = 'delivered';
+    message.id = 990;
+    const staleDelivery = await whatsappPaymentStatusService.reconcileProviderStatus({
+      status: { status: 'delivered' },
+      message,
+      clinicId: 56,
+      source: 'test_secure_status',
+    });
+    assert.equal(staleDelivery.cleared, false);
+    assert.equal(staleDelivery.reason, 'success_precedes_payment_failure');
+    assert.equal(asset.additionalData.payment.status, 'missing_payment_method');
+    assert.equal(recoveries.length, 0);
+
+    message.id = 992;
+    const delivered = await whatsappPaymentStatusService.reconcileProviderStatus({
+      status: { status: 'delivered' },
+      message,
+      clinicId: 56,
+      source: 'test_secure_status',
+    });
+    assert.equal(delivered.cleared, true);
+    assert.equal(asset.additionalData.payment.status, 'active');
+    assert.equal(recoveries.length, 1);
+    assert.equal(recoveries[0].explicitRecovery, true);
+  } finally {
+    restorers.reverse().forEach((restore) => restore());
+  }
 });
 
 test('CONNECTED prevalece sobre un estado local not_registered obsoleto', () => {

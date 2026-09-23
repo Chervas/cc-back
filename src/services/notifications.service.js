@@ -114,9 +114,13 @@ function buildNotificationContent(event, payload = {}) {
     case 'whatsapp.payment_missing': {
       const clinic = payload.clinicName || 'tu clínica';
       const phone = payload.phoneNumber ? ` (${payload.phoneNumber})` : '';
+      const role = payload.channelRole === 'secondary' ? ' secundario' : '';
+      const consequence = payload.consequence
+        ? ` ${payload.consequence}`
+        : ' Los mensajes automáticos que dependan de este número quedan pausados.';
       return {
         title: `WhatsApp sin método de pago en ${clinic}`,
-        message: `WhatsApp no puede entregar mensajes${phone} porque la cuenta Business no tiene una tarjeta o método de pago activo. Añade el método de pago en Meta Business para reactivar los envíos.`,
+        message: `El WhatsApp${role}${phone} no puede entregar mensajes porque la cuenta Business no tiene una tarjeta o método de pago activo.${consequence} Añade el método de pago en Meta Business para reactivar el remitente.`,
         icon: 'heroicons_outline:credit-card',
         level: defaults.level || 'error'
       };

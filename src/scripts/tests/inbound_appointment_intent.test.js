@@ -56,6 +56,76 @@ function testConfirmationKeepsSecondaryQuestion() {
   assert.equal(output.necesita_respuesta, true);
 }
 
+function testConfirmAppointmentContextIsCompactAndKeepsNonTextEvidence() {
+  const context = contextWithConversation(
+    'Sí\nPero me teníais que confirmar lo del tema brackets',
+    '¿Me confirmas que recibes los datos de tu cita?'
+  );
+  context.last_response = 'Sí\nPero me teníais que confirmar lo del tema brackets';
+  context.last_prompt = '¿Me confirmas que recibes los datos de tu cita?';
+  context.last_response_context = {
+    response_text: context.last_response,
+    response_lines: ['Sí', 'Pero me teníais que confirmar lo del tema brackets'],
+    response_items: [
+      { message_id: 127216, content_type: 'text', text: 'Sí' },
+      { message_id: 127217, content_type: 'text', text: 'Pero me teníais que confirmar lo del tema brackets' },
+      {
+        message_id: 127218,
+        content_type: 'attachment',
+        attachment_type: 'image',
+        content_available: false,
+        caption: null,
+      },
+    ],
+    response_message_id: 127218,
+    response_message_type: 'image',
+    response_media_kind: 'image',
+    listened_message_preview: context.last_prompt,
+  };
+
+  const compact = flowEngine.buildScopedConfirmAppointmentBatch(context);
+  assert.equal(Object.hasOwn(compact, 'response_text'), false);
+  assert.deepEqual(compact.response_messages, [
+    { text: 'Sí' },
+    { text: 'Pero me teníais que confirmar lo del tema brackets' },
+  ]);
+  assert.equal(compact.listened_message_preview, context.last_prompt);
+  assert.deepEqual(compact.response_items, [context.last_response_context.response_items[2]]);
+  assert.equal(Object.hasOwn(compact, 'response_lines'), false);
+  assert.doesNotMatch(JSON.stringify(compact.response_items), /tema brackets/);
+
+  const derived = flowEngine.deriveConfirmAppointmentOutput({
+    respuesta_afirmativa_a_la_clinica: true,
+    negacion_explicita_de_la_confirmacion: false,
+    requiere_respuesta: true,
+    motivo: 'Confirma y plantea otro asunto.',
+    confianza_respuesta_afirmativa_a_la_clinica: 0.96,
+    confianza_negacion_explicita_de_la_confirmacion: 0.94,
+    confianza_requiere_respuesta: 0.92,
+    confianza_motivo: 0.9,
+  });
+  assert.equal(derived.confirma_asistencia, true);
+  assert.equal(derived.requiere_respuesta, true);
+  assert.equal(derived.confianza_confirma_asistencia, 0.94);
+  assert.deepEqual(derived._ai_confirmation_signals, {
+    affirmative: true,
+    contradiction: false,
+    affirmative_confidence: 0.96,
+    contradiction_confidence: 0.94,
+  });
+
+  const contradicted = flowEngine.deriveConfirmAppointmentOutput({
+    respuesta_afirmativa_a_la_clinica: true,
+    negacion_explicita_de_la_confirmacion: true,
+    requiere_respuesta: true,
+    confianza_respuesta_afirmativa_a_la_clinica: 0.96,
+    confianza_negacion_explicita_de_la_confirmacion: 0.91,
+    confianza_requiere_respuesta: 0.95,
+  });
+  assert.equal(contradicted.confirma_asistencia, false);
+  assert.equal(contradicted.confianza_confirma_asistencia, 0.91);
+}
+
 async function testManualReplyOnlyCompletesResolvedPendingQuestion() {
   const clinic = await db.Clinica.findOne({
     attributes: ['id_clinica'],
@@ -346,8 +416,10 @@ async function testBinaryConfirmationPresetIsExecutable() {
   const originalAnalyzeStructured = aiOrchestrator.analyzeStructured;
   try {
     aiOrchestrator.analyzeStructured = async () => ({
-      confirma_asistencia: true,
-      confianza_confirma_asistencia: 0.97,
+      respuesta_afirmativa_a_la_clinica: true,
+      confianza_respuesta_afirmativa_a_la_clinica: 0.97,
+      negacion_explicita_de_la_confirmacion: false,
+      confianza_negacion_explicita_de_la_confirmacion: 0.96,
       requiere_respuesta: false,
       confianza_requiere_respuesta: 0.96,
       motivo: 'Confirmación expresa.',
@@ -362,9 +434,23 @@ async function testBinaryConfirmationPresetIsExecutable() {
     assert.equal(confirmed.output.confirma_asistencia, true);
     assert.equal(confirmed.output.requiere_respuesta, false);
 
+    const compatibleV2Node = {
+      ...node,
+      config: { ...node.config, preset_contract_version: 2 },
+    };
+    const compatibleV2 = await flowEngine._processNode(
+      compatibleV2Node,
+      contextWithConversation('Sí, confirmo.'),
+      { simulation: false },
+    );
+    assert.equal(compatibleV2.output.confirma_asistencia, true);
+    assert.equal(compatibleV2.output.requiere_respuesta, false);
+
     aiOrchestrator.analyzeStructured = async () => ({
-      confirma_asistencia: false,
-      confianza_confirma_asistencia: 0.91,
+      respuesta_afirmativa_a_la_clinica: false,
+      confianza_respuesta_afirmativa_a_la_clinica: 0.91,
+      negacion_explicita_de_la_confirmacion: false,
+      confianza_negacion_explicita_de_la_confirmacion: 0.93,
       requiere_respuesta: true,
       confianza_requiere_respuesta: 0.94,
       motivo: 'El paciente pregunta sin confirmar.',
@@ -800,7 +886,9 @@ async function testConversationStateOwnershipUsesAtomicCompareAndSet() {
   const originalUpdate = db.ConversationAutomationState.update;
   const originalFindOne = db.ConversationAutomationState.findOne;
   let where = null;
-  db.ConversationAutomationState.update = async (_patch, options) => {
+  let persistedPatch = null;
+  db.ConversationAutomationState.update = async (patch, options) => {
+    persistedPatch = patch;
     where = options.where;
     return [1];
   };
@@ -820,6 +908,15 @@ async function testConversationStateOwnershipUsesAtomicCompareAndSet() {
     }, { expectedExecutionId: 88, emit: false });
     assert.ok(state);
     assert.deepEqual(where, { conversation_id: 41, clinic_id: 3, execution_id: 88 });
+
+    await conversationAutomationState.updateOwnedState({
+      clinicId: 3,
+      conversationId: 41,
+      appointmentStatus: 'info_confirmada',
+    }, { expectedExecutionId: 88, emit: false });
+    assert.equal(Object.hasOwn(persistedPatch, 'stage'), false);
+    assert.equal(Object.hasOwn(persistedPatch, 'status'), false);
+    assert.equal(persistedPatch.appointment_status, 'info_confirmada');
 
     db.ConversationAutomationState.update = async () => [0];
     const stale = await conversationAutomationState.updateOwnedState({
@@ -849,7 +946,10 @@ async function testInboundDispatchLeasePreventsConcurrentProcessing() {
     },
   };
   db.AutomationInboundMessageClaim.findByPk = async () => claim;
-  db.sequelize.transaction = async (callback) => callback({ LOCK: { UPDATE: 'UPDATE' } });
+  db.sequelize.transaction = async (...args) => {
+    const callback = args[args.length - 1];
+    return callback({ LOCK: { UPDATE: 'UPDATE' } });
+  };
 
   try {
     const acquired = await inbound.beginInboundDispatchAttempt(1701, { id: 501, attempts: 1 });
@@ -886,7 +986,10 @@ async function testHumanAppointmentChangeWinsWhileAiIsAnalyzing() {
   };
 
   db.CitaPaciente.findByPk = async () => appointment;
-  db.sequelize.transaction = async (callback) => callback({ LOCK: { UPDATE: 'UPDATE' } });
+  db.sequelize.transaction = async (...args) => {
+    const callback = args[args.length - 1];
+    return callback({ LOCK: { UPDATE: 'UPDATE' } });
+  };
   conversationAutomationState.updateOwnedState = async (patch) => {
     automationStatePatch = patch;
     return patch;
@@ -1502,6 +1605,7 @@ function testExternallyResolvedChangeRequestClosesTheAutomaticAction() {
 
 async function run() {
   testConfirmationKeepsSecondaryQuestion();
+  testConfirmAppointmentContextIsCompactAndKeepsNonTextEvidence();
   await testManualReplyOnlyCompletesResolvedPendingQuestion();
   testThanksOnlyConfirmsInConfirmationContext();
   testBufferedAcknowledgementUsesTheListenedPromptOnly();

@@ -2,17 +2,17 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 require('./fixtures/campaign_offline_runtime.cjs');
 const health=require('../../lib/whatsappInboxHealth'),fresh=require('../../lib/whatsappFreshInboundEligibility');
-function fixture({hold=false,beforeCut=false}={}) {
+function fixture({hold=false,beforeCut=false,reaction=false}={}) {
  const now=Date.now(),cut=new Date(now-60000).toISOString();
  const b={clinicId:2,assetId:4,phoneId:'123',wabaId:'456',sendEnabled:true,authorizationId:'synthetic'};
  const config={bindings:[b],messageNotBefore:new Date(now-86400000).toISOString()};
  const snapshot={version:1,observedAt:now,recoveryHold:hold,recoveryNotBefore:cut,clinics:[{clinicId:2,oldestPendingAt:null,blockingReview:0}]};
  const conversation={id:3,clinic_id:2,channel:'whatsapp'};
- const message={id:5,conversation_id:3,direction:'inbound',message_type:'text',sent_at:new Date(now-(beforeCut?120000:5000)),
-  metadata:{passive_recovery:true,historical:false,provider_type:'text',phone_number_id:'123',waba_id:'456',wamid:'wamid.SYNTHETIC',inbox_receipt:'a1234567-1234-4234-8234-123456789abc'},
+ const message={id:5,conversation_id:3,direction:'inbound',message_type:reaction?'reaction':'text',sent_at:new Date(now-(beforeCut?120000:5000)),
+  metadata:{passive_recovery:true,historical:false,provider_type:reaction?'reaction':'text',phone_number_id:'123',waba_id:'456',wamid:'wamid.SYNTHETIC',inbox_receipt:'a1234567-1234-4234-8234-123456789abc',...(reaction?{reaction:{emoji:'thumbs_up',message_id:'wamid.TARGET'}}:{})},
   async update(p){Object.assign(this,p)}};
  let dispatched=0,queried=0;
- const db={sequelize:{query:async(_sql,{replacements})=>{queried++;assert.equal(replacements.cutoff.toISOString(),cut);return [[{id:5}]]},transaction:work=>work({LOCK:{UPDATE:'UPDATE'}})},
+ const db={sequelize:{query:async(_sql,{replacements})=>{queried++;assert.equal(replacements.cutoff.toISOString(),cut);assert.match(_sql,/m\.message_type='reaction'/);return [[{id:5}]]},transaction:work=>work({LOCK:{UPDATE:'UPDATE'}})},
   Message:{findByPk:async()=>message},Conversation:{findByPk:async()=>conversation}};
  const c={module:{exports:{}},Date,require:name=>{
   if(name==='../lib/whatsappFreshInboundEligibility')return fresh;
@@ -32,5 +32,9 @@ test('hold never dispatches and a previously imported row without a recovery mar
 });
 test('fresh replies after reopening resume the ordinary flow exactly once',async()=>{
  const f=fixture();await f.run();assert.equal(f.dispatched,1);assert.equal(f.message.metadata.automatic_actions_allowed,true);
+ await f.run();assert.equal(f.dispatched,1);
+});
+test('fresh reactions after reopening reach the same ordinary flow exactly once',async()=>{
+ const f=fixture({reaction:true});await f.run();assert.equal(f.dispatched,1);assert.equal(f.message.metadata.automatic_actions_allowed,true);
  await f.run();assert.equal(f.dispatched,1);
 });

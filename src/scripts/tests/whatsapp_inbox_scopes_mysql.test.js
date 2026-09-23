@@ -50,6 +50,8 @@ test('multiclinic passive importer preserves parent on partial failure, retries 
     assert.deepEqual(media.map(r=>[r.clinic_id,r.direction,r.message_type,r.metadata.media.kind,r.metadata.media.id]),
       [[71,'inbound','image','image','501'],[72,'outbound','text','audio','502']]);
     for(const r of media){assert.equal(r.metadata.automatic_actions_allowed,false);assert.equal(r.metadata.passive_recovery,true);}
+    assert.equal(media[0].metadata.source_event,'messages');assert.equal(media[0].metadata.coexistence.source_event,'messages');
+    assert.equal(media[1].metadata.source_event,'smb_message_echoes');assert.equal(media[1].metadata.coexistence.source_event,'smb_message_echoes');
     assert.equal(media[1].metadata.audio_transcribed,false);assert.equal(media[1].metadata.media.playable,true);
     report.checks.push('scoped image and mobile audio preserve media IDs under consumer grants without duplicate import');
     const placeholder=make([config.scopes[0]],'19995550120');const placeholderBody=JSON.parse(placeholder.raw);

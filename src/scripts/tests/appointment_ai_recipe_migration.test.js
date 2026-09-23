@@ -32,7 +32,7 @@ const structuredConfirmation = {
 };
 
 const refreshedConfirmation = refreshNode(structuredConfirmation);
-assert.equal(refreshedConfirmation.config.preset_contract_version, 3);
+assert.equal(refreshedConfirmation.config.preset_contract_version, 4);
 assert.equal(refreshedConfirmation.config.instruction, CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction);
 assert.equal(refreshedConfirmation.config.max_tokens, 650);
 assert.equal(refreshedConfirmation.config.migration_key, 'keep_me');

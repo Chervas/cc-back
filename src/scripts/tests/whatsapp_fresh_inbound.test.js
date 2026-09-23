@@ -13,6 +13,12 @@ test('audio waits for transcription; historical recovery never replays automatio
 test('fresh text and button replies from exact active scopes can resume existing automations',()=>{
   for(const type of ['text','button','interactive']){const m=message();m.metadata.provider_type=type;assert.equal(eligible(m,c,b,cut,now),true);}
 });
+test('a fresh non-empty reaction with a valid target can resume an active wait',()=>{
+  const m=message();m.message_type='reaction';Object.assign(m.metadata,{provider_type:'reaction',reaction:{emoji:'thumbs_up',message_id:'wamid.TARGET'}});
+  assert.equal(eligible(m,c,b,cut,now),true);
+  m.metadata.reaction.emoji='';assert.equal(eligible(m,c,b,cut,now),false);
+  m.metadata.reaction.emoji='thumbs_up';m.metadata.reaction.message_id='invalid';assert.equal(eligible(m,c,b,cut,now),false);
+});
 test('history, pre-cutoff replies, echoes, replayed or unproven messages never dispatch',()=>{
   for(const change of [{historical:true},{historical:undefined},{passive_recovery:false},{fresh_inbound_dispatched_at:cut},{inbox_receipt:''},{phone_number_id:'789'},{waba_id:'789'},{provider_type:'reaction'},{wamid:''}]){const m=message();Object.assign(m.metadata,change);assert.equal(eligible(m,c,b,cut,now),false);}
   for(const change of [{direction:'outbound'},{sent_at:'2026-09-15T16:59Z'},{sent_at:'2026-09-15T18:10Z'},{message_type:'event'},{conversation_id:4}]){assert.equal(eligible({...message(),...change},c,b,cut,now),false);}

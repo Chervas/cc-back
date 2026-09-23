@@ -129,6 +129,13 @@ atrasadas, sin cancelar la cita. El flujo futuro conserva sus plazos configurado
 Los mensajes de texto generados por timeout también vuelven a comprobar vigencia
 de la cita y salud inmediatamente antes del envío.
 
+El dispatcher admite texto/botón/interactivo, adjuntos recuperables y reacciones
+frescas. Para una reacción exige dirección entrante, `message_type` y
+`provider_type` de reacción, emoji no vacío y WAMID objetivo válido. Conserva
+todos los demás límites: binding exacto, recibo durable, corte por número, máximo
+24 horas, `historical=false` y ausencia de marcas de recuperación. Una reacción
+eliminada, un histórico o un eco saliente nunca reanuda una espera.
+
 Recuperación operativa: publicar primero la barrera de timeouts y el filtro del
 dispatcher. Arrancar después el importador con `WHATSAPP_INBOX_RECOVERY_HOLD=true`
 y un corte UTC `WHATSAPP_INBOX_RECOVERY_NOT_BEFORE`. Los mensajes recuperados
@@ -153,6 +160,20 @@ aislados), `whatsapp_inbox_{import,scopes}_mysql.test.js` (MySQL temporal sin re
 `whatsapp_appointment_eligibility.test.js` (sin proveedores). Al desplegar actualizar
 por separado broker AWS, API, dispatcher y release del importador; un push a
 staging no actualiza los procesos dedicados.
+
+Tras el commit de cada hijo, `whatsappFreshPostImport.service` concilia los ecos
+salientes del móvil y los estados de entrega. El eco cuenta como intervención
+humana y puede cerrar la atención pendiente, pero no entra como mensaje del
+paciente ni llama a IA. Los estados avanzan entrega, colas y salud de forma
+idempotente. Solo después se publica el refresco de vista con IDs, sin contenido.
+
+Meta `131042` se materializa como bloqueo crítico del activo emisor con motivo
+`meta_error_131042_payment_missing`; puede estar conectado y a la vez no poder
+enviar. Las notificaciones se crean por ámbito vinculante e indican rol,
+propósitos y acción configurada. No hay fallback ni reintento implícito. Un
+`sent`, `delivered` o `read` de un mensaje local posterior en el mismo activo
+limpia la incidencia y recupera su salud; un estado atrasado anterior o una
+reconexión local sin esa evidencia no basta.
 
 ## Contrato y autoridad
 
