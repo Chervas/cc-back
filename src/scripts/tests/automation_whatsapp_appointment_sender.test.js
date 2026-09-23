@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const { selectWhatsappPhoneAsset, isWhatsappRoutingConfigAvailable } = require('../../lib/whatsapp-channel-role');
-const { selectTemplateInWaba } = require('../../lib/whatsapp-template-scope');
+const templateLocale = require('../../lib/whatsapp-template-locale');
 const source = fs.readFileSync(require.resolve('../../services/flowEngineV2.service'), 'utf8');
 
 function extract(name) {
@@ -27,6 +27,7 @@ function fixture({ primaryAvailable = true, secondaryAvailable = true } = {}) {
     } } };
   const policies = [];
   const sandbox = {
+    ...templateLocale,
     cleanString: value => String(value || '').trim(),
     toLowerSafe: value => String(value || '').trim().toLowerCase(),
     toIntOrNull: value => Number(value) || null,
@@ -43,8 +44,14 @@ function fixture({ primaryAvailable = true, secondaryAvailable = true } = {}) {
     } },
   };
   vm.createContext(sandbox);
-  vm.runInContext(extract('resolveWhatsappRoutingPurpose') + '\n' + extract('resolveWhatsAppSenderConfig'), sandbox);
-  return { policies, send: (context = {}, config = {}) => sandbox.resolveWhatsAppSenderConfig({ config, context, clinicId: 10 }) };
+  for (const name of ['resolveWhatsappRoutingPurpose', 'resolveWhatsAppSenderConfig',
+    'normalizeWhatsappTemplateComponents', 'extractWhatsappTemplateBodyText', 'normalizeTemplateBodyForComparison',
+    'getWhatsappTemplateCatalogBodyText', 'matchesCurrentCatalogBody', 'isTemplateBlockedForSend',
+    'getWhatsappTemplateWabaId', 'scoreWhatsappTemplateCandidate', 'selectBestWhatsappTemplateCandidate']) {
+    vm.runInContext(extract(name), sandbox);
+  }
+  return { policies, selectTemplate: sandbox.selectBestWhatsappTemplateCandidate,
+    send: (context = {}, config = {}) => sandbox.resolveWhatsAppSenderConfig({ config, context, clinicId: 10 }) };
 }
 
 for (const [label, context] of Object.entries({
@@ -63,14 +70,16 @@ for (const [label, context] of Object.entries({
 }
 
 test('an appointment originating from a lead can use its approved template before secondary provisioning', async () => {
-  const { send } = fixture();
+  const { send, selectTemplate } = fixture();
   const { clinic_config: sender } = await send({ appointment: { id_cita: 100 }, lead: { id: 200 } }, { template_usage: 'cita_sin_confirmar_noche' });
   const template = { id: 50, clinic_id: null, waba_id: 'clinic-waba', catalog_template_id: 5,
     name: 'appointment_notice_v1', language: 'es', status: 'APPROVED', is_active: true,
-    components: [{ type: 'BODY', text: 'Tu cita es mañana a las {{1}}.' }] };
+    components: [{ type: 'BODY', text: 'Tu cita es mañana a las {{1}}.' }],
+    catalog: { name: 'appointment_notice', locale: 'es', body_text: 'Tu cita es mañana a las {{1}}.' } };
   const local = { ...template, clinic_id: 10, waba_id: null };
-  assert.equal(selectTemplateInWaba(local, [template], { clinicId: 10, wabaId: sender.wabaId }), template);
-  assert.equal(selectTemplateInWaba(local, [template], { clinicId: 10, wabaId: 'group-waba' }), null);
+  const options = { clinicId: 10, expectedLocale: 'es', requireCurrentCatalogBody: true };
+  assert.equal(selectTemplate([local, template], { ...options, targetWabaId: sender.wabaId }), template);
+  assert.equal(selectTemplate([local, template], { ...options, targetWabaId: 'group-waba' }), null);
 });
 
 test('a failed secondary cannot block an appointment reminder', async () => {
