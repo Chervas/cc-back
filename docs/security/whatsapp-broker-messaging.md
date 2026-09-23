@@ -117,8 +117,11 @@ que también contiene una respuesta real sí bloquea hasta resolverse.
 
 Los timeouts de citas con WhatsApp autorizado vuelven a una espera durable de
 un minuto mientras falla la recepción; no mandan el segundo mensaje ni cancelan
-la cita por silencio. Al recuperarse comprueban la cita actual y las respuestas
-ya importadas, incluso las pasivas. Las peticiones de recuperación solo se permiten
+la cita por silencio. Al recuperarse comprueban la cita actual. Desde el 23/09
+se retira la cancelación adicional `reply_already_received`: la entrega de una
+respuesta al nodo corresponde al mecanismo nativo, sin cancelar la ejecución
+por encontrar una fila inbound antes de su despacho. No se reabren ejecuciones
+ni se reproducen respuestas históricas. Las peticiones de recuperación solo se permiten
 para una cita de hoy aún futura, sin petición ya materializada hoy para esa misma
 cita/hora. Una clave única compartida entre ejecuciones evita dos recuperaciones
 concurrentes. Se descartan los timeouts obsoletos y las cancelaciones nocturnas
