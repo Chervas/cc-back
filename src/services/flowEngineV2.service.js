@@ -3632,6 +3632,9 @@ function buildFallbackWhatsappTemplateConfig(config) {
 }
 
 async function handleSendWhatsapp(node, context, runtime) {
+  if (require('../lib/appointment-reschedule-reason').isSilentReschedule(context, runtime?.execution)) {
+    return { kind: 'success', output: { status: 'skipped_administrative_reschedule' }, next_node_id: readOutputTarget(node, 'on_success') };
+  }
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const execution = runtime?.execution || null;
   const automationDeliveryKey = buildAutomationWhatsappDeliveryKey(execution, node);
@@ -6021,6 +6024,9 @@ function resolveAutomationTemplateContext(config = {}, context = {}) {
 }
 
 async function handleSendEmail(node, context, runtime = {}) {
+  if (require('../lib/appointment-reschedule-reason').isSilentReschedule(context, runtime?.execution)) {
+    return { kind: 'success', output: { status: 'skipped_administrative_reschedule' }, next_node_id: readOutputTarget(node, 'on_success') };
+  }
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const requestedStream = toLowerSafe(resolveTemplateValue(config?.stream, context)) || 'automation';
   if (requestedStream === 'marketing') {

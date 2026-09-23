@@ -744,7 +744,7 @@ function isRescheduleTemplateEligible(template, cita) {
     .map((value) => value.toLowerCase());
 
   if (!allowedReasons.length) {
-    return reason !== 'patient_request';
+    return reason === 'clinic_schedule';
   }
   return allowedReasons.includes(reason);
 }
