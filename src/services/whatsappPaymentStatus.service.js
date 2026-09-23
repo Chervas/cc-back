@@ -43,6 +43,73 @@ function parseDateMs(value) {
   return Number.isNaN(ms) ? 0 : ms;
 }
 
+function normalizeObservedAt(value, fallback = new Date()) {
+  let candidate = value;
+  if (typeof candidate === 'string' && /^\d+$/.test(candidate.trim())) {
+    candidate = Number(candidate.trim());
+  }
+  if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+    candidate = candidate < 1e12 ? candidate * 1000 : candidate;
+  }
+  const parsed = candidate instanceof Date ? candidate : new Date(candidate || fallback);
+  return Number.isNaN(parsed.getTime()) ? fallback.toISOString() : parsed.toISOString();
+}
+
+function normalizeMetaPaymentHref(value) {
+  const raw = cleanString(value);
+  if (!raw) return null;
+  const match = raw.match(/https:\/\/business\.facebook\.com\/[^\s"'<>]+/i);
+  if (!match) return null;
+  const candidate = match[0].replace(/[),.;]+$/, '');
+  try {
+    const url = new URL(candidate);
+    const allowedPath = [
+      '/billing_hub/',
+      '/latest/billing_hub/',
+      '/latest/whatsapp_manager/',
+      '/wa/manage/',
+    ].some((prefix) => url.pathname.startsWith(prefix));
+    if (url.protocol !== 'https:' || url.hostname !== 'business.facebook.com' || !allowedPath) {
+      return null;
+    }
+    return url.toString();
+  } catch (_) {
+    return null;
+  }
+}
+
+function extractPaymentRemediationHref(error) {
+  const pending = [error?.response?.data || error];
+  const seen = new Set();
+  let inspected = 0;
+  while (pending.length && inspected < 80) {
+    const value = pending.shift();
+    inspected += 1;
+    if (typeof value === 'string') {
+      const href = normalizeMetaPaymentHref(value);
+      if (href) return href;
+      continue;
+    }
+    if (!value || typeof value !== 'object' || seen.has(value)) continue;
+    seen.add(value);
+    for (const nested of Object.values(value)) pending.push(nested);
+  }
+  return null;
+}
+
+function buildWhatsappManagerHref({ wabaId = null, businessId = null } = {}) {
+  const normalizedWabaId = cleanString(wabaId);
+  const normalizedBusinessId = cleanString(businessId);
+  if (!normalizedWabaId) return 'https://business.facebook.com/wa/manage/phone-numbers/';
+  const url = new URL('https://business.facebook.com/latest/whatsapp_manager/phone_numbers/');
+  url.searchParams.set('asset_id', normalizedWabaId);
+  if (normalizedBusinessId) {
+    url.searchParams.set('business_id', normalizedBusinessId);
+    url.searchParams.set('global_scope_id', normalizedBusinessId);
+  }
+  return url.toString();
+}
+
 function hasMissingPaymentMarker(payment = {}) {
   return cleanString(payment.status).toLowerCase() === 'missing_payment_method'
     || Number(payment.last_error_code || 0) === PAYMENT_MISSING_ERROR_CODE;
@@ -64,7 +131,7 @@ function derivePaymentSnapshot(additionalData = {}) {
     missing,
     last_error_code: missing ? payment.last_error_code || PAYMENT_MISSING_ERROR_CODE : null,
     last_error_message: missing ? PAYMENT_MISSING_MESSAGE : null,
-    last_error_href: missing ? payment.last_error_href || null : null,
+    last_error_href: missing ? normalizeMetaPaymentHref(payment.last_error_href) : null,
     last_detected_at: missing ? payment.last_detected_at || null : null,
     last_success_at: payment.last_success_at || null,
   };
@@ -201,6 +268,13 @@ async function dispatchPaymentMissingNotifications({ asset, clinicId = null, mes
   if (!asset) return { notified_scopes: 0 };
   const notificationService = require('./notifications.service');
   const scopes = await paymentNotificationScopes(asset, clinicId);
+  const payment = derivePaymentSnapshot(asset.additionalData || {});
+  const paymentHref = payment.last_error_href || buildWhatsappManagerHref({
+    wabaId: asset.wabaId,
+    businessId: asset.additionalData?.whatsappBusinessHealth?.business_id
+      || asset.additionalData?.businessId
+      || null,
+  });
   for (const scope of scopes) {
     const clinic = Clinica
       ? await Clinica.findByPk(scope.clinicId, { attributes: ['nombre_clinica'], raw: true })
@@ -228,7 +302,11 @@ async function dispatchPaymentMissingNotifications({ asset, clinicId = null, mes
         wamid,
         errorCode: PAYMENT_MISSING_ERROR_CODE,
         errorMessage: PAYMENT_MISSING_MESSAGE,
-        settingsHref: '/ajustes?tab=whatsapp',
+        paymentHref,
+        link: paymentHref,
+        useRouter: false,
+        actionLabel: 'Revisar pago',
+        actionIcon: 'heroicons_outline:arrow-top-right-on-square',
       },
     });
   }
@@ -243,6 +321,7 @@ async function markMissingPaymentFromProviderError({
   messageId = null,
   wamid = null,
   source = 'whatsapp_provider_error',
+  observedAt = null,
 } = {}) {
   const errorCode = extractProviderErrorCode(error);
   if (errorCode !== PAYMENT_MISSING_ERROR_CODE) {
@@ -257,16 +336,39 @@ async function markMissingPaymentFromProviderError({
   const payment = additionalData.payment && typeof additionalData.payment === 'object'
     ? { ...additionalData.payment }
     : {};
-  const now = new Date().toISOString();
+  const detectedAt = normalizeObservedAt(observedAt, new Date());
+  const detectedAtMs = parseDateMs(detectedAt);
+  const existingDetectedAt = parseDateMs(payment.last_detected_at);
+  const lastSuccessAt = parseDateMs(payment.last_success_at);
+  if (lastSuccessAt && detectedAtMs && detectedAtMs <= lastSuccessAt) {
+    return {
+      marked: false,
+      reason: 'payment_failure_precedes_success',
+      error_code: errorCode,
+      asset_id: asset.id,
+    };
+  }
+  const shouldReplaceFailure = !existingDetectedAt || detectedAtMs >= existingDetectedAt;
+  const providerHref = extractPaymentRemediationHref(error);
+  const businessId = additionalData.whatsappBusinessHealth?.business_id
+    || additionalData.businessId
+    || null;
+  const existingHref = normalizeMetaPaymentHref(payment.last_error_href);
+  const fallbackHref = buildWhatsappManagerHref({ wabaId: asset.wabaId, businessId });
   additionalData.payment = {
     ...payment,
     status: 'missing_payment_method',
     last_error_code: PAYMENT_MISSING_ERROR_CODE,
     last_error_message: PAYMENT_MISSING_MESSAGE,
-    last_detected_at: now,
-    last_message_id: messageId || null,
-    last_wamid: wamid || null,
-    last_source: source,
+    last_error_href: shouldReplaceFailure
+      ? providerHref || existingHref || fallbackHref
+      : existingHref || fallbackHref,
+    ...(shouldReplaceFailure ? {
+      last_detected_at: detectedAt,
+      last_message_id: messageId || null,
+      last_wamid: wamid || null,
+      last_source: source,
+    } : {}),
   };
   asset.additionalData = additionalData;
   await asset.save();
@@ -323,6 +425,7 @@ async function reconcileProviderStatus({
     messageId: messageRow.id,
     wamid,
     source,
+    observedAt: status?.timestamp || messageRow.updatedAt || messageRow.createdAt || null,
   });
   if (!marked.marked) return { handled: false, ...marked };
 
@@ -350,11 +453,15 @@ async function reconcileProviderStatus({
 module.exports = {
   PAYMENT_MISSING_ERROR_CODE,
   PAYMENT_MISSING_MESSAGE,
+  buildWhatsappManagerHref,
   clearMissingPaymentAfterSuccessfulStatus,
   dispatchPaymentMissingNotifications,
   derivePaymentSnapshot,
   findWhatsappPhoneAssetForMetadata,
   formatPurposeConsequences,
+  extractPaymentRemediationHref,
   markMissingPaymentFromProviderError,
+  normalizeMetaPaymentHref,
+  normalizeObservedAt,
   reconcileProviderStatus,
 };
