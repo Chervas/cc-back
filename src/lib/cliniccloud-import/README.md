@@ -442,6 +442,14 @@ representación ORM actual, incluidos booleanos/fechas, no sobre una mezcla de
 tipos SQL y JSON. No acepta cambiar otros campos, apoyos, programas ni un perfil
 previo. Exige transacción externa y los tres gates de reserva.
 
+También admite `tratamiento_id: null` **solo** si está marcado expresamente como
+pendiente de correspondencia clínica. Reserva cabina, profesional y equipo sin
+fabricar un tratamiento, precio o consentimiento ni borrar ese pendiente. No
+admite un ID ausente, cero o inválido, ni una revisión ya confirmada como «sin
+tratamiento». La confirmación de recursos posterior no resuelve el acto clínico.
+La QA aislada comprueba que los escritores publicados conservan esa distinción
+al editar, cancelar y reabrir la reserva, junto con HOLD y la unidad ocupada.
+
 Preparar un paquete inmutable con fila/ocupaciones antes, evidencia de unidad y
 ubicación, y casos fuente todavía sin conciliar. El operador valida respaldo,
 ensaya con rollback, aplica con diario y verifica independientemente estado y

@@ -1,6 +1,6 @@
 'use strict';
 
-const { importReviewVersion } = require('./appointment-import-review');
+const { importReviewVersion, importTreatmentPending } = require('./appointment-import-review');
 const { normalizeBookingProfile } = require('./booking-profile');
 
 const fail = () => {
@@ -26,8 +26,12 @@ function importedEquipmentProfile(appointment, assignment) {
     || appointment.voucher_id || appointment.lead_intake_id || appointment.es_provisional || appointment.hold_expires_at
     || !metadata || typeof metadata !== 'object' || Array.isArray(metadata)
     || ['booking', 'program_session', 'additional_staff'].some(key => metadata[key] != null)
-    || !['id_cita', 'paciente_id', 'clinica_id', 'doctor_id', 'instalacion_id', 'tratamiento_id']
+    || !['id_cita', 'paciente_id', 'clinica_id', 'doctor_id', 'instalacion_id']
       .every(key => Number.isSafeInteger(Number(appointment[key])) && Number(appointment[key]) > 0)
+    // A documented resource reservation must not manufacture a clinical tariff.
+    // Only an explicit unresolved null is allowed; its clinical warning remains.
+    || !(Number.isSafeInteger(Number(appointment.tratamiento_id)) && Number(appointment.tratamiento_id) > 0
+      || appointment.tratamiento_id === null && importTreatmentPending(appointment))
     || !['appointment_details', 'day_before', 'same_day'].every(key => metadata.notification_suppression?.[key] === true)) fail();
   const ids = assignment.equipment_ids;
   if (!Array.isArray(ids) || !ids.length || ids.length > 8

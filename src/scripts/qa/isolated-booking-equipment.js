@@ -113,7 +113,7 @@ async function main() {
       source_system: 'cliniccloud', source_reference: `${marker}-imported`, nota: 'Fictitious imported booking' }, { transaction: tx });
     await imported.reload({ transaction: tx });
     const originalImported = imported.toJSON();
-    const { importReviewVersion } = require('../../lib/appointment-import-review');
+    const { importReviewVersion, importTreatmentPending } = require('../../lib/appointment-import-review');
     const reconciled = await mutateAppointmentBooking({ db, existingAppointmentId: imported.id_cita, appointmentValues: {},
       capabilities: { simple: true, multi: true, equipment: true }, transaction: tx, persist,
       importEquipmentAssignment: { expected_version: importReviewVersion(originalImported), source_sha256: 'a'.repeat(64), equipment_ids: [machine.id] } });
@@ -145,6 +145,32 @@ async function main() {
       assert.equal((await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: imported.id_cita, resource_kind: 'equipment' }, transaction: tx })).length, 1);
       checks.push('published-crm-command-preserves-imported-snapshot-and-revalidates-reopening-on-isolated-db');
     }
+    const pendingClinical = await db.CitaPaciente.create({ ...values(0), tratamiento_id: null,
+      inicio: '2031-01-06T15:00:00Z', fin: '2031-01-06T15:20:00Z', source_system: 'cliniccloud',
+      source_reference: `${marker}-pending-treatment`, import_metadata: { ...values(0).import_metadata,
+        cliniccloud_delta: { pending_assignment: ['treatment_id'] } } }, { transaction: tx });
+    await pendingClinical.reload({ transaction: tx });
+    const beforePending = pendingClinical.toJSON();
+    const assignedPending = await mutateAppointmentBooking({ db, existingAppointmentId: pendingClinical.id_cita, appointmentValues: {},
+      capabilities: { simple: true, multi: true, equipment: true }, transaction: tx, persist,
+      importEquipmentAssignment: { expected_version: importReviewVersion(beforePending), source_sha256: 'b'.repeat(64), equipment_ids: [machine.id] } });
+    assert(importTreatmentPending(assignedPending.toJSON()));
+    assert.equal(assignedPending.tratamiento_id, null);
+    const pendingSnapshot = assignedPending.import_metadata.booking;
+    if (process.env.QA_PUBLISHED_BOOKING_COMPAT === 'crm') {
+      const published = require('/home/ubuntu/wt/back-staging/src/services/appointmentBookingCommand.service');
+      for (const [appointmentValues, stateOnly] of [[{ nota: 'Fictitious note' }, false], [{ estado: 'cancelada' }, true], [{ estado: 'pendiente' }, true]]) {
+        await published.mutateAppointmentBooking({ db, existingAppointmentId: pendingClinical.id_cita, appointmentValues,
+          capabilities: { simple: true, multi: true, equipment: true }, transaction: tx, persist, stateOnly });
+      }
+    }
+    await assignedPending.reload({ transaction: tx });
+    assert.equal(assignedPending.tratamiento_id, null);
+    assert(importTreatmentPending(assignedPending.toJSON()));
+    assert.deepEqual(assignedPending.import_metadata.booking.profile, pendingSnapshot.profile);
+    assert.deepEqual(assignedPending.import_metadata.notification_suppression, beforePending.import_metadata.notification_suppression);
+    assert.equal((await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: pendingClinical.id_cita }, transaction: tx })).length, 3);
+    checks.push('unmapped-treatment-machine-snapshot-survives-published-writer-with-clinical-warning-and-hold');
     await tx.rollback(); tx = null;
     await owner.reload();
     assert.equal(owner.equipment_booking_enabled, originalFeature); assert.equal(owner.grupoClinicaId, originalGroup);

@@ -9,7 +9,7 @@ const { loadBookingContext, searchTreatmentSlots } = require('../../services/app
 const { mutateAppointmentBooking } = require('../../services/appointmentBookingCommand.service');
 const { bookingSegments } = require('../../lib/appointment-booking-segments');
 const { normalizeAdditionalStaff, additionalStaffPayload } = require('../../lib/appointment-additional-staff');
-const { importReviewVersion, hasReviewedImportResources, importResourceFingerprint } = require('../../lib/appointment-import-review');
+const { importReviewVersion, hasReviewedImportResources, importResourceFingerprint, importTreatmentPending } = require('../../lib/appointment-import-review');
 const { importedEquipmentProfile } = require('../../lib/appointment-import-equipment');
 
 const capabilities = { simple: true, multi: true };
@@ -670,6 +670,46 @@ test('documentary equipment profile is derived, bounded, and cannot choose new c
     { duration_minutes: 10 }, { doctor_id: 6 }, { installation_id: 10 }]) {
     assert.throws(() => importedEquipmentProfile(f.row, { ...f.assignment, ...changes }), { code: 'booking_import_equipment_invalid' });
   }
+});
+
+test('documented machinery can protect an explicitly unresolved treatment without resolving its clinical warning', async () => {
+  const f = importedEquipmentFixture({}, { tratamiento_id: null });
+  f.row.import_metadata.cliniccloud_delta.pending_assignment.push('treatment_id');
+  f.assignment.expected_version = importReviewVersion(f.row);
+  f.db.Tratamiento.findByPk = async () => { throw new Error('UNEXPECTED_CATALOG_QUERY'); };
+  const before = structuredClone(f.row);
+  const saved = await f.reconcile();
+  assert.equal(saved.tratamiento_id, null);
+  assert(importTreatmentPending(saved));
+  assert.deepEqual({ ...saved, import_metadata: before.import_metadata }, before);
+  assert.equal(saved.import_metadata.import_treatment_resolution, undefined);
+  assert.equal(saved.import_metadata.import_resource_resolution, undefined);
+  assert.deepEqual(f.state.occupancies.map(r => r.resource_key).sort(), ['doctor:5', 'equipment:1', 'installation:9']);
+  const edited = await f.reserve({ capabilities: eqCaps, existingAppointmentId: saved.id_cita, appointmentValues: { nota: 'Updated note' } });
+  assert.deepEqual(edited.import_metadata.booking.profile, saved.import_metadata.booking.profile);
+  await f.reserve({ capabilities: eqCaps, existingAppointmentId: saved.id_cita, appointmentValues: { estado: 'cancelada' }, stateOnly: true });
+  const reopened = await f.reserve({ capabilities: eqCaps, existingAppointmentId: saved.id_cita, appointmentValues: { estado: 'pendiente' }, stateOnly: true });
+  assert(importTreatmentPending(reopened));
+  assert.equal(reopened.tratamiento_id, null);
+  assert.deepEqual(reopened.import_metadata.notification_suppression, before.import_metadata.notification_suppression);
+  assert.deepEqual(reopened.import_metadata.booking.profile, saved.import_metadata.booking.profile);
+  assert.equal(f.state.occupancies.filter(r => r.resource_kind === 'equipment').length, 1);
+  assert.equal(f.state.events.length, 0);
+});
+
+test('an absent or malformed treatment cannot masquerade as an explicitly unresolved clinical mapping', () => {
+  for (const treatment of [undefined, '', 0, -1, 'unknown']) {
+    const f = importedEquipmentFixture({}, { tratamiento_id: treatment });
+    f.row.import_metadata.cliniccloud_delta.pending_assignment.push('treatment_id');
+    f.assignment.expected_version = importReviewVersion(f.row);
+    assert.throws(() => importedEquipmentProfile(f.row, f.assignment), { code: 'booking_import_equipment_invalid' });
+  }
+  const f = importedEquipmentFixture({}, { tratamiento_id: null, tipo_cita: 'revision' });
+  f.row.import_metadata.cliniccloud_delta.pending_assignment.push('treatment_id');
+  f.row.import_metadata.import_treatment_resolution = { version: 1, mode: 'no_treatment', visit_type: 'revision',
+    appointment_id: f.row.id_cita, patient_id: f.row.paciente_id, clinic_id: f.row.clinica_id, actor_id: 7, request_hash: 'c'.repeat(64) };
+  f.assignment.expected_version = importReviewVersion(f.row);
+  assert.throws(() => importedEquipmentProfile(f.row, f.assignment), { code: 'booking_import_equipment_invalid' });
 });
 
 test('only complete, unchanged, open ClinicCloud appointments in HOLD can receive documentary machines', async () => {
