@@ -50,6 +50,27 @@ test('rejects source/notes/time/HOLD/clinic/multi-room/active/capacity changes',
 test('even a rehashed package cannot add mutation columns or enable messages',()=>{
  for(const change of [p=>p.allowed_columns.push('inicio'),p=>p.sends_messages=true,p=>p.activates_rooms=true]){const p=packageFor();change(p);const {package_sha256,...body}=p;p.package_sha256=hash(body);assert.throws(()=>verifyPackage(p),/INVALID/);}
 });
+test('active documentary placement needs explicit approval and preserves pending clinical review',async()=>{
+ const f=fixture();f.cabin.activo=1;f.cabin.profesionales_permitidos=[53];
+ assert.throws(()=>operationFor(f),/INACTIVE_ROOM_REQUIRED/);
+ f.allowActiveDocumentaryRoom=true;const pkg=packageFor(f);verifyPackage(pkg);
+ const store=memoryStore(f.before);await executeAssignments({pkg,store,journal:{append:async()=>{}},now:()=>now});
+ assert.equal(store.row.instalacion_id,80);assert.equal(store.row.doctor_id,53);
+ assert.equal(store.row.import_metadata.import_resource_resolution,undefined);
+ assert.deepEqual(store.row.import_metadata.notification_suppression,f.before.import_metadata.notification_suppression);
+});
+test('active documentary placement cannot bypass professional restrictions',()=>{
+ const f=fixture();f.cabin.activo=1;f.cabin.profesionales_permitidos=[99];f.allowActiveDocumentaryRoom=true;
+ assert.throws(()=>operationFor(f),/PROFESSIONAL_NOT_ALLOWED/);
+ // A location can be documented while the missing professional remains pending.
+ f.before.doctor_id=null;const pkg=packageFor(f);verifyPackage(pkg);
+ assert.equal(pkg.operations[0].before.doctor_id,null);
+});
+test('active approval is hashed and cannot be removed or replaced by a truthy string',()=>{
+ const f=fixture();f.cabin.activo=1;f.allowActiveDocumentaryRoom='true';assert.throws(()=>operationFor(f),/INACTIVE_ROOM_REQUIRED/);
+ f.allowActiveDocumentaryRoom=true;const pkg=packageFor(f);delete pkg.operations[0].allow_active_documentary_room;
+ const {package_sha256,...body}=pkg;pkg.package_sha256=hash(body);assert.throws(()=>verifyPackage(pkg),/OPERATION_CHANGED/);
+});
 test('SQL store rejects wrong scope and triggers',async()=>{
  for(const rows of [[{id_clinica:66,grupoClinicaId:29}], [{id_clinica:66,grupoClinicaId:29},{id_clinica:72,grupoClinicaId:1}]])await assert.rejects(createCabinStore({query:async()=>[rows]}),/GROUP_CHANGED/);
  await assert.rejects(createCabinStore({query:async sql=>[sql.includes('TRIGGER')?[{TRIGGER_NAME:'t'}]:[{id_clinica:66,grupoClinicaId:29},{id_clinica:72,grupoClinicaId:29}]]}),/TRIGGERS/);

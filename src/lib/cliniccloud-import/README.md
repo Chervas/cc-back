@@ -414,6 +414,28 @@ Pruebas: `cliniccloud_catalog_cosmetic_prices.test.js`,
 `economic_fiscal_price_source.test.js`. Recuperación selectiva de esas columnas,
 comparando el estado posterior y el uso económico, no restauración global.
 
+## Traslado documental a salas ya abiertas
+
+`cabin-assignments` mantiene por defecto la exigencia de sala documental inactiva.
+El operador puede preparar explícitamente `allowActiveDocumentaryRoom: true`
+cuando las salas ya están habilitadas: esa decisión forma parte de la huella del
+paquete. No cambia la capacidad ni activa salas; el profesional ya asignado debe
+estar permitido. Si falta profesional, la ubicación no confirma la reserva ni
+retira el aviso de importación. Las reservas con ocupación canónica se trasladan
+mediante `mutateAppointmentBooking`, nunca con el actualizador físico simple.
+
+Preparar el lote completo antes de aplicar: rechazar ambos lados de los solapes
+proyectados, incluyendo aliases Medical/Capilar. Revalidar fila, sala, paciente y
+ocupaciones bajo sus anclas; conservar acto, horario, estado y HOLD. Ensayar con
+rollback y verificar idempotencia. No hacer una sustitución global de IDs de
+agendas antiguas: pueden mezclar técnicas y contener citas propias posteriores.
+
+Retirar una agenda virtual exige trasladar antes las reservas nativas/canónicas.
+Las importadas que sigan pendientes deben conservarse y aparecer en la lista de
+revisión, con `installation_inactive`; no borrarlas para ocultar columnas. La
+retirada usa la API normal de instalaciones y conserva historia y reversibilidad.
+Esto no acredita disponibilidad completa mientras existan asignaciones dudosas.
+
 ## Completar personal con reservas simultáneas documentadas
 
 Una cita sin profesional no demuestra que todos los profesionales de la clínica

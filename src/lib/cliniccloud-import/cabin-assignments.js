@@ -7,7 +7,7 @@ const { normalizedRow } = require('./appointments-apply');
 const { sourceReference } = require('./week-appointments');
 const VERSION = 'cliniccloud-cabin-assignments/1';
 const fail = message => { throw Error(message); };
-function operationFor({ before: raw, source, cabin, catalogRow, reason, projectedConflicts = [] }) {
+function operationFor({ before: raw, source, cabin, catalogRow, reason, projectedConflicts = [], allowActiveDocumentaryRoom = false }) {
   const before = normalizedRow(raw), metadata = before.import_metadata;
   if (before.source_system !== 'cliniccloud' || ![66,72].includes(before.clinica_id)
     || before.estado !== 'pendiente' || before.es_provisional || before.hold_expires_at
@@ -24,13 +24,22 @@ function operationFor({ before: raw, source, cabin, catalogRow, reason, projecte
   if (metadata.cliniccloud_reconciliation?.automation_policy !== 'hold'
     || !['appointment_details','day_before','same_day'].every(k => suppression?.[k] === true)) fail('CABIN_HOLD_REQUIRED');
   if (!Number.isSafeInteger(cabin.id) || cabin.id <= 0 || cabin.clinica_id !== before.clinica_id
-    || cabin.activo !== 0 || cabin.capacidad !== 1 || !/^Mapa físico documental BS 2026\./.test(cabin.descripcion || '')) fail('CABIN_DOCUMENTARY_INACTIVE_ROOM_REQUIRED');
+    || !(cabin.activo === 0 || (allowActiveDocumentaryRoom === true && cabin.activo === 1))
+    || cabin.capacidad !== 1 || !/^Mapa físico documental BS 2026\./.test(cabin.descripcion || '')) fail('CABIN_DOCUMENTARY_INACTIVE_ROOM_REQUIRED');
+  // Explicit operator-only physical relocation after the documentary rooms were
+  // opened. This does not certify missing professionals/equipment or remove the
+  // import review. Existing canonical bookings still require the normal command.
+  if (allowActiveDocumentaryRoom && before.doctor_id) {
+    const { installationAllowsStaff } = require('../installation-professionals');
+    if (!installationAllowsStaff(cabin, [Number(before.doctor_id)])) fail('CABIN_PROFESSIONAL_NOT_ALLOWED');
+  }
   if (catalogRow.clinic_id !== before.clinica_id || catalogRow.kind !== 'treatment'
     || catalogRow.installation_resolution?.length !== 1 || catalogRow.installation_resolution[0].confirmed_id !== cabin.id) fail('CABIN_SINGLE_DOCUMENTED_LOCATION_REQUIRED');
   if (!String(reason || '').trim() || projectedConflicts.length) fail('CABIN_REVIEW_OR_SOURCE_CONFLICT');
   if (before.instalacion_id === cabin.id) fail('CABIN_ALREADY_ASSIGNED');
   const body = { appointment_id: before.id_cita, before, before_sha256:hash(before), cabin, cabin_sha256:hash(cabin),
-    source, catalog_source_key: catalogRow.source_catalog_key, catalog_provenance: catalogRow.provenance, reason };
+    source, catalog_source_key: catalogRow.source_catalog_key, catalog_provenance: catalogRow.provenance, reason,
+    ...(allowActiveDocumentaryRoom === true ? { allow_active_documentary_room: true } : {}) };
   return { ...body, operation_sha256:hash(body) };
 }
 function preparePackage({ operations, catalogPlanHash, sourcePlanHash, reviewedBy, createdAt = new Date().toISOString() }) {
@@ -51,6 +60,7 @@ function verifyPackage(pkg) {
     const {operation_sha256,...op}=operation;
     if(hash(op)!==operation_sha256 || hash(op.before)!==op.before_sha256 || hash(op.cabin)!==op.cabin_sha256) fail('CABIN_OPERATION_CHANGED');
     const rebuilt=operationFor({ before:op.before, source:op.source, cabin:op.cabin, reason:op.reason,
+      allowActiveDocumentaryRoom:op.allow_active_documentary_room === true,
       catalogRow:{clinic_id:op.cabin.clinica_id,kind:'treatment',installation_resolution:[{confirmed_id:op.cabin.id}],source_catalog_key:op.catalog_source_key,provenance:op.catalog_provenance} });
     if(hash(rebuilt)!==hash(operation))fail('CABIN_OPERATION_CHANGED');
   }
