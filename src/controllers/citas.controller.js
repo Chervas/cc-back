@@ -2984,10 +2984,11 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     if (cita.source_system === 'treatment_program' && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
     }
-    if (!['patient_request', 'clinic_schedule'].includes(rescheduleReason)) {
+    const { RESCHEDULE_REASONS, statusForReschedule } = require('../lib/appointment-reschedule-reason');
+    if (!RESCHEDULE_REASONS.includes(rescheduleReason)) {
         return res.status(400).json({
             message: 'reschedule_reason inválido',
-            allowed: ['patient_request', 'clinic_schedule'],
+            allowed: RESCHEDULE_REASONS,
         });
     }
 
@@ -3067,10 +3068,8 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
                 allowed: Array.from(CITA_ESTADOS_VALIDOS),
             });
         }
-        cita.estado = estadoRaw;
-    } else {
-        cita.estado = 'reprogramada';
     }
+    cita.estado = statusForReschedule(rescheduleReason, estadoRaw);
     cita.updated_by = req.userData?.userId || null;
     if (bookingEnabled) {
         cita = await mutateAppointmentBooking({
@@ -3153,7 +3152,9 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         console.warn('[reagendarCita] No se pudo cerrar la revisión de automatización:', error.message || error);
     });
 
-    await ensureConsentPackageAndAutomation(cita, req, 'appointment_rescheduled');
+    if (rescheduleReason !== 'administrative_error') {
+        await ensureConsentPackageAndAutomation(cita, req, 'appointment_rescheduled');
+    }
 
     const citaActualizada = await CitaPaciente.findByPk(citaId, {
         include: [
