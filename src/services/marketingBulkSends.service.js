@@ -5,6 +5,8 @@ const { Op, QueryTypes, Sequelize } = require('sequelize');
 const db = require('../../models');
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const whatsappService = require('./whatsapp.service');
+const whatsappAccountHealthService = require('./whatsappAccountHealth.service');
+const whatsappChannelBindingsService = require('./whatsappChannelBindings.service');
 const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const whatsappDeliveryGovernanceService = require('./whatsappDeliveryGovernance.service');
@@ -12,7 +14,7 @@ const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-templ
 const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
 const { usesExplicitDispatchWindow } = require('../lib/marketing-dispatch-window');
 const { normalizeReviewSenderName, requireReviewSenderName } = require('../lib/review-sender-policy');
-const { resolveWhatsappChannelRole } = require('../lib/whatsapp-channel-role');
+const { resolveWhatsappChannelRole, resolveWhatsappRouting } = require('../lib/whatsapp-channel-role');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const {
   REVIEW_AUTOMATION_TRIGGER,
@@ -2191,6 +2193,89 @@ function isReviewRequestList(list) {
 
 function getWhatsappRoutingPurposeForList(list) {
   return isReviewRequestList(list) ? 'review_requests' : 'bulk_campaigns';
+}
+
+function getRequestedWhatsappSenderOriginId(body = {}, list = null) {
+  const criteria = asPlainObject(list?.criteria);
+  const dispatch = asPlainObject(criteria.dispatch);
+  const parsed = Number(
+    body.sender_origin_id
+    || body.whatsapp_sender_origin_id
+    || body.senderOriginId
+    || dispatch.sender_origin_id
+    || criteria.sender_origin_id
+    || 0
+  );
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function buildWhatsappSenderSnapshot(config = null) {
+  if (!config?.originId) return null;
+  return {
+    origin_id: Number(config.originId),
+    phone_number_id: config.phoneNumberId || null,
+    waba_id: config.wabaId || null,
+    role: resolveWhatsappChannelRole(config) || null,
+    label: config.originLabel || null,
+  };
+}
+
+async function resolveWhatsappClinicConfigForList(list, clinicId, body = {}) {
+  const safeClinicId = Number(clinicId || 0);
+  if (!safeClinicId) return null;
+  const originId = getRequestedWhatsappSenderOriginId(body, list);
+  if (!originId) {
+    return whatsappService.getClinicConfig(safeClinicId, {
+      purpose: getWhatsappRoutingPurposeForList(list),
+    });
+  }
+
+  const [clinic, asset, bindings] = await Promise.all([
+    Clinica.findByPk(safeClinicId, { attributes: ['id_clinica', 'grupoClinicaId'], raw: true }),
+    ClinicMetaAsset.findOne({
+      where: { id: originId, assetType: 'whatsapp_phone_number' },
+      raw: true,
+    }),
+    whatsappChannelBindingsService.listClinicBindings(safeClinicId),
+  ]);
+  const belongsToClinic = asset?.assignmentScope === 'clinic' && Number(asset.clinicaId) === safeClinicId;
+  const belongsToGroup = asset?.assignmentScope === 'group'
+    && Number(asset.grupoClinicaId) === Number(clinic?.grupoClinicaId || 0);
+  if (!clinic || !asset || (!belongsToClinic && !belongsToGroup)) {
+    const error = new Error('El remitente de WhatsApp elegido no pertenece a esta clínica.');
+    error.code = 'whatsapp_sender_outside_clinic_scope';
+    error.status = 409;
+    throw error;
+  }
+
+  const binding = bindings.find((item) => Number(item.asset_id) === originId) || null;
+  const effectiveAsset = binding
+    ? whatsappChannelBindingsService.applyBindingToAsset(asset, binding)
+    : asset;
+  const routing = resolveWhatsappRouting(effectiveAsset);
+  const purpose = getWhatsappRoutingPurposeForList(list);
+  if (routing.role === 'secondary' && !routing.purposes.includes(purpose)) {
+    const error = new Error('El WhatsApp secundario elegido no está habilitado para este tipo de envío.');
+    error.code = 'whatsapp_sender_purpose_not_allowed';
+    error.status = 409;
+    throw error;
+  }
+
+  const config = await whatsappService.getConfigByAssetId(originId, { clinicId: safeClinicId });
+  if (!config) {
+    const error = new Error('El remitente de WhatsApp elegido no está disponible.');
+    error.code = 'whatsapp_sender_unavailable';
+    error.status = 409;
+    throw error;
+  }
+  return {
+    ...config,
+    clinicId: safeClinicId,
+    clinicaId: safeClinicId,
+    whatsapp_channel_role: routing.role,
+    routingPurpose: purpose,
+    originLabel: asset.waVerifiedName || asset.metaAssetName || config.originLabel || null,
+  };
 }
 
 function isWhatsappRoutingConfigAvailable(config) {
@@ -6042,6 +6127,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         template_usage: templateUsage,
         template_commercial: templateCommercial,
         whatsapp_template_id: Number(body.whatsapp_template_id || body.template_id || 0) || null,
+        sender_origin_id: getRequestedWhatsappSenderOriginId(body),
         opt_out_text: templateCommercial ? normalizeText(body.opt_out_text) : null,
         consent_acknowledged: !!body.consent_acknowledged,
         list_source: source,
@@ -6383,6 +6469,13 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   if (channels) nextCriteria.channels = channels;
   if (body.whatsapp_template_id !== undefined || body.template_id !== undefined) {
     nextCriteria.whatsapp_template_id = Number(body.whatsapp_template_id || body.template_id || 0) || null;
+  }
+  if (
+    body.sender_origin_id !== undefined
+    || body.whatsapp_sender_origin_id !== undefined
+    || body.senderOriginId !== undefined
+  ) {
+    nextCriteria.sender_origin_id = getRequestedWhatsappSenderOriginId(body);
   }
   if (body.template_usage !== undefined) nextCriteria.template_usage = normalizeTemplateUsage(body.template_usage);
   if (body.template_commercial !== undefined) nextCriteria.template_commercial = body.template_commercial === true;
@@ -7043,9 +7136,7 @@ async function getWhatsappAccountQualityForList(list, scope = {}) {
 
   let clinicConfig = null;
   try {
-    clinicConfig = await whatsappService.getClinicConfig(clinicId, {
-      purpose: getWhatsappRoutingPurposeForList(list),
-    });
+    clinicConfig = await resolveWhatsappClinicConfigForList(list, clinicId);
   } catch (_) {
     clinicConfig = null;
   }
@@ -7419,6 +7510,20 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       ? await resolveWhatsappTemplate(selectedTemplateId, scope)
       : null;
   }
+  const senderOriginId = getRequestedWhatsappSenderOriginId(body, list);
+  const senderClinicId = getClinicIdForList(list, scope);
+  const senderConfig = needsWhatsappTemplate && senderOriginId
+    ? await resolveWhatsappClinicConfigForList(list, senderClinicId, body)
+    : null;
+  if (template && senderConfig) {
+    template = await resolveWhatsappTemplateForClinic(template, senderClinicId, senderConfig);
+    if (!template) {
+      const err = new Error('La plantilla elegida no está disponible en el número de WhatsApp seleccionado.');
+      err.code = 'whatsapp_template_not_available_for_sender';
+      err.status = 409;
+      throw err;
+    }
+  }
   const snapshot = buildTemplateSnapshot(template);
   const requestedTemplateCommercial = body.template_commercial === true
     || (body.template_commercial !== false && (list.criteria?.template_commercial === true || isCommercialTemplateUsage(requestedTemplateUsage)));
@@ -7493,7 +7598,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     ...(list.criteria || {}),
     active_segment_id: activeSegmentId,
   }, selectedItems);
-  const clinicId = getClinicIdForList(list, scope);
+  const clinicId = senderClinicId;
   const clinic = await loadClinicForTemplateVariables(clinicId);
   if (needsWhatsappTemplate && template) {
     const missingVariables = buildMissingVariablesSummary({ template, items: selectedItems, list, clinic });
@@ -7536,6 +7641,8 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       campaign_name: normalizeText(body.campaign_name || list.criteria?.campaign_name || list.name),
       list_name: normalizeText(body.list_name || list.criteria?.list_name || list.name),
       whatsapp_template_id: isWelcomeDispatch ? (list.criteria?.whatsapp_template_id || null) : (template?.id || null),
+      sender_origin_id: senderOriginId,
+      sender_snapshot: buildWhatsappSenderSnapshot(senderConfig),
       template_usage: templateUsage,
       template_commercial: templateCommercial,
       opt_out_text: templateCommercial ? normalizeText(body.opt_out_text || list.criteria?.opt_out_text) : null,
@@ -7598,6 +7705,8 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
         label: dispatchLabel,
         filter: dispatchFilter,
         whatsapp_template_id: template?.id || null,
+        sender_origin_id: senderOriginId,
+        sender_snapshot: buildWhatsappSenderSnapshot(senderConfig),
         template_snapshot: dispatchSnapshot,
         job_id: null,
         started_at: null,
@@ -7797,9 +7906,7 @@ async function sendTest(scope, campaignId, body = {}) {
   }
   const plainItem = item.get({ plain: true });
   const clinic = await loadClinicForTemplateVariables(clinicId);
-  const clinicConfig = await whatsappService.getClinicConfig(clinicId, {
-    purpose: getWhatsappRoutingPurposeForList(list),
-  });
+  const clinicConfig = await resolveWhatsappClinicConfigForList(list, clinicId, body);
   if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
     const err = new Error(clinicConfig?.routingUnavailable === true
       ? 'whatsapp_secondary_unavailable'
@@ -7808,6 +7915,10 @@ async function sendTest(scope, campaignId, body = {}) {
     throw err;
   }
   clinicConfig.clinicId = clinicId;
+  await whatsappAccountHealthService.assertCanSend({
+    clinicConfig,
+    source: 'marketing_bulk_send_test_preflight',
+  });
   template = await resolveWhatsappTemplateForClinic(template, clinicId, clinicConfig);
   if (!template) {
     const err = new Error('No hay plantilla WhatsApp aprobada compatible con la clínica del contacto de prueba.');
@@ -7879,6 +7990,7 @@ async function sendTest(scope, campaignId, body = {}) {
       recipient: targetPhone,
       phoneNumberId: clinicConfig.phoneNumberId || null,
       wabaId: clinicConfig.wabaId || null,
+      sender_origin_id: clinicConfig.originId || null,
       whatsapp_channel_role: resolveWhatsappChannelRole(clinicConfig),
     },
     sent_at: null,
@@ -8327,7 +8439,23 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     || (context === 'welcome' ? welcomeMessage.template_id : null)
     || list.criteria?.whatsapp_template_id
     || list.template_snapshot?.id;
-  const template = await resolveWhatsappTemplate(selectedTemplateId, scope);
+  let template = await resolveWhatsappTemplate(selectedTemplateId, scope);
+  const clinicId = getClinicIdForList(list, scope);
+  const clinicConfig = clinicId
+    ? await resolveWhatsappClinicConfigForList(list, clinicId, body)
+    : null;
+  if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
+    const err = new Error(clinicConfig?.routingUnavailable === true
+      ? 'El WhatsApp secundario configurado no está disponible.'
+      : 'La campaña necesita un número de WhatsApp disponible.');
+    err.status = 409;
+    throw err;
+  }
+  await whatsappAccountHealthService.assertCanSend({
+    clinicConfig,
+    source: 'marketing_bulk_send_start_preflight',
+  });
+  template = await resolveWhatsappTemplateForClinic(template, clinicId, clinicConfig);
   if (!template || String(template.status || '').toUpperCase() !== 'APPROVED') {
     const err = new Error('La plantilla no está aprobada. Meta suele aprobarla en unos 15 minutos.');
     err.status = 409;
@@ -8357,6 +8485,8 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     filter,
     whatsapp_template_id: template?.id || null,
     template_snapshot: buildTemplateSnapshot(template),
+    sender_origin_id: clinicConfig.originId || null,
+    sender_snapshot: buildWhatsappSenderSnapshot(clinicConfig),
     job_id: null,
     batch_size: dispatch.batch_size,
     delay_ms: dispatch.delay_ms,
@@ -8577,7 +8707,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     err.status = 409;
     throw err;
   }
-  const template = await resolveWhatsappTemplate(
+  let template = await resolveWhatsappTemplate(
     dispatch.whatsapp_template_id
       || dispatch.template_snapshot?.id
       || (context === 'welcome' ? welcomeMessage.template_id : null)
@@ -8587,12 +8717,22 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   );
   const clinicId = getClinicIdForList(list, scope);
   const clinicConfig = clinicId
-    ? await whatsappService.getClinicConfig(clinicId, { purpose: getWhatsappRoutingPurposeForList(list) })
+    ? await resolveWhatsappClinicConfigForList(list, clinicId, body)
     : null;
   if (!template || !isWhatsappRoutingConfigAvailable(clinicConfig)) {
     const err = new Error(clinicConfig?.routingUnavailable === true
       ? 'No se puede reanudar la cola porque el WhatsApp secundario configurado no está disponible.'
       : 'No se puede reanudar la cola hasta que la plantilla y la cuenta de WhatsApp estén disponibles.');
+    err.status = 409;
+    throw err;
+  }
+  await whatsappAccountHealthService.assertCanSend({
+    clinicConfig,
+    source: 'marketing_bulk_send_resume_preflight',
+  });
+  template = await resolveWhatsappTemplateForClinic(template, clinicId, clinicConfig);
+  if (!template || String(template.status || '').toUpperCase() !== 'APPROVED') {
+    const err = new Error('La plantilla no está aprobada para el número de WhatsApp seleccionado.');
     err.status = 409;
     throw err;
   }
@@ -8814,6 +8954,7 @@ async function sendDispatchItem({
       phoneNumberId: clinicConfig.phoneNumberId || null,
       phoneId: clinicConfig.phoneNumberId || null,
       wabaId: clinicConfig.wabaId || null,
+      sender_origin_id: clinicConfig.originId || null,
       batch_index: batchIndex,
       whatsapp_channel_role: resolveWhatsappChannelRole(clinicConfig),
     },
@@ -9065,7 +9206,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   const welcomeMessage = list.criteria?.welcome_message && typeof list.criteria.welcome_message === 'object'
     ? list.criteria.welcome_message
     : {};
-  const template = await resolveWhatsappTemplate(
+  let template = await resolveWhatsappTemplate(
     dispatch.whatsapp_template_id
       || dispatch.template_snapshot?.id
       || (context === 'welcome' ? welcomeMessage.template_id : null)
@@ -9090,7 +9231,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   const clinicId = getClinicIdForList(list, scope);
   const clinic = await loadClinicForTemplateVariables(clinicId);
   const clinicConfig = clinicId
-    ? await whatsappService.getClinicConfig(clinicId, { purpose: getWhatsappRoutingPurposeForList(list) })
+    ? await resolveWhatsappClinicConfigForList(list, clinicId)
     : null;
   if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
     const pausedReason = clinicConfig?.routingUnavailable === true
@@ -9110,6 +9251,44 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     return { status: 'completed', result: { paused: true, reason: pausedReason, list_id: list.id } };
   }
   clinicConfig.clinicId = clinicId;
+  template = await resolveWhatsappTemplateForClinic(template, clinicId, clinicConfig);
+  if (!template || String(template.status || '').toUpperCase() !== 'APPROVED') {
+    await list.update({
+      status: 'paused',
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: 'paused_template',
+          paused_reason: 'template_not_approved_for_sender',
+          paused_at: new Date().toISOString(),
+        },
+      }),
+    });
+    return { status: 'completed', result: { paused: true, reason: 'template_not_approved_for_sender', list_id: list.id } };
+  }
+  try {
+    await whatsappAccountHealthService.assertCanSend({
+      clinicConfig,
+      source: 'marketing_bulk_send_worker_preflight',
+      jobId: jobRequest?.id || dispatch.job_id || null,
+    });
+  } catch (error) {
+    await list.update({
+      status: 'paused',
+      criteria: mergeCriteria(list, {
+        dispatch: {
+          ...dispatch,
+          status: 'paused_config',
+          paused_reason: error?.health?.reason_code || 'whatsapp_sender_health_blocked',
+          paused_at: new Date().toISOString(),
+        },
+      }),
+    });
+    return {
+      status: 'completed',
+      result: { paused: true, reason: error?.health?.reason_code || 'whatsapp_sender_health_blocked', list_id: list.id },
+    };
+  }
 
   const deliveryGate = await whatsappDeliveryGovernanceService.getDispatchGate({
     clinicId,
@@ -9242,9 +9421,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     let itemTemplate = template;
     if (itemClinicId && itemClinicId !== Number(clinicId || 0)) {
       itemClinic = await loadClinicForTemplateVariables(itemClinicId);
-      itemClinicConfig = await whatsappService.getClinicConfig(itemClinicId, {
-        purpose: getWhatsappRoutingPurposeForList(list),
-      }).catch(() => null);
+      itemClinicConfig = await resolveWhatsappClinicConfigForList(list, itemClinicId).catch(() => null);
       if (itemClinicConfig) itemClinicConfig.clinicId = itemClinicId;
       itemTemplate = await resolveWhatsappTemplateForClinic(template, itemClinicId, itemClinicConfig);
     }
@@ -9998,6 +10175,8 @@ module.exports = {
   removeCampaign,
   reconcileDispatchJobState,
   __testing: {
+    buildWhatsappSenderSnapshot,
+    getRequestedWhatsappSenderOriginId,
     resolveWhatsappTemplateForClinic,
     scoreWhatsappTemplateForScope,
     computeCounters,
