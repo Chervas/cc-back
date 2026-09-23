@@ -2231,6 +2231,7 @@ async function createCustomTemplateForClinic({
   templateUsage = null,
   replaceTemplateId = null,
   createdByUserId = null,
+  technicalName = null,
 }) {
   const safeClinicId = Number(clinicId || 0) || null;
   const safeWabaId = cleanString(wabaId);
@@ -2293,7 +2294,9 @@ async function createCustomTemplateForClinic({
     } : {}),
   };
   const extraComponents = buildCustomTemplateExtraComponents({ templateUsage: safeTemplateUsage });
-  const technicalName = buildCustomTemplateTechnicalName(safeDisplayName);
+  const safeTechnicalName = cleanString(technicalName)
+    ? normalizeTemplateKey(technicalName).slice(0, 100)
+    : buildCustomTemplateTechnicalName(safeDisplayName);
   if (safeHeaderImageUrl && !/^https:\/\//i.test(safeHeaderImageUrl)) {
     const error = new Error('La imagen de cabecera debe usar una URL HTTPS publica.');
     error.code = 'invalid_template_header_image_url';
@@ -2308,7 +2311,7 @@ async function createCustomTemplateForClinic({
     },
   }] : [];
   const draftTemplate = {
-    name: technicalName,
+    name: safeTechnicalName,
     category: safeCategory,
     components: [...imageHeaderComponents, bodyComponent, ...extraComponents],
   };
@@ -2342,7 +2345,7 @@ async function createCustomTemplateForClinic({
     const row = await WhatsappTemplate.create({
       waba_id: safeWabaId,
       clinic_id: safeClinicId,
-      name: technicalName,
+      name: safeTechnicalName,
       display_name: safeDisplayName,
       language,
       category: safeCategory,
@@ -2361,7 +2364,7 @@ async function createCustomTemplateForClinic({
   const row = await WhatsappTemplate.create({
     waba_id: safeWabaId,
     clinic_id: safeClinicId,
-    name: technicalName,
+    name: safeTechnicalName,
     display_name: safeDisplayName,
     language,
     category: safeCategory,

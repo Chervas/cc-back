@@ -1509,7 +1509,21 @@ exports.listTemplatesForClinic = async (req, res) => {
     }
 
     let templates = [];
-    if (clinicId) {
+    let selectedAsset = null;
+    if (phoneNumberId) {
+      selectedAsset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
+      if (!selectedAsset || !selectedAsset.wabaId) {
+        return res.json([]);
+      }
+      templates = await WhatsappTemplate.findAll({
+        where: {
+          waba_id: selectedAsset.wabaId,
+          is_active: true,
+        },
+        include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'family_key', 'locale', 'display_name', 'category', 'body_text', 'variables'] }],
+        order: [['name', 'ASC']],
+      });
+    } else if (clinicId) {
       templates = await loadEffectiveWhatsappTemplatesForClinic({
         clinicId,
         userId,
@@ -1518,13 +1532,13 @@ exports.listTemplatesForClinic = async (req, res) => {
         includeAllTemplates: includeAllForAdmin,
       });
     } else {
-      const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
-      if (!asset || !asset.wabaId) {
+      selectedAsset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
+      if (!selectedAsset || !selectedAsset.wabaId) {
         return res.json([]);
       }
       templates = await WhatsappTemplate.findAll({
         where: {
-          waba_id: asset.wabaId,
+          waba_id: selectedAsset.wabaId,
           is_active: true,
         },
         include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'family_key', 'locale', 'display_name', 'category', 'body_text', 'variables'] }],
@@ -1546,6 +1560,13 @@ exports.listTemplatesForClinic = async (req, res) => {
           const isLegacyUnassigned = isLegacyUnassignedWhatsappTemplate(json);
           return {
             ...publicJson,
+            ...(selectedAsset ? {
+              effective_assignment_scope: selectedAsset.assignmentScope || null,
+              effective_group_id: selectedAsset.grupoClinicaId || null,
+              effective_waba_id: selectedAsset.wabaId || null,
+              effective_phone_number_id: selectedAsset.phoneNumberId || null,
+              effective_waba_shared: selectedAsset.assignmentScope === 'group',
+            } : {}),
             variables: buildWhatsappTemplateVariableContract(json),
             template_usages: getWhatsappTemplateUsages(json),
             workflow_scope: isReviewWorkflowWhatsappTemplate(json) ? 'review_campaign' : null,
@@ -1752,6 +1773,10 @@ exports.createCustomTemplate = async (req, res) => {
   try {
     const clinicId = req.body?.clinic_id ? Number(req.body.clinic_id) : (req.query.clinic_id ? Number(req.query.clinic_id) : null);
     const phoneNumberId = req.body?.phone_number_id || req.query.phone_number_id || null;
+    const requestedPhoneNumberIds = Array.from(new Set([
+      ...(Array.isArray(req.body?.phone_number_ids) ? req.body.phone_number_ids : []),
+      ...(phoneNumberId ? [phoneNumberId] : []),
+    ].map((value) => String(value || '').trim()).filter(Boolean))).slice(0, 4);
     const userId = req.userData?.userId;
     const templateUsage = String(
       req.body?.template_usage || req.body?.uso || req.body?.usage || ''
@@ -1766,34 +1791,67 @@ exports.createCustomTemplate = async (req, res) => {
       });
     }
 
-    if (!clinicId && !phoneNumberId) {
+    if (!clinicId && !requestedPhoneNumberIds.length) {
       return res.status(400).json({ error: 'clinic_id o phone_number_id requerido' });
     }
     if (clinicId) {
       await assertWhatsappTemplateClinicAccess({ clinicId, userId });
     }
 
-    const asset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
-    if (!asset || !asset.wabaId || (!asset.waAccessToken && !asset.whatsappAuthorizedBinding)) {
+    const assets = [];
+    if (requestedPhoneNumberIds.length) {
+      for (const targetPhoneNumberId of requestedPhoneNumberIds) {
+        const asset = await resolveWabaFromContext({ clinicId, phoneNumberId: targetPhoneNumberId, userId });
+        if (!asset) {
+          return res.status(403).json({ error: 'whatsapp_asset_scope_forbidden' });
+        }
+        if (asset && !assets.some((item) => String(item.wabaId) === String(asset.wabaId))) {
+          assets.push(asset);
+        }
+      }
+    } else {
+      const asset = await resolveWabaFromContext({ clinicId, phoneNumberId: null, userId });
+      if (asset) assets.push(asset);
+    }
+    if (!assets.length || assets.some((asset) => !asset.wabaId || (!asset.waAccessToken && !asset.whatsappAuthorizedBinding))) {
       return res.status(404).json({ error: 'waba_not_found' });
     }
 
     const { createCustomTemplateForClinic } = require('../services/whatsappTemplates.service');
-    const result = await createCustomTemplateForClinic({
-      clinicId: asset.clinicaId || clinicId || null,
-      wabaId: asset.wabaId,
-      accessToken: asset.waAccessToken,
-      displayName: req.body?.display_name || req.body?.nombre || req.body?.name,
-      bodyText: req.body?.body_text || req.body?.contenido || req.body?.body,
-      headerImageUrl: req.body?.header_image_url || req.body?.headerImageUrl || null,
-      category: req.body?.category || (req.body?.template_commercial ? 'MARKETING' : 'UTILITY'),
-      language: req.body?.language || 'es',
-      variables: req.body?.variables || [],
-      templateUsage: templateUsage || null,
-      replaceTemplateId: req.body?.replace_template_id || req.body?.replaceTemplateId || null,
-      createdByUserId: userId,
-    });
-    const rawJson = result.row.get ? result.row.get({ plain: true }) : result.row;
+    const results = [];
+    let sharedTechnicalName = null;
+    for (const asset of assets) {
+      try {
+        const result = await createCustomTemplateForClinic({
+          clinicId: clinicId || asset.clinicaId || null,
+          wabaId: asset.wabaId,
+          accessToken: asset.waAccessToken,
+          displayName: req.body?.display_name || req.body?.nombre || req.body?.name,
+          bodyText: req.body?.body_text || req.body?.contenido || req.body?.body,
+          headerImageUrl: req.body?.header_image_url || req.body?.headerImageUrl || null,
+          category: req.body?.category || (req.body?.template_commercial ? 'MARKETING' : 'UTILITY'),
+          language: req.body?.language || 'es',
+          variables: req.body?.variables || [],
+          templateUsage: templateUsage || null,
+          replaceTemplateId: assets.length === 1
+            ? (req.body?.replace_template_id || req.body?.replaceTemplateId || null)
+            : null,
+          createdByUserId: userId,
+          technicalName: sharedTechnicalName,
+        });
+        const raw = result.row.get ? result.row.get({ plain: true }) : result.row;
+        sharedTechnicalName = sharedTechnicalName || raw.name;
+        results.push({ asset, result, raw, success: true });
+      } catch (error) {
+        results.push({ asset, error, success: false });
+      }
+    }
+    const successful = results.filter((item) => item.success);
+    if (!successful.length) {
+      throw results[0]?.error || new Error('template_submission_failed');
+    }
+    const result = successful[0].result;
+    const rawJson = successful[0].raw;
     const { created_by_user_id: _createdByUserId, ...json } = rawJson;
     return res.status(201).json({
       success: true,
@@ -1810,9 +1868,20 @@ exports.createCustomTemplate = async (req, res) => {
         can_manage_by_current_user: true,
       },
       message: result.submitted
-        ? 'Plantilla enviada a WhatsApp. Meta suele aprobarla en unos 15 minutos.'
+        ? (assets.length > 1
+          ? 'Plantilla enviada a los números configurados. Meta suele aprobarla en unos 15 minutos.'
+          : 'Plantilla enviada a WhatsApp. Meta suele aprobarla en unos 15 minutos.')
         : 'Plantilla guardada localmente, pero no se pudo enviar a Meta. Revisa la conexión WhatsApp.',
       ...(result.error ? { error: result.error } : {}),
+      replicas: results.map((item) => ({
+        success: item.success,
+        phone_number_id: item.asset?.phoneNumberId || null,
+        waba_id: item.asset?.wabaId || null,
+        template_id: item.success ? item.raw?.id || null : null,
+        status: item.success ? item.raw?.status || null : null,
+        submitted: item.success ? item.result?.submitted === true : false,
+        error: item.success ? item.result?.error || null : item.error?.code || item.error?.message || 'template_submission_failed',
+      })),
     });
   } catch (err) {
     console.error('Error createCustomTemplate', err);
