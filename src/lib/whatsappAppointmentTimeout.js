@@ -3,7 +3,7 @@ const { state } = require('./whatsappInboxHealth');
 const day = value => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value));
 // A no-response timeout is a business decision. A transport outage is never
 // evidence of silence, and recovering a timer is not permission to replay it.
-async function decide({ execution, context, nextNode, snapshot, loadAppointment, hasReply, hasAskedToday, now = Date.now() }) {
+async function decide({ execution, context, nextNode, snapshot, loadAppointment, hasAskedToday, now = Date.now() }) {
   const health = state(snapshot, execution.clinic_id, now);
   if (!health.healthy) return { action: 'wait', reason: health.reason, recovery: true };
   if (!health.readyForTimeout) return { action: 'wait', reason: 'inbox_reception_pending' };
@@ -19,7 +19,8 @@ async function decide({ execution, context, nextNode, snapshot, loadAppointment,
   const due = new Date(meta.inbox_original_due_at || execution.wait_until || '').getTime();
   const recovery = !!meta.inbox_held_since || now - due > 5 * 60000
     || Number.isFinite(due) && due < Date.parse(health.recoveryNotBefore || '');
-  if (await hasReply()) return { action: 'stop', reason: 'reply_already_received' };
+  // Response ownership and resumption belong to the native wait_response path.
+  // Merely finding an inbound row must not cancel that waiting execution.
   if (!recovery) return { action: 'continue' };
   // Never carry a night-before cancellation or yesterday's reminder forward.
   if (day(start) !== day(now) || nextNode?.type !== 'action/send_whatsapp') return { action: 'stop', reason: 'obsolete_recovery_timeout' };

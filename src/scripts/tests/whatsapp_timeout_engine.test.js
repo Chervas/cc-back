@@ -31,8 +31,14 @@ test('real engine timeout branch returns to a durable wait when reception health
  assert.equal(f.execution.status,'waiting');assert.equal(f.execution.current_node_id,'wait');
  assert.equal(f.execution.waiting_meta.inbox_original_due_at,due);assert.ok(f.execution.wait_until>Date.now());
 });
-test('real engine never enters the send node after an already received reply or a duplicate recovery request',async()=>{
- for(const options of [{reply:true},{stale:true,asked:true}]){const f=fixture(options);await f.run();assert.equal(f.execution.status,'cancelled');assert.equal(f.execution.current_node_id,null);}
+test('real engine no longer cancels a waiting flow just because an inbound row exists',async()=>{
+ const f=fixture({reply:true});await f.run();
+ assert.equal(f.execution.status,'running');assert.equal(f.execution.current_node_id,'send');
+ assert.notEqual(f.execution.last_error,'reply_already_received');
+});
+test('real engine still suppresses a duplicate recovery request',async()=>{
+ const f=fixture({stale:true,asked:true});await f.run();
+ assert.equal(f.execution.status,'cancelled');assert.equal(f.execution.current_node_id,null);
 });
 test('normal flow retains its next node and marks text followups for final transport checks',async()=>{
  const f=fixture();await f.run();assert.equal(f.execution.status,'running');assert.equal(f.execution.current_node_id,'send');
