@@ -13,7 +13,8 @@ function resourceUse(row) {
   const phases = metadata(row).booking?.phases || [{ start_at: row.inicio, end_at: row.fin,
     installation_id: row.instalacion_id, doctor_ids: row.doctor_id ? [row.doctor_id] : [] }];
   return JSON.stringify(phases.map(phase => [new Date(phase.start_at).toISOString(), new Date(phase.end_at).toISOString(),
-    Number(phase.installation_id), phase.doctor_ids.map(Number).sort((a,b)=>a-b)]));
+    Number(phase.installation_id), phase.doctor_ids.map(Number).sort((a,b)=>a-b),
+    (phase.equipment || []).map(unit => [Number(unit.id), Number(unit.turnaround_minutes || 0)]).sort((a,b)=>a[0]-b[0])]));
 }
 
 function normalizeResolution(input) {
