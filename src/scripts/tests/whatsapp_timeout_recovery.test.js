@@ -9,7 +9,7 @@ function input() {
   return { now, execution: { id: 4, clinic_id: 2, trigger_entity_id: 1, wait_until: new Date(now), waiting_meta: {} },
     context: { appointment }, nextNode: { type: 'action/send_whatsapp' },
     snapshot: { version: 1, observedAt: now, clinics: [{ clinicId: 2, oldestPendingAt: null, blockingReview: 0 }] },
-    loadAppointment: async () => appointment, hasReply: async () => false, hasAskedToday: async () => false };
+    loadAppointment: async () => appointment, hasAskedToday: async () => false };
 }
 test('ordinary future flows retain their planned no-response reminder', async () => {
   const i = input(); i.context.appointment.inicio = '2026-09-23T17:00:00Z';
@@ -25,8 +25,8 @@ test('receiver outage or stale heartbeat cannot send or cancel; clinic health re
   const snapshot = input().snapshot; snapshot.clinics.push({ clinicId: 3, oldestPendingAt: now - 1e7, blockingReview: 1 });
   assert.equal(state(snapshot, 2, now).healthy, true); assert.equal(state(snapshot, 3, now).healthy, false);
 });
-test('reply already imported suppresses timeout even when passive recovery did not dispatch IA', async () => {
-  assert.deepEqual(await decide({ ...input(), hasReply: async () => true }), { action: 'stop', reason: 'reply_already_received' });
+test('an imported reply does not introduce a cancellation outside native response resumption', async () => {
+  assert.deepEqual(await decide({ ...input(), hasReply: async () => { throw Error('unexpected reply scan'); } }), { action: 'continue' });
 });
 test('even a recent pending receipt postpones a no-response decision without treating normal short latency as an outage',async()=>{
  const i=input();i.snapshot.clinics[0].oldestPendingAt=now-1000;
