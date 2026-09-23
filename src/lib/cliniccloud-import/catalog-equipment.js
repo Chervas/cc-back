@@ -6,6 +6,8 @@ const { hash } = require('./adapter');
 const { normalizeBookingProfile } = require('../booking-profile');
 const { equipmentFitsRoom } = require('../booking-equipment');
 const VERSION = 'cliniccloud-catalog-equipment/1';
+// Only families with reviewed documentary bindings, not every inventory entry.
+const REVIEWED_MOBILITY = Object.freeze({ exion: 'mobile', emshape: 'mobile', cyclone: 'fixed' });
 const json = value => typeof value === 'string' ? JSON.parse(value) : value;
 const canonical = row => ({ ...row, clinical_config: json(row.clinical_config) });
 const fail = () => { throw Error('CATALOG_EQUIPMENT_REVIEW_INVALID'); };
@@ -32,15 +34,24 @@ function prepareCatalogEquipment({ before, review, createdAt = new Date().toISOS
     const units = before.units.filter(u => u.id === target.equipment_id);
     if (units.length !== 1) fail();
     const unit = units[0];
-    if (unit.group_id !== 29 || unit.owner_clinic_id !== 72 || unit.mobility !== 'mobile'
-      || unit.family_key !== target.family_key || !['exion', 'emshape'].includes(unit.family_key)
+    if (unit.group_id !== 29 || unit.owner_clinic_id !== 72 || unit.mobility !== REVIEWED_MOBILITY[unit.family_key]
+      || unit.family_key !== target.family_key || !Object.hasOwn(REVIEWED_MOBILITY, unit.family_key)
       || unit.status !== 'available' || !before.shares.some(s => s.equipment_id === unit.id && s.clinic_id === row.clinica_id)) fail();
+    let resourceUnit = unit;
+    if (unit.mobility === 'fixed') {
+      const home = before.rooms.find(r => r.id === unit.home_installation_id);
+      // This operator accepts a canonical, confirmed physical home only.
+      // It does not move machines or infer a home from the treatment's name.
+      if (!home || home.clinica_id !== unit.owner_clinic_id || home.activo !== 1 || home.capacidad !== 1
+        || before.aliases.some(a => a.installation_id === home.id)) fail();
+      resourceUnit = { ...unit, fixed_resource_key: `installation:${home.id}` };
+    }
     for (const id of profile.phases[0].installation_ids) {
       const room = before.rooms.find(r => r.id === id);
       const physical = before.aliases.find(a => a.installation_id === id)?.canonical_installation_id || id;
       const policy = before.policies.find(p => p.installation_id === physical);
       if (room?.clinica_id !== row.clinica_id || room.activo !== 1 || room.capacidad !== 1
-        || !policy || !equipmentFitsRoom(unit, { resource_key: `installation:${physical}`,
+        || !policy || !equipmentFitsRoom(resourceUnit, { resource_key: `installation:${physical}`,
           equipment_policy: { mode: policy.mode, equipment_ids: json(policy.equipment_ids) } })) fail();
     }
     const nextProfile = normalizeBookingProfile({ version: 2, phases: profile.phases.map(phase => ({ ...phase,

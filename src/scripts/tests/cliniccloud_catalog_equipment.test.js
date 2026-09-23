@@ -84,3 +84,42 @@ test('modified packages and reviews cannot be applied', () => {
   const fresh = prepareCatalogEquipment(f); f.review.reviewed_by = 'other';
   assert.throws(() => verifyCatalogEquipment(fresh, f.review));
 });
+
+function fixedFixture() {
+  const f = fixture();
+  Object.assign(f.before.units[0], { family_key: 'cyclone', mobility: 'fixed', home_installation_id: 81 });
+  f.review.targets[0].family_key = 'cyclone';
+  f.before.policies[0] = { installation_id: 81, mode: 'none', equipment_ids: [] };
+  return f;
+}
+test('reviewed Cyclone draft uses its fixed unit even when the room disallows mobile equipment', () => {
+  const f = fixedFixture(), pkg = prepareCatalogEquipment(f);
+  assert.deepEqual(pkg.operations[0].after_config.booking_profile.phases[0].equipment_requirements, [{ equipment_ids: [4] }]);
+  assert.equal(pkg.operations[0].after_config.source_equipment_assignment.family_key, 'cyclone');
+  assert.equal(pkg.operations[0].after_config.catalog_status, 'draft');
+  verifyCatalogEquipment(pkg, f.review);
+});
+test('a fixed unit cannot follow a treatment into another room, even when mobile policy allows all', () => {
+  const f = fixedFixture();
+  f.before.rooms.push({ id: 82, clinica_id: 72, activo: 1, capacidad: 1 });
+  f.before.units[0].home_installation_id = 82;
+  f.before.policies[0] = { installation_id: 81, mode: 'all', equipment_ids: [] };
+  assert.throws(() => prepareCatalogEquipment(f));
+});
+test('logical treatment room may alias a fixed unit home without duplicating that unit', () => {
+  const f = fixedFixture();
+  f.before.rooms.push({ id: 80, clinica_id: 72, activo: 1, capacidad: 1 });
+  f.before.units[0].home_installation_id = 80;
+  f.before.aliases.push({ installation_id: 81, canonical_installation_id: 80, group_id: 29 });
+  f.before.policies[0].installation_id = 80;
+  assert.equal(prepareCatalogEquipment(f).operations.length, 1);
+});
+test('fixed preparation rejects missing, inactive, noncanonical or foreign homes and unreviewed families', () => {
+  const changes = [f => { f.before.units[0].home_installation_id = null; },
+    f => { f.before.units[0].home_installation_id = 999; }, f => { f.before.rooms[0].activo = 0; },
+    f => { f.before.rooms[0].clinica_id = 66; }, f => { f.before.rooms[0].capacidad = 2; },
+    f => { f.before.aliases = [{ installation_id: 81, canonical_installation_id: 80 }]; },
+    f => { f.before.units[0].mobility = 'mobile'; },
+    f => { f.before.units[0].family_key = f.review.targets[0].family_key = 'carboxytherapy'; }];
+  for (const change of changes) { const f = fixedFixture(); change(f); assert.throws(() => prepareCatalogEquipment(f)); }
+});

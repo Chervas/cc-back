@@ -407,8 +407,13 @@ comparando el estado posterior y el uso económico, no restauración global.
 un borrador individual importado, con una fase y una cabina ya documentadas.
 Revisión privada: `confirmation_reference`, `confirmed_on`, `reviewed_by` y
 `targets` con `treatment_id`, `equipment_id`, `family_key` y la huella
-`source_catalog_sha256`. La vía inicial está acotada a EXION/EMShape de BS;
-combinaciones, ondas BTL con cabina contradictoria y maquinaria fija quedan fuera.
+`source_catalog_sha256`. La vía está acotada a EXION/EMShape móviles y Cyclone
+fijo de BS; combinaciones, ondas BTL con cabina contradictoria y las demás
+familias fijas quedan fuera. Para Cyclone exige una ubicación física canónica
+activa, de capacidad uno y de su clínica propietaria. Las cabinas lógicas del
+tratamiento pueden compartir esa identidad física, sin duplicar el equipo.
+La política que prohíbe móviles no impide usar un fijo en su propia sala; nunca
+permite trasladarlo a otra ni deduce su ubicación del nombre del tratamiento.
 
 Ejecutar desde back-dev/dev, `--target crm --mode prepare --review …
 --private-output …`; después `--mode rehearse|apply --review … --package …

@@ -12,12 +12,20 @@ const bsEquipmentBlueprint = Object.freeze({
     { name: 'EMShape PRO', family_key: 'emshape', aliases: ['EMS', 'EMShape'], mobility: 'mobile' },
     { name: 'Ondas de choque BTL', family_key: 'btl_shockwave', aliases: ['Ondas acústicas BTL', 'Ondas de choque'], mobility: 'mobile' },
   ],
+  // Only locations corroborated by the written cabin map AND the later
+  // clarification that all equipment except the three above remains fixed.
+  // Home codes describe physical rooms, never a second unit per clinic alias.
+  fixed_equipment: [
+    { name: 'Cyclone', family_key: 'cyclone', aliases: [], mobility: 'fixed', home_room: 'C11' },
+    { name: 'BTL Lymphastim', family_key: 'btl_lymphastim', aliases: ['Lymphastim', 'Presoterapia'], mobility: 'fixed', home_room: 'C9' },
+    { name: 'Equipo de carboxiterapia', family_key: 'carboxytherapy', aliases: ['Carbo'], mobility: 'fixed', home_room: 'C10' },
+  ],
   mobile_prohibited_rooms: ['C9', 'C10'],
   other_documented_cabins_allow_mobile: true,
   external_hospital_included: false,
   reminders_enabled: false,
   pending: ['Confirmar margen de traslado/preparación antes de habilitar reservas consecutivas.',
-    'Vincular cada unidad fija a su ubicación confirmada, distinguiendo modelos INDIBA.',
+    'Completar las restantes unidades fijas con ubicación confirmada, distinguiendo modelos INDIBA.',
     'Conciliar reservas existentes antes de activar requisitos de maquinaria.'],
 });
 module.exports = { bsEquipmentBlueprint };
