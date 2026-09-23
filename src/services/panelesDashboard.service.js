@@ -18,6 +18,7 @@ const {
   resolveClinicTimeZone,
 } = require('./clinicOpeningHours.service');
 const personalPresenceService = require('./personalPresence.service');
+const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
 
 const {
   AccountingCashSession,
@@ -934,7 +935,7 @@ function hasOperationalWhatsappConnection(assets = []) {
 
 async function loadWhatsappStatus({ clinicIds, groupIds }) {
   if (!ClinicMetaAsset || (!clinicIds.length && !groupIds.length)) {
-    return { connected: null, paymentReady: null, paymentMissing: false };
+    return { connected: null, paymentReady: null, paymentMissing: false, paymentHref: null };
   }
   const scopeOr = [];
   if (clinicIds.length) {
@@ -956,12 +957,24 @@ async function loadWhatsappStatus({ clinicIds, groupIds }) {
   });
 
   const connected = hasOperationalWhatsappConnection(assets);
-  const paymentMissing = assets.some((asset) => hasMissingPaymentSignal(parseJsonObject(asset.additionalData)));
+  const paymentAsset = assets.find((asset) => hasMissingPaymentSignal(parseJsonObject(asset.additionalData))) || null;
+  const paymentMissing = Boolean(paymentAsset);
+  const paymentAdditionalData = parseJsonObject(paymentAsset?.additionalData);
+  const paymentSnapshot = whatsappPaymentStatusService.derivePaymentSnapshot(paymentAdditionalData);
+  const paymentHref = paymentAsset
+    ? paymentSnapshot.last_error_href || whatsappPaymentStatusService.buildWhatsappManagerHref({
+        wabaId: paymentAsset.wabaId,
+        businessId: paymentAdditionalData.whatsappBusinessHealth?.business_id
+          || paymentAdditionalData.businessId
+          || null,
+      })
+    : null;
 
   return {
     connected,
     paymentReady: connected && !paymentMissing,
     paymentMissing,
+    paymentHref,
   };
 }
 
@@ -1055,8 +1068,9 @@ async function loadSetupStatus({ clinicIds, groupIds, clinics, whatsappStatus })
       description: 'Evita bloqueos de envío por facturación de Meta.',
       completed: whatsappStatus.paymentReady === true,
       severity: whatsappStatus.paymentMissing ? 'critical' : 'normal',
-      link: '/ajustes',
-      queryParams: { panel: 'connected-accounts' },
+      link: whatsappStatus.paymentHref || '/ajustes',
+      queryParams: whatsappStatus.paymentHref ? undefined : { panel: 'connected-accounts' },
+      external: Boolean(whatsappStatus.paymentHref),
       actionLabel: 'Revisar',
     },
     {
@@ -1508,8 +1522,9 @@ async function getMainDashboard({ userId, query = {} }) {
       id: 'whatsapp_payment_missing',
       title: 'WhatsApp no tiene método de pago activo',
       subtitle: 'Meta puede bloquear plantillas y recordatorios hasta que se configure la facturación.',
-      link: '/ajustes',
-      queryParams: { panel: 'connected-accounts' },
+      link: whatsappStatus.paymentHref || '/ajustes',
+      queryParams: whatsappStatus.paymentHref ? undefined : { panel: 'connected-accounts' },
+      external: Boolean(whatsappStatus.paymentHref),
       actionLabel: 'Revisar pago',
     });
   }

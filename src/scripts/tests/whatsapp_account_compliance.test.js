@@ -212,6 +212,29 @@ assert.strictEqual(manualSpec.webhook_field, 'manual_health_review');
 assert.strictEqual(manualSpec.restriction_info[0].error_code, 141006);
 assert.strictEqual(JSON.stringify(manualSpec.raw_payload).includes('must-not-be-copied'), false);
 
+const paymentReviewSpec = buildManualReviewIncidentSpec({
+  asset: {
+    id: 396,
+    assetType: 'whatsapp_phone_number',
+    wabaId: 'waba-payment',
+    phoneNumberId: 'phone-payment',
+    additionalData: {
+      payment: {
+        status: 'missing_payment_method',
+        last_error_code: 131042,
+      },
+    },
+  },
+  context: { clinicId: 56, groupId: null },
+  health: {
+    state: 'blocked',
+    can_send: false,
+    reason_code: 'meta_error_131042_payment_missing',
+    provider_error_code: 131042,
+  },
+});
+assert.strictEqual(paymentReviewSpec, null);
+
 const sanitizedActivity = sanitizeAppealActivity({
   last_7d: 3,
   failed_7d: 1,

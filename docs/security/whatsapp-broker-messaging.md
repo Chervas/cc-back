@@ -163,10 +163,18 @@ idempotente. Solo después se publica el refresco de vista con IDs, sin contenid
 Meta `131042` se materializa como bloqueo crítico del activo emisor con motivo
 `meta_error_131042_payment_missing`; puede estar conectado y a la vez no poder
 enviar. Las notificaciones se crean por ámbito vinculante e indican rol,
-propósitos y acción configurada. No hay fallback ni reintento implícito. Un
-`sent`, `delivered` o `read` de un mensaje local posterior en el mismo activo
-limpia la incidencia y recupera su salud; un estado atrasado anterior o una
-reconexión local sin esa evidencia no basta.
+propósitos y acción configurada. La remediación abre únicamente una URL HTTPS
+validada de `business.facebook.com`, obtenida del error de Meta o construida para
+el WABA y negocio. No conduce a Ajustes internos ni crea incidentes o apelaciones
+de cumplimiento. No hay fallback ni reintento implícito.
+
+`last_detected_at` usa el timestamp del estado de Meta o, si falta, la fecha del
+mensaje fallido. La hora de una conciliación posterior no sustituye la hora del
+fallo, y un fallo histórico no pisa otro posterior. Un `sent`, `delivered` o
+`read` de un mensaje local posterior en el mismo activo limpia la incidencia y
+recupera su salud; un estado atrasado anterior, `CONNECTED`, una reconexión local
+o un diagnóstico realizado con otra credencial no bastan. No se debe probar el
+pago saltándose el broker o el cortacircuitos.
 
 ## Contrato y autoridad
 

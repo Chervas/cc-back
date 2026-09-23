@@ -2391,6 +2391,7 @@ exports.getComplianceAdminOverview = async (req, res) => {
         payment_status: payment.status || null,
         payment_missing: payment.missing === true,
         payment_message: payment.last_error_message || null,
+        payment_last_error_href: payment.last_error_href || null,
         payment_last_detected_at: payment.last_detected_at || null,
         payment_last_success_at: payment.last_success_at || null,
       };

@@ -1194,9 +1194,19 @@ function buildManualReviewIncidentSpec({ asset, context, health, now = new Date(
   const reasonCode = clean(health?.reason_code).toLowerCase();
   const accountReviewStatus = clean(businessHealth.account_review_status).toUpperCase();
   const businessVerificationStatus = clean(businessHealth.business_verification_status).toLowerCase();
-  const hasReviewableState = health?.can_send === false
-    || accountReviewStatus === 'REJECTED'
+  const restrictions = buildTechnicalRestrictions(businessHealth);
+  const hasExplicitReviewState = accountReviewStatus === 'REJECTED'
     || ['rejected', 'failed', 'revoked'].includes(businessVerificationStatus);
+  const paymentBlocked = reasonCode.includes('131042')
+    || Number(health?.provider_error_code || 0) === 131042
+    || safeObject(additionalData.payment).status === 'missing_payment_method'
+    || Number(safeObject(additionalData.payment).last_error_code || 0) === 131042
+    || restrictions.some((item) => [131042, 141006].includes(Number(item.error_code || 0)));
+  const hasNonPaymentRestriction = restrictions.some(
+    (item) => ![131042, 141006].includes(Number(item.error_code || 0))
+  );
+  const hasReviewableState = hasExplicitReviewState
+    || (health?.can_send === false && (!paymentBlocked || hasNonPaymentRestriction));
   if (!hasReviewableState) return null;
 
   let providerEvent = 'WHATSAPP_ACCOUNT_HEALTH_REVIEW';
@@ -1213,7 +1223,6 @@ function buildManualReviewIncidentSpec({ asset, context, health, now = new Date(
     || now
   );
   const safeOccurredAt = Number.isNaN(occurredAt.getTime()) ? now : occurredAt;
-  const restrictions = buildTechnicalRestrictions(businessHealth);
   const remediation = restrictions.map((item) => item.remediation).filter(Boolean).join('\n') || null;
   const rawPayload = {
     source: 'clinicaclick_manual_health_review',

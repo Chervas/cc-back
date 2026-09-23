@@ -64,6 +64,21 @@ test('el error 131042 pausa el remitente y explica las consecuencias por propós
     whatsappPaymentStatusService.formatPurposeConsequences(['bulk_campaigns'], 'fallback_primary'),
     /WhatsApp principal/i
   );
+  assert.equal(
+    whatsappPaymentStatusService.extractPaymentRemediationHref({
+      errors: [{
+        code: 131042,
+        error_data: {
+          details: 'Visit https://business.facebook.com/billing_hub/accounts/details/?business_id=294&asset_id=100 to resolve it.',
+        },
+      }],
+    }),
+    'https://business.facebook.com/billing_hub/accounts/details/?business_id=294&asset_id=100'
+  );
+  assert.equal(
+    whatsappPaymentStatusService.normalizeMetaPaymentHref('https://attacker.example/billing_hub/accounts/details/'),
+    null
+  );
 });
 
 test('131042 persiste el bloqueo, notifica el ámbito secundario y una entrega posterior lo recupera', async () => {
@@ -108,6 +123,7 @@ test('131042 persiste el bloqueo, notifica el ámbito secundario y una entrega p
   const message = {
     id: 991,
     status: 'failed',
+    updatedAt: '2026-09-23T15:15:05.000Z',
     metadata: {
       phoneNumberId: asset.phoneNumberId,
       wabaId: asset.wabaId,
@@ -117,18 +133,48 @@ test('131042 persiste el bloqueo, notifica el ámbito secundario y una entrega p
 
   try {
     const failed = await whatsappPaymentStatusService.reconcileProviderStatus({
-      status: { status: 'failed', errors: [{ code: 131042 }] },
+      status: {
+        status: 'failed',
+        errors: [{
+          code: 131042,
+          error_data: {
+            details: 'Visit https://business.facebook.com/billing_hub/accounts/details/?business_id=294&asset_id=100 to resolve it.',
+          },
+        }],
+      },
       message,
       clinicId: 56,
       source: 'test_secure_status',
     });
     assert.equal(failed.handled, true);
     assert.equal(asset.additionalData.payment.status, 'missing_payment_method');
+    assert.equal(asset.additionalData.payment.last_detected_at, '2026-09-23T15:15:05.000Z');
+    assert.match(asset.additionalData.payment.last_error_href, /^https:\/\/business\.facebook\.com\/billing_hub\//);
     assert.equal(failures.length, 1);
     assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0].data.paymentHref, asset.additionalData.payment.last_error_href);
     assert.equal(dispatched[0].data.channelRole, 'secondary');
     assert.match(dispatched[0].data.consequence, /primeros contactos automáticos a leads/i);
     assert.match(dispatched[0].data.consequence, /solicitudes de reseña/i);
+
+    const currentPaymentHref = asset.additionalData.payment.last_error_href;
+    await whatsappPaymentStatusService.markMissingPaymentFromProviderError({
+      error: {
+        errors: [{
+          code: 131042,
+          error_data: {
+            details: 'Visit https://business.facebook.com/latest/whatsapp_manager/phone_numbers/?asset_id=older to resolve it.',
+          },
+        }],
+      },
+      phoneId: asset.phoneNumberId,
+      wabaId: asset.wabaId,
+      messageId: 900,
+      observedAt: '2026-09-23T08:00:13.000Z',
+    });
+    assert.equal(asset.additionalData.payment.last_detected_at, '2026-09-23T15:15:05.000Z');
+    assert.equal(asset.additionalData.payment.last_message_id, 991);
+    assert.equal(asset.additionalData.payment.last_error_href, currentPaymentHref);
 
     message.status = 'delivered';
     message.id = 990;
@@ -154,6 +200,21 @@ test('131042 persiste el bloqueo, notifica el ámbito secundario y una entrega p
     assert.equal(asset.additionalData.payment.status, 'active');
     assert.equal(recoveries.length, 1);
     assert.equal(recoveries[0].explicitRecovery, true);
+
+    message.id = 900;
+    message.status = 'failed';
+    message.updatedAt = '2026-09-23T08:00:13.000Z';
+    const historicalFailure = await whatsappPaymentStatusService.reconcileProviderStatus({
+      status: { status: 'failed', errors: [{ code: 131042 }] },
+      message,
+      clinicId: 56,
+      source: 'test_secure_status',
+    });
+    assert.equal(historicalFailure.handled, false);
+    assert.equal(historicalFailure.reason, 'payment_failure_precedes_success');
+    assert.equal(asset.additionalData.payment.status, 'active');
+    assert.equal(failures.length, 1);
+    assert.equal(dispatched.length, 1);
   } finally {
     restorers.reverse().forEach((restore) => restore());
   }
