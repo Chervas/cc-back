@@ -2,25 +2,21 @@
 const { Model } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
-  class MarketingEmailTemplate extends Model {
+  class MarketingEmailTemplateCatalog extends Model {
     static associate(models) {
-      if (models.MarketingEmailTemplateCatalog) {
-        MarketingEmailTemplate.belongsTo(models.MarketingEmailTemplateCatalog, {
-          foreignKey: 'catalog_template_id',
-          as: 'catalog',
-        });
-      }
+      MarketingEmailTemplateCatalog.hasMany(models.MarketingEmailTemplate, {
+        foreignKey: 'catalog_template_id',
+        as: 'instances',
+      });
     }
   }
-  MarketingEmailTemplate.init({
+
+  MarketingEmailTemplateCatalog.init({
     id: { type: DataTypes.INTEGER.UNSIGNED, primaryKey: true, autoIncrement: true },
     public_id: { type: DataTypes.STRING(64), allowNull: false, unique: true },
-    scope_type: { type: DataTypes.STRING(16), allowNull: false },
-    scope_key: { type: DataTypes.STRING(64), allowNull: false },
-    clinica_id: DataTypes.INTEGER,
-    grupo_clinica_id: DataTypes.INTEGER,
+    catalog_key: { type: DataTypes.STRING(100), allowNull: false, unique: true },
     name: { type: DataTypes.STRING(160), allowNull: false },
-    status: { type: DataTypes.STRING(24), allowNull: false, defaultValue: 'draft' },
+    status: { type: DataTypes.STRING(24), allowNull: false, defaultValue: 'ready' },
     subject: { type: DataTypes.STRING(160), allowNull: false },
     preheader: DataTypes.STRING(255),
     layout_key: { type: DataTypes.STRING(40), allowNull: false, defaultValue: 'classic' },
@@ -28,18 +24,19 @@ module.exports = (sequelize, DataTypes) => {
     rendered_html: DataTypes.TEXT('long'),
     rendered_text: DataTypes.TEXT('long'),
     version: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 1 },
-    catalog_template_id: DataTypes.INTEGER.UNSIGNED,
-    catalog_version: DataTypes.INTEGER.UNSIGNED,
-    origin: { type: DataTypes.STRING(24), allowNull: false, defaultValue: 'custom' },
+    is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+    propagation_state: DataTypes.STRING(24),
+    last_propagated_at: DataTypes.DATE,
     created_by: DataTypes.INTEGER,
     updated_by: DataTypes.INTEGER,
   }, {
     sequelize,
-    modelName: 'MarketingEmailTemplate',
-    tableName: 'MarketingEmailTemplates',
+    modelName: 'MarketingEmailTemplateCatalog',
+    tableName: 'MarketingEmailTemplateCatalog',
     underscored: true,
     createdAt: 'created_at',
     updatedAt: 'updated_at',
   });
-  return MarketingEmailTemplate;
+
+  return MarketingEmailTemplateCatalog;
 };

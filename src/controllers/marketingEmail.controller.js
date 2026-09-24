@@ -2,6 +2,7 @@
 
 const { resolveClinicScope } = require('../lib/clinicScope');
 const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
+const { isGlobalAdmin } = require('../lib/role-helpers');
 const service = require('../services/marketingEmail.service');
 
 async function scope(req, access = 'read') {
@@ -21,6 +22,15 @@ function handle(res, error, fallback) {
   const status = Number(error.status || 500);
   if (status >= 500) console.error('[marketing-email]', error.code || error.message || error);
   return res.status(status).json({ success: false, error: error.message || fallback, code: error.code || 'marketing_email_error', details: error.details || undefined });
+}
+
+function assertAdmin(req) {
+  if (!isGlobalAdmin(req.userData?.userId)) {
+    throw Object.assign(Error('Solo un administrador puede gestionar el catálogo de plantillas de email.'), {
+      status: 403,
+      code: 'email_template_catalog_forbidden',
+    });
+  }
 }
 
 exports.settings = async (req, res) => {
@@ -65,6 +75,57 @@ exports.createTemplate = async (req, res) => {
 exports.updateTemplate = async (req, res) => {
   try { return res.json({ success: true, template: await service.saveTemplate(await scope(req, 'write'), req.body || {}, req.userData?.userId, req.params.id) }); }
   catch (error) { return handle(res, error, 'No se pudo actualizar la plantilla.'); }
+};
+exports.duplicateTemplate = async (req, res) => {
+  try {
+    return res.status(201).json({
+      success: true,
+      template: await service.duplicateTemplate(await scope(req, 'write'), req.params.id, req.body || {}, req.userData?.userId),
+    });
+  }
+  catch (error) { return handle(res, error, 'No se pudo duplicar la plantilla.'); }
+};
+exports.listCatalogTemplates = async (req, res) => {
+  try { assertAdmin(req); return res.json({ success: true, templates: await service.listCatalogTemplates() }); }
+  catch (error) { return handle(res, error, 'No se pudo cargar el catálogo de email.'); }
+};
+exports.createCatalogTemplate = async (req, res) => {
+  try {
+    assertAdmin(req);
+    return res.status(201).json({ success: true, template: await service.saveCatalogTemplate(req.body || {}, req.userData?.userId) });
+  }
+  catch (error) { return handle(res, error, 'No se pudo crear la plantilla del catálogo.'); }
+};
+exports.updateCatalogTemplate = async (req, res) => {
+  try {
+    assertAdmin(req);
+    return res.json({ success: true, template: await service.saveCatalogTemplate(req.body || {}, req.userData?.userId, req.params.id) });
+  }
+  catch (error) { return handle(res, error, 'No se pudo actualizar la plantilla del catálogo.'); }
+};
+exports.duplicateCatalogTemplate = async (req, res) => {
+  try {
+    assertAdmin(req);
+    return res.status(201).json({ success: true, template: await service.duplicateCatalogTemplate(req.params.id, req.userData?.userId) });
+  }
+  catch (error) { return handle(res, error, 'No se pudo duplicar la plantilla del catálogo.'); }
+};
+exports.setCatalogTemplateActive = async (req, res) => {
+  try {
+    assertAdmin(req);
+    return res.json({
+      success: true,
+      template: await service.setCatalogTemplateActive(req.params.id, req.body?.is_active, req.userData?.userId),
+    });
+  }
+  catch (error) { return handle(res, error, 'No se pudo cambiar el estado de la plantilla del catálogo.'); }
+};
+exports.propagateCatalogTemplate = async (req, res) => {
+  try {
+    assertAdmin(req);
+    return res.json({ success: true, ...(await service.propagateCatalogTemplate(req.params.id, req.userData?.userId)) });
+  }
+  catch (error) { return handle(res, error, 'No se pudo propagar la plantilla del catálogo.'); }
 };
 exports.costEstimate = async (req, res) => {
   try {

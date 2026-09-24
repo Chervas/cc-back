@@ -144,6 +144,29 @@ function textFromDesign(design) {
   return design.blocks.filter(block => ['heading', 'text', 'button'].includes(block.type)).map(block => block.text).join('\n\n');
 }
 
+function normalizeTemplateContent(body = {}) {
+  const name = clean(body.name);
+  const subject = clean(body.subject);
+  if (!name || name.length > 160) fail('email_template_name_invalid', 400, 'Indica un nombre para la plantilla.');
+  emailTemplates.assertSafeSubject(subject);
+  const layoutKey = LAYOUTS.has(body.layout_key || body.layoutKey) ? (body.layout_key || body.layoutKey) : 'classic';
+  const design = normalizeDesign(body.design || {});
+  const preheader = clean(body.preheader);
+  return {
+    name,
+    subject,
+    preheader,
+    layout_key: layoutKey,
+    design,
+    rendered_html: renderTemplateDocument({ subject, preheader, layoutKey, design }),
+    rendered_text: textFromDesign(design),
+  };
+}
+
+function templateIdentifier(id) {
+  return { [Op.or]: [{ public_id: id }, { id: Number(id) || 0 }] };
+}
+
 function serializeDomain(row) {
   const value = row?.get ? row.get({ plain: true }) : row;
   if (!value) return null;
@@ -205,6 +228,14 @@ function serializeTemplate(row, { includeRendered = false } = {}) {
     layout_key: value.layout_key,
     design: value.design,
     version: value.version,
+    origin: value.origin || 'custom',
+    is_system: value.origin === 'system',
+    editable: value.origin !== 'system',
+    catalog_template_id: value.catalog_template_id || null,
+    catalog_version: value.catalog_version || null,
+    is_active: value.is_active !== false,
+    propagation_state: value.propagation_state || null,
+    last_propagated_at: value.last_propagated_at || null,
     updated_at: value.updated_at,
     ...(includeRendered ? { rendered_html: value.rendered_html, rendered_text: value.rendered_text } : {}),
   };
@@ -395,33 +426,183 @@ async function listTemplates(scope) {
 
 async function saveTemplate(scope, body, userId, id = null) {
   const descriptor = scopeDescriptor(scope);
-  const name = clean(body.name);
-  const subject = clean(body.subject);
-  if (!name || name.length > 160) fail('email_template_name_invalid', 400, 'Indica un nombre para la plantilla.');
-  emailTemplates.assertSafeSubject(subject);
-  const layoutKey = LAYOUTS.has(body.layout_key || body.layoutKey) ? (body.layout_key || body.layoutKey) : 'classic';
-  const design = normalizeDesign(body.design || {});
-  const renderedHtml = renderTemplateDocument({ subject, preheader: clean(body.preheader), layoutKey, design });
-  const renderedText = textFromDesign(design);
+  const content = normalizeTemplateContent(body);
   if (id) {
-    const row = await db.MarketingEmailTemplate.findOne({ where: { [Op.or]: [{ public_id: id }, { id: Number(id) || 0 }], scope_key: descriptor.scope_key } });
+    const row = await db.MarketingEmailTemplate.findOne({ where: { ...templateIdentifier(id), scope_key: descriptor.scope_key } });
     if (!row) fail('email_template_not_found', 404, 'No se ha encontrado la plantilla.');
-    await row.update({ name, subject, preheader: clean(body.preheader), layout_key: layoutKey, design,
-      rendered_html: renderedHtml, rendered_text: renderedText, status: 'ready', version: row.version + 1, updated_by: userId || null });
+    if (row.origin === 'system' || row.catalog_template_id) {
+      fail('email_system_template_read_only', 409, 'Las plantillas de sistema no se editan. Duplica la plantilla para personalizarla.');
+    }
+    await row.update({ ...content, status: 'ready', version: row.version + 1, updated_by: userId || null });
     return serializeTemplate(row, { includeRendered: true });
   }
   const row = await db.MarketingEmailTemplate.create({
-    public_id: publicId('et'), ...descriptor, name, subject, preheader: clean(body.preheader), layout_key: layoutKey,
-    design, rendered_html: renderedHtml, rendered_text: renderedText, status: 'ready', created_by: userId || null, updated_by: userId || null,
+    public_id: publicId('et'), ...descriptor, ...content, status: 'ready', origin: 'custom',
+    created_by: userId || null, updated_by: userId || null,
+  });
+  return serializeTemplate(row, { includeRendered: true });
+}
+
+async function duplicateTemplate(scope, id, body, userId) {
+  const descriptor = scopeDescriptor(scope);
+  const source = await db.MarketingEmailTemplate.findOne({
+    where: { ...templateIdentifier(id), scope_key: descriptor.scope_key, status: { [Op.ne]: 'archived' } },
+  });
+  if (!source) fail('email_template_not_found', 404, 'No se ha encontrado la plantilla.');
+  const row = await db.MarketingEmailTemplate.create({
+    public_id: publicId('et'),
+    ...descriptor,
+    name: clean(body?.name) || `Copia de ${source.name}`,
+    status: 'ready',
+    subject: source.subject,
+    preheader: source.preheader,
+    layout_key: source.layout_key,
+    design: source.design,
+    rendered_html: source.rendered_html,
+    rendered_text: source.rendered_text,
+    version: 1,
+    origin: 'custom',
+    catalog_template_id: null,
+    catalog_version: null,
+    created_by: userId || null,
+    updated_by: userId || null,
   });
   return serializeTemplate(row, { includeRendered: true });
 }
 
 async function getTemplate(scope, id) {
   const descriptor = scopeDescriptor(scope);
-  const row = await db.MarketingEmailTemplate.findOne({ where: { [Op.or]: [{ public_id: id }, { id: Number(id) || 0 }], scope_key: descriptor.scope_key } });
+  const row = await db.MarketingEmailTemplate.findOne({ where: { ...templateIdentifier(id), scope_key: descriptor.scope_key } });
   if (!row) fail('email_template_not_found', 404, 'No se ha encontrado la plantilla.');
   return serializeTemplate(row, { includeRendered: true });
+}
+
+async function listCatalogTemplates() {
+  const rows = await db.MarketingEmailTemplateCatalog.findAll({ order: [['updated_at', 'DESC']] });
+  return rows.map(row => serializeTemplate(row, { includeRendered: true }));
+}
+
+async function getCatalogTemplate(id) {
+  const row = await db.MarketingEmailTemplateCatalog.findOne({ where: templateIdentifier(id) });
+  if (!row) fail('email_template_catalog_not_found', 404, 'No se ha encontrado la plantilla del catálogo.');
+  return row;
+}
+
+async function saveCatalogTemplate(body, userId, id = null) {
+  const content = normalizeTemplateContent(body);
+  if (id) {
+    const row = await getCatalogTemplate(id);
+    await row.update({
+      ...content,
+      status: 'ready',
+      version: Number(row.version || 1) + 1,
+      propagation_state: null,
+      updated_by: userId || null,
+    });
+    return serializeTemplate(row, { includeRendered: true });
+  }
+  const row = await db.MarketingEmailTemplateCatalog.create({
+    public_id: publicId('etc'),
+    catalog_key: `email_${crypto.randomUUID()}`,
+    ...content,
+    status: 'ready',
+    version: 1,
+    is_active: body.is_active !== false,
+    created_by: userId || null,
+    updated_by: userId || null,
+  });
+  return serializeTemplate(row, { includeRendered: true });
+}
+
+async function duplicateCatalogTemplate(id, userId) {
+  const source = await getCatalogTemplate(id);
+  const row = await db.MarketingEmailTemplateCatalog.create({
+    public_id: publicId('etc'),
+    catalog_key: `email_${crypto.randomUUID()}`,
+    name: `Copia de ${source.name}`,
+    status: 'ready',
+    subject: source.subject,
+    preheader: source.preheader,
+    layout_key: source.layout_key,
+    design: source.design,
+    rendered_html: source.rendered_html,
+    rendered_text: source.rendered_text,
+    version: 1,
+    is_active: false,
+    created_by: userId || null,
+    updated_by: userId || null,
+  });
+  return serializeTemplate(row, { includeRendered: true });
+}
+
+async function setCatalogTemplateActive(id, isActive, userId) {
+  const row = await getCatalogTemplate(id);
+  await row.update({ is_active: !!isActive, propagation_state: null, updated_by: userId || null });
+  if (!isActive) {
+    await db.MarketingEmailTemplate.update(
+      { status: 'archived', updated_by: userId || null },
+      { where: { catalog_template_id: row.id, origin: 'system' } }
+    );
+  }
+  return serializeTemplate(row, { includeRendered: true });
+}
+
+async function propagateCatalogTemplate(id, userId) {
+  const catalog = await getCatalogTemplate(id);
+  if (!catalog.is_active) fail('email_template_catalog_inactive', 409, 'Activa la plantilla antes de propagarla.');
+  await catalog.update({ propagation_state: 'pending', updated_by: userId || null });
+  const [clinics, groups] = await Promise.all([
+    db.Clinica.findAll({ attributes: ['id_clinica'], raw: true }),
+    db.GrupoClinica.findAll({ attributes: ['id_grupo'], raw: true }),
+  ]);
+  const scopes = [
+    ...clinics.map(row => ({ scope_type: 'clinic', scope_key: `clinic:${row.id_clinica}`, clinica_id: row.id_clinica, grupo_clinica_id: null })),
+    ...groups.map(row => ({ scope_type: 'group', scope_key: `group:${row.id_grupo}`, clinica_id: null, grupo_clinica_id: row.id_grupo })),
+  ];
+  let created = 0;
+  let updated = 0;
+  await db.sequelize.transaction(async transaction => {
+    for (const descriptor of scopes) {
+      const existing = await db.MarketingEmailTemplate.findOne({
+        where: { scope_key: descriptor.scope_key, catalog_template_id: catalog.id },
+        transaction,
+      });
+      const values = {
+        ...descriptor,
+        name: catalog.name,
+        status: 'ready',
+        subject: catalog.subject,
+        preheader: catalog.preheader,
+        layout_key: catalog.layout_key,
+        design: catalog.design,
+        rendered_html: catalog.rendered_html,
+        rendered_text: catalog.rendered_text,
+        version: catalog.version,
+        catalog_version: catalog.version,
+        origin: 'system',
+        updated_by: userId || null,
+      };
+      if (existing) {
+        await existing.update(values, { transaction });
+        updated += 1;
+      } else {
+        await db.MarketingEmailTemplate.create({
+          public_id: publicId('et'),
+          ...values,
+          catalog_template_id: catalog.id,
+          created_by: userId || null,
+        }, { transaction });
+        created += 1;
+      }
+    }
+    await catalog.update({ propagation_state: 'complete', last_propagated_at: new Date() }, { transaction });
+  });
+  return {
+    template: serializeTemplate(catalog, { includeRendered: true }),
+    scopes: scopes.length,
+    created,
+    updated,
+  };
 }
 
 function unsubscribeBaseUrl() {
@@ -532,7 +713,13 @@ module.exports = {
   setDefaultSender,
   listTemplates,
   saveTemplate,
+  duplicateTemplate,
   getTemplate,
+  listCatalogTemplates,
+  saveCatalogTemplate,
+  duplicateCatalogTemplate,
+  setCatalogTemplateActive,
+  propagateCatalogTemplate,
   issueUnsubscribe,
   unsubscribe,
   providerCostEstimate,
