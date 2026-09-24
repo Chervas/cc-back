@@ -47,8 +47,13 @@ function createEmailBroker({ env = process.env, readFile = privateFile, clientFa
     if (!isConfigured(env)) fail('email_broker_configuration_invalid');
     const bytes = Buffer.byteLength(JSON.stringify(payload)) + 2048;
     return admission.run(async () => {
+      if (env.EMAIL_BROKER_ENABLED !== 'true') fail('email_broker_disabled');
+      if (!isConfigured(env) || env.EMAIL_BROKER_ENVIRONMENT !== environment) {
+        fail('email_broker_configuration_invalid');
+      }
       if (beforeDispatch) await beforeDispatch();
       if (env.EMAIL_BROKER_ENABLED !== 'true' || !isConfigured(env) || env.EMAIL_BROKER_ENVIRONMENT !== environment) {
+        if (env.EMAIL_BROKER_ENABLED !== 'true') fail('email_broker_disabled');
         fail('email_broker_configuration_invalid');
       }
       const client = clientFactory({ origin: env.EMAIL_BROKER_ORIGIN, audience: env.EMAIL_BROKER_AUDIENCE,
