@@ -10,6 +10,7 @@ const {
   evaluatePendingLeadContact,
 } = require('../../services/leadContactState.service');
 const {
+  __testing,
   buildManagedNodes,
   getUnsupportedLeadTemplateVariables,
   isLeadAutoReplyTemplate,
@@ -17,6 +18,7 @@ const {
   resolvePendingBatchSources,
   resolveLeadEventKind,
 } = require('../../services/leadAutoReply.service');
+const whatsappService = require('../../services/whatsapp.service');
 const flowEngine = require('../../services/flowEngineV2.service');
 const templateAutomationSync = require('../../services/whatsappTemplateAutomationSync.service');
 const commercialMigration = require('../../../migrations/20260906220000-mark-lead-outreach-commercial');
@@ -230,6 +232,7 @@ async function run() {
 
   const originalTemplateFindOne = db.WhatsappTemplate.findOne;
   const originalTemplateFindAll = db.WhatsappTemplate.findAll;
+  const originalGetClinicConfig = whatsappService.getClinicConfig;
   const templateLookupCalls = [];
   try {
     db.WhatsappTemplate.findOne = async ({ where }) => {
@@ -283,6 +286,47 @@ async function run() {
   } finally {
     db.WhatsappTemplate.findOne = originalTemplateFindOne;
     db.WhatsappTemplate.findAll = originalTemplateFindAll;
+  }
+
+  try {
+    whatsappService.getClinicConfig = async () => ({ wabaId: 'waba-sant-marti' });
+    db.WhatsappTemplate.findOne = async () => ({
+      id: 3558,
+      clinic_id: null,
+      waba_id: 'waba-sant-marti',
+      name: 'clinicaclick_lead_primera_visita_programar_v35',
+      status: 'APPROVED',
+      is_active: true,
+      retired_at: null,
+      superseded_by_template_id: null,
+    });
+    const effectiveWabaTemplate = await __testing.loadSelectedTemplate({
+      whatsapp_template_id: 3558,
+    }, 56);
+    assert.equal(effectiveWabaTemplate.id, 3558);
+
+    db.WhatsappTemplate.findOne = async () => ({
+      id: 3559,
+      clinic_id: null,
+      waba_id: 'waba-other-clinic',
+      status: 'APPROVED',
+      is_active: true,
+      retired_at: null,
+      superseded_by_template_id: null,
+    });
+    assert.equal(await __testing.loadSelectedTemplate({ whatsapp_template_id: 3559 }, 56), null);
+
+    db.WhatsappTemplate.findOne = async () => ({
+      id: 1858,
+      clinic_id: 56,
+      waba_id: null,
+      status: 'APPROVED',
+      is_active: true,
+    });
+    assert.equal((await __testing.loadSelectedTemplate({ whatsapp_template_id: 1858 }, 56)).id, 1858);
+  } finally {
+    db.WhatsappTemplate.findOne = originalTemplateFindOne;
+    whatsappService.getClinicConfig = originalGetClinicConfig;
   }
 
   const originalFlowTemplateFindAll = db.AutomationFlowTemplateV2.findAll;

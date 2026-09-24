@@ -7,6 +7,8 @@ const jobScheduler = require('./jobScheduler.service');
 const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact, isEffectiveContactAttempt } = require('./leadContactState.service');
 const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
+const { isApprovedTemplateInWaba } = require('../lib/whatsapp-template-scope');
+const whatsappService = require('./whatsapp.service');
 
 const { Op } = db.Sequelize;
 const FEATURE_KEY = 'lead_auto_reply';
@@ -249,13 +251,26 @@ async function findLatestClinicFlow(clinicId, options = {}) {
 
 async function loadSelectedTemplate(config, clinicId) {
   if (!config.whatsapp_template_id) return null;
-  return db.WhatsappTemplate.findOne({
-    where: { id: config.whatsapp_template_id, clinic_id: clinicId, is_active: true },
+  const template = await db.WhatsappTemplate.findOne({
+    where: { id: config.whatsapp_template_id, is_active: true },
     attributes: [
       'id', 'clinic_id', 'name', 'display_name', 'status', 'components', 'variables',
       'language', 'catalog_template_id', 'created_by_user_id', 'origin', 'is_active',
+      'waba_id', 'retired_at', 'superseded_by_template_id',
     ],
   });
+  if (!template) return null;
+
+  const row = template.toJSON ? template.toJSON() : template;
+  if (Number(row.clinic_id) === Number(clinicId)) return template;
+
+  const clinicConfig = await whatsappService.getClinicConfig(clinicId, {
+    purpose: 'lead_first_contact',
+  });
+  return isApprovedTemplateInWaba(row, {
+    wabaId: clinicConfig?.wabaId,
+    clinicId,
+  }) ? template : null;
 }
 
 async function buildReadiness(config, clinicId) {
@@ -808,4 +823,7 @@ module.exports = {
   startPendingBatch,
   setActive,
   validateFlowActivation,
+  __testing: {
+    loadSelectedTemplate,
+  },
 };
