@@ -158,6 +158,11 @@ SES con `cc_outbox`. Un evento concurrente no se degrada al asentar el worker.
 Monitor distingue configuración del broker de ausencia de claves SES locales.
 `brokerConfigured` valida configuración declarada: no prueba vault, red ni entrega.
 
+Los correos transaccionales no incluyen `identityName`: ese campo pertenece solo
+a `marketing.campaign`. Esta omisión mantiene interoperabilidad con el contrato
+transaccional inicial durante despliegues escalonados de consumidor y broker; el
+contrato nuevo lo acepta como opcional y sigue exigiéndolo para marketing.
+
 ## Pruebas y límites de la evidencia
 
 Logs privados en `qa-evidence/security-resume-20260917/`:
