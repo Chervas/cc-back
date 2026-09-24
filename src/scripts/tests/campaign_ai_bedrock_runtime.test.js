@@ -22,6 +22,7 @@ const ENV_KEYS = [
   'BEDROCK_MODEL_COMPLEX',
   'BEDROCK_MODEL_ASSISTANT',
   'BEDROCK_MODEL_FALLBACK',
+  'BEDROCK_BROKER_ENABLED',
 ];
 
 function response(input, modelRequestId = 'request-test') {
@@ -48,6 +49,7 @@ async function withRuntime(mockClient, callback) {
   process.env.BEDROCK_MODEL_COMPLEX = 'eu.amazon.nova-lite-v1:0';
   process.env.BEDROCK_MODEL_ASSISTANT = 'eu.amazon.nova-pro-v1:0';
   process.env.BEDROCK_MODEL_FALLBACK = 'eu.amazon.nova-lite-v1:0';
+  process.env.BEDROCK_BROKER_ENABLED = 'false';
   telemetry.recordAiUsage = async (event) => { usage.push(event); return null; };
   bedrock.__testing.setClientForTests(mockClient);
   try {

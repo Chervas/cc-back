@@ -29,7 +29,11 @@ assert.doesNotMatch(
 );
 assert.match(
   intakeSource,
-  /pending_automation_attention:\s*pendingState\?\.requiresAutomationAttention === true/,
+  /let pendingAutomationAttention = pendingState\?\.requiresAutomationAttention === true/,
+);
+assert.match(
+  intakeSource,
+  /pending_automation_attention:\s*pendingAutomationAttention/,
 );
 
 require('../../../models').sequelize.close()
