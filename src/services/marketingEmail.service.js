@@ -335,6 +335,11 @@ async function refreshDomain(scope, id) {
   const descriptor = scopeDescriptor(scope);
   const row = await db.EmailSendingDomain.findOne({ where: { [Op.or]: [{ public_id: id }, { id: Number(id) || 0 }], scope_key: descriptor.scope_key } });
   if (!row) fail('email_domain_not_found', 404, 'No se ha encontrado el dominio.');
+  const storedSnapshot = row.get ? row.get('provider_snapshot') : row.provider_snapshot;
+  if (process.env.RUNTIME_NAMESPACE === 'dev' && storedSnapshot?.mock === true) {
+    await row.update({ checked_at: new Date() });
+    return serializeDomain(await row.reload());
+  }
   let identity;
   try { identity = await createEmailBroker().getIdentity(row.identity_name); }
   catch (error) {

@@ -166,6 +166,40 @@ test('a SES domain already owned by another scope is rejected before provider ac
   }, 1), { code: 'email_domain_owned_by_another_scope', status: 409 });
 });
 
+test('refreshing a DEV mock domain never contacts the email provider', async t => {
+  const previousRuntime = process.env.RUNTIME_NAMESPACE;
+  process.env.RUNTIME_NAMESPACE = 'dev';
+  t.after(() => {
+    if (previousRuntime === undefined) delete process.env.RUNTIME_NAMESPACE;
+    else process.env.RUNTIME_NAMESPACE = previousRuntime;
+  });
+  const row = {
+    id: 31,
+    public_id: 'ed_dev_qa_ready_21',
+    scope_key: 'clinic:21',
+    domain: 'qa-email-ready-clinic-21.test',
+    status: 'active',
+    verification_status: 'verified',
+    dkim_status: 'verified',
+    spf_status: 'verified',
+    dmarc_status: 'verified',
+    mail_from_domain: 'bounce.qa-email-ready-clinic-21.test',
+    mail_from_status: 'success',
+    dns_records: [],
+    provider_snapshot: { mock: true },
+    checked_at: new Date(0),
+    get(argument) { return argument === 'provider_snapshot' ? this.provider_snapshot : { ...this }; },
+    async update(values) { Object.assign(this, values); return this; },
+    async reload() { return this; },
+  };
+  t.mock.method(db.EmailSendingDomain, 'findOne', async () => row);
+
+  const refreshed = await marketingEmail.refreshDomain({ scope: 'clinic', clinicIds: [21] }, row.public_id);
+
+  assert.equal(refreshed.status, 'active');
+  assert.ok(row.checked_at.getTime() > 0);
+});
+
 test('SES DNS setup keeps the clinic root SPF untouched and gates senders on custom MAIL FROM', () => {
   const records = marketingEmail.dnsRecords('clinic.example', {
     dkimTokens: ['token_one'],
