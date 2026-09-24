@@ -27,8 +27,10 @@ function authorize({ request, binding }) {
 function project(value) {
   const status = String(value?.verificationStatus || '').toLowerCase();
   const dkimStatus = String(value?.dkimStatus || '').toLowerCase();
+  const mailFromStatus = String(value?.mailFromStatus || 'not_started').toLowerCase();
   if (!['pending', 'success', 'failed', 'temporary_failure', 'not_started'].includes(status)
-    || !['pending', 'success', 'failed', 'temporary_failure', 'not_started'].includes(dkimStatus)) fail('provider_failed');
+    || !['pending', 'success', 'failed', 'temporary_failure', 'not_started'].includes(dkimStatus)
+    || !['pending', 'success', 'failed', 'temporary_failure', 'not_started'].includes(mailFromStatus)) fail('provider_failed');
   const tokens = Array.isArray(value?.dkimTokens)
     ? value.dkimTokens.filter(token => typeof token === 'string' && /^[A-Za-z0-9+/=_-]{1,255}$/.test(token)).slice(0, 3)
     : [];
@@ -38,8 +40,10 @@ function project(value) {
     verifiedForSending: value.verifiedForSending === true,
     dkimStatus,
     dkimTokens: tokens,
-    mailFromDomain: typeof value.mailFromDomain === 'string' ? value.mailFromDomain : null,
-    mailFromStatus: typeof value.mailFromStatus === 'string' ? value.mailFromStatus.toLowerCase() : 'not_started',
+    mailFromDomain: typeof value.mailFromDomain === 'string'
+      && /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}$/.test(value.mailFromDomain)
+      ? value.mailFromDomain : null,
+    mailFromStatus,
   };
 }
 

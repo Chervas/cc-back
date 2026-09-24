@@ -1,6 +1,11 @@
 'use strict';
 const https = require('node:https');
-const { SESv2Client, CreateEmailIdentityCommand, GetEmailIdentityCommand } = require('@aws-sdk/client-sesv2');
+const {
+  SESv2Client,
+  CreateEmailIdentityCommand,
+  GetEmailIdentityCommand,
+  PutEmailIdentityMailFromAttributesCommand,
+} = require('@aws-sdk/client-sesv2');
 const { NodeHttpHandler } = require('@smithy/node-http-handler');
 const { credentials: validateCredentials } = require('./bedrock-contract');
 const { fail } = require('./errors');
@@ -34,6 +39,11 @@ function createEmailIdentityHttp({ clientFactory = config => new SESv2Client(con
         } catch (error) {
           if (!['AlreadyExistsException', 'ConflictException'].includes(error?.name)) throw error;
         }
+        await client.send(new PutEmailIdentityMailFromAttributesCommand({
+          EmailIdentity: payload.identityName,
+          MailFromDomain: `bounce.${payload.identityName}`,
+          BehaviorOnMxFailure: 'REJECT_MESSAGE',
+        }), { abortSignal: signal });
       }
       const response = await client.send(new GetEmailIdentityCommand({ EmailIdentity: payload.identityName }), { abortSignal: signal });
       return normalize(payload.identityName, response);

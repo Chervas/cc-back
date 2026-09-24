@@ -20,8 +20,10 @@ function limitedHandler(inner) {
       const outbound = request.method === 'POST' && request.path === '/v2/email/outbound-emails';
       const identityCreate = request.method === 'POST' && request.path === '/v2/email/identities';
       const identityRead = request.method === 'GET' && /^\/v2\/email\/identities\/[A-Za-z0-9.%_-]+$/.test(request.path);
+      const identityMailFrom = request.method === 'PUT'
+        && /^\/v2\/email\/identities\/[A-Za-z0-9.%_-]+\/mail-from$/.test(request.path);
       if (request.protocol !== 'https:' || request.hostname !== `email.${REGION}.amazonaws.com`
-        || request.port && request.port !== 443 || !outbound && !identityCreate && !identityRead
+        || request.port && request.port !== 443 || !outbound && !identityCreate && !identityRead && !identityMailFrom
         || Object.keys(request.query || {}).length) fail('invalid_request');
       const result = await inner.handle(request, options), body = result.response.body, chunks = [];
       let size = 0;
@@ -70,7 +72,10 @@ function createEmailHttp({ clientFactory = config => new SESv2Client(config),
         useFipsEndpoint: false, useDualstackEndpoint: false, retryMode: 'standard', maxAttempts: 1, requestHandler: handler });
       if (payload.stream === 'marketing') {
         const identity = await client.send(new GetEmailIdentityCommand({ EmailIdentity: payload.identityName }), { abortSignal: controller.signal });
-        if (identity?.VerifiedForSendingStatus !== true || identity?.DkimAttributes?.Status !== 'SUCCESS') {
+        const expectedMailFrom = `bounce.${payload.identityName}`;
+        if (identity?.VerifiedForSendingStatus !== true || identity?.DkimAttributes?.Status !== 'SUCCESS'
+          || identity?.MailFromAttributes?.MailFromDomain !== expectedMailFrom
+          || identity?.MailFromAttributes?.MailFromDomainStatus !== 'SUCCESS') {
           return project({ accepted: false, code: 'email_ses_mail_from_unverified', retryable: false });
         }
       }

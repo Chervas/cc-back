@@ -77,6 +77,15 @@ test('pinned HTTP handler denies alternate destinations and caps provider bodies
   }
   assert.equal(calls, 0);
   await assert.rejects(handler.handle(request), { code: 'provider_failed' }); assert.equal(calls, 1);
+
+  const identityHandler = limitedHandler({ async handle() {
+    return { response: { body: Readable.from([Buffer.from('{}')]) } };
+  } });
+  await assert.doesNotReject(identityHandler.handle({
+    ...request,
+    method: 'PUT',
+    path: '/v2/email/identities/clinic.example/mail-from',
+  }));
 });
 
 test('contract rejects arbitrary SES features, marketing, header injection and oversized UTF8 content', () => {
@@ -101,7 +110,11 @@ test('marketing email verifies the exact SES domain before sending and blocks an
     async send(command) {
       commands.push(command.constructor.name);
       if (command.constructor.name === 'GetEmailIdentityCommand') {
-        return { VerifiedForSendingStatus: true, DkimAttributes: { Status: 'SUCCESS' } };
+        return {
+          VerifiedForSendingStatus: true,
+          DkimAttributes: { Status: 'SUCCESS' },
+          MailFromAttributes: { MailFromDomain: 'bounce.example.test', MailFromDomainStatus: 'SUCCESS' },
+        };
       }
       return { MessageId: accepted().providerMessageId };
     },
@@ -127,4 +140,23 @@ test('marketing email verifies the exact SES domain before sending and blocks an
     retryable: false,
   });
   assert.equal(sent, false);
+
+  const pendingMailFrom = createEmailHttp({ clientFactory: () => ({
+    async send(command) {
+      if (command.constructor.name === 'GetEmailIdentityCommand') {
+        return {
+          VerifiedForSendingStatus: true,
+          DkimAttributes: { Status: 'SUCCESS' },
+          MailFromAttributes: { MailFromDomain: 'bounce.example.test', MailFromDomainStatus: 'PENDING' },
+        };
+      }
+      assert.fail('mail must not be sent before the custom MAIL FROM is verified');
+    },
+    destroy() {},
+  }) });
+  assert.deepEqual(await pendingMailFrom({ payload: marketing, token: Buffer.from(JSON.stringify(credentials)) }), {
+    accepted: false,
+    code: 'email_ses_mail_from_unverified',
+    retryable: false,
+  });
 });
