@@ -202,6 +202,13 @@ router.get('/email/templates', marketingEmailController.listTemplates);
 router.post('/email/templates', marketingEmailController.createTemplate);
 router.get('/email/templates/:id', marketingEmailController.getTemplate);
 router.put('/email/templates/:id', marketingEmailController.updateTemplate);
+router.post('/email/templates/:id/duplicate', marketingEmailController.duplicateTemplate);
+router.get('/email/template-catalog', marketingEmailController.listCatalogTemplates);
+router.post('/email/template-catalog', marketingEmailController.createCatalogTemplate);
+router.put('/email/template-catalog/:id', marketingEmailController.updateCatalogTemplate);
+router.post('/email/template-catalog/:id/duplicate', marketingEmailController.duplicateCatalogTemplate);
+router.put('/email/template-catalog/:id/active', marketingEmailController.setCatalogTemplateActive);
+router.post('/email/template-catalog/:id/propagate', marketingEmailController.propagateCatalogTemplate);
 router.get('/email/cost-estimate', marketingEmailController.costEstimate);
 
 // Catálogo de plantillas de flujos de chat (snippet web)

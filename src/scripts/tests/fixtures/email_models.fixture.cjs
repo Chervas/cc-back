@@ -9,7 +9,7 @@ for (const name of ['literal','fn','col','where']) db.sequelize[name] = db.Seque
 for (const name of [
   'EmailMessage','EmailProviderEvent','EmailSuppression','PasswordResetToken','SystemNotificationDelivery','Usuario','JobRequest',
   'MarketingPatientList','MarketingPatientListItem','MarketingPatientContactEvent','MarketingEmailUnsubscribe',
-  'EmailSenderIdentity','EmailSendingDomain','MarketingEmailTemplate','Clinica',
+  'EmailSenderIdentity','EmailSendingDomain','MarketingEmailTemplate','MarketingEmailTemplateCatalog','Clinica','GrupoClinica',
 ]) db[name] = stub();
 const id = require.resolve('../../../../models');
 if (require.cache[id]) throw Error('EMAIL_TEST_MODEL_CACHE_ALREADY_POPULATED');
