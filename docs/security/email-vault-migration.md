@@ -8,6 +8,13 @@ credenciales SES locales. CRM usa la cohorte `email-ses-v2` con los activos
 permitir la plantilla `marketing.campaign`, la región `eu-west-3`, el
 configuration set revisado y las identidades de envío previstas.
 
+El alta de una identidad configura de forma cerrada el MAIL FROM
+`bounce.<dominio>` con `REJECT_MESSAGE` ante fallo de MX. La operación de envío
+vuelve a leer SES y exige identidad, DKIM y ese MAIL FROM exacto en estado
+`SUCCESS` antes de `SendEmail`. El DNS solicitado publica MX y SPF en el
+subdominio `bounce`; nunca altera el SPF del dominio principal. CRM mantiene el
+remitente inactivo hasta observar también esos registros.
+
 El orden de despliegue es migración SQL aditiva, broker y grants, API CRM,
 workers de jobs/email y frontend. La entrega real permanece desactivada salvo
 que `EMAIL_ENABLED`, `EMAIL_MARKETING_ENABLED` y `EMAIL_BROKER_ENABLED` sean
