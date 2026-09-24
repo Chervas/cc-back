@@ -1070,7 +1070,7 @@
         {"COLUMN_NAME": "template_key","COLUMN_TYPE": "varchar(120)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
         {"COLUMN_NAME": "template_version","COLUMN_TYPE": "varchar(32)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
         {"COLUMN_NAME": "subject_key","COLUMN_TYPE": "varchar(120)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
-        {"COLUMN_NAME": "from_email","COLUMN_TYPE": "varchar(320)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
+        {"COLUMN_NAME": "from_email","COLUMN_TYPE": "varchar(512)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
         {"COLUMN_NAME": "reply_to","COLUMN_TYPE": "varchar(320)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
         {"COLUMN_NAME": "recipient_email_envelope","COLUMN_TYPE": "longtext","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
         {"COLUMN_NAME": "recipient_hash","COLUMN_TYPE": "char(64)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
