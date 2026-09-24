@@ -18,7 +18,15 @@ const { drainAudit } = require('../src/audit');
 const L = require('../src/email-limits');
 const F = require('./email-fixture.cjs');
 
-async function setup(t, work = async () => F.accepted()) {
+async function setup(t, work = async () => F.accepted(), identityWork = async input => ({
+  identityName: input.payload.identityName,
+  verificationStatus: 'success',
+  verifiedForSending: true,
+  dkimStatus: 'success',
+  dkimTokens: ['fictitious_token'],
+  mailFromDomain: `bounce.${input.payload.identityName}`,
+  mailFromStatus: 'success',
+})) {
   const f = fixture(t), cert = path.join(f.dir, 'email.crt'), key = path.join(f.dir, 'email.key');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert,
     '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
@@ -29,10 +37,12 @@ async function setup(t, work = async () => F.accepted()) {
   policy.principals[0].id = 'email:staging'; policy.connections = [F.binding()];
   policy.grants = L.TEMPLATES.map(template => ({ principalId: 'email:staging', tenantRef: 'platform:staging',
     connectionRef: 'email:staging', assetRef: `email:${template}`, operations: [L.OPERATION] }));
+  policy.grants.push({ principalId: 'email:staging', tenantRef: 'platform:staging', connectionRef: 'email:staging',
+    assetRef: 'email:identity-management', operations: [L.OPERATIONS.IDENTITY_ENSURE, L.OPERATIONS.IDENTITY_GET] });
   const config = { enabled: true, cohort: 'email-ses-transactional-v1', environment: 'staging', policy, listenAddress: '127.0.0.1', port,
     stateFile: path.join(f.dir, 'email.sqlite'), tlsCertFile: cert, tlsKeyFile: key };
   const filename = path.join(f.dir, 'email.json'); fs.writeFileSync(filename, JSON.stringify(config), { mode: 0o600 });
-  const calls = [], buffers = [], events = [], secretCalls = [];
+  const calls = [], identityCalls = [], buffers = [], events = [], secretCalls = [];
   const secrets = { async send(command) {
     secretCalls.push(command.input); assert.equal(command.input.SecretId, policy.connections[0].secretArn);
     if (command.constructor.name === 'DescribeSecretCommand') return { ARN: command.input.SecretId, KmsKeyId: SECRET_KEY };
@@ -42,6 +52,10 @@ async function setup(t, work = async () => F.accepted()) {
   const sink = { async write(row) { events.push(JSON.parse(row.event)); return { versionId: 'fictitious-audit', digest: row.digest }; } };
   const runtime = await main(filename, { awsFactory: async () => ({ secrets, sink, close() {} }), http: async input => {
     calls.push(input.payload); buffers.push(input.token); assert.deepEqual(JSON.parse(input.token.toString()), F.credentials); return work(input);
+  }, identityHttp: async input => {
+    identityCalls.push({ action: input.action, payload: input.payload });
+    assert.deepEqual(JSON.parse(input.token.toString()), F.credentials);
+    return identityWork(input);
   } });
   t.after(async () => { await runtime.close(); removePort(port); });
   const env = { EMAIL_BROKER_ENABLED: 'true', EMAIL_BROKER_ENVIRONMENT: 'staging', EMAIL_BROKER_ORIGIN: `https://127.0.0.1:${port}`,
@@ -54,9 +68,23 @@ async function setup(t, work = async () => F.accepted()) {
     assetRef: `email:${p.templateKey}`, payload: p, ...change });
   // These cases exercise broker concurrency/fencing directly. Consumer pacing
   // is tested separately with its actual admission queue.
-  return { ...f, config, env, runtime, sink, calls, secretCalls, buffers, events, low, command,
+  return { ...f, config, env, runtime, sink, calls, identityCalls, secretCalls, buffers, events, low, command,
     client: createEmailBroker({ env, admission: { run: work => work() } }) };
 }
+
+test('signed email transport admits identity ensure and get operations end to end', async t => {
+  const f = await setup(t);
+  const ensured = await f.client.ensureIdentity('clinic.example');
+  const read = await f.client.getIdentity('clinic.example');
+  assert.equal(ensured.identityName, 'clinic.example');
+  assert.equal(read.mailFromDomain, 'bounce.clinic.example');
+  assert.deepEqual(f.identityCalls, [
+    { action: 'ensure', payload: { identityName: 'clinic.example', timeoutMs: 15000 } },
+    { action: 'get', payload: { identityName: 'clinic.example', timeoutMs: 15000 } },
+  ]);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.secretCalls.length, 4);
+});
 
 test('signed TLS delivery preserves long Unicode content, metadata-only audit, and durable accepted dedupe', async t => {
   const f = await setup(t), p = F.payload({ text: 'FICTITIOUS_CONTEXT ñ 日本語 👍\n'.repeat(1800) });

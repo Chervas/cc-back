@@ -47,7 +47,7 @@ function validateConfig(config) {
   }
   return config;
 }
-async function main(filename, { awsFactory = connectAws, http = createEmailHttp() } = {}) {
+async function main(filename, { awsFactory = connectAws, http = createEmailHttp(), identityHttp } = {}) {
   const config = validateConfig(JSON.parse(privateFile(filename)));
   const tls = { cert: privateFile(config.tlsCertFile, 65536), key: privateFile(config.tlsKeyFile, 65536) };
   const store = new BrokerStore(config.stateFile);
@@ -56,7 +56,7 @@ async function main(filename, { awsFactory = connectAws, http = createEmailHttp(
     aws = await awsFactory();
     const secrets = createAwsSecretStore({ client: aws.secrets, accountId: ACCOUNT, kmsKeyArn: SECRET_KEY,
       prefix: config.environment === 'dev' ? '/clinicaclick/integrations/dev/' : '/clinicaclick/integrations/prod/' });
-    broker = new Broker({ store, policy: config.policy, secrets, operations: createEmailOperations({ store, http }),
+    broker = new Broker({ store, policy: config.policy, secrets, operations: createEmailOperations({ store, http, identityHttp }),
       transportProfile: 'email', timeoutMs: L.MAX_PROVIDER_TIMEOUT_MS + 5000 });
     server = createServer(broker, tls, { transportProfile: 'email' });
     server.maxConnections = 4;

@@ -35,7 +35,7 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
       if (!Number.isInteger(budget) || budget < 1 || budget > operationLimit
         || onboarding && !/^meta\.whatsapp\.onboarding\.(?:prepare|begin|finish|status|abort|profile|activate|activation-status)\.v1$/.test(command.operation)
         || ai && !aiLimits.isAiOperation(command.operation)
-        || email && command.operation !== emailLimits.OPERATION) return Promise.reject(error('invalid_request'));
+        || email && !emailLimits.isEmailOperation(command.operation)) return Promise.reject(error('invalid_request'));
       const requestId = command.requestId || randomUUID();
       const body = Buffer.from(JSON.stringify({ ...command, requestId, version: 1, audience, issuedAt: Date.now(), nonce: randomUUID() }));
       if (body.length > (ai ? aiLimits.MAX_REQUEST_BYTES : email ? emailLimits.MAX_REQUEST_BYTES : 32768)) return Promise.reject(error('invalid_request'));
