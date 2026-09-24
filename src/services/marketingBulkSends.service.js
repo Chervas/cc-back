@@ -8258,6 +8258,40 @@ async function sendTest(scope, campaignId, body = {}) {
   };
 }
 
+async function getEmailTestStatus(scope, campaignId, messagePublicId) {
+  const list = await MarketingPatientList.findByPk(campaignId);
+  ensureScopeAccess(list, scope);
+
+  const publicId = normalizeText(messagePublicId);
+  if (!publicId || publicId.length > 64) {
+    throw Object.assign(new Error('Identificador de prueba de email inválido'), { status: 400 });
+  }
+
+  const message = await db.EmailMessage.findOne({
+    where: {
+      public_id: publicId,
+      related_type: 'marketing_bulk_send_test',
+    },
+  });
+  const metadata = asPlainObject(message?.metadata);
+  if (!message || Number(metadata.list_id || 0) !== Number(list.id)) {
+    throw Object.assign(new Error('Prueba de email no encontrada'), { status: 404 });
+  }
+
+  return {
+    success: true,
+    email_message_id: message.public_id,
+    status: message.status,
+    provider_status: message.last_event_type || null,
+    error: message.last_error_message
+      ? { code: message.last_error_code || null, message: message.last_error_message }
+      : null,
+    sent_at: message.sent_at || null,
+    delivered_at: message.delivered_at || null,
+    updated_at: message.updated_at || null,
+  };
+}
+
 async function listRecipients(scope, campaignId, query = {}) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
@@ -10402,6 +10436,7 @@ module.exports = {
   updateRecipient,
   prepareCampaign,
   sendTest,
+  getEmailTestStatus,
   getDispatchStatus,
   startCampaignDispatch,
   pauseCampaignDispatch,
