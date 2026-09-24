@@ -200,6 +200,16 @@ test('refreshing a DEV mock domain never contacts the email provider', async t =
   assert.ok(row.checked_at.getTime() > 0);
 });
 
+test('DEV domain setup builds a pending identity without provider credentials', () => {
+  const identity = marketingEmail.buildDevMockIdentity('clinic.example');
+  assert.equal(identity.mock, true);
+  assert.equal(identity.verifiedForSending, false);
+  assert.equal(identity.verificationStatus, 'pending');
+  assert.equal(identity.dkimStatus, 'pending');
+  assert.equal(identity.mailFromDomain, 'bounce.clinic.example');
+  assert.equal(identity.dkimTokens.length, 3);
+});
+
 test('SES DNS setup keeps the clinic root SPF untouched and gates senders on custom MAIL FROM', () => {
   const records = marketingEmail.dnsRecords('clinic.example', {
     dkimTokens: ['token_one'],
