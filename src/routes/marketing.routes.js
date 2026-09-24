@@ -192,6 +192,7 @@ router.post('/bulk-sends/campaigns/:id/send', marketingBulkSendsController.start
 router.post('/bulk-sends/campaigns/:id/cancel', marketingBulkSendsController.cancelDispatch);
 router.post('/bulk-sends/campaigns/:id/resume', marketingBulkSendsController.resumeDispatch);
 router.post('/bulk-sends/campaigns/:id/test-send', marketingBulkSendsController.sendTest);
+router.get('/bulk-sends/campaigns/:id/test-send/email/:messageId/status', marketingBulkSendsController.getEmailTestStatus);
 router.delete('/bulk-sends/campaigns/:id', marketingBulkSendsController.removeCampaign);
 router.get('/email/settings', marketingEmailController.settings);
 router.post('/email/domains', marketingEmailController.addDomain);

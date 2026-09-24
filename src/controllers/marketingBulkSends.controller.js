@@ -288,6 +288,21 @@ exports.sendTest = async (req, res) => {
   }
 };
 
+exports.getEmailTestStatus = async (req, res) => {
+  try {
+    const scope = await resolveScope(req, { allowAll: false });
+    const result = await marketingBulkSendsService.getEmailTestStatus(
+      scope,
+      req.params.id,
+      req.params.messageId
+    );
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'Error consultando la entrega de la prueba');
+  }
+};
+
 exports.removeCampaign = async (req, res) => {
   try {
     const scope = await resolveScopeFromRequest(req, { allowAll: false });
