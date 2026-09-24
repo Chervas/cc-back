@@ -1773,7 +1773,7 @@ exports.createCustomTemplate = async (req, res) => {
   try {
     const clinicId = req.body?.clinic_id ? Number(req.body.clinic_id) : (req.query.clinic_id ? Number(req.query.clinic_id) : null);
     const phoneNumberId = req.body?.phone_number_id || req.query.phone_number_id || null;
-    const requestedPhoneNumberIds = Array.from(new Set([
+    let requestedPhoneNumberIds = Array.from(new Set([
       ...(Array.isArray(req.body?.phone_number_ids) ? req.body.phone_number_ids : []),
       ...(phoneNumberId ? [phoneNumberId] : []),
     ].map((value) => String(value || '').trim()).filter(Boolean))).slice(0, 4);
@@ -1796,6 +1796,18 @@ exports.createCustomTemplate = async (req, res) => {
     }
     if (clinicId) {
       await assertWhatsappTemplateClinicAccess({ clinicId, userId });
+    }
+
+    if (
+      clinicId
+      && !requestedPhoneNumberIds.length
+      && ['solicitud_resena', 'resena', 'review_request', 'reviews'].includes(templateUsage)
+    ) {
+      const reviewSender = await whatsappService.resolvePhoneAssetByClinic(clinicId, {
+        purpose: 'review_requests',
+      });
+      const reviewPhoneNumberId = String(reviewSender?.phoneNumberId || '').trim();
+      if (reviewPhoneNumberId) requestedPhoneNumberIds = [reviewPhoneNumberId];
     }
 
     const assets = [];

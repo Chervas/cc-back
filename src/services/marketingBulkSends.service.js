@@ -11,6 +11,10 @@ const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
 const whatsappConnectionStatusService = require('./whatsappConnectionStatus.service');
 const whatsappDeliveryGovernanceService = require('./whatsappDeliveryGovernance.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
+const {
+  formatMarketingDate,
+  resolveLastAttendedAppointmentDate,
+} = require('../lib/marketing-template-variables');
 const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
 const { usesExplicitDispatchWindow } = require('../lib/marketing-dispatch-window');
 const { normalizeReviewSenderName, requireReviewSenderName } = require('../lib/review-sender-policy');
@@ -3171,10 +3175,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
 }
 
 function formatReviewDate(value) {
-  if (!value) return '';
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  return formatMarketingDate(value);
 }
 
 function parseReviewCandidateDate(value) {
@@ -3306,6 +3307,9 @@ function mapReviewPatientItem({ patient, appointment = null, source = 'manual_se
   const name = buildPatientDisplayName(patient);
   const appointmentDate = appointment?.inicio || appointment?.appointment_at || null;
   const formattedAppointmentDate = formatReviewDate(appointmentDate);
+  const attendedAppointmentDate = normalizeText(appointment?.estado).toLowerCase() === 'completada'
+    ? formattedAppointmentDate
+    : '';
   const visitReference = formattedAppointmentDate
     ? `el pasado ${formattedAppointmentDate}`
     : 'en tu última atención';
@@ -3320,7 +3324,7 @@ function mapReviewPatientItem({ patient, appointment = null, source = 'manual_se
     email: patient.email || null,
     treatment,
     treatment_id: appointment?.tratamiento_id || null,
-    last_visit_at: appointmentDate,
+    last_visit_at: attendedAppointmentDate ? appointmentDate : null,
     appointment_at: appointmentDate,
     treatment_completed: source === 'completed_treatment',
     status: 'ready',
@@ -3337,6 +3341,7 @@ function mapReviewPatientItem({ patient, appointment = null, source = 'manual_se
       tratamiento: treatment,
       fecha: formattedAppointmentDate,
       fecha_cita: formattedAppointmentDate,
+      fecha_ultima_cita_asistida: attendedAppointmentDate,
       referencia_visita: visitReference,
       clinica: clinicName,
       nombre_clinica: clinicName,
@@ -3481,6 +3486,7 @@ async function buildReviewRequestCandidateForAppointment(scope, body = {}) {
 function mapReviewItemsFromImportedList(rows, importedList, alreadyRequested, body = {}) {
   const items = (rows || []).map((row) => {
     const plain = row?.get ? row.get({ plain: true }) : row;
+    const attendedDate = resolveLastAttendedAppointmentDate(plain);
     const patientId = Number(plain?.paciente_id || 0) || null;
     const sourceStatus = normalizeKey(plain?.status || '');
     const sourceExcluded = sourceStatus.startsWith('excluded_')
@@ -3509,13 +3515,60 @@ function mapReviewItemsFromImportedList(rows, importedList, alreadyRequested, bo
         ? 'solicitud_previa'
         : (sourceExcluded ? plain?.exclusion_reason : null),
       selected: status === 'ready',
-      custom_fields: plain?.custom_fields || {},
+      custom_fields: {
+        ...(plain?.custom_fields || {}),
+        ...(attendedDate ? { fecha_ultima_cita_asistida: attendedDate } : {}),
+      },
       missing_variables: plain?.missing_variables || [],
       notes: plain?.notes || null,
     };
   });
 
-  return sortReviewRequestItemsByRecentCare(applyReviewRequestExclusions(items, body));
+  return applyReviewRequestExclusions(items, body);
+}
+
+async function attachLatestAttendedAppointmentDate(items = [], scope = {}) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  const patientIds = Array.from(new Set((items || [])
+    .filter((item) => !resolveLastAttendedAppointmentDate(item))
+    .map((item) => Number(item?.paciente_id || 0))
+    .filter((id) => Number.isInteger(id) && id > 0)));
+  if (!patientIds.length || !clinicIds.length || !CitaPaciente) return items;
+
+  const rows = await CitaPaciente.findAll({
+    where: {
+      paciente_id: { [Op.in]: patientIds },
+      clinica_id: { [Op.in]: clinicIds },
+      estado: 'completada',
+    },
+    attributes: [
+      'paciente_id',
+      [Sequelize.fn('MAX', Sequelize.col('inicio')), 'ultima_cita_asistida'],
+    ],
+    group: ['paciente_id'],
+    raw: true,
+  });
+  const latestByPatient = new Map();
+  for (const row of rows) {
+    const patientId = Number(row.paciente_id || 0);
+    if (patientId) latestByPatient.set(patientId, row.ultima_cita_asistida);
+  }
+
+  return (items || []).map((item) => {
+    if (resolveLastAttendedAppointmentDate(item)) return item;
+    const appointmentAt = latestByPatient.get(Number(item?.paciente_id || 0));
+    const formatted = formatReviewDate(appointmentAt);
+    if (!formatted) return item;
+    return {
+      ...item,
+      last_visit_at: item.last_visit_at || appointmentAt,
+      appointment_at: item.appointment_at || appointmentAt,
+      custom_fields: {
+        ...(item.custom_fields || {}),
+        fecha_ultima_cita_asistida: formatted,
+      },
+    };
+  });
 }
 
 async function buildReviewItemsFromImportedList(scope, body = {}) {
@@ -3547,7 +3600,10 @@ async function buildReviewItemsFromImportedList(scope, body = {}) {
     getReviewRequestedPatientIds(scope),
   ]);
 
-  return mapReviewItemsFromImportedList(rows, importedList, alreadyRequested, body);
+  const items = mapReviewItemsFromImportedList(rows, importedList, alreadyRequested, body);
+  return sortReviewRequestItemsByRecentCare(
+    await attachLatestAttendedAppointmentDate(items, scope)
+  );
 }
 
 async function buildItemsForReviewRequest(scope, body = {}) {
@@ -3659,7 +3715,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
       latestAppointmentByPatient.set(patientId, row);
     }
 
-    return sortReviewRequestItemsByRecentCare(applyReviewRequestExclusions(patients.map((patient) => {
+    const items = applyReviewRequestExclusions(patients.map((patient) => {
       const latestAppointment = latestAppointmentByPatient.get(Number(patient.id_paciente));
       const item = mapReviewPatientItem({
         patient,
@@ -3667,6 +3723,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
           ? {
             clinica_id: Number(latestAppointment.clinica_id || patient.review_clinica_id || patient.clinica_id || 0) || null,
             tratamiento_id: Number(latestAppointment.tratamiento_id || 0) || null,
+            estado: 'completada',
             inicio: latestAppointment.inicio || null,
             titulo: latestAppointment.titulo || '',
             motivo: latestAppointment.motivo || '',
@@ -3689,7 +3746,10 @@ async function buildItemsForReviewRequest(scope, body = {}) {
           ...(item.custom_fields || {}),
         },
       };
-    }), body));
+    }), body);
+    return sortReviewRequestItemsByRecentCare(
+      await attachLatestAttendedAppointmentDate(items, scope)
+    );
   }
 
   const appointmentWhere = {
@@ -3734,7 +3794,10 @@ async function buildItemsForReviewRequest(scope, body = {}) {
     if (selected.size >= limit) break;
   }
 
-  return sortReviewRequestItemsByRecentCare(applyReviewRequestExclusions(Array.from(selected.values()), body));
+  const items = applyReviewRequestExclusions(Array.from(selected.values()), body);
+  return sortReviewRequestItemsByRecentCare(
+    await attachLatestAttendedAppointmentDate(items, scope)
+  );
 }
 
 async function buildReviewTreatmentOptions(scope) {
@@ -7095,6 +7158,7 @@ function resolveVariableValue(variableName, item, list, clinic) {
     tratamiento: item.treatment || '',
     fecha: custom.fecha || custom.fecha_cita || '',
     fecha_cita: custom.fecha_cita || custom.fecha || '',
+    fecha_ultima_cita_asistida: resolveLastAttendedAppointmentDate(item),
     referencia_visita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última atención'),
     referencia_cita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última atención'),
   };
@@ -7162,6 +7226,7 @@ async function getOrCreateReviewTestSampleItem(list, clinicId, listCriteria = {}
       firma_resenas: senderName,
       tratamiento: 'Tratamiento de ejemplo',
       fecha: new Date().toISOString().slice(0, 10),
+      fecha_ultima_cita_asistida: formatReviewDate(new Date()),
       test_sample: true,
     },
     missing_variables: [],
@@ -10662,6 +10727,8 @@ module.exports = {
     scoreWhatsappTemplateForScope,
     computeCounters,
     mapReviewItemsFromImportedList,
+    attachLatestAttendedAppointmentDate,
+    resolveVariableValue,
     parseReviewImportListId,
     shouldScheduleReviewReminder,
     buildItemDedupeKeyForChannels,

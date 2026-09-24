@@ -13,6 +13,7 @@ for tool in /usr/sbin/iptables /usr/sbin/ip6tables; do
     # Meta staging (8454) and direct provider access remain denied.
     "$tool" -w -A CC_DEV_EGRESS_V1 -p tcp -d 13.39.100.55 --dport 8447 -j RETURN
     "$tool" -w -A CC_DEV_EGRESS_V1 -p tcp -d 13.39.100.55 --dport 8453 -j RETURN
+    "$tool" -w -A CC_DEV_EGRESS_V1 -p tcp -d 13.39.100.55 --dport 8455 -j RETURN
   fi
   "$tool" -w -A CC_DEV_EGRESS_V1 -j REJECT
   "$tool" -w -C OUTPUT -m owner --uid-owner 998 -j CC_DEV_EGRESS_V1 2>/dev/null || "$tool" -w -I OUTPUT 1 -m owner --uid-owner 998 -j CC_DEV_EGRESS_V1

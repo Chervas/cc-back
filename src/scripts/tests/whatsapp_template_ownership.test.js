@@ -263,6 +263,90 @@ test('sync y creación rechazan la clínica ajena antes de resolver activos', as
   }
 });
 
+test('una plantilla de reseña sin número explícito usa el remitente efectivo de review_requests', async () => {
+  const whatsappService = require('../../services/whatsapp.service');
+  const templateService = require('../../services/whatsappTemplates.service');
+  const originals = {
+    clinicFindAll: db.Clinica.findAll,
+    clinicFindOne: db.Clinica.findOne,
+    assetFindOne: db.ClinicMetaAsset.findOne,
+    resolvePhoneAssetByClinic: whatsappService.resolvePhoneAssetByClinic,
+    createCustomTemplateForClinic: templateService.createCustomTemplateForClinic,
+  };
+  const asset = {
+    id: 398,
+    clinicaId: 56,
+    assignmentScope: 'clinic',
+    assetType: 'whatsapp_phone_number',
+    phoneNumberId: 'phone-review-secondary',
+    wabaId: 'waba-review-secondary',
+    waAccessToken: 'test-only-token',
+    metaConnection: { userId: 1 },
+  };
+  let resolvedPurpose = null;
+  let submittedWabaId = null;
+
+  db.Clinica.findAll = async (options = {}) => {
+    const attributes = options.attributes || [];
+    return attributes.includes('grupoClinicaId')
+      ? [{ grupoClinicaId: 5 }]
+      : [{ id_clinica: 56 }];
+  };
+  db.Clinica.findOne = async () => ({ grupoClinicaId: 5 });
+  db.ClinicMetaAsset.findOne = async () => asset;
+  whatsappService.resolvePhoneAssetByClinic = async (_clinicId, options) => {
+    resolvedPurpose = options?.purpose || null;
+    return asset;
+  };
+  templateService.createCustomTemplateForClinic = async (input) => {
+    submittedWabaId = input.wabaId;
+    return {
+      submitted: true,
+      row: {
+        get: () => ({
+          id: 900,
+          clinic_id: 56,
+          waba_id: input.wabaId,
+          name: 'cc_review_test',
+          display_name: 'Solicitud de reseña',
+          language: 'es',
+          category: input.category,
+          status: 'PENDING',
+          components: [{ type: 'BODY', text: 'Hola {{1}}' }],
+          variables: [{ position: 1, name: 'nombre_paciente', example: 'Ana' }],
+          origin: 'custom',
+          created_by_user_id: 1,
+        }),
+      },
+    };
+  };
+
+  try {
+    const res = responseRecorder();
+    await whatsappController.createCustomTemplate({
+      query: {},
+      body: {
+        clinic_id: 56,
+        display_name: 'Solicitud de reseña',
+        body_text: 'Hola {{nombre_paciente}}',
+        template_usage: 'solicitud_resena',
+        category: 'UTILITY',
+      },
+      userData: { userId: 1 },
+    }, res);
+    assert.equal(res.statusCode, 201);
+    assert.equal(resolvedPurpose, 'review_requests');
+    assert.equal(submittedWabaId, 'waba-review-secondary');
+    assert.equal(res.body?.replicas?.[0]?.phone_number_id, 'phone-review-secondary');
+  } finally {
+    db.Clinica.findAll = originals.clinicFindAll;
+    db.Clinica.findOne = originals.clinicFindOne;
+    db.ClinicMetaAsset.findOne = originals.assetFindOne;
+    whatsappService.resolvePhoneAssetByClinic = originals.resolvePhoneAssetByClinic;
+    templateService.createCustomTemplateForClinic = originals.createCustomTemplateForClinic;
+  }
+});
+
 test('el autor tampoco puede retirar una plantilla si ya no tiene acceso a su activo', async () => {
   const originals = {
     membershipFindAll: db.UsuarioClinica.findAll,

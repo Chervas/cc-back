@@ -10,6 +10,7 @@ const VARIABLE_METADATA = {
   profesional_apellidos: { description: 'Apellidos del doctor o profesional asignado', example: 'Perez' },
   profesional_email: { description: 'Email del doctor o profesional asignado', example: 'laura.perez@clinicaclick.com' },
   fecha_cita: { description: 'Fecha de la cita programada', example: '30/03/2026' },
+  fecha_ultima_cita_asistida: { description: 'Fecha de la última cita a la que asistió el paciente', example: '21/05/2026' },
   hora_cita: { description: 'Hora de la cita programada', example: '10:00' },
   nombre_clinica: { description: 'Nombre de la clínica', example: 'Propdental Eixample' },
   firma_resenas: { description: 'Remitente que firma una solicitud de reseña', example: 'Recepción' },
@@ -54,6 +55,10 @@ const VARIABLE_ALIASES = {
   doctor_email: 'profesional_email',
   fecha_cita: 'fecha_cita',
   appointment_date: 'fecha_cita',
+  fecha_ultima_cita_asistida: 'fecha_ultima_cita_asistida',
+  ultima_cita_asistida: 'fecha_ultima_cita_asistida',
+  last_attended_appointment_date: 'fecha_ultima_cita_asistida',
+  last_attended_visit_date: 'fecha_ultima_cita_asistida',
   hora_cita: 'hora_cita',
   appointment_time: 'hora_cita',
   nombre_clinica: 'nombre_clinica',
@@ -104,6 +109,7 @@ const SYSTEM_DEFAULT_NAMED_BINDINGS = {
   profesional_apellidos: '{{profesional.apellidos}}',
   profesional_email: '{{profesional.email}}',
   fecha_cita: '{{cita.fecha}}',
+  fecha_ultima_cita_asistida: '{{paciente.fecha_ultima_cita_asistida}}',
   hora_cita: '{{cita.hora}}',
   nombre_clinica: '{{clinica.nombre}}',
   firma_resenas: '{{clinica.firma_resenas}}',
@@ -131,10 +137,12 @@ const SYSTEM_TEMPLATE_OVERRIDES = {
   clinicaclick_solicitar_resena: {
     2: ['nombre_paciente', 'nombre_clinica'],
     3: ['nombre_paciente', 'firma_resenas', 'nombre_clinica'],
+    4: ['nombre_paciente', 'firma_resenas', 'nombre_clinica', 'fecha_ultima_cita_asistida'],
   },
   clinicaclick_solicitar_resena_foto: {
     2: ['nombre_paciente', 'nombre_clinica'],
     3: ['nombre_paciente', 'firma_resenas', 'nombre_clinica'],
+    4: ['nombre_paciente', 'firma_resenas', 'nombre_clinica', 'fecha_ultima_cita_asistida'],
   },
   clinicaclick_recordatorio_resena_sin_respuesta: {
     1: ['nombre_paciente'],
@@ -229,7 +237,8 @@ function inferVariableNameFromTemplateBody(bodyText, placeholderIndex, example) 
     if (/(doctor|doctora|profesional|odontolog)/.test(windowText)) return 'profesional_nombre';
     if (/(estamos en|direccion|dirección|ubicacion|ubicación|calle|avenida|plaza|localizacion|localización)/.test(windowText)) return 'direccion_clinica';
     if (/(hora|horario|a las)/.test(windowText)) return 'hora_cita';
-    if (/(dia|día|fecha|cita para el|visita del)/.test(windowText)) return 'fecha_cita';
+    if (/(ultima cita asistida|última cita asistida|ultima visita|última visita|visita del)/.test(windowText)) return 'fecha_ultima_cita_asistida';
+    if (/(dia|día|fecha|cita para el)/.test(windowText)) return 'fecha_cita';
     if (/(clinica|clínica|centro)/.test(windowText)) return 'nombre_clinica';
     if (/(telefono|teléfono|llamanos|llámanos|contacto|whatsapp)/.test(windowText)) return 'telefono_clinica';
     if (/(tratamiento|implante|ortodoncia|higiene|revision|revisión)/.test(windowText)) return 'tratamiento';
@@ -288,6 +297,12 @@ function buildReviewRequestVariablesFromBody(templateName, indexes, bodyText, ex
   if (!isReviewRequestTemplateName(templateName)) return null;
   if (indexes.length === 1) return buildVariablesFromNames(indexes, ['nombre_paciente'], examples);
   if (indexes.length === 2) return buildVariablesFromNames(indexes, ['nombre_paciente', 'nombre_clinica'], examples);
+  if (indexes.length === 4) {
+    if (/soy\s*\{\{\s*3\s*\}\}\s+de\s+\{\{\s*2\s*\}\}/i.test(bodyText)) {
+      return buildVariablesFromNames(indexes, ['nombre_paciente', 'nombre_clinica', 'firma_resenas', 'fecha_ultima_cita_asistida'], examples);
+    }
+    return buildVariablesFromNames(indexes, ['nombre_paciente', 'firma_resenas', 'nombre_clinica', 'fecha_ultima_cita_asistida'], examples);
+  }
   if (indexes.length !== 3) return null;
 
   if (/soy\s*\{\{\s*2\s*\}\}\s+de\s+\{\{\s*3\s*\}\}/i.test(bodyText)) {

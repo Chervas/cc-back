@@ -330,6 +330,28 @@ en `meta-standby-deployment.json`; misma carpeta privada de evidencia del corte
 anterior. Con doce destinos ya enrolados, conservar el soporte de `0627ae37` al
 recuperar: `release-0ab512d8` no admite las dos identidades nuevas.
 
+### Alta y renovacion de PUBLIC_MEDIA DEV verificadas, 24/09/2026
+
+El publicador y el firmante admiten en codigo un decimotercer servicio HTTPS:
+`public-media-dev:8455`. La pareja nombre/puerto es fija; identidades ajenas,
+intercambio con Meta o un puerto expresado como texto se rechazan. El monitor
+reconoce la nueva etiqueta y admite catorce filas completas al sumar el cliente
+de mantenimiento. La regla de salida DEV solo agrega
+`13.39.100.55:8455`; no abre `8454`, otros destinos ni S3 directo.
+
+El orden previsto se completo: unidad y clave aisladas en AWS, hoja inicial
+valida, lector compatible en DEV, publicador y firmante ampliados y alta del
+destino sin alterar los doce anteriores. La renovacion forzada de
+`public-media-dev` cambio la hoja servida conservando clave y PID. La ejecucion
+final devuelve catorce certificados sanos al incluir el cliente de mantenimiento;
+el timer sigue activo y el broker mantiene cero reinicios.
+
+Recuperacion: la release anterior del firmante/publicador solo admite doce
+destinos. No restaurarla dejando `public-media-dev` en configuracion. Para retirar
+este servicio, cerrar primero su consumidor, eliminar exclusivamente su destino
+de ambos registros y comprobar las trece filas restantes; no sustituir hojas,
+claves o estado de los otros servicios.
+
 ### Lectura de metadata por el DEV aislado
 
 El directorio de salud es root `0750` y sus JSON root `0640`, con grupo del CRM.

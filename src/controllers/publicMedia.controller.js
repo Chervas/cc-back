@@ -8,6 +8,7 @@ const {
   assertUserCanAccessFeature,
   getAccessibleClinicIdsForFeature,
 } = require('../lib/access-policy');
+const { isGlobalAdmin } = require('../lib/role-helpers');
 
 const CLINIC_VIEW_FEATURE = 'clinic.settings.view';
 const CLINIC_EDIT_FEATURE = 'clinic.settings.edit';
@@ -113,6 +114,15 @@ function resolveScope(req) {
     ?? req.query?.groupId
   ) || groupIdFromScope;
 
+  if (scope === 'catalog') {
+    if (explicitClinicId || groupId) {
+      const error = new Error('public_media_scope_ambiguous');
+      error.status = 400;
+      throw error;
+    }
+    return { scopeType: 'catalog', clinicId: null, groupId: null };
+  }
+
   if (explicitClinicId && groupId) {
     const error = new Error('public_media_scope_ambiguous');
     error.status = 400;
@@ -134,6 +144,14 @@ function resolveScope(req) {
 }
 
 async function assertScopeAccess({ actorId, scope, featureKey }) {
+  if (scope.scopeType === 'catalog') {
+    if (!isGlobalAdmin(actorId)) {
+      const error = new Error('public_media_catalog_forbidden');
+      error.status = 403;
+      throw error;
+    }
+    return;
+  }
   if (scope.scopeType === 'clinic') {
     const clinic = await Clinica.findByPk(scope.clinicId, {
       attributes: ['id_clinica'],
@@ -198,7 +216,9 @@ async function buildUsage(scope) {
   if (!PublicMediaAsset) return null;
 
   const where = { status: 'active', sensitivity: 'public' };
-  if (scope.scopeType === 'group' && scope.groupId) {
+  if (scope.scopeType === 'catalog') {
+    where.scope_type = 'catalog';
+  } else if (scope.scopeType === 'group' && scope.groupId) {
     where.scope_type = 'group';
     where.grupo_clinica_id = scope.groupId;
   } else if (scope.clinicId) {
@@ -243,6 +263,11 @@ exports.upload = async (req, res) => {
   try {
     const scope = resolveScope(req);
     const purpose = String(req.body?.purpose || 'public_asset').trim().toLowerCase();
+    if (scope.scopeType === 'catalog' && purpose !== 'marketing_image') {
+      const error = new Error('public_media_catalog_requires_marketing_image');
+      error.status = 400;
+      throw error;
+    }
     if (purpose === 'web_editor_media') assertWebScopeEnabled(webScope(scope));
     await assertScopeAccess({
       actorId: req.userData?.userId,
@@ -273,6 +298,7 @@ exports.upload = async (req, res) => {
 
     const uploadInput = {
       purpose,
+      scope: scope.scopeType,
       clinicId: scope.clinicId,
       groupId: scope.groupId,
       contentType: req.body?.content_type || req.body?.contentType,

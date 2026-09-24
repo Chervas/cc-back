@@ -112,6 +112,23 @@ async function testWebEditorPurposeIsAllowedAndKeepsImageContract() {
   assert.equal(prepared.imageMetadata.malware_scan_status, 'not_available');
 }
 
+async function testMarketingImageIsReencodedWithoutMetadata() {
+  const source = await makePng();
+  const prepared = await publicMediaStorage.preparePublicMediaPayload({
+    purpose: 'marketing_image',
+    contentType: 'image/png',
+    buffer: source,
+  });
+  const outputMetadata = await sharp(prepared.buffer).metadata();
+  assert.equal(prepared.contentType, 'image/webp');
+  assert.equal(outputMetadata.format, 'webp');
+  assert.equal(outputMetadata.exif, undefined);
+  assert.equal(outputMetadata.orientation, undefined);
+  assert.equal(prepared.imageMetadata.transformed, true);
+  assert.equal(prepared.imageMetadata.metadata_stripped, true);
+  assert.equal(prepared.imageMetadata.content_disarm, 'sharp_reencode_v1');
+}
+
 function testControllerRequiresAssertionScopeAndEditCapability() {
   const controllerSource = fs.readFileSync(
     path.resolve(__dirname, '../../controllers/publicMedia.controller.js'),
@@ -206,6 +223,40 @@ function testReviewPhotoKeepsMarketingCapability() {
     /public_media_scope_ambiguous/,
     'two explicit scopes must remain invalid',
   );
+
+  assert.deepEqual(
+    publicMediaController._private.resolveScope({
+      body: { scope: 'catalog' },
+      query: {},
+      headers: { 'x-selected-clinic': '66' },
+    }),
+    { scopeType: 'catalog', clinicId: null, groupId: null },
+    'the catalog scope must not inherit the clinic selected in the browser',
+  );
+  assert.throws(
+    () => publicMediaController._private.resolveScope({
+      body: { scope: 'catalog', clinic_id: 66 },
+      query: {},
+      headers: {},
+    }),
+    /public_media_scope_ambiguous/,
+  );
+}
+
+async function testCatalogScopeIsRestrictedToGlobalAdmins() {
+  await publicMediaController._private.assertScopeAccess({
+    actorId: 1,
+    scope: { scopeType: 'catalog', clinicId: null, groupId: null },
+    featureKey: 'marketing',
+  });
+  await assert.rejects(
+    () => publicMediaController._private.assertScopeAccess({
+      actorId: 2,
+      scope: { scopeType: 'catalog', clinicId: null, groupId: null },
+      featureKey: 'marketing',
+    }),
+    (error) => error?.message === 'public_media_catalog_forbidden' && error?.status === 403,
+  );
 }
 
 async function run() {
@@ -214,7 +265,9 @@ async function run() {
   await testMagicBytesMustMatchDeclaredMime();
   await testSourceSizeIsRejectedBeforeImageDecode();
   await testWebEditorPurposeIsAllowedAndKeepsImageContract();
+  await testMarketingImageIsReencodedWithoutMetadata();
   await testWebEditorQuotaFailsClosed();
+  await testCatalogScopeIsRestrictedToGlobalAdmins();
   testControllerRequiresAssertionScopeAndEditCapability();
   testReviewPhotoKeepsMarketingCapability();
   console.log('public_media_clinic_access.test.js: OK');

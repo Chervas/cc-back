@@ -38,7 +38,7 @@ async function main() {
       exclusion_reason: 'cita_futura',
       selected: false,
       last_visit_at: '2026-06-01T10:00:00.000Z',
-      custom_fields: { origen: 'csv' },
+      custom_fields: { origen: 'csv', fecha_ultima_cita: '01/06/2026' },
     },
     {
       paciente_id: 11,
@@ -84,6 +84,7 @@ async function main() {
   assert.equal(futureAppointment.status, 'ready', 'una cita futura no excluye de una reseña');
   assert.equal(futureAppointment.selected, true);
   assert.equal(futureAppointment.custom_fields.origen, 'csv');
+  assert.equal(futureAppointment.custom_fields.fecha_ultima_cita_asistida, '01/06/2026');
   assert.equal(invalidPhone.status, 'excluded_invalid_phone');
   assert.equal(invalidPhone.selected, false);
   assert.equal(alreadyRequested.status, 'excluded_review_already_requested');

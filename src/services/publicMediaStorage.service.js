@@ -5,6 +5,7 @@ const sharp = require('sharp');
 const { CloudFrontClient, CreateInvalidationCommand } = require('@aws-sdk/client-cloudfront');
 const { DeleteObjectCommand, PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
 const { AssumeRoleCommand, STSClient } = require('@aws-sdk/client-sts');
+const publicMediaBroker = require('./publicMediaBroker.service');
 
 const DEFAULT_REGION = 'eu-west-3';
 const DEFAULT_BUCKET = 'clinicaclick-public-media-eu-west-3';
@@ -262,7 +263,7 @@ async function preparePublicMediaPayload(input = {}) {
     buffer = await normalizeWhatsappImageToJpeg(buffer);
     contentType = 'image/jpeg';
     transformed = true;
-  } else if (['web_editor_media', 'invoice_logo'].includes(purpose)) {
+  } else if (['web_editor_media', 'invoice_logo', 'marketing_image'].includes(purpose)) {
     buffer = await normalizeWebEditorImageToWebp(buffer);
     contentType = 'image/webp';
     transformed = true;
@@ -292,9 +293,9 @@ async function preparePublicMediaPayload(input = {}) {
       output_width: outputImage?.width || null,
       output_height: outputImage?.height || null,
       transformed,
-      metadata_stripped: transformed && ['clinic_access_image', 'web_editor_media', 'invoice_logo', 'review_team_photo', 'whatsapp_image'].includes(purpose),
-      content_disarm: purpose === 'web_editor_media' ? 'sharp_reencode_v1' : null,
-      malware_scan_status: purpose === 'web_editor_media' ? 'not_available' : null,
+      metadata_stripped: transformed && ['clinic_access_image', 'web_editor_media', 'invoice_logo', 'marketing_image', 'review_team_photo', 'whatsapp_image'].includes(purpose),
+      content_disarm: ['web_editor_media', 'marketing_image'].includes(purpose) ? 'sharp_reencode_v1' : null,
+      malware_scan_status: ['web_editor_media', 'marketing_image'].includes(purpose) ? 'not_available' : null,
       whatsapp_compatible: ['clinic_access_image', 'review_team_photo', 'whatsapp_image'].includes(purpose)
         ? buffer.length <= MAX_WHATSAPP_IMAGE_BYTES
         : null,
@@ -439,6 +440,32 @@ async function uploadPublicMedia(input = {}) {
     buffer,
     imageMetadata,
   } = prepared;
+
+  if (purpose === 'marketing_image' && publicMediaBroker.enabled()) {
+    const brokerUpload = await publicMediaBroker.uploadEmailImage({
+      ...input,
+      purpose,
+      contentType,
+      buffer,
+    });
+    return {
+      bucket: getConfig().bucket,
+      region: getConfig().region,
+      key: brokerUpload.key,
+      url: brokerUpload.url,
+      contentType: brokerUpload.contentType,
+      sizeBytes: brokerUpload.sizeBytes,
+      sha256: brokerUpload.sha256,
+      etag: brokerUpload.etag,
+      cacheControl: brokerUpload.cacheControl,
+      imageMetadata,
+    };
+  }
+  if (purpose === 'marketing_image' && process.env.PUBLIC_MEDIA_BROKER_REQUIRED === 'true') {
+    const err = new Error('public_media_broker_required');
+    err.status = 503;
+    throw err;
+  }
 
   const { region, bucket } = getConfig();
   const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');

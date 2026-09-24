@@ -116,6 +116,22 @@ test('contact variables are HTML-escaped while plain text remains readable', () 
   assert.equal(templates.replaceVars('Hola {{nombre}}', context), 'Hola <img src=x onerror=alert(1)> Ana');
 });
 
+test('email templates expose the canonical last attended appointment date', () => {
+  const context = dispatch.__testing.templateContext({
+    list: { criteria: { review_sender_name: 'Vero' } },
+    item: {
+      name: 'Ana García',
+      email: 'ana@example.test',
+      custom_fields: { fecha_ultima_cita: '21/05/2026' },
+    },
+    clinic: { nombre_clinica: 'Clínica Centro' },
+  });
+  assert.equal(context.nombre_paciente, 'Ana');
+  assert.equal(context.nombre_clinica, 'Clínica Centro');
+  assert.equal(context.firma_resenas, 'Vero');
+  assert.equal(context.fecha_ultima_cita_asistida, '21/05/2026');
+});
+
 test('marketing outbox refuses a message without explicit consent or unsubscribe URL before touching storage', async () => {
   await assert.rejects(delivery.queueEmail({
     stream: 'marketing',
