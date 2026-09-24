@@ -5,8 +5,23 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const { Op } = require('sequelize');
+
 const db = require('../../../models');
 const whatsappController = require('../../controllers/whatsapp.controller');
+const { queues, connection: queueConnection } = require('../../services/queue.service');
+
+// Loading the application also loads its .env. Remove the real registry only
+// after that bootstrap so these ownership tests stay on their local fixtures.
+delete process.env.WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE;
+
+test.after(async () => {
+  await Promise.all(Object.values(queues).map((queue) => queue.waitUntilReady()));
+  await Promise.all(Object.values(queues).map((queue) => queue.close()));
+  if (typeof queueConnection?.connection?.quit === 'function') {
+    await queueConnection.connection.quit();
+  }
+  await db.sequelize.close();
+});
 
 const {
   canUserAccessWhatsappTemplateAsset,
