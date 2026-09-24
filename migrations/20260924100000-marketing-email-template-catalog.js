@@ -29,72 +29,92 @@ module.exports = {
       updated_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
     };
 
-    await queryInterface.createTable('MarketingEmailTemplateCatalog', {
-      id: { type: Sequelize.INTEGER.UNSIGNED, autoIncrement: true, primaryKey: true },
-      public_id: { type: Sequelize.STRING(64), allowNull: false, unique: true },
-      catalog_key: { type: Sequelize.STRING(100), allowNull: false, unique: true },
-      name: { type: Sequelize.STRING(160), allowNull: false },
-      status: { type: Sequelize.STRING(24), allowNull: false, defaultValue: 'ready' },
-      subject: { type: Sequelize.STRING(160), allowNull: false },
-      preheader: { type: Sequelize.STRING(255), allowNull: true },
-      layout_key: { type: Sequelize.STRING(40), allowNull: false, defaultValue: 'classic' },
-      design: { type: Sequelize.JSON, allowNull: false },
-      rendered_html: { type: Sequelize.TEXT('long'), allowNull: true },
-      rendered_text: { type: Sequelize.TEXT('long'), allowNull: true },
-      version: { type: Sequelize.INTEGER.UNSIGNED, allowNull: false, defaultValue: 1 },
-      is_active: { type: Sequelize.BOOLEAN, allowNull: false, defaultValue: true },
-      propagation_state: { type: Sequelize.STRING(24), allowNull: true },
-      last_propagated_at: { type: Sequelize.DATE, allowNull: true },
-      created_by: { type: Sequelize.INTEGER, allowNull: true },
-      updated_by: { type: Sequelize.INTEGER, allowNull: true },
-      ...timestamps,
-    });
+    const tableNames = (await queryInterface.showAllTables()).map(table => (
+      typeof table === 'string' ? table : table.tableName || table.name
+    ));
+    if (!tableNames.includes('MarketingEmailTemplateCatalog')) {
+      await queryInterface.createTable('MarketingEmailTemplateCatalog', {
+        id: { type: Sequelize.INTEGER.UNSIGNED, autoIncrement: true, primaryKey: true },
+        public_id: { type: Sequelize.STRING(64), allowNull: false, unique: true },
+        catalog_key: { type: Sequelize.STRING(100), allowNull: false, unique: true },
+        name: { type: Sequelize.STRING(160), allowNull: false },
+        status: { type: Sequelize.STRING(24), allowNull: false, defaultValue: 'ready' },
+        subject: { type: Sequelize.STRING(160), allowNull: false },
+        preheader: { type: Sequelize.STRING(255), allowNull: true },
+        layout_key: { type: Sequelize.STRING(40), allowNull: false, defaultValue: 'classic' },
+        design: { type: Sequelize.JSON, allowNull: false },
+        rendered_html: { type: Sequelize.TEXT('long'), allowNull: true },
+        rendered_text: { type: Sequelize.TEXT('long'), allowNull: true },
+        version: { type: Sequelize.INTEGER.UNSIGNED, allowNull: false, defaultValue: 1 },
+        is_active: { type: Sequelize.BOOLEAN, allowNull: false, defaultValue: true },
+        propagation_state: { type: Sequelize.STRING(24), allowNull: true },
+        last_propagated_at: { type: Sequelize.DATE, allowNull: true },
+        created_by: { type: Sequelize.INTEGER, allowNull: true },
+        updated_by: { type: Sequelize.INTEGER, allowNull: true },
+        ...timestamps,
+      });
+    }
 
-    await queryInterface.addColumn('MarketingEmailTemplates', 'catalog_template_id', {
-      type: Sequelize.INTEGER.UNSIGNED,
-      allowNull: true,
-      references: { model: 'MarketingEmailTemplateCatalog', key: 'id' },
-      onUpdate: 'CASCADE',
-      onDelete: 'SET NULL',
-    });
-    await queryInterface.addColumn('MarketingEmailTemplates', 'catalog_version', {
-      type: Sequelize.INTEGER.UNSIGNED,
-      allowNull: true,
-    });
-    await queryInterface.addColumn('MarketingEmailTemplates', 'origin', {
-      type: Sequelize.STRING(24),
-      allowNull: false,
-      defaultValue: 'custom',
-    });
-    await queryInterface.addIndex('MarketingEmailTemplates', ['scope_key', 'catalog_template_id'], {
-      name: 'uq_marketing_email_system_template_scope',
-      unique: true,
-    });
+    const templateColumns = await queryInterface.describeTable('MarketingEmailTemplates');
+    if (!templateColumns.catalog_template_id) {
+      await queryInterface.addColumn('MarketingEmailTemplates', 'catalog_template_id', {
+        type: Sequelize.INTEGER.UNSIGNED,
+        allowNull: true,
+        references: { model: 'MarketingEmailTemplateCatalog', key: 'id' },
+        onUpdate: 'CASCADE',
+        onDelete: 'SET NULL',
+      });
+    }
+    if (!templateColumns.catalog_version) {
+      await queryInterface.addColumn('MarketingEmailTemplates', 'catalog_version', {
+        type: Sequelize.INTEGER.UNSIGNED,
+        allowNull: true,
+      });
+    }
+    if (!templateColumns.origin) {
+      await queryInterface.addColumn('MarketingEmailTemplates', 'origin', {
+        type: Sequelize.STRING(24),
+        allowNull: false,
+        defaultValue: 'custom',
+      });
+    }
+    const templateIndexes = await queryInterface.showIndex('MarketingEmailTemplates');
+    if (!templateIndexes.some(index => index.name === 'uq_marketing_email_system_template_scope')) {
+      await queryInterface.addIndex('MarketingEmailTemplates', ['scope_key', 'catalog_template_id'], {
+        name: 'uq_marketing_email_system_template_scope',
+        unique: true,
+      });
+    }
 
     const now = new Date();
-    await queryInterface.bulkInsert('MarketingEmailTemplateCatalog', [{
-      public_id: CATALOG_PUBLIC_ID,
-      catalog_key: CATALOG_KEY,
-      name: 'Novedades de la clínica · Prueba',
-      status: 'ready',
-      subject: 'Novedades de {{clinica}}',
-      preheader: 'Información de tu clínica',
-      layout_key: 'classic',
-      design: JSON.stringify(DESIGN),
-      rendered_html: renderedHtml(),
-      rendered_text: 'Hola {{nombre}}\n\nQueremos compartir contigo una novedad de {{clinica}}.\n\nMás información',
-      version: 1,
-      is_active: true,
-      propagation_state: 'complete',
-      last_propagated_at: now,
-      created_at: now,
-      updated_at: now,
-    }]);
-
-    const [catalog] = await queryInterface.sequelize.query(
+    let [catalog] = await queryInterface.sequelize.query(
       'SELECT id FROM MarketingEmailTemplateCatalog WHERE public_id = :publicId LIMIT 1',
       { replacements: { publicId: CATALOG_PUBLIC_ID }, type: Sequelize.QueryTypes.SELECT }
     );
+    if (!catalog) {
+      await queryInterface.bulkInsert('MarketingEmailTemplateCatalog', [{
+        public_id: CATALOG_PUBLIC_ID,
+        catalog_key: CATALOG_KEY,
+        name: 'Novedades de la clínica · Prueba',
+        status: 'ready',
+        subject: 'Novedades de {{clinica}}',
+        preheader: 'Información de tu clínica',
+        layout_key: 'classic',
+        design: JSON.stringify(DESIGN),
+        rendered_html: renderedHtml(),
+        rendered_text: 'Hola {{nombre}}\n\nQueremos compartir contigo una novedad de {{clinica}}.\n\nMás información',
+        version: 1,
+        is_active: true,
+        propagation_state: 'complete',
+        last_propagated_at: now,
+        created_at: now,
+        updated_at: now,
+      }]);
+      [catalog] = await queryInterface.sequelize.query(
+        'SELECT id FROM MarketingEmailTemplateCatalog WHERE public_id = :publicId LIMIT 1',
+        { replacements: { publicId: CATALOG_PUBLIC_ID }, type: Sequelize.QueryTypes.SELECT }
+      );
+    }
     const clinics = await queryInterface.sequelize.query(
       'SELECT id_clinica FROM Clinicas',
       { type: Sequelize.QueryTypes.SELECT }
@@ -107,8 +127,14 @@ module.exports = {
       ...clinics.map(row => ({ scope_type: 'clinic', scope_key: `clinic:${row.id_clinica}`, clinica_id: row.id_clinica, grupo_clinica_id: null })),
       ...groups.map(row => ({ scope_type: 'group', scope_key: `group:${row.id_grupo}`, clinica_id: null, grupo_clinica_id: row.id_grupo })),
     ];
-    if (catalog?.id && scopes.length) {
-      await queryInterface.bulkInsert('MarketingEmailTemplates', scopes.map(scope => ({
+    const linkedInstances = catalog?.id ? await queryInterface.sequelize.query(
+      'SELECT scope_key FROM MarketingEmailTemplates WHERE catalog_template_id = :catalogId',
+      { replacements: { catalogId: catalog.id }, type: Sequelize.QueryTypes.SELECT }
+    ) : [];
+    const linkedScopes = new Set(linkedInstances.map(row => row.scope_key));
+    const missingScopes = scopes.filter(scope => !linkedScopes.has(scope.scope_key));
+    if (catalog?.id && missingScopes.length) {
+      await queryInterface.bulkInsert('MarketingEmailTemplates', missingScopes.map(scope => ({
         public_id: `et_${crypto.randomUUID()}`,
         ...scope,
         name: 'Novedades de la clínica · Prueba',

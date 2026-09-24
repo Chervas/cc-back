@@ -30,6 +30,9 @@ test('marketing email migration creates globally owned domains and expands the s
 test('email catalog migration seeds one system playbook for clinic and group scopes', async () => {
   const calls = [];
   const queryInterface = {
+    async showAllTables() { return ['MarketingEmailTemplates']; },
+    async describeTable() { return {}; },
+    async showIndex() { return []; },
     async createTable(name, columns) { calls.push(['createTable', name, columns]); },
     async addIndex(table, fields, options) { calls.push(['addIndex', table, fields, options]); },
     async addColumn(table, column, definition) { calls.push(['addColumn', table, column, definition]); },
@@ -48,6 +51,34 @@ test('email catalog migration seeds one system playbook for clinic and group sco
   const instances = calls.find(call => call[0] === 'bulkInsert' && call[1] === 'MarketingEmailTemplates')?.[2] || [];
   assert.deepEqual(instances.map(row => row.scope_key).sort(), ['clinic:21', 'group:8']);
   assert.ok(instances.every(row => row.origin === 'system' && row.catalog_template_id === 7));
+});
+
+test('email catalog migration resumes safely after its catalog table was created', async () => {
+  const writes = [];
+  const queryInterface = {
+    async showAllTables() { return ['MarketingEmailTemplateCatalog', 'MarketingEmailTemplates']; },
+    async describeTable() {
+      return { catalog_template_id: {}, catalog_version: {}, origin: {} };
+    },
+    async showIndex() { return [{ name: 'uq_marketing_email_system_template_scope' }]; },
+    async createTable() { writes.push('createTable'); },
+    async addIndex() { writes.push('addIndex'); },
+    async addColumn() { writes.push('addColumn'); },
+    async bulkInsert() { writes.push('bulkInsert'); },
+    sequelize: {
+      async query(sql) {
+        if (sql.includes('MarketingEmailTemplateCatalog')) return [{ id: 7 }];
+        if (sql.includes('FROM Clinicas')) return [{ id_clinica: 21 }];
+        if (sql.includes('FROM GruposClinicas')) return [{ id_grupo: 8 }];
+        if (sql.includes('FROM MarketingEmailTemplates')) return [{ scope_key: 'clinic:21' }, { scope_key: 'group:8' }];
+        return [];
+      },
+    },
+  };
+
+  await catalogMigration.up(queryInterface, Sequelize);
+
+  assert.deepEqual(writes, []);
 });
 
 test('marketing renderer always adds one visible unsubscribe action and Clinicaclick attribution', () => {
