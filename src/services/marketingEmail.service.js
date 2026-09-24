@@ -181,10 +181,14 @@ function serializeSender(row) {
     dkim_status: value.domain?.dkim_status || null,
     spf_status: value.domain?.spf_status || null,
     dmarc_status: value.domain?.dmarc_status || null,
+    mail_from_domain: value.domain?.mail_from_domain || null,
+    mail_from_status: value.domain?.mail_from_status || null,
     ready: value.status === 'active'
       && value.verification_status === 'verified'
       && value.domain?.verification_status === 'verified'
-      && value.domain?.dkim_status === 'verified',
+      && value.domain?.dkim_status === 'verified'
+      && value.domain?.spf_status === 'verified'
+      && value.domain?.mail_from_status === 'success',
   };
 }
 
@@ -208,9 +212,11 @@ function serializeTemplate(row, { includeRendered = false } = {}) {
 
 function dnsRecords(domain, identity) {
   const tokens = Array.isArray(identity?.dkimTokens) ? identity.dkimTokens : [];
+  const mailFromDomain = identity?.mailFromDomain || `bounce.${domain}`;
   return [
     ...tokens.map(token => ({ type: 'CNAME', name: `${token}._domainkey.${domain}`, value: `${token}.dkim.amazonses.com`, purpose: 'DKIM' })),
-    { type: 'TXT', name: domain, value: 'v=spf1 include:amazonses.com ~all', purpose: 'SPF' },
+    { type: 'MX', name: mailFromDomain, value: '10 feedback-smtp.eu-west-3.amazonses.com', purpose: 'MAIL FROM' },
+    { type: 'TXT', name: mailFromDomain, value: 'v=spf1 include:amazonses.com ~all', purpose: 'SPF' },
     { type: 'TXT', name: `_dmarc.${domain}`, value: `v=DMARC1; p=none; rua=mailto:dmarc@${domain}`, purpose: 'DMARC' },
   ];
 }
@@ -222,12 +228,14 @@ async function txtIncludes(name, expected) {
   } catch { return false; }
 }
 
-async function dnsStatus(domain) {
-  const [spf, dmarc] = await Promise.all([
-    txtIncludes(domain, 'include:amazonses.com'),
+async function dnsStatus(domain, mailFromDomain = `bounce.${domain}`) {
+  const [spf, dmarc, mailFromMx] = await Promise.all([
+    txtIncludes(mailFromDomain, 'include:amazonses.com'),
     txtIncludes(`_dmarc.${domain}`, 'v=dmarc1'),
+    dns.resolveMx(mailFromDomain).then(rows => rows.some(row => row.priority === 10
+      && String(row.exchange || '').replace(/\.$/, '').toLowerCase() === 'feedback-smtp.eu-west-3.amazonses.com')).catch(() => false),
   ]);
-  return { spf_status: spf ? 'verified' : 'pending', dmarc_status: dmarc ? 'verified' : 'pending' };
+  return { spf_status: spf && mailFromMx ? 'verified' : 'pending', dmarc_status: dmarc ? 'verified' : 'pending' };
 }
 
 async function listSettings(scope) {
@@ -302,15 +310,19 @@ async function refreshDomain(scope, id) {
     await row.update({ last_error_code: error.code || 'provider_unavailable', last_error_message: 'No se pudo consultar SES.', checked_at: new Date() });
     fail('email_identity_provider_unavailable', 503, 'No se pudo comprobar el dominio en este momento.');
   }
-  const dnsChecks = await dnsStatus(row.domain);
-  const verified = identity.verifiedForSending === true && identity.dkimStatus === 'success';
+  const mailFromDomain = identity.mailFromDomain || `bounce.${row.domain}`;
+  const dnsChecks = await dnsStatus(row.domain, mailFromDomain);
+  const verified = identity.verifiedForSending === true
+    && identity.dkimStatus === 'success'
+    && identity.mailFromStatus === 'success'
+    && dnsChecks.spf_status === 'verified';
   await db.sequelize.transaction(async transaction => {
     await row.update({
       status: verified ? 'active' : 'pending',
       verification_status: verified ? 'verified' : identity.verificationStatus,
       dkim_status: identity.dkimStatus === 'success' ? 'verified' : identity.dkimStatus,
       ...dnsChecks,
-      mail_from_domain: identity.mailFromDomain,
+      mail_from_domain: mailFromDomain,
       mail_from_status: identity.mailFromStatus,
       dns_records: dnsRecords(row.domain, identity),
       provider_snapshot: identity,
@@ -526,6 +538,8 @@ module.exports = {
   providerCostEstimate,
   whatsappProviderCostEstimate,
   renderTemplateDocument,
+  dnsRecords,
+  dnsStatus,
   serializeSender,
   serializeTemplate,
 };
