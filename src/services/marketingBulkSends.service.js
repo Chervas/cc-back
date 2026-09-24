@@ -1256,6 +1256,13 @@ function normalizeDispatchContext(value) {
   return key || null;
 }
 
+function getWelcomeDispatchLabel(channels = []) {
+  const normalized = normalizeChannels(channels);
+  if (normalized.includes('whatsapp') && normalized.includes('email')) return 'Bienvenida por WhatsApp y email';
+  if (normalized.includes('email')) return 'Bienvenida por email';
+  return 'Bienvenida por WhatsApp';
+}
+
 function buildDispatchFilterFromBody(body = {}, fallbackContext = null) {
   const importBatchId = normalizeText(body.import_batch_id || body.importBatchId || '');
   if (!importBatchId) return null;
@@ -6294,11 +6301,18 @@ async function createCampaign(scope, body = {}, userId = null) {
         throw err;
       }
       sourceCriteria = asPlainObject(sourceList.criteria);
-      const sourceItems = await MarketingPatientListItem.findAll({
+      let sourceItems = await MarketingPatientListItem.findAll({
         where: { list_id: sourceList.id },
         order: [['id', 'ASC']],
         transaction,
       });
+      const welcomeImportBatchId = normalizeText(body.import_batch_id || body.importBatchId || '');
+      if (welcomeImportBatchId) {
+        sourceItems = sourceItems.filter((item) => itemMatchesDispatchFilter(item, {
+          type: 'import_batch',
+          import_batch_id: welcomeImportBatchId,
+        }));
+      }
       itemPayloads = sourceItems.map((item) => cloneRecipientItemForCampaign(item, channels));
       columnMapping = sourceCriteria.column_mapping || {};
       customFieldsSchema = Array.isArray(sourceList.custom_fields_schema) ? sourceList.custom_fields_schema : [];
@@ -6358,6 +6372,8 @@ async function createCampaign(scope, body = {}, userId = null) {
         sender_origin_id: getRequestedWhatsappSenderOriginId(body),
         email_template_id: Number(body.email_template_id || 0) || null,
         email_sender_identity_id: Number(body.email_sender_identity_id || 0) || null,
+        email_subject: normalizeText(body.email_subject || body.emailSubject) || null,
+        email_preheader: normalizeText(body.email_preheader || body.emailPreheader) || null,
         opt_out_text: templateCommercial ? normalizeText(body.opt_out_text) : null,
         consent_acknowledged: !!body.consent_acknowledged,
         list_source: source,
@@ -6722,6 +6738,12 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   }
   if (body.email_sender_identity_id !== undefined) {
     nextCriteria.email_sender_identity_id = Number(body.email_sender_identity_id || 0) || null;
+  }
+  if (body.email_subject !== undefined || body.emailSubject !== undefined) {
+    nextCriteria.email_subject = normalizeText(body.email_subject || body.emailSubject) || null;
+  }
+  if (body.email_preheader !== undefined || body.emailPreheader !== undefined) {
+    nextCriteria.email_preheader = normalizeText(body.email_preheader || body.emailPreheader) || null;
   }
   if (
     body.sender_origin_id !== undefined
@@ -7920,7 +7942,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     ? 'welcome'
     : (isReviewRequest ? 'review_request' : normalizeDispatchContext(body.dispatch_context || body.dispatch_mode || dispatchConfig.context));
   const dispatchLabel = isWelcomeDispatch
-    ? 'Bienvenida WhatsApp'
+    ? getWelcomeDispatchLabel(channels)
     : (isReviewRequest ? (dispatchConfig.label || 'Solicitud de reseñas') : (dispatchConfig.label || null));
 
   const dispatchSnapshot = buildTemplateSnapshot(template);
@@ -7946,6 +7968,8 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       sender_snapshot: buildWhatsappSenderSnapshot(senderConfig),
       email_template_id: emailTemplateId,
       email_sender_identity_id: emailSenderIdentityId,
+      email_subject: normalizeText(body.email_subject || body.emailSubject || list.criteria?.email_subject) || null,
+      email_preheader: normalizeText(body.email_preheader || body.emailPreheader || list.criteria?.email_preheader) || null,
       template_usage: templateUsage,
       template_commercial: templateCommercial,
       opt_out_text: templateCommercial ? normalizeText(body.opt_out_text || list.criteria?.opt_out_text) : null,
@@ -8849,7 +8873,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     business_hours: dispatchBusinessHours,
     status: nextRunAt ? 'scheduled' : 'queued',
     context,
-    label: context === 'welcome' ? 'Bienvenida WhatsApp' : dispatch.label || null,
+    label: context === 'welcome' ? getWelcomeDispatchLabel(channels) : dispatch.label || null,
     filter,
     whatsapp_template_id: template?.id || null,
     template_snapshot: buildTemplateSnapshot(template),
@@ -10643,6 +10667,8 @@ module.exports = {
     buildItemDedupeKeyForChannels,
     buildItemChannelEligibilityPatch,
     cloneRecipientItemForCampaign,
+    itemMatchesDispatchFilter,
+    getWelcomeDispatchLabel,
     normalizeMassSendRecordKind,
     ensureDispatchableCampaignRecord,
     shouldPreserveRecipientListOnArchive,

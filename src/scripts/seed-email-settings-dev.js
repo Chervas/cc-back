@@ -75,6 +75,126 @@ async function upsertSender(fixture, domain, scope, transaction) {
   return row;
 }
 
+async function upsertEmailTemplate(scope, transaction) {
+  const publicId = `et_dev_qa_welcome_${scope.clinica_id}`;
+  const design = {
+    header_color: '#2563eb',
+    footer_color: '#0f172a',
+    background_color: '#f1f5f9',
+    content_color: '#ffffff',
+    text_color: '#1e293b',
+    logo_url: null,
+    show_clinicaclick_branding: true,
+    blocks: [
+      { type: 'heading', text: 'Hola {{nombre}}' },
+      { type: 'text', text: 'Este es un contenido ficticio de DEV para comprobar el editor y el recorrido completo de una campaña.' },
+      { type: 'button', text: 'Conocer novedades', url: 'https://clinicaclick.com' },
+    ],
+  };
+  const renderedHtml = '<!doctype html><html><body><h1>Hola {{nombre}}</h1><p>Este es un contenido ficticio de DEV para comprobar el editor y el recorrido completo de una campaña.</p></body></html>';
+  const [template] = await db.MarketingEmailTemplate.findOrCreate({
+    where: { public_id: publicId },
+    defaults: {
+      public_id: publicId,
+      ...scope,
+      name: 'Novedades DEV · contenido de prueba',
+      status: 'ready',
+      subject: 'Novedades de {{clinica}}',
+      preheader: 'Contenido ficticio para validar el asistente',
+      layout_key: 'classic',
+      design,
+      rendered_html: renderedHtml,
+      rendered_text: 'Hola {{nombre}}\n\nEste es un contenido ficticio de DEV para comprobar el editor y el recorrido completo de una campaña.',
+      version: 1,
+      origin: 'custom',
+    },
+    transaction,
+  });
+  await template.update({
+    ...scope,
+    name: 'Novedades DEV · contenido de prueba',
+    status: 'ready',
+    subject: 'Novedades de {{clinica}}',
+    preheader: 'Contenido ficticio para validar el asistente',
+    layout_key: 'classic',
+    design,
+    rendered_html: renderedHtml,
+    rendered_text: 'Hola {{nombre}}\n\nEste es un contenido ficticio de DEV para comprobar el editor y el recorrido completo de una campaña.',
+  }, { transaction });
+  return template;
+}
+
+async function upsertMassSendFixture(fixture, scope, transaction) {
+  const listScope = {
+    scope_type: scope.scope_type,
+    clinica_id: scope.clinica_id,
+    grupo_clinica_id: scope.grupo_clinica_id,
+  };
+  const [list] = await db.MarketingPatientList.findOrCreate({
+    where: { clinica_id: scope.clinica_id, name: fixture.name, source: 'dev_fixture' },
+    defaults: {
+      name: fixture.name,
+      objective_id: 'mass_sends',
+      source: 'dev_fixture',
+      status: fixture.status,
+      ...listScope,
+    },
+    transaction,
+  });
+  const total = fixture.items.length;
+  const sent = fixture.items.filter(item => item.dispatch_status === 'sent' || item.dispatch_status === 'read').length;
+  const read = fixture.items.filter(item => item.dispatch_status === 'read').length;
+  await list.update({
+    status: fixture.status,
+    action_mode: 'whatsapp',
+    channel: 'whatsapp',
+    condition_summary: 'Datos ficticios exclusivos de DEV para revisar el flujo visual.',
+    exclusion_summary: 'Sin exclusiones en esta muestra.',
+    criteria: {
+      dev_fixture: true,
+      dev_fixture_key: fixture.key,
+      record_kind: fixture.recordKind,
+      source_list_id: null,
+      campaign_name: fixture.name,
+      list_name: fixture.name,
+      channels: ['whatsapp'],
+      template_usage: 'promocion',
+      template_commercial: true,
+      consent_acknowledged: true,
+      list_source: 'manual_list',
+      sender_snapshot: { label: 'WhatsApp secundario DEV', role: 'secondary' },
+      dispatch: fixture.dispatch || null,
+    },
+    counters: { total, ready: Math.max(0, total - sent), selected: total, sent, delivered: sent, read, replied: 0, excluded: 0 },
+    metrics: { total_cost: 0, estimated_revenue: 0 },
+    safety_gates: fixture.recordKind === 'campaign'
+      ? { frozen_audience: true, opt_out: true, approved_template: true, audit: true, capping: true, cancelable_queue: true }
+      : { frozen_audience: true, opt_out: true, approved_template: false, audit: true, capping: false, cancelable_queue: false },
+    template_snapshot: fixture.recordKind === 'campaign'
+      ? { id: 900000 + scope.clinica_id, name: 'clinicaclick_dev_promocion', status: 'APPROVED', language: 'es' }
+      : null,
+    prepared_at: fixture.recordKind === 'campaign' ? new Date(Date.now() - 60 * 60 * 1000) : null,
+    last_sent_at: sent ? new Date(Date.now() - 20 * 60 * 1000) : null,
+  }, { transaction });
+  await db.MarketingPatientListItem.destroy({ where: { list_id: list.id }, transaction });
+  await db.MarketingPatientListItem.bulkCreate(fixture.items.map((item, index) => ({
+    list_id: list.id,
+    clinica_id: scope.clinica_id,
+    name: item.name,
+    phone: `+34610000${String(scope.clinica_id).padStart(2, '0')}${index}`,
+    email: `qa.mass.${scope.clinica_id}.${index}@example.test`,
+    status: 'ready',
+    selected: true,
+    custom_fields: { ciudad: index % 2 ? 'Barcelona' : 'Madrid', dev_fixture: true },
+    missing_variables: [],
+    dispatch_status: item.dispatch_status || null,
+    sent_at: item.dispatch_status ? new Date(Date.now() - (index + 1) * 10 * 60 * 1000) : null,
+    delivered_at: item.dispatch_status ? new Date(Date.now() - (index + 1) * 9 * 60 * 1000) : null,
+    read_at: item.dispatch_status === 'read' ? new Date(Date.now() - (index + 1) * 8 * 60 * 1000) : null,
+  })), { transaction });
+  return list;
+}
+
 async function main() {
   if (process.env.RUNTIME_NAMESPACE !== 'dev') {
     throw new Error('This fixture is restricted to RUNTIME_NAMESPACE=dev.');
@@ -112,6 +232,37 @@ async function main() {
       verification_status: 'verified',
       is_default: false,
     }, readyDomain, scope, transaction);
+    await upsertEmailTemplate(scope, transaction);
+    await upsertMassSendFixture({
+      key: 'recipients',
+      name: 'DEV · Lista pacientes septiembre',
+      status: 'draft',
+      recordKind: 'recipient_list',
+      items: [{ name: 'Ana Prueba' }, { name: 'Luis Prueba' }, { name: 'Marta Prueba' }],
+    }, scope, transaction);
+    await upsertMassSendFixture({
+      key: 'draft',
+      name: 'DEV · Campaña WhatsApp en borrador',
+      status: 'draft',
+      recordKind: 'campaign',
+      items: [{ name: 'Elena Demo' }, { name: 'Álvaro Demo' }, { name: 'Sofía Demo' }],
+    }, scope, transaction);
+    await upsertMassSendFixture({
+      key: 'sending',
+      name: 'DEV · Campaña WhatsApp en curso',
+      status: 'sending',
+      recordKind: 'campaign',
+      dispatch: { status: 'waiting_next_batch', label: 'Envío regulado DEV', next_allowed_at: new Date(Date.now() + 30 * 60 * 1000).toISOString() },
+      items: [{ name: 'Carlos Demo', dispatch_status: 'read' }, { name: 'Noa Demo', dispatch_status: 'sent' }, { name: 'Pablo Demo' }, { name: 'Irene Demo' }],
+    }, scope, transaction);
+    await upsertMassSendFixture({
+      key: 'completed',
+      name: 'DEV · Campaña WhatsApp completada',
+      status: 'completed',
+      recordKind: 'campaign',
+      dispatch: { status: 'completed', label: 'Envío completado DEV', completed_at: new Date().toISOString() },
+      items: [{ name: 'Lucía Demo', dispatch_status: 'read' }, { name: 'Mario Demo', dispatch_status: 'read' }, { name: 'Raquel Demo', dispatch_status: 'sent' }],
+    }, scope, transaction);
   });
   console.log(JSON.stringify({
     ok: true,
@@ -119,6 +270,8 @@ async function main() {
     clinic: { id: scope.clinica_id, name: clinic.nombre_clinica },
     domains: fixtures.length,
     senders: fixtures.length + 1,
+    email_templates: 1,
+    mass_send_fixtures: 4,
   }));
 }
 

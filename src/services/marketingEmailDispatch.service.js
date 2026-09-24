@@ -73,7 +73,7 @@ async function assertReady(list, { validateRecipients = false } = {}) {
       const context = templateContext({ list, item, clinic: clinics.get(clinicId) });
       const missing = emailTemplates.missingTemplateVariables(
         context,
-        assets.template.subject,
+        campaignSubject(list, assets.template),
         assets.template.rendered_html,
         assets.template.rendered_text
       );
@@ -232,10 +232,18 @@ function templateContext({ list, item, clinic }) {
   };
 }
 
-function assertTemplateVariables(template, variables) {
+function campaignSubject(list, template) {
+  return String(list.criteria?.email_subject || template.subject || '').trim();
+}
+
+function campaignPreheader(list, template) {
+  return String(list.criteria?.email_preheader || template.preheader || '').trim();
+}
+
+function assertTemplateVariables(template, variables, list) {
   const missing = emailTemplates.missingTemplateVariables(
     variables,
-    template.subject,
+    campaignSubject(list, template),
     template.rendered_html,
     template.rendered_text
   );
@@ -262,8 +270,8 @@ async function queueItem({ list, item, sender, template, scopeKey }) {
   });
   const clinic = item.clinica_id ? await db.Clinica.findByPk(item.clinica_id) : (list.clinica_id ? await db.Clinica.findByPk(list.clinica_id) : null);
   const variables = templateContext({ list, item, clinic });
-  assertTemplateVariables(template, variables);
-  const subject = emailTemplates.assertSafeSubject(emailTemplates.replaceVars(template.subject, variables));
+  assertTemplateVariables(template, variables, list);
+  const subject = emailTemplates.assertSafeSubject(emailTemplates.replaceVars(campaignSubject(list, template), variables));
   const bodyHtml = emailTemplates.replaceVars(template.rendered_html, variables, { html: true });
   const bodyText = emailTemplates.replaceVars(template.rendered_text, variables);
   const result = await emailDelivery.queueEmail({
@@ -284,7 +292,14 @@ async function queueItem({ list, item, sender, template, scopeKey }) {
     replyTo: sender.reply_to || sender.email,
     groupId: list.grupo_clinica_id || null,
     marketingConsent: true,
-    templateContext: { subject, body_html: bodyHtml, body_text: bodyText, unsubscribe_url: unsubscribeUrl },
+    templateContext: {
+      subject,
+      preheader: emailTemplates.replaceVars(campaignPreheader(list, template), variables),
+      body_html: bodyHtml,
+      body_text: bodyText,
+      unsubscribe_url: unsubscribeUrl,
+      show_clinicaclick_branding: template.design?.show_clinicaclick_branding !== false,
+    },
     metadata: {
       list_id: list.id,
       item_id: item.id,
@@ -392,7 +407,7 @@ async function sendTest(list, body = {}) {
   if (!item) fail('marketing_email_test_item_missing', 409, 'La campaña necesita un contacto de ejemplo para completar variables.');
   const clinic = item.clinica_id ? await db.Clinica.findByPk(item.clinica_id) : (list.clinica_id ? await db.Clinica.findByPk(list.clinica_id) : null);
   const variables = templateContext({ list, item, clinic });
-  assertTemplateVariables(template, variables);
+  assertTemplateVariables(template, variables, list);
   const unsubscribeUrl = await marketingEmail.issueUnsubscribe({ scopeKey, clinicaId: item.clinica_id || list.clinica_id,
     groupId: list.grupo_clinica_id, listId: list.id, itemId: null, recipientEmail });
   const result = await emailDelivery.queueEmail({
@@ -404,10 +419,12 @@ async function sendTest(list, body = {}) {
     groupId: list.grupo_clinica_id || null,
     marketingConsent: true,
     templateContext: {
-      subject: emailTemplates.assertSafeSubject(emailTemplates.replaceVars(template.subject, variables)),
+      subject: emailTemplates.assertSafeSubject(emailTemplates.replaceVars(campaignSubject(list, template), variables)),
+      preheader: emailTemplates.replaceVars(campaignPreheader(list, template), variables),
       body_html: emailTemplates.replaceVars(template.rendered_html, variables, { html: true }),
       body_text: emailTemplates.replaceVars(template.rendered_text, variables),
       unsubscribe_url: unsubscribeUrl,
+      show_clinicaclick_branding: template.design?.show_clinicaclick_branding !== false,
     },
     metadata: {
       list_id: list.id,
