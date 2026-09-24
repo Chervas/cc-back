@@ -42,6 +42,38 @@ test('a personal local reference can resolve only to its exact remote identity a
   assert.equal(selectTemplateInWaba(source, [remote], scope), remote);
   assert.equal(selectTemplateInWaba(source, [{ ...remote, meta_template_id: 'different' }], scope), null);
 });
+test('an explicitly replicated custom template resolves across WABAs by owner and exact contract', async t => {
+  const source = {
+    ...local,
+    catalog_template_id: null,
+    origin: 'custom',
+    clinic_id: 35,
+    created_by_user_id: 99,
+    category: 'MARKETING',
+    meta_template_id: 'source-meta-id',
+  };
+  const replica = {
+    ...remote,
+    origin: 'custom',
+    clinic_id: 35,
+    created_by_user_id: 99,
+    category: 'MARKETING',
+    name: source.name,
+    meta_template_id: 'replica-meta-id',
+  };
+  t.mock.method(db.WhatsappTemplate, 'findAll', async options => {
+    assert.equal(options.where.waba_id, scope.wabaId);
+    assert.equal(options.where.name, source.name);
+    assert.equal(options.where.origin, 'custom');
+    assert.equal(options.where.clinic_id, 35);
+    assert.equal(options.where.created_by_user_id, 99);
+    return [replica];
+  });
+  assert.equal(await service.resolveTemplateInWaba({ template: source, ...scope }), replica);
+  assert.equal(selectTemplateInWaba(source, [{ ...replica, created_by_user_id: 100 }], scope), null);
+  assert.equal(selectTemplateInWaba(source, [{ ...replica, category: 'UTILITY' }], scope), null);
+  assert.equal(selectTemplateInWaba(source, [{ ...replica, clinic_id: 36 }], scope), null);
+});
 test('the author retains access to an existing personal template in the same shared WABA', async () => {
   const personal = { ...remote, clinic_id: 36, created_by_user_id: 99 };
   assert.equal(await service.resolveTemplateInWaba({ template: personal, ...scope, userId: 99 }), personal);

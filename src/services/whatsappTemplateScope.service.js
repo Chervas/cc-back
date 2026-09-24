@@ -11,12 +11,23 @@ async function resolveTemplateInWaba({ template, wabaId, clinicId, transaction, 
   // sharing this exact WABA. The conversation controller also applies its ACL.
   if (Number(userId) > 0 && Number(template?.created_by_user_id) === Number(userId)
     && isApprovedTemplateInWaba(template, { wabaId, clinicId: template.clinic_id })) return template;
-  if (!wabaId || !Number(template?.catalog_template_id) && !template?.meta_template_id) return null;
+  const customReplica = String(template?.origin || '').trim().toLowerCase() === 'custom'
+    && Number(template?.clinic_id) > 0
+    && Number(template?.created_by_user_id) > 0
+    && String(template?.name || '').trim();
+  if (!wabaId || !Number(template?.catalog_template_id) && !template?.meta_template_id && !customReplica) return null;
   const candidates = await WhatsappTemplate.findAll({
     where: {
       waba_id: String(wabaId), ...(Number(template.catalog_template_id)
         ? { catalog_template_id: Number(template.catalog_template_id) }
-        : { name: template.name, meta_template_id: template.meta_template_id }),
+        : (customReplica
+          ? {
+              name: template.name,
+              origin: 'custom',
+              clinic_id: Number(template.clinic_id),
+              created_by_user_id: Number(template.created_by_user_id),
+            }
+          : { name: template.name, meta_template_id: template.meta_template_id })),
       language: template.language, status: 'APPROVED', is_active: true,
       [Op.or]: [{ clinic_id: null }, { clinic_id: Number(clinicId) }],
     },
