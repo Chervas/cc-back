@@ -219,6 +219,12 @@ function inferVariableNameFromTemplateBody(bodyText, placeholderIndex, example) 
     const after = bodyText.slice(at + token.length, Math.min(bodyText.length, at + token.length + 60)).toLowerCase();
     const windowText = `${before} ${after}`;
 
+    // A direct greeting identifies the recipient even when the following text
+    // mentions a clinic address inside the same inference window.
+    if (/(?:hola|buenas(?:\s+(?:dias|días|tardes|noches))?)(?:\s+de\s+nuevo)?[\s,¡!¿?.:;-]*$/i.test(before)) {
+      return 'nombre_paciente';
+    }
+
     if (/(soy|asesor|recepcion|recepción|hemos hablado|te escribo|te llamo)/.test(windowText)) return 'usuario_nombre';
     if (/(doctor|doctora|profesional|odontolog)/.test(windowText)) return 'profesional_nombre';
     if (/(estamos en|direccion|dirección|ubicacion|ubicación|calle|avenida|plaza|localizacion|localización)/.test(windowText)) return 'direccion_clinica';
