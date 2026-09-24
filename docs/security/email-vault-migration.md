@@ -26,6 +26,38 @@ antes de acceder al broker. Los resultados inciertos esperan conciliación y no
 se reintentan creando otro mensaje. El HTML comercial se renderiza en servidor
 con baja explícita y atribución de Clinicaclick.
 
+### Activación controlada de marketing en staging (24/09/2026)
+
+La cuenta SES se comprobó en `eu-west-3` como saludable, fuera de sandbox y con
+cuota de 50.000 mensajes diarios y 14 por segundo. Se creó el configuration set
+`clinicaclick-marketing` con TLS obligatorio, métricas de reputación, supresión
+de rebotes/quejas y el mismo destino EventBridge saneado que el correo
+transaccional. La política IAM adicional solo permite gestionar identidades y
+enviar con ese configuration set; no concede `SendRawEmail` ni acceso a otros
+secretos o servicios.
+
+El broker staging quedó en la cohorte `email-ses-v2` con grants exclusivos para
+`email:identity-management` y `email:marketing.campaign`; DEV no se modificó.
+La API corrigió además la admisión del cliente firmado para aceptar las tres
+operaciones email tipadas, no solo `email.ses.send.v1`. La suite aislada del
+broker terminó 777/777 y las regresiones de consumidor/campañas 19/19.
+
+`clinicaclick.com` quedó `SUCCESS` en identidad, DKIM y MAIL FROM
+`bounce.clinicaclick.com`, con `BehaviorOnMxFailure=REJECT_MESSAGE`; el backend
+observó también SPF y DMARC válidos. Staging conserva allowlist obligatoria y
+solo se habilitó el piloto comercial controlado. No equivale a permitir campañas
+sin consentimiento ni a retirar los gates de remitente, plantilla, baja,
+supresión o pausa.
+
+La primera prueba quedó cerrada antes del proveedor con
+`email_marketing_disabled`: PM2 conservaba dos valores antiguos que prevalecían
+sobre `.env`. No obtuvo `MessageId`, no generó eventos y no se reintentó. Tras
+actualizar y persistir el entorno efectivo de PM2, una segunda prueba creó
+`EmailMessage #215` y `JobRequest #120249`; SES la aceptó al primer intento y se
+conciliaron `send` y `delivery`. El `provider_message_id` solo aparece en una
+fila. Esta secuencia forma parte del runbook: verificar siempre `pm2 env` además
+del archivo `.env` antes de abrir un canal.
+
 Estado 2026-09-20: transporte broker activo en la API CRM y en el worker de
 seguridad DEV; ambos servicios SES AWS habilitados al arranque. Un aviso autorizado
 desde la interfaz CRM queda entregado por SES y conciliado en el outbox. Sus dos
