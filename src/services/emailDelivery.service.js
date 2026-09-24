@@ -145,9 +145,10 @@ function maxAttempts() {
   return Math.max(1, parseIntSafe(process.env.EMAIL_MAX_ATTEMPTS, 3));
 }
 
-async function findActiveSuppression({ emailHash, stream, clinicaId }, options = {}) {
+async function findActiveSuppression({ emailHash, stream, clinicaId, groupId }, options = {}) {
   const scopeValues = ['global'];
   if (clinicaId) scopeValues.push(`clinic:${clinicaId}`);
+  if (groupId) scopeValues.push(`group:${groupId}`);
   return db.EmailSuppression.findOne({
     where: {
       email_hash: emailHash,
@@ -165,6 +166,14 @@ async function queueEmail(input = {}, options = {}) {
   const stream = normalizeStream(input.stream);
   const recipientHash = hashEmail(recipientEmail);
   const templateKey = cleanString(input.templateKey) || 'ops.email_test';
+  if (stream === 'marketing' && (templateKey !== 'marketing.campaign'
+    || input.marketingConsent !== true
+    || !cleanString(input.templateContext?.unsubscribe_url))) {
+    const error = new Error('email_marketing_consent_and_unsubscribe_required');
+    error.code = 'email_marketing_consent_and_unsubscribe_required';
+    error.retryable = false;
+    throw error;
+  }
   const dedupeKey = cleanString(input.dedupeKey)
     || sha256([
       stream,
@@ -212,7 +221,12 @@ async function queueEmail(input = {}, options = {}) {
         related_type: cleanString(input.relatedType),
         related_id: cleanString(input.relatedId),
         template_context: storedTemplateContext,
-        metadata: input.metadata || {},
+        metadata: {
+          ...(input.metadata || {}),
+          ...((input.groupId || input.grupo_clinica_id)
+            ? { grupo_clinica_id: Number(input.groupId || input.grupo_clinica_id) }
+            : {}),
+        },
         queued_at: new Date(),
       },
       transaction,
@@ -297,6 +311,29 @@ async function settleMessageIfActive(message, patch) {
   return { updated: false, message: current || message };
 }
 
+async function marketingDispatchDeliveryState(message) {
+  if (message.related_type !== 'marketing_bulk_send') return 'active';
+  const listId = Number(message.metadata?.list_id || 0);
+  if (!listId || !db.MarketingPatientList) return 'cancelled';
+  const list = await db.MarketingPatientList.findByPk(listId, { attributes: ['id', 'email_dispatch'] });
+  if (!list) return 'cancelled';
+  const dispatch = list.email_dispatch || {};
+  const status = String(dispatch.status || '').toLowerCase();
+  if (dispatch.cancel_requested === true || status === 'cancelled') return 'cancelled';
+  if (status === 'paused') return 'paused';
+  return 'active';
+}
+
+function pausedEmailResult(message) {
+  const next = new Date(Date.now() + 60 * 1000);
+  return {
+    status: 'waiting',
+    nextRunAt: next,
+    nextAllowedAt: next,
+    result: { email_message_id: message.id, paused: true },
+  };
+}
+
 async function runEmailSendJob(payload = {}, jobRequest = null) {
   const emailMessageId = parseIntSafe(payload.email_message_id || payload.emailMessageId, 0);
   if (!emailMessageId) {
@@ -322,10 +359,24 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
     };
   }
 
+  const initialDispatchState = await marketingDispatchDeliveryState(message);
+  if (initialDispatchState === 'paused') return pausedEmailResult(message);
+  if (initialDispatchState === 'cancelled') {
+    const settlement = await settleMessageIfActive(message, {
+      status: 'cancelled',
+      completed_at: new Date(),
+      last_error_code: 'email_marketing_dispatch_cancelled',
+      last_error_message: 'La campaña se canceló antes del envío.',
+    });
+    await require('./marketingEmailDispatch.service').materializeEmailMessage(settlement.message).catch(() => null);
+    return { status: 'completed', result: { email_message_id: message.id, skipped: true, reason: 'marketing_dispatch_cancelled' } };
+  }
+
   const suppression = await findActiveSuppression({
     emailHash: message.recipient_hash,
     stream: message.stream,
     clinicaId: message.clinica_id,
+    groupId: message.metadata?.grupo_clinica_id,
   });
   if (suppression) {
     await message.update({
@@ -387,7 +438,26 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       if (!current || current.status !== 'sending') {
         throw Object.assign(Error('email_outbox_no_longer_sending'), { code: 'email_outbox_no_longer_sending', retryable: false });
       }
-      if (await findActiveSuppression({ emailHash: current.recipient_hash, stream: current.stream, clinicaId: current.clinica_id })) {
+      const dispatchState = await marketingDispatchDeliveryState(current);
+      if (dispatchState === 'paused') {
+        await settleMessageIfActive(message, { status: 'queued', completed_at: null });
+        throw Object.assign(Error('email_marketing_dispatch_paused'), { code: 'email_marketing_dispatch_paused', retryable: true });
+      }
+      if (dispatchState === 'cancelled') {
+        await settleMessageIfActive(message, {
+          status: 'cancelled',
+          completed_at: new Date(),
+          last_error_code: 'email_marketing_dispatch_cancelled',
+          last_error_message: 'La campaña se canceló antes del envío.',
+        });
+        throw Object.assign(Error('email_marketing_dispatch_cancelled'), { code: 'email_marketing_dispatch_cancelled', retryable: false });
+      }
+      if (await findActiveSuppression({
+        emailHash: current.recipient_hash,
+        stream: current.stream,
+        clinicaId: current.clinica_id,
+        groupId: current.metadata?.grupo_clinica_id,
+      })) {
         await settleMessageIfActive(message, { status: 'suppressed', suppressed_at: new Date(), completed_at: new Date(),
           last_error_code: 'email_recipient_suppressed', last_error_message: 'El destinatario está en lista de supresión.' });
         await revokePendingPasswordResetToken(message);
@@ -428,6 +498,7 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       });
     }
     const settledMessage = settlement.message;
+    await require('./marketingEmailDispatch.service').materializeEmailMessage(settledMessage).catch(() => null);
     return {
       status: 'completed',
       result: {
@@ -441,6 +512,12 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       },
     };
   } catch (error) {
+    if (error?.code === 'email_marketing_dispatch_paused') return pausedEmailResult(message);
+    if (error?.code === 'email_marketing_dispatch_cancelled') {
+      const current = await db.EmailMessage.findByPk(message.id);
+      await require('./marketingEmailDispatch.service').materializeEmailMessage(current || message).catch(() => null);
+      return { status: 'completed', result: { email_message_id: message.id, skipped: true, reason: 'marketing_dispatch_cancelled' } };
+    }
     if (providerResult?.providerMessageId) {
       let current = null;
       try {

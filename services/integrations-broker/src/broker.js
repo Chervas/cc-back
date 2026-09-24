@@ -16,7 +16,7 @@ class Broker {
   constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, policyResolver, now = () => Date.now(), timeoutMs = 10000, transportProfile = 'default' }) {
     if (!['default', 'ai', 'email'].includes(transportProfile)
       || transportProfile === 'ai' && Object.keys(operations).some(op => !aiLimits.isAiOperation(op))
-      || transportProfile === 'email' && Object.keys(operations).some(op => op !== emailLimits.OPERATION)) fail('invalid_request');
+      || transportProfile === 'email' && Object.keys(operations).some(op => !emailLimits.isEmailOperation(op))) fail('invalid_request');
     this.store = store; this.policy = structuredClone(validatePolicy(policy)); this.secrets = secrets;
     this.transportProfile = transportProfile;
     this.maxRequestBytes = transportProfile === 'ai' ? aiLimits.MAX_REQUEST_BYTES : transportProfile === 'email' ? emailLimits.MAX_REQUEST_BYTES : 32768;

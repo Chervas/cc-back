@@ -8,6 +8,7 @@ const marketingCompetitionController = require('../controllers/marketingCompetit
 const marketingAiVisibilityController = require('../controllers/marketingAiVisibility.controller');
 const marketingReactivationController = require('../controllers/marketingReactivation.controller');
 const marketingBulkSendsController = require('../controllers/marketingBulkSends.controller');
+const marketingEmailController = require('../controllers/marketingEmail.controller');
 const managedCampaignsController = require('../controllers/managedCampaigns.controller');
 const campaignOptimizationController = require('../controllers/campaignOptimization.controller');
 const marketingObjectivesController = require('../controllers/marketingObjectives.controller');
@@ -191,6 +192,16 @@ router.post('/bulk-sends/campaigns/:id/cancel', marketingBulkSendsController.can
 router.post('/bulk-sends/campaigns/:id/resume', marketingBulkSendsController.resumeDispatch);
 router.post('/bulk-sends/campaigns/:id/test-send', marketingBulkSendsController.sendTest);
 router.delete('/bulk-sends/campaigns/:id', marketingBulkSendsController.removeCampaign);
+router.get('/email/settings', marketingEmailController.settings);
+router.post('/email/domains', marketingEmailController.addDomain);
+router.post('/email/domains/:id/refresh', marketingEmailController.refreshDomain);
+router.post('/email/senders', marketingEmailController.addSender);
+router.post('/email/senders/:id/default', marketingEmailController.setDefaultSender);
+router.get('/email/templates', marketingEmailController.listTemplates);
+router.post('/email/templates', marketingEmailController.createTemplate);
+router.get('/email/templates/:id', marketingEmailController.getTemplate);
+router.put('/email/templates/:id', marketingEmailController.updateTemplate);
+router.get('/email/cost-estimate', marketingEmailController.costEstimate);
 
 // Catálogo de plantillas de flujos de chat (snippet web)
 router.get('/chat-flow-templates', chatFlowTemplatesController.listChatFlowTemplates);

@@ -1,5 +1,24 @@
 # Correo SES mediante vault y operación tipada
 
+## Campañas comerciales (24/09/2026)
+
+El email comercial amplía el límite del broker existente; no restaura
+credenciales SES locales. CRM usa la cohorte `email-ses-v2` con los activos
+`email:identity-management` y `email:marketing.campaign`. El binding debe
+permitir la plantilla `marketing.campaign`, la región `eu-west-3`, el
+configuration set revisado y las identidades de envío previstas.
+
+El orden de despliegue es migración SQL aditiva, broker y grants, API CRM,
+workers de jobs/email y frontend. La entrega real permanece desactivada salvo
+que `EMAIL_ENABLED`, `EMAIL_MARKETING_ENABLED` y `EMAIL_BROKER_ENABLED` sean
+`true` y el cliente firmado esté completo. No existe fallback directo a AWS.
+
+Cada destinatario se materializa como `EmailMessage` con idempotencia estable
+antes de encolar `email_send`. El worker comprueba pausa o cancelación justo
+antes de acceder al broker. Los resultados inciertos esperan conciliación y no
+se reintentan creando otro mensaje. El HTML comercial se renderiza en servidor
+con baja explícita y atribución de Clinicaclick.
+
 Estado 2026-09-20: transporte broker activo en la API CRM y en el worker de
 seguridad DEV; ambos servicios SES AWS habilitados al arranque. Un aviso autorizado
 desde la interfaz CRM queda entregado por SES y conciliado en el outbox. Sus dos

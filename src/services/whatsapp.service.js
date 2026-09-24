@@ -282,6 +282,7 @@ class WhatsAppService {
             source: healthContext.source || 'whatsapp_service_preflight',
             messageId: healthContext.messageId || null,
             jobId: healthContext.jobId || null,
+            allowPaymentRecoveryProbe: healthContext.allowPaymentRecoveryProbe === true,
         });
         await this.assertRecipientCanReceive({ to, clinicConfig });
         this.setClinicCredentials(clinicConfig);

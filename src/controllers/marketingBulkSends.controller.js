@@ -284,7 +284,7 @@ exports.sendTest = async (req, res) => {
     const result = await marketingBulkSendsService.sendTest(scope, req.params.id, req.body || {});
     return res.json(result);
   } catch (error) {
-    return sendError(res, error, 'Error enviando prueba de WhatsApp');
+    return sendError(res, error, 'Error enviando la prueba');
   }
 };
 

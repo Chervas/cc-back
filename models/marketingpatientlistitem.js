@@ -34,6 +34,8 @@ module.exports = (sequelize, DataTypes) => {
     appointment_at: { type: DataTypes.DATE, allowNull: true },
     treatment_completed: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     dispatch_status: { type: DataTypes.STRING(32), allowNull: true },
+    channel_status: { type: DataTypes.JSON, allowNull: true },
+    email_message_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
     provider_message_id: { type: DataTypes.STRING(255), allowNull: true },
     app_message_id: { type: DataTypes.INTEGER, allowNull: true },
     conversation_id: { type: DataTypes.INTEGER, allowNull: true },

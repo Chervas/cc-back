@@ -16,11 +16,14 @@ const {
   ClinicMetaAsset,
   Clinica,
   GrupoClinica,
+  Message,
   WhatsappAccountHealthEvent,
 } = db;
 
 const STALE_MINUTES = Math.max(5, Number(process.env.WHATSAPP_HEALTH_STALE_MINUTES || 90) || 90);
 const RECOVERY_OBSERVATIONS_REQUIRED = 2;
+const PAYMENT_RECOVERY_PROBE_MIN_AGE_MS = 5 * 60 * 1000;
+const PAYMENT_RECOVERY_PROBE_COOLDOWN_MS = 30 * 60 * 1000;
 
 function clean(value) {
   return value === undefined || value === null ? '' : String(value).trim();
@@ -38,6 +41,98 @@ function parseDate(value, fallback = new Date()) {
   }
   const date = value ? new Date(value) : null;
   return date && !Number.isNaN(date.getTime()) ? date : fallback;
+}
+
+function paymentRecoveryProbeEligibility({ asset, health, message, now = new Date() } = {}) {
+  const plainAsset = asset?.get ? asset.get({ plain: true }) : asset;
+  const plainMessage = message?.get ? message.get({ plain: true }) : message;
+  const additionalData = safeObject(plainAsset?.additionalData);
+  const payment = safeObject(additionalData.payment);
+  const metadata = safeObject(plainMessage?.metadata);
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(now || '');
+  const failureMs = Date.parse(payment.last_detected_at || '');
+  const lastProbeMs = Date.parse(payment.last_probe_at || '');
+  const messageCreatedMs = Date.parse(plainMessage?.createdAt || plainMessage?.created_at || '');
+
+  if (
+    health?.state !== 'blocked'
+    || health?.reason_code !== 'meta_error_131042_payment_missing'
+    || String(health?.provider_status || '').toUpperCase() !== 'CONNECTED'
+    || Number(payment.last_error_code || 0) !== 131042
+    || String(payment.status || '').toLowerCase() !== 'missing_payment_method'
+  ) {
+    return { allowed: false, reason: 'payment_probe_not_applicable' };
+  }
+  if (!Number.isFinite(nowMs) || !Number.isFinite(failureMs) || nowMs - failureMs < PAYMENT_RECOVERY_PROBE_MIN_AGE_MS) {
+    return { allowed: false, reason: 'payment_probe_failure_too_recent' };
+  }
+  if (Number.isFinite(lastProbeMs) && nowMs - lastProbeMs < PAYMENT_RECOVERY_PROBE_COOLDOWN_MS) {
+    return {
+      allowed: false,
+      reason: 'payment_probe_cooldown',
+      retry_after_seconds: Math.ceil((PAYMENT_RECOVERY_PROBE_COOLDOWN_MS - (nowMs - lastProbeMs)) / 1000),
+    };
+  }
+  if (
+    !plainMessage
+    || plainMessage.direction !== 'outbound'
+    || plainMessage.status !== 'pending'
+    || metadata.kind !== 'mass_campaign_test'
+    || metadata.payment_recovery_probe !== true
+    || Number(metadata.sender_origin_id || 0) !== Number(plainAsset?.id || 0)
+    || !Number.isFinite(messageCreatedMs)
+    || nowMs - messageCreatedMs < 0
+    || nowMs - messageCreatedMs > 10 * 60 * 1000
+  ) {
+    return { allowed: false, reason: 'payment_probe_message_ineligible' };
+  }
+  return { allowed: true, reason: 'payment_probe_claimed' };
+}
+
+async function claimPaymentRecoveryProbe({ assetId, messageId, source, now = new Date() } = {}) {
+  if (clean(source) !== 'marketing_bulk_send_test_payment_recovery_probe') {
+    return { allowed: false, reason: 'payment_probe_source_invalid' };
+  }
+  const parsedAssetId = Number(assetId || 0);
+  const parsedMessageId = Number(messageId || 0);
+  if (!Number.isInteger(parsedAssetId) || parsedAssetId <= 0 || !Number.isInteger(parsedMessageId) || parsedMessageId <= 0) {
+    return { allowed: false, reason: 'payment_probe_identity_invalid' };
+  }
+
+  return db.sequelize.transaction(async (transaction) => {
+    const [asset, message] = await Promise.all([
+      ClinicMetaAsset.findByPk(parsedAssetId, { transaction, lock: transaction.LOCK.UPDATE }),
+      Message.findByPk(parsedMessageId, { transaction }),
+    ]);
+    if (!asset || asset.assetType !== 'whatsapp_phone_number') {
+      return { allowed: false, reason: 'payment_probe_asset_not_found' };
+    }
+    const health = summarizeAssetHealth(asset, { now });
+    const eligibility = paymentRecoveryProbeEligibility({ asset, health, message, now });
+    if (!eligibility.allowed) return eligibility;
+
+    const additionalData = { ...safeObject(asset.additionalData) };
+    additionalData.payment = {
+      ...safeObject(additionalData.payment),
+      last_probe_at: now.toISOString(),
+      last_probe_message_id: parsedMessageId,
+      last_probe_source: source,
+    };
+    asset.additionalData = additionalData;
+    asset.changed('additionalData', true);
+    await asset.save({ transaction });
+    await createEvent({
+      asset,
+      eventType: 'payment_recovery_probe',
+      source,
+      previousState: health.state,
+      health,
+      observedAt: now,
+      dedupeIdentity: `message:${parsedMessageId}`,
+      details: healthEventDetails({ messageId: parsedMessageId }),
+    }, transaction);
+    return { ...eligibility, asset_id: asset.id, message_id: parsedMessageId };
+  });
 }
 
 function sha256(value) {
@@ -407,13 +502,34 @@ async function recordBlockedSend({ asset, health, source, messageId = null, jobI
   });
 }
 
-async function assertCanSend({ clinicConfig = {}, source = 'send_preflight', messageId = null, jobId = null } = {}) {
+async function assertCanSend({
+  clinicConfig = {},
+  source = 'send_preflight',
+  messageId = null,
+  jobId = null,
+  allowPaymentRecoveryProbe = false,
+} = {}) {
   const asset = await findAssetForConfig(clinicConfig);
   const health = summarizeAssetHealth(asset || {
     additionalData: clinicConfig.additionalData || {},
     quality_rating: clinicConfig.quality_rating || null,
   });
   if (health.can_send === false || isBlockingState(health.base_state || health.state)) {
+    if (asset && allowPaymentRecoveryProbe === true) {
+      const probe = await claimPaymentRecoveryProbe({
+        assetId: asset.id,
+        messageId,
+        source,
+      });
+      if (probe.allowed) {
+        return { allowed: true, asset_id: asset.id, health, payment_recovery_probe: probe };
+      }
+      if (probe.retry_after_seconds) {
+        const error = blockedError(health);
+        error.details = { retry_after_seconds: probe.retry_after_seconds };
+        throw error;
+      }
+    }
     if (asset) {
       await recordBlockedSend({ asset, health, source, messageId, jobId }).catch(() => null);
       throw blockedError(health);
@@ -755,6 +871,8 @@ async function reconcileStoredHealth({ activeOnly = true } = {}) {
 }
 
 module.exports = {
+  PAYMENT_RECOVERY_PROBE_COOLDOWN_MS,
+  PAYMENT_RECOVERY_PROBE_MIN_AGE_MS,
   RECOVERY_OBSERVATIONS_REQUIRED,
   STALE_MINUTES,
   assertCanSend,
@@ -774,6 +892,7 @@ module.exports = {
     healthEventDetails,
     normalizeBusinessVerificationStatus,
     parseDate,
+    paymentRecoveryProbeEligibility,
     summarizeEventHistory,
   },
 };

@@ -4,7 +4,7 @@
 // ambient AWS credential chain. The durable outbox remains the retry owner.
 const fs = require('node:fs');
 const path = require('node:path');
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const L = require('../../services/integrations-broker/src/email-limits');
 const { validate } = require('../../services/integrations-broker/src/email-contract');
@@ -41,6 +41,28 @@ function isConfigured(env = process.env) {
   } catch { return false; }
 }
 function createEmailBroker({ env = process.env, readFile = privateFile, clientFactory = createIntegrationsBrokerClient, admission = sharedAdmission } = {}) {
+  const execute = async ({ requestId: stableRequestId, operation, assetRef, payload, beforeDispatch }) => {
+    if (env.EMAIL_BROKER_ENABLED !== 'true') fail('email_broker_disabled');
+    const environment = env.EMAIL_BROKER_ENVIRONMENT;
+    if (!isConfigured(env)) fail('email_broker_configuration_invalid');
+    const bytes = Buffer.byteLength(JSON.stringify(payload)) + 2048;
+    return admission.run(async () => {
+      if (beforeDispatch) await beforeDispatch();
+      if (env.EMAIL_BROKER_ENABLED !== 'true' || !isConfigured(env) || env.EMAIL_BROKER_ENVIRONMENT !== environment) {
+        fail('email_broker_configuration_invalid');
+      }
+      const client = clientFactory({ origin: env.EMAIL_BROKER_ORIGIN, audience: env.EMAIL_BROKER_AUDIENCE,
+        keyId: env.EMAIL_BROKER_KEY_ID, privateKey: readFile(env.EMAIL_BROKER_KEY_FILE), ca: readFile(env.EMAIL_BROKER_CA_FILE),
+        transportProfile: 'email', timeoutMs: L.MAX_TIMEOUT_MS });
+      try {
+        return await client.execute({ requestId: stableRequestId, operation,
+          tenantRef: `platform:${environment}`, connectionRef: env.EMAIL_BROKER_CONNECTION_REF,
+          assetRef, payload }, { timeoutMs: L.MAX_TIMEOUT_MS });
+      } catch {
+        fail('email_provider_broker_unknown_outcome');
+      }
+    }, bytes);
+  };
   return {
     async send(payload, { beforeDispatch } = {}) {
       if (env.EMAIL_BROKER_ENABLED !== 'true') fail('email_broker_disabled');
@@ -49,25 +71,8 @@ function createEmailBroker({ env = process.env, readFile = privateFile, clientFa
       let bytes;
       try { validate(payload); const json = JSON.stringify(payload); bytes = Buffer.byteLength(json) + 2048; payload = JSON.parse(json); }
       catch { fail('email_broker_request_invalid'); }
-      const response = await admission.run(async () => {
-        if (env.EMAIL_BROKER_ENABLED !== 'true') fail('email_broker_disabled');
-        if (!isConfigured(env) || env.EMAIL_BROKER_ENVIRONMENT !== environment) fail('email_broker_configuration_invalid');
-        if (beforeDispatch) await beforeDispatch();
-        if (env.EMAIL_BROKER_ENABLED !== 'true') fail('email_broker_disabled');
-        if (!isConfigured(env) || env.EMAIL_BROKER_ENVIRONMENT !== environment) fail('email_broker_configuration_invalid');
-        const client = clientFactory({ origin: env.EMAIL_BROKER_ORIGIN, audience: env.EMAIL_BROKER_AUDIENCE,
-          keyId: env.EMAIL_BROKER_KEY_ID, privateKey: readFile(env.EMAIL_BROKER_KEY_FILE), ca: readFile(env.EMAIL_BROKER_CA_FILE),
-          transportProfile: 'email', timeoutMs: L.MAX_TIMEOUT_MS });
-        try {
-          return await client.execute({ requestId: requestId(payload.outboxId, payload.attempt), operation: L.OPERATION,
-            tenantRef: `platform:${environment}`, connectionRef: env.EMAIL_BROKER_CONNECTION_REF,
-            assetRef: `email:${payload.templateKey}`, payload }, { timeoutMs: L.MAX_TIMEOUT_MS });
-        } catch {
-          // Broker errors are not SES rejections. The local admission errors
-          // above are retryable only because execute has not been called.
-          fail('email_provider_broker_unknown_outcome');
-        }
-      }, bytes);
+      const response = await execute({ requestId: requestId(payload.outboxId, payload.attempt), operation: L.OPERATION,
+        assetRef: `email:${payload.templateKey}`, payload, beforeDispatch });
       const data = response?.data;
       if (data?.accepted === true && data.provider === 'ses' && typeof data.providerMessageId === 'string'
         && /^[A-Za-z0-9_-]{1,200}$/.test(data.providerMessageId)) {
@@ -75,6 +80,18 @@ function createEmailBroker({ env = process.env, readFile = privateFile, clientFa
       }
       if (data?.accepted === false && REJECTION_CODES.has(data.code) && data.retryable === (data.code === 'email_ses_throttled')) fail(data.code, data.retryable);
       fail('email_provider_broker_unknown_outcome');
+    },
+    async ensureIdentity(identityName) {
+      const payload = { identityName, timeoutMs: 15000 };
+      const response = await execute({ requestId: randomUUID(), operation: L.OPERATIONS.IDENTITY_ENSURE,
+        assetRef: 'email:identity-management', payload });
+      return response?.data || fail('email_provider_broker_unknown_outcome');
+    },
+    async getIdentity(identityName) {
+      const payload = { identityName, timeoutMs: 15000 };
+      const response = await execute({ requestId: randomUUID(), operation: L.OPERATIONS.IDENTITY_GET,
+        assetRef: 'email:identity-management', payload });
+      return response?.data || fail('email_provider_broker_unknown_outcome');
     },
   };
 }
