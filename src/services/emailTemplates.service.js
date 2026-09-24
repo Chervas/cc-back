@@ -200,24 +200,36 @@ function renderMarketingCampaign(context = {}) {
   const bodyHtml = cleanString(context.body_html);
   const bodyText = cleanString(context.body_text) || stripHtml(bodyHtml || '');
   const unsubscribeUrl = cleanString(context.unsubscribe_url);
+  const preheader = cleanString(context.preheader);
+  const showBranding = context.show_clinicaclick_branding !== false;
   if ((!bodyHtml && !bodyText) || !unsubscribeUrl || !/^https:\/\//i.test(unsubscribeUrl)) {
     const error = new Error('marketing_email_body_or_unsubscribe_invalid');
     error.code = 'marketing_email_body_or_unsubscribe_invalid';
     throw error;
   }
+  const branding = showBranding
+    ? [
+      '<div style="margin-top:10px">',
+      '<img src="https://crm.clinicaclick.com/assets/images/logo/isotipo-email.png" alt="Clinicaclick" width="18" height="18" style="display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:middle;border:0">',
+      '<span style="vertical-align:middle">Enviado con Clinicaclick</span></div>',
+    ].join('')
+    : '';
   const footer = [
     '<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td style="padding:20px 24px;text-align:center;font:12px/1.5 Arial,sans-serif;color:#64748b">',
     '<a href="', escapeHtml(unsubscribeUrl), '" style="color:#475569;text-decoration:underline">Dejar de recibir estas comunicaciones</a>',
-    '<div style="margin-top:8px">Enviado con Clinicaclick</div>',
+    branding,
     '</td></tr></table>',
   ].join('');
+  const preheaderHtml = preheader
+    ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">${escapeHtml(preheader)}</div>`
+    : '';
   const html = bodyHtml
-    ? bodyHtml.replace(/<\/body>\s*<\/html>\s*$/i, `${footer}</body></html>`)
-    : `<!doctype html><html><body><p>${escapeHtml(bodyText)}</p>${footer}</body></html>`;
+    ? bodyHtml.replace(/<body([^>]*)>/i, `<body$1>${preheaderHtml}`).replace(/<\/body>\s*<\/html>\s*$/i, `${footer}</body></html>`)
+    : `<!doctype html><html><body>${preheaderHtml}<p>${escapeHtml(bodyText)}</p>${footer}</body></html>`;
   return {
     subject,
-    html: html.includes('Enviado con Clinicaclick') ? html : `${html}${footer}`,
-    text: `${bodyText}\n\nDejar de recibir estas comunicaciones: ${unsubscribeUrl}\nEnviado con Clinicaclick`,
+    html: html.includes('Dejar de recibir estas comunicaciones') ? html : `${html}${footer}`,
+    text: `${bodyText}\n\nDejar de recibir estas comunicaciones: ${unsubscribeUrl}${showBranding ? '\nEnviado con Clinicaclick' : ''}`,
   };
 }
 

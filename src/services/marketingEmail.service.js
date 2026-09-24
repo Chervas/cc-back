@@ -18,6 +18,7 @@ const DEFAULT_DESIGN = Object.freeze({
   content_color: '#ffffff',
   text_color: '#1e293b',
   logo_url: null,
+  show_clinicaclick_branding: true,
   blocks: [
     { type: 'heading', text: 'Hola {{nombre}}' },
     { type: 'text', text: 'Tenemos novedades que pueden interesarte.' },
@@ -104,6 +105,7 @@ function normalizeDesign(raw = {}) {
     content_color: hexColor(raw.content_color, DEFAULT_DESIGN.content_color),
     text_color: hexColor(raw.text_color, DEFAULT_DESIGN.text_color),
     logo_url: safeHttpsUrl(raw.logo_url),
+    show_clinicaclick_branding: raw.show_clinicaclick_branding !== false,
     blocks,
   };
 }

@@ -95,6 +95,21 @@ test('marketing renderer always adds one visible unsubscribe action and Clinicac
   assert.deepEqual(templates.missingTemplateVariables({}, rendered.html), ['nombre']);
 });
 
+test('marketing renderer keeps unsubscribe while allowing the optional Clinicaclick attribution to be hidden', () => {
+  const rendered = templates.renderMarketingCampaign({
+    subject: 'Novedades de la clínica',
+    preheader: 'Vista previa de campaña',
+    body_html: '<!doctype html><html><body><p>Hola</p></body></html>',
+    body_text: 'Hola',
+    unsubscribe_url: 'https://crm.example.test/email/baja?token=fictitious',
+    show_clinicaclick_branding: false,
+  });
+  assert.equal((rendered.html.match(/Dejar de recibir estas comunicaciones/g) || []).length, 1);
+  assert.equal((rendered.html.match(/Enviado con Clinicaclick/g) || []).length, 0);
+  assert.match(rendered.html, /Vista previa de campaña/);
+  assert.doesNotMatch(rendered.text, /Enviado con Clinicaclick/);
+});
+
 test('contact variables are HTML-escaped while plain text remains readable', () => {
   const context = { nombre: '<img src=x onerror=alert(1)> Ana' };
   assert.equal(templates.replaceVars('<p>{{nombre}}</p>', context, { html: true }), '<p>&lt;img src=x onerror=alert(1)&gt; Ana</p>');

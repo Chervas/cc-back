@@ -87,3 +87,20 @@ test('archivar una campaña sin lista separada conserva antes sus destinatarios'
     criteria: { record_kind: 'campaign', preserved_recipient_list_id: 45 },
   }), false);
 });
+
+test('la bienvenida se limita al lote recién importado', () => {
+  const filter = { type: 'import_batch', import_batch_id: 'batch-20260924' };
+  assert.equal(__testing.itemMatchesDispatchFilter({
+    custom_fields: { lote_importacion: 'batch-20260924' },
+  }, filter), true);
+  assert.equal(__testing.itemMatchesDispatchFilter({
+    custom_fields: { lote_importacion: 'batch-anterior' },
+  }, filter), false);
+  assert.equal(__testing.itemMatchesDispatchFilter({ custom_fields: {} }, filter), false);
+});
+
+test('la bienvenida identifica correctamente el canal de salida', () => {
+  assert.equal(__testing.getWelcomeDispatchLabel(['whatsapp']), 'Bienvenida por WhatsApp');
+  assert.equal(__testing.getWelcomeDispatchLabel(['email']), 'Bienvenida por email');
+  assert.equal(__testing.getWelcomeDispatchLabel(['whatsapp', 'email']), 'Bienvenida por WhatsApp y email');
+});
