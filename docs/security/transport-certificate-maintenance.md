@@ -2,7 +2,7 @@
 
 > **Tipo:** runbook.
 > **Fuente de verdad:** preparación, verificación y recuperación de certificados de transporte; no tokens de Meta/Google.
-> **Última revisión:** 2026-09-17.
+> **Última revisión:** 2026-09-19.
 > **Estado y prioridad:** manual central [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones) y [16](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/16-roadmap.md#seguridad-de-acceso-e-integraciones).
 
 ## Límites
@@ -78,6 +78,10 @@ Ejecutar primero con los certificados actuales y comprobar estado `healthy`. Par
 
 La publicación de esta herramienta no instala ni activa el temporizador. Comprobar explícitamente unidad, timer, última ejecución y fichero de salud en el host destino.
 
+Las unidades versionadas están en `ops/security/systemd/clinicaclick-transport-certificates.{service,timer}`. El enlace root `/opt/clinicaclick-transport-certificates/current` fija una release revisada; no apunta a un checkout escribible por el CRM. El timer ejecuta a las 00:00 y 12:00 UTC con hasta cinco minutos de dispersión y recupera ejecuciones perdidas. El servicio solo puede escribir los dos directorios de clientes, su estado y la metadata de salud; el filtro de red permite únicamente la IP del inbox. No lee una sesión SSO. Ejecutar una vez la unidad endurecida y verificar `Result=success` antes de habilitar el timer.
+
+Gateway sigue ejecutando Node 18 y el importador Node 22. El cliente común usa las fechas X.509 compatibles con ambos; probar solo con Node 24 del broker no acredita la recarga de gateway. El evento `whatsapp_inbox_client_certificate` debe mostrar `reloaded` después de una renovación real. `reload_failed` conserva el certificado anterior en memoria, pero exige corregir el problema antes de su caducidad.
+
 ## Avisos y diagnóstico
 
 El monitor de aplicación solo lee metadata saneada. Con `TRANSPORT_CERTIFICATE_MONITOR_ENABLED=true`, el activador **Certificados de comunicación** avisa de fallo, menos de siete días de vigencia o comprobación ausente/caducada (36 horas). Se integra con la notificación configurable `security.activity_detected`, sin pausa automática y sin ofrecer pausar una clínica.
@@ -107,9 +111,16 @@ Desde la raíz backend:
 ```sh
 sudo python3 ops/security/test-transport-certificates.py
 node --test src/scripts/tests/transport_certificate_health.test.js src/scripts/tests/security_monitoring_pricing.test.js
+node --test src/scripts/tests/whatsapp_inbox_client_tls.test.js
 ```
 
 La prueba Python usa únicamente una CA y claves ficticias en `/tmp`; necesita root para probar las mismas restricciones de propietario del firmante. No usa AWS, Meta ni BD. La revisión visual del panel debe comprobar que el aviso lleva a Seguridad y que nunca ofrece pausar una clínica por este motivo.
+
+Para clientes de auditoría, ejecutar también desde la raíz backend:
+
+```sh
+node --test src/scripts/tests/audit_client_trust_transition.test.js
+```
 
 ## Certificados de servidores AWS
 
@@ -170,9 +181,194 @@ sustitución de confianza antes de vencer; este mecanismo no cambia esa raíz.
 El estado publicado y los servidores realmente cubiertos se registran en 19;
 esta sección define el procedimiento, no acredita un despliegue por sí sola.
 
+Los puertos nuevos8451 y8452 quedan ligados respectivamente a `email-staging`
+y `email-dev`, tanto en el firmante como en el publicador. Un identificador
+ajeno, intercambio de puertos o destino nuevo8453 se rechaza. Estos nombres,
+`ai-staging` y `bedrock-staging` también deben figurar en la lista cerrada del
+lector de salud del CRM; de lo contrario una hoja válida produce una alerta
+genérica de estado inválido. El lector conserva el rechazo de identidades
+desconocidas y las alertas individuales de fallo/caducidad. El corte SES del
+18/09 acredita dos renovaciones nuevas y nueve identidades sanas; no acredita
+por ello la entrega de notificaciones dentro de una sesión autenticada.
+
 Pruebas adicionales (CA ficticia, sin AWS ni proveedores):
 
 ```sh
 sudo python3 ops/security/test-server-certificates.py
 sudo python3 ops/security/test-server-certificate-publisher.py
 ```
+
+### Sustitución planificada de la autoridad
+
+La autoridad actual vence el **15/09/2027 a las 04:04:15 UTC**. El firmante
+rechaza una autoridad con menos de 31 días de vigencia, pero esa protección no
+la sustituye. Preparar la transición con al menos 90 días de margen; no esperar
+al aviso de caducidad de una hoja. La huella fijada, el fichero de salud y los
+recibos del publicador deben seguir correspondiendo a la autoridad realmente
+instalada durante todo el corte.
+
+1. Inventariar consumidores efectivos, incluidos workers y unidades aisladas,
+   sus rutas de confianza, identidades mTLS, SPKI y recargas. Los entrypoints
+   de servidor fijan la CA al arrancar: sustituir su fichero no cambia la CA
+   en memoria. Tampoco cambia la huella de autoridad del firmante/publicador.
+2. Crear la nueva autoridad exclusivamente bajo root en el host firmante.
+   Distribuir solo su certificado público y preparar confianza doble en todos
+   los clientes de servidores y validadores mTLS. Verificar que la identidad
+   anterior sigue funcionando y que otra clave/rol sigue siendo rechazada.
+3. Emitir hojas con los mismos SPKI, sujetos, SAN y usos. Preparar las nuevas
+   configuraciones fijadas y sus respaldos; desplegar servidor por servidor,
+   manteniendo las identidades antiguas aún válidas como recuperación. Probar
+   recepción, consulta y operaciones tipadas con cada consumidor real.
+4. Probar renovación por el temporizador, comprobación externa y alertas antes
+   de retirar la confianza anterior. Confirmar qué procesos recargaron o se
+   reiniciaron: un fichero actualizado no prueba el estado TLS en memoria.
+5. Retirar la antigua autoridad únicamente al verificar todo el inventario y
+   cerrar las conexiones anteriores. Documentar nueva huella, vencimiento y
+   recuperación. Conservar los respaldos protegidos; no rotar por esta vía
+   credenciales de proveedores ni repetir operaciones de negocio.
+
+Este procedimiento no acredita una sustitución de la CA raíz. La transición de
+los dos certificados autofirmados de auditoría a la CA ya existente es un corte
+distinto; tampoco equivale a renovar credenciales de proveedores.
+
+### Corte verificado de auditoría, 18/09/2026
+
+Clientes DEV `4fbf4bda` y staging `2cb6a65c` publicados; candidata IA conserva el
+arreglo en `88351630`. Los cuatro ficheros de confianza de staging/worker DEV
+pasaron por confianza doble y terminaron con solo la CA existente. API DEV no
+puede leerlos. Servidores AWS parten de sus respectivas releases reales:
+`release-writer-tls-4fbf4bda` y `release-reader-tls-4fbf4bda`; solo se añade el
+hook/módulo de recarga. Dependencias, grants, protocolos, claves y estado se
+conservan. Cada reinicio inicial y comprobación duró aproximadamente tres
+segundos. Posteriormente ambos renovaron realmente sin cambiar PID.
+
+El publicador/firmante cubre los certificados de diez servicios HTTPS alojados en
+la misma EC2 de seguridad, más la identidad del cliente de mantenimiento:
+once estados sanos, unidad root `Result=success` y temporizador activo. Dos
+rechazos de login visuales en DEV, más el del ensayo cuyo capturador agotó el
+plazo esperando animaciones, produjeron tres eventos anónimos. El worker los
+entregó por el escritor renovado y el lector verificó sus recibos; HEAD S3
+independiente contrastó las tres versiones, SHA256 y clave KMS. No aumentaron
+correos, desafíos MFA ni sesiones. Capturas 1440/390px inspeccionadas; no equivale
+a una sesión autenticada ni al panel de actividad/automatizaciones.
+
+Evidencia privada: `qa-evidence/security-resume-20260917/audit-certificates/`;
+respaldos AWS: `/var/lib/clinicaclick-audit-tls-20260918/`. Para recuperar el
+certificado autofirmado, restaurar **primero** la confianza doble en todos los
+clientes y comprobarla; luego restaurar configuración/selector del servidor.
+Restaurar también las listas del publicador/firmante para retirar exclusivamente
+los destinos revertidos. No reemplazar SQLite, recibos, permisos ni claves. Una
+recuperación entre hojas firmadas por la misma CA no exige volver al certificado
+autofirmado. Los nuevos registros ya entregados se conservan siempre.
+
+
+### Ampliación preparada para los propietarios Meta (19/09/2026)
+
+El código de firmante y publicador admite certificados de hasta doce
+servicios HTTPS dentro de la misma EC2 de seguridad; no supone doce máquinas.
+Añade únicamente las parejas
+`meta-marketing-dev:8453` y `meta-marketing-staging:8454`; nombres ajenos o puertos
+intercambiados se rechazan. El monitor reconoce sus etiquetas por entorno y admite
+las trece filas completas (doce certificados de servicio y uno del cliente de
+mantenimiento), sin relajar identidad,
+permisos, vigencia o rechazo de ficheros incompletos.
+
+Orden: publicar primero monitor/validadores compatibles, instalar cada servicio y
+su clave local, firmar su CSR público conservando la CA, verificar TLS y recursos,
+y enrolar su hoja fijada en publicador/firmante. No registrar una identidad que aún
+no sirve su certificado. Preservar las diez entradas previas y sus pins; las claves
+privadas nuevas permanecen en AWS. La CA privada nunca sale de su host. La prueba
+y el estado publicados deben cubrir también las identidades nuevas.
+
+QA: seis tests de publicador, cinco de firmante con mTLS/renovación reales locales
+y siete de salud/alertas; claves y CA ficticias. Ningún servicio o certificado fue
+modificado por esas pruebas. La publicación de soporte y altas Meta se documenta
+por separado en99; no confundir código preparado con renovación operativa.
+
+### Compatibilidad publicada, 19/09/2026 a las 11:15 UTC
+
+El monitor nuevo está publicado en DEV y CRM; staging incorpora los commits
+`0ab512d8` y `0627ae37` como `edfe7d20`/`ac4703a3`. DEV conserva su release
+aislada anterior y solo sustituye el lector de salud. Los preflights SQL son
+compatibles sin DDL. CRM se reinició tras comprobar trabajos/correos/flujos y
+colas activas vacíos; MFA, entorno, colas históricas y proceso gateway conservados.
+
+Firmante local y publicador AWS seleccionan
+`/opt/clinicaclick-server-certificates/release-0627ae37-meta-support`.
+Se preservaron configuración, certificados, claves y los diez destinos anteriores.
+La ejecución de la unidad endurecida de mantenimiento devuelve `Result=success`,
+once certificados `healthy` y cero alertas en ambos monitores. Timer activo.
+No se forzó ninguna renovación ni se añadieron identidades durante este corte.
+
+Recuperación antes de incorporar Meta: volver al enlace `release-0ab512d8` en el
+host afectado y reiniciar solo el publicador si es AWS; verificar mTLS y la unidad
+local. **Después de incorporar Meta**, esa release anterior no admite sus dos
+destinos: conservar validadores/lectores compatibles y las identidades enroladas;
+no restaurar código antiguo sin un procedimiento que contemple esos consumidores.
+No restaurar estado SQL/SQLite, certificados viejos ni configuraciones clínicas
+para revertir un cambio del monitor.
+
+Evidencia privada: `qa-evidence/security-resume-20260917/meta-transport-publication-20260919/`.
+Cuatro capturas reales de login DEV/CRM a 1440/390px, sin respuestas simuladas,
+errores JS/5xx, desbordamientos ni POST; inspeccionadas. No acreditan sesión MFA
+completada ni entrega de alertas dentro del panel autenticado.
+
+### Altas y renovaciones Meta verificadas, 19/09/2026 a las 11:33 UTC
+
+Los servicios Meta vacíos DEV8453/staging8454 ya están enrolados en ambos
+registros. Claves generadas en AWS, CSR públicos firmados por la CA existente;
+los destinos nuevos fijan SPKI, identidad, hostname y puerto. Tras comprobar TLS
+se incorporaron los dos destinos, sin cambiar los diez anteriores. Ambos renovaron
+realmente con `--force-id` por separado y se observó la nueva hoja desde el host
+de aplicación; PID y claves conservados. Ejecución final de la unidad endurecida:
+trece certificados `healthy`, timer activo y cero alertas en DEV/CRM. Las once
+filas de salud previas, incluido el cliente de mantenimiento, son idénticas.
+
+Esto acredita mantenimiento de estos dos servicios sin autoridad clínica, no
+OAuth del titular ni funcionamiento de una integración Meta real. Estado y acta
+en `meta-standby-deployment.json`; misma carpeta privada de evidencia del corte
+anterior. Con doce destinos ya enrolados, conservar el soporte de `0627ae37` al
+recuperar: `release-0ab512d8` no admite las dos identidades nuevas.
+
+### Alta y renovacion de PUBLIC_MEDIA DEV verificadas, 24/09/2026
+
+El publicador y el firmante admiten en codigo un decimotercer servicio HTTPS:
+`public-media-dev:8455`. La pareja nombre/puerto es fija; identidades ajenas,
+intercambio con Meta o un puerto expresado como texto se rechazan. El monitor
+reconoce la nueva etiqueta y admite catorce filas completas al sumar el cliente
+de mantenimiento. La regla de salida DEV solo agrega
+`13.39.100.55:8455`; no abre `8454`, otros destinos ni S3 directo.
+
+El orden previsto se completo: unidad y clave aisladas en AWS, hoja inicial
+valida, lector compatible en DEV, publicador y firmante ampliados y alta del
+destino sin alterar los doce anteriores. La renovacion forzada de
+`public-media-dev` cambio la hoja servida conservando clave y PID. La ejecucion
+final devuelve catorce certificados sanos al incluir el cliente de mantenimiento;
+el timer sigue activo y el broker mantiene cero reinicios.
+
+Recuperacion: la release anterior del firmante/publicador solo admite doce
+destinos. No restaurarla dejando `public-media-dev` en configuracion. Para retirar
+este servicio, cerrar primero su consumidor, eliminar exclusivamente su destino
+de ambos registros y comprobar las trece filas restantes; no sustituir hojas,
+claves o estado de los otros servicios.
+
+### Lectura de metadata por el DEV aislado
+
+El directorio de salud es root `0750` y sus JSON root `0640`, con grupo del CRM.
+Una prueba como root puede ocultar que el UID aislado DEV no pueda leerlos. En el
+corte del 19/09 se detectó ese permiso ausente al ejecutar el lector con el UID,
+grupos y espacio de montajes reales de la API DEV. Sus flags de monitor no estaban
+configurados; no se observaron notificaciones DEV erróneas en ejecución automática.
+
+`sudo python3 ops/security/grant-transport-health-reader.py --apply` concede al
+usuario `clinicaclick-dev` únicamente tránsito del directorio y lectura de sus
+dos JSON. La ACL por defecto conserva esa lectura al crear/reemplazar los ficheros
+desde `atomic_write`, sin hacerlos escribibles ni añadir DEV al grupo del CRM.
+Este directorio contiene solo metadata saneada; nunca guardar claves allí.
+
+Verificación real: ejecutar ambas unidades de mantenimiento y volver a leer como
+los UID efectivos. En el corte pasaron ambos lectores, tres rechazos DEV de lectura
+privada (clave CA, clave mTLS y `.env` CRM) y dos rechazos de escritura de metadata.
+Los permisos de root/grupo se conservan. No se cambiaron flags, cron o grupos de
+procesos. La lectura forzada correcta no acredita que las notificaciones estén
+activadas en DEV ni entregadas dentro de una sesión autenticada.

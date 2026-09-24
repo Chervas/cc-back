@@ -4,6 +4,7 @@ const { Op } = require('sequelize');
 const crypto = require('crypto');
 const db = require('../../models');
 const { normalizePhoneDigits } = require('../lib/phone');
+const { formatMarketingDate } = require('../lib/marketing-template-variables');
 const marketingOptOutService = require('./marketingOptOut.service');
 
 const {
@@ -914,6 +915,10 @@ const IMPORT_ALIASES = {
   email: ['email', 'correo', 'correo_electronico', 'mail'],
   treatment: ['tratamiento', 'descripcion_tratamiento', 'descripción_tratamiento', 'nombre_tratamiento', 'tratamiento_realizado', 'treatment', 'servicio', 'procedimiento'],
   last_visit_at: [
+    'fecha_ultima_cita_asistida',
+    'ultima_cita_asistida',
+    'last_attended_appointment_date',
+    'last_attended_visit_date',
     'fecha_fin_realizacion',
     'fecha_fin_realización',
     'fecha_fin_tratamiento',
@@ -1798,6 +1803,7 @@ async function buildImportedItemPayloads(scope, body, transaction) {
       selected,
       custom_fields: {
         ...customFields,
+        ...(lastVisit ? { fecha_ultima_cita_asistida: formatMarketingDate(lastVisit) } : {}),
         import_patient_status: patientImportStatus,
       },
       missing_variables: [],

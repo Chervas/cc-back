@@ -8,6 +8,7 @@ const emailTemplates = require('./emailTemplates.service');
 const emailProvider = require('./emailProvider.service');
 const marketingEmail = require('./marketingEmail.service');
 const jobRequests = require('./jobRequests.service');
+const { resolveLastAttendedAppointmentDate } = require('../lib/marketing-template-variables');
 
 const JOB_TYPE = 'marketing_bulk_email_dispatch';
 const DEFAULT_BATCH_SIZE = Math.max(1, Number.parseInt(process.env.MARKETING_EMAIL_BATCH_SIZE || '100', 10) || 100);
@@ -221,14 +222,24 @@ function templateContext({ list, item, clinic }) {
   const value = plain(item);
   const fullName = String(value.name || '').trim();
   const nameParts = fullName.split(/\s+/).filter(Boolean);
+  const resolvedClinicName = clinicName(clinic);
+  const reviewSenderName = String(
+    list?.criteria?.review_sender_name
+    || list?.criteria?.firma_resenas
+    || ''
+  ).trim();
   return {
     ...(value.custom_fields && typeof value.custom_fields === 'object' ? value.custom_fields : {}),
     nombre: nameParts[0] || 'Hola',
+    nombre_paciente: nameParts[0] || 'Hola',
     apellido: nameParts.slice(1).join(' '),
     nombre_completo: fullName,
     email: value.email,
     telefono: value.phone || '',
-    clinica: clinicName(clinic),
+    clinica: resolvedClinicName,
+    nombre_clinica: resolvedClinicName,
+    firma_resenas: reviewSenderName,
+    fecha_ultima_cita_asistida: resolveLastAttendedAppointmentDate(value),
   };
 }
 
@@ -515,4 +526,7 @@ module.exports = {
   sendTest,
   materializeEmailMessage,
   reconcileEmailDispatchCompletion,
+  __testing: {
+    templateContext,
+  },
 };

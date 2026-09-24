@@ -28,7 +28,8 @@ UTC = dt.timezone.utc
 def target_port_valid(target):
     port=target.get('port');identity=target.get('id')
     dedicated_ports={'email-staging':8451,'email-dev':8452,
-                     'meta-marketing-dev':8453,'meta-marketing-staging':8454}
+                     'meta-marketing-dev':8453,'meta-marketing-staging':8454,
+                     'public-media-dev':8455}
     if not isinstance(port,int):return False
     if identity in dedicated_ports:return port==dedicated_ports[identity]
     return 8443<=port<=8450
@@ -129,7 +130,7 @@ def configuration(filename):
     if state.stat().st_uid != 0 or stat.S_IMODE(state.stat().st_mode) != 0o700:
         raise Error('unsafe_state_directory')
     ids = set(); files = set(); ports = set()
-    if not 1 <= len(config['targets']) <= 12:
+    if not 1 <= len(config['targets']) <= 13:
         raise Error('configuration_invalid')
     for target in config['targets']:
         if set(target) != {'id','certificateFile','hostname','port','publicKeySha256','identitySha256'} \

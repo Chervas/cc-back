@@ -15,14 +15,16 @@ R=P.transport
 
 
 class PublisherTest(unittest.TestCase):
-    def test_email_ports_are_bound_to_the_two_declared_service_identities(self):
+    def test_dedicated_ports_are_bound_to_the_declared_service_identities(self):
         for identity,port in [('email-staging',8451),('email-dev',8452),('publisher',8450),('bedrock-staging',8449),
-                              ('meta-marketing-dev',8453),('meta-marketing-staging',8454)]:
+                              ('meta-marketing-dev',8453),('meta-marketing-staging',8454),('public-media-dev',8455)]:
             self.assertTrue(P.target_port_valid({'id':identity,'port':port}))
         for identity,port in [('foreign',8451),('foreign',8452),('email-dev',8451),('email-staging',8452),
                               ('email-dev',8449),('email-staging',8450),('email-dev',8453),('email-dev','8452'),
-                              ('foreign',8453),('foreign',8454),('meta-marketing-dev',8454),('meta-marketing-staging',8453),
-                              ('meta-marketing-dev',8449),('meta-marketing-staging',8450),('meta-marketing-dev','8453')]:
+                              ('foreign',8453),('foreign',8454),('foreign',8455),('meta-marketing-dev',8454),
+                              ('meta-marketing-staging',8453),('public-media-dev',8454),('public-media-dev',8453),
+                              ('meta-marketing-dev',8455),('meta-marketing-dev',8449),('meta-marketing-staging',8450),
+                              ('meta-marketing-dev','8453'),('public-media-dev','8455')]:
             self.assertFalse(P.target_port_valid({'id':identity,'port':port}))
 
     def setUp(self):

@@ -9,17 +9,21 @@ const { BrokerError, fail } = require('./errors');
 const { validatePolicy } = require('./policy');
 const aiLimits = require('./ai-limits');
 const emailLimits = require('./email-limits');
+const publicMediaLimits = require('./public-media-limits');
 
 const { canonical } = require('./canonical');
 const { canonicalDigest } = require('./canonical-digest');
 class Broker {
   constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, policyResolver, now = () => Date.now(), timeoutMs = 10000, transportProfile = 'default' }) {
-    if (!['default', 'ai', 'email'].includes(transportProfile)
+    if (!['default', 'ai', 'email', 'public-media'].includes(transportProfile)
       || transportProfile === 'ai' && Object.keys(operations).some(op => !aiLimits.isAiOperation(op))
-      || transportProfile === 'email' && Object.keys(operations).some(op => !emailLimits.isEmailOperation(op))) fail('invalid_request');
+      || transportProfile === 'email' && Object.keys(operations).some(op => !emailLimits.isEmailOperation(op))
+      || transportProfile === 'public-media' && Object.keys(operations).some(op => !publicMediaLimits.isPublicMediaOperation(op))) fail('invalid_request');
     this.store = store; this.policy = structuredClone(validatePolicy(policy)); this.secrets = secrets;
     this.transportProfile = transportProfile;
-    this.maxRequestBytes = transportProfile === 'ai' ? aiLimits.MAX_REQUEST_BYTES : transportProfile === 'email' ? emailLimits.MAX_REQUEST_BYTES : 32768;
+    this.maxRequestBytes = transportProfile === 'ai' ? aiLimits.MAX_REQUEST_BYTES
+      : transportProfile === 'email' ? emailLimits.MAX_REQUEST_BYTES
+        : transportProfile === 'public-media' ? publicMediaLimits.MAX_REQUEST_BYTES : 32768;
     this.operations = operations; this.adsEnrollment = adsEnrollment; this.policyResolver = policyResolver; this.now = now;
     this.timeoutMs = Math.min(transportProfile === 'ai' ? aiLimits.MAX_TIMEOUT_MS : 30000, Math.max(1, timeoutMs));
     this.active = new Map(); this.activeAssets = new Map();
@@ -62,7 +66,7 @@ class Broker {
     }
     const identity = { operation: request.operation, tenantRef: request.tenantRef,
       connectionRef: request.connectionRef, assetRef: request.assetRef, payload: request.payload };
-    const digest = this.transportProfile === 'ai' ? canonicalDigest(identity)
+    const digest = ['ai', 'public-media'].includes(this.transportProfile) ? canonicalDigest(identity)
       : createHash('sha256').update(canonical(identity)).digest('hex');
     const assetKey = JSON.stringify([request.tenantRef, request.connectionRef, request.assetRef]);
     if (['google_oauth', 'whatsapp_onboarding', 'meta_marketing_oauth'].includes(operation.control)) {
@@ -122,7 +126,10 @@ class Broker {
         if (secret && JSON.stringify(data).includes(secret.toString('utf8'))) fail('provider_failed');
         return data;
       };
-      const work = metadataOnly ? execute(null) : this.secrets.withSecret(binding, execute,
+      // GBP receipts need no provider credential. Unlike enrollment controls,
+      // they still require the active connection revision and asset throughout.
+      const receiptOnly = operation.control === 'google_business_profile_status' && operation.secretless === true;
+      const work = metadataOnly || receiptOnly || operation.secretless === true ? execute(null) : this.secrets.withSecret(binding, execute,
         { signal: controller.signal, onRevoked, requiredScopes: operation.requiredScopes });
       const data = await Promise.race([work, new Promise((_, reject) => {
         timer = setTimeout(() => { controller.abort(); reject(new BrokerError('provider_timeout')); }, this.timeoutMs);

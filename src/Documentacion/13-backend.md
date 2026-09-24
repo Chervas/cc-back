@@ -6431,6 +6431,17 @@ Variables:
 - `PUBLIC_MEDIA_ASSUME_ROLE_ARN` opcional si el servidor debe asumir un rol en la cuenta propietaria de los recursos.
 - Credenciales por rol IAM/AssumeRole o `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` en `.env` seguro. No subir secretos a git.
 
+> **Estado sustituido el 24/09/2026:** las recomendaciones de access key y
+> escritura directa que siguen en este bloque describen el despliegue historico,
+> no el limite de confianza vigente. La API CRM endurecida no conserva esas
+> credenciales ni alcanza IMDS. `marketing_image` usa el consumidor
+> `src/services/publicMediaBroker.service.js` y la operacion firmada
+> `storage.public-media.email-image.put.v1`. El runtime aislado esta en
+> `services/integrations-broker/src/public-media-main.js`; su instalacion IAM y
+> canary real quedaron completados en DEV el 24/09/2026. Runbook actual:
+> `docs/security/public-media-broker.md`. No restaurar la opcion A para resolver
+> la ausencia del servicio.
+
 Estado de cuentas 2026-07-01:
 
 - la instancia llama como `arn:aws:sts::468355432137:assumed-role/AmazonLightsailInstanceRole/i-0b2967e8de0866910`;
@@ -6519,6 +6530,24 @@ Estado QA 2026-07-01:
 - `node src/scripts/test_public_media_upload.js` devuelve `success: true` y sube `test/health.txt`.
 - `curl -I https://media.clinicaclick.com/test/health.txt` devuelve `HTTP/2 200`, `x-cache: Hit from cloudfront` y metadatos `purpose=test_health`, `sensitivity=public`.
 - `pm2-back-dev` reiniciado con `--update-env` y queda `online`.
+
+Estado de seguridad 2026-09-24:
+
+- el estado QA de julio es evidencia historica y no describe el runtime actual;
+- la API DEV no contiene credenciales AWS y el usuario systemd no alcanza
+  metadata de instancia; las variables `PUBLIC_MEDIA_BROKER_*` solo describen
+  el canal firmado, su identidad cliente y la CA;
+- el contrato broker, consumidor API y transporte TLS pasan las 10 pruebas
+  focales de PUBLIC_MEDIA, incluidas idempotencia, scope y aislamiento de
+  acceso por clinica;
+- la unidad aislada `clinicaclick-public-media@dev.service`, la identidad fija
+  `public-media-dev:8455`, el monitor de catorce filas y la salida DEV exacta
+  hacia ese puerto estan desplegados;
+- el rol writer solo admite `s3:PutObject` bajo `marketing/email/*`; la API usa
+  `PUBLIC_MEDIA_BROKER_ENABLED=true` y `PUBLIC_MEDIA_BROKER_REQUIRED=true`;
+- el canary autenticado creo `PublicMediaAssets.id=1775`, sirvio WebP por CDN y
+  valido reintento idempotente, rechazo de scope ajeno y MIME falso. La
+  renovacion TLS real cambio la hoja sin cambiar el PID del broker.
 
 Documento canonico frontend/producto: `src/Documentacion/32-storage-publico-y-clinico.md`.
 
@@ -8207,6 +8236,21 @@ de segmentacion. `buildImportedItemPayloads` no crea `CitasPacientes` por
 defecto: solo lo haria si un flujo futuro envia el booleano estricto
 `create_historical_appointments=true`; valores ausentes, falsos o la cadena
 `"true"` no activan el comportamiento. La UI actual no envia ese opt-in.
+
+Desde 2026-09-24, las plantillas de WhatsApp y email pueden usar
+`fecha_ultima_cita_asistida`. Una lista importada conserva primero la columna
+canonica o sus alias; si falta y el item esta vinculado a un paciente, el
+backend obtiene `MAX(CitasPacientes.inicio)` limitado a las clinicas del scope y
+`estado=completada`. El valor se normaliza como `dd/MM/yyyy` en
+`custom_fields.fecha_ultima_cita_asistida`. No se crean citas historicas para
+rellenarlo. El mensaje de resenas nuevo se crea desde el wizard como una version
+inmutable y solicita categoria `UTILITY`; Meta puede reclasificarla. Las copias
+aprobadas anteriores no se desactivan por la publicacion de este codigo.
+Si el alta no aporta `phone_number_id`, `POST /api/whatsapp/templates/custom`
+resuelve `purpose=review_requests` con la misma politica de enrutamiento que el
+envio; esto evita crear la plantilla en el primario cuando la clinica ha elegido
+el secundario para resenas. Un `phone_number_id` explicito sigue siendo
+autoritativo y se valida contra el scope antes de contactar con Meta.
 
 La limpieza correctiva del 2026-07-31 retiro 4.427 citas artificiales del grupo
 Propdental identificadas exclusivamente por `estado=completada`, titulo
