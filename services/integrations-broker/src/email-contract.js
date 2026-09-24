@@ -22,7 +22,10 @@ const check = new Ajv({ strict: true }).compile({
   subject: { ...header, maxLength: 160 }, text: content, html: content,
   identityName: { anyOf: [{ type: 'string', minLength: 3, maxLength: 255, pattern: '^[a-z0-9.-]+\\.[a-z]{2,}$' }, { type: 'null' }] },
   },
-  required: ['outboxId', 'attempt', 'timeoutMs', 'templateKey', 'stream', 'recipientPolicy', 'to', 'from', 'replyTo', 'configurationSet', 'subject', 'text', 'html', 'identityName'],
+  // identityName was added for marketing identities. Keep it optional for
+  // transactional callers so updated consumers remain compatible with the
+  // original transactional-only broker contract during rolling upgrades.
+  required: ['outboxId', 'attempt', 'timeoutMs', 'templateKey', 'stream', 'recipientPolicy', 'to', 'from', 'replyTo', 'configurationSet', 'subject', 'text', 'html'],
 });
 const bindingSchema = object({
   region: { const: L.REGION }, fromAddresses: { ...list(header), minItems: 1 },
