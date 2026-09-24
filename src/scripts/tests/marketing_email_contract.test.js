@@ -111,6 +111,35 @@ test('a SES domain already owned by another scope is rejected before provider ac
   }, 1), { code: 'email_domain_owned_by_another_scope', status: 409 });
 });
 
+test('SES DNS setup keeps the clinic root SPF untouched and gates senders on custom MAIL FROM', () => {
+  const records = marketingEmail.dnsRecords('clinic.example', {
+    dkimTokens: ['token_one'],
+    mailFromDomain: 'bounce.clinic.example',
+  });
+  assert.deepEqual(records.filter(record => record.purpose === 'SPF'), [{
+    type: 'TXT',
+    name: 'bounce.clinic.example',
+    value: 'v=spf1 include:amazonses.com ~all',
+    purpose: 'SPF',
+  }]);
+  assert.deepEqual(records.filter(record => record.purpose === 'MAIL FROM'), [{
+    type: 'MX',
+    name: 'bounce.clinic.example',
+    value: '10 feedback-smtp.eu-west-3.amazonses.com',
+    purpose: 'MAIL FROM',
+  }]);
+  assert.equal(marketingEmail.serializeSender({
+    status: 'active',
+    verification_status: 'verified',
+    domain: {
+      verification_status: 'verified',
+      dkim_status: 'verified',
+      spf_status: 'verified',
+      mail_from_status: 'pending',
+    },
+  }).ready, false);
+});
+
 test('a paused campaign holds already queued email jobs before rendering or provider access', async t => {
   const message = {
     id: 91,
