@@ -594,6 +594,20 @@ function normalizeChannels(rawChannels) {
   return Array.from(new Set(channels.length ? channels : ['whatsapp']));
 }
 
+function normalizeMassSendRecordKind(value, fallback = 'campaign') {
+  const normalized = normalizeText(value).toLowerCase();
+  if (normalized === 'recipient_list' || normalized === 'campaign') return normalized;
+  return fallback === 'recipient_list' ? 'recipient_list' : 'campaign';
+}
+
+function ensureDispatchableCampaignRecord(list) {
+  if (normalizeMassSendRecordKind(list?.criteria?.record_kind, 'campaign') !== 'campaign') {
+    const err = new Error('Selecciona esta lista dentro de una campaña antes de preparar o enviar mensajes');
+    err.status = 409;
+    throw err;
+  }
+}
+
 function computeCounters(items) {
   const total = items.length;
   const readyTotal = items.filter((item) => item.status === 'ready').length;
@@ -1906,6 +1920,115 @@ function buildItemChannelEligibilityPatch(item, channels) {
     };
   }
   return null;
+}
+
+function cloneRecipientItemForCampaign(item, channels) {
+  const plain = item?.get ? item.get({ plain: true }) : (item || {});
+  const cloned = {
+    paciente_id: plain.paciente_id || null,
+    clinica_id: plain.clinica_id || null,
+    name: normalizeText(plain.name) || 'Contacto',
+    phone: normalizeText(plain.phone) || null,
+    email: normalizeText(plain.email) || null,
+    treatment: plain.treatment || null,
+    treatment_id: plain.treatment_id || null,
+    last_visit_at: plain.last_visit_at || null,
+    appointment_at: plain.appointment_at || null,
+    treatment_completed: plain.treatment_completed === true,
+    status: plain.status || 'ready',
+    reason: plain.reason || null,
+    exclusion_reason: plain.exclusion_reason || null,
+    selected: plain.status === 'ready',
+    custom_fields: plain.custom_fields || {},
+    missing_variables: [],
+    notes: plain.notes || null,
+  };
+  const eligibilityPatch = buildItemChannelEligibilityPatch({
+    ...plain,
+    dispatch_status: null,
+    sent_at: null,
+  }, channels);
+  return eligibilityPatch ? { ...cloned, ...eligibilityPatch } : cloned;
+}
+
+function shouldPreserveRecipientListOnArchive(list) {
+  const criteria = asPlainObject(list?.criteria);
+  if (normalizeMassSendRecordKind(criteria.record_kind, 'campaign') !== 'campaign') return false;
+  return !Number(criteria.source_list_id || 0)
+    && !Number(criteria.preserved_recipient_list_id || 0);
+}
+
+async function preserveRecipientListOnArchive(list, userId = null, transaction = null) {
+  if (!shouldPreserveRecipientListOnArchive(list)) return null;
+  const plain = list?.get ? list.get({ plain: true }) : (list || {});
+  const criteria = asPlainObject(plain.criteria);
+  const channels = normalizeChannels(criteria.channels || plain.action_mode || plain.channel || 'whatsapp');
+  const sourceItems = await MarketingPatientListItem.findAll({
+    where: { list_id: plain.id },
+    order: [['id', 'ASC']],
+    transaction,
+  });
+  const itemPayloads = sourceItems.map((item) => cloneRecipientItemForCampaign(item, channels));
+  const counters = computeCounters(itemPayloads);
+  const {
+    dispatch: _dispatch,
+    campaign_name: _campaignName,
+    email_template_id: _emailTemplateId,
+    email_sender_identity_id: _emailSenderIdentityId,
+    whatsapp_template_id: _whatsappTemplateId,
+    sender_origin_id: _senderOriginId,
+    schedule_mode: _scheduleMode,
+    scheduled_at: _scheduledAt,
+    auto_send_when_template_approved: _autoSend,
+    source_list_id: _sourceListId,
+    ...recipientCriteria
+  } = criteria;
+  const preservedList = await MarketingPatientList.create({
+    name: normalizeText(criteria.list_name) || normalizeText(plain.name) || 'Lista de destinatarios',
+    objective_id: OBJECTIVE_ID,
+    source: 'saved_recipient_list',
+    status: 'draft',
+    scope_type: plain.scope_type,
+    clinica_id: plain.clinica_id || null,
+    grupo_clinica_id: plain.grupo_clinica_id || null,
+    clinic_ids: plain.clinic_ids || [],
+    treatment: plain.treatment || null,
+    condition_summary: plain.condition_summary || 'Lista conservada al archivar una campaña anterior.',
+    exclusion_summary: plain.exclusion_summary || 'Sin exclusiones detectadas.',
+    criteria: {
+      ...recipientCriteria,
+      record_kind: 'recipient_list',
+      source_list_id: null,
+      source_campaign_id: plain.id,
+      list_name: normalizeText(criteria.list_name) || normalizeText(plain.name) || 'Lista de destinatarios',
+      channels,
+    },
+    action_mode: channels.join(','),
+    channel: channels[0] || 'whatsapp',
+    template_id: null,
+    email_template_id: null,
+    email_sender_identity_id: null,
+    template_snapshot: null,
+    counters,
+    metrics: {},
+    safety_gates: {},
+    custom_fields_schema: plain.custom_fields_schema || [],
+    created_by: userId || null,
+  }, { transaction });
+  if (itemPayloads.length) {
+    await MarketingPatientListItem.bulkCreate(
+      itemPayloads.map((item) => ({ ...item, list_id: preservedList.id })),
+      { transaction }
+    );
+  }
+  await MarketingPatientContactEvent.create({
+    list_id: preservedList.id,
+    event_type: 'mass_recipient_list_preserved',
+    channel: preservedList.channel,
+    payload: { source_campaign_id: plain.id, user_id: userId || null },
+    occurred_at: new Date(),
+  }, { transaction });
+  return preservedList.id;
 }
 
 async function revalidateItemsForChannels(items, channels, transaction = null) {
@@ -6128,7 +6251,11 @@ async function createCampaign(scope, body = {}, userId = null) {
   const rows = Array.isArray(body.import_rows) ? body.import_rows.filter((row) => row && typeof row === 'object') : [];
   const channels = normalizeChannels(body.channels || body.destinations || body.channel);
   const listSource = normalizeText(body.list_source || body.source || 'import');
-  const source = listSource === 'current_patients' ? 'existing_patients_condition' : (listSource === 'manual' ? 'manual_list' : 'imported_file');
+  const sourceListId = Number(body.source_list_id || body.sourceListId || 0) || null;
+  const recordKind = normalizeMassSendRecordKind(body.record_kind || body.recordKind, 'campaign');
+  const source = sourceListId
+    ? 'saved_recipient_list'
+    : (listSource === 'current_patients' ? 'existing_patients_condition' : (listSource === 'manual' ? 'manual_list' : 'imported_file'));
   const templateUsage = normalizeTemplateUsage(body.template_usage || body.template_uso || body.uso || 'promocion');
   const templateCommercial = body.template_commercial === true || isCommercialTemplateUsage(templateUsage);
   const listName = normalizeText(body.name) || 'Lista de envíos masivos';
@@ -6150,8 +6277,32 @@ async function createCampaign(scope, body = {}, userId = null) {
     let customFieldsSchema = Array.isArray(body.custom_fields_schema) ? body.custom_fields_schema : [];
     let importSummary = null;
     let importMetadata = null;
+    let sourceList = null;
+    let sourceCriteria = {};
 
-    if (source === 'existing_patients_condition') {
+    if (sourceListId) {
+      if (recordKind !== 'campaign') {
+        const err = new Error('Una lista de destinatarios no puede copiar otra lista como campaña');
+        err.status = 400;
+        throw err;
+      }
+      sourceList = await MarketingPatientList.findByPk(sourceListId, { transaction });
+      ensureScopeAccess(sourceList, effectiveScope);
+      if (String(sourceList.status || '').toLowerCase() === 'archived') {
+        const err = new Error('La lista de destinatarios seleccionada está archivada');
+        err.status = 409;
+        throw err;
+      }
+      sourceCriteria = asPlainObject(sourceList.criteria);
+      const sourceItems = await MarketingPatientListItem.findAll({
+        where: { list_id: sourceList.id },
+        order: [['id', 'ASC']],
+        transaction,
+      });
+      itemPayloads = sourceItems.map((item) => cloneRecipientItemForCampaign(item, channels));
+      columnMapping = sourceCriteria.column_mapping || {};
+      customFieldsSchema = Array.isArray(sourceList.custom_fields_schema) ? sourceList.custom_fields_schema : [];
+    } else if (source === 'existing_patients_condition') {
       itemPayloads = await buildItemsFromCurrentPatients(effectiveScope, body, channels);
     } else {
       const importResult = buildItemsFromRows(rows, body, channels);
@@ -6191,9 +6342,13 @@ async function createCampaign(scope, body = {}, userId = null) {
         ? (isReviewRequest
           ? 'Pacientes elegibles para solicitar valoración, excluyendo quienes ya recibieron una solicitud.'
           : 'Pacientes actuales que cumplen la condición seleccionada.')
-        : 'Lista externa importada para campaña puntual.',
+        : (source === 'saved_recipient_list'
+          ? `Copia estable de la lista de destinatarios «${sourceList?.name || listName}».`
+          : 'Lista externa importada para campaña puntual.'),
       exclusion_summary: counters.excluded ? `${counters.excluded} contactos no tienen los campos necesarios o están duplicados.` : 'Sin exclusiones detectadas.',
       criteria: {
+        record_kind: recordKind,
+        source_list_id: sourceListId,
         campaign_name: campaignName,
         list_name: listName,
         channels,
@@ -6232,7 +6387,9 @@ async function createCampaign(scope, body = {}, userId = null) {
         import_file_name: body.import_file_name || null,
         column_mapping: columnMapping,
         name_format: normalizeNameFormat(body.name_format || body.nameFormat || (source === 'imported_file' ? 'auto' : null)),
-        import_history: importSummary ? [importSummary] : [],
+        import_history: importSummary ? [importSummary] : (Array.isArray(sourceCriteria.import_history) ? sourceCriteria.import_history : []),
+        segments: Array.isArray(sourceCriteria.segments) ? sourceCriteria.segments : [],
+        active_segment_id: normalizeText(body.active_segment_id || body.segment_id) || null,
         welcome_message: body.welcome_message && typeof body.welcome_message === 'object' ? body.welcome_message : null,
         link_tracking: linkTracking,
         required_policy: {
@@ -6263,11 +6420,24 @@ async function createCampaign(scope, body = {}, userId = null) {
       await MarketingPatientListItem.bulkCreate(itemPayloads.map((item) => ({ ...item, list_id: list.id })), { transaction });
     }
 
+    if (sourceListId && normalizeText(body.active_segment_id || body.segment_id)) {
+      const campaignItems = await MarketingPatientListItem.findAll({ where: { list_id: list.id }, transaction });
+      await applyActiveSegmentSelection(list, campaignItems, body.active_segment_id || body.segment_id, transaction);
+      list.counters = await refreshListCounters(list.id, transaction);
+      await list.save({ transaction });
+    }
+
     await MarketingPatientContactEvent.create({
       list_id: list.id,
-      event_type: 'mass_campaign_created',
+      event_type: recordKind === 'recipient_list' ? 'mass_recipient_list_created' : 'mass_campaign_created',
       channel: list.channel,
-      payload: { channels, counters, source },
+      payload: {
+        channels,
+        counters: list.counters || counters,
+        source,
+        record_kind: recordKind,
+        source_list_id: sourceListId,
+      },
       occurred_at: new Date(),
     }, { transaction });
 
@@ -6622,6 +6792,13 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   let appendImportSummary = null;
 
   await db.sequelize.transaction(async (transaction) => {
+    if (requestedStatus === 'archived') {
+      const preservedRecipientListId = await preserveRecipientListOnArchive(list, userId, transaction);
+      if (preservedRecipientListId) {
+        nextCriteria.preserved_recipient_list_id = preservedRecipientListId;
+        updatePayload.criteria = nextCriteria;
+      }
+    }
     if (appendRows.length) {
       const effectiveChannels = channels || normalizeChannels(nextCriteria.channels || list.action_mode || list.channel || 'whatsapp');
       const importBody = {
@@ -7570,6 +7747,7 @@ async function renderTemplatePreview({ template, item, list, clinic }) {
 async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  ensureDispatchableCampaignRecord(list);
   const dispatchContext = normalizeDispatchContext(body.dispatch_context || body.dispatch_mode);
   const isWelcomeDispatch = dispatchContext === 'welcome' || body.welcome === true;
   const dispatchFilter = buildDispatchFilterFromBody(body, isWelcomeDispatch ? 'welcome' : null);
@@ -7893,6 +8071,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
 async function sendTest(scope, campaignId, body = {}) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  ensureDispatchableCampaignRecord(list);
   if (String(body.channel || '').toLowerCase() === 'email') {
     return marketingEmailDispatchService.sendTest(list, body);
   }
@@ -8557,6 +8736,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const userId = getActorUserId(actor);
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  ensureDispatchableCampaignRecord(list);
   const rawDispatchOverride = body.dispatch_config || body.dispatchConfig || null;
   const requestedContext = normalizeDispatchContext(
     body.dispatch_context
@@ -8889,6 +9069,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   const userId = getActorUserId(actor);
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  ensureDispatchableCampaignRecord(list);
   const channels = Array.isArray(list.criteria?.channels)
     ? list.criteria.channels
     : normalizeChannels(list.action_mode || list.channel);
@@ -10461,5 +10642,9 @@ module.exports = {
     shouldScheduleReviewReminder,
     buildItemDedupeKeyForChannels,
     buildItemChannelEligibilityPatch,
+    cloneRecipientItemForCampaign,
+    normalizeMassSendRecordKind,
+    ensureDispatchableCampaignRecord,
+    shouldPreserveRecipientListOnArchive,
   },
 };

@@ -9,6 +9,7 @@ const provider = require('../../services/emailProvider.service');
 const dispatch = require('../../services/marketingEmailDispatch.service');
 const marketingEmail = require('../../services/marketingEmail.service');
 const migration = require('../../../migrations/20260923120000-create-marketing-email-system');
+const catalogMigration = require('../../../migrations/20260924100000-marketing-email-template-catalog');
 
 test('marketing email migration creates globally owned domains and expands the stored sender header', async () => {
   const calls = [];
@@ -24,6 +25,60 @@ test('marketing email migration creates globally owned domains and expands the s
   assert.equal(ownerIndex?.[3]?.unique, true);
   const senderHeader = calls.find(call => call[0] === 'changeColumn' && call[1] === 'EmailMessages' && call[2] === 'from_email');
   assert.equal(senderHeader?.[3]?.type?.options?.length, 512);
+});
+
+test('email catalog migration seeds one system playbook for clinic and group scopes', async () => {
+  const calls = [];
+  const queryInterface = {
+    async showAllTables() { return ['MarketingEmailTemplates']; },
+    async describeTable() { return {}; },
+    async showIndex() { return []; },
+    async createTable(name, columns) { calls.push(['createTable', name, columns]); },
+    async addIndex(table, fields, options) { calls.push(['addIndex', table, fields, options]); },
+    async addColumn(table, column, definition) { calls.push(['addColumn', table, column, definition]); },
+    async bulkInsert(table, rows) { calls.push(['bulkInsert', table, rows]); },
+    sequelize: {
+      async query(sql) {
+        if (sql.includes('MarketingEmailTemplateCatalog')) return [{ id: 7 }];
+        if (sql.includes('FROM Clinicas')) return [{ id_clinica: 21 }];
+        if (sql.includes('FROM GruposClinicas')) return [{ id_grupo: 8 }];
+        return [];
+      },
+    },
+  };
+  await catalogMigration.up(queryInterface, Sequelize);
+  assert.ok(calls.some(call => call[0] === 'createTable' && call[1] === 'MarketingEmailTemplateCatalog'));
+  const instances = calls.find(call => call[0] === 'bulkInsert' && call[1] === 'MarketingEmailTemplates')?.[2] || [];
+  assert.deepEqual(instances.map(row => row.scope_key).sort(), ['clinic:21', 'group:8']);
+  assert.ok(instances.every(row => row.origin === 'system' && row.catalog_template_id === 7));
+});
+
+test('email catalog migration resumes safely after its catalog table was created', async () => {
+  const writes = [];
+  const queryInterface = {
+    async showAllTables() { return ['MarketingEmailTemplateCatalog', 'MarketingEmailTemplates']; },
+    async describeTable() {
+      return { catalog_template_id: {}, catalog_version: {}, origin: {} };
+    },
+    async showIndex() { return [{ name: 'uq_marketing_email_system_template_scope' }]; },
+    async createTable() { writes.push('createTable'); },
+    async addIndex() { writes.push('addIndex'); },
+    async addColumn() { writes.push('addColumn'); },
+    async bulkInsert() { writes.push('bulkInsert'); },
+    sequelize: {
+      async query(sql) {
+        if (sql.includes('MarketingEmailTemplateCatalog')) return [{ id: 7 }];
+        if (sql.includes('FROM Clinicas')) return [{ id_clinica: 21 }];
+        if (sql.includes('FROM GruposClinicas')) return [{ id_grupo: 8 }];
+        if (sql.includes('FROM MarketingEmailTemplates')) return [{ scope_key: 'clinic:21' }, { scope_key: 'group:8' }];
+        return [];
+      },
+    },
+  };
+
+  await catalogMigration.up(queryInterface, Sequelize);
+
+  assert.deepEqual(writes, []);
 });
 
 test('marketing renderer always adds one visible unsubscribe action and Clinicaclick attribution', () => {
@@ -111,6 +166,50 @@ test('a SES domain already owned by another scope is rejected before provider ac
   }, 1), { code: 'email_domain_owned_by_another_scope', status: 409 });
 });
 
+test('refreshing a DEV mock domain never contacts the email provider', async t => {
+  const previousRuntime = process.env.RUNTIME_NAMESPACE;
+  process.env.RUNTIME_NAMESPACE = 'dev';
+  t.after(() => {
+    if (previousRuntime === undefined) delete process.env.RUNTIME_NAMESPACE;
+    else process.env.RUNTIME_NAMESPACE = previousRuntime;
+  });
+  const row = {
+    id: 31,
+    public_id: 'ed_dev_qa_ready_21',
+    scope_key: 'clinic:21',
+    domain: 'qa-email-ready-clinic-21.test',
+    status: 'active',
+    verification_status: 'verified',
+    dkim_status: 'verified',
+    spf_status: 'verified',
+    dmarc_status: 'verified',
+    mail_from_domain: 'bounce.qa-email-ready-clinic-21.test',
+    mail_from_status: 'success',
+    dns_records: [],
+    provider_snapshot: { mock: true },
+    checked_at: new Date(0),
+    get(argument) { return argument === 'provider_snapshot' ? this.provider_snapshot : { ...this }; },
+    async update(values) { Object.assign(this, values); return this; },
+    async reload() { return this; },
+  };
+  t.mock.method(db.EmailSendingDomain, 'findOne', async () => row);
+
+  const refreshed = await marketingEmail.refreshDomain({ scope: 'clinic', clinicIds: [21] }, row.public_id);
+
+  assert.equal(refreshed.status, 'active');
+  assert.ok(row.checked_at.getTime() > 0);
+});
+
+test('DEV domain setup builds a pending identity without provider credentials', () => {
+  const identity = marketingEmail.buildDevMockIdentity('clinic.example');
+  assert.equal(identity.mock, true);
+  assert.equal(identity.verifiedForSending, false);
+  assert.equal(identity.verificationStatus, 'pending');
+  assert.equal(identity.dkimStatus, 'pending');
+  assert.equal(identity.mailFromDomain, 'bounce.clinic.example');
+  assert.equal(identity.dkimTokens.length, 3);
+});
+
 test('SES DNS setup keeps the clinic root SPF untouched and gates senders on custom MAIL FROM', () => {
   const records = marketingEmail.dnsRecords('clinic.example', {
     dkimTokens: ['token_one'],
@@ -138,6 +237,118 @@ test('SES DNS setup keeps the clinic root SPF untouched and gates senders on cus
       mail_from_status: 'pending',
     },
   }).ready, false);
+});
+
+test('system email templates are read-only and expose their catalog ownership', async t => {
+  const systemTemplate = {
+    id: 11,
+    public_id: 'et_system',
+    scope_key: 'clinic:21',
+    name: 'Sistema',
+    subject: 'Hola',
+    layout_key: 'classic',
+    design: marketingEmail.DEFAULT_DESIGN,
+    version: 4,
+    origin: 'system',
+    catalog_template_id: 7,
+    catalog_version: 4,
+  };
+  const serialized = marketingEmail.serializeTemplate(systemTemplate);
+  assert.equal(serialized.is_system, true);
+  assert.equal(serialized.editable, false);
+  assert.equal(serialized.catalog_version, 4);
+  t.mock.method(db.MarketingEmailTemplate, 'findOne', async () => systemTemplate);
+  await assert.rejects(marketingEmail.saveTemplate({ scope: 'clinic', clinicIds: [21] }, {
+    name: 'Cambio indebido',
+    subject: 'Cambio indebido',
+    design: marketingEmail.DEFAULT_DESIGN,
+  }, 1, 'et_system'), { code: 'email_system_template_read_only', status: 409 });
+});
+
+test('duplicating a system email template creates an independent custom copy', async t => {
+  const source = {
+    id: 11,
+    public_id: 'et_system',
+    scope_key: 'clinic:21',
+    name: 'Sistema',
+    subject: 'Hola {{nombre}}',
+    preheader: 'Prueba',
+    layout_key: 'classic',
+    design: marketingEmail.DEFAULT_DESIGN,
+    rendered_html: '<html></html>',
+    rendered_text: 'Hola',
+    version: 3,
+    origin: 'system',
+    catalog_template_id: 7,
+  };
+  let created = null;
+  t.mock.method(db.MarketingEmailTemplate, 'findOne', async () => source);
+  t.mock.method(db.MarketingEmailTemplate, 'create', async values => {
+    created = values;
+    return { id: 12, ...values };
+  });
+  const duplicated = await marketingEmail.duplicateTemplate(
+    { scope: 'clinic', clinicIds: [21] },
+    'et_system',
+    {},
+    1
+  );
+  assert.equal(created.origin, 'custom');
+  assert.equal(created.catalog_template_id, null);
+  assert.equal(created.catalog_version, null);
+  assert.equal(duplicated.editable, true);
+  assert.match(duplicated.name, /^Copia de /);
+});
+
+test('catalog propagation updates linked instances in place and creates only missing scopes', async t => {
+  const catalog = {
+    id: 7,
+    public_id: 'etc_system',
+    name: 'Sistema actualizado',
+    status: 'ready',
+    subject: 'Hola {{nombre}}',
+    preheader: 'Prueba',
+    layout_key: 'classic',
+    design: marketingEmail.DEFAULT_DESIGN,
+    rendered_html: '<html></html>',
+    rendered_text: 'Hola',
+    version: 5,
+    is_active: true,
+    async update(values) { Object.assign(this, values); },
+  };
+  const existing = {
+    id: 41,
+    public_id: 'et_existing',
+    scope_key: 'clinic:21',
+    async update(values) { Object.assign(this, values); },
+  };
+  const created = [];
+  t.mock.method(db.MarketingEmailTemplateCatalog, 'findOne', async () => catalog);
+  t.mock.method(db.Clinica, 'findAll', async () => [{ id_clinica: 21 }]);
+  t.mock.method(db.GrupoClinica, 'findAll', async () => [{ id_grupo: 8 }]);
+  t.mock.method(db.sequelize, 'transaction', async callback => callback({ id: 'test-transaction' }));
+  t.mock.method(db.MarketingEmailTemplate, 'findOne', async ({ where }) => (
+    where.scope_key === 'clinic:21' ? existing : null
+  ));
+  t.mock.method(db.MarketingEmailTemplate, 'create', async values => {
+    created.push(values);
+    return values;
+  });
+
+  const result = await marketingEmail.propagateCatalogTemplate('etc_system', 1);
+
+  assert.deepEqual({ scopes: result.scopes, created: result.created, updated: result.updated }, {
+    scopes: 2,
+    created: 1,
+    updated: 1,
+  });
+  assert.equal(existing.id, 41);
+  assert.equal(existing.catalog_version, 5);
+  assert.equal(existing.origin, 'system');
+  assert.equal(created[0].scope_key, 'group:8');
+  assert.equal(created[0].catalog_template_id, 7);
+  assert.equal(catalog.propagation_state, 'complete');
+  assert.ok(catalog.last_propagated_at instanceof Date);
 });
 
 test('a paused campaign holds already queued email jobs before rendering or provider access', async t => {

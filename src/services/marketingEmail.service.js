@@ -221,6 +221,20 @@ function dnsRecords(domain, identity) {
   ];
 }
 
+function buildDevMockIdentity(domain) {
+  const seed = crypto.createHash('sha256').update(`clinicaclick-dev-email-domain\n${domain}`).digest('hex');
+  return {
+    mock: true,
+    source: 'isolated_dev_domain_setup',
+    verifiedForSending: false,
+    verificationStatus: 'pending',
+    dkimStatus: 'pending',
+    dkimTokens: [`dev${seed.slice(0, 12)}`, `dev${seed.slice(12, 24)}`, `dev${seed.slice(24, 36)}`],
+    mailFromDomain: `bounce.${domain}`,
+    mailFromStatus: 'pending',
+  };
+}
+
 async function txtIncludes(name, expected) {
   try {
     const rows = await dns.resolveTxt(name);
@@ -274,8 +288,14 @@ async function addDomain(scope, body, userId) {
     fail('email_domain_owned_by_another_scope', 409, 'Este dominio ya pertenece a otra clínica o grupo.');
   }
   let identity;
-  try { identity = await createEmailBroker().ensureIdentity(domain); }
-  catch (error) { fail('email_identity_provider_unavailable', 503, 'No se pudo registrar el dominio en el proveedor. Inténtalo de nuevo.', { provider_code: error.code }); }
+  const useIsolatedDevIdentity = process.env.RUNTIME_NAMESPACE === 'dev'
+    && process.env.EMAIL_BROKER_ENABLED !== 'true';
+  if (useIsolatedDevIdentity) {
+    identity = buildDevMockIdentity(domain);
+  } else {
+    try { identity = await createEmailBroker().ensureIdentity(domain); }
+    catch (error) { fail('email_identity_provider_unavailable', 503, 'No se pudo registrar el dominio en el proveedor. Inténtalo de nuevo.', { provider_code: error.code }); }
+  }
   const records = dnsRecords(domain, identity);
   const [row] = await db.EmailSendingDomain.findOrCreate({
     where: { domain },
@@ -540,6 +560,7 @@ module.exports = {
   renderTemplateDocument,
   dnsRecords,
   dnsStatus,
+  buildDevMockIdentity,
   serializeSender,
   serializeTemplate,
 };
