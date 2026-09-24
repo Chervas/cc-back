@@ -37,7 +37,7 @@ module.exports = (sequelize, DataTypes) => {
     template_key: { type: DataTypes.STRING(120), allowNull: false },
     template_version: DataTypes.STRING(32),
     subject_key: DataTypes.STRING(120),
-    from_email: DataTypes.STRING(320),
+    from_email: DataTypes.STRING(512),
     reply_to: DataTypes.STRING(320),
     recipient_email_envelope: DataTypes.TEXT('long'),
     recipient_hash: { type: DataTypes.CHAR(64), allowNull: false },

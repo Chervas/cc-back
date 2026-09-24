@@ -2,12 +2,14 @@
 
 const { OPERATION, PROVIDER } = require('./email-limits');
 const contract = require('./email-contract');
+const identityContract = require('./email-identity-contract');
+const { createEmailIdentityHttp } = require('./email-identity-http');
 const { createEmailHttp, project } = require('./email-http');
 const { EmailLedger } = require('./email-ledger');
 
-function createEmailOperations({ store, http = createEmailHttp() }) {
+function createEmailOperations({ store, http = createEmailHttp(), identityHttp = createEmailIdentityHttp() }) {
   const ledger = new EmailLedger(store);
-  return { [OPERATION]: { provider: PROVIDER,
+  const operations = { [OPERATION]: { provider: PROVIDER,
     validate: contract.validate, authorize: contract.authorize,
     async execute(context) {
       const scope = { ...context, connectionRef: context.binding.connectionRef };
@@ -27,5 +29,19 @@ function createEmailOperations({ store, http = createEmailHttp() }) {
     completionAudit: data => data.accepted ? ['integration.completed', 'success', 'email_ses_accepted']
       : ['integration.failed', 'failed', data.code],
   } };
+  for (const [operation, action] of [[require('./email-limits').OPERATIONS.IDENTITY_ENSURE, 'ensure'], [require('./email-limits').OPERATIONS.IDENTITY_GET, 'get']]) {
+    operations[operation] = {
+      provider: PROVIDER,
+      validate: identityContract.validate,
+      authorize: identityContract.authorize,
+      async execute(context) {
+        context.assertActive();
+        return identityHttp({ action, payload: context.payload, token: context.secret, signal: context.signal });
+      },
+      project: identityContract.project,
+      completionAudit: () => ['integration.completed', 'success', action === 'ensure' ? 'email_identity_ensured' : 'email_identity_read'],
+    };
+  }
+  return operations;
 }
 module.exports = { createEmailOperations };

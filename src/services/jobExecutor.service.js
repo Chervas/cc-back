@@ -574,6 +574,7 @@ const JOB_HANDLERS = {
     require('./whatsappLanguageRollout.service').runRolloutJob(payload, jobRequest)
   ),
   marketing_bulk_send_dispatch: async (payload = {}, jobRequest) => marketingBulkSendsService.runDispatchJob(payload, jobRequest),
+  marketing_bulk_email_dispatch: async (payload = {}, jobRequest) => require('./marketingEmailDispatch.service').runDispatchJob(payload, jobRequest),
   marketing_review_request_reminder: async (payload = {}, jobRequest) => marketingBulkSendsService.runReviewRequestReminderJob(payload, jobRequest),
   marketing_review_request_no_response: async (payload = {}, jobRequest) => marketingBulkSendsService.runReviewNoResponseJob(payload, jobRequest),
   automation_inbound_dispatch: async (payload = {}, jobRequest = null) => (

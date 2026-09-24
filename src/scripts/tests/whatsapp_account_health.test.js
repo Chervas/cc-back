@@ -81,6 +81,66 @@ test('el error 131042 pausa el remitente y explica las consecuencias por propós
   );
 });
 
+test('la recuperación de pago solo admite una prueba manual reciente y respeta el cooldown', () => {
+  const now = new Date('2026-09-24T10:00:00.000Z');
+  const asset = {
+    id: 396,
+    additionalData: {
+      payment: {
+        status: 'missing_payment_method',
+        last_error_code: 131042,
+        last_detected_at: '2026-09-24T09:30:00.000Z',
+      },
+    },
+  };
+  const health = {
+    state: 'blocked',
+    reason_code: 'meta_error_131042_payment_missing',
+    provider_status: 'CONNECTED',
+  };
+  const message = {
+    id: 1200,
+    direction: 'outbound',
+    status: 'pending',
+    createdAt: '2026-09-24T09:59:00.000Z',
+    metadata: {
+      kind: 'mass_campaign_test',
+      sender_origin_id: 396,
+      payment_recovery_probe: true,
+    },
+  };
+
+  const eligible = whatsappAccountHealthService.__testing.paymentRecoveryProbeEligibility({
+    asset,
+    health,
+    message,
+    now,
+  });
+  assert.equal(eligible.allowed, true);
+
+  asset.additionalData.payment.last_probe_at = '2026-09-24T09:50:00.000Z';
+  const cooldown = whatsappAccountHealthService.__testing.paymentRecoveryProbeEligibility({
+    asset,
+    health,
+    message,
+    now,
+  });
+  assert.equal(cooldown.allowed, false);
+  assert.equal(cooldown.reason, 'payment_probe_cooldown');
+  assert.equal(cooldown.retry_after_seconds, 1200);
+
+  delete asset.additionalData.payment.last_probe_at;
+  message.metadata.kind = 'flow_send_whatsapp';
+  const automation = whatsappAccountHealthService.__testing.paymentRecoveryProbeEligibility({
+    asset,
+    health,
+    message,
+    now,
+  });
+  assert.equal(automation.allowed, false);
+  assert.equal(automation.reason, 'payment_probe_message_ineligible');
+});
+
 test('131042 persiste el bloqueo, notifica el ámbito secundario y una entrega posterior lo recupera', async () => {
   const notificationsService = require('../../services/notifications.service');
   const asset = {

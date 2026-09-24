@@ -184,10 +184,13 @@ function marketingQueuePresentation(row = {}, dispatch = {}) {
     };
   }
   if (objectiveId === 'mass_sends') {
+    const campaignId = Number(row.id || 0);
     return {
       type: 'mass_send',
       type_label: 'Envío masivo',
-      configuration_url: '/marketing/objetivos?objective=mass_sends&mass_send_view=campaigns',
+      configuration_url: campaignId > 0
+        ? `/marketing/herramientas/envios-masivos?campaign=${encodeURIComponent(campaignId)}`
+        : '/marketing/herramientas/envios-masivos',
       configuration_label: 'Abrir envíos masivos',
     };
   }
@@ -315,6 +318,11 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
             SUM(CASE WHEN dispatch_status IN ('sent','delivered','read','replied','failed') THEN 1 ELSE 0 END) AS processed,
             SUM(CASE WHEN selected = 1 AND status = 'ready' AND (dispatch_status IS NULL OR dispatch_status IN ('pending','queued','sending','accepted','held_quality')) THEN 1 ELSE 0 END) AS pending,
             SUM(CASE WHEN dispatch_status = 'failed' OR failed_at IS NOT NULL THEN 1 ELSE 0 END) AS failed,
+            SUM(CASE WHEN selected = 1 AND status = 'ready' AND email IS NOT NULL THEN 1 ELSE 0 END) AS email_eligible,
+            SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.status')) IN ('sent','delivered','bounced','complained','suppressed','failed','rejected','cancelled') THEN 1 ELSE 0 END) AS email_processed,
+            SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.status')) IN ('bounced','complained','suppressed','failed','rejected') THEN 1 ELSE 0 END) AS email_failed,
+            SUM(CASE WHEN selected = 1 AND status = 'ready' AND email IS NOT NULL AND (channel_status IS NULL OR JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.status')) IS NULL OR JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.status')) IN ('pending','ready','queued','sending','accepted')) THEN 1 ELSE 0 END) AS email_pending,
+            MAX(JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.sent_at'))) AS email_last_sent_at,
             MAX(sent_at) AS last_sent_at
           FROM MarketingPatientListItems
           WHERE list_id IN (:rowIds)
@@ -330,7 +338,15 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
     const groupClinicIds = clinicsByGroupId.get(toInt(row.grupo_clinica_id)) || [];
     const scopedClinicIds = Array.from(new Set([...directClinicIds, ...groupClinicIds]));
     if (!scopedClinicIds.length) return [];
-    const dispatch = row.criteria?.dispatch || {};
+    const whatsappDispatch = row.criteria?.dispatch || {};
+    const emailDispatch = row.email_dispatch || {};
+    const channels = Array.isArray(row.criteria?.channels) ? row.criteria.channels : [row.channel || 'whatsapp'];
+    const activeStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting', 'waiting_next_batch', 'awaiting_delivery', 'paused', 'failed']);
+    const whatsappStatus = String(whatsappDispatch.status || '').toLowerCase();
+    const emailStatus = String(emailDispatch.status || '').toLowerCase();
+    const preferEmail = channels.includes('email') && (!channels.includes('whatsapp')
+      || (!activeStatuses.has(whatsappStatus) && activeStatuses.has(emailStatus)));
+    const dispatch = preferEmail ? { ...emailDispatch, context: 'email', label: 'Envío masivo por email' } : whatsappDispatch;
     const effectiveStatus = String(dispatch.status || row.status || '').toLowerCase();
     const visibleStatuses = new Set([
       'queued', 'sending', 'scheduled', 'waiting', 'waiting_next_batch',
@@ -341,12 +357,26 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
     if (!visibleStatuses.has(effectiveStatus)) return [];
     const counters = row.counters || {};
     const stats = itemStatsByListId.get(Number(row.id)) || {};
-    const total = numberValue(stats.eligible, counters.ready_total ?? counters.selected ?? counters.total);
-    const processed = numberValue(stats.processed, counters.sent ?? counters.processed);
-    const failed = numberValue(stats.failed, counters.failed ?? counters.errors);
-    const pending = numberValue(stats.pending, Math.max(0, total - processed));
+    const eligible = numberValue(stats.eligible, counters.ready_total ?? counters.selected ?? counters.total);
+    const whatsappTotal = channels.includes('whatsapp') ? eligible : 0;
+    const emailTotal = channels.includes('email') ? numberValue(stats.email_eligible, 0) : 0;
+    const whatsappProcessed = channels.includes('whatsapp') ? numberValue(stats.processed, counters.sent ?? counters.processed) : 0;
+    const emailProcessed = channels.includes('email') ? numberValue(stats.email_processed, 0) : 0;
+    const whatsappFailed = channels.includes('whatsapp') ? numberValue(stats.failed, counters.failed ?? counters.errors) : 0;
+    const emailFailed = channels.includes('email') ? numberValue(stats.email_failed, 0) : 0;
+    const whatsappPending = channels.includes('whatsapp') ? numberValue(stats.pending, Math.max(0, whatsappTotal - whatsappProcessed)) : 0;
+    const emailPending = channels.includes('email') ? numberValue(stats.email_pending, Math.max(0, emailTotal - emailProcessed)) : 0;
+    const total = whatsappTotal + emailTotal;
+    const processed = whatsappProcessed + emailProcessed;
+    const failed = whatsappFailed + emailFailed;
+    const pending = whatsappPending + emailPending;
     const group = statusGroup(effectiveStatus);
-    const statusCopy = statusPresentation(effectiveStatus);
+    const statusCopy = preferEmail && effectiveStatus === 'awaiting_delivery'
+      ? {
+          label: 'Entregando emails',
+          explanation: 'Los emails ya están en la cola segura. Clinicaclick espera la aceptación o el error del proveedor antes de cerrarla.',
+        }
+      : statusPresentation(effectiveStatus);
     const cadence = describeDispatchCadence(dispatch);
     const presentation = marketingQueuePresentation(row, dispatch);
     const templateSnapshot = dispatch.template_snapshot || row.template_snapshot || {};
@@ -362,8 +392,9 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
       source_id: row.id,
       source_type: 'marketing_list',
       ...presentation,
+      type_label: channels.length > 1 ? `${presentation.type_label} · WhatsApp + email` : presentation.type_label,
       title: dispatch.label || row.name || 'Envío de marketing',
-      channel: String(row.channel || row.criteria?.channels?.[0] || 'whatsapp').toLowerCase(),
+      channel: channels.length > 1 ? 'multichannel' : String(channels[0] || 'whatsapp').toLowerCase(),
       status: effectiveStatus,
       status_group: group,
       status_label: statusCopy.label,
@@ -374,6 +405,10 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
       processed: group === 'history' ? total : Math.min(total, processed),
       pending: group === 'history' ? 0 : pending,
       failed,
+      channel_stats: {
+        whatsapp: { total: whatsappTotal, processed: whatsappProcessed, pending: whatsappPending, failed: whatsappFailed, status: whatsappStatus || null },
+        email: { total: emailTotal, processed: emailProcessed, pending: emailPending, failed: emailFailed, status: emailStatus || null },
+      },
       next_at: dispatch.next_allowed_at || null,
       cadence: cadence.cadence,
       cadence_note: cadence.cadence_note,
@@ -392,7 +427,7 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
       can_resume: group === 'paused' && pending > 0 && !cannotResume,
       action_scope: actionScope,
       created_at: row.created_at,
-      last_sent_at: latestDate(row.last_sent_at, stats.last_sent_at),
+      last_sent_at: latestDate(row.last_sent_at, stats.last_sent_at, stats.email_last_sent_at),
       updated_at: row.updated_at,
     }];
   });
@@ -537,6 +572,10 @@ async function emailQueues({ clinicIds, clinicNameById }) {
     where: {
       clinica_id: { [Op.in]: clinicIds },
       status: { [Op.in]: ['queued', 'sending', 'failed', 'rejected', 'bounced', 'complained', 'suppressed'] },
+      [Op.or]: [
+        { related_type: null },
+        { related_type: { [Op.ne]: 'marketing_bulk_send' } },
+      ],
     },
     order: [['updated_at', 'DESC']],
     limit: 100,

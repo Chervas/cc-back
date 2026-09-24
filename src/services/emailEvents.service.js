@@ -403,6 +403,9 @@ async function recordProviderEvent(rawPayload = {}) {
     const suppression = await suppressRecipientFromEvent(message, event, row, { transaction });
     await reconcileSystemNotificationDelivery(message, event, { transaction });
     await reconcileTerminalRelatedState(message, event, { transaction });
+    if (message) {
+      await require('./marketingEmailDispatch.service').materializeEmailMessage(message, { transaction });
+    }
     return {
       created: true,
       event: row,

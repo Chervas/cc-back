@@ -6,7 +6,8 @@ function payload(patch = {}) {
   return { outboxId: `em_${randomUUID()}`, attempt: 1, timeoutMs: 15000,
     templateKey: 'auth.email_verification', stream: 'transactional', recipientPolicy: 'allowlist',
     to: 'qa@example.test', from: 'QA <no-reply@example.test>', replyTo: null, configurationSet: 'qa-transactional',
-    subject: 'Fictitious verification', text: 'FICTITIOUS_EMAIL_CODE_123456 ñ 日本語 👍', html: '<p>FICTITIOUS_EMAIL_BODY</p>', ...patch };
+    subject: 'Fictitious verification', text: 'FICTITIOUS_EMAIL_CODE_123456 ñ 日本語 👍', html: '<p>FICTITIOUS_EMAIL_BODY</p>',
+    identityName: null, ...patch };
 }
 function binding() {
   return { connectionRef: 'email:staging', provider: L.PROVIDER, initialState: 'active',

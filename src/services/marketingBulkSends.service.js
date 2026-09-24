@@ -37,6 +37,8 @@ const {
   resolveClinicGoogleReviewProfile,
 } = require('./googleLocalLinks.service');
 const publicMediaPersonalizationService = require('./publicMediaPersonalization.service');
+const marketingEmailService = require('./marketingEmail.service');
+const marketingEmailDispatchService = require('./marketingEmailDispatch.service');
 
 const {
   Clinica,
@@ -1861,6 +1863,61 @@ function missingRequiredFields({ channels, name, phoneDigits, email }) {
   return Array.from(new Set(missing));
 }
 
+function buildItemDedupeKeyForChannels({ channels, name, phoneDigits, email }) {
+  const normalizedChannels = normalizeChannels(channels);
+  const normalizedEmail = normalizeText(email).toLowerCase();
+  const needsPhone = normalizedChannels.includes('whatsapp') || normalizedChannels.includes('managed_calls');
+  if (!needsPhone && normalizedChannels.includes('email') && normalizedEmail) {
+    return `email:${normalizedEmail}`;
+  }
+  if (phoneDigits) return `phone:${phoneDigits}`;
+  if (normalizedEmail) return `email:${normalizedEmail}`;
+  const normalizedName = normalizeKey(name);
+  return normalizedName ? `name:${normalizedName}` : null;
+}
+
+function buildItemChannelEligibilityPatch(item, channels) {
+  const plain = item?.get ? item.get({ plain: true }) : item;
+  const status = normalizeText(plain?.status).toLowerCase();
+  const dispatchStatus = normalizeText(plain?.dispatch_status).toLowerCase();
+  if (!['ready', 'excluded_missing_required'].includes(status) || plain?.sent_at || dispatchStatus) {
+    return null;
+  }
+  const missing = missingRequiredFields({
+    channels: normalizeChannels(channels),
+    name: normalizeText(plain?.name),
+    phoneDigits: normalizePhoneDigits(plain?.phone),
+    email: normalizeText(plain?.email),
+  });
+  if (missing.length) {
+    return {
+      status: 'excluded_missing_required',
+      reason: `Faltan campos: ${missing.join(', ')}`,
+      exclusion_reason: 'missing_required',
+      selected: false,
+    };
+  }
+  if (status === 'excluded_missing_required') {
+    return {
+      status: 'ready',
+      reason: 'Contacto listo para los destinos seleccionados',
+      exclusion_reason: null,
+      selected: true,
+    };
+  }
+  return null;
+}
+
+async function revalidateItemsForChannels(items, channels, transaction = null) {
+  for (const item of items) {
+    const patch = buildItemChannelEligibilityPatch(item, channels);
+    if (patch && typeof item?.update === 'function') {
+      await item.update(patch, { transaction });
+    }
+  }
+  return items;
+}
+
 function buildItemsFromRows(rows, body, channels) {
   const columnMapping = inferColumnMapping(rows, body.column_mapping || {});
   const importMetadata = buildImportMetadata(body);
@@ -1879,7 +1936,7 @@ function buildItemsFromRows(rows, body, channels) {
     const importedClinic = readImportValue(row, columnMapping, 'clinic') || null;
     const customFields = buildCustomFields(row, columnMapping, customFieldsSchema);
     const missing = missingRequiredFields({ channels, name: nameInfo.name, phoneDigits, email });
-    const dedupeKey = phoneDigits || normalizeKey(email) || normalizeKey(nameInfo.name);
+    const dedupeKey = buildItemDedupeKeyForChannels({ channels, name: nameInfo.name, phoneDigits, email });
     let status = missing.length ? 'excluded_missing_required' : 'ready';
     let reason = missing.length ? `Faltan campos: ${missing.join(', ')}` : 'Contacto importado listo';
     let exclusionReason = missing.length ? 'missing_required' : null;
@@ -1922,7 +1979,7 @@ function buildItemsFromRows(rows, body, channels) {
   return { items, columnMapping, customFieldsSchema, nameFormat, importMetadata };
 }
 
-async function buildItemsFromCurrentPatients(scope, body) {
+async function buildItemsFromCurrentPatients(scope, body, channels = normalizeChannels(body?.channels)) {
   if (isReviewRequestBody(body)) {
     return buildItemsForReviewRequest(scope, body);
   }
@@ -1936,22 +1993,33 @@ async function buildItemsFromCurrentPatients(scope, body) {
     attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
     limit: Math.min(Math.max(Number(body.limit || 500), 1), 2000),
   });
-  return rows.map((patient) => ({
-    paciente_id: patient.id_paciente,
-    clinica_id: patient.clinica_id || null,
-    name: [patient.nombre, patient.apellidos].filter(Boolean).join(' ').trim() || 'Paciente',
-    phone: patient.telefono_movil || null,
-    email: patient.email || null,
-    treatment: null,
-    treatment_id: null,
-    last_visit_at: null,
-    status: 'ready',
-    reason: 'Paciente actual incluido por condición',
-    exclusion_reason: null,
-    selected: true,
-    custom_fields: {},
-    missing_variables: [],
-  }));
+  return rows.map((patient) => {
+    const name = [patient.nombre, patient.apellidos].filter(Boolean).join(' ').trim() || 'Paciente';
+    const phone = patient.telefono_movil || null;
+    const email = patient.email || null;
+    const missing = missingRequiredFields({
+      channels: normalizeChannels(channels),
+      name,
+      phoneDigits: normalizePhoneDigits(phone),
+      email: normalizeText(email),
+    });
+    return {
+      paciente_id: patient.id_paciente,
+      clinica_id: patient.clinica_id || null,
+      name,
+      phone,
+      email,
+      treatment: null,
+      treatment_id: null,
+      last_visit_at: null,
+      status: missing.length ? 'excluded_missing_required' : 'ready',
+      reason: missing.length ? `Faltan campos: ${missing.join(', ')}` : 'Paciente actual incluido por condición',
+      exclusion_reason: missing.length ? 'missing_required' : null,
+      selected: !missing.length,
+      custom_fields: {},
+      missing_variables: [],
+    };
+  });
 }
 
 function isReviewRequestBody(body = {}) {
@@ -5891,6 +5959,8 @@ function serializeItem(item) {
     custom_fields: plain.custom_fields || {},
     missing_variables: plain.missing_variables || [],
     dispatch_status: plain.dispatch_status || null,
+    channel_status: plain.channel_status || {},
+    email_message_id: plain.email_message_id || null,
     provider_message_id: plain.provider_message_id || null,
     app_message_id: plain.app_message_id || null,
     conversation_id: plain.conversation_id || null,
@@ -5928,12 +5998,15 @@ function serializeCampaign(list, { itemsPreview = [] } = {}) {
     action_mode: plain.action_mode,
     channel: plain.channel,
     template_id: plain.template_id,
+    email_template_id: plain.email_template_id || plain.criteria?.email_template_id || null,
+    email_sender_identity_id: plain.email_sender_identity_id || plain.criteria?.email_sender_identity_id || null,
     template_snapshot: plain.template_snapshot || null,
     counters: plain.counters || {},
     metrics: plain.metrics || {},
     safety_gates: plain.safety_gates || {},
     blocked_gates: getBlockedGates(plain.safety_gates || {}),
     dispatch: getDispatchProgress(plain, plain.counters || null),
+    email_dispatch: plain.email_dispatch || null,
     custom_fields_schema: plain.custom_fields_schema || [],
     prepared_at: plain.prepared_at,
     last_sent_at: plain.last_sent_at,
@@ -6079,7 +6152,7 @@ async function createCampaign(scope, body = {}, userId = null) {
     let importMetadata = null;
 
     if (source === 'existing_patients_condition') {
-      itemPayloads = await buildItemsFromCurrentPatients(effectiveScope, body);
+      itemPayloads = await buildItemsFromCurrentPatients(effectiveScope, body, channels);
     } else {
       const importResult = buildItemsFromRows(rows, body, channels);
       itemPayloads = importResult.items;
@@ -6128,6 +6201,8 @@ async function createCampaign(scope, body = {}, userId = null) {
         template_commercial: templateCommercial,
         whatsapp_template_id: Number(body.whatsapp_template_id || body.template_id || 0) || null,
         sender_origin_id: getRequestedWhatsappSenderOriginId(body),
+        email_template_id: Number(body.email_template_id || 0) || null,
+        email_sender_identity_id: Number(body.email_sender_identity_id || 0) || null,
         opt_out_text: templateCommercial ? normalizeText(body.opt_out_text) : null,
         consent_acknowledged: !!body.consent_acknowledged,
         list_source: source,
@@ -6168,6 +6243,8 @@ async function createCampaign(scope, body = {}, userId = null) {
       },
       action_mode: channels.join(','),
       channel: channels[0] || 'whatsapp',
+      email_template_id: Number(body.email_template_id || 0) || null,
+      email_sender_identity_id: Number(body.email_sender_identity_id || 0) || null,
       counters,
       metrics: { total_cost: 0, estimated_revenue: 0 },
       safety_gates: {
@@ -6470,6 +6547,12 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   if (body.whatsapp_template_id !== undefined || body.template_id !== undefined) {
     nextCriteria.whatsapp_template_id = Number(body.whatsapp_template_id || body.template_id || 0) || null;
   }
+  if (body.email_template_id !== undefined) {
+    nextCriteria.email_template_id = Number(body.email_template_id || 0) || null;
+  }
+  if (body.email_sender_identity_id !== undefined) {
+    nextCriteria.email_sender_identity_id = Number(body.email_sender_identity_id || 0) || null;
+  }
   if (
     body.sender_origin_id !== undefined
     || body.whatsapp_sender_origin_id !== undefined
@@ -6513,6 +6596,8 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   }
 
   const updatePayload = { criteria: nextCriteria };
+  if (body.email_template_id !== undefined) updatePayload.email_template_id = nextCriteria.email_template_id;
+  if (body.email_sender_identity_id !== undefined) updatePayload.email_sender_identity_id = nextCriteria.email_sender_identity_id;
   if (requestedStatus === 'archived') {
     updatePayload.status = 'archived';
   }
@@ -6602,7 +6687,11 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
       updatePayload.exclusion_summary = list.exclusion_summary || 'Sin exclusiones detectadas.';
     }
 
-    const segmentItems = await MarketingPatientListItem.findAll({ where: { list_id: list.id }, transaction });
+    let segmentItems = await MarketingPatientListItem.findAll({ where: { list_id: list.id }, transaction });
+    if (channels) {
+      await revalidateItemsForChannels(segmentItems, channels, transaction);
+      segmentItems = await MarketingPatientListItem.findAll({ where: { list_id: list.id }, transaction });
+    }
     updatePayload.criteria = annotateSegmentCounts(updatePayload.criteria || nextCriteria, segmentItems);
     await list.update(updatePayload, { transaction });
     const counters = await refreshListCounters(list.id, transaction);
@@ -7487,10 +7576,37 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const welcomeMessage = list.criteria?.welcome_message && typeof list.criteria.welcome_message === 'object'
     ? list.criteria.welcome_message
     : {};
-  const channels = Array.isArray(list.criteria?.channels)
-    ? list.criteria.channels
-    : normalizeChannels(list.action_mode || list.channel);
+  const channels = normalizeChannels(
+    body.channels
+    || body.destinations
+    || (Array.isArray(list.criteria?.channels) ? list.criteria.channels : (list.action_mode || list.channel))
+  );
   const needsWhatsappTemplate = channels.includes('whatsapp');
+  const needsEmailTemplate = channels.includes('email');
+  const emailTemplateId = Number(body.email_template_id || list.email_template_id || list.criteria?.email_template_id || 0) || null;
+  const emailSenderIdentityId = Number(body.email_sender_identity_id || list.email_sender_identity_id || list.criteria?.email_sender_identity_id || 0) || null;
+  let emailAssetsReady = !needsEmailTemplate;
+  if (needsEmailTemplate) {
+    const descriptor = marketingEmailService.scopeDescriptor(scope);
+    const [emailTemplate, emailSender] = await Promise.all([
+      db.MarketingEmailTemplate.findOne({ where: { id: emailTemplateId || 0, scope_key: descriptor.scope_key, status: 'ready' } }),
+      db.EmailSenderIdentity.findOne({
+        where: { id: emailSenderIdentityId || 0, scope_key: descriptor.scope_key, status: 'active', verification_status: 'verified' },
+        include: [{ model: db.EmailSendingDomain, as: 'domain' }],
+      }),
+    ]);
+    if (!emailTemplate) {
+      const err = new Error('Selecciona una plantilla de email válida antes de preparar la campaña.');
+      err.status = 409;
+      throw err;
+    }
+    if (!emailSender || emailSender.domain?.verification_status !== 'verified' || emailSender.domain?.dkim_status !== 'verified') {
+      const err = new Error('Elige un remitente con dominio y DKIM verificados antes de preparar la campaña.');
+      err.status = 409;
+      throw err;
+    }
+    emailAssetsReady = true;
+  }
   const selectedTemplateId = isWelcomeDispatch
     ? (body.whatsapp_template_id || body.template_id || welcomeMessage.template_id)
     : (body.whatsapp_template_id
@@ -7563,6 +7679,8 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     ? !!template && String(template.status || '').toUpperCase() === 'APPROVED'
     : true;
   let items = await MarketingPatientListItem.findAll({ where: { list_id: list.id } });
+  await revalidateItemsForChannels(items, channels);
+  items = await MarketingPatientListItem.findAll({ where: { list_id: list.id } });
   const listCounters = computeCounters(items.map((item) => (item?.get ? item.get({ plain: true }) : item)));
   const dispatchItems = dispatchFilter
     ? items.filter((item) => itemMatchesDispatchFilter(item, dispatchFilter))
@@ -7614,7 +7732,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     ...(list.safety_gates || {}),
     frozen_audience: counters.ready > 0,
     opt_out: !!(body.consent_acknowledged ?? list.criteria?.consent_acknowledged),
-    approved_template: approved,
+    approved_template: approved && emailAssetsReady,
     audit: true,
     capping: true,
     cancelable_queue: true,
@@ -7633,6 +7751,10 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     // `template_id` points to legacy MessageTemplates. WABA templates live in
     // WhatsappTemplates, so keep the approved WABA reference in criteria/snapshot.
     template_id: null,
+    email_template_id: emailTemplateId,
+    email_sender_identity_id: emailSenderIdentityId,
+    action_mode: channels.join(','),
+    channel: channels[0] || list.channel || 'whatsapp',
     counters: isWelcomeDispatch ? listCounters : counters,
     safety_gates: nextGates,
     prepared_at: new Date(),
@@ -7640,9 +7762,12 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       ...nextCriteriaBase,
       campaign_name: normalizeText(body.campaign_name || list.criteria?.campaign_name || list.name),
       list_name: normalizeText(body.list_name || list.criteria?.list_name || list.name),
+      channels,
       whatsapp_template_id: isWelcomeDispatch ? (list.criteria?.whatsapp_template_id || null) : (template?.id || null),
       sender_origin_id: senderOriginId,
       sender_snapshot: buildWhatsappSenderSnapshot(senderConfig),
+      email_template_id: emailTemplateId,
+      email_sender_identity_id: emailSenderIdentityId,
       template_usage: templateUsage,
       template_commercial: templateCommercial,
       opt_out_text: templateCommercial ? normalizeText(body.opt_out_text || list.criteria?.opt_out_text) : null,
@@ -7768,6 +7893,9 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
 async function sendTest(scope, campaignId, body = {}) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  if (String(body.channel || '').toLowerCase() === 'email') {
+    return marketingEmailDispatchService.sendTest(list, body);
+  }
   let listCriteria = asPlainObject(list?.criteria);
   const templateUsage = normalizeTemplateUsage(body.template_usage || listCriteria.template_usage || 'promocion');
   if (isReviewTemplateUsage(templateUsage)) {
@@ -7915,10 +8043,13 @@ async function sendTest(scope, campaignId, body = {}) {
     throw err;
   }
   clinicConfig.clinicId = clinicId;
-  await whatsappAccountHealthService.assertCanSend({
-    clinicConfig,
-    source: 'marketing_bulk_send_test_preflight',
-  });
+  const paymentRecoveryProbe = body.payment_recovery_probe === true;
+  if (!paymentRecoveryProbe) {
+    await whatsappAccountHealthService.assertCanSend({
+      clinicConfig,
+      source: 'marketing_bulk_send_test_preflight',
+    });
+  }
   template = await resolveWhatsappTemplateForClinic(template, clinicId, clinicConfig);
   if (!template) {
     const err = new Error('No hay plantilla WhatsApp aprobada compatible con la clínica del contacto de prueba.');
@@ -7992,6 +8123,7 @@ async function sendTest(scope, campaignId, body = {}) {
       wabaId: clinicConfig.wabaId || null,
       sender_origin_id: clinicConfig.originId || null,
       whatsapp_channel_role: resolveWhatsappChannelRole(clinicConfig),
+      payment_recovery_probe: paymentRecoveryProbe,
     },
     sent_at: null,
   });
@@ -8007,7 +8139,13 @@ async function sendTest(scope, campaignId, body = {}) {
       templateParams: params,
       templateComponents,
       clinicConfig,
-      healthContext: { source: 'marketing_bulk_sends', messageId: appMessage.id },
+      healthContext: {
+        source: paymentRecoveryProbe
+          ? 'marketing_bulk_send_test_payment_recovery_probe'
+          : 'marketing_bulk_sends',
+        messageId: appMessage.id,
+        allowPaymentRecoveryProbe: paymentRecoveryProbe,
+      },
     });
   } catch (sendErr) {
     const providerError = sendErr?.response?.data || sendErr?.message || 'whatsapp_send_failed';
@@ -8407,10 +8545,33 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   if (isReviewRequestList(list)) {
     requireReviewSenderName(list.criteria?.review_sender_name || list.criteria?.reviewSenderName);
   }
-  if (!channels.includes('whatsapp')) {
-    const err = new Error('El envío real solo está conectado para WhatsApp en este MVP.');
+  const blockedGates = getBlockedGates(list.safety_gates || {});
+  if (blockedGates.length) {
+    const err = new Error('La campaña tiene garantías pendientes antes del envío.');
     err.status = 409;
+    err.details = { blocked_gates: blockedGates };
     throw err;
+  }
+  let emailReadiness = null;
+  if (channels.includes('email')) {
+    emailReadiness = await marketingEmailDispatchService.assertReady(list, { validateRecipients: true });
+  }
+  if (!channels.includes('whatsapp')) {
+    if (!['prepared', 'paused', 'cancelled', 'sending', 'scheduled'].includes(String(list.status || '').toLowerCase())) {
+      const err = new Error('Prepara la campaña antes de enviarla.');
+      err.status = 409;
+      throw err;
+    }
+    const emailDispatch = await marketingEmailDispatchService.enqueueDispatch(list, {
+      userId,
+      scheduledAt: body.scheduled_at || list.criteria?.scheduled_at || null,
+    });
+    await list.update({ status: emailDispatch.status === 'scheduled' ? 'scheduled' : 'sending' });
+    return {
+      success: true,
+      campaign: serializeCampaign(await list.reload()),
+      dispatch: { channel: 'email', ...emailDispatch, eligible: emailReadiness?.eligible || 0 },
+    };
   }
   if (!['prepared', 'paused', 'cancelled', 'sending'].includes(String(list.status || '').toLowerCase())) {
     const err = new Error('Prepara la campaña antes de enviarla.');
@@ -8420,13 +8581,6 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   if (isBlockingQualityPause(dispatch) && !isActorGlobalAdmin(actor)) {
     const err = new Error('No se puede reanudar una campaña pausada por baja calidad. Contacta con soporte.');
     err.status = 403;
-    throw err;
-  }
-  const blockedGates = getBlockedGates(list.safety_gates || {});
-  if (blockedGates.length) {
-    const err = new Error('La campaña tiene garantías pendientes antes del envío.');
-    err.status = 409;
-    err.details = { blocked_gates: blockedGates };
     throw err;
   }
   const welcomeMessage = list.criteria?.welcome_message && typeof list.criteria.welcome_message === 'object'
@@ -8512,6 +8666,13 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   await (primedList || list).update({
     criteria: mergeCriteria(primedList || list, { dispatch_config: { ...dispatch, business_hours: dispatchBusinessHours }, dispatch: nextDispatch }),
   });
+  let emailDispatch = null;
+  if (channels.includes('email')) {
+    emailDispatch = await marketingEmailDispatchService.enqueueDispatch(primedList || list, {
+      userId,
+      scheduledAt: body.scheduled_at || list.criteria?.scheduled_at || null,
+    });
+  }
   await MarketingPatientContactEvent.create({
     list_id: list.id,
     event_type: 'mass_campaign_dispatch_queued',
@@ -8533,13 +8694,33 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     success: true,
     campaign: serializeCampaign(reloaded),
     dispatch: getDispatchProgress(reloaded, scopedCounters, accountQuality),
+    email_dispatch: emailDispatch,
   };
 }
 
 async function cancelCampaignDispatch(scope, campaignId, body = {}, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  const channels = Array.isArray(list.criteria?.channels)
+    ? list.criteria.channels
+    : normalizeChannels(list.action_mode || list.channel);
+  let emailDispatch = null;
+  if (channels.includes('email')) {
+    emailDispatch = await marketingEmailDispatchService.cancelDispatch(list, {
+      userId,
+      reason: normalizeText(body.reason) || 'Cancelado por el usuario',
+    });
+  }
   const dispatch = getDispatchConfig(list);
+  const whatsappTerminal = ['completed', 'cancelled', 'archived', 'failed'].includes(String(dispatch.status || '').toLowerCase());
+  if (!channels.includes('whatsapp') || whatsappTerminal) {
+    await list.update({ status: 'cancelled' });
+    return {
+      success: true,
+      campaign: serializeCampaign(await list.reload()),
+      dispatch: { channel: 'email', ...(emailDispatch || {}) },
+    };
+  }
   const nextDispatch = {
     ...dispatch,
     status: 'cancel_requested',
@@ -8571,8 +8752,31 @@ async function cancelCampaignDispatch(scope, campaignId, body = {}, userId = nul
 async function pauseCampaignDispatch(scope, campaignId, body = {}, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  const channels = Array.isArray(list.criteria?.channels)
+    ? list.criteria.channels
+    : normalizeChannels(list.action_mode || list.channel);
+  let emailDispatch = null;
+  if (channels.includes('email')) {
+    emailDispatch = await marketingEmailDispatchService.pauseDispatch(list, {
+      userId,
+      reason: normalizeText(body.reason) || 'paused_by_user',
+    });
+  }
   const dispatch = getDispatchConfig(list);
   const normalizedStatus = String(dispatch.status || list.status || '').toLowerCase();
+  if (!channels.includes('whatsapp') || ['completed', 'cancelled', 'archived', 'failed'].includes(normalizedStatus)) {
+    if (!emailDispatch || ['completed', 'cancelled'].includes(String(emailDispatch.status || '').toLowerCase())) {
+      const err = new Error('Esta cola ya no está en curso y no se puede pausar.');
+      err.status = 409;
+      throw err;
+    }
+    await list.update({ status: 'paused' });
+    return {
+      success: true,
+      campaign: serializeCampaign(await list.reload()),
+      dispatch: { channel: 'email', ...emailDispatch },
+    };
+  }
   if (['completed', 'cancelled', 'archived', 'failed'].includes(normalizedStatus)) {
     const err = new Error('Esta cola ya no está en curso y no se puede pausar.');
     err.status = 409;
@@ -8651,7 +8855,34 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   const userId = getActorUserId(actor);
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  const channels = Array.isArray(list.criteria?.channels)
+    ? list.criteria.channels
+    : normalizeChannels(list.action_mode || list.channel);
+  if (!channels.includes('whatsapp')) {
+    const emailDispatch = await marketingEmailDispatchService.resumeDispatch(list, { userId });
+    await list.update({ status: emailDispatch.status === 'scheduled' ? 'scheduled' : 'sending' });
+    return {
+      success: true,
+      campaign: serializeCampaign(await list.reload()),
+      dispatch: { channel: 'email', ...emailDispatch },
+    };
+  }
   const dispatch = getDispatchConfig(list);
+  if (['completed', 'cancelled', 'archived', 'failed'].includes(String(dispatch.status || '').toLowerCase())
+    && channels.includes('email')) {
+    const emailDispatch = await marketingEmailDispatchService.resumeDispatch(list, { userId });
+    if (!['queued', 'scheduled', 'sending', 'waiting_next_batch', 'awaiting_delivery'].includes(String(emailDispatch.status || '').toLowerCase())) {
+      const err = new Error('Esta cola ya no tiene envíos pendientes que reanudar.');
+      err.status = 409;
+      throw err;
+    }
+    await list.update({ status: emailDispatch.status === 'scheduled' ? 'scheduled' : 'sending' });
+    return {
+      success: true,
+      campaign: serializeCampaign(await list.reload()),
+      dispatch: { channel: 'email', ...emailDispatch },
+    };
+  }
   const context = normalizeDispatchContext(dispatch.context);
   const welcomeMessage = list.criteria?.welcome_message && typeof list.criteria.welcome_message === 'object'
     ? list.criteria.welcome_message
@@ -8663,12 +8894,17 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     ['queued', 'sending', 'waiting_next_batch', 'scheduled'].includes(dispatchStatus)
     && dispatch.cancel_requested !== true
   ) {
+    let emailDispatch = list.email_dispatch || null;
+    if (channels.includes('email') && ['paused', 'cancelled', 'failed'].includes(String(emailDispatch?.status || ''))) {
+      emailDispatch = await marketingEmailDispatchService.resumeDispatch(list, { userId });
+    }
     const counters = await getDispatchScopedCounters(list, filter);
     return {
       success: true,
       already_running: true,
       campaign: serializeCampaign(list),
       dispatch: getDispatchProgress(list, counters, await getWhatsappAccountQualityForList(list, scope)),
+      email_dispatch: emailDispatch,
     };
   }
   if (['cancelled', 'changes_required'].includes(adminDecision)) {
@@ -8778,6 +9014,10 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   await (primedList || list).update({
     criteria: mergeCriteria(primedList || list, { dispatch: nextDispatch }),
   });
+  let emailDispatch = (primedList || list).email_dispatch || null;
+  if (channels.includes('email') && ['paused', 'cancelled', 'failed'].includes(String(emailDispatch?.status || ''))) {
+    emailDispatch = await marketingEmailDispatchService.resumeDispatch(primedList || list, { userId });
+  }
   await MarketingPatientContactEvent.create({
     list_id: list.id,
     event_type: 'mass_campaign_dispatch_resumed',
@@ -8792,6 +9032,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     success: true,
     campaign: serializeCampaign(reloaded),
     dispatch: getDispatchProgress(reloaded, counters, await getWhatsappAccountQualityForList(reloaded, scope)),
+    email_dispatch: emailDispatch,
   };
 }
 
@@ -10183,5 +10424,7 @@ module.exports = {
     mapReviewItemsFromImportedList,
     parseReviewImportListId,
     shouldScheduleReviewReminder,
+    buildItemDedupeKeyForChannels,
+    buildItemChannelEligibilityPatch,
   },
 };

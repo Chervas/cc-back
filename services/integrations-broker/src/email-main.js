@@ -19,7 +19,7 @@ function validateConfig(config) {
   const keys = ['cohort', 'enabled', 'environment', 'listenAddress', 'policy', 'port', 'stateFile', 'tlsCertFile', 'tlsKeyFile'];
   if (config?.tlsRenewal) { keys.push('tlsRenewal'); tlsReload.validateSettings(config.tlsRenewal); }
   if (!config || Object.keys(config).sort().join(',') !== keys.sort().join(',')
-    || config.cohort !== 'email-ses-transactional-v1' || config.enabled !== true || !['dev', 'staging', 'prod'].includes(config.environment)
+    || !['email-ses-transactional-v1', 'email-ses-v2'].includes(config.cohort) || config.enabled !== true || !['dev', 'staging', 'prod'].includes(config.environment)
     || !net.isIP(config.listenAddress) || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535
     || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   validatePolicy(config.policy);
@@ -34,11 +34,16 @@ function validateConfig(config) {
     || Object.keys(binding).some(key => !['connectionRef', 'provider', 'initialState', 'expiresAt', 'secretArn', 'email'].includes(key))
     || binding.email.recipientAllowlist.some(address => address !== address.toLowerCase())
     || binding.email.registeredAccountTemplates.some(template => !binding.email.templates.includes(template))
-    || config.environment === 'dev' && binding.email.templates.some(template => !L.AUTH_TEMPLATES.includes(template))) fail('invalid_request');
+    || config.environment === 'dev' && config.cohort === 'email-ses-transactional-v1'
+      && binding.email.templates.some(template => !L.AUTH_TEMPLATES.includes(template))) fail('invalid_request');
   for (const grant of config.policy.grants) {
+    const identityGrant = grant.assetRef === 'email:identity-management';
     if (grant.principalId !== ref || grant.connectionRef !== ref || grant.tenantRef !== `platform:${config.environment}`
-      || !binding.email.templates.some(template => grant.assetRef === `email:${template}`)
-      || grant.operations.length !== 1 || grant.operations[0] !== L.OPERATION) fail('invalid_request');
+      || !(binding.email.templates.some(template => grant.assetRef === `email:${template}`)
+        || grant.assetRef === 'email:identity-management')
+      || !grant.operations.length || grant.operations.some(operation => !L.isEmailOperation(operation))
+      || identityGrant && grant.operations.some(operation => operation === L.OPERATION)
+      || !identityGrant && grant.operations.some(operation => operation !== L.OPERATION)) fail('invalid_request');
   }
   return config;
 }

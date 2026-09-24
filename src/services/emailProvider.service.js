@@ -91,6 +91,12 @@ function messageTagValue(value) {
   return normalized || null;
 }
 
+function identityNameFromAddress(value) {
+  const match = String(value || '').match(/<([^<>]+)>\s*$/) || [null, value];
+  const address = String(match[1] || '').trim().toLowerCase();
+  return address.split('@')[1] || null;
+}
+
 function mapStreamToConfigurationSet(stream, config) {
   if (String(stream || '').toLowerCase() === 'marketing') {
     return config.marketingConfigurationSet;
@@ -109,6 +115,7 @@ function buildClient(config) {
 
 async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
   const config = getConfig(env);
+  const isMarketing = String(message.stream || '').trim().toLowerCase() === 'marketing';
   if (!config.enabled) {
     const error = new Error('email_provider_disabled');
     error.code = 'email_provider_disabled';
@@ -116,7 +123,7 @@ async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
     throw error;
   }
 
-  if (String(message.stream || '').trim().toLowerCase() === 'marketing' && !config.marketingEnabled) {
+  if (isMarketing && !config.marketingEnabled) {
     const error = new Error('email_marketing_disabled');
     error.code = 'email_marketing_disabled';
     error.retryable = false;
@@ -143,13 +150,19 @@ async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
     throw error;
   }
 
+  if (isMarketing && !config.brokerEnabled) {
+    throw Object.assign(new Error('email_marketing_broker_required'), {
+      code: 'email_marketing_broker_required',
+      retryable: false,
+    });
+  }
   if (!config.brokerEnabled) assertSesCredentials(config);
-  let recipientPolicy = 'allowlist';
+  let recipientPolicy = isMarketing ? 'marketing-consent' : 'allowlist';
   // The broker path must not turn a disabled local allowlist into unrestricted
   // recipients. Only the existing persisted-account policy can authorize MFA.
   const recipientConfig = config.brokerEnabled ? { ...config, requireRecipientAllowlist: true } : config;
   try {
-    assertRecipientAllowed(message.to, recipientConfig);
+    if (!isMarketing) assertRecipientAllowed(message.to, recipientConfig);
   } catch (error) {
     if (error.code !== 'email_recipient_not_allowlisted') throw error;
     let authorized;
@@ -171,6 +184,7 @@ async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
       templateKey: message.templateKey, stream: message.stream, recipientPolicy,
       to: message.to, from: cleanString(message.from) || config.defaultFrom, replyTo: cleanString(message.replyTo),
       configurationSet, subject: message.subject, text: message.text || '', html: message.html || '',
+      identityName: isMarketing ? identityNameFromAddress(cleanString(message.from) || config.defaultFrom) : null,
     }, { beforeDispatch: async () => {
       if (!getConfig(env).enabled) throw Object.assign(Error('email_provider_disabled'), { code: 'email_provider_disabled', retryable: false });
       if (beforeDispatch) {
@@ -308,4 +322,5 @@ module.exports = {
   sendEmail,
   classifyProviderError,
   mapStreamToConfigurationSet,
+  identityNameFromAddress,
 };

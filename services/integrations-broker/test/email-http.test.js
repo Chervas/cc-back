@@ -86,3 +86,45 @@ test('contract rejects arbitrary SES features, marketing, header injection and o
     assert.throws(() => C.validate(payload(patch)), { code: 'invalid_request' });
   }
 });
+
+test('marketing email verifies the exact SES domain before sending and blocks an unverified identity', async () => {
+  const marketing = payload({
+    templateKey: 'marketing.campaign',
+    stream: 'marketing',
+    recipientPolicy: 'marketing-consent',
+    from: 'Clinic QA <news@example.test>',
+    configurationSet: 'qa-marketing',
+    identityName: 'example.test',
+  });
+  const commands = [];
+  const verified = createEmailHttp({ clientFactory: () => ({
+    async send(command) {
+      commands.push(command.constructor.name);
+      if (command.constructor.name === 'GetEmailIdentityCommand') {
+        return { VerifiedForSendingStatus: true, DkimAttributes: { Status: 'SUCCESS' } };
+      }
+      return { MessageId: accepted().providerMessageId };
+    },
+    destroy() {},
+  }) });
+  assert.deepEqual(await verified({ payload: marketing, token: Buffer.from(JSON.stringify(credentials)) }), accepted());
+  assert.deepEqual(commands, ['GetEmailIdentityCommand', 'SendEmailCommand']);
+
+  let sent = false;
+  const blocked = createEmailHttp({ clientFactory: () => ({
+    async send(command) {
+      if (command.constructor.name === 'GetEmailIdentityCommand') {
+        return { VerifiedForSendingStatus: true, DkimAttributes: { Status: 'PENDING' } };
+      }
+      sent = true;
+      return { MessageId: accepted().providerMessageId };
+    },
+    destroy() {},
+  }) });
+  assert.deepEqual(await blocked({ payload: marketing, token: Buffer.from(JSON.stringify(credentials)) }), {
+    accepted: false,
+    code: 'email_ses_mail_from_unverified',
+    retryable: false,
+  });
+  assert.equal(sent, false);
+});

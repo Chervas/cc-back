@@ -2,7 +2,7 @@
 
 const https = require('node:https');
 const { Readable } = require('node:stream');
-const { SESv2Client, SendEmailCommand } = require('@aws-sdk/client-sesv2');
+const { SESv2Client, SendEmailCommand, GetEmailIdentityCommand } = require('@aws-sdk/client-sesv2');
 const { NodeHttpHandler } = require('@smithy/node-http-handler');
 const { BrokerError, fail } = require('./errors');
 const { credentials: validateCredentials } = require('./bedrock-contract');
@@ -17,8 +17,11 @@ const REJECTIONS = Object.freeze({
 function limitedHandler(inner) {
   return { metadata: inner.metadata,
     async handle(request, options) {
+      const outbound = request.method === 'POST' && request.path === '/v2/email/outbound-emails';
+      const identityCreate = request.method === 'POST' && request.path === '/v2/email/identities';
+      const identityRead = request.method === 'GET' && /^\/v2\/email\/identities\/[A-Za-z0-9.%_-]+$/.test(request.path);
       if (request.protocol !== 'https:' || request.hostname !== `email.${REGION}.amazonaws.com`
-        || request.port && request.port !== 443 || request.method !== 'POST' || request.path !== '/v2/email/outbound-emails'
+        || request.port && request.port !== 443 || !outbound && !identityCreate && !identityRead
         || Object.keys(request.query || {}).length) fail('invalid_request');
       const result = await inner.handle(request, options), body = result.response.body, chunks = [];
       let size = 0;
@@ -65,6 +68,12 @@ function createEmailHttp({ clientFactory = config => new SESv2Client(config),
       handler = limitedHandler(handlerFactory());
       client = clientFactory({ region: REGION, credentials, endpoint: `https://email.${REGION}.amazonaws.com`,
         useFipsEndpoint: false, useDualstackEndpoint: false, retryMode: 'standard', maxAttempts: 1, requestHandler: handler });
+      if (payload.stream === 'marketing') {
+        const identity = await client.send(new GetEmailIdentityCommand({ EmailIdentity: payload.identityName }), { abortSignal: controller.signal });
+        if (identity?.VerifiedForSendingStatus !== true || identity?.DkimAttributes?.Status !== 'SUCCESS') {
+          return project({ accepted: false, code: 'email_ses_mail_from_unverified', retryable: false });
+        }
+      }
       const response = await client.send(new SendEmailCommand(commandInput(payload)), { abortSignal: controller.signal });
       if (controller.signal.aborted) fail('provider_timeout');
       const data = project({ accepted: true, provider: 'ses', providerMessageId: response.MessageId });

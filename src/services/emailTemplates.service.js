@@ -25,12 +25,32 @@ function stripHtml(value) {
     .trim();
 }
 
-function replaceVars(template, context = {}) {
+function replaceVars(template, context = {}, { html = false } = {}) {
   return String(template || '').replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_match, path) => {
     const value = String(path).split('.').reduce((acc, key) => (
       acc && Object.prototype.hasOwnProperty.call(acc, key) ? acc[key] : undefined
     ), context);
-    return value === undefined || value === null ? '' : String(value);
+    if (value === undefined || value === null) return '';
+    return html ? escapeHtml(value) : String(value);
+  });
+}
+
+function templateVariables(...templates) {
+  const variables = new Set();
+  for (const template of templates) {
+    for (const match of String(template || '').matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)) {
+      variables.add(match[1]);
+    }
+  }
+  return [...variables];
+}
+
+function missingTemplateVariables(context = {}, ...templates) {
+  return templateVariables(...templates).filter(path => {
+    const value = String(path).split('.').reduce((acc, key) => (
+      acc && Object.prototype.hasOwnProperty.call(acc, key) ? acc[key] : undefined
+    ), context);
+    return value === undefined || value === null || String(value).trim() === '';
   });
 }
 
@@ -175,6 +195,32 @@ function renderAutomationGeneric(context = {}) {
   };
 }
 
+function renderMarketingCampaign(context = {}) {
+  const subject = assertSafeSubject(cleanString(context.subject) || 'Novedades de tu clínica');
+  const bodyHtml = cleanString(context.body_html);
+  const bodyText = cleanString(context.body_text) || stripHtml(bodyHtml || '');
+  const unsubscribeUrl = cleanString(context.unsubscribe_url);
+  if ((!bodyHtml && !bodyText) || !unsubscribeUrl || !/^https:\/\//i.test(unsubscribeUrl)) {
+    const error = new Error('marketing_email_body_or_unsubscribe_invalid');
+    error.code = 'marketing_email_body_or_unsubscribe_invalid';
+    throw error;
+  }
+  const footer = [
+    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td style="padding:20px 24px;text-align:center;font:12px/1.5 Arial,sans-serif;color:#64748b">',
+    '<a href="', escapeHtml(unsubscribeUrl), '" style="color:#475569;text-decoration:underline">Dejar de recibir estas comunicaciones</a>',
+    '<div style="margin-top:8px">Enviado con Clinicaclick</div>',
+    '</td></tr></table>',
+  ].join('');
+  const html = bodyHtml
+    ? bodyHtml.replace(/<\/body>\s*<\/html>\s*$/i, `${footer}</body></html>`)
+    : `<!doctype html><html><body><p>${escapeHtml(bodyText)}</p>${footer}</body></html>`;
+  return {
+    subject,
+    html: html.includes('Enviado con Clinicaclick') ? html : `${html}${footer}`,
+    text: `${bodyText}\n\nDejar de recibir estas comunicaciones: ${unsubscribeUrl}\nEnviado con Clinicaclick`,
+  };
+}
+
 function renderTemplate(templateKey, context = {}) {
   switch (String(templateKey || '').trim()) {
     case 'auth.password_reset':
@@ -187,6 +233,8 @@ function renderTemplate(templateKey, context = {}) {
       return renderOpsSystemAlert(context);
     case 'automation.generic':
       return renderAutomationGeneric(context);
+    case 'marketing.campaign':
+      return renderMarketingCampaign(context);
     default: {
       const error = new Error('email_template_not_supported');
       error.code = 'email_template_not_supported';
@@ -199,5 +247,8 @@ module.exports = {
   renderTemplate,
   assertSafeSubject,
   replaceVars,
+  templateVariables,
+  missingTemplateVariables,
   stripHtml,
+  renderMarketingCampaign,
 };

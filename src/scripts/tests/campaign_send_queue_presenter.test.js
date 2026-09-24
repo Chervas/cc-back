@@ -68,7 +68,7 @@ test('review and mass-send queues expose their type and canonical configuration 
   }, {}), {
     type: 'mass_send',
     type_label: 'Envío masivo',
-    configuration_url: '/marketing/objetivos?objective=mass_sends&mass_send_view=campaigns',
+    configuration_url: '/marketing/herramientas/envios-masivos',
     configuration_label: 'Abrir envíos masivos',
   });
 });
