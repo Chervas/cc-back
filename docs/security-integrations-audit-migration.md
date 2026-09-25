@@ -132,6 +132,16 @@ presencia de los archivos en Git no autoriza su aplicación ni la activación de
 los consumidores GBP. Antes de activar ambos gates, aplicar el corte controlado
 y repetir el preflight; faltando cualquiera de las dos migraciones fallará.
 
+El corte dedicado es
+`src/scripts/google-business-profile-writes-schema-release.js`. Admite únicamente
+`plan`, `backup` y `apply`, requiere fuente limpia y comprometida y escribe sus
+artefactos root-only bajo `/var/lib/clinicaclick-schema-recovery`. Detiene el
+proceso ante escritores públicos/WhatsApp activos, conexiones SQL adicionales,
+cambio de configuración, plan caducado, backup no verificable, DDL parcial o
+alteración de metadata previa. No activa los gates ni crea bindings de Google.
+La secuencia y el estado operativo se mantienen en
+[google-schema-readiness.md](google-schema-readiness.md).
+
 Para migrar **solo DEV**, con el checkout limpio y comprometido, crear un plan
 con las migraciones concretas, en el orden necesario. El plan guarda versión,
 hashes y metadata previa; no contiene datos clínicos ni contraseñas. Ejemplo del

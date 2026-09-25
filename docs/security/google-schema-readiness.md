@@ -56,6 +56,25 @@ esquema clínico con el catálogo de migraciones actual, ambas DDL continúan
 estado GBP ni justifica ejecutar el resto del historial pendiente. Este estado
 debe conservarse durante la reconciliación DEV/staging y su despliegue.
 
+El corte público de esas dos DDL dispone ahora de un operador dedicado:
+`src/scripts/google-business-profile-writes-schema-release.js`. No usa el
+`db:migrate` global. Sus fases separadas `plan`, `backup` y `apply` fijan el
+commit, contrato, hashes de ambas migraciones, configuración de staging/gateway
+y metadata previa. `backup` genera una copia de esquema cifrada; `apply` exige
+API, gateway y consumidores WhatsApp detenidos, cero conexiones adicionales a
+la base y el backup verificado. Tras aplicar, comprueba las tres tablas vacías y
+que toda la metadata anterior permanece idéntica al excluir estas tablas y sus
+dos entradas de `SequelizeMeta`. Un corte parcial o un plan consumido se detiene
+para revisión; no hay reintento ni `down` automáticos. El ensayo real sobre un
+MySQL propio y sin red externa está en
+`google_business_profile_writes_schema_release_mysql.integration.js`.
+
+Aplicar este corte solo satisface el requisito SQL. No configura claves, OAuth,
+grants o bindings, no abre `GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED` ni
+`GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED`, y no autoriza retirar el recorrido
+legacy. La activación continúa condicionada al canario aislado, conciliación de
+resultados inciertos y aceptación autenticada contra Google.
+
 ## Corte anterior — 19/09/2026, 18:04 UTC
 
 Las aplicaciones SQL descritas aquí no deben repetirse. DEV recibió sus seis DDL
