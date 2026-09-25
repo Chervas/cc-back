@@ -113,3 +113,9 @@ test('the operator accepts only an absolute source and a private recovery direct
     ['all', '--source', '/home/ubuntu/wt/back-dev', '--dir', '/var/lib/clinicaclick-schema-recovery/google-gbp-writes-20260925'],
   ]) assert.throws(() => operator.parse(argv), /google_business_profile_writes_arguments_invalid/);
 });
+
+test('writer detection excludes only the schema operator itself', () => {
+  assert.equal(operator.isPublicWriter('123', '/home/ubuntu/wt/back-staging', ['node', 'src/scripts/google-business-profile-writes-schema-release.js'], 123), false);
+  assert.equal(operator.isPublicWriter('124', '/home/ubuntu/wt/back-staging', ['node', 'src/app.js'], 123), true);
+  assert.equal(operator.isPublicWriter('124', '/home/ubuntu/wt/front-staging', ['node', 'src/app.js'], 123), false);
+});

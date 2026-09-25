@@ -48,6 +48,11 @@ function parse(argv) {
   return { action, source: fs.realpathSync(source), directory };
 }
 
+function isPublicWriter(id, cwd, command, currentPid = process.pid) {
+  return Number(id) !== currentPid && ROOTS.includes(cwd)
+    && command.some(value => /(^|\/)(node|npm)(\s|$)|src\/app\.js/.test(value));
+}
+
 function noWriters() {
   for (const id of fs.readdirSync('/proc').filter(value => /^[1-9][0-9]*$/.test(value))) {
     let cwd;
@@ -56,7 +61,7 @@ function noWriters() {
       cwd = fs.realpathSync(`/proc/${id}/cwd`);
       command = fs.readFileSync(`/proc/${id}/cmdline`).toString().split('\0');
     } catch { continue; }
-    if (ROOTS.includes(cwd) && command.some(value => /(^|\/)(node|npm)(\s|$)|src\/app\.js/.test(value))) {
+    if (isPublicWriter(id, cwd, command)) {
       fail('google_business_profile_writes_stop_public_writers_first');
     }
   }
@@ -268,4 +273,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run, parse, noWriters, publicTarget, verifyTarget, contracts };
+module.exports = { run, parse, isPublicWriter, noWriters, publicTarget, verifyTarget, contracts };
