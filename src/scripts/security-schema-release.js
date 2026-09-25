@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
-const { snapshot, compare, digest, validatePlan } = require('../lib/securitySchemaContract');
+const { snapshot, compare, digest, validatePlan, effectiveContract } = require('../lib/securitySchemaContract');
 const { observedEnvironment } = require('./security-email-login-metadata');
 const { configuration } = require('./security-database-metadata');
 const SOURCE = path.resolve(__dirname, '../..');
@@ -48,7 +48,8 @@ function environment(runtime) {
 }
 function settings(env) {
   return Object.fromEntries(['RUNTIME_NAMESPACE','JOB_RUNTIME_NAMESPACE','QUEUE_PREFIX','AUTH_SESSION_MODE',
-    'AUTH_EMAIL_MFA_MODE','EMAIL_ENABLED','JOBS_WORKER_ENABLED','JOBS_CRON_LEADER'].map(k => [k, env[k] ?? null]));
+    'AUTH_EMAIL_MFA_MODE','EMAIL_ENABLED','JOBS_WORKER_ENABLED','JOBS_CRON_LEADER',
+    'GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED','GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED'].map(k => [k, env[k] ?? null]));
 }
 function parse(argv) {
   const action = argv.shift(); const options = { source: SOURCE, runtime: 'dev', migrations: [] };
@@ -107,6 +108,7 @@ async function run(argv) {
   const options = parse([...argv]);
   const info = sourceInfo(options.source, options.action !== 'check');
   const env = environment(options.runtime);
+  info.contract = effectiveContract(info.contract, env);
   const connection = await require('mysql2/promise').createConnection(configuration(env));
   const query = async (sql, values = []) => (await connection.query({ sql, values, timeout: 30000 }))[0];
   let journalFd;
@@ -118,7 +120,8 @@ async function run(argv) {
       if (options.action === 'check') {
         const report = { status: compatibility.compatible ? 'compatible' : 'incompatible', runtime: options.runtime,
           revision: info.revision, contractDigest: info.contractDigest, snapshotDigest: digest(before),
-          settings: settings(env), checkedTables: Object.keys(info.contract.tables).length, ...compatibility };
+          settings: settings(env), checkedTables: Object.keys(info.contract.tables).length,
+          disabledFeatureGroups: info.contract.disabledFeatureGroups || [], ...compatibility };
         writeJson(options.out, report); return report;
       }
       const plan = { version: 1, runtime: 'dev', database: DEV_DATABASE, revision: info.revision,

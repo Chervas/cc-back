@@ -17,7 +17,9 @@ function identity(location) {
     connectionId: Number(location.google_connection_id), connectionRef: location.broker_read_connection_ref ?? null,
     assetRef: location.broker_read_asset_ref ?? null };
 }
-function createBusinessProfileCache({ models }) {
+function createBusinessProfileCache({ models,
+  enabled = () => process.env.GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED === 'true'
+    && process.env.GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED === 'true' }) {
   const db = () => typeof models === 'function' ? models() : models;
   async function locked(key, transaction) {
     if (!transaction) fail('business_profile_cache_invalid');
@@ -36,6 +38,7 @@ function createBusinessProfileCache({ models }) {
   }
   return {
     async mutation(assetRef, kind, delta, transaction) {
+      if (!enabled()) fail('broker_cohort_disabled');
       if (![1, -1].includes(delta)) fail('business_profile_cache_invalid');
       const row = await locked(keyFor(asset(assetRef).locationId, familyFor(kind)), transaction);
       const pending = Number(row.pending_count) + delta;
@@ -44,6 +47,7 @@ function createBusinessProfileCache({ models }) {
     },
     async begin(location, family, validate) {
       const captured = identity(location), key = keyFor(captured.id, family);
+      if (!enabled()) return Object.freeze({ bypass: true, captured, validate });
       return db().sequelize.transaction(async transaction => {
         await mapping(captured, transaction, validate);
         const row = await locked(key, transaction);
@@ -56,6 +60,7 @@ function createBusinessProfileCache({ models }) {
     async commit(ticket, apply) {
       return db().sequelize.transaction(async transaction => {
         await mapping(ticket.captured, transaction, ticket.validate);
+        if (ticket.bypass) return apply(transaction);
         const row = await db().BusinessProfileCacheState.findByPk(ticket.key, { transaction, lock: transaction.LOCK.UPDATE, logging: false });
         if (!row || row.pending_count || row.epoch !== ticket.epoch || row.observation_ref !== ticket.observation) fail('business_profile_sync_superseded');
         return apply(transaction);

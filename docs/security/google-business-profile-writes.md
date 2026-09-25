@@ -252,6 +252,13 @@ Variables sin activar: `GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED`,
 además del gate lector GBP y `JOB_RUNTIME_NAMESPACE` explícito. No se han generado
 ni admitido claves reales de escritor ni instalado esta cohorte en AWS.
 
+Mientras `GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED` y
+`GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED` no estén ambos activos, el preflight
+excluye el grupo de esquema `google_business_profile_writes` y los sync de solo
+lectura no consultan sus tres tablas. Esto conserva el comportamiento previo,
+pero no autoriza escrituras. Activar ambos gates obliga a tener registradas las
+dos DDL y hace que el preflight falle cerrado si falta alguna.
+
 Siguiente implementación necesaria:
 
 1. Completar la resolución de incertidumbres retenidas para revisión y la aceptación real del

@@ -1,6 +1,19 @@
 {
   "version": 1,
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
+  "featureGroups": {
+    "google_business_profile_writes": {
+      "enabledWhenAll": {
+        "GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED": "true",
+        "GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED": "true"
+      },
+      "tables": ["BusinessProfileMutations", "BusinessProfileMutationLocks", "BusinessProfileCacheStates"],
+      "migrations": [
+        "20260919200000-create-business-profile-mutation-journal.js",
+        "20260919210000-create-business-profile-cache-coordination.js"
+      ]
+    }
+  },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
     "WhatsappPhoneActivations": {

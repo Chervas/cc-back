@@ -9,7 +9,8 @@ function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credent
     '../../models': models, sequelize: require('sequelize'), crypto: require('node:crypto'),
     'node-cron': { schedule: fail }, axios: { create: () => legacyHttp, post: fail },
     '../services/businessProfileBroker.service': broker,
-    '../services/businessProfileCache.service': require('../../../services/businessProfileCache.service').createBusinessProfileCache({ models }),
+    '../services/businessProfileCache.service': require('../../../services/businessProfileCache.service')
+      .createBusinessProfileCache({ models, enabled: () => true }),
     '../services/googleLegacyCredentials.service': credentials || new Proxy({}, { get: () => fail }),
     '../services/searchConsoleBroker.service': searchConsole || new Proxy({}, { get: () => fail }),
     '../services/analyticsBroker.service': analytics || new Proxy({}, { get: () => fail }),

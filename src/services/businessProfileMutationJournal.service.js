@@ -47,7 +47,7 @@ function createBusinessProfileMutationJournal({ models, sessions, audit, now = D
       const gate = () => { if (!enabled() || namespace() !== runtimeNamespace) fail('broker_cohort_disabled'); }; gate();
       const m = typeof models === 'function' ? models() : models;
       const P = m.BusinessProfileMutation, L = m.BusinessProfileMutationLock;
-      const cache = require('./businessProfileCache.service').createBusinessProfileCache({ models: m });
+      const cache = require('./businessProfileCache.service').createBusinessProfileCache({ models: m, enabled });
       const events = audit || createRepository(m.PlatformAuditEvent);
       const broker = context.broker, location = context.location, brokerContext = context.brokerContext;
       if (typeof broker?.assert !== 'function' || typeof broker?.write !== 'function') fail('broker_binding_invalid');

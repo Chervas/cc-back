@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { compare, validatePlan, digest } = require('../../lib/securitySchemaContract');
+const { compare, validatePlan, digest, effectiveContract } = require('../../lib/securitySchemaContract');
 const { parse } = require('../security-schema-release');
 const schema = require('../../../ops/security/schema-contract.json');
 function baseline() {
@@ -62,4 +62,24 @@ test('command line never permits a public migration target or mixed actions', ()
   assert.throws(()=>parse(['apply-dev','--runtime','staging','--plan','/tmp/p','--out','/tmp/o']));
   assert.throws(()=>parse(['check','--migration','anything','--out','/tmp/o']));
   assert.throws(()=>parse(['plan-dev','--out','/tmp/o']));
+});
+test('gated schema requirements are omitted only while every declared gate is closed', () => {
+  const disabled = effectiveContract(schema, {});
+  for (const table of ['BusinessProfileMutations', 'BusinessProfileMutationLocks', 'BusinessProfileCacheStates']) {
+    assert.equal(Object.hasOwn(disabled.tables, table), false);
+  }
+  assert.equal(disabled.migrations.some(m => m.name.startsWith('202609192')), false);
+  assert.deepEqual(disabled.disabledFeatureGroups, ['google_business_profile_writes']);
+
+  const partiallyEnabled = effectiveContract(schema, { GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED: 'true' });
+  assert.equal(Object.hasOwn(partiallyEnabled.tables, 'BusinessProfileMutations'), false);
+
+  const enabled = effectiveContract(schema, {
+    GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED: 'true',
+    GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED: 'true',
+  });
+  assert.equal(Object.hasOwn(enabled.tables, 'BusinessProfileMutations'), true);
+  assert.equal(Object.hasOwn(enabled.tables, 'BusinessProfileCacheStates'), true);
+  assert.equal(enabled.migrations.filter(m => m.name.startsWith('202609192')).length, 2);
+  assert.deepEqual(enabled.disabledFeatureGroups || [], []);
 });

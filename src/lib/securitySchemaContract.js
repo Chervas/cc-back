@@ -2,6 +2,20 @@
 // Schema metadata only: never import application models or select business rows.
 const crypto = require('node:crypto');
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function effectiveContract(contract, env = {}) {
+  const selected = structuredClone(contract);
+  for (const [name, group] of Object.entries(contract.featureGroups || {})) {
+    const required = group.enabledWhenAll && Object.entries(group.enabledWhenAll)
+      .every(([key, value]) => String(env[key] ?? '') === String(value));
+    if (required) continue;
+    for (const table of group.tables || []) delete selected.tables[table];
+    const migrations = new Set(group.migrations || []);
+    selected.migrations = selected.migrations.filter(migration => !migrations.has(migration.name));
+    selected.disabledFeatureGroups ||= [];
+    selected.disabledFeatureGroups.push(name);
+  }
+  return selected;
+}
 async function snapshot(query) {
   const [defaults] = await query('SELECT DEFAULT_CHARACTER_SET_NAME,DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=DATABASE()', []);
   const tables = await query("SELECT TABLE_NAME,ENGINE,TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME", []);
@@ -52,4 +66,4 @@ function validatePlan(plan, actual, revision, contractDigest, migrations) {
   for (const m of plan.migrations) if (!/^[0-9]{14}-[a-z0-9-]+\.js$/.test(m.name)
     || !/^[a-f0-9]{64}$/.test(m.sha256) || migrations[m.name] !== m.sha256 || actual.migrations.includes(m.name)) throw Error('schema_migration_changed_or_applied');
 }
-module.exports = { snapshot, compare, digest, validatePlan };
+module.exports = { snapshot, compare, digest, validatePlan, effectiveContract };

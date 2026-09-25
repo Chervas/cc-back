@@ -122,9 +122,15 @@ Comprobación de la promoción reconciliada del 25/09: el esquema clínico regis
 `20260924100000-marketing-email-template-catalog.js`; las migraciones
 `20260919200000-create-business-profile-mutation-journal.js` y
 `20260919210000-create-business-profile-cache-coordination.js` no están
-registradas y permanecen fuera de este corte. No ejecutar `sequelize db:migrate`
-contra el conjunto completo. La presencia de los archivos en Git no autoriza su
-aplicación ni la activación de los consumidores GBP.
+registradas y permanecen fuera de este corte. El contrato las agrupa como
+`google_business_profile_writes`: solo son requisito de arranque cuando
+`GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED=true` y
+`GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED=true`. Con la cohorte cerrada, las
+sincronizaciones de solo lectura conservan una transacción local y no consultan
+esas tablas. No ejecutar `sequelize db:migrate` contra el conjunto completo. La
+presencia de los archivos en Git no autoriza su aplicación ni la activación de
+los consumidores GBP. Antes de activar ambos gates, aplicar el corte controlado
+y repetir el preflight; faltando cualquiera de las dos migraciones fallará.
 
 Para migrar **solo DEV**, con el checkout limpio y comprometido, crear un plan
 con las migraciones concretas, en el orden necesario. El plan guarda versión,
