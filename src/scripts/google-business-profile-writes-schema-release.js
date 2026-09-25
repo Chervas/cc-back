@@ -49,8 +49,9 @@ function parse(argv) {
 }
 
 function isPublicWriter(id, cwd, command, currentPid = process.pid) {
+  const executable = path.basename(command[0] || '');
   return Number(id) !== currentPid && ROOTS.includes(cwd)
-    && command.some(value => /(^|\/)(node|npm)(\s|$)|src\/app\.js/.test(value));
+    && (executable === 'node' || executable === 'npm');
 }
 
 function noWriters() {

@@ -114,8 +114,10 @@ test('the operator accepts only an absolute source and a private recovery direct
   ]) assert.throws(() => operator.parse(argv), /google_business_profile_writes_arguments_invalid/);
 });
 
-test('writer detection excludes only the schema operator itself', () => {
+test('writer detection excludes the operator and its shell wrappers, but not another Node writer', () => {
   assert.equal(operator.isPublicWriter('123', '/home/ubuntu/wt/back-staging', ['node', 'src/scripts/google-business-profile-writes-schema-release.js'], 123), false);
   assert.equal(operator.isPublicWriter('124', '/home/ubuntu/wt/back-staging', ['node', 'src/app.js'], 123), true);
   assert.equal(operator.isPublicWriter('124', '/home/ubuntu/wt/front-staging', ['node', 'src/app.js'], 123), false);
+  assert.equal(operator.isPublicWriter('124', '/home/ubuntu/wt/back-staging', ['/bin/bash', '-lc', 'sudo /usr/bin/node schema-release.js'], 123), false);
+  assert.equal(operator.isPublicWriter('124', '/home/ubuntu/wt/back-staging', ['sudo', '/usr/bin/node', 'schema-release.js'], 123), false);
 });
