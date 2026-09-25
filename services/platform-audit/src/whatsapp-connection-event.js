@@ -8,7 +8,7 @@ function whatsappConnectionEvent(v){
   if(!exact(v,keys)||!exact(v.actor,['type','id'])||!exact(v.scope,['type','id'])||v.version!==26
     ||![v.eventId,v.correlationId,v.sessionRef,v.requestRef].every(x=>typeof x==='string'&&UUID.test(x))||!stamp(v.occurredAt)
     ||!actions.includes(v.action)||v.stage!=='completed'||v.outcome!=='success'
-    ||!(v.action===actions[0]?['catalog_prepared','connection_activated']:['routing_saved']).includes(v.reason)
+    ||!(v.action===actions[0]?['catalog_prepared','connection_activated','connection_reauthorized']:['routing_saved']).includes(v.reason)
     ||v.actor.type!=='user'||!id(v.actor.id)||!['clinic','group'].includes(v.scope.type)||!id(v.scope.id)
     ||!Array.isArray(v.assetIds)||v.assetIds.length<1||v.assetIds.length>2||v.assetIds.some((x,i,a)=>!id(x)||i&&Number(a[i-1])>=Number(x))
     ||v.capturePolicy!=='whatsapp-operational-v1')fail();

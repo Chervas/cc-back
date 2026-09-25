@@ -24,6 +24,37 @@ Una autorización empieza con `enabled:false`; autorizar no concede permiso de e
 No mover la candidata a `AWSCURRENT`: una versión posterior del slot no sustituye
 silenciosamente la versión revisada.
 
+### Renovación de un permiso revocado
+
+Un `credential_revoked` detectado por el broker no elimina el teléfono ni su
+enrutamiento. La lectura segura del broker publica únicamente que la credencial
+operativa de una activación vigente está revocada; no expone el token ni reutiliza
+el estado administrativo del ámbito. Ajustes une ese recibo con el activo local
+por el `authorizationId` ya comprobado y muestra **Permiso desconectado**. La acción
+**Reconectar permiso** siempre abre un Embedded Signup nuevo; nunca cambia el
+estado del secreto anterior ni lo recupera manualmente.
+
+Un bloqueo de clínica/grupo, un cambio de configuración o una autorización aún
+sin activar conservan sus estados propios y no muestran esta acción.
+
+Al completar el alta, CRM solo admite una sustitución si WABA, `phoneId`, ámbito
+y conjunto ordenado de clínicas coinciden exactamente con la activación vigente.
+El activo conserva su ID, rol, rutas, políticas y `messageNotBefore`. Broker y
+CRM cambian atómicamente la activación anterior a `superseded` y la nueva a
+`active`; lectores, grants y catálogo excluyen la anterior. Un intento antiguo
+no puede reactivarse después. La migración
+`20260925113000-whatsapp-activation-history.js` conserva el historial y usa una
+clave generada para impedir dos activaciones `active` del mismo teléfono. El
+rollback se rechaza si ya existe historial de renovación.
+
+La renovación no libera colas, no reenvía históricos, no crea otra ficha de
+teléfono y no vuelve a solicitar plantillas ya asociadas al mismo WABA. Un WABA,
+número o ámbito diferente se trata como conflicto y no modifica el activo local.
+El orden de despliegue es obligatorio: migración SQL, broker y API CRM, y por
+último frontend. No mostrar el botón con un broker o API anterior, porque esos
+runtimes no conocen la sustitución coordinada. Verificar catálogo e inventario
+antes de habilitar la primera renovación real.
+
 La operación `meta.whatsapp.authorized.send.v1` recibe únicamente
 `{authorizationId,phoneId,message}`. `message` admite las formas de Graph que usa
 la aplicación: texto, plantilla y botón CTA URL. No compara huellas ni consulta

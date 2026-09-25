@@ -88,6 +88,11 @@ class BrokerStore {
     if (!row || row.state !== 'active' || row.expires_at !== null && row.expires_at <= now) fail('connection_blocked');
     return row;
   }
+  connectionState(ref, now = Date.now()) {
+    const row = this.db.prepare('SELECT state,expires_at FROM connections WHERE ref=?').get(ref);
+    if (!row) fail('connection_blocked');
+    return row.expires_at !== null && row.expires_at <= now ? 'expired' : row.state;
+  }
   assertAssetActive(request) {
     if (this.db.prepare('SELECT 1 FROM asset_revocations WHERE tenant=? AND connection=? AND asset=?')
       .get(request.tenantRef, request.connectionRef, request.assetRef)) fail('asset_revoked');

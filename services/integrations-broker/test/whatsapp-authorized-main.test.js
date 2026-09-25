@@ -25,10 +25,12 @@ function tlsFiles(c) {
     '-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
   fs.chmodSync(c.tlsKeyFile, 0o600); fs.chmodSync(c.tlsCertFile, 0o600);
 }
-test('Static staging grants accept only the bounded authorized profile read',async t=>{
+test('Static staging grants accept only the bounded authorized profile and permission-status reads',async t=>{
   const f=await fixture(t,{enabled:false});const c=config(f);
   const profileRead=require('../src/whatsapp-authorized-profile').READ;
+  const statusRead=require('../src/whatsapp-authorized-status').READ;
   assert(c.policy.grants.filter(grant=>grant.principalId==='staging:whatsapp').every(grant=>grant.operations.includes(profileRead)));
+  assert(c.policy.grants.filter(grant=>grant.principalId==='staging:whatsapp').every(grant=>grant.operations.includes(statusRead)));
   assert.doesNotThrow(()=>runtime.validateConfig(c));
   c.policy.grants.find(grant=>grant.principalId==='staging:whatsapp').operations.push('meta.whatsapp.authorized.profile.write.v1');
   assert.throws(()=>runtime.validateConfig(c),{code:'invalid_request'});

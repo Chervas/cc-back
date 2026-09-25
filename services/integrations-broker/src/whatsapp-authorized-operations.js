@@ -1,8 +1,10 @@
 'use strict';
 const C = require('./whatsapp-authorized-contract'); const { fail } = require('./errors');
-function createWhatsappAuthorizedOperations({ http, secrets, registry }) {
-  if (typeof http !== 'function' || typeof secrets?.proof !== 'function' || typeof registry?.assert !== 'function') fail('invalid_request');
+function createWhatsappAuthorizedOperations({ http, secrets, registry, store }) {
+  if (typeof http !== 'function' || typeof secrets?.proof !== 'function' || typeof registry?.assert !== 'function'
+    || typeof store?.connectionState !== 'function') fail('invalid_request');
   return Object.freeze({
+    [require('./whatsapp-authorized-status').READ]: require('./whatsapp-authorized-status').operation({registry,store}),
     [require('./whatsapp-inbound-media').READ]: require('./whatsapp-inbound-media').operation({secrets,registry}),
     [require('./whatsapp-authorized-profile').READ]: require('./whatsapp-authorized-profile').operation({http,secrets,registry}),
     ...require('./whatsapp-template-management').operations({ http, secrets, registry }),

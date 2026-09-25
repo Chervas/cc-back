@@ -5,7 +5,7 @@ function fixture({automatic=null}={}){
  const now=new Date('2026-09-15T12:00:00.000Z'),key=Buffer.alloc(32,7),viewer={userId:501,sessionRef:randomUUID(),sessionExpiresAt:Math.floor(now.getTime()/1000)+3600};
  const state={clinics:[{id_clinica:19,grupoClinicaId:5},{id_clinica:35,grupoClinicaId:5},{id_clinica:66,grupoClinicaId:29},{id_clinica:72,grupoClinicaId:29}],
   memberships:new Set([19,35,66,72]),blocked:new Set(),sessions:[],brokerCalls:[],queries:[],keys:[],revoked:false,afterBroker:null,onSnapshot:null,snapshots:0,remoteState:'staged',clock:0,rows:[],
-  assets:[],assetQueries:[],onAssetRead:null,phoneIds:new Map()};
+  assets:[],assetQueries:[],onAssetRead:null,phoneIds:new Map(),superseded:new Set(),active:new Set(),credentialRevoked:new Set(),authorizedCalls:[]};
  const bindings=[{scopeKey:'clinic:19',clinicIds:[19],connectionRef:'enrollment:19'},{scopeKey:'clinic:35',clinicIds:[35],connectionRef:'enrollment:35'},
   {scopeKey:'group:29',clinicIds:[66,72],connectionRef:'enrollment:29'}];
  function row(scope,age=0){
@@ -27,6 +27,8 @@ function fixture({automatic=null}={}){
    return state.assets.filter(a=>Object.entries(q.where).every(([k,v])=>a[k]===v)).slice(0,q.limit)
     .map(a=>Object.fromEntries(q.attributes.map(attr=>{const name=Array.isArray(attr)?attr[1]:attr;return[name,a[name]];})));}},
   UsuarioClinica:{findAll:async q=>{assert(q.where.rol_clinica[Op.in].includes('personaldeclinica'));return q.where.id_clinica[Op.in].filter(id=>state.memberships.has(id)).map(id=>({id_clinica:id}));}},
+  WhatsappPhoneActivation:{findAll:async q=>q.where.authorization_id[Op.in].flatMap(authorization_id=>state.superseded.has(authorization_id)
+   ?[{authorization_id,asset_id:382,state:'superseded'}]:state.active.has(authorization_id)?[{authorization_id,asset_id:382,state:'active'}]:[])},
   WhatsappAuthorizationState:{findAll:async q=>{state.queries.push(q);
    if(q.group)return [...new Map(state.rows.map(r=>[r.scope_type+':'+r.scope_id,{scope_type:r.scope_type,scope_id:r.scope_id}])).values()];
    return structuredClone(state.rows.filter(r=>q.where[Op.or].some(s=>s.scope_type===r.scope_type&&s.scope_id===r.scope_id)).slice(0,q.limit));},
@@ -35,10 +37,12 @@ function fixture({automatic=null}={}){
   assert.equal(actor.sessionRef,viewer.sessionRef);if(state.revoked)throw Object.assign(Error('FICTITIOUS_SESSION_SECRET'),{code:'auth_invalid',status:401});}};
  const broker={statusReadOnly:async context=>{state.brokerCalls.push(structuredClone(context));await state.afterBroker?.(context);
   const phoneId=state.phoneIds.get(context.requestId)||'401';
-  return {status:state.remoteState,accessBlocked:false,configurationChanged:false,channelRole:context.channelRole,candidate:state.remoteState==='staged'?{wabaId:'301',phoneId,FICTITIOUS_TOKEN:'NEVER_RETURN'}:null,
+  return {status:state.remoteState,accessBlocked:false,configurationChanged:false,channelRole:context.channelRole,
+   ...(state.credentialRevoked.has(context.requestId)?{credentialStatus:'revoked'}:{}),candidate:state.remoteState==='staged'?{wabaId:'301',phoneId,FICTITIOUS_TOKEN:'NEVER_RETURN'}:null,
    phoneState:state.remoteState==='staged'?{phoneId,isOnBizApp:true,platformType:'CLOUD_API',coexistenceAvailable:true,registrationAttempted:false,observedAt:now.getTime()}:null};},
   status:()=>assert.fail('ordinary status must not run'),begin:()=>assert.fail('begin must not run'),finish:()=>assert.fail('finish must not run'),abort:()=>assert.fail('abort must not run')};
- const service=createService({models,sessions,broker,loadBindings:()=>structuredClone(bindings),loadAutomatic:()=>automatic,config:()=>{const k=Buffer.from(key);state.keys.push(k);return {key:k};},
+ const authorizedBroker={permissionStatus:async(clinicId,assetId)=>{state.authorizedCalls.push({clinicId,assetId});return state.credentialRevoked.size?'disconnected':'connected';}};
+ const service=createService({models,sessions,broker,authorizedBroker,loadBindings:()=>structuredClone(bindings),loadAutomatic:()=>automatic,config:()=>{const k=Buffer.from(key);state.keys.push(k);return {key:k};},
   isBlocked:async scope=>state.blocked.has(scope.assignmentScope==='clinic'?'clinic:'+scope.clinicId:'group:'+scope.groupId),now:()=>new Date(now),clock:()=>state.clock});
  return {state,bindings,row,call:(scope=null)=>service.list({...viewer,scope}),raw:input=>service.list(input),viewer,
   resign:(r,channelRole)=>{r.channel_role=channelRole;r.context_digest=S.contextDigest(r);r.state_hash=S.digest(S.stateFor(key,r));}};
@@ -105,6 +109,20 @@ test('Changed group snapshot, binding config or original MAC never yields a succ
 test('Scope block preserves the staged receipt as blocked with no sending or selected-phone assertion',async()=>{
  const f=fixture();f.state.blocked.add('clinic:19');const result=await f.call({type:'clinic',id:19});
  assert.equal(result.authorizations[0].authorizationStatus,'blocked');assert.equal(result.authorizations[0].connected,false);assert.equal(result.authorizations[0].selected,null);assert.equal(result.authorizations[0].phoneState,null);
+});
+test('An operational credential revocation keeps the exact phone visible for permission renewal',async()=>{
+ const f=fixture();f.state.assets=[localAsset()];f.state.active.add(f.state.rows[0].request_id);f.state.credentialRevoked.add(f.state.rows[0].request_id);
+ const result=await f.call({type:'clinic',id:19}),receipt=result.authorizations[0];
+ assert.equal(receipt.authorizationStatus,'awaiting_activation');assert.equal(receipt.permissionStatus,'disconnected');
+ assert.equal(receipt.localPhone.id,382);assert.deepEqual(receipt.selected,{wabaId:'301',phoneId:'401'});
+ assert.deepEqual(f.state.authorizedCalls,[{clinicId:19,assetId:382}]);
+ const blocked=fixture();blocked.state.assets=[localAsset()];blocked.state.blocked.add('clinic:19');
+ const blockedReceipt=(await blocked.call({type:'clinic',id:19})).authorizations[0];
+ assert.equal(blockedReceipt.authorizationStatus,'blocked');assert.equal(Object.hasOwn(blockedReceipt,'permissionStatus'),false);
+});
+test('A superseded credential receipt is retained for audit but no longer shown as reconnectable',async()=>{
+ const f=fixture();f.state.superseded.add(f.state.rows[0].request_id);const result=await f.call({type:'clinic',id:19});
+ assert.deepEqual(result,{authorizations:[],incomplete:false});assert.equal(f.state.brokerCalls.length,0);
 });
 test('Status errors are incomplete; limits are bounded and newest receipt wins per scope and phone',async()=>{
  const f=fixture();f.state.afterBroker=()=>{throw Error('FICTITIOUS_PROVIDER_TOKEN');};assert.deepEqual(await f.call({type:'clinic',id:19}),{authorizations:[],incomplete:true});

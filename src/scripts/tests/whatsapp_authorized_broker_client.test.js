@@ -92,6 +92,17 @@ test('authorized profile refresh uses a read operation bound to the same clinic 
   assert.equal(f.calls[0].operation, 'meta.whatsapp.authorized.profile.read.v1');
   assert.deepEqual(f.calls[0].payload, { authorizationId: binding().authorizationId, phoneId: '401' });
 });
+test('permission status uses the exact authorized binding and a bounded secretless read', async () => {
+  let transportOptions;
+  const f = fixture({ createTransport: (_config, options) => { transportOptions = options; return { execute: async command => {
+    f.calls.push(command); return { requestId: command.requestId, replayed: false, data: { permissionStatus: 'disconnected' } };
+  } }; } });
+  assert.equal(await f.client.permissionStatus(123, 456), 'disconnected');
+  assert.deepEqual(transportOptions, { timeoutMs: 5000 });
+  assert.equal(f.calls[0].operation, 'meta.whatsapp.authorized.status.read.v1');
+  assert.deepEqual(f.calls[0].payload, { authorizationId: binding().authorizationId, phoneId: '401' });
+  assert.equal(f.calls[0].tenantRef, 'clinic:123'); assert.equal(f.calls[0].assetRef, 'wa-phone:401');
+});
 test('unbound or forged clinic, asset, authorization and revision never dispatch', async () => {
   for (const forged of [{ clinicId: 999 }, { assetId: 999 }, { phoneId: '402' }, { wabaId: '502' }, { revision: 2 },
     { connectionRef: 'wa:foreign' }, { authorizationId: 'b1234567-1234-4234-8234-123456789abc' }, { accessToken: 'SYNTHETIC_FORBIDDEN' }]) {

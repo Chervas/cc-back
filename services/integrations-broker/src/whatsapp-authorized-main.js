@@ -69,7 +69,7 @@ function validateConfig(config) {
       if (!b.clinicIds.some(id => grant.tenantRef === 'clinic:' + id) || grant.assetRef !== 'wa-phone:' + a.phoneId
         || grant.principalId !== 'dev:whatsapp' && !grant.operations.includes(expected)
         || grant.operations.some(op => ![expected,...(expected === C.SEND ? [...M.OPERATIONS,require('./whatsapp-inbound-media').READ,
-          require('./whatsapp-authorized-profile').READ] : [])].includes(op)) || new Set(grant.operations).size !== grant.operations.length || seen.has(key)) fail('invalid_request');
+          require('./whatsapp-authorized-profile').READ,require('./whatsapp-authorized-status').READ] : [])].includes(op)) || new Set(grant.operations).size !== grant.operations.length || seen.has(key)) fail('invalid_request');
       seen.add(key);
     }
   }
@@ -117,7 +117,7 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappAu
     store = new BrokerStore(config.stateFile);
     aws = await awsFactory();
     secrets = createWhatsappAuthorizedSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY, registry, http });
-    broker = new Broker({ store, policy: config.policy, secrets, operations: createWhatsappAuthorizedOperations({ http, secrets, registry }), timeoutMs: 25000,
+    broker = new Broker({ store, policy: config.policy, secrets, operations: createWhatsappAuthorizedOperations({ http, secrets, registry, store }), timeoutMs: 25000,
       policyResolver:activations?{resolve:(request,principal,policy)=>activations.resolve(request,principal,policy,store)}:undefined });
     server = createServer({ execute(...args) {
       if (!accepting || pending.size >= 8) fail('rate_limited');

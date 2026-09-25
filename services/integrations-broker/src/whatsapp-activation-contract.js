@@ -8,6 +8,7 @@ const ACTIVATE = 'meta.whatsapp.onboarding.activate.v1';
 const STATUS = 'meta.whatsapp.onboarding.activation-status.v1';
 const OPERATIONS = Object.freeze([PROFILE, ACTIVATE, STATUS]);
 const phases = Object.freeze(['prepared','capture_ready','register_requested','registration_uncertain','registration_required','subscribing','provider_pending','active']);
+const storedPhases = Object.freeze([...phases, 'superseded']);
 const positive = n => Number.isSafeInteger(n) && n > 0 && n <= 2147483647;
 function validate(payload, operation) {
   const keys = ['flowId', 'scopeDigest', 'clinicSetDigest', ...(operation === ACTIVATE ? ['assetId'] : [])];
@@ -29,4 +30,4 @@ function profile(raw, expected) {
     isOnBizApp: typeof raw.is_on_biz_app === 'boolean' ? raw.is_on_biz_app : null,
   };
 }
-module.exports = { PROFILE, ACTIVATE, STATUS, OPERATIONS, phases, positive, validate, connectionRef, profile };
+module.exports = { PROFILE, ACTIVATE, STATUS, OPERATIONS, phases, storedPhases, positive, validate, connectionRef, profile };

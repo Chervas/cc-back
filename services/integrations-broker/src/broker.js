@@ -51,7 +51,7 @@ class Broker {
       operation.validate(request.payload);
       operation.authorize?.({ request, binding, principal });
       this.adsEnrollment?.assert(request, principal, this.policy);
-      if (!['revoke_asset','google_oauth','whatsapp_onboarding','meta_marketing_oauth','google_ads_enrollment_status','google_ads_enrollment_revoke'].includes(operation.control)) {
+      if (!['revoke_asset','google_oauth','whatsapp_onboarding','meta_marketing_oauth','google_ads_enrollment_status','google_ads_enrollment_revoke','whatsapp_authorized_status'].includes(operation.control)) {
         this.store.connection(request.connectionRef, now);
         this.store.assertAssetActive(request);
       }
@@ -90,7 +90,7 @@ class Broker {
     const cached = this.store.reserve(principal.id, request.requestId, digest,
       eventFor(request, principal, resolved, 'integration.requested', 'accepted', 'authorized', now), this.policy.maxBacklog, now);
     if (cached) return { ...cached, replayed: true };
-    const metadataOnly = ['google_ads_enrollment_status','google_ads_enrollment_revoke'].includes(operation.control) && operation.secretless === true;
+    const metadataOnly = ['google_ads_enrollment_status','google_ads_enrollment_revoke','whatsapp_authorized_status'].includes(operation.control) && operation.secretless === true;
     const revision = metadataOnly ? null : this.store.connection(request.connectionRef, now).revision;
     const controller = new AbortController();
     const active = this.active.get(request.connectionRef) || new Set(); active.add(controller); this.active.set(request.connectionRef, active);
