@@ -179,6 +179,22 @@ function normalizeText(value) {
   return repairMojibake(String(value ?? '')).trim();
 }
 
+const CAMPAIGN_SENDER_VARIABLE_KEYS = new Set(['usuario_nombre', 'nombre_remitente', 'sender_name']);
+
+function normalizeCampaignSenderName(value) {
+  return normalizeText(value).replace(/\s+/g, ' ').slice(0, 80);
+}
+
+function resolveCampaignSenderName(list) {
+  const criteria = asPlainObject(list?.criteria);
+  return normalizeCampaignSenderName(
+    criteria.sender_name
+    || criteria.senderName
+    || criteria.usuario_nombre
+    || ''
+  );
+}
+
 function asPlainObject(value) {
   if (!value) return {};
   if (typeof value === 'string') {
@@ -6342,6 +6358,9 @@ async function createCampaign(scope, body = {}, userId = null) {
   const reviewSenderName = isReviewRequest
     ? requireReviewSenderName(body.review_sender_name || body.reviewSenderName)
     : null;
+  const campaignSenderName = normalizeCampaignSenderName(
+    body.sender_name || body.senderName || body.usuario_nombre || ''
+  );
 
   return db.sequelize.transaction(async (transaction) => {
     let itemPayloads = [];
@@ -6433,6 +6452,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         channels,
         template_usage: templateUsage,
         template_commercial: templateCommercial,
+        sender_name: campaignSenderName || null,
         whatsapp_template_id: Number(body.whatsapp_template_id || body.template_id || 0) || null,
         sender_origin_id: getRequestedWhatsappSenderOriginId(body),
         email_template_id: Number(body.email_template_id || 0) || null,
@@ -6819,6 +6839,11 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   }
   if (body.template_usage !== undefined) nextCriteria.template_usage = normalizeTemplateUsage(body.template_usage);
   if (body.template_commercial !== undefined) nextCriteria.template_commercial = body.template_commercial === true;
+  if (body.sender_name !== undefined || body.senderName !== undefined || body.usuario_nombre !== undefined) {
+    nextCriteria.sender_name = normalizeCampaignSenderName(
+      body.sender_name ?? body.senderName ?? body.usuario_nombre
+    ) || null;
+  }
   if (body.opt_out_text !== undefined) nextCriteria.opt_out_text = normalizeText(body.opt_out_text) || null;
   if (body.consent_acknowledged !== undefined) nextCriteria.consent_acknowledged = body.consent_acknowledged === true;
   if (body.schedule_mode !== undefined) nextCriteria.schedule_mode = normalizeText(body.schedule_mode) || 'now';
@@ -7124,6 +7149,7 @@ function resolveVariableValue(variableName, item, list, clinic) {
   const custom = item.custom_fields || {};
   const displayClinicName = resolveReviewDisplayClinicName(list, clinic);
   const reviewSenderName = resolveReviewSenderName(list);
+  const campaignSenderName = resolveCampaignSenderName(list);
   const patientFirstName = resolvePatientFirstNameForTemplate(item || {});
   const patientFullName = normalizeText(custom.nombre_completo || item.name || patientFirstName);
   const values = {
@@ -7144,6 +7170,9 @@ function resolveVariableValue(variableName, item, list, clinic) {
     nombre_remitente_resenas: reviewSenderName,
     remitente_resena: reviewSenderName,
     review_sender_name: reviewSenderName,
+    usuario_nombre: campaignSenderName,
+    nombre_remitente: campaignSenderName,
+    sender_name: campaignSenderName,
     telefono_clinica: clinic?.telefono || clinic?.telefono_clinica || '',
     direccion_clinica: clinic?.direccion || '',
     url_web_clinica: clinic?.url_web || '',
@@ -7164,6 +7193,9 @@ function resolveVariableValue(variableName, item, list, clinic) {
     referencia_visita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última atención'),
     referencia_cita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última atención'),
   };
+  if (CAMPAIGN_SENDER_VARIABLE_KEYS.has(key)) {
+    return campaignSenderName;
+  }
   return normalizeText(custom[key] || values[key] || '');
 }
 
@@ -7925,6 +7957,15 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       || list.criteria?.reviewSenderName
     )
     : null;
+  const campaignSenderName = normalizeCampaignSenderName(
+    body.sender_name
+    ?? body.senderName
+    ?? body.usuario_nombre
+    ?? list.criteria?.sender_name
+    ?? list.criteria?.senderName
+    ?? list.criteria?.usuario_nombre
+    ?? ''
+  );
   const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource || list.criteria?.review_source);
   const reviewTreatmentIds = parseReviewTreatmentIds({
     review_treatment_ids: body.review_treatment_ids || body.reviewTreatmentIds || list.criteria?.review_treatment_ids,
@@ -7986,7 +8027,14 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const clinicId = senderClinicId;
   const clinic = await loadClinicForTemplateVariables(clinicId);
   if (needsWhatsappTemplate && template) {
-    const missingVariables = buildMissingVariablesSummary({ template, items: selectedItems, list, clinic });
+    const variableList = {
+      ...(list?.get ? list.get({ plain: true }) : list),
+      criteria: {
+        ...asPlainObject(list.criteria),
+        sender_name: campaignSenderName || null,
+      },
+    };
+    const missingVariables = buildMissingVariablesSummary({ template, items: selectedItems, list: variableList, clinic });
     if (missingVariables.length) {
       const err = new Error(formatMissingVariablesMessage(missingVariables));
       err.status = 409;
@@ -8039,6 +8087,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       email_preheader: normalizeText(body.email_preheader || body.emailPreheader || list.criteria?.email_preheader) || null,
       template_usage: templateUsage,
       template_commercial: templateCommercial,
+      sender_name: campaignSenderName || null,
       opt_out_text: templateCommercial ? normalizeText(body.opt_out_text || list.criteria?.opt_out_text) : null,
       consent_acknowledged: !!(body.consent_acknowledged ?? list.criteria?.consent_acknowledged),
       review_request: isReviewRequest,
@@ -8167,6 +8216,18 @@ async function sendTest(scope, campaignId, body = {}) {
     return marketingEmailDispatchService.sendTest(list, body);
   }
   let listCriteria = asPlainObject(list?.criteria);
+  const hasExplicitCampaignSender = body.sender_name !== undefined
+    || body.senderName !== undefined
+    || body.usuario_nombre !== undefined;
+  if (hasExplicitCampaignSender) {
+    const nextSenderName = normalizeCampaignSenderName(
+      body.sender_name ?? body.senderName ?? body.usuario_nombre
+    ) || null;
+    if ((listCriteria.sender_name || null) !== nextSenderName) {
+      listCriteria = { ...listCriteria, sender_name: nextSenderName };
+      await list.update({ criteria: listCriteria });
+    }
+  }
   const templateUsage = normalizeTemplateUsage(body.template_usage || listCriteria.template_usage || 'promocion');
   if (isReviewTemplateUsage(templateUsage)) {
     const hasExplicitSender = body.review_sender_name !== undefined || body.reviewSenderName !== undefined;
@@ -8378,6 +8439,7 @@ async function sendTest(scope, campaignId, body = {}) {
       template_usage: templateUsage,
       template_commercial: templateCommercial,
       template_category: template.category || template.catalog?.category || null,
+      sender_name: listCriteria.sender_name || null,
       template_id: template.id,
       template_name: template.name,
       template_language: template.language || 'es',
