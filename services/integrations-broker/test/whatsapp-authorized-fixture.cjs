@@ -4,6 +4,7 @@ const { fixture: onboardingFixture } = require('./whatsapp-onboarding-fixture.cj
 const { BrokerStore } = require('../src/store'); const { Broker } = require('../src/broker'); const { signRequest } = require('../src/auth');
 const C = require('../src/whatsapp-authorized-contract'); const { createWhatsappAuthorizedRegistry } = require('../src/whatsapp-authorized-registry');
 const { createWhatsappAuthorizedSecrets } = require('../src/whatsapp-authorized-secrets'); const { createWhatsappAuthorizedOperations } = require('../src/whatsapp-authorized-operations');
+const P = require('../src/whatsapp-authorized-profile');
 const { ACCOUNT, SECRET_KEY } = require('../src/google-main');
 const template = () => ({ id: '901', name: 'appointment_qa', language: 'es', status: 'APPROVED', components: [
   { type: 'HEADER', format: 'IMAGE', example: { header_handle: ['FICTITIOUS_IMAGE_HANDLE'] } },
@@ -35,6 +36,9 @@ async function fixture(t, { enabled = true, ongoing = false } = {}) {
     await state.before?.(request); let result;
     if (request.action === 'send') result = structuredClone(state.response);
     else if (request.action === 'template') result = structuredClone(state.remoteTemplate);
+    else if (request.action === 'profile') result = { id: '401', status: 'CONNECTED', code_verification_status: 'VERIFIED',
+      quality_rating: 'GREEN', is_on_biz_app: false, platform_type: 'CLOUD_API',
+      display_phone_number: '+34 600 000 401', verified_name: 'Synthetic Clinic' };
     else result = await f.http(request);
     return state.after ? state.after(request, result) : result;
   };
@@ -42,7 +46,7 @@ async function fixture(t, { enabled = true, ongoing = false } = {}) {
   const principal = (id, keyId, key) => ({ id, keyId, enabled: true, maxPerMinute: 60, publicKey: key.publicKey.export({ type: 'spki', format: 'pem' }) });
   const policy = { audience: 'broker:authorized-qa', version: 'authorized-qa-v1', maxBacklog: 100,
     principals: [principal('staging:whatsapp','qa-staging',f.gateway), principal('control:whatsapp','qa-control',f.control)], connections: [binding],
-    grants: [71,72].flatMap(id => [{ principalId: 'staging:whatsapp', tenantRef: 'clinic:'+id, connectionRef: binding.connectionRef, assetRef: 'wa-phone:401', operations: [C.SEND] },
+    grants: [71,72].flatMap(id => [{ principalId: 'staging:whatsapp', tenantRef: 'clinic:'+id, connectionRef: binding.connectionRef, assetRef: 'wa-phone:401', operations: [C.SEND,P.READ] },
       { principalId: 'control:whatsapp', tenantRef: 'clinic:'+id, connectionRef: binding.connectionRef, assetRef: 'wa-phone:401', operations: [C.REVOKE] }]) };
   const filename = path.join(f.dir, 'authorized.sqlite'); const stores=[];
   const make = () => { const store = new BrokerStore(filename); stores.push(store); return { store, broker: new Broker({ store, policy, secrets,
