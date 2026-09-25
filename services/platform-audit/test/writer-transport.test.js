@@ -98,5 +98,11 @@ test('remote failure or a poisoned receipt never acknowledges a batch and expose
 test('a transport timeout leaves delivery uncertain without an automatic second request', async t => {
   const f = await setup(t, { write: async value => { await new Promise(resolve => setTimeout(resolve, 80)); return success(value); } });
   await assert.rejects(createClient({ ...f.settings, timeoutMs: 20 }).write(batch()), /audit_writer_unavailable/);
-  await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(f.calls(), 1);
+  const deadline = Date.now() + 2000;
+  while (f.calls() === 0 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(f.calls(), 1);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(f.calls(), 1);
 });

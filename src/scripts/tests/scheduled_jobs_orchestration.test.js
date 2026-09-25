@@ -17,7 +17,7 @@ const jobExecutor = require('../../services/jobExecutor.service');
 const jobScheduler = require('../../services/jobScheduler.service');
 const { metaSyncJobs, MetaSyncJobs } = require('../../jobs/sync.jobs');
 const webPublicationHealthMonitorService = require('../../services/webPublicationHealthMonitor.service');
-const { queues } = require('../../services/queue.service');
+const { queues, connection } = require('../../services/queue.service');
 const realAcquireBackgroundIntegrationLease = jobRequestsService.acquireBackgroundIntegrationLease;
 const testBackgroundLease = async () => ({
   acquired: true,
@@ -1513,6 +1513,14 @@ async function closeTestResources() {
   // handshake deja un error tardío de ioredis; primero esperamos readiness.
   await Promise.all(queueList.map((queue) => queue.waitUntilReady()));
   await Promise.all(queueList.map((queue) => queue.close()));
+  const redis = connection?.connection;
+  if (redis && redis.status !== 'end' && typeof redis.quit === 'function') {
+    try {
+      await redis.quit();
+    } catch (_error) {
+      if (typeof redis.disconnect === 'function') redis.disconnect();
+    }
+  }
   await new Promise((resolve) => setImmediate(resolve));
 }
 

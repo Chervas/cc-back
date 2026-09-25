@@ -50,9 +50,15 @@ async function main() {
   assert.deepEqual(capturedWhere.rol_clinica[Op.in], MARKETING_WRITE_ROLES);
 
   const appSource = fs.readFileSync(path.resolve(__dirname, '../../app.js'), 'utf8');
-  assert.match(appSource, /readPatients && patientSensitive/);
-  assert.match(appSource, /readLeads && leadSensitive/);
-  assert.match(appSource, /allowedClinicIds\.includes\(id\)/);
+  const socketAccessSource = fs.readFileSync(
+    path.resolve(__dirname, '../../services/socketAccess.service.js'),
+    'utf8',
+  );
+  assert.match(appSource, /socket-realtime-guard'\)\.installRealtimeAccess\(io\)/);
+  assert.match(socketAccessSource, /const PATIENT = \['quickchat\.read_patients', 'patients\.sensitive\.view'\]/);
+  assert.match(socketAccessSource, /const LEAD = \['quickchat\.read_leads', 'leads\.sensitive\.view'\]/);
+  assert.match(socketAccessSource, /for \(const clinicId of descriptor\.clinicIds\)[\s\S]*?for \(const featureKey of descriptor\.features\)[\s\S]*?canAccess/);
+  assert.match(socketAccessSource, /location\.clinicIds\.includes\(Number\(packet\.body\.clinic_id\)\)/);
 
   const intakeSource = fs.readFileSync(
     path.resolve(__dirname, '../../controllers/intake.controller.js'),

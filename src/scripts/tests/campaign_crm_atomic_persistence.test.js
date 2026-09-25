@@ -276,7 +276,10 @@ test('controllers use atomic persistence before post-commit conversion hooks in 
     assert.ok(upload > persistence, `${start}: no Google upload before the CRM commits`);
   }
   const appointments = source('controllers/citas.controller.js');
-  assert.match(appointments, /afterPersist: \(appointment, transaction\) => enqueueCreatedAppointmentCrmSignals/);
+  assert.match(
+    appointments,
+    /afterPersist: async \(appointment, transaction\) => \{[\s\S]*?await enqueueCreatedAppointmentCrmSignals\(\{ lead, appointment, transaction \}\);[\s\S]*?\}/,
+  );
   assert.match(appointments, /await createOptions\.afterPersist\(created, transaction\)/);
   assert.match(source('lib/patient-language.js'), /await afterPersist\(appointment, transaction\)/);
   assert.doesNotMatch(source('services/leadCrmSignalPersistence.service.js'), /sendMeta|maybeUploadGoogle|axios|fetch\(/);

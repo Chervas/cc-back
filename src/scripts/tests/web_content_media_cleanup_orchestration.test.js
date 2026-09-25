@@ -10,7 +10,7 @@ const marketingAiVisibilityService = require('../../services/marketingAiVisibili
 const marketingReportOverviewCacheService = require('../../services/marketingReportOverviewCache.service');
 const webContentMediaService = require('../../services/webContentMedia.service');
 const webContentGenerationService = require('../../services/webContentGeneration.service');
-const { queues } = require('../../services/queue.service');
+const { queues, connection } = require('../../services/queue.service');
 
 async function main() {
   const originals = {
@@ -79,7 +79,17 @@ async function main() {
 }
 
 async function closeTestResources() {
-  await Promise.all(Object.values(queues || {}).map((queue) => queue.close()));
+  const queueList = Object.values(queues || {});
+  await Promise.all(queueList.map((queue) => queue.waitUntilReady()));
+  await Promise.all(queueList.map((queue) => queue.close()));
+  const redis = connection?.connection;
+  if (redis && redis.status !== 'end' && typeof redis.quit === 'function') {
+    try {
+      await redis.quit();
+    } catch (_error) {
+      if (typeof redis.disconnect === 'function') redis.disconnect();
+    }
+  }
   await db.sequelize.close();
 }
 

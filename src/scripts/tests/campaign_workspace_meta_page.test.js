@@ -16,7 +16,11 @@ function harness() {
     leadAccess: true, connection: { id: 7, accessToken: 'private-token', expiresAt: '2099-01-01' }, setting: null };
   const transaction = { LOCK: { UPDATE: 'UPDATE' } };
   const models = {
-    Clinica: { findByPk: async () => ({ id_clinica: 1, estado_clinica: 1, grupoClinicaId: null }) },
+    Clinica: {
+      findByPk: async () => ({ id_clinica: 1, estado_clinica: 1, grupoClinicaId: null }),
+      findAll: async () => [],
+    },
+    GrupoClinica: { findAll: async () => [] },
     CampaignWorkspaceSetting: { findOne: async () => state.setting },
     ClinicMetaAsset: { findAll: async ({ where }) => where.assetType === 'facebook_page' ? state.pages || [structuredClone(state.page)]
       : [{ metaConnectionId: 7, assignmentScope: 'clinic', clinicaId: 1 }],

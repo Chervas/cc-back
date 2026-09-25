@@ -101,8 +101,12 @@ async function testDelayedTemplateSyncUsesDurableJobRequestWithoutToken() {
   }
 
   const source = read('services/whatsappTemplates.service.js');
-  const delayedStart = source.indexOf('if (delayMs > 0)');
+  const enqueueStart = source.indexOf('async function enqueueSyncTemplatesJob');
+  const delayedStart = source.indexOf('if (delayMs > 0', enqueueStart);
   const immediateStart = source.indexOf('\n  return queues.whatsappTemplateSync.add', delayedStart);
+  assert.ok(enqueueStart >= 0);
+  assert.ok(delayedStart > enqueueStart);
+  assert.ok(immediateStart > delayedStart);
   const delayedBlock = source.slice(delayedStart, immediateStart);
   assert.match(delayedBlock, /enqueueUniqueJobRequest/);
   assert.doesNotMatch(delayedBlock, /queues\.whatsappTemplateSync\.add/);

@@ -13,7 +13,7 @@ function fixture(decision) {
   const posts = []; const checks = []; const output = { exports: {} };
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module: output, exports: output.exports, console,
     process: { env: { META_PIXEL_ID: 'global-pixel', META_CAPI_TOKEN: 'global-token' } }, require: name => {
-      if (name === 'axios') return { post: async (...args) => { posts.push(args); return { data: { events_received: 1 } }; } };
+      if (name === '../lib/metaQuarantineHttp') return { post: async (...args) => { posts.push(args); return { data: { events_received: 1 } }; } };
       if (name === './campaignWorkspaceSignalPolicy.service') return { resolveWorkspaceSignalPolicy: async input => { checks.push(input); return decision; } };
       if (name === './metaWorkspaceSignalDelivery.service') return { sendWorkspaceMetaSignal: async input => {
         posts.push([`scoped/${input.pixelId}/events`, input, { params: { access_token: input.accessToken } }]);

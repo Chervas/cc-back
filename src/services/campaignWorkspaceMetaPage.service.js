@@ -71,6 +71,10 @@ async function assertPageMutation({ models, page, actorId, transaction = null, h
       findImplicitGroupId: async () => page.assignmentScope === 'group' ? page.grupoClinicaId : null,
       findGroupClinicIds: async groupId => (await models.Clinica.findAll({ where: { grupoClinicaId: groupId },
         attributes: ['id_clinica'], raw: true, transaction })).map(row => row.id_clinica),
+      findPrimaryGroupIds: async () => (await models.GrupoClinica.findAll({
+        where: { facebook_primary_asset_id: page.id }, attributes: ['id_grupo'], raw: true, transaction,
+        ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}),
+      })).map(row => row.id_grupo),
     });
   } catch (error) {
     if (error.code === 'asset_in_use') fail('workspace_meta_page_shared_access_required', 403);

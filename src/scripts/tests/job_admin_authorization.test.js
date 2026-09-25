@@ -6,7 +6,7 @@ const metaJobsController = require('../../controllers/metasync.jobs.controller')
 const jobRequestsController = require('../../controllers/jobrequests.controller');
 const jobRequestsService = require('../../services/jobRequests.service');
 const jobScheduler = require('../../services/jobScheduler.service');
-const { queues } = require('../../services/queue.service');
+const { queues, connection } = require('../../services/queue.service');
 
 function responseHarness() {
   return {
@@ -318,6 +318,14 @@ async function closeTestResources() {
   const queueList = Object.values(queues || {});
   await Promise.all(queueList.map((queue) => queue.waitUntilReady()));
   await Promise.all(queueList.map((queue) => queue.close()));
+  const redis = connection?.connection;
+  if (redis && redis.status !== 'end' && typeof redis.quit === 'function') {
+    try {
+      await redis.quit();
+    } catch (_error) {
+      if (typeof redis.disconnect === 'function') redis.disconnect();
+    }
+  }
   await new Promise((resolve) => setImmediate(resolve));
 }
 

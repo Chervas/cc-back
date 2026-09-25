@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const db = require('../../../models');
-const { queues } = require('../../services/queue.service');
+const { queues, connection } = require('../../services/queue.service');
 const accessPolicy = require('../../lib/access-policy');
 const intakeController = require('../../controllers/intake.controller');
 
@@ -14,6 +14,10 @@ const source = fs.readFileSync(
   'utf8',
 );
 const appSource = fs.readFileSync(path.resolve(__dirname, '../../app.js'), 'utf8');
+const socketAccessSource = fs.readFileSync(
+  path.resolve(__dirname, '../../services/socketAccess.service.js'),
+  'utf8',
+);
 const attachmentSource = fs.readFileSync(
   path.resolve(__dirname, '../../services/patientClinicalAttachments.service.js'),
   'utf8',
@@ -224,14 +228,26 @@ assert.doesNotMatch(
   /canSearchSensitive\s*\?[^:]*:\s*\[[\s\S]{0,160}source_detail/,
   'non-sensitive list/stats search must not fall back to source_detail',
 );
-assert.match(appSource, /readPatients && patientSensitive/);
-assert.match(appSource, /readLeads && leadSensitive/);
+assert.match(appSource, /socket-realtime-guard'\)\.installRealtimeAccess\(io\)/);
+assert.match(socketAccessSource, /const PATIENT = \['quickchat\.read_patients', 'patients\.sensitive\.view'\]/);
+assert.match(socketAccessSource, /const LEAD = \['quickchat\.read_leads', 'leads\.sensitive\.view'\]/);
+assert.match(socketAccessSource, /for \(const featureKey of descriptor\.features\) if \(!await canAccess/);
 assert.match(attachmentSource, /clinical_attachment:[\s\S]*featureKey: 'patients\.sensitive\.view'/);
 
 console.log('lead privacy access contract: ok');
 
 async function closeTestResources() {
-  await Promise.all(Object.values(queues || {}).map((queue) => queue.close()));
+  const queueList = Object.values(queues || {});
+  await Promise.all(queueList.map((queue) => queue.waitUntilReady()));
+  await Promise.all(queueList.map((queue) => queue.close()));
+  const redis = connection?.connection;
+  if (redis && redis.status !== 'end' && typeof redis.quit === 'function') {
+    try {
+      await redis.quit();
+    } catch (_error) {
+      if (typeof redis.disconnect === 'function') redis.disconnect();
+    }
+  }
   await db.sequelize.close();
 }
 

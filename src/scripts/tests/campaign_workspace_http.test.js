@@ -107,7 +107,20 @@ async function fixture(t) {
   } };
   const controller = loadModule('controllers/campaignWorkspace.controller.js', overrides);
   const secret = randomBytes(32).toString('hex');
-  const auth = loadModule('routes/auth.middleware.js', {}, { process: { env: { JWT_SECRET: secret } } });
+  const sessionVerifier = {
+    bearer(header) {
+      if (typeof header !== 'string' || !header.startsWith('Bearer ')) {
+        throw new jwt.JsonWebTokenError('missing bearer token');
+      }
+      return header.slice(7);
+    },
+    async verify(token) {
+      return jwt.verify(token, secret, { algorithms: ['HS256'] });
+    },
+  };
+  const auth = loadModule('routes/auth.middleware.js', {
+    '../services/accessSession.service': sessionVerifier,
+  });
   const unrelated = () => assert.fail('Unrelated marketing endpoints must not execute');
   const unrelatedController = new Proxy({}, { get: () => unrelated });
   const routeSource = fs.readFileSync(path.join(root, 'routes/marketing.routes.js'), 'utf8');
