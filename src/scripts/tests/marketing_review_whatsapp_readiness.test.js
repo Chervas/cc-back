@@ -10,6 +10,7 @@ const {
   hasWhatsappConfigForClinic,
   isAllowedReviewRequestTemplateCopy,
   isWhatsappRoutingConfigAvailable,
+  selectApprovedReviewTemplateCandidate,
 } = service.__testing;
 
 test('review readiness accepts an exact tokenless broker authorization', () => {
@@ -125,4 +126,44 @@ test('an approved admin review template may keep the category accepted by Meta',
   };
 
   assert.equal(isAllowedReviewRequestTemplateCopy(template), true);
+});
+
+test('a clinic-specific approved photo template wins over the generic catalog copy', () => {
+  const components = [{
+    type: 'HEADER',
+    format: 'IMAGE',
+  }, {
+    type: 'BODY',
+    text: 'Hola {{1}}, soy {{2}} de {{3}}. Queremos saber cómo te atendimos en tu visita del {{4}}. ¿Cómo valorarías tu experiencia?\n\nResponde con un número:\n\n5 ⭐⭐⭐⭐⭐\n4 ⭐⭐⭐⭐\n3 ⭐⭐⭐\n2 ⭐⭐\n1 ⭐\n\nTu valoración nos ayuda mucho.',
+  }];
+  const custom = {
+    id: 4714,
+    name: 'cc_solicitud_de_opinion_tras_visita_test',
+    origin: 'custom',
+    created_by_user_id: 1,
+    category: 'UTILITY',
+    clinic_id: 56,
+    waba_id: 'waba-review-secondary',
+    components,
+    variables: [{ name: 'nombre_paciente', template_usage: 'solicitud_resena' }],
+  };
+  const catalog = {
+    id: 4552,
+    name: 'clinicaclick_solicitar_resena_foto_v1',
+    origin: 'catalog',
+    category: 'MARKETING',
+    clinic_id: null,
+    waba_id: 'waba-review-secondary',
+    components,
+    variables: [{ name: 'nombre_paciente', template_usage: 'solicitud_resena' }],
+    catalog: { body_text: components[1].text },
+  };
+
+  const selected = selectApprovedReviewTemplateCandidate([catalog, custom], {
+    clinicIds: [56],
+    targetWabaId: 'waba-review-secondary',
+    preferPhoto: true,
+  });
+
+  assert.equal(selected.id, 4714);
 });
