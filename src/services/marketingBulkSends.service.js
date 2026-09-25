@@ -7703,6 +7703,28 @@ function partitionItemsByTemplateVariableAvailability({ template, items, list, c
   return { eligibleItems, excludedItems };
 }
 
+async function persistMissingVariableExclusion({ item, missingVariables, listId }) {
+  const patch = {
+    status: 'excluded_missing_variables',
+    exclusion_reason: 'variables_faltantes',
+    selected: false,
+    reason: formatMissingVariablesMessage(missingVariables),
+    missing_variables: missingVariables,
+  };
+  if (typeof item?.update === 'function') {
+    await item.update(patch);
+    return patch;
+  }
+
+  const itemId = Number(item?.id || 0);
+  if (itemId && Number(listId || 0)) {
+    await MarketingPatientListItem.update(patch, {
+      where: { id: itemId, list_id: Number(listId) },
+    });
+  }
+  return patch;
+}
+
 function formatMissingVariablesMessage(summary) {
   const first = summary?.[0];
   if (!first) return 'La plantilla usa variables que no existen para todos los contactos.';
@@ -8078,13 +8100,10 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
         clinic,
       });
       await Promise.all(partition.excludedItems.map(async ({ item, missingVariables: itemMissingVariables }) => {
-        if (typeof item?.update !== 'function') return;
-        await item.update({
-          status: 'excluded_missing_variables',
-          exclusion_reason: 'variables_faltantes',
-          selected: false,
-          reason: formatMissingVariablesMessage(itemMissingVariables),
-          missing_variables: itemMissingVariables,
+        await persistMissingVariableExclusion({
+          item,
+          missingVariables: itemMissingVariables,
+          listId: list.id,
         });
       }));
       selectedItems = partition.eligibleItems;
@@ -10857,5 +10876,6 @@ module.exports = {
     isAllowedReviewRequestTemplateCopy,
     selectApprovedReviewTemplateCandidate,
     partitionItemsByTemplateVariableAvailability,
+    persistMissingVariableExclusion,
   },
 };
