@@ -14,37 +14,35 @@ la vía anterior con el guard de credenciales legacy. El nodo gestionado conserv
 un intento por ejecución/nodo y comprueba el intento vigente del job antes de
 aceptar su resultado.
 
-Estado operativo verificado el 25/09/2026: la BD compartida por CRM/staging ya
-contiene `BusinessProfileBrokerBindings`, `BusinessProfileMutations`,
-`BusinessProfileMutationLocks` y `BusinessProfileCacheStates`, pero las cuatro
-tablas están vacías. Los gates de la cohorte están ausentes o apagados; no hay
-bindings, mutaciones, bloqueos ni caché gestionada. Por tanto, disponer del esquema
-**no acredita una migración ni habilita escrituras por broker**. Las 15 ubicaciones
-activas continúan sincronizando correctamente por el lector nativo actual y las
-fichas no migradas conservan su vía legacy protegida.
+Estado operativo verificado el 25/09/2026: la BD compartida por CRM/staging
+contiene las cuatro tablas, un único `BusinessProfileBrokerBinding` para la
+clínica 92 y ninguna mutación, lock, caché o revocación pendiente. Los gates de
+lectura, escritura y revocación están activos en la API staging. Las otras 14
+ubicaciones activas siguen por la vía legacy protegida; no se han creado bindings
+ni grants para ellas.
 
-Preparación de despliegue del 25/09/2026: la fuente incorpora una unidad systemd
-dedicada `clinicaclick-google-business-profile@.service`, el enrolamiento cerrado
-de la identidad TLS `google-business-profile-staging:8456` y su etiqueta de
-monitorización. Las pruebas de contrato, TLS ficticio, recuperación y unidad
-endurecida pasan con Node 24. **Esta preparación no acredita instalación**: el
-inventario AWS de solo lectura no encontró unidad, configuración, secreto Google,
-certificado enrolado ni proceso `google-main`, y CRM no tiene todavía claves
-cliente ni flags activos.
+El runtime aislado `google-main` está instalado en AWS como
+`clinicaclick-google-business-profile@staging.service`, escucha por mTLS en 8456
+y usa la cohorte `google-business-profile-write-v1`. Lector, escritor y control
+tienen claves Ed25519 diferentes; el proceso AWS conserva solo sus públicas. El
+servicio está limitado por política al único activo piloto. La API staging carga
+las privadas desde archivos 0600 y no recibe refresh tokens ni secretos OAuth.
 
 La unidad usa la cuenta de sistema abreviada `cc-google-gbp-<entorno>`. El nombre
 completo del servicio supera el límite efectivo de 32 caracteres aceptado por
 `groupadd` en el host AWS; la abreviatura conserva un usuario/grupo exclusivo sin
 compartir identidad con otros brokers.
 
-La primera cohorte propuesta queda limitada a la clínica de pruebas `clinic:92`,
+La primera cohorte real queda limitada a la clínica de pruebas `clinic:92`,
 cuenta `accounts/103033606619897470310` y ubicación
 `locations/9681856373471112042`, mediante la conexión Google 23 ya utilizada por
-el lector legacy. El corte debe crear un único binding y grants exactos para ese
-activo; no copiar bindings a las otras 14 ubicaciones. Primero se acepta una
-lectura gestionada y después, con una operación inocua expresamente elegida por
-el titular, la escritura y su conciliación. Hasta entonces las 15 ubicaciones
-siguen por el lector legacy y los gates permanecen apagados.
+el lector legacy. El corte creó un único binding y grants exactos para ese activo.
+La lectura gestionada completó una sincronización nativa sin errores. La prueba
+de proveedor vació una lista de horarios especiales que ya estaba vacía, obtuvo
+`applied`, recuperó el mismo recibo con `mutation.status.v1` y comprobó de nuevo
+cero periodos, por lo que no produjo cambio visible. Después, el cliente real de
+la API aceptó lectura y conciliación `not_found` sin mutar Google. No copiar este
+binding a las otras 14 ubicaciones.
 
 El refresh token y el secreto OAuth no se deben copiar por VNC, consola, línea de
 comandos, logs o tickets. Su traslado exige un canal de migración de una sola vez
@@ -56,8 +54,8 @@ La clave TLS del servidor permanece en AWS. Una sesión web VNC permite validar
 Google y AWS, pero no sustituye esas identidades técnicas ni autoriza usar una
 sesión root para provisionar.
 
-No retirar tokens compartidos ni activar la cohorte hasta completar el censo, la
-resolución de incertidumbres y una aceptación autenticada por cohorte. El puente
+No retirar tokens compartidos ni ampliar la cohorte hasta completar el censo, la
+resolución de incertidumbres y una aceptación autenticada por nueva cohorte. El puente
 externo OPS es independiente del lector nativo: en la comprobación del 25/09 su
 endpoint no respondió y sus jobs agotaron reintentos, sin afectar al sync nativo
 15/15. Su recuperación requiere un corte propio; no justifica abrir estos gates.
@@ -293,10 +291,11 @@ plantilla/ejecución, sustituir el UUID ni editar filas para desbloquearla.
 Tampoco se libera un lock
 por antigüedad. Los jobs clínicos de DEV permanecen apagados.
 
-Variables sin activar: `GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED`,
-`GOOGLE_BUSINESS_PROFILE_WRITER_KEY_ID` y `GOOGLE_BUSINESS_PROFILE_WRITER_KEY_FILE`,
-además del gate lector GBP y `JOB_RUNTIME_NAMESPACE` explícito. No se han generado
-ni admitido claves reales de escritor ni instalado esta cohorte en AWS.
+Staging tiene activos `GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED`,
+`GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED`, `GOOGLE_BUSINESS_PROFILE_REVOCATION_ENABLED`
+y su worker. Las identidades de lectura, escritura y control apuntan a archivos
+privados distintos. DEV conserva estos gates cerrados. `JOB_RUNTIME_NAMESPACE`
+sigue siendo explícito y los jobs clínicos de DEV permanecen apagados.
 
 Mientras `GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED` y
 `GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED` no estén ambos activos, el preflight
@@ -307,24 +306,25 @@ dos DDL y hace que el preflight falle cerrado si falta alguna.
 
 Siguiente implementación necesaria:
 
-1. Completar la resolución de incertidumbres retenidas para revisión y la aceptación real del
-   nodo adaptado. Mantener apagados en DEV los jobs que actúan sobre pacientes,
+1. Completar la aceptación autenticada de un consumidor manual en la pantalla
+   real y la resolución de incertidumbres retenidas del nodo adaptado. Mantener
+   apagados en DEV los jobs que actúan sobre pacientes,
    leads, campañas y automatizaciones; este corte no autoriza su activación.
 2. Las DDL `20260919200000-create-business-profile-mutation-journal.js`
    y `20260919210000-create-business-profile-cache-coordination.js` (tres tablas)
-   ya están aplicadas también en la BD compartida de CRM/staging y sus tablas
-   continúan vacías a 25/09. El requisito SQL está satisfecho, pero no constituye
-   activación: antes de publicar consumidores/sync hay que volver a comprobar
-   que sigan vacías, drenar escritores y lecturas, y fijar la release compatible.
+   ya están aplicadas también en la BD compartida de CRM/staging. Mutaciones,
+   locks y caché continúan vacíos tras la aceptación del broker; el binding piloto
+   es la única fila gestionada. Antes de ampliar hay que comprobar esos diarios,
+   drenar escritores y lecturas y fijar la release compatible.
    No inicializar contadores a cero sobre actividad anterior ni mezclar escritores
    de versiones que no participan. El down rechaza borrar filas de coordinación
    existentes y estas DDL no deben volver a ejecutarse.
 3. Conservar la compatibilidad AWS v1–v25 publicada el 20/09 y publicar el panel
    y filtro v25 junto con los consumidores. El canario sintético real verifica
    transporte S3; no sustituye la aceptación clínica del consumidor.
-4. Completar resolución/retención de incertidumbres, censo de identidad compartida,
-   promoción selectiva y pruebas autenticadas en las pantallas reales con titular,
-   proveedor y cardinalidad/carga reales. La preparación no autoriza el cierre legacy.
+4. Completar resolución/retención de incertidumbres, censo de identidad compartida
+   y pruebas autenticadas en las pantallas reales con titular, proveedor y
+   cardinalidad/carga reales. El piloto no autoriza el cierre legacy.
 
 ## Evidencia y recuperación
 
@@ -333,8 +333,10 @@ MySQL 8/SQLite: consumidores manuales y recuperación con permisos/sesiones fict
 fallos de auditoría, sesión revocada, aliases, grupos, fotos compartidas y caché
 posterior protegida. Auditoría: 97 pruebas, incluidas v25 y rechazo de referencia,
 digest o KMS distintos. El componente Angular y su servicio se prueban en Chromium
-con HTTP ficticio, en escritorio/móvil. Los proveedores, sesiones y datos de QA
-son ficticios: no es aceptación clínica autenticada. Resultado de regresión global y revisiones en
+con HTTP ficticio, en escritorio/móvil. La regresión automatizada conserva
+proveedores y sesiones ficticios. Además, el 25/09 se aceptaron contra Google real
+la lectura piloto, una escritura vacía idempotente y su recuperación, sin cambio
+visible. Todavía no es aceptación humana de todos los consumidores. Resultado de regresión global y revisiones en
 la [bitácora](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-consumidores-manuales-gbp-diario-sql-y-pendientes-2026-09-19).
 
 Evidencia privada: `qa-evidence/security-resume-20260917/google-gbp-consumers-20260919/`
@@ -347,8 +349,9 @@ La fuente real del executor y motor se carga con dependencias explícitas en el
 MySQL aislado. Se prueban ACK perdido, timeout real antes/después de aceptar Google
 ficticio, reemplazo/cancelación de claim, namespace/ejecución incorrectos, permisos
 y plantilla modificados durante la llamada, rollback del nodo, plan concurrente
-y consulta de incertidumbres sin reenvío. No prueba interfaz autenticada ni Google real.
-No hay despliegue del consumidor GBP que revertir. La publicación AWS de auditoría
+y consulta de incertidumbres sin reenvío. No prueba la interfaz autenticada real.
+Existe un despliegue piloto que se revierte cerrando primero los gates de staging,
+sin borrar el binding, los diarios ni el estado SQLite. La publicación AWS de auditoría
 exige conservar un lector v1–v25. Conservar las releases/grants clínicos actuales. Una futura
 recuperación debe mantener el diario y los intentos inciertos; volver a código
 que lea tokens o borrar bloqueos no es una recuperación válida de una cohorte
