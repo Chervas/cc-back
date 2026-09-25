@@ -658,8 +658,10 @@ function assertCompletedProviderResponse(payload = {}) {
 
 async function runOpenAiGeneration(generation, dependencies = {}) {
   await require('./securityMonitoring.service').assertAiAllowed('web_content');
-  const http = aiBroker.enabled('openai') ? { post: (_url, body, options) => aiBroker.execute('openai', 'web_content', body, { timeoutMs: options.timeout }) }
-    : dependencies.axios || axios;
+  const http = dependencies.axios
+    || (aiBroker.enabled('openai')
+      ? { post: (_url, body, options) => aiBroker.execute('openai', 'web_content', body, { timeoutMs: options.timeout }) }
+      : axios);
   const response = await http.post('https://api.openai.com/v1/responses', {
     model: OPENAI_MODEL,
     store: false,
