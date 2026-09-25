@@ -68,7 +68,8 @@ function validateConfig(config) {
       const key = JSON.stringify([grant.principalId,grant.tenantRef]);
       if (!b.clinicIds.some(id => grant.tenantRef === 'clinic:' + id) || grant.assetRef !== 'wa-phone:' + a.phoneId
         || grant.principalId !== 'dev:whatsapp' && !grant.operations.includes(expected)
-        || grant.operations.some(op => ![expected,...(expected === C.SEND ? [...M.OPERATIONS,require('./whatsapp-inbound-media').READ] : [])].includes(op)) || new Set(grant.operations).size !== grant.operations.length || seen.has(key)) fail('invalid_request');
+        || grant.operations.some(op => ![expected,...(expected === C.SEND ? [...M.OPERATIONS,require('./whatsapp-inbound-media').READ,
+          require('./whatsapp-authorized-profile').READ] : [])].includes(op)) || new Set(grant.operations).size !== grant.operations.length || seen.has(key)) fail('invalid_request');
       seen.add(key);
     }
   }

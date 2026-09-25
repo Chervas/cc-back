@@ -41,6 +41,8 @@ test('Cloud registration completes subscription and exposes only exact activated
   const policy={connections:[],grants:[]};const request={connectionRef:A.connectionRef(f.flow.flowId),tenantRef:'clinic:71',assetRef:'wa-phone:401',operation:'meta.whatsapp.authorized.send.v1'};
   const C=require('../src/whatsapp-authorized-contract');request.operation=C.SEND;
   assert.equal(reader.resolve(request,{id:'staging:whatsapp'},policy,f.f.current.store).grants.length,1);
+  const profileRequest={...request,operation:require('../src/whatsapp-authorized-profile').READ};
+  assert.equal(reader.resolve(profileRequest,{id:'staging:whatsapp'},policy,f.f.current.store).grants.length,1);
   assert.equal(reader.resolve(request,{id:'dev:whatsapp'},policy,f.f.current.store),policy);
   assert.throws(()=>reader.resolve({...request,tenantRef:'clinic:73'},{id:'staging:whatsapp'},policy,f.f.current.store),/scope_denied/);
   f.restart();await f.execute();assert.equal(f.state.calls.filter(v=>v==='register_phone').length,1);

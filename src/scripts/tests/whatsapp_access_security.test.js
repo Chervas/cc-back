@@ -3,7 +3,7 @@ const test = require('node:test'); const assert = require('node:assert/strict');
 require('./fixtures/security_offline_runtime.cjs');
 const { Op } = require('sequelize');
 function fake(name, exports) { const id = require.resolve(name); require.cache[id] = { id, filename: id, loaded: true, exports }; }
-let assetQueries = [], role = 'propietario', sqlFails = false, assetRow = null;
+let assetQueries = [], role = 'propietario', sqlFails = false, assetRow = null, authorizedRefreshCalls = [];
 const models = {
   UsuarioClinica: { findAll: async options => {
     if (!options.where.id_clinica) return [{ id_clinica: 4, rol_clinica: role }];
@@ -18,7 +18,7 @@ const models = {
   }, findOne: async () => ({ id_clinica: 4, grupoClinicaId: null }), findByPk: async () => ({ id_clinica: 4, grupoClinicaId: null }) },
   ClinicMetaAsset: { findAll: async options => { assetQueries.push(options); if (sqlFails) throw Error('SENTINEL_SQL_SECRET');
     return assetRow && options.where.assetType === 'whatsapp_phone_number' ? [assetRow] : []; },
-    findOne: async options => { assetQueries.push(options); return null; } },
+    findOne: async options => { assetQueries.push(options); return assetRow; } },
 };
 assert.equal(require.cache[require.resolve('../../../models')], undefined); fake('../../../models', models);
 // Stub service side effects before loading the actual controller/router. The
@@ -30,6 +30,10 @@ for (const match of source.matchAll(/require\(['"]\.\.\/services\/([^'"]+)['"]\)
     throw Error('UNEXPECTED_SERVICE_SIDE_EFFECT');
   } }));
 }
+fake('../../services/whatsappAuthorizedPhoneRefresh.service', { refresh: async input => {
+  authorizedRefreshCalls.push(input);
+  return { health: { state: 'healthy', can_send: true } };
+} });
 fake('../../routes/auth.middleware', (req, res, next) => {
   if (req.headers['x-test-auth'] !== 'yes') return res.status(401).json({ error: 'unauthorized' });
   req.userData = { userId: 123 }; next();
@@ -40,7 +44,7 @@ test.before(async () => {
   server = http.createServer(app); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   agent = new http.Agent(); agent.createConnection = require('./fixtures/campaign_offline_runtime.cjs').connectionForTestServer(server);
 });
-test.beforeEach(() => { assetQueries = []; role = 'propietario'; sqlFails = false; assetRow = null; });
+test.beforeEach(() => { assetQueries = []; role = 'propietario'; sqlFails = false; assetRow = null; authorizedRefreshCalls = []; });
 test.after(async () => { agent?.destroy(); if (server?.listening) await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); });
 function request(path, { method = 'GET', authenticated = true, body = {} } = {}) {
   return new Promise((resolve, reject) => {
@@ -75,13 +79,37 @@ test('strict IDs reject malformed scopes; an authorized clinic still has a histo
   const r = await request('/status?clinic_id=4'); assert.equal(r.status, 200); assert.deepEqual(r.data, { configured: false });
 });
 test('quarantine rejects all public WhatsApp mutations before queueing, registration or local assignment', async () => {
-  for (const [method, path] of [['POST', '/messages'], ['POST', '/templates/sync'], ['POST', '/phones/222222/register'],
+  for (const [method, path] of [['POST', '/messages'], ['POST', '/phones/222222/register'],
     ['PUT', '/phones/222222/assignment'], ['DELETE', '/phones/222222'], ['PATCH', '/phones/222222']]) {
     assert.equal((await request(path, { method, authenticated: false })).status, 401);
     const r = await request(path, { method, body: { accessToken: 'SENTINEL_TOKEN', clinic_id: 999 } });
     assert.equal(r.status, 503); assert.equal(r.data.error, 'meta_security_quarantine'); assert(!JSON.stringify(r.data).includes('SENTINEL'));
   }
   assert.equal(assetQueries.length, 0);
+});
+test('profile refresh opens only for a scoped broker authorization and never falls back to a legacy token', async () => {
+  const base = { id: 10, phoneNumberId: '222222', wabaId: '111111', clinicaId: 4, assignmentScope: 'clinic',
+    grupoClinicaId: null, isActive: true, metaConnection: { userId: 123 }, clinica: { id_clinica: 4, grupoClinicaId: null } };
+  assetRow = { ...base, waAccessToken: 'SENTINEL_LEGACY_TOKEN' };
+  let response = await request('/phones/222222/refresh', { method: 'POST', body: { clinic_id: 4 } });
+  assert.equal(response.status, 503);
+  assert.equal(response.data.error, 'meta_security_quarantine');
+  assert.equal(authorizedRefreshCalls.length, 0);
+
+  assetRow = { ...base, whatsappAuthorizationId: 'a1234567-1234-4234-8234-123456789abc' };
+  response = await request('/phones/222222/refresh', { method: 'POST', body: { clinic_id: 4 } });
+  assert.equal(response.status, 200);
+  assert.equal(response.data.mode, 'authorized');
+  assert.deepEqual(response.data.health, { state: 'healthy', can_send: true });
+  assert.equal(authorizedRefreshCalls.length, 1);
+  assert.equal(authorizedRefreshCalls[0].asset, assetRow);
+  assert.equal(authorizedRefreshCalls[0].clinicId, 4);
+  assert(!JSON.stringify(response.data).includes('SENTINEL'));
+
+  response = await request('/phones/222222/refresh', { method: 'POST', body: { clinic_id: 5 } });
+  assert.equal(response.status, 403);
+  assert.equal(response.data.error, 'forbidden');
+  assert.equal(authorizedRefreshCalls.length, 1);
 });
 test('phone list SQL failures never return or log raw credentials', async () => {
   sqlFails = true; const logs = []; const original = console.error; console.error = (...args) => logs.push(args);

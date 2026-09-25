@@ -25,6 +25,14 @@ function tlsFiles(c) {
     '-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
   fs.chmodSync(c.tlsKeyFile, 0o600); fs.chmodSync(c.tlsCertFile, 0o600);
 }
+test('Static staging grants accept only the bounded authorized profile read',async t=>{
+  const f=await fixture(t,{enabled:false});const c=config(f);
+  const profileRead=require('../src/whatsapp-authorized-profile').READ;
+  c.policy.grants.filter(grant=>grant.principalId==='staging:whatsapp').forEach(grant=>grant.operations.push(profileRead));
+  assert.doesNotThrow(()=>runtime.validateConfig(c));
+  c.policy.grants.find(grant=>grant.principalId==='staging:whatsapp').operations.push('meta.whatsapp.authorized.profile.write.v1');
+  assert.throws(()=>runtime.validateConfig(c),{code:'invalid_request'});
+});
 test('Authorized runtime rejects mixed identities, grants, enrollment slots and aliased paths before AWS', async t => {
   const f = await fixture(t, { enabled: false }); const base = config(f); runtime.validateConfig(base);
   const changes = [c => { c.cohort = 'whatsapp-messaging-v1'; }, c => { c.enabled = false; },

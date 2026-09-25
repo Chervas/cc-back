@@ -8,11 +8,11 @@ const whatsappPaymentStatusService = require('../services/whatsappPaymentStatus.
 const {
   buildRegisteredSnapshot,
   enqueueSyncPhonesJob,
-  syncPhonesForWaba,
 } = require('../services/whatsappPhones.service');
 const whatsappCoexistenceService = require('../services/whatsappCoexistence.service');
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
 const whatsappAccountHealthService = require('../services/whatsappAccountHealth.service');
+const whatsappAuthorizedPhoneRefreshService = require('../services/whatsappAuthorizedPhoneRefresh.service');
 const whatsappChannelBindingsService = require('../services/whatsappChannelBindings.service');
 const { buildWhatsappProfileAlignment } = require('../lib/whatsapp-profile-alignment');
 const { filterEffectiveWhatsappPhoneAssets } = require('../lib/effective-whatsapp-phone');
@@ -3654,19 +3654,32 @@ exports.refreshPhoneStatus = async (req, res) => {
       return res.status(403).json({ success: false, error: 'forbidden' });
     }
 
-    if (!phone.wabaId || !phone.waAccessToken) {
-      return res.status(400).json({ success: false, error: 'missing_waba_or_token' });
+    if (phone.whatsappAuthorizationId) {
+      const requestedClinicId = Number(req.body?.clinic_id || phone.clinicaId || 0);
+      if (!Number.isInteger(requestedClinicId) || requestedClinicId <= 0) {
+        return res.status(400).json({ success: false, error: 'clinic_id_required' });
+      }
+      await assertWhatsappTemplateClinicAccess({ clinicId: requestedClinicId, userId });
+      const requestedClinic = await Clinica.findByPk(requestedClinicId, {
+        attributes: ['id_clinica', 'grupoClinicaId'],
+        raw: true,
+      });
+      if ((phone.assignmentScope === 'clinic' && Number(phone.clinicaId) !== requestedClinicId)
+        || (phone.assignmentScope === 'group' && Number(requestedClinic?.grupoClinicaId) !== Number(phone.grupoClinicaId))) {
+        return res.status(400).json({ success: false, error: 'whatsapp_scope_invalid' });
+      }
+      const result = await whatsappAuthorizedPhoneRefreshService.refresh({
+        asset: phone,
+        clinicId: requestedClinicId,
+      });
+      return res.json({ success: true, mode: 'authorized', health: result.health });
     }
 
-    await syncPhonesForWaba({
-      wabaId: phone.wabaId,
-      accessToken: phone.waAccessToken,
-      mode: 'full',
-      ensureTemplates: false,
-    });
-
-    return res.json({ success: true });
+    return res.status(503).json({ success: false, error: 'meta_security_quarantine' });
   } catch (err) {
+    if (err?.statusCode === 403 || err?.code === 'whatsapp_template_clinic_scope_forbidden') {
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
     console.error('Error refreshPhoneStatus', err);
     return res.status(500).json({ success: false, error: 'refresh_failed' });
   }

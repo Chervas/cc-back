@@ -9,12 +9,12 @@ function createWhatsappAuthorizedHttp({ request = https.request, timeoutMs = 800
   return async input => {
     if (!input || Object.keys(input).some(key => !['action', 'id', 'token', 'proof', 'candidate', 'json', 'signal', 'after'].includes(key))) fail('invalid_request');
     const { action, id, token, proof, candidate, json, signal, after } = input;
-    if (!['send', 'template', 'inspect', 'phones', 'phone_state', 'waba_owner','templates_list','templates_create','templates_delete'].includes(action) || typeof id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(id)
+    if (!['send', 'template', 'inspect', 'phones', 'phone_state', 'profile', 'waba_owner','templates_list','templates_create','templates_delete'].includes(action) || typeof id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(id)
       || !Buffer.isBuffer(token) || !tokenText(token.toString('utf8'))
       || action !== 'inspect' && (typeof proof !== 'string' || !/^[a-f0-9]{64}$/.test(proof) || candidate !== undefined)
       || action === 'inspect' && (proof !== undefined || json !== undefined || !Buffer.isBuffer(candidate) || !tokenText(candidate.toString('utf8'))
         || !new RegExp('^' + id + '\\|[a-f0-9]{32}$').test(token.toString('utf8')))
-      || ['template', 'phones', 'phone_state', 'waba_owner'].includes(action) && json !== undefined
+      || ['template', 'phones', 'phone_state', 'profile', 'waba_owner'].includes(action) && json !== undefined
       || after !== undefined && (!['phones','templates_list'].includes(action) || typeof after !== 'string' || !/^[A-Za-z0-9_+=/-]{1,2048}$/.test(after))
       || action === 'send' && (json?.messaging_product !== 'whatsapp' || !['text', 'template', 'interactive'].includes(json.type))) fail('invalid_request');
     if (action === 'send') validateMessage(json);
@@ -33,6 +33,7 @@ function createWhatsappAuthorizedHttp({ request = https.request, timeoutMs = 800
     if (action === 'template') query.set('fields', 'id,name,language,status,components');
     if (action === 'phones') { query.set('fields', 'id'); query.set('limit', '100'); if (after !== undefined) query.set('after', after); }
     if (action === 'phone_state') query.set('fields', 'id,is_on_biz_app,platform_type');
+    if (action === 'profile') query.set('fields', 'id,status,code_verification_status,quality_rating,is_on_biz_app,platform_type,display_phone_number,verified_name');
     if (action === 'waba_owner') query.set('fields', 'id,owner_business_info');
     return new Promise((resolve, reject) => {
       let req; let timer; let settled = false;
