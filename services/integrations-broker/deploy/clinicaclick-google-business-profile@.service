@@ -7,8 +7,8 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-User=cc-google-business-profile-%i
-Group=cc-google-business-profile-%i
+User=cc-google-gbp-%i
+Group=cc-google-gbp-%i
 WorkingDirectory=/opt/clinicaclick-google-business-profile/current
 Environment=AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_EC2_METADATA_V1_DISABLED=true AWS_EC2_METADATA_SERVICE_ENDPOINT=http://169.254.169.254
 ExecStart=/opt/clinicaclick-audit/node-v24.21.0-recovery1/bin/node --max-old-space-size=128 src/google-main.js /etc/clinicaclick-google-business-profile-%i/config.json
