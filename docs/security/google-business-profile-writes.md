@@ -23,6 +23,34 @@ bindings, mutaciones, bloqueos ni caché gestionada. Por tanto, disponer del esq
 activas continúan sincronizando correctamente por el lector nativo actual y las
 fichas no migradas conservan su vía legacy protegida.
 
+Preparación de despliegue del 25/09/2026: la fuente incorpora una unidad systemd
+dedicada `clinicaclick-google-business-profile@.service`, el enrolamiento cerrado
+de la identidad TLS `google-business-profile-staging:8456` y su etiqueta de
+monitorización. Las pruebas de contrato, TLS ficticio, recuperación y unidad
+endurecida pasan con Node 24. **Esta preparación no acredita instalación**: el
+inventario AWS de solo lectura no encontró unidad, configuración, secreto Google,
+certificado enrolado ni proceso `google-main`, y CRM no tiene todavía claves
+cliente ni flags activos.
+
+La primera cohorte propuesta queda limitada a la clínica de pruebas `clinic:92`,
+cuenta `accounts/103033606619897470310` y ubicación
+`locations/9681856373471112042`, mediante la conexión Google 23 ya utilizada por
+el lector legacy. El corte debe crear un único binding y grants exactos para ese
+activo; no copiar bindings a las otras 14 ubicaciones. Primero se acepta una
+lectura gestionada y después, con una operación inocua expresamente elegida por
+el titular, la escritura y su conciliación. Hasta entonces las 15 ubicaciones
+siguen por el lector legacy y los gates permanecen apagados.
+
+El refresh token y el secreto OAuth no se deben copiar por VNC, consola, línea de
+comandos, logs o tickets. Su traslado exige un canal de migración de una sola vez
+desde el proceso que ya puede descifrarlos hacia dos secretos KMS del prefijo
+`/clinicaclick/integrations/prod/`, con un rol temporal restringido a esos ARN y
+retirado al terminar. La clave cliente de lectura y la de escritura Ed25519 son
+distintas; sus privadas permanecen en CRM y el broker recibe solo las públicas.
+La clave TLS del servidor permanece en AWS. Una sesión web VNC permite validar
+Google y AWS, pero no sustituye esas identidades técnicas ni autoriza usar una
+sesión root para provisionar.
+
 No retirar tokens compartidos ni activar la cohorte hasta completar el censo, la
 resolución de incertidumbres y una aceptación autenticada por cohorte. El puente
 externo OPS es independiente del lector nativo: en la comprobación del 25/09 su

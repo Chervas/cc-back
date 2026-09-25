@@ -1,0 +1,42 @@
+[Unit]
+Description=ClinicaClick %i Google Business Profile broker
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=cc-google-business-profile-%i
+Group=cc-google-business-profile-%i
+WorkingDirectory=/opt/clinicaclick-google-business-profile/current
+Environment=AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_EC2_METADATA_V1_DISABLED=true AWS_EC2_METADATA_SERVICE_ENDPOINT=http://169.254.169.254
+ExecStart=/opt/clinicaclick-audit/node-v24.21.0-recovery1/bin/node --max-old-space-size=128 src/google-main.js /etc/clinicaclick-google-business-profile-%i/config.json
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/clinicaclick-google-business-profile-%i
+UMask=0077
+LimitCORE=0
+LimitNOFILE=256
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=45
+MemoryMax=256M
+MemoryHigh=224M
+CPUQuota=40%
+Nice=5
+OOMScoreAdjust=400
+TasksMax=48
+
+[Install]
+WantedBy=multi-user.target

@@ -352,6 +352,24 @@ este servicio, cerrar primero su consumidor, eliminar exclusivamente su destino
 de ambos registros y comprobar las trece filas restantes; no sustituir hojas,
 claves o estado de los otros servicios.
 
+### Soporte preparado para Perfil de Empresa Google staging, 25/09/2026
+
+Firmante y publicador admiten en fuente un decimocuarto servicio HTTPS:
+`google-business-profile-staging:8456`. La pareja identidad/puerto es fija y el
+monitor reconoce su etiqueta. Una vez enrolado, el estado completo tendrá quince
+filas al sumar el cliente de mantenimiento. La unidad versionada
+`services/integrations-broker/deploy/clinicaclick-google-business-profile@.service`
+usa Node 24, usuario, configuración y SQLite propios, sin access keys ni
+`EnvironmentFile` compartido.
+
+Este soporte aún no está desplegado. No añadir el destino al firmante/publicador
+hasta que el servicio sirva su hoja inicial y no abrir el puerto salvo
+`51.44.225.192/32:8456`. El orden es: instalar runtime vacío con política cerrada,
+generar clave TLS en AWS, firmar solo el CSR, comprobar TLS, enrolar el destino,
+forzar una renovación y verificar las quince filas. Después se pueden instalar
+principales/grants del piloto Google. El rollback retira primero el consumidor y
+su destino 8456; no revierte los catorce estados anteriores ni toca sus claves.
+
 ### Lectura de metadata por el DEV aislado
 
 El directorio de salud es root `0750` y sus JSON root `0640`, con grupo del CRM.

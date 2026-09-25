@@ -22,7 +22,19 @@ el lector nativo legacy protegido. La publicación de una cohorte de broker exig
 otro corte con identidad, grants, runtime, canario autenticado y recuperación de
 resultados inciertos; el esquema vacío no autoriza esa activación.
 
-## Esquema GBP aplicado solo en DEV — 20/09/2026, 06:45 UTC
+La fuente del 25/09 ya prepara la unidad systemd aislada y la pareja cerrada
+`google-business-profile-staging:8456` para firmante, publicador y monitor. No se
+ha instalado ni enrolado: AWS continúa sin proceso, configuración o secretos
+Google y CRM sin claves/flags. El piloto propuesto es únicamente `clinic:92` con
+`gbp:103033606619897470310:9681856373471112042`; cualquier alta adicional exige
+otro censo y aceptación. El secreto legacy debe migrarse por un rol temporal de
+escritura a Secrets Manager, sin mostrarlo en consola ni pasarlo como argumento.
+
+## Corte histórico: esquema GBP aplicado primero en DEV — 20/09/2026, 06:45 UTC
+
+Este apartado conserva el acta de aquel corte. La frase histórica sobre CRM sin
+las DDL queda sustituida por el estado actual del 25/09: ambas migraciones ya
+figuran `up` también en CRM/staging y las tablas siguen vacías.
 
 Las dos DDL `20260919200000-create-business-profile-mutation-journal.js` y
 `20260919210000-create-business-profile-cache-coordination.js` ya están aplicadas
