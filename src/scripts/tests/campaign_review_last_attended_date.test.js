@@ -81,6 +81,27 @@ test('un importado sin fecha usa la última cita completada del paciente dentro 
   );
 });
 
+test('recupera la cita completada antes de aplicar la exclusión por fecha', async (t) => {
+  t.mock.method(db.CitaPaciente, 'findAll', async () => [
+    { paciente_id: 41, ultima_cita_asistida: '2026-09-07T10:00:00.000Z' },
+  ]);
+  const [item] = await bulkSends.__testing.prepareReviewItemsForExclusions([
+    {
+      paciente_id: 41,
+      status: 'ready',
+      selected: true,
+      phone: '+34617560236',
+      custom_fields: {},
+    },
+  ], { clinicIds: [56] }, {
+    review_exclusion_rules: { no_visit_date: true },
+  });
+
+  assert.equal(item.status, 'ready');
+  assert.equal(item.selected, true);
+  assert.equal(item.custom_fields.fecha_ultima_cita_asistida, '07/09/2026');
+});
+
 test('las reseñas separan los contactos sin fecha en vez de bloquear toda la tanda', () => {
   const template = {
     name: 'cc_solicitud_de_opinion_tras_visita_test',
