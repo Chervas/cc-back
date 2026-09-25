@@ -42,7 +42,9 @@ test('all five email templates keep exactly the same native SES input in broker 
     await provider.sendEmail(message, { env: direct });
     await provider.sendEmail(message, { env });
     assert.equal(current.attempt, 4); assert.equal(current.recipientPolicy, 'allowlist');
-    assert.equal(Object.hasOwn(current, 'identityName'), false);
+    // Keep transactional payloads compatible with the deployed v2 broker,
+    // which requires the marketing-only field to be explicitly null.
+    assert.equal(current.identityName, null);
     assert.deepEqual(contract.commandInput(current), native);
   }
   assert.equal(provider.publicConfig(env).brokerEnabled, true);
