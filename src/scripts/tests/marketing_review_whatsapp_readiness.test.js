@@ -6,7 +6,9 @@ const service = require('../../services/marketingBulkSends.service');
 const whatsappService = require('../../services/whatsapp.service');
 
 const {
+  getReviewWabaIdForScope,
   hasWhatsappConfigForClinic,
+  isAllowedReviewRequestTemplateCopy,
   isWhatsappRoutingConfigAvailable,
 } = service.__testing;
 
@@ -89,4 +91,38 @@ test('review readiness resolves the sender selected for review requests', async 
 
   assert.equal(await hasWhatsappConfigForClinic(56), true);
   assert.deepEqual(calls, [{ clinicId: 56, options: { purpose: 'review_requests' } }]);
+});
+
+test('review templates resolve the WABA selected for review requests', async (t) => {
+  const calls = [];
+  t.mock.method(whatsappService, 'getClinicConfig', async (clinicId, options) => {
+    calls.push({ clinicId, options });
+    return { wabaId: 'waba-review-secondary' };
+  });
+
+  const wabaId = await getReviewWabaIdForScope({ clinicIds: [56] });
+
+  assert.equal(wabaId, 'waba-review-secondary');
+  assert.deepEqual(calls, [{ clinicId: 56, options: { purpose: 'review_requests' } }]);
+});
+
+test('an approved admin review template may keep the category accepted by Meta', () => {
+  const template = {
+    name: 'cc_solicitud_de_opinion_tras_visita_test',
+    origin: 'custom',
+    created_by_user_id: 1,
+    category: 'UTILITY',
+    variables: [
+      { position: 1, name: 'nombre_paciente', template_usage: 'solicitud_resena' },
+      { position: 2, name: 'firma_resenas', template_usage: 'solicitud_resena' },
+      { position: 3, name: 'nombre_clinica', template_usage: 'solicitud_resena' },
+      { position: 4, name: 'fecha_ultima_cita_asistida', template_usage: 'solicitud_resena' },
+    ],
+    components: [{
+      type: 'BODY',
+      text: 'Hola {{1}}, soy {{2}} de {{3}}. Queremos saber cómo te atendimos en tu visita del {{4}}. ¿Cómo valorarías tu experiencia?\n\nResponde con un número:\n\n5 ⭐⭐⭐⭐⭐\n4 ⭐⭐⭐⭐\n3 ⭐⭐⭐\n2 ⭐⭐\n1 ⭐\n\nTu valoración nos ayuda mucho.',
+    }],
+  };
+
+  assert.equal(isAllowedReviewRequestTemplateCopy(template), true);
 });

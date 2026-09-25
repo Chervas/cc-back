@@ -4262,7 +4262,7 @@ function scoreReviewTemplatePreference(template, options = {}) {
 async function findApprovedReviewReminderWhatsappTemplate(scope) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   if (!WhatsappTemplate || !clinicIds.length) return null;
-  const targetWabaId = await getPrimaryWabaIdForScope(scope);
+  const targetWabaId = await getReviewWabaIdForScope(scope);
   const candidates = await WhatsappTemplate.findAll({
     where: {
       is_active: true,
@@ -4302,7 +4302,7 @@ async function findApprovedReviewReminderWhatsappTemplate(scope) {
 async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = null, options = {}) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   if (!WhatsappTemplate || !clinicIds.length) return null;
-  const targetWabaId = await getPrimaryWabaIdForScope(scope);
+  const targetWabaId = await getReviewWabaIdForScope(scope);
   const preferPhoto = options.preferPhoto === true;
 
   if (explicitTemplateId) {
@@ -4447,8 +4447,7 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
   });
   return candidates
     .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
-    .filter(isDefaultReviewRequestWhatsappTemplateIdentity)
-    .filter(reviewTemplateMatchesCurrentCatalogBody)
+    .filter(isAllowedReviewRequestTemplateCopy)
     .filter((template) => (preferPhoto ? templateHasImageHeader(template) : !templateHasImageHeader(template)))
     .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
     .sort((a, b) => {
@@ -4570,7 +4569,15 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       hasWhatsappConfigForScope(clinicScope),
       getReviewAutomationTemplate(clinicScope, { includeInactive: true }),
     ]);
-    const templatesReady = !!approvedTemplate;
+    const configuredPhotoUrl = normalizeText(
+      clinicAutomationTemplate?.review_team_photo_url
+      || options.review_team_photo_url
+      || options.reviewTeamPhotoUrl
+      || ''
+    );
+    const approvedEffectiveTemplate = approvedTemplate
+      || (configuredPhotoUrl && approvedPhotoTemplate ? approvedPhotoTemplate : null);
+    const templatesReady = !!approvedEffectiveTemplate;
     const ready = !!googleReviewUrlAvailable && !!whatsappAvailable && templatesReady;
     const serializedAutomation = serializeReviewAutomationTemplate(clinicAutomationTemplate);
     const automationEnabled = serializedAutomation?.is_active === true;
@@ -4578,7 +4585,7 @@ async function buildReviewClinicStatuses(scope, options = {}) {
     const missing = [
       !googleReviewUrlAvailable ? 'google_review_url' : null,
       !whatsappAvailable ? 'whatsapp_connection' : null,
-      !approvedTemplate ? 'approved_whatsapp_template' : null,
+      !approvedEffectiveTemplate ? 'approved_whatsapp_template' : null,
     ].filter(Boolean);
     const googleLabel = googleReviewUrlAvailable ? 'Ficha lista' : 'Falta Perfil Google';
     const whatsappLabel = whatsappAvailable ? 'WhatsApp conectado' : 'Falta WhatsApp';
@@ -4589,7 +4596,7 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       : [
           !googleReviewUrlAvailable ? 'Conecta su Perfil Google para generar el enlace correcto de reseña.' : null,
           !whatsappAvailable ? 'Conecta WhatsApp para poder enviar la solicitud.' : null,
-          !approvedTemplate ? 'ClinicaClick debe tener una plantilla de reseñas aprobada por WhatsApp para esta sede.' : null,
+          !approvedEffectiveTemplate ? 'ClinicaClick debe tener una plantilla de reseñas aprobada por WhatsApp para esta sede.' : null,
         ].filter(Boolean).join(' ');
     const automationLabel = automationEnabled
       ? (ready ? 'Activa' : 'Configurada, sin enviar')
@@ -4611,8 +4618,8 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       google_status_label: googleLabel,
       whatsapp_available: !!whatsappAvailable,
       whatsapp_status_label: whatsappLabel,
-      approved_template_available: !!approvedTemplate,
-      approved_template_id: approvedTemplate?.id || null,
+      approved_template_available: templatesReady,
+      approved_template_id: approvedEffectiveTemplate?.id || null,
       approved_reminder_template_available: !!approvedReminderTemplate,
       approved_reminder_template_id: approvedReminderTemplate?.id || null,
       approved_photo_template_available: !!approvedPhotoTemplate && templateHasImageHeader(approvedPhotoTemplate),
@@ -5066,7 +5073,19 @@ async function getReviewRequestSummary(scope, options = {}) {
   const groupApprovedTemplate = groupReadyClinics.find((clinic) => clinic.approved_template_id)
     || clinicStatuses.find((clinic) => clinic.approved_template_id)
     || null;
-  const effectiveApprovedTemplateId = approvedReviewTemplate?.id || groupApprovedTemplate?.approved_template_id || null;
+  const serializedAutomationTemplate = serializeReviewAutomationTemplate(automationTemplate);
+  const configuredReviewPhotoUrl = normalizeText(
+    serializedAutomationTemplate?.review_team_photo_url
+    || lastRequestTemplate?.review_team_photo_url
+    || options.review_team_photo_url
+    || options.reviewTeamPhotoUrl
+    || ''
+  );
+  const effectiveApprovedReviewTemplate = approvedReviewTemplate
+    || (configuredReviewPhotoUrl && approvedPhotoReviewTemplate ? approvedPhotoReviewTemplate : null);
+  const effectiveApprovedTemplateId = effectiveApprovedReviewTemplate?.id
+    || groupApprovedTemplate?.approved_template_id
+    || null;
   const groupApprovedReminderTemplate = groupReadyClinics.find((clinic) => clinic.approved_reminder_template_id)
     || clinicStatuses.find((clinic) => clinic.approved_reminder_template_id)
     || null;
@@ -5081,7 +5100,6 @@ async function getReviewRequestSummary(scope, options = {}) {
   const groupAutomationTemplates = clinicStatuses
     .filter((clinic) => clinic.clinic_automation_enabled && clinic.clinic_automation_template)
     .map((clinic) => clinic.clinic_automation_template);
-  const serializedAutomationTemplate = serializeReviewAutomationTemplate(automationTemplate);
   const effectiveAutomationTemplate = scope?.scope === 'group'
     ? (groupAutomationTemplates[0] || null)
     : serializedAutomationTemplate;
@@ -5131,7 +5149,9 @@ async function getReviewRequestSummary(scope, options = {}) {
       last_request_template: lastRequestTemplate,
       approved_template_available: !!effectiveApprovedTemplateId,
       approved_template_id: effectiveApprovedTemplateId,
-      approved_template_snapshot: approvedReviewTemplate ? buildTemplateSnapshot(approvedReviewTemplate) : null,
+      approved_template_snapshot: effectiveApprovedReviewTemplate
+        ? buildTemplateSnapshot(effectiveApprovedReviewTemplate)
+        : null,
       approved_reminder_template_available: !!effectiveApprovedReminderTemplateId,
       approved_reminder_template_id: effectiveApprovedReminderTemplateId,
       approved_photo_template_available: !!effectiveApprovedPhotoTemplateId,
@@ -7063,12 +7083,14 @@ function getTemplateWabaId(template) {
   return normalizeText(plain.waba_id || plain.wabaId || '');
 }
 
-async function getPrimaryWabaIdForScope(scope) {
+async function getReviewWabaIdForScope(scope) {
   const clinicIds = Array.isArray(scope?.clinicIds)
     ? scope.clinicIds.filter(Number.isInteger)
     : [];
   if (!clinicIds.length) return '';
-  const clinicConfig = await whatsappService.getClinicConfig(clinicIds[0]).catch(() => null);
+  const clinicConfig = await whatsappService.getClinicConfig(clinicIds[0], {
+    purpose: 'review_requests',
+  }).catch(() => null);
   return normalizeText(clinicConfig?.wabaId || '');
 }
 
@@ -10805,5 +10827,7 @@ module.exports = {
     shouldPreserveRecipientListOnArchive,
     hasWhatsappConfigForClinic,
     isWhatsappRoutingConfigAvailable,
+    getReviewWabaIdForScope,
+    isAllowedReviewRequestTemplateCopy,
   },
 };
