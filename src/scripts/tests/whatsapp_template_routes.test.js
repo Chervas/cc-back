@@ -9,10 +9,14 @@ test('template routes reach existing ACL handlers; legacy writes remain quaranti
  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../../routes/whatsapp.routes.js'),'utf8'),context);
  const app=express();app.use(context.module.exports);const server=app.listen(0,'127.0.0.1');await new Promise(resolve=>server.once('listening',resolve));t.after(()=>server.close());
  const origin='http://127.0.0.1:'+server.address().port;
+ for(const url of ['/templates/123/status?clinic_id=56']){
+  assert.equal((await fetch(origin+url)).status,401);
+  assert.equal((await fetch(origin+url,{headers:{'x-synthetic-user':'admin'}})).status,200,url);
+ }
  for(const [method,url] of [['POST','/templates/custom'],['POST','/templates/sync'],['POST','/templates/create-from-catalog'],['DELETE','/templates/123'],['POST','/template-catalog'],['PUT','/template-catalog/123'],['POST','/template-catalog/123/propagate']]){
   assert.equal((await fetch(origin+url,{method})).status,401);
   assert.equal((await fetch(origin+url,{method,headers:{'x-synthetic-user':'admin'}})).status,200,url);
  }
  for(const url of ['/messages','/phones/123/register','/preverified/start','/template-catalog/language-rollout'])assert.equal((await fetch(origin+url,{method:'POST',headers:{'x-synthetic-user':'admin'}})).status,503,url);
- assert.equal(calls.length,7);
+ assert.equal(calls.length,8);
 });
