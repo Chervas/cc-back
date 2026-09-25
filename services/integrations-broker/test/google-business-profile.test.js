@@ -142,6 +142,11 @@ test('KMS, OAuth scope and reflected access/refresh/client secrets fail closed',
   const f = fakeSecrets(); t.after(() => f.store.close());
   for (const sentinel of [ACCESS, REFRESH, CLIENT]) await assert.rejects(f.store.withSecret({ ...connection, secretArn, clientSecretArn: appArn }, async () => ({ comment: 'prefix ' + sentinel })), { code: 'provider_failed' });
 });
+test('Secrets Manager KMS key ID is accepted only when it matches the pinned KMS ARN', async t => {
+  const f = fakeSecrets({ metadata: { KmsKeyId: runtime.SECRET_KEY.split('/').at(-1) } }); t.after(() => f.store.close());
+  const result = await f.store.withSecret({ ...connection, secretArn, clientSecretArn: appArn }, async token => ({ matches: token.toString() === ACCESS }));
+  assert.deepEqual(result, { matches: true }); assert.equal(f.count(), 1);
+});
 test('invalid_grant persists revocation through restart; a block cancels refresh without late dispatch', async t => {
   const bad = fakeSecrets({ refresh: async () => { throw new BrokerError('credential_revoked'); } });
   const f = gbp(t, { secrets: bad.store }); await assert.rejects(f.execute(f.command('details')), { code: 'credential_revoked' });

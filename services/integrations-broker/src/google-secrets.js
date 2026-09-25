@@ -21,6 +21,7 @@ function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, n
   if (!/^\d{12}$/.test(accountId) || !/^\/clinicaclick\/integrations\/(dev|staging|prod)\/$/.test(prefix)
     || !new RegExp(`^arn:aws:kms:eu-west-3:${accountId}:key/[a-f0-9-]+$`).test(kmsKeyArn)
     || !Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 128) fail('invalid_request');
+  const kmsKeyId = kmsKeyArn.slice(kmsKeyArn.lastIndexOf('/') + 1);
   const arnPrefix = `arn:aws:secretsmanager:eu-west-3:${accountId}:secret:${prefix}`;
   const entries = new Map(); const flights = new Map();
   async function read(arn, signal) {
@@ -28,7 +29,9 @@ function createGoogleSecretStore({ client, http, accountId, prefix, kmsKeyArn, n
       if (typeof arn !== 'string' || !arn.startsWith(arnPrefix) || arn.length > 2048
         || !/^[A-Za-z0-9/_+=.@-]+$/.test(arn.slice(arnPrefix.length))) fail('secret_unavailable');
       const metadata = await client.send(new DescribeSecretCommand({ SecretId: arn }), { abortSignal: signal });
-      if (metadata.ARN !== arn || metadata.KmsKeyId !== kmsKeyArn || metadata.DeletedDate) fail('secret_unavailable');
+      // Secrets Manager may return the configured KMS key as either its ARN or
+      // its exact key ID. Both values identify the pinned key above.
+      if (metadata.ARN !== arn || ![kmsKeyArn, kmsKeyId].includes(metadata.KmsKeyId) || metadata.DeletedDate) fail('secret_unavailable');
       const result = await client.send(new GetSecretValueCommand({ SecretId: arn, VersionStage: 'AWSCURRENT' }), { abortSignal: signal });
       if (result.ARN !== arn || !result.VersionId || !result.VersionStages?.includes('AWSCURRENT')
         || typeof result.SecretString !== 'string' || Buffer.byteLength(result.SecretString) > 32768) fail('secret_unavailable');
