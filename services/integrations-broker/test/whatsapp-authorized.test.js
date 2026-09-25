@@ -2,6 +2,7 @@
 const test = require('node:test'); const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto'); const { fixture, template, textMessage, templateMessage } = require('./whatsapp-authorized-fixture.cjs');
 const C = require('../src/whatsapp-authorized-contract'); const { validateAuthorization } = require('../src/whatsapp-authorized-registry');
+const P = require('../src/whatsapp-authorized-profile');
 test('Disabled is the default and blocks before any candidate read or Meta call', async t => {
   const a=await fixture(t,{enabled:false}); const v={...a.definition};delete v.enabled;assert.equal(validateAuthorization(v).enabled,false);
   const count=a.f.state.awsCalls.length;await assert.rejects(a.execute(),{code:'connection_blocked'});assert.equal(a.f.state.awsCalls.length,count);assert.equal(a.state.calls.length,0);
@@ -12,6 +13,15 @@ test('Same verified BISU candidate sends selected phone, preserving held status 
   assert.equal(a.f.state.puts,puts);assert.equal(a.f.snapshot(),before);assert.equal(a.sends().length,1);assert.equal(a.sends()[0].id,'401');
   for(const token of a.f.state.heldTokens)assert(token.every(v=>v===0));
   assert.deepEqual(a.state.calls.map(c=>c.action), ['send']);
+});
+test('Signed authorized profile read crosses the full broker registry without widening its scope',async t=>{
+  const a=await fixture(t);const request=a.request(textMessage(),{operation:P.READ,
+    payload:{authorizationId:a.definition.authorizationId,phoneId:a.definition.phoneId}});
+  const result=await a.execute(request);
+  assert.equal(result.data.id,'401');assert.equal(result.data.status,'CONNECTED');
+  assert.deepEqual(a.state.calls.map(c=>c.action),['profile']);
+  await assert.rejects(a.execute({...request,requestId:randomUUID(),tenantRef:'clinic:73'}),{code:'scope_denied'});
+  assert.deepEqual(a.state.calls.map(c=>c.action),['profile']);
 });
 test('Staged credential survives the completed OAuth window but not operational expiry',async t=>{
   const a=await fixture(t);a.f.state.clock+=660000;await a.execute();a.f.state.clock=a.definition.expiresAt;

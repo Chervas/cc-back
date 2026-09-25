@@ -28,7 +28,7 @@ function tlsFiles(c) {
 test('Static staging grants accept only the bounded authorized profile read',async t=>{
   const f=await fixture(t,{enabled:false});const c=config(f);
   const profileRead=require('../src/whatsapp-authorized-profile').READ;
-  c.policy.grants.filter(grant=>grant.principalId==='staging:whatsapp').forEach(grant=>grant.operations.push(profileRead));
+  assert(c.policy.grants.filter(grant=>grant.principalId==='staging:whatsapp').every(grant=>grant.operations.includes(profileRead)));
   assert.doesNotThrow(()=>runtime.validateConfig(c));
   c.policy.grants.find(grant=>grant.principalId==='staging:whatsapp').operations.push('meta.whatsapp.authorized.profile.write.v1');
   assert.throws(()=>runtime.validateConfig(c),{code:'invalid_request'});
