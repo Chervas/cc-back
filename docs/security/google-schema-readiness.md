@@ -2,7 +2,7 @@
 
 > **Tipo:** runbook de requisitos SQL y recuperación.
 > **Fuente de verdad:** compatibilidad de esquema Google; no certifica migración de credenciales ni acceso al proveedor.
-> **Última revisión:** 2026-09-20.
+> **Última revisión:** 2026-09-25.
 > **Relacionado con:** [contrato backend](../../src/Documentacion/13-backend.md#esquema-google-completo-y-publicación-por-entorno), [estado central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
 
 ## Esquema GBP aplicado solo en DEV — 20/09/2026, 06:45 UTC
@@ -48,6 +48,13 @@ Pendiente: tratamiento operativo de incertidumbres, publicación selectiva de
 consumidores GBP, nuevo corte clínico para estas dos DDL, censo compartido y
 aceptación autenticada/proveedor/carga. Compatibilidad AWS v1–v25 ya publicada;
 no abrir gates ni retirar tokens por haber completado únicamente el esquema DEV.
+
+Revalidación de solo lectura del 25/09/2026: al consultar `SequelizeMeta` del
+esquema clínico con el catálogo de migraciones actual, ambas DDL continúan
+`down`. La migración independiente
+`20260924100000-marketing-email-template-catalog.js` figura `up`; no cambia el
+estado GBP ni justifica ejecutar el resto del historial pendiente. Este estado
+debe conservarse durante la reconciliación DEV/staging y su despliegue.
 
 ## Corte anterior — 19/09/2026, 18:04 UTC
 

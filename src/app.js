@@ -447,7 +447,7 @@ if (RESUME_AUTOMATIONS_FROM_SOCKET_BUS) {
         }
     });
 } else {
-    console.log('[automations-v2] Reanudacion por socket-bus deshabilitada; el gateway coordina inbound');
+    console.log('[automations-v2] Reanudacion por socket-bus deshabilitada; fresh-inbound entrega los mensajes nuevos al motor');
 }
 require('./lib/socket-session-guard').installSocketSessionGuard(io);
 

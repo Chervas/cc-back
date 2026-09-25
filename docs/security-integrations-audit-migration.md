@@ -1,6 +1,6 @@
 # Runbook: Migración Segura De Integraciones Y Auditoría
 
-> Guía de ejecución vigente, revisada el 13/09/2026 a las 22:25 UTC.
+> Guía de ejecución vigente, revisada el 25/09/2026.
 > Arquitectura y contrato de producto: frontend `39-seguridad-integraciones-cifrado-auditoria.md`.
 > **Fuente de verdad:** ejecución de candidatos, QA, publicación y rollback; estado y prioridades en el manual central.
 > **Relacionado con:** [00-README](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/00-README.md), [índice técnico](README.md#seguridad).
@@ -12,6 +12,14 @@ y [99: cortes públicos](https://github.com/Chervas/cc-front/blob/dev/src/Docume
 El [acta técnica](security/admin-session-deployment-20260913.md) contiene
 versiones, rama de gateway, pruebas, respaldos y rollback. Comprobar esos
 datos antes del corte: publicar código no cambia el runtime ni sus pausas.
+
+Desde la conciliación del 25/09, el código promocionable tiene una sola línea:
+se integra y valida en `dev`, y `staging` avanza con `--ff-only`. Una candidata
+aislada sigue sirviendo para ensayar seguridad, pero debe incorporarse a DEV
+antes de cerrar la entrega. No aplicar cherry-picks o resoluciones directamente
+en staging. Esta regla no convierte la activación de una integración en
+automática: DDL, flags, credenciales, procesos y proveedor conservan sus puertas
+independientes.
 
 ## Elegir el siguiente corte
 
@@ -65,10 +73,11 @@ El orden se mantiene en [16: prioridades](https://github.com/Chervas/cc-front/bl
 4. Antes de un corte real nuevo, presentar archivos/versiones, DDL exactas,
    configuración, permisos, coste, respaldo, ventana, prueba y rollback. La
    aprobación del corte de acceso anterior no habilita MFA ni proveedores.
-5. Verificar hashes y flags, desplegar únicamente el candidato aprobado y
-   comprobar cada entrada. No usar `--update-env`, migración global o promoción
-   completa de DEV como atajo; cualquier cambio de configuración debe figurar
-   en el lote. No restaurar JWT vulnerables o credenciales revocadas al revertir.
+5. Verificar hashes y flags. Cuando el HEAD completo de DEV sea el candidato
+   aprobado, avanzar staging por fast-forward y publicar únicamente los runtimes
+   afectados. No usar `--update-env` o una migración global como atajo; cualquier
+   cambio de configuración debe figurar en el lote. No restaurar JWT vulnerables
+   o credenciales revocadas al revertir.
 6. Publicar los commits propios, comprobar SHA remoto, documentar versión
    instalada y diferencias respecto de DEV. Actualizar contrato/API/estado,
    mantener evidencias privadas y entregar un handoff que no requiera el chat.
@@ -108,6 +117,14 @@ Los candidatos necesitan el contrato y las migraciones incluidas en él. Los
 archivos de evidencia deben ser nuevos; no se sobreescriben. Código de salida
 `0` = compatible, `2` = diferencias de esquema, `1` = fallo operativo. No ignorar
 un resultado incompatible ni generar un contrato nuevo para silenciarlo.
+
+Comprobación de la promoción reconciliada del 25/09: el esquema clínico registra
+`20260924100000-marketing-email-template-catalog.js`; las migraciones
+`20260919200000-create-business-profile-mutation-journal.js` y
+`20260919210000-create-business-profile-cache-coordination.js` no están
+registradas y permanecen fuera de este corte. No ejecutar `sequelize db:migrate`
+contra el conjunto completo. La presencia de los archivos en Git no autoriza su
+aplicación ni la activación de los consumidores GBP.
 
 Para migrar **solo DEV**, con el checkout limpio y comprometido, crear un plan
 con las migraciones concretas, en el orden necesario. El plan guarda versión,
@@ -475,7 +492,11 @@ Si no existe un candidato aislable o falta permiso de push, entregar commits/pat
 
 ## 6. Despliegue Y Rollback
 
-Push a DEV no es despliegue ni permiso para promover todo a staging. Antes de desplegar, acordar commits exactos, migraciones concretas, respaldo, canary, flags y servicios a reiniciar. No copiar recetas generales de `merge origin/dev`, `npm install` o `db:migrate` que ejecuten todos los cambios pendientes.
+Push a DEV no es despliegue ni activación. Antes de desplegar, acordar el HEAD
+completo de la release, migraciones concretas, respaldo, canary, flags y servicios
+a reiniciar. La rama staging se mueve solo por fast-forward desde ese HEAD; no
+copiar recetas de cherry-pick, `npm install` sin lock o `db:migrate` que ejecuten
+todos los cambios pendientes.
 
 - DEV backend: fuente `/home/ubuntu/wt/back-dev`, release `/opt/clinicaclick-dev/current`, `clinicaclick-back-dev.service`, puerto local `3004`. Publicar con `sudo python3 ops/security/publish-isolated-dev.py`, Git limpio y dependencias aisladas; no arrancar el PM2 antiguo.
 - Staging backend: `/home/ubuntu/wt/back-staging`, `pm2-back-staging`, puerto `3001`.
