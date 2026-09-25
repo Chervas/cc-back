@@ -136,3 +136,30 @@ test('una exclusión por variables se revalida al cambiar de plantilla', () => {
     },
   );
 });
+
+test('persiste la exclusión aunque la selección haya convertido la fila en objeto plano', async (t) => {
+  const updates = [];
+  t.mock.method(db.MarketingPatientListItem, 'update', async (patch, options) => {
+    updates.push({ patch, options });
+    return [1];
+  });
+  const missingVariables = [{
+    variable: 'fecha_ultima_cita_asistida',
+    token: '{{fecha_ultima_cita_asistida}}',
+    missing_count: 1,
+    total_ready: 1,
+    sample_item_ids: [823275],
+  }];
+
+  await bulkSends.__testing.persistMissingVariableExclusion({
+    item: { id: 823275, status: 'ready', selected: true },
+    missingVariables,
+    listId: 820,
+  });
+
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].patch.status, 'excluded_missing_variables');
+  assert.equal(updates[0].patch.selected, false);
+  assert.deepEqual(updates[0].patch.missing_variables, missingVariables);
+  assert.deepEqual(updates[0].options.where, { id: 823275, list_id: 820 });
+});
