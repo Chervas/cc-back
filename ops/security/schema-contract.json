@@ -159,22 +159,19 @@
           "CHARACTER_SET_NAME": null,
           "COLLATION_NAME": null,
           "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "active_phone_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "STORED GENERATED",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": "(case when (`state` = _utf8mb4\\'active\\') then `phone_id` else NULL end)"
         }
       ],
       "indexes": [
-        {
-          "name": "asset_id",
-          "columns": [
-            {
-              "INDEX_NAME": "asset_id",
-              "NON_UNIQUE": 0,
-              "SEQ_IN_INDEX": 1,
-              "COLUMN_NAME": "asset_id",
-              "SUB_PART": null,
-              "INDEX_TYPE": "BTREE"
-            }
-          ]
-        },
         {
           "name": "connection_ref",
           "columns": [
@@ -183,6 +180,48 @@
               "NON_UNIQUE": 0,
               "SEQ_IN_INDEX": 1,
               "COLUMN_NAME": "connection_ref",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_whatsapp_activation_asset_history",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_whatsapp_activation_asset_history",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "asset_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "idx_whatsapp_activation_asset_history",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_whatsapp_activation_phone_history",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_whatsapp_activation_phone_history",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "phone_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "idx_whatsapp_activation_phone_history",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "state",
               "SUB_PART": null,
               "INDEX_TYPE": "BTREE"
             }
@@ -210,19 +249,6 @@
           ]
         },
         {
-          "name": "phone_id",
-          "columns": [
-            {
-              "INDEX_NAME": "phone_id",
-              "NON_UNIQUE": 0,
-              "SEQ_IN_INDEX": 1,
-              "COLUMN_NAME": "phone_id",
-              "SUB_PART": null,
-              "INDEX_TYPE": "BTREE"
-            }
-          ]
-        },
-        {
           "name": "PRIMARY",
           "columns": [
             {
@@ -230,6 +256,19 @@
               "NON_UNIQUE": 0,
               "SEQ_IN_INDEX": 1,
               "COLUMN_NAME": "authorization_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "uniq_whatsapp_active_phone",
+          "columns": [
+            {
+              "INDEX_NAME": "uniq_whatsapp_active_phone",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "active_phone_id",
               "SUB_PART": null,
               "INDEX_TYPE": "BTREE"
             }
@@ -4296,6 +4335,7 @@
     {"name":"20260919120000-meta-marketing-enrollment-scope-latest.js","sha256":"3daff36382d7f0c649bce200b6e901d2551ecd0a114c5dc78acf7f2b386d2a99"},
     {"name": "20260919200000-create-business-profile-mutation-journal.js", "sha256": "3c13134c86ab24e753115e1292e473504ebbf6307f2b4a9582f0c79d08ab055b"},
     {"name": "20260919210000-create-business-profile-cache-coordination.js", "sha256": "d05ec2f4efb1deea3a9c8a5aeb889d5202d0bcd45f915458f2f709adc34e6825"},
-    {"name": "20260922153000-create-whatsapp-phone-activations.js", "sha256": "243e65409413549b47a1befc2570d1f2164235324592b93465ff12c2ad003d12"}
+    {"name": "20260922153000-create-whatsapp-phone-activations.js", "sha256": "243e65409413549b47a1befc2570d1f2164235324592b93465ff12c2ad003d12"},
+    {"name": "20260925113000-whatsapp-activation-history.js", "sha256": "44befbf80817e894c95cbc0429c221f671b9e77cab13b7ec52bf768ceddcb0bc"}
   ]
 }
