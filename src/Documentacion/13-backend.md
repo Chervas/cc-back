@@ -9787,8 +9787,13 @@ Las colas manuales de resenas mantienen dos acciones distintas:
   un lote en curso si detecta la lista archivada.
 
 `getReviewRequestedPatientIds` considera `l.status='paused'`, por lo que una
-cola pausada no devuelve pacientes al pool. Las colas `archived` quedan fuera
-del pool y de las metricas activas.
+cola pausada no devuelve pacientes al pool. Archivar libera únicamente los
+destinatarios pendientes que nunca llegaron a materializarse en el despacho.
+Un item con `sent_at` o con estado `queued`, `sending`, `sent`, `delivered`,
+`read` o `replied` sigue excluyendo al paciente aunque su lista se archive; así
+no se vuelve a solicitar una reseña por borrar una cola histórica. La métrica
+`active_queue_recipients` solo cuenta pendientes de listas activas y deduplica
+por paciente, teléfono o email, no por el número de filas históricas.
 
 `materializeInboundReply` sigue usando primero reglas deterministas para
 valoraciones `1-5`. Se anade reconocimiento de expresiones largas tipo
