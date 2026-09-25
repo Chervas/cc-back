@@ -183,16 +183,16 @@ async function backup(directory, plan, query) {
 async function run(argv) {
   if (process.getuid() !== 0) fail('google_business_profile_writes_operator_requires_root');
   const options = parse(argv);
-  const runtime = observedEnvironment('staging');
-  const info = contracts(options.source, runtime.env);
   if (!fs.existsSync(RECOVERY)) fs.mkdirSync(RECOVERY, { mode: 0o700 });
   secure(RECOVERY, true);
 
   let plan;
   let target;
+  let contractEnvironment;
   if (options.action === 'plan') {
     fs.mkdirSync(options.directory, { mode: 0o700 });
     syncDirectory(RECOVERY);
+    contractEnvironment = observedEnvironment('staging').env;
     target = publicTarget();
   } else {
     secure(options.directory, true);
@@ -200,8 +200,14 @@ async function run(argv) {
     plan = JSON.parse(fs.readFileSync(path.join(options.directory, 'plan.json')));
     target = plan.target;
     verifyTarget(target);
+    // The public processes must be stopped before backup/apply, so their
+    // /proc environments are intentionally unavailable. The plan pins both
+    // protected files; use the verified staging file only to select feature
+    // groups and never persist its credentials.
+    contractEnvironment = require('dotenv').parse(fs.readFileSync(`${ROOTS[0]}/.env`));
     noWriters();
   }
+  const info = contracts(options.source, contractEnvironment);
 
   const database = await connection(target.database);
   const query = async (sql, values = []) => (await database.query({ sql, values, timeout: 30000 }))[0];
