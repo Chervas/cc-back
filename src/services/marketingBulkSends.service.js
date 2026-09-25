@@ -1921,7 +1921,7 @@ function buildItemChannelEligibilityPatch(item, channels) {
   const plain = item?.get ? item.get({ plain: true }) : item;
   const status = normalizeText(plain?.status).toLowerCase();
   const dispatchStatus = normalizeText(plain?.dispatch_status).toLowerCase();
-  if (!['ready', 'excluded_missing_required'].includes(status) || plain?.sent_at || dispatchStatus) {
+  if (!['ready', 'excluded_missing_required', 'excluded_missing_variables'].includes(status) || plain?.sent_at || dispatchStatus) {
     return null;
   }
   const missing = missingRequiredFields({
@@ -1938,7 +1938,7 @@ function buildItemChannelEligibilityPatch(item, channels) {
       selected: false,
     };
   }
-  if (status === 'excluded_missing_required') {
+  if (status === 'excluded_missing_required' || status === 'excluded_missing_variables') {
     return {
       status: 'ready',
       reason: 'Contacto listo para los destinos seleccionados',
@@ -7681,6 +7681,28 @@ function buildMissingVariablesSummary({ template, items, list, clinic }) {
     .filter((item) => item.missing_count > 0);
 }
 
+function partitionItemsByTemplateVariableAvailability({ template, items, list, clinic }) {
+  const eligibleItems = [];
+  const excludedItems = [];
+
+  for (const item of items || []) {
+    const plain = item?.get ? item.get({ plain: true }) : item;
+    const missingVariables = buildMissingVariablesSummary({
+      template,
+      items: [plain],
+      list,
+      clinic,
+    });
+    if (missingVariables.length) {
+      excludedItems.push({ item, missingVariables });
+    } else {
+      eligibleItems.push(item);
+    }
+  }
+
+  return { eligibleItems, excludedItems };
+}
+
 function formatMissingVariablesMessage(summary) {
   const first = summary?.[0];
   if (!first) return 'La plantilla usa variables que no existen para todos los contactos.';
@@ -8042,10 +8064,30 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     };
     const missingVariables = buildMissingVariablesSummary({ template, items: selectedItems, list: variableList, clinic });
     if (missingVariables.length) {
-      const err = new Error(formatMissingVariablesMessage(missingVariables));
-      err.status = 409;
-      err.details = { missing_variables: missingVariables };
-      throw err;
+      if (!isReviewRequest) {
+        const err = new Error(formatMissingVariablesMessage(missingVariables));
+        err.status = 409;
+        err.details = { missing_variables: missingVariables };
+        throw err;
+      }
+
+      const partition = partitionItemsByTemplateVariableAvailability({
+        template,
+        items: selectedItems,
+        list: variableList,
+        clinic,
+      });
+      await Promise.all(partition.excludedItems.map(async ({ item, missingVariables: itemMissingVariables }) => {
+        if (typeof item?.update !== 'function') return;
+        await item.update({
+          status: 'excluded_missing_variables',
+          exclusion_reason: 'variables_faltantes',
+          selected: false,
+          reason: formatMissingVariablesMessage(itemMissingVariables),
+          missing_variables: itemMissingVariables,
+        });
+      }));
+      selectedItems = partition.eligibleItems;
     }
   }
   const counters = computeCounters(selectedItems);
@@ -10814,5 +10856,6 @@ module.exports = {
     getReviewWabaIdForScope,
     isAllowedReviewRequestTemplateCopy,
     selectApprovedReviewTemplateCandidate,
+    partitionItemsByTemplateVariableAvailability,
   },
 };
