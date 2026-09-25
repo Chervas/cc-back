@@ -15,6 +15,18 @@ test('Dedicated authorized transport supports CTA on fixed HTTPS phone/messages;
   assert.equal(call.options.rejectUnauthorized,true);assert.equal(call.options.agent,false);assert(!url.href.includes(TOKEN));assert.deepEqual(JSON.parse(call.body),message());
   await assert.rejects(createWhatsappHttp({request:f.request})(input()),{code:'invalid_request'});assert.equal(f.calls.length,1);
 });
+test('Authorized profile transport pins the phone path and bounded read-only fields',async()=>{
+  const response={id:'401',status:'CONNECTED',code_verification_status:'VERIFIED',quality_rating:'GREEN',
+    is_on_biz_app:false,platform_type:'CLOUD_API',display_phone_number:'+34 600 000 401',verified_name:'Synthetic Clinic'};
+  const f=fixture({response});const http=createWhatsappAuthorizedHttp({request:f.request});
+  assert.deepEqual(await http({...input(),action:'profile',json:undefined}),response);
+  const call=f.calls[0];const url=new URL('https://graph.facebook.com'+call.options.path);
+  assert.equal(call.options.method,'GET');assert.equal(url.pathname,'/v24.0/401');
+  assert.equal(url.searchParams.get('fields'),'id,status,code_verification_status,quality_rating,is_on_biz_app,platform_type,display_phone_number,verified_name');
+  assert.equal(call.body,undefined);assert(!url.href.includes(TOKEN));
+  await assert.rejects(http({...input(),action:'profile',json:undefined,after:'cursor'}),{code:'invalid_request'});
+  assert.equal(f.calls.length,1);
+});
 test('Authorized transport refuses arbitrary Graph payloads, endpoints and token overrides before network',async()=>{
   const f=fixture();const http=createWhatsappAuthorizedHttp({request:f.request});
   for(const change of [{url:'https://other.invalid'},{id:'../401'},{action:'create_template'},{json:{...message(),access_token:TOKEN}},

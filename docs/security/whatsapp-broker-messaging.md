@@ -46,8 +46,18 @@ en la revisión administrativa (`verifyProvider:true`) y al incorporar una
 credencial. El control `meta.whatsapp.authorized.phone.revoke.v1` mantiene la
 baja por clínica incluso si el número se comparte.
 
+`meta.whatsapp.authorized.profile.read.v1` refresca el estado operativo de un
+número ya activado sin recuperar `waAccessToken` en CRM. La lectura queda fijada
+al mismo `authorizationId`, clínica, activo y `phoneId`; solo hace GET del perfil
+del número y proyecta estado, verificación, calidad, modalidad, nombre y número.
+CRM revalida el binding antes y después y materializa el resultado en la salud
+local. Un número de grupo exige la clínica seleccionada para no convertir el
+grupo en un ámbito global implícito. La ruta pública de refresco sigue cerrada
+para activos legacy durante la cuarentena; una autorización nueva nunca cae de
+vuelta a una credencial local.
+
 Para desplegar: ampliar exclusivamente los grants existentes de `staging:whatsapp`
-con las cuatro operaciones de plantillas; los grants de control siguen solo con
+con las cuatro operaciones de plantillas y la lectura de perfil; los grants de control siguen solo con
 revocación. No crear conexiones ni ampliar clínicas en este cambio. Conservar
 configuración y release anteriores para rollback; no borrar SQLite, recibos ni
 bloqueos. La migración SQL aditiva se aplica antes de reiniciar la API. Restaurar

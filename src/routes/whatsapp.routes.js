@@ -19,7 +19,8 @@ router.use((req, res, next) => {
     || (['PUT','DELETE'].includes(req.method) && /^\/template-catalog\/[1-9][0-9]*$/.test(path))
     || (req.method === 'PUT' && /^\/template-catalog\/[1-9][0-9]*\/toggle$/.test(path))
     || (req.method === 'POST' && /^\/template-catalog\/[1-9][0-9]*\/(duplicate|translations|disciplines|propagate)$/.test(path));
-  if (templateRoute || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
+  const authorizedProfileRefresh = req.method === 'POST' && /^\/phones\/[1-9][0-9]*\/refresh$/.test(path);
+  if (templateRoute || authorizedProfileRefresh || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
   return authMiddleware(req, res, () => metaQuarantine.middleware(req, res));
 });
 

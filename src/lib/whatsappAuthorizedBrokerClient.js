@@ -235,6 +235,32 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       if(!latest||!sameBinding(captured,latest))fail('whatsapp_authorized_binding_changed');
       return operation===TM.LIST ? TM.project(operation,{...result.data,paging:result.data?.after?{next:true,cursors:{after:result.data.after}}:null}) : TM.project(operation,result.data);
     },
+    async profile(clinicId, assetId) {
+      runtime.namespace(environment());
+      const P = require('../../services/integrations-broker/src/whatsapp-authorized-profile');
+      const captured = await binding(clinicId, assetId);
+      if (!captured) fail('whatsapp_authorized_binding_invalid');
+      const config = read();
+      const before = await binding(captured.clinicId, captured.assetId);
+      if (!before || !sameBinding(captured, before) || JSON.stringify(read()) !== JSON.stringify(config)) {
+        fail('whatsapp_authorized_binding_changed');
+      }
+      const requestId = randomUUID();
+      const result = await createTransport(config).execute({
+        requestId,
+        tenantRef: 'clinic:' + captured.clinicId,
+        connectionRef: captured.connectionRef,
+        assetRef: 'wa-phone:' + captured.phoneId,
+        operation: P.READ,
+        payload: { authorizationId: captured.authorizationId, phoneId: captured.phoneId },
+      });
+      const latest = await binding(captured.clinicId, captured.assetId);
+      if (!latest || !sameBinding(captured, latest) || !exact(result, ['requestId','data','replayed'])
+        || result.requestId !== requestId || typeof result.replayed !== 'boolean') fail('whatsapp_authorized_binding_changed');
+      const profile = P.project(result.data);
+      if (profile.id !== captured.phoneId) fail('whatsapp_authorized_binding_changed');
+      return profile;
+    },
     async send(input) {
       runtime.namespace(environment());
       if (!exact(input, ['messageId','clinicId','assetId','expectedBinding','message']) || !id(input.clinicId) || !id(input.assetId)) fail('whatsapp_authorized_request_invalid');

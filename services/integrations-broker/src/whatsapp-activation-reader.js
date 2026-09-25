@@ -34,7 +34,8 @@ function createActivationReader(filename) {
       const definition=this.definitions().find(d=>d.connectionRef===request.connectionRef);
       if(!definition||!['staging:whatsapp','control:whatsapp'].includes(principal.id))return policy;
       const b=E.bindingFor(definition.enrollmentBinding);
-      const operations=principal.id==='control:whatsapp'?[C.REVOKE]:[C.SEND,...require('./whatsapp-template-management').OPERATIONS,require('./whatsapp-inbound-media').READ];
+      const operations=principal.id==='control:whatsapp'?[C.REVOKE]:[C.SEND,...require('./whatsapp-template-management').OPERATIONS,
+        require('./whatsapp-inbound-media').READ,require('./whatsapp-authorized-profile').READ];
       if(!b.clinicIds.some(id=>request.tenantRef==='clinic:'+id)||request.assetRef!=='wa-phone:'+definition.phoneId||!operations.includes(request.operation))fail('scope_denied');
       const binding={connectionRef:definition.connectionRef,provider:C.PROVIDER,initialState:'active',expiresAt:definition.expiresAt};
       store.seedConnection(binding.connectionRef,{state:'active',expiresAt:binding.expiresAt});

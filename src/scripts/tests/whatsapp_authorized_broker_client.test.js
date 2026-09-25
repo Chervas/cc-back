@@ -75,6 +75,23 @@ test('durable Message identity and server metadata determine exactly one compati
   await f.client.send({ ...input(), message: { ...message(), text: { body: 'Another synthetic body' } } });
   assert.equal(f.calls[0].requestId, f.calls[1].requestId);
 });
+test('authorized profile refresh uses a read operation bound to the same clinic and phone', async () => {
+  const f = fixture({ createTransport: () => ({ execute: async command => {
+    f.calls.push(command);
+    return { requestId: command.requestId, replayed: false, data: {
+      id: '401', status: 'CONNECTED', codeVerificationStatus: 'VERIFIED', qualityRating: 'GREEN',
+      isOnBizApp: false, platformType: 'CLOUD_API', displayPhoneNumber: '+34 600 000 401', verifiedName: 'Synthetic Clinic',
+    } };
+  } }) });
+  const result = await f.client.profile(123, 456);
+  assert.equal(result.status, 'CONNECTED');
+  assert.equal(result.verifiedName, 'Synthetic Clinic');
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].tenantRef, 'clinic:123');
+  assert.equal(f.calls[0].assetRef, 'wa-phone:401');
+  assert.equal(f.calls[0].operation, 'meta.whatsapp.authorized.profile.read.v1');
+  assert.deepEqual(f.calls[0].payload, { authorizationId: binding().authorizationId, phoneId: '401' });
+});
 test('unbound or forged clinic, asset, authorization and revision never dispatch', async () => {
   for (const forged of [{ clinicId: 999 }, { assetId: 999 }, { phoneId: '402' }, { wabaId: '502' }, { revision: 2 },
     { connectionRef: 'wa:foreign' }, { authorizationId: 'b1234567-1234-4234-8234-123456789abc' }, { accessToken: 'SYNTHETIC_FORBIDDEN' }]) {
