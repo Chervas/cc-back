@@ -206,6 +206,7 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     type: 'ops_global_discovery',
     priority: 'low',
     executorMethod: 'executeOpsGlobalDiscovery',
+    enabledEnv: 'OPS_BRIDGE_ENABLED',
     // Los cinco bridges migran desde el crontab del host, que operaba en UTC.
     // Mantener su zona evita desplazar ejecuciones durante el cutover o por DST.
     timezone: 'UTC',
@@ -214,12 +215,14 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     type: 'ops_summary',
     priority: 'low',
     executorMethod: 'executeOpsSummary',
+    enabledEnv: 'OPS_BRIDGE_ENABLED',
     timezone: 'UTC',
   }),
   opsGoogleBusinessProfileDaily: Object.freeze({
     type: 'ops_google_business_profile_daily',
     priority: 'low',
     executorMethod: 'executeOpsGoogleBusinessProfile',
+    enabledEnv: 'OPS_BRIDGE_ENABLED',
     payloadDefaults: Object.freeze({ onlyRequested: false }),
     timezone: 'UTC',
   }),
@@ -227,12 +230,14 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     type: 'ops_search_console_daily',
     priority: 'low',
     executorMethod: 'executeOpsSearchConsole',
+    enabledEnv: 'OPS_BRIDGE_ENABLED',
     timezone: 'UTC',
   }),
   opsGoogleBusinessProfileRequested: Object.freeze({
     type: 'ops_google_business_profile_requested',
     priority: 'low',
     executorMethod: 'executeOpsGoogleBusinessProfile',
+    enabledEnv: 'OPS_BRIDGE_ENABLED',
     payloadDefaults: Object.freeze({ onlyRequested: true }),
     timezone: 'UTC',
   }),

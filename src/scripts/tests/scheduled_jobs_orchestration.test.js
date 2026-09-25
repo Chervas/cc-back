@@ -47,6 +47,11 @@ function testCatalogCoversEveryCronAndExecutor() {
       'UTC',
       `${jobName} must preserve the historical host-cron timezone`
     );
+    assert.equal(
+      SCHEDULED_JOB_DEFINITIONS[jobName].enabledEnv,
+      'OPS_BRIDGE_ENABLED',
+      `${jobName} must remain closed unless the external OPS bridge is explicitly enabled`
+    );
   }
   assert.equal(
     SCHEDULED_JOB_DEFINITIONS.competitionSync.attachJobRequestId,
@@ -512,6 +517,7 @@ async function testCronMonitorReportsEnqueueNotBusinessCompletion() {
 async function testScheduledEnqueueMergesCatalogPayloadDefaults() {
   const jobs = new MetaSyncJobs();
   const originalEnqueue = jobRequestsService.enqueueUniqueJobRequest;
+  const previousOpsGate = process.env.OPS_BRIDGE_ENABLED;
   const calls = [];
   jobRequestsService.enqueueUniqueJobRequest = async (args) => {
     calls.push(args);
@@ -525,6 +531,7 @@ async function testScheduledEnqueueMergesCatalogPayloadDefaults() {
   };
 
   try {
+    process.env.OPS_BRIDGE_ENABLED = 'true';
     await jobs.enqueueScheduledJob('opsGoogleBusinessProfileRequested');
     await jobs.enqueueScheduledJob('adsSyncMidday');
     await jobs.enqueueScheduledJob('opsGoogleBusinessProfileRequested', {
@@ -542,7 +549,35 @@ async function testScheduledEnqueueMergesCatalogPayloadDefaults() {
     });
     assert.deepEqual(calls[3].payload, { windowLabel: 'manual-window' });
   } finally {
+    if (previousOpsGate === undefined) delete process.env.OPS_BRIDGE_ENABLED;
+    else process.env.OPS_BRIDGE_ENABLED = previousOpsGate;
     jobRequestsService.enqueueUniqueJobRequest = originalEnqueue;
+  }
+}
+
+async function testOpsBridgeGate() {
+  const jobs = new MetaSyncJobs();
+  const previous = process.env.OPS_BRIDGE_ENABLED;
+  const originalEnqueue = jobRequestsService.enqueueUniqueJobRequest;
+  let queued = 0;
+  jobRequestsService.enqueueUniqueJobRequest = async (args) => {
+    queued += 1;
+    return { created: true, job: { id: 991, payload: args.payload } };
+  };
+  try {
+    delete process.env.OPS_BRIDGE_ENABLED;
+    assert.deepEqual(await jobs.enqueueScheduledJob('opsGoogleBusinessProfileRequested'), {
+      status: 'disabled', queued: false, job_type: 'ops_google_business_profile_requested',
+    });
+    assert.equal(queued, 0, 'an OPS token alone must not activate the external bridge');
+
+    process.env.OPS_BRIDGE_ENABLED = 'true';
+    assert.equal((await jobs.enqueueScheduledJob('opsGoogleBusinessProfileRequested')).queued, true);
+    assert.equal(queued, 1);
+  } finally {
+    jobRequestsService.enqueueUniqueJobRequest = originalEnqueue;
+    if (previous === undefined) delete process.env.OPS_BRIDGE_ENABLED;
+    else process.env.OPS_BRIDGE_ENABLED = previous;
   }
 }
 
@@ -1472,6 +1507,7 @@ async function testAuthSessionExpiryGate() {
 
 async function run() {
   testCatalogCoversEveryCronAndExecutor();
+  await testOpsBridgeGate();
   await testAuthSessionExpiryGate();
   await testAwsCostsGateAndHandler();
   await testPlatformAuditJobsRespectGates();

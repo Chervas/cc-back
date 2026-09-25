@@ -104,3 +104,12 @@ test('la bienvenida identifica correctamente el canal de salida', () => {
   assert.equal(__testing.getWelcomeDispatchLabel(['email']), 'Bienvenida por email');
   assert.equal(__testing.getWelcomeDispatchLabel(['whatsapp', 'email']), 'Bienvenida por WhatsApp y email');
 });
+
+test('el nombre del remitente de campaña resuelve usuario_nombre sin depender del contacto', () => {
+  const list = { criteria: { sender_name: '  Vero  ' } };
+  const item = { custom_fields: { usuario_nombre: 'Administrador 1' } };
+
+  assert.equal(__testing.resolveVariableValue('usuario_nombre', item, list, {}), 'Vero');
+  assert.equal(__testing.resolveVariableValue('nombre_remitente', item, list, {}), 'Vero');
+  assert.equal(__testing.resolveVariableValue('sender_name', item, list, {}), 'Vero');
+});

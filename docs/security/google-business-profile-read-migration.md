@@ -185,6 +185,9 @@ alteran; 183 días no se convierten en «seis meses» por esta implementación.
    `push_ops_google_business_profile.js` renueva, consulta detalles,
    reseñas/posts y escribe en OPS. OPS queda aplazado por el usuario, sin migrar
    ni cambiar su runtime; no está autorizado ejecutarlo desde esta tarea.
+   Todos los cron OPS exigen además `OPS_BRIDGE_ENABLED=true`; conservar el
+   token o la URL configurados no los activa. El gate no afecta a los jobs
+   nativos `businessProfile*` que alimentan Perfil de Empresa dentro del CRM.
    Pausarlos para ese ámbito o migrarlos antes de declarar una única fuente.
    El registro independiente impide que borrar/recrear el mapping reactive los
    dos jobs legacy. El alta/reasignación/desconexión OAuth aún necesita su

@@ -5,7 +5,6 @@ const jwt = require('jsonwebtoken');
 const { Op } = require('sequelize');
 const db = require('../../models');
 const whatsappService = require('./whatsapp.service');
-const { isWhatsappRoutingConfigAvailable } = require('../lib/whatsapp-channel-role');
 const economicPrograms = require('../lib/economicProgramSnapshot');
 const economicPrices = require('../lib/economicPriceProfile');
 const fiscalPrices = require('../lib/economicFiscalPriceSource');
@@ -1704,7 +1703,7 @@ async function sendBudgetSignatureWhatsapp({ request, patient, clinic, publicUrl
     throw domainError(400, 'budget_signature_patient_phone_missing', 'El paciente no tiene un teléfono válido.');
   }
   const clinicConfig = await whatsappService.getClinicConfig(request.clinic_id);
-  if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
+  if (!clinicConfig?.phoneNumberId || !clinicConfig?.accessToken) {
     throw domainError(409, 'whatsapp_config_missing_for_scope', 'La clínica no tiene WhatsApp conectado.');
   }
   const template = await findApprovedBudgetSignatureWhatsappTemplate(clinicConfig.wabaId);
