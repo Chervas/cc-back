@@ -361,6 +361,8 @@ filas al sumar el cliente de mantenimiento. La unidad versionada
 `services/integrations-broker/deploy/clinicaclick-google-business-profile@.service`
 usa Node 24, usuario, configuración y SQLite propios, sin access keys ni
 `EnvironmentFile` compartido.
+Su usuario y grupo aislados se llaman `cc-google-gbp-staging`; la abreviatura evita
+superar el límite efectivo de nombres de cuenta del host.
 
 Este soporte aún no está desplegado. No añadir el destino al firmante/publicador
 hasta que el servicio sirva su hoja inicial y no abrir el puerto salvo

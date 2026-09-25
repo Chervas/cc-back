@@ -9,8 +9,8 @@ const filename = path.join(__dirname, '..', 'deploy', 'clinicaclick-google-busin
 test('Google Business Profile unit keeps its own OS identity, state and hardened Node 24 runtime', () => {
   const unit = fs.readFileSync(filename, 'utf8');
   for (const line of [
-    'User=cc-google-business-profile-%i',
-    'Group=cc-google-business-profile-%i',
+    'User=cc-google-gbp-%i',
+    'Group=cc-google-gbp-%i',
     'WorkingDirectory=/opt/clinicaclick-google-business-profile/current',
     'ExecStart=/opt/clinicaclick-audit/node-v24.21.0-recovery1/bin/node --max-old-space-size=128 src/google-main.js /etc/clinicaclick-google-business-profile-%i/config.json',
     'ReadWritePaths=/var/lib/clinicaclick-google-business-profile-%i',

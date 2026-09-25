@@ -32,6 +32,11 @@ inventario AWS de solo lectura no encontró unidad, configuración, secreto Goog
 certificado enrolado ni proceso `google-main`, y CRM no tiene todavía claves
 cliente ni flags activos.
 
+La unidad usa la cuenta de sistema abreviada `cc-google-gbp-<entorno>`. El nombre
+completo del servicio supera el límite efectivo de 32 caracteres aceptado por
+`groupadd` en el host AWS; la abreviatura conserva un usuario/grupo exclusivo sin
+compartir identidad con otros brokers.
+
 La primera cohorte propuesta queda limitada a la clínica de pruebas `clinic:92`,
 cuenta `accounts/103033606619897470310` y ubicación
 `locations/9681856373471112042`, mediante la conexión Google 23 ya utilizada por
