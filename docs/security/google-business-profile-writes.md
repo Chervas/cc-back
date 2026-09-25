@@ -1,23 +1,36 @@
 # Escrituras Google Business Profile y recuperación de recibos
 
 > **Tipo:** contrato de implementación y validación.
-> **Fuente de verdad:** broker, diario SQL y consumidores manuales/automatizados preparados en fuente DEV; no acredita publicación ni aceptación clínica.
-> **Última revisión:** 2026-09-20.
+> **Fuente de verdad:** broker, diario SQL y consumidores manuales/automatizados; el estado operativo exige además comprobar gates, registros y runtime del entorno.
+> **Última revisión:** 2026-09-25.
 > **Relacionado con:** [consumidores públicos](google-public-consumers.md), [contrato backend](../../src/Documentacion/13-backend.md#escrituras-tipadas-business-profile-preparadas), [estado central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
 
 ## Estado y frontera
 
-Preparados en fuente DEV el broker, diario SQLite, diario SQL, cuatro consumidores
-manuales, nodo de horarios programados, rutas de recuperación y UI. Las fichas gestionadas ya tienen un recorrido
-sin leer tokens locales; las no migradas conservan la vía anterior con el guard de
-credenciales legacy. El nodo gestionado conserva un intento por ejecución/nodo y
-comprueba el intento vigente del job antes de aceptar su resultado.
-No retirar tokens compartidos ni activar la cohorte hasta completar el censo,
-la resolución de incertidumbres y la aceptación autenticada. Ninguna candidata
-pública ni runtime incorpora este consumidor. Las tres tablas SQL ya están
-aplicadas y vacías solo en DEV desde el 20/09; CRM conserva el esquema anterior.
-[Acta SQL y recuperación](google-schema-readiness.md). La compatibilidad AWS de auditoría v25 está publicada
-y verificada desde el 20/09: [acta y recuperación](audit-reader-view-migration.md).
+Están preparados el broker, diario SQLite, diario SQL, cuatro consumidores
+manuales, nodo de horarios programados, rutas de recuperación y UI. Las fichas
+gestionadas tienen un recorrido sin leer tokens locales; las no migradas conservan
+la vía anterior con el guard de credenciales legacy. El nodo gestionado conserva
+un intento por ejecución/nodo y comprueba el intento vigente del job antes de
+aceptar su resultado.
+
+Estado operativo verificado el 25/09/2026: la BD compartida por CRM/staging ya
+contiene `BusinessProfileBrokerBindings`, `BusinessProfileMutations`,
+`BusinessProfileMutationLocks` y `BusinessProfileCacheStates`, pero las cuatro
+tablas están vacías. Los gates de la cohorte están ausentes o apagados; no hay
+bindings, mutaciones, bloqueos ni caché gestionada. Por tanto, disponer del esquema
+**no acredita una migración ni habilita escrituras por broker**. Las 15 ubicaciones
+activas continúan sincronizando correctamente por el lector nativo actual y las
+fichas no migradas conservan su vía legacy protegida.
+
+No retirar tokens compartidos ni activar la cohorte hasta completar el censo, la
+resolución de incertidumbres y una aceptación autenticada por cohorte. El puente
+externo OPS es independiente del lector nativo: en la comprobación del 25/09 su
+endpoint no respondió y sus jobs agotaron reintentos, sin afectar al sync nativo
+15/15. Su recuperación requiere un corte propio; no justifica abrir estos gates.
+[Acta SQL y recuperación](google-schema-readiness.md). La compatibilidad AWS de
+auditoría v25 está publicada y verificada desde el 20/09:
+[acta y recuperación](audit-reader-view-migration.md).
 
 La cohorte explícita `google-business-profile-write-v1` admite lectores y escritores
 con identidades distintas. La cohorte anterior de lectura rechaza tanto grants
