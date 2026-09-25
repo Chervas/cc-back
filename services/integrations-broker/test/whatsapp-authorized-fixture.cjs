@@ -4,7 +4,7 @@ const { fixture: onboardingFixture } = require('./whatsapp-onboarding-fixture.cj
 const { BrokerStore } = require('../src/store'); const { Broker } = require('../src/broker'); const { signRequest } = require('../src/auth');
 const C = require('../src/whatsapp-authorized-contract'); const { createWhatsappAuthorizedRegistry } = require('../src/whatsapp-authorized-registry');
 const { createWhatsappAuthorizedSecrets } = require('../src/whatsapp-authorized-secrets'); const { createWhatsappAuthorizedOperations } = require('../src/whatsapp-authorized-operations');
-const P = require('../src/whatsapp-authorized-profile');
+const P = require('../src/whatsapp-authorized-profile'); const S = require('../src/whatsapp-authorized-status');
 const { ACCOUNT, SECRET_KEY } = require('../src/google-main');
 const template = () => ({ id: '901', name: 'appointment_qa', language: 'es', status: 'APPROVED', components: [
   { type: 'HEADER', format: 'IMAGE', example: { header_handle: ['FICTITIOUS_IMAGE_HANDLE'] } },
@@ -46,11 +46,11 @@ async function fixture(t, { enabled = true, ongoing = false } = {}) {
   const principal = (id, keyId, key) => ({ id, keyId, enabled: true, maxPerMinute: 60, publicKey: key.publicKey.export({ type: 'spki', format: 'pem' }) });
   const policy = { audience: 'broker:authorized-qa', version: 'authorized-qa-v1', maxBacklog: 100,
     principals: [principal('staging:whatsapp','qa-staging',f.gateway), principal('control:whatsapp','qa-control',f.control)], connections: [binding],
-    grants: [71,72].flatMap(id => [{ principalId: 'staging:whatsapp', tenantRef: 'clinic:'+id, connectionRef: binding.connectionRef, assetRef: 'wa-phone:401', operations: [C.SEND,P.READ] },
+    grants: [71,72].flatMap(id => [{ principalId: 'staging:whatsapp', tenantRef: 'clinic:'+id, connectionRef: binding.connectionRef, assetRef: 'wa-phone:401', operations: [C.SEND,P.READ,S.READ] },
       { principalId: 'control:whatsapp', tenantRef: 'clinic:'+id, connectionRef: binding.connectionRef, assetRef: 'wa-phone:401', operations: [C.REVOKE] }]) };
   const filename = path.join(f.dir, 'authorized.sqlite'); const stores=[];
   const make = () => { const store = new BrokerStore(filename); stores.push(store); return { store, broker: new Broker({ store, policy, secrets,
-    operations: createWhatsappAuthorizedOperations({ http, secrets, registry }), now: f.now }) }; };
+    operations: createWhatsappAuthorizedOperations({ http, secrets, registry, store }), now: f.now }) }; };
   let current = make();
   const request = (message = textMessage(), overrides = {}) => ({ requestId: randomUUID(), tenantRef: 'clinic:71', connectionRef: binding.connectionRef,
     assetRef: 'wa-phone:401', operation: C.SEND, payload: { authorizationId: flow.flowId, phoneId: '401', message }, ...overrides });

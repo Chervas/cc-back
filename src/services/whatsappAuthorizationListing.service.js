@@ -31,7 +31,8 @@ function integrity(row, key) {
   return row;
 }
 function createService({ models, sessions, broker = configuredClient(), config = S.settings,
-  loadBindings, loadAutomatic, isBlocked = scopeBlocks.blocked, now = () => new Date(), clock = () => Date.now() } = {}) {
+  authorizedBroker = require('../lib/whatsappAuthorizedBrokerClient'), loadBindings, loadAutomatic,
+  isBlocked = scopeBlocks.blocked, now = () => new Date(), clock = () => Date.now() } = {}) {
   const bindingsSource = loadBindings || (() => configuration(process.env).bindings);
   const automaticSource = loadAutomatic || (loadBindings ? () => null : () => configuration(process.env).automatic || null);
   const db = () => typeof models === 'function' ? models() : models || require('../../models');
@@ -100,8 +101,16 @@ function createService({ models, sessions, broker = configuredClient(), config =
         [Op.or]:[...allowed.values()].map(({scope})=>({scope_type:scope.type,scope_id:scope.id}))},
         attributes:ATTRIBUTES,order:[['created_at','DESC'],['request_id','DESC']],limit:50,raw:true });
       if (rows.length >= 50) incomplete = true;
+      const activationSnapshot = async ids => !ids.length ? [] : db().WhatsappPhoneActivation.findAll({
+        where:{authorization_id:{[Op.in]:ids},state:{[Op.in]:['active','superseded']}},
+        attributes:['authorization_id','asset_id','state'],raw:true,
+      });
+      const activationRows = await activationSnapshot(rows.map(row=>row.request_id));
+      const retired = new Set(activationRows.filter(row=>row.state==='superseded').map(row=>row.authorization_id));
+      const active = new Map(activationRows.filter(row=>row.state==='active').map(row=>[row.authorization_id,row]));
       const seen = new Set(); const authorizations = []; const metadataDigests = new Map(); const remoteDeadline = clock()+12000;
       for (const row of rows) {
+        if (retired.has(row.request_id)) continue;
         const scopeKey = row.scope_type + ':' + row.scope_id;
         const selected = allowed.get(scopeKey); if (!selected) { incomplete = true; continue; }
         try {
@@ -139,6 +148,15 @@ function createService({ models, sessions, broker = configuredClient(), config =
               const metadata = await phoneMetadata.read({models:db(),authorization:result,now:now()});
               result.localPhone = metadata.phone; metadataDigests.set(result.requestId,metadata.digest);
             } catch { incomplete = true; }
+            const activation = active.get(result.requestId);
+            if (activation && result.localPhone) {
+              if (clock()+5000 > remoteDeadline) incomplete = true;
+              else try {
+                const permission = await authorizedBroker.permissionStatus(result.scope.type==='clinic'?result.scope.id:row.original_clinic_ids[0],activation.asset_id);
+                if (permission === 'disconnected') result.permissionStatus = 'disconnected';
+                else if (permission !== 'connected') incomplete = true;
+              } catch { incomplete = true; }
+            }
           }
           seen.add(phoneKey); authorizations.push(result);
         } catch (error) {
@@ -160,8 +178,10 @@ function createService({ models, sessions, broker = configuredClient(), config =
       }
       // Recheck every emitted scope after all remote work, covering revocation
       // while another scope's status was being fetched.
-      const visible = [];
+      const visible = [], finallyRetired = new Set((await activationSnapshot(authorizations.map(dto=>dto.requestId)))
+        .filter(row=>row.state==='superseded').map(row=>row.authorization_id));
       for (const dto of authorizations) {
+        if (finallyRetired.has(dto.requestId)) continue;
         try {
           const latest = await snapshot(dto.scope,actor), initial = allowed.get(keyFor(dto.scope)).snap;
           if (latest.digest !== initial.digest || !unchanged()) { incomplete = true; continue; }

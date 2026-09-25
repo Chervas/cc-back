@@ -25,10 +25,11 @@ async function setup(t,{legacyCaller=false}={}){
       return f.http(r);
     }});
   let engine=make();
-  const execute=(operation=A.ACTIVATE,changes={})=>engine.operations[operation].execute({request:f.command(operation,
-    {flowId:flow.flowId,scopeDigest:flow.payload.scopeDigest,clinicSetDigest:flow.payload.clinicSetDigest,
+  const executeFlow=(selected,operation=A.ACTIVATE,changes={})=>engine.operations[operation].execute({request:f.command(operation,
+    {flowId:selected.flowId,scopeDigest:selected.payload.scopeDigest,clinicSetDigest:selected.payload.clinicSetDigest,
       ...(operation===A.ACTIVATE?{assetId:991}:{}),...changes}),principal:f.policy.principals[0],binding:f.binding,policy:legacyCaller?undefined:f.policy});
-  return {f,flow,state,execute,async prepare(){return execute(A.PROFILE)},restart(){f.restart();engine=make();},
+  const execute=(operation=A.ACTIVATE,changes={})=>executeFlow(flow,operation,changes);
+  return {f,flow,state,execute,executeFlow,async prepare(){return execute(A.PROFILE)},restart(){f.restart();engine=make();},
     row:()=>f.current.store.db.prepare('SELECT * FROM whatsapp_activations WHERE flow_id=?').get(flow.flowId)};
 }
 test('Cloud registration completes subscription and exposes only exact activated clinic grants after restart',async t=>{
@@ -80,4 +81,16 @@ test('activation audit uses its configured policy with the deployed legacy contr
   const f=await setup(t,{legacyCaller:true});await f.prepare();assert.equal((await f.execute()).data.state,'active');
   const events=f.f.current.store.db.prepare('SELECT event FROM audit_outbox').all().map(r=>JSON.parse(r.event));
   assert(events.some(e=>e.reason==='whatsapp_activation_completed'&&e.operation===A.ACTIVATE));
+});
+test('reauthorizing the exact same phone atomically supersedes the prior credential',async t=>{
+  const f=await setup(t);await f.prepare();await f.execute();
+  const replacement=await f.f.begin();await f.f.finish(replacement);
+  await f.executeFlow(replacement,A.PROFILE);const result=await f.executeFlow(replacement);
+  assert.equal(result.data.state,'active');assert.equal(result.data.assetId,991);
+  const rows=f.f.current.store.db.prepare('SELECT flow_id,state,asset_id FROM whatsapp_activations ORDER BY started_at').all();
+  assert.deepEqual(rows.map(row=>[row.flow_id,row.state,row.asset_id]),[[f.flow.flowId,'superseded',991],[replacement.flowId,'active',991]]);
+  const reader=createActivationReader(f.f.filename);t.after(()=>reader.close());
+  assert.deepEqual(reader.definitions().map(value=>value.authorizationId),[replacement.flowId]);
+  assert.deepEqual(reader.scopes('101'),[{phoneId:'401',wabaId:'301',clinicIds:[71,72]}]);
+  await assert.rejects(f.execute(A.STATUS),/asset_revoked/);
 });

@@ -36,6 +36,18 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
       state:saved?.state||'prepared',profile:saved?.profile?JSON.parse(saved.profile):null,
       observedAt:saved?.updated_at||null,activatedAt:saved?.activated_at||null};
   }
+  function supersedePrevious(id,assetId,definition) {
+    const previous=store.db.prepare("SELECT flow_id,definition FROM whatsapp_activations WHERE asset_id=? AND state='active' AND flow_id<>? LIMIT 2").all(assetId,id);
+    if(previous.length>1)fail('scope_denied');
+    if(!previous.length)return;
+    let old;
+    try{old=JSON.parse(previous[0].definition);}catch{fail('scope_denied');}
+    const currentBinding=E.bindingFor(definition.enrollmentBinding),oldBinding=E.bindingFor(old.enrollmentBinding);
+    if(old.phoneId!==definition.phoneId||old.wabaId!==definition.wabaId
+      ||oldBinding.scopeKey!==currentBinding.scopeKey||JSON.stringify(oldBinding.clinicIds)!==JSON.stringify(currentBinding.clinicIds))fail('scope_denied');
+    store.db.prepare("UPDATE whatsapp_activations SET state='superseded',updated_at=? WHERE flow_id=? AND state='active'")
+      .run(now(),previous[0].flow_id);
+  }
   async function execute({request,principal,binding,policy:originalPolicy=policy}) {
     const ctx=context(request,principal,binding);
     const registry=registryFactory({filename,authorizations:[ctx.definition],loadEnrollmentBinding:enrollment,now});
@@ -54,11 +66,13 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
     });
     try {
       active();
-      if(request.operation===A.STATUS)return {requestId:request.requestId,data:projection(row(id),ctx),replayed:true};
+      if(request.operation===A.STATUS){const current=row(id);if(current?.state==='superseded')fail('asset_revoked');
+        return {requestId:request.requestId,data:projection(current,ctx),replayed:true};}
       const saved=store.transaction(()=>{
         active();let saved=row(id);
         if(!saved){store.db.prepare('INSERT INTO whatsapp_activations(flow_id,state,definition,pin_version,started_at,updated_at) VALUES (?,?,?,?,?,?)')
           .run(id,'prepared',JSON.stringify(ctx.definition),randomUUID(),now(),now());saved=row(id);}
+        if(saved.state==='superseded')fail('asset_revoked');
         if(saved.definition!==JSON.stringify(ctx.definition)||saved.asset_id && request.operation===A.ACTIVATE && saved.asset_id!==request.payload.assetId)fail('idempotency_conflict');
         if(saved.lease_until>now())fail('rate_limited');
         if(request.operation===A.ACTIVATE && !saved.profile)fail('invalid_request');
@@ -106,6 +120,7 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
         if(!await subscribed()) {const result=await call('subscribe',ctx.flow.waba_id);if(result.success!==true&&result.success!=='true')fail('provider_failed');}
         if(!await subscribed())fail('provider_failed');
         store.transaction(()=>{active();const current=row(id);if(current.lease_owner!==owner)fail('idempotency_conflict');
+          supersedePrevious(id,current.asset_id,ctx.definition);
           record('whatsapp_activation_completed');
           store.db.prepare("UPDATE whatsapp_activations SET state='active',profile=?,updated_at=?,activated_at=? WHERE flow_id=?")
             .run(JSON.stringify(p),now(),now(),id);});

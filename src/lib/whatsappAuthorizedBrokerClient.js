@@ -100,13 +100,13 @@ function configuration(env = process.env) {
   catch { fail('whatsapp_authorized_configuration_invalid'); }
   finally { raw.fill(0); }
 }
-function configuredTransport(config) {
+function configuredTransport(config, { timeoutMs = 30000 } = {}) {
   return { async execute(command) {
     let key; let ca;
     try {
       key = privateFile(config.privateKeyFile, 8192); ca = privateFile(config.caFile, 65536);
       const client = createIntegrationsBrokerClient({ origin: config.origin, keyId: config.keyId, audience: config.audience,
-        privateKey: key, ca, timeoutMs: 30000 });
+        privateKey: key, ca, timeoutMs });
       return await client.execute(command);
     } finally { key?.fill(0); ca?.fill(0); }
   } };
@@ -175,6 +175,22 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       return read()?.bindings.filter(b => b.clinicId === clinicId).map(b => ({ ...b })) || [];
     },
     binding,
+    async permissionStatus(clinicId, assetId) {
+      runtime.namespace(environment());
+      const S = require('../../services/integrations-broker/src/whatsapp-authorized-status');
+      const captured = await binding(clinicId, assetId);
+      if (!captured) fail('whatsapp_authorized_binding_invalid');
+      const config = read(); const before = await binding(captured.clinicId, captured.assetId);
+      if (!before || !sameBinding(captured, before) || JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
+      const requestId = randomUUID();
+      const result = await createTransport(config, { timeoutMs: 5000 }).execute({ requestId, tenantRef: 'clinic:' + captured.clinicId,
+        connectionRef: captured.connectionRef, assetRef: 'wa-phone:' + captured.phoneId, operation: S.READ,
+        payload: { authorizationId: captured.authorizationId, phoneId: captured.phoneId } });
+      const latest = await binding(captured.clinicId, captured.assetId);
+      if (!latest || !sameBinding(captured, latest) || !exact(result, ['requestId','data','replayed'])
+        || result.requestId !== requestId || typeof result.replayed !== 'boolean') fail('whatsapp_authorized_binding_changed');
+      return S.project(result.data).permissionStatus;
+    },
     async media(messageId) {
       runtime.namespace(environment());
       const message=await loadMessage(Number(messageId));

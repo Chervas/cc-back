@@ -13,6 +13,8 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   for(const file of ['20260912210000-create-platform-audit-events','20260913003000-add-platform-audit-result-part'])await require('../../../migrations/'+file).up(qi,D);
   const migration=require('../../../migrations/20260922153000-create-whatsapp-phone-activations');
   await migration.up(qi,D);await migration.up(qi,D);await migration.down(qi);await migration.up(qi,D);
+  const historyMigration=require('../../../migrations/20260925113000-whatsapp-activation-history');
+  await historyMigration.up(qi,D);await historyMigration.up(qi,D);await historyMigration.down(qi);await historyMigration.up(qi,D);
   models.ClinicMetaAsset=require('../../../models/ClinicMetaAsset')(sql,D);
   models.WhatsappPhoneActivation=require('../../../models/whatsappphoneactivation')(sql,D);
   await table('ActivationTestJob','ActivationTestJobs',{authorization_id:{type:D.STRING(36),primaryKey:true},waba_id:D.STRING(30)});
@@ -53,9 +55,19 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   const cutoff=published.connections[0].messageNotBefore;
   await make().complete({...actor,requestId:context.requestId});assert.equal(activations,1);assert.equal(await models.WhatsappPhoneActivation.count(),1);assert.equal(published.connections[0].messageNotBefore,cutoff);
   assert.equal(await models.PlatformAuditEvent.count(),2);assert.equal(await models.ActivationTestJob.count(),1);
+  const previousAuthorization=context.requestId;context.requestId=randomUUID();remote.flowId=context.requestId;
+  remote.connectionRef=A.connectionRef(context.requestId);remote.assetId=null;remote.state='prepared';remote.activatedAt=null;
+  const renewed=await make().complete({...actor,requestId:context.requestId});assert.equal(renewed.assetId,asset.id);assert.equal(renewed.connected,true);assert.equal(activations,2);
+  assert.equal((await models.ClinicMetaAsset.findByPk(asset.id)).whatsappAuthorizationId,context.requestId);
+  assert.equal((await models.WhatsappPhoneActivation.findByPk(previousAuthorization)).state,'superseded');
+  assert.equal((await models.WhatsappPhoneActivation.findByPk(context.requestId)).state,'active');
+  assert.equal(await models.WhatsappPhoneActivation.count(),2);assert.equal(published.connections.length,1);
+  assert.equal(published.connections[0].authorizationId,context.requestId);assert.equal(published.connections[0].assetId,asset.id);
+  assert.equal(published.connections[0].messageNotBefore,cutoff);assert.equal(await models.ActivationTestJob.count(),1);
+  await assert.rejects(historyMigration.down(qi),/Preserve WhatsApp activation history/);
   await assert.rejects(models.ClinicMetaAsset.create({assetType:'ad_account',metaAssetId:'701',metaConnectionId:null}));
   await assert.rejects(migration.down(qi),/Preserve WhatsApp/);
-  report.checks.push('Migration up/up/down/up, independent catalog identity, restart recovery without provider reactivation, immutable cutoff, no secrets, audit and rollback guard');
+  report.checks.push('Migration up/up/down/up, independent catalog identity, exact-phone credential renewal, restart recovery without provider reactivation, immutable cutoff, no secrets, audit and rollback guard');
   }
   const own=await models.ClinicMetaAsset.create({metaConnectionId:1,assetType:'whatsapp_phone_number',metaAssetId:'402',phoneNumberId:'402',wabaId:'302',assignmentScope:'clinic',clinicaId:71,isActive:true,additionalData:{whatsapp_channel_role:'primary'}});
   const bindings=id=>[{assetId:asset.id,phoneId:'401',wabaId:'301',sendEnabled:true},...(id===71?[{assetId:own.id,phoneId:'402',wabaId:'302',sendEnabled:true}]:[])];
@@ -106,4 +118,4 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   assert.equal((await asset.reload()).additionalData.whatsapp_channel_role,'primary','an inherited primary cannot be silently demoted');
   report.checks.push('Group secondary is atomic and idempotent, preserves existing and absent primaries, routes only selected purposes, rejects primary conflict and missing member permission, audit failure rolls back');
   report.checks.push('Atomic clinic route selects group over own, keeps own asset available, explicit secondary removal, unselected new group does not send; rollback on audit failure, scope/session/duplicate rejection');
-}).catch(error=>{console.error(error.message);process.exitCode=1});
+}).catch(error=>{console.error(error.stack||error.message);process.exitCode=1});

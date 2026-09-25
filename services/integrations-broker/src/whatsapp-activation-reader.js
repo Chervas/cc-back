@@ -16,7 +16,7 @@ function createActivationReader(filename) {
     if(rows.length>1000)fail('scope_denied');
     return rows.map(row=>{
       const definition=validateAuthorization(JSON.parse(row.definition));
-      if(!A.phases.includes(row.state)||!A.positive(row.asset_id)||definition.authorizationId!==row.flow_id
+      if(!A.storedPhases.includes(row.state)||!A.positive(row.asset_id)||definition.authorizationId!==row.flow_id
         ||definition.connectionRef!==A.connectionRef(row.flow_id)||definition.enabled!==false
         ||row.state==='active'&&(!Number.isSafeInteger(row.activated_at)||row.activated_at<=0))fail('scope_denied');
       return {...row,definition};
@@ -24,7 +24,7 @@ function createActivationReader(filename) {
   }
   return {
     definitions:()=>rows().filter(r=>r.state==='active').map(r=>({...r.definition,enabled:true})),
-    scopes:(appId)=>rows().filter(r=>r.state!=='prepared').map(r=>{
+    scopes:(appId)=>rows().filter(r=>!['prepared','superseded'].includes(r.state)).map(r=>{
       const b=E.bindingFor(r.definition.enrollmentBinding);
       if(!E.id(appId)||b.appId!==appId)fail('scope_denied');
       return {wabaId:r.definition.wabaId,phoneId:r.definition.phoneId,clinicIds:[...b.clinicIds]};
@@ -35,7 +35,7 @@ function createActivationReader(filename) {
       if(!definition||!['staging:whatsapp','control:whatsapp'].includes(principal.id))return policy;
       const b=E.bindingFor(definition.enrollmentBinding);
       const operations=principal.id==='control:whatsapp'?[C.REVOKE]:[C.SEND,...require('./whatsapp-template-management').OPERATIONS,
-        require('./whatsapp-inbound-media').READ,require('./whatsapp-authorized-profile').READ];
+        require('./whatsapp-inbound-media').READ,require('./whatsapp-authorized-profile').READ,require('./whatsapp-authorized-status').READ];
       if(!b.clinicIds.some(id=>request.tenantRef==='clinic:'+id)||request.assetRef!=='wa-phone:'+definition.phoneId||!operations.includes(request.operation))fail('scope_denied');
       const binding={connectionRef:definition.connectionRef,provider:C.PROVIDER,initialState:'active',expiresAt:definition.expiresAt};
       store.seedConnection(binding.connectionRef,{state:'active',expiresAt:binding.expiresAt});
