@@ -244,6 +244,55 @@ test('un phone_number_id ajeno no permite leer plantillas aunque el actor sea pr
   }
 });
 
+test('el estado de una plantilla secundaria solo se expone dentro del ámbito de la clínica', async () => {
+  const originals = {
+    membershipFindAll: db.UsuarioClinica.findAll,
+    clinicFindOne: db.Clinica.findOne,
+    templateFindOne: db.WhatsappTemplate.findOne,
+    assetFindOne: db.ClinicMetaAsset.findOne,
+  };
+  db.UsuarioClinica.findAll = async () => [{ id_clinica: 56, rol_clinica: 'propietario' }];
+  db.Clinica.findOne = async () => ({ grupoClinicaId: 5 });
+  db.WhatsappTemplate.findOne = async () => ({
+    id: 4714,
+    waba_id: 'waba-review-secondary',
+    clinic_id: 56,
+    status: 'APPROVED',
+    origin: 'custom',
+    catalog_template_id: null,
+    created_by_user_id: 76,
+  });
+  db.ClinicMetaAsset.findOne = async ({ where }) => (
+    where.wabaId === 'waba-review-secondary' ? { id: 398 } : null
+  );
+
+  try {
+    const allowed = responseRecorder();
+    await whatsappController.getTemplateStatusForClinic({
+      params: { id: '4714' },
+      query: { clinic_id: '56' },
+      userData: { userId: 76 },
+    }, allowed);
+    assert.equal(allowed.statusCode, 200);
+    assert.deepEqual(allowed.body, { id: 4714, status: 'APPROVED' });
+
+    db.ClinicMetaAsset.findOne = async () => null;
+    const foreign = responseRecorder();
+    await whatsappController.getTemplateStatusForClinic({
+      params: { id: '4714' },
+      query: { clinic_id: '56' },
+      userData: { userId: 76 },
+    }, foreign);
+    assert.equal(foreign.statusCode, 404);
+    assert.deepEqual(foreign.body, { error: 'template_not_found' });
+  } finally {
+    db.UsuarioClinica.findAll = originals.membershipFindAll;
+    db.Clinica.findOne = originals.clinicFindOne;
+    db.WhatsappTemplate.findOne = originals.templateFindOne;
+    db.ClinicMetaAsset.findOne = originals.assetFindOne;
+  }
+});
+
 test('sync y creación rechazan la clínica ajena antes de resolver activos', async () => {
   const originals = {
     membershipFindAll: db.UsuarioClinica.findAll,

@@ -1619,6 +1619,62 @@ exports.listTemplatesForClinic = async (req, res) => {
   }
 };
 
+exports.getTemplateStatusForClinic = async (req, res) => {
+  try {
+    const templateId = Number(req.params.id);
+    const clinicId = Number(req.query.clinic_id);
+    const userId = req.userData?.userId;
+    if (!Number.isInteger(templateId) || templateId <= 0 || !Number.isInteger(clinicId) || clinicId <= 0) {
+      return res.status(400).json({ error: 'template_id_and_clinic_id_required' });
+    }
+
+    await assertWhatsappTemplateClinicAccess({ clinicId, userId });
+    const [clinic, template] = await Promise.all([
+      Clinica.findOne({
+        where: { id_clinica: clinicId },
+        attributes: ['grupoClinicaId'],
+        raw: true,
+      }),
+      WhatsappTemplate.findOne({
+        where: { id: templateId, is_active: true },
+        attributes: ['id', 'waba_id', 'clinic_id', 'status', 'origin', 'catalog_template_id', 'created_by_user_id'],
+        raw: true,
+      }),
+    ]);
+    if (!template || !canUserSelectWhatsappTemplate(template, userId)) {
+      return res.status(404).json({ error: 'template_not_found' });
+    }
+
+    const scope = [
+      { assignmentScope: 'clinic', clinicaId: clinicId },
+      ...(clinic?.grupoClinicaId
+        ? [{ assignmentScope: 'group', grupoClinicaId: clinic.grupoClinicaId }]
+        : []),
+    ];
+    const asset = await ClinicMetaAsset.findOne({
+      where: {
+        wabaId: String(template.waba_id),
+        isActive: true,
+        assetType: { [Op.in]: ['whatsapp_phone_number', 'whatsapp_business_account'] },
+        [Op.or]: scope,
+      },
+      attributes: ['id'],
+      raw: true,
+    });
+    if (!asset) {
+      return res.status(404).json({ error: 'template_not_found' });
+    }
+
+    return res.json({ id: template.id, status: template.status });
+  } catch (err) {
+    if (err?.code === 'whatsapp_template_clinic_scope_forbidden') {
+      return res.status(403).json({ error: err.code });
+    }
+    console.error('Error getTemplateStatusForClinic', err);
+    return res.status(500).json({ error: 'Error obteniendo estado de plantilla' });
+  }
+};
+
 exports.syncTemplates = async (req, res) => {
   try {
     const clinicId = req.query.clinic_id ? Number(req.query.clinic_id) : null;

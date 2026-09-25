@@ -31,6 +31,7 @@ router.post('/messages', authMiddleware, whatsappController.sendMessage);
 
 // Plantillas del WABA según clinic_id o phone_number_id
 router.get('/templates', authMiddleware, whatsappController.listTemplatesForClinic);
+router.get('/templates/:id/status', authMiddleware, whatsappController.getTemplateStatusForClinic);
 router.post('/templates/sync', authMiddleware, whatsappController.syncTemplates);
 router.post('/templates/custom', authMiddleware, whatsappController.createCustomTemplate);
 router.post('/templates/create-from-catalog', authMiddleware, whatsappController.createTemplatesFromCatalog);
