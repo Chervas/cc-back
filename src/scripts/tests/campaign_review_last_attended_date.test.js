@@ -80,3 +80,59 @@ test('un importado sin fecha usa la última cita completada del paciente dentro 
     '07/09/2026',
   );
 });
+
+test('las reseñas separan los contactos sin fecha en vez de bloquear toda la tanda', () => {
+  const template = {
+    name: 'cc_solicitud_de_opinion_tras_visita_test',
+    components: [{ type: 'BODY', text: REVIEW_TEMPLATE_BODY }],
+    variables: REVIEW_TEMPLATE_VARIABLES,
+  };
+  const withDate = {
+    id: 1,
+    status: 'ready',
+    selected: true,
+    name: 'Paciente con fecha',
+    custom_fields: { fecha_ultima_cita_asistida: '21/05/2026' },
+  };
+  const withoutDate = {
+    id: 2,
+    status: 'ready',
+    selected: true,
+    name: 'Paciente sin fecha',
+    custom_fields: {},
+  };
+
+  const result = bulkSends.__testing.partitionItemsByTemplateVariableAvailability({
+    template,
+    items: [withDate, withoutDate],
+    list: { criteria: { review_sender_name: 'Vero', review_display_clinic_name: 'Propdental' } },
+    clinic: { nombre_clinica: 'Propdental Sant Martí' },
+  });
+
+  assert.deepEqual(result.eligibleItems.map((item) => item.id), [1]);
+  assert.deepEqual(result.excludedItems.map(({ item }) => item.id), [2]);
+  assert.deepEqual(
+    result.excludedItems[0].missingVariables.map((item) => item.variable),
+    ['fecha_ultima_cita_asistida'],
+  );
+});
+
+test('una exclusión por variables se revalida al cambiar de plantilla', () => {
+  assert.deepEqual(
+    bulkSends.__testing.buildItemChannelEligibilityPatch({
+      status: 'excluded_missing_variables',
+      selected: false,
+      name: 'Paciente',
+      phone: '+34617560236',
+      email: null,
+      sent_at: null,
+      dispatch_status: null,
+    }, ['whatsapp']),
+    {
+      status: 'ready',
+      reason: 'Contacto listo para los destinos seleccionados',
+      exclusion_reason: null,
+      selected: true,
+    },
+  );
+});
