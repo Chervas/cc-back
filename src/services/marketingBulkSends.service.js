@@ -3499,8 +3499,8 @@ async function buildReviewRequestCandidateForAppointment(scope, body = {}) {
   };
 }
 
-function mapReviewItemsFromImportedList(rows, importedList, alreadyRequested, body = {}) {
-  const items = (rows || []).map((row) => {
+function mapReviewItemsFromImportedListBase(rows, importedList, alreadyRequested) {
+  return (rows || []).map((row) => {
     const plain = row?.get ? row.get({ plain: true }) : row;
     const attendedDate = resolveLastAttendedAppointmentDate(plain);
     const patientId = Number(plain?.paciente_id || 0) || null;
@@ -3539,8 +3539,13 @@ function mapReviewItemsFromImportedList(rows, importedList, alreadyRequested, bo
       notes: plain?.notes || null,
     };
   });
+}
 
-  return applyReviewRequestExclusions(items, body);
+function mapReviewItemsFromImportedList(rows, importedList, alreadyRequested, body = {}) {
+  return applyReviewRequestExclusions(
+    mapReviewItemsFromImportedListBase(rows, importedList, alreadyRequested),
+    body
+  );
 }
 
 async function attachLatestAttendedAppointmentDate(items = [], scope = {}) {
@@ -3587,6 +3592,11 @@ async function attachLatestAttendedAppointmentDate(items = [], scope = {}) {
   });
 }
 
+async function prepareReviewItemsForExclusions(items = [], scope = {}, body = {}) {
+  const datedItems = await attachLatestAttendedAppointmentDate(items, scope);
+  return applyReviewRequestExclusions(datedItems, body);
+}
+
 async function buildReviewItemsFromImportedList(scope, body = {}) {
   const importedListId = parseReviewImportListId(body);
   if (!importedListId) return null;
@@ -3616,9 +3626,9 @@ async function buildReviewItemsFromImportedList(scope, body = {}) {
     getReviewRequestedPatientIds(scope),
   ]);
 
-  const items = mapReviewItemsFromImportedList(rows, importedList, alreadyRequested, body);
+  const items = mapReviewItemsFromImportedListBase(rows, importedList, alreadyRequested);
   return sortReviewRequestItemsByRecentCare(
-    await attachLatestAttendedAppointmentDate(items, scope)
+    await prepareReviewItemsForExclusions(items, scope, body)
   );
 }
 
@@ -3731,7 +3741,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
       latestAppointmentByPatient.set(patientId, row);
     }
 
-    const items = applyReviewRequestExclusions(patients.map((patient) => {
+    const items = patients.map((patient) => {
       const latestAppointment = latestAppointmentByPatient.get(Number(patient.id_paciente));
       const item = mapReviewPatientItem({
         patient,
@@ -3762,9 +3772,9 @@ async function buildItemsForReviewRequest(scope, body = {}) {
           ...(item.custom_fields || {}),
         },
       };
-    }), body);
+    });
     return sortReviewRequestItemsByRecentCare(
-      await attachLatestAttendedAppointmentDate(items, scope)
+      await prepareReviewItemsForExclusions(items, scope, body)
     );
   }
 
@@ -10866,6 +10876,7 @@ module.exports = {
     computeCounters,
     mapReviewItemsFromImportedList,
     attachLatestAttendedAppointmentDate,
+    prepareReviewItemsForExclusions,
     resolveVariableValue,
     parseReviewImportListId,
     shouldScheduleReviewReminder,

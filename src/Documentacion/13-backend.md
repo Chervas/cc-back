@@ -9795,6 +9795,12 @@ no se vuelve a solicitar una reseña por borrar una cola histórica. La métrica
 `active_queue_recipients` solo cuenta pendientes de listas activas y deduplica
 por paciente, teléfono o email, no por el número de filas históricas.
 
+La variable `fecha_ultima_cita_asistida` se resuelve antes de aplicar la regla
+de exclusión por fecha. En listados importados y selecciones históricas se usa
+primero la fecha aportada por la fila y, si falta, la última cita `completada`
+del paciente dentro del alcance autorizado. Solo se excluye por falta de fecha
+cuando ninguna de las dos fuentes aporta un valor válido.
+
 `materializeInboundReply` sigue usando primero reglas deterministas para
 valoraciones `1-5`. Se anade reconocimiento de expresiones largas tipo
 `os doy un 5`. Si no hay nota determinista y el mensaje responde a una solicitud
