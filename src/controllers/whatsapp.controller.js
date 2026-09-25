@@ -14,6 +14,7 @@ const whatsappAccountComplianceService = require('../services/whatsappAccountCom
 const whatsappAccountHealthService = require('../services/whatsappAccountHealth.service');
 const whatsappAuthorizedPhoneRefreshService = require('../services/whatsappAuthorizedPhoneRefresh.service');
 const whatsappChannelBindingsService = require('../services/whatsappChannelBindings.service');
+const whatsappPermissionInventoryService = require('../services/whatsappPermissionInventory.service');
 const { buildWhatsappProfileAlignment } = require('../lib/whatsapp-profile-alignment');
 const { filterEffectiveWhatsappPhoneAssets } = require('../lib/effective-whatsapp-phone');
 const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
@@ -2088,6 +2089,10 @@ exports.listPhones = async (req, res) => {
     const routingBindingByAssetId = new Map(
       routingBindings.map((binding) => [Number(binding.asset_id), binding])
     );
+    const permissionStatuses = await whatsappPermissionInventoryService.read({
+      clinicId: routingScopeClinicId || clinicIdFilter,
+      phones,
+    });
     const payload = [];
 
     for (const p of phones) {
@@ -2137,6 +2142,7 @@ exports.listPhones = async (req, res) => {
         whatsapp_channel_role: channelRouting.role,
         authorization_id: p.whatsappAuthorizationId || null,
         sending_enabled: p.whatsappAuthorizationId ? !!p.isActive : undefined,
+        permission_status: permissionStatuses.get(Number(p.id)) || undefined,
         requires_clinic_selection: additionalData.requireClinicSelection === true,
         routing_disabled: additionalData.routing_disabled === true,
         activation_state: additionalData.activationState || null,

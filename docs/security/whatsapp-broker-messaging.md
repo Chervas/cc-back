@@ -29,8 +29,12 @@ silenciosamente la versión revisada.
 Un `credential_revoked` detectado por el broker no elimina el teléfono ni su
 enrutamiento. La lectura segura del broker publica únicamente que la credencial
 operativa de una activación vigente está revocada; no expone el token ni reutiliza
-el estado administrativo del ámbito. Ajustes une ese recibo con el activo local
-por el `authorizationId` ya comprobado y muestra **Permiso desconectado**. La acción
+el estado administrativo del ámbito. La API operativa consulta únicamente los
+activos presentes en el registro privado de la clínica seleccionada y proyecta
+`connected|disconnected` en su inventario público. El gateway de alta no recibe
+esta capacidad ni consulta credenciales operativas. Ajustes une esa proyección con
+el recibo durable por `authorizationId` o por la identidad exacta ya verificada de
+ámbito, WABA y teléfono, y muestra **Permiso desconectado**. La acción
 **Reconectar permiso** siempre abre un Embedded Signup nuevo; nunca cambia el
 estado del secreto anterior ni lo recupera manualmente.
 
