@@ -279,13 +279,13 @@ Siguiente implementación necesaria:
    leads, campañas y automatizaciones; este corte no autoriza su activación.
 2. Las DDL `20260919200000-create-business-profile-mutation-journal.js`
    y `20260919210000-create-business-profile-cache-coordination.js` (tres tablas)
-   ya están aplicadas solo en DEV. Preparar su corte clínico nuevo antes de
-   publicar allí consumidores/sync. Fuente y esquema DEV pasan 52 tablas;
-   el corte clínico anterior de 49 sigue consumido y no
-   se amplía ni se ejecuta de nuevo. Drenar escritores y sync para el corte; la
-   migración de coordinación rechaza intentos inciertos existentes. No inicializar
-   contadores a cero sobre actividad anterior ni mezclar escritores de versiones
-   que no participan. El down rechaza borrar filas de coordinación existentes.
+   ya están aplicadas también en la BD compartida de CRM/staging y sus tablas
+   continúan vacías a 25/09. El requisito SQL está satisfecho, pero no constituye
+   activación: antes de publicar consumidores/sync hay que volver a comprobar
+   que sigan vacías, drenar escritores y lecturas, y fijar la release compatible.
+   No inicializar contadores a cero sobre actividad anterior ni mezclar escritores
+   de versiones que no participan. El down rechaza borrar filas de coordinación
+   existentes y estas DDL no deben volver a ejecutarse.
 3. Conservar la compatibilidad AWS v1–v25 publicada el 20/09 y publicar el panel
    y filtro v25 junto con los consumidores. El canario sintético real verifica
    transporte S3; no sustituye la aceptación clínica del consumidor.

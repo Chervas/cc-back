@@ -5,6 +5,23 @@
 > **Última revisión:** 2026-09-25.
 > **Relacionado con:** [contrato backend](../../src/Documentacion/13-backend.md#esquema-google-completo-y-publicación-por-entorno), [estado central](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones).
 
+## Estado actual en CRM/staging — 25/09/2026
+
+Las DDL `20260919200000-create-business-profile-mutation-journal.js` y
+`20260919210000-create-business-profile-cache-coordination.js` ya figuran `up`
+en la BD compartida. `BusinessProfileMutations`,
+`BusinessProfileMutationLocks` y `BusinessProfileCacheStates` existen y siguen
+vacías. `BusinessProfileBrokerBindings` también está vacía. No repetir el
+operador de esquema ni ejecutar `down`.
+
+Este corte solo satisface el requisito SQL. El runtime no tiene activados
+`GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED` ni
+`GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED`, no hay claves de escritor ni proceso
+`google-main`, y no existen bindings reales. Las 15 fichas activas continúan por
+el lector nativo legacy protegido. La publicación de una cohorte de broker exige
+otro corte con identidad, grants, runtime, canario autenticado y recuperación de
+resultados inciertos; el esquema vacío no autoriza esa activación.
+
 ## Esquema GBP aplicado solo en DEV — 20/09/2026, 06:45 UTC
 
 Las dos DDL `20260919200000-create-business-profile-mutation-journal.js` y
@@ -45,18 +62,17 @@ El corte solo crea tablas vacías y conserva metadata: no requiere exportar dato
 clínicos ni aborda las copias generales. Rotación también excluida.
 
 Pendiente: tratamiento operativo de incertidumbres, publicación selectiva de
-consumidores GBP, nuevo corte clínico para estas dos DDL, censo compartido y
-aceptación autenticada/proveedor/carga. Compatibilidad AWS v1–v25 ya publicada;
-no abrir gates ni retirar tokens por haber completado únicamente el esquema DEV.
+consumidores GBP, censo compartido y aceptación autenticada/proveedor/carga.
+El corte clínico de estas dos DDL se completó posteriormente, según el estado
+actual anterior. Compatibilidad AWS v1–v25 ya publicada; no abrir gates ni
+retirar tokens por disponer únicamente del esquema.
 
-Revalidación de solo lectura del 25/09/2026: al consultar `SequelizeMeta` del
-esquema clínico con el catálogo de migraciones actual, ambas DDL continúan
-`down`. La migración independiente
-`20260924100000-marketing-email-template-catalog.js` figura `up`; no cambia el
-estado GBP ni justifica ejecutar el resto del historial pendiente. Este estado
-debe conservarse durante la reconciliación DEV/staging y su despliegue.
+Revalidación de solo lectura del 25/09/2026: `SequelizeMeta` registra ambas DDL
+como `up`; las tres tablas creadas están vacías. La migración independiente
+`20260924100000-marketing-email-template-catalog.js` también figura `up` y no
+cambia el estado de la cohorte GBP. Los gates y bindings continúan cerrados.
 
-El corte público de esas dos DDL dispone ahora de un operador dedicado:
+El corte público de esas dos DDL utilizó el operador dedicado:
 `src/scripts/google-business-profile-writes-schema-release.js`. No usa el
 `db:migrate` global. Sus fases separadas `plan`, `backup` y `apply` fijan el
 commit, contrato, hashes de ambas migraciones, configuración de staging/gateway
@@ -69,7 +85,7 @@ para revisión; no hay reintento ni `down` automáticos. El ensayo real sobre un
 MySQL propio y sin red externa está en
 `google_business_profile_writes_schema_release_mysql.integration.js`.
 
-Aplicar este corte solo satisface el requisito SQL. No configura claves, OAuth,
+El corte aplicado solo satisface el requisito SQL. No configura claves, OAuth,
 grants o bindings, no abre `GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED` ni
 `GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED`, y no autoriza retirar el recorrido
 legacy. La activación continúa condicionada al canario aislado, conciliación de
