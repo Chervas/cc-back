@@ -4259,6 +4259,32 @@ function scoreReviewTemplatePreference(template, options = {}) {
   return score;
 }
 
+function selectApprovedReviewTemplateCandidate(candidates, options = {}) {
+  const clinicIds = Array.isArray(options.clinicIds)
+    ? options.clinicIds.filter(Number.isInteger)
+    : [];
+  const targetWabaId = normalizeText(options.targetWabaId || '');
+  const preferPhoto = options.preferPhoto === true;
+
+  return (Array.isArray(candidates) ? candidates : [])
+    .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
+    .filter(isAllowedReviewRequestTemplateCopy)
+    .filter((template) => (preferPhoto ? templateHasImageHeader(template) : !templateHasImageHeader(template)))
+    .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
+    .sort((a, b) => {
+      const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
+      const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
+      if (aScore !== bScore) return bScore - aScore;
+      const aPreference = scoreReviewTemplatePreference(a, { preferPhoto });
+      const bPreference = scoreReviewTemplatePreference(b, { preferPhoto });
+      if (aPreference !== bPreference) return bPreference - aPreference;
+      const aFresh = scoreReviewTemplateFreshness(a);
+      const bFresh = scoreReviewTemplateFreshness(b);
+      if (aFresh !== bFresh) return bFresh - aFresh;
+      return Number(b.id || 0) - Number(a.id || 0);
+    })[0] || null;
+}
+
 async function findApprovedReviewReminderWhatsappTemplate(scope) {
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
   if (!WhatsappTemplate || !clinicIds.length) return null;
@@ -4381,38 +4407,6 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
     return null;
   }
 
-  if (preferPhoto) {
-    const photoCandidates = await WhatsappTemplate.findAll({
-      where: {
-        is_active: true,
-        status: 'APPROVED',
-        name: { [Op.like]: `${REVIEW_PHOTO_TEMPLATE_NAME}%` },
-        [Op.or]: [
-          { clinic_id: { [Op.in]: clinicIds } },
-          { clinic_id: null },
-        ],
-      },
-      include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
-      order: [['updatedAt', 'DESC'], ['id', 'DESC']],
-    });
-    const photoTemplate = photoCandidates
-      .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
-      .filter(templateHasImageHeader)
-      .filter(isDefaultReviewRequestWhatsappTemplateIdentity)
-      .filter(reviewTemplateMatchesCurrentCatalogBody)
-      .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
-      .sort((a, b) => {
-        const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
-        const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
-        if (aScore !== bScore) return bScore - aScore;
-        const aPreference = scoreReviewTemplatePreference(a, { preferPhoto });
-        const bPreference = scoreReviewTemplatePreference(b, { preferPhoto });
-        if (aPreference !== bPreference) return bPreference - aPreference;
-        return Number(b.id || 0) - Number(a.id || 0);
-      })[0] || null;
-    if (photoTemplate) return photoTemplate;
-  }
-
   const candidates = await WhatsappTemplate.findAll({
     where: {
       is_active: true,
@@ -4445,23 +4439,11 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
     include: [{ model: db.WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'display_name', 'body_text', 'variables'], required: false }],
     order: [['updatedAt', 'DESC'], ['id', 'DESC']],
   });
-  return candidates
-    .filter(isPrimaryReviewRequestWhatsappTemplateCandidate)
-    .filter(isAllowedReviewRequestTemplateCopy)
-    .filter((template) => (preferPhoto ? templateHasImageHeader(template) : !templateHasImageHeader(template)))
-    .filter((template) => scoreWhatsappTemplateForScope(template, clinicIds, targetWabaId) > 0)
-    .sort((a, b) => {
-      const aScore = scoreWhatsappTemplateForScope(a, clinicIds, targetWabaId);
-      const bScore = scoreWhatsappTemplateForScope(b, clinicIds, targetWabaId);
-      if (aScore !== bScore) return bScore - aScore;
-      const aPreference = scoreReviewTemplatePreference(a, { preferPhoto });
-      const bPreference = scoreReviewTemplatePreference(b, { preferPhoto });
-      if (aPreference !== bPreference) return bPreference - aPreference;
-      const aFresh = scoreReviewTemplateFreshness(a);
-      const bFresh = scoreReviewTemplateFreshness(b);
-      if (aFresh !== bFresh) return bFresh - aFresh;
-      return Number(b.id || 0) - Number(a.id || 0);
-    })[0] || null;
+  return selectApprovedReviewTemplateCandidate(candidates, {
+    clinicIds,
+    targetWabaId,
+    preferPhoto,
+  });
 }
 
 async function waitForReviewRequestDispatchAnchor(campaignId, timeoutMs = 6000) {
@@ -4575,8 +4557,9 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       || options.reviewTeamPhotoUrl
       || ''
     );
-    const approvedEffectiveTemplate = approvedTemplate
-      || (configuredPhotoUrl && approvedPhotoTemplate ? approvedPhotoTemplate : null);
+    const approvedEffectiveTemplate = configuredPhotoUrl
+      ? approvedPhotoTemplate
+      : approvedTemplate;
     const templatesReady = !!approvedEffectiveTemplate;
     const ready = !!googleReviewUrlAvailable && !!whatsappAvailable && templatesReady;
     const serializedAutomation = serializeReviewAutomationTemplate(clinicAutomationTemplate);
@@ -5081,8 +5064,9 @@ async function getReviewRequestSummary(scope, options = {}) {
     || options.reviewTeamPhotoUrl
     || ''
   );
-  const effectiveApprovedReviewTemplate = approvedReviewTemplate
-    || (configuredReviewPhotoUrl && approvedPhotoReviewTemplate ? approvedPhotoReviewTemplate : null);
+  const effectiveApprovedReviewTemplate = configuredReviewPhotoUrl
+    ? approvedPhotoReviewTemplate
+    : approvedReviewTemplate;
   const effectiveApprovedTemplateId = effectiveApprovedReviewTemplate?.id
     || groupApprovedTemplate?.approved_template_id
     || null;
@@ -10829,5 +10813,6 @@ module.exports = {
     isWhatsappRoutingConfigAvailable,
     getReviewWabaIdForScope,
     isAllowedReviewRequestTemplateCopy,
+    selectApprovedReviewTemplateCandidate,
   },
 };
