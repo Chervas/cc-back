@@ -7,7 +7,6 @@ const { addDays } = require('../lib/personal-schedule-recurring');
 const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
 const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
 const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staff');
-const { requiresMultiResourceBooking } = require('../lib/booking-profile');
 const { bookingCapabilities, bookingError, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
 const { resourceAppointments, resourceInstallationBlocks } = require('../services/appointmentResourceCalendar.service');
 const {
@@ -32,6 +31,49 @@ const {
 
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
+
+// A single phase can be painted in the ordinary agenda even when it requires
+// equipment. Use the canonical solver, including its machine occupancy checks.
+// Multi-phase/all-staff bookings still use the explicit treatment planner.
+function assertGridProfile(profile) {
+  if (profile.phases.length !== 1 || (profile.phases[0].professionals.mode === 'all'
+    && profile.phases[0].professionals.ids.length > 1)) {
+    throw bookingError('booking_profile_use_treatment_slots',
+      'Este tratamiento usa varias fases o profesionales simultáneos. Utiliza la búsqueda de huecos del tratamiento.');
+  }
+}
+
+function profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds }) {
+  assertGridProfile(profile);
+  const stepMin = parseIntSafe(query.granularity_min) || 15;
+  if (stepMin < 5 || stepMin > 120) throw Object.assign(Error('granularity_min debe estar entre 5 y 120'), { statusCode: 400 });
+  const installationIds = parseIntArray(query.instalacion_ids || query['instalacion_ids[]']);
+  const professionalIds = parseIntArray(query.doctor_ids || query['doctor_ids[]']);
+  if (installationIds.length > 50 || professionalIds.length > 50 || (installationIds.length && professionalIds.length)
+    || (installationIds.length && (!query.doctor_id || query.instalacion_id))
+    || (professionalIds.length && (!query.instalacion_id || query.doctor_id))) {
+    throw Object.assign(Error('Batch de cabinas/profesionales inválido'), { statusCode: 400 });
+  }
+  const phase = profile.phases[0];
+  const getSolutions = (doctor, installation) => {
+    // Skip incompatible columns before iterating times; no SQL per column/slot.
+    if ((doctor && !phase.professionals.ids.includes(doctor))
+      || (installation && !phase.installation_ids.includes(installation))) return [];
+    return solutionsForCalendar({ profile, context, date: query.fecha_local, stepMinutes: stepMin,
+      limit: Math.min(parseIntSafe(query.limit) > 0 ? parseIntSafe(query.limit) : 500, 500), additionalStaffIds,
+      selections: { [phase.key]: { doctor_id: doctor, installation_id: installation } },
+      fromLocal: typeof query.from_local === 'string' ? query.from_local : '00:00',
+      toLocal: typeof query.to_local === 'string' ? query.to_local : null });
+  };
+  const response = { timezone: resolveClinicTimezone(clinic), clinica_id: Number(clinic.id_clinica),
+    fecha_local: query.fecha_local, duracion_min: phase.duration_minutes, granularity_min: stepMin };
+  if (installationIds.length) return { ...response, doctor_id: Number(query.doctor_id), instalacion_ids: installationIds,
+    slots_by_instalacion: Object.fromEntries(installationIds.map(id => [id, getSolutions(Number(query.doctor_id), id)])), unavailable_by_instalacion: {} };
+  if (professionalIds.length) return { ...response, instalacion_id: Number(query.instalacion_id), doctor_ids: professionalIds,
+    slots_by_doctor: Object.fromEntries(professionalIds.map(id => [id, getSolutions(id, Number(query.instalacion_id))])), unavailable_by_doctor: {} };
+  return { ...response, slots: getSolutions(query.doctor_id ? Number(query.doctor_id) : null,
+    query.instalacion_id ? Number(query.instalacion_id) : null), unavailable_intervals: [] };
+}
 
 exports.bookingCapabilities = asyncHandler(async (req, res) => res.json(bookingCapabilities()));
 
@@ -866,10 +908,7 @@ exports.slots = asyncHandler(async (req, res) => {
     const treatment = await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic: clinica });
     const profile = requireOperationalProfile(treatment);
     if (profile) {
-      if (requiresMultiResourceBooking(profile)) {
-        return res.status(409).json({ code: 'booking_profile_use_treatment_slots', can_force: false,
-          message: 'Este tratamiento usa disponibilidad por fases o equipo. Utiliza la búsqueda de huecos del tratamiento.' });
-      }
+      assertGridProfile(profile);
       if (stepMin < 5 || stepMin > 120) return res.status(400).json({ message: 'granularity_min debe estar entre 5 y 120' });
       const installationIds = parseIntArray(instalacion_ids || req.query['instalacion_ids[]']);
       const professionalIds = parseIntArray(doctor_ids || req.query['doctor_ids[]']);
@@ -881,16 +920,7 @@ exports.slots = asyncHandler(async (req, res) => {
       const context = await loadBookingContext({ db, clinic: clinica, profile,
         start: resolveLocalInstant(fecha_local, '00:00:00', timezone),
         end: resolveLocalInstant(addDays(fecha_local, 1), '00:00:00', timezone), occupancyEnabled: true, additionalStaffIds });
-      const getSolutions = (doctor, installation) => solutionsForCalendar({ profile, context, date: fecha_local,
-        stepMinutes: stepMin, limit: Math.min(requestedLimit > 0 ? requestedLimit : 500, 500), additionalStaffIds,
-        selections: { [profile.phases[0].key]: { doctor_id: doctor, installation_id: installation } },
-        fromLocal: typeof from_local === 'string' ? from_local : '00:00', toLocal: typeof to_local === 'string' ? to_local : null });
-      const response = { timezone, clinica_id: clinicaId, fecha_local, duracion_min: profile.phases[0].duration_minutes, granularity_min: stepMin };
-      if (installationIds.length) return res.json({ ...response, doctor_id: Number(doctor_id), instalacion_ids: installationIds,
-        slots_by_instalacion: Object.fromEntries(installationIds.map((id) => [id, getSolutions(Number(doctor_id), id)])), unavailable_by_instalacion: {} });
-      if (professionalIds.length) return res.json({ ...response, instalacion_id: Number(instalacion_id), doctor_ids: professionalIds,
-        slots_by_doctor: Object.fromEntries(professionalIds.map((id) => [id, getSolutions(id, Number(instalacion_id))])), unavailable_by_doctor: {} });
-      return res.json({ ...response, slots: getSolutions(doctor_id ? Number(doctor_id) : null, instalacion_id ? Number(instalacion_id) : null), unavailable_intervals: [] });
+      return res.json(profileSlotsPayload({ query: req.query, profile, context, clinic: clinica, additionalStaffIds }));
     }
   }
   const clinicTimezone = resolveClinicTimezone(clinica);
@@ -1445,6 +1475,32 @@ exports.grid = asyncHandler(async (req, res) => {
   const additionalStaffIds = requestedAdditionalStaff(req);
   if (additionalStaffIds.length) baseQuery.additional_staff_ids = additionalStaffIds;
 
+  // Request-local snapshot for the entire treatment grid: one ACL, one catalog
+  // read and one bulk occupancy load, independent of days × visible columns.
+  // No global cache: a subsequent request sees newly booked/cancelled visits.
+  let treatmentGrid = null;
+  if (tratamiento_id) {
+    await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
+    const clinic = await db.Clinica.findByPk(clinicaId);
+    if (!clinic) return res.status(404).json({ message: 'Clínica no encontrada' });
+    const treatment = await loadScopedTreatment({ db, treatmentId: tratamiento_id, clinic });
+    const profile = requireOperationalProfile(treatment);
+    if (profile) {
+      assertGridProfile(profile);
+      if (stepMin < 5 || stepMin > 120 || peerInstalacionIds.length > 50 || peerDoctorIds.length > 50) {
+        return res.status(400).json({ message: 'Rango o recursos de disponibilidad inválidos' });
+      }
+      const sortedDates = [...dateList].sort();
+      const timezone = resolveClinicTimezone(clinic);
+      const start = resolveLocalInstant(sortedDates[0], '00:00:00', timezone);
+      const end = resolveLocalInstant(addDays(sortedDates[sortedDates.length - 1], 1), '00:00:00', timezone);
+      if (end - start > 32 * 86400000) return res.status(400).json({ message: 'El rango no puede superar 31 días' });
+      const context = await loadBookingContext({ db, clinic, profile, start, end, dates: dateList,
+        occupancyEnabled: true, additionalStaffIds });
+      treatmentGrid = { profile, context, clinic, additionalStaffIds };
+    }
+  }
+
   const tasks = [];
   dateList.forEach((dateIso) => {
     columnIds.forEach((columnId) => {
@@ -1477,7 +1533,8 @@ exports.grid = asyncHandler(async (req, res) => {
     }
 
     try {
-      const payload = await invokeSlotsForSummary(query, req.userData);
+      const payload = treatmentGrid ? profileSlotsPayload({ ...treatmentGrid, query })
+        : await invokeSlotsForSummary(query, req.userData);
       return {
         day_id: dateIso,
         column_id: String(columnId),

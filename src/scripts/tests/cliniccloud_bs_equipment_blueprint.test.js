@@ -13,12 +13,13 @@ test('BS inventory preserves one unit per family and the three confirmed mobile 
   assert(plan.mobile_equipment.find(u => u.family_key === 'btl_shockwave').aliases.includes('Ondas acústicas BTL'));
 });
 
-test('only the three documented fixed locations are prepared, without guessing INDIBA models', () => {
+test('fixed locations include the two INDIBA rooms confirmed on September 25', () => {
   assert.deepEqual(plan.fixed_equipment.map(u => [u.family_key, u.home_room]), [
     ['cyclone', 'C11'], ['btl_lymphastim', 'C9'], ['carboxytherapy', 'C10'],
+    ['indiba_ona', 'C8'], ['indiba_rf', 'C12'],
   ]);
-  assert(!plan.fixed_equipment.some(u => /indiba|hifu_facial/i.test(u.family_key)));
-  assert(plan.pending.some(s => s.includes('INDIBA')));
+  assert.equal(plan.turnaround_minutes, 0);
+  assert.equal(plan.confirmed_on, '2026-09-25');
 });
 
 for (const unit of plan.fixed_equipment) {
