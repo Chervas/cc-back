@@ -3299,7 +3299,6 @@ async function getReviewRequestedPatientIds(scope) {
     WHERE i.paciente_id IS NOT NULL
       AND i.clinica_id IN (:clinicIds)
       AND l.objective_id = :objectiveId
-      AND l.status <> 'archived'
       AND (
         JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
         OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
@@ -3308,7 +3307,8 @@ async function getReviewRequestedPatientIds(scope) {
         i.sent_at IS NOT NULL
         OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
         OR (
-          i.selected = TRUE
+          l.status <> 'archived'
+          AND i.selected = TRUE
           AND i.status = 'ready'
           AND l.status IN ('ready','sending','sent','completed','scheduled','paused')
         )
@@ -4755,7 +4755,14 @@ async function getReviewRequestSummary(scope, options = {}) {
 
   const [activeQueueRow] = await db.sequelize.query(
     `
-    SELECT COUNT(DISTINCT i.id) AS total
+    SELECT COUNT(DISTINCT CASE
+      WHEN i.paciente_id IS NOT NULL THEN CONCAT('patient:', i.paciente_id)
+      WHEN REGEXP_REPLACE(COALESCE(i.phone, ''), '[^0-9]', '') <> ''
+        THEN CONCAT('phone:', REGEXP_REPLACE(i.phone, '[^0-9]', ''))
+      WHEN TRIM(COALESCE(i.email, '')) <> ''
+        THEN CONCAT('email:', LOWER(TRIM(i.email)))
+      ELSE CONCAT('item:', i.id)
+    END) AS total
     FROM MarketingPatientListItems i
     INNER JOIN MarketingPatientLists l ON l.id = i.list_id
     WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
