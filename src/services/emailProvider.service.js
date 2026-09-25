@@ -184,7 +184,9 @@ async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
       templateKey: message.templateKey, stream: message.stream, recipientPolicy,
       to: message.to, from: cleanString(message.from) || config.defaultFrom, replyTo: cleanString(message.replyTo),
       configurationSet, subject: message.subject, text: message.text || '', html: message.html || '',
-      ...(isMarketing ? { identityName: identityNameFromAddress(cleanString(message.from) || config.defaultFrom) } : {}),
+      identityName: isMarketing
+        ? identityNameFromAddress(cleanString(message.from) || config.defaultFrom)
+        : null,
     }, { beforeDispatch: async () => {
       if (!getConfig(env).enabled) throw Object.assign(Error('email_provider_disabled'), { code: 'email_provider_disabled', retryable: false });
       if (beforeDispatch) {
