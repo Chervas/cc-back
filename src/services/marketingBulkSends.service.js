@@ -4498,8 +4498,10 @@ async function hasWhatsappConfigForClinic(clinicId) {
   const safeClinicId = Number(clinicId || 0);
   if (!safeClinicId) return false;
   try {
-    const config = await whatsappService.getClinicConfig(safeClinicId);
-    return !!(config?.phoneNumberId && config?.accessToken);
+    const config = await whatsappService.getClinicConfig(safeClinicId, {
+      purpose: 'review_requests',
+    });
+    return isWhatsappRoutingConfigAvailable(config);
   } catch (_) {
     return false;
   }
@@ -10739,5 +10741,7 @@ module.exports = {
     normalizeMassSendRecordKind,
     ensureDispatchableCampaignRecord,
     shouldPreserveRecipientListOnArchive,
+    hasWhatsappConfigForClinic,
+    isWhatsappRoutingConfigAvailable,
   },
 };
