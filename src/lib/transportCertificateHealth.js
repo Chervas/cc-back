@@ -13,7 +13,8 @@ const SERVER_LABELS = { 'maintenance-client': 'Mantenimiento de la comunicación
   'email-staging': 'Entrega de correo (staging)', 'email-dev': 'Entrega de correo (DEV)',
   'meta-marketing-dev': 'Conexiones Meta de publicidad (DEV)',
   'meta-marketing-staging': 'Conexiones Meta de publicidad (staging)',
-  'public-media-dev': 'Imágenes públicas de marketing (DEV)' };
+  'public-media-dev': 'Imágenes públicas de marketing (DEV)',
+  'google-business-profile-staging': 'Perfil de Empresa de Google (staging)' };
 function readHealth({ enabled = process.env.TRANSPORT_CERTIFICATE_MONITOR_ENABLED === 'true',
   serversEnabled = process.env.SERVER_CERTIFICATE_MONITOR_ENABLED === 'true',
   filename = STATUS_FILE, serverFilename = SERVER_STATUS_FILE, now = Date.now(), read = fs.readFileSync, stat = fs.lstatSync } = {}) {

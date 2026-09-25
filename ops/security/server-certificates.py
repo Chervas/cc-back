@@ -150,7 +150,7 @@ def configuration(filename):
     if config['statusFile']!='/var/lib/clinicaclick-transport-health/servers.json':
         raise Error('configuration_invalid')
     ids=set();ports=set()
-    if not 1<=len(config['targets'])<=13:raise Error('configuration_invalid')
+    if not 1<=len(config['targets'])<=14:raise Error('configuration_invalid')
     for t in config['targets']:
         if set(t)!={'id','hostname','port','publicKeySha256','identitySha256'} \
           or not re.fullmatch('[a-z][a-z0-9-]{1,39}',t['id']) or t['hostname']!='13.39.100.55' \

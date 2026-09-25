@@ -12149,6 +12149,16 @@ fotos públicas y horarios especiales. Permisos y claves independientes por func
 El archivo fotográfico no atraviesa el broker; se transmite una URL pública de la
 clínica propietaria o de otra clínica admitida expresamente para esa ficha.
 
+Preparación de runtime del 25/09: unidad systemd aislada, soporte de certificado
+`google-business-profile-staging:8456` y monitor están versionados y probados con
+Node 24, pero todavía no instalados. El inventario AWS no muestra proceso,
+configuración ni secretos Google. El primer binding se limita a `clinic:92` y
+`gbp:103033606619897470310:9681856373471112042`; no habilita las otras fichas.
+La migración del refresh token y secreto OAuth debe hacerse con un rol temporal
+restringido a los ARN de destino, sin exponer valores en VNC, comandos o logs.
+Lectura y escritura usan claves Ed25519 diferentes y los dos gates continúan
+apagados hasta completar TLS, secrets, grants y aceptación del piloto.
+
 Los cuatro consumidores manuales guardan el UUID y su autor en SQL antes del envío.
 El broker conserva su propio intento/recibo. La caché SQL, evento de auditoría v25,
 recibo y liberación de locks se confirman juntos; recuperar el resultado no repite
@@ -12182,14 +12192,14 @@ intentos con una sesión nueva. HTTP202 no significa publicación confirmada. El
 panel de actividad incorpora v25 con metadatos, sin texto de reseñas, fotos o URLs.
 
 Preparado y probado con MySQL/SQLite/HTTP y componentes Angular aislados; sin
-publicación del consumidor ni activación. DDL aplicada solo en DEV el 20/09.
-Faltan aceptación real de horarios, resolución de las incertidumbres retenidas
+publicación del consumidor ni activación. Las dos DDL están aplicadas en DEV y,
+desde el corte posterior verificado el 25/09, también en CRM/staging; sus tablas
+siguen vacías. Faltan aceptación real de horarios, resolución de las incertidumbres retenidas
 para revisión, aceptación clínica y carga. Consultar el recibo como autor no
 reanuda automáticamente una ejecución agotada. La compatibilidad AWS
 v1–v25 ya está publicada y verificada desde el 20/09; no publica este consumidor.
-Las dos migraciones nuevas añaden tres tablas: fuente y esquema DEV pasan52,
-con la release anterior de49 aún compatible. CRM requiere su DDL nuevo, con
-escritores/sync drenados y sin intentos inciertos, antes del código coordinado. No se reutiliza ni amplía el corte clínico de19 DDL. Contrato y recuperación:
+Las dos migraciones nuevas añaden tres tablas. No deben repetirse ni revertirse;
+el esquema preparado por sí solo no abre gates ni crea bindings. Contrato y recuperación:
 `docs/security/google-business-profile-writes.md`.
 
 ### Esquema clínico Google: corte limitado y conservación de identidad compartida
@@ -12233,7 +12243,11 @@ Conservar lector v1–v25; no repetir canarios ni revertir a un lector inferior.
 No despliega consumidores/DDL Google ni prueba aceptación clínica autenticada.
 Runbook `docs/security/audit-reader-view-migration.md`; acta `audit-v25-publication.json`.
 
-### Esquema GBP preparado en DEV, misma aplicación (20/09/2026)
+### Corte histórico: esquema GBP preparado primero en DEV (20/09/2026)
+
+Este apartado conserva el acta del primer corte. Su afirmación de que CRM aún no
+tenía las DDL era correcta ese día y queda sustituida por el estado actual del
+25/09 descrito arriba: las DDL ya están aplicadas también en CRM/staging.
 
 Dos DDL fijadas a fuente `46a0c877` aplicadas una vez a la BD ficticia: tres tablas
 vacías para diario, bloqueos y coordinación de caché. DEV pasa52 y conserva la
