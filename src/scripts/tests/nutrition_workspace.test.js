@@ -408,7 +408,21 @@ function run() {
   });
   assert.equal(noComparisonReport.comparison.available, false);
   assert.equal(noComparisonReport.comparison.reason, 'comparison_disabled');
+  for (const metric of noComparisonReport.sections.flatMap(section => section.metrics)) {
+    assert.equal(metric.previous_value, null);
+    assert.equal(metric.delta, null);
+    assert.equal(metric.trend, 'not_comparable');
+  }
+  for (const priorWeight of [null, undefined, '', '  ', 0, '0']) {
+    const previous = measurementJson(first);
+    previous.raw_values = { ...previous.raw_values, weight_kg: priorWeight };
+    const report = __testing.buildReportForMeasurement(measurementJson(second), previous);
+    const metric = report.sections.flatMap(section => section.metrics).find(metric => metric.key === 'weight_kg');
+    assert.equal(metric.delta, priorWeight === 0 || priorWeight === '0' ? second.raw_values_json.weight_kg : null);
+  }
   assert.match(noComparisonHtml, /sin comparación temporal/);
+  assert.match(noComparisonHtml, /Sin histórico/);
+  assert.doesNotMatch(noComparisonHtml, /vs anterior/);
   assert.doesNotMatch(noComparisonHtml, /Comparativas principales/);
   assert.equal(
     calculateNutritionValues({

@@ -2567,7 +2567,11 @@ function buildReportMetric(measurement, previousMeasurement, metricDefinition) {
   const previousValue = getReportMetricValue(previousMeasurement, metricDefinition);
   const numericValue = Number(value);
   const numericPreviousValue = Number(previousValue);
-  const canCompare = Number.isFinite(numericValue) && Number.isFinite(numericPreviousValue);
+  // Number(null) and Number('') are zero, but an absent prior measurement is
+  // not a measured zero. Preserve genuine zero values for comparable metrics.
+  const hasPreviousValue = previousValue !== null && previousValue !== undefined
+    && !(typeof previousValue === 'string' && previousValue.trim() === '');
+  const canCompare = hasPreviousValue && Number.isFinite(numericValue) && Number.isFinite(numericPreviousValue);
   const delta = canCompare ? round(numericValue - numericPreviousValue, metricDefinition.decimals) : null;
 
   return {
