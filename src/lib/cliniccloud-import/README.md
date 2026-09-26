@@ -561,3 +561,41 @@ posteriores antes de revertir exclusivamente esos campos; si ya hay citas o
 ediciones humanas, preparar una revisión nueva. No restaurar toda la BD ni borrar
 el tratamiento o su historia. Evidencia de cada aplicación en el manual central,
 documento 99. Pruebas: `cliniccloud_catalog_simple_activation.test.js`.
+
+## Asignación provisional de personal en borradores
+
+`cliniccloud-import-catalog-provisional-staff.js` refleja exclusivamente la
+confirmación del titular para dos borradores corporales de BS Medical:
+carboxiterapia y mesoterapia. No es una excepción general a la validación clínica
+de inyectables. Mantiene `INJECTABLE_STAFF_REQUIRES_CLINICAL_VALIDATION`,
+`catalog_status=draft` y `activo=0`; la procedencia indica explícitamente
+`qualification_verified=false` y `activation=false`.
+
+Ejecutar solo desde `back-dev/dev`, con `--target crm`. Preparar mediante
+`--mode prepare --workbook … --review … --private-output …`. La revisión privada
+incluye versión, confirmación literal, scope, huella del Excel y dos bindings con
+ID y huella previa. El operador exige el archivo y las dos filas revisadas, sin
+citas ni perfil previo, diez minutos documentados, personal activo con horarios,
+cabinas activas de capacidad uno que lo permiten y la unidad fija de carboxiterapia
+en C10. Mesoterapia en C9 no reserva la máquina de presoterapia por compartir sala.
+
+Revisar el paquete y ejecutar primero `--mode dry-run`, después `--mode apply`,
+con `--workbook … --package … --approved-sha256 … --backup-manifest …
+--private-journal …`. Paquete y respaldo CRM íntegro de menos de dos horas,
+diario privado durable, transacción bajo lock, comparación del estado completo,
+rollback del ensayo y lectura independiente tras commit. `--mode verify` requiere
+workbook, paquete y `--private-output` nuevo; solo lee. Replay idéntico: cero
+actualizaciones. Una edición posterior detiene la operación, no se sobreescribe.
+
+Solo escribe `clinical_config` y `updatedAt`; conserva precio, fiscalidad,
+consentimientos, anotaciones y los avisos clínicos. Retira el aviso técnico de
+instalación inactiva únicamente tras comprobar que ya está activa. No habilita
+tratamientos, concilia reservas antiguas, altera roles ni toca pacientes, citas,
+programas, mensajes o recordatorios. Tampoco añade procesos a la agenda.
+
+Rollback: contrastar fila actual con el `after` del diario y sus usos posteriores;
+solo si permanece intacta, revertir esos dos campos desde la preimagen registrada.
+No restaurar toda la BD ni eliminar la ficha. Si el commit resulta incierto,
+revisar el diario y la BD antes de reintentar. Pruebas focales:
+`cliniccloud_catalog_provisional_staff.test.js`; aplicaciones en el documento 99
+del manual central.
