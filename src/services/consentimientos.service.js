@@ -193,10 +193,10 @@ function slugifyKioskPart(value) {
         .slice(0, 36);
 }
 
-async function generateUniquePublicId(model, prefix) {
+async function generateUniquePublicId(model, prefix, transaction = null) {
     for (let i = 0; i < 8; i += 1) {
         const publicId = generatePublicId(prefix);
-        const existing = await model.findOne({ where: { public_id: publicId }, attributes: ['id'], raw: true });
+        const existing = await model.findOne({ where: { public_id: publicId }, attributes: ['id'], raw: true, transaction });
         if (!existing) return publicId;
     }
     throw new Error(`${prefix}_public_id_generation_failed`);
@@ -841,8 +841,9 @@ async function findPacienteByIdentifier(identifier) {
     });
 }
 
-async function getLatestCatalogVersion(catalogId, locale = 'es') {
+async function getLatestCatalogVersion(catalogId, locale = 'es', transaction = null) {
     return db.ConsentTemplateCatalogVersion.findOne({
+        transaction,
         where: {
             catalog_id: catalogId,
             locale,
@@ -852,8 +853,9 @@ async function getLatestCatalogVersion(catalogId, locale = 'es') {
     });
 }
 
-async function getLatestClinicVersion(templateId, locale = 'es') {
+async function getLatestClinicVersion(templateId, locale = 'es', transaction = null) {
     return db.ClinicConsentTemplateVersion.findOne({
+        transaction,
         where: {
             clinic_template_id: templateId,
             locale,
@@ -1547,7 +1549,7 @@ async function propagateAdminTemplateToClinics(catalogIdRaw, options = {}) {
     };
 }
 
-async function getTreatmentRequirements({ tratamientoId, tratamientoIds = null, clinicaId = null }) {
+async function getTreatmentRequirements({ tratamientoId, tratamientoIds = null, clinicaId = null, transaction = null }) {
     const parsedTreatmentId = toIntOrNull(tratamientoId);
     const ids = Array.isArray(tratamientoIds) ? [...new Set(tratamientoIds.map(toIntOrNull).filter(Boolean))] : [];
     if (!parsedTreatmentId && !ids.length) return [];
@@ -1558,6 +1560,7 @@ async function getTreatmentRequirements({ tratamientoId, tratamientoIds = null, 
     }
     return db.TreatmentConsentRequirement.findAll({
         where,
+        transaction,
         include: [
             { model: db.ClinicConsentTemplate, as: 'clinicTemplate', required: false, include: [{ model: db.ClinicConsentTemplateVersion, as: 'versions', required: false }] },
             { model: db.ConsentTemplateCatalog, as: 'catalogTemplate', required: false, include: [{ model: db.ConsentTemplateCatalogVersion, as: 'versions', required: false }] },
@@ -1601,10 +1604,11 @@ async function saveTreatmentRequirements(tratamientoIdRaw, payload = {}) {
     return getTreatmentRequirements({ tratamientoId, clinicaId: clinicId });
 }
 
-async function findAppointment(citaIdRaw) {
+async function findAppointment(citaIdRaw, transaction = null) {
     const citaId = toIntOrNull(citaIdRaw);
     if (!citaId) return null;
     return db.CitaPaciente.findByPk(citaId, {
+        transaction,
         include: [
             {
                 model: db.Paciente,
@@ -1631,10 +1635,10 @@ function pickLatestVersion(versions = []) {
     })[0];
 }
 
-async function resolveRequirementTemplate(requirement) {
+async function resolveRequirementTemplate(requirement, transaction = null) {
     const plain = getPlain(requirement);
     if (plain.clinicTemplate) {
-        const version = pickLatestVersion(plain.clinicTemplate.versions) || await getLatestClinicVersion(plain.clinicTemplate.id, 'es');
+        const version = pickLatestVersion(plain.clinicTemplate.versions) || await getLatestClinicVersion(plain.clinicTemplate.id, 'es', transaction);
         return {
             source: 'clinic',
             template: plain.clinicTemplate,
@@ -1642,7 +1646,7 @@ async function resolveRequirementTemplate(requirement) {
         };
     }
     if (plain.catalogTemplate) {
-        const version = pickLatestVersion(plain.catalogTemplate.versions) || await getLatestCatalogVersion(plain.catalogTemplate.id, 'es');
+        const version = pickLatestVersion(plain.catalogTemplate.versions) || await getLatestCatalogVersion(plain.catalogTemplate.id, 'es', transaction);
         return {
             source: 'catalog',
             template: plain.catalogTemplate,
@@ -1665,11 +1669,12 @@ function buildTemplateDocumentWhere(resolved = {}) {
     return { catalog_template_id: resolved.template?.id || null };
 }
 
-async function findSignedReusableConsent({ pacienteId, clinicaId, resolved }) {
+async function findSignedReusableConsent({ pacienteId, clinicaId, resolved, transaction = null }) {
     if (!pacienteId || !clinicaId || !resolved?.template || !isReusableSignedConsentTemplate(resolved.template)) {
         return null;
     }
     return db.PatientConsentDocument.findOne({
+        transaction,
         where: {
             paciente_id: pacienteId,
             clinica_id: clinicaId,
@@ -1681,7 +1686,7 @@ async function findSignedReusableConsent({ pacienteId, clinicaId, resolved }) {
     });
 }
 
-async function supersedePendingReusableConsents({ pacienteId, clinicaId, resolved, exceptId = null }) {
+async function supersedePendingReusableConsents({ pacienteId, clinicaId, resolved, exceptId = null, transaction = null }) {
     if (!pacienteId || !clinicaId || !resolved?.template || !isReusableSignedConsentTemplate(resolved.template)) {
         return;
     }
@@ -1697,7 +1702,7 @@ async function supersedePendingReusableConsents({ pacienteId, clinicaId, resolve
     }
     await db.PatientConsentDocument.update(
         { status: 'superseded', delivery_status: 'superseded' },
-        { where }
+        { where, transaction }
     );
 }
 
@@ -1746,7 +1751,7 @@ async function supersedePendingReusableConsentDocuments(documentLike) {
     await Promise.all(packageIds.map((packageId) => refreshPackageCounts(packageId)));
 }
 
-async function resolveRequirementsForAppointment(citaLike) {
+async function resolveRequirementsForAppointment(citaLike, transaction = null) {
     const plain = getPlain(citaLike);
     const tratamientoId = toIntOrNull(plain?.tratamiento_id || plain?.tratamiento?.id_tratamiento);
     const clinicId = toIntOrNull(plain?.clinica_id || plain?.clinica?.id_clinica);
@@ -1755,10 +1760,10 @@ async function resolveRequirementsForAppointment(citaLike) {
     // Look up the canonical purchased unit, never take treatment IDs from HTTP
     // metadata. Ordinary appointments retain their existing single-treatment path.
     if (plain.source_system === 'treatment_program' && plain.voucher_id) {
-        const frozen = await require('../lib/program-appointment-context').programAppointmentContext(db, plain);
+        const frozen = await require('../lib/program-appointment-context').programAppointmentContext(db, plain, transaction);
         tratamientoIds = frozen.treatment_ids;
     }
-    const directRequirements = await getTreatmentRequirements({ tratamientoIds, clinicaId: clinicId });
+    const directRequirements = await getTreatmentRequirements({ tratamientoIds, clinicaId: clinicId, transaction });
     return directRequirements.filter((requirement) => {
         const plainRequirement = getPlain(requirement);
         const clinicTemplate = plainRequirement.clinicTemplate;
@@ -2177,8 +2182,22 @@ async function createPatientIntakePackage(identifier, options = {}) {
     });
 }
 
-async function createPackageForAppointment(citaIdRaw, options = {}) {
-    const cita = await findAppointment(citaIdRaw);
+async function createPackageForAppointment(citaIdRaw, options = {}, transaction = null) {
+    const execute = async tx => {
+        // Lock only the appointment, not every joined patient/clinic/template.
+        // All entry points use this lock before deriving the document snapshot.
+        const id = toIntOrNull(citaIdRaw);
+        const locked = id ? await db.CitaPaciente.findByPk(id, {
+            attributes: ['id_cita'], transaction: tx, lock: tx.LOCK.UPDATE,
+        }) : null;
+        if (!locked) throw Object.assign(new Error('appointment_not_found'), { statusCode: 404 });
+        return createPackageForLockedAppointment(await findAppointment(id, tx), options, tx);
+    };
+    return transaction ? execute(transaction)
+        : db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, execute);
+}
+
+async function createPackageForLockedAppointment(cita, options, transaction) {
     if (!cita) {
         const err = new Error('appointment_not_found');
         err.statusCode = 404;
@@ -2191,7 +2210,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
         throw err;
     }
 
-    const requirements = await resolveRequirementsForAppointment(cita);
+    const requirements = await resolveRequirementsForAppointment(cita, transaction);
     if (!requirements.length) {
         const err = new Error('appointment_has_no_consent_requirements');
         err.statusCode = 400;
@@ -2199,6 +2218,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
     }
 
     let packageRow = await db.ConsentSignaturePackage.findOne({
+        transaction,
         where: {
             cita_id: plainCita.id_cita,
             paciente_id: plainCita.paciente_id,
@@ -2212,7 +2232,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
         const dueAt = appointmentStart && Number.isFinite(appointmentStart.getTime()) ? appointmentStart : null;
         const expiresAt = dueAt ? new Date(dueAt.getTime() + 30 * 24 * 60 * 60 * 1000) : addHours(new Date(), 24 * 30);
         packageRow = await db.ConsentSignaturePackage.create({
-            public_id: await generateUniquePublicId(db.ConsentSignaturePackage, 'cpkg'),
+            public_id: await generateUniquePublicId(db.ConsentSignaturePackage, 'cpkg', transaction),
             paciente_id: plainCita.paciente_id,
             clinica_id: plainCita.clinica_id,
             cita_id: plainCita.id_cita,
@@ -2222,7 +2242,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
             expires_at: expiresAt,
             trigger_source: toCleanString(options.triggerSource) || 'manual',
             created_by: toIntOrNull(options.createdBy),
-        });
+        }, { transaction });
     }
 
     const context = buildTemplateContext({
@@ -2234,13 +2254,13 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
     });
 
     const requirementTreatmentIds = [...new Set(requirements.map(row => Number(getPlain(row).tratamiento_id)).filter(Boolean))];
-    const requirementTreatments = requirementTreatmentIds.some(id => id !== Number(plainCita.tratamiento_id)) ? await db.Tratamiento.findAll({ where: { id_tratamiento: { [Op.in]: requirementTreatmentIds } } }) : [];
+    const requirementTreatments = requirementTreatmentIds.some(id => id !== Number(plainCita.tratamiento_id)) ? await db.Tratamiento.findAll({ where: { id_tratamiento: { [Op.in]: requirementTreatmentIds } }, transaction }) : [];
     const programContext = plainCita.source_system === 'treatment_program' && plainCita.voucher_id
-        ? await require('../lib/program-appointment-context').programAppointmentContext(db, plainCita) : null;
+        ? await require('../lib/program-appointment-context').programAppointmentContext(db, plainCita, transaction) : null;
     const doctorsByTreatment = new Map(programContext ? requirementTreatmentIds.map(id => [id,
         require('../lib/program-appointment-context').programTreatmentDoctorIds(programContext, plainCita, id)]) : []);
     const programDoctorIds = [...new Set([...doctorsByTreatment.values()].flat())];
-    const programDoctors = programDoctorIds.length ? await db.Usuario.findAll({ where: { id_usuario: { [Op.in]: programDoctorIds } }, attributes: ['id_usuario', 'nombre', 'apellidos'] }) : [];
+    const programDoctors = programDoctorIds.length ? await db.Usuario.findAll({ where: { id_usuario: { [Op.in]: programDoctorIds } }, attributes: ['id_usuario', 'nombre', 'apellidos'], transaction }) : [];
 
     for (const requirement of requirements) {
         const plainRequirement = getPlain(requirement);
@@ -2252,13 +2272,16 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
         const professional = programContext ? (assignedDoctors.length === 1 ? getPlain(programDoctors.find(row => row.id_usuario === assignedDoctors[0])) : null) : plainCita.doctor;
         const documentContext = requirementTreatment || programContext ? buildTemplateContext({ paciente: plainCita.paciente, clinica: plainCita.clinica,
             tratamiento: getPlain(requirementTreatment) || plainCita.tratamiento, cita: { ...plainCita, tratamiento_id: requirementTreatmentId }, profesional: professional }) : context;
-        const resolved = await resolveRequirementTemplate(requirement);
-        if (!resolved?.template || !resolved?.version) continue;
+        const resolved = await resolveRequirementTemplate(requirement, transaction);
+        if (!resolved?.template || !resolved?.version) {
+            throw Object.assign(new Error('consent_template_version_unavailable'), { statusCode: 409 });
+        }
 
         const signedReusable = await findSignedReusableConsent({
             pacienteId: plainCita.paciente_id,
             clinicaId: plainCita.clinica_id,
             resolved,
+            transaction,
         });
         if (signedReusable) {
             await supersedePendingReusableConsents({
@@ -2266,6 +2289,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
                 clinicaId: plainCita.clinica_id,
                 resolved,
                 exceptId: signedReusable.id,
+                transaction,
             });
             continue;
         }
@@ -2275,15 +2299,18 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
             paciente_id: plainCita.paciente_id,
             cita_id: plainCita.id_cita,
             tratamiento_id: requirementTreatmentId,
-            status: { [Op.notIn]: ['cancelled', 'voided', 'superseded'] },
+            status: { [Op.notIn]: ['cancelled', 'voided', 'superseded', 'rejected', 'revoked', 'expired'] },
+            revoked_at: null,
         };
         if (plainRequirement.clinic_template_id) {
             existingWhere.clinic_template_id = plainRequirement.clinic_template_id;
         } else {
             existingWhere.catalog_template_id = plainRequirement.catalog_template_id;
         }
-        const existing = await db.PatientConsentDocument.findOne({ where: existingWhere });
-        if (existing && !DOCUMENT_CLOSED_STATUSES.has(existing.status)) continue;
+        const existing = await db.PatientConsentDocument.findOne({ where: existingWhere, transaction });
+        // Signed documents belong to this same act. A refresh/retry must never
+        // replace them with another pending signature (including dual signing).
+        if (existing) continue;
 
         const title = resolved.version.title || resolved.template.name;
         const renderedHtml = renderTemplateHtml(resolved.version.body_html || buildDefaultBodyHtml(title), documentContext);
@@ -2325,7 +2352,7 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
         };
 
         await db.PatientConsentDocument.create({
-            public_id: await generateUniquePublicId(db.PatientConsentDocument, 'cdoc'),
+            public_id: await generateUniquePublicId(db.PatientConsentDocument, 'cdoc', transaction),
             package_id: packageRow.id,
             paciente_id: plainCita.paciente_id,
             clinica_id: plainCita.clinica_id,
@@ -2345,11 +2372,12 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
             snapshot_html: renderedHtml,
             snapshot_hash: hashSnapshot({ ...snapshot, rendered_html: renderedHtml }),
             expires_at: packageRow.expires_at || null,
-        });
+        }, { transaction });
     }
 
-    await refreshPackageCounts(packageRow.id);
+    await refreshPackageCounts(packageRow.id, transaction);
     return db.ConsentSignaturePackage.findByPk(packageRow.id, {
+        transaction,
         include: [
             { model: db.PatientConsentDocument, as: 'documents', required: false },
             { model: db.Paciente, as: 'paciente', required: false },
@@ -2358,20 +2386,31 @@ async function createPackageForAppointment(citaIdRaw, options = {}) {
     });
 }
 
-async function refreshPackageCounts(packageIdRaw) {
+async function refreshPackageCounts(packageIdRaw, transaction = null) {
     const packageId = toIntOrNull(packageIdRaw);
     if (!packageId) return null;
     const documents = await db.PatientConsentDocument.findAll({
+        transaction,
         where: { package_id: packageId, status: { [Op.notIn]: ['cancelled', 'voided', 'superseded'] } },
         raw: true,
     });
-    const requiredCount = documents.filter((doc) => !!doc.required).length;
-    const signedCount = documents.filter((doc) => !!doc.required && doc.status === 'signed').length;
-    const pending = documents.some((doc) => DOCUMENT_PENDING_STATUSES.has(doc.status));
+    // A revoked/rejected attempt stays in history, but its replacement must
+    // not double the obligation or make completion impossible forever.
+    const latest = new Map();
+    for (const doc of documents) {
+        const template = doc.clinic_template_id ? `clinic:${doc.clinic_template_id}`
+            : doc.catalog_template_id ? `catalog:${doc.catalog_template_id}` : `document:${doc.id}`;
+        const key = `${doc.tratamiento_id || 0}:${template}`;
+        if (!latest.has(key) || Number(doc.id) > Number(latest.get(key).id)) latest.set(key, doc);
+    }
+    const currentDocuments = [...latest.values()];
+    const requiredCount = currentDocuments.filter((doc) => !!doc.required).length;
+    const signedCount = currentDocuments.filter((doc) => !!doc.required && doc.status === 'signed' && !doc.revoked_at).length;
+    const pending = currentDocuments.some((doc) => DOCUMENT_PENDING_STATUSES.has(doc.status));
     const status = requiredCount > 0 && signedCount >= requiredCount ? 'signed' : (pending ? 'pending' : 'draft');
     await db.ConsentSignaturePackage.update(
         { required_count: requiredCount, signed_count: signedCount, status },
-        { where: { id: packageId } }
+        { where: { id: packageId }, transaction }
     );
     return { required_count: requiredCount, signed_count: signedCount, status };
 }
