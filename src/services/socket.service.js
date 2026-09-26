@@ -5,6 +5,7 @@ let ioInstance = null;
 let publisher = null;
 let subscriber = null;
 let subscriberInitialized = false;
+let availabilityInvalidator = null;
 const busListeners = new Set();
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
@@ -116,6 +117,17 @@ function publish(event, payload, rooms = []) {
 function emitThroughBus(event, payload, rooms = []) {
     emitLocal(event, payload, rooms);
     publish(event, payload, rooms);
+    // Writer/reader and the authenticated CRM consumer must support this event
+    // before enabling the producer. Never produce from the Redis receive path.
+    if (process.env.AVAILABILITY_REALTIME_ENABLED === 'true'
+        && ['appointment:created', 'appointment:updated', 'appointment:deleted'].includes(event)) {
+        availabilityInvalidator ||= require('../lib/availability-realtime').createInvalidator({
+            resolve: clinicIds => require('../lib/availability-realtime').relatedClinics({ db: require('../../models'), clinicIds }),
+            publish: emitThroughBus,
+            warn: code => console.warn('[availability-realtime]', code),
+        });
+        availabilityInvalidator.notify(event, payload);
+    }
 }
 
 const ioProxy = {
