@@ -6,6 +6,7 @@
 > **Relacionado con:** [CONTRIBUTING](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/CONTRIBUTING.md).
 
 Procedimiento clínico: [versiones de áreas por clínica](medical-area-contracts-release.md).
+Importación acotada: [borradores de programas capilares](cliniccloud-capillary-program-drafts.md).
 
 ## Seguridad
 
