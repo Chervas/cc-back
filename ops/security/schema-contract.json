@@ -2629,7 +2629,7 @@
         },
         {
           "COLUMN_NAME": "from_email",
-          "COLUMN_TYPE": "varchar(320)",
+          "COLUMN_TYPE": "varchar(512)",
           "IS_NULLABLE": "YES",
           "COLUMN_DEFAULT": null,
           "EXTRA": "",
@@ -5939,22 +5939,19 @@
           "CHARACTER_SET_NAME": null,
           "COLLATION_NAME": null,
           "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "active_phone_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "STORED GENERATED",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": "(case when (`state` = _utf8mb4\\'active\\') then `phone_id` else NULL end)"
         }
       ],
       "indexes": [
-        {
-          "name": "asset_id",
-          "columns": [
-            {
-              "INDEX_NAME": "asset_id",
-              "NON_UNIQUE": 0,
-              "SEQ_IN_INDEX": 1,
-              "COLUMN_NAME": "asset_id",
-              "SUB_PART": null,
-              "INDEX_TYPE": "BTREE"
-            }
-          ]
-        },
         {
           "name": "connection_ref",
           "columns": [
@@ -5963,6 +5960,48 @@
               "NON_UNIQUE": 0,
               "SEQ_IN_INDEX": 1,
               "COLUMN_NAME": "connection_ref",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_whatsapp_activation_asset_history",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_whatsapp_activation_asset_history",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "asset_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "idx_whatsapp_activation_asset_history",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_whatsapp_activation_phone_history",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_whatsapp_activation_phone_history",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "phone_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "idx_whatsapp_activation_phone_history",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "state",
               "SUB_PART": null,
               "INDEX_TYPE": "BTREE"
             }
@@ -5990,19 +6029,6 @@
           ]
         },
         {
-          "name": "phone_id",
-          "columns": [
-            {
-              "INDEX_NAME": "phone_id",
-              "NON_UNIQUE": 0,
-              "SEQ_IN_INDEX": 1,
-              "COLUMN_NAME": "phone_id",
-              "SUB_PART": null,
-              "INDEX_TYPE": "BTREE"
-            }
-          ]
-        },
-        {
           "name": "PRIMARY",
           "columns": [
             {
@@ -6010,6 +6036,19 @@
               "NON_UNIQUE": 0,
               "SEQ_IN_INDEX": 1,
               "COLUMN_NAME": "authorization_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "uniq_whatsapp_active_phone",
+          "columns": [
+            {
+              "INDEX_NAME": "uniq_whatsapp_active_phone",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "active_phone_id",
               "SUB_PART": null,
               "INDEX_TYPE": "BTREE"
             }
