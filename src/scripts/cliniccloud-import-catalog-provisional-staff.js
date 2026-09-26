@@ -4,40 +4,42 @@ const path=require('node:path'),{execFileSync}=require('node:child_process');
 const {hash}=require('../lib/cliniccloud-import/adapter');
 const {parseArgs,readBytes,writePrivateJson}=require('../lib/cliniccloud-import/io');
 const {connectOperatorDatabase}=require('../lib/cliniccloud-import/operator-database');
-const {SOURCE,prepare,verifyPackage,verifyAfter}=require('../lib/cliniccloud-import/catalog-provisional-staff');
+const {SOURCE,scopeConfig,prepare,verifyPackage,verifyAfter}=require('../lib/cliniccloud-import/catalog-provisional-staff');
 const {privateJson,openJournal,acquireExecutorLocks}=require('./cliniccloud-import-appointments-apply');
 const {validateBackup}=require('./cliniccloud-import-contacts-apply');
-async function capture(c,lock=false){
+async function capture(c,lock=false,scopeName='provisional_piedad_body_injectables_drafts'){
+  const scope=scopeConfig(scopeName),ids=scope.targets.map(t=>t.id).join(','),rooms=[...new Set(scope.targets.map(t=>t.room))].join(',');
+  // Identifiers above come only from the closed scope definitions, never CLI SQL.
   const select=async sql=>(await c.query(sql+(lock?' FOR UPDATE':'')))[0];
   return {
-    clinics:await select('SELECT id_clinica,grupoClinicaId FROM Clinicas WHERE id_clinica=72'),
-    treatments:await select('SELECT * FROM Tratamientos WHERE id_tratamiento IN (1973,1974) ORDER BY id_tratamiento'),
-    rooms:await select('SELECT * FROM Instalaciones WHERE id IN (82,84) ORDER BY id'),
-    room_hours:await select('SELECT * FROM InstalacionHorarios WHERE instalacion_id IN (82,84) ORDER BY id'),
-    staff:await select('SELECT * FROM DoctorClinicas WHERE doctor_id=221 AND clinica_id=72 ORDER BY id'),
-    staff_hours:await select('SELECT * FROM DoctorHorarios WHERE doctor_clinica_id=119 ORDER BY id'),
-    equipment:await select('SELECT * FROM BookingEquipment WHERE id=12'),
-    equipment_clinics:await select('SELECT * FROM BookingEquipmentClinics WHERE equipment_id=12 ORDER BY clinic_id'),
-    requirements:await select('SELECT * FROM TreatmentConsentRequirements WHERE tratamiento_id IN (1973,1974) ORDER BY id'),
-    appointments:await select('SELECT id_cita,tratamiento_id FROM CitasPacientes WHERE tratamiento_id IN (1973,1974) ORDER BY id_cita'),
+    clinics:await select(`SELECT id_clinica,grupoClinicaId FROM Clinicas WHERE id_clinica=${scope.clinic}`),
+    treatments:await select(`SELECT * FROM Tratamientos WHERE id_tratamiento IN (${ids}) ORDER BY id_tratamiento`),
+    rooms:await select(`SELECT * FROM Instalaciones WHERE id IN (${rooms}) ORDER BY id`),
+    room_hours:await select(`SELECT * FROM InstalacionHorarios WHERE instalacion_id IN (${rooms}) ORDER BY id`),
+    staff:await select(`SELECT * FROM DoctorClinicas WHERE doctor_id=${scope.staff} AND clinica_id=${scope.clinic} ORDER BY id`),
+    staff_hours:await select(`SELECT * FROM DoctorHorarios WHERE doctor_clinica_id IN (SELECT id FROM DoctorClinicas WHERE doctor_id=${scope.staff} AND clinica_id=${scope.clinic}) ORDER BY id`),
+    equipment:await select(`SELECT * FROM BookingEquipment WHERE id=${scope.equipment}`),
+    equipment_clinics:await select(`SELECT * FROM BookingEquipmentClinics WHERE equipment_id=${scope.equipment} ORDER BY clinic_id`),
+    requirements:await select(`SELECT * FROM TreatmentConsentRequirements WHERE tratamiento_id IN (${ids}) ORDER BY id`),
+    appointments:await select(`SELECT id_cita,tratamiento_id FROM CitasPacientes WHERE tratamiento_id IN (${ids}) ORDER BY id_cita`),
   };
 }
 async function execute({c,pkg,journal,dryRun=false}){
   let commitAttempted=false;
   try{
     await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');await c.beginTransaction();
-    const before=await capture(c,true);
+    const before=await capture(c,true,pkg.review.scope);
     if(hash(before)!==pkg.before_sha256){verifyAfter(before,pkg);await c.rollback();await journal.append({stage:'provisional_staff_replay',updated:0});return{status:'replay_preserved',updated:0};}
     await journal.append({stage:'provisional_staff_before',before,operations:pkg.operations});
     for(const op of pkg.operations){
       const [r]=await c.query('UPDATE Tratamientos SET clinical_config=?,updatedAt=UTC_TIMESTAMP() WHERE id_tratamiento=? AND activo=0',[JSON.stringify(op.after_config),op.id]);
       if(r.affectedRows!==1)throw Error('PROVISIONAL_STAFF_UPDATE_MISMATCH');
     }
-    const after=await capture(c);verifyAfter(after,pkg);await journal.append({stage:'provisional_staff_verified_before_commit',after});
-    if(dryRun){await c.rollback();if(hash(await capture(c))!==pkg.before_sha256)throw Error('PROVISIONAL_STAFF_ROLLBACK_MISMATCH');await journal.append({stage:'provisional_staff_rolled_back'});return{status:'rolled_back_and_verified',proposed:pkg.operations.length,updated:0};}
+    const after=await capture(c,false,pkg.review.scope);verifyAfter(after,pkg);await journal.append({stage:'provisional_staff_verified_before_commit',after});
+    if(dryRun){await c.rollback();if(hash(await capture(c,false,pkg.review.scope))!==pkg.before_sha256)throw Error('PROVISIONAL_STAFF_ROLLBACK_MISMATCH');await journal.append({stage:'provisional_staff_rolled_back'});return{status:'rolled_back_and_verified',proposed:pkg.operations.length,updated:0};}
     commitAttempted=true;await c.commit();await journal.append({stage:'provisional_staff_committed',updated:pkg.operations.length});
     const independent=await connectOperatorDatabase('crm');
-    try{await independent.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const current=await capture(independent);verifyAfter(current,pkg);await independent.rollback();await journal.append({stage:'provisional_staff_independent_read_verified',after_sha256:hash(current)});}
+    try{await independent.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const current=await capture(independent,false,pkg.review.scope);verifyAfter(current,pkg);await independent.rollback();await journal.append({stage:'provisional_staff_independent_read_verified',after_sha256:hash(current)});}
     finally{await independent.end();}
     return{status:'committed_and_verified',updated:pkg.operations.length,...pkg.policy};
   }catch(e){await c.rollback().catch(()=>{});if(commitAttempted)throw Error('PROVISIONAL_STAFF_COMMIT_RESULT_REQUIRES_JOURNAL_REVIEW');throw e;}
@@ -52,12 +54,12 @@ async function run(args){
   try{
     if(o['--mode']==='prepare'){
       const review=privateJson(o['--review']);await c.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
-      const pkg=prepare({before:await capture(c),review});await c.rollback();writePrivateJson(o['--private-output'],pkg);
+      const pkg=prepare({before:await capture(c,false,review.scope),review});await c.rollback();writePrivateJson(o['--private-output'],pkg);
       return{status:'prepared',proposed:pkg.operations.length,package_sha256:pkg.package_sha256,writes:0};
     }
     const pkg=privateJson(o['--package']);verifyPackage(pkg);
     if(o['--mode']==='verify'){
-      await c.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const after=await capture(c);verifyAfter(after,pkg);await c.rollback();
+      await c.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const after=await capture(c,false,pkg.review.scope);verifyAfter(after,pkg);await c.rollback();
       writePrivateJson(o['--private-output'],{verified_at:new Date().toISOString(),package_sha256:pkg.package_sha256,after,policy:pkg.policy});return{status:'verified_read_only',treatments:after.treatments.length};
     }
     const age=Date.now()-Date.parse(pkg.created_at);

@@ -583,7 +583,8 @@ documento 99. Pruebas: `cliniccloud_catalog_simple_activation.test.js`.
 
 ## Asignación provisional de personal en borradores
 
-`cliniccloud-import-catalog-provisional-staff.js` refleja exclusivamente la
+`cliniccloud-import-catalog-provisional-staff.js` permite ámbitos cerrados,
+sin deducir acreditación clínica a partir del rol de agenda. El ámbito corporal refleja la
 confirmación del titular para dos borradores corporales de BS Medical:
 carboxiterapia y mesoterapia. No es una excepción general a la validación clínica
 de inyectables. Mantiene `INJECTABLE_STAFF_REQUIRES_CLINICAL_VALIDATION`,
@@ -597,6 +598,15 @@ ID y huella previa. El operador exige el archivo y las dos filas revisadas, sin
 citas ni perfil previo, diez minutos documentados, personal activo con horarios,
 cabinas activas de capacidad uno que lo permiten y la unidad fija de carboxiterapia
 en C10. Mesoterapia en C9 no reserva la máquina de presoterapia por compartir sala.
+
+El ámbito `provisional_ainhoa_capillary_c2_drafts` acepta únicamente los cuatro
+borradores del Excel capilar filas 22/26/29/31: dutasteride, vitaminas, Hair
+Filler y Dr. CYJ. Revisión con cuatro bindings y la referencia identificada de
+C2/Ainhoa; la hoja y fila deben coincidir. Conserva 30/30/20/20 minutos,
+asigna C2/Ainhoa y añade el LED fijo de C2 solo al dutasteride, donde ya figura
+incluido. No añade diez minutos ni una sesión. No incluye PRP, carboxiterapia,
+INDIBA ni revisiones médicas, y no convierte un rol auxiliar en acreditación
+de enfermería. Preserva avisos clínicos y precios pendientes.
 
 Revisar el paquete y ejecutar primero `--mode dry-run`, después `--mode apply`,
 con `--workbook … --package … --approved-sha256 … --backup-manifest …
