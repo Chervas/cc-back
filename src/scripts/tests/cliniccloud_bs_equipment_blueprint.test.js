@@ -13,13 +13,21 @@ test('BS inventory preserves one unit per family and the three confirmed mobile 
   assert(plan.mobile_equipment.find(u => u.family_key === 'btl_shockwave').aliases.includes('Ondas acústicas BTL'));
 });
 
-test('fixed locations include the two INDIBA rooms confirmed on September 25', () => {
+test('fixed locations include INDIBA rooms and the separate C2 capillary LED confirmed on September 25', () => {
   assert.deepEqual(plan.fixed_equipment.map(u => [u.family_key, u.home_room]), [
     ['cyclone', 'C11'], ['btl_lymphastim', 'C9'], ['carboxytherapy', 'C10'],
-    ['indiba_ona', 'C8'], ['indiba_rf', 'C12'],
+    ['indiba_ona', 'C8'], ['indiba_rf', 'C12'], ['capillary_led', 'C2'],
   ]);
   assert.equal(plan.turnaround_minutes, 0);
   assert.equal(plan.confirmed_on, '2026-09-25');
+});
+
+test('capillary LED is not another alias for the ONA device or a mobile machine', () => {
+  const led = plan.fixed_equipment.find(u => u.family_key === 'capillary_led');
+  assert.equal(led.home_room, 'C2');
+  assert(led.aliases.includes('Fotorregeneración LED'));
+  assert.equal(plan.mobile_equipment.some(u => u.family_key === led.family_key), false);
+  assert.equal(plan.fixed_equipment.find(u => u.family_key === 'indiba_ona').aliases.some(a => led.aliases.includes(a)), false);
 });
 
 for (const unit of plan.fixed_equipment) {
