@@ -584,7 +584,8 @@ exports.createClinica = async (req, res) => {
             configPayload.disciplinas = ['dental'];
         }
 
-        const newClinica = await Clinica.create({   
+        const newClinica = await Clinica.sequelize.transaction(async (transaction) => {
+            const created = await Clinica.create({
             nombre_clinica,
             telefono: telefono || telefono_fijo || telefono_movil || telefono_whatsapp || null,
             telefono_fijo,
@@ -615,6 +616,11 @@ exports.createClinica = async (req, res) => {
             datos_fiscales_clinica,
             configuracion: configPayload,
             grupoClinicaId
+            }, { transaction });
+            await require('../services/medicalAreaContracts.service').initializeClinic(created.id_clinica, {
+                transaction, actorId: Number(req.userData?.userId),
+            });
+            return created;
         });
 
         // Encolar creación de automatizaciones y plantillas predefinidas

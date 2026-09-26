@@ -5,6 +5,8 @@
 > **Última revisión de navegación de seguridad:** 2026-09-18.
 > **Relacionado con:** [CONTRIBUTING](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/CONTRIBUTING.md).
 
+Procedimiento clínico: [versiones de áreas por clínica](medical-area-contracts-release.md).
+
 ## Seguridad
 
 El [runbook de migración](security-integrations-audit-migration.md) describe

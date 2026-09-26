@@ -55,6 +55,7 @@ module.exports = (sequelize, DataTypes) => {
     professional_id: { type: DataTypes.INTEGER, allowNull: true },
     appointment_id: { type: DataTypes.INTEGER, allowNull: true },
     treatment_id: { type: DataTypes.INTEGER, allowNull: true },
+    area_contract_revision_id: { type: DataTypes.INTEGER, allowNull: true },
     profile_code: { type: DataTypes.STRING(40), allowNull: false, defaultValue: 'quick' },
     measured_at: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
     raw_values_json: { type: DataTypes.JSON, allowNull: false, defaultValue: {} },

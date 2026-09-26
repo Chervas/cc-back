@@ -86,11 +86,26 @@ function fixture() {
   vm.runInNewContext(`(function(require,module,exports){${fs.readFileSync(contractsFile, 'utf8')}\n})`,
     { console })(name => name === '../../models' ? db : createRequire(contractsFile)(name), contractsModule, contractsModule.exports);
   const contracts = contractsModule.exports;
+  const areaRevisions = new Map([10, 20].map(id => [id, {
+    ...contracts.getBaseContractForArea('nutricion'), revision: { id, number: 1, hash: 'fictitious' },
+  }]));
   const wrappedRequire = name => name === '../../models' ? db : name === '../lib/access-policy' ? {
     assertUserCanAccessFeature: permission,
     getAccessibleClinicIdsForFeature: async ({ clinicIds, featureKey }) => state.deniedFeatures.includes(featureKey) ? [] : clinicIds.filter(id => state.grants.includes(id)),
   }
-    : name === './medicalAreaContracts.service' ? { ...contracts, getContractForArea: async () => contracts.getBaseContractForArea('nutricion') }
+    : name === './medicalAreaContracts.service' ? { ...contracts,
+      getContractForArea: async (code, options) => {
+        state.calls.push({ name: 'areaContract', ...options });
+        assert.equal(code, 'nutricion');
+        assert(areaRevisions.has(options.clinicId), 'contract must use the authorized clinic');
+        return areaRevisions.get(options.clinicId);
+      },
+      getRecordedContract: async (code, id) => {
+        state.calls.push({ name: 'recordedContract', code, id });
+        assert(areaRevisions.has(id || 10), 'original revision must remain available');
+        return areaRevisions.get(id || 10);
+      },
+    }
       : name === './clinicalPrivateStorage.service' ? {
         readClinicalPrivateAsset: async asset => { state.calls.push({ name: 'readBinary', asset }); return { buffer: Buffer.from('private fictitious binary'), filename: 'fictitious.pdf' }; },
         storeClinicalPrivateAsset: async values => { state.calls.push({ name: 'storeBinary', values }); return { id: 100 }; },
@@ -162,9 +177,12 @@ test('service writes all verified links atomically and report uses the measureme
   const f = fixture(); const row = await f.save({ appointment_id: 200 });
   assert.equal(row.clinic_id, 20); assert.equal(row.appointment_id, 200); assert.equal(row.treatment_id, 6);
   const create = f.state.calls.find(c => c.name === 'create'); assert.equal(create.transaction, f.tx);
+  assert.equal(f.state.rows[0].area_contract_revision_id, 20);
+  assert(f.state.calls.some(c => c.name === 'areaContract' && c.clinicId === 20 && c.transaction === f.tx));
   assert(f.state.calls.some(c => c.name === 'patient' && c.transaction === f.tx && c.lock === 'UPDATE'));
   const report = await f.service.getNutritionMeasurementReport('pac_ficticio', row.id, { actorUserId: 7 });
   assert.equal(report.patient.clinic_id, 20); assert.equal(report.patient.clinic_name, 'Secundaria ficticia');
+  assert(f.state.calls.some(c => c.name === 'recordedContract' && c.id === 20));
   assert.equal(f.patient.clinica_id, 10);
 });
 

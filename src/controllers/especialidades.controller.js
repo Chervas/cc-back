@@ -89,21 +89,40 @@ function requireGlobalAdmin(req, res) {
 
 // ============ ESPECIALIDADES DE SISTEMA ============
 
-exports.getMedicalAreaContracts = asyncHandler(async (req, res) => {
-    res.json(await medicalAreaContractsService.getMedicalAreaContracts());
+const areaHandler = (handler) => asyncHandler(async (req, res) => {
+    try { return await handler(req, res); }
+    catch (error) {
+        if (!String(error.code || '').startsWith('medical_area_')) throw error;
+        const messages = {
+            medical_area_revision_required: 'Actualiza la página antes de publicar la configuración.',
+            medical_area_revision_conflict: 'La versión ha cambiado. Actualiza y revisa tu edición.',
+            medical_area_configuration_not_initialized: 'La configuración de áreas todavía no está preparada para esta clínica.',
+            medical_area_not_configured: 'Esta área todavía no está configurada para la clínica.',
+        };
+        return res.status(error.statusCode || 409).json({ code: error.code,
+            message: messages[error.code] || 'No se puede aplicar esta configuración de área médica. Revisa la versión y sus campos.' });
+    }
 });
 
-exports.getMedicalAreaContract = asyncHandler(async (req, res) => {
+exports.getMedicalAreaContracts = areaHandler(async (req, res) => {
+    const clinicId = req.query.clinica_id;
+    if (clinicId !== undefined && !(await canAccessClinicFeature(req, res, clinicId, 'clinic.settings.view'))) return;
+    res.json(await medicalAreaContractsService.getMedicalAreaContracts({ clinicId }));
+});
+
+exports.getMedicalAreaContract = areaHandler(async (req, res) => {
     const code = String(req.params.code || '').trim().toLowerCase();
+    const clinicId = req.query.clinica_id;
+    if (clinicId !== undefined && !(await canAccessClinicFeature(req, res, clinicId, 'clinic.settings.view'))) return;
     res.json({
         version: medicalAreaContractsService.VERSION,
         source: 'backend-db',
         fallback_code: medicalAreaContractsService.FALLBACK_CODE,
-        contract: await medicalAreaContractsService.getContractForArea(code)
+        contract: await medicalAreaContractsService.getContractForArea(code, { clinicId })
     });
 });
 
-exports.updateMedicalAreaContract = asyncHandler(async (req, res) => {
+exports.updateMedicalAreaContract = areaHandler(async (req, res) => {
     if (!requireGlobalAdmin(req, res)) return;
 
     const code = String(req.params.code || '').trim().toLowerCase();
@@ -112,11 +131,12 @@ exports.updateMedicalAreaContract = asyncHandler(async (req, res) => {
     }
 
     try {
-        const updatedBy = Number(req.userData?.userId || req.user?.id || req.body?.updated_by || null) || null;
+        const updatedBy = Number(req.userData?.userId || req.user?.id || null) || null;
         const contract = await medicalAreaContractsService.upsertMedicalAreaContract(
             code,
             req.body?.contract || req.body,
-            updatedBy
+            updatedBy,
+            { expectedRevisionId: req.body?.expected_revision_id }
         );
         return res.json({
             version: medicalAreaContractsService.VERSION,
@@ -130,6 +150,18 @@ exports.updateMedicalAreaContract = asyncHandler(async (req, res) => {
         }
         throw error;
     }
+});
+
+// Deliberate adoption, never a side effect of saving the global template.
+// Initially restricted to global admins until a clinic-facing review UI exists.
+exports.adoptMedicalAreaRevision = areaHandler(async (req, res) => {
+    if (!requireGlobalAdmin(req, res)) return;
+    const contract = await medicalAreaContractsService.adoptClinicRevision(req.params.clinicId, req.params.code, {
+        revisionId: req.body?.revision_id,
+        expectedRevisionId: req.body?.expected_revision_id,
+        actorId: Number(req.userData?.userId || req.user?.id),
+    });
+    res.json({ contract });
 });
 
 // Listar especialidades de sistema (solo lectura para clínicas)

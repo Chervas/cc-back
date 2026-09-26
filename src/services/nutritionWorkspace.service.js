@@ -1476,12 +1476,10 @@ function normalizeProfileCode(value) {
   return value === 'express_isak' ? 'express_isak' : 'quick';
 }
 
-async function getNutritionContractSafe() {
-  try {
-    return await medicalAreaContracts.getContractForArea('nutricion');
-  } catch (error) {
-    return medicalAreaContracts.getBaseContractForArea('nutricion');
-  }
+async function getNutritionContract(clinicId, transaction) {
+  // Missing configuration is an operational error, never permission to change
+  // the clinical schema silently to the latest system/default configuration.
+  return medicalAreaContracts.getContractForArea('nutricion', { clinicId, transaction });
 }
 
 function profileDefinitionsFromContract(contract = {}) {
@@ -3020,7 +3018,7 @@ async function getPatientNutritionWorkspace(patientIdentifier, options = {}) {
   const clinicId = context.clinicId;
   const clinic = clinicId === Number(patient.clinica_id) ? patient.clinica : await db.Clinica.findByPk(clinicId);
   const groupId = toIntOrNull(clinic?.grupoClinicaId || clinic?.grupo_clinica_id);
-  const nutritionContract = await getNutritionContractSafe();
+  const nutritionContract = await getNutritionContract(clinicId);
   const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
   const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
   const measurements = await db.PatientNutritionMeasurement.findAll({
@@ -3061,6 +3059,7 @@ async function getPatientNutritionWorkspace(patientIdentifier, options = {}) {
       calculation_profile: CALCULATION_PROFILE,
       formula_references: FORMULA_REFERENCES.map(({ profiles, ...reference }) => reference),
       measurement_contract_source: 'medical-area-contracts-v1',
+      area_contract_revision: nutritionContract.revision,
       generated_at: new Date().toISOString(),
     },
   };
@@ -3182,21 +3181,6 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
   }
 
   const profileCode = normalizeProfileCode(payload.profile_code);
-  const nutritionContract = await getNutritionContractSafe();
-  const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
-  const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
-  const rawValues = normalizeRawValues(payload.raw_values || payload.values || {}, fieldDefinitions);
-  const missingRequiredFields = missingRequiredFieldsForProfile(rawValues, profileCode, profileDefinitions, fieldDefinitions);
-  if (missingRequiredFields.length) {
-    const error = new Error('missing_required_measurement_fields');
-    error.status = 400;
-    error.details = {
-      profile_code: profileCode,
-      missing_fields: missingRequiredFields,
-    };
-    throw error;
-  }
-  const qualityFlags = qualityFlagsForValues(rawValues, fieldDefinitions);
   const measuredAt = payload.measured_at ? new Date(payload.measured_at) : new Date();
 
   if (!Number.isFinite(measuredAt.getTime())) {
@@ -3208,11 +3192,21 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
     const lockedPatient = await findPatient(patient.id_paciente, transaction);
     if (!lockedPatient) throw Object.assign(new Error('patient_not_found'), { status: 404 });
     const context = await resolveMeasurementContext({ patient: lockedPatient, payload, actorUserId, transaction });
+    const nutritionContract = await getNutritionContract(context.clinic_id, transaction);
+    const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
+    const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
+    const rawValues = normalizeRawValues(payload.raw_values || payload.values || {}, fieldDefinitions);
+    const missingRequiredFields = missingRequiredFieldsForProfile(rawValues, profileCode, profileDefinitions, fieldDefinitions);
+    if (missingRequiredFields.length) throw Object.assign(new Error('missing_required_measurement_fields'), {
+      status: 400, details: { profile_code: profileCode, missing_fields: missingRequiredFields },
+    });
+    const qualityFlags = qualityFlagsForValues(rawValues, fieldDefinitions);
     const calculatedValues = calculateNutritionValues(rawValues, profileCode, buildPatientFormulaContext(lockedPatient, measuredAt));
     return db.PatientNutritionMeasurement.create({
       patient_id: lockedPatient.id_paciente,
       ...context,
       profile_code: profileCode,
+      area_contract_revision_id: nutritionContract.revision.id,
       measured_at: measuredAt,
       raw_values_json: rawValues,
       calculated_values_json: calculatedValues,
@@ -3303,7 +3297,11 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     measurements.sort((a, b) => new Date(b.measured_at) - new Date(a.measured_at) || Number(b.id) - Number(a.id));
   }
 
-  const nutritionContract = await getNutritionContractSafe();
+  // A new report variation must use the measurement's original configuration,
+  // even after the clinic explicitly adopts a newer area revision. Legacy
+  // measurements have no known original revision; use the migration baseline
+  // and declare that provenance. Existing signed report snapshots stay intact.
+  const nutritionContract = await medicalAreaContracts.getRecordedContract('nutricion', measurementRow.area_contract_revision_id);
   const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
   const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
   const equationCode = selectedFatMassEquationCodeFromOptions(options);
@@ -3378,6 +3376,8 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
       formula_references: formulaReferencesForProfile(measurement.profile_code, calculationProfile),
       fat_mass_equation_code: equationCode,
       measurement_contract_source: 'medical-area-contracts-v1',
+      area_contract_revision: nutritionContract.revision,
+      area_contract_provenance: measurementRow.area_contract_revision_id ? 'recorded' : 'legacy_baseline',
       generated_at: new Date().toISOString(),
       source_measurements: measurements.filter(item => sourceIds.has(Number(item.id))).map(item => ({ id: Number(item.id), clinic_id: Number(item.clinic_id) })),
       pdf_strategy: 'json_snapshot_printable_on_demand',

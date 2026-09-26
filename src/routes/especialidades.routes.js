@@ -8,6 +8,7 @@ const authMiddleware = require('./auth.middleware');
 router.get('/area-contracts', authMiddleware, ctrl.getMedicalAreaContracts);
 router.get('/area-contracts/:code', authMiddleware, ctrl.getMedicalAreaContract);
 router.put('/area-contracts/:code', authMiddleware, ctrl.updateMedicalAreaContract);
+router.put('/clinica/:clinicId/area-contracts/:code/revision', authMiddleware, ctrl.adoptMedicalAreaRevision);
 
 // Especialidades de sistema (solo lectura)
 router.get('/sistema', ctrl.getEspecialidadesSistema);

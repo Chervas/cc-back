@@ -34,6 +34,10 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
       },
+      revision_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
     },
     {
       sequelize,
@@ -44,5 +48,8 @@ module.exports = (sequelize, DataTypes) => {
     },
   );
 
+  MedicalAreaContract.associate = (models) => {
+    MedicalAreaContract.belongsTo(models.MedicalAreaContractRevision, { as: 'revision', foreignKey: 'revision_id' });
+  };
   return MedicalAreaContract;
 };
