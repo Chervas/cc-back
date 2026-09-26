@@ -10,6 +10,9 @@ const { promisify } = require('util');
 const db = require('../../models');
 const medicalAreaContracts = require('./medicalAreaContracts.service');
 const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
+const { assertUserCanAccessFeature } = require('../lib/access-policy');
+const { createNutritionMeasurementContextResolver } = require('./nutritionMeasurementContext.service');
+const resolveMeasurementContext = createNutritionMeasurementContextResolver({ db, assertUserCanAccessFeature });
 
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
@@ -2931,7 +2934,7 @@ function buildNutritionReportSnapshotPayload(reportData, renderedHtml, generated
   };
 }
 
-async function findPatient(patientIdentifier) {
+async function findPatient(patientIdentifier, transaction = null) {
   const raw = String(patientIdentifier || '').trim();
   if (!raw) return null;
   const where = /^\d+$/.test(raw)
@@ -2939,6 +2942,7 @@ async function findPatient(patientIdentifier) {
     : { public_id: raw };
   return db.Paciente.findOne({
     where,
+    ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {}),
     include: db.Clinica
       ? [{ model: db.Clinica, as: 'clinica', required: false }]
       : [],
@@ -3173,7 +3177,6 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
     throw error;
   }
   const qualityFlags = qualityFlagsForValues(rawValues, fieldDefinitions);
-  const clinicId = toIntOrNull(payload.clinic_id) || Number(patient.clinica_id);
   const measuredAt = payload.measured_at ? new Date(payload.measured_at) : new Date();
 
   if (!Number.isFinite(measuredAt.getTime())) {
@@ -3181,23 +3184,24 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
     error.status = 400;
     throw error;
   }
-  const calculatedValues = calculateNutritionValues(rawValues, profileCode, buildPatientFormulaContext(patient, measuredAt));
-
-  const row = await db.PatientNutritionMeasurement.create({
-    patient_id: patient.id_paciente,
-    clinic_id: clinicId,
-    professional_id: toIntOrNull(payload.professional_id) || toIntOrNull(actorUserId),
-    appointment_id: toIntOrNull(payload.appointment_id),
-    treatment_id: toIntOrNull(payload.treatment_id),
-    profile_code: profileCode,
-    measured_at: measuredAt,
-    raw_values_json: rawValues,
-    calculated_values_json: calculatedValues,
-    formula_version: FORMULA_VERSION,
-    quality_flags_json: qualityFlags,
-    notes: payload.notes ? String(payload.notes).trim().slice(0, 2000) : null,
-    created_by: toIntOrNull(actorUserId),
-    updated_by: toIntOrNull(actorUserId),
+  const row = await db.sequelize.transaction(async (transaction) => {
+    const lockedPatient = await findPatient(patient.id_paciente, transaction);
+    if (!lockedPatient) throw Object.assign(new Error('patient_not_found'), { status: 404 });
+    const context = await resolveMeasurementContext({ patient: lockedPatient, payload, actorUserId, transaction });
+    const calculatedValues = calculateNutritionValues(rawValues, profileCode, buildPatientFormulaContext(lockedPatient, measuredAt));
+    return db.PatientNutritionMeasurement.create({
+      patient_id: lockedPatient.id_paciente,
+      ...context,
+      profile_code: profileCode,
+      measured_at: measuredAt,
+      raw_values_json: rawValues,
+      calculated_values_json: calculatedValues,
+      formula_version: FORMULA_VERSION,
+      quality_flags_json: qualityFlags,
+      notes: payload.notes ? String(payload.notes).trim().slice(0, 2000) : null,
+      created_by: toIntOrNull(actorUserId),
+      updated_by: toIntOrNull(actorUserId),
+    }, { transaction });
   });
 
   const measurement = measurementToJson(row);
@@ -3331,15 +3335,20 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     })
     : null;
   const patientFormulaContext = buildPatientFormulaContext(patient, measurement.measured_at);
+  const measurementClinicId = Number(measurement.clinic_id);
+  const measurementClinic = measurementClinicId === Number(patient.clinica_id)
+    ? patient.clinica
+    : await db.Clinica.findByPk(measurementClinicId, { attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] });
+  if (!measurementClinic) throw Object.assign(new Error('measurement_clinic_not_found'), { status: 404 });
 
   return {
     patient: {
       id: patient.id_paciente,
       public_id: patient.public_id,
       name: [patient.nombre, patient.apellidos].filter(Boolean).join(' ').trim(),
-      clinic_id: Number(patient.clinica_id),
-      clinic_name: patient.clinica?.nombre_clinica || '',
-      clinic_avatar_url: patient.clinica?.url_avatar || '',
+      clinic_id: measurementClinicId,
+      clinic_name: measurementClinic.nombre_clinica || '',
+      clinic_avatar_url: measurementClinic.url_avatar || '',
       sex: patientFormulaContext.sex,
       age_years: patientFormulaContext.age_years,
     },

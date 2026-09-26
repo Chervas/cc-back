@@ -90,6 +90,7 @@ exports.createPatientNutritionMeasurement = asyncHandler(async (req, res) => {
     if (error.status === 400) {
       return res.status(400).json({
         message: error.message,
+        code: error.code || null,
         details: error.details || null,
       });
     }
