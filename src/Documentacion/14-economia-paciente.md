@@ -322,7 +322,8 @@ DDL aditiva: `20260914070000-create-patient-program-sessions.js`, también añad
 
 Rutas autenticadas bajo `/api/economics/vouchers/:voucherId`:
 
-- `GET /program-plan`: unidades pendientes/reservadas/completadas y capacidades.
+- `GET /program-plan`: unidades pendientes/reservadas/completadas/ausentes,
+  capacidades, `plan_revision` y bloque `resume` con alcance/motivo de bloqueo.
 - `POST /program-proposals`: consulta acotada, sin reservar; `from_date`,
   `days` (1–180), hasta 30 `session_keys`; `fixed_sessions` conserva propuestas
   al pedir día anterior/siguiente, sin convertirlas en reservas.
@@ -331,6 +332,24 @@ Rutas autenticadas bajo `/api/economics/vouchers/:voucherId`:
   profesional alternativo. Bloquea compra/recursos/paciente y revalida en una
   transacción READ COMMITTED: todas las citas elegidas o ninguna. Repetir la
   misma solicitud devuelve el recibo; cambiarla con la misma clave da 409.
+
+Continuación tras ausencia o cancelación: ambos POST aceptan `mode: "resume"`,
+`replan_from_key` y `expected_plan_revision`. La propuesta no modifica citas.
+La confirmación exige todas las unidades sin completar del alcance actual,
+con revisión vigente bajo bloqueo; una revisión vieja devuelve
+`program_resume_changed` y una selección parcial `program_resume_incomplete`.
+La asistencia pasada todavía abierta, ejecución fuera de orden, más de treinta
+unidades o reservas con comunicaciones activadas requieren revisión, no force.
+Este corte de continuación solo mueve reservas de programa en HOLD.
+
+Las futuras mantienen IDs y apoyo; una ausencia/cancelación conserva su fila
+y recibe una sustitución ligada a la misma unidad. Nunca se consumen sesiones
+ni se mueve una realizada. La lista de reservas a excluir de disponibilidad
+se deriva exclusivamente de la compra; el cliente no puede enviar IDs ajenos.
+La solicitud normal conserva su hash histórico; modo/revisión forman parte del
+hash nuevo. El recibo idempotente prevalece incluso si el plan cambió después
+del commit. La actividad canónica se escribe con la transacción y los eventos
+`appointment:created/updated` se publican tras ella por el bus existente.
 
 Los endpoints exigen scope de clínica, `patients.sensitive.view`, lectura o
 edición del paciente y lectura o gestión de agenda según la operación. No
