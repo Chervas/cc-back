@@ -1,6 +1,7 @@
 'use strict';
 
-// Deliberately narrow: individual facial acts, one consultation/doctor, no
+// Deliberately narrow: individuals listed in the facial tariff (including its
+// explicitly listed Body filler variant), one consultation/doctor, no
 // equipment, price already reviewed and published consents already linked.
 // This is operational catalogue activation, never clinical/legal approval.
 const { hash } = require('./adapter');

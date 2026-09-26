@@ -7,14 +7,14 @@ const { normalizeBookingProfile } = require('../booking-profile');
 const { equipmentFitsRoom } = require('../booking-equipment');
 const VERSION = 'cliniccloud-catalog-equipment/1';
 // Only families with reviewed documentary bindings, not every inventory entry.
-const REVIEWED_MOBILITY = Object.freeze({ exion: 'mobile', emshape: 'mobile', cyclone: 'fixed' });
+const REVIEWED_MOBILITY = Object.freeze({ exion: 'mobile', emshape: 'mobile', cyclone: 'fixed', capillary_led: 'fixed' });
 const json = value => typeof value === 'string' ? JSON.parse(value) : value;
 const canonical = row => ({ ...row, clinical_config: json(row.clinical_config) });
 const fail = () => { throw Error('CATALOG_EQUIPMENT_REVIEW_INVALID'); };
 
 function prepareCatalogEquipment({ before, review, createdAt = new Date().toISOString() }) {
   if (!review || !String(review.confirmation_reference || '').trim() || !String(review.reviewed_by || '').trim()
-    || review.confirmed_on !== '2026-09-22' || !Array.isArray(review.targets) || !review.targets.length
+    || !['2026-09-22', '2026-09-25'].includes(review.confirmed_on) || !Array.isArray(review.targets) || !review.targets.length
     || review.targets.length > 20 || new Set(review.targets.map(t => t.treatment_id)).size !== review.targets.length
     || !Number.isFinite(Date.parse(createdAt))) fail();
   const operations = review.targets.map(target => {
@@ -34,7 +34,15 @@ function prepareCatalogEquipment({ before, review, createdAt = new Date().toISOS
     const units = before.units.filter(u => u.id === target.equipment_id);
     if (units.length !== 1) fail();
     const unit = units[0];
-    if (unit.group_id !== 29 || unit.owner_clinic_id !== 72 || unit.mobility !== REVIEWED_MOBILITY[unit.family_key]
+    const capillaryLed = unit.family_key === 'capillary_led';
+    if (review.confirmed_on !== (capillaryLed ? '2026-09-25' : '2026-09-22')) fail();
+    // The LED confirmation concerns the separate ten-minute C2 session only.
+    // It is not an authorization to add another visit to PRP/dutasteride or to
+    // treat the integrated blue LED in ONA as this capillary physical unit.
+    if (capillaryLed && (row.clinica_id !== 66 || row.duracion_min !== 10
+      || config.source_cabin !== '2' || config.source_catalog.sheet !== 'Capilar · sesiones y bonos'
+      || config.source_catalog.source_row !== 43 || unit.home_installation_id !== 75)) fail();
+    if (unit.group_id !== 29 || unit.owner_clinic_id !== (capillaryLed ? 66 : 72) || unit.mobility !== REVIEWED_MOBILITY[unit.family_key]
       || unit.family_key !== target.family_key || !Object.hasOwn(REVIEWED_MOBILITY, unit.family_key)
       || unit.status !== 'available' || !before.shares.some(s => s.equipment_id === unit.id && s.clinic_id === row.clinica_id)) fail();
     let resourceUnit = unit;

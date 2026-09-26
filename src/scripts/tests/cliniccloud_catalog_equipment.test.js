@@ -123,3 +123,50 @@ test('fixed preparation rejects missing, inactive, noncanonical or foreign homes
     f => { f.before.units[0].family_key = f.review.targets[0].family_key = 'carboxytherapy'; }];
   for (const change of changes) { const f = fixedFixture(); change(f); assert.throws(() => prepareCatalogEquipment(f)); }
 });
+
+function ledFixture() {
+  const f = fixedFixture();
+  const row = f.before.treatments[0], cfg = row.clinical_config;
+  row.clinica_id = 66; row.duracion_min = 10;
+  cfg.source_cabin = '2'; cfg.source_catalog.sheet = 'Capilar · sesiones y bonos'; cfg.source_catalog.source_row = 43;
+  cfg.booking_profile.phases[0].installation_ids = [75]; cfg.booking_profile.phases[0].duration_minutes = 10;
+  Object.assign(f.before.units[0], { family_key: 'capillary_led', home_installation_id: 75, owner_clinic_id: 66 });
+  f.before.clinics[0].id_clinica = 66; f.before.shares[0].clinic_id = 66;
+  Object.assign(f.before.rooms[0], { id: 75, clinica_id: 66 }); f.before.policies[0].installation_id = 75;
+  f.review.confirmed_on = '2026-09-25'; f.review.targets[0].family_key = 'capillary_led';
+  f.review.targets[0].source_catalog_sha256 = hash(cfg.source_catalog);
+  return f;
+}
+test('confirmed capillary LED belongs to Capilar and augments only its existing draft C2 phase', () => {
+  const f = ledFixture(), before = structuredClone(f), pkg = prepareCatalogEquipment(f), cfg = pkg.operations[0].after_config;
+  assert.deepEqual(f, before);
+  assert.equal(cfg.booking_profile.phases.length, 1);
+  assert.deepEqual(cfg.booking_profile.phases[0].equipment_requirements, [{ equipment_ids: [4] }]);
+  assert.equal(cfg.booking_profile.phases[0].duration_minutes, 10);
+  assert.equal(cfg.catalog_status, 'draft'); assert.equal(cfg.fiscal_mapping_pending, true);
+  assert.deepEqual(cfg.import_issues, ['OTHER_PENDING_REVIEW']);
+  assert.deepEqual(cfg.source_price, before.before.treatments[0].clinical_config.source_price);
+  assert.deepEqual(cfg.booking_profile.phases[0].professionals, before.before.treatments[0].clinical_config.booking_profile.phases[0].professionals);
+  verifyCatalogEquipment(pkg, f.review);
+});
+test('LED binding rejects other acts, another owner/home or the older machine confirmation', () => {
+  for (const change of [f => { f.before.treatments[0].clinica_id = 72; },
+    f => { f.before.treatments[0].clinical_config.source_catalog.source_row = 24; },
+    f => { f.before.treatments[0].clinical_config.source_catalog.sheet = 'Facial · tratamientos'; },
+    f => { f.before.treatments[0].clinical_config.source_cabin = '7'; },
+    f => { f.before.treatments[0].duracion_min = f.before.treatments[0].clinical_config.booking_profile.phases[0].duration_minutes = 30; },
+    f => { f.before.units[0].owner_clinic_id = 72; }, f => { f.before.units[0].home_installation_id = 80; },
+    f => { f.before.units[0].mobility = 'mobile'; }, f => { f.review.confirmed_on = '2026-09-22'; }]) {
+    const f = ledFixture(); change(f);
+    f.review.targets[0].source_catalog_sha256 = hash(f.before.treatments[0].clinical_config.source_catalog);
+    assert.throws(() => prepareCatalogEquipment(f));
+  }
+});
+test('C2 LED confirmation cannot approve EXION, EMShape or Cyclone instead', () => {
+  for (const family of ['exion', 'emshape', 'cyclone']) {
+    const f = family === 'cyclone' ? fixedFixture() : fixture();
+    f.before.units[0].family_key = f.review.targets[0].family_key = family;
+    f.review.confirmed_on = '2026-09-25';
+    assert.throws(() => prepareCatalogEquipment(f));
+  }
+});

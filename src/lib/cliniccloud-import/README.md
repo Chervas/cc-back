@@ -494,8 +494,12 @@ un borrador individual importado, con una fase y una cabina ya documentadas.
 Revisión privada: `confirmation_reference`, `confirmed_on`, `reviewed_by` y
 `targets` con `treatment_id`, `equipment_id`, `family_key` y la huella
 `source_catalog_sha256`. La vía está acotada a EXION/EMShape móviles y Cyclone
-fijo de BS; combinaciones, ondas BTL con cabina contradictoria y las demás
-familias fijas quedan fuera. Para Cyclone exige una ubicación física canónica
+fijo de BS, con confirmación del 22/09. La confirmación de C2 del 25/09 permite
+también el fotorregenerador LED capilar fijo, propietario Capilar, únicamente
+para la sesión suelta de diez minutos documentada en la fila 43 del Excel capilar.
+No alcanza PRP/dutasteride ni el LED integrado en ONA; no añade citas o fases.
+Combinaciones, ondas BTL con cabina contradictoria y las demás familias fijas
+quedan fuera. Para los fijos exige una ubicación física canónica
 activa, de capacidad uno y de su clínica propietaria. Las cabinas lógicas del
 tratamiento pueden compartir esa identidad física, sin duplicar el equipo.
 La política que prohíbe móviles no impide usar un fijo en su propia sala; nunca
@@ -524,6 +528,9 @@ Pruebas: `cliniccloud_catalog_equipment.test.js` y ensayo SQL con rollback.
 `back-dev/dev`, no una migración de arranque ni un endpoint. Esta primera vía
 solo admite individuales de «Facial · tratamientos» de BS Medical, una consulta,
 un doctor y duración cerrada; no maquinaria, fases, programas ni otras áreas.
+La variante Body de ácido hialurónico figura expresamente en esa hoja y en
+FAC-02 de la tarifa facial; no se infiere que cualquier acto corporal pertenezca
+a este alcance ni que los distintos productos sean intercambiables.
 No modifica la elección fiscal: exige precio final fijo ya revisado y coincidente
 con la fuente, sin pendientes excepto el aviso antiguo de instalación inactiva.
 Comprueba sala activa/capacidad uno, autorización del doctor y horarios existentes;
