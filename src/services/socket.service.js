@@ -7,6 +7,7 @@ let subscriber = null;
 let subscriberInitialized = false;
 let confirmedPublisher = null;
 let backgroundPublishingEnabled = false;
+let availabilityInvalidator = null;
 const busListeners = new Set();
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
@@ -110,6 +111,18 @@ function publish(event, payload, rooms = []) {
 function emitThroughBus(event, payload, rooms = []) {
     emitLocal(event, payload, rooms);
     publish(event, payload, rooms);
+    // Roll out writer/reader audit vocabulary before enabling this producer.
+    if (process.env.AVAILABILITY_REALTIME_ENABLED === 'true'
+        && ['appointment:created', 'appointment:updated', 'appointment:deleted'].includes(event)) {
+        // Only the producer schedules this signal, never a Redis subscriber:
+        // one event cannot fan out recursively across runtimes.
+        availabilityInvalidator ||= require('../lib/availability-realtime').createInvalidator({
+            resolve: clinicIds => require('../lib/availability-realtime').relatedClinics({ db: require('../../models'), clinicIds }),
+            publish: emitThroughBus,
+            warn: code => console.warn('[availability-realtime]', code),
+        });
+        availabilityInvalidator.notify(event, payload);
+    }
 }
 
 const ioProxy = {

@@ -49,6 +49,12 @@ function createPolicy({ models, canAccess, isAdmin }) {
       row = await db().FlowExecutionV2.findByPk(id, { attributes: ['id', 'clinic_id', 'group_id'], raw: true });
       if (!row) return null;
       features = ['marketing', 'patients.sensitive.view', 'leads.sensitive.view']; location = await scopeFor(row.clinic_id, row.group_id);
+    } else if (type === 'calendar') {
+      // Target calendar only: the packet carries no source clinic, appointment,
+      // patient, resource, times or counts. Read permissions remain checked for
+      // this destination; sharing a machine grants no access to another clinic.
+      if (packet.event !== 'availability:changed' || Number(packet.body?.clinic_id) !== id) return null;
+      features = ['appointments.view']; location = await scopeFor(id);
     } else if (type === 'appointment') {
       row = await db().CitaPaciente.findByPk(id, { attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id'], raw: true });
       // Deleted rows have no authoritative lookup: only a content-free invalidation is emitted.

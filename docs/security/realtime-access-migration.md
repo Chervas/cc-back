@@ -49,6 +49,7 @@ no implica que el socket vaya a recibir eventos por seguir conectado.
 | `message:*`, `conversation:*` | Conversation por ID, canal/paciente actuales | Internal: `quickchat.read_team`; paciente: `quickchat.read_patients` + `patients.sensitive.view`; resto: `quickchat.read_leads` + `leads.sensitive.view` |
 | `lead:*` | LeadIntake, clínica o todas las clínicas del grupo | `quickchat.read_leads` + `leads.sensitive.view` |
 | `appointment:*` | CitaPaciente por ID | `appointments.view` + las dos capacidades `*.sensitive.view` |
+| `availability:changed` | Clínica destinataria por ID, recurso `calendar` | `appointments.view`; sin datos de citas, pacientes o clínica origen |
 | `flow_execution:*` | FlowExecutionV2, clínica o grupo completo | `marketing` + las dos capacidades `*.sensitive.view` |
 | `notification:*` | Notification por ID y propietario actual | Propietario de notificación; si enlaza QuickChat, permisos de esa conversación; si solo declara clínica, las dos capacidades sensibles |
 
@@ -73,6 +74,21 @@ No se afirma resistencia frente a un productor comprometido con acceso al bus
 y a BD, ni se firma cada sobre Redis en este bloque.
 
 ## Proyección y compatibilidad
+
+Ampliación aditiva de disponibilidad: `availability:changed` admite únicamente
+`clinic_id` de destino. Éxito auditado exige `scope=clinic` e ID igual al recurso
+`calendar`. Antes de habilitar `AVAILABILITY_REALTIME_ENABLED=true`, publicar y
+comprobar writer y reader compatibles, después consumidores API/gateway y UI.
+La ausencia del flag no produce avisos nuevos. Tras el primer recibo de esta
+familia, un rollback apaga el productor pero mantiene lector compatible.
+El contrato actual incluye además `message:refresh`; conservarlo al promover
+el vocabulario y no sobrescribir ampliaciones de seguridad de otras cohortes.
+
+Solo el productor local de `appointment:created|updated|deleted` agrupa avisos
+durante 200 ms. Una consulta de relaciones de salas, profesionales y máquinas
+por lote (máximo 100 orígenes), una consulta en vuelo y hasta 1000 pendientes/
+destinos; no lee citas ni hace búsquedas de huecos. Redis no vuelve a producir
+avisos al recibirlos. Un fallo de refresco no altera la transacción de reserva.
 
 [Inventario estático](realtime-event-inventory.json): 21 nombres, 85 apariciones
 literales en 17 archivos. No es cobertura de ejecución ni prueba de ausencia

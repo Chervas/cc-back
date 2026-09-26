@@ -5,6 +5,7 @@ const fields = {
   conversation: 'id unread_count pending_automation_attention pending_automation_count pending_automation_message_id automation_response_processing automation_response_processing_message_id automation_processing_stage automation_processing_status automation_processing_started_at automation_processing_deadline_at automation_action_appointment_id automation_action_appointment_status automation_intent automation_possible_urgency automation_needs_response automation_manual_action_required last_message last_message_at',
   lead: 'type lead_id clinic_id group_id campaign_id source channel status_lead created_at emitted_at call_initiated call_initiated_at call_outcome call_outcome_at call_outcome_appointment_id',
   appointment: 'appointment_id clinic_id patient_id lead_intake_id doctor_id instalacion_id tratamiento_id estado inicio fin updated_at created_at',
+  availability: 'clinic_id',
   flow_execution: 'execution_id template_version_id status current_node_id wait_until trigger_type trigger_entity_type trigger_entity_id clinic_id group_id updated_at kind',
   notification: 'id title description time link useRouter icon read category categoryLabel event level clinicaId',
 };
@@ -23,8 +24,8 @@ function packetFor(event, payload) {
   if (!SOCKET_EVENTS.includes(event) || !payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
   const family = event.split(':')[0];
   if (family === 'message' && (payload.metadata?.qa_cleanup === true || payload.metadata?.hide_from_quickchat === true)) return null;
-  const resourceType = { message: 'conversation', conversation: 'conversation', lead: 'lead', appointment: 'appointment', flow_execution: 'execution', notification: 'notification' }[family];
-  const resourceId = payload[{ message: 'conversation_id', conversation: 'id', lead: 'lead_id', appointment: 'appointment_id', flow_execution: 'execution_id', notification: 'id' }[family]];
+  const resourceType = { message: 'conversation', conversation: 'conversation', lead: 'lead', appointment: 'appointment', availability: 'calendar', flow_execution: 'execution', notification: 'notification' }[family];
+  const resourceId = payload[{ message: 'conversation_id', conversation: 'id', lead: 'lead_id', appointment: 'appointment_id', availability: 'clinic_id', flow_execution: 'execution_id', notification: 'id' }[family]];
   if (!positive(resourceId)) return null;
   const body = project(payload, fields[family]);
   if (family === 'message') {

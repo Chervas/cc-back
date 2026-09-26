@@ -1108,6 +1108,25 @@ Contrato: `back-dev/docs/security/realtime-access-migration.md` e inventario
 `realtime-event-inventory.json`. Conservar guard, hotfix, pausas y datos de
 auditoría al volver atrás. No ejecutar el corte por publicar código.
 
+### Disponibilidad de recursos compartidos
+
+`availability:changed` es una invalidación sin contenido clínico: únicamente
+`{clinic_id}` de la agenda destinataria, recurso auditado `calendar` con ese ID.
+El guard resuelve esa clínica y exige `appointments.view`, sesión vigente y
+auditoría v5 según su gate; compartir recursos no concede acceso a pacientes
+ni citas ajenas. Las tarjetas siguen usando los eventos `appointment:*` propios.
+
+`AVAILABILITY_REALTIME_ENABLED=true` habilita el productor; por defecto apagado.
+Solo las emisiones locales de altas/cambios/borrados de citas encolan el aviso,
+nunca su recepción Redis. Agrupa 200 ms, hasta 100 clínicas origen por consulta
+de metadata, una consulta en vuelo, cola máxima 1000 y resultado máximo 1000;
+no consulta citas ni recalcula slots por destinatario. Resuelve alias físicos,
+profesionales compartidos y propietarios/cesiones de máquinas sin caché global.
+Ante fallo se conserva la cita y la validación canónica al reservar; el refresco
+es best-effort, no una garantía de recepción. La ampliación aditiva exige
+writer y reader compatibles antes de activar el productor en API y gateway.
+Rollback: apagar productor y conservar lector compatible con los recibos nuevos.
+
 ## 2026-09-12 — Políticas de acceso: límites de grupo y auditoría preparada
 
 Las cuatro rutas `/api/access-policies` preparan auditoría v4 con
@@ -9547,6 +9566,14 @@ canónico es `clinic_hours_not_configured` y la UI enlaza a Personal y horarios.
 La configuración sí puede guardarse mientras Meta aprueba la plantilla, pero
 queda pausada.
 
+La activación desde `Marketing > Leads` abre siempre el configurador y guarda
+`config` y `active=true` en el mismo `PATCH`. `saveConfig` valida remitente,
+plantilla, variables y horario antes de publicar la nueva versión; si falla o el
+usuario cancela, no queda una automatización activa a medio configurar. En una
+clínica sin configuración previa, la UI propone la familia
+`clinicaclick_lead_primera_visita_programar`, origen `write` y plazo
+`immediate`; el nombre del remitente nunca se inventa y sigue siendo obligatorio.
+
 El selector solo admite plantillas marcadas para primera visita/respuesta de
 lead y cuyas variables puedan resolverse con datos del lead y de la clínica.
 Las creadas desde el diálogo reciben `template_usage=lead_auto_reply`. El
@@ -9584,6 +9611,10 @@ pendientes. El request HTTP no recorre ni envía el lote: crea un
 relee cada lead y repite todos los gates justo antes de encolar su ejecución V2.
 El job persiste progreso por bloques, admite reintento/idempotencia con scope
 `backfill` y sigue ejecutándose aunque se cierre el diálogo.
+La previsualización devuelve por separado `count` para los orígenes configurados
+y `optional_call_count` para llamadas pendientes cuando `call` no forma parte de
+la configuración. La UI muestra ambas cantidades y el total elegido; incluir las
+llamadas solo modifica esa tanda retrospectiva, no la configuración futura.
 
 ## Reprogramación por origen y agrupación de respuestas (2026-07-21)
 

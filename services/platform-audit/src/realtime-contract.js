@@ -4,6 +4,7 @@ const SOCKET_EVENTS = Object.freeze([
   'message:refresh', 'message:created', 'message:updated', 'conversation:updated', 'conversation:read',
   'lead:created', 'lead:call_initiated', 'lead:call_outcome',
   'appointment:created', 'appointment:updated', 'appointment:deleted',
+  'availability:changed',
   'flow_execution:created', 'flow_execution:engine_start', 'flow_execution:updated',
   'flow_execution:completed', 'flow_execution:failed', 'flow_execution:dead_letter',
   'flow_execution:resumed', 'flow_execution:cancelled', 'flow_execution:log', 'notification:created', 'notification:updated',

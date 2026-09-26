@@ -24,3 +24,14 @@ test('v5 rejects inconsistent event/resource/scope tuples and arbitrary policy o
   for (const patch of [{ resource: { type: 'lead', id: '91' } }, { clinicIds: ['72'] }, { clinicIds: [] }, { authorizationPolicyVersion: 'unknown' },
     { content: 'FICTITIOUS_SECRET' }, { scope: { type: 'platform', id: null }, clinicIds: [] }, { socketEvent: 'unknown' }]) assert.throws(() => pack({ ...fixture(), ...patch }));
 });
+
+test('availability signals audit only the destination calendar, including reader roundtrip', async () => {
+  const event={...fixture(),socketEvent:'availability:changed',resource:{type:'calendar',id:'71'}};
+  const row=pack(event),key=keyFor(row);
+  const input=inputFor({version:1,audience:'clinicaclick-audit-reader-v1',requestId:randomUUID(),nonce:randomUUID(),issuedAt:Date.now(),mode:'confirmed',
+    actorId:'1',sessionRef:randomUUID(),refs:[{key,digest:row.digest,versionId:'fictitious-calendar'}]});
+  const result=await readBatch(input,{send:async()=>({Body:Readable.from([row.body]),ContentLength:Buffer.byteLength(row.body),ContentType:'application/json',
+    ChecksumSHA256:Buffer.from(row.digest,'hex').toString('base64'),ServerSideEncryption:'aws:kms',SSEKMSKeyId:KEY_ARN,VersionId:'fictitious-calendar'})});
+  assert.equal(result.results[0].status,'verified');assert.equal(result.results[0].body,row.body);
+  for(const patch of [{resource:{type:'appointment',id:'71'}},{resource:{type:'calendar',id:'72'}},{scope:{type:'group',id:'71'}},{sourceClinicId:'72'}])assert.throws(()=>pack({...event,...patch}));
+});

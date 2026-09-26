@@ -132,3 +132,26 @@ test('standalone notifications require Redis acknowledgement and publish only cl
     await assert.rejects(bus.publishConfirmed('message:created',payload,[]),/packet_invalid/);
   }finally{if(previous)require.cache[redisPath]=previous;else delete require.cache[redisPath];if(previousBus)require.cache[busPath]=previousBus;else delete require.cache[busPath];}
 });
+
+test('only locally produced appointment events schedule shared-calendar invalidations, not Redis re-delivery', async () => {
+  const previousFlag=process.env.AVAILABILITY_REALTIME_ENABLED;
+  const connections=[],notified=[];
+  class FakeRedis extends EventEmitter {constructor(){super();connections.push(this);}subscribe(){return Promise.resolve();}publish(){return Promise.resolve(1);}}
+  const paths=[require.resolve('ioredis'),require.resolve('../../services/socket.service'),require.resolve('../../lib/availability-realtime')];
+  const before=paths.map(p=>require.cache[p]);
+  require.cache[paths[0]]={id:paths[0],filename:paths[0],loaded:true,exports:FakeRedis};delete require.cache[paths[1]];
+  require.cache[paths[2]]={id:paths[2],filename:paths[2],loaded:true,exports:{createInvalidator:()=>({notify:(...args)=>notified.push(args)})}};
+  const f=fixture();f.connect(501);await f.idle();
+  try {
+    const bus=require('../../services/socket.service');bus.setIO(f.io);
+    const event='appointment:updated',payload={appointment_id:91,clinic_id:71};
+    delete process.env.AVAILABILITY_REALTIME_ENABLED;
+    bus.getIO().to('clinic:71').emit(event,payload);await f.idle();assert.equal(notified.length,0,'producer remains closed until audit consumers are compatible');
+    process.env.AVAILABILITY_REALTIME_ENABLED='true';
+    bus.getIO().to('clinic:71').emit(event,payload);await f.idle();assert.deepEqual(notified,[[event,payload]]);
+    const channel=process.env.SOCKET_BUS_CHANNEL||`clinicaclick:socket:events:${process.env.DB_NAME||'default'}`;
+    connections[0].emit('message',channel,JSON.stringify({source:'another-runtime',event,payload,rooms:['clinic:71']}));
+    bus.emit('availability:changed',{clinic_id:71},['clinic:71']);await f.idle();assert.equal(notified.length,1);
+  } finally {paths.forEach((p,i)=>{if(before[i])require.cache[p]=before[i];else delete require.cache[p];});
+    if(previousFlag===undefined)delete process.env.AVAILABILITY_REALTIME_ENABLED;else process.env.AVAILABILITY_REALTIME_ENABLED=previousFlag;}
+});

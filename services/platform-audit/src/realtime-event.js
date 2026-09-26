@@ -17,7 +17,7 @@ function realtimeEvent(v) {
     || new Set(v.clinicIds).size !== v.clinicIds.length) fail();
   if (v.action === 'realtime.subscribe') {
     if (v.socketEvent !== null || v.resource.type !== 'subscription' || v.resource.id !== null || v.scope.type !== 'platform') fail();
-  } else if (!SOCKET_EVENTS.includes(v.socketEvent) || ({ message: 'conversation', conversation: 'conversation', lead: 'lead', appointment: 'appointment', flow_execution: 'execution', notification: 'notification' })[v.socketEvent.split(':')[0]] !== v.resource.type || !id(v.resource.id)) fail();
+  } else if (!SOCKET_EVENTS.includes(v.socketEvent) || ({ message: 'conversation', conversation: 'conversation', lead: 'lead', appointment: 'appointment', availability: 'calendar', flow_execution: 'execution', notification: 'notification' })[v.socketEvent.split(':')[0]] !== v.resource.type || !id(v.resource.id)) fail();
   if (v.stage === 'attempted') {
     if (v.outcome !== 'unknown' || v.reason !== 'request_received' || v.clinicIds.length) fail();
   } else if (v.stage === 'completed') {
@@ -28,6 +28,8 @@ function realtimeEvent(v) {
     } else if (v.clinicIds.length || !(v.outcome === 'denied' && ['access_denied', 'request_invalid'].includes(v.reason)
       || v.outcome === 'error' && v.reason === 'operation_unconfirmed')) fail();
   } else fail();
+  if (v.socketEvent === 'availability:changed' && v.stage === 'completed' && v.outcome === 'success'
+    && (v.scope.type !== 'clinic' || v.scope.id !== v.resource.id)) fail();
   return Object.fromEntries(keys.map(k => [k, k === 'actor' || k === 'scope' || k === 'resource' ? { type: v[k].type, id: v[k].id }
     : k === 'clinicIds' ? [...v.clinicIds] : v[k]]));
 }

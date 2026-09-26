@@ -33,6 +33,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.PatientDirectionProfile.hasMany(models.PatientDirectionSetting, { as: 'clinicSettings', foreignKey: 'director_user_id', sourceKey: 'user_id', constraints: false });
   await require('../../../migrations/20260912220000-create-auth-sessions').up(sql.getQueryInterface(), D);
   await require('../../../migrations/20260913130000-create-auth-email-challenges').up(sql.getQueryInterface(), D);
+  await require('../../../migrations/20260914220000-create-auth-trusted-devices').up(sql.getQueryInterface(), D);
   models.AuthSession = require('../../../models/authsession')(sql, D);
   // Only scope metadata is needed. No production clinical rows, jobs, Redis or providers.
   models.Conversation = sql.define('Conversation', { id: { type: D.INTEGER, primaryKey: true }, clinic_id: D.INTEGER, patient_id: D.INTEGER, channel: D.STRING }, { timestamps: false });
@@ -93,6 +94,16 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     assert.deepEqual(await client.timeout(3000).emitWithAck('subscribe', [71]), { status: 'ready', clinicIds: [71] });
     guard.deliver('message:created', { ...patient.body, metadata: { provider_token: 'FICTITIOUS_PROVIDER_SECRET' } }, ['clinic:71', 'user:501']); await idle();
     assert.equal(received.length, 1); assert(!JSON.stringify(received).includes('FICTITIOUS_PROVIDER_SECRET'));
+    const availabilityReceived=[];client.on('availability:changed',value=>availabilityReceived.push(value));
+    // The actor has access only to clinic 71. A related clinic's appointment is
+    // never needed to invalidate 71: neither its ID nor its patient crosses over.
+    assert.equal((await policy.subscription(501,[72])).allowed,false);
+    guard.deliver('availability:changed',{clinic_id:71,source_clinic_id:72,appointment_id:9001,patient_id:'FICTITIOUS_PRIVATE'},['clinic:71']);await idle();
+    assert.deepEqual(availabilityReceived,[{clinic_id:71}]);
+    await models.AccessPolicyOverride.create({scope_type:'clinic',scope_id:71,feature_key:'appointments.view',role_code:'propietario',effect:'deny',updated_by:1});
+    guard.deliver('availability:changed',{clinic_id:71},['clinic:71']);await idle();assert.equal(availabilityReceived.length,1);
+    await models.AccessPolicyOverride.destroy({where:{feature_key:'appointments.view'}});
+    report.checks.push('shared-resource invalidation reaches only the permitted destination calendar, with no source/patient data; current calendar permission revocation stops delivery');
     await models.AccessPolicyOverride.create({ scope_type: 'clinic', scope_id: 71, feature_key: 'patients.sensitive.view', role_code: 'propietario', effect: 'deny', updated_by: 1 });
     for (const rooms of [['clinic:71'], ['user:501'], []]) guard.deliver('message:created', patient.body, rooms);
     await idle(); assert.equal(received.length, 1); assert(client.connected);
