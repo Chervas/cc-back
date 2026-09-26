@@ -563,6 +563,18 @@ procedencia, perfiles, precios, relaciones documentales y catálogo antiguo.
 No escribe citas, pacientes, programas, cobros, automatizaciones ni recordatorios.
 No añade consultas a la agenda: la activación usa el perfil ordinario existente.
 
+El mismo operador admite un segundo ámbito explícito,
+`reviewed_single_equipment_cosmetic_catalogue`, para las sesiones individuales
+INDIBA corporal y EXION Body (filas 18/21 de Tratamientos individuales; COR-16/26
+del PDF corporal). Exige 90 € finales ya revisados, 45 minutos, Piedad, una cabina
+canónica y una sola unidad física, sin cambiar ninguno de esos datos. Verifica
+equipo disponible, familia/movilidad, ámbito, política de sala, margen cero y
+gates de maquinaria en API/gateway. Captura/bloquea esas dependencias y las
+compara también en replay. No se aplica al combinado EXION+INDIBA, otros actos,
+otros profesionales, programas ni a tratamientos sin consentimiento asociado.
+Las ocupaciones concretas siguen resolviéndose por el motor canónico; activar
+un catálogo no concilia las citas heredadas que continúan sin recursos.
+
 Rollback: comparar la fila actual con el `after` registrado y comprobar usos
 posteriores antes de revertir exclusivamente esos campos; si ya hay citas o
 ediciones humanas, preparar una revisión nueva. No restaurar toda la BD ni borrar

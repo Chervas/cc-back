@@ -31,7 +31,19 @@ async function capture(c, review, lock = false) {
   const templates = templateIds.length ? await select('SELECT * FROM ClinicConsentTemplates WHERE id IN (?) ORDER BY id', [templateIds]) : [];
   const versions = templateIds.length ? await select('SELECT * FROM ClinicConsentTemplateVersions WHERE clinic_template_id IN (?) ORDER BY id', [templateIds]) : [];
   const appointments = await select('SELECT id_cita,tratamiento_id FROM CitasPacientes WHERE tratamiento_id IN (?) ORDER BY id_cita', [ids]);
-  return { clinics, treatments, rooms, staff, room_hours, staff_hours, requirements, templates, versions, appointments };
+  let equipment;
+  if (review.scope === 'reviewed_single_equipment_cosmetic_catalogue') {
+    equipment = {};
+    for (const [key, sql] of [
+      ['clinics', 'SELECT id_clinica,equipment_booking_enabled FROM Clinicas WHERE id_clinica IN (66,72) ORDER BY id_clinica'],
+      ['units', 'SELECT * FROM BookingEquipment WHERE group_id=29 ORDER BY id'],
+      ['shares', 'SELECT * FROM BookingEquipmentClinics WHERE clinic_id IN (66,72) ORDER BY equipment_id,clinic_id'],
+      ['aliases', 'SELECT * FROM InstallationPhysicalAliases WHERE group_id=29 ORDER BY installation_id'],
+      ['policies', 'SELECT p.* FROM BookingEquipmentRoomPolicies p INNER JOIN Instalaciones i ON i.id=p.installation_id WHERE i.clinica_id IN (66,72) ORDER BY p.installation_id'],
+    ]) equipment[key] = await select(sql);
+  }
+  return { clinics, treatments, rooms, staff, room_hours, staff_hours, requirements, templates, versions, appointments,
+    ...(equipment ? { equipment } : {}) };
 }
 
 async function execute({ c, pkg, journal, dryRun = false }) {
@@ -105,6 +117,7 @@ async function run(args) {
     for (const filename of ['/home/ubuntu/wt/back-staging/.env','/home/ubuntu/wt/gateway/.env']) {
       const env = require('dotenv').parse(fs.readFileSync(filename));
       if (env.BOOKING_PROFILES_ENABLED !== 'true' || env.BOOKING_MULTI_RESOURCE_ENABLED !== 'true') throw Error('CATALOG_ACTIVATION_RUNTIME_NOT_READY');
+      if (pkg.review.scope === 'reviewed_single_equipment_cosmetic_catalogue' && env.BOOKING_EQUIPMENT_ENABLED !== 'true') throw Error('CATALOG_ACTIVATION_EQUIPMENT_RUNTIME_NOT_READY');
     }
     const manifest = privateJson(o['--backup-manifest']);
     if (manifest.database_target !== 'crm' || !manifest.full_gzip_verified || !manifest.dump_completion_verified

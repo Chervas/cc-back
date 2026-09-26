@@ -33,6 +33,59 @@ function fixture() {
 }
 const rehash = f => { f.review.bindings[0].before_sha256=hash(f.before.treatments[0]); return f; };
 
+function equipmentFixture(family = 'exion') {
+  const f = fixture(), source = f.plan.rows[0], t = f.before.treatments[0];
+  source.sheet = 'Tratamientos individuales'; source.provenance.source_row = family === 'exion' ? 21 : 18;
+  source.source_price.gross_amount = 90; source.duration_info.minutes = 45;
+  const { plan_sha256, ...body } = f.plan; f.plan.plan_sha256 = hash(body); f.review.plan_sha256 = f.plan.plan_sha256;
+  f.review.scope = 'reviewed_single_equipment_cosmetic_catalogue';
+  t.precio_base = '90.00'; t.duracion_min = 45;
+  const config = t.clinical_config; config.imported_price_review.gross_amount = 90;
+  config.booking_profile.version = 2;
+  Object.assign(config.booking_profile.phases[0], { duration_minutes:45, professionals:{ mode:'any', ids:[221], preferred_id:221 }, equipment_requirements:[{ equipment_ids:[4] }] });
+  Object.assign(f.before.rooms[0], { tipo:'box', profesionales_permitidos:[221] });
+  Object.assign(f.before.staff[0], { doctor_id:221, rol_en_clinica:'Auxiliares y enfermeros' });
+  f.before.equipment = { clinics:[{ id_clinica:72, equipment_booking_enabled:1 }],
+    units:[{ id:4, owner_clinic_id:72, group_id:29, family_key:family, status:'available', turnaround_minutes:0,
+      mobility:family === 'exion' ? 'mobile' : 'fixed', home_installation_id:family === 'exion' ? null : 80 }],
+    shares:[{ equipment_id:4, clinic_id:72 }], aliases:[], policies:[{ installation_id:80, mode:'selected', equipment_ids:[4] }] };
+  return rehash(f);
+}
+
+test('separate reviewed body scope preserves one fixed/mobile unit and confirmed operator', () => {
+  for (const family of ['exion','indiba_rf']) {
+    const f = equipmentFixture(family), pkg = prepare(f);
+    assert.equal(pkg.operations[0].after.activo, 1);
+    assert.deepEqual(pkg.operations[0].after.clinical_config.booking_profile, f.before.treatments[0].clinical_config.booking_profile);
+    verifyPackage(pkg, f.plan);
+    assert(verifyAfter({ ...f.before, treatments:pkg.operations.map(o=>o.after) }, pkg));
+  }
+});
+test('body scope rejects unrelated/combined source, price or duration changes', () => {
+  for (const change of [f=>{ f.plan.rows[0].provenance.source_row=22; },
+    f=>{ f.before.treatments[0].duracion_min=30; }, f=>{ f.before.treatments[0].precio_base='91.00'; }]) {
+    const f=equipmentFixture();change(f);const {plan_sha256,...body}=f.plan;f.plan.plan_sha256=hash(body);f.review.plan_sha256=f.plan.plan_sha256;
+    assert.throws(()=>prepare(rehash(f)));
+  }
+});
+test('body activation fails closed for equipment, clinic, physical room and personal eligibility', () => {
+  for (const mutate of [b=>b.equipment.units[0].status='maintenance', b=>b.equipment.units[0].turnaround_minutes=5,
+    b=>b.equipment.units[0].owner_clinic_id=66, b=>b.equipment.units[0].family_key='indiba_ona',
+    b=>b.equipment.units.push({...b.equipment.units[0],id:5}), b=>b.equipment.shares=[],
+    b=>b.equipment.clinics[0].equipment_booking_enabled=0, b=>b.equipment.policies[0].mode='none',
+    b=>b.equipment.aliases.push({installation_id:80,canonical_installation_id:999}),
+    b=>b.staff[0].doctor_id=999, b=>b.requirements=[], b=>b.rooms[0].activo=0]) {
+    const f=equipmentFixture();mutate(f.before);assert.throws(()=>prepare(f));
+  }
+  const fixed=equipmentFixture('indiba_rf');fixed.before.equipment.units[0].home_installation_id=999;
+  assert.throws(()=>prepare(fixed),/EQUIPMENT_PENDING/);
+});
+test('equipment dependencies remain protected during readback and replay', () => {
+  const f=equipmentFixture(),pkg=prepare(f),after={...f.before,treatments:pkg.operations.map(o=>o.after)};
+  after.equipment=structuredClone(after.equipment);after.equipment.policies[0].mode='none';
+  assert.throws(()=>verifyAfter(after,pkg),/DEPENDENCIES_CHANGED/);
+});
+
 test('activation preserves price, profile, source, consents and clinical annotation', () => {
   const f=fixture(), pkg=prepare(f), after=pkg.operations[0].after;
   assert.equal(after.activo,1); assert.equal(after.clinical_config.catalog_status,'active');
@@ -95,7 +148,14 @@ function fakeConnection(initial, failUpdate=false) {
     rollback:async()=>{if(saved)state=structuredClone(saved);},
     query:async(sql,args)=>{
       if(sql.startsWith('SET TRANSACTION'))return[[]];
-      if(sql.startsWith('SELECT')){const table=Object.keys(tables).find(t=>sql.includes(' FROM '+t+' WHERE'));assert(table);return[structuredClone(state[tables[table]])];}
+      if(sql.startsWith('SELECT')){
+        if(sql.startsWith('SELECT id_clinica,equipment_booking_enabled'))return[structuredClone(state.equipment.clinics)];
+        for(const [fragment,key] of [['FROM BookingEquipment WHERE','units'],['FROM BookingEquipmentClinics WHERE','shares'],
+          ['FROM InstallationPhysicalAliases WHERE','aliases'],['FROM BookingEquipmentRoomPolicies p','policies']]) {
+          if(sql.includes(fragment))return[structuredClone(state.equipment[key])];
+        }
+        const table=Object.keys(tables).find(t=>sql.includes(' FROM '+t+' WHERE'));assert(table);return[structuredClone(state[tables[table]])];
+      }
       assert(sql.startsWith('UPDATE Tratamientos SET activo=1,clinical_config=?,descripcion=?'));writes.push({sql,args});
       if(failUpdate)throw Error('TEST_UPDATE_FAILURE');
       Object.assign(state.treatments.find(t=>t.id_tratamiento===args[2]),{activo:1,clinical_config:JSON.parse(args[0]),descripcion:args[1],updatedAt:'later'});
@@ -120,4 +180,12 @@ test('exact replay writes nothing, a later edit is rejected and SQL failures rol
 test('implicit target or unsupported mode fail before credential access',async()=>{
   await assert.rejects(run(['--mode','apply','--target','dev']),/EXPLICIT_CATALOG/);
   await assert.rejects(run(['--mode','activate','--target','crm']),/EXPLICIT_CATALOG/);
+});
+test('body activation captures equipment dependencies under lock and rolls back/replays without collateral writes',async()=>{
+  const pkg=prepare(equipmentFixture()),c=fakeConnection(pkg.before),journal={append:async()=>{}};
+  assert.equal((await execute({c,pkg,dryRun:true,journal})).status,'rolled_back_and_verified');
+  assert.deepEqual(c.getState(),pkg.before);
+  const replay=fakeConnection({...pkg.before,treatments:pkg.operations.map(o=>o.after)});
+  assert.equal((await execute({c:replay,pkg,journal})).status,'replay_preserved');
+  assert.equal(replay.writes.length,0);
 });

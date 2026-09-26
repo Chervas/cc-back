@@ -1,21 +1,23 @@
 'use strict';
 
-// Deliberately narrow: individuals listed in the facial tariff (including its
-// explicitly listed Body filler variant), one consultation/doctor, no
-// equipment, price already reviewed and published consents already linked.
+// Deliberately narrow: reviewed facial individuals, or the two separately
+// reviewed single-equipment body modalities. Never infer a combined protocol.
 // This is operational catalogue activation, never clinical/legal approval.
 const { hash } = require('./adapter');
 const { verifyPlan, BATCH } = require('./catalog-drafts');
 const { normalizeBookingProfile } = require('../booking-profile');
 const { normalizeProfile } = require('../economicPriceProfile');
+const { equipmentFitsRoom } = require('../booking-equipment');
 const VERSION = 'cliniccloud-catalog-simple-activation/1';
+const EQUIPMENT_SCOPE = 'reviewed_single_equipment_cosmetic_catalogue';
 const fail = code => { throw Error(code); };
 const decode = value => typeof value === 'string' ? JSON.parse(value) : value;
 const initialNotice = 'Borrador importado: completar revisión de agenda, documentación y fiscalidad antes de activar.';
 
 function prepare({ plan, review, before, createdAt = new Date().toISOString() }) {
   verifyPlan(plan);
-  if (review?.version !== 1 || review.scope !== 'reviewed_simple_facial_catalogue'
+  const usesEquipment = review?.scope === EQUIPMENT_SCOPE;
+  if (review?.version !== 1 || !['reviewed_simple_facial_catalogue', EQUIPMENT_SCOPE].includes(review.scope)
     || review.plan_sha256 !== plan.plan_sha256 || !Array.isArray(review.bindings)
     || !review.bindings.length || review.bindings.length > 30
     || before.treatments.length !== review.bindings.length
@@ -27,7 +29,8 @@ function prepare({ plan, review, before, createdAt = new Date().toISOString() })
     const row = before.treatments.find(t => t.id_tratamiento === binding.id), config = row && decode(row.clinical_config);
     const source = plan.rows.find(s => s.proposed_code === row?.codigo);
     if (!row || hash(row) !== binding.before_sha256 || typeof binding.reason !== 'string' || binding.reason.length < 40
-      || !source || source.kind !== 'treatment' || source.sheet !== 'Facial · tratamientos'
+      || !source || source.kind !== 'treatment'
+      || source.sheet !== (usesEquipment ? 'Tratamientos individuales' : 'Facial · tratamientos')
       || row.clinica_id !== 72 || row.origen !== 'clinica' || Number(row.activo) !== 0
       || config?.catalog_status !== 'draft' || config.import_batch !== BATCH
       || config.product_type !== 'treatment' || config.medical_area_code !== 'estetica'
@@ -43,7 +46,8 @@ function prepare({ plan, review, before, createdAt = new Date().toISOString() })
       || hash(normalizeProfile(config.imported_price_review.price_profile)) !== hash(profile)) fail('CATALOG_ACTIVATION_PRICE_PENDING');
     const booking = normalizeBookingProfile(config.booking_profile);
     const phase = booking?.phases[0];
-    if (!booking || booking.version !== 1 || booking.phases.length !== 1 || phase.equipment_requirements?.length
+    if (!booking || booking.version !== (usesEquipment ? 2 : 1) || booking.phases.length !== 1
+      || (usesEquipment ? phase.equipment_requirements?.length !== 1 || phase.equipment_requirements[0].equipment_ids.length !== 1 : phase.equipment_requirements?.length)
       || phase.installation_ids.length !== 1 || phase.professionals.ids.length !== 1
       || phase.professionals.mode !== 'any' || phase.professionals.preferred_id !== phase.professionals.ids[0]
       || source.duration_info.mode !== 'fixed' || source.duration_info.minutes !== row.duracion_min
@@ -52,11 +56,32 @@ function prepare({ plan, review, before, createdAt = new Date().toISOString() })
     const doctor = before.staff.find(d => d.doctor_id === phase.professionals.ids[0] && d.clinica_id === 72);
     const allowed = decode(room?.profesionales_permitidos);
     if (!room || room.clinica_id !== 72 || !room.activo || Number(room.capacidad) !== 1
-      || room.tipo !== 'consulta' || room.tiempo_preparacion_minutos !== 0
-      || !doctor?.activo || !doctor.recibe_citas || doctor.rol_en_clinica !== 'Doctores'
+      || room.tipo !== (usesEquipment ? 'box' : 'consulta') || room.tiempo_preparacion_minutos !== 0
+      || !doctor?.activo || !doctor.recibe_citas
+      || (usesEquipment ? doctor.doctor_id !== 221 || doctor.rol_en_clinica !== 'Auxiliares y enfermeros' : doctor.rol_en_clinica !== 'Doctores')
       || !Array.isArray(allowed) || !allowed.includes(doctor.doctor_id)
       || !before.staff_hours.some(h => h.doctor_clinica_id === doctor.id && h.activo && h.hora_inicio < h.hora_fin)
       || !before.room_hours.some(h => h.instalacion_id === room.id && h.activo && h.hora_inicio < h.hora_fin)) fail('CATALOG_ACTIVATION_RESOURCES_PENDING');
+    if (usesEquipment) {
+      // Exact reviewed source rows: INDIBA corporal and the standalone EXION
+      // Body session, not their combination, pain or post-operative modalities.
+      const family = { 18: 'indiba_rf', 21: 'exion' }[source.provenance.source_row];
+      const equipment = before.equipment;
+      const unit = equipment?.units?.find(u => u.id === phase.equipment_requirements[0].equipment_ids[0]);
+      const policy = equipment?.policies?.find(p => p.installation_id === room.id);
+      if (!family || price !== 90 || row.duracion_min !== 45 || profile.tax_percent !== 21
+        || !unit || unit.family_key !== family || unit.owner_clinic_id !== 72 || unit.group_id !== 29
+        || unit.turnaround_minutes !== 0
+        || unit.mobility !== (family === 'exion' ? 'mobile' : 'fixed')
+        || equipment.units.filter(u => u.family_key === family).length !== 1
+        || equipment.aliases.some(a => a.installation_id === room.id || a.installation_id === unit.home_installation_id)
+        || !equipment.clinics.some(c => c.id_clinica === 72 && c.equipment_booking_enabled === 1)
+        || !equipment.shares.some(s => s.equipment_id === unit.id && s.clinic_id === 72)
+        || !equipmentFitsRoom({ ...unit, fixed_resource_key: `installation:${unit.home_installation_id}` },
+          { resource_key: `installation:${room.id}`, equipment_policy: policy && { mode: policy.mode, equipment_ids: decode(policy.equipment_ids) } })) {
+        fail('CATALOG_ACTIVATION_EQUIPMENT_PENDING');
+      }
+    }
     const requirements = before.requirements.filter(r => r.tratamiento_id === row.id_tratamiento);
     if (!requirements.length) fail('CATALOG_ACTIVATION_CONSENT_PENDING');
     for (const requirement of requirements) {
