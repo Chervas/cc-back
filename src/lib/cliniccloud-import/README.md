@@ -517,3 +517,47 @@ La procedencia guarda perfil anterior, revisión y paquete. **No activa catálog
 reserva máquinas para citas antiguas ni modifica programas o recordatorios**.
 La preparación de un borrador no acredita la conciliación de ocupaciones reales.
 Pruebas: `cliniccloud_catalog_equipment.test.js` y ensayo SQL con rollback.
+
+## Activar individuales faciales ya revisados
+
+`cliniccloud-import-catalog-simple-activation.js` es un operador explícito desde
+`back-dev/dev`, no una migración de arranque ni un endpoint. Esta primera vía
+solo admite individuales de «Facial · tratamientos» de BS Medical, una consulta,
+un doctor y duración cerrada; no maquinaria, fases, programas ni otras áreas.
+No modifica la elección fiscal: exige precio final fijo ya revisado y coincidente
+con la fuente, sin pendientes excepto el aviso antiguo de instalación inactiva.
+Comprueba sala activa/capacidad uno, autorización del doctor y horarios existentes;
+los huecos concretos se validan después por la API normal de disponibilidad.
+
+Todos los consentimientos previamente asociados deben seguir siendo clínicos,
+de la misma clínica, obligatorios/bloqueantes y con última versión publicada.
+Esto conserva una correspondencia ya revisada: no decide indicaciones, aprueba
+protocolos, firma documentos ni acredita la capacitación profesional. No sirve
+para activar por lote tratamientos que carezcan de esas precondiciones.
+
+Preparar `--target crm --mode prepare --plan … --workbook … --review …
+--private-output …`. La revisión privada incluye `version: 1`,
+`scope: reviewed_simple_facial_catalogue`, `plan_sha256` y `bindings` con `id`,
+`before_sha256` y motivo operativo. Requiere fuentes exactas y comparación de
+filas/recursos/plantillas; máximo treinta individuales por paquete.
+
+Después: `--mode dry-run|apply --plan … --workbook … --package …
+--approved-sha256 … --backup-manifest … --private-journal …`, con paquete y copia
+CRM íntegra de menos de dos horas. Revisar primero el ensayo revertido. Compara
+el estado completo bajo lock, actualiza en una transacción y verifica desde otra
+conexión tras commit. `--mode verify … --private-output …` es solo lectura.
+El replay idéntico escribe cero filas; cambios posteriores obligan a revisar,
+no restauran automáticamente una versión antigua. Commit incierto: revisar el
+diario, nunca repetir por suposición.
+
+Solo cambia `activo`, estado/avisos técnicos en `clinical_config`, `updatedAt`
+y la frase exacta de borrador generada por el importador. Preserva anotaciones,
+procedencia, perfiles, precios, relaciones documentales y catálogo antiguo.
+No escribe citas, pacientes, programas, cobros, automatizaciones ni recordatorios.
+No añade consultas a la agenda: la activación usa el perfil ordinario existente.
+
+Rollback: comparar la fila actual con el `after` registrado y comprobar usos
+posteriores antes de revertir exclusivamente esos campos; si ya hay citas o
+ediciones humanas, preparar una revisión nueva. No restaurar toda la BD ni borrar
+el tratamiento o su historia. Evidencia de cada aplicación en el manual central,
+documento 99. Pruebas: `cliniccloud_catalog_simple_activation.test.js`.
