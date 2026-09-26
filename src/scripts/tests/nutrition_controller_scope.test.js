@@ -29,9 +29,13 @@ for (const [action, service, actorPosition] of [
     name => name === 'express-async-handler' ? fn => fn : fakeService, module, module.exports);
   const req = { userData: { userId: 7 }, params: { id: 'fictitious', measurementId: '1', photoId: '1' },
     query: { clinic_id: '20', actorUserId: '999', readableClinicIds: [30] }, body: { actorUserId: 999, clinic_id: 20 } };
-  const res = { status() { return this; }, json() {}, send() {}, setHeader() {} };
+  const headers = {};
+  const res = { status() { return this; }, json() {}, send() {}, setHeader(key, value) { headers[key] = value; } };
   await module.exports[action](req, res);
   assert.equal(typeof args[actorPosition] === 'object' ? args[actorPosition].actorUserId : args[actorPosition], 7);
   if (typeof args[actorPosition] === 'object') assert.equal(args[actorPosition].readableClinicIds, undefined);
   if (action === 'getPatientNutritionWorkspace') assert.equal(args[1].clinicId, '20');
+  if (['getPatientNutritionMeasurementPhoto', 'renderPatientNutritionMeasurementReport', 'getPatientNutritionMeasurementReportPdf'].includes(action)) {
+    assert.equal(headers['Cache-Control'], 'private, no-store');
+  }
 });

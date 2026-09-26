@@ -159,6 +159,7 @@ exports.renderPatientNutritionMeasurementReport = asyncHandler(async (req, res) 
       reportOptionsFromRequest(req),
     );
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'private, no-store');
     return res.send(html);
   } catch (error) {
     const handled = sendNutritionError(error, res);
@@ -233,6 +234,7 @@ exports.getPatientNutritionMeasurementReportPdf = asyncHandler(async (req, res) 
       reportOptionsFromRequest(req),
     );
     res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
     res.setHeader('Content-Length', buffer.length);
     return res.send(buffer);
