@@ -122,14 +122,15 @@ function programPlans({ budget, lines, events = [], vouchers = [], sessions = nu
       const appointment = record?.appointment_id ? appointments.find(c => Number(c.id_cita) === Number(record.appointment_id)
         && String(c.voucher_id) === String(voucher?.id)) : null;
       const inconsistent = record && (record.snapshot_sha256 !== line.program_snapshot.sha256 || (record.appointment_id && !appointment));
+      const state = require('./program-replan').schedulingState(record, appointment);
       const status = !included ? 'not_accepted' : sessions === null ? 'not_loaded' : inconsistent ? 'review_required'
-        : record?.consumption_movement_id ? 'completed' : appointment && appointment.estado !== 'cancelada' ? 'reserved' : 'pending_planning';
+        : state === 'pending' ? 'pending_planning' : state;
       return { ...copy(a), scheduling_status: status,
         appointment_id: !inconsistent && appointment ? Number(appointment.id_cita) : null,
         start_at: !inconsistent && appointment && appointment.estado !== 'cancelada' ? new Date(appointment.inicio).toISOString() : null };
     });
     const counts = sessions === null ? null : planned.reduce((out, a) => {
-      if (a.scheduling_status === 'pending_planning') out.pending++;
+      if (['pending_planning', 'missed'].includes(a.scheduling_status)) out.pending++;
       if (a.scheduling_status === 'reserved') out.reserved++;
       if (a.scheduling_status === 'completed') out.completed++;
       if (a.scheduling_status === 'review_required') out.review_required++;

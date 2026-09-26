@@ -1,9 +1,5 @@
 'use strict';
 
-const db = require('../../models');
-
-const { PatientOperationalEvent } = db;
-
 const APPOINTMENT_STATUS_EVENT_TYPE = 'appointment.status_changed';
 const APPOINTMENT_STAFF_EVENT_TYPE = 'appointment.staff_changed';
 const APPOINTMENT_IMPORT_EVENT_TYPE = 'appointment.import_resolved';
@@ -171,16 +167,18 @@ async function recordAppointmentStatusChange({
   metadata = {},
   occurredAt = new Date(),
   transaction = null,
+  eventModel = require('../../models').PatientOperationalEvent,
+  recordUnchanged = false,
 }) {
-  if (!PatientOperationalEvent || !appointment) return null;
+  if (!eventModel || !appointment) return null;
   const appointmentId = toPositiveInt(appointment.id_cita || appointment.id);
   const patientId = toPositiveInt(appointment.paciente_id || appointment.patient_id);
   const clinicId = toPositiveInt(appointment.clinica_id || appointment.clinic_id);
   const previous = cleanString(previousStatus)?.toLowerCase() || null;
   const next = cleanString(newStatus)?.toLowerCase() || null;
-  if (!appointmentId || !clinicId || !next || previous === next) return null;
+  if (!appointmentId || !clinicId || !next || previous === next && !recordUnchanged) return null;
 
-  return PatientOperationalEvent.create({
+  return eventModel.create({
     patient_id: patientId,
     clinic_id: clinicId,
     actor_user_id: toPositiveInt(actorUserId),

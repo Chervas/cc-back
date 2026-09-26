@@ -90,8 +90,9 @@ function bookingRequest(payload) {
     if (row.priority_acknowledged != null && typeof row.priority_acknowledged !== 'boolean') error('program_booking_selection_invalid', 'Confirma expresamente el cambio de profesional.');
     return { key: row.key, start_at: new Date(row.start_at).toISOString(), selections: normalized, priority_acknowledged: row.priority_acknowledged === true };
   }).sort((a, b) => a.key.localeCompare(b.key));
-  return { request_key: payload.request_key, snapshot_sha256: payload.snapshot_sha256, sessions,
-    request_sha256: hash({ snapshot_sha256: payload.snapshot_sha256, sessions }) };
+  const resume = require('./program-replan').resumeInput(payload);
+  const contents = { snapshot_sha256: payload.snapshot_sha256, sessions, ...(resume || {}) };
+  return { request_key: payload.request_key, ...contents, request_sha256: hash(contents) };
 }
 
 module.exports = { normalizeCadence, composeAppointmentProfile, seriesIssues, weekKey, bookingRequest, programBookingEnabled };

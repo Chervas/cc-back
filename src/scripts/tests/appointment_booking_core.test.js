@@ -13,7 +13,7 @@ const { importReviewVersion, hasReviewedImportResources, importResourceFingerpri
 const { importedEquipmentProfile } = require('../../lib/appointment-import-equipment');
 
 const capabilities = { simple: true, multi: true };
-const Op = Object.fromEntries(['ne', 'in', 'or', 'lt', 'lte', 'gt'].map((key) => [key, Symbol(key)]));
+const Op = Object.fromEntries(['ne', 'in', 'notIn', 'or', 'lt', 'lte', 'gt'].map((key) => [key, Symbol(key)]));
 const hours = Array.from({ length: 7 }, (_, dia_semana) => ({ dia_semana, activo: true, hora_inicio: '08:00', hora_fin: '20:00', excepciones: [] }));
 const phase = (key, installations = [9], doctors = [5], mode = 'any') => ({ key, duration_minutes: 30, installation_ids: installations,
   professionals: { mode, ids: doctors, preferred_id: mode === 'any' ? doctors[0] : null } });
@@ -31,6 +31,7 @@ function matches(row, where = {}) {
       return Reflect.ownKeys(condition).every((operator) => {
         const expected = condition[operator];
         if (operator === Op.in) return expected.map(String).includes(String(value));
+        if (operator === Op.notIn) return !expected.map(String).includes(String(value));
         if (operator === Op.ne) return String(value) !== String(expected);
         const left = new Date(value).getTime();
         const right = new Date(expected).getTime();
@@ -130,6 +131,16 @@ test('flags are closed by default; incomplete rollout cannot create advanced boo
   assert.deepEqual(bookingCapabilities({}), { simple: false, multi: false });
   const treatment = { clinical_config: { booking_profile: profile(phase('one'), phase('two')) } };
   assert.throws(() => requireOperationalProfile(treatment, { capabilities: { simple: true, multi: false } }), { code: 'booking_profile_runtime_unavailable' });
+});
+
+test('internal batch exclusions cover legacy, canonical and patient occupancy, bounded at thirty', async () => {
+  const appointments = [101,102,103].map(id_cita => ({ id_cita, clinica_id:72, paciente_id:1, doctor_id:5, instalacion_id:9, inicio:start, fin:end, estado:'pendiente' }));
+  const occupancies = appointments.map(row=>({appointment_id:row.id_cita,resource_key:'doctor:5',doctor_id:5,start_at:start,end_at:end}));
+  const f=fixture({appointments,occupancies});
+  const options={db:f.db,clinic:f.clinic,profile:profile(phase('one')),start:new Date(start),end:new Date(end),occupancyEnabled:true,patientId:1,ignoreAppointmentIds:[101,102]};
+  const context=await loadBookingContext(options);
+  assert.equal(context.patientBusy.length,1);assert.equal(context.doctors.get(5).busy.length,1);
+  for(const ignoreAppointmentIds of [[0],['101'],Array.from({length:31},(_,i)=>i+1)]) await assert.rejects(loadBookingContext({...options,ignoreAppointmentIds}),{code:'booking_ignore_invalid'});
 });
 
 test('solver prefers primary, uses a secondary only when needed and reports the actual alternatives', () => {

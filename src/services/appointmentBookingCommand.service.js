@@ -58,13 +58,14 @@ function solveLegacy(values, context, force = false) {
 async function mutateAppointmentBooking({ db, appointmentValues, existingAppointmentId = null, persist,
   priorityAcknowledged = false, selections = {}, transaction = null, capabilities = bookingCapabilities(),
   allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false,
-  additionalStaffIds = undefined, supportOnly = false, expectedRange = null, importEquipmentAssignment = null }) {
+  additionalStaffIds = undefined, supportOnly = false, expectedRange = null, importEquipmentAssignment = null,
+  trustedProgramSeries = null }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
   // Internal documentary reconciliation only, never forwarded from an HTTP
   // payload. Same command/locks/occupancy as normal booking; no extra read on
   // ordinary appointments. Derive the profile from the locked source row.
   if (importEquipmentAssignment && (!transaction || !existingAppointmentId || stateOnly || supportOnly || force
-    || trustedProgramSession || preparedContext || additionalStaffIds !== undefined
+    || trustedProgramSession || trustedProgramSeries || preparedContext || additionalStaffIds !== undefined
     || Object.keys(appointmentValues || {}).length || Object.keys(selections || {}).length
     || !capabilities.multi || capabilities.equipment !== true)) {
     throw bookingError('booking_import_equipment_invalid', 'La conciliación de maquinaria no puede modificar otros datos de la cita.');
@@ -105,6 +106,10 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     // ordinary appointment request cannot forge a purchase or change its owner.
     const session = existing && db.PatientProgramSession && previous.voucher_id
       ? await db.PatientProgramSession.findOne({ where: { appointment_id: existing.id_cita }, transaction: tx }) : null;
+    const preparedSeries = trustedProgramSeries
+      ? require('../lib/program-replan').assertSeriesContext(trustedProgramSeries, {
+        transaction:tx,session:session || trustedProgramSession,existing,values }) : null;
+    if (preparedSeries && (!transaction || !preparedContext || stateOnly || supportOnly || force)) throw new Error('program_series_context_invalid');
     if (session) {
       const voucher = await db.PatientVoucher.findByPk(session.voucher_id, { transaction: tx, lock: tx.LOCK.UPDATE });
       if (!voucher || Number(voucher.patient_id) !== Number(previous.paciente_id) || Number(voucher.clinic_id) !== Number(previous.clinica_id)
@@ -118,14 +123,18 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       if (session.consumption_movement_id && (new Date(values.inicio).getTime() !== new Date(previous.inicio).getTime() || new Date(values.fin).getTime() !== new Date(previous.fin).getTime())) throw bookingError('program_session_completed', 'La fecha de una sesión consumida forma parte de su historial.');
       if (!require('../lib/program-booking').programBookingEnabled()) throw bookingError('program_booking_disabled', 'Esta cita necesita el entorno compatible con programas.');
       if (values.estado !== 'cancelada') {
-        const records = await db.PatientProgramSession.findAll({ where: { voucher_id: session.voucher_id }, order: [['position', 'ASC']], transaction: tx });
-        const appointments = await db.CitaPaciente.findAll({ where: { voucher_id: session.voucher_id, estado: { [db.Sequelize.Op.ne]: 'cancelada' } }, transaction: tx });
-        const series = records.map(record => {
-          const appointment = Number(record.id) === Number(session.id) ? values : appointments.find(row => Number(row.id_cita) === Number(record.appointment_id));
-          return { key: record.session_key, start_at: appointment?.inicio, end_at: appointment?.fin };
-        });
-        const clinic = await db.Clinica.findByPk(values.clinica_id, { transaction: tx });
-        const issues = require('../lib/program-booking').seriesIssues(series, metadataObject(session.snapshot).program_cadence, require('../lib/availability-calendar').resolveClinicTimezone(clinic));
+        let series=preparedSeries?.series, timeZone=preparedSeries?.timeZone;
+        if (!series) {
+          const records = await db.PatientProgramSession.findAll({ where: { voucher_id: session.voucher_id }, order: [['position', 'ASC']], transaction: tx });
+          const appointments = await db.CitaPaciente.findAll({ where: { voucher_id: session.voucher_id, estado: { [db.Sequelize.Op.notIn]: ['cancelada','no_asistio'] } }, transaction: tx });
+          series = records.map(record => {
+            const appointment = Number(record.id) === Number(session.id) ? values : appointments.find(row => Number(row.id_cita) === Number(record.appointment_id));
+            return { key: record.session_key, start_at: appointment?.inicio, end_at: appointment?.fin };
+          });
+          const clinic = await db.Clinica.findByPk(values.clinica_id, { transaction: tx });
+          timeZone = require('../lib/availability-calendar').resolveClinicTimezone(clinic);
+        }
+        const issues = require('../lib/program-booking').seriesIssues(series, metadataObject(session.snapshot).program_cadence, timeZone);
         if (issues.length) throw bookingError('program_cadence_conflict', 'El cambio no respeta el orden o la pauta del programa.', { issues });
       }
     } else if (existing && metadataObject(previous.import_metadata).program_session) {
@@ -210,7 +219,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     await lockBookingResources({ db, resourceKeys: keys, transaction: tx });
     let solution = null;
     if (values.estado !== 'cancelada') {
-      const context = (!extraStaff.length && preparedContext) || await loadBookingContext({ db, clinic, profile, start, end, transaction: tx,
+      const context = ((!extraStaff.length || preparedSeries) && preparedContext) || await loadBookingContext({ db, clinic, profile, start, end, transaction: tx,
         ignoreAppointmentId: existing?.id_cita, occupancyEnabled: true, installationMapping: mapping, patientId: values.paciente_id,
         additionalStaffIds: extraStaff, equipmentEnabled: capabilities.equipment });
       const existingSelections = previousMetadata.booking?.phases && configuredProfile
@@ -226,6 +235,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       const supportFree = extraStaff.every(id => isFree(context.doctors.get(id), start, end));
       solution = supportFree ? (configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen })
         : solveLegacy(values, context, !extraStaff.length && force === true)) : null;
+      if (solution && extraStaff.length && solution.phases.some(phase =>
+        !require('../lib/installation-professionals').installationAllowsStaff(context.installations.get(phase.installation_id),extraStaff))) solution=null;
       const patientConflict = (context.patientBusy || []).some(busy => new Date(busy.start) < end && new Date(busy.end) > start);
       if (!solution || patientConflict || new Date(solution.end_at).getTime() !== end.getTime()) {
         // Re-evaluated under the same resource locks. Force is only available
