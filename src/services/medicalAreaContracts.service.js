@@ -108,6 +108,8 @@ function createMedicalAreaContractsService(models) {
       const previous = await Revision.findByPk(baseHead.revision_id, { transaction });
       exposeRevision(previous);
       if (previous.code !== baseHead.code) throw problem('medical_area_revision_scope_mismatch', 503);
+      const submittedSnapshot = Object.fromEntries(Object.entries(payload).filter(([key]) => key !== 'revision'));
+      if (head && contractHash(submittedSnapshot) === previous.content_hash) return exposeRevision(previous);
       if (head && previous.content_hash === hash) return exposeRevision(previous);
       const revision = await Revision.create({ code: normalizedCode, contract_json: contract,
         content_hash: hash, revision_number: head ? previous.revision_number + 1 : 1, created_by: actor }, { transaction });

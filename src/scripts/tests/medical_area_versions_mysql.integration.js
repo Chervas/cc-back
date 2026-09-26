@@ -14,7 +14,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await qi.createTable('PatientNutritionMeasurements', { id: { type: D.INTEGER, primaryKey: true } });
   const legacy = require('../../../models/medicalareacontract')(sql, D);
   legacy.removeAttribute('revision_id'); await legacy.sync();
-  await legacy.create({ code: 'nutricion', contract_json: { profile: { defaultDuration: 55 } }, version: 'custom-v1', active: true });
+  await legacy.create({ code: 'dental', contract_json: { profile: { defaultDuration: 55 } }, version: 'custom-v1', active: true });
   await migration.up(qi); await migration.up(qi);
   for (const file of ['medicalareacontract', 'medicalareacontractrevision', 'clinicmedicalareacontract']) {
     const model = require('../../../models/' + file)(sql, D); models[model.name] = model;
@@ -27,12 +27,17 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(await revisions.count(), codes.length);
   assert.equal(await pins.count(), codes.length * 2);
   const before = await service.getContractForArea('nutricion', { clinicId: 1 });
-  assert.equal(before.profile.defaultDuration, 55);
+  assert.equal(before.profile.defaultDuration, 45);
+  assert.equal((await service.getContractForArea('dental', { clinicId: 1 })).profile.defaultDuration, 55);
   assert.equal(before.revision.number, 1);
   const response = await service.getMedicalAreaContracts({ clinicId: 1 });
   assert.equal(response.configuration_scope, 'clinic');
   assert.equal(response.clinic_id, 1);
   report.checks.push('DDL and initialization replay preserve the effective legacy override and freeze all areas for both existing clinics');
+
+  const noChange = await service.upsertMedicalAreaContract('nutricion', before, 10, { expectedRevisionId: before.revision.id });
+  assert.deepEqual(noChange, before, 'saving a baseline snapshot unchanged must not run a newer normalizer');
+  assert.equal(await revisions.count(), codes.length);
 
   const payload = { ...before, profile: { ...before.profile, defaultDuration: 65 } };
   const next = await service.upsertMedicalAreaContract('nutricion', payload, 10, { expectedRevisionId: before.revision.id });
