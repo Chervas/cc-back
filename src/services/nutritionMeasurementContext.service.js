@@ -40,9 +40,9 @@ function createNutritionMeasurementContextResolver({ db, assertUserCanAccessFeat
       where: { paciente_id: Number(patient.id_paciente), clinica_id: clinicId }, attributes: ['id'], ...lock,
     });
     if (!linked) throw invalid('nutrition_patient_clinic_mismatch', 'El paciente no está vinculado a esta clínica.');
-    // The controller's existing patient access gate is retained. Additionally
-    // require both capabilities at the actual destination before any write.
-    for (const featureKey of ['nutrition.workspace.view', 'nutrition.measurements.create']) {
+    // All patient and clinical capabilities belong to the actual destination;
+    // permission in the patient's primary clinic is not a substitute.
+    for (const featureKey of ['patients.view', 'patients.sensitive.view', 'nutrition.workspace.view', 'nutrition.measurements.create']) {
       await assertUserCanAccessFeature({ actorId, featureKey, clinicId });
     }
     const clinic = await db.Clinica.findByPk(clinicId, { attributes: ['id_clinica', 'grupoClinicaId'], ...lock });

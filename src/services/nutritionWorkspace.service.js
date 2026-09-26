@@ -10,9 +10,11 @@ const { promisify } = require('util');
 const db = require('../../models');
 const medicalAreaContracts = require('./medicalAreaContracts.service');
 const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
-const { assertUserCanAccessFeature } = require('../lib/access-policy');
+const { assertUserCanAccessFeature, getAccessibleClinicIdsForFeature } = require('../lib/access-policy');
 const { createNutritionMeasurementContextResolver } = require('./nutritionMeasurementContext.service');
 const resolveMeasurementContext = createNutritionMeasurementContextResolver({ db, assertUserCanAccessFeature });
+const { createNutritionReadContextResolver, nutritionSnapshotDependencies, isNutritionSnapshotReadable } = require('./nutritionReadContext.service');
+const resolveReadContext = createNutritionReadContextResolver({ db, assertUserCanAccessFeature, getAccessibleClinicIdsForFeature });
 
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
@@ -2378,11 +2380,12 @@ function clinicalPhotoAssetToJson(asset) {
   };
 }
 
-async function listNutritionPhotoAssetsForMeasurements(patientId, measurementIds = []) {
+async function listNutritionPhotoAssetsForMeasurements(patientId, measurementIds = [], clinicIds = []) {
   if (!db.ClinicalPrivateAsset || !patientId || !measurementIds.length) return [];
   return db.ClinicalPrivateAsset.findAll({
     where: {
       patient_id: Number(patientId),
+      clinic_id: { [Op.in]: clinicIds },
       owner_type: 'patient_nutrition_measurement',
       owner_id: { [Op.in]: measurementIds.map((id) => String(id)) },
       purpose: 'nutrition_clinical_photo',
@@ -2856,12 +2859,34 @@ function attachReportSnapshots(reports = [], snapshotRows = []) {
   });
 }
 
-async function findCurrentNutritionReportSnapshotsForPatient(patientId) {
+async function readableReportSnapshots(rows, context) {
+  if (!rows.length) return [];
+  const ids = [...new Set(rows.flatMap(row => nutritionSnapshotDependencies(row)?.measurementIds || []))];
+  if (!ids.length) return [];
+  const measurements = await db.PatientNutritionMeasurement.findAll({
+    where: { patient_id: context.patientId, id: { [Op.in]: ids }, clinic_id: { [Op.in]: context.readableClinicIds } },
+    attributes: ['id', 'clinic_id'],
+  });
+  const clinics = new Map(measurements.map(row => [Number(row.id), Number(row.clinic_id)]));
+  return rows.filter(row => isNutritionSnapshotReadable(row, context, clinics));
+}
+
+async function checkedReportSnapshot(snapshot, context) {
+  if (!snapshot) return null;
+  if ((await readableReportSnapshots([snapshot], context)).length) return snapshot;
+  if (snapshot.status === 'final') throw Object.assign(new Error('No se puede abrir este informe final con tus permisos actuales. Solicita su revisión a un responsable.'), {
+    status: 403, code: 'nutrition_report_scope_forbidden',
+  });
+  return null;
+}
+
+async function findCurrentNutritionReportSnapshotsForPatient(patientId, context) {
   if (!db.PatientNutritionReport || !patientId) return [];
   try {
     return await db.PatientNutritionReport.findAll({
       where: {
         patient_id: patientId,
+        clinic_id: { [Op.in]: context.readableClinicIds },
         status: { [Op.in]: NUTRITION_REPORT_CURRENT_STATUSES },
       },
       order: [['generated_at', 'DESC'], ['id', 'DESC']],
@@ -2979,7 +3004,7 @@ async function getNutritionTreatments({ clinicId, groupId }) {
   });
 }
 
-async function getPatientNutritionWorkspace(patientIdentifier) {
+async function getPatientNutritionWorkspace(patientIdentifier, options = {}) {
   const patient = await findPatient(patientIdentifier);
   if (!patient) {
     const error = new Error('patient_not_found');
@@ -2987,21 +3012,23 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
     throw error;
   }
 
-  const clinicId = Number(patient.clinica_id);
-  const groupId = toIntOrNull(patient.clinica?.grupoClinicaId || patient.clinica?.grupo_clinica_id);
+  const context = await resolveReadContext({ patient, actorUserId: options.actorUserId, clinicId: options.clinicId });
+  const clinicId = context.clinicId;
+  const clinic = clinicId === Number(patient.clinica_id) ? patient.clinica : await db.Clinica.findByPk(clinicId);
+  const groupId = toIntOrNull(clinic?.grupoClinicaId || clinic?.grupo_clinica_id);
   const nutritionContract = await getNutritionContractSafe();
   const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
   const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
   const measurements = await db.PatientNutritionMeasurement.findAll({
-    where: { patient_id: patient.id_paciente },
+    where: { patient_id: patient.id_paciente, clinic_id: { [Op.in]: context.readableClinicIds } },
     order: [['measured_at', 'DESC'], ['id', 'DESC']],
     limit: 50,
   });
   const measurementIds = measurements.map((measurement) => Number(measurement.id)).filter(Boolean);
   const photosByMeasurement = groupClinicalPhotosByMeasurement(
-    await listNutritionPhotoAssetsForMeasurements(patient.id_paciente, measurementIds),
+    await listNutritionPhotoAssetsForMeasurements(patient.id_paciente, measurementIds, context.readableClinicIds),
   );
-  const reportSnapshots = await findCurrentNutritionReportSnapshotsForPatient(patient.id_paciente);
+  const reportSnapshots = await readableReportSnapshots(await findCurrentNutritionReportSnapshotsForPatient(patient.id_paciente, context), context);
   const reports = attachReportSnapshots(buildReports(measurements, fieldDefinitions), reportSnapshots);
   const patientFormulaContext = buildPatientFormulaContext(patient);
   const measurementJsonRows = measurements.map((measurement) => (
@@ -3035,7 +3062,7 @@ async function getPatientNutritionWorkspace(patientIdentifier) {
   };
 }
 
-async function findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier) {
+async function findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier, options = {}) {
   const patient = await findPatient(patientIdentifier);
   if (!patient) {
     const error = new Error('patient_not_found');
@@ -3059,7 +3086,8 @@ async function findNutritionMeasurementForPatient(patientIdentifier, measurement
     error.status = 404;
     throw error;
   }
-  return { patient, measurement };
+  const context = await resolveReadContext({ patient, measurement, actorUserId: options.actorUserId, featureKey: options.featureKey });
+  return { patient, measurement, context };
 }
 
 function decodeClinicalPhotoPayload(payload = {}) {
@@ -3082,14 +3110,16 @@ function decodeClinicalPhotoPayload(payload = {}) {
   };
 }
 
-async function listNutritionMeasurementClinicalPhotos(patientIdentifier, measurementIdentifier) {
-  const { patient, measurement } = await findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier);
-  const assets = await listNutritionPhotoAssetsForMeasurements(patient.id_paciente, [measurement.id]);
+async function listNutritionMeasurementClinicalPhotos(patientIdentifier, measurementIdentifier, options = {}) {
+  const { patient, measurement } = await findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier, options);
+  const assets = await listNutritionPhotoAssetsForMeasurements(patient.id_paciente, [measurement.id], [Number(measurement.clinic_id)]);
   return assets.map(clinicalPhotoAssetToJson).filter(Boolean);
 }
 
 async function addNutritionMeasurementClinicalPhoto(patientIdentifier, measurementIdentifier, payload = {}, actorUserId = null) {
-  const { patient, measurement } = await findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier);
+  const { patient, measurement } = await findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier, {
+    actorUserId, featureKey: 'nutrition.measurements.create',
+  });
   const decoded = decodeClinicalPhotoPayload(payload);
   const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
     purpose: 'nutrition_clinical_photo',
@@ -3112,8 +3142,8 @@ async function addNutritionMeasurementClinicalPhoto(patientIdentifier, measureme
   return clinicalPhotoAssetToJson(asset);
 }
 
-async function readNutritionMeasurementClinicalPhoto(patientIdentifier, measurementIdentifier, photoIdentifier) {
-  const { patient, measurement } = await findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier);
+async function readNutritionMeasurementClinicalPhoto(patientIdentifier, measurementIdentifier, photoIdentifier, options = {}) {
+  const { patient, measurement } = await findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier, options);
   const photoId = toIntOrNull(photoIdentifier);
   if (!photoId) {
     const error = new Error('clinical_photo_not_found');
@@ -3124,6 +3154,7 @@ async function readNutritionMeasurementClinicalPhoto(patientIdentifier, measurem
     where: {
       id: photoId,
       patient_id: patient.id_paciente,
+      clinic_id: measurement.clinic_id,
       owner_type: 'patient_nutrition_measurement',
       owner_id: String(measurement.id),
       purpose: 'nutrition_clinical_photo',
@@ -3136,21 +3167,6 @@ async function readNutritionMeasurementClinicalPhoto(patientIdentifier, measurem
     throw error;
   }
   return clinicalPrivateStorage.readClinicalPrivateAsset(asset);
-}
-
-async function getPatientNutritionAccessContext(patientIdentifier) {
-  const patient = await findPatient(patientIdentifier);
-  if (!patient) {
-    const error = new Error('patient_not_found');
-    error.status = 404;
-    throw error;
-  }
-
-  return {
-    patient_id: patient.id_paciente,
-    clinic_id: Number(patient.clinica_id),
-    group_id: toIntOrNull(patient.clinica?.grupoClinicaId || patient.clinica?.grupo_clinica_id),
-  };
 }
 
 async function createNutritionMeasurement(patientIdentifier, payload = {}, actorUserId = null) {
@@ -3272,30 +3288,15 @@ function canUseStoredReportSnapshot(options = {}) {
 }
 
 async function buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, options = {}) {
-  const patient = await findPatient(patientIdentifier);
-  if (!patient) {
-    const error = new Error('patient_not_found');
-    error.status = 404;
-    throw error;
-  }
-
-  const measurementId = toIntOrNull(measurementIdentifier);
-  if (!measurementId) {
-    const error = new Error('measurement_not_found');
-    error.status = 404;
-    throw error;
-  }
-
+  const { patient, measurement: measurementRow, context } = await findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier, options);
   const measurements = await db.PatientNutritionMeasurement.findAll({
-    where: { patient_id: patient.id_paciente },
+    where: { patient_id: patient.id_paciente, clinic_id: { [Op.in]: context.readableClinicIds } },
     order: [['measured_at', 'DESC'], ['id', 'DESC']],
     limit: 50,
   });
-  const measurementRow = measurements.find((item) => Number(item.id) === Number(measurementId));
-  if (!measurementRow) {
-    const error = new Error('measurement_not_found');
-    error.status = 404;
-    throw error;
+  if (!measurements.some(item => Number(item.id) === Number(measurementRow.id))) {
+    measurements.push(measurementRow);
+    measurements.sort((a, b) => new Date(b.measured_at) - new Date(a.measured_at) || Number(b.id) - Number(a.id));
   }
 
   const nutritionContract = await getNutritionContractSafe();
@@ -3327,7 +3328,8 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     })
     : null;
   const appointment = measurement.appointment_id && db.CitaPaciente
-    ? await db.CitaPaciente.findByPk(measurement.appointment_id, {
+    ? await db.CitaPaciente.findOne({
+      where: { id_cita: measurement.appointment_id, paciente_id: patient.id_paciente, clinica_id: measurement.clinic_id },
       attributes: ['id_cita', 'inicio', 'fin', 'estado', 'doctor_id', 'clinica_id'],
       include: db.Usuario
         ? [{ model: db.Usuario, as: 'doctor', attributes: ['id_usuario', 'nombre', 'apellidos'], required: false }]
@@ -3340,8 +3342,14 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     ? patient.clinica
     : await db.Clinica.findByPk(measurementClinicId, { attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] });
   if (!measurementClinic) throw Object.assign(new Error('measurement_clinic_not_found'), { status: 404 });
+  const projection = buildProjectionForMeasurement(reportMeasurements, measurement.id);
+  const sourceIds = new Set([Number(measurement.id), Number(previousMeasurement?.id),
+    ...(projection.based_on_measurement_ids || []).map(Number),
+    ...(projection.metric_projections || []).flatMap(item => [Number(item.previous_measurement_id), Number(item.current_measurement_id)]),
+  ]);
 
   return {
+    access_context: context,
     patient: {
       id: patient.id_paciente,
       public_id: patient.public_id,
@@ -3359,7 +3367,7 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
     report: effectiveReport,
     profile_definitions: profileDefinitions,
     field_definitions: fieldDefinitions,
-    projection: buildProjectionForMeasurement(reportMeasurements, measurement.id),
+    projection,
     meta: {
       formula_version: FORMULA_VERSION,
       calculation_profile: calculationProfile,
@@ -3367,6 +3375,7 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
       fat_mass_equation_code: equationCode,
       measurement_contract_source: 'medical-area-contracts-v1',
       generated_at: new Date().toISOString(),
+      source_measurements: measurements.filter(item => sourceIds.has(Number(item.id))).map(item => ({ id: Number(item.id), clinic_id: Number(item.clinic_id) })),
       pdf_strategy: 'json_snapshot_printable_on_demand',
       storage: 'not_persisted',
       clinical_storage: buildClinicalStoragePolicy({
@@ -3378,12 +3387,12 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
   };
 }
 
-async function getNutritionMeasurementReport(patientIdentifier, measurementIdentifier) {
-  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
-  const snapshot = await findCurrentNutritionReportSnapshot(
+async function getNutritionMeasurementReport(patientIdentifier, measurementIdentifier, options = {}) {
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, options);
+  const snapshot = await checkedReportSnapshot(await findCurrentNutritionReportSnapshot(
     reportData.measurement.id,
     reportData.report.report_type,
-  );
+  ), reportData.access_context);
   const snapshotJson = nutritionReportSnapshotToJson(snapshot);
   if (!snapshotJson) return reportData;
   return {
@@ -3410,12 +3419,12 @@ async function getNutritionMeasurementReport(patientIdentifier, measurementIdent
 async function createNutritionMeasurementReportSnapshot(patientIdentifier, measurementIdentifier, actorUserId = null) {
   if (!db.PatientNutritionReport) return null;
 
-  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
-  const finalSnapshot = await findNutritionReportSnapshotByStatus(
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, { actorUserId, featureKey: 'nutrition.measurements.create' });
+  const finalSnapshot = await checkedReportSnapshot(await findNutritionReportSnapshotByStatus(
     reportData.measurement.id,
     reportData.report.report_type,
     'final',
-  );
+  ), reportData.access_context);
   if (finalSnapshot) {
     return nutritionReportSnapshotToJson(finalSnapshot);
   }
@@ -3425,10 +3434,9 @@ async function createNutritionMeasurementReportSnapshot(patientIdentifier, measu
     reportData.report.report_type,
     'active',
   );
-  if (existing && isCurrentNutritionReportSnapshot(existing)) {
-    return nutritionReportSnapshotToJson(existing);
-  }
   if (existing) {
+    if (!await checkedReportSnapshot(existing, reportData.access_context)) throw Object.assign(new Error('access_policy_forbidden'), { status: 403 });
+    if (isCurrentNutritionReportSnapshot(existing)) return nutritionReportSnapshotToJson(existing);
     existing.status = 'superseded';
     await existing.save();
   }
@@ -3487,14 +3495,18 @@ async function createNutritionMeasurementReportSnapshot(patientIdentifier, measu
 async function finalizeNutritionMeasurementReportSnapshot(patientIdentifier, measurementIdentifier, actorUserId = null) {
   if (!db.PatientNutritionReport) return null;
 
-  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier);
-  const existingFinal = await findNutritionReportSnapshotByStatus(
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, { actorUserId, featureKey: 'nutrition.reports.finalize' });
+  const existingFinal = await checkedReportSnapshot(await findNutritionReportSnapshotByStatus(
     reportData.measurement.id,
     reportData.report.report_type,
     'final',
-  );
+  ), reportData.access_context);
   if (existingFinal) {
     return nutritionReportSnapshotToJson(existingFinal);
+  }
+  const activeSnapshot = await findNutritionReportSnapshotByStatus(reportData.measurement.id, reportData.report.report_type, 'active');
+  if (activeSnapshot && !await checkedReportSnapshot(activeSnapshot, reportData.access_context)) {
+    throw Object.assign(new Error('access_policy_forbidden'), { status: 403 });
   }
 
   const generatedAt = new Date().toISOString();
@@ -4115,12 +4127,12 @@ async function htmlToPdfBuffer(html, filenameSeed = 'nutrition-report') {
 
 async function renderNutritionMeasurementReport(patientIdentifier, measurementIdentifier, options = {}) {
   const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, options);
-  const snapshot = canUseStoredReportSnapshot(options)
+  const snapshot = await checkedReportSnapshot(canUseStoredReportSnapshot(options)
     ? await findCurrentNutritionReportSnapshot(
       reportData.measurement.id,
       reportData.report.report_type,
     )
-    : null;
+    : null, reportData.access_context);
   if (snapshot?.snapshot_html && isCurrentNutritionReportSnapshot(snapshot)) {
     return snapshot.snapshot_html;
   }
@@ -4164,16 +4176,21 @@ async function persistFinalNutritionReportPdf(snapshot, reportData, buffer, file
 }
 
 async function generateNutritionMeasurementReportPdf(patientIdentifier, measurementIdentifier, actorUserId = null, options = {}) {
-  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, options);
-  const snapshot = canUseStoredReportSnapshot(options)
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, { ...options, actorUserId });
+  const snapshot = await checkedReportSnapshot(canUseStoredReportSnapshot(options)
     ? await findCurrentNutritionReportSnapshot(
       reportData.measurement.id,
       reportData.report.report_type,
     )
-    : null;
+    : null, reportData.access_context);
   if (snapshot?.pdf_asset_id && isCurrentNutritionReportSnapshot(snapshot)) {
     try {
-      const cached = await clinicalPrivateStorage.readClinicalPrivateAsset(snapshot.pdf_asset_id);
+      const asset = await db.ClinicalPrivateAsset.findOne({ where: {
+        id: snapshot.pdf_asset_id, patient_id: reportData.patient.id, clinic_id: reportData.patient.clinic_id,
+        owner_type: 'patient_nutrition_report', owner_id: String(snapshot.id), purpose: 'nutrition_report_pdf', status: 'active',
+      } });
+      if (!asset) throw new Error('nutrition_report_cache_unavailable');
+      const cached = await clinicalPrivateStorage.readClinicalPrivateAsset(asset);
       return {
         filename: cached.filename || `informe-nutricion-${reportData.measurement.id}.pdf`,
         buffer: cached.buffer,
@@ -4213,7 +4230,6 @@ module.exports = {
   PROFILE_DEFINITIONS,
   FIELD_DEFINITIONS,
   calculateNutritionValues,
-  getPatientNutritionAccessContext,
   getPatientNutritionWorkspace,
   createNutritionMeasurement,
   getNutritionMeasurementReport,
