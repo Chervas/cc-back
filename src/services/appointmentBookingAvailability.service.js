@@ -57,8 +57,15 @@ async function resolveInstallationKeys({ db, clinic, installationIds, transactio
 
 /** Bounded, bulk read model. No patient names, notes, foreign clinic IDs or SQL per candidate. */
 async function loadBookingContext({ db, clinic, profile, start, end, transaction = null, ignoreAppointmentId = null,
-  occupancyEnabled = false, installationMapping = null, dates = null, patientId = null, additionalStaffIds = [], equipmentEnabled = undefined }) {
+  occupancyEnabled = false, installationMapping = null, dates = null, patientId = null, additionalStaffIds = [], equipmentEnabled = undefined,
+  ignoreAppointmentIds = [] }) {
   const { Op } = db.Sequelize;
+  // Server-owned batch only. HTTP callers never forward this option; program
+  // continuation derives the IDs from the scoped purchase, not the request.
+  if (!Array.isArray(ignoreAppointmentIds) || ignoreAppointmentIds.length > 30
+    || ignoreAppointmentIds.some(id => !Number.isSafeInteger(id) || id < 1)) throw bookingError('booking_ignore_invalid','Revisa las citas de la planificación.',null,400);
+  const ignored = uniqueIds([...ignoreAppointmentIds, ...(ignoreAppointmentId ? [ignoreAppointmentId] : [])]);
+  const ignore = field => ignored.length ? { [field]: ignored.length === 1 ? { [Op.ne]: ignored[0] } : { [Op.notIn]: ignored } } : {};
   const clinicId = Number(clinic.id_clinica);
   const timeZone = resolveClinicTimezone(clinic);
   if (!Number.isFinite(new Date(start).getTime()) || !Number.isFinite(new Date(end).getTime())
@@ -85,12 +92,12 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     db.InstalacionBloqueo.findAll({ where: { instalacion_id: { [Op.in]: mapping.physicalInstallationIds },
       fecha_inicio: { [Op.lt]: end }, fecha_fin: { [Op.gt]: start } }, transaction }),
     db.CitaPaciente.findAll({ where: { estado: { [Op.ne]: 'cancelada' }, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start },
-      ...(ignoreAppointmentId ? { id_cita: { [Op.ne]: ignoreAppointmentId } } : {}),
+      ...ignore('id_cita'),
       [Op.or]: [{ doctor_id: { [Op.in]: doctorIds } }, { instalacion_id: { [Op.in]: mapping.physicalInstallationIds } }],
     }, attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin', 'source_system', protectedBookingAttribute(db, 'CitaPaciente')], transaction }),
   ]);
   const occupancies = occupancyEnabled ? await db.AppointmentBookingOccupancy.findAll({ where: {
-    ...(ignoreAppointmentId ? { appointment_id: { [Op.ne]: ignoreAppointmentId } } : {}),
+    ...ignore('appointment_id'),
     [Op.or]: [
       { resource_key: { [Op.in]: resources }, start_at: { [Op.lt]: occupancyEnd }, end_at: { [Op.gt]: start } },
       // Any occupancy marks this appointment as segmented: do not count the
@@ -140,7 +147,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
   }
   const patientBusy = patientId ? await db.CitaPaciente.findAll({ where: {
     paciente_id: patientId, estado: { [Op.ne]: 'cancelada' }, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start },
-    ...(ignoreAppointmentId ? { id_cita: { [Op.ne]: ignoreAppointmentId } } : {}),
+    ...ignore('id_cita'),
   }, attributes: ['inicio', 'fin'], transaction }).then(rows => rows.map(row => ({ start: row.inicio, end: row.fin }))) : [];
   return { doctors, installations: cabins, clinicWindows, installationKeys: mapping.keys, mapping, timeZone, patientBusy,
     ...attachEquipmentContext(equipmentContext, cabins, mapping, busy) };

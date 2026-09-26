@@ -106,6 +106,9 @@ exports.reserveProgramPlan = asyncHandler(async (req, res) => {
   const result = await programBooking.book(context);
   const documentationPending = [];
   if (!result.replayed) {
+    try {
+      await require('../services/programBookingRealtime.service').publishProgramBookings({ db: require('../../models'), result, clinicId: context.clinicId });
+    } catch (_) { console.warn('[program-booking] committed agenda invalidation pending'); }
     for (const session of result.sessions) {
       try {
         // Existing tablet/package lifecycle, no delivery or provider call. A
