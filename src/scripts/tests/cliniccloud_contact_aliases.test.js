@@ -43,6 +43,18 @@ function nativeFixture(){
   created_by:44,estado:'info_confirmada',tipo_cita:'primera_sin_trat',source_system:null,source_reference:null}];
  return{s,l,e};
 }
+for (const state of require('../../lib/status-catalog').CITA_STATUSES.filter(s=>!s.is_terminal).map(s=>s.value)) {
+ test(`identity-only native-first-visit evidence accepts canonical active state ${state} without modifying it`,()=>{
+  for(const history of [false,true]){
+   const {s,l,e}=nativeFixture(),previous=validateContactAlias(s,9,l,e);
+   l.native_appointments[0].estado=state;
+   if(history)Object.assign(e,{kind:'unique_phone_given_name_and_observed_history',identity_only:true,source_appointment_sha256:'f'.repeat(64)});
+   const before=JSON.stringify(l),result=validateContactAlias(s,9,l,e);
+   assert.equal(result.patient.id_paciente,9);assert.equal(JSON.stringify(l),before);
+   if(state!=='info_confirmada')assert.notEqual(result.native_appointment_sha256,previous.native_appointment_sha256);
+  }
+ });
+}
 test('different intake surname needs explicit exact native-first-visit corroboration; only alias is returned',()=>{
  const {s,l,e}=nativeFixture(),before=JSON.stringify(l);
  assert.throws(()=>validateContactAlias(s,9,l),/NOT_UNIQUE/);

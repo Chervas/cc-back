@@ -2,6 +2,15 @@
 const { hash, norm, dateOnly } = require('./adapter');
 const { instant } = require('./appointments-apply');
 const { phoneKey: reviewedContactPhoneKey } = require('./new-patients-apply');
+const { CITA_STATUSES } = require('../status-catalog');
+// This corroborates identity, not booking eligibility or a state transition.
+// Keep the canonical active states together; the row hash still detects any
+// subsequent state/time change before an alias is written. Legacy confirmada
+// remains accepted for existing native appointments.
+const nativeActiveStates = new Set([
+  ...CITA_STATUSES.filter(state => !state.is_terminal).map(state => state.value),
+  'confirmada',
+]);
 const phoneKey = value => {
   const digits=String(value||'').replace(/\D/g,'');
   const key=/^0034\d{9}$/.test(digits)?digits.slice(4):/^34\d{9}$/.test(digits)?digits.slice(2):digits;
@@ -92,8 +101,8 @@ function nativeAppointmentCandidate(source, patientId, live, evidence) {
   if(sameStart.length!==1||Number(appointment.id_cita)!==evidence.native_appointment_id
     ||Number(appointment.clinica_id)!==evidence.clinic_id||Number(appointment.created_by)!==evidence.native_created_by
     ||appointment.source_system!=null||appointment.source_reference!=null||appointment.tipo_cita!=='primera_sin_trat'
-    ||!['pendiente','info_enviada','info_confirmada','recordatorio_enviado','confirmada',
-      ...(history?['completada','cancelada','no_asistio']:[])].includes(appointment.estado)) throw Error('CONTACT_ALIAS_NATIVE_FIRST_VISIT_NOT_CORROBORATED');
+    ||!(nativeActiveStates.has(appointment.estado)
+      ||(history&&['completada','cancelada','no_asistio'].includes(appointment.estado)))) throw Error('CONTACT_ALIAS_NATIVE_FIRST_VISIT_NOT_CORROBORATED');
   return {patient:candidates[0],appointment_sha256:hash(appointment)};
 }
 function validateContactAlias(source, patientId, live, corroboration = null) {

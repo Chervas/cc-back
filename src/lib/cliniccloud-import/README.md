@@ -137,6 +137,11 @@ solo si no existe y la revierte; nunca puede ejecutarse en CRM.
   exclusivo en el export. Además exige nombre de pila exacto, teléfono exclusivo
   en el grupo y una sola primera visita nativa en esa clínica e instante,
   creada por la persona revisada. Bloquea y coteja también la cita, sin editarla.
+  Los estados activos se toman del catálogo canónico, incluidos
+  `recordatorio_confirmado`, `cambio_solicitado` y `reprogramada`; no son una
+  razón para perder la corroboración de identidad. Se conserva compatibilidad
+  con `confirmada` antiguo. El hash completo detecta cualquier cambio posterior
+  de estado/hora y detiene la escritura; no confirma ni reactiva ninguna cita.
   Un nombre compuesto puede estar repartido entre `nombre` y el principio de
   `apellidos` en captación: se admite únicamente esa partición exacta de todas
   sus palabras, manteniendo teléfono exclusivo y primera visita corroborada.
