@@ -2330,6 +2330,37 @@ exports.createCita = asyncHandler(async (req, res) => {
 /**
  * Listar citas (simplificado para calendario)
  */
+exports.getAppointmentHubList = asyncHandler(async (req, res) => {
+    const q = require('../lib/appointment-hub-query').parseAppointmentHubQuery(req.query);
+    if (await denyAppointmentViewAccessIfNeeded(req, res, q.clinicId)) return;
+    let patientId = Number(q.patient) || null;
+    if (q.patient && !patientId) {
+        const publicId = q.patient.replace(/^pat_/, 'pac_');
+        const patient = await Paciente.findOne({ where: { public_id: publicId }, attributes: ['id_paciente'] });
+        patientId = Number(patient?.id_paciente) || null;
+        if (!patientId) return res.json({ items: [], page: q.page, has_more: false });
+    }
+    const where = { clinica_id: q.clinicId,
+        ...(patientId ? { paciente_id: patientId } : { lead_intake_id: q.leadId }),
+        inicio: { [q.past ? Op.lt : Op.gte]: new Date() },
+    };
+    const rows = await CitaPaciente.findAll({ where,
+        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'inicio', 'fin', 'estado', 'motivo', 'tipo_cita', 'tratamiento_id', 'doctor_id', 'instalacion_id'],
+        include: [
+            { model: Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] },
+            { model: Instalacion, as: 'instalacion', required: false, attributes: ['id', 'nombre'] },
+            ...(db.Usuario ? [{ model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos'] }] : []),
+        ],
+        order: [['inicio', q.past ? 'DESC' : 'ASC'], ['id_cita', q.past ? 'DESC' : 'ASC']],
+        offset: (q.page - 1) * q.limit, limit: q.limit + 1,
+    });
+    const scope = await buildClinicCalendarScope([q.clinicId]);
+    const timeZone = scope.timeZones.get(q.clinicId) || DEFAULT_TIMEZONE;
+    const items = rows.slice(0, q.limit).map(row => ({ ...plainCita(row), inicio_local: formatDateTimeLocal(row.inicio, timeZone), time_zone: timeZone }));
+    const canManage = await canUserAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.manage', clinicId: q.clinicId });
+    res.json({ items: await protectAppointmentsForRequest(req, items), can_manage: canManage, page: q.page, has_more: rows.length > q.limit });
+});
+
 exports.getCitas = asyncHandler(async (req, res) => {
     const { clinica_id, startDate, endDate, paciente_id, patient_id } = req.query;
 
@@ -2504,6 +2535,33 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
     res.json(await protectAppointmentsForRequest(req, calendarRows));
 });
 
+exports.getAppointmentHubActivity = asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ message: 'Cita inválida' });
+    const cita = await CitaPaciente.findByPk(id);
+    if (!cita) return res.status(404).json({ message: 'Cita no encontrada' });
+    if (await denyAppointmentViewAccessIfNeeded(req, res, cita.clinica_id)) return;
+    const caps = (await appointmentPrivacyCapabilities(req, [cita.clinica_id])).get(Number(cita.clinica_id));
+    if (!(cita.paciente_id ? caps.patientSensitive : caps.leadSensitive)) return res.status(403).json({ message: 'No puedes consultar este historial.' });
+    const page = Math.min(Math.max(Number.parseInt(req.query.page, 10) || 1, 1), 10000);
+    const service = require('../services/appointmentActivity.service');
+    const rows = await db.PatientOperationalEvent.findAll({
+        where: { clinic_id: cita.clinica_id, patient_id: cita.paciente_id || null,
+            event_type: { [Op.in]: [service.APPOINTMENT_STATUS_EVENT_TYPE, service.APPOINTMENT_STAFF_EVENT_TYPE, service.APPOINTMENT_IMPORT_EVENT_TYPE] },
+            'metadata.appointment_id': id },
+        include: [{ model: db.Usuario, as: 'actor', required: false, attributes: ['nombre', 'apellidos'] }],
+        order: [['occurred_at', 'DESC'], ['id', 'DESC']], limit: 31, offset: (page - 1) * 30,
+    });
+    const items = rows.slice(0, 30).map(row => {
+        const event = row.toJSON();
+        return service.serializeAppointmentStatusActivity(event, { patientId: cita.paciente_id, leadId: cita.lead_intake_id,
+            actorName: [event.actor?.nombre, event.actor?.apellidos].filter(Boolean).join(' ') || 'Sistema' });
+    });
+    if (rows.length <= 30 && cita.created_at) items.push({ id: `appointment-created-${id}`, citaId: String(id), fecha: cita.created_at,
+        titulo: 'Cita creada', icono: 'heroicons_outline:calendar-days', color: 'info' });
+    res.json({ items, page, has_more: rows.length > 30 });
+});
+
 exports.getCitaById = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const citaId = Number(id);
@@ -2538,10 +2596,10 @@ exports.getCitaById = asyncHandler(async (req, res) => {
 
     let conversation_id = null;
     try {
-        if (db.Conversation && cita.paciente_id && cita.clinica_id) {
+        if (db.Conversation && (cita.paciente_id || cita.lead_intake_id) && cita.clinica_id) {
             const conv = await findCanonicalWhatsappConversation({
                 clinicId: cita.clinica_id,
-                contactId: cita?.paciente?.telefono_movil || null,
+                contactId: cita?.paciente?.telefono_movil || cita?.lead?.telefono || null,
                 patientId: cita.paciente_id,
                 leadId: cita.lead_intake_id || null,
                 createIfMissing: false,
@@ -2552,9 +2610,16 @@ exports.getCitaById = asyncHandler(async (req, res) => {
         conversation_id = null;
     }
 
+    const canManage = await canUserAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.manage', clinicId: cita.clinica_id });
+    const scope = await buildClinicCalendarScope([cita.clinica_id]);
+    const timeZone = scope.timeZones.get(Number(cita.clinica_id)) || DEFAULT_TIMEZONE;
     return res.json(await protectAppointmentsForRequest(req, {
         ...cita.toJSON(),
         conversation_id,
+        time_zone: timeZone,
+        inicio_local: formatDateTimeLocal(cita.inicio, timeZone),
+        fin_local: formatDateTimeLocal(cita.fin, timeZone),
+        hub_permissions: { manage: canManage },
     }));
 });
 

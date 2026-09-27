@@ -10,6 +10,8 @@ router.get('/next', authMiddleware, citasController.getNextCita);
 router.get('/manual-attribution-preview', authMiddleware, citasController.getManualAttributionPreview);
 router.get('/clinical-reports/patient/:patientId', authMiddleware, clinicalReportsController.listForPatient);
 router.get('/calendar', authMiddleware, citasController.getCitasCalendar);
+router.get('/hub', authMiddleware, citasController.getAppointmentHubList);
+router.get('/:id/activity', authMiddleware, citasController.getAppointmentHubActivity);
 router.get('/:id/clinical-report', authMiddleware, clinicalReportsController.getByAppointment);
 router.put('/:id/clinical-report', authMiddleware, clinicalReportsController.save);
 router.post('/:id/clinical-report/finalize', authMiddleware, clinicalReportsController.finalize);
