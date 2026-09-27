@@ -306,6 +306,15 @@ tanto del contenido como del directorio.
   consultan ni modifican por este adaptador.
 - BLOQUEO no es cita de paciente. Alertas no ocupan agenda; su fecha es de aviso,
   no se resta otro mes ni se inventa fecha clínica objetivo.
+- El adaptador offline 1.1 también reconoce el contacto administrativo exacto
+  «BLOQUEO AGENDA»/«BLOQUEO AGENDA» con una letra o dígito opcional al final del
+  apellido, aunque su fila utilice un servicio clínico de relleno. Necesita un
+  único ID en contactos; conserva ambas procedencias, texto e intervalo. No
+  propone crear su ficha. Si ya estuviera enlazado a un paciente local, requiere
+  revisión y no modifica esa ficha. No basta una palabra en notas/servicios ni
+  el parecido de nombre. La traducción del bloqueo a recursos físicos sigue
+  exigiendo mapa explícito: clasificarlo no cierra automáticamente una cabina,
+  profesional o equipo. No reinterpreta por esta regla las citas históricas.
 - Europe/Madrid: se rechazan horas ambiguas/inexistentes del cambio horario.
 - `choosePrimaryClinic` aplica primer tratamiento con pago acreditado; a falta de
   él, primer tratamiento registrado. Estado histórico 3 no acredita pago por sí

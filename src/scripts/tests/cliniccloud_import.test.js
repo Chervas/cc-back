@@ -58,6 +58,69 @@ test('classification uses BLOQUEO, not TIPO=CITA; payment state does not create 
   const unknown = sourceAppointment({ ESTADO: '' });
   assert.equal(unknown.status, null); assert.ok(unknown.validation_errors.includes('UNKNOWN_SOURCE_STATE'));
 });
+function administrativeAppointment(contacts, extra = {}) {
+  return normalizeAppointments([{ source_row: 7, values: { IDCONTACTO: 'synthetic-block', FECHA: '07/09/2026',
+    'HORA INICIO': '09:30', 'HORA FIN': '20:00', ESTADO: 'Pendiente', 'TIPO SERVICIO': 'CAPILAR',
+    SERVICIOS: 'IM CAPILAR', AGENDA: 'Agenda sintética', ...extra } }], 'appointment-file', { contacts })[0];
+}
+const administrativeContacts = () => normalizeContacts([contactRecord({ IDCONTACTO: 'synthetic-block',
+  NOMBRE: 'Bloqueo agenda', APELLIDOS: 'BLOQUEO AGENDA A' })], 'administrative-contact-file');
+test('reserved agenda-block contact overrides a clinical placeholder without creating a patient or reserving resources', () => {
+  const contacts = administrativeContacts(), row = administrativeAppointment(contacts);
+  assert.equal(row.kind, 'block');
+  assert.equal(row.service_key, 'IM CAPILAR');
+  assert.equal(row.source_contact_id, 'synthetic-block');
+  assert.equal(row.block_classification.reason, 'RESERVED_AGENDA_BLOCK_CONTACT');
+  assert.deepEqual(row.block_classification.contact_provenance, contacts[0].provenance);
+  assert.match(row.provenance.row_key, /^block:/);
+  const p = plan({ contacts, appointments: [row], snapshot: snapshot([], { patients: [] }) });
+  const contact = p.actions.find(a => a.entity === 'patient');
+  assert.equal(contact.action, 'preserve_administrative_contact');
+  assert.equal(contact.requires_review, false);
+  assert.deepEqual(contact.fields_patch, {});
+  const block = p.actions.find(a => a.entity === 'block');
+  assert.equal(block.action, 'create_block_candidate');
+  assert.equal(block.patient_id, null);
+  assert.deepEqual(block.reasons, ['BLOCK_SCOPE_REQUIRES_EXPLICIT_RESOURCE_MAP']);
+  assert.equal(block.requires_review, true);
+  assert.equal(block.automation_policy, 'hold');
+  assert.equal(p.summary.priority_day.clinical_active, 0);
+  assert.equal(p.summary.priority_day.blocks_active, 1);
+  assert.equal(p.summary.application_implemented, false);
+});
+test('administrative classification requires one exact reserved contact identity, not an ID or text hint', () => {
+  const contacts = administrativeContacts();
+  for (const context of [[], [...contacts, { ...contacts[0] }],
+    [{ ...contacts[0], fields: { ...contacts[0].fields, name: 'Persona de prueba' } }],
+    [{ ...contacts[0], fields: { ...contacts[0].fields, surname: 'Apellido real' } }],
+    [{ ...contacts[0], source_contact_id: 'different-contact' }]]) {
+    const row = administrativeAppointment(context, { ASUNTO: 'BLOQUEO AGENDA', DETALLES: 'BLOQUEO AGENDA' });
+    assert.equal(row.kind, 'appointment');
+    assert.equal(row.block_classification, undefined);
+  }
+  const duplicatePlan = plan({ contacts: [...contacts, { ...contacts[0] }], appointments: [] });
+  assert(duplicatePlan.actions.every(a => a.action === 'review'));
+});
+test('a block with a source cancellation remains cancelled and never supplies a paid clinical visit', () => {
+  const contacts = administrativeContacts();
+  const row = administrativeAppointment(contacts, { ESTADO: 'Anulada (Contacto)' });
+  assert.equal(row.kind, 'block');
+  assert.equal(row.status, 'cancelada');
+  const p = plan({ contacts, appointments: [row] });
+  assert.equal(p.summary.priority_day.clinical_cancelled, 0);
+  assert.equal(p.summary.priority_day.blocks_active, 0);
+});
+test('an existing local patient link for a reserved contact is reviewed, not overwritten or discarded', () => {
+  const contacts = administrativeContacts();
+  const linked = snapshot([], { patients: [{ id: 77, source_contact_ids: ['synthetic-block'], fields: sourceContacts()[0].fields }] });
+  const before = hash(linked), p = plan({ contacts, appointments: [], snapshot: linked });
+  const decision = p.actions.find(a => a.entity === 'patient');
+  assert.equal(decision.action, 'review');
+  assert.equal(decision.local_id, 77);
+  assert.deepEqual(decision.reasons, ['ADMINISTRATIVE_CONTACT_HAS_LOCAL_PATIENT_LINK']);
+  assert.deepEqual(decision.fields_patch, {});
+  assert.equal(hash(linked), before);
+});
 test('identical duplicate source rows alias once; distinct rows at same slot require review', () => {
   const same = [sourceAppointment({}, 2), sourceAppointment({}, 3)];
   assert.equal(appointmentActions(plan({ appointments: same }))[1].action, 'alias_identical_source_row');

@@ -1,6 +1,6 @@
 'use strict';
 
-const { ADAPTER_VERSION, TIMEZONE, hash, stableJson, index, norm, dateOnly } = require('./adapter');
+const { ADAPTER_VERSION, TIMEZONE, hash, stableJson, index, norm, dateOnly, isAgendaBlockContact } = require('./adapter');
 const { sourceReference } = require('./week-appointments');
 const { dispositionForReviewedPair } = require('./reviewed-source-pairs');
 const { matchesSelectionEntry } = require('./confirmed-source-selection');
@@ -40,6 +40,10 @@ function planContacts(contacts, historical, patients) {
     const action = { entity: 'patient', source_contact_id: contact.source_contact_id, provenance: contact.provenance, action: 'review', reasons: [], fields_patch: {}, local_id: targets.length === 1 ? targets[0].id : null };
     if (!contact.source_contact_id || newById.get(contact.source_contact_id).length !== 1) action.reasons.push('DUPLICATE_OR_MISSING_SOURCE_CONTACT_ID');
     else if (targets.length > 1) action.reasons.push('CONFLICTING_PATIENT_SOURCE_LINKS');
+    else if (isAgendaBlockContact(contact)) {
+      action.action = targets.length ? 'review' : 'preserve_administrative_contact';
+      action.reasons.push(targets.length ? 'ADMINISTRATIVE_CONTACT_HAS_LOCAL_PATIENT_LINK' : 'SOURCE_CONTACT_IS_AGENDA_BLOCK');
+    }
     else if (targets.length === 1) {
       action.action = 'link_patient';
       const local = targets[0];
@@ -65,7 +69,7 @@ function planContacts(contacts, historical, patients) {
       action.candidate_source_ids = [...new Set(hints.map((r) => r.source_contact_id))];
       action.reasons.push(hints.length ? 'IDENTITY_HINT_IS_NOT_A_MERGE_AUTHORIZATION' : 'REQUIRES_LOCAL_IDENTITY_VALIDATION');
     }
-    action.requires_review = action.action !== 'link_patient';
+    action.requires_review = !['link_patient', 'preserve_administrative_contact'].includes(action.action);
     actions.push(action);
   }
   return { actions, bySource };

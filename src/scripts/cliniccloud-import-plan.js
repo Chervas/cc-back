@@ -35,7 +35,7 @@ function run(args) {
     alerts = normalizeAlerts(source.rows, source.file.sha256, normalizedContacts, oldAlerts);
   }
   const snapshot = options['--local-snapshot'] ? JSON.parse(readBytes(options['--local-snapshot']).toString('utf8')) : null;
-  const plan = buildPlan({ sourceAccount: options['--source-account'], coverage: { start: options['--coverage-start'], end: options['--coverage-end'] }, priorityDate: options['--priority-date'], files, contacts: normalizedContacts, appointments: normalizeAppointments(appointments.rows, appointments.file.sha256), alerts, historicalContacts: oldContacts, historicalAppointments: oldAppointments, snapshot });
+  const plan = buildPlan({ sourceAccount: options['--source-account'], coverage: { start: options['--coverage-start'], end: options['--coverage-end'] }, priorityDate: options['--priority-date'], files, contacts: normalizedContacts, appointments: normalizeAppointments(appointments.rows, appointments.file.sha256, { contacts: normalizedContacts }), alerts, historicalContacts: oldContacts, historicalAppointments: oldAppointments, snapshot });
   if (options['--private-output']) writePrivateJson(options['--private-output'], plan);
   return { manifest: plan.manifest, plan_sha256: plan.plan_sha256, summary: plan.summary, private_plan_written: Boolean(options['--private-output']) };
 }

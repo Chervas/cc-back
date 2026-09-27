@@ -31,7 +31,7 @@ async function run(args){
  if(needsCurrent){
   if(!o['--appointments']||!o['--plan']||!o['--live-comparison'])throw Error('CONTACT_ALIAS_NATIVE_SOURCE_FILES_REQUIRED');
   const appointmentFile=readCsv(o['--appointments'],'appointments',['IDCONTACTO','FECHA','HORA INICIO','HORA FIN']);
-  nativeContext={contacts:sourceRows,appointments:normalizeAppointments(appointmentFile.rows,appointmentFile.file.sha256),
+  nativeContext={contacts:sourceRows,appointments:normalizeAppointments(appointmentFile.rows,appointmentFile.file.sha256,{contacts:sourceRows}),
    plan:privateJson(o['--plan']),comparison:privateJson(o['--live-comparison'])};
  }
  if(needsHistory){if(!o['--live-histories'])throw Error('CONTACT_ALIAS_NATIVE_SOURCE_FILES_REQUIRED');histories=privateJson(o['--live-histories']);}

@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 
-const ADAPTER_VERSION = 'cliniccloud-offline/1.0.0';
+const ADAPTER_VERSION = 'cliniccloud-offline/1.1.0';
 const TIMEZONE = 'Europe/Madrid';
 const norm = (v) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\s+/g, ' ').toUpperCase();
 const clean = (v) => String(v ?? '').trim();
@@ -70,10 +70,17 @@ function normalizeContacts(records, fileHash, historical = false) {
     };
   });
 }
-function normalizeAppointments(records, fileHash, { historical = false, agendas = [], services = [], serviceTypes = [] } = {}) {
+// A reserved source contact used to close an agenda, not a person. Keep this
+// exact and narrow: a treatment/note mentioning a block is not this identity.
+function isAgendaBlockContact(contact) {
+  return norm(contact?.fields?.name) === 'BLOQUEO AGENDA'
+    && /^BLOQUEO AGENDA(?: [A-Z0-9])?$/.test(norm(contact?.fields?.surname));
+}
+function normalizeAppointments(records, fileHash, { historical = false, agendas = [], services = [], serviceTypes = [], contacts = [] } = {}) {
   const agendaById = index(agendas, (r) => clean(r.values.idAgenda));
   const serviceById = index(services, (r) => clean(r.values.idServicio));
   const typeById = index(serviceTypes, (r) => clean(r.values.idTipoServicio));
+  const contactsById = index(contacts, r => clean(r.source_contact_id));
   return records.map((record) => {
     const r = record.values;
     const start = localDateTime(r[historical ? 'fechaIni' : 'FECHA'], r[historical ? 'horaIni' : 'HORA INICIO']);
@@ -81,11 +88,18 @@ function normalizeAppointments(records, fileHash, { historical = false, agendas 
     const service = historical ? serviceById.get(clean(r.idServicio))?.[0]?.values : null;
     const sourceState = clean(r[historical ? 'estado' : 'ESTADO']);
     const serviceType = typeById.get(clean(service?.idTipoServicio))?.[0]?.values.nombre;
-    const kind = historical ? (norm(serviceType || service?.nombre) === 'BLOQUEO' ? 'block' : 'appointment') : (norm(r['TIPO SERVICIO']) === 'BLOQUEO' ? 'block' : 'appointment');
+    const sourceContactId = clean(r[historical ? 'idContacto' : 'IDCONTACTO']);
+    const linkedContacts = contactsById.get(sourceContactId) || [];
+    const administrativeContact = !historical && linkedContacts.length === 1 && isAgendaBlockContact(linkedContacts[0]);
+    const serviceIsBlock = historical ? norm(serviceType || service?.nombre) === 'BLOQUEO' : norm(r['TIPO SERVICIO']) === 'BLOQUEO';
+    const kind = serviceIsBlock || administrativeContact ? 'block' : 'appointment';
     const sourceId = historical ? clean(r.idCita) : clean(r.IDCITA);
     const result = {
       kind, source_external_id: sourceId || null,
-      source_contact_id: clean(r[historical ? 'idContacto' : 'IDCONTACTO']),
+      source_contact_id: sourceContactId,
+      ...(administrativeContact && !serviceIsBlock ? { block_classification: {
+        reason: 'RESERVED_AGENDA_BLOCK_CONTACT', contact_provenance: linkedContacts[0].provenance,
+      } } : {}),
       start_local: start, end_local: end, start_utc: localToUtc(start), end_utc: localToUtc(end),
       agenda_key: norm(historical ? agendaById.get(clean(r.idAgenda))?.[0]?.values.nombre : r.AGENDA),
       service_key: norm(historical ? service?.nombre : r.SERVICIOS),
@@ -138,4 +152,4 @@ function normalizeAlerts(records, fileHash, contacts, historical = []) {
   return rows;
 }
 
-module.exports = { ADAPTER_VERSION, TIMEZONE, norm, clean, hash, stableJson, index, dateOnly, localDateTime, utcToLocal, localToUtc, normalizeContacts, normalizeAppointments, normalizeAlerts };
+module.exports = { ADAPTER_VERSION, TIMEZONE, norm, clean, hash, stableJson, index, dateOnly, localDateTime, utcToLocal, localToUtc, normalizeContacts, normalizeAppointments, normalizeAlerts, isAgendaBlockContact };
