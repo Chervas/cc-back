@@ -15,8 +15,11 @@ No crea compras, citas de pacientes ni movimientos de maquinaria.
 Los dos PDF exactos de `Archivo explicado.zip` tienen huellas fijadas en
 `corporal-program-drafts.js`: protocolo Corporal V1 y Tarifa 2026 Corporal.
 La tarifa declara vigencia 01/10/2026; el protocolo contiene fechas contradictorias.
-Los importes se conservan en notas, con `total_price=null`, nunca cero ni
-aplicación anticipada. La importación no aprueba clínicamente el manual.
+El operador inicial conserva los importes en notas, con `total_price=null`,
+nunca cero ni aplicación anticipada implícita. La autorización posterior de
+adelantar la tarifa se ejecuta por separado mediante
+[la revisión de precios](#revisión-autorizada-de-precios-de-octubre).
+La importación no aprueba clínicamente el manual.
 
 | Definición | Citas | Tratamiento individual |
 | --- | ---: | --- |
@@ -86,6 +89,56 @@ No requiere build frontend, migración ni reinicio de runtime.
 No restaurar una base completa ni borrar definiciones/revisiones. Conservar
 borradores y diario; si procede retirarlos, archivar mediante API y versión
 actual tras comprobar dependencias y que no haya ediciones humanas nuevas.
+
+## Revisión autorizada de precios de octubre
+
+`src/scripts/cliniccloud-import-program-prices.js` completa el precio final de
+23 borradores existentes: once corporales, cinco capilares y siete de obesidad.
+No incluye Tono/Suelo Pélvico, que ya tienen importe. Exige los cinco PDF exactos
+de los creadores originales y la autorización expresa de adelantar la tarifa.
+La identidad es la clave de creación y clínica, nunca una coincidencia de nombre.
+
+```text
+node src/scripts/cliniccloud-import-program-prices.js
+  --target crm --mode prepare
+  --archive /ruta/Archivo explicado.zip
+  --early-authorization apply_documented_october_gross_prices_now
+  --private-output /ruta/privada/paquete-nuevo.json
+```
+
+`prepare` solo lee. Rechaza precios existentes, aunque sean cero o coincidan,
+programas activos, procedencia distinta y cambios de las frases documentales
+que corrige. Conserva las notas humanas, sesiones, variantes, pautas y avisos
+clínicos. Las tarifas condicionadas a cirugía o a haber completado Arranque no
+se aplican automáticamente; se usa el precio ordinario documentado.
+
+Para `preview|apply|verify`, sustituir la autorización por `--package` y una
+salida privada nueva. `preview` usa la API normal sin guardar. `apply` requiere
+sesión CRM vigente, `--approved-sha256`, `--backup-manifest` completo verificado
+y `--private-journal`; paquete y backup menores de dos horas, operador limpio
+commiteado. Cada PATCH incluye versión esperada y modifica únicamente precio
+final y las frases que decían que no estaba incorporado. SQL solo lee.
+
+No es una transacción global: tras un timeout se inspeccionan fila y revisión.
+El mismo paquete reconoce resultados exactos, reanuda operaciones pendientes y
+rechaza una edición posterior; no se reconstruye un paquete sobre precios ya
+aplicados. `verify` comprueba independientemente las 23 nuevas revisiones.
+Preserva las revisiones antiguas, los otros programas y ocho conjuntos de datos
+de citas, tratamientos, consentimientos, presupuestos y compras. Si hay cambios
+concurrentes se investigan, no se restaura la BD. No cambia fiscalidad,
+consentimientos o activación; no crea ventas, reservas ni recordatorios.
+
+```sh
+node --test src/scripts/tests/cliniccloud_program_prices.test.js src/scripts/tests/treatment_programs.test.js src/scripts/tests/economic_program_snapshot.test.js
+QA_DEV_PROGRAM_PRICE_WRITES=dev-program-price-revision-v1 node src/scripts/qa/verify-dev-program-price-revision.js
+```
+
+La última prueba requiere sesión normal DEV y la clínica ficticia multiárea;
+conserva un programa DEMO en borrador con dos revisiones para practicar. No
+copia registros reales ni ejecuta el operador CRM en DEV. Recuperación de un
+precio real: nueva revisión de corrección por API después de revisar compras y
+ediciones posteriores; nunca borrar revisiones ni restaurar precios en bloque.
+El operador es offline: no requiere migración, build ni reinicio de gateway/API.
 
 ## Perfiles físicos de las sesiones combinadas
 
