@@ -83,6 +83,37 @@ async function main() {
       checks.push('One physical equipment unit is reserved canonically and cannot overlap in another room with another patient/staff');
     });
     await run(async transaction => {
+      await db.Clinica.update({ equipment_booking_enabled: true }, { where: { id_clinica: 1 }, transaction, hooks: false });
+      const units = [];
+      for (const mobility of ['mobile', 'fixed']) {
+        const unit = await db.BookingEquipment.create({ owner_clinic_id: 1, name: marker + mobility,
+          family_key: 'qa_' + mobility, mobility, status: 'available', turnaround_minutes: 0,
+          home_installation_id: mobility === 'fixed' ? rooms[0].id : null }, { transaction });
+        await db.BookingEquipmentClinic.create({ equipment_id: unit.id, clinic_id: 1 }, { transaction });
+        units.push(unit);
+      }
+      for (const room of rooms.slice(0,2)) await db.BookingEquipmentRoomPolicy.upsert({ installation_id: room.id, mode: 'all', equipment_ids: [] }, { transaction });
+      const payload = { ...make('two-units'), inicio: '2030-01-07T13:00:00.000Z', fin: '2030-01-07T14:00:00.000Z' };
+      const row = await reserve(transaction, payload, { equipmentIds: units.map(unit => unit.id) }); ids.push(row.id_cita);
+      await row.reload({ transaction });
+      const phases = row.import_metadata.booking.profile.phases;
+      assert.equal(phases.length, 1); assert.equal(phases[0].duration_minutes, 60);
+      assert.deepEqual(phases[0].equipment_requirements, units.map(unit => ({ equipment_ids: [unit.id] })));
+      assert.equal(row.tratamiento_id, null);
+      const occupancy = await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: row.id_cita }, transaction });
+      assert.equal(occupancy.length, 4);
+      for (const resource of occupancy) {
+        assert.equal(new Date(resource.start_at).toISOString(), payload.inicio);
+        assert.equal(new Date(resource.end_at).toISOString(), payload.fin);
+      }
+      const second = await db.Paciente.create({ clinica_id: 1, public_id: 'pac_' + randomUUID().replaceAll('-','').slice(0,20),
+        nombre: 'Ficticio', apellidos: marker }, { transaction, hooks: false });
+      await assert.rejects(reserve(transaction, { ...payload, source_reference: marker + 'mobile-overlap',
+        paciente_id: second.id_paciente, doctor_id: staff[1].id_usuario, instalacion_id: rooms[1].id },
+      { equipmentIds: [units[0].id] }), { code: 'booking_unavailable' });
+      checks.push('Source combination reserves both fixed and mobile units for its full interval, not alternatives or invented phase timings; either unit remains unavailable elsewhere');
+    });
+    await run(async transaction => {
       await assert.rejects(reserve(transaction, make('identity'), { beforeInsert: async () => { throw Error('SOURCE_IDENTITY_CHANGED'); } }), /SOURCE_IDENTITY_CHANGED/);
       assert.equal(await db.CitaPaciente.count({ where: { source_reference: marker + 'identity' }, transaction }), 0);
       checks.push('Identity drift stops before inserting the source appointment');
