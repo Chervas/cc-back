@@ -414,6 +414,50 @@ Pruebas: `cliniccloud_catalog_cosmetic_prices.test.js`,
 `economic_fiscal_price_source.test.js`. Recuperación selectiva de esas columnas,
 comparando el estado posterior y el uso económico, no restauración global.
 
+## Retirada gradual del catálogo anterior como obsoleto
+
+`cliniccloud-import-catalog-retirement.js` solo opera desde DEV sobre CRM explícito.
+No es un importador genérico ni deduce equivalencias. Selecciona filas `CCLOUD-*`
+del lote antiguo confirmado de BS, con identidad/nombre fuente íntegros, activas
+y sin estado de catálogo cambiado. Conserva íntegros nombres, IDs, precios,
+procedencia y todas las relaciones; cambia `activo`, estado `obsolete`, metadata
+de retirada y timestamp. No borra tratamientos ni reescribe su historia.
+
+Retiene cualquier tratamiento con citas desde el inicio de la semana de arranque
+21/09 (20/09 22:00 UTC), incluso canceladas, o servicio escrito desde esa fecha
+en `delta20sept.zip`, aunque aún no esté importado. La coincidencia de texto es
+solo una exclusión conservadora, nunca una equivalencia. También protege IDs
+externos de citas aún sin tratamiento local, bonos con cualquier estado/saldo,
+dependencias directas de agenda/documentos/automatizaciones y referencias en
+presupuestos, firmas, programas, instalaciones y protocolos. No declara libre
+un bono por deducir su consumo. Un consumidor directo nuevo en el esquema obliga
+a revisar el operador. No fija cantidades ni subconjuntos por constantes:
+el paquete depende del estado y las fuentes leídos en ese momento.
+
+Flujo: `--mode prepare --target crm --source-zip <ZIP> --private-output <paquete>`;
+revisar `operations` y los motivos de `retained`. Probar antes en MySQL aislado
+con `cliniccloud_catalog_retirement_mysql.integration.js`. Después `dry-run` y
+`apply` con el mismo ZIP, `--package`, `--approved-sha256`, `--backup-manifest`
+y `--private-journal` distintos. Requiere worktree limpio y backup íntegro/paquete
+menores de dos horas. El backup y la procedencia deben ser del corte real,
+no de la base ficticia. `verify` usa paquete/ZIP y `--private-output` nuevos.
+
+La transacción bloquea primero las dos clínicas (la reserva canónica usa SHARE)
+y luego el catálogo: una reserva previa debe terminar y entrar en la comprobación.
+El ensayo revierte; commit tiene lectura independiente. Compara huellas completas
+de las citas y filas dependientes sin guardarlas de nuevo en el paquete. No añade
+ninguna consulta a la navegación diaria ni procesos recurrentes. Replay exacto
+es cero escrituras y una edición humana invalida el paquete; no se pisa.
+
+Comprobar después desde CRM: catálogo activo sin los retirados, ficha `Obsoleto`
+sin edición y antecedentes del paciente con tratamiento original. El acceso
+directo por ID conserva su lectura. El contenido continúa consultable usando
+el filtro Todos/Inactivos; no confundir retirada del catálogo activo con borrado.
+Si es necesario recuperar alguno, preparar una reversión selectiva de estado
+con los valores anteriores y nueva comparación de dependencias, bajo backup y
+transacción; no restaurar la BD entera, crear IDs sustitutos ni editar sus precios.
+Resultados/cantidades reales y aceptación en el manual central `19`/`99`.
+
 ## Traslado documental a salas ya abiertas
 
 `cabin-assignments` mantiene por defecto la exigencia de sala documental inactiva.
