@@ -46,6 +46,37 @@ requieren un modo de aplicación explícito y su propio paquete validado.
 
 ## Ejecutores acotados
 
+### Reserva de recursos de una cita fuente revisada
+
+`book-reviewed-appointment.js` es una pieza interna de operador, no una ruta
+HTTP ni un `apply` general. Un paquete revisado puede crear en **una misma
+transacción READ COMMITTED** la cita fuente y sus ocupaciones mediante el
+comando canónico de agenda. Solo admite pendiente, profesional/cabina concretos,
+los tres HOLD y evidencia por huella; nunca `force`, programas, cambios de hora
+o aprobación clínica implícita. Conserva explícitamente el tratamiento pendiente
+si todavía no hay equivalencia. Un tratamiento fuente sin perfil puede conservar
+su referencia histórica, incluso Obsoleto, sin reactivarlo en catálogo. No
+sustituye el perfil de un tratamiento configurado por recursos arbitrarios.
+
+El llamador debe verificar paquete/backup/diario, scope, identidad fuente única,
+membresías, ausencia de correspondencia previa y asignación documental. Es
+obligatorio volver a comprobarlos en `beforeInsert`, bajo los mismos anclajes
+de paciente, profesional, sala física y equipos que usa agenda. La cita inicial
+no se hace visible antes de confirmar también sus ocupaciones; cualquier error
+exige rollback de **toda** la transacción, no continuar con la fila parcial.
+Una máquina móvil sigue siendo una única unidad, aunque se use en otra cabina.
+El helper no emite eventos ni mensajes; no confirma por sí solo la revisión
+clínica/documental de la cita. No añade lecturas al cálculo habitual de huecos.
+
+Pruebas: `cliniccloud_documented_booking.test.js` y el ensayo con rollback
+`src/scripts/qa/isolated-cliniccloud-documented-booking.js`, exclusivamente en
+DEV ficticio y con `QA_ISOLATED_CLINICAL_WRITES=bs-startup-isolated-20260920`.
+Este último requiere la fixture clínica aislada existente y comprueba reserva,
+conflictos de paciente/recursos, una unidad móvil entre dos salas, preservación
+de fechas/HOLD y rechazo de sustitución de perfiles del catálogo.
+
+### Otros ejecutores
+
 - `cliniccloud-import-contact-aliases.js`: `--target crm --mode prepare`
   con `--contacts`, `--review` y `--private-output`. La revisión privada contiene
   `reviewed_by` y `links` con `source_contact_id`/`patient_id`. Exige coincidencia
