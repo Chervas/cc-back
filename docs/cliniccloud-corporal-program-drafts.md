@@ -20,7 +20,7 @@ aplicación anticipada. La importación no aprueba clínicamente el manual.
 
 | Definición | Citas | Tratamiento individual |
 | --- | ---: | --- |
-| BS Contorno | 8 | Variante COR-43 pendiente; no sustituir por dos sesiones sueltas. |
+| BS Contorno | 8 | Variante COR-43 específica; operador complementario al final de este runbook. |
 | BS Firmeza | 8 | Combinado EXION/INDIBA de 45 min, pendiente de cierre de recursos. |
 | BS Celulitis | 8 | Combinado ondas/RF; mesoterapia después en citas 3 y 6, 55 min en total. |
 | BS Recuperación / versión corta | 10 / 6 | Postoperatorio combinado de 45 min, no INDIBA suelto. |
@@ -30,8 +30,9 @@ aplicación anticipada. La importación no aprueba clínicamente el manual.
 
 Son 92 entradas de composición, **no 92 reservas**. Las citas semanales tienen
 propuesta días 0/7/14…; frecuencias variables siguen sin pauta automática.
-Contorno añade mesoterapia después de sus 45 min en citas 2/5/8; se conserva
-en notas/etiquetas, sin vincular solo el inyectable y perder la base pendiente.
+Contorno añade mesoterapia después de sus 45 min en citas 2/5/8. El operador
+inicial conserva huecos sin enlazar únicamente el inyectable; el complemento
+COR-43 vincula después la base y la mesoterapia, juntas y en ese orden.
 En los tres ciclos de captación no se conoce el reparto de sus 45 min ni si
 mesoterapia se añade: no copiar el reparto de otro protocolo.
 Las condiciones 590 € dentro de cirugía y crédito de 100 € tras Arranque se
@@ -134,3 +135,39 @@ Reversión de perfiles: revisar primero los IDs, cambios posteriores y el
 `previous_profile` del diario; preparar una corrección individual versionada,
 sin retirar maquinaria ni restaurar toda la base. No aprobar ni activar un
 perfil antiguo por volver a él. Las notas se corrigen con una revisión nueva.
+
+## Variante COR-43 y composición de BS Contorno
+
+`cliniccloud-import-contorno-program-variant.js` crea un único individual
+inactivo `BS26-COR43-PROGRAM` y revisa la definición de Contorno, sin cambiar
+los tratamientos sueltos, los otros programas ni citas existentes.
+Fuente exacta: mismo protocolo, páginas PDF 10/11/32. Sesión total 45 min:
+C11/Piedad/Cyclone 35 min (5+3+10+9+8) y C11/Piedad/EXION 10 min (8+2).
+La sala sigue ocupada entre pasos; EXION no se reserva durante el Cyclone.
+No es la variante COR-42 de 75 min ni la suma de dos sesiones de 45 min.
+
+Las ocho entradas reciben COR-43; en 2/5/8 se añade después la mesoterapia
+existente de C9, diez minutos. Totales 45/55/45/45/55/45/45/55, conservando
+la propuesta semanal y sin crear reservas. Piedad en inyectables sigue siendo
+la asignación provisional autorizada, no una acreditación clínica.
+Precio base nulo; 145 € documental desde 01/10/2026 queda en procedencia/notas,
+no se presenta como precio vigente ni se transforma en cero. No se añade bono
+ni consentimiento por suposición. Borrador y revisión clínica/fiscal persisten.
+
+Mismos argumentos, modos `prepare|apply|verify`. `prepare` solo lee; `apply`
+exige backup CRM íntegro verificado y paquete menores de dos horas, SHA
+revisado, código limpio commiteado, diario privado y sesión normal de CRM.
+Usa POST canónico de tratamiento y PATCH de programa con versión esperada 1;
+son dos operaciones, no una transacción global. SQL es solo lectura y verifica
+también la revisión 2. Si falla entre operaciones, conciliar el código estable
+y el diario con el paquete original; el replay no duplica ni pisa cambios.
+Comprueba todas las citas y vínculos de consentimiento antes/después.
+
+```sh
+node --test src/scripts/tests/cliniccloud_contorno_program_variant.test.js
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/cliniccloud_contorno_program_variant_mysql.integration.js
+```
+
+Reversión no destructiva: mantener el individual como borrador y, solo tras
+comprobar dependencias y cambios humanos, emitir una revisión de programa
+basada en el snapshot anterior. No borrar historial ni restaurar la BD completa.
