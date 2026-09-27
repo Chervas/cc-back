@@ -4,6 +4,11 @@ const router = express.Router();
 const ctrl = require('../controllers/especialidades.controller');
 const authMiddleware = require('./auth.middleware');
 
+// Fail before reaching a legacy reader/writer on the external gateway. Keep
+// normal API authentication/clinic permissions and unrelated routes unchanged.
+const { createMedicalAreaApiBoundary } = require('../middleware/medicalAreaApiBoundary');
+router.use(['/area-contracts', '/clinica/:clinicId/area-contracts'], createMedicalAreaApiBoundary());
+
 // Contratos de areas medicas consumidos por catalogo/agenda/workspaces
 router.get('/area-contracts', authMiddleware, ctrl.getMedicalAreaContracts);
 router.get('/area-contracts/:code', authMiddleware, ctrl.getMedicalAreaContract);
