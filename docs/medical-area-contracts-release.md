@@ -2,12 +2,17 @@
 
 > **Tipo:** runbook técnico, no estado ni roadmap.
 > **Fuente de verdad funcional:** [18.2](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/18.2-sistema-tratamientos.md#configuración-de-áreas-versionada-por-clínica).
-> **Última revisión:** 2026-09-26.
+> **Última revisión:** 2026-09-27.
 
 ## Alcance
 
-Solo `20260926180000-version-medical-area-contracts.js`: dos tablas,
-referencias desde la cabecera/mediciones y snapshots iniciales por clínica.
+Una migración explícita por ejecución, exclusivamente del allowlist:
+
+- `20260926180000-version-medical-area-contracts.js` (predeterminada): dos tablas,
+  referencias desde la cabecera/mediciones y snapshots iniciales por clínica.
+- `20260927103000-create-medical-area-adoptions.js`: diario append-only de
+  adopciones revisadas. Requiere el corte inicial y no cambia asignaciones.
+
 No ejecuta la cola de migraciones pendientes, no activa programas ni mensajes.
 El script no carga modelos de la aplicación ni modifica su entorno.
 
@@ -34,6 +39,7 @@ Desde `/home/ubuntu/wt/back-dev`, sustituir los valores por rutas/huella verific
 ```bash
 node src/scripts/medical-area-schema-release.js \
   --target dev \
+  --migration 20260927103000-create-medical-area-adoptions.js \
   --approved-migration-sha256 HUELLA_SHA256 \
   --backup-manifest RUTA_PRIVADA/backup-manifest.json \
   --private-journal RUTA_PRIVADA/corte-areas.jsonl
@@ -41,6 +47,9 @@ node src/scripts/medical-area-schema-release.js \
 
 El ejecutor registra commit, hash y respaldo antes de DDL. Comprueba cobertura
 clínica/área, cabeceras y columna nullable antes de insertar `SequelizeMeta`.
+Para el diario comprueba columnas, índice y FK restrictivas; conserva la huella
+de todas las asignaciones antes/después. Si ya está aplicada, verifica el
+esquema sin repetir DDL. No aplicar la DDL sobre una candidata sin commitear.
 Un error conserva diario y DDL parcial para inspección; no reiniciar ni aplicar
 migraciones genéricas. El DML se revierte conjuntamente. Un replay de la
 migración conserva las versiones ya publicadas/asignadas.
@@ -53,6 +62,16 @@ versión visible, guardar idéntico sin nueva revisión, publicar una modificaci
 ficticia, clínica existente intacta, alta nueva con revisión publicada, conflicto
 de edición concurrente y medición/informe con revisión de origen. Comprobar
 clínica secundaria y cierre de permiso, además de escritorio/móvil.
+
+Para la UI de adopción: `Áreas médicas > Versiones por clínica`, buscar una
+clínica ficticia, comparar versiones, revisar cambios y marcar aceptación.
+Comprobar actualización de esa clínica y diario en la misma transacción;
+segunda clínica, ajustes locales e historias intactos. Simular conflicto
+entre revisión y aplicación: debe exigir nueva revisión. El botón no puede
+repetir automáticamente una escritura cuyo resultado no se confirmó.
+Orden de publicación: diario aditivo → API compatible → frontend. API antigua
+no accede al diario y sigue operando durante el corte; no habilitar la UI
+nueva contra un backend que todavía acepte adopciones sin revisión.
 
 En CRM repetir backup/corte y promoción fast-forward autorizada, sin copiar
 filas desde DEV. Usar solo una clínica/paciente DEMO autorizados para QA con

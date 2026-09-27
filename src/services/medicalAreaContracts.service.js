@@ -2,6 +2,7 @@
 
 const { createHash } = require('node:crypto');
 const definitions = require('../lib/medical-area-contracts');
+const { createMedicalAreaAdoptionService } = require('./medicalAreaAdoption.service');
 
 function problem(code, statusCode = 409) {
   return Object.assign(new Error(code), { code, statusCode, status: statusCode });
@@ -139,30 +140,12 @@ function createMedicalAreaContractsService(models) {
       revision_id: head.revision_id, updated_by: actorId })), { transaction });
   }
 
-  async function adoptClinicRevision(clinicId, code, { revisionId, expectedRevisionId, actorId }) {
-    const clinic = positiveId(clinicId, 'clinic_id');
-    const targetId = positiveId(revisionId, 'revision_id');
-    const expected = expectedRevisionId === null ? null : positiveId(expectedRevisionId, 'expected_revision_id');
-    const actor = positiveId(actorId, 'actor_id');
-    const area = definitions.normalizeCode(code);
-    return sequelize.transaction(async transaction => {
-      const clinicRow = await Clinica.findByPk(clinic, { transaction, lock: transaction.LOCK.UPDATE });
-      if (!clinicRow) throw problem('clinic_not_found', 404);
-      const pin = await Pin.findOne({ where: { clinic_id: clinic, code: area },
-        transaction, lock: transaction.LOCK.UPDATE });
-      if ((pin ? Number(pin.revision_id) : null) !== expected) throw problem('medical_area_revision_conflict');
-      const revision = await Revision.findByPk(targetId, { transaction });
-      if (!revision || revision.code !== area) throw problem('medical_area_revision_scope_mismatch', 422);
-      const contract = exposeRevision(revision);
-      if (!pin) await Pin.create({ clinic_id: clinic, code: area, revision_id: targetId, updated_by: actor }, { transaction });
-      else if (targetId !== expected) await pin.update({ revision_id: targetId,
-        previous_revision_id: pin.revision_id, updated_by: actor }, { transaction });
-      return contract;
-    });
-  }
+  const adoption = createMedicalAreaAdoptionService(models, { exposeRevision, contractHash });
 
   return { getMedicalAreaContracts, getContractForArea, upsertMedicalAreaContract,
-    initializeClinic, adoptClinicRevision, getRecordedContract };
+    initializeClinic, adoptClinicRevision: adoption.adopt, getRecordedContract,
+    reviewClinicRevision: adoption.review, listClinicVersions: adoption.list,
+    getClinicRevisionHistory: adoption.history };
 }
 
 // Lazy loading keeps pure contract tests and migration preparation free of app
@@ -177,4 +160,7 @@ module.exports = { ...definitions, contractHash, assertUnits, exposeRevision,
   initializeClinic: (...args) => service().initializeClinic(...args),
   adoptClinicRevision: (...args) => service().adoptClinicRevision(...args),
   getRecordedContract: (...args) => service().getRecordedContract(...args),
+  reviewClinicRevision: (...args) => service().reviewClinicRevision(...args),
+  listClinicVersions: (...args) => service().listClinicVersions(...args),
+  getClinicRevisionHistory: (...args) => service().getClinicRevisionHistory(...args),
 };

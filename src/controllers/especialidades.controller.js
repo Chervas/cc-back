@@ -98,6 +98,10 @@ const areaHandler = (handler) => asyncHandler(async (req, res) => {
             medical_area_revision_conflict: 'La versión ha cambiado. Actualiza y revisa tu edición.',
             medical_area_configuration_not_initialized: 'La configuración de áreas todavía no está preparada para esta clínica.',
             medical_area_not_configured: 'Esta área todavía no está configurada para la clínica.',
+            medical_area_review_required: 'Revisa las diferencias y confirma su alcance antes de actualizar esta clínica.',
+            medical_area_review_stale: 'La configuración ha cambiado desde la revisión. Vuelve a revisar las diferencias.',
+            medical_area_update_incompatible: 'Esta actualización necesita una migración específica. No se ha cambiado la clínica.',
+            medical_area_reason_required: 'Indica un motivo de entre 5 y 500 caracteres para registrar la actualización.',
         };
         return res.status(error.statusCode || 409).json({ code: error.code,
             message: messages[error.code] || 'No se puede aplicar esta configuración de área médica. Revisa la versión y sus campos.' });
@@ -160,8 +164,28 @@ exports.adoptMedicalAreaRevision = areaHandler(async (req, res) => {
         revisionId: req.body?.revision_id,
         expectedRevisionId: req.body?.expected_revision_id,
         actorId: Number(req.userData?.userId || req.user?.id),
+        reviewHash: req.body?.review_hash,
+        acknowledged: req.body?.acknowledge_impact,
+        reason: req.body?.reason,
     });
     res.json({ contract });
+});
+
+exports.listClinicAreaVersions = areaHandler(async (req, res) => {
+    if (!requireGlobalAdmin(req, res)) return;
+    res.json(await medicalAreaContractsService.listClinicVersions({ search: req.query.search,
+        page: req.query.page, pageSize: req.query.page_size, clinicId: req.query.clinica_id }));
+});
+
+exports.reviewClinicAreaRevision = areaHandler(async (req, res) => {
+    if (!requireGlobalAdmin(req, res)) return;
+    res.json(await medicalAreaContractsService.reviewClinicRevision(req.params.clinicId,
+        req.params.code, req.query.revision_id));
+});
+
+exports.getClinicAreaRevisionHistory = areaHandler(async (req, res) => {
+    if (!requireGlobalAdmin(req, res)) return;
+    res.json(await medicalAreaContractsService.getClinicRevisionHistory(req.params.clinicId, req.params.code));
 });
 
 // Listar especialidades de sistema (solo lectura para clínicas)

@@ -6,9 +6,12 @@ const authMiddleware = require('./auth.middleware');
 
 // Contratos de areas medicas consumidos por catalogo/agenda/workspaces
 router.get('/area-contracts', authMiddleware, ctrl.getMedicalAreaContracts);
+router.get('/area-contracts/clinics', authMiddleware, ctrl.listClinicAreaVersions);
 router.get('/area-contracts/:code', authMiddleware, ctrl.getMedicalAreaContract);
 router.put('/area-contracts/:code', authMiddleware, ctrl.updateMedicalAreaContract);
 router.put('/clinica/:clinicId/area-contracts/:code/revision', authMiddleware, ctrl.adoptMedicalAreaRevision);
+router.get('/clinica/:clinicId/area-contracts/:code/review', authMiddleware, ctrl.reviewClinicAreaRevision);
+router.get('/clinica/:clinicId/area-contracts/:code/history', authMiddleware, ctrl.getClinicAreaRevisionHistory);
 
 // Especialidades de sistema (solo lectura)
 router.get('/sistema', ctrl.getEspecialidadesSistema);
