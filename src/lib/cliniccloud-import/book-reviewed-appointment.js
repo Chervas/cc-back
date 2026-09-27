@@ -6,6 +6,7 @@ const { hash } = require('./adapter');
 const { lockBookingResources, mutateAppointmentBooking } = require('../../services/appointmentBookingCommand.service');
 const { resolveInstallationKeys } = require('../../services/appointmentBookingAvailability.service');
 const { importReviewVersion } = require('../appointment-import-review');
+const { assertSourcePatientUnambiguous } = require('./source-patient-notes');
 const COLUMNS = Object.freeze(['clinica_id','paciente_id','doctor_id','instalacion_id','tratamiento_id',
   'titulo','nota','motivo','tipo_cita','estado','inicio','fin','source_system','source_reference',
   'es_provisional','created_at','updated_at','import_metadata']);
@@ -18,6 +19,7 @@ function validatePayload(payload, equipmentIds, sourceSha256) {
     || !(payload.tratamiento_id === null || positive(payload.tratamiento_id))
     || payload.source_system !== 'cliniccloud' || !payload.source_reference
     || payload.estado !== 'pendiente' || payload.es_provisional !== 0) fail('DOCUMENTED_BOOKING_PAYLOAD_INVALID');
+  assertSourcePatientUnambiguous(payload.nota);
   const metadata = payload.import_metadata;
   if (!metadata || metadata.source_account !== 'cliniccloud-5880'
     || !/^\d+$/.test(metadata.source_contact_id || '')

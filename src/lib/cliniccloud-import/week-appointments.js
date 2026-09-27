@@ -7,6 +7,7 @@ const { hash, dateOnly, localToUtc } = require('./adapter');
 const { verifyPlan, instant } = require('./appointments-apply');
 const { revisedSource, validateSourceRevision, assertFreshRevision } = require('./source-revisions');
 const { validateDistinctVisit, assertFreshDistinctVisit } = require('./distinct-visits');
+const { assertSourcePatientUnambiguous } = require('./source-patient-notes');
 const VERSION = 'cliniccloud-week-appointments/1';
 const ACCOUNT = 'cliniccloud-5880';
 const positive = value => Number.isSafeInteger(value) && value > 0;
@@ -38,6 +39,7 @@ function prepareWeekAppointments({ plan, snapshot, review, target, capturedAt = 
     const action = byKey.get(decision.action_key);
     if (decision.disposition === 'defer') { deferred.push({ action_key: action.action_key, reason: decision.reason }); continue; }
     const source = decision.source_revision ? revisedSource(action.source, decision.source_revision) : action.source;
+    assertSourcePatientUnambiguous(source.details);
     if (decision.distinct_visit) {
       validateDistinctVisit(decision.distinct_visit, action);
       if (decision.source_revision || decision.assignment?.appointment_type !== 'continuacion') fail('WEEK_DISTINCT_VISIT_SCOPE_INVALID');
@@ -110,6 +112,9 @@ function verifyWeekPackage(pkg) {
   }
 }
 function appointmentPayload(operation, pkg, approval, now) {
+  // Also stop packages prepared before the planner learned this review signal.
+  // Existing rows are replayed without calling this creation-only function.
+  assertSourcePatientUnambiguous(operation.note);
   const timestamp = new Date(Math.floor(now / 1000) * 1000).toISOString();
   return { clinica_id: operation.assignment.clinic_id, paciente_id: operation.patient_id,
     doctor_id: operation.assignment.doctor_id, instalacion_id: operation.assignment.installation_id,

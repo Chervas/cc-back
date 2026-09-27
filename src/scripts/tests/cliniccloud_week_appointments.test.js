@@ -98,3 +98,21 @@ test('expired approval or tampered package never writes', async () => {
   pkg.operations[0].patient_id = 99;
   await assert.rejects(executeWeekAppointments(options), /WEEK_PACKAGE_INVALID/); assert.equal(f.rows().length, 0);
 });
+test('a valid older package with an explicit other beneficiary cannot create a patient visit', async () => {
+  const pkg=prepareWeekAppointments(fixture()), op=pkg.operations[0];
+  op.note='ES PARA SU HERMANO';
+  const {operation_sha256,...body}=op;op.operation_sha256=hash(body);
+  const {package_sha256,...packageBody}=pkg;pkg.package_sha256=hash(packageBody);
+  const f=memoryStore(),options=execution(pkg,f.store);
+  await assert.rejects(executeWeekAppointments(options),/SOURCE_NOTE_REFERS_TO_OTHER_PATIENT/);
+  assert.equal(f.rows().length,0);assert.equal(options.entries.length,0);
+});
+test('older already-applied receipts remain auditable and replay never changes their patient or notes', async () => {
+  const pkg=prepareWeekAppointments(fixture()),op=pkg.operations[0];op.note='ES PARA SU HERMANO';
+  const {operation_sha256,...body}=op;op.operation_sha256=hash(body);
+  const {package_sha256,...packageBody}=pkg;pkg.package_sha256=hash(packageBody);
+  const f=memoryStore();await f.store.insert({paciente_id:op.patient_id,source_reference:op.source_reference,nota:'Preserved clinical follow-up',
+    import_metadata:{cliniccloud_reconciliation:{applied:{[op.action_key]:{package_sha256:pkg.package_sha256,operation_sha256:op.operation_sha256}}}}});
+  const before=hash(f.rows()),result=await executeWeekAppointments(execution(pkg,f.store));
+  assert.equal(result.replayed,1);assert.equal(result.created,0);assert.equal(hash(f.rows()),before);
+});

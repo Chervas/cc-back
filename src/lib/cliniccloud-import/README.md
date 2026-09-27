@@ -340,6 +340,14 @@ tanto del contenido como del directorio.
 - Igual paciente/hora no basta: estado, agenda y servicio pueden distinguir citas.
   Exactas nativas se enlazan sin crear otra; duplicados nativa/importada y cambios
   de fecha quedan explícitos en la revisión.
+- Una nota explícita al inicio de frase como «es para su hermano» o «la cita es
+  para su hija» añade `SOURCE_NOTE_REFERS_TO_OTHER_PATIENT`, aunque el contacto
+  externo ya tenga ficha enlazada. No decide quién es el familiar ni cambia
+  contactos/historia. Es una señal conservadora y acotada, no comprensión general
+  de notas: no confundir quien llama o acompaña con quien recibe la atención.
+  Preparación y creación de citas vuelven a comprobarla, también para paquetes
+  antiguos; el replay de citas ya aplicadas no las reescribe ni las borra. Resolver
+  la identidad concreta antes de crear, sin trasladar todas las citas del titular.
 - El CSV manda dentro de su cobertura, además de las citas nativas. Ausencias
   importadas proponen `supersede_candidate`, nunca borrado físico ni no asistencia.
   Fuera de cobertura y nativas se preservan. Todas las propuestas requieren writer

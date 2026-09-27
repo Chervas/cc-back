@@ -4,6 +4,7 @@ const { ADAPTER_VERSION, TIMEZONE, hash, stableJson, index, norm, dateOnly, isAg
 const { sourceReference } = require('./week-appointments');
 const { dispositionForReviewedPair } = require('./reviewed-source-pairs');
 const { matchesSelectionEntry } = require('./confirmed-source-selection');
+const { REASON: patientNoteReason, refersToOtherPatient } = require('./source-patient-notes');
 
 const appointmentKey = (r) => stableJson([r.kind || 'appointment', r.source_contact_id, r.start_local, r.end_local, r.agenda_key]);
 const patientTimeKey = (r) => r.patient_id ? stableJson([r.kind || 'appointment', String(r.patient_id), r.start_local, r.end_local]) : null;
@@ -128,6 +129,7 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
       decisions.push(decision); continue;
     }
     sourceRowHashes.set(row.provenance.row_sha256, row.provenance.row_key);
+    if (row.kind === 'appointment' && refersToOtherPatient(row.details)) decision.reasons.push(patientNoteReason);
     if (!inCoverage(row, coverage)) decision.reasons.push('SOURCE_ROW_OUTSIDE_DECLARED_COVERAGE');
     if (row.kind !== 'block' && (contactIds.get(row.source_contact_id)?.length || 0) !== 1) decision.reasons.push('SOURCE_PATIENT_NOT_UNIQUE');
     if (row.source_external_id && sourceExternalIds.get(row.source_external_id).length > 1) decision.reasons.push('DUPLICATE_SOURCE_APPOINTMENT_ID');
