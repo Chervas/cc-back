@@ -3,7 +3,8 @@
 const crypto = require('node:crypto');
 const { settingScope, publicSettings } = require('./campaignWorkspaceSettings.service');
 const { loadWorkspaceInventory } = require('./campaignWorkspace.service');
-const { googleDestinationContext } = require('./campaignWorkspaceGoogleDestination.service');
+const { googleDestinationContext, googleDestinationAccessError } = require('./campaignWorkspaceGoogleDestination.service');
+const { assertGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
 const { metaCampaignContext } = require('./campaignWorkspaceMetaDestination.service');
 const { metaSignalPreparationContext } = require('./campaignWorkspaceMetaSignalPreparation.service');
 const { ensureGoogleConnectionAccessToken, GOOGLE_ADS_SCOPE } = require('./googleAdsScopedRuntime.service');
@@ -15,7 +16,8 @@ const fail = (code, status = 409) => { throw Object.assign(new Error(code), { co
 const query = transaction => ({ transaction, ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}) });
 
 async function optimizationContext({ models, scope, reference, transaction = null, now = new Date(), loadInventory = loadWorkspaceInventory,
-  googleContext = googleDestinationContext, metaContext = metaCampaignContext, metaGrant = metaSignalPreparationContext, requirePreferences = true }) {
+  googleContext = googleDestinationContext, metaContext = metaCampaignContext, metaGrant = metaSignalPreparationContext, requirePreferences = true,
+  expectedBrokerGrant = null }) {
   const owner = settingScope(scope); const options = query(transaction);
   const ownerRow = await (scope.groupId ? models.GrupoClinica : models.Clinica).findByPk(owner.scope_id, options);
   if (!ownerRow) fail('scope_not_found', 404);
@@ -26,7 +28,8 @@ async function optimizationContext({ models, scope, reference, transaction = nul
   const setting = await models.CampaignWorkspaceSetting.findOne({ where: owner, ...options });
   if (!setting || requirePreferences && (setting.preferences?.mode !== 'optimize' || !setting.preferences.optimization)) fail('workspace_optimization_preferences_required');
   const google = reference.provider === 'google_ads';
-  const source = await (google ? googleContext : metaContext)({ models, scope, reference, transaction, now, loadInventory });
+  const source = await (google ? googleContext : metaContext)({ models, scope, reference, transaction, now, loadInventory,
+    ...(google ? { expectedBrokerGrant } : {}) });
   // Reuse account authorization independently of the CRM signal preference. No signal is checked or sent here.
   const grant = google ? source.account : await metaGrant({ models, scope, accountId: reference.account_id, transaction, now, signalEvents: ['lead'] });
   if (!source.campaign.assigned || !scope.clinicIds.includes(source.campaign.clinicId)) fail('workspace_clinic_assignment_required');
@@ -85,6 +88,10 @@ async function saveCheck({ models, context, record, actorId, transaction, now })
 }
 
 function checkError(error) {
+  const accessError = googleDestinationAccessError(error);
+  if (accessError === 'workspace_google_service_pending' || error.code === 'workspace_google_service_pending') return 'workspace_optimization_service_pending';
+  if (accessError === 'workspace_google_permissions_required') return 'workspace_optimization_permissions_required';
+  if (['broker_timeout', 'provider_timeout'].includes(error.code)) return 'workspace_optimization_timeout';
   const providerCode = Number(error.response?.data?.error?.code);
   if (/permission|access|token|scope/.test(String(error.code || '').toLowerCase()) || [10, 190, 200].includes(providerCode)
     || [401, 403].includes(error.response?.status)) return 'workspace_optimization_permissions_required';
@@ -105,21 +112,38 @@ async function checkOptimizationPreparation(options) {
     await saveCheck({ ...options, context, transaction, now: now(), record: { status: 'checking', run_id: runId, started_at: now().toISOString() } });
     return context;
   });
+  const currentContext = async transaction => {
+    await permitted({ ...options, transaction }, 'write');
+    const context = await optimizationContext({ ...options, reference, transaction, now: now(), expectedBrokerGrant: started.grant.brokerGrant });
+    if (context.fingerprint !== started.fingerprint || context.latest?.run_id !== runId
+      || publicOptimizationProof(context, now()).status !== 'checking') fail('workspace_optimization_changed');
+    if (started.grant.brokerGrant) await assertGoogleAdsGrantTransport(started.grant.brokerGrant, { clinicId: context.campaign.clinicId, transaction });
+    return context;
+  };
   let inspection = null; let error = null;
   try {
-    await permitted(options, 'write');
-    let accessToken = started.grant.connection.accessToken;
-    if (reference.provider === 'google_ads') ({ accessToken } = await (options.ensureToken || ensureGoogleConnectionAccessToken)(started.grant.connection, { requiredScopes: [GOOGLE_ADS_SCOPE] }));
-    await permitted(options, 'write');
-    const fresh = await optimizationContext({ ...options, reference, now: now() });
-    if (fresh.fingerprint !== started.fingerprint) fail('workspace_optimization_changed');
-    inspection = await (reference.provider === 'google_ads' ? options.inspectGoogle || inspectGoogleOptimization : options.inspectMeta || inspectMetaOptimization)({ reference,
-      accessToken, loginCustomerId: started.grant.loginCustomerId, read: options.read, now: now() });
+    await currentContext();
+    if (reference.provider === 'google_ads' && started.grant.brokerGrant) {
+      inspection = await (options.inspectGoogle || inspectGoogleOptimization)({ reference, now: now(), readSection: async (section, timeoutMs) => {
+        const deadline = Date.now() + timeoutMs;
+        await currentContext();
+        const runtime = await assertGoogleAdsGrantTransport(started.grant.brokerGrant, { clinicId: started.campaign.clinicId });
+        const remaining = deadline - Date.now();
+        if (remaining < 1000) fail('workspace_optimization_timeout');
+        return runtime.broker.read(runtime.account, runtime.brokerContext, 'optimization',
+          { campaignId: reference.campaign_id, section }, { timeoutMs: remaining, beforeExecute: () => currentContext() });
+      } });
+    } else {
+      const { accessToken } = reference.provider === 'google_ads'
+        ? await (options.ensureToken || ensureGoogleConnectionAccessToken)(started.grant.connection, { requiredScopes: [GOOGLE_ADS_SCOPE] })
+        : started.grant.connection;
+      await currentContext();
+      inspection = await (reference.provider === 'google_ads' ? options.inspectGoogle || inspectGoogleOptimization : options.inspectMeta || inspectMetaOptimization)({ reference,
+        accessToken, loginCustomerId: started.grant.loginCustomerId, read: options.read, now: now() });
+    }
   } catch (failure) { error = checkError(failure); }
   return options.models.sequelize.transaction(async transaction => {
-    await permitted({ ...options, transaction }, 'write');
-    const context = await optimizationContext({ ...options, reference, transaction, now: now() });
-    if (context.fingerprint !== started.fingerprint || context.latest?.run_id !== runId || context.latest.status !== 'checking') fail('workspace_optimization_changed');
+    const context = await currentContext(transaction);
     const checkedAt = now();
     const record = { status: 'checked', run_id: runId, inspection, error,
       checked_at: checkedAt.toISOString(), expires_at: new Date(+checkedAt + TTL_MS).toISOString() };

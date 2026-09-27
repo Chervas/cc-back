@@ -34,6 +34,7 @@ cuenta y operación; no tenant de grupo ni operación genérica de búsqueda.
 | `google.ads.ads.read.v1` | `{campaignId, pageToken}` | Identidad/estado de campaña, grupo y anuncio; URLs, titulares, descripciones RSA y estado de revisión; máximo 200.000 |
 | `google.ads.ad_metrics.read.v1` | `{campaignId, startDate, endDate, pageToken}` | Identidades y métricas diarias de anuncio por fecha/red/dispositivo; máximo 200.000 |
 | `google.ads.campaign_destinations.read.v1` | `{campaignId, section, pageToken}` | Metadatos de destinos de una campaña; secciones cerradas, máximo 2.000 filas por sección; preparado en fuente el 27/09, no publicado |
+| `google.ads.optimization.read.v1` | `{campaignId, section, pageToken}` | Compatibilidad de Optimiza: campaña/presupuesto, grupos y estado de anuncios; máximo 2.000 filas por sección; preparado el 27/09, no publicado |
 | `google.ads.asset.revoke.v1` | `{}` | `{revoked: true}` con UUID/replay durable |
 
 Fechas canónicas, ventana máxima inclusiva de 15 días y 100.000 filas por
@@ -99,6 +100,33 @@ Un runtime anterior devuelve un estado de servicio pendiente, no solicita
 repetir OAuth ni recurre a tokens locales. Publicación/activación separadas
 según el runbook vigente. Evidencia y siguiente corte en
 [campaign-workspace-implementation](../campaign-workspace-implementation.md).
+
+### Compatibilidad de Optimiza: adaptación del 27/09/2026
+
+`optimization` admite exclusivamente `campaign`, `ad_groups` y `ads`, con
+`campaignId` positivo obligatorio (no null) y cursor ligado a cuenta, campaña,
+sección y autorización. El nuevo contrato conserva las consultas acotadas del
+inspector existente, no sus tokens. Proyecta estrategia/objetivo actual, moneda,
+propietario y condición compartida del presupuesto, IDs y estado de entrega.
+No consulta ni devuelve contactos, búsquedas, anuncios completos o conversiones.
+Un dato opcional ausente queda ausente: no acredita aprobación de un anuncio
+ni propiedad exclusiva de un presupuesto. Proyección repetida en ambos límites.
+
+El consumidor `campaignWorkspaceOptimizationPreparation` mantiene grant opaco
+original, ACL, selección, clínica, preferencias y lease antes/después de cada
+página y en la transacción final. GET no consulta proveedores; POST solo renueva
+la prueba persistida 24h con `authorized=false`. No modifica mandato ni
+publicidad. Cuentas migradas no recuperan tokens locales ni usan fallback.
+`operation_denied` se presenta como servicio pendiente, no como necesidad de
+repetir OAuth. La revalidación impide conservar verde tras cambios concurrentes.
+
+Requiere motor/consumidor compatibles y permiso exacto en grant o `readOperations`;
+no amplía automáticamente los grants ya instalados. La ejecución de ajustes,
+sus evidencias y los permisos de escritura siguen siendo otro corte pendiente.
+Referencias de los campos:
+[campaña v24](https://developers.google.com/google-ads/api/fields/v24/campaign),
+[presupuesto v24](https://developers.google.com/google-ads/api/fields/v24/campaign_budget)
+y [aprobación del anuncio](https://developers.google.com/google-ads/api/reference/rpc/v24/AdGroupAdPolicySummary).
 
 Las nuevas selecciones siguen los recursos oficiales de
 [destinos](https://developers.google.com/google-ads/api/fields/v24/landing_page_view),

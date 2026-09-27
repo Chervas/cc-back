@@ -143,3 +143,12 @@ test('a euro monthly limit cannot authorize a budget in a different currency', a
     assert.ok(count(result, 'adjust_bids') > 0);
   }
 });
+
+test('typed metadata inspection does not accept a successful response after its total deadline', async t => {
+  let clock = 1000; t.mock.method(Date, 'now', () => clock);
+  const f = googleFixture(); let calls = 0;
+  await assert.rejects(f.run({ readSection: async () => {
+    calls++; clock += 45000; return [f.state.root];
+  } }), { code: 'workspace_optimization_timeout' });
+  assert.equal(calls, 1); assert.equal(f.state.calls.length, 0);
+});

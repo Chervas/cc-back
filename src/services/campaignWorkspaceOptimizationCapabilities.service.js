@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
 const { graphList } = require('./campaignWorkspaceMetaDestination.service');
 const { googleAdHasUnrestrictedDelivery } = require('./googleAdDelivery.service');
+const googleOptimizationContract = require('../../services/integrations-broker/src/google-optimization-contract');
 
 const ACTIONS = ['pause_underperforming_ads', 'adjust_bids', 'negative_keywords', 'adjust_budget'];
 const TTL_MS = 24 * 3600000;
@@ -65,27 +66,24 @@ function pausableAds(ads, targets, resource) {
 }
 
 // Compatibility is not authorization or a recommendation. Only allowlisted metadata is retained.
-async function inspectGoogleOptimization({ reference, accessToken, loginCustomerId, read = googleAdsSearchRows, now = new Date() }) {
+async function inspectGoogleOptimization({ reference, accessToken, loginCustomerId, read = googleAdsSearchRows, readSection, now = new Date() }) {
   optimizationReference(reference);
   if (reference.provider !== 'google_ads') fail('workspace_optimization_provider_mismatch');
   const account = reference.account_id; const campaignId = reference.campaign_id;
   const campaignResource = `customers/${account}/campaigns/${campaignId}`;
   const deadline = Date.now() + 45000;
-  const search = async query => {
+  const search = async section => {
     const remaining = deadline - Date.now();
     if (remaining < 1000) fail('workspace_optimization_timeout');
-    const rows = await read({ customerId: account, accessToken, loginCustomerId, query: `${query} LIMIT 2001`, maxPages: 5, timeoutMs: remaining });
+    const rows = readSection ? await readSection(section, remaining)
+      : await read({ customerId: account, accessToken, loginCustomerId,
+        query: googleOptimizationContract.query({ section, campaignId }, { customerId: account }), maxPages: 5, timeoutMs: remaining });
+    if (Date.now() >= deadline) fail('workspace_optimization_timeout');
     if (!Array.isArray(rows) || rows.length > 2000 || rows.some(row => String(row.customer?.id) !== account
       || String(row.campaign?.id) !== campaignId)) fail('workspace_optimization_incomplete');
     return rows;
   };
-  const rows = await search(`SELECT customer.id, customer.currency_code, campaign.id, campaign.status,
-    campaign.experiment_type, campaign.advertising_channel_type, campaign.bidding_strategy, campaign.bidding_strategy_type,
-    campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas,
-    campaign.maximize_conversions.target_cpa_micros, campaign.maximize_conversion_value.target_roas,
-    campaign_budget.resource_name, campaign_budget.amount_micros, campaign_budget.period,
-    campaign_budget.explicitly_shared, campaign_budget.reference_count
-    FROM campaign WHERE campaign.id = ${campaignId} AND campaign.status != 'REMOVED'`);
+  const rows = await search('campaign');
   if (rows.length !== 1) fail('workspace_optimization_campaign_unavailable');
   const campaign = rows[0].campaign; const budget = rows[0].campaignBudget || {};
   const currency = rows[0].customer.currencyCode;
@@ -98,18 +96,13 @@ async function inspectGoogleOptimization({ reference, accessToken, loginCustomer
     for (const action of ACTIONS) reasons[action].push(!active ? 'campaign_inactive' : !base ? 'experiment_campaign' : 'campaign_type_unsupported');
     return result(reference, currency, targets, reasons, now);
   }
-  const groups = campaign.advertisingChannelType === 'SEARCH' ? await search(`SELECT customer.id, campaign.id,
-    ad_group.id, ad_group.status, ad_group.cpc_bid_micros FROM ad_group
-    WHERE campaign.id = ${campaignId} AND ad_group.status != 'REMOVED'`) : [];
+  const groups = campaign.advertisingChannelType === 'SEARCH' ? await search('ad_groups') : [];
   const groupIds = new Set();
   for (const row of groups) {
     if (!id(String(row.adGroup?.id)) || groupIds.has(String(row.adGroup.id))) fail('workspace_optimization_incomplete');
     groupIds.add(String(row.adGroup.id));
   }
-  const ads = campaign.advertisingChannelType === 'SEARCH' ? await search(`SELECT customer.id, campaign.id,
-    ad_group.id, ad_group.status, ad_group_ad.ad.id, ad_group_ad.status,
-    ad_group_ad.primary_status, ad_group_ad.policy_summary.approval_status FROM ad_group_ad
-    WHERE campaign.id = ${campaignId} AND ad_group_ad.status != 'REMOVED' AND ad_group.status != 'REMOVED'`) : [];
+  const ads = campaign.advertisingChannelType === 'SEARCH' ? await search('ads') : [];
   const adKeys = new Set();
   for (const row of ads) {
     const key = `${row.adGroup?.id}:${row.adGroupAd?.ad?.id}`;

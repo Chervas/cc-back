@@ -65,13 +65,77 @@ aquella fotografia. Fuentes vigentes: documentos front 00, 19, 25, 30, 31 y 39.
   presupuesto, publicacion de anuncios, reinicios, migraciones o despliegues.
   Fuente local en DEV: este corte no cambia localhost:4203 ni el CRM publico.
 
+### Segundo corte: compatibilidad de Optimiza por broker
+
+Preparado el 27/09 sobre backend `207af62e` y frontend `c3338b41f`, sin cambios
+de runtime. La inspeccion Google de Optimiza ya usa
+`google.ads.optimization.read.v1` para cuentas migradas. Tres secciones cerradas
+(`campaign`, `ad_groups`, `ads`), 2.000 filas/seccion y las mismas consultas y
+politicas de compatibilidad anteriores. No recibe GAQL, cuenta, gestor o tokens
+del consumidor ni expone mutaciones, terminos de busqueda, contactos o destinos.
+
+- Grant original opaco, ACL de escritura para renovar la prueba, seleccion,
+  clinica, preferencias y lease revalidados alrededor de cada pagina y al
+  confirmar en transaccion. Sustituir un binding no permite terminar con otro.
+- GET solo lee la prueba persistida. POST guarda checking y resultado con
+  auditoria, cache 24h y `authorized=false`; no cambia preferencias, mandato,
+  anuncios, pujas, presupuestos ni senales. Un nuevo fallo retira el verde previo.
+- Sin refresco local o fallback legacy para cuentas migradas. Servicio pendiente
+  se distingue de permisos revocados; el mensaje no propone repetir OAuth y
+  permite una nueva comprobacion explicita cuando se habilite el servicio.
+- PMax sigue sin anuncios individuales; presupuestos compartidos no son ajustables.
+  Estados de entrega ausentes no hacen que un anuncio sea apto para pausa.
+  Exclusiones automaticas siguen pendientes de evidencia de relevancia.
+- QA: 1.097 backend, 803 broker y 131 frontend correctas; Angular
+  `ngc --noEmit` correcto. Se incluye consumidor real, autorizador real y motor
+  firmado con SQLite y proveedor/AWS ficticios: paginacion, revocacion,
+  reemplazo de binding, cambio de preferencias/clinica, caducidad y reintento.
+  Logs `/tmp/cc-optimization-{all-backend,all-broker,all-front,front-ngc}-20260927.log`.
+
+Contraste autenticado de solo lectura en CRM, por peticion del titular:
+`GET /api/marketing/campaign-workspace/configuration?scope=group:5` devuelve
+Dental - Parallel Campaign `1851215478`, sincronizacion en cache
+`2026-09-27T03:44:24Z`, 26 campanas, 19 asignadas y 7 sin asignar. Configuracion
+del nuevo workspace version 0, sin seleccion persistida. No se asignan campanas
+ni se deduce acceso operativo al broker de este inventario. El grupo actual
+incluye nueve sedes; el listado historico de seis activas no sustituye el alcance
+actual ni permite reactivar sedes cerradas. Sin datos de pacientes en evidencias.
+
+El titular inicia MFA en VNC. Se verifica identidad de sesion CRM con `/auth/me`;
+DEV termina sin sesion al entrar en su ruta protegida. No se exportan sesiones
+ni se elude MFA. La QA publica comprueba el build existente, no este candidato.
+Capturas privadas en `/tmp/cc-optimization-authenticated-20260927/`.
+La entrada general renderiza sin errores JS ni desborde horizontal en 1440.
+Seleccionando Propdental mediante el menu real, el informe supera el timeout
+frontend de 30s y muestra un aviso generico; Nginx registra 499 al cancelar el
+cliente. GET directo autenticado de ese mismo informe termina 200, y
+configuracion/preparacion tambien 200. No es prueba de falta de permisos ni
+de fallo de Google: hace falta localizar el coste del lector/agregador antes
+de repetir QA completa. Las nueve capturas/retornos previstos NO se completaron.
+El candidato frontend distingue el timeout/fallo de informe de un guardado
+fallido; conserva 30s, reintento explicito y mensajes de sesion/permisos.
+Los requests no GET y dominios externos se bloquearon en las paginas de QA;
+filtro local restaurado, tabs propias cerradas y sesion del titular conservada.
+
+Este corte NO adapta aun la ejecucion de ajustes ni sus colectores de evidencia.
+No se habilitan jobs, permisos nuevos, OAuth, Meta, conversiones ni publicidad.
+Publicar lectura exige instalacion compatible y grant exacto; guardar fuente
+en DEV no modifica el preview, CRM o AWS.
+
 ### Siguiente corte
 
-1. Adaptar la inspeccion y ejecucion de Optimiza al transporte tipado. Siguen
-   pendientes consumidores legacy en `campaignWorkspaceOptimizationPreparation`
-   y `campaignWorkspaceOptimizationExecution`; no se sustituyen con GAQL libre
-   ni se activan para demostrar la interfaz. Preparacion de conversiones ya
-   tiene transporte broker y no necesita duplicarse.
+Prioridad inmediata: resolver la latencia del informe agregado Propdental
+observada en Chromium (timeout 30s, API finalmente 200), sin alargar el timeout
+para ocultarla. Aislar consultas/agregacion con mediciones acotadas y datos
+sinteticos; no repetir cargas costosas en CRM mientras se investiga. QA
+responsive y Resumen/Campanas/Salud/retornos siguen pendientes en ese ambito.
+
+1. Adaptar la ejecucion y evidencia de Optimiza al transporte tipado. La
+   preparacion de compatibilidad ya esta adaptada; siguen pendientes
+   `campaignWorkspaceOptimizationExecution`, lectores de valores y colectores
+   de evidencia/politicas. No se sustituyen con GAQL libre ni se activan para
+   demostrar la interfaz. Preparacion de conversiones ya tiene transporte
+   broker y no necesita duplicarse.
 2. Publicacion compatible siguiendo DEV -> staging, con los gates efectivos
    conservados. Instalar motor y grant de lectura de destinos solo en una
    cohorte aprobada; no abrir conversiones, leads o mutaciones por ello.
