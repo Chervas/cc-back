@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const db = require('../../models');
+const { requireExpectedVersion, assertCurrentVersion } = require('../lib/clinical-report-version');
 
 const {
   sequelize,
@@ -185,6 +186,7 @@ async function listForPatient({ patientIdentifier, clinicId }) {
 }
 
 async function save({ appointmentId, actorId, payload, finalize = false }) {
+  const expectedVersion = requireExpectedVersion(payload);
   return sequelize.transaction(async (transaction) => {
     const appointment = await loadAppointment(appointmentId, transaction);
     let report = await AppointmentClinicalReport.findOne({
@@ -192,6 +194,7 @@ async function save({ appointmentId, actorId, payload, finalize = false }) {
       transaction,
       lock: transaction.LOCK.UPDATE,
     });
+    assertCurrentVersion(expectedVersion, report);
     if (report?.status === 'final' && !payload.reopen) {
       throw domainError(409, 'clinical_report_final', 'El informe está cerrado. Reábrelo antes de modificarlo.');
     }
