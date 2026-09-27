@@ -1,6 +1,6 @@
 'use strict';
 
-const asyncHandler = require('express-async-handler');
+const { clinicalReportHandler: asyncHandler } = require('../lib/clinical-report-version');
 const db = require('../../models');
 const reports = require('../services/appointmentClinicalReports.service');
 const { canUserAccessFeature } = require('../lib/access-policy');
