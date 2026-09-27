@@ -171,3 +171,66 @@ CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/cliniccloud_contorno_p
 Reversión no destructiva: mantener el individual como borrador y, solo tras
 comprobar dependencias y cambios humanos, emitir una revisión de programa
 basada en el snapshot anterior. No borrar historial ni restaurar la BD completa.
+
+## Programas de obesidad, nutrición y psiconutrición
+
+Ámbito documental separado `--family obesity` del operador de borradores.
+El valor omitido sigue siendo `corporal`; cualquier otro valor se rechaza.
+Fuentes cerradas: Protocolo V4 Obesidad y Tarifa 2026 Obesidad, con SHA fijados
+en `obesity-program-variants.js`. El workbook de procedencia sigue siendo
+`BASE_DE_DATOS_TRATAMIENTOS_BS_MEDICAL_v2.xlsx`, no el archivo denominado
+«actualizado», que contiene una versión diferente. No cambia el runtime.
+
+Antes de las siete definiciones, `cliniccloud-import-obesity-program-variants.js`
+crea dos individuales inactivos: seguimiento GLP-1 de 30 min en C7/Camacho
+y Ligereza 45 min en C12/INDIBA 23 min → C9/Lymphastim 22 min/Piedad.
+No sobrescribe la receta individual de cinco minutos ni Recuperación 28+17.
+El profesional de GLP-1 es la asignación documental inicial, no limita la
+elección clínica futura ni incorpora al médico excluido por el titular.
+Tiempos incluyen preparación y registro; no se mueve ninguna máquina fija.
+
+| Programa | Citas | Composición |
+| --- | ---: | --- |
+| OBE-22 GLP-1 | 3 | Seguimiento 30 min; no incluye plumas ni receta automáticamente. |
+| OBE-23 Nutrición | 3 | Nutrición 45 min. |
+| OBE-24 Psico-nutricional | 5 | Psiconutrición 45 min, no psicología genérica 60 min. |
+| OBE-27 Ligereza | 6 | Variante 45 min, semanal. |
+| OBE-28 Transición | 8 | Alterna Ligereza y EXION+INDIBA 45 min, semanal. |
+| OBE-29 Firmeza · pérdida de peso | 12 | 8 EXION+INDIBA 45 min y 4 EMShape 30 min. |
+| OBE-30 Reconstrucción | 16 | 10 EXION+INDIBA 45 min y 6 EMShape 30 min. |
+
+Las dos últimas agrupan series en el editor, **no definen su orden cronológico**.
+Una serie semanal y otra dos veces/semana no se convierten en una pauta global.
+Se conservan notas de días no consecutivos, citas separadas y calendario
+individual pendiente; todos los offsets quedan nulos. Firmeza de pérdida de
+peso no sustituye a Firmeza corporal de ocho citas. No se selecciona programa
+por peso ni se interpreta la importación como aprobación médica. Caducidad
+de doce meses queda documental, no se afirma que ya se aplique al bono.
+
+Variantes: modos `prepare|apply|verify`, mismos argumentos de fuentes/paquete/
+backup/diario que COR-43, dos POST de tratamiento y ninguna revisión de los
+programas previos. Primero verificar/repetir variantes; después preparar y
+previsualizar los siete programas con `--family obesity` y aplicar su paquete.
+Cada paso exige código limpio commiteado, copia CRM íntegra y paquete de menos
+de dos horas, diario y sesión normal. SQL solo lee. Ante fallo parcial, conciliar
+código estable/clave idempotente y diario; no regenerar ni sobreescribir.
+El verificador de variantes exige el conjunto de programas original intacto:
+ejecutarlo antes de importar los siete programas; el de programas verifica
+posteriormente todas las variantes y los individuales por huella.
+
+Precios del 01/10/2026 solo en procedencia/notas; `total_price=null` y borradores
+sin compra ni reserva. No se crean recetas, firmas, pacientes, citas ni avisos.
+El contrato clínico/documental/fiscal pendiente no se resuelve con esta carga.
+Reversión: conservar variantes inactivas y archivar las definiciones mediante
+API/versionado solo tras revisar dependencias; no eliminar datos ni restaurar
+la BD completa. Evidencia de aplicación en el documento 99 central.
+
+```sh
+node --test src/scripts/tests/cliniccloud_obesity_programs.test.js
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/cliniccloud_obesity_programs_mysql.integration.js
+```
+
+La integración SQL usa exclusivamente datos ficticios; pasa por el controlador
+real de tratamientos y servicio canónico de programas. Comprueba minutos,
+revisiones, idempotencia, clínica ajena y bloqueo de activación. La QA Chromium
+de escritorio/móvil usa sesión normal, lecturas, y nunca guarda definiciones.

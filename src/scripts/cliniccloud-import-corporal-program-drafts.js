@@ -7,7 +7,6 @@ const {parseArgs,writePrivateJson,readBytes}=require('../lib/cliniccloud-import/
 const {hash}=require('../lib/cliniccloud-import/adapter');
 const {connectOperatorDatabase}=require('../lib/cliniccloud-import/operator-database');
 const {normalizeValues,payloadHash}=require('../lib/treatmentPrograms.contract');
-const {prepare,SOURCES}=require('../lib/cliniccloud-import/corporal-program-drafts');
 const {privateJson,openJournal,acquireExecutorLocks}=require('./cliniccloud-import-appointments-apply');
 const {validateBackup}=require('./cliniccloud-import-contacts-apply');
 
@@ -47,7 +46,9 @@ async function verify(c,pkg,oldPrograms){
  return created;
 }
 async function run(args){
- const o=parseArgs(args,['--mode','--target','--plan','--workbook','--archive','--package','--private-output','--approved-sha256','--backup-manifest','--private-journal']);
+ const o=parseArgs(args,['--family','--mode','--target','--plan','--workbook','--archive','--package','--private-output','--approved-sha256','--backup-manifest','--private-journal']);
+ const family=o['--family']||'corporal';assert(['corporal','obesity'].includes(family),'EXPLICIT_DOCUMENTARY_FAMILY_REQUIRED');
+ const {prepare,SOURCES}=family==='obesity'?require('../lib/cliniccloud-import/obesity-program-drafts'):require('../lib/cliniccloud-import/corporal-program-drafts');
  if(o['--target']!=='crm'||!['prepare','preview','apply','verify'].includes(o['--mode']))throw Error('EXPLICIT_CRM_DRAFT_MODE_REQUIRED');
  if(process.cwd()!=='/home/ubuntu/wt/back-dev'||execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim()!=='dev')throw Error('DEV_OPERATOR_REQUIRED');
  const plan=privateJson(o['--plan']);if(hash(readBytes(o['--workbook']))!==plan.workbook_sha256)throw Error('SOURCE_WORKBOOK_CHANGED');
