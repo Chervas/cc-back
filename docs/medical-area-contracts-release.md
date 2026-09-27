@@ -73,6 +73,27 @@ Orden de publicación: diario aditivo → API compatible → frontend. API antig
 no accede al diario y sigue operando durante el corte; no habilitar la UI
 nueva contra un backend que todavía acepte adopciones sin revisión.
 
+La aceptación autenticada reproducible está en el frontend,
+`scripts/tests/clinic_area_adoption_dev_chromium_qa.js`. Usa exclusivamente
+`localhost:4203`, la clínica ficticia multiárea DEV `110`, una sesión normal del
+Chromium local y un backup DEV verificado de menos de dos horas:
+
+```bash
+QA_MEDICAL_AREA_DEV_WRITES=versioned-config-only \
+QA_BACKUP_MANIFEST=RUTA_PRIVADA_DEV/backup-manifest.json \
+node scripts/tests/clinic_area_adoption_dev_chromium_qa.js
+```
+
+Publica cambios ficticios, provoca una revisión caducada real, adopta desde la
+interfaz y restaura la asignación original desde móvil. Conserva publicaciones
+y diario inmutables de QA; no los borra. Contrasta huellas de tablas clínicas,
+económicas, consentimientos, configuración local y asignaciones de las demás
+áreas/clínicas. No intercepta respuestas ni crea sesiones, firmas, cobros o
+citas. Ante un error reconcilia el resultado y restaura por API con control de
+versión, sin sobrescribir cambios ajenos. Evidencia en directorio privado.
+Este ensayo DEV no autoriza ejecutarlo contra una clínica real ni sustituye la
+comprobación de lectura de la release en CRM.
+
 En CRM repetir backup/corte y promoción fast-forward autorizada, sin copiar
 filas desde DEV. Usar solo una clínica/paciente DEMO autorizados para QA con
 escrituras. Verificar consumidores compartidos antes de reiniciar. No cambiar
