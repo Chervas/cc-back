@@ -40,6 +40,34 @@ function validSource(s) {
     && localToUtc(s.start_local) && localToUtc(s.end_local) && s.end_local > s.start_local
     && (Date.parse(localToUtc(s.end_local))-Date.parse(localToUtc(s.start_local))) <= 86400000;
 }
+// Older CSV exports had no appointment IDs. An archived authenticated calendar
+// observation may bind that exact imported slot to the ID returned today. This
+// is not patient/name similarity and cannot bind an edited or unrelated slot.
+function reviewedIdentityBinding(before, originalLive, liveCapturedAt) {
+  const m = before.import_metadata, delta = m?.cliniccloud_delta;
+  if (m?.source_appointment_id) { if (originalLive !== undefined) fail(); return null; }
+  if (!originalLive || originalLive.source_account !== ACCOUNT || !Array.isArray(originalLive.rows)
+    || !Number.isFinite(Date.parse(originalLive.captured_at))
+    || Date.parse(originalLive.captured_at) >= Date.parse(liveCapturedAt)
+    || m?.source_account !== ACCOUNT || delta?.version !== 1
+    || delta.source_reference_kind !== 'import_fingerprint_not_source_appointment_id'
+    || !sha(delta.provenance?.file_sha256) || !sha(delta.provenance?.row_sha256)
+    || !positive(delta.provenance?.source_row) || before.source_reference !== sourceReference(delta.source)
+    || m.cliniccloud_reconciliation?.automation_policy !== 'hold'
+    || !['appointment_details','day_before','same_day'].every(k => m.notification_suppression?.[k] === true)) fail();
+  const baseline = pick({ ...delta.source, details:before.nota || '' });
+  if (!validSource(baseline) || before.inicio !== localToUtc(baseline.start_local)
+    || before.fin !== localToUtc(baseline.end_local) || before.estado !== baseline.status
+    || baseline.source_contact_id !== String(m.source_contact_id)) fail();
+  const matches = originalLive.rows.filter(r => String(r.contact_id) === baseline.source_contact_id
+    && Number(r.state) === 0 && String(r.start).replace(' ','T') === baseline.start_local
+    && String(r.end).replace(' ','T') === baseline.end_local && norm(r.agenda) === baseline.agenda_key
+    && norm(r.service) === baseline.service_key && norm(r.details || '') === norm(baseline.details));
+  if (matches.length !== 1 || !positive(matches[0].appointment_id)) fail();
+  return { version:1, source_appointment_id:String(matches[0].appointment_id),
+    source_contact_id:baseline.source_contact_id, baseline_sha256:hash(baseline),
+    observation_sha256:hash(originalLive), row_sha256:hash(matches[0]), observed_at:originalLive.captured_at };
+}
 function storedSourceRefresh(row, metadata) {
   const ledger = metadata[KEY];
   if (ledger === undefined) return null;
@@ -78,6 +106,15 @@ function storedSourceRefresh(row, metadata) {
       || Date.parse(receipt.live_captured_at) > Date.parse(receipt.reviewed_at)
       || Date.parse(receipt.reviewed_at) - Date.parse(receipt.live_captured_at) > 3600000
       || previous && Date.parse(receipt.live_captured_at) < Date.parse(previous.live_captured_at)) fail();
+    const binding = receipt.source_identity_binding;
+    if (binding && (previous || binding.version !== 1 || binding.source_appointment_id !== receipt.source_appointment_id
+      || binding.source_contact_id !== receipt.source_contact_id || binding.baseline_sha256 !== hash(receipt.baseline)
+      || !sha(binding.observation_sha256) || !sha(binding.row_sha256)
+      || !Number.isFinite(Date.parse(binding.observed_at))
+      || Date.parse(binding.observed_at) >= Date.parse(receipt.live_captured_at)
+      || metadata.cliniccloud_delta?.version !== 1
+      || metadata.cliniccloud_delta.source_reference_kind !== 'import_fingerprint_not_source_appointment_id'
+      || row.source_reference !== sourceReference(metadata.cliniccloud_delta.source))) fail();
     for (const source of [receipt.baseline,receipt.current]) entries.set(sourceReference(source), {
       source_reference:sourceReference(source), source_appointment_id:receipt.source_appointment_id, source,
     });
@@ -103,13 +140,15 @@ function sourceBaseline(before, metadata, detail, previous) {
     agenda_key:norm(detail.agenda.nombre), service_key:norm(detail.cita_conceptos[0].asunto),
     status:'pendiente', details:String(raw.detalles || '') });
 }
-function prepareSourceRefresh({ before:raw, source, detail, liveCapturedAt, sourcePlanSha256,
+function prepareSourceRefresh({ before:raw, source, detail, liveCapturedAt, sourcePlanSha256, originalLive,
   coverage, resources, reviewedBy, reason, now=Date.now() }) {
   const before=normalizedSourceRefreshRow(raw), m=before.import_metadata;
+  const binding = reviewedIdentityBinding(before, originalLive, liveCapturedAt);
+  const linked = binding ? {...m, source_appointment_id:binding.source_appointment_id} : m;
   if (before.source_system !== 'cliniccloud' || ![66,72].includes(before.clinica_id)
     || !['id_cita','paciente_id','clinica_id'].every(k=>positive(before[k]))
     || before.estado !== 'pendiente' || before.updated_by || before.voucher_id || before.lead_intake_id
-    || before.es_provisional || before.hold_expires_at || !before.source_reference || !m || !positive(m.source_appointment_id)
+    || before.es_provisional || before.hold_expires_at || !before.source_reference || !m || !positive(linked.source_appointment_id)
     || !positive(m.source_contact_id) || m.source_account && m.source_account !== ACCOUNT
     || ['booking','program_session','additional_staff','import_resource_resolution','import_treatment_resolution',
       'cliniccloud_parallel_sources','cliniccloud_reviewed_source_pair','cliniccloud_confirmed_source_selection']
@@ -123,7 +162,7 @@ function prepareSourceRefresh({ before:raw, source, detail, liveCapturedAt, sour
     || source.end_local.slice(0,10)>coverage.end || Date.parse(source.start_utc)<now
     || !sha(source.provenance?.file_sha256) || !sha(source.provenance?.row_sha256)
     || !positive(source.provenance?.source_row)) fail();
-  if (!detail || Number(detail.idEmpresa)!==5880 || String(detail.idCita)!==String(m.source_appointment_id)
+  if (!detail || Number(detail.idEmpresa)!==5880 || String(detail.idCita)!==String(linked.source_appointment_id)
     || String(detail.idContacto)!==String(m.source_contact_id) || source.source_contact_id!==String(m.source_contact_id)
     || Number(detail.estado)!==0 || !Array.isArray(detail.cita_conceptos) || !detail.cita_conceptos.length
     || !detail.agenda?.nombre || norm(detail.agenda.nombre)!==source.agenda_key
@@ -131,7 +170,7 @@ function prepareSourceRefresh({ before:raw, source, detail, liveCapturedAt, sour
     || localDateTime(detail.fechaIni,detail.horaIni)!==source.start_local
     || localDateTime(detail.fechaFin,detail.horaFin)!==source.end_local
     || norm(detail.detalles||'')!==norm(source.details||'')) fail();
-  const previous=storedSourceRefresh(before,m), baseline=sourceBaseline(before,m,detail,previous);
+  const previous=storedSourceRefresh(before,m), baseline=sourceBaseline(before,linked,detail,previous);
   if (!validSource(baseline) || before.inicio!==localToUtc(baseline.start_local)
     || before.fin!==localToUtc(baseline.end_local) || baseline.service_key!==source.service_key
     || norm(baseline.details)!==norm(source.details||'')
@@ -141,11 +180,12 @@ function prepareSourceRefresh({ before:raw, source, detail, liveCapturedAt, sour
   const effective={...before,doctor_id:Number(resources.doctor_id),instalacion_id:Number(resources.installation_id)};
   const body={version:VERSION,source_account:ACCOUNT,appointment_id:before.id_cita,patient_id:before.paciente_id,
     clinic_id:before.clinica_id,source_reference:before.source_reference,source_contact_id:String(m.source_contact_id),
-    source_appointment_id:String(m.source_appointment_id),before_sha256:hash(before),original_evidence_sha256:hash(origin(m)),
+    source_appointment_id:String(linked.source_appointment_id),before_sha256:hash(before),original_evidence_sha256:hash(origin(linked)),
     previous_receipt_sha256:previous?.receipt_sha256||null,baseline,current:pick(source),provenance:source.provenance,
     source_plan_sha256:sourcePlanSha256,source_detail_sha256:hash(detail),live_captured_at:liveCapturedAt,
     reviewed_at:new Date(now).toISOString(),reviewed_by:reviewedBy,reason,coverage:{...coverage},
-    resources:{...resources},clinical_sha256:hash(clinical(effective)),automation_policy:'hold'};
+    resources:{...resources},clinical_sha256:hash(clinical(effective)),automation_policy:'hold',
+    ...(binding ? {source_identity_binding:binding} : {})};
   return {...body,receipt_sha256:hash(body)};
 }
 function patchSourceRefresh(raw, receipt, now=Date.now()) {
@@ -156,6 +196,7 @@ function patchSourceRefresh(raw, receipt, now=Date.now()) {
   const after={...before,inicio:localToUtc(receipt.current.start_local),fin:localToUtc(receipt.current.end_local),
     doctor_id:Number(receipt.resources.doctor_id),instalacion_id:Number(receipt.resources.installation_id),
     updated_at:new Date(Math.floor(now/1000)*1000).toISOString(),import_metadata:{...m,
+      ...(receipt.source_identity_binding ? {source_appointment_id:receipt.source_appointment_id} : {}),
       notification_suppression:{...m.notification_suppression,appointment_details:true,day_before:true,same_day:true},
       cliniccloud_reconciliation:{...m.cliniccloud_reconciliation,automation_policy:'hold'},
       [KEY]:{version:VERSION,receipts:[...(m[KEY]?.receipts||[]),receipt]}}};

@@ -101,6 +101,22 @@ relectura del intervalo anterior no lo restaura. Rechaza cambios locales,
 citas cerradas, programas, perfiles ya reservados y decisiones incompatibles;
 esos casos requieren su revisión específica, no borrar metadata para admitirlos.
 
+Si el delta antiguo no guardó IDCITA, se exige además una observación autenticada
+archivada que coincida de forma única con su contacto, intervalo, agenda, acto,
+nota y estado originales. El mismo ID debe aparecer en el detalle actual. La
+vinculación queda registrada con huellas y fechas; no se deduce de nombres ni
+de que haya desaparecido una reserva. Conserva el delta original y permite
+trasladar una reserva pendiente antigua a su nueva fecha futura, sin dar por
+realizada ni borrar la visita anterior. CAS y guardas de dependencias siguen
+siendo obligatorios.
+
+La conciliación legacy permite corregir una reserva pendiente que conserva una
+fecha pasada cuando su ID aparece explícitamente anulado en una fecha futura.
+No admite anulaciones por ausencia, estados locales completados ni cierres de
+historia retrospectivos; mantiene evidencia, nota y el registro local. La
+ejecución acotada exige comprobar y bloquear dependencias/ocupaciones antes de
+escribir. Si existen, requiere el flujo canónico correspondiente y otra revisión.
+
 `refresh-reviewed-appointment.js` aplica ese recibo **dentro de la transacción
 READ COMMITTED del llamador**: CAS de fila completa, bloqueo de recursos antiguos
 y nuevos, `beforeUpdate` obligatorio, cambio acotado y reserva mediante el comando

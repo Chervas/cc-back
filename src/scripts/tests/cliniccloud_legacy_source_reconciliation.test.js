@@ -37,6 +37,19 @@ test('explicit source cancellation retains date, source ID, notes and history', 
   const f = fixture(true), after = patchForLegacyReconciliation(f.before, prepareLegacyReconciliation(f), f.now);
   assert.equal(after.estado, 'cancelada'); assert.equal(after.inicio, f.before.inicio); assert.equal(after.nota, f.before.nota);
 });
+test('explicit future cancellation corrects an unchanged pending import still pointing to a past date', () => {
+  const f = fixture(true);
+  Object.assign(f.before.import_metadata.raw,{fechaIni:'2026-09-14',fechaFin:'2026-09-14'});
+  f.before.inicio=localToUtc('2026-09-14T12:00:00');f.before.fin=localToUtc('2026-09-14T12:20:00');
+  const receipt=prepareLegacyReconciliation(f), after=patchForLegacyReconciliation(f.before,receipt,f.now);
+  assert.equal(after.estado,'cancelada');assert.equal(after.inicio,localToUtc('2026-10-05T12:00:00'));
+  assert.deepEqual(after.import_metadata.raw,f.before.import_metadata.raw);
+  assert.equal(after.nota,f.before.nota);assert.equal(after.id_cita,f.before.id_cita);
+  const completed=structuredClone(f);completed.before.estado='completada';assert.throws(()=>prepareLegacyReconciliation(completed),/INVALID/);
+  const past=structuredClone(f);past.history.patients[0].rows[0].fechaIni='2026-09-14';past.history.patients[0].rows[0].fechaFin='2026-09-14';
+  assert.throws(()=>prepareLegacyReconciliation(past),/INVALID/);
+  const missing=structuredClone(f);missing.history.patients[0].rows=[];assert.throws(()=>prepareLegacyReconciliation(missing),/INVALID/);
+});
 
 function durationFixture() {
   const f = fixture();

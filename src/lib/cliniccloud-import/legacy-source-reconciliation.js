@@ -75,7 +75,11 @@ function prepareLegacyReconciliation({ before: raw, history, sources, reviewedBy
     // slot too. This does not permit unrelated future-to-future reconciliation.
     || (current.status === 'pendiente' && !inReviewedWeek(current.start_local)
       && !inReviewedWeek(localDateTime(old.fechaIni, old.horaIni)))
-    || Date.parse(before.inicio) < now || Date.parse(localToUtc(current.start_local)) < now) fail();
+    // A stale pending import may still show its former, now-past date although
+    // that exact source ID was moved forward and explicitly cancelled. This
+    // path never infers cancellation from absence or rewrites completed care.
+    || (Date.parse(before.inicio) < now && current.status !== 'cancelada')
+    || Date.parse(localToUtc(current.start_local)) < now) fail();
   if (!Array.isArray(sources) || !sources.length || sources.length > 2) fail();
   let duration = null;
   if (originalLive !== undefined || reviewedMinutes !== undefined) {

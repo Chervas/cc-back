@@ -8,6 +8,7 @@ const path = require('node:path');
 const { MARKER } = require('./prepare-isolated-clinical-fixture');
 const { hash, localToUtc } = require('../../lib/cliniccloud-import/adapter');
 const { prepareSourceRefresh, storedSourceRefresh } = require('../../lib/cliniccloud-import/source-refresh');
+const { sourceReference } = require('../../lib/cliniccloud-import/week-appointments');
 const { refreshReviewedAppointment } = require('../../lib/cliniccloud-import/refresh-reviewed-appointment');
 const plain = row => {
   const result = JSON.parse(JSON.stringify(row.toJSON()));
@@ -68,10 +69,11 @@ async function main() {
         provenance: { source_row: 2, file_sha256: hash(marker), row_sha256: hash('synthetic') } };
       const detail = { idEmpresa: 5880, idCita: 999998, idContacto: 999999, idAgenda: 999996, fechaIni: '2030-01-07', fechaFin: '2030-01-07', horaIni: '11:00:00', horaFin: '11:30:00', estado: 0,
         agenda: { nombre: 'Synthetic' }, cita_conceptos: [{ idServicio: 999997, asunto: 'Synthetic' }], detalles: '' };
-      const receipt = prepareSourceRefresh({ before, source, detail, now, liveCapturedAt: new Date(now-1000).toISOString(), sourcePlanSha256: hash('fictional plan'),
+      const input = { before, source, detail, now, liveCapturedAt: new Date(now-1000).toISOString(), sourcePlanSha256: hash('fictional plan'),
         coverage: { start: '2030-01-07', end: '2030-01-07' }, resources: { doctor_id: doctor.id_usuario, installation_id: rooms[1].id, equipment_ids: [equipment.id], evidence_sha256: hash('fictional review') },
-        reviewedBy: 'Fictional QA', reason: 'Synthetic source reschedule reviewed for isolated SQL rollback test' });
-      return { row, before, receipt, now, rooms };
+        reviewedBy: 'Fictional QA', reason: 'Synthetic source reschedule reviewed for isolated SQL rollback test' };
+      const receipt = prepareSourceRefresh(input);
+      return { row, before, receipt, now, rooms, input };
     };
     await run(async transaction => {
       const f = await seed(transaction);
@@ -86,6 +88,31 @@ async function main() {
       assert.deepEqual(after.import_metadata.notification_suppression, { appointment_details: true, day_before: true, same_day: true });
       await assert.rejects(refreshReviewedAppointment({ db, receipt: f.receipt, transaction, now: f.now, beforeUpdate: async () => {} }), /SOURCE_REFRESH_REVIEW_REQUIRED/);
       checks.push('Identity/history/HOLD preserved; date, physical room, doctor and equipment occupancies updated atomically; stale replay rejected');
+    });
+    await run(async transaction => {
+      const f = await seed(transaction);
+      const baseline = { source_contact_id:'999999', start_local:'2030-01-07T10:00:00', end_local:'2030-01-07T10:30:00',
+        agenda_key:'SYNTHETIC', service_key:'SYNTHETIC', status:'pendiente' };
+      const metadata = { source_account:'cliniccloud-5880', source_contact_id:'999999',
+        cliniccloud_delta:{ version:1, source:baseline, provenance:f.input.source.provenance, pending_assignment:['treatment_id'],
+          source_reference_kind:'import_fingerprint_not_source_appointment_id' },
+        notification_suppression:{appointment_details:true,day_before:true,same_day:true},cliniccloud_reconciliation:{automation_policy:'hold'} };
+      await db.sequelize.query('UPDATE CitasPacientes SET source_reference=?, nota=?, import_metadata=? WHERE id_cita=?', {
+        replacements:[sourceReference(baseline),'',JSON.stringify(metadata),f.row.id_cita],transaction });
+      await f.row.reload({ transaction }); const before = plain(f.row);
+      const input = { ...f.input, before, originalLive:{source_account:'cliniccloud-5880',captured_at:new Date(f.now-2000).toISOString(),rows:[{
+        appointment_id:'999998',contact_id:'999999',state:0,start:baseline.start_local,end:baseline.end_local,
+        agenda:'SYNTHETIC',service:'SYNTHETIC',details:''}]} };
+      const receipt = prepareSourceRefresh(input);
+      const saved = await refreshReviewedAppointment({db,receipt,transaction,now:f.now,beforeUpdate:async({before:locked})=>assert.deepEqual(locked,before)});
+      const after = plain(saved);
+      assert.equal(after.id_cita,before.id_cita);assert.equal(after.source_reference,before.source_reference);
+      assert.deepEqual(after.import_metadata.cliniccloud_delta,metadata.cliniccloud_delta);
+      assert.equal(after.import_metadata.source_appointment_id,'999998');
+      assert.equal(storedSourceRefresh(after,after.import_metadata).source_identity_binding.source_appointment_id,'999998');
+      assert.equal(await db.CitaPaciente.count({where:{paciente_id:before.paciente_id},transaction}),1);
+      assert.equal(await db.AppointmentBookingOccupancy.count({where:{appointment_id:before.id_cita},transaction}),3);
+      checks.push('Archived authenticated source ID binds an unlinked delta and reschedules the same row atomically; original delta/HOLD retained and no duplicate');
     });
     await run(async transaction => {
       const f = await seed(transaction);
