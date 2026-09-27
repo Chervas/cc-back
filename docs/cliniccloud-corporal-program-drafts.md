@@ -85,3 +85,52 @@ No requiere build frontend, migración ni reinicio de runtime.
 No restaurar una base completa ni borrar definiciones/revisiones. Conservar
 borradores y diario; si procede retirarlos, archivar mediante API y versión
 actual tras comprobar dependencias y que no haya ediciones humanas nuevas.
+
+## Perfiles físicos de las sesiones combinadas
+
+`cliniccloud-import-corporal-program-profiles.js` concilia cinco individuales
+inactivos con el mismo PDF y las unidades confirmadas. No crea tratamientos,
+programas, citas ni equipos. Siete definiciones reciben una revisión solo de
+notas, sin cambiar composición, precio o pauta.
+
+| Sesión | Primer paso | Segundo paso | Total |
+| --- | --- | --- | ---: |
+| Firmeza | C12, EXION, 20 min | C12, INDIBA, 25 min | 45 min |
+| Celulitis | C11, ondas BTL, 27 min | C11, Cyclone, 18 min | 45 min |
+| Recuperación | C12, INDIBA, 28 min | C9, Lymphastim, 17 min | 45 min |
+| Lipedema estándar | C12, INDIBA, 35 min | C9, Lymphastim, 25 min | 60 min |
+| Linfedema | C12, INDIBA, 40 min | C9, Lymphastim, 20 min | 60 min |
+
+Son agrupaciones de pasos consecutivos del documento por uso de máquina,
+incluyendo preparación/registro. No se añaden tiempos ni se cambia el contenido
+clínico. Dos fases en la misma cabina mantienen su ocupación continua, pero
+liberan EXION/BTL al terminar su parte. Piedad conserva la asignación del Excel;
+la cualificación específica de linfedema **no se da por acreditada**. El estado
+permanece borrador y conserva revisión clínica/fiscal y consentimientos pendientes.
+La mesoterapia adicional de Celulitis sigue siendo su tratamiento de diez minutos;
+las citas 3/6 continúan sumando 55 minutos, ahora con tres fases físicas.
+
+Mismos argumentos de fuentes/paquete del operador anterior; modos
+`prepare|rehearse|apply|verify`. Preparación solo SELECT. Ensayo y aplicación
+requieren SHA del paquete, copia íntegra de CRM de menos de dos horas, código
+commiteado limpio, diario privado y sesión normal de CRM. Los cinco perfiles se
+actualizan en una transacción bloqueada, solo `clinical_config` y `updatedAt`;
+el ensayo revierte y comprueba el estado original. El resto del catálogo,
+recursos, citas y vínculos de consentimiento no cambian. Las siete revisiones
+posteriores usan la API normal con versión esperada: no es una transacción
+global con los perfiles. Un fallo parcial exige el mismo paquete/diario; replay
+concilia el estado y no pisa ediciones humanas. La verificación independiente
+comprueba también las revisiones canónicas. No ejecutar nuevamente `prepare`
+para sobrescribir una configuración ya aplicada.
+
+Pruebas focales:
+
+```sh
+node --test src/scripts/tests/cliniccloud_corporal_program_profiles.test.js
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/cliniccloud_corporal_program_profiles_mysql.integration.js
+```
+
+Reversión de perfiles: revisar primero los IDs, cambios posteriores y el
+`previous_profile` del diario; preparar una corrección individual versionada,
+sin retirar maquinaria ni restaurar toda la base. No aprobar ni activar un
+perfil antiguo por volver a él. Las notas se corrigen con una revisión nueva.
