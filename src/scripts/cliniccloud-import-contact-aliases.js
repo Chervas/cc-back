@@ -5,12 +5,12 @@ const {execFileSync}=require('node:child_process');
 const {hash,normalizeContacts,normalizeAppointments}=require('../lib/cliniccloud-import/adapter');
 const {readCsv,readBytes,parseArgs,writePrivateJson}=require('../lib/cliniccloud-import/io');
 const {validateContactAlias}=require('../lib/cliniccloud-import/contact-aliases');
-const {prepareNativeCorroboration,prepareHistoryCorroboration,prepareConfirmedIdentity,preparePartialIdentityReview}=require('../lib/cliniccloud-import/contact-alias-evidence');
+const {prepareNativeCorroboration,prepareHistoryCorroboration,prepareConfirmedIdentity,preparePartialIdentityReview,prepareAnchoredIntakeReview}=require('../lib/cliniccloud-import/contact-alias-evidence');
 const {connectOperatorDatabase}=require('../lib/cliniccloud-import/operator-database');
 const {createNewPatientsStore}=require('../lib/cliniccloud-import/new-patients-store');
 const {privateJson,openJournal,acquireExecutorLocks}=require('./cliniccloud-import-appointments-apply');
 const {validateBackup}=require('./cliniccloud-import-contacts-apply');
-const VERSION='cliniccloud-contact-aliases/4';
+const VERSION='cliniccloud-contact-aliases/5';
 async function run(args){
  const o=parseArgs(args,['--mode','--target','--contacts','--review','--private-output','--package','--approved-sha256','--backup-manifest','--private-journal','--appointments','--plan','--live-comparison','--live-histories','--identity-confirmation']);
  if(o['--target']!=='crm'||!['prepare','dry-run','apply'].includes(o['--mode']))throw Error('EXPLICIT_CRM_ALIAS_MODE_REQUIRED');
@@ -38,8 +38,10 @@ async function run(args){
  const selected=review.links.map(link=>{
   const matches=sourceRows.filter(s=>s.source_contact_id===link.source_contact_id);
   if(matches.length!==1)throw Error('ALIAS_SOURCE_ID_NOT_UNIQUE');
-  if([link.native_first_visit,link.native_history_visit,link.confirmed_identity,link.reviewed_partial_identity].filter(Boolean).length>1)throw Error('CONTACT_ALIAS_ONE_EVIDENCE_METHOD_REQUIRED');
-  return {source:matches[0],patient_id:link.patient_id,...(link.reviewed_partial_identity
+  if([link.native_first_visit,link.native_history_visit,link.confirmed_identity,link.reviewed_partial_identity,link.reviewed_intake_alias].filter(Boolean).length>1)throw Error('CONTACT_ALIAS_ONE_EVIDENCE_METHOD_REQUIRED');
+  return {source:matches[0],patient_id:link.patient_id,...(link.reviewed_intake_alias
+   ? {corroboration:prepareAnchoredIntakeReview({link,source:matches[0],contacts:sourceRows,reviewedBy:review.reviewed_by})}
+   :link.reviewed_partial_identity
    ? {corroboration:preparePartialIdentityReview({link,source:matches[0],contacts:sourceRows,reviewedBy:review.reviewed_by})}
    :link.confirmed_identity
    ? {corroboration:prepareConfirmedIdentity({link,source:matches[0],confirmation})}
@@ -50,7 +52,7 @@ async function run(args){
  let pkg,backup;
  if(o['--mode']!=='prepare'){
   pkg=privateJson(o['--package']);const {package_sha256,...body}=pkg;
-  if(![VERSION,'cliniccloud-contact-aliases/3','cliniccloud-contact-aliases/2','cliniccloud-contact-aliases/1'].includes(pkg.version)||hash(body)!==package_sha256||o['--approved-sha256']!==package_sha256||pkg.target!=='crm'
+  if(![VERSION,'cliniccloud-contact-aliases/4','cliniccloud-contact-aliases/3','cliniccloud-contact-aliases/2','cliniccloud-contact-aliases/1'].includes(pkg.version)||hash(body)!==package_sha256||o['--approved-sha256']!==package_sha256||pkg.target!=='crm'
     ||pkg.review_sha256!==hash(review)||pkg.contacts_sha256!==input.file.sha256||hash(pkg.selected)!==hash(selected)
     ||pkg.policy!=='add_external_alias_only_no_patient_or_history_mutation')throw Error('ALIAS_PACKAGE_REVIEW_MISMATCH');
   if(!Array.isArray(pkg.operations)||pkg.operations.length!==selected.length

@@ -105,10 +105,29 @@ function nativeAppointmentCandidate(source, patientId, live, evidence) {
       ||(history&&['completada','cancelada','no_asistio'].includes(appointment.estado)))) throw Error('CONTACT_ALIAS_NATIVE_FIRST_VISIT_NOT_CORROBORATED');
   return {patient:candidates[0],appointment_sha256:hash(appointment)};
 }
+function anchoredIntakeCandidate(source,patientId,live,evidence) {
+  if(evidence.kind!=='operator_reviewed_intake_with_existing_identity'||evidence.source_contact_id!==source.source_contact_id
+    ||evidence.patient_id!==patientId||evidence.policy!=='phone_given_name_and_existing_source_identity'
+    ||!String(evidence.policy_reference||'').trim()||!String(evidence.reason||'').trim()||!String(evidence.reviewed_by||'').trim()
+    ||!/^[a-f0-9]{64}$/.test(evidence.review_sha256||'')||!/^[a-f0-9]{64}$/.test(evidence.anchor_source_sha256||'')
+    ||!['MOD','PV'].includes(evidence.intake_label)||norm(source.fields.surname)!==evidence.intake_label
+    ||evidence.source_full_name!==fullName(source.fields)||norm(source.fields.name)!==evidence.anchor_given_name
+    ||evidence.anchor_given_name.length<4||evidence.source_phone!==phoneKey(source.fields.phone)) throw Error('CONTACT_ALIAS_ANCHORED_EVIDENCE_INVALID');
+  const candidates=live.patients.filter(p=>[p.telefono_movil,p.telefono_secundario].some(v=>phoneKey(v)===evidence.source_phone));
+  if(candidates.length!==1||Number(candidates[0].id_paciente)!==patientId) throw Error('CONTACT_ALIAS_ANCHOR_LOCAL_PHONE_AMBIGUOUS');
+  const patient=candidates[0],document=norm(patient.dni).replace(/[ .-]/g,''),birth=dateOnly(patient.fecha_nacimiento);
+  if(fullName({name:patient.nombre,surname:patient.apellidos})!==evidence.anchor_full_name
+    ||!document||document!==evidence.anchor_national_id||!birth||birth!==evidence.anchor_birth_date) throw Error('CONTACT_ALIAS_ANCHOR_LOCAL_IDENTITY_CHANGED');
+  const owners=[...new Set(live.source_links.filter(r=>String(r.source_contact_id)===evidence.anchor_source_contact_id).map(r=>Number(r.paciente_id)))];
+  if(owners.length!==1||owners[0]!==patientId) throw Error('CONTACT_ALIAS_ANCHOR_NOT_ALREADY_OWNED');
+  return patient;
+}
 function validateContactAlias(source, patientId, live, corroboration = null) {
   if(!source||!/^[1-9]\d*$/.test(source.source_contact_id)||!Number.isSafeInteger(patientId)||patientId<=0)throw Error('CONTACT_ALIAS_INPUT_INVALID');
   let patient,appointmentHash;
-  if(corroboration?.kind==='operator_reviewed_unique_phone_name_prefix'){
+  if(corroboration?.kind==='operator_reviewed_intake_with_existing_identity'){
+    patient=anchoredIntakeCandidate(source,patientId,live,corroboration);
+  }else if(corroboration?.kind==='operator_reviewed_unique_phone_name_prefix'){
     patient=partialIdentityCandidate(source,patientId,live,corroboration);
   }else if(corroboration?.kind==='user_confirmed_identity_pair'){
     patient=confirmedIdentityCandidate(source,patientId,live,corroboration);

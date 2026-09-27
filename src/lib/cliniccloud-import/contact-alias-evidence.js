@@ -88,4 +88,32 @@ function preparePartialIdentityReview({link,source,contacts,reviewedBy,now=Date.
     patient_full_name:norm(review.patient_full_name),policy:review.policy,policy_reference:review.policy_reference,
     reviewed_by:reviewedBy,reviewed_at:review.reviewed_at,reason:review.reason.trim(),review_sha256:hash({review,reviewedBy})};
 }
-module.exports={prepareNativeCorroboration,prepareHistoryCorroboration,prepareConfirmedIdentity,preparePartialIdentityReview};
+// Some intake records contain only a given name and the explicit MOD/PV label.
+// The second export record is not another possible patient if it is the already
+// linked full identity, with document AND birth date verified again at apply.
+// This remains an operator-reviewed alias, not a person/history merge.
+function prepareAnchoredIntakeReview({link,source,contacts,reviewedBy,now=Date.now()}) {
+  const review=link.reviewed_intake_alias,captured=Date.parse(review?.reviewed_at);
+  if(!review||link.native_first_visit||link.native_history_visit||link.confirmed_identity||link.reviewed_partial_identity
+    ||review.policy!=='phone_given_name_and_existing_source_identity'||!String(review.policy_reference||'').trim()
+    ||!String(reviewedBy||'').trim()||String(review.reason||'').trim().length<20
+    ||!Number.isFinite(captured)||captured>now||now-captured>2*3600000
+    ||!Number.isSafeInteger(link.patient_id)||link.patient_id<=0
+    ||!['MOD','PV'].includes(review.intake_label)||norm(source.fields.surname)!==review.intake_label
+    ||!/^[1-9]\d*$/.test(review.existing_source_contact_id||'')||review.existing_source_contact_id===source.source_contact_id) throw Error('CONTACT_ALIAS_ANCHORED_REVIEW_REQUIRED');
+  const matches=contacts.filter(c=>c.source_contact_id===review.existing_source_contact_id),anchor=matches[0];
+  const phone=phoneKey(source.fields.phone),owners=new Set(contacts.filter(c=>phone&&phoneKey(c.fields.phone)===phone).map(c=>c.source_contact_id));
+  if(matches.length!==1||!phone||phoneKey(anchor.fields.phone)!==phone||owners.size!==2
+    ||!owners.has(source.source_contact_id)||!owners.has(anchor.source_contact_id)) throw Error('CONTACT_ALIAS_ANCHOR_SOURCE_PHONE_AMBIGUOUS');
+  const given=norm(source.fields.name),anchorName=norm(`${anchor.fields.name||''} ${anchor.fields.surname||''}`);
+  const document=norm(anchor.fields.national_id).replace(/[ .-]/g,''),birth=require('./adapter').dateOnly(anchor.fields.birth_date);
+  if(given.length<4||!/^\p{L}+(?: \p{L}+)*$/u.test(given)||given!==norm(anchor.fields.name)
+    ||!norm(anchor.fields.surname)||anchorName!==norm(review.patient_full_name)||!document||!birth) throw Error('CONTACT_ALIAS_ANCHOR_IDENTITY_INCOMPLETE');
+  return {kind:'operator_reviewed_intake_with_existing_identity',source_contact_id:source.source_contact_id,patient_id:link.patient_id,
+    source_full_name:norm(`${source.fields.name||''} ${source.fields.surname||''}`),source_phone:phone,intake_label:review.intake_label,
+    anchor_source_contact_id:anchor.source_contact_id,anchor_full_name:anchorName,anchor_given_name:given,
+    anchor_national_id:document,anchor_birth_date:birth,anchor_source_sha256:hash(anchor),
+    policy:review.policy,policy_reference:review.policy_reference,reviewed_by:reviewedBy,reviewed_at:review.reviewed_at,
+    reason:review.reason.trim(),review_sha256:hash({review,reviewedBy})};
+}
+module.exports={prepareNativeCorroboration,prepareHistoryCorroboration,prepareConfirmedIdentity,preparePartialIdentityReview,prepareAnchoredIntakeReview};

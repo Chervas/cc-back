@@ -286,6 +286,18 @@ letras o más y ninguna contradicción documental/nacimiento/propietario. Puede
 ignorar una inicial final de recepción, nunca una palabra completa discordante.
 No modifica el matcher automático ni permite inferir citas duplicadas.
 
+`reviewed_intake_alias` cubre una excepción más estrecha: nombre de pila exacto
+y etiqueta explícita `MOD`/`PV`, bajo la misma regla autorizada. El teléfono
+completo tiene un único propietario local; en el export solo lo comparten el
+contacto nuevo y una identidad completa **ya enlazada** a esa misma ficha.
+La identidad anterior debe coincidir también en nombre completo, documento y
+fecha de nacimiento, ambos presentes. La revisión declara contacto anterior,
+etiqueta, motivo, autor y fecha reciente; una tercera coincidencia, contradicción
+o cambio de propietario bloquea. El paquete fija el export y se revalida bajo
+lock antes de añadir el alias. No ignora apellidos arbitrarios, no afirma una
+confirmación humana específica ni fusiona fichas/historias. La versión 5 del
+operador conserva la verificación de paquetes anteriores.
+
 Aliases `--mode dry-run` usa el mismo paquete/revisión/backup y camino SQL que
 `apply`, pero revierte toda la transacción y comprueba fichas/campos restaurados.
 Usar diarios distintos para ensayo y aplicación; conservar ambos para replay.
