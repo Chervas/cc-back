@@ -19,4 +19,16 @@ function assertCurrentVersion(expected, report) {
     });
   }
 }
-module.exports = { requireExpectedVersion, assertCurrentVersion };
+// These routes predate the shared JSON error boundary. Expected domain errors
+// must not fall through to Express' HTML handler (which can expose a stack).
+function clinicalReportHandler(action) {
+  return (req, res, next) => Promise.resolve().then(() => action(req, res)).catch(error => {
+    if ([400, 401, 403, 404, 409, 428].includes(error?.statusCode) && typeof error.code === 'string') {
+      const body = { code: error.code, message: error.message };
+      if (error.code === 'clinical_report_version_conflict') body.details = error.details;
+      return res.status(error.statusCode).json({ error: body });
+    }
+    return next(error);
+  });
+}
+module.exports = { requireExpectedVersion, assertCurrentVersion, clinicalReportHandler };
