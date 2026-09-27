@@ -46,6 +46,21 @@ requieren un modo de aplicación explícito y su propio paquete validado.
 
 ## Ejecutores acotados
 
+### Orden del archivo y posibles cambios de fecha
+
+El plan calcula primero las correspondencias verificadas del **export completo**
+y después revisa las filas sin correspondencia. Una visita no solapada que ya
+está representada en otra fila del mismo archivo no es un posible cambio de
+fecha solo porque su fila aparezca después. Las coincidencias que siguen en
+revisión no despejan esa duda. Se mantienen los solapes parciales, las visitas
+nativas y la protección de ediciones locales y de ausencias no conciliadas.
+
+Si dos correspondencias ordinarias compiten por la misma cita local, ambas
+quedan en revisión; no gana la primera fila. Solo los recibos durables ya
+validados permiten que varias filas describan una reserva canónica compartida.
+Esto es planificación offline, no autorización de altas: todo candidato sigue
+necesitando revisión de recursos, paquete y comprobación transaccional vigente.
+
 ### Reserva de recursos de una cita fuente revisada
 
 `book-reviewed-appointment.js` es una pieza interna de operador, no una ruta

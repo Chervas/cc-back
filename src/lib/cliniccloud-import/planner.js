@@ -109,9 +109,10 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
   const confirmedSelections = index(localAppointments.filter(local => isImported(local) && local.confirmed_source_selection)
     .flatMap(local => ['retained', 'superseded'].map(disposition => ({ local, disposition,
       entry: local.confirmed_source_selection[disposition] }))), item => item.entry.source_reference);
-  const claimedLocal = new Set();
   const recoveredHistoricalIds = new Set();
   const decisions = [];
+  const normalMatches = new Set();
+  const unmatched = [];
   for (const row of appointments) {
     const patientTargets = contactPlan.bySource.get(row.source_contact_id) || [];
     const patient = patientTargets.length === 1 ? patientTargets[0] : null;
@@ -148,7 +149,7 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
         }
         if (!decision.reasons.length) {
           decision.action = disposition === 'retained' ? 'preserve_confirmed_source_selection' : 'preserve_superseded_source_row';
-          decision.requires_review = false; claimedLocal.add(String(local.id));
+          decision.requires_review = false;
         }
       }
       decisions.push(decision); continue;
@@ -176,7 +177,7 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
         if (!decision.reasons.length) {
           decision.action = disposition === 'retained' ? 'preserve_reviewed_source_pair' : 'preserve_superseded_source_row';
           decision.source_external_id = disposition === 'retained' ? pair.source_appointment_id : null;
-          decision.requires_review = false; claimedLocal.add(String(local.id));
+          decision.requires_review = false;
         }
       }
       decisions.push(decision); continue;
@@ -196,7 +197,7 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
           || ['start_local', 'end_local', 'status'].some(key => local[key] !== current[key])) decision.reasons.push('LOCAL_EDIT_REQUIRES_REVIEW');
         const overlaps = current.status !== 'cancelada' && patient ? localTime.get(patientTimeKey({ ...current, patient_id: patient.id })) || [] : [];
         if (overlaps.some(other => String(other.id) !== String(local.id) && other.status !== 'cancelada')) decision.reasons.push('RECONCILED_SOURCE_LOCAL_OVERLAP');
-        if (!decision.reasons.length) { decision.action = 'preserve_reconciled_legacy_source'; decision.requires_review = false; claimedLocal.add(String(local.id)); }
+        if (!decision.reasons.length) { decision.action = 'preserve_reconciled_legacy_source'; decision.requires_review = false; }
       }
       decisions.push(decision); continue;
     }
@@ -215,7 +216,7 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
           || ['start_local', 'end_local', 'status'].some(key => local[key] !== revision.current[key])) decision.reasons.push('LOCAL_EDIT_REQUIRES_REVIEW');
         const overlaps = patient ? localTime.get(patientTimeKey({ ...revision.current, patient_id: patient.id })) || [] : [];
         if (overlaps.some(other => String(other.id) !== String(local.id))) decision.reasons.push('REVISED_SOURCE_LOCAL_OVERLAP');
-        if (!decision.reasons.length) { decision.action = 'preserve_verified_source_revision'; decision.requires_review = false; claimedLocal.add(String(local.id)); }
+        if (!decision.reasons.length) { decision.action = 'preserve_verified_source_revision'; decision.requires_review = false; }
       }
       decisions.push(decision); continue;
     }
@@ -237,7 +238,6 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
         if (overlaps.some(other => String(other.id) !== String(local.id))) decision.reasons.push('PARALLEL_LOCAL_OVERLAP_REQUIRES_REVIEW');
         if (!decision.reasons.length) {
           decision.action = 'preserve_parallel_source_link'; decision.requires_review = false;
-          claimedLocal.add(String(local.id));
         }
       }
       decisions.push(decision); continue;
@@ -256,9 +256,9 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
     const target = targets.length === 1 ? targets[0] : null;
     const competingNative = target && isImported(target) ? atSameTime.filter((r) => !isImported(r) && String(r.id) !== String(target.id)) : [];
     if (competingNative.length) decision.reasons.push('NATIVE_OVERLAP_WITH_MATCHED_SOURCE');
-    if (target && claimedLocal.has(String(target.id))) decision.reasons.push('LOCAL_TARGET_ALREADY_CLAIMED');
     if (target && row.kind !== 'block' && patient && String(target.patient_id) !== String(patient.id)) decision.reasons.push('LOCAL_PATIENT_IDENTITY_CONFLICT');
     if (target) {
+      normalMatches.add(decision);
       decision.local_id = target.id;
       decision.expected_local_hash = hash(target);
       decision.preserve = { doctor_id: target.doctor_id ?? null, installation_id: target.installation_id ?? null, treatment_id: target.treatment_id ?? null, clinical_relations: true, economic_relations: true, local_optouts: true };
@@ -271,28 +271,43 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
         if (target.status !== row.status) decision.reasons.push('NATIVE_SOURCE_STATE_CONFLICT');
         decision.action = decision.reasons.length ? 'review' : 'link_native_preserve';
       } else decision.action = decision.reasons.length ? 'review' : 'update_imported_candidate';
-      if (!decision.reasons.length) { claimedLocal.add(String(target.id)); decision.requires_review = decision.action !== 'link_native_preserve'; }
+      if (!decision.reasons.length) decision.requires_review = decision.action !== 'link_native_preserve';
       decision.candidate_local_ids = [...targets, ...competingNative].map((r) => r.id);
-    } else {
-      // Matching one source row does not make its patient interval disappear.
-      // Another agenda may describe the same visit with a longer or shifted
-      // interval. Surface that ambiguity before SQL, without picking a winner
-      // or treating an adjacent session as a duplicate.
-      const claimedOverlaps = patient && row.kind === 'appointment'
-        ? (localPatient.get(String(patient.id)) || []).filter(r => claimedLocal.has(String(r.id))
-          && r.kind !== 'block' && r.status !== 'cancelada'
-          && r.start_local < row.end_local && r.end_local > row.start_local) : [];
-      const possibleMoves = patient ? (localPatient.get(String(patient.id)) || []).filter((r) => inCoverage(r, coverage) && !claimedLocal.has(String(r.id))) : [];
-      decision.candidate_local_ids = [...new Set([...targets, ...atSameTime, ...possibleMoves, ...claimedOverlaps].map((r) => r.id))];
-      if (claimedOverlaps.length) decision.reasons.push('CLAIMED_PATIENT_INTERVAL_OVERLAP');
-      if (decision.candidate_local_ids.length) decision.reasons.push('POSSIBLE_RESCHEDULE_OR_NATIVE_DUPLICATE');
-      if (row.kind !== 'block' && !patient) decision.reasons.push('PATIENT_LINK_NOT_RESOLVED');
-      if (!decision.reasons.length) decision.action = row.kind === 'block' ? 'create_block_candidate' : 'create_appointment_candidate';
-      else if (decision.reasons.every((r) => r === 'PATIENT_LINK_NOT_RESOLVED')) decision.action = 'create_appointment_candidate';
-      decision.reasons.push(row.kind === 'block' ? 'BLOCK_SCOPE_REQUIRES_EXPLICIT_RESOURCE_MAP' : 'RESOURCE_AND_SERVICE_MAP_REQUIRED');
-      if (old && !snapshot) decision.reasons.push('LOCAL_SNAPSHOT_NOT_PROVIDED');
-    }
+    } else unmatched.push({ decision, patient, targets, atSameTime, old });
     decisions.push(decision);
+  }
+  // Resolve all successful claims before considering unmatched source rows.
+  // The CSV order is not chronology or evidence of which appointment won.
+  // Multiple validated receipts may intentionally describe one canonical
+  // visit, but a competing ordinary match always needs reconciliation.
+  const claims = index(decisions.filter(d => d.local_id != null && !d.reasons.length), d => String(d.local_id));
+  const claimedLocal = new Set();
+  for (const [id, matches] of claims) {
+    if (matches.length > 1 && matches.some(d => normalMatches.has(d))) {
+      for (const decision of matches) {
+        decision.action = 'review'; decision.requires_review = true;
+        decision.reasons.push('LOCAL_TARGET_ALREADY_CLAIMED');
+      }
+    } else claimedLocal.add(id);
+  }
+  for (const { decision, patient, targets, atSameTime, old } of unmatched) {
+    const row = decision.source;
+    // A matched visit remains occupied; another agenda with a partially
+    // overlapping interval can still be a duplicate. Non-overlapping visits
+    // already matched elsewhere in this export are not possible reschedules.
+    const claimedOverlaps = patient && row.kind === 'appointment'
+      ? (localPatient.get(String(patient.id)) || []).filter(r => claimedLocal.has(String(r.id))
+        && r.kind !== 'block' && r.status !== 'cancelada'
+        && r.start_local < row.end_local && r.end_local > row.start_local) : [];
+    const possibleMoves = patient ? (localPatient.get(String(patient.id)) || []).filter((r) => inCoverage(r, coverage) && !claimedLocal.has(String(r.id))) : [];
+    decision.candidate_local_ids = [...new Set([...targets, ...atSameTime, ...possibleMoves, ...claimedOverlaps].map((r) => r.id))];
+    if (claimedOverlaps.length) decision.reasons.push('CLAIMED_PATIENT_INTERVAL_OVERLAP');
+    if (decision.candidate_local_ids.length) decision.reasons.push('POSSIBLE_RESCHEDULE_OR_NATIVE_DUPLICATE');
+    if (row.kind !== 'block' && !patient) decision.reasons.push('PATIENT_LINK_NOT_RESOLVED');
+    if (!decision.reasons.length) decision.action = row.kind === 'block' ? 'create_block_candidate' : 'create_appointment_candidate';
+    else if (decision.reasons.every((r) => r === 'PATIENT_LINK_NOT_RESOLVED')) decision.action = 'create_appointment_candidate';
+    decision.reasons.push(row.kind === 'block' ? 'BLOCK_SCOPE_REQUIRES_EXPLICIT_RESOURCE_MAP' : 'RESOURCE_AND_SERVICE_MAP_REQUIRED');
+    if (old && !snapshot) decision.reasons.push('LOCAL_SNAPSHOT_NOT_PROVIDED');
   }
   const absenceActions = [];
   // A possible reschedule is not evidence that the old appointment disappeared.

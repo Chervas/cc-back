@@ -88,6 +88,51 @@ test('reschedule without IDCITA becomes a candidate, never blind create', () => 
   assert.equal(oldDecision.action, 'preserve_local');
   assert.deepEqual(oldDecision.reasons, ['SOURCE_LINK_UNDER_REVIEW']);
 });
+test('a later exact source match is not a possible reschedule of an earlier distinct visit', () => {
+  const matched = sourceAppointment();
+  for (const extra of [
+    { 'HORA INICIO': '10:30', 'HORA FIN': '11:00' },
+    { FECHA: '08/09/2026' },
+    { FECHA: '06/09/2026' },
+  ]) {
+    const additional = sourceAppointment(extra, 3);
+    for (const rows of [[additional, matched], [matched, additional]]) {
+      const decisions = appointmentActions(plan({ appointments: rows, snapshot: snapshot([localAppointment()]) }));
+      const next = decisions.find(r => r.provenance?.source_row === 3);
+      assert.equal(next.action, 'create_appointment_candidate');
+      assert.deepEqual(next.candidate_local_ids, []);
+      assert.deepEqual(next.reasons, ['RESOURCE_AND_SERVICE_MAP_REQUIRED']);
+      assert.equal(decisions.find(r => r.provenance?.source_row === 2).action, 'update_imported_candidate');
+    }
+  }
+});
+test('an exact match still requiring review cannot clear an unmatched visit', () => {
+  const matched = sourceAppointment(), additional = sourceAppointment({ FECHA: '08/09/2026' }, 3);
+  for (const rows of [[additional, matched], [matched, additional]]) {
+    const decisions = appointmentActions(plan({ appointments: rows, snapshot: snapshot([localAppointment({ local_modified: true })]) }));
+    assert(decisions.find(r => r.provenance?.source_row === 2).reasons.includes('LOCAL_EDIT_REQUIRES_REVIEW'));
+    const next = decisions.find(r => r.provenance?.source_row === 3);
+    assert.equal(next.action, 'review');
+    assert(next.reasons.includes('POSSIBLE_RESCHEDULE_OR_NATIVE_DUPLICATE'));
+    assert.deepEqual(next.candidate_local_ids, [101]);
+  }
+});
+test('two source claims of one local appointment both require review, without first-row-wins', () => {
+  const matched = sourceAppointment();
+  const moved = sourceAppointment({ IDCITA: 'old-1', FECHA: '08/09/2026' }, 3);
+  const extra = sourceAppointment({ FECHA: '09/09/2026' }, 4);
+  for (const rows of [[matched, moved, extra], [extra, moved, matched]]) {
+    const decisions = appointmentActions(plan({ appointments: rows, snapshot: snapshot([localAppointment()]) }));
+    for (const row of decisions.filter(r => r.source && r.provenance.source_row !== 4)) {
+      assert.equal(row.action, 'review');
+      assert(row.reasons.includes('LOCAL_TARGET_ALREADY_CLAIMED'));
+    }
+    const next = decisions.find(r => r.provenance?.source_row === 4);
+    assert.equal(next.action, 'review');
+    assert.deepEqual(next.candidate_local_ids, [101]);
+    assert(decisions.some(r => !r.source && r.local_id === 101 && r.action === 'preserve_local'));
+  }
+});
 test('a claimed local visit still blocks a second source row with a partially overlapping interval', () => {
   for (const extra of [
     { 'HORA INICIO': '10:15', 'HORA FIN': '10:45' },
@@ -95,11 +140,14 @@ test('a claimed local visit still blocks a second source row with a partially ov
     { 'HORA INICIO': '09:45', 'HORA FIN': '10:15' },
   ]) {
     const rows = [sourceAppointment(), sourceAppointment({ AGENDA: 'Otra agenda', ...extra }, 3)];
-    const decisions = appointmentActions(plan({ appointments: rows, snapshot: snapshot([localAppointment()]) }));
-    assert.equal(decisions[0].action, 'update_imported_candidate');
-    assert.equal(decisions[1].action, 'review');
-    assert(decisions[1].reasons.includes('CLAIMED_PATIENT_INTERVAL_OVERLAP'));
-    assert.deepEqual(decisions[1].candidate_local_ids, [101]);
+    for (const input of [rows, rows.slice().reverse()]) {
+      const decisions = appointmentActions(plan({ appointments: input, snapshot: snapshot([localAppointment()]) }));
+      assert.equal(decisions.find(r => r.provenance?.source_row === 2).action, 'update_imported_candidate');
+      const overlap = decisions.find(r => r.provenance?.source_row === 3);
+      assert.equal(overlap.action, 'review');
+      assert(overlap.reasons.includes('CLAIMED_PATIENT_INTERVAL_OVERLAP'));
+      assert.deepEqual(overlap.candidate_local_ids, [101]);
+    }
   }
 });
 test('adjacent intervals do not create a false overlap with an already matched visit', () => {
@@ -110,9 +158,11 @@ test('adjacent intervals do not create a false overlap with an already matched v
 });
 test('a matched cancellation does not occupy a partially overlapping replacement', () => {
   const rows = [sourceAppointment({ ESTADO: 'Anulada (Clínica)' }), sourceAppointment({ AGENDA: 'Otra agenda', 'HORA INICIO': '10:15', 'HORA FIN': '10:45' }, 3)];
-  const decisions = appointmentActions(plan({ appointments: rows, snapshot: snapshot([localAppointment({ status: 'cancelada' })]) }));
-  assert.equal(decisions[0].action, 'update_imported_candidate');
-  assert.equal(decisions[1].action, 'create_appointment_candidate');
+  for (const input of [rows, rows.slice().reverse()]) {
+    const decisions = appointmentActions(plan({ appointments: input, snapshot: snapshot([localAppointment({ status: 'cancelada' })]) }));
+    assert.equal(decisions.find(r => r.provenance?.source_row === 2).action, 'update_imported_candidate');
+    assert.equal(decisions.find(r => r.provenance?.source_row === 3).action, 'create_appointment_candidate');
+  }
 });
 test('source-ID reschedule can be proposed but local edits are protected', () => {
   const row = sourceAppointment({ IDCITA: 'old-1', 'HORA INICIO': '11:00', 'HORA FIN': '11:30' });
