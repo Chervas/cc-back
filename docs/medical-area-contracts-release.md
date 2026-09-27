@@ -16,6 +16,17 @@ Una migración explícita por ejecución, exclusivamente del allowlist:
 No ejecuta la cola de migraciones pendientes, no activa programas ni mensajes.
 El script no carga modelos de la aplicación ni modifica su entorno.
 
+La configuración HTTP de áreas pertenece a la API, no al gateway. Comprobar
+`medical_area_api_boundary.test.js` y `medical_area_controller_scope.test.js`:
+el gateway debe responder 404 `medical_area_api_required` en ambos prefijos de
+áreas antes de sus controladores antiguos. No promocionar el router completo
+ni otros módulos de DEV para cerrar esa vía: integrar únicamente la frontera
+compatible en el router efectivo del gateway, con su preflight de seguridad.
+Conservar MFA, namespaces, workers y proveedores; las rutas OAuth/webhook no
+forman parte de este corte. Verificar después que las lecturas autenticadas de
+áreas siguen respondiendo en la API de la aplicación. Este cierre no acredita
+modernización de todos los servicios internos del gateway.
+
 ## Antes del corte
 
 1. DEV limpio/commiteado, misma candidata front/back y pruebas focales:

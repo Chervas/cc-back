@@ -151,7 +151,7 @@ function prepareSourceRefresh({ before:raw, source, detail, liveCapturedAt, sour
     || before.es_provisional || before.hold_expires_at || !before.source_reference || !m || !positive(linked.source_appointment_id)
     || !positive(m.source_contact_id) || m.source_account && m.source_account !== ACCOUNT
     || ['booking','program_session','additional_staff','import_resource_resolution','import_treatment_resolution',
-      'cliniccloud_parallel_sources','cliniccloud_reviewed_source_pair','cliniccloud_confirmed_source_selection']
+      'cliniccloud_parallel_sources','cliniccloud_reviewed_source_pair','cliniccloud_confirmed_source_selection','cliniccloud_duplicate_visit']
       .some(k=>m[k]!=null) || !String(reviewedBy||'').trim() || String(reason||'').trim().length < 20
     || !sha(sourcePlanSha256) || !Number.isFinite(Date.parse(liveCapturedAt))
     || now < Date.parse(liveCapturedAt) || now-Date.parse(liveCapturedAt)>3600000

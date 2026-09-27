@@ -14,6 +14,7 @@ const { validatedStoredRevision } = require('../lib/cliniccloud-import/source-re
 const { storedReviewedSourcePair } = require('../lib/cliniccloud-import/reviewed-source-pairs');
 const { storedConfirmedSelection, selectionLocalChanged } = require('../lib/cliniccloud-import/confirmed-source-selection');
 const { storedSourceRefresh, sourceRefreshChanged } = require('../lib/cliniccloud-import/source-refresh');
+const { duplicateVisitLinks } = require('../lib/cliniccloud-import/duplicate-visits');
 
 function importedDeltaBaseline(row, metadata) {
   const delta = metadata.cliniccloud_delta;
@@ -77,6 +78,7 @@ async function run(args) {
     const rawByPatient = index(rawIdentities, (r) => String(r.paciente_id));
     const treatmentNames = new Map(treatments.map((r) => [r.id_tratamiento, norm(r.nombre)]));
     const metadataOf = (r) => typeof r.import_metadata === 'string' ? JSON.parse(r.import_metadata) : r.import_metadata || {};
+    const duplicateLinks = duplicateVisitLinks(rows);
     const resourceAgendas = new Map();
     for (const row of rows) {
       if (row.source_system !== 'cliniccloud' || !row.doctor_id || !row.instalacion_id) continue;
@@ -98,7 +100,8 @@ async function run(args) {
         const sourceAgenda = sourceRefresh?.current.agenda_key || delta?.agenda_key || norm(agendaIds.get(String(metadata.source_agenda_id))?.[0]?.values.nombre);
         const resources = resourceAgendas.get(`${r.clinica_id}:${r.doctor_id}:${r.instalacion_id}`);
         const mappedAgenda = !sourceAgenda && !r.source_system && resources?.size === 1 ? [...resources][0] : '';
-        const parallelSources = validatedParallelSources(r, metadata);
+        const duplicate = duplicateLinks.get(r.id_cita);
+        const parallelSources = [...validatedParallelSources(r, metadata), ...(duplicate?.entries || [])];
         const sourceRevision = validatedStoredRevision(r, metadata);
         const legacyReconciliation = storedLegacyReconciliation(r, metadata);
         const sourceReconciliation = storedDeltaReconciliation(r, metadata);
@@ -107,7 +110,8 @@ async function run(args) {
         if (legacyReconciliation && sourceReconciliation) throw Error('CONFLICTING_SOURCE_RECONCILIATION_RECEIPTS');
         return { id: r.id_cita, patient_id: r.paciente_id, clinic_id: r.clinica_id, kind: 'appointment', source_system: r.source_system, source_reference: r.source_reference, source_external_id: metadata.source_appointment_id || null, source_contact_id: metadata.source_contact_id || null,
           ...(parallelSources.length ? { parallel_sources: parallelSources,
-            parallel_local_note_changed: parallelLocalNoteChanged(r, parallelSources) } : {}),
+            parallel_local_note_changed: duplicate ? duplicate.local_changed : parallelLocalNoteChanged(r, parallelSources),
+            ...(duplicate ? { parallel_duplicate_retired_id: duplicate.retired_id } : {}) } : {}),
           ...(sourceRevision ? { source_revision: sourceRevision,
             revision_local_note_changed: norm(r.nota || '') !== norm(sourceRevision.current.details) } : {}),
           ...(legacyReconciliation && !sourceRefresh ? { legacy_source_reconciliation: legacyReconciliation,

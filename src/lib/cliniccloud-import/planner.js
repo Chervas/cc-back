@@ -239,7 +239,10 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
         if (local.local_modified === true || local.parallel_local_note_changed === true
           || ['start_local', 'end_local', 'status'].some(key => local[key] !== baseline[key])) decision.reasons.push('LOCAL_EDIT_REQUIRES_REVIEW');
         const overlaps = patient ? localTime.get(patientTimeKey({ ...row, patient_id: patient.id })) || [] : [];
-        if (overlaps.some(other => String(other.id) !== String(local.id))) decision.reasons.push('PARALLEL_LOCAL_OVERLAP_REQUIRES_REVIEW');
+        if (overlaps.some(other => String(other.id) !== String(local.id)
+          && !(other.status === 'cancelada' && String(other.id) === String(local.parallel_duplicate_retired_id)))) {
+          decision.reasons.push('PARALLEL_LOCAL_OVERLAP_REQUIRES_REVIEW');
+        }
         if (!decision.reasons.length) {
           decision.action = 'preserve_parallel_source_link'; decision.requires_review = false;
         }

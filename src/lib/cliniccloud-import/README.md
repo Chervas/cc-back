@@ -46,6 +46,39 @@ requieren un modo de aplicación explícito y su propio paquete validado.
 
 ## Ejecutores acotados
 
+### Una visita heredada duplicada en dos agendas
+
+`duplicate-visits.js` prepara una decisión revisada sobre **dos** citas heredadas:
+mismo identificador de contacto, paciente/clínica locales, servicio fuente,
+intervalo y nota; ambas pendientes, sin edición humana, cobro, bono ni contrato
+avanzado. Cada fila debe coincidir con el delta y con su detalle autenticado de
+menos de una hora. No deduce identidad por teléfono/nombre ni usa el orden del
+CSV. La canónica corresponde a la copia creada después en origen, una vez
+demostrado que ambas describen la misma visita y el mismo estado.
+
+`consolidate-reviewed-duplicate.js` exige una transacción READ COMMITTED del
+llamador y su guardia de dependencias/identidad/recursos. Conserva las dos filas,
+referencias, notas e importación original. Solo cancela **localmente** la copia
+duplicada; no afirma que ClinicCloud la haya anulado. Reserva profesional,
+sala física y máquinas de la canónica mediante el comando habitual, sin forzar
+disponibilidad. Un fallo revierte también la cancelación. No se fusionan ni
+trasladan documentos, movimientos, firmas o jobs: cualquier dependencia exige
+otra revisión. Paquete, backup, diario antes/después, ensayo con rollback y
+verificación posterior son responsabilidad obligatoria del operador.
+
+El snapshot valida ambos extremos del recibo; el plan conserva las dos filas
+fuente ligadas a una única cita activa. Una copia reactivada, desaparecida o con
+procedencia contradictoria detiene la conciliación; un cambio de fuente o de la
+cita canónica vuelve a revisión. Repetir el delta no debe revivir el duplicado.
+Los recordatorios permanecen HOLD; no se publica ningún evento automático.
+Esta lógica offline no añade consultas al cálculo habitual de agenda.
+
+Pruebas: `cliniccloud_duplicate_visits.test.js` y
+`src/scripts/qa/isolated-cliniccloud-duplicate-visits.js`, con
+`QA_ISOLATED_CLINICAL_WRITES=bs-startup-isolated-20260920`. La segunda usa solo
+DEV ficticio, revierte todos los datos y comprueba conflictos de sala/máquina,
+guardia fallida, conservación de las dos filas y ausencia de reservas parciales.
+
 ### Orden del archivo y posibles cambios de fecha
 
 El plan calcula primero las correspondencias verificadas del **export completo**
