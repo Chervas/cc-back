@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {hash}=require('../../lib/cliniccloud-import/adapter');
-const {SOURCE_BATCH,SINCE,prepare,verifyPackage,verifyAfter,referencedTreatmentIds}=require('../../lib/cliniccloud-import/catalog-retirement');
+const {SOURCE_BATCH,DEMO_BATCH,SINCE,prepare,verifyPackage,verifyAfter,referencedTreatmentIds}=require('../../lib/cliniccloud-import/catalog-retirement');
 const {assertCatalogEditable,catalogState}=require('../../lib/treatment-catalog-contract');
 const {requireOperationalProfile}=require('../../services/treatmentBookingProfile.service');
 const {run}=require('../cliniccloud-import-catalog-retirement');
@@ -62,5 +62,45 @@ test('nested budget/program references detect scalar/array IDs without confusing
 test('operator requires an explicit CRM target and mode before using credentials',async()=>{
  await assert.rejects(run(['--mode','prepare','--target','dev']),/EXPLICIT_RETIREMENT/);
  await assert.rejects(run(['--target','crm']),/EXPLICIT_RETIREMENT/);
+});
+function demoFixture(){
+ const f=fixture();f.source.catalogue_kind='demo';f.source.services=['Servicio ficticio 1'];
+ f.before.canonical_treatments=structuredClone(f.before.treatments);
+ f.before.treatments=f.before.treatments.map(t=>({...t,id_tratamiento:t.id_tratamiento+100,codigo:t.codigo.replace('CCLOUD-','CCIMP-'),createdAt:t.updatedAt,
+  clinical_config:{demo:true,import_batch:DEMO_BATCH,source_system:'cliniccloud',source_service_id:t.clinical_config.raw.idServicio,unknown:{preserve:true}}}));
+ f.before.appointment_usage=[{treatment_id:101,count:5,recent_count:0}];return f;
+}
+test('explicit demo scope hides unused duplicates even if the exact real source service has future demand; no reference remapping',()=>{
+ const f=demoFixture(),p=prepare(f);verifyPackage(p);assert.deepEqual(p.operations.map(o=>o.id),[101,102]);
+ assert(p.operations.every(o=>o.after.clinical_config.demo&&o.after.clinical_config.source_catalog_retirement.replacement_treatment_id===null));
+ assert.deepEqual(p.before.canonical_treatments,f.before.canonical_treatments);
+ const after={...f.before,treatments:p.operations.map(o=>o.after)};assert(verifyAfter(after,p));
+ after.canonical_treatments=structuredClone(after.canonical_treatments);after.canonical_treatments[0].precio_base='0';assert.throws(()=>verifyAfter(after,p),/DEPENDENCIES_CHANGED/);
+});
+test('demo scope requires exact marker, import batch, source ID, unchanged timestamp/name and unique canonical counterpart',()=>{
+ for(const mutate of [f=>f.before.treatments[0].clinical_config.demo=false,f=>f.before.treatments[0].clinical_config.import_batch='other',
+  f=>f.before.treatments[0].codigo='CCIMP-other',f=>f.before.treatments[0].nombre='Edited demo',f=>f.before.treatments[0].updatedAt='2026-09-27 03:00:00',
+  f=>f.before.canonical_treatments.shift(),f=>f.before.canonical_treatments.push({...f.before.canonical_treatments[0],id_tratamiento:3}),
+  f=>f.before.canonical_treatments[0].clinical_config.source_batch='other',f=>f.before.canonical_treatments[0].clinica_id=99]){
+  const f=demoFixture();mutate(f);assert.deepEqual(prepare(f).operations.map(o=>o.id),[102]);
+ }
+});
+test('demo scope retains current appointments, vouchers, signatures and JSON dependencies without assuming they are fake',()=>{
+ for(const kind of ['PatientVouchers','EconomicBudgetSignatureRequests.snapshot_json','appointment_snapshot','appointment_source_service']){
+  const f=demoFixture();f.before.references=[{kind,treatment_id:101}];assert.deepEqual(prepare(f).operations.map(o=>o.id),[102]);
+ }
+ const f=demoFixture();f.before.appointment_usage[0].recent_count=1;assert.deepEqual(prepare(f).operations.map(o=>o.id),[102]);
+});
+test('demo scope does not remove a source-demanded service if its canonical counterpart is unavailable',()=>{
+ for(const change of [t=>t.activo=0,t=>t.clinical_config.catalog_status='draft',t=>t.clinical_config.catalog_status='obsolete']){
+  const f=demoFixture();change(f.before.canonical_treatments[0]);assert.deepEqual(prepare(f).operations.map(o=>o.id),[102]);
+ }
+ const f=demoFixture();f.before.canonical_treatments[1].activo=0;assert.equal(prepare(f).operations.length,2); // No source demand for second service.
+});
+test('demo mode fails closed for missing counterparts, unknown scopes and overbroad sets; default legacy mode never includes demo records',()=>{
+ for(const mutate of [f=>f.before.canonical_treatments=[],f=>f.source.catalogue_kind='any',f=>f.before.treatments=Array(101).fill(f.before.treatments[0])]){
+  const f=demoFixture();mutate(f);assert.throws(()=>prepare(f),/SCOPE_INVALID/);
+ }
+ const f=demoFixture();delete f.source.catalogue_kind;assert.equal(prepare(f).operations.length,0);
 });
 module.exports={fixture};

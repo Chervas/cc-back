@@ -2,7 +2,7 @@
 const assert=require('node:assert/strict');
 const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fixture');
 const {fixture}=require('./cliniccloud_catalog_retirement.test');
-const {prepare,verifyAfter}=require('../../lib/cliniccloud-import/catalog-retirement');
+const {prepare,verifyAfter,DEMO_BATCH}=require('../../lib/cliniccloud-import/catalog-retirement');
 const {capture,execute,directReferences,snapshots}=require('../cliniccloud-import-catalog-retirement');
 const {hash}=require('../../lib/cliniccloud-import/adapter');
 
@@ -11,7 +11,7 @@ withIsolatedCampaignMysql(async({sql,report})=>{
  const connect=()=>mysql.createConnection({user:'root',socketPath,database:'campaign_optimization_qa',dateStrings:true,timezone:'Z'});
  const c=await connect();try{
   await c.query('CREATE TABLE Clinicas(id_clinica INT PRIMARY KEY,grupoClinicaId INT)');
-  await c.query('CREATE TABLE Tratamientos(id_tratamiento INT PRIMARY KEY,id_tratamiento_base INT,codigo VARCHAR(64),nombre VARCHAR(255),clinica_id INT,origen VARCHAR(20),activo INT,precio_base DECIMAL(10,2),descripcion TEXT,duracion_min INT,clinical_config JSON,updatedAt DATETIME)');
+  await c.query('CREATE TABLE Tratamientos(id_tratamiento INT PRIMARY KEY,id_tratamiento_base INT,codigo VARCHAR(64),nombre VARCHAR(255),clinica_id INT,origen VARCHAR(20),activo INT,precio_base DECIMAL(10,2),descripcion TEXT,duracion_min INT,clinical_config JSON,createdAt DATETIME,updatedAt DATETIME)');
   await c.query('CREATE TABLE CitasPacientes(id_cita INT PRIMARY KEY,clinica_id INT,tratamiento_id INT,inicio DATETIME,estado VARCHAR(30),import_metadata JSON)');
   const tables=new Map();
   for(const[table,column]of directReferences){if(table==='Tratamientos')continue;if(!tables.has(table))tables.set(table,new Map());tables.get(table).set(column,'INT');}
@@ -52,6 +52,22 @@ withIsolatedCampaignMysql(async({sql,report})=>{
   assert.equal((await c.query('SELECT activo FROM Tratamientos WHERE id_tratamiento=1'))[0][0].activo,1);
   assert.equal((await c.query('SELECT COUNT(*) n FROM CitasPacientes'))[0][0].n,2);
   report.checks.push('Earlier clinic-locked booking is captured and preserved; one independent retirement commits and readback/replay preserve appointments, old price and source.');
+  // Demo markers never authorize deleting/fusing a patient or appointment.
+  for(const row of f.before.treatments)await c.query('INSERT INTO Tratamientos SET ?',[{...row,id_tratamiento:row.id_tratamiento+100,
+   codigo:row.codigo.replace('CCLOUD-','CCIMP-'),createdAt:row.updatedAt,clinical_config:JSON.stringify({demo:true,import_batch:DEMO_BATCH,source_system:'cliniccloud',source_service_id:row.clinical_config.raw.idServicio})}]);
+  await c.query("INSERT INTO CitasPacientes VALUES(4,72,101,'2020-01-01 10:00:00','completada',NULL),(5,72,102,'2026-10-01 10:00:00','pendiente',NULL)");
+  const demoSource={...f.source,catalogue_kind:'demo',services:['Servicio ficticio 1']};
+  const demoBefore=await capture(c,false,'demo'),demoPkg=prepare({...f,source:demoSource,before:demoBefore});assert.deepEqual(demoPkg.operations.map(o=>o.id),[101]);
+  await execute({c,pkg:demoPkg,journal,dryRun:true});assert.equal(hash(await capture(c,false,'demo')),demoPkg.before_sha256);
+  await c.query('UPDATE Tratamientos SET precio_base=999 WHERE id_tratamiento=1');
+  await assert.rejects(execute({c,pkg:demoPkg,journal,dryRun:true}),/AFTER_CHANGED|DEPENDENCIES_CHANGED/);
+  assert.equal((await c.query('SELECT activo FROM Tratamientos WHERE id_tratamiento=101'))[0][0].activo,1);
+  await c.query('UPDATE Tratamientos SET precio_base=123.45 WHERE id_tratamiento=1');
+  r=await execute({c,pkg:demoPkg,journal,independentFactory:connect});assert.equal(r.retired,1);verifyAfter(await capture(c,false,'demo'),demoPkg);
+  r=await execute({c,pkg:demoPkg,journal,independentFactory:connect});assert.equal(r.retired,0);
+  assert.equal((await c.query('SELECT tratamiento_id FROM CitasPacientes WHERE id_cita=4'))[0][0].tratamiento_id,101);
+  assert.equal((await c.query('SELECT activo FROM Tratamientos WHERE id_tratamiento=102'))[0][0].activo,1);
+  report.checks.push('Demo retirement separately preserves canonical catalogue and original historical IDs, protects future demo appointments, rejects counterpart edits, rolls back and replays without new writes.');
   await c.query('ALTER TABLE PatientVouchers ADD COLUMN extra_treatment_id INT');
   await assert.rejects(capture(c),/REFERENCE_SCHEMA_CHANGED/);
   report.checks.push('An unreviewed direct treatment consumer blocks the operator instead of silently retiring its references.');

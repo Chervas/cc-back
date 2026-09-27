@@ -417,7 +417,7 @@ comparando el estado posterior y el uso económico, no restauración global.
 ## Retirada gradual del catálogo anterior como obsoleto
 
 `cliniccloud-import-catalog-retirement.js` solo opera desde DEV sobre CRM explícito.
-No es un importador genérico ni deduce equivalencias. Selecciona filas `CCLOUD-*`
+No es un importador genérico ni deduce equivalencias. Por defecto selecciona filas `CCLOUD-*`
 del lote antiguo confirmado de BS, con identidad/nombre fuente íntegros, activas
 y sin estado de catálogo cambiado. Conserva íntegros nombres, IDs, precios,
 procedencia y todas las relaciones; cambia `activo`, estado `obsolete`, metadata
@@ -433,6 +433,18 @@ presupuestos, firmas, programas, instalaciones y protocolos. No declara libre
 un bono por deducir su consumo. Un consumidor directo nuevo en el esquema obliga
 a revisar el operador. No fija cantidades ni subconjuntos por constantes:
 el paquete depende del estado y las fuentes leídos en ese momento.
+
+El ámbito explícito `--catalogue-kind demo` revisa por separado `CCIMP-*` del
+lote `cliniccloud_demo_20260722`, con marca `demo=true`, identificador fuente
+exacto y timestamp sin editar. Exige un único registro real `CCLOUD` del mismo
+servicio y nombre, con procedencia contrastada. Si la última fuente sigue
+usando ese servicio, el registro real debe permanecer activo. No transforma
+esta correspondencia en una sustitución de referencias ni presupone que los
+pacientes o documentos ligados a una demo sean ficticios. Citas recientes,
+bonos, firmas y demás dependencias siguen protegiendo el registro; los IDs
+externos ambiguos también se retienen. El catálogo real completo se captura,
+bloquea y verifica como dependencia inmutable. Los ámbitos anterior y demo no
+se mezclan en un paquete; indicar `--catalogue-kind demo` en todas sus fases.
 
 Flujo: `--mode prepare --target crm --source-zip <ZIP> --private-output <paquete>`;
 revisar `operations` y los motivos de `retained`. Probar antes en MySQL aislado

@@ -30,17 +30,21 @@ const snapshots = [
   ['TreatmentProtocols','treatment_ids'],
 ];
 
-function readSource(filename) {
+function readSource(filename, kind = 'legacy') {
+  if (!['legacy','demo'].includes(kind)) throw Error('RETIREMENT_CATALOGUE_KIND_INVALID');
   const data = execFileSync('python3',['-c',
     "import sys,json,zipfile,csv,io\nwith zipfile.ZipFile(sys.argv[1]) as z:\n rows=csv.DictReader(io.StringIO(z.read('BACKUP_CITAS_2026-09-01_2026-12-31.csv').decode('utf-8-sig')),delimiter=';')\n services=sorted({r['SERVICIOS'].strip() for r in rows if r['FECHA']>=sys.argv[2] and r['SERVICIOS'].strip()})\n print(json.dumps(services))", filename,SINCE],{encoding:'utf8',maxBuffer:1024*1024});
-  return { since:SINCE, zip_sha256:hash(readBytes(filename)), services:JSON.parse(data) };
+  return { since:SINCE, zip_sha256:hash(readBytes(filename)), services:JSON.parse(data), ...(kind === 'demo' ? {catalogue_kind:kind} : {}) };
 }
 
-async function capture(c, lock = false) {
+async function capture(c, lock = false, kind = 'legacy') {
+  if (!['legacy','demo'].includes(kind)) throw Error('RETIREMENT_CATALOGUE_KIND_INVALID');
   // Canonical booking takes SHARE on its clinic. Take both clinics first so
   // the candidate snapshot includes earlier completed reservations.
   const clinics = (await c.query('SELECT id_clinica,grupoClinicaId AS grupo_clinica_id FROM Clinicas WHERE id_clinica IN (66,72) ORDER BY id_clinica'+(lock?' FOR UPDATE':'')))[0];
-  const treatments = (await c.query("SELECT * FROM Tratamientos WHERE clinica_id IN (66,72) AND codigo LIKE 'CCLOUD-%' ORDER BY id_tratamiento"+(lock?' FOR UPDATE':'')))[0];
+  const prefix = kind === 'demo' ? 'CCIMP-%' : 'CCLOUD-%';
+  const treatments = (await c.query('SELECT * FROM Tratamientos WHERE clinica_id IN (66,72) AND codigo LIKE ? ORDER BY id_tratamiento'+(lock?' FOR UPDATE':''),[prefix]))[0];
+  const canonical = kind === 'demo' ? {canonical_treatments:(await c.query("SELECT * FROM Tratamientos WHERE clinica_id IN (66,72) AND codigo LIKE 'CCLOUD-%' ORDER BY id_tratamiento"+(lock?' FOR UPDATE':'')))[0]} : {};
   if (!treatments.length || treatments.length>250) throw Error('RETIREMENT_SCOPE_INVALID');
   const ids = treatments.map(t=>t.id_tratamiento), candidates = new Set(ids), references = [], dependency_hashes = {};
   // Fail closed if the schema gains another direct treatment consumer.
@@ -50,7 +54,7 @@ async function capture(c, lock = false) {
   const appointments = (await c.query('SELECT * FROM CitasPacientes WHERE clinica_id IN (66,72) OR tratamiento_id IN (?) ORDER BY id_cita',[ids]))[0];
   dependency_hashes.appointments = hash(appointments);
   const usage = new Map();
-  const sourceIds = new Map(treatments.map(t => [String(t.clinical_config?.raw?.idServicio), t.id_tratamiento]));
+  const sourceIds = new Map(treatments.map(t => [String(t.clinical_config?.raw?.idServicio ?? t.clinical_config?.source_service_id), t.id_tratamiento]));
   for (const row of appointments) {
     if (candidates.has(row.tratamiento_id)) {
       const item = usage.get(row.tratamiento_id) || { treatment_id:row.tratamiento_id,count:0,recent_count:0 };
@@ -86,40 +90,43 @@ async function capture(c, lock = false) {
     dependency_hashes[table+'.'+column]=hash(matching);
   }
   const unique = [...new Map(references.map(r=>[r.kind+':'+r.treatment_id,r])).values()].sort((a,b)=>a.kind.localeCompare(b.kind)||a.treatment_id-b.treatment_id);
-  return {clinics,treatments,appointment_usage:[...usage.values()].sort((a,b)=>a.treatment_id-b.treatment_id),references:unique,dependency_hashes};
+  return {clinics,treatments,appointment_usage:[...usage.values()].sort((a,b)=>a.treatment_id-b.treatment_id),references:unique,dependency_hashes,...canonical};
 }
 
 async function execute({c,pkg,journal,dryRun=false,independentFactory=()=>connectOperatorDatabase('crm')}) {
   let commitAttempted=false;
+  const kind=pkg.source.catalogue_kind || 'legacy';
+  const read=(connection,lock=false)=>capture(connection,lock,kind);
   try {
     await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');await c.beginTransaction();
-    const before=await capture(c,true);
+    const before=await read(c,true);
     if(hash(before)!==pkg.before_sha256){verifyAfter(before,pkg);await c.rollback();await journal.append({stage:'retirement_replay_preserved',retired:0});return{status:'replay_preserved',retired:0};}
     await journal.append({stage:'retirement_before',before,operations:pkg.operations});
     for(const op of pkg.operations){
       const [result]=await c.query('UPDATE Tratamientos SET activo=0,clinical_config=?,updatedAt=UTC_TIMESTAMP() WHERE id_tratamiento=? AND activo=1',[JSON.stringify(op.after.clinical_config),op.id]);
       if(result.affectedRows!==1)throw Error('RETIREMENT_UPDATE_FAILED');
     }
-    const after=await capture(c);verifyAfter(after,pkg);await journal.append({stage:'retirement_verified_before_commit',after_sha256:hash(after)});
-    if(dryRun){await c.rollback();if(hash(await capture(c))!==pkg.before_sha256)throw Error('RETIREMENT_ROLLBACK_MISMATCH');await journal.append({stage:'retirement_dry_run_rolled_back'});return{status:'rolled_back_and_verified',proposed:pkg.operations.length,retired:0};}
+    const after=await read(c);verifyAfter(after,pkg);await journal.append({stage:'retirement_verified_before_commit',after_sha256:hash(after)});
+    if(dryRun){await c.rollback();if(hash(await read(c))!==pkg.before_sha256)throw Error('RETIREMENT_ROLLBACK_MISMATCH');await journal.append({stage:'retirement_dry_run_rolled_back'});return{status:'rolled_back_and_verified',proposed:pkg.operations.length,retired:0};}
     commitAttempted=true;await c.commit();await journal.append({stage:'retirement_committed',retired:pkg.operations.length});
-    const independent=await independentFactory();try{await independent.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const actual=await capture(independent);verifyAfter(actual,pkg);if(hash(actual)!==hash(after))throw Error('RETIREMENT_READBACK_MISMATCH');await independent.rollback();await journal.append({stage:'retirement_readback_verified',after_sha256:hash(actual)});}finally{await independent.end();}
+    const independent=await independentFactory();try{await independent.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const actual=await read(independent);verifyAfter(actual,pkg);if(hash(actual)!==hash(after))throw Error('RETIREMENT_READBACK_MISMATCH');await independent.rollback();await journal.append({stage:'retirement_readback_verified',after_sha256:hash(actual)});}finally{await independent.end();}
     return{status:'committed_and_verified',retired:pkg.operations.length,retained:pkg.retained.length,...pkg.policy};
   }catch(error){await c.rollback().catch(()=>{});if(commitAttempted)throw Error('RETIREMENT_COMMIT_REQUIRES_JOURNAL_REVIEW');throw error;}
 }
 
 async function run(args) {
-  const o=parseArgs(args,['--mode','--target','--source-zip','--package','--private-output','--approved-sha256','--backup-manifest','--private-journal']);
+  const o=parseArgs(args,['--mode','--target','--catalogue-kind','--source-zip','--package','--private-output','--approved-sha256','--backup-manifest','--private-journal']);
   if(o['--target']!=='crm'||!['prepare','dry-run','apply','verify'].includes(o['--mode']))throw Error('EXPLICIT_RETIREMENT_MODE_REQUIRED');
   if(process.cwd()!=='/home/ubuntu/wt/back-dev'||execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim()!=='dev')throw Error('DEV_OPERATOR_WORKTREE_REQUIRED');
-  const source=readSource(o['--source-zip']),c=await connectOperatorDatabase('crm');let journal;
+  const kind=o['--catalogue-kind'] || 'legacy';
+  const source=readSource(o['--source-zip'],kind),c=await connectOperatorDatabase('crm');let journal;
   try{
     if(o['--mode']==='prepare'){
-      await c.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const before=await capture(c),pkg=prepare({before,source});await c.rollback();writePrivateJson(o['--private-output'],pkg);
+      await c.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const before=await capture(c,false,kind),pkg=prepare({before,source});await c.rollback();writePrivateJson(o['--private-output'],pkg);
       return{status:'prepared',retirable:pkg.operations.length,retained:pkg.retained.length,package_sha256:pkg.package_sha256,writes:0};
     }
     const pkg=privateJson(o['--package']);verifyPackage(pkg);if(hash(source)!==hash(pkg.source))throw Error('RETIREMENT_SOURCE_CHANGED');
-    if(o['--mode']==='verify'){await c.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const after=await capture(c);verifyAfter(after,pkg);await c.rollback();writePrivateJson(o['--private-output'],{verified_at:new Date().toISOString(),package_sha256:pkg.package_sha256,after_sha256:hash(after),after});return{status:'verified_read_only',retired:pkg.operations.length};}
+    if(o['--mode']==='verify'){await c.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');const after=await capture(c,false,kind);verifyAfter(after,pkg);await c.rollback();writePrivateJson(o['--private-output'],{verified_at:new Date().toISOString(),package_sha256:pkg.package_sha256,after_sha256:hash(after),after});return{status:'verified_read_only',retired:pkg.operations.length};}
     if(!pkg.operations.length||o['--approved-sha256']!==pkg.package_sha256||!Number.isFinite(Date.parse(pkg.created_at))||Date.now()-Date.parse(pkg.created_at)>7200000||Date.parse(pkg.created_at)>Date.now())throw Error('FRESH_RETIREMENT_APPROVAL_REQUIRED');
     if(execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim())throw Error('RETIREMENT_CLEAN_WORKTREE_REQUIRED');
     const manifest=privateJson(o['--backup-manifest']);
