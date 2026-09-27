@@ -92,6 +92,33 @@ de fechas/HOLD y rechazo de sustitución de perfiles del catálogo.
 
 ### Otros ejecutores
 
+`source-refresh.js` conserva actualizaciones sucesivas de una cita importada
+en un registro encadenado y append-only. Requiere el mismo IDCITA/contacto
+comprobado en el detalle autenticado, coincidencia con el delta, acto/nota sin
+cambios, evidencia reciente y recursos documentados. No sobreescribe los
+recibos anteriores: el snapshot proyecta el último intervalo validado y una
+relectura del intervalo anterior no lo restaura. Rechaza cambios locales,
+citas cerradas, programas, perfiles ya reservados y decisiones incompatibles;
+esos casos requieren su revisión específica, no borrar metadata para admitirlos.
+
+`refresh-reviewed-appointment.js` aplica ese recibo **dentro de la transacción
+READ COMMITTED del llamador**: CAS de fila completa, bloqueo de recursos antiguos
+y nuevos, `beforeUpdate` obligatorio, cambio acotado y reserva mediante el comando
+canónico. Mantiene identificador, paciente, tratamiento, nota, historia y HOLD.
+No fuerza disponibilidad ni confirma equivalencias clínicas. La actualización
+SQL parametrizada conserva el timestamp revisado; normaliza BOOLEAN/TINYINT al
+comparar lecturas ORM/SQL. Cualquier error obliga a revertir toda la transacción.
+No reutilizar un recibo ya aplicado para restaurar la fila: leer su resultado y
+preparar una nueva revisión cuando haya otro delta.
+
+El operador debe aportar backup reciente, diario durable, identidad única,
+scope/membresías, ausencia de dependencias clínicas/económicas/automatizaciones,
+fuente sin solapes ocultos y comprobación posterior. Pruebas puras en
+`cliniccloud_source_refresh.test.js`; ensayo SQL con rollback en
+`src/scripts/qa/isolated-cliniccloud-source-refresh.js`, solo DEV ficticio bajo
+el mismo permiso QA descrito arriba. Este ensayo crea la clínica ficticia 66
+solo si no existe y la revierte; nunca puede ejecutarse en CRM.
+
 - `cliniccloud-import-contact-aliases.js`: `--target crm --mode prepare`
   con `--contacts`, `--review` y `--private-output`. La revisión privada contiene
   `reviewed_by` y `links` con `source_contact_id`/`patient_id`. Exige coincidencia
