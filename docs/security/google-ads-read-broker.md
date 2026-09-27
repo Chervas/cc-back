@@ -33,6 +33,7 @@ cuenta y operación; no tenant de grupo ni operación genérica de búsqueda.
 | `google.ads.landing_pages.read.v1` | `{startDate, endDate, pageToken}` | Campaña, URL final observada y clics; máximo 100.000 |
 | `google.ads.ads.read.v1` | `{campaignId, pageToken}` | Identidad/estado de campaña, grupo y anuncio; URLs, titulares, descripciones RSA y estado de revisión; máximo 200.000 |
 | `google.ads.ad_metrics.read.v1` | `{campaignId, startDate, endDate, pageToken}` | Identidades y métricas diarias de anuncio por fecha/red/dispositivo; máximo 200.000 |
+| `google.ads.campaign_destinations.read.v1` | `{campaignId, section, pageToken}` | Metadatos de destinos de una campaña; secciones cerradas, máximo 2.000 filas por sección; preparado en fuente el 27/09, no publicado |
 | `google.ads.asset.revoke.v1` | `{}` | `{revoked: true}` con UUID/replay durable |
 
 Fechas canónicas, ventana máxima inclusiva de 15 días y 100.000 filas por
@@ -41,7 +42,7 @@ anuncios mantiene 15 días y 200.000 filas. Los límites de bytes pueden rechaza
 una consulta antes de alcanzar su máximo de filas. `campaignId` es null o una
 cadena de 1–20 dígitos, positiva sin ceros iniciales; no amplía el grant de cuenta.
 `pageToken` siempre es null o string y todos los campos de cada payload son
-obligatorios. El broker construye diez plantillas GAQL cerradas.
+obligatorios. El broker construye las plantillas GAQL cerradas de cada operación.
 La ampliación [de inventario y estado](google-ads-discovery-migration.md) conecta
 discovery con API/sesión/permisos; account mantiene su proyección anterior.
 El consumidor no envía query, URL, método, cabeceras, cuenta, gestor, campos,
@@ -66,6 +67,38 @@ Los campos siguen el recurso oficial de
 [acciones de conversión v24](https://developers.google.com/google-ads/api/fields/v24/conversion_action).
 Se conservan paginación, rechazo de inventarios incompletos y grants explícitos;
 este código no añade permisos a ninguna conexión instalada.
+
+### Destinos de campañas: adaptación del 27/09/2026
+
+`campaign_destinations` no es el alta de destinos de Data Manager. Inspecciona
+exclusivamente la configuración de los anuncios: `campaign`, `ad_groups`,
+`campaign_forms`, `account_forms`, `ad_group_forms`, `asset_groups`,
+`asset_group_forms` y `ads`. `campaignId` es obligatorio y no admite null.
+Cuenta/gestor vienen del grant, nunca del payload. Máximo 2.000 filas por
+sección, sin truncar; cursores ligados a sección y campaña incluso para los
+formularios de cuenta cuya GAQL es idéntica entre campañas.
+
+La proyección conserva solo IDs, nombres/titulares de formulario, enlaces
+habilitados, canal, automatización de URL y URLs HTTP/HTTPS sin credenciales.
+No selecciona respuestas, contactos, claves de webhook ni métodos de entrega;
+no visita las URLs. Sigue las referencias oficiales de
+[campaña](https://developers.google.com/google-ads/api/fields/v24/campaign),
+[assets](https://developers.google.com/google-ads/api/fields/v24/asset) y
+[vínculos de campaña](https://developers.google.com/google-ads/api/fields/v24/campaign_asset).
+
+El consumidor `campaignWorkspaceGoogleDestination` conserva el grant opaco
+original y revalida selección, clínica, ACL, lease y autorización antes/después
+de cada página y antes de guardar. No llama al refresco ni al lector legacy
+cuando la cuenta está migrada. El modo legacy previo conserva sus guards para
+cuentas no migradas; no sirve de fallback ante errores del broker.
+
+Preparado y probado offline, sin instalación ni ampliación de grants en AWS.
+Para publicar se necesitan motor y consumidor compatibles y permiso explícito
+de esta operación en el grant de lectura o en `readOperations` del alta.
+Un runtime anterior devuelve un estado de servicio pendiente, no solicita
+repetir OAuth ni recurre a tokens locales. Publicación/activación separadas
+según el runbook vigente. Evidencia y siguiente corte en
+[campaign-workspace-implementation](../campaign-workspace-implementation.md).
 
 Las nuevas selecciones siguen los recursos oficiales de
 [destinos](https://developers.google.com/google-ads/api/fields/v24/landing_page_view),

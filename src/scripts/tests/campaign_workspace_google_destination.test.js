@@ -68,6 +68,14 @@ test('foreign identities, partial responses and malformed form metadata fail the
     const h = discovery(); mutate(h); await assert.rejects(h.run(), /workspace_google_/);
   }
 });
+test('a response arriving after the inspection deadline cannot become a successful proof', async t => {
+  const h = discovery(); let at = 1;
+  t.mock.method(Date, 'now', () => at);
+  await assert.rejects(inspectGoogleDestinations({ reference, now, read: async input => {
+    const result = await h.read(input); at += 50001; return result;
+  } }), { code: 'workspace_google_check_timeout' });
+  assert.equal(h.calls.length, 1);
+});
 test('unsafe URLs, calls and missing ads remain incomplete instead of proving form coverage', async () => {
   for (const url of ['javascript:alert(1)', 'https://user:password@clinic.example/']) {
     const h = discovery(); h.data.ad_group_ad[0].adGroupAd.ad.finalUrls = [url];

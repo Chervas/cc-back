@@ -6,7 +6,7 @@ const { canonicalLeadAdvertisingIdentity } = require('./leadAdvertisingIdentity.
 const { nativeForms } = require('./campaignWorkspaceNativeReception.service');
 const { destinationCheck } = require('./campaignWorkspaceMetaDestination.service');
 const { googleNativeForms } = require('./campaignWorkspaceGoogleReception.service');
-const { googleDestinationDetection } = require('./campaignWorkspaceGoogleDestination.service');
+const { googleDestinationDetection, googleDestinationCheck } = require('./campaignWorkspaceGoogleDestination.service');
 const { adKey, createLeadAdMatcher, evaluateAdComparison, evaluateAdSpendCoverage } = require('./campaignAdAttribution.service');
 
 const TIME_ZONE = 'Europe/Madrid';
@@ -90,7 +90,7 @@ function visibleCampaigns({ scope, mappings, assignments, inventory }) {
     if (assignedClinic && !clinics.has(assignedClinic)) continue;
     const detection = (identity.provider === 'google_ads' && googleDestinationDetection(item.destination_detection)) || item.destination_detection;
     const verifiedSource = ['workspace_meta_graph', 'workspace_google_ads'].includes(detection?.source);
-    const metaCheck = identity.provider === 'meta_ads' ? destinationCheck(detection) : null;
+    const providerCheck = identity.provider === 'meta_ads' ? destinationCheck(detection) : googleDestinationCheck(detection);
     result.set(key, {
       ...identity, id: key, name: item.campaign_name || identity.campaign_id,
       clinicId: assignedClinic, assigned: !!assignedClinic, accountName: item.account_name || identity.account_id,
@@ -99,8 +99,8 @@ function visibleCampaigns({ scope, mappings, assignments, inventory }) {
       destination: ({ web: 'web', lead_form: 'native', mixed: 'mixed' })[detection?.kind] || 'unknown',
       nativeForms: identity.provider === 'meta_ads' ? nativeForms(detection) : googleNativeForms(item.destination_detection),
       destinationCheckedAt: verifiedSource ? detection.checked_at || null : null,
-      destinationComplete: verifiedSource && detection.complete === true && !metaCheck?.status,
-      ...(metaCheck?.status ? { destinationCheck: metaCheck } : {}),
+      destinationComplete: verifiedSource && detection.complete === true && !providerCheck?.status,
+      ...(providerCheck?.status ? { destinationCheck: providerCheck } : {}),
       urls: (Array.isArray(detection?.urls) ? detection.urls : []).filter(url => {
         try { const parsed = new URL(url); return ['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password; } catch (_) { return false; }
       }),

@@ -21,8 +21,11 @@ function createGoogleAdsOperations({ http, cursor, withDeveloperSecret, now = Da
     async execute(context) {
       const { payload, binding, assetRef, signal, secret } = context;
       const account = contract.resource(binding, assetRef); const name = contract.family(operation);
-      const query = contract.query(name, payload); const scope = { ...context, operation };
-      const queryHash = createHash('sha256').update(query).digest('hex');
+      const query = contract.query(name, payload, account); const scope = { ...context, operation };
+      // Account-level forms share GAQL across campaigns, but their cursors must
+      // still belong to the campaign inspection that requested them.
+      const queryIdentity = name === 'campaign_destinations' ? JSON.stringify([query, payload.campaignId, payload.section]) : query;
+      const queryHash = createHash('sha256').update(queryIdentity).digest('hex');
       return withDeveloperSecret(binding, async developerToken => {
         if (!Buffer.isBuffer(secret) || !Buffer.isBuffer(developerToken) || signal?.aborted) fail('connection_blocked');
         const epoch = createHash('sha256').update(secret).update(Buffer.from([0])).update(developerToken).digest('hex');

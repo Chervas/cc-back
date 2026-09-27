@@ -21,7 +21,8 @@ function harness() {
   const models = { CampaignWorkspaceSetting: { findAll: async () => state.settings },
     ExternalCampaignInventory: { findAll: async () => [{ customer_id: '20', campaign_id: '30', destination_detection: { workspace_google: state.detection } }] },
     LeadIntake: {}, LeadAttributionAudit: { findAll: async query => { state.queries.push(query); return state.audits; } } };
-  const accountContext = async () => { state.accounts++; if (!state.permitted) throw Object.assign(new Error('revoked'), { code: 'google_lead_account_access_required' });
+  const accountContext = async () => { state.accounts++; if (state.error) throw Object.assign(new Error('private internal message'), { code: state.error });
+    if (!state.permitted) throw Object.assign(new Error('revoked'), { code: 'google_lead_account_access_required' });
     return { fingerprint: 'private-grant' }; };
   return { state, read: () => loadGoogleNativeEvidence({ models, campaigns: [state.campaign], selectedClinics: [{ id_clinica: 1 }],
     scope: { clinicIds: [1] }, now, env: state.env, accountContext, resolveClinic: async () => ({ id_clinica: state.recipient }) }) };
@@ -71,6 +72,21 @@ test('unassigned and web-only inventory cannot borrow native receipt evidence', 
   assert.equal((await h.read()).size, 0); assert.equal(h.state.queries.length, 0);
   h.state.campaign.nativeForms = [{ id: '50' }]; h.state.campaign.assigned = false;
   assert.equal((await h.read()).size, 0); assert.equal(h.state.queries.length, 0);
+});
+test('broker revocation or pending setup does not crash the entire report or retain a green receipt', async () => {
+  for (const code of ['broker_binding_invalid', 'asset_revoked', 'workspace_google_permissions_required', 'broker_cohort_disabled', 'broker_configuration_invalid']) {
+    const h = harness(); h.state.error = code;
+    const result = (await h.read()).get(h.state.campaign.id);
+    assert.equal(result.reception.ready, false); assert.equal(result.reception.configured, false);
+    assert.ok(result.forms.every(form => form.receivedAt));
+    if (['broker_cohort_disabled', 'broker_configuration_invalid'].includes(code)) {
+      assert.equal(result.reception.state, 'unverified'); assert.match(result.reception.detail, /no necesitas volver a conectar Google/);
+      assert.ok(result.forms.every(form => form.state === 'service_pending'));
+    } else assert.ok(result.forms.every(form => form.state === 'access_required'));
+    assert.doesNotMatch(JSON.stringify(result), /private internal message/);
+  }
+  const h = harness(); h.state.error = 'unexpected_database_failure';
+  await assert.rejects(h.read(), { code: 'unexpected_database_failure' });
 });
 test('public inventory retains mixed destinations but never exposes the private detection fingerprint', () => {
   const h = harness();

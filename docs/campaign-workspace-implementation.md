@@ -6,6 +6,81 @@ promover a staging/produccion ni abrir los gates hasta completar los contratos,
 las pruebas de permisos y el QA autenticado. Referencia UX canonica en front:
 `src/Documentacion/20.17-marketing-arquitectura-experiencia-objetivos.md`, apartado 19.
 
+## Reanudacion Sobre La Arquitectura Aislada (2026-09-27)
+
+El titular autoriza continuar implementando y probando sin requerir su presencia.
+Plan gestionado sigue aplazado. Se conservan navegacion, hub, cinco KPI y seis
+bloques de Salud aprobados; no se vuelve al wizard o mock antiguos.
+
+Contexto sincronizado mediante fetch, sin merges necesarios: backend `e3fb71c3`,
+frontend `a647d2d24`, ambos DEV limpios y 0/0 antes de este corte. Los avances
+concurrentes de frontend hasta `6af1850ef` se conservan; nuevo fetch
+confirma 0/0 antes de guardar este trabajo. Las referencias
+y autorizaciones de septiembre 12 siguientes son historicas: DEV ahora usa
+datos ficticios y release systemd propia, no la BD/PM2 compartidos anteriores.
+El hotfix de seguridad y los brokers posteriores tampoco deben inferirse de
+aquella fotografia. Fuentes vigentes: documentos front 00, 19, 25, 30, 31 y 39.
+
+### Primer corte implementado, aun no publicado
+
+- `refreshGoogleDestinations` reconoce `brokerGrant` de `receptionAccount`.
+  Las cuentas migradas usan `google.ads.campaign_destinations.read.v1`; la API
+  general no obtiene ni renueva access/refresh tokens para esta comprobacion.
+  No hay proxy GAQL generico ni fallback legacy cuando falla el broker.
+- Ocho secciones cerradas de metadata, consultas existentes reutilizadas,
+  proyeccion de campos permitidos y limite 2.000 filas/seccion. Se conservan
+  formularios heredados/especificos, destinos web/mixtos y PMax no exhaustivo
+  cuando hay expansion dinamica. No se leen contactos, respuestas ni webhooks.
+- Grant original opaco, ACL, seleccion, asignacion de clinica y lease
+  revalidados alrededor de cada pagina y dentro de la transaccion de resultado.
+  Revocacion, reemplazo de binding, cambio de ambito o de run no dejan prueba
+  verde. El presupuesto temporal incluye las comprobaciones de autorizacion.
+- TTL de evidencia 24h y merge de cache persistente conservados. El job de
+  destinos reutiliza el mismo consumidor; no se habilita ni se ejecuta aqui.
+- Google proyecta `destinationCheck` igual que Meta. Salud no deja que una
+  recepcion historica o una web verificada oculten el ultimo fallo de consulta.
+  Los permisos se agrupan por proveedor/cuenta; una caida de consulta no se
+  presenta como prueba de que no llegan leads.
+- Un broker deshabilitado/no actualizado produce
+  `workspace_google_service_pending`; no pide reconectar Google. Los fallos
+  conocidos de acceso/binding no derriban el informe completo de recepcion.
+  La UI permite reintento explicito tras habilitacion, sin bucles automaticos.
+
+### Evidencia y limites
+
+- Regresion amplia: 1.081 pruebas backend, 796 broker y 128 frontend; suite broker completa
+  repetida tras fijar el cursor de formularios de cuenta. Sin red de proveedores.
+  Cierre enfocado: 84 backend, 51 Google broker y, tras el ultimo ajuste de
+  identificadores, 7 del contrato de destinos y 22 de su consumidor correctas.
+- Angular `ngc --noEmit` correcto. Chromium real sobre componente Angular,
+  HTTP service y estilos Fuse: 15 capturas en 1440/1024/390, estados inicial,
+  preparado mixto, servicio pendiente, permisos y conflicto. Reintento tras
+  habilitacion y retorno `Preparar web` comprobados. Es QA aislada con API
+  ficticia, NO una sesion autenticada de la app completa ni llamadas reales.
+- Logs: `/tmp/cc-campaign-{backend,broker,front,final}-20260927.log`,
+  `/tmp/cc-campaign-google-broker-final-20260927.log` y
+  `/tmp/cc-campaign-front-ngc-20260927.log`. Capturas/result.json:
+  `/tmp/cc-campaign-destinations-20260927-ui/`.
+- Sin SQL real, OAuth, AWS, traslado de secretos, proveedores, cambios de
+  presupuesto, publicacion de anuncios, reinicios, migraciones o despliegues.
+  Fuente local en DEV: este corte no cambia localhost:4203 ni el CRM publico.
+
+### Siguiente corte
+
+1. Adaptar la inspeccion y ejecucion de Optimiza al transporte tipado. Siguen
+   pendientes consumidores legacy en `campaignWorkspaceOptimizationPreparation`
+   y `campaignWorkspaceOptimizationExecution`; no se sustituyen con GAQL libre
+   ni se activan para demostrar la interfaz. Preparacion de conversiones ya
+   tiene transporte broker y no necesita duplicarse.
+2. Publicacion compatible siguiendo DEV -> staging, con los gates efectivos
+   conservados. Instalar motor y grant de lectura de destinos solo en una
+   cohorte aprobada; no abrir conversiones, leads o mutaciones por ello.
+3. QA autenticada integral con MFA vigente en DEV sintetico. Para contrastar
+   datos reales: cuenta Google Ads aprobada, su binding broker y permiso de
+   lectura en el entorno clinico correcto. No restaurar tokens/BD reales en DEV.
+4. Recepcion real de leads y senales requieren su validacion separada. Meta
+   publicitario permanece cerrado, y Plan Gestionado necesita su mock/validacion.
+
 ## Cache Por Anuncio Aplicada Con Autorizacion (2026-09-12)
 
 El usuario autoriza expresamente la migracion compartida y el refresco exclusivo

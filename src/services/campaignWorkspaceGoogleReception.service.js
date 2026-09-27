@@ -3,7 +3,7 @@
 const { Op, json } = require('sequelize');
 const { googleNativeAdvertisingIdentity } = require('./leadAdvertisingIdentity.service');
 const { receptionAccount, receivingClinic, enabled } = require('./googleLeadReception.service');
-const { googleDestinationDetection, TTL_MS } = require('./campaignWorkspaceGoogleDestination.service');
+const { googleDestinationDetection, googleDestinationAccessError, TTL_MS } = require('./campaignWorkspaceGoogleDestination.service');
 
 function googleNativeForms(raw) {
   const detection = googleDestinationDetection(raw);
@@ -59,7 +59,7 @@ async function loadGoogleNativeEvidence({ models, campaigns, selectedClinics, sc
     const setting = scope?.groupId ? settings.find(row => row.scope_type === 'group' && Number(row.scope_id) === scope.groupId)
       : settings.find(row => row.scope_type === 'clinic' && Number(row.scope_id) === campaign.clinicId)
         || settings.find(row => row.scope_type === 'group' && Number(row.scope_id) === Number(clinic?.grupoClinicaId));
-    let context = null;
+    let context = null; let servicePending = false;
     try {
       if (setting) {
         const key = `${setting.id}:${campaign.account_id}`;
@@ -68,7 +68,11 @@ async function loadGoogleNativeEvidence({ models, campaigns, selectedClinics, sc
         const recipient = await resolveClinic({ models, context, identity: campaign, transaction });
         if (Number(recipient.id_clinica) !== campaign.clinicId) context = null;
       }
-    } catch (error) { if (!/^google_lead_/.test(error.code || '')) throw error; context = null; }
+    } catch (error) {
+      const code = googleDestinationAccessError(error);
+      if (!code) throw error;
+      servicePending = code === 'workspace_google_service_pending'; context = null;
+    }
     const matches = caches.filter(row => row.customer_id === campaign.account_id && row.campaign_id === campaign.campaign_id);
     const detection = matches.length === 1 ? googleDestinationDetection(matches[0].destination_detection) : null;
     const age = +now - +new Date(detection?.checked_at);
@@ -77,15 +81,16 @@ async function loadGoogleNativeEvidence({ models, campaigns, selectedClinics, sc
     const forms = campaign.nativeForms.map(form => {
       const received = receipts.get([campaign.clinicId, campaign.account_id, campaign.campaign_id, form.id].join(':'));
       return { id: form.id, name: form.name, receivedAt: received ? new Date(received).toISOString() : null,
-        state: !context || !form.metadataAccessible ? 'access_required' : !fresh ? 'check_required'
+        state: servicePending ? 'service_pending' : !context || !form.metadataAccessible ? 'access_required' : !fresh ? 'check_required'
           : !enabled(env) ? 'service_pending' : received ? 'receiving' : 'prepared' };
     });
     const configured = fresh && enabled(env) && forms.every(form => ['prepared', 'receiving'].includes(form.state));
     const ready = configured && forms.every(form => form.state === 'receiving');
     evidence.set(campaign.id, { forms, reception: { checked: true, ready, configured,
-      state: ready ? 'verified' : configured ? 'pending_confirmation' : context && !fresh ? 'unverified' : 'action_required',
+      state: ready ? 'verified' : configured ? 'pending_confirmation' : servicePending || context && !fresh ? 'unverified' : 'action_required',
       checkedAt: ready ? forms.map(form => form.receivedAt).sort()[0] : null,
-      detail: !context ? 'Revisa el acceso y la clínica que debe recibir los formularios de esta cuenta.'
+      detail: servicePending ? 'La comprobación segura de Google está pendiente de habilitación. Los resultados guardados se conservan; no necesitas volver a conectar Google.'
+        : !context ? 'Revisa el acceso y la clínica que debe recibir los formularios de esta cuenta.'
         : !fresh ? 'Actualiza la comprobación de los destinos de esta campaña en Google.'
         : forms.some(form => form.state === 'access_required') ? 'Falta comprobar el acceso a todos los formularios.'
         : !enabled(env) ? 'La recepción automática de formularios de Google está pendiente de habilitación del servicio.'

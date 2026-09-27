@@ -72,6 +72,22 @@ test('Meta destination failure is projected without internal lease identifiers a
 test('shared account without a reviewed assignment cannot leak into a clinic', () => {
   assert.deepEqual(visible({ mappings: [owner, { ...owner, clinicId: 2 }] }), []);
 });
+test('Google failed or pending checks reach the report without leaking internal error, grant or run metadata', () => {
+  const detection = { version: 1, source: 'workspace_google_ads', kind: 'web', complete: true,
+    checked_at: now.toISOString(), urls: ['https://clinic.example/'], status: 'failed',
+    error: 'workspace_google_service_pending', run_id: 'private-run', access_fingerprint: 'private-grant' };
+  const options = { inventory: [{ ...inventory[0], destination_detection: { workspace_google: detection } }] };
+  let value = visible(options)[0];
+  assert.equal(value.destinationComplete, false);
+  assert.deepEqual(value.destinationCheck, { status: 'failed', error: 'workspace_google_service_pending' });
+  assert.doesNotMatch(JSON.stringify(value), /private-run|private-grant/);
+  detection.error = 'private-error'; value = visible(options)[0];
+  assert.equal(value.destinationCheck.error, 'workspace_google_check_failed');
+  detection.status = 'checking'; value = visible(options)[0];
+  assert.deepEqual(value.destinationCheck, { status: 'checking', error: null });
+  detection.status = 'checked'; value = visible(options)[0];
+  assert.equal(value.destinationCheck, undefined); assert.equal(value.destinationComplete, true);
+});
 test('reviewed owner beats an exclusive account mapping and archival hides the campaign', () => {
   assert.deepEqual(visible({ assignments: [{ ...identity, clinica_id: 2, status: 'active' }] }), []);
   assert.deepEqual(visible({ assignments: [{ ...identity, clinica_id: 1, status: 'archived' }] }), []);

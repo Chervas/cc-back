@@ -69,6 +69,27 @@ test('shared technical failure is one finding affecting two campaigns', () => {
   assert.equal(result.findings.length, 1); assert.equal(result.affectedCount, 2);
   assert.deepEqual(result.findings[0].campaignIds, ['1', '2']);
 });
+test('Google destination checks override previous web and native receipts without mixing providers in group findings', () => {
+  const rows = ['google_ads', 'meta_ads'].flatMap(provider => ['web', 'native'].map(destination => row(`${provider}:${destination}`, {
+    receptionReady: true, campaign: { ...row('1').campaign, id: `${provider}:${destination}`, provider, account_id: '20', destination,
+      destinationCheck: { status: 'failed', error: `workspace_${provider === 'google_ads' ? 'google' : 'meta'}_permissions_required` } },
+  })));
+  const result = health(rows, new Map(rows.map(item => [item.campaign.id, { reception: { checked: true, ready: true, state: 'verified' } }])));
+  assert.equal(result.findings.length, 2); assert.equal(result.affectedCount, 4);
+  assert.ok(result.findings.every(item => item.campaignIds.length === 2));
+  assert.ok(result.findings.some(item => item.title === 'Revisa el acceso a Google'));
+  assert.ok(result.rows.every(item => item.receptionReady === false && item.current.leads === 10));
+});
+test('Google checks in progress or with service errors do not claim either healthy reception or a proven outage', () => {
+  for (const check of [{ status: 'checking', error: null }, { status: 'failed', error: 'workspace_google_service_pending' },
+    { status: 'failed', error: 'workspace_google_check_failed' }]) {
+    const item = row('1', { receptionReady: true, campaign: { ...row('1').campaign, provider: 'google_ads', destinationCheck: check } });
+    const result = health([item], new Map([['1', { reception: { checked: true, ready: true, state: 'verified' } }]]));
+    assert.equal(result.rows[0].receptionReady, false);
+    assert.equal(result.healthBlocks.find(block => block.id === 'reception').tone, 'neutral');
+    assert.equal(result.findings.length, 0);
+  }
+});
 test('partial coverage remains neutral when checked campaigns are healthy', () => {
   const result = health([row('1'), row('2')], new Map([['1', { privacy: { checked: true, ready: true } }]]));
   const block = result.healthBlocks.find(block => block.id === 'privacy');

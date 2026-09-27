@@ -6,6 +6,8 @@ const { receptionAccount, receivingClinic } = require('./googleLeadReception.ser
 const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
 const { googleUrlExpansionOptedOut } = require('../lib/googleAdsCampaignMeasurementDiagnosis');
 const { ensureGoogleConnectionAccessToken, GOOGLE_ADS_SCOPE } = require('./googleAdsScopedRuntime.service');
+const { assertGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
+const destinationContract = require('../../services/integrations-broker/src/google-campaign-destinations-contract');
 
 const SOURCE = 'workspace_google_ads';
 const TTL_MS = 86400000;
@@ -14,6 +16,23 @@ const id = value => typeof value === 'string' && /^[1-9][0-9]{0,31}$/.test(value
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value || null)).digest('hex');
 const fail = (code, status = 409) => { throw Object.assign(new Error(code), { code, status }); };
 const queryOptions = transaction => ({ raw: true, transaction, ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}) });
+const serviceErrors = new Set(['broker_cohort_disabled', 'broker_configuration_invalid', 'operation_denied']);
+const accessErrors = new Set(['broker_binding_invalid', 'asset_revoked', 'credential_revoked', 'connection_blocked', 'provider_unauthorized',
+  'scope_denied', 'workspace_google_permissions_required', 'google_connection_missing', 'google_oauth_legacy_closed']);
+const checkErrors = new Set(['workspace_google_permissions_required', 'workspace_google_service_pending',
+  'workspace_google_rate_limited', 'workspace_google_check_failed']);
+
+function googleDestinationCheck(detection) {
+  const status = ['checking', 'failed'].includes(detection?.status) ? detection.status : null;
+  return { status, error: status === 'failed'
+    ? checkErrors.has(detection.error) ? detection.error : 'workspace_google_check_failed' : null };
+}
+
+function googleDestinationAccessError(error) {
+  if (serviceErrors.has(error?.code)) return 'workspace_google_service_pending';
+  if (accessErrors.has(error?.code) || /^google_lead_/.test(error?.code || '')) return 'workspace_google_permissions_required';
+  return null;
+}
 
 function googleCampaignReference(input, write = false) {
   const keys = ['account_id', 'campaign_id', ...(write ? ['revision'] : [])];
@@ -56,7 +75,7 @@ async function saveObservedGoogleDestination({ models, reference, detection, bef
   });
 }
 
-async function googleDestinationContext({ models, scope, reference, loadInventory, transaction = null, now = new Date() }) {
+async function googleDestinationContext({ models, scope, reference, loadInventory, transaction = null, now = new Date(), expectedBrokerGrant = null }) {
   const owner = settingScope(scope); const options = queryOptions(transaction);
   const ownerRow = await (scope.groupId ? models.GrupoClinica : models.Clinica).findByPk(owner.scope_id, options);
   if (!ownerRow) fail('scope_not_found', 404);
@@ -68,10 +87,11 @@ async function googleDestinationContext({ models, scope, reference, loadInventor
   const setting = await models.CampaignWorkspaceSetting.findOne({ where: owner, ...options });
   if (!setting) fail('workspace_account_not_selected', 403);
   let account;
-  try { account = await receptionAccount({ models, settingId: setting.id, accountId: reference.account_id, now, transaction }); }
+  try { account = await receptionAccount({ models, settingId: setting.id, accountId: reference.account_id, now, transaction, expectedBrokerGrant }); }
   catch (error) {
-    if (!/^google_lead_/.test(error.code || '')) throw error;
-    fail('workspace_google_permissions_required');
+    const code = googleDestinationAccessError(error);
+    if (code) fail(code);
+    throw error;
   }
   if (JSON.stringify(account.members.map(row => Number(row.id_clinica)).sort((a, b) => a - b))
     !== JSON.stringify([...scope.clinicIds].sort((a, b) => a - b))) fail('workspace_scope_changed');
@@ -90,38 +110,30 @@ async function googleDestinationContext({ models, scope, reference, loadInventor
 }
 
 // Inspect only configuration metadata. No submissions, form answers or webhook credentials are requested.
-async function inspectGoogleDestinations({ reference, accessToken, loginCustomerId, read = googleAdsSearchRows, now = new Date() }) {
+async function inspectGoogleDestinations({ reference, accessToken, loginCustomerId, read = googleAdsSearchRows, readSection, now = new Date() }) {
   const { account_id: accountId, campaign_id: campaignId } = reference;
   const deadline = Date.now() + 50000;
-  const search = async query => {
+  const search = async section => {
     const remaining = deadline - Date.now();
     if (remaining < 1000) fail('workspace_google_check_timeout');
-    const rows = await read({ customerId: accountId, accessToken, loginCustomerId, query: `${query} LIMIT 2001`, maxPages: 5, timeoutMs: remaining });
+    const rows = readSection ? await readSection(section, remaining)
+      : await read({ customerId: accountId, accessToken, loginCustomerId,
+        query: destinationContract.query({ section, campaignId }, { customerId: accountId }), maxPages: 5, timeoutMs: remaining });
+    if (Date.now() >= deadline) fail('workspace_google_check_timeout');
     if (!Array.isArray(rows) || rows.length > 2000 || rows.some(row => String(row.customer?.id) !== accountId)) fail('workspace_google_destination_incomplete');
     return rows;
   };
-  const campaignRows = await search(`SELECT customer.id, campaign.id, campaign.advertising_channel_type, campaign.asset_automation_settings
-    FROM campaign WHERE campaign.id = ${campaignId} AND campaign.status != 'REMOVED'`);
+  const campaignRows = await search('campaign');
   if (campaignRows.length !== 1 || String(campaignRows[0].campaign?.id) !== campaignId) fail('workspace_google_campaign_unavailable');
   const campaign = campaignRows[0].campaign;
-  const groups = await search(`SELECT customer.id, campaign.id, ad_group.id FROM ad_group WHERE campaign.id = ${campaignId} AND ad_group.status != 'REMOVED'`);
+  const groups = await search('ad_groups');
   const groupIds = new Set(groups.map(row => String(row.adGroup?.id)));
-  const formFields = 'asset.id, asset.name, asset.lead_form_asset.headline';
-  const campaignForms = await search(`SELECT customer.id, campaign.id, campaign_asset.status, ${formFields}
-    FROM campaign_asset WHERE campaign.id = ${campaignId} AND campaign_asset.field_type = 'LEAD_FORM' AND campaign_asset.status = 'ENABLED'`);
-  const accountForms = await search(`SELECT customer.id, customer_asset.status, ${formFields}
-    FROM customer_asset WHERE customer_asset.field_type = 'LEAD_FORM' AND customer_asset.status = 'ENABLED'`);
-  const groupForms = await search(`SELECT customer.id, campaign.id, ad_group.id, ad_group_asset.status, ${formFields}
-    FROM ad_group_asset WHERE campaign.id = ${campaignId} AND ad_group_asset.field_type = 'LEAD_FORM' AND ad_group_asset.status = 'ENABLED'`);
-  const assetGroups = campaign.advertisingChannelType === 'PERFORMANCE_MAX' ? await search(`SELECT customer.id, asset_group.id,
-    asset_group.campaign, asset_group.final_urls, asset_group.final_mobile_urls FROM asset_group
-    WHERE asset_group.campaign = 'customers/${accountId}/campaigns/${campaignId}' AND asset_group.status != 'REMOVED'`) : [];
-  const assetForms = campaign.advertisingChannelType === 'PERFORMANCE_MAX' ? await search(`SELECT customer.id, asset_group.id,
-    asset_group.campaign, asset_group_asset.status, ${formFields} FROM asset_group_asset
-    WHERE asset_group.campaign = 'customers/${accountId}/campaigns/${campaignId}' AND asset_group_asset.field_type = 'LEAD_FORM' AND asset_group_asset.status = 'ENABLED'`) : [];
-  const ads = await search(`SELECT customer.id, campaign.id, ad_group.id, ad_group_ad.ad.id, ad_group_ad.ad.type,
-    ad_group_ad.ad.final_urls, ad_group_ad.ad.final_mobile_urls FROM ad_group_ad
-    WHERE campaign.id = ${campaignId} AND ad_group_ad.status != 'REMOVED' AND ad_group.status != 'REMOVED'`);
+  const campaignForms = await search('campaign_forms');
+  const accountForms = await search('account_forms');
+  const groupForms = await search('ad_group_forms');
+  const assetGroups = campaign.advertisingChannelType === 'PERFORMANCE_MAX' ? await search('asset_groups') : [];
+  const assetForms = campaign.advertisingChannelType === 'PERFORMANCE_MAX' ? await search('asset_group_forms') : [];
+  const ads = await search('ads');
   for (const row of [...groups, ...campaignForms, ...groupForms, ...ads]) if (String(row.campaign?.id) !== campaignId) fail('workspace_google_destination_identity_mismatch');
   for (const row of [...assetGroups, ...assetForms]) if (row.assetGroup?.campaign !== `customers/${accountId}/campaigns/${campaignId}`) fail('workspace_google_destination_identity_mismatch');
   if (groups.some(row => !id(String(row.adGroup?.id)))) fail('workspace_google_destination_identity_mismatch');
@@ -189,23 +201,42 @@ async function refreshGoogleDestinations({ models, scope, actorId, input, hasAcc
       started_at: now().toISOString(), run_id: runId }, transaction);
     return context;
   });
+  const currentContext = async transaction => {
+    await permitted();
+    const context = await googleDestinationContext({ models, scope, reference, loadInventory, transaction, now: now(),
+      expectedBrokerGrant: started.account.brokerGrant });
+    if (context.detection?.run_id !== runId || context.detection.status !== 'checking'
+      || context.account.fingerprint !== started.account.fingerprint || context.campaign.clinicId !== started.campaign.clinicId) fail('workspace_google_check_conflict');
+    if (started.account.brokerGrant) await assertGoogleAdsGrantTransport(started.account.brokerGrant, { clinicId: context.campaign.clinicId, transaction });
+    return context;
+  };
   let detection;
   try {
-    const { accessToken } = await ensureToken(started.account.connection, { requiredScopes: [GOOGLE_ADS_SCOPE] });
-    detection = await inspectGoogleDestinations({ reference, accessToken, loginCustomerId: started.account.loginCustomerId, read, now: now() });
+    if (started.account.brokerGrant) {
+      detection = await inspectGoogleDestinations({ reference, now: now(), readSection: async (section, timeoutMs) => {
+        const deadline = Date.now() + timeoutMs;
+        await currentContext();
+        const runtime = await assertGoogleAdsGrantTransport(started.account.brokerGrant, { clinicId: started.campaign.clinicId });
+        const remaining = deadline - Date.now();
+        if (remaining < 1000) fail('workspace_google_check_timeout');
+        return runtime.broker.read(runtime.account, runtime.brokerContext, 'campaign_destinations',
+          { campaignId: reference.campaign_id, section }, { timeoutMs: remaining, beforeExecute: () => currentContext() });
+      } });
+    } else {
+      const { accessToken } = await ensureToken(started.account.connection, { requiredScopes: [GOOGLE_ADS_SCOPE] });
+      detection = await inspectGoogleDestinations({ reference, accessToken, loginCustomerId: started.account.loginCustomerId, read, now: now() });
+    }
   } catch (error) {
     const { checkError } = require('./campaignWorkspaceGooglePreparation.service');
     detection = { version: 1, source: SOURCE, status: 'failed', complete: false, kind: 'unknown',
-      forms: [], urls: [], checked_at: now().toISOString(), error: checkError(error) };
+      forms: [], urls: [], checked_at: now().toISOString(), error: googleDestinationAccessError(error) || checkError(error) };
   }
   await models.sequelize.transaction(async transaction => {
-    await permitted(); const context = await googleDestinationContext({ models, scope, reference, loadInventory, transaction, now: now() });
-    if (context.detection?.run_id !== runId || context.detection.status !== 'checking'
-      || context.account.fingerprint !== started.account.fingerprint || context.campaign.clinicId !== started.campaign.clinicId) fail('workspace_google_check_conflict');
+    const context = await currentContext(transaction);
     await store(context, { ...detection, access_fingerprint: context.account.fingerprint }, transaction);
   });
   return { success: true };
 }
 
-module.exports = { SOURCE, TTL_MS, CACHE_KEY, googleCampaignReference, googleDestinationDetection,
+module.exports = { SOURCE, TTL_MS, CACHE_KEY, googleCampaignReference, googleDestinationDetection, googleDestinationCheck, googleDestinationAccessError,
   googleDestinationContext, inspectGoogleDestinations, refreshGoogleDestinations, saveObservedGoogleDestination };

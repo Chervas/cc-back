@@ -38,12 +38,14 @@ function buildWorkspaceHealth(report, evidence = new Map(), now = new Date()) {
   for (const row of report.rows) {
     const observed = { ...(evidence.get(row.campaign.id) || {}) };
     // Historical receipts cannot override a newer failed or unfinished provider check, including web-only campaigns.
-    if (row.campaign.provider === 'meta_ads' && row.campaign.destinationCheck?.status) {
-      const denied = row.campaign.destinationCheck.error === 'workspace_meta_permissions_required';
+    if (['meta_ads', 'google_ads'].includes(row.campaign.provider) && row.campaign.destinationCheck?.status) {
+      const google = row.campaign.provider === 'google_ads';
+      const provider = google ? 'Google' : 'Meta';
+      const denied = row.campaign.destinationCheck.error === `workspace_${google ? 'google' : 'meta'}_permissions_required`;
       observed.reception = { checked: true, ready: false, configured: false,
-        state: denied ? 'action_required' : 'unverified', title: 'Revisa el acceso a Meta',
-        detail: 'Meta ha rechazado el acceso. Los resultados guardados se conservan, pero la recepción necesita una nueva comprobación.',
-        key: denied ? `meta-account:${row.campaign.account_id}` : row.campaign.id };
+        state: denied ? 'action_required' : 'unverified', title: `Revisa el acceso a ${provider}`,
+        detail: `No se ha podido confirmar el acceso a ${provider}. Los resultados guardados se conservan, pero la recepción necesita una nueva comprobación.`,
+        key: denied ? `${google ? 'google' : 'meta'}-account:${row.campaign.account_id}` : row.campaign.id };
       row.receptionReady = false;
     }
     for (const pending of observed.optimization || []) add(row, pending.action === 'pause_underperforming_ads' ? 'delivery' : 'cost',
