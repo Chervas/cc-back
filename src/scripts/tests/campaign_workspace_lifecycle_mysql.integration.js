@@ -1,12 +1,13 @@
 'use strict';
 
 // Real HTTP controllers/services and MySQL persistence. Authentication, provider
-// observations and web receipts are fixtures, never a substitute for DEV login QA.
+// observations are fixtures. Web receipts use the real signed intake handler,
+// never a substitute for DEV login, installed-plugin or provider QA.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
-const { randomBytes } = require('node:crypto');
+const { randomBytes, createHmac } = require('node:crypto');
 const { DataTypes } = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 
@@ -19,13 +20,15 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
   }
   models.FormSubmissionEvent.associate(models);
   models.LeadAttributionAudit.associate(models);
+  models.FlowExecutionV2.associate(models);
   models.GrupoClinica.hasMany(models.Clinica, { foreignKey: 'grupoClinicaId', as: 'clinicas' });
   const tables = ['GrupoClinica', 'Clinica', 'UsuarioClinica', 'ClinicGoogleAdsAccount', 'ClinicMetaAsset',
     'ExternalCampaignInventory', 'ExternalCampaignAssignment', 'GoogleAdsAdInventory', 'GoogleAdsAdInsightsDaily',
     'GoogleAdsAdSyncDay', 'GoogleAdsInsightsDaily', 'CampaignWorkspaceSetting', 'CampaignWorkspaceEvent',
     'IntakeConfig', 'CampaignRequest', 'CampaignOptimizationPolicy', 'CampaignWorkspaceOptimizationRun',
     'LeadIntake', 'LeadAttributionAudit', 'FormSubmissionEvent', 'EconomicBudget', 'CitaPaciente',
-    'GoogleAdsConversionUploadAttempt', 'JobRequest', 'WebPublication', 'WebArtifact', 'WebIntakeRuntimeReconciliation'];
+    'GoogleAdsConversionUploadAttempt', 'JobRequest', 'WebPublication', 'WebArtifact', 'WebIntakeRuntimeReconciliation',
+    'AutomationFlowTemplateV2', 'FlowExecutionV2'];
   await sql.query('ALTER DATABASE campaign_optimization_qa CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci');
   for (const name of tables) {
     const model = models[name]; assert.ok(model, name);
@@ -53,15 +56,20 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
   const accessOptions = { membershipModel: models.UsuarioClinica, globalAdminCheck: () => false };
   const hasAccess = input => hasMarketingClinicScopeAccess({ ...input, ...accessOptions });
   const handlers = createWorkspaceConfigurationHandlers({ models, hasAccess });
+  const { ingestLead } = require('../../controllers/intake.controller');
+  const { loadCampaignWorkspace } = require('../../services/campaignWorkspace.service');
   const express = require('express'), asyncHandler = require('express-async-handler'), jwt = require('jsonwebtoken');
   const secret = randomBytes(32), token = jwt.sign({ userId: actor }, secret, { expiresIn: 600 });
-  const app = express(); app.use(express.json());
+  const app = express(); app.use(express.json({ verify: (req, res, body) => { req.rawBody = body; } }));
+  app.post('/api/intake/leads', ingestLead);
   app.use((req, res, next) => {
     try { req.userData = jwt.verify((req.headers.authorization || '').replace(/^Bearer /, ''), secret, { algorithms: ['HS256'] }); next(); }
     catch { res.status(401).json({ error: 'qa_authentication_required' }); }
   });
   const base = '/api/marketing/campaign-workspace';
   app.get(base, asyncHandler(createWorkspaceHandler({ models, hasAccess,
+    // Reports exclude today. Advance only the report clock, never the receipt or lead timestamps.
+    load: options => loadCampaignWorkspace({ ...options, now: new Date(Date.now() + 86400000) }),
     accessibleClinics: input => getAccessibleMarketingClinicIds({ ...input, ...accessOptions }) })));
   for (const [method, suffix, handler] of [['get', '/configuration', 'get'], ['put', '/configuration', 'put'],
     ['get', '/preparation', 'preparation'], ['put', '/preferences', 'preferences'], ['put', '/activation', 'activate']]) {
@@ -72,11 +80,12 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
   const server = http.createServer(app), agent = new http.Agent({ keepAlive: false });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); registerOwnedLoopbackServer(server);
   report.requests = 0;
-  const request = (method, suffix, body, { scope = String(clinic), authenticated = true } = {}) => new Promise((resolve, reject) => {
+  const request = (method, suffix, body, { scope = String(clinic), authenticated = true, intake = false, signingKey = null } = {}) => new Promise((resolve, reject) => {
     const data = body === undefined ? null : JSON.stringify(body); report.requests++;
     const req = http.request({ host: '127.0.0.1', port: server.address().port, agent, method,
-      path: `${base}${suffix}?${new URLSearchParams({ scope })}`,
+      path: intake ? '/api/intake/leads' : `${base}${suffix}?${new URLSearchParams({ scope })}`,
       headers: { ...(authenticated ? { authorization: `Bearer ${token}` } : {}),
+        ...(signingKey ? { 'x-cc-signature': createHmac('sha256', signingKey).update(data).digest('hex') } : {}),
         ...(data === null ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) }) } }, res => {
       const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => {
         try { resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()), headers: res.headers }); }
@@ -147,11 +156,32 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
     assert.equal((await ok(request('GET', '/preparation'))).receptionReady, false);
     report.checks.push('a form event without a CRM lead or linked to a foreign clinic cannot mark reception ready');
 
-    const lead = await models.LeadIntake.create({ clinica_id: clinic, source: 'web', channel: 'paid',
-      google_ads_customer_id: account, google_ads_campaign_id: '200', nombre: 'Contacto ficticio QA',
-      created_at: new Date(Date.now() - 86400000) });
-    await models.FormSubmissionEvent.create({ clinic_id: clinic, lead_intake_id: lead.id, page_url: url + '?gclid=fixture',
-      submitted_at: new Date(), form_id: 'fixture-form' });
+    const submission = { clinic_id: clinic, source: 'web', channel: 'paid', event_id: 'qa-lifecycle-form',
+      google_ads_customer_id: account, google_ads_campaign_id: '200', page_url: url + '?gclid=fixture',
+      consent: false, form_submission: { form_id: 'fixture-form', page_url: url + '?gclid=fixture',
+        fields: { nombre: 'Contacto ficticio QA', email: 'qa@example.invalid' } } };
+    const submit = (body = submission, signingKey = record.hmac_key) => request('POST', '', body,
+      { intake: true, authenticated: false, signingKey });
+    const beforeLeadCount = await models.LeadIntake.count(), beforeReceiptCount = await models.FormSubmissionEvent.count();
+    assert.equal((await submit(submission, null)).status, 401);
+    assert.equal((await submit(submission, 'wrong-fictitious-key')).status, 401);
+    assert.equal((await submit({ ...submission, page_url: 'https://foreign.example.invalid/landing' })).status, 403);
+    assert.equal(await models.LeadIntake.count(), beforeLeadCount);
+    assert.equal(await models.FormSubmissionEvent.count(), beforeReceiptCount);
+    assert.equal((await ok(request('GET', '/preparation'))).receptionReady, false);
+    const accepted = await submit(); assert.equal(accepted.status, 201, JSON.stringify(accepted.body));
+    const lead = await models.LeadIntake.findByPk(accepted.body.id);
+    assert.equal(lead.clinica_id, clinic); assert.equal(lead.email, 'qa@example.invalid');
+    assert.equal(lead.google_ads_customer_id, account); assert.equal(lead.google_ads_campaign_id, '200');
+    assert.equal(lead.campana_id, null);
+    assert.equal(await models.LeadIntake.count(), beforeLeadCount + 1);
+    assert.equal(await models.FormSubmissionEvent.count({ where: { lead_intake_id: lead.id, clinic_id: clinic } }), 1);
+    assert.equal(await models.LeadAttributionAudit.count({ where: { lead_intake_id: lead.id } }), 1);
+    const duplicate = await submit(); assert.equal(duplicate.status, 409, JSON.stringify(duplicate.body));
+    assert.equal(duplicate.body.id, lead.id); assert.equal(await models.LeadIntake.count(), beforeLeadCount + 1);
+    assert.equal(await models.GoogleAdsConversionUploadAttempt.count(), 0);
+    assert.equal(await models.JobRequest.count(), 0);
+    report.checks.push('signed HTTP form creates CRM lead, audit and receipt without a local campaign; missing/wrong signatures and foreign domain write nothing; duplicate does not create another lead or advertising job');
     const stale = await request('PUT', '/activation', activation(preparation));
     assert.equal(stale.status, 409); assert.equal(stale.body.error, 'workspace_preparation_changed');
     preparation = await ok(request('GET', '/preparation')); assert.equal(preparation.receptionReady, true);

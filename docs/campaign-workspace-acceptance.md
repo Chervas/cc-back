@@ -27,9 +27,9 @@ lectura cacheada no acredita recepcion real ni entrega a un proveedor.
 | Requisito | Fuente / evidencia disponible | Lo necesario antes de cerrarlo |
 |---|---|---|
 | Hub y objetivo conservados, breadcrumb unico y retorno al origen | Rutas/componentes productivos; `campaign_canonical_navigation.test.js`; QA anterior documentada | Repetir navegacion autenticada del build instalado, Atras/Adelante, reload y tres anchos |
-| Inicio simple: conectar, preparar, revisar | `campaign-workspace.component` y endpoints configuration/preparation/activation; recorrido HTTP/MySQL aislado desde vacio a resumen, 28 peticiones, transacciones reales | Repetir recorrido visual autenticado del candidato DEV; cancelar/volver sin perder origen. El fixture SQL no prueba OAuth, instalacion en web o envio de formularios |
+| Inicio simple: conectar, preparar, revisar | `campaign-workspace.component` y endpoints configuration/preparation/activation; recorrido HTTP/MySQL aislado desde vacio a resumen, 34 peticiones, transacciones reales y formulario firmado | Repetir recorrido visual autenticado del candidato DEV; cancelar/volver sin perder origen. El fixture SQL no prueba OAuth ni instalacion/envio desde un plugin externo |
 | Google/Meta, cuentas e incorporacion | WorkspaceSettings/SharedAccount/Assignment; tests de seleccion, scope y cuentas compartidas. Google: descubrimiento tipado Search/PMax -> inventario -> seleccion real probado con fixtures; nueva campana -> lead CRM sin campana local ni emparejado | Repetir el recorrido integrado con sesion DEV y comprobar la excepcion compartida en UI. Las pruebas aisladas no acreditan sincronizacion/recepcion del proveedor real. OAuth real no se ejecuta en DEV ni reactiva Meta |
-| Web, privacidad y formularios | Preparacion web reutilizable; WorkspaceReception/GoogleDestination/NativeReception; tests web/reception/destinos | Recorrer instalar/comprobar/cancelar y recibir un formulario sintetico por el circuito autorizado. Un check de metadata no prueba entrega |
+| Web, privacidad y formularios | Preparacion web reutilizable; WorkspaceReception/GoogleDestination/NativeReception; HTTP firmado -> ingestLead -> lead/auditoria/recibo -> preparacion/resumen con MySQL temporal | Recorrer instalar/comprobar/cancelar y enviar desde el plugin en un circuito autorizado. La recepcion HTTP aislada no acredita instalacion externa ni el navegador |
 | Medicion de interesados y senales separadas de ajustes | WorkspacePreferences/SignalAuthorization/Activation; dialogos Google/Meta y tests de autorizacion | Confirmacion por destino/hito, retirada y recibo trazable en entorno autorizado; sin envios reales durante QA visual |
 | Optimiza conserva permiso, limite y responsabilidad | Ejecutor, evidencia, contabilidad mensual, escritor/cliente aislados; 1.302 backend y 883 broker en el corte anterior | Instalar cohorte/grants solo con corte aprobado; validar recepcion y cuenta correctas antes de cualquier ejecucion real |
 | Incertidumbre sin reenvio ni falso exito | Revision manual CRM/broker, firma/SQLite/HTTPS; 18 capturas con API ficticia y CSS publicado | Revisar comandos started abandonados, recursos no verificables e identidades cambiadas sin desbloqueo por tiempo. QA autenticada del historial |
@@ -129,6 +129,34 @@ Auth/me y workspace dan401 sin sesion por3004/4203. VNC sigue en sign-in; no
 hay una aceptacion autenticada nueva. La correccion no solicita ni renueva OAuth.
 
 ## Siguiente validacion
+
+Ampliacion de evidencia (28/09): el mismo test de ciclo ya no inserta directamente
+el recibo valido. Envia el formulario por HTTP al handler productivo `ingestLead`,
+con raw body y HMAC de un scope ficticio, sin JWT de usuario en esa ruta publica.
+Se conservan firma/dominio, deduplicacion, creacion del lead, auditoria y recibo,
+consultas de automatizaciones (sin flujos configurados) y gates de consentimiento.
+No hay mocks del controlador ni de la persistencia de recepcion.
+
+- Firma ausente/incorrecta y dominio ajeno: 401/403 sin lead ni recibo nuevos.
+- Formulario valido: 201, lead de la clinica esperada, atribucion Google,
+  auditoria y recibo; `campana_id` nulo, sin segunda campana ClinicaClick.
+- Reenvio: 409 con el mismo lead, sin duplicarlo. No se afirma deduplicacion de
+  eventos de formulario: se conserva el comportamiento actual del handler.
+- El recibo habilita la revision nueva de preparacion y el resumen. Para incluir
+  el lead de hoy, el reloj del informe se fija al dia siguiente SOLO en el test:
+  no se alteran fechas persistidas ni el periodo productivo que excluye hoy.
+- 34 peticiones, ocho grupos correctos, cero conexiones ajenas, cero jobs y cero
+  intentos Google; consentimiento publicitario denegado. 35 contratos relacionados
+  correctos. La configuracion/atestacion web y el login del workspace siguen siendo
+  fixtures; no es una prueba del plugin, OAuth, navegador autenticado o proveedor.
+
+Logs `/tmp/cc-campaign-http-intake-{mysql,contracts}-20260928.log` y resultado
+`/tmp/cc-campaign-opt-mysql-CuAt5n/result.json`. MySQL temporal termina codigo0;
+datos propios retirados tras verificar proceso cerrado, conservando logs/resultado.
+Sin cambios productivos, despliegues ni reinicios en esta ampliacion. VNC vuelve
+a `/sign-in`; la sesion del CRM publico no acredita acceso DEV.
+
+## Pendientes De Aceptacion
 
 1. Sesion humana en localhost:4203, sin exportarla desde CRM. Repetir recorrido
    instalado con sus APIs reales; registrar vacios y gates cerrados como tales.
