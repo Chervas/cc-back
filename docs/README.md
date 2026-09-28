@@ -9,6 +9,12 @@ Procedimiento clínico: [versiones de áreas por clínica](medical-area-contract
 Importación acotada: [borradores de programas capilares](cliniccloud-capillary-program-drafts.md)
 y [corporales](cliniccloud-corporal-program-drafts.md).
 
+Marketing y Campanas se documentan en la carpeta unificada del frontend:
+[UX](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/20.17-marketing-arquitectura-experiencia-objetivos.md),
+[implementacion](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/20.18-marketing-campanas-implementacion.md)
+y [validacion](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/20.19-marketing-campanas-validacion.md).
+No mantener contratos ni matrices paralelas de Campanas en este directorio.
+
 ## Seguridad
 
 El [runbook de migración](security-integrations-audit-migration.md) describe
