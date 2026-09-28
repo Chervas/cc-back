@@ -20,12 +20,13 @@ const rawLine = () => ({ key: 'line-1', program_id: definition().id, program_ver
 
 test('backend resolves the purchased program relation without duplicating its clinical service', () => {
   const serialize = serviceFunction('serializeBudget', {
+    budgetAmounts: require('../../lib/economicBudgetAcceptance'),
     roundMoney: value => value, numberValue: value => Number(value) || 0, paymentAppliedToBudget: () => 0,
     serializeVersion: () => ({ lines: [{ key: 'program', product_type: 'pack' }, { key: 'individual', product_type: 'treatment' }], totals: { total: 620 } }),
     economicPrograms: { integrationCapabilities: () => ({}), programPlans: () => [] },
     serializeEvent: value => value, serializeBudgetSignatureRequest: value => value,
   });
-  const result = serialize({ id: 4, public_id: 'budget', clinic_id: 72, patient_id: 1 }, {}, [], [], 0, [], [{ budget_line_key: 'program', public_id: 'purchase' }]);
+  const result = serialize({ id: 4, public_id: 'budget', clinic_id: 72, patient_id: 1 }, { totals: { total: 620 } }, [], [], 0, [], [{ budget_line_key: 'program', public_id: 'purchase' }]);
   assert.equal(result.current.lines[0].fulfillment_voucher_id, 'purchase');
   assert.equal(result.current.lines[1].fulfillment_voucher_id, null);
 });

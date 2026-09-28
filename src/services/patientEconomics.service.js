@@ -7,6 +7,7 @@ const db = require('../../models');
 const whatsappService = require('./whatsapp.service');
 const economicPrograms = require('../lib/economicProgramSnapshot');
 const economicPrices = require('../lib/economicPriceProfile');
+const budgetAmounts = require('../lib/economicBudgetAcceptance');
 const fiscalPrices = require('../lib/economicFiscalPriceSource');
 const treatmentPrograms = require('./treatmentPrograms.service');
 
@@ -700,7 +701,7 @@ function normalizePaymentProposal(raw, total) {
     }
     normalized.option_discounts[mode] = percentage;
   }
-  const optionTotal = (mode) => roundMoney(total * (1 - normalized.option_discounts[mode] / 100));
+  const optionTotal = (mode) => budgetAmounts.discountedAmount(total, normalized.option_discounts[mode]);
   if (includedModes.includes('single')) {
     normalized.single_payment = {
       base_amount: total,
@@ -1374,6 +1375,7 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
       if (!ACCEPTANCE_BANK_DATA_STATUSES.has(bankDataStatus)) {
         throw domainError(400, 'accepted_bank_data_status_invalid', 'El estado de datos bancarios no es válido.');
       }
+      acceptedAmount = amountForAcceptedLineKeys(version, acceptedLineKeys, selectedPaymentMode);
       acceptance = {
         selected_payment_mode: selectedPaymentMode || null,
         selected_financing_months: selectedFinancingMonths,
@@ -1495,11 +1497,8 @@ function acceptedLineKeysForRequest(request, version, payload = {}) {
   return lines.map((line) => line.key);
 }
 
-function amountForAcceptedLineKeys(version, acceptedLineKeys) {
-  const acceptedSet = new Set(acceptedLineKeys);
-  return roundMoney(parseJson(version.lines, [])
-    .filter((line) => acceptedSet.has(line.key))
-    .reduce((sum, line) => sum + numberValue(line.total), 0));
+function amountForAcceptedLineKeys(version, acceptedLineKeys, paymentMode = null) {
+  return budgetAmounts.acceptedAmount(version, acceptedLineKeys, paymentMode);
 }
 
 function normalizeBankDataForSignature(value) {
@@ -1791,7 +1790,7 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
   const acceptedLineKeys = requestType === 'accept_partial'
     ? acceptedLineKeysForRequest({ request_type: requestType, accepted_line_keys: payload.accepted_line_keys }, version, payload)
     : parseJson(version.lines, []).map((line) => line.key);
-  const acceptedAmount = amountForAcceptedLineKeys(version, acceptedLineKeys);
+  const acceptedAmount = amountForAcceptedLineKeys(version, acceptedLineKeys, selectedPaymentMode);
   const signatureChannel = normalizedChannel === 'tablet' ? 'tablet' : 'mobile';
   const now = new Date();
   const snapshot = {
@@ -2012,7 +2011,7 @@ async function applyBudgetSignatureAcceptance({ request, payload = {}, requestMe
       throw domainError(400, 'accepted_financing_term_invalid', 'Selecciona uno de los plazos de financiación ofrecidos.');
     }
     const acceptedLineKeys = acceptedLineKeysForRequest(lockedRequest, version, payload);
-    const acceptedAmount = amountForAcceptedLineKeys(version, acceptedLineKeys);
+    const acceptedAmount = amountForAcceptedLineKeys(version, acceptedLineKeys, selectedPaymentMode);
     const transitionTo = lockedRequest.request_type === 'accept_partial' ? 'partially_accepted' : 'accepted';
     const bankData = normalizeBankDataForSignature(payload.bank_data);
     const bankDataStatus = bankData.iban
@@ -2037,6 +2036,8 @@ async function applyBudgetSignatureAcceptance({ request, payload = {}, requestMe
     await lockedRequest.update({
       status: 'signed',
       signed_at: now,
+      accepted_amount: acceptedAmount,
+      accepted_line_keys: acceptedLineKeys,
       selected_payment_mode: selectedPaymentMode || lockedRequest.selected_payment_mode,
       selected_financing_months: selectedFinancingMonths,
       bank_data_status: bankDataStatus,
@@ -2306,9 +2307,7 @@ async function createPayment({ publicId, actorId, payload }) {
         );
       }
     }
-    const payable = numberValue(budget.accepted_amount) > 0
-      ? numberValue(budget.accepted_amount)
-      : numberValue(parseJson(version?.totals, {}).total);
+    const payable = budgetAmounts.payableAmount(budget, version);
     const previouslyApplied = roundMoney(
       previousPayments.reduce((sum, item) => sum + paymentAppliedToBudget(item), 0)
       + appliedWalletEntries.reduce((sum, item) => sum + Math.abs(numberValue(item.amount)), 0)
@@ -2495,9 +2494,7 @@ async function applyWallet({ publicId, actorId, payload }) {
         transaction,
       }),
     ]);
-    const payable = numberValue(budget.accepted_amount) > 0
-      ? numberValue(budget.accepted_amount)
-      : numberValue(parseJson(version?.totals, {}).total);
+    const payable = budgetAmounts.payableAmount(budget, version);
     const alreadyApplied = roundMoney(
       confirmedPayments.reduce((sum, item) => sum + paymentAppliedToBudget(item), 0)
       + previousAllocations.reduce((sum, item) => sum + Math.abs(numberValue(item.amount)), 0)
@@ -3456,9 +3453,7 @@ function serializeBudget(budget, version, events, payments, walletApplied = 0, s
   serializedVersion.lines = serializedVersion.lines.map(line => ({ ...line,
     fulfillment_voucher_id: programVouchers.find(voucher => String(voucher.budget_line_key) === String(line.key))?.public_id || null,
   }));
-  const payable = numberValue(budget.accepted_amount) > 0
-    ? numberValue(budget.accepted_amount)
-    : numberValue(serializedVersion.totals.total);
+  const payable = budgetAmounts.payableAmount(budget, version);
   return {
     id: budget.public_id,
     number: budget.number,
