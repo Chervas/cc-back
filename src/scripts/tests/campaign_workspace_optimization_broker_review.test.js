@@ -97,3 +97,35 @@ test('broker-only transport resolution never loads legacy credentials when mappi
   await assert.rejects(resolveGoogleAdsGrantTransport({ models: f.deps.models, accounts: [f.scope.mapping], requiredScopes: [], requireBroker: true }), { code: 'broker_binding_invalid' });
   await assert.rejects(f.review()); assert.equal(f.local.events.length, 0); assert.equal(f.provider.state.writes, 1);
 });
+
+test('unverifiable resources never close uncertainty or release the broker campaign lock', async t => {
+  for (const mode of ['missing', 'duplicate', 'foreign-campaign', 'missing-value', 'timeout', 'assignment-during-read']) await t.test(mode, async t => {
+    const f = await fixture(t);
+    if (mode === 'missing') f.provider.state.rows.ad_groups = [];
+    if (mode === 'duplicate') f.provider.state.rows.ad_groups.push(structuredClone(f.provider.state.rows.ad_groups[0]));
+    if (mode === 'foreign-campaign') f.provider.state.rows.ad_groups[0].campaign.id = '31';
+    if (mode === 'missing-value') delete f.provider.state.rows.ad_groups[0].adGroup.cpcBidMicros;
+    if (mode === 'timeout') f.writerState.beforeReadResponse = () => { throw Object.assign(Error('fictitious-timeout'), { code: 'provider_timeout' }); };
+    if (mode === 'assignment-during-read') f.writerState.beforeReadResponse = () => { f.source.context.campaign.clinicId = 2; };
+    const version = f.setting.version;
+    await assert.rejects(f.review());
+    assert.equal(f.row().status, 'uncertain'); assert.equal(f.row().resolution, null);
+    assert.equal(f.local.events.length, 0); assert.equal(f.setting.version, version);
+    assert.equal(f.provider.state.writes, 1);
+    assert.equal(f.provider.getStore().db.prepare('SELECT count(*) n FROM google_optimization_reviews').get().n, 0);
+    assert.equal(f.provider.getStore().db.prepare('SELECT count(*) n FROM google_optimization_locks').get().n, 1);
+    assert.equal(f.writerState.commands.filter(row => row.operation === C.OPERATIONS.review).length, 0);
+  });
+});
+
+test('CRM review cannot dismiss a broker command restored as started after restart', async t => {
+  const f = await fixture(t);
+  const original = f.provider.getStore().db.prepare('SELECT principal,request_id FROM google_optimization_mutations WHERE id=?').get(f.row().id);
+  f.provider.getStore().db.prepare("UPDATE commands SET state='started',result=NULL WHERE principal=? AND id=?").run(original.principal, original.request_id);
+  f.provider.reopen(); f.state.now = new Date(+f.state.now + 30 * 86400000); f.provider.state.at = +f.state.now;
+  await assert.rejects(f.review(), { code: 'workspace_optimization_review_pending' });
+  assert.equal(f.row().status, 'uncertain'); assert.equal(f.local.events.length, 0);
+  assert.equal(f.provider.state.writes, 1);
+  assert.equal(f.provider.getStore().db.prepare('SELECT count(*) n FROM google_optimization_locks').get().n, 1);
+  assert.equal(f.provider.getStore().db.prepare('SELECT count(*) n FROM google_optimization_reviews').get().n, 0);
+});

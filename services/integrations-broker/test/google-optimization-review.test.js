@@ -68,6 +68,21 @@ test('a still-running or abandoned started transport is not dismissed using elap
   assert.equal(f.getStore().db.prepare('SELECT count(*) n FROM google_optimization_reviews').get().n, 0);
   release(); await pending;
 });
+test('a persisted started command remains blocked after restart and long expiry, without replaying its mutation', async t => {
+  const f = setup(t); const input = f.input(); await unknown(f, input);
+  const original = f.getStore().db.prepare('SELECT principal,request_id FROM google_optimization_mutations WHERE id=?').get(input.executionId);
+  // Reproduce the durable state left by a process exit before its uncertainty audit.
+  f.getStore().db.prepare("UPDATE commands SET state='started',result=NULL WHERE principal=? AND id=?").run(original.principal, original.request_id);
+  f.reopen(); f.state.at += 30 * 86400000;
+  const calls = f.state.calls.length;
+  assert.equal((await f.status(input.executionId)).state, 'unknown');
+  await assert.rejects(f.execute(review(f, input)), { code: 'optimization_review_pending' });
+  await assert.rejects(f.execute(f.command('apply', input)), { code: 'outcome_unknown' });
+  assert.equal(f.getStore().db.prepare('SELECT state FROM commands WHERE principal=? AND id=?').get(original.principal, original.request_id).state, 'started');
+  assert.equal(f.getStore().db.prepare('SELECT count(*) n FROM google_optimization_reviews').get().n, 0);
+  assert.equal(f.getStore().db.prepare('SELECT count(*) n FROM google_optimization_locks').get().n, 1);
+  assert.equal(f.state.calls.length, calls); assert.equal(f.state.writes, 1);
+});
 test('revocation and changed scope prevent reading or reusing a manual receipt after restart', async t => {
   const f = setup(t); const input = f.input(); await unknown(f, input); await f.execute(review(f, input)); f.reopen();
   f.binding.googleSubject = 'different-subject'; f.reset();
