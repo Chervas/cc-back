@@ -12,7 +12,9 @@ const MARKER = 'campaign-qa-isolated-20260928';
 const ACCOUNT = '9999900928';
 const TABLES = Object.freeze({ GoogleConnections: 'id', ClinicGoogleAdsAccounts: 'id', ExternalCampaignInventories: 'id',
   GoogleAdsInsightsDaily: 'id', GoogleAdsAdInventory: 'id', GoogleAdsAdInsightsDaily: 'id', GoogleAdsAdSyncDays: 'id',
-  LeadIntakes: 'id', Pacientes: 'id_paciente', CitasPacientes: 'id_cita', EconomicBudgets: 'id' });
+  LeadIntakes: 'id', Pacientes: 'id_paciente', CitasPacientes: 'id_cita', EconomicBudgets: 'id',
+  CampaignWorkspaceSettings: 'id', CampaignWorkspaceEvents: 'id' });
+const DRAFT_TABLES = ['CampaignWorkspaceSettings', 'CampaignWorkspaceEvents'];
 const CLOSED = ['JOBS_WORKER_ENABLED', 'JOBS_CRON_LEADER', 'JOBS_AUTO_START', 'CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED',
   'CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED', 'CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED', 'CAMPAIGN_OPTIMIZATION_ENABLED',
   'CAMPAIGN_PUBLISH_ENABLED', 'CAMPAIGN_AUTOPILOT_ENABLED'];
@@ -152,7 +154,8 @@ async function cleanup(connection, filename) {
   try {
     await assertDatabase(connection);
     for (const row of manifest.rows) {
-      assert.ok(Object.hasOwn(TABLES, row.table) && Number.isSafeInteger(row.id) && row.id > 0);
+      assert.ok(Object.hasOwn(TABLES, row.table) && (DRAFT_TABLES.includes(row.table)
+        ? /^[a-f0-9-]{36}$/.test(row.id) : Number.isSafeInteger(row.id) && row.id > 0));
       const [[current]] = await connection.query('SELECT * FROM ?? WHERE ??=? FOR UPDATE', [row.table, TABLES[row.table], row.id]);
       assert.ok(current && digest(current) === row.hash, 'FIXTURE_ROW_CHANGED:' + row.table + ':' + row.id);
     }
@@ -180,14 +183,73 @@ async function cleanup(connection, filename) {
   } catch (error) { await connection.rollback(); throw error; }
 }
 
+function validateDraftCapture(setting, events, startedAt) {
+  const accounts = value => Array.isArray(value) && value.length <= 1 && value.every(row => row.provider === 'google_ads'
+    && row.account_id === ACCOUNT && typeof row.include_future === 'boolean' && Array.isArray(row.campaign_ids)
+    && row.campaign_ids.every(id => ['999990092801', '999990092802', '999990092803'].includes(id)));
+  const preferences = value => value == null || ['measurement', 'optimize'].includes(value.mode)
+    && value.signals?.enabled === false && value.signals.events?.length === 0
+    && (value.mode === 'measurement' ? value.optimization === null
+      : value.optimization?.budget_changes === false && value.optimization.monthly_limit_cents === null
+        && Array.isArray(value.optimization.actions) && value.optimization.actions.every(action => ['pause_underperforming_ads', 'adjust_bids'].includes(action)));
+  const afterStart = value => Number.isFinite(+new Date(value + 'Z')) && +new Date(value + 'Z') >= Math.floor(+new Date(startedAt) / 1000) * 1000;
+  assert.ok(setting?.scope_type === 'clinic' && setting.scope_id === 1 && setting.updated_by_user_id === 1
+    && setting.activation === null && setting.signal_preparation === null && accounts(setting.accounts)
+    && preferences(setting.preferences) && afterStart(setting.created_at), 'ONLY_OWN_UNACTIVATED_DRAFT_CAN_BE_CAPTURED');
+  assert.ok(events.length > 0 && events.length <= 20 && setting.version === events.length, 'INCOMPLETE_DRAFT_AUDIT');
+  let previousAccounts = []; let previousPreferences = null;
+  for (const [index, event] of events.entries()) {
+    assert.ok(event.setting_id === setting.id && event.actor_user_id === 1 && event.version === index + 1 && afterStart(event.created_at), 'FOREIGN_DRAFT_EVENT');
+    if (event.event_type === 'accounts_selected') {
+      const change = event.changes?.accounts;
+      assert.ok(change && accounts(change.before) && accounts(change.after) && digest(change.before) === digest(previousAccounts), 'FOREIGN_ACCOUNT_DRAFT');
+      previousAccounts = change.after;
+    } else {
+      assert.equal(event.event_type, 'preferences_saved', 'NON_DRAFT_EVENT');
+      const change = event.changes?.preferences;
+      assert.ok(change && preferences(change.before) && preferences(change.after) && digest(change.before) === digest(previousPreferences), 'FOREIGN_PREFERENCE_DRAFT');
+      previousPreferences = change.after;
+    }
+  }
+  assert.equal(digest(setting.accounts), digest(previousAccounts), 'ACCOUNT_AUDIT_MISMATCH');
+  assert.equal(digest(setting.preferences), digest(previousPreferences), 'PREFERENCE_AUDIT_MISMATCH');
+}
+
+async function captureDrafts(connection, filename) {
+  const stat = fs.lstatSync(filename);
+  assert.ok(stat.isFile() && !stat.isSymbolicLink() && !(stat.mode & 0o077) && stat.uid === process.getuid());
+  const manifest = JSON.parse(fs.readFileSync(filename, 'utf8'));
+  assert.equal(manifest.marker, MARKER); assert.equal(manifest.account, ACCOUNT); assert.equal(manifest.state, 'seeded');
+  assert.ok(!manifest.rows.some(row => DRAFT_TABLES.includes(row.table)), 'DRAFTS_ALREADY_CAPTURED');
+  await connection.query('SET TRANSACTION READ ONLY'); await connection.beginTransaction();
+  try {
+    await assertDatabase(connection);
+    const mapping = manifest.rows.find(row => row.table === 'ClinicGoogleAdsAccounts');
+    assert.ok(mapping);
+    const [[currentMapping]] = await connection.query('SELECT * FROM ClinicGoogleAdsAccounts WHERE id=?', [mapping.id]);
+    assert.equal(digest(currentMapping), mapping.hash, 'FIXTURE_MAPPING_CHANGED');
+    const [settings] = await connection.query("SELECT * FROM CampaignWorkspaceSettings WHERE scope_type='clinic' AND scope_id=1");
+    assert.equal(settings.length, 1, 'SINGLE_FIXTURE_DRAFT_REQUIRED');
+    const [events] = await connection.query('SELECT * FROM CampaignWorkspaceEvents WHERE setting_id=? ORDER BY version', [settings[0].id]);
+    validateDraftCapture(settings[0], events, manifest.createdAt);
+    await connection.rollback();
+    manifest.rows.push(...settings.map(row => ({ table: 'CampaignWorkspaceSettings', id: row.id, hash: digest(row) })),
+      ...events.map(row => ({ table: 'CampaignWorkspaceEvents', id: row.id, hash: digest(row) })));
+    manifest.draftCaptureAt = new Date().toISOString();
+    fs.writeFileSync(filename, JSON.stringify(manifest, null, 2), { mode: 0o600 });
+    return { state: 'drafts-captured', events: events.length, activation: false };
+  } catch (error) { await connection.rollback(); throw error; }
+}
+
 async function main() {
   assert.equal(process.env.CC_QA_ISOLATED_CAMPAIGN_WRITES, MARKER, 'EXPLICIT_ISOLATED_FIXTURE_OPT_IN_REQUIRED');
   const [action, filename, ...rest] = process.argv.slice(2);
-  assert.ok(['seed', 'cleanup'].includes(action) && !rest.length, 'USE_SEED_OR_CLEANUP_WITH_MANIFEST');
+  assert.ok(['seed', 'capture-drafts', 'cleanup'].includes(action) && !rest.length, 'USE_SEED_CAPTURE_DRAFTS_OR_CLEANUP_WITH_MANIFEST');
   manifestPath(filename); runtimeSafety();
   const connection = await connectOperatorDatabase('dev');
-  try { console.log(JSON.stringify(await (action === 'seed' ? seed(connection, filename) : cleanup(connection, filename)))); }
+  try { console.log(JSON.stringify(await (action === 'seed' ? seed(connection, filename)
+    : action === 'capture-drafts' ? captureDrafts(connection, filename) : cleanup(connection, filename)))); }
   finally { await connection.end(); }
 }
-module.exports = { MARKER, ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, seed, cleanup };
+module.exports = { MARKER, ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, seed, cleanup, validateDraftCapture, captureDrafts };
 if (require.main === module) main().catch(error => { console.error(error.code || error.message); process.exitCode = 1; });

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { MARKER, ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, cleanup } = require('../qa/campaign-workspace-isolated-fixture');
+const { MARKER, ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, cleanup, validateDraftCapture } = require('../qa/campaign-workspace-isolated-fixture');
 
 test('isolated QA refuses business workers or activation, including absent worker-off flags', () => {
   const closed = { JOBS_WORKER_ENABLED: 'false', JOBS_CRON_LEADER: 'false' };
@@ -90,4 +90,28 @@ for (const hasNewDependant of [true, false]) test('cleanup protects cascading de
       assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).state, 'cleaned');
     }
   } finally { fs.unlinkSync(file); fs.rmdirSync(dir); }
+});
+
+test('capture only accepts a complete audit of own unactivated drafts without signals or budgets', () => {
+  const accounts = [{ provider: 'google_ads', account_id: ACCOUNT, include_future: true, campaign_ids: ['999990092801'] }];
+  const preferences = { schema_version: 1, mode: 'measurement', signals: { enabled: false, events: [] }, optimization: null };
+  const setting = { id: 'f9aa8c28-46c1-4ba4-aef5-4e39832998d0', scope_type: 'clinic', scope_id: 1, updated_by_user_id: 1,
+    version: 2, accounts, preferences, activation: null, signal_preparation: null, created_at: '2026-09-28 07:01:00' };
+  const events = [
+    { setting_id: setting.id, actor_user_id: 1, version: 1, event_type: 'accounts_selected', created_at: setting.created_at,
+      changes: { accounts: { before: [], after: accounts } } },
+    { setting_id: setting.id, actor_user_id: 1, version: 2, event_type: 'preferences_saved', created_at: setting.created_at,
+      changes: { preferences: { before: null, after: preferences } } },
+  ];
+  const started = '2026-09-28T07:00:00Z';
+  assert.doesNotThrow(() => validateDraftCapture(setting, events, started));
+  for (const change of [{ activation: {} }, { signal_preparation: {} }, { updated_by_user_id: 2 }, { scope_id: 2 }, { version: 3 },
+    { created_at: '2026-09-27 01:00:00' }, { accounts: [{ ...accounts[0], account_id: '1851215478' }] },
+    { preferences: { ...preferences, signals: { enabled: true, events: ['lead'] } } }]) {
+    assert.throws(() => validateDraftCapture({ ...setting, ...change }, events, started));
+  }
+  for (const change of [{ actor_user_id: 2 }, { setting_id: 'another' }, { version: 7 }, { event_type: 'activated' },
+    { changes: { preferences: { before: null, after: { ...preferences, mode: 'optimize' } } } }]) {
+    assert.throws(() => validateDraftCapture(setting, [events[0], { ...events[1], ...change }], started));
+  }
 });
