@@ -6,6 +6,12 @@ promover a staging/produccion ni abrir los gates hasta completar los contratos,
 las pruebas de permisos y el QA autenticado. Referencia UX canonica en front:
 `src/Documentacion/20.17-marketing-arquitectura-experiencia-objetivos.md`, apartado 19.
 
+Corte vigente 28/09: DEV aislado ejecuta `59dd9020`, con correccion de guardado
+idempotente tras recuperar JSON de MySQL. Recorrido HTTP/SQL temporal real,
+28 peticiones y 1.297 regresiones correctas; autenticacion/proveedores del
+fixture ficticios, QA autenticada DEV aun pendiente. Evidencia, matriz y
+rollback vigentes en [aceptacion](campaign-workspace-acceptance.md).
+
 ## Reanudacion Sobre La Arquitectura Aislada (2026-09-27)
 
 El titular autoriza continuar implementando y probando sin requerir su presencia.

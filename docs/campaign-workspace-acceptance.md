@@ -7,7 +7,7 @@ no implementado ni aprobado por arrastrar su codigo anterior.
 
 ## Lo instalado
 
-- API DEV aislada: `7285c6f6526978e4145777b405e4b813af39ad0f`, unidad
+- API DEV aislada: `59dd90201682938d1fa2b0d035f7a585137ec6da`, unidad
   `clinicaclick-back-dev.service`, BD ficticia `clinicaclick_dev_isolated`.
 - Front DEV: fuente `8f06408df`, build `46666b9cf5e19833`, main
   `main.2662a192537bcec1.js`, servido en `http://localhost:4203`.
@@ -121,6 +121,13 @@ Comando reproducible, Node24 por compatibilidad del runtime:
 CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/campaign_workspace_lifecycle_mysql.integration.js
 ```
 
+Correccion publicada en DEV aislado, release `59dd9020`: preflight compatible,
+API y worker de seguridad activos, hashes de los dos servicios iguales a la
+fuente. Sin cambios de dependencias/esquema, frontend ni runtime publico. MFA y
+sesiones enforce, workers de negocio false y gates de campanas sin habilitar.
+Auth/me y workspace dan401 sin sesion por3004/4203. VNC sigue en sign-in; no
+hay una aceptacion autenticada nueva. La correccion no solicita ni renueva OAuth.
+
 ## Siguiente validacion
 
 1. Sesion humana en localhost:4203, sin exportarla desde CRM. Repetir recorrido
@@ -135,7 +142,7 @@ CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/campaign_workspace_lif
    conseguir un test verde. No marcar el objetivo completo antes de esta matriz.
 
 Rollback DEV: conservar BD, datos, claves y pausas. API anterior
-`/opt/clinicaclick-dev/release-e3fb71c31d9accb4cd01e39e6ad12d5972d947a1`;
+`/opt/clinicaclick-dev/release-7285c6f6526978e4145777b405e4b813af39ad0f`;
 frontend anterior `/home/ubuntu/www/front-multiarea-history-20260927-kmOIhV`.
 El nuevo destino conserva los assets anteriores. No restaurar el PM2/BD
 compartidos ni credenciales historicas. Procedimientos operativos front 25/30/31.
