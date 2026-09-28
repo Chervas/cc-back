@@ -7,6 +7,7 @@ const vm = require('node:vm');
 const { Op } = require('sequelize');
 const helpers = require('../../lib/googleAdsSyncHelpers');
 const { daysBetween } = require('../../services/googleAdCache.service');
+const { loadWorkspaceInventory, selectedByWorkspace } = require('../../services/campaignWorkspace.service');
 const syncSource = fs.readFileSync(require.resolve('../../jobs/sync.jobs'), 'utf8');
 const searchOutput = { exports: {} };
 vm.runInNewContext(fs.readFileSync(require.resolve('../../lib/googleAdsSearchRows'), 'utf8'), {
@@ -58,7 +59,7 @@ function fixture() {
     read: async (account, context, family, payload) => {
       await broker.assert(account, context); state.typed.push({ family, payload }); await state.onTyped?.(family);
       await broker.assert(account, context);
-      return family === 'publishing_campaigns' ? [{ campaign: { id: '456', status: 'ENABLED', advertisingChannelType: 'SEARCH' } }] : [];
+      return family === 'publishing_campaigns' ? state.campaignRows || [{ campaign: { id: '456', status: 'ENABLED', advertisingChannelType: 'SEARCH' } }] : [];
     } };
   const modules = { sequelize: { Op }, axios: { create: () => ({}) }, '../../models': models,
     '../lib/googleAdsSyncHelpers': helpers, '../lib/googleAdsClient': client,
@@ -93,6 +94,40 @@ test('managed recent and backfill jobs use all eight typed read families and loc
     assert.equal(f.state.fences.length, 6); assert.equal(f.state.destinations.length, 1);
     assert.equal(f.state.synced.filter(row => row.patch.lastSyncedAt).length, 1);
     assert.ok(f.state.synced.every(row => row.options.transaction));
+  }
+});
+
+test('discovered Search and PMax campaigns enter the workspace without ads, metrics or a second local campaign', async () => {
+  for (const method of ['executeGoogleAdsSync', 'executeGoogleAdsBackfill']) {
+    const f = fixture(); f.state.brokerContext = Object.freeze({}); f.job._syncGoogleAdsPublishingState = f.publishing;
+    f.state.accounts[0] = { ...baseAccount, assignmentScope: 'clinic', clinicaId: 59, grupoClinicaId: null };
+    f.state.campaignRows = [
+      { campaign: { id: '456', name: 'New Search', status: 'ENABLED', advertisingChannelType: 'SEARCH' } },
+      { campaign: { id: '457', name: 'New PMax', status: 'PAUSED', advertisingChannelType: 'PERFORMANCE_MAX' } },
+    ];
+    assert.equal((await f.job[method](window)).status, 'completed');
+    assert.equal(f.state.tokenReads, 0); assert.equal(f.state.requests.length, 0);
+    assert.equal(f.state.inventory.length, 2);
+    const models = {
+      Clinica: { findAll: async () => [{ id_clinica: 59, estado_clinica: 1 }] },
+      ClinicGoogleAdsAccount: { findAll: async () => f.state.accounts },
+      ClinicMetaAsset: { findAll: () => assert.fail('Google discovery must not inspect Meta') },
+      ExternalCampaignInventory: { findAll: async () => structuredClone(f.state.inventory) },
+      ExternalCampaignAssignment: { findAll: async () => [] },
+      GoogleAdsAdInventory: { findAll: async () => [] },
+    };
+    const scope = { clinicIds: [59] };
+    const inventory = await loadWorkspaceInventory({ models, scope,
+      accountReference: { provider: 'google_ads', account_id: baseAccount.customerId } });
+    assert.deepEqual(inventory.campaigns.map(row => [row.campaign_id, row.name, row.clinicId, row.paused]),
+      [['456', 'New Search', 59, false], ['457', 'New PMax', 59, true]]);
+    const selection = { provider: 'google_ads', account_id: baseAccount.customerId, include_future: true, campaign_ids: [] };
+    const settings = [{ scope_type: 'clinic', scope_id: 59, accounts: [selection] }];
+    const included = () => inventory.campaigns.filter(row => selectedByWorkspace(row, inventory, settings, scope)).map(row => row.campaign_id);
+    assert.deepEqual(included(), ['456', '457']);
+    selection.include_future = false; assert.deepEqual(included(), []);
+    selection.campaign_ids = ['456']; assert.deepEqual(included(), ['456']);
+    settings[0].accounts = []; assert.deepEqual(included(), []);
   }
 });
 test('a managed scope failure or late revocation never falls back to tokens or marks the account complete', async () => {

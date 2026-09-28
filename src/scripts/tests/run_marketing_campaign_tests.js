@@ -10,6 +10,7 @@ const explicitContracts = new Set([
   'appointment_lead_milestone_conversion.test.js',
   'google_ads_conversion_tracking.test.js',
   'google_ads_clinicaclick_goal_policy.test.js',
+  'google_ads_sync_pipeline.test.js',
   'google_lead_lifecycle_conversion.test.js',
   'marketing_web_campaign_integration.test.js',
   'qualified_lead_milestone.test.js',

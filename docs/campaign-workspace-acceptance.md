@@ -28,7 +28,7 @@ lectura cacheada no acredita recepcion real ni entrega a un proveedor.
 |---|---|---|
 | Hub y objetivo conservados, breadcrumb unico y retorno al origen | Rutas/componentes productivos; `campaign_canonical_navigation.test.js`; QA anterior documentada | Repetir navegacion autenticada del build instalado, Atras/Adelante, reload y tres anchos |
 | Inicio simple: conectar, preparar, revisar | `campaign-workspace.component` y endpoints configuration/preparation/activation; tests de comandos/lifecycle | Recorrido integrado desde cuenta vacia hasta resumen con fixtures DEV, cancelar/volver sin perder origen |
-| Google/Meta, cuentas e incorporacion | WorkspaceSettings/SharedAccount/Assignment; tests de seleccion, scope y cuentas compartidas | Verificar nueva campana en cuenta incluida, excepcion compartida y ausencia de duplicado manual. OAuth real no se ejecuta en DEV ni reactiva Meta |
+| Google/Meta, cuentas e incorporacion | WorkspaceSettings/SharedAccount/Assignment; tests de seleccion, scope y cuentas compartidas. Google: descubrimiento tipado Search/PMax -> inventario -> seleccion real probado con fixtures; nueva campana -> lead CRM sin campana local ni emparejado | Repetir el recorrido integrado con sesion DEV y comprobar la excepcion compartida en UI. Las pruebas aisladas no acreditan sincronizacion/recepcion del proveedor real. OAuth real no se ejecuta en DEV ni reactiva Meta |
 | Web, privacidad y formularios | Preparacion web reutilizable; WorkspaceReception/GoogleDestination/NativeReception; tests web/reception/destinos | Recorrer instalar/comprobar/cancelar y recibir un formulario sintetico por el circuito autorizado. Un check de metadata no prueba entrega |
 | Medicion de interesados y senales separadas de ajustes | WorkspacePreferences/SignalAuthorization/Activation; dialogos Google/Meta y tests de autorizacion | Confirmacion por destino/hito, retirada y recibo trazable en entorno autorizado; sin envios reales durante QA visual |
 | Optimiza conserva permiso, limite y responsabilidad | Ejecutor, evidencia, contabilidad mensual, escritor/cliente aislados; 1.302 backend y 883 broker en el corte anterior | Instalar cohorte/grants solo con corte aprobado; validar recepcion y cuenta correctas antes de cualquier ejecucion real |
@@ -57,6 +57,30 @@ lectura cacheada no acredita recepcion real ni entrega a un proveedor.
   noscript, ambiguedad y rutas ajenas. Evidencia privada temporal:
   `/tmp/cc-campaign-dev-release-20260928/`, logs
   `/tmp/cc-campaign-dev-{build,review-qa,destinations-qa,frontend-regression}-20260928.log`.
+
+## Incorporacion Automatica: Revision Aislada
+
+Revision adicional de incorporacion (28/09): `google_ads_sync_pipeline.test.js`
+encadena los metodos reales de sync reciente/backfill, persistencia de inventario
+y seleccion del workspace con dependencias de proveedor/BD ficticias. Search y
+PMax no requieren anuncios ni filas de metricas para aparecer. `include_future`
+incluye ambas; quitarlo o retirar la cuenta respeta la seleccion explicita.
+El contrato del broker verifica que el descubrimiento no filtre por actividad
+ni fecha. `campaign_google_lead_reception.test.js` comprueba dos campanas
+sucesivas, recepcion sin duplicado local, deduplicacion y exclusion posterior.
+La suite canonica de campanas incluye ahora tambien el pipeline Google, antes
+fuera de su seleccion de archivos. Sin cambios en codigo productivo ni runtime.
+Los contratos de autorizacion existentes rechazan nuevas campanas en Optimiza
+aunque la cuenta permita incorporacion automatica: recibir/medir no amplian el
+mandato de ajustes. Regresion ejecutada con `campaign_offline_runtime.cjs`, que
+bloquea sockets de proveedor/BD y colas; las filas y contactos son ficticios.
+La prueba real en pestana propia del VNC vuelve a `/sign-in`; el acceso CRM no
+acredita una sesion DEV. No se extraen cookies ni se fabrica autenticacion.
+Logs de este corte: `/tmp/cc-campaign-incorporation-regression-20260928.log`
+y `/tmp/cc-campaign-incorporation-broker-20260928.log`.
+Resultado: 1.295 pruebas de la suite canonica de campanas y 8 del contrato
+broker de sincronizacion, todas correctas. Estos conteos describen los archivos
+ejecutados en este corte, no sustituyen el alcance mas amplio del corte previo.
 
 ## Siguiente validacion
 

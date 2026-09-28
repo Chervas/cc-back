@@ -113,11 +113,29 @@ test('API reception reuses the existing CRM with atomic minimal audit and no web
     assert.equal((await h.run()).duplicates, 1); assert.equal(h.state.leads.length, 1); assert.equal(h.state.audits.length, 1);
   }
 });
-test('an explicitly selected account can include future campaigns without creating a local campaign', async () => {
+test('an account without future campaigns receives only the campaigns explicitly selected', async () => {
   const h = harness(); h.state.setting.accounts[0].include_future = false;
   assert.equal((await h.run()).excluded, 1); assert.equal(h.state.leads.length, 0);
   h.state.setting.accounts[0].campaign_ids = ['200'];
   assert.equal((await h.run()).received, 1);
+});
+test('a new campaign receives leads with the original account selection, without local campaign creation or rematching', async () => {
+  const h = harness(); const selection = structuredClone(h.state.setting.accounts);
+  assert.equal((await h.run()).received, 1);
+  h.state.rows = [providerRow({ id: 'new-campaign-submission',
+    resourceName: 'customers/1234567890/leadFormSubmissionData/new-campaign-submission',
+    campaign: 'customers/1234567890/campaigns/201' })];
+  assert.equal((await h.run()).received, 1);
+  assert.deepEqual(h.state.setting.accounts, selection);
+  assert.deepEqual(h.state.decisions, []);
+  assert.deepEqual(h.state.leads.map(row => [row.clinica_id, row.google_ads_campaign_id]), [[5, '200'], [5, '201']]);
+  assert.equal((await h.run()).duplicates, 1); assert.equal(h.state.leads.length, 2);
+  h.state.setting.accounts[0].include_future = false;
+  h.state.setting.accounts[0].campaign_ids = ['200'];
+  h.state.rows = [providerRow({ id: 'excluded-new-submission',
+    resourceName: 'customers/1234567890/leadFormSubmissionData/excluded-new-submission',
+    campaign: 'customers/1234567890/campaigns/201' })];
+  assert.equal((await h.run()).excluded, 1); assert.equal(h.state.leads.length, 2);
 });
 test('a group representative clinic is never a recipient; unresolved campaigns remain retryable', async () => {
   const h = harness({ group: true }); h.state.decisions = [];

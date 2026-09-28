@@ -22,6 +22,21 @@ test('full sync reads project publishing, observed destinations, creatives and d
     assert.equal(f.state.calls.at(-1).path, `/v24/customers/${CUSTOMER}/googleAds:search`);
   }
 });
+test('campaign discovery includes paused and zero-activity Search/PMax without a metric or date filter', async t => {
+  const f = adsFixture(t);
+  const search = syncRow('publishing_campaigns', 1);
+  const pmax = syncRow('publishing_campaigns', 2);
+  search.campaign.status = 'ENABLED'; search.campaign.advertisingChannelType = 'SEARCH';
+  pmax.campaign.status = 'PAUSED'; pmax.campaign.advertisingChannelType = 'PERFORMANCE_MAX';
+  f.state.response = { results: [search, pmax] };
+  const result = (await f.execute('publishing_campaigns', payload('publishing_campaigns'))).data;
+  assert.deepEqual(result.results.map(row => [row.campaign.id, row.campaign.status, row.campaign.advertisingChannelType]),
+    [['1', 'ENABLED', 'SEARCH'], ['2', 'PAUSED', 'PERFORMANCE_MAX']]);
+  assert.equal(result.nextPageToken, null);
+  const query = f.state.calls[0].json.query;
+  assert.match(query, /FROM campaign WHERE campaign.status IN \('ENABLED', 'PAUSED'\)/);
+  assert.doesNotMatch(query, /metrics\.|segments\.|ad_group|BETWEEN|campaign\.id\s*=/);
+});
 test('sync payloads reject arbitrary fields, campaign injection, invalid windows and missing exact keys before secrets', async t => {
   const f = adsFixture(t);
   for (const family of families) for (const extra of [{ query: 'SELECT *' }, { accessToken: ACCESS }, { url: 'https://fictitious.example' }]) {
