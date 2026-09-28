@@ -68,6 +68,33 @@ test('manifest requires a private owned directory and a bounded location', () =>
   } finally { fs.rmdirSync(dir); }
 });
 
+test('aggregate fixture owns two new clinics without altering users, existing clinics or provider permissions', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-campaign-fixture-test-')); const file = path.join(dir, 'manifest.json');
+  const rows = []; let last;
+  const connection = { beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, query: async (sql, values) => {
+    if (sql.includes('DATABASE() db')) return [[{ db: 'clinicaclick_dev_isolated', db_user: 'cc_dev_api@localhost' }]];
+    if (sql.includes('FROM Clinicas')) return [[{ nombre_clinica: 'Clinica ficticia DEV' }]];
+    if (sql.includes('COUNT(*)')) return [[{ n: 0 }]];
+    if (sql.startsWith('INSERT')) { rows.push({ table: values[0], row: values[1] }); last = { id: rows.length, ...values[1] }; return [{ insertId: rows.length }]; }
+    if (sql.startsWith('SELECT *')) return [[last]];
+    assert.fail('Only inserts and reads are allowed: ' + sql);
+  } };
+  try {
+    assert.deepEqual(await seed(connection, file, new Date('2026-09-28T06:00:00Z'), 'aggregate'), { state: 'seeded', rows: 724, campaigns: 6 });
+    const manifest = JSON.parse(fs.readFileSync(file));
+    assert.equal(manifest.aggregate.clinics.length, 2);
+    assert.ok(manifest.aggregate.clinics.every(id => id > 1));
+    const assignments = rows.filter(r => r.table === 'ExternalCampaignAssignments');
+    assert.equal(assignments.length, 2);
+    assert.ok(assignments.every(r => manifest.aggregate.clinics.includes(r.row.clinica_id)
+      && r.row.approved_by_user_id === undefined && r.row.match_explanation === MARKER));
+    assert.equal(rows.filter(r => r.table === 'GruposClinicas').length, 1);
+    assert.ok(rows.filter(r => r.table === 'Clinicas').every(r => r.row.grupoClinicaId === manifest.aggregate.group));
+    assert.ok(!rows.some(r => /User|Usuario|Session|Token|Setting|Event/.test(r.table)));
+    assert.ok(rows.filter(r => r.table === 'ClinicGoogleAdsAccounts').every(r => r.row.broker_read_connection_ref === null));
+  } finally { fs.rmSync(dir, { recursive: true }); }
+});
+
 test('cleanup refuses the entire transaction when a fixture row changed', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'campaign-fixture-test-'));
   const file = path.join(dir, 'manifest.json');

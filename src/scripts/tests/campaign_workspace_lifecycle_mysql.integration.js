@@ -39,6 +39,11 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
     model.refreshAttributes(); await model.sync();
   }
   const clinic = 59, group = 5, actor = 91002, account = '1234567890';
+  await sql.query('ALTER TABLE ClinicGoogleAdsAccounts MODIFY COLUMN clinicaId INT NOT NULL');
+  const groupRepair = require('../../../migrations/20260928180000-repair-google-ads-group-account-nullability');
+  await groupRepair.up(sql.getQueryInterface());
+  await groupRepair.up(sql.getQueryInterface());
+  report.checks.push('group account nullability repair succeeds on real MySQL and is idempotent');
   const domain = 'campaign-lifecycle.example.invalid', url = `https://${domain}/landing`;
   await models.GrupoClinica.create({ id_grupo: group, nombre_grupo: 'Grupo ficticio QA' });
   await models.Clinica.bulkCreate([
@@ -218,6 +223,51 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
     assert.equal(await models.CampaignWorkspaceEvent.count(), eventsBefore);
     assert.equal((await ok(request('GET', '/preparation'))).counts.total, 1);
     report.checks.push('future campaigns appear unprepared without extending receipt proof; explicit exclusion persists; failed audit rolls back selection and version');
+    await models.GrupoClinica.create({ id_grupo: 6, nombre_grupo: 'Grupo agregado ficticio' });
+    for (const id of [81, 82]) {
+      await models.Clinica.create({ id_clinica: id, grupoClinicaId: 6, nombre_clinica: 'Sede ficticia ' + id, estado_clinica: true });
+      await models.UsuarioClinica.create({ id_usuario: actor, id_clinica: id, rol_clinica: 'agencia', estado_invitacion: 'aceptada' });
+    }
+    const groupAccount = '9876543210';
+    const shared = await models.ClinicGoogleAdsAccount.create({ clinicaId: null, grupoClinicaId: 6, assignmentScope: 'group',
+      googleConnectionId: 2, customerId: groupAccount, descriptiveName: 'Cuenta compartida ficticia', currencyCode: 'EUR', isActive: true });
+    const date = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    for (const [index, id] of [81, 82, null].entries()) {
+      const campaignId = '300' + index;
+      const inventory = await models.ExternalCampaignInventory.create({ provider: 'google_ads', customer_id: groupAccount,
+        campaign_id: campaignId, campaign_name: id ? 'Visita compartida' : 'Pendiente sin sede', status: 'ENABLED', last_seen_at: new Date() });
+      if (id) await models.ExternalCampaignAssignment.create({ inventory_id: inventory.id, provider: 'google_ads', customer_id: groupAccount,
+        campaign_id: campaignId, grupo_clinica_id: 6, clinica_id: id, status: 'active' });
+      await models.GoogleAdsInsightsDaily.create({ clinicGoogleAdsAccountId: shared.id, clinicaId: id, customerId: groupAccount,
+        campaignId, date, costMicros: [40, 60, 20][index] * 1e6 });
+      for (let n = 0; id && n < index + 2; n++) await models.LeadIntake.create({ clinica_id: id, source: 'google_ads',
+        channel: 'paid', google_ads_customer_id: groupAccount, google_ads_campaign_id: campaignId, nombre: 'Contacto ficticio agregado' });
+    }
+    const groupResult = await ok(request('GET', '', undefined, { scope: 'group:6' }));
+    assert.equal(groupResult.accounts.length, 1); assert.equal(groupResult.accounts[0].sharedOutsideScope, false);
+    assert.equal(groupResult.report.rows.length, 3); assert.equal(groupResult.report.current.spend, 100); assert.equal(groupResult.report.current.leads, 5);
+    const unassigned = groupResult.report.rows.find(row => !row.campaign.assigned);
+    assert.equal(unassigned.current.spend, 20); assert.equal(unassigned.current.leads, null);
+    assert.equal(groupResult.report.healthBlocks.length, 6);
+    assert.equal(new Set(groupResult.report.rows.map(row => row.campaign.id)).size, 3);
+    const north = await ok(request('GET', '', undefined, { scope: '81' }));
+    assert.equal(north.report.rows.length, 1); assert.equal(north.report.rows[0].campaign.clinicId, 81);
+    assert.equal(north.report.current.spend, 40); assert.equal(north.report.current.leads, 2);
+    assert.equal(north.accounts[0].sharedOutsideScope, true);
+    assert.doesNotMatch(JSON.stringify(north), /3001|3002|Pendiente sin sede|Contacto ficticio agregado/);
+    const all = await ok(request('GET', '', undefined, { scope: 'all' }));
+    assert.equal(all.report.rows.length, 4); assert.equal(all.report.current.leads, 6);
+    assert.equal(all.report.current.spend, null, 'A clinic with missing investment keeps the aggregate unavailable');
+    assert.equal((await request('GET', '/configuration', undefined, { scope: 'all' })).status, 400);
+    report.checks.push('group, clinic and all HTTP reports use SQL assignments; shared campaigns count once, unassigned totals stay excluded and absent investment remains unknown');
+    await models.UsuarioClinica.update({ estado_invitacion: 'pendiente' }, { where: { id_usuario: actor, id_clinica: 82 } });
+    assert.equal((await request('GET', '', undefined, { scope: 'group:6' })).status, 403);
+    assert.equal((await request('GET', '', undefined, { scope: '81,82' })).status, 403);
+    const reduced = await ok(request('GET', '', undefined, { scope: 'all' }));
+    assert.equal(reduced.report.rows.length, 2); assert.equal(reduced.report.current.leads, 3);
+    assert.doesNotMatch(JSON.stringify(reduced), /3001|3002|Pendiente sin sede/);
+    assert.equal(await models.CampaignWorkspaceEvent.count(), eventsBefore);
+    report.checks.push('revoking one group member immediately removes its campaigns from all, refuses explicit group/CSV and leaves configuration audits unchanged');
     await models.UsuarioClinica.update({ estado_invitacion: 'pendiente' }, { where: { id_usuario: actor } });
     assert.equal((await request('GET', '/configuration')).status, 403);
     assert.equal((await request('PUT', '/configuration', { expected_version: version, accounts: [] })).status, 403);

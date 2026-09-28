@@ -10,10 +10,12 @@ const { execFileSync } = require('node:child_process');
 const { connectOperatorDatabase } = require('../../lib/cliniccloud-import/operator-database');
 const MARKER = 'campaign-qa-isolated-20260928';
 const ACCOUNT = '9999900928';
+const GROUP_ACCOUNT = '9999900929';
 const TABLES = Object.freeze({ GoogleConnections: 'id', ClinicGoogleAdsAccounts: 'id', ExternalCampaignInventories: 'id',
   GoogleAdsInsightsDaily: 'id', GoogleAdsAdInventory: 'id', GoogleAdsAdInsightsDaily: 'id', GoogleAdsAdSyncDays: 'id',
   LeadIntakes: 'id', Pacientes: 'id_paciente', CitasPacientes: 'id_cita', EconomicBudgets: 'id',
-  CampaignWorkspaceSettings: 'id', CampaignWorkspaceEvents: 'id' });
+  CampaignWorkspaceSettings: 'id', CampaignWorkspaceEvents: 'id', GruposClinicas: 'id_grupo', Clinicas: 'id_clinica',
+  ExternalCampaignAssignments: 'id' });
 const DRAFT_TABLES = ['CampaignWorkspaceSettings', 'CampaignWorkspaceEvents'];
 const CLOSED = ['JOBS_WORKER_ENABLED', 'JOBS_CRON_LEADER', 'JOBS_AUTO_START', 'CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED',
   'CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED', 'CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED', 'CAMPAIGN_OPTIMIZATION_ENABLED',
@@ -58,7 +60,7 @@ function daysBefore(now, days) {
 }
 
 async function seed(connection, filename, now = new Date(), scenario = 'standard') {
-  assert.ok(['standard', 'report'].includes(scenario), 'UNKNOWN_FIXTURE_SCENARIO');
+  assert.ok(['standard', 'report', 'aggregate'].includes(scenario), 'UNKNOWN_FIXTURE_SCENARIO');
   const fd = fs.openSync(filename, 'wx', 0o600);
   const manifest = { version: 1, marker: MARKER, account: ACCOUNT, scenario, createdAt: now.toISOString(), state: 'preparing', rows: [] };
   const persist = () => { const data = JSON.stringify(manifest, null, 2); fs.ftruncateSync(fd); fs.writeSync(fd, data, 0, 'utf8'); fs.fsyncSync(fd); };
@@ -141,10 +143,41 @@ async function seed(connection, filename, now = new Date(), scenario = 'standard
         }
       }
     }
+    if (scenario === 'aggregate') {
+      const group = await insert('GruposClinicas', { nombre_grupo: 'QA FICTICIA - Grupo campanas', ads_assignment_mode: 'manual', web_assignment_mode: 'manual' });
+      const clinics = [];
+      for (const name of ['Norte', 'Sur']) clinics.push(await insert('Clinicas', {
+        nombre_clinica: 'QA FICTICIA - Sede ' + name, grupoClinicaId: group, estado_clinica: 1,
+      }));
+      const groupMapping = await insert('ClinicGoogleAdsAccounts', { clinicaId: null, grupoClinicaId: group, assignmentScope: 'group',
+        googleConnectionId: connectionId, customerId: GROUP_ACCOUNT, descriptiveName: 'QA FICTICIA - Cuenta compartida',
+        currencyCode: 'EUR', timeZone: 'Europe/Madrid', isActive: 1, lastSyncedAt: observed,
+        broker_read_connection_ref: null, broker_read_asset_ref: null });
+      for (let index = 0; index < 3; index++) {
+        const campaignId = GROUP_ACCOUNT + '0' + (index + 1); const clinic = clinics[index] || null;
+        const name = 'QA FICTICIA - ' + (clinic ? 'Visita de grupo' : 'Pendiente de clinica');
+        const inventory = await insert('ExternalCampaignInventories', { provider: 'google_ads', customer_id: GROUP_ACCOUNT,
+          campaign_id: campaignId, campaign_name: name, account_name: 'QA FICTICIA - Cuenta compartida',
+          status: 'ENABLED', channel_type: 'SEARCH', source: MARKER, last_seen_at: observed,
+          destination_detection: JSON.stringify({ kind: 'web', urls: ['https://campaign-qa.invalid/grupo'], fixture: MARKER }) });
+        if (clinic) await insert('ExternalCampaignAssignments', { inventory_id: inventory, provider: 'google_ads',
+          customer_id: GROUP_ACCOUNT, campaign_id: campaignId, campaign_name_snapshot: name, grupo_clinica_id: group,
+          clinica_id: clinic, match_kind: 'manual', match_explanation: MARKER, status: 'active', ...timestamps });
+        const date = daysBefore(now, 1);
+        await insert('GoogleAdsInsightsDaily', { clinicGoogleAdsAccountId: groupMapping, clinicaId: clinic, customerId: GROUP_ACCOUNT,
+          campaignId, campaignName: name, campaignStatus: 'ENABLED', date, network: 'SEARCH', device: 'MOBILE',
+          costMicros: [40, 60, 20][index] * 1e6, ...timestamps });
+        for (let n = 0; clinic && n < index + 2; n++) await insert('LeadIntakes', { clinica_id: clinic, source: 'google_ads', channel: 'paid',
+          nombre: 'QA FICTICIA - Contacto sin datos personales', external_source: MARKER, external_id: `group-${index}-${n}`,
+          google_ads_customer_id: GROUP_ACCOUNT, google_ads_campaign_id: campaignId,
+          consentimiento_canal: JSON.stringify({ marketing: false }), created_at: date + ' 09:00:00', updated_at: date + ' 09:00:00' });
+      }
+      manifest.aggregate = { group, clinics, account: GROUP_ACCOUNT };
+    }
     manifest.state = 'ready-to-commit'; persist();
     await connection.commit(); committed = true;
     manifest.state = 'seeded'; persist();
-    return { state: manifest.state, rows: manifest.rows.length, campaigns: campaigns.length };
+    return { state: manifest.state, rows: manifest.rows.length, campaigns: campaigns.length + (scenario === 'aggregate' ? 3 : 0) };
   } catch (error) {
     if (!committed) { await connection.rollback(); manifest.state = 'rolled-back'; persist(); }
     throw error;
@@ -251,12 +284,12 @@ async function captureDrafts(connection, filename) {
 async function main() {
   assert.equal(process.env.CC_QA_ISOLATED_CAMPAIGN_WRITES, MARKER, 'EXPLICIT_ISOLATED_FIXTURE_OPT_IN_REQUIRED');
   const [action, filename, ...rest] = process.argv.slice(2);
-  assert.ok(['seed', 'seed-report', 'capture-drafts', 'cleanup'].includes(action) && !rest.length, 'USE_SEED_CAPTURE_DRAFTS_OR_CLEANUP_WITH_MANIFEST');
+  assert.ok(['seed', 'seed-report', 'seed-aggregate', 'capture-drafts', 'cleanup'].includes(action) && !rest.length, 'USE_SEED_CAPTURE_DRAFTS_OR_CLEANUP_WITH_MANIFEST');
   manifestPath(filename); runtimeSafety();
   const connection = await connectOperatorDatabase('dev');
-  try { console.log(JSON.stringify(await (action === 'seed' || action === 'seed-report' ? seed(connection, filename, new Date(), action === 'seed-report' ? 'report' : 'standard')
+  try { console.log(JSON.stringify(await (action.startsWith('seed') ? seed(connection, filename, new Date(), action === 'seed-report' ? 'report' : action === 'seed-aggregate' ? 'aggregate' : 'standard')
     : action === 'capture-drafts' ? captureDrafts(connection, filename) : cleanup(connection, filename)))); }
   finally { await connection.end(); }
 }
-module.exports = { MARKER, ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, seed, cleanup, validateDraftCapture, captureDrafts };
+module.exports = { MARKER, ACCOUNT, GROUP_ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, seed, cleanup, validateDraftCapture, captureDrafts };
 if (require.main === module) main().catch(error => { console.error(error.code || error.message); process.exitCode = 1; });
