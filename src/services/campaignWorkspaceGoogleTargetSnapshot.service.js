@@ -3,9 +3,10 @@
 const { digest, optimizationReference } = require('./campaignWorkspaceOptimizationCapabilities.service');
 const { scopedTarget } = require('./campaignWorkspaceOptimizationAuthorization.service');
 const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
+const targetContract = require('../../services/integrations-broker/src/google-optimization-targets-contract');
 
 const TIMEOUT_MS = 45000;
-const MAX_ROWS = 2000;
+const MAX_ROWS = targetContract.MAX_ROWS;
 const fail = suffix => { throw Object.assign(new Error(`workspace_optimization_target_${suffix}`),
   { code: `workspace_optimization_target_${suffix}` }); };
 const id = value => typeof value === 'string' && /^[1-9][0-9]{0,63}$/.test(value);
@@ -46,9 +47,7 @@ function multiplier(value) {
 
 async function readGoals(search, reference, conversionCustomer) {
   const account = reference.account_id; const campaign = `customers/${account}/campaigns/${reference.campaign_id}`;
-  const configs = await search(`SELECT customer.id, conversion_goal_campaign_config.resource_name, conversion_goal_campaign_config.campaign,
-    conversion_goal_campaign_config.goal_config_level, conversion_goal_campaign_config.custom_conversion_goal
-    FROM conversion_goal_campaign_config WHERE campaign.id = ${reference.campaign_id}`);
+  const configs = await search('config');
   if (configs.length !== 1) fail('goals_required');
   const config = configs[0].conversionGoalCampaignConfig;
   if (config?.resourceName !== `customers/${account}/conversionGoalCampaignConfigs/${reference.campaign_id}` || config.campaign !== campaign
@@ -56,8 +55,7 @@ async function readGoals(search, reference, conversionCustomer) {
   let custom = null;
   if (!empty(config.customConversionGoal)) {
     if (config.goalConfigLevel !== 'CAMPAIGN' || !resource(config.customConversionGoal, conversionCustomer, 'customConversionGoals')) fail('goals_required');
-    const rows = await search(`SELECT customer.id, custom_conversion_goal.resource_name, custom_conversion_goal.status,
-      custom_conversion_goal.conversion_actions FROM custom_conversion_goal WHERE custom_conversion_goal.resource_name = '${config.customConversionGoal}'`);
+    const rows = await search('custom_goal', { conversionCustomerId: conversionCustomer, customGoalResource: config.customConversionGoal });
     const goal = rows[0]?.customConversionGoal;
     if (rows.length !== 1 || goal?.resourceName !== config.customConversionGoal || goal.status !== 'ENABLED'
       || !Array.isArray(goal.conversionActions) || !goal.conversionActions.length || goal.conversionActions.length > MAX_ROWS
@@ -65,9 +63,7 @@ async function readGoals(search, reference, conversionCustomer) {
       || new Set(goal.conversionActions).size !== goal.conversionActions.length) fail('goals_required');
     custom = { resource: goal.resourceName, actions: [...goal.conversionActions].sort() };
   }
-  const goalRows = await search(`SELECT customer.id, campaign_conversion_goal.campaign,
-    campaign_conversion_goal.category, campaign_conversion_goal.origin, campaign_conversion_goal.biddable
-    FROM campaign_conversion_goal WHERE campaign.id = ${reference.campaign_id}`);
+  const goalRows = await search('goals');
   const seen = new Set(); const goals = [];
   for (const row of goalRows) {
     const goal = row.campaignConversionGoal;
@@ -75,13 +71,7 @@ async function readGoals(search, reference, conversionCustomer) {
       || seen.has(`${goal.category}:${goal.origin}`)) fail('incomplete');
     seen.add(`${goal.category}:${goal.origin}`); goals.push({ category: goal.category, origin: goal.origin, biddable: bool(goal.biddable) });
   }
-  const actionRows = await search(`SELECT customer.id, conversion_action.resource_name, conversion_action.owner_customer,
-    conversion_action.status, conversion_action.category, conversion_action.origin, conversion_action.primary_for_goal,
-    conversion_action.type, conversion_action.counting_type, conversion_action.attribution_model_settings.attribution_model,
-    conversion_action.click_through_lookback_window_days, conversion_action.view_through_lookback_window_days,
-    conversion_action.value_settings.default_value, conversion_action.value_settings.default_currency_code,
-    conversion_action.value_settings.always_use_default_value FROM conversion_action
-    WHERE conversion_action.owner_customer = 'customers/${conversionCustomer}'`);
+  const actionRows = await search('actions', { conversionCustomerId: conversionCustomer });
   const actions = []; const actionIds = new Set();
   for (const row of actionRows) {
     const action = row.conversionAction;
@@ -112,25 +102,20 @@ async function readGoals(search, reference, conversionCustomer) {
 }
 
 async function inspectGoogleTargetSnapshot({ reference, accessToken, loginCustomerId, read = googleAdsSearchRows,
-  now = () => new Date(), clock = Date.now }) {
+  now = () => new Date(), clock = Date.now, readSection }) {
   optimizationReference(reference); if (reference.provider !== 'google_ads') fail('unsupported');
   const started = clock(); if (!Number.isFinite(started)) fail('timeout');
   const account = reference.account_id; const campaignId = reference.campaign_id;
-  const search = async query => {
+  const search = async (section, scope = {}) => {
     const remaining = TIMEOUT_MS - (clock() - started); if (!Number.isFinite(remaining) || remaining < 1000 || remaining > TIMEOUT_MS) fail('timeout');
-    const rows = await read({ customerId: account, accessToken, loginCustomerId, query: `${query} LIMIT ${MAX_ROWS + 1}`,
-      maxPages: 5, timeoutMs: remaining });
+    const rows = readSection ? await readSection(section, remaining)
+      : await read({ customerId: account, accessToken, loginCustomerId,
+        query: targetContract.query({ campaignId, section }, { customerId: account, ...scope }), maxPages: 5, timeoutMs: remaining });
     if (!Number.isFinite(clock() - started) || clock() - started < 0 || clock() - started >= TIMEOUT_MS) fail('timeout');
     if (!Array.isArray(rows) || rows.length > MAX_ROWS || rows.some(row => row.customer?.id !== account)) fail('incomplete');
     return rows;
   };
-  const metadata = () => search(`SELECT customer.id, customer.currency_code, customer.time_zone,
-    customer.conversion_tracking_setting.google_ads_conversion_customer, campaign.id, campaign.status,
-    campaign.experiment_type, campaign.advertising_channel_type, campaign.bidding_strategy, campaign.bidding_strategy_type,
-    campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas, campaign.maximize_conversions.target_cpa_micros,
-    campaign.maximize_conversion_value.target_roas, campaign_budget.resource_name, campaign_budget.amount_micros,
-    campaign_budget.period, campaign_budget.explicitly_shared, campaign_budget.reference_count
-    FROM campaign WHERE campaign.id = ${campaignId}`);
+  const metadata = () => search('campaign');
   const rows = await metadata(); if (rows.length !== 1) fail('incomplete');
   const campaign = rows[0].campaign; const customer = rows[0].customer; const budget = rows[0].campaignBudget;
   if (campaign?.id !== campaignId || campaign.status !== 'ENABLED' || campaign.experimentType !== 'BASE'
@@ -149,8 +134,7 @@ async function inspectGoogleTargetSnapshot({ reference, accessToken, loginCustom
   if (!budget || !resource(budget.resourceName, account, 'campaignBudgets') || budget.period !== 'DAILY'
     || bool(budget.explicitlyShared) || budget.referenceCount !== '1') fail('budget_unsupported');
   const dailyBudget = { resource: budget.resourceName, amount_micros: micros(budget.amountMicros) };
-  const readGroups = () => campaign.advertisingChannelType === 'SEARCH' ? search(`SELECT customer.id, campaign.id,
-    ad_group.id, ad_group.target_cpa_micros, ad_group.target_roas FROM ad_group WHERE campaign.id = ${campaignId} AND ad_group.status = 'ENABLED'`) : [];
+  const readGroups = () => campaign.advertisingChannelType === 'SEARCH' ? search('ad_groups') : [];
   const groups = await readGroups();
   const groupIds = new Set();
   for (const row of groups) {
@@ -159,10 +143,7 @@ async function inspectGoogleTargetSnapshot({ reference, accessToken, loginCustom
     if (![undefined, '0'].includes(row.adGroup.targetCpaMicros) || ![undefined, 0].includes(row.adGroup.targetRoas)) fail('group_override');
   }
   const goals = await readGoals(search, reference, conversionCustomerResource.split('/')[1]);
-  const recommendationRows = await search(`SELECT customer.id, recommendation.resource_name, recommendation.type,
-    recommendation.campaign, recommendation.ad_group, recommendation.dismissed, recommendation.raise_target_cpa_recommendation,
-    recommendation.lower_target_roas_recommendation FROM recommendation WHERE recommendation.campaign = '${target.resource}'
-    AND recommendation.type IN ('RAISE_TARGET_CPA', 'LOWER_TARGET_ROAS') AND recommendation.dismissed = FALSE`);
+  const recommendationRows = await search('recommendations');
   const recommendations = []; const seen = new Set();
   for (const row of recommendationRows) {
     const rec = row.recommendation;

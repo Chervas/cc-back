@@ -21,14 +21,23 @@ function createGoogleAdsOperations({ http, cursor, withDeveloperSecret, now = Da
     async execute(context) {
       const { payload, binding, assetRef, signal, secret } = context;
       const account = contract.resource(binding, assetRef); const name = contract.family(operation);
-      const query = contract.query(name, payload, account); const scope = { ...context, operation };
-      // Account-level forms share GAQL across campaigns, but their cursors must
-      // still belong to the campaign inspection that requested them.
-      const queryIdentity = name === 'campaign_destinations' || ['optimization_performance', 'optimization_budget'].includes(name)
-        ? JSON.stringify([query, payload.campaignId, payload.section, payload.startDate, payload.endDate]) : query;
-      const queryHash = createHash('sha256').update(queryIdentity).digest('hex');
+      const scope = { ...context, operation };
       return withDeveloperSecret(binding, async developerToken => {
         if (!Buffer.isBuffer(secret) || !Buffer.isBuffer(developerToken) || signal?.aborted) fail('connection_blocked');
+        const search = async (query, pageToken) => {
+          if (signal?.aborted) fail('connection_blocked');
+          const raw = await http({ hostname: 'googleads.googleapis.com', path: `/${contract.API_VERSION}/customers/${account.customerId}/googleAds:search`,
+            token: secret, developerToken, loginCustomerId: account.loginCustomerId, signal, json: { query, ...(pageToken ? { pageToken } : {}) } });
+          if (signal?.aborted) fail('connection_blocked'); return raw;
+        };
+        const resolved = name === 'optimization_targets'
+          ? await require('./google-optimization-targets-contract').resolveScope(payload, account, search) : account;
+        const query = contract.query(name, payload, resolved);
+        // Even account-level reads belong to one campaign inspection. Resolve
+        // conversion ownership again before serving a cached target page.
+        const queryIdentity = ['campaign_destinations', 'optimization_targets', 'optimization_performance', 'optimization_budget'].includes(name)
+          ? JSON.stringify([query, payload.campaignId, payload.section, payload.startDate, payload.endDate, resolved]) : query;
+        const queryHash = createHash('sha256').update(queryIdentity).digest('hex');
         const epoch = createHash('sha256').update(secret).update(Buffer.from([0])).update(developerToken).digest('hex');
         const key = scopeKey(context, operation); let entry; let offset = 0;
         prune();
@@ -44,11 +53,8 @@ function createGoogleAdsOperations({ http, cursor, withDeveloperSecret, now = Da
           const next = entry?.nextPageToken || null;
           const previous = entry?.seenTokens || [];
           if (next && previous.includes(next) || previous.length >= Math.ceil(contract.rowLimit(name, payload) / contract.PROVIDER_PAGE_SIZE) + 1) fail('provider_failed');
-          const raw = await http({ hostname: 'googleads.googleapis.com', path: `/${contract.API_VERSION}/customers/${account.customerId}/googleAds:search`,
-            token: secret, developerToken, loginCustomerId: account.loginCustomerId, signal,
-            json: { query, ...(next ? { pageToken: next } : {}) } });
-          if (signal?.aborted) fail('connection_blocked');
-          const page = contract.projectPage(name, raw, payload, account);
+          const raw = await search(query, next);
+          const page = contract.projectPage(name, raw, payload, resolved);
           if (name === 'leads' && page.results.some(row => Date.parse(row.leadFormSubmissionData.submissionDateTime) > now() + 300000)) fail('provider_failed');
           const count = (entry?.count || 0) + page.results.length;
           const maximum = contract.rowLimit(name, payload);

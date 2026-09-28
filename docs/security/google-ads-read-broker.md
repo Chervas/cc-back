@@ -41,6 +41,7 @@ cuenta y operación; no tenant de grupo ni operación genérica de búsqueda.
 | `google.ads.optimization.read.v1` | `{campaignId, section, pageToken}` | Compatibilidad de Optimiza: campaña/presupuesto, grupos y estado de anuncios; máximo 2.000 filas por sección; preparado el 27/09, no publicado |
 | `google.ads.optimization_performance.read.v1` | `{campaignId, section, startDate, endDate, pageToken}` | Evidencia madura: metadata, inventario y clics/coste diarios de campaña y anuncios; preparado el 28/09, no publicado |
 | `google.ads.optimization_budget.read.v1` | `{campaignId, section, startDate, endDate, pageToken}` | Propiedad del presupuesto y coste acumulado del mes por campaña; preparado el 28/09, no publicado |
+| `google.ads.optimization_targets.read.v1` | `{campaignId, section, pageToken}` | Objetivos CPA/ROAS, baseline, conversiones efectivas y recomendaciones; siete secciones, máximo 2.000 por sección; preparado el 28/09, no publicado |
 | `google.ads.asset.revoke.v1` | `{}` | `{revoked: true}` con UUID/replay durable |
 
 Fechas canónicas, ventana máxima inclusiva de 15 días y 100.000 filas por
@@ -167,6 +168,40 @@ de relevancia. Ambos se detienen antes de intentar rutas legacy en cuentas
 migradas. El escritor de Optimiza sigue bloqueado. Requiere instalación compatible
 y autorización separada de las operaciones exactas en el grant o `readOperations`.
 No hay cambio de runtime, cohorte, secreto, OAuth, jobs ni permisos en este corte.
+
+### Objetivos CPA/ROAS: adaptación posterior del 28/09/2026
+
+`optimization_targets` admite solo `campaign`, `ad_groups`, `config`,
+`custom_goal`, `goals`, `actions` y `recommendations`. Payload sin query, owner,
+manager o recurso elegido por el llamante. Todas las lecturas están dirigidas a
+la cuenta del binding; no se cambia de cuenta publicitaria por usar conversiones
+de un administrador. Antes de consultar acciones se obtiene su propietario de
+la configuración Google de la cuenta; el objetivo custom se obtiene además de
+la configuración de la campaña. No se reinterpreta un token ni se buscan permisos
+alternativos. La documentación oficial contempla recuperar objetivos custom de
+la cuenta de conversiones efectiva desde la cuenta publicitaria:
+[objetivos de campaña](https://developers.google.com/google-ads/api/docs/conversions/goals/campaign-goals).
+
+Propietario y custom goal vuelven a comprobarse antes de servir páginas cacheadas;
+su identidad forma parte del cursor junto a campaña y sección. Si cambia, el cursor
+anterior se rechaza. Proyecciones mínimas sin nombres, contactos, snippets o
+credenciales; claves de fila específicas impiden colisiones/duplicados entre
+acciones, categoría-origen y recomendaciones. No se amplían grants instalados.
+
+El consumidor conserva las políticas anteriores: propietario efectivo,
+Search/PMax, EUR/Madrid, presupuesto exclusivo, sin objetivos de grupo ni
+estrategia compartida, relectura de grupos/objetivos/metadata y recomendación
+única RAISE_TARGET_CPA o LOWER_TARGET_ROAS. El multiplicador y objetivo medio
+se conservan sin redondeo prematuro; información de cartera no se convierte en
+recomendación de campaña. Campos contrastados con
+[TargetAdjustmentInfo v24](https://developers.google.com/google-ads/api/reference/rpc/v24/Recommendation.TargetAdjustmentInfo).
+No aplica recomendaciones ni cambia estrategias u objetivos de conversión.
+
+La recogida CPA/ROAS y el lector de baseline tienen pruebas firmadas reales con
+proveedor ficticio. El ejecutor permanece bloqueado antes de escribir: falta su
+contrato de mutación y conectar allí esta baseline. Exclusiones sigue pendiente
+de contrato y política de relevancia. Sin nuevas operaciones activadas en runtime.
+
 Referencias de los campos:
 [campaña v24](https://developers.google.com/google-ads/api/fields/v24/campaign),
 [presupuesto v24](https://developers.google.com/google-ads/api/fields/v24/campaign_budget)

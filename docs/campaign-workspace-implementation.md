@@ -248,17 +248,58 @@ No se abre el escritor de Optimiza ni se habilitan grants, cuentas, jobs,
 OAuth, Meta o senales. Sin SQL real, migraciones, reinicios, despliegue ni nueva
 QA visual: la interfaz no cambia y se conserva el contraste anterior.
 
+### Sexto corte: evidencia CPA/ROAS por broker (2026-09-28)
+
+Sobre backend `3e2271a5` y frontend `79b74aa3e`, sin despliegue. Nueva lectura
+`google.ads.optimization_targets.read.v1`, permiso independiente y siete
+secciones cerradas. Se reutilizan las consultas del snapshot y las politicas
+existentes; no se aplica `recommendations:apply` ni se habilita un escritor.
+
+- El colector para TARGET_CPA, TARGET_ROAS, MAXIMIZE_CONVERSIONS y
+  MAXIMIZE_CONVERSION_VALUE usa exclusivamente el grant opaco en cuentas
+  migradas. No recupera credenciales ni consulta leads CRM para deducir CPA/ROAS.
+- Conversiones compartidas: el broker descubre el propietario a traves de
+  `customer.conversion_tracking_setting` en la cuenta publicitaria autorizada.
+  Para un objetivo personalizado comprueba tambien su configuracion de campana.
+  No admite owner, resource, query o manager del cliente. Las peticiones no
+  cambian de cuenta HTTP; la proyeccion valida la relacion y el consumidor la
+  contrasta con su metadata inicial/final.
+- Cada pagina de acciones vuelve a comprobar el propietario. Cursor ligado a
+  campana/seccion/relacion, limite 2.000, sin truncar ni aceptar identidades
+  repetidas. No se persisten acciones, recomendaciones o datos de resultado
+  en el diario duradero del broker, y no viajan contactos o nombres de acciones.
+- Se mantienen lectura repetida de objetivos, grupos y metadata, TTL 60s de
+  recogida, snapshot 45s, recepcion y mandato/ACL originales. Recomendacion
+  unica, objetivo previo coincidente, maximo 10%, periodo de observacion y
+  presupuesto exclusivo conservados; los objetivos custom pueden incluir
+  acciones secundarias sin borrar los objetivos estandar autorizados.
+- El comprobador de baseline se prueba con este mismo lector tipado. Su
+  invocacion productiva desde el ejecutor sigue detras del bloqueo de escritura;
+  este corte no afirma haber completado ese recorrido ni ejecutado ajustes.
+- QA con transporte firmado/SQLite y autorizador reales, servicios ficticios:
+  cuatro estrategias, Search/PMax, propietario MCC, paginacion, cambio de
+  objetivos/grupos/presupuesto, permisos, falta de recomendacion, precision
+  decimal, baseline alterada y ausencia de acceso legacy.
+  Regresion completa: **1.243 pruebas backend y 817 del broker correctas**.
+  Enfocadas (incluidas en la regresion): 29 legacy/consumidor comun, 7 contrato
+  y 59 evidencia con broker.
+  Logs `/tmp/cc-target-evidence-{legacy,contract,consumer,all-backend,all-broker}-20260928.log`.
+
+Contrato y referencias oficiales en `docs/security/google-ads-read-broker.md`.
+Sin SQL real, AWS/proveedor real, OAuth, grants nuevos, Meta, senales, jobs,
+migraciones, reinicios o nueva QA visual. Plan Gestionado permanece aplazado.
+
 ### Siguiente corte
 
 La causa de la latencia Propdental esta corregida y medida en el candidato.
 Falta instalarlo mediante un corte autorizado y repetir el HTTP real y QA sin
 intercepcion del informe; no repetir cargas lentas contra el build antiguo.
 
-1. Adaptar la evidencia Google CPA/ROAS (objetivos, recomendaciones y baseline)
-   y la escritura de Optimiza al transporte tipado, con permiso propio,
+1. Adaptar la escritura de Optimiza al transporte tipado, con permiso propio,
    idempotencia y recibo duradero. Compatibilidad, rendimiento maduro, calculo
-   mensual y lectura de resultado/recuperacion ya estan adaptados; esto NO
-   significa que los ajustes sean ejecutables. Las exclusiones siguen
+   mensual, evidencia CPA/ROAS y lectura de resultado/recuperacion ya estan
+   adaptados; falta conectar su baseline en la ruta de ejecucion tipada. Esto
+   NO significa que los ajustes sean ejecutables. Las exclusiones siguen
    necesitando politica de relevancia. No se sustituyen con GAQL libre ni se
    activan para demostrar la interfaz.
    Preparacion de conversiones ya tiene transporte broker y no necesita duplicarse.

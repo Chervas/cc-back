@@ -141,11 +141,11 @@ async function collectOptimizationEvidence({ settingId, mandateId, reference: in
     const targetedBid = action === 'adjust_bids' && initial.source.entry.targets.some(target => targetReader.supportedTarget(target, reference));
     let credentials; let brokerRead;
     if (reference.provider === 'google_ads' && initialBrokerGrant) {
-      // These collectors need their own typed contracts; never reinterpret their GAQL or try a local token.
-      if (targetedBid || action === 'negative_keywords') fail('workspace_optimization_service_pending');
+      // Search exclusions still need their own typed contract; never fall back to local credentials.
+      if (action === 'negative_keywords') fail('workspace_optimization_service_pending');
       brokerRead = createOptimizationBrokerRead({ brokerGrant: initialBrokerGrant, reference, clinicId: initialCampaign.clinicId,
         revalidate: authorize, ...(deps.clock ? { clock: deps.clock } : {}) });
-      credentials = { readSection: (section, timeoutMs) => brokerRead('optimization', section, {}, timeoutMs) };
+      credentials = { readSection: (section, timeoutMs) => brokerRead(targetedBid ? 'optimization_targets' : 'optimization', section, {}, timeoutMs) };
     } else if (reference.provider === 'google_ads') {
       const google = require('./googleAdsScopedRuntime.service');
       await authorize();

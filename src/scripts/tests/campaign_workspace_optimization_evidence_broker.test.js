@@ -52,17 +52,13 @@ test('manual bids and budget decisions use typed compatibility controls plus the
     assert.ok(f.brokerState.commands.every(row => ['google.ads.optimization.read.v1', 'google.ads.optimization_performance.read.v1'].includes(row.operation)));
   });
 });
-test('CPA/ROAS and query exclusions remain explicitly pending until their own evidence is migrated, without a legacy read', async t => {
-  for (const action of ['adjust_bids', 'negative_keywords']) await t.test(action, async t => {
-    const f = await evidenceBrokerFixture(t);
-    const target = action === 'adjust_bids' ? { action, entity: 'campaign', id: '30', resource: `customers/${f.input.reference.account_id}/campaigns/30`,
-      field: 'target_cpa.target_cpa_micros', unit: 'micros', strategy: 'TARGET_CPA' } : { action, entity: 'campaign', id: '30',
-      resource: `customers/${f.input.reference.account_id}/campaigns/30`, field: 'keyword', match_type: 'EXACT' };
-    f.entry.targets = [target]; f.setting.activation.optimization.authorization.limits.actions = [action];
-    const result = await collectOptimizationEvidence({ ...f.input, action }, f.deps);
-    assert.deepEqual(result, { collected: false, reason: 'workspace_optimization_service_pending' });
-    assert.equal(f.brokerState.commands.length, 0); assert.equal(f.state.leadQueries.length, 0);
-  });
+test('query exclusions remain explicitly pending until evidence and relevance policy are migrated, without a legacy read', async t => {
+  const f = await evidenceBrokerFixture(t); const action = 'negative_keywords';
+  f.entry.targets = [{ action, entity: 'campaign', id: '30', resource: `customers/${f.input.reference.account_id}/campaigns/30`, field: 'keyword', match_type: 'EXACT' }];
+  f.setting.activation.optimization.authorization.limits.actions = [action];
+  const result = await collectOptimizationEvidence({ ...f.input, action }, f.deps);
+  assert.deepEqual(result, { collected: false, reason: 'workspace_optimization_service_pending' });
+  assert.equal(f.brokerState.commands.length, 0); assert.equal(f.state.leadQueries.length, 0);
 });
 test('read failures, missing permissions and missing service never return partial or fabricated evidence', async t => {
   for (const [failure, expected] of [['operation_denied', 'workspace_optimization_service_pending'],

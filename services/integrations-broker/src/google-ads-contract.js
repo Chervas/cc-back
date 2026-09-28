@@ -5,12 +5,13 @@ const leads = require('./google-leads-contract');
 const destinations = require('./google-campaign-destinations-contract');
 const optimization = require('./google-optimization-contract');
 const optimizationEvidence = require('./google-optimization-evidence-contract');
+const optimizationTargets = require('./google-optimization-targets-contract');
 const PROVIDER = 'google_ads';
 const PREFIX = 'google.ads.';
 const API_VERSION = 'v24';
 const SCOPES = Object.freeze(['https://www.googleapis.com/auth/adwords']);
 const FAMILIES = Object.freeze(['account', 'campaigns', 'campaign_metrics', 'adgroup_metrics',
-  'publishing_campaigns', 'landing_pages', 'ads', 'ad_metrics', 'discovery', 'conversion_actions', 'conversion_settings', 'leads', 'campaign_destinations', 'optimization', ...optimizationEvidence.FAMILIES]);
+  'publishing_campaigns', 'landing_pages', 'ads', 'ad_metrics', 'discovery', 'conversion_actions', 'conversion_settings', 'leads', 'campaign_destinations', 'optimization', 'optimization_targets', ...optimizationEvidence.FAMILIES]);
 const singleResult = name => ['account', 'discovery', 'conversion_settings'].includes(name);
 const OPERATIONS = Object.freeze(FAMILIES.map(name => PREFIX + name + '.read.v1'));
 const REVOKE_OPERATION = PREFIX + 'asset.revoke.v1';
@@ -18,7 +19,7 @@ const PROVIDER_PAGE_SIZE = 10000;
 const PAGE_SIZE = 250;
 const MAX_ROWS = 100000;
 const rowLimit = (name, payload) => optimizationEvidence.FAMILIES.includes(name) ? optimizationEvidence.limit(name, payload)
-  : singleResult(name) ? 1 : name === 'leads' ? leads.MAX_ROWS : name === 'optimization' ? optimization.MAX_ROWS : name === 'campaign_destinations' ? destinations.MAX_ROWS : ['campaigns', 'publishing_campaigns', 'conversion_actions'].includes(name) ? 5000
+  : singleResult(name) ? 1 : name === 'leads' ? leads.MAX_ROWS : name === 'optimization_targets' ? optimizationTargets.MAX_ROWS : name === 'optimization' ? optimization.MAX_ROWS : name === 'campaign_destinations' ? destinations.MAX_ROWS : ['campaigns', 'publishing_campaigns', 'conversion_actions'].includes(name) ? 5000
   : ['ads', 'ad_metrics'].includes(name) ? 200000 : MAX_ROWS;
 const RESOURCE_FIELDS = ['customer.id', 'campaign.id', 'campaign.name', 'campaign.status',
   'campaign.serving_status', 'campaign.primary_status', 'campaign.primary_status_reasons'];
@@ -48,6 +49,7 @@ const validators = { account: schema({}), discovery: schema({}), conversion_sett
     campaignId: { type: 'string', pattern: '^[1-9][0-9]{0,19}$' }, section: { type: 'string', enum: optimizationEvidence.SECTIONS[name] } })])),
   campaign_destinations: schema({ ...cursor, campaignId: { type: 'string', pattern: '^[1-9][0-9]{0,19}$' }, section: { type: 'string', enum: destinations.SECTIONS } }),
   optimization: schema({ ...cursor, campaignId: { type: 'string', pattern: '^[1-9][0-9]{0,19}$' }, section: { type: 'string', enum: optimization.SECTIONS } }),
+  optimization_targets: schema({ ...cursor, campaignId: { type: 'string', pattern: '^[1-9][0-9]{0,19}$' }, section: { type: 'string', enum: optimizationTargets.SECTIONS } }),
   leads: schema({ ...cursor, sinceDate: { type: 'string' } }),
   campaign_metrics: schema({ ...cursor, ...windowFields }), adgroup_metrics: schema({ ...cursor, ...windowFields }),
   publishing_campaigns: schema(cursor), landing_pages: schema({ ...cursor, ...windowFields }),
@@ -69,6 +71,7 @@ function query(name, payload, account) {
   validate(PREFIX + name + '.read.v1', payload);
   if (name === 'campaign_destinations') return destinations.query(payload, account);
   if (name === 'optimization') return optimization.query(payload, account);
+  if (name === 'optimization_targets') return optimizationTargets.query(payload, account);
   if (optimizationEvidence.FAMILIES.includes(name)) return optimizationEvidence.query(name, payload);
   if (name === 'leads') return leads.query(payload);
   if (name === 'discovery') return 'SELECT customer.id, customer.descriptive_name, customer.manager, customer.currency_code, customer.time_zone, customer.status FROM customer LIMIT 2';
@@ -145,7 +148,12 @@ function rowKey(result) {
   if (result.asset || result.assetGroup) return JSON.stringify([result.customer.id, result.campaign?.id,
     result.adGroup?.id, result.assetGroup?.id, result.asset?.id]);
   if (result.leadFormSubmissionData) return JSON.stringify([result.customer.id, 'lead', result.leadFormSubmissionData.id]);
-  if (result.conversionAction) return JSON.stringify([result.customer.id, 'conversion_action', result.conversionAction.id]);
+  if (result.conversionAction) return JSON.stringify([result.customer.id, 'conversion_action', result.conversionAction.id || result.conversionAction.resourceName]);
+  for (const key of ['conversionGoalCampaignConfig', 'customConversionGoal', 'recommendation']) {
+    if (result[key]) return JSON.stringify([result.customer.id, key, result[key].resourceName]);
+  }
+  if (result.campaignConversionGoal) return JSON.stringify([result.customer.id, 'campaign_goal', result.campaignConversionGoal.campaign,
+    result.campaignConversionGoal.category, result.campaignConversionGoal.origin]);
   return JSON.stringify([result.customer.id, result.campaign?.id, result.adGroup?.id, result.adGroupAd?.ad?.id,
     result.landingPageView?.unexpandedFinalUrl, result.segments?.date, result.segments?.adNetworkType, result.segments?.device]);
 }
@@ -158,6 +166,7 @@ function projectPage(name, raw, payload, account) {
     if (!plain(row) || !plain(row.customer) || row.customer.id !== account.customerId) fail('provider_failed');
     if (name === 'campaign_destinations') return destinations.project(row, payload, account);
     if (name === 'optimization') return optimization.project(row, payload, account);
+    if (name === 'optimization_targets') return optimizationTargets.project(row, payload, account);
     if (optimizationEvidence.FAMILIES.includes(name)) return optimizationEvidence.project(name, row, payload, account);
     if (name === 'leads') return leads.project(row, payload, account);
     if (name === 'conversion_settings') {

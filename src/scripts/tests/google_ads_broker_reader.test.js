@@ -75,7 +75,7 @@ test('all read families use the same complete-page validator and downstream erro
     const input = family === 'account' ? {} : family.endsWith('_metrics') || family === 'landing_pages' ? { ...payload } : {};
     if (['ads', 'ad_metrics'].includes(family)) input.campaignId = null;
     if (family === 'leads') input.sinceDate = new Date().toISOString().slice(0, 10);
-    if (['campaign_destinations', 'optimization'].includes(family)) Object.assign(input, { campaignId: '30', section: 'ad_groups' });
+    if (['campaign_destinations', 'optimization', 'optimization_targets'].includes(family)) Object.assign(input, { campaignId: '30', section: 'ad_groups' });
     if (['optimization_performance', 'optimization_budget'].includes(family)) Object.assign(input, { campaignId: '30',
       section: family === 'optimization_performance' ? 'ad_daily' : 'month_cost', startDate: '2026-09-01',
       endDate: family === 'optimization_performance' ? '2026-09-28' : '2026-09-11' });

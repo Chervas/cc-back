@@ -6,9 +6,9 @@ const fail = code => { throw Object.assign(Error(code), { code }); };
 function createOptimizationBrokerRead({ brokerGrant, reference, clinicId, revalidate, clock = Date.now }) {
   if (!brokerGrant || reference?.provider !== 'google_ads' || typeof revalidate !== 'function') fail('workspace_optimization_permissions_required');
   return async (family, section, window, timeoutMs) => {
-    if (!['optimization', 'optimization_performance', 'optimization_budget'].includes(family)
+    if (!['optimization', 'optimization_targets', 'optimization_performance', 'optimization_budget'].includes(family)
       || !Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60000) fail('workspace_optimization_evidence_invalid');
-    const fields = family === 'optimization' ? '' : 'endDate,startDate';
+    const fields = ['optimization', 'optimization_targets'].includes(family) ? '' : 'endDate,startDate';
     if (!window || typeof window !== 'object' || Array.isArray(window) || Object.keys(window).sort().join(',') !== fields) fail('workspace_optimization_evidence_invalid');
     const started = clock(); const deadline = started + timeoutMs; let guardError;
     const current = async () => {
