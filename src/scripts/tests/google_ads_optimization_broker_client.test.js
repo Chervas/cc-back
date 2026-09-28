@@ -86,3 +86,34 @@ test('configured writer is lazy, independently gated and refuses the same reader
   env.GOOGLE_ADS_OPTIMIZATION_BROKER_KEY_ID = 'reader';
   assert.throws(() => createConfiguredGoogleAdsOptimizationClient(options).identity(), { code: 'broker_configuration_invalid' });
 });
+function reviewFixture(f) {
+  const input = { submission: f.input, actorId: 7, confirmed: true, value: f.input.before, observedAt: f.local.at };
+  const data = { executionId: f.input.executionId, state: 'reviewed', result: { reviewedAt: f.local.at, observedAt: f.local.at,
+    reviewedBy: 7, value: f.input.before, resourceName: C.mutation(f.input, f.mapping.customerId).resourceName, previousState: 'unknown' } };
+  f.local.after = response => { response.data = structuredClone(data); };
+  return { input, data };
+}
+test('manual review uses an exact signed envelope and a bounded receipt, distinct from provider acknowledgement', async () => {
+  const f = await fixture(); const { input, data } = reviewFixture(f);
+  assert.deepEqual(await f.invoke('review', input), data);
+  assert.equal(f.local.calls[0].operation, C.OPERATIONS.review); assert.deepEqual(f.local.calls[0].payload, input);
+  assert.deepEqual(await f.invoke('status', { executionId: f.input.executionId }), data);
+  await assert.rejects(f.invoke(), { code: 'broker_response_invalid' });
+  for (const patch of [{ token: 'private' }, { actorId: 0 }, { confirmed: false }, { value: 'private' }, { observedAt: NaN }]) {
+    await assert.rejects(f.invoke('review', { ...input, ...patch }), { code: 'invalid_request' });
+  }
+  assert.equal(f.local.calls.length, 3);
+});
+test('malformed, cross-resource and secret-bearing manual receipts fail closed', async () => {
+  const changes = [d => { d.executionId = randomUUID(); }, d => { d.state = 'applied'; },
+    d => { d.result.resourceName = d.result.resourceName.replace('/50', '/51'); },
+    d => { d.result.resourceName = d.result.resourceName.replace('1234567890', '9999999999'); },
+    d => { d.result.accessToken = 'private'; }, d => { d.result.value = 'PRIVATE'; },
+    d => { d.result.value = '0'; }, d => { d.result.value = '0.5'; }, d => { d.result.reviewedAt--; },
+    d => { d.result.observedAt = NaN; }, d => { d.result.reviewedBy = 2147483648; },
+    d => { d.result.previousState = 'verified'; }, d => { d.result = null; }];
+  for (const change of changes) {
+    const f = await fixture(); const { input, data } = reviewFixture(f); change(data);
+    await assert.rejects(f.invoke('review', input), { code: 'broker_response_invalid' }); assert.equal(f.local.calls.length, 1);
+  }
+});

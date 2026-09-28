@@ -5,6 +5,7 @@ const { Op, literal } = require('sequelize');
 const { digest } = require('./campaignWorkspaceOptimizationCapabilities.service');
 const { verifyChange } = require('./campaignWorkspaceOptimizationCommand.service');
 const { settingScope } = require('./campaignWorkspaceSettings.service');
+const { REVIEW_DELAY_MS } = require('../../services/integrations-broker/src/google-optimization-write-contract');
 const loadWorkspaceInventory = options => require('./campaignWorkspace.service').loadWorkspaceInventory(options);
 const currentNamespace = () => require('./jobRequests.service').getCurrentRuntimeNamespace();
 
@@ -65,12 +66,15 @@ function changeLabel(change, value, currency) {
     + (['micros', 'minor'].includes(unit) ? ' (moneda de la cuenta)' : ' ROAS');
 }
 
-function publicRun(row, campaign, { canWrite = false, owner = null, job = null, now = new Date() } = {}) {
+function publicRun(row, campaign, { canWrite = false, owner = null, job = null, now = new Date(), brokerReviewEnabled = false } = {}) {
   const change = verifyChange(row.change);
   if (!Object.hasOwn(STATUSES, row.status) || !sameCampaign(row, campaign)) fail('workspace_optimization_history_invalid');
   const leaseActive = row.lease_token && +new Date(row.lease_until) > +now;
+  const submission = row.outcome?.broker_submission;
+  const reviewAfter = submission?.payload?.expiresAt + REVIEW_DELAY_MS;
+  const brokerReady = !submission || brokerReviewEnabled && Number.isSafeInteger(reviewAfter) && +now >= reviewAfter;
   const canResolve = row.status === 'uncertain' && !!row.submitted_at && !leaseActive && !ACTIVE_JOBS.includes(job?.status)
-    && canWrite && owner?.id === row.setting_id && !row.outcome?.broker_submission;
+    && canWrite && owner?.id === row.setting_id && brokerReady;
   return { id: row.id, revision: revision(row), campaignId: campaign.id, campaignName: campaign.name, provider: row.provider,
     action: change.target.action, actionLabel: row.evidence?.schema_version === 5
       ? change.target.unit === 'ratio' ? 'Objetivo de rentabilidad publicitaria' : 'Objetivo de coste por conversión'
@@ -84,7 +88,7 @@ function publicRun(row, campaign, { canWrite = false, owner = null, job = null, 
             : 'No se envió el ajuste porque sus condiciones dejaron de cumplirse.') : null };
 }
 
-async function loadOptimizationHistory({ models, scope, actorId, input = {}, hasAccess, loadInventory = loadWorkspaceInventory, now = new Date(), namespace = currentNamespace() }) {
+async function loadOptimizationHistory({ models, scope, actorId, input = {}, hasAccess, loadInventory = loadWorkspaceInventory, now = new Date(), namespace = currentNamespace(), env = process.env }) {
   if (!Number.isSafeInteger(actorId) || actorId <= 0 || !await hasAccess({ userId: actorId, clinicIds: scope.clinicIds, access: 'read' })) fail('marketing_scope_forbidden', 403);
   const page = input.page === undefined ? 0 : Number(input.page);
   if (!Number.isSafeInteger(page) || page < 0 || page > 10000 || input.campaignId != null && typeof input.campaignId !== 'string') fail('invalid_optimization_history_query', 400);
@@ -107,46 +111,70 @@ async function loadOptimizationHistory({ models, scope, actorId, input = {}, has
   const jobs = ids.length ? await models.JobRequest.findAll({ where: { id: { [Op.in]: ids } }, attributes: ['id', 'status'], raw: true }) : [];
   if (!await hasAccess({ userId: actorId, clinicIds: scope.clinicIds, access: 'read' })) fail('marketing_scope_forbidden', 403);
   return { ...empty, total: result.count, rows: result.rows.map(row => publicRun(row, campaigns.find(c => sameCampaign(row, c)),
-    { owner, canWrite, now, job: jobs.find(job => job.id === row.job_request_id) })) };
+    { owner, canWrite, now, job: jobs.find(job => job.id === row.job_request_id), brokerReviewEnabled: env.GOOGLE_ADS_OPTIMIZATION_BROKER_ENABLED === 'true' })) };
 }
 
-async function resolveOptimizationReview({ models, scope, actorId, runId, input, hasAccess, loadInventory = loadWorkspaceInventory, now = () => new Date(), namespace = currentNamespace() }) {
+async function reviewContext({ models, scope, actorId, runId, input, hasAccess, loadInventory, now, namespace, env }, transaction) {
+  const owner = settingScope(scope);
+  const membershipModel = { findAll: options => models.UsuarioClinica.findAll({ ...options, ...query(transaction) }) };
+  const permitted = () => hasAccess({ userId: actorId, clinicIds: scope.clinicIds, access: 'write', membershipModel });
+  if (!await permitted()) fail('marketing_scope_forbidden', 403);
+  const scopeOwner = await (scope.groupId ? models.GrupoClinica : models.Clinica).findByPk(owner.scope_id, query(transaction));
+  if (!scopeOwner) fail('scope_not_found', 404);
+  const members = scope.groupId ? await models.Clinica.findAll({ where: { grupoClinicaId: scope.groupId },
+    attributes: ['id_clinica', 'estado_clinica'], ...query(transaction) }) : [scopeOwner];
+  if (members.some(row => ![true, 1, '1'].includes(row.estado_clinica))
+    || JSON.stringify(members.map(row => Number(row.id_clinica)).sort((a, b) => a - b))
+      !== JSON.stringify([...scope.clinicIds].sort((a, b) => a - b))) fail('workspace_scope_changed');
+  const setting = await models.CampaignWorkspaceSetting.findOne({ where: owner, ...query(transaction) });
+  const run = await models.CampaignWorkspaceOptimizationRun.findByPk(runId, query(transaction));
+  if (!setting || run?.setting_id !== setting.id || run.runtime_namespace !== namespace) fail('workspace_optimization_run_not_found', 404);
+  const inventory = await loadInventory({ models, scope, transaction });
+  const campaign = inventory.campaigns.find(campaign => sameCampaign(run, campaign));
+  if (!campaign) fail('workspace_campaign_not_in_scope', 404);
+  if (run.status === 'resolved' && run.resolution?.expected_revision === input.expected_revision) return { alreadyResolved: true };
+  if (revision(run) !== input.expected_revision) fail('workspace_optimization_review_changed');
+  const brokerReviewEnabled = env.GOOGLE_ADS_OPTIMIZATION_BROKER_ENABLED === 'true';
+  if (run.outcome?.broker_submission && !brokerReviewEnabled) fail('workspace_optimization_broker_reconciliation_required');
+  const job = run.job_request_id ? await models.JobRequest.findByPk(run.job_request_id, query(transaction)) : null;
+  if (!publicRun(run, campaign, { owner: setting, canWrite: true, job, now: now(), brokerReviewEnabled }).canResolve) fail('workspace_optimization_review_busy');
+  if (!await permitted()) fail('marketing_scope_forbidden', 403);
+  return { run, setting, campaign, permitted };
+}
+
+async function closeReview({ models, actorId, input, now }, { run, setting, permitted }, transaction, receipt = null) {
+  if (!await permitted()) fail('marketing_scope_forbidden', 403);
+  const resolution = { decision: 'reviewed_in_platform', resolved_at: now().toISOString(), resolved_by_user_id: actorId, expected_revision: input.expected_revision };
+  if (receipt) resolution.broker_review = receipt;
+  await run.update({ status: 'resolved', resolution, next_check_at: null, completed_at: now(), lease_token: null, lease_until: null }, { transaction });
+  const version = setting.version + 1;
+  await setting.update({ version, updated_by_user_id: actorId }, { transaction });
+  await models.CampaignWorkspaceEvent.create({ id: crypto.randomUUID(), setting_id: setting.id, version,
+    actor_user_id: actorId, created_at: now(), event_type: 'optimization_resolved',
+    changes: { run_id: run.id, decision: resolution.decision, provider_mutation: false } }, { transaction });
+  return { success: true, changed: true };
+}
+
+async function resolveOptimizationReview({ models, scope, actorId, runId, input, hasAccess, loadInventory = loadWorkspaceInventory,
+  now = () => new Date(), namespace = currentNamespace(), env = process.env, brokerDependencies }) {
   if (!/^[a-f0-9-]{36}$/.test(runId || '') || !input || Object.keys(input).sort().join(',') !== 'confirmed,expected_revision'
     || input.confirmed !== true || !/^[a-f0-9]{64}$/.test(input.expected_revision || '')) fail('invalid_optimization_resolution', 400);
   if (!Number.isSafeInteger(actorId) || actorId <= 0) fail('unauthenticated', 401);
-  const owner = settingScope(scope);
+  const options = { models, scope, actorId, runId, input, hasAccess, loadInventory, now, namespace, env };
+  const first = await models.sequelize.transaction(async transaction => {
+    const context = await reviewContext(options, transaction);
+    if (context.alreadyResolved) return { success: true, changed: false };
+    if (!context.run.outcome?.broker_submission) return closeReview(options, context, transaction);
+    return { broker: true };
+  });
+  if (!first.broker) return first;
+  const reviewed = await require('./campaignWorkspaceOptimizationBrokerReview.service').reviewBrokerOptimization({ ...options,
+    revalidate: transaction => reviewContext(options, transaction), ...brokerDependencies });
   return models.sequelize.transaction(async transaction => {
-    const membershipModel = { findAll: options => models.UsuarioClinica.findAll({ ...options, ...query(transaction) }) };
-    const permitted = () => hasAccess({ userId: actorId, clinicIds: scope.clinicIds, access: 'write', membershipModel });
-    if (!await permitted()) fail('marketing_scope_forbidden', 403);
-    const scopeOwner = await (scope.groupId ? models.GrupoClinica : models.Clinica).findByPk(owner.scope_id, query(transaction));
-    if (!scopeOwner) fail('scope_not_found', 404);
-    const members = scope.groupId ? await models.Clinica.findAll({ where: { grupoClinicaId: scope.groupId },
-      attributes: ['id_clinica', 'estado_clinica'], ...query(transaction) }) : [scopeOwner];
-    if (members.some(row => ![true, 1, '1'].includes(row.estado_clinica))
-      || JSON.stringify(members.map(row => Number(row.id_clinica)).sort((a, b) => a - b))
-        !== JSON.stringify([...scope.clinicIds].sort((a, b) => a - b))) fail('workspace_scope_changed');
-    const setting = await models.CampaignWorkspaceSetting.findOne({ where: owner, ...query(transaction) });
-    const run = await models.CampaignWorkspaceOptimizationRun.findByPk(runId, query(transaction));
-    if (!setting || run?.setting_id !== setting.id || run.runtime_namespace !== namespace) fail('workspace_optimization_run_not_found', 404);
-    const inventory = await loadInventory({ models, scope, transaction });
-    const campaign = inventory.campaigns.find(campaign => sameCampaign(run, campaign));
-    if (!campaign) fail('workspace_campaign_not_in_scope', 404);
-    if (run.status === 'resolved' && run.resolution?.expected_revision === input.expected_revision) return { success: true, changed: false };
-    if (revision(run) !== input.expected_revision) fail('workspace_optimization_review_changed');
-    // Closing the CRM row alone cannot release an uncertain provider-side lock.
-    if (run.outcome?.broker_submission) fail('workspace_optimization_broker_reconciliation_required');
-    const job = run.job_request_id ? await models.JobRequest.findByPk(run.job_request_id, query(transaction)) : null;
-    if (!publicRun(run, campaign, { owner: setting, canWrite: true, job, now: now() }).canResolve) fail('workspace_optimization_review_busy');
-    if (!await permitted()) fail('marketing_scope_forbidden', 403);
-    const resolution = { decision: 'reviewed_in_platform', resolved_at: now().toISOString(), resolved_by_user_id: actorId, expected_revision: input.expected_revision };
-    await run.update({ status: 'resolved', resolution, next_check_at: null, completed_at: now(), lease_token: null, lease_until: null }, { transaction });
-    const version = setting.version + 1;
-    await setting.update({ version, updated_by_user_id: actorId }, { transaction });
-    await models.CampaignWorkspaceEvent.create({ id: crypto.randomUUID(), setting_id: setting.id, version,
-      actor_user_id: actorId, created_at: now(), event_type: 'optimization_resolved',
-      changes: { run_id: run.id, decision: resolution.decision, provider_mutation: false } }, { transaction });
-    return { success: true, changed: true };
+    const context = await reviewContext(options, transaction);
+    if (context.alreadyResolved) return { success: true, changed: false };
+    await reviewed.assertCurrent(transaction);
+    return closeReview(options, context, transaction, reviewed.receipt);
   });
 }
 

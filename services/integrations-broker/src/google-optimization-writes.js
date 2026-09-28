@@ -71,6 +71,9 @@ function createGoogleOptimizationWrites({ store, http, withDeveloperSecret, now 
     request_id TEXT NOT NULL, campaign_key TEXT NOT NULL, cooldown_key TEXT NOT NULL, created_at INTEGER NOT NULL, result_json TEXT);
     CREATE TABLE IF NOT EXISTS google_optimization_locks (
       resource TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES google_optimization_mutations(id));
+    CREATE TABLE IF NOT EXISTS google_optimization_reviews (
+      execution_id TEXT PRIMARY KEY, principal TEXT NOT NULL, tenant TEXT NOT NULL, connection TEXT NOT NULL, asset TEXT NOT NULL,
+      input_digest TEXT NOT NULL, scope_digest TEXT NOT NULL, result_json TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS google_optimization_cooldown ON google_optimization_mutations(cooldown_key,created_at);`);
   const load = (request, principal, binding, kind) => {
     const row = store.db.prepare('SELECT * FROM google_optimization_mutations WHERE id=?').get(request.payload.executionId);
@@ -82,12 +85,27 @@ function createGoogleOptimizationWrites({ store, http, withDeveloperSecret, now 
   };
   const receipt = row => row.state === 'applied' ? JSON.parse(row.result_json)
     : { executionId: row.id, state: 'unknown', result: null };
-  const operations = Object.fromEntries(Object.entries(C.OPERATIONS).map(([kind, operation]) => [operation, {
+  const reviewed = (request, principal, binding, comparePayload = false) => {
+    const row = store.db.prepare('SELECT * FROM google_optimization_reviews WHERE execution_id=?').get(request.payload.executionId);
+    if (!row) return null;
+    if (row.principal !== principal.id || row.tenant !== request.tenantRef || row.connection !== request.connectionRef
+      || row.asset !== request.assetRef || row.scope_digest !== C.scopeDigest(binding, C.resource(binding, request.assetRef), principal)) fail('scope_denied');
+    if (comparePayload && row.input_digest !== C.hash(request.payload)) fail('idempotency_conflict');
+    return JSON.parse(row.result_json);
+  };
+  const requireApplyGrant = (request, principal, policy) => {
+    if (!policy.grants.some(grant => grant.principalId === principal.id && grant.tenantRef === request.tenantRef
+      && grant.connectionRef === request.connectionRef && grant.assetRef === request.assetRef
+      && grant.operations.includes(C.OPERATIONS.apply))) fail('scope_denied');
+  };
+  const operations = Object.fromEntries(['apply', 'status'].map(kind => [C.OPERATIONS[kind], {
     provider: ads.PROVIDER, requiredScopes: ads.SCOPES, effect: kind === 'apply' ? 'write' : 'read',
     ...(kind === 'status' ? { secretless: true, persistResult: false } : {}),
     validate: payload => C.validate(kind, payload),
-    authorize({ request, binding, principal }) {
+    authorize({ request, binding, principal, policy }) {
+      requireApplyGrant(request, principal, policy);
       C.resource(binding, request.assetRef, kind === 'apply' ? request.payload : null); load(request, principal, binding, kind);
+      if (reviewed(request, principal, binding, kind === 'apply') && kind === 'apply') fail('optimization_reviewed');
     },
     async execute(context) {
       const { binding, assetRef, tenantRef, principalId, payload, assertActive } = context;
@@ -97,13 +115,14 @@ function createGoogleOptimizationWrites({ store, http, withDeveloperSecret, now 
       if (kind === 'status') {
         if (!context.policy.grants.some(grant => grant.principalId === principalId && grant.tenantRef === tenantRef
           && grant.connectionRef === binding.connectionRef && grant.assetRef === assetRef && grant.operations.includes(C.OPERATIONS.apply))) fail('scope_denied');
-        return existing ? receipt(existing) : { executionId: payload.executionId, state: 'not_found', result: null };
+        return reviewed(request, principal, binding) || (existing ? receipt(existing) : { executionId: payload.executionId, state: 'not_found', result: null });
       }
       if (existing) { if (existing.state !== 'applied') fail('outcome_unknown'); return receipt(existing); }
       const account = C.resource(binding, assetRef, payload); const started = now();
       const check = () => {
         assertActive(); const at = now();
         if (!Number.isFinite(at) || at < started || at >= payload.expiresAt || payload.expiresAt - at > C.TTL_MS) fail('optimization_expired');
+        if (reviewed(request, principal, binding, true)) fail('optimization_reviewed');
       };
       check();
       return withDeveloperSecret(binding, async developerToken => {
@@ -134,6 +153,7 @@ function createGoogleOptimizationWrites({ store, http, withDeveloperSecret, now 
     },
     commit({ request, principal, result }) {
       if (kind !== 'apply') return;
+      if (store.db.prepare('SELECT 1 FROM google_optimization_reviews WHERE execution_id=?').get(request.payload.executionId)) fail('optimization_reviewed');
       const row = store.db.prepare('SELECT * FROM google_optimization_mutations WHERE id=?').get(request.payload.executionId);
       if (!row || row.principal !== principal.id || row.input_digest !== C.hash(request.payload)) fail('outcome_unknown');
       if (row.state === 'applied') return;
@@ -143,6 +163,62 @@ function createGoogleOptimizationWrites({ store, http, withDeveloperSecret, now 
     },
     completionAudit: () => ['integration.completed', 'success', kind === 'apply' ? 'optimization_provider_acknowledged' : 'optimization_receipt_checked'],
   }]));
+  const reviewRequest = request => ({ ...request, payload: request.payload.submission });
+  const reviewTime = (payload, at) => {
+    if (!Number.isFinite(at) || !Number.isSafeInteger(payload.submission.expiresAt + C.REVIEW_DELAY_MS)
+      || at < payload.submission.expiresAt + C.REVIEW_DELAY_MS || payload.observedAt < payload.submission.expiresAt + C.REVIEW_DELAY_MS
+      || payload.observedAt > at || at - payload.observedAt >= C.TTL_MS) fail('optimization_review_pending');
+  };
+  const reviewState = (request, principal, binding) => {
+    const original = reviewRequest(request); const row = load(original, principal, binding, 'apply');
+    const previous = reviewed(original, principal, binding, true);
+    return { original, row, previous };
+  };
+  const settledAttempt = row => {
+    if (!row) return;
+    const command = store.db.prepare('SELECT state FROM commands WHERE principal=? AND id=?').get(row.principal, row.request_id);
+    if (!command || !['unknown', 'completed'].includes(command.state)) fail('optimization_review_pending');
+  };
+  operations[C.OPERATIONS.review] = {
+    provider: ads.PROVIDER, requiredScopes: ads.SCOPES, effect: 'write', secretless: true,
+    validate: payload => C.validate('review', payload),
+    authorize({ request, binding, principal, policy }) {
+      requireApplyGrant(request, principal, policy);
+      C.resource(binding, request.assetRef, request.payload.submission); reviewState(request, principal, binding);
+    },
+    async execute({ payload, principalId, policy, binding, assetRef, tenantRef, assertActive }) {
+      assertActive();
+      const principal = policy.principals.find(row => row.id === principalId);
+      const request = { payload, assetRef, tenantRef, connectionRef: binding.connectionRef };
+      if (!policy.grants.some(grant => grant.principalId === principalId && grant.tenantRef === tenantRef
+        && grant.connectionRef === binding.connectionRef && grant.assetRef === assetRef && grant.operations.includes(C.OPERATIONS.apply))) fail('scope_denied');
+      const { row, previous } = reviewState(request, principal, binding);
+      if (previous) return previous;
+      settledAttempt(row);
+      reviewTime(payload, now());
+      return { executionId: payload.submission.executionId, state: 'reviewed', result: {
+        reviewedAt: now(), reviewedBy: payload.actorId, observedAt: payload.observedAt, value: payload.value,
+        resourceName: C.mutation(payload.submission, C.resource(binding, assetRef).customerId).resourceName,
+        previousState: row ? row.state === 'applied' ? 'applied' : 'unknown' : 'not_found',
+      } };
+    },
+    project: result => structuredClone(result),
+    commit({ request, principal, policy, result }) {
+      const binding = policy.connections.find(row => row.connectionRef === request.connectionRef);
+      const { row, previous } = reviewState(request, principal, binding);
+      if (previous) { if (C.hash(previous) !== C.hash(result.data)) fail('idempotency_conflict'); return; }
+      settledAttempt(row);
+      reviewTime(request.payload, now());
+      if (now() < result.data.result.reviewedAt) fail('optimization_review_pending');
+      const state = row ? row.state === 'applied' ? 'applied' : 'unknown' : 'not_found';
+      if (result.data.result.previousState !== state) fail('optimization_conflict');
+      store.db.prepare('INSERT INTO google_optimization_reviews VALUES (?,?,?,?,?,?,?,?)').run(request.payload.submission.executionId,
+        principal.id, request.tenantRef, request.connectionRef, request.assetRef, C.hash(request.payload.submission),
+        C.scopeDigest(binding, C.resource(binding, request.assetRef), principal), JSON.stringify(result.data));
+      store.db.prepare('DELETE FROM google_optimization_locks WHERE execution_id=?').run(request.payload.submission.executionId);
+    },
+    completionAudit: () => ['integration.completed', 'success', 'optimization_manually_reviewed'],
+  };
   return { operations };
 }
 module.exports = { createGoogleOptimizationWrites };

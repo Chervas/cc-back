@@ -5,6 +5,7 @@ const { scopeFixture } = require('./google_ads_broker_scope.fixture');
 const { setup } = require('../../../../services/integrations-broker/test/google-optimization-writes-fixture.cjs');
 const { CUSTOMER } = require('../../../../services/integrations-broker/test/google-ads-fixture.cjs');
 const { targetRows, targetResponse } = require('../../../../services/integrations-broker/test/google-optimization-targets-fixture.cjs');
+const { signRequest } = require('../../../../services/integrations-broker/src/auth');
 const { sectionForQuery } = require('../../../../services/integrations-broker/test/google-optimization-fixture.cjs');
 const { optimizationChange } = require('../../../services/campaignWorkspaceOptimizationCommand.service');
 const { sourceStamp } = require('../../../services/campaignWorkspaceOptimizationEvidence.service');
@@ -44,7 +45,9 @@ async function writerFixture(t, kind = 'manual_cpc') {
   const broker = brokerService.createGoogleAdsBroker({ ...scope.options, now: () => +f.state.now,
     client: { execute: async command => {
       state.commands.push(structuredClone(command)); currentRead = command;
-      const signed = provider.signed(command); const result = await provider.getBroker().execute(signed.raw, signed.headers);
+      const signed = signRequest(command, { keyId: 'qa-key', privateKey: provider.readerKeys.privateKey,
+        audience: provider.policy.audience, now: +f.state.now });
+      const result = await provider.getBroker().execute(signed.raw, signed.headers);
       await state.beforeReadResponse?.(command); return result;
     } },
     optimizationEnabled: () => state.enabled,

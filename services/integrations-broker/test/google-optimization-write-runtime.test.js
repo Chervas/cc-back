@@ -42,6 +42,16 @@ test('actual isolated optimization HTTPS runtime requires its own key and preser
   assert.deepEqual((await writer.execute(f.command('status', { executionId: input.executionId }))).data, value);
   assert.equal(f.state.sdk.length, secretReads);
   assert.deepEqual((await writer.execute(f.command('apply', input))).data, value); assert.equal(f.state.writes, 1);
+  const unsent = { ...f.input('manual_cpc'), expiresAt: Date.now() - C.REVIEW_DELAY_MS - 1000 };
+  const counts = [f.state.sdk.length, f.state.calls.length];
+  const reviewed = (await writer.execute(f.command('review', { submission: unsent, actorId: 7,
+    observedAt: Date.now(), value: unsent.before, confirmed: true }))).data;
+  assert.equal(reviewed.state, 'reviewed'); assert.equal(reviewed.result.previousState, 'not_found');
+  assert.deepEqual([f.state.sdk.length, f.state.calls.length], counts);
+  await app.close(); app = null; app = await runtime.main(filename, deps);
+  assert.deepEqual((await writer.execute(f.command('status', { executionId: unsent.executionId }))).data, reviewed);
+  await assert.rejects(writer.execute(f.command('apply', unsent)), { code: 'optimization_reviewed' });
+  assert.deepEqual([f.state.sdk.length, f.state.calls.length], counts);
   const revoke = f.command('status', {}, { operation: ads.REVOKE_OPERATION }); await control.execute(revoke);
   await app.close(); app = null; app = await runtime.main(filename, deps);
   const before = f.state.sdk.length;
@@ -50,6 +60,7 @@ test('actual isolated optimization HTTPS runtime requires its own key and preser
   assert.equal(f.state.writes, 1); assert.equal(f.state.sdk.length, before);
   await drainAudit(app.store, sink); assert.equal(app.store.backlog().pending, 0);
   assert.ok(delivered.some(row => row.reason === 'optimization_provider_acknowledged'));
+  assert.ok(delivered.some(row => row.reason === 'optimization_manually_reviewed'));
   assert.ok(delivered.some(row => row.reason === 'scope_disconnected'));
   const durable = JSON.stringify(delivered) + JSON.stringify(app.store.db.prepare('SELECT * FROM google_optimization_mutations').all());
   for (const secret of [ACCESS, DEVELOPER, 'FICTITIOUS_REFRESH', 'FICTITIOUS_CLIENT_SECRET']) assert.ok(!durable.includes(secret));

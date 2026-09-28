@@ -8,11 +8,26 @@ const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a
 const SAFE = new Set(['broker_binding_invalid', 'broker_cohort_disabled', 'broker_configuration_invalid', 'broker_response_invalid',
   'broker_timeout', 'broker_unavailable', 'invalid_request', 'operation_denied', 'scope_denied', 'asset_revoked', 'connection_blocked',
   'credential_revoked', 'secret_unavailable', 'provider_failed', 'provider_timeout', 'provider_unauthorized', 'rate_limited',
-  'audit_unavailable', 'idempotency_conflict', 'outcome_unknown', 'optimization_conflict', 'optimization_expired', 'optimization_busy', 'optimization_cooldown']);
+  'audit_unavailable', 'idempotency_conflict', 'outcome_unknown', 'optimization_conflict', 'optimization_expired', 'optimization_busy', 'optimization_cooldown',
+  'optimization_reviewed', 'optimization_review_pending']);
 const safe = error => SAFE.has(error?.code) ? error.code : 'google_optimization_broker_failed';
 function project(family, data, input, customerId) {
-  if (!exact(data, 'executionId,state,result') || data.executionId !== input.executionId
-    || !['applied', 'unknown', 'not_found'].includes(data.state) || family === 'apply' && data.state !== 'applied') fail('broker_response_invalid');
+  const original = family === 'review' ? input.submission : input;
+  if (!exact(data, 'executionId,state,result') || data.executionId !== original.executionId
+    || !['applied', 'unknown', 'not_found', 'reviewed'].includes(data.state) || family === 'apply' && data.state !== 'applied'
+    || family === 'review' && data.state !== 'reviewed') fail('broker_response_invalid');
+  if (data.state === 'reviewed') {
+    const r = data.result;
+    if (!exact(r, 'reviewedAt,reviewedBy,observedAt,value,resourceName,previousState')
+      || !Number.isSafeInteger(r.reviewedAt) || !Number.isSafeInteger(r.observedAt) || r.observedAt < 1 || r.reviewedAt < r.observedAt
+      || !Number.isSafeInteger(r.reviewedBy) || r.reviewedBy < 1 || r.reviewedBy > 2147483647
+      || !['unknown', 'not_found', 'applied'].includes(r.previousState) || typeof r.value !== 'string' || !r.value || r.value.length > 24
+      || typeof r.resourceName !== 'string' || !new RegExp(`^customers/${customerId}/(?:campaigns|campaignBudgets|adGroups)/[1-9][0-9]{0,19}$|^customers/${customerId}/adGroupAds/[1-9][0-9]{0,19}~[1-9][0-9]{0,19}$`).test(r.resourceName)
+      || family === 'review' && r.resourceName !== C.mutation(original, customerId).resourceName) fail('broker_response_invalid');
+    if (r.resourceName.includes('/adGroupAds/')) { if (!['ENABLED', 'PAUSED', 'REMOVED'].includes(r.value)) fail('broker_response_invalid'); }
+    else { try { C.scaled(r.value, r.resourceName.includes('/campaigns/')); } catch { fail('broker_response_invalid'); } }
+    return structuredClone(data);
+  }
   if (data.state !== 'applied') { if (data.result !== null) fail('broker_response_invalid'); }
   else {
     if (!exact(data.result, 'acknowledged,resourceName') || data.result.acknowledged !== true || typeof data.result.resourceName !== 'string'

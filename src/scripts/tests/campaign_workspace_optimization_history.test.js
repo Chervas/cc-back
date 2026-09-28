@@ -103,6 +103,24 @@ test('an uncertain broker attempt cannot be dismissed locally or expose its priv
   await assert.rejects(f.resolve(), { code: 'workspace_optimization_broker_reconciliation_required' });
   assert.equal(f.state.rows[0].status, 'uncertain'); assert.equal(f.state.setting.version, 4); assert.equal(f.state.events.length, 0);
 });
+test('broker history offers manual review only after expiry and its safety delay with the writer gate enabled', async () => {
+  const f = fixture(); const { REVIEW_DELAY_MS } = require('../../../services/integrations-broker/src/google-optimization-write-contract');
+  const expiresAt = +f.row.created_at;
+  f.row.outcome = { broker_submission: { payload: { expiresAt } } };
+  const options = { owner: { id: f.row.setting_id }, canWrite: true, brokerReviewEnabled: true };
+  for (const now of [expiresAt, expiresAt + REVIEW_DELAY_MS - 1, NaN]) {
+    assert.equal(publicRun(f.row, f.campaign, { ...options, now }).canResolve, false);
+  }
+  const now = expiresAt + REVIEW_DELAY_MS;
+  assert.equal(publicRun(f.row, f.campaign, { ...options, now }).canResolve, true);
+  assert.equal(publicRun(f.row, f.campaign, { ...options, now, brokerReviewEnabled: false }).canResolve, false);
+  assert.equal((await f.load({ now, env: { GOOGLE_ADS_OPTIMIZATION_BROKER_ENABLED: 'true' } })).rows[0].canResolve, true);
+  assert.equal((await f.load({ now, env: {} })).rows[0].canResolve, false);
+  for (const expiresAt of [undefined, NaN, 'private', Infinity, Number.MAX_SAFE_INTEGER]) {
+    f.row.outcome.broker_submission.payload.expiresAt = expiresAt;
+    assert.equal(publicRun(f.row, f.campaign, { ...options, now }).canResolve, false);
+  }
+});
 test('resolution rejects changed revisions, foreign owners, changed scope and revoked permissions', async () => {
   for (const [mutate, code] of [
     [f => { f.row.setting_id = 'other'; }, 'workspace_optimization_run_not_found'],

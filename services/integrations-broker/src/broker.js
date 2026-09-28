@@ -49,7 +49,7 @@ class Broker {
       binding = resolved.connections.find(item => item.connectionRef === request.connectionRef);
       if (!binding || binding.provider !== operation.provider) fail('scope_denied');
       operation.validate(request.payload);
-      operation.authorize?.({ request, binding, principal });
+      operation.authorize?.({ request, binding, principal, policy: resolved });
       this.adsEnrollment?.assert(request, principal, this.policy);
       if (!['revoke_asset','google_oauth','whatsapp_onboarding','meta_marketing_oauth','google_ads_enrollment_status','google_ads_enrollment_revoke','whatsapp_authorized_status'].includes(operation.control)) {
         this.store.connection(request.connectionRef, now);

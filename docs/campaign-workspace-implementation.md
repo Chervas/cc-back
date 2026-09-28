@@ -374,15 +374,56 @@ Sin SQL clinico, llamadas reales a proveedores, reinicios, despliegue ni QA
 visual nueva; no hay cambio de interfaz en este corte. No es una validacion
 operativa con Propdental. Plan Gestionado continua aplazado.
 
+### Noveno corte: revision manual con trazabilidad CRM/broker (2026-09-28)
+
+Sobre backend `faad91e4` y frontend `457e2d0ba`, sin divergencia al comenzar.
+Solo fuente DEV, sin instalar ni habilitar escritor/grants en cuentas reales.
+
+- Operacion tipada `google.ads.optimization.review.v1`, secretless, con grant
+  propio y permiso apply vigente incluso antes de devolver recibos cacheados.
+  Revision humana del intento original, no comando nuevo ni reenvio a Google.
+- SQLite conserva sello de executionId, revisor/observacion, estado anterior y
+  auditoria atomica con la liberacion de su lock. Conserva intento, recibo
+  original, cooldown y reserva mensual. Apply tardio se rechaza tras reinicio.
+- Exige caducidad mas 120s, lectura reciente y comando de transporte finalizado.
+  Un comando `started` en curso o abandonado tras caida sigue bloqueado; el
+  transcurso del tiempo no acredita que la llamada haya terminado.
+- CRM conserva el boton y confirmacion del historial; relee el recurso, obtiene
+  el sello y cierra con auditoria SQL. Permisos, scope, clinica, asignacion,
+  version, lease, grant e identidad revalidados hasta commit. Sin HTTP dentro
+  de locks SQL ni fallback legacy. Mandato pausado no impide revisar, pero
+  tampoco se reactiva. `resolved` no se presenta como `verified`.
+- Perdida de acuse broker/SQL y fallo de auditoria se recuperan sin repetir el
+  ajuste ni duplicar el evento. Un recibo manual ya existente nunca permite al
+  ejecutor acreditar automaticamente una mutacion publicitaria.
+- Regresion final: **1.302 pruebas backend, 883 broker y 134 frontend correctas**;
+  Angular `ngc --noEmit` correcto. Firma, SQLite y HTTPS local reales con
+  modelos CRM, Google/AWS ficticios. Incluye recibos malformados, replay tras
+  retirar permiso, perdida de acuses/auditoria y rechazo de apply tardio.
+  Logs `/tmp/cc-optimization-review-all-{backend,broker}-final-20260928.log`,
+  `/tmp/cc-optimization-review-all-front-20260928.log` y
+  `/tmp/cc-optimization-review-front-ngc-20260928.log`.
+- Chromium real, componente Angular/servicio HTTP/Fuse, **API ficticia solo
+  loopback**: 18 capturas a 1440/1024/390; confirmacion, cancelacion sin POST,
+  revision pendiente, servicio pendiente, timeout y cierre manual correcto.
+  Sin cortes/desbordes/errores JS; no equivale a QA autenticada del CRM completo.
+  Harness `scripts/tests/campaign_optimization_review_chromium_qa.js` en front;
+  capturas y `result.json` en `/tmp/cc-optimization-review-20260928-ui/`.
+
+Sin SQL clinico, llamadas a proveedores/AWS, OAuth, Meta, senales, cambios de
+campana/presupuesto, cobros, reinicios o despliegues. Plan Gestionado aplazado.
+Contrato y limites: `docs/security/google-ads-optimization-broker.md`.
+
 ### Siguiente corte
 
 La causa de la latencia Propdental esta corregida y medida en el candidato.
 Falta instalarlo mediante un corte autorizado y repetir el HTTP real y QA sin
 intercepcion del informe; no repetir cargas lentas contra el build antiguo.
 
-1. Conciliacion autorizada de intentos desconocidos entre broker y CRM, sin
-   repetir escrituras ni afirmar autoria por una lectura coincidente. Ejecutor,
-   evidencia y contabilidad mensual estan conectados en fuente, no instalados.
+1. Conciliacion tecnica de comandos `started` abandonados o recursos/identidades
+   no verificables, sin borrar locks ni repetir escrituras. El cierre manual
+   para comandos finalizados, ejecutor, evidencia y contabilidad mensual estan
+   conectados en fuente, no instalados.
    Las exclusiones siguen necesitando politica de relevancia. No se sustituyen
    con GAQL libre ni se activan para demostrar la interfaz.
    Preparacion de conversiones ya tiene transporte broker y no necesita duplicarse.

@@ -5,9 +5,10 @@ const { canonical } = require('./canonical');
 const { fail } = require('./errors');
 const ads = require('./google-ads-contract');
 const COHORT = 'google-ads-optimization-v1';
-const OPERATIONS = Object.freeze({ apply: 'google.ads.optimization.apply.v1', status: 'google.ads.optimization.status.v1' });
+const OPERATIONS = Object.freeze({ apply: 'google.ads.optimization.apply.v1', status: 'google.ads.optimization.status.v1', review: 'google.ads.optimization.review.v1' });
 const KINDS = Object.freeze(['pause_ad', 'manual_cpc', 'target_cpa', 'maximize_conversions_cpa', 'target_roas', 'maximize_conversion_value_roas', 'daily_budget']);
 const TTL_MS = 60000;
+const REVIEW_DELAY_MS = 120000;
 const object = properties => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) });
 const id = { type: 'string', pattern: '^[1-9][0-9]{0,19}$' };
 const uuid = { type: 'string', pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$' };
@@ -22,7 +23,9 @@ const bindingSchema = object({ accounts: { type: 'array', minItems: 1, maxItems:
 const applyFields = { executionId: uuid, mandateId: uuid, evidenceFingerprint: hashField, expiresAt: { type: 'integer', minimum: 1 },
   campaignId: id, kind: { enum: KINDS }, resourceId: id, adGroupId: { ...id, type: ['string', 'null'] },
   baselineAdId: { ...id, type: ['string', 'null'] }, before: { type: 'string', maxLength: 24 }, after: { type: 'string', maxLength: 24 } };
-const validators = { apply: schema(applyFields), status: schema({ executionId: uuid }) };
+const validators = { apply: schema(applyFields), status: schema({ executionId: uuid }),
+  review: schema({ submission: object(applyFields), actorId: { type: 'integer', minimum: 1, maximum: 2147483647 },
+    observedAt: { type: 'integer', minimum: 1 }, value: { type: 'string', minLength: 1, maxLength: 24 }, confirmed: { const: true } }) };
 const hash = value => createHash('sha256').update(canonical(value)).digest('hex');
 function scaled(value, ratio = false) {
   if (typeof value !== 'string' || !(ratio ? /^(0|[1-9][0-9]{0,15})(\.[0-9]{1,6})?$/ : /^[1-9][0-9]{0,15}$/).test(value)) fail('invalid_request');
@@ -40,6 +43,12 @@ const action = kind => kind === 'pause_ad' ? 'pause' : kind === 'daily_budget' ?
 function validate(kind, input) {
   if (!Object.hasOwn(validators, kind)) fail('operation_denied'); validators[kind](input);
   if (kind === 'status') return;
+  if (kind === 'review') {
+    validate('apply', input.submission);
+    if (input.submission.kind === 'pause_ad') { if (!['ENABLED', 'PAUSED', 'REMOVED'].includes(input.value)) fail('invalid_request'); }
+    else scaled(input.value, ratioKind(input.submission.kind));
+    return;
+  }
   if (input.kind === 'pause_ad') {
     if (!input.adGroupId || !input.baselineAdId || input.resourceId === input.baselineAdId
       || input.before !== 'ENABLED' || input.after !== 'PAUSED') fail('invalid_request');
@@ -125,5 +134,5 @@ function result(raw, expected) {
     || Object.keys(raw.results[0]).join(',') !== 'resourceName') fail('provider_failed');
   return { acknowledged: true, resourceName: expected };
 }
-module.exports = { COHORT, OPERATIONS, KINDS, TTL_MS, bindingSchema, validateBinding, validate, resource, scopeDigest, hash,
+module.exports = { COHORT, OPERATIONS, KINDS, TTL_MS, REVIEW_DELAY_MS, bindingSchema, validateBinding, validate, resource, scopeDigest, hash,
   scaled, ratioKind, targetKind, action, mutation, validateMutation, result };

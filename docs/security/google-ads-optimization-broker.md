@@ -2,7 +2,7 @@
 
 ## Estado 2026-09-28
 
-Motor, cliente tipado y ejecutor CRM conectados en fuente DEV, con pruebas
+Motor, cliente tipado, ejecutor CRM y revision manual conectados en fuente DEV, con pruebas
 ficticias de transporte, HTTPS, firma, SQLite y auditoria. **No instalado ni
 habilitado para cuentas reales.** Sin configuracion/permiso escritor independiente
 el ejecutor conserva `workspace_optimization_service_pending` antes de enviar.
@@ -16,7 +16,8 @@ no habilita el Plan Gestionado, conversiones, anuncios nuevos ni exclusiones.
 ## Configuracion separada
 
 Solo la nueva cohorte `google-ads-optimization-v1` del runtime `google-main.js`
-registra `google.ads.optimization.apply.v1` y `google.ads.optimization.status.v1`.
+registra `google.ads.optimization.apply.v1`, `google.ads.optimization.status.v1`
+y `google.ads.optimization.review.v1`.
 Las cohortes existentes de lectura/conversiones rechazan este contrato. No hay
 alta OAuth ni enrollment de cuentas en esta cohorte.
 
@@ -27,7 +28,7 @@ absolutos `maxBidMicros`, `maxTargetRoas`, `maxDailyBudgetMicros` y el permiso
 presupuesto requiere ese permiso adicional; un mandato CRM no lo concede.
 Cuenta, gestor, sujeto Google y referencias Secrets Manager provienen del binding.
 
-El principal y la clave de firma de apply/status deben ser distintos de los de
+El principal y la clave de firma de apply/status/review deben ser distintos de los de
 lectura/control. No basta otro keyId con la misma clave. Los grants siguen siendo
 por clinica, conexion, activo y operacion. Una cuenta nueva descubierta por el
 lector nunca se incorpora automaticamente a esta lista de escritura.
@@ -52,8 +53,10 @@ lector actual; no hay rotacion implicita ni alternancia automatica de claves.
 Apply admite exclusivamente `executionId`, `mandateId` (UUID v4),
 `evidenceFingerprint` (SHA-256), `expiresAt`, `campaignId`, `kind`, `resourceId`,
 `adGroupId`, `baselineAdId`, `before`, `after`. Los dos IDs de grupo/baseline son
-null salvo pausa de anuncio. Status solo recibe `executionId` y exige tambien
-el permiso apply actual sobre ese mismo activo.
+null salvo pausa de anuncio. Status solo recibe `executionId`. Status y review
+exigen tambien el permiso apply actual sobre ese mismo activo, antes incluso
+de recuperar un recibo cacheado. Review requiere ademas su grant especifico;
+este corte no lo instala en ninguna politica real.
 
 | Tipo | Unico campo modificado | Restriccion |
 |---|---|---|
@@ -103,14 +106,54 @@ politica de cuenta o clave no permite reutilizar/exponer recibos anteriores.
 Cooldown duradero de 24h por grupo para pausa y 336h por campana/accion para
 puja/presupuesto; cambiar UUID, principal o binding no evita esos plazos.
 
-No hay desbloqueo automatico ni herramienta de conciliacion instalada en este
-corte. No borrar filas/locks para reintentar. El futuro reconciliador debera
-contrastar estado/historial, conservar el executionId original y auditar una
-resolucion autorizada. Una lectura coincidente por si sola no atribuye autoria.
+No hay desbloqueo automatico. La revision manual siguiente esta implementada en
+fuente, no instalada. No borrar filas/locks para reintentar: una lectura
+coincidente por si sola no atribuye autoria ni confirma un ajuste de ClinicaClick.
+
+## Revision manual entre CRM y broker
+
+`review` solo modifica el registro local del broker, no llama a Google ni accede
+a secretos. Recibe `submission` original e inmutable, `actorId`, `observedAt`,
+`value` acotado y `confirmed=true`. Exige el mismo principal, binding, politica
+de cuenta y hash del intento, con plazo vencido mas 120s. La observacion debe
+ser posterior a ese plazo, no futura y tener menos de 60s. No admite cambiar el
+comando ni usar otro UUID para liberar el intento anterior.
+
+Si existe intento, su comando de transporte original debe estar en `unknown`
+o `completed`. **Un comando `started`, en vuelo o abandonado tras caida de proceso,
+no se desbloquea por tiempo transcurrido**. Requiere conciliacion tecnica posterior,
+fuera de este flujo. Registro ausente o ilegible tampoco permite asumir envio
+fallido. Si nunca se reservo un intento de proveedor, la revision conserva un
+sello de ese executionId que impide un apply tardio.
+
+La tabla aditiva `google_optimization_reviews` guarda un recibo inmutable:
+executionId, state `reviewed` y resultado con `reviewedAt`, `reviewedBy`,
+`observedAt`, `value`, `resourceName`, `previousState` (unknown/not_found/applied).
+Su insercion, liberacion **solo** del lock de ese intento y auditoria se confirman
+atomicamente. Conserva la orden, su recibo original si existia, la reserva mensual
+y los cooldowns; no los borra ni los reinicia. Reinicios/reintentos recuperan el
+primer recibo, no sustituyen al revisor original. Una revision concurrente no
+puede convertir el intento en aplicado. Auditoria fallida revierte sello y lock.
+
+El CRM mantiene el mismo boton de revision del historial. Solo lo ofrece con
+gate escritor habilitado, plazo cumplido, permiso de escritura y sin job/lease
+activo. Tras confirmacion humana relee el recurso mediante el lector tipado y
+obtiene el sello del broker. Revalida ACL, clinica, asignacion, version, grant
+opaco e identidad original del escritor antes/despues de cada llamada y al
+cerrar en SQL. Nunca mantiene un bloqueo SQL durante HTTP. Si el mandato esta
+pausado puede revisar, pero no reactivarlo. No requiere ni inicia OAuth.
+
+El resultado local es `resolved`, **revision cerrada manualmente**, no `verified`.
+`resolution.broker_review` conserva el recibo privado; no se expone en el DTO.
+Acuse perdido o fallo de auditoria/commit CRM permiten recuperar el sello en un
+nuevo intento de cierre, sin reenviar apply ni duplicar el evento CRM. Un cambio
+de permisos impide cerrar; no permite usar tokens legacy aunque desaparezcan
+marcadores de migracion. Recurso eliminado/no verificable o identidad cambiada
+permanecen pendientes, sin bypass administrativo implicito.
 
 ## Integracion con el ejecutor CRM
 
-`googleAdsOptimizationBrokerClient.service` acepta solo apply/status y proyecta
+`googleAdsOptimizationBrokerClient.service` acepta solo apply/status/review y proyecta
 recibos acotados. `campaignWorkspaceOptimizationBrokerExecution.service` crea
 una capacidad privada ligada a un run y a su grant opaco original. Antes de
 preparar envio consulta status sin secretos; una identidad ya utilizada exige
@@ -132,15 +175,16 @@ durante la recuperacion cambie el modo de conexion.
 
 Perdida del acuse SQL: no se envia. Perdida del acuse del consumidor: status
 puede recuperar el recibo aplicado, y solo con readback coincidente se confirma
-verified. Status unknown/not_found nunca repite apply ni acredita autoria,
+verified. Status unknown/not_found/reviewed nunca repite apply ni acredita autoria,
 aunque el valor deseado pueda leerse. El marcador se conserva ante errores,
-revocacion y recuperacion denegada. El cierre manual antiguo del CRM esta
-bloqueado para estos intentos: no puede liberar el lock desconocido del broker.
+revocacion y recuperacion denegada. El cierre exclusivamente local del CRM sigue
+bloqueado para estos intentos: necesita la revision broker descrita arriba.
 
 ## Responsabilidades pendientes y limites
 
-- Implementar conciliacion autorizada de intentos desconocidos, con trazabilidad
-  CRM/broker; no resolverlos borrando filas ni usando otra clave/UUID.
+- Completar conciliacion tecnica de comandos `started` abandonados, recursos
+  no verificables o identidades cambiadas. Este cierre humano no los desbloquea;
+  no resolverlos borrando filas ni usando otra clave/UUID.
 - Publicacion compatible y QA real siguen pendientes. No basta instalar este
   codigo: hacen falta principal/clave/grants propios expresamente autorizados.
 - La evidencia de negocio se verifica en CRM. Un UUID y una huella no demuestran
@@ -163,6 +207,15 @@ reserva mensual, grants, firma y SQLite; modelos CRM/proveedores ficticios. La
 regresion final suma 1.279 pruebas backend y 866 broker correctas. HTTPS local confirma que
 conflicto, caducidad y cooldown llegan al CRM como codigos acotados, sin detalle
 del proveedor. Los controles nuevos no cambian permisos ni configuracion activa.
+
+El corte posterior de revision manual anade cobertura de recibos, sellos,
+auditoria atomica, perdida de acuses, concurrencia y gates. HTTPS local verifica
+review/status y rechazo de apply tardio tras reinicio, sin secretos/proveedor.
+QA visual del dialogo Angular/Fuse a 1440/1024/390, API ficticia solo loopback:
+18 capturas sin desbordes/errores, cancelacion sin envio y mensajes diferenciados
+para pendiente, servicio no preparado y cierre incierto. No es QA del CRM
+autenticado ni instalacion del candidato. Recuentos finales en el noveno corte
+de `campaign-workspace-implementation.md`.
 
 La construccion REST sigue los [ejemplos oficiales de Google Ads](https://developers.google.com/google-ads/api/rest/examples):
 actualizaciones con mascara explicita y operaciones sin fallos parciales. La

@@ -9,14 +9,14 @@ const query = transaction => ({ transaction, ...(transaction ? { lock: transacti
 
 // Caller retains its own workspace/reception ACL and mapping selection. This
 // boundary selects transport without treating absence of a local token as a grant.
-async function resolveGoogleAdsGrantTransport({ models, accounts, requiredScopes, transaction = null }) {
-  if (!Array.isArray(accounts) || !accounts.length || !Array.isArray(requiredScopes)) fail('broker_binding_invalid');
+async function resolveGoogleAdsGrantTransport({ models, accounts, requiredScopes, transaction = null, requireBroker = false }) {
+  if (!Array.isArray(accounts) || !accounts.length || !Array.isArray(requiredScopes) || typeof requireBroker !== 'boolean') fail('broker_binding_invalid');
   const ids = [...new Set(accounts.map(row => Number(row.googleConnectionId)))];
   if (ids.length !== 1 || !Number.isSafeInteger(ids[0]) || ids[0] < 1) fail('broker_binding_invalid');
   const metadata = await models.GoogleConnection.findByPk(ids[0], { ...query(transaction), attributes: ['id', 'googleUserId'] });
   if (!metadata || Number(metadata.id) !== ids[0] || !metadata.googleUserId) fail('google_connection_missing');
   const credentials = legacy.forModels(models);
-  let managed = accounts.some(marked);
+  let managed = requireBroker || accounts.some(marked);
   if (!managed) {
     try { await credentials.assert(metadata); }
     catch (error) {

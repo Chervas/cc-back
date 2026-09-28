@@ -80,7 +80,7 @@ function parseGoogleLead(row, accountId, now = new Date()) {
       email: validEmail, telefono: validPhone, email_hash: validEmail ? hash(validEmail) : null, phone_hash: validPhone ? hash(validPhone) : null } };
 }
 
-async function receptionAccount({ models, settingId, accountId, transaction = null, now = new Date(), expectedBrokerGrant = null }) {
+async function receptionAccount({ models, settingId, accountId, transaction = null, now = new Date(), expectedBrokerGrant = null, requireBroker = false }) {
   if (typeof settingId !== 'string' || !settingId || settingId.length > 36 || !id(accountId)) fail('google_lead_job_invalid');
   const options = query(transaction);
   const setting = await models.CampaignWorkspaceSetting.findByPk(settingId, options);
@@ -105,7 +105,7 @@ async function receptionAccount({ models, settingId, accountId, transaction = nu
   // below still detect added/removed owners; the assertion pins original refs.
   const transport = expectedBrokerGrant
     ? { ...await assertGoogleAdsGrantTransport(expectedBrokerGrant, { transaction }), brokerGrant: expectedBrokerGrant }
-    : await resolveGoogleAdsGrantTransport({ models, accounts: eligible, requiredScopes: [GOOGLE_ADS_SCOPE], transaction });
+    : await resolveGoogleAdsGrantTransport({ models, accounts: eligible, requiredScopes: [GOOGLE_ADS_SCOPE], transaction, requireBroker });
   const { connection, brokerGrant } = transport;
   if (!brokerGrant && (!Number.isFinite(+new Date(connection.expiresAt)) || +new Date(connection.expiresAt) <= +now)
     && !connection.refreshToken) fail('google_lead_account_access_required');
