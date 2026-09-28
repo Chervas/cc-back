@@ -414,16 +414,44 @@ Sin SQL clinico, llamadas a proveedores/AWS, OAuth, Meta, senales, cambios de
 campana/presupuesto, cobros, reinicios o despliegues. Plan Gestionado aplazado.
 Contrato y limites: `docs/security/google-ads-optimization-broker.md`.
 
+### Decimo corte: publicacion exclusivamente DEV y aceptacion (2026-09-28)
+
+API `7285c6f6` publicada mediante `ops/security/publish-isolated-dev.py` en la
+copia systemd aislada, no en PM2 legacy. Preflight compatible, dependencias sin
+cambio y readiness401 correctos; API y worker de seguridad existentes activos.
+MFA/sesiones enforce, BD ficticia, namespaces y gates/pausas conservados.
+Consulta information_schema READ ONLY confirma las tres tablas del workspace,
+JSON, estado resolved e indices unicos; no datos clinicos ni DDL.
+
+Front fuente `8f06408df`, build `46666b9cf5e19833`, publicado solo en4203 mediante
+release y cambio atomico de symlink, conservando assets/rollback anteriores.
+Main `main.2662a192537bcec1.js`, indice y assets comprobados por HTTP/bytes.
+Build correcto con aviso inicial preexistente 4,86MB frente a warning3MB.
+El escritor AWS **no se instala ni se habilita**; ninguna operacion publicitaria
+se activa por publicar el consumidor DEV. Staging/gateway sin promocion.
+
+Chromium confirma entrada real a sign-in: falta sesion para QA autenticada del
+build instalado; no se elude MFA. Repetidas 33 capturas aisladas de destinos y
+revision a tres anchos con el CSS exacto del indice publicado. Corregida la
+seleccion del CSS en los harness, que antes podia elegir un asset retenido.
+138 tests frontend correctos; no cambios nuevos de logica backend respecto de
+las 1.302 pruebas y 883 broker del corte anterior.
+
+Evidencia, alcance real, rollback y requisitos pendientes en
+[matriz de aceptacion](campaign-workspace-acceptance.md). Es una lista de cierre
+del recorrido completo, no un recorte del objetivo a los tests del escritor.
+
 ### Siguiente corte
 
 La causa de la latencia Propdental esta corregida y medida en el candidato.
-Falta instalarlo mediante un corte autorizado y repetir el HTTP real y QA sin
-intercepcion del informe; no repetir cargas lentas contra el build antiguo.
+El consumidor ya esta instalado solo en DEV ficticio; faltan HTTP autenticado
+y QA sin intercepcion del informe. El contraste real de Propdental necesita
+su corte autorizado en el entorno clinico, no publicar en staging implicitamente.
 
 1. Conciliacion tecnica de comandos `started` abandonados o recursos/identidades
    no verificables, sin borrar locks ni repetir escrituras. El cierre manual
    para comandos finalizados, ejecutor, evidencia y contabilidad mensual estan
-   conectados en fuente, no instalados.
+   conectados e instalados en API DEV; el escritor AWS no esta instalado/habilitado.
    Las exclusiones siguen necesitando politica de relevancia. No se sustituyen
    con GAQL libre ni se activan para demostrar la interfaz.
    Preparacion de conversiones ya tiene transporte broker y no necesita duplicarse.
