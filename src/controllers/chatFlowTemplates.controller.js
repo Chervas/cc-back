@@ -2,6 +2,7 @@
 
 const { Op } = require('sequelize');
 const db = require('../../models');
+const { TEMPLATE_DESTINATION_ERROR, assertReusableWhatsAppTemplate } = require('../lib/intakeWhatsAppDestination');
 
 const ChatFlowTemplate = db.ChatFlowTemplate;
 const Clinica = db.Clinica;
@@ -357,6 +358,7 @@ async function propagateChatFlowTemplateToExistingConfigs(template) {
 
   const base = template?.toJSON ? template.toJSON() : template;
   const templateId = Number(base?.id);
+  assertReusableWhatsAppTemplate(base);
   const templateRules = extractTemplateFlowRules(base);
   if (!Number.isFinite(templateId) || templateRules.length === 0) {
     return { updated: 0, skipped: 0, reason: 'empty_template' };
@@ -512,6 +514,8 @@ exports.createChatFlowTemplate = async (req, res) => {
       return res.status(400).json({ message: 'Debe incluirse flow o flows (no vacío)' });
     }
 
+    assertReusableWhatsAppTemplate({ flow, flows });
+
     const created = await db.sequelize.transaction(async (transaction) => {
       const defaults = Array.isArray(is_default_for) && is_default_for.length > 0 ? is_default_for : null;
       if (defaults) {
@@ -538,6 +542,9 @@ exports.createChatFlowTemplate = async (req, res) => {
 
     res.status(201).json(mapTemplate(created));
   } catch (error) {
+    if (error?.code === TEMPLATE_DESTINATION_ERROR) {
+      return res.status(400).json({ code: error.code, message: error.message });
+    }
     if (error?.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ message: 'Ya existe una plantilla con ese name' });
     }
@@ -584,6 +591,8 @@ exports.updateChatFlowTemplate = async (req, res) => {
       return res.status(400).json({ message: 'Debe incluirse flow o flows (no vacío)' });
     }
 
+    assertReusableWhatsAppTemplate({ flow: nextFlow, flows: nextFlows });
+
     await db.sequelize.transaction(async (transaction) => {
       if (Array.isArray(newDefaultDisciplines) && newDefaultDisciplines.length > 0) {
         await removeDefaultDisciplinesFromOtherTemplates({
@@ -597,6 +606,9 @@ exports.updateChatFlowTemplate = async (req, res) => {
     await row.reload();
     res.status(200).json(mapTemplate(row));
   } catch (error) {
+    if (error?.code === TEMPLATE_DESTINATION_ERROR) {
+      return res.status(400).json({ code: error.code, message: error.message });
+    }
     if (error?.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ message: 'Ya existe una plantilla con ese name' });
     }
@@ -630,6 +642,9 @@ exports.propagateChatFlowTemplate = async (req, res) => {
       propagation,
     });
   } catch (error) {
+    if (error?.code === TEMPLATE_DESTINATION_ERROR) {
+      return res.status(400).json({ code: error.code, message: error.message });
+    }
     return res.status(500).json({ message: 'Error propagando plantilla', error: error.message });
   }
 };
@@ -652,6 +667,8 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
     const flows = row.flows ?? null;
     const texts = row.texts ?? null;
     const appearance = row.appearance ?? null;
+
+    assertReusableWhatsAppTemplate({ flow, flows });
 
     let name = baseName;
     for (let i = 0; i < 50; i += 1) {
@@ -677,6 +694,9 @@ exports.duplicateChatFlowTemplate = async (req, res) => {
 
     res.status(409).json({ message: 'No se pudo duplicar: demasiados nombres en conflicto' });
   } catch (error) {
+    if (error?.code === TEMPLATE_DESTINATION_ERROR) {
+      return res.status(400).json({ code: error.code, message: error.message });
+    }
     res.status(500).json({ message: 'Error duplicando plantilla', error: error.message });
   }
 };

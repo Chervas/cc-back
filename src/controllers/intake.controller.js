@@ -23,6 +23,7 @@ const ClinicMetaAsset = db.ClinicMetaAsset;
 const MetaConnection = db.MetaConnection;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const IntakeConfig = db.IntakeConfig;
+const { scopeWhatsAppFlows } = require('../lib/intakeWhatsAppDestination');
 const ExternalCampaignInventory = db.ExternalCampaignInventory;
 const ChatFlowTemplate = db.ChatFlowTemplate;
 const ClinicaHorario = db.ClinicaHorario;
@@ -4892,6 +4893,14 @@ const getIntakeConfig = async (
       checked_at: new Date().toISOString(),
       error: 'clinic_schedule_unavailable',
     };
+  }
+
+  if (!includeAllLocations) {
+    const scopedFlows = scopeWhatsAppFlows({
+      flow: payload.flow, flows: payload.flows, availableLocations: payload.available_locations,
+    });
+    Object.assign(payload, scopedFlows);
+    if (payload.config) Object.assign(payload.config, scopedFlows);
   }
 
   return res.json(payload);

@@ -1,5 +1,6 @@
 'use strict';
 const { Model } = require('sequelize');
+const { assertReusableWhatsAppTemplate } = require('../src/lib/intakeWhatsAppDestination');
 
 module.exports = (sequelize, DataTypes) => {
   class ChatFlowTemplate extends Model {
@@ -37,6 +38,12 @@ module.exports = (sequelize, DataTypes) => {
       underscored: true,
       createdAt: 'created_at',
       updatedAt: 'updated_at',
+      hooks: {
+        beforeValidate: assertReusableWhatsAppTemplate,
+        beforeSave: assertReusableWhatsAppTemplate,
+        beforeBulkCreate: rows => rows.forEach(assertReusableWhatsAppTemplate),
+        beforeBulkUpdate: options => assertReusableWhatsAppTemplate(options.attributes),
+      },
     }
   );
 
