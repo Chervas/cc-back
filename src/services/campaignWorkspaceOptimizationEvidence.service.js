@@ -7,6 +7,9 @@ const { performancePeriod, inspectGooglePerformance, inspectMetaPerformance } = 
 const { canonicalLeadAdvertisingIdentity, attachLeadAdvertisingIdentities } = require('./leadAdvertisingIdentity.service');
 const { createLeadAdMatcher } = require('./campaignAdAttribution.service');
 const { formatDateLocal, localDateTimeToUtc } = require('../lib/availability-calendar');
+const { assertGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
+const { createOptimizationBrokerRead } = require('./campaignWorkspaceOptimizationBrokerRead.service');
+const { googleDestinationAccessError } = require('./campaignWorkspaceGoogleDestination.service');
 
 const MAX_LEADS = 10000;
 const TTL_MS = 60000;
@@ -62,12 +65,16 @@ function leadCounts(leads, campaign, snapshot) {
 }
 
 function safeError(error) {
+  const accessError = googleDestinationAccessError(error);
+  if (accessError === 'workspace_google_service_pending' || error?.code === 'workspace_google_service_pending') return 'workspace_optimization_service_pending';
+  if (accessError === 'workspace_google_permissions_required') return 'workspace_optimization_permissions_required';
+  if (['broker_timeout', 'provider_timeout'].includes(error?.code)) return 'workspace_optimization_evidence_timeout';
   if (['NO_SCOPED_CONNECTION', 'INSUFFICIENT_SCOPE', 'NO_TOKEN', 'TOKEN_EXPIRED', 'REFRESH_FAILED',
     'workspace_meta_permissions_required', 'workspace_google_permissions_required', 'marketing_scope_forbidden'].includes(error?.code)
     || [10, 190, 200].includes(Number(error?.response?.data?.error?.code)) || [401, 403].includes(error?.response?.status)) {
     return 'workspace_optimization_permissions_required';
   }
-  if ([4, 17, 613].includes(Number(error?.response?.data?.error?.code)) || error?.response?.status === 429) return 'workspace_optimization_rate_limited';
+  if (error?.code === 'rate_limited' || [4, 17, 613].includes(Number(error?.response?.data?.error?.code)) || error?.response?.status === 429) return 'workspace_optimization_rate_limited';
   if (/^workspace_optimization_[a-z_]{1,80}$/.test(error?.code || '')) return error.code;
   return 'workspace_optimization_evidence_unavailable';
 }
@@ -93,7 +100,7 @@ async function collectOptimizationEvidence({ settingId, mandateId, reference: in
     const resolve = deps.resolveAuthorization || require('./campaignWorkspaceOptimizationAuthorization.service').resolveOptimizationAuthorization;
     const hasAccess = deps.hasAccess || require('../lib/marketingScopeAccess').hasMarketingClinicScopeAccess;
     const started = instant(deps); const period = performancePeriod(started);
-    let initialStamp; let initialCampaign;
+    let initialStamp; let initialCampaign; let initialBrokerGrant = null;
     const checkTime = () => {
       if (!enabled(deps.env || process.env)) fail('workspace_optimization_disabled');
       const age = +instant(deps) - +started;
@@ -110,7 +117,7 @@ async function collectOptimizationEvidence({ settingId, mandateId, reference: in
       }
       const scope = { groupId: setting.scope_type === 'group' ? setting.scope_id : null, clinicIds: mandate.authorization.clinic_ids };
       const source = await resolve({ models, setting, scope, campaign: reference, action,
-        now: instant(deps), hasAccess, loadInventory: deps.loadInventory });
+        now: instant(deps), hasAccess, loadInventory: deps.loadInventory, expectedBrokerGrant: initialBrokerGrant });
       const campaign = source.context.campaign;
       if (!campaign?.assigned || campaign.paused || !positive(campaign.clinicId) || !scope.clinicIds.includes(campaign.clinicId)
         || source.entry.clinic_id !== campaign.clinicId || !sameCampaign(campaign, reference)) fail('workspace_optimization_scope_changed');
@@ -119,33 +126,45 @@ async function collectOptimizationEvidence({ settingId, mandateId, reference: in
       const stamp = sourceStamp(setting, scope, source);
       if (initialStamp && initialStamp !== stamp) fail('workspace_optimization_scope_changed');
       if (!initialStamp) { initialStamp = stamp; initialCampaign = structuredClone(campaign); }
+      if (initialBrokerGrant) await assertGoogleAdsGrantTransport(initialBrokerGrant, { clinicId: campaign.clinicId });
       checkTime();
       return { source, setting, scope };
     };
     const initial = await authorize();
+    initialBrokerGrant = initial.source.context.grant.brokerGrant || null;
     const reception = async () => {
       const current = await authorize();
       return assertOptimizationReception({ models, scope: current.scope, campaign: initialCampaign, now: instant(deps) }, deps);
     };
     await reception();
-    const google = require('./googleAdsScopedRuntime.service');
-    let credentials = { accessToken: initial.source.context.grant.connection.accessToken,
-      loginCustomerId: initial.source.context.grant.loginCustomerId };
-    if (reference.provider === 'google_ads') {
+    const targetReader = require('./campaignWorkspaceGoogleTargetSnapshot.service');
+    const targetedBid = action === 'adjust_bids' && initial.source.entry.targets.some(target => targetReader.supportedTarget(target, reference));
+    let credentials; let brokerRead;
+    if (reference.provider === 'google_ads' && initialBrokerGrant) {
+      // These collectors need their own typed contracts; never reinterpret their GAQL or try a local token.
+      if (targetedBid || action === 'negative_keywords') fail('workspace_optimization_service_pending');
+      brokerRead = createOptimizationBrokerRead({ brokerGrant: initialBrokerGrant, reference, clinicId: initialCampaign.clinicId,
+        revalidate: authorize, ...(deps.clock ? { clock: deps.clock } : {}) });
+      credentials = { readSection: (section, timeoutMs) => brokerRead('optimization', section, {}, timeoutMs) };
+    } else if (reference.provider === 'google_ads') {
+      const google = require('./googleAdsScopedRuntime.service');
       await authorize();
       const token = await (deps.ensureToken || google.ensureGoogleConnectionAccessToken)(initial.source.context.grant.connection,
         { requiredScopes: [google.GOOGLE_ADS_SCOPE] });
-      credentials = { ...credentials, accessToken: token.accessToken };
-    }
-    if (typeof credentials.accessToken !== 'string' || !credentials.accessToken) fail('workspace_optimization_permissions_required');
+      credentials = { accessToken: token.accessToken, loginCustomerId: initial.source.context.grant.loginCustomerId };
+    } else credentials = { accessToken: initial.source.context.grant.connection.accessToken };
+    if (!brokerRead && (typeof credentials.accessToken !== 'string' || !credentials.accessToken)) fail('workspace_optimization_permissions_required');
     const guardedRead = read => async (...args) => {
       await authorize();
       const result = await read(...args);
       await authorize();
       return result;
     };
-    const googleRead = options => require('../lib/googleAdsSearchRows').googleAdsSearchRows({ ...options,
-      request: guardedRead(deps.googleRequest || require('../lib/googleAdsClient').googleAdsRequest) });
+    const googleRead = options => {
+      if (brokerRead) fail('workspace_optimization_service_pending');
+      return require('../lib/googleAdsSearchRows').googleAdsSearchRows({ ...options,
+        request: guardedRead(deps.googleRequest || require('../lib/googleAdsClient').googleAdsRequest) });
+    };
     const metaRead = guardedRead(deps.metaRead || require('../lib/metaClient').metaGet);
     if (action === 'negative_keywords') {
       const searchTerms = await require('./campaignWorkspaceSearchTerms.service').inspectGoogleSearchTerms({ reference, ...credentials,
@@ -158,8 +177,7 @@ async function collectOptimizationEvidence({ settingId, mandateId, reference: in
         collected_at: started.toISOString(), observed_at: instant(deps).toISOString() };
       return { collected: true, evidence: { ...record, fingerprint: digest(record) } };
     }
-    const targetReader = require('./campaignWorkspaceGoogleTargetSnapshot.service');
-    if (action === 'adjust_bids' && initial.source.entry.targets.some(target => targetReader.supportedTarget(target, reference))) {
+    if (targetedBid) {
       const snapshot = await targetReader.inspectGoogleTargetSnapshot({ reference, ...credentials, now: () => instant(deps), clock: deps.clock, read: googleRead });
       const readiness = await reception(); await authorize();
       // Provider recommendations use the campaign's conversion goals, not the CRM lead-cost comparison.
@@ -180,7 +198,8 @@ async function collectOptimizationEvidence({ settingId, mandateId, reference: in
     }
     const performance = reference.provider === 'google_ads'
       ? await inspectGooglePerformance({ reference, ...credentials, now: () => instant(deps), clock: deps.clock,
-        read: googleRead })
+        read: googleRead, ...(brokerRead ? { readSection: (section, timeoutMs, window) => brokerRead('optimization_performance', section,
+          { startDate: window.start, endDate: window.end }, timeoutMs) } : {}) })
       : await inspectMetaPerformance({ reference, ...credentials, now: () => instant(deps), clock: deps.clock,
         read: metaRead });
     await authorize();

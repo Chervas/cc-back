@@ -24,7 +24,8 @@ function createGoogleAdsOperations({ http, cursor, withDeveloperSecret, now = Da
       const query = contract.query(name, payload, account); const scope = { ...context, operation };
       // Account-level forms share GAQL across campaigns, but their cursors must
       // still belong to the campaign inspection that requested them.
-      const queryIdentity = name === 'campaign_destinations' ? JSON.stringify([query, payload.campaignId, payload.section]) : query;
+      const queryIdentity = name === 'campaign_destinations' || ['optimization_performance', 'optimization_budget'].includes(name)
+        ? JSON.stringify([query, payload.campaignId, payload.section, payload.startDate, payload.endDate]) : query;
       const queryHash = createHash('sha256').update(queryIdentity).digest('hex');
       return withDeveloperSecret(binding, async developerToken => {
         if (!Buffer.isBuffer(secret) || !Buffer.isBuffer(developerToken) || signal?.aborted) fail('connection_blocked');
@@ -42,7 +43,7 @@ function createGoogleAdsOperations({ http, cursor, withDeveloperSecret, now = Da
           if (entry && !entry.nextPageToken) fail('invalid_request');
           const next = entry?.nextPageToken || null;
           const previous = entry?.seenTokens || [];
-          if (next && previous.includes(next) || previous.length >= Math.ceil(contract.rowLimit(name) / contract.PROVIDER_PAGE_SIZE) + 1) fail('provider_failed');
+          if (next && previous.includes(next) || previous.length >= Math.ceil(contract.rowLimit(name, payload) / contract.PROVIDER_PAGE_SIZE) + 1) fail('provider_failed');
           const raw = await http({ hostname: 'googleads.googleapis.com', path: `/${contract.API_VERSION}/customers/${account.customerId}/googleAds:search`,
             token: secret, developerToken, loginCustomerId: account.loginCustomerId, signal,
             json: { query, ...(next ? { pageToken: next } : {}) } });
@@ -50,7 +51,7 @@ function createGoogleAdsOperations({ http, cursor, withDeveloperSecret, now = Da
           const page = contract.projectPage(name, raw, payload, account);
           if (name === 'leads' && page.results.some(row => Date.parse(row.leadFormSubmissionData.submissionDateTime) > now() + 300000)) fail('provider_failed');
           const count = (entry?.count || 0) + page.results.length;
-          const maximum = contract.rowLimit(name);
+          const maximum = contract.rowLimit(name, payload);
           if (count > maximum || count === maximum && page.nextPageToken
             || page.nextPageToken && [...previous, next].includes(page.nextPageToken)) fail('provider_failed');
           const size = Buffer.byteLength(JSON.stringify(page.results));

@@ -6,8 +6,12 @@ const { campaignIncluded } = require('./campaignWorkspaceSettings.service');
 const { verifyChange } = require('./campaignWorkspaceOptimizationCommand.service');
 const { cents, budgetPeriod, inspectGoogleBudget, inspectMetaBudget } = require('./campaignWorkspaceBudgetSnapshot.service');
 const { localDateTimeToUtc } = require('../lib/availability-calendar');
+const { assertGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
+const { createOptimizationBrokerRead } = require('./campaignWorkspaceOptimizationBrokerRead.service');
+const { googleDestinationAccessError } = require('./campaignWorkspaceGoogleDestination.service');
 
 const TTL_MS = 60000;
+const collectedBrokerGrants = new WeakMap();
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const key = row => `${row.provider}:${row.account_id}:${row.campaign_id}`;
 const resourceKey = (reference, resource) => `${reference.provider}:${reference.account_id}:${resource}`;
@@ -65,38 +69,71 @@ async function collectBudgetAccounting({ models, run, authorization }, deps = {}
   const startedAt = instant(deps); const period = budgetPeriod(startedAt);
   const selection = await selectedBudgetCampaigns({ models, setting: authorization.setting, scope: authorization.scope, loadInventory: deps.loadInventory });
   const resolve = deps.resolveContext || require('./campaignWorkspaceOptimizationPreparation.service').optimizationContext;
-  const snapshots = []; const grants = [];
+  const snapshots = []; const grants = []; const authorities = []; const finalGuards = [];
+  const checkTime = () => {
+    const age = +instant(deps) - +startedAt;
+    if (!Number.isFinite(age) || age < 0 || age >= TTL_MS) fail('workspace_optimization_budget_timeout');
+    if (digest(budgetPeriod(instant(deps))) !== digest(period)) fail('workspace_optimization_budget_stale');
+  };
   for (const selected of selection.campaigns) {
-    if (+instant(deps) - +startedAt >= TTL_MS) fail('workspace_optimization_budget_timeout');
+    checkTime();
     if (deps.revalidate) await deps.revalidate();
     const context = await resolve({ models, scope: authorization.scope, reference: selected.reference,
       requirePreferences: false, loadInventory: deps.loadInventory, now: instant(deps) });
     if (stamp(plain(context.setting)) !== stamp(plain(authorization.setting)) || context.campaign.clinicId !== selected.clinic_id) fail('workspace_optimization_budget_scope_changed');
-    grants.push(grantStamp(context));
+    const capturedStamp = grantStamp(context); grants.push(capturedStamp);
+    const brokerGrant = selected.reference.provider === 'google_ads' ? context.grant.brokerGrant : null;
+    authorities.push(brokerGrant || null);
     let value;
     try {
-      const credentials = { accessToken: context.grant.connection.accessToken, loginCustomerId: context.grant.loginCustomerId };
-      if (selected.reference.provider === 'google_ads') {
+      let credentials;
+      if (brokerGrant) {
+        if (typeof deps.revalidate !== 'function') fail('workspace_optimization_permissions_required');
+        const revalidate = async () => {
+          checkTime(); await deps.revalidate();
+          const current = await resolve({ models, scope: authorization.scope, reference: selected.reference,
+            requirePreferences: false, loadInventory: deps.loadInventory, now: instant(deps), expectedBrokerGrant: brokerGrant });
+          if (stamp(plain(current.setting)) !== stamp(plain(authorization.setting)) || current.campaign.clinicId !== selected.clinic_id
+            || grantStamp(current) !== capturedStamp) fail('workspace_optimization_budget_scope_changed');
+          const latest = await selectedBudgetCampaigns({ models, setting: current.setting, scope: authorization.scope, loadInventory: deps.loadInventory });
+          if (latest.fingerprint !== selection.fingerprint) fail('workspace_optimization_budget_scope_changed');
+          await assertGoogleAdsGrantTransport(brokerGrant, { clinicId: selected.clinic_id });
+          checkTime();
+        };
+        const read = createOptimizationBrokerRead({ brokerGrant, reference: selected.reference, clinicId: selected.clinic_id,
+          revalidate, ...(deps.clock ? { clock: deps.clock } : {}) });
+        credentials = { readSection: (section, timeoutMs, window) => read('optimization_budget', section,
+          { startDate: window.start, endDate: window.end }, Math.min(timeoutMs, TTL_MS - (+instant(deps) - +startedAt))) };
+        finalGuards.push(revalidate);
+      } else if (selected.reference.provider === 'google_ads') {
         const google = require('./googleAdsScopedRuntime.service');
         const token = await (deps.ensureToken || google.ensureGoogleConnectionAccessToken)(context.grant.connection, { requiredScopes: [google.GOOGLE_ADS_SCOPE] });
-        credentials.accessToken = token.accessToken;
-      }
+        credentials = { accessToken: token.accessToken, loginCustomerId: context.grant.loginCustomerId };
+      } else credentials = { accessToken: context.grant.connection.accessToken };
       const read = selected.reference.provider === 'google_ads' ? deps.inspectGoogleBudget || inspectGoogleBudget : deps.inspectMetaBudget || inspectMetaBudget;
       if (deps.revalidate) await deps.revalidate();
       value = await read({ reference: selected.reference, ...credentials, now: instant(deps) });
     }
     catch (error) {
+      const accessError = googleDestinationAccessError(error);
+      if (accessError === 'workspace_google_service_pending' || error.code === 'workspace_google_service_pending') fail('workspace_optimization_service_pending');
+      if (accessError === 'workspace_google_permissions_required') fail('workspace_optimization_permissions_required');
+      if (['broker_timeout', 'provider_timeout'].includes(error.code)) fail('workspace_optimization_budget_timeout');
       if (['NO_SCOPED_CONNECTION', 'INSUFFICIENT_SCOPE', 'NO_TOKEN', 'TOKEN_EXPIRED', 'REFRESH_FAILED'].includes(error.code)
         || [10, 190, 200].includes(Number(error.response?.data?.error?.code)) || [401, 403].includes(error.response?.status)) fail('workspace_optimization_permissions_required');
-      if ([4, 17, 613].includes(Number(error.response?.data?.error?.code)) || error.response?.status === 429) fail('workspace_optimization_rate_limited');
+      if (error.code === 'rate_limited' || [4, 17, 613].includes(Number(error.response?.data?.error?.code)) || error.response?.status === 429) fail('workspace_optimization_rate_limited');
       throw error;
     }
     verifySnapshot(value, selected.reference, period, instant(deps));
     snapshots.push(value);
   }
+  for (const check of finalGuards) await check();
+  checkTime();
   const record = { schema_version: 1, scope_fingerprint: selection.fingerprint, run_id: run.id, change_fingerprint: run.change.fingerprint,
     setting_id: run.setting_id, mandate_id: run.mandate_id, period, snapshots, grants, collected_at: startedAt.toISOString() };
-  return { ...record, fingerprint: digest(record) };
+  const result = { ...record, fingerprint: digest(record) };
+  if (authorities.some(Boolean)) collectedBrokerGrants.set(result, authorities);
+  return result;
 }
 
 // Keep the month ledger on the existing durable attempt. No provider I/O belongs inside this transaction.
@@ -115,10 +152,15 @@ async function reserveBudgetAccounting({ models, run, authorization, accounting,
     || selection.campaigns.length !== accounting.grants.length) fail('workspace_optimization_budget_scope_changed');
   const snapshots = selection.campaigns.map((campaign, index) => verifySnapshot(accounting.snapshots[index], campaign.reference, period, now));
   const resolve = deps.resolveContext || require('./campaignWorkspaceOptimizationPreparation.service').optimizationContext;
+  const authorities = collectedBrokerGrants.get(accounting);
   for (const [index, selected] of selection.campaigns.entries()) {
+    const expectedBrokerGrant = authorities?.[index] || null;
     const context = await resolve({ models, scope: authorization.scope, reference: selected.reference, requirePreferences: false,
-      loadInventory: deps.loadInventory, now, transaction });
+      loadInventory: deps.loadInventory, now, transaction, expectedBrokerGrant });
     if (grantStamp(context) !== accounting.grants[index] || context.campaign.clinicId !== selected.clinic_id) fail('workspace_optimization_budget_scope_changed');
+    // A serialized proof is not a replacement for the original, in-process broker authority.
+    if (context.grant.brokerGrant && !expectedBrokerGrant || expectedBrokerGrant && !context.grant.brokerGrant) fail('workspace_optimization_budget_scope_changed');
+    if (expectedBrokerGrant) await assertGoogleAdsGrantTransport(expectedBrokerGrant, { clinicId: selected.clinic_id, transaction });
   }
   const prior = await models.CampaignWorkspaceOptimizationRun.findAll({ where: { setting_id: run.setting_id, id: { [Op.ne]: run.id },
     submitted_at: { [Op.ne]: null }, [Op.or]: [

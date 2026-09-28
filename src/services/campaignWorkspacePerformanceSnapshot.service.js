@@ -5,10 +5,11 @@ const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
 const { graphList } = require('./campaignWorkspaceMetaDestination.service');
 const { formatDateLocal } = require('../lib/availability-calendar');
 const { googleAdHasUnrestrictedDelivery } = require('./googleAdDelivery.service');
+const evidenceContract = require('../../services/integrations-broker/src/google-optimization-evidence-contract');
 
-const DAYS = 28;
+const DAYS = evidenceContract.DAYS;
 const EXCLUDED_DAYS = 2;
-const MAX_ADS = 2000;
+const MAX_ADS = evidenceContract.MAX_ADS;
 const MAX_ROWS = DAYS * MAX_ADS;
 const TIMEOUT_MS = 45000;
 const fail = suffix => { throw Object.assign(new Error(`workspace_optimization_performance_${suffix}`),
@@ -121,28 +122,26 @@ function snapshot(reference, period, inventory, campaignRows, adRows, observedAt
 }
 
 async function inspectGooglePerformance({ reference, accessToken, loginCustomerId,
-  now = () => new Date(), clock = Date.now, read = googleAdsSearchRows }) {
+  now = () => new Date(), clock = Date.now, read = googleAdsSearchRows, readSection }) {
   const collect = session({ reference, provider: 'google_ads', now, clock });
   const account = reference.account_id; const campaignId = reference.campaign_id;
-  const search = async (query, limit) => {
-    const rows = await read({ customerId: account, accessToken, loginCustomerId, query: `${query} LIMIT ${limit + 1}`,
-      maxPages: 12, timeoutMs: collect.remaining() });
+  const search = async section => {
+    const payload = { campaignId, section, startDate: collect.period.start, endDate: collect.period.end };
+    const limit = evidenceContract.limit('optimization_performance', payload);
+    const rows = readSection ? await readSection(section, collect.remaining(), collect.period)
+      : await read({ customerId: account, accessToken, loginCustomerId, query: evidenceContract.query('optimization_performance', payload),
+        maxPages: 12, timeoutMs: collect.remaining() });
     collect.remaining();
     if (!Array.isArray(rows) || rows.length > limit || rows.some(row => row.customer?.id !== account
       || row.campaign?.id !== campaignId)) fail('incomplete');
     return rows;
   };
-  const metadata = await search(`SELECT customer.id, customer.currency_code, customer.time_zone, campaign.id,
-    campaign.status, campaign.experiment_type, campaign.advertising_channel_type
-    FROM campaign WHERE campaign.id = ${campaignId}`, 1);
+  const metadata = await search('campaign');
   if (metadata.length !== 1) fail('incomplete');
   owner(metadata[0].customer.currencyCode, metadata[0].customer.timeZone);
   if (metadata[0].campaign.status !== 'ENABLED' || metadata[0].campaign.experimentType !== 'BASE'
     || metadata[0].campaign.advertisingChannelType !== 'SEARCH') fail('unsupported');
-  const inventoryRows = await search(`SELECT customer.id, campaign.id, ad_group.id, ad_group.status,
-    ad_group_ad.ad.id, ad_group_ad.status, ad_group_ad.primary_status,
-    ad_group_ad.policy_summary.approval_status FROM ad_group_ad WHERE campaign.id = ${campaignId}
-    AND ad_group_ad.status IN ('ENABLED', 'PAUSED', 'REMOVED') AND ad_group.status IN ('ENABLED', 'PAUSED', 'REMOVED')`, MAX_ADS);
+  const inventoryRows = await search('inventory');
   const inventory = inventoryRows.map(row => {
     if (!id(row.adGroup?.id) || !id(row.adGroupAd?.ad?.id) || !['ENABLED', 'PAUSED', 'REMOVED'].includes(row.adGroup?.status)
       || !['ENABLED', 'PAUSED', 'REMOVED'].includes(row.adGroupAd?.status)) fail('incomplete');
@@ -151,12 +150,8 @@ async function inspectGooglePerformance({ reference, accessToken, loginCustomerI
         adGroupStatus: row.adGroup.status, groupAd: row.adGroupAd }) };
   });
   inventoryIndex(inventory, 'google_ads');
-  const condition = `WHERE campaign.id = ${campaignId} AND segments.date BETWEEN '${collect.period.start}' AND '${collect.period.end}'`;
-  const campaignRows = await search(`SELECT customer.id, campaign.id, segments.date, metrics.clicks,
-    metrics.cost_micros FROM campaign ${condition}`, DAYS);
-  const adRows = await search(`SELECT customer.id, campaign.id, ad_group.id, ad_group_ad.ad.id,
-    segments.date, metrics.clicks, metrics.cost_micros FROM ad_group_ad ${condition}
-    AND ad_group_ad.status IN ('ENABLED', 'PAUSED', 'REMOVED') AND ad_group.status IN ('ENABLED', 'PAUSED', 'REMOVED')`, MAX_ROWS);
+  const campaignRows = await search('campaign_daily');
+  const adRows = await search('ad_daily');
   const metric = row => ({ date: row.segments?.date, clicks: clicks(row.metrics?.clicks),
     cost_micros: amount(row.metrics?.costMicros, 'google_ads') });
   return snapshot(reference, collect.period, inventory, campaignRows.map(metric), adRows.map(row => {

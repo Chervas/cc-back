@@ -72,7 +72,7 @@ function createGoogleAdsBrokerReader({ client, assertContext, now = Date.now }) 
         }
         catch { fail('broker_response_invalid'); }
         bytes += Buffer.byteLength(JSON.stringify(projected));
-        if (bytes > 64 * 1024 * 1024 || rows.length + projected.length > contract.rowLimit(family)) fail('broker_response_invalid');
+        if (bytes > 64 * 1024 * 1024 || rows.length + projected.length > contract.rowLimit(family, payload)) fail('broker_response_invalid');
         for (const row of projected) {
           const key = contract.rowKey(row);
           if (seen.has(key)) fail('broker_response_invalid');
@@ -92,7 +92,7 @@ function createGoogleAdsBrokerReader({ client, assertContext, now = Date.now }) 
           if (!singleSettings) { await verify(); await beforeExecute?.(); }
           if (now() >= deadline) fail('broker_timeout'); return rows;
         }
-        if (rows.length === contract.rowLimit(family)) fail('broker_response_invalid');
+        if (rows.length === contract.rowLimit(family, payload)) fail('broker_response_invalid');
         tokens.add(next); pageToken = next;
       }
       fail('broker_response_invalid');

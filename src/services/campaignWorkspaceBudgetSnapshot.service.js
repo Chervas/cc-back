@@ -3,6 +3,7 @@
 const { optimizationReference, digest } = require('./campaignWorkspaceOptimizationCapabilities.service');
 const { googleAdsSearchRows } = require('../lib/googleAdsSearchRows');
 const { graphList } = require('./campaignWorkspaceMetaDestination.service');
+const evidenceContract = require('../../services/integrations-broker/src/google-optimization-evidence-contract');
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const MAX_CENTS = BigInt(Number.MAX_SAFE_INTEGER);
@@ -49,20 +50,19 @@ function validateAccount(currency, timezone) {
   if (timezone !== 'Europe/Madrid') fail('workspace_optimization_budget_timezone');
 }
 
-async function inspectGoogleBudget({ reference, accessToken, loginCustomerId, now = new Date(), read = googleAdsSearchRows }) {
+async function inspectGoogleBudget({ reference, accessToken, loginCustomerId, now = new Date(), read = googleAdsSearchRows, readSection }) {
   optimizationReference(reference);
   if (reference.provider !== 'google_ads') fail('workspace_optimization_budget_incomplete');
   const period = budgetPeriod(now);
-  const search = async query => {
-    const rows = await read({ customerId: reference.account_id, accessToken, loginCustomerId, query: `${query} LIMIT 2`, maxPages: 2, timeoutMs: 10000 });
+  const search = async section => {
+    const rows = readSection ? await readSection(section, 10000, period) : await read({ customerId: reference.account_id, accessToken, loginCustomerId,
+      query: evidenceContract.query('optimization_budget', { campaignId: reference.campaign_id, section, startDate: period.start, endDate: period.end }),
+      maxPages: 2, timeoutMs: 10000 });
     if (!Array.isArray(rows) || rows.length > 1 || rows.some(row => String(row.customer?.id) !== reference.account_id
       || String(row.campaign?.id) !== reference.campaign_id)) fail('workspace_optimization_budget_incomplete');
     return rows;
   };
-  const rows = await search(`SELECT customer.id, customer.currency_code, customer.time_zone, campaign.id, campaign.status,
-    campaign_budget.resource_name, campaign_budget.amount_micros, campaign_budget.period,
-    campaign_budget.explicitly_shared, campaign_budget.reference_count
-    FROM campaign WHERE campaign.id = ${reference.campaign_id}`);
+  const rows = await search('campaign');
   if (rows.length !== 1) fail('workspace_optimization_budget_incomplete');
   const row = rows[0]; validateAccount(row.customer.currencyCode, row.customer.timeZone);
   if (!['ENABLED', 'PAUSED', 'REMOVED'].includes(row.campaign.status)) fail('workspace_optimization_budget_incomplete');
@@ -75,8 +75,7 @@ async function inspectGoogleBudget({ reference, accessToken, loginCustomerId, no
     if (daily <= 0) fail('workspace_optimization_budget_incomplete');
     resources.push({ resource: budget.resourceName, unit: 'micros', amount: budget.amountMicros, daily_cents: daily });
   }
-  const costs = await search(`SELECT customer.id, campaign.id, metrics.cost_micros FROM campaign
-    WHERE campaign.id = ${reference.campaign_id} AND segments.date BETWEEN '${period.start}' AND '${period.end}'`);
+  const costs = await search('month_cost');
   return snapshot(reference, period, costs.length ? cents(costs[0].metrics?.costMicros, 'micros') : 0, resources, now);
 }
 

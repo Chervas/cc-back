@@ -76,6 +76,9 @@ test('all read families use the same complete-page validator and downstream erro
     if (['ads', 'ad_metrics'].includes(family)) input.campaignId = null;
     if (family === 'leads') input.sinceDate = new Date().toISOString().slice(0, 10);
     if (['campaign_destinations', 'optimization'].includes(family)) Object.assign(input, { campaignId: '30', section: 'ad_groups' });
+    if (['optimization_performance', 'optimization_budget'].includes(family)) Object.assign(input, { campaignId: '30',
+      section: family === 'optimization_performance' ? 'ad_daily' : 'month_cost', startDate: '2026-09-01',
+      endDate: family === 'optimization_performance' ? '2026-09-28' : '2026-09-11' });
     f.state.response = { results: ['account', 'discovery'].includes(family)
       ? [{ customer: { id: account.customerId, manager: false, currencyCode: 'EUR', timeZone: 'Europe/Madrid', ...(family === 'discovery' ? { descriptiveName: 'Fictitious account', status: 'ENABLED' } : {}) } }] : [], nextPageToken: null };
     if (family === 'conversion_settings') f.state.response = { results: [{ customer: { id: account.customerId, conversionTrackingSetting: {} } }], nextPageToken: null, dataManagerConfiguration: { quotaProjectConfigured: true } };
@@ -83,6 +86,17 @@ test('all read families use the same complete-page validator and downstream erro
   }
   f.state.onCall = () => { throw Error('FICTITIOUS_SECRET_NOT_FOR_LOGS'); };
   await assert.rejects(f.read(), error => { assert.equal(error.code, 'google_ads_broker_read_failed'); assert.doesNotMatch(error.message, /FICTITIOUS_SECRET/); return true; });
+});
+test('optimization evidence section limits are enforced again by the consumer, not just the broker', async () => {
+  const f = fixture();
+  f.state.onCall = () => {
+    const offset = (f.state.calls.length - 1) * 250;
+    f.state.response = { results: Array.from({ length: 250 }, (_, i) => ({ customer: { id: account.customerId }, campaign: { id: '30' },
+      adGroup: { id: '50', status: 'ENABLED' }, adGroupAd: { ad: { id: String(offset + i + 1) }, status: 'ENABLED' } })), nextPageToken: `page-${offset + 250}` };
+  };
+  await assert.rejects(f.read('optimization_performance', { campaignId: '30', section: 'inventory', startDate: '2026-09-01', endDate: '2026-09-28' }),
+    { code: 'broker_response_invalid' });
+  assert.equal(f.state.calls.length, 8, '2000 inventory rows with a next page is incomplete, never a successful truncated snapshot');
 });
 
 test('settings configuration must be a closed broker assertion and cannot arrive through provider rows', async () => {

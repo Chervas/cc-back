@@ -1,7 +1,7 @@
 # Campaign workspace: implementacion en curso
 
 Estado: EN CURSO. El mock aprobado NO se considera implementado por publicar el
-contrato de lectura. La ruta canonica se integra solo en el preview DEV; no
+contrato de lectura. Fuente y runtime se distinguen en cada corte siguiente; no
 promover a staging/produccion ni abrir los gates hasta completar los contratos,
 las pruebas de permisos y el QA autenticado. Referencia UX canonica en front:
 `src/Documentacion/20.17-marketing-arquitectura-experiencia-objetivos.md`, apartado 19.
@@ -206,17 +206,61 @@ operacion de proveedor, GAQL libre ni fallback de token para cuentas migradas.
   nueva. **1.160 pruebas de regresion backend y 6 del contrato broker correctas**.
   Logs `/tmp/cc-optimization-readback-{focused,regression,broker}-20260928.log`.
 
+### Quinto corte: rendimiento y presupuesto por broker (2026-09-28)
+
+Sobre backend `e145d04c` y frontend `b398b1868`, sin despliegue. Se anaden dos
+lecturas tipadas: `google.ads.optimization_performance.read.v1` (cuatro secciones)
+y `google.ads.optimization_budget.read.v1` (dos secciones). Las mismas consultas
+de los snapshots previos se comparten entre la ruta legacy protegida y el broker;
+no hay traduccion de GAQL arbitraria ni recuperacion local de tokens migrados.
+Ventanas y limites por seccion en `docs/security/google-ads-read-broker.md`.
+
+- Evidencia de pausa, CPC manual y evaluacion de presupuesto: compatibilidad
+  tipada cuando corresponde, inventario completo, 28 dias maduros Madrid y
+  conciliacion de clics/gasto diarios. Atribucion por anuncio con el CRM local;
+  no se envian contactos ni IDs de leads al broker. Datos ausentes o atribucion
+  ambigua no generan una propuesta ejecutable; no se usa conversion Google
+  como sustituto del recuento de leads CRM.
+- Mandato, seleccion, clinica, permisos, recepcion, periodo y grant original
+  revisados hasta terminar. Rechazos y paginas incompletas no dejan evidencia
+  parcial. Se mantiene TTL de recogida 60s y timeout de snapshot 45s.
+- Limite mensual: lectura de gasto y propiedad del presupuesto de TODAS las
+  campanas seleccionadas, aunque alguna no tenga autorizacion de ajustes.
+  Comparacion monotona de gasto/reservas conservada. Cada binding original se
+  retiene en memoria opaca hasta la transaccion de reserva; revocarlo,
+  sustituirlo o serializar la prueba obliga a recogerla de nuevo. Sin I/O de
+  proveedor dentro de la reserva y sin persistir tokens o handles en el recibo.
+- CPA/ROAS y exclusiones se paran con servicio pendiente antes de tocar
+  lectores legacy cuando la cuenta es broker. No se cambia su politica ni se
+  sustituyen objetivos/recomendaciones por rendimiento generico. Son el
+  siguiente contrato de evidencia; la relevancia de exclusiones sigue pendiente.
+- QA aislada con consumidor, autorizador, transporte firmado y SQLite reales;
+  BD de workspace/Google/AWS ficticios. Una propuesta real de la politica de
+  pausa se genera desde la nueva evidencia, sin enviarla. Paginas, revocaciones,
+  ventanas, totales, ausencia de metricas y reserva mensual probados.
+  Regresion completa: **1.214 pruebas backend y 810 del broker correctas**.
+  Repeticion final de los tres consumidores afectados: **60 correctas**.
+  Logs `/tmp/cc-optimization-evidence-{focused,contract,consumer,all-backend,all-broker}-20260928.log`
+  y `/tmp/cc-optimization-budget-broker-20260928.log`; repeticion final en
+  `/tmp/cc-optimization-evidence-final-focused-20260928.log`.
+
+No se abre el escritor de Optimiza ni se habilitan grants, cuentas, jobs,
+OAuth, Meta o senales. Sin SQL real, migraciones, reinicios, despliegue ni nueva
+QA visual: la interfaz no cambia y se conserva el contraste anterior.
+
 ### Siguiente corte
 
 La causa de la latencia Propdental esta corregida y medida en el candidato.
 Falta instalarlo mediante un corte autorizado y repetir el HTTP real y QA sin
 intercepcion del informe; no repetir cargas lentas contra el build antiguo.
 
-1. Adaptar los colectores de evidencia/politicas y la escritura de Optimiza al
-   transporte tipado, con permiso propio, idempotencia y recibo duradero. La
-   preparacion de compatibilidad y la lectura de resultado/recuperacion ya
-   estan adaptadas; esto NO significa que los ajustes sean ejecutables. No se
-   sustituyen con GAQL libre ni se activan para demostrar la interfaz.
+1. Adaptar la evidencia Google CPA/ROAS (objetivos, recomendaciones y baseline)
+   y la escritura de Optimiza al transporte tipado, con permiso propio,
+   idempotencia y recibo duradero. Compatibilidad, rendimiento maduro, calculo
+   mensual y lectura de resultado/recuperacion ya estan adaptados; esto NO
+   significa que los ajustes sean ejecutables. Las exclusiones siguen
+   necesitando politica de relevancia. No se sustituyen con GAQL libre ni se
+   activan para demostrar la interfaz.
    Preparacion de conversiones ya tiene transporte broker y no necesita duplicarse.
 2. Publicacion compatible siguiendo DEV -> staging, con los gates efectivos
    conservados. Instalar motor y grant de lectura de destinos solo en una

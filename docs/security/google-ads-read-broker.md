@@ -1,5 +1,9 @@
 # Motor de lecturas Google Ads en el broker
 
+Los parrafos iniciales describen la entrega historica del 13/09. No acreditan
+el inventario ni los grants instalados hoy. Los contratos posteriores indican
+su propio estado; la situacion operativa se recoge en los documentos front 19/39.
+
 Preparado el 13/09/2026 sobre backend `503b6080f7efd0408b7e9679c29d84c116280408`
 y frontend `672b8ae122410a4839593372aac1d7891867c9fe`. OPS aplazado. Motor y QA
 ficticia; **ninguna cuenta Ads está migrada ni activada en runtime**. El cierre
@@ -35,6 +39,8 @@ cuenta y operación; no tenant de grupo ni operación genérica de búsqueda.
 | `google.ads.ad_metrics.read.v1` | `{campaignId, startDate, endDate, pageToken}` | Identidades y métricas diarias de anuncio por fecha/red/dispositivo; máximo 200.000 |
 | `google.ads.campaign_destinations.read.v1` | `{campaignId, section, pageToken}` | Metadatos de destinos de una campaña; secciones cerradas, máximo 2.000 filas por sección; preparado en fuente el 27/09, no publicado |
 | `google.ads.optimization.read.v1` | `{campaignId, section, pageToken}` | Compatibilidad de Optimiza: campaña/presupuesto, grupos y estado de anuncios; máximo 2.000 filas por sección; preparado el 27/09, no publicado |
+| `google.ads.optimization_performance.read.v1` | `{campaignId, section, startDate, endDate, pageToken}` | Evidencia madura: metadata, inventario y clics/coste diarios de campaña y anuncios; preparado el 28/09, no publicado |
+| `google.ads.optimization_budget.read.v1` | `{campaignId, section, startDate, endDate, pageToken}` | Propiedad del presupuesto y coste acumulado del mes por campaña; preparado el 28/09, no publicado |
 | `google.ads.asset.revoke.v1` | `{}` | `{revoked: true}` con UUID/replay durable |
 
 Fechas canónicas, ventana máxima inclusiva de 15 días y 100.000 filas por
@@ -123,6 +129,44 @@ repetir OAuth. La revalidación impide conservar verde tras cambios concurrentes
 Requiere motor/consumidor compatibles y permiso exacto en grant o `readOperations`;
 no amplía automáticamente los grants ya instalados. La ejecución de ajustes,
 sus evidencias y los permisos de escritura siguen siendo otro corte pendiente.
+
+### Evidencia de Optimiza: adaptación del 28/09/2026
+
+Dos operaciones de lectura independientes, sin ampliar grants instalados:
+
+- `optimization_performance`: `campaign` (1 fila), `inventory` (2.000),
+  `campaign_daily` (28) y `ad_daily` (56.000). Ventana exactamente de 28 días;
+  el consumidor fija el calendario Europe/Madrid, excluye los dos últimos días
+  completos y valida que no cambie durante la recogida. Incluye anuncios
+  retirados/restringidos para conciliar el gasto, sin hacerlos candidatos a pausa.
+- `optimization_budget`: `campaign` y `month_cost`, máximo 1 fila por sección.
+  La ventana empieza el día 1 y acaba dentro del mismo mes; el consumidor usa
+  el mes corriente Europe/Madrid. Coste sin segmentar, propiedad exclusiva del
+  presupuesto, estados y moneda/zona. No mezcla meses con cierres diferentes.
+
+Todos los campos del payload son obligatorios, incluida la ventana en metadata.
+Los cursores quedan ligados también a esas fechas cuando la GAQL de metadata
+no cambia. Límites específicos por sección comprobados en broker y consumidor;
+las filas no se truncan. No hay query, destinos, contactos, creatividades,
+términos de búsqueda ni recomendaciones de conversión en estos contratos.
+Los campos numéricos requeridos ausentes **no** se proyectan como ceros: son
+evidencia incompleta. La inferencia de días sin gasto solo ocurre en el colector
+tras completar todas las páginas y conciliar anuncios con el total de campaña.
+
+El grant original, selección, clínica, mandato y ACL se revisan durante las
+lecturas y al terminar, sin recuperar tokens en la API general. La atribución
+CRM se calcula localmente y solo conserva recuentos agregados. El cálculo mensual
+incluye todas las campañas seleccionadas, no solo las autorizadas para ajustes.
+Conserva las autoridades opacas hasta la reserva en la misma ejecución; una
+copia serializada no sustituye esos permisos ni admite un binding nuevo.
+
+La compatibilidad y el readback anteriores reutilizan `optimization`; estas dos
+lecturas no autorizan cambios publicitarios. CPA/ROAS necesita aún adaptar su
+lector de objetivos/recomendaciones; exclusiones necesitan su contrato y política
+de relevancia. Ambos se detienen antes de intentar rutas legacy en cuentas
+migradas. El escritor de Optimiza sigue bloqueado. Requiere instalación compatible
+y autorización separada de las operaciones exactas en el grant o `readOperations`.
+No hay cambio de runtime, cohorte, secreto, OAuth, jobs ni permisos en este corte.
 Referencias de los campos:
 [campaña v24](https://developers.google.com/google-ads/api/fields/v24/campaign),
 [presupuesto v24](https://developers.google.com/google-ads/api/fields/v24/campaign_budget)
