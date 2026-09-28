@@ -108,6 +108,7 @@ sincroniza el espejo frontend. Este índice no mantiene otro roadmap ni diario.
 
 - [Cierre de credenciales Google Ads antiguas](security/google-ads-legacy-boundary.md).
 - [Motor de lecturas Google Ads en el broker](security/google-ads-read-broker.md).
+- [Optimiza Google Ads: escritor aislado, recibos y limites pendientes](security/google-ads-optimization-broker.md).
 - [Google Ads: registro durable y sincronización por broker](security/google-ads-backend-migration.md).
 - [Google Ads: desconexión durable, entrega y auditoría](security/google-ads-revocation-migration.md).
 - [Google Ads: reautorización por broker, API y Ajustes](security/google-ads-oauth-migration.md).

@@ -1,5 +1,14 @@
 # Broker de integraciones
 
+## 28/09/2026 - Escritor aislado de Optimiza Google Ads
+
+Cohorte propia, principal/clave separados de lectura, campanas/tipos/limites
+explicitos y cambios de un solo campo. Preflight tipado, marcador previo a HTTP,
+bloqueo persistente de incertidumbre, cooldown y recibo atomico con auditoria.
+Motor probado offline, incluido HTTPS/firma/SQLite. **No instalado ni conectado
+al ejecutor CRM**: conserva servicio pendiente, gates y permisos efectivos.
+[Contrato, responsabilidades y recuperacion](../../docs/security/google-ads-optimization-broker.md).
+
 ## 18/09/2026 — Gestión tipada de acciones canónicas Google Ads
 
 Preparar, validar, aplicar y consultar planes propios; creación fija y ajuste de

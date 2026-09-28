@@ -1,0 +1,52 @@
+'use strict';
+const { test } = require('node:test'); const assert = require('node:assert/strict');
+const fs = require('node:fs'); const path = require('node:path'); const net = require('node:net');
+const { randomBytes } = require('node:crypto'); const { execFileSync } = require('node:child_process');
+const { setup } = require('./google-optimization-writes-fixture.cjs');
+const { allowPort, removePort } = require('./offline-guard.cjs');
+const { ACCESS, DEVELOPER } = require('./google-ads-fixture.cjs');
+const runtime = require('../src/google-main'); const C = require('../src/google-optimization-write-contract');
+const ads = require('../src/google-ads-contract'); const { drainAudit } = require('../src/audit');
+const { createIntegrationsBrokerClient } = require('../../../src/lib/integrationsBrokerClient');
+test('actual isolated optimization HTTPS runtime requires its own key and preserves receipts and revocation after restart', async t => {
+  const f = setup(t); const cert = path.join(f.dir, 'writer.crt'); const key = path.join(f.dir, 'writer.key'); const cursor = path.join(f.dir, 'writer.cursor');
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert,
+    '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
+  for (const file of [cert, key]) fs.chmodSync(file, 0o600); fs.writeFileSync(cursor, randomBytes(32), { mode: 0o600 });
+  const probe = net.createServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
+  const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
+  const config = { enabled: true, cohort: C.COHORT, policy: f.policy, listenAddress: '127.0.0.1', port,
+    stateFile: path.join(f.dir, 'writer.sqlite'), tlsCertFile: cert, tlsKeyFile: key, cursorKeyFile: cursor };
+  const filename = path.join(f.dir, 'writer.json'); fs.writeFileSync(filename, JSON.stringify(config), { mode: 0o600 });
+  const delivered = []; const sink = { write: async item => { delivered.push(JSON.parse(item.event)); return { versionId: 'fictitious-s3-version', digest: item.digest }; } };
+  const deps = { awsFactory: async () => ({ secrets: f.sdk, sink, close: () => {} }), http: f.http };
+  let app = await runtime.main(filename, deps); allowPort(port);
+  t.after(async () => { if (app) await app.close(); removePort(port); });
+  const clientFor = (keyId, privateKey) => createIntegrationsBrokerClient({ origin: `https://127.0.0.1:${port}`, keyId,
+    audience: f.policy.audience, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), ca: fs.readFileSync(cert) });
+  const writer = clientFor(f.principal.keyId, f.keys.privateKey), reader = clientFor('qa-key', f.readerKeys.privateKey);
+  const control = clientFor('control-key', f.control.privateKey); const input = f.input();
+  await assert.rejects(reader.execute(f.command('apply', input)), { code: 'scope_denied' });
+  await assert.rejects(writer.execute(f.command('status', { executionId: input.executionId }, { operation: ads.PREFIX + 'account.read.v1', payload: { pageToken: null } })), { code: 'scope_denied' });
+  assert.equal(f.state.sdk.length, 0); assert.equal(f.state.calls.length, 0);
+  const value = (await writer.execute(f.command('apply', input))).data; assert.equal(value.state, 'applied'); assert.equal(f.state.writes, 1);
+  const secretReads = f.state.sdk.length;
+  assert.deepEqual((await writer.execute(f.command('status', { executionId: input.executionId }))).data, value);
+  assert.equal(f.state.sdk.length, secretReads);
+  await app.close(); app = null; app = await runtime.main(filename, deps);
+  assert.deepEqual((await writer.execute(f.command('status', { executionId: input.executionId }))).data, value);
+  assert.equal(f.state.sdk.length, secretReads);
+  assert.deepEqual((await writer.execute(f.command('apply', input))).data, value); assert.equal(f.state.writes, 1);
+  const revoke = f.command('status', {}, { operation: ads.REVOKE_OPERATION }); await control.execute(revoke);
+  await app.close(); app = null; app = await runtime.main(filename, deps);
+  const before = f.state.sdk.length;
+  await assert.rejects(writer.execute(f.command('status', { executionId: input.executionId })), { code: 'asset_revoked' });
+  await assert.rejects(writer.execute(f.command('apply', f.input())), { code: 'asset_revoked' });
+  assert.equal(f.state.writes, 1); assert.equal(f.state.sdk.length, before);
+  await drainAudit(app.store, sink); assert.equal(app.store.backlog().pending, 0);
+  assert.ok(delivered.some(row => row.reason === 'optimization_provider_acknowledged'));
+  assert.ok(delivered.some(row => row.reason === 'scope_disconnected'));
+  const durable = JSON.stringify(delivered) + JSON.stringify(app.store.db.prepare('SELECT * FROM google_optimization_mutations').all());
+  for (const secret of [ACCESS, DEVELOPER, 'FICTITIOUS_REFRESH', 'FICTITIOUS_CLIENT_SECRET']) assert.ok(!durable.includes(secret));
+  assert.equal(require.cache[require.resolve('../../../models')], undefined);
+});

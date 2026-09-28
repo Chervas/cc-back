@@ -56,6 +56,9 @@ discovery con API/sesión/permisos; account mantiene su proyección anterior.
 El consumidor no envía query, URL, método, cabeceras, cuenta, gestor, campos,
 versión de API ni tokens. La cohorte de lectura no expone escritura o ingesta;
 la cohorte explícita de conversiones se describe en [Data Manager](google-data-manager-broker.md).
+El [escritor de Optimiza](google-ads-optimization-broker.md) se prepara el 28/09
+en otra cohorte, con principal/clave y lista de campañas propios; no modifica
+los permisos del lector ni está instalado o conectado al ejecutor CRM.
 La revocación requiere principal y clave diferentes de todos los lectores;
 rechaza lectores con el mismo material criptográfico bajo otro keyId.
 

@@ -4,8 +4,8 @@ const { BrokerError, fail } = require('./errors');
 const HOSTS = new Set(['mybusiness.googleapis.com', 'businessprofileperformance.googleapis.com',
   'mybusinessbusinessinformation.googleapis.com', 'mybusinessverifications.googleapis.com', 'mybusinessaccountmanagement.googleapis.com']);
 // This transport is private to reviewed operations. It never accepts consumer headers or URLs.
-function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManagerEnabled = false, actionManagementEnabled = false, businessProfileWritesEnabled = false } = {}) {
-  return async function googleHttp({ hostname, path, token, form, json, signal, developerToken, loginCustomerId, quotaProjectId, businessProfileMutation }) {
+function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManagerEnabled = false, actionManagementEnabled = false, businessProfileWritesEnabled = false, optimizationEnabled = false } = {}) {
+  return async function googleHttp({ hostname, path, token, form, json, signal, developerToken, loginCustomerId, quotaProjectId, businessProfileMutation, optimizationMutation }) {
     // A private operation selector, never a consumer-controlled HTTP method.
     const gbpMethods = { replyUpdate: 'PUT', replyDelete: 'DELETE', photo: 'POST', hours: 'PATCH' };
     const gbpWrite = businessProfileMutation !== undefined;
@@ -23,7 +23,12 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManag
     const analytics = hostname === 'analyticsdata.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}:runReport$/.test(path);
     const discovery = hostname === 'analyticsadmin.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}$/.test(path)
       || hostname === 'www.googleapis.com' && /^\/webmasters\/v3\/sites\/[^/?#]+$/.test(path);
-    const adsWrite = actionManagementEnabled === true && hostname === 'googleads.googleapis.com'
+    const optimizationWrite = optimizationMutation !== undefined;
+    if (optimizationWrite) {
+      if (optimizationEnabled !== true || hostname !== 'googleads.googleapis.com') fail('invalid_request');
+      require('./google-optimization-write-contract').validateMutation(path, optimizationMutation, json);
+    }
+    const adsWrite = optimizationWrite || actionManagementEnabled === true && hostname === 'googleads.googleapis.com'
       && /^\/v24\/customers\/[0-9]{10}\/conversionActions:mutate$/.test(path);
     const ads = adsWrite || hostname === 'googleads.googleapis.com' && /^\/v24\/customers\/[0-9]{10}\/googleAds:search$/.test(path);
     const dmWrite = dataManagerEnabled === true && hostname === 'datamanager.googleapis.com' && path === '/v1/events:ingest';

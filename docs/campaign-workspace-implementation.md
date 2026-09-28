@@ -289,16 +289,56 @@ Contrato y referencias oficiales en `docs/security/google-ads-read-broker.md`.
 Sin SQL real, AWS/proveedor real, OAuth, grants nuevos, Meta, senales, jobs,
 migraciones, reinicios o nueva QA visual. Plan Gestionado permanece aplazado.
 
+### Septimo corte: motor escritor aislado de Optimiza (2026-09-28)
+
+Sobre backend `62ca215f` y frontend `a6ae61866`. Solo fuente DEV; el ejecutor
+CRM conserva `workspace_optimization_service_pending` antes de enviar. Cohorte
+nueva `google-ads-optimization-v1`, apply/status tipados, principal y clave
+separados de lectura/control. Sin OAuth/enrollment ni permisos nuevos reales.
+
+- Binding explicito por campana, tipos y limites absolutos; incremento de
+  presupuesto exige permiso independiente. Solo pausa, CPC manual, cuatro
+  objetivos CPA/ROAS existentes y presupuesto diario exclusivo. Un campo por
+  orden, maximo 10%, sin crear/eliminar anuncios, cambiar estrategia o aplicar
+  recomendaciones genericamente. Transporte TLS fijo, sin redirects/reintentos.
+- Preflight de metadata/baseline/propiedad, ultimo anuncio apto, presupuesto
+  exclusivo y grupos sin overrides. Caducidad 60s y relectura antes de reservar.
+  La ventana entre lectura y proveedor no equivale a compare-and-swap.
+- SQLite guarda el intento y bloquea la campana antes de HTTP. Acuse exacto,
+  recibo, liberacion y auditoria atomicos. UUID nuevo no elude un intento incierto
+  ni cooldown (24h pausa/grupo, 336h puja o presupuesto/campana). Status sin
+  secretos y siempre bajo permiso original; revocacion persiste tras reinicio.
+- Las politicas CRM no se trasladan implicitamente a este motor. Mandato,
+  grant/ACL/seleccion, recepcion, evidencia madura, recomendacion vigente y
+  contabilidad mensual deberan conservarse al adaptar el ejecutor. La huella
+  enviada no sustituye esa autorizacion. No hay conciliador de desbloqueo nuevo.
+- QA enfocada: **49 pruebas** con datos ficticios, Google/AWS falsos y HTTPS,
+  firmas, SQLite y autorizador reales. Incluye dos instancias con conexiones
+  SQLite independientes, acuse perdido, respuesta invalida, drift, revocacion,
+  auditoria fallida, reinicio, precision sin redondeo, aislamiento de claves,
+  transportes y limites.
+  Logs `/tmp/cc-optimization-writer-{focused,runtime}-20260928.log`.
+  Regresion completa: **1.247 pruebas backend y 866 del broker correctas**,
+  sin red de proveedores. Las 49 enfocadas estan incluidas en las 866 y se
+  repiten tras ampliar la cobertura de rebind y cambio de clave.
+  Logs `/tmp/cc-optimization-writer-{all-backend,all-broker}-20260928.log`.
+
+Contrato en `docs/security/google-ads-optimization-broker.md`. No hay cambios
+visuales, SQL clinico, llamadas a proveedores reales, despliegue ni activacion
+de Meta, senales, jobs o presupuestos. Plan Gestionado sigue aplazado.
+
 ### Siguiente corte
 
 La causa de la latencia Propdental esta corregida y medida en el candidato.
 Falta instalarlo mediante un corte autorizado y repetir el HTTP real y QA sin
 intercepcion del informe; no repetir cargas lentas contra el build antiguo.
 
-1. Adaptar la escritura de Optimiza al transporte tipado, con permiso propio,
-   idempotencia y recibo duradero. Compatibilidad, rendimiento maduro, calculo
+1. Conectar el motor escritor de Optimiza al ejecutor y cliente backend,
+   con permiso/clave propios, identidad durable y recuperacion. Compatibilidad,
+   rendimiento maduro, calculo
    mensual, evidencia CPA/ROAS y lectura de resultado/recuperacion ya estan
-   adaptados; falta conectar su baseline en la ruta de ejecucion tipada. Esto
+   adaptados; falta conservar esos controles y conectar su baseline en la ruta
+   de ejecucion tipada. Esto
    NO significa que los ajustes sean ejecutables. Las exclusiones siguen
    necesitando politica de relevancia. No se sustituyen con GAQL libre ni se
    activan para demostrar la interfaz.
