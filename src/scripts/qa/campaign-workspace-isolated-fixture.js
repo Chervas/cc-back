@@ -5,7 +5,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { connectOperatorDatabase } = require('../../lib/cliniccloud-import/operator-database');
 const MARKER = 'campaign-qa-isolated-20260928';
@@ -14,12 +14,13 @@ const GROUP_ACCOUNT = '9999900929';
 const TABLES = Object.freeze({ GoogleConnections: 'id', ClinicGoogleAdsAccounts: 'id', ExternalCampaignInventories: 'id',
   GoogleAdsInsightsDaily: 'id', GoogleAdsAdInventory: 'id', GoogleAdsAdInsightsDaily: 'id', GoogleAdsAdSyncDays: 'id',
   LeadIntakes: 'id', Pacientes: 'id_paciente', CitasPacientes: 'id_cita', EconomicBudgets: 'id',
-  CampaignWorkspaceSettings: 'id', CampaignWorkspaceEvents: 'id', GruposClinicas: 'id_grupo', Clinicas: 'id_clinica',
+  CampaignWorkspaceSettings: 'id', CampaignWorkspaceEvents: 'id', CampaignWorkspaceOptimizationRuns: 'id', GruposClinicas: 'id_grupo', Clinicas: 'id_clinica',
   ExternalCampaignAssignments: 'id' });
 const DRAFT_TABLES = ['CampaignWorkspaceSettings', 'CampaignWorkspaceEvents'];
+const UUID_TABLES = [...DRAFT_TABLES, 'CampaignWorkspaceOptimizationRuns'];
 const CLOSED = ['JOBS_WORKER_ENABLED', 'JOBS_CRON_LEADER', 'JOBS_AUTO_START', 'CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED',
   'CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED', 'CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED', 'CAMPAIGN_OPTIMIZATION_ENABLED',
-  'CAMPAIGN_PUBLISH_ENABLED', 'CAMPAIGN_AUTOPILOT_ENABLED'];
+  'CAMPAIGN_PUBLISH_ENABLED', 'CAMPAIGN_AUTOPILOT_ENABLED', 'GOOGLE_ADS_OPTIMIZATION_BROKER_ENABLED'];
 const REQUIRED_FALSE = ['JOBS_WORKER_ENABLED', 'JOBS_CRON_LEADER'];
 const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
@@ -59,24 +60,52 @@ function daysBefore(now, days) {
   return new Date(Date.parse(today + 'T12:00:00Z') - days * 86400000).toISOString().slice(0, 10);
 }
 
+function historyRows(settingId, campaigns, now) {
+  const statuses = ['uncertain', 'verified', 'observed', 'skipped', 'resolved'];
+  return Array.from({ length: 13 }, (_, index) => {
+    const campaign = campaigns[index % campaigns.length];
+    const at = new Date(+now - (index + 1) * 60000);
+    const status = statuses[index] || 'verified';
+    const change = { schema_version: 1,
+      reference: { provider: 'google_ads', account_id: ACCOUNT, campaign_id: campaign.id },
+      target: { action: 'adjust_bids', entity: 'ad_group', id: campaign.id + '1',
+        resource: `customers/${ACCOUNT}/adGroups/${campaign.id}1`, field: 'cpc_bid_micros', unit: 'micros', strategy: 'MANUAL_CPC' },
+      before: '1000000', after: '950000' };
+    change.fingerprint = digest(change);
+    return { id: randomUUID(), runtime_namespace: 'dev', setting_id: settingId, mandate_id: randomUUID(),
+      plan_key: digest([MARKER, index]), provider: 'google_ads', account_id: ACCOUNT, campaign_id: campaign.id, clinic_id: 1,
+      resource_key: digest(['google_ads', ACCOUNT, change.target.resource]), change,
+      evidence: { fixture: MARKER }, status, job_request_id: null, lease_token: null, lease_until: null,
+      submitted_at: status === 'skipped' ? null : sqlTime(at),
+      completed_at: status === 'uncertain' ? null : sqlTime(at), next_check_at: null,
+      // The DEV writer gate is closed. This marker also prevents the legacy manual-close path.
+      outcome: status === 'uncertain' ? { fixture: MARKER, broker_submission: { fixture: MARKER, payload: { expiresAt: +at - 3600000 } } }
+        : { fixture: MARKER, ...(status === 'skipped' ? { reason: 'workspace_optimization_reception_unverified' } : {}) },
+      resolution: status === 'resolved' ? { decision: 'reviewed_in_platform', resolved_at: at.toISOString(), fixture: MARKER } : null,
+      created_at: sqlTime(at), updated_at: sqlTime(at),
+    };
+  });
+}
+
 async function seed(connection, filename, now = new Date(), scenario = 'standard') {
-  assert.ok(['standard', 'report', 'aggregate'].includes(scenario), 'UNKNOWN_FIXTURE_SCENARIO');
+  assert.ok(['standard', 'report', 'aggregate', 'history'].includes(scenario), 'UNKNOWN_FIXTURE_SCENARIO');
   const fd = fs.openSync(filename, 'wx', 0o600);
   const manifest = { version: 1, marker: MARKER, account: ACCOUNT, scenario, createdAt: now.toISOString(), state: 'preparing', rows: [] };
   const persist = () => { const data = JSON.stringify(manifest, null, 2); fs.ftruncateSync(fd); fs.writeSync(fd, data, 0, 'utf8'); fs.fsyncSync(fd); };
   const observed = sqlTime(now); let committed = false;
   try {
     persist(); await connection.beginTransaction(); await assertDatabase(connection);
-    for (const table of ['ClinicGoogleAdsAccounts', 'GoogleConnections', 'ExternalCampaignInventories', 'LeadIntakes', 'CampaignWorkspaceSettings']) {
+    for (const table of ['ClinicGoogleAdsAccounts', 'GoogleConnections', 'ExternalCampaignInventories', 'LeadIntakes', 'CampaignWorkspaceSettings', 'CampaignWorkspaceOptimizationRuns']) {
       const [[row]] = await connection.query('SELECT COUNT(*) n FROM ??', [table]);
       assert.equal(row.n, 0, 'FIXTURE_REQUIRES_EMPTY_DEV_CAMPAIGN_DATA:' + table);
     }
     const insert = async (table, row) => {
       assert.ok(Object.hasOwn(TABLES, table));
       const [result] = await connection.query('INSERT INTO ?? SET ?', [table, row]);
-      const [[saved]] = await connection.query('SELECT * FROM ?? WHERE ??=?', [table, TABLES[table], result.insertId]);
-      manifest.rows.push({ table, id: result.insertId, hash: digest(saved) });
-      return result.insertId;
+      const id = row[TABLES[table]] ?? result.insertId;
+      const [[saved]] = await connection.query('SELECT * FROM ?? WHERE ??=?', [table, TABLES[table], id]);
+      manifest.rows.push({ table, id, hash: digest(saved) });
+      return id;
     };
     const connectionId = await insert('GoogleConnections', { googleUserId: MARKER, userName: 'QA FICTICIA - SIN CREDENCIALES',
       accessToken: null, refreshToken: null, scopes: null, userId: null });
@@ -143,6 +172,18 @@ async function seed(connection, filename, now = new Date(), scenario = 'standard
         }
       }
     }
+    if (scenario === 'history') {
+      const setting = await insert('CampaignWorkspaceSettings', { id: randomUUID(), scope_type: 'clinic', scope_id: 1,
+        version: 1, accounts: JSON.stringify([{ provider: 'google_ads', account_id: ACCOUNT,
+          include_future: false, campaign_ids: campaigns.map(campaign => campaign.id) }]),
+        preferences: JSON.stringify({ schema_version: 1, mode: 'measurement', signals: { enabled: false, events: [] }, optimization: null }),
+        activation: null, signal_preparation: null, updated_by_user_id: 1, ...timestamps });
+      const runs = historyRows(setting, campaigns, now);
+      for (const run of runs) await insert('CampaignWorkspaceOptimizationRuns', { ...run,
+        change: JSON.stringify(run.change), evidence: JSON.stringify(run.evidence), outcome: JSON.stringify(run.outcome),
+        resolution: run.resolution ? JSON.stringify(run.resolution) : null });
+      manifest.history = { setting, runs: runs.map(run => ({ id: run.id, campaignId: run.campaign_id, status: run.status })) };
+    }
     if (scenario === 'aggregate') {
       const group = await insert('GruposClinicas', { nombre_grupo: 'QA FICTICIA - Grupo campanas', ads_assignment_mode: 'manual', web_assignment_mode: 'manual' });
       const clinics = [];
@@ -194,7 +235,7 @@ async function cleanup(connection, filename) {
   try {
     await assertDatabase(connection);
     for (const row of manifest.rows) {
-      assert.ok(Object.hasOwn(TABLES, row.table) && (DRAFT_TABLES.includes(row.table)
+      assert.ok(Object.hasOwn(TABLES, row.table) && (UUID_TABLES.includes(row.table)
         ? /^[a-f0-9-]{36}$/.test(row.id) : Number.isSafeInteger(row.id) && row.id > 0));
       const [[current]] = await connection.query('SELECT * FROM ?? WHERE ??=? FOR UPDATE', [row.table, TABLES[row.table], row.id]);
       assert.ok(current && digest(current) === row.hash, 'FIXTURE_ROW_CHANGED:' + row.table + ':' + row.id);
@@ -284,12 +325,12 @@ async function captureDrafts(connection, filename) {
 async function main() {
   assert.equal(process.env.CC_QA_ISOLATED_CAMPAIGN_WRITES, MARKER, 'EXPLICIT_ISOLATED_FIXTURE_OPT_IN_REQUIRED');
   const [action, filename, ...rest] = process.argv.slice(2);
-  assert.ok(['seed', 'seed-report', 'seed-aggregate', 'capture-drafts', 'cleanup'].includes(action) && !rest.length, 'USE_SEED_CAPTURE_DRAFTS_OR_CLEANUP_WITH_MANIFEST');
+  assert.ok(['seed', 'seed-report', 'seed-aggregate', 'seed-history', 'capture-drafts', 'cleanup'].includes(action) && !rest.length, 'USE_SEED_CAPTURE_DRAFTS_OR_CLEANUP_WITH_MANIFEST');
   manifestPath(filename); runtimeSafety();
   const connection = await connectOperatorDatabase('dev');
-  try { console.log(JSON.stringify(await (action.startsWith('seed') ? seed(connection, filename, new Date(), action === 'seed-report' ? 'report' : action === 'seed-aggregate' ? 'aggregate' : 'standard')
+  try { console.log(JSON.stringify(await (action.startsWith('seed') ? seed(connection, filename, new Date(), action === 'seed' ? 'standard' : action.slice(5))
     : action === 'capture-drafts' ? captureDrafts(connection, filename) : cleanup(connection, filename)))); }
   finally { await connection.end(); }
 }
-module.exports = { MARKER, ACCOUNT, GROUP_ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, seed, cleanup, validateDraftCapture, captureDrafts };
+module.exports = { MARKER, ACCOUNT, GROUP_ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, seed, cleanup, validateDraftCapture, captureDrafts, historyRows };
 if (require.main === module) main().catch(error => { console.error(error.code || error.message); process.exitCode = 1; });

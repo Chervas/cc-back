@@ -4,14 +4,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { MARKER, ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, seed, cleanup, validateDraftCapture } = require('../qa/campaign-workspace-isolated-fixture');
+const { MARKER, ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, seed, cleanup, validateDraftCapture, historyRows } = require('../qa/campaign-workspace-isolated-fixture');
 
 test('isolated QA refuses business workers or activation, including absent worker-off flags', () => {
   const closed = { JOBS_WORKER_ENABLED: 'false', JOBS_CRON_LEADER: 'false' };
   assert.doesNotThrow(() => assertClosed(closed));
   assert.throws(() => assertClosed({}));
   for (const key of ['JOBS_WORKER_ENABLED', 'JOBS_CRON_LEADER', 'CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED',
-    'CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED', 'CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED']) {
+    'CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED', 'CAMPAIGN_GOOGLE_LEAD_SYNC_ENABLED', 'GOOGLE_ADS_OPTIMIZATION_BROKER_ENABLED']) {
     assert.throws(() => assertClosed({ ...closed, [key]: 'true' }));
   }
 });
@@ -66,6 +66,57 @@ test('manifest requires a private owned directory and a bounded location', () =>
     fs.chmodSync(dir, 0o755);
     assert.throws(() => manifestPath(path.join(dir, 'manifest.json')));
   } finally { fs.rmdirSync(dir); }
+});
+
+test('history fixture changes satisfy the production reader without enabling a mandate, job or closure', () => {
+  const { publicRun } = require('../../services/campaignWorkspaceOptimizationHistory.service');
+  const setting = 'd4d4f090-4950-4d0a-87cf-87d7e6c39289';
+  const now = new Date('2026-09-28T09:00:00Z');
+  const rows = historyRows(setting, [{ id: '999990092801' }, { id: '999990092802' }, { id: '999990092803' }], now);
+  assert.equal(rows.length, 13); assert.equal(new Set(rows.map(row => row.id)).size, 13);
+  const states = new Set();
+  for (const row of rows) {
+    const result = publicRun(row, { assigned: true, clinicId: 1, provider: 'google_ads', account_id: ACCOUNT,
+      campaign_id: row.campaign_id, id: 'google_ads:' + ACCOUNT + ':' + row.campaign_id,
+      name: 'QA FICTICIA - Historial', currency: 'EUR' }, { canWrite: true, owner: { id: setting }, now, brokerReviewEnabled: false });
+    assert.equal(result.canResolve, false); assert.equal(result.before, '1,00\u00a0\u20ac'); assert.equal(result.after, '0,95\u00a0\u20ac');
+    assert.doesNotMatch(JSON.stringify(result), /broker_submission|resourceName|fixture/);
+    assert.equal(row.runtime_namespace, 'dev'); assert.equal(row.job_request_id, null);
+    assert.ok(!['queued', 'leased', 'submitted'].includes(row.status));
+    states.add(result.status);
+  }
+  assert.deepEqual([...states], ['uncertain', 'verified', 'observed', 'skipped', 'resolved']);
+});
+
+test('history seed owns all UUID rows and its cleanup removes runs before their setting', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-campaign-fixture-test-')); const file = path.join(dir, 'manifest.json');
+  const rows = new Map(); const removed = []; let serial = 0;
+  const keys = { Clinicas: 'id_clinica', GruposClinicas: 'id_grupo', Pacientes: 'id_paciente', CitasPacientes: 'id_cita' };
+  const connection = { beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, query: async (sql, values) => {
+    if (sql.includes('DATABASE() db')) return [[{ db: 'clinicaclick_dev_isolated', db_user: 'cc_dev_api@localhost' }]];
+    if (sql.includes('FROM Clinicas')) return [[{ nombre_clinica: 'Clinica ficticia DEV' }]];
+    if (sql.includes('KEY_COLUMN_USAGE')) return [[{ TABLE_NAME: 'CampaignWorkspaceOptimizationRuns', COLUMN_NAME: 'setting_id', REFERENCED_TABLE_NAME: 'CampaignWorkspaceSettings' }]];
+    if (sql.includes('COUNT(*)')) return [[{ n: 0 }]];
+    if (sql.startsWith('INSERT')) {
+      const [table, row] = values; const key = keys[table] || 'id'; const id = row[key] || ++serial;
+      rows.set(table + ':' + id, { [key]: id, ...row }); return [{ insertId: typeof id === 'string' ? 0 : id }];
+    }
+    if (sql.startsWith('SELECT *')) return [[rows.get(values[0] + ':' + values[2])]];
+    if (sql.startsWith('DELETE')) { removed.push(values[0]); assert(rows.delete(values[0] + ':' + values[2])); return [{ affectedRows: 1 }]; }
+    assert.fail('Unexpected SQL: ' + sql);
+  } };
+  try {
+    assert.deepEqual(await seed(connection, file, new Date('2026-09-28T09:00:00Z'), 'history'), { state: 'seeded', rows: 721, campaigns: 3 });
+    const manifest = JSON.parse(fs.readFileSync(file));
+    assert.equal(manifest.history.runs.length, 13);
+    const setting = rows.get('CampaignWorkspaceSettings:' + manifest.history.setting);
+    assert.equal(setting.activation, null); assert.equal(setting.signal_preparation, null);
+    assert.equal(JSON.parse(setting.preferences).signals.enabled, false);
+    assert.equal(JSON.parse(setting.preferences).optimization, null);
+    assert.deepEqual(await cleanup(connection, file), { state: 'cleaned', rows: 721 });
+    assert.equal(rows.size, 0);
+    assert(removed.lastIndexOf('CampaignWorkspaceOptimizationRuns') < removed.indexOf('CampaignWorkspaceSettings'));
+  } finally { fs.rmSync(dir, { recursive: true }); }
 });
 
 test('aggregate fixture owns two new clinics without altering users, existing clinics or provider permissions', async () => {
