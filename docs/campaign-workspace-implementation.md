@@ -172,18 +172,52 @@ no se sustituyen con estimaciones ni se cambian los TTL/timeouts.
 Sin reinicios, despliegues, migraciones, OAuth, Meta, senales ni ajustes
 publicitarios. Se conserva la cuarentena y la separacion de entornos.
 
+### Cuarto corte: lectura de resultado de Optimiza (2026-09-28)
+
+Sobre backend `91cbb900` y frontend `7e77c4d17`, sin publicar. El worker
+reconoce el grant opaco Google antes de intentar obtener credenciales locales.
+La lectura del valor actual reutiliza las tres secciones cerradas de
+`google.ads.optimization.read.v1`: estado de anuncio, CPC de grupo,
+presupuesto de campana y los cuatro campos CPA/ROAS ya admitidos. No hay nueva
+operacion de proveedor, GAQL libre ni fallback de token para cuentas migradas.
+
+- Recuperacion de una orden ya enviada: solo lectura. Si el valor coincide,
+  registra `observed`, nunca atribuye a esta consulta una mutacion ni la declara
+  `verified`. Si no coincide conserva `uncertain`; no repite la orden.
+- Antes/despues de paginas y en la transaccion final se comprueban el grant
+  original, mandato, ACL, cuenta, clinica, plan inmutable y lease. Sustituir el
+  binding no autoriza completar con otro; un trabajador que pierde el lease
+  no puede sobrescribir al nuevo. Se mantienen gates, namespace y job propietario.
+- Plazo total 15s por lectura, incluida su revalidacion final; ausencia,
+  duplicados, ambito ajeno y campos desconocidos no se convierten en exito.
+- **La escritura broker sigue pendiente.** Una orden nueva que necesite cambiar
+  algo se detiene con `workspace_optimization_service_pending` ANTES de recoger
+  evidencia legacy, reservar presupuesto o marcar `submitted`. La funcion de
+  mutacion tambien rechaza credenciales broker. Un permiso de lectura no
+  habilita escrituras; tampoco se crea un grant, mandato o trigger nuevo aqui.
+- Servicio pendiente, permisos, cuota y timeout se clasifican por separado.
+  Las exclusiones de palabras clave no se consultan ni ejecutan por esta ruta;
+  sigue faltando su politica de relevancia. La cuarentena Meta no se cambia.
+- Tests con consumidor, contexto opaco, reader, firma y motor SQLite reales;
+  almacenamiento del workspace, Google y AWS ficticios. Incluyen paginacion,
+  revocacion entre paginas, cambio de binding, ACL al confirmar, presupuesto
+  extranjero, anuncio de otro grupo, caducidad, recuperacion pausada y ausencia
+  de replay. Sin DB ni proveedores reales, ni cambios de interfaz o QA visual
+  nueva. **1.160 pruebas de regresion backend y 6 del contrato broker correctas**.
+  Logs `/tmp/cc-optimization-readback-{focused,regression,broker}-20260928.log`.
+
 ### Siguiente corte
 
 La causa de la latencia Propdental esta corregida y medida en el candidato.
 Falta instalarlo mediante un corte autorizado y repetir el HTTP real y QA sin
 intercepcion del informe; no repetir cargas lentas contra el build antiguo.
 
-1. Adaptar la ejecucion y evidencia de Optimiza al transporte tipado. La
-   preparacion de compatibilidad ya esta adaptada; siguen pendientes
-   `campaignWorkspaceOptimizationExecution`, lectores de valores y colectores
-   de evidencia/politicas. No se sustituyen con GAQL libre ni se activan para
-   demostrar la interfaz. Preparacion de conversiones ya tiene transporte
-   broker y no necesita duplicarse.
+1. Adaptar los colectores de evidencia/politicas y la escritura de Optimiza al
+   transporte tipado, con permiso propio, idempotencia y recibo duradero. La
+   preparacion de compatibilidad y la lectura de resultado/recuperacion ya
+   estan adaptadas; esto NO significa que los ajustes sean ejecutables. No se
+   sustituyen con GAQL libre ni se activan para demostrar la interfaz.
+   Preparacion de conversiones ya tiene transporte broker y no necesita duplicarse.
 2. Publicacion compatible siguiendo DEV -> staging, con los gates efectivos
    conservados. Instalar motor y grant de lectura de destinos solo en una
    cohorte aprobada; no abrir conversiones, leads o mutaciones por ello.

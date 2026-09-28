@@ -83,6 +83,22 @@ async function inspectOptimizationChange(change, credentials, dependencies = {})
 
 async function readOptimizationValue(change, credentials, dependencies = {}) {
   const { reference, target, after } = verifyChange(change);
+  if (reference.provider === 'google_ads' && credentials.deliveryMode === 'broker') {
+    if (target.action === 'negative_keywords' || typeof credentials.readSection !== 'function') fail('workspace_optimization_service_pending');
+    const section = { campaign: 'campaign', campaign_budget: 'campaign', ad_group: 'ad_groups', ad: 'ads' }[target.entity];
+    const rows = await credentials.readSection(section, 15000);
+    if (!Array.isArray(rows) || rows.length > 2000 || rows.some(row => row?.customer?.id !== reference.account_id
+      || row?.campaign?.id !== reference.campaign_id)) fail('workspace_optimization_readback_invalid');
+    const matches = rows.filter(row => target.entity === 'campaign' ? row.campaign.id === target.id
+      : target.entity === 'campaign_budget' ? row.campaignBudget?.resourceName === target.resource
+        : target.entity === 'ad_group' ? row.adGroup?.id === target.id
+          : row.adGroup?.id === target.group_id && row.adGroupAd?.ad?.id === target.id);
+    if (matches.length !== 1) fail('workspace_optimization_readback_invalid');
+    const entity = { campaign: 'campaign', campaign_budget: 'campaignBudget', ad_group: 'adGroup', ad: 'adGroupAd' }[target.entity];
+    const value = target.field.split('.').map(camel).reduce((current, field) => current?.[field], matches[0][entity]);
+    if (value == null) fail('workspace_optimization_readback_invalid');
+    return String(value);
+  }
   if (reference.provider === 'meta_ads') {
     const read = dependencies.metaGet || require('../lib/metaClient').metaGet;
     const fields = ['id', 'account_id', ...(target.entity === 'campaign' ? [] : ['campaign_id']),
@@ -133,6 +149,8 @@ function desiredState(change, value) {
 
 async function mutateOptimizationChange(change, credentials, dependencies = {}) {
   if (!enabled(dependencies.env || process.env)) fail('workspace_optimization_disabled');
+  // Read permission is not mutation permission. No local-token fallback while the typed writer is pending.
+  if (credentials.deliveryMode === 'broker') fail('workspace_optimization_service_pending');
   const mutation = providerMutation(change);
   if (change.reference.provider === 'meta_ads') {
     const write = dependencies.metaWrite || require('../lib/metaClient').metaUpdateAdvertisingResource;

@@ -91,6 +91,68 @@ test('Meta readback rejects other campaigns and nested constraints that would be
   const roas = meta({ target: { ...change.target, field: 'bid_constraints.roas_average_floor', unit: 'roas_10000', strategy: 'LOWEST_COST_WITH_MIN_ROAS' }, before: '20000', after: '22000' });
   await assert.rejects(readOptimizationValue(roas, {}, dependencies));
 });
+test('broker readback uses fixed metadata sections for bids, budgets, ads and all Google target strategies', async () => {
+  const rows = require('../../../services/integrations-broker/test/google-optimization-fixture.cjs').optimizationRows();
+  const account_id = rows.campaign[0].customer.id;
+  const create = (target, before, after) => make({ reference: { ...reference, account_id },
+    target: { ...target, resource: target.resource.replace('customers/20/', `customers/${account_id}/`) }, before, after });
+  const cases = [
+    [create(bid, '1500000', '1350000'), 'ad_groups', '1500000'],
+    [create({ action: 'adjust_budget', entity: 'campaign_budget', id: '40', resource: 'customers/20/campaignBudgets/40',
+      field: 'amount_micros', unit: 'micros' }, '20000000', '19000000'), 'campaign', '20000000'],
+    [create({ action: 'pause_underperforming_ads', entity: 'ad', id: '60', group_id: '50', resource: 'customers/20/adGroupAds/50~60',
+      field: 'status' }, 'ENABLED', 'PAUSED'), 'ads', 'PAUSED'],
+  ];
+  rows.ads[0].adGroupAd.status = 'PAUSED';
+  for (const [strategy, field, key, valueKey, unit, before, after] of [
+    ['TARGET_CPA', 'target_cpa.target_cpa_micros', 'targetCpa', 'targetCpaMicros', 'micros', '2000000', '1900000'],
+    ['TARGET_ROAS', 'target_roas.target_roas', 'targetRoas', 'targetRoas', 'ratio', '2', '2.1'],
+    ['MAXIMIZE_CONVERSIONS', 'maximize_conversions.target_cpa_micros', 'maximizeConversions', 'targetCpaMicros', 'micros', '2000000', '1900000'],
+    ['MAXIMIZE_CONVERSION_VALUE', 'maximize_conversion_value.target_roas', 'maximizeConversionValue', 'targetRoas', 'ratio', '2', '2.1'],
+  ]) {
+    rows.campaign[0].campaign[key] = { [valueKey]: before };
+    cases.push([create({ action: 'adjust_bids', entity: 'campaign', id: '30', resource: 'customers/20/campaigns/30',
+      field, unit, strategy }, before, after), 'campaign', before]);
+  }
+  for (const [change, section, expected] of cases) {
+    const value = await readOptimizationValue(change, { deliveryMode: 'broker', readSection: async (name, timeout) => {
+      assert.equal(name, section); assert.equal(timeout, 15000); return rows[name];
+    } }, { googleRead: async () => assert.fail('legacy query') });
+    assert.equal(value, expected);
+  }
+});
+test('broker readback rejects missing or ambiguous targets, cross-account/campaign rows and missing values without fallback', async () => {
+  const change = make();
+  const row = { customer: { id: '20' }, campaign: { id: '30' }, adGroup: { id: '50', cpcBidMicros: '900000' } };
+  for (const rows of [null, [], [row, row], Array(2001).fill(row), [{ ...row, customer: { id: '99' } }],
+    [{ ...row, campaign: { id: '31' } }], [{ ...row, adGroup: { id: '51', cpcBidMicros: '900000' } }], [{ ...row, adGroup: { id: '50' } }]]) {
+    await assert.rejects(readOptimizationValue(change, { deliveryMode: 'broker', readSection: async () => rows },
+      { googleRead: async () => assert.fail('legacy query') }), /workspace_optimization_readback_invalid/);
+  }
+  for (const command of [change, negative()]) {
+    await assert.rejects(readOptimizationValue(command, { deliveryMode: 'broker' },
+      { googleRead: async () => assert.fail('legacy query') }), /workspace_optimization_service_pending/);
+  }
+  await assert.rejects(readOptimizationValue(change, { deliveryMode: 'broker', readSection: async () => { throw Error('broker down'); } },
+    { googleRead: async () => assert.fail('legacy query') }), /broker down/);
+});
+test('broker read capability never permits a legacy advertising write even with both rollout gates open', async () => {
+  await assert.rejects(mutateOptimizationChange(make(), { deliveryMode: 'broker' }, {
+    env, googleWrite: async () => assert.fail('legacy write'), metaWrite: async () => assert.fail('Meta write'),
+  }), /workspace_optimization_service_pending/);
+});
+test('broker readback cannot confuse an ad in another group or a budget that belongs to another customer', async () => {
+  for (const [target, before, after, row] of [
+    [{ action: 'pause_underperforming_ads', entity: 'ad', id: '60', group_id: '50', resource: 'customers/20/adGroupAds/50~60', field: 'status' },
+      'ENABLED', 'PAUSED', { adGroup: { id: '51' }, adGroupAd: { ad: { id: '60' }, status: 'PAUSED' } }],
+    [{ action: 'adjust_budget', entity: 'campaign_budget', id: '40', resource: 'customers/20/campaignBudgets/40', field: 'amount_micros', unit: 'micros' },
+      '10000000', '9000000', { campaignBudget: { resourceName: 'customers/99/campaignBudgets/40', amountMicros: '9000000' } }],
+  ]) {
+    await assert.rejects(readOptimizationValue(make({ target, before, after }), { deliveryMode: 'broker', readSection: async () => [
+      { customer: { id: '20' }, campaign: { id: '30' }, ...row },
+    ] }), /workspace_optimization_readback_invalid/);
+  }
+});
 test('provider writes require both gates and validate acknowledgements without retrying', async () => {
   let calls = 0;
   const dependencies = { googleWrite: async () => { calls++; return { results: [{ resourceName: bid.resource }] }; } };

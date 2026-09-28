@@ -7,6 +7,8 @@ const { resolveOptimizationAuthorization, lockOptimizationAccounts } = require('
 const { digest } = require('./campaignWorkspaceOptimizationCapabilities.service');
 const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
 const { ensureGoogleConnectionAccessToken, GOOGLE_ADS_SCOPE } = require('./googleAdsScopedRuntime.service');
+const { assertGoogleAdsGrantTransport } = require('./googleAdsGrantTransport.service');
+const { googleDestinationAccessError } = require('./campaignWorkspaceGoogleDestination.service');
 
 const JOB_TYPE = 'campaign_workspace_optimization_apply';
 const CHECK_JOB_TYPE = 'campaign_workspace_optimization_check';
@@ -20,9 +22,13 @@ const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 function reason(error) {
   if (/^workspace_optimization_[a-z_]{1,80}$/.test(error?.code || '')) return error.code;
+  const googleError = googleDestinationAccessError(error);
+  if (googleError === 'workspace_google_service_pending' || error?.code === 'workspace_google_service_pending') return 'workspace_optimization_service_pending';
+  if (googleError === 'workspace_google_permissions_required') return 'workspace_optimization_permissions_required';
+  if (['broker_timeout', 'provider_timeout'].includes(error?.code)) return 'workspace_optimization_timeout';
   if (['NO_SCOPED_CONNECTION', 'INSUFFICIENT_SCOPE', 'NO_TOKEN', 'TOKEN_EXPIRED', 'REFRESH_FAILED'].includes(error?.code)
     || [10, 190, 200].includes(Number(error?.response?.data?.error?.code)) || [401, 403].includes(error?.response?.status)) return 'workspace_optimization_permissions_required';
-  if ([4, 17, 613].includes(Number(error?.response?.data?.error?.code)) || error?.response?.status === 429) return 'workspace_optimization_rate_limited';
+  if (error?.code === 'rate_limited' || [4, 17, 613].includes(Number(error?.response?.data?.error?.code)) || error?.response?.status === 429) return 'workspace_optimization_rate_limited';
   return 'workspace_optimization_unavailable';
 }
 const plain = row => row?.get ? row.get({ plain: true }) : structuredClone(row);
@@ -74,7 +80,7 @@ function samePlan(run, previous) {
   if (digest(identity(run)) !== digest(identity(previous))) fail('workspace_optimization_plan_changed');
 }
 
-async function authorize(run, deps, transaction = null) {
+async function authorize(run, deps, transaction = null, expectedBrokerGrant = null) {
   const models = model(deps); const change = validateRun(run);
   const setting = await models.CampaignWorkspaceSetting.findByPk(run.setting_id, query(transaction));
   if (!setting || setting.activation?.optimization?.id !== run.mandate_id) fail('workspace_optimization_mandate_changed');
@@ -82,7 +88,7 @@ async function authorize(run, deps, transaction = null) {
   if (!Array.isArray(clinicIds) || !clinicIds.length) fail('workspace_optimization_mandate_changed');
   const scope = { groupId: setting.scope_type === 'group' ? setting.scope_id : null, clinicIds };
   const source = await (deps.authorize || resolveOptimizationAuthorization)({ models, setting, scope, campaign: change.reference,
-    action: change.target.action, transaction, now: now(deps), readOnly: deps.readOnly === true,
+    action: change.target.action, transaction, now: now(deps), readOnly: deps.readOnly === true, expectedBrokerGrant,
     hasAccess: deps.hasAccess || hasMarketingClinicScopeAccess });
   if (run.clinic_id != null && run.clinic_id !== source.entry.clinic_id) fail('workspace_optimization_scope_changed');
   const targets = source.entry.targets.filter(target => Object.keys(target).length === Object.keys(change.target).length
@@ -184,9 +190,10 @@ async function reserve(payload, job, deps) {
   });
 }
 
-async function finish(run, token, state, outcome, deps) {
+async function finish(run, token, state, outcome, deps, brokerGrant = null) {
   const models = model(deps);
   return models.sequelize.transaction(async transaction => {
+    if (brokerGrant && ['verified', 'observed'].includes(state)) await readbackContext(run, token, brokerGrant, deps, transaction);
     const row = await models.CampaignWorkspaceOptimizationRun.findByPk(run.id, query(transaction));
     if (!row || row.lease_token !== token) fail('workspace_optimization_lease_changed');
     if (['verified', 'observed'].includes(state)) samePlan(row, run);
@@ -204,9 +211,35 @@ async function finish(run, token, state, outcome, deps) {
   });
 }
 
-async function credentialsFor(authorization, deps) {
+async function readbackContext(run, token, brokerGrant, deps, transaction = null) {
+  if (!enabled(deps.env || process.env)) fail('workspace_optimization_disabled');
+  const current = await authorize(run, deps, transaction, brokerGrant);
+  const runtime = await assertGoogleAdsGrantTransport(brokerGrant, { clinicId: current.context.campaign.clinicId, transaction });
+  if (runtime.customerId !== run.account_id) fail('workspace_optimization_connection_changed');
+  const row = await model(deps).CampaignWorkspaceOptimizationRun.findByPk(run.id, query(transaction));
+  if (!row || row.lease_token !== token || !['leased', 'submitted'].includes(row.status)
+    || !Number.isFinite(+new Date(row.lease_until)) || +new Date(row.lease_until) <= +now(deps)) fail('workspace_optimization_lease_changed');
+  samePlan(row, run);
+  return runtime;
+}
+
+async function credentialsFor(authorization, deps, reservation) {
   const context = authorization.context; const connection = context.grant.connection;
   if (context.reference.provider !== 'google_ads') return { accessToken: connection.accessToken };
+  if (context.grant.brokerGrant) {
+    const current = transaction => readbackContext(reservation.run, reservation.token, context.grant.brokerGrant, deps, transaction);
+    await current();
+    return { deliveryMode: 'broker', readSection: async (section, timeoutMs) => {
+      const deadline = Date.now() + timeoutMs;
+      const runtime = await current(); const remaining = deadline - Date.now();
+      if (remaining < 1000) fail('workspace_optimization_timeout');
+      const rows = await runtime.broker.read(runtime.account, runtime.brokerContext, 'optimization',
+        { campaignId: context.reference.campaign_id, section }, { timeoutMs: remaining, beforeExecute: () => current() });
+      await current();
+      if (Date.now() >= deadline) fail('workspace_optimization_timeout');
+      return rows;
+    } };
+  }
   const token = await (deps.ensureToken || ensureGoogleConnectionAccessToken)(connection, { requiredScopes: [GOOGLE_ADS_SCOPE] });
   return { accessToken: token.accessToken, loginCustomerId: context.grant.loginCustomerId };
 }
@@ -253,16 +286,17 @@ async function runOptimizationAdjustmentJob(payload, job, deps = {}) {
     const { run, token, authorization } = reservation;
     if (reservation.terminal) return { status: 'completed', result: { run_id: run.id, state: run.status, idempotent: true } };
     submitted = !!run.submitted_at;
-    const credentials = await credentialsFor(authorization, deps);
+    const credentials = await credentialsFor(authorization, deps, reservation);
     const read = deps.read || readOptimizationValue;
     const value = await read(run.change, credentials, deps.providerDependencies);
     if (desiredState(run.change, value)) {
-      await authorize(run, deps);
-      return await finish(run, token, 'observed', { reason: 'desired_state_observed', provider_mutation: false }, deps);
+      await authorize(run, deps, null, authorization.context.grant.brokerGrant);
+      return await finish(run, token, 'observed', { reason: 'desired_state_observed', provider_mutation: false }, deps, authorization.context.grant.brokerGrant);
     }
     // A submitted marker survives a crash before/after HTTP. Never replay that write.
     if (submitted) return await finish(run, token, 'uncertain', { reason: 'workspace_optimization_manual_review_required', provider_mutation: false }, deps);
     if (deps.readOnly) fail('workspace_optimization_job_mismatch');
+    if (credentials.deliveryMode === 'broker') fail('workspace_optimization_service_pending');
     const inspection = await (deps.inspect || inspectOptimizationChange)(run.change, credentials, deps.providerDependencies);
     require('./campaignWorkspaceAdPausePolicy.service').assertPauseBaseline(inspection, run.evidence, run.change);
     if (run.evidence.schema_version === 5) await require('./campaignWorkspaceTargetBidPolicy.service').assertTargetBidBaseline({

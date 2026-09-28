@@ -208,7 +208,7 @@ async function pauseWorkspaceOptimization({ models, scope, actorId, input, hasAc
 }
 
 async function resolveOptimizationAuthorization({ models, setting, scope, campaign, action, now = new Date(), transaction = null,
-  hasAccess, resolveContext = optimizationContext, loadInventory, readOnly = false,
+  hasAccess, resolveContext = optimizationContext, loadInventory, readOnly = false, expectedBrokerGrant = null,
   checkOwnership = assertOptimizationExecutionOwnership }) {
   const mandate = setting?.activation?.optimization;
   if (setting?.activation?.schema_version !== 2 || setting.activation.mode !== 'optimize' || setting.activation.status !== 'active'
@@ -233,7 +233,8 @@ async function resolveOptimizationAuthorization({ models, setting, scope, campai
       || limits.monthly_limit_cents < 10000 || limits.monthly_limit_cents > 5000000 : limits.monthly_limit_cents !== null)
     || !Array.isArray(entry.targets) || entry.targets.some(target => !scopedTarget(target, campaign))
     || !entry.targets.some(target => target.action === action)) fail('workspace_optimization_action_not_authorized');
-  const context = await resolveContext({ models, scope, reference: reference(campaign), now, transaction, loadInventory, requirePreferences: false });
+  const context = await resolveContext({ models, scope, reference: reference(campaign), now, transaction, loadInventory,
+    requirePreferences: false, expectedBrokerGrant });
   if (context.setting.id !== setting.id || context.setting.version !== setting.version || context.campaign.clinicId !== entry.clinic_id
     || grantHash(context) !== entry.grant_fingerprint || Number(context.grant.connection.id) !== entry.connection_id
     || (context.grant.loginCustomerId || null) !== entry.login_customer_id) fail('workspace_optimization_connection_changed');

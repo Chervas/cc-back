@@ -81,6 +81,13 @@ test('disabled optimization performs no context reads', async () => {
   const f = fixture(); f.setting.preferences.mode = 'measurement'; const result = await f.review();
   assert.equal(result.review.enabled, false); assert.equal(f.state.contexts, 0);
 });
+test('execution authorization forwards the original opaque broker grant, including read-only recovery', async () => {
+  const f = fixture(); await f.activate(); const expectedBrokerGrant = Object.freeze({});
+  f.state.resolve = input => { assert.equal(input.expectedBrokerGrant, expectedBrokerGrant); assert.equal(input.requirePreferences, false); };
+  await f.executeContext({ expectedBrokerGrant });
+  f.setting.activation.optimization.status = 'paused';
+  await f.executeContext({ expectedBrokerGrant, readOnly: true });
+});
 
 function refreshInspection(f) {
   f.inspection.actions = ACTIONS.map(action => ({ action, targets: f.inspection.targets.filter(target => target.action === action).length, reasons: [] }));
