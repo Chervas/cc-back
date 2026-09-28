@@ -56,7 +56,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     exports: new Proxy({}, { get: () => { throw Error('MESSAGING_FORBIDDEN_IN_BUDGET_TRACE'); } }) };
   process.env.BUDGET_SIGNATURE_TOKEN_SECRET = 'isolated-budget-trace-test-only-not-a-live-credential';
   const { listCatalog, createBudget, transitionBudget, createBudgetSignatureRequest,
-    signPublicBudgetSignatureRequest } = require('../../services/patientEconomics.service');
+    previewBudgetAcceptance, getPublicBudgetSignatureRequest, signPublicBudgetSignatureRequest } = require('../../services/patientEconomics.service');
   const { loadBudgetCampaignAttribution } = require('../../services/campaignEconomicAttribution.service');
   const { reportPeriod, aggregateReport } = require('../../services/campaignWorkspaceReport.service');
   const { externalCampaignIdentityKey } = require('../../services/externalCampaignAssignmentTargets.service');
@@ -91,8 +91,29 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     return aggregateReport({ campaigns: [campaign], budgetAttribution: attribution, period, now: new Date(+now + day) });
   };
   const full = await create();
+  const previewPayload = { expected_version: 1, action: 'accept', selected_payment_mode: 'single' };
+  const unchanged = await models.EconomicBudget.findByPk(full.id, { raw: true });
+  const eventsBeforePreview = await models.EconomicBudgetEvent.count();
+  const preview = await previewBudgetAcceptance({ publicId: full.public_id, payload: previewPayload });
+  assert.equal(preview.accepted_amount, 623.45);
+  assert.equal(preview.budget_id, full.public_id); assert.equal(preview.version, 1);
+  for (const [payload, code] of [
+    [{ ...previewPayload, expected_version: 2 }, 'budget_acceptance_changed'],
+    [{ ...previewPayload, action: 'reject' }, 'budget_transition_invalid'],
+    [{ ...previewPayload, selected_payment_mode: 'external_financing' }, 'accepted_payment_mode_invalid'],
+    [{ ...previewPayload, action: 'accept_partial', accepted_line_keys: [] }, 'accepted_lines_required'],
+    [{ ...previewPayload, action: 'accept_partial', accepted_line_keys: ['foreign'] }, 'budget_acceptance_amount_invalid'],
+  ]) await assert.rejects(previewBudgetAcceptance({ publicId: full.public_id, payload }), { code });
+  for (const expectation of [
+    { expected_version: 2 }, { expected_accepted_amount: 999 }, { expected_accepted_amount: null },
+    { expected_accepted_amount: '623.45' }, { expected_accepted_amount: 0 },
+  ]) await assert.rejects(transitionBudget({ publicId: full.public_id, actorId: 1, action: 'accept', payload: expectation }), { code: 'budget_acceptance_changed' });
+  assert.deepEqual(await models.EconomicBudget.findByPk(full.id, { raw: true }), unchanged);
+  assert.equal(await models.EconomicBudgetEvent.count(), eventsBeforePreview);
+  report.checks.push('acceptance-preview-readonly-and-stale-confirmations-rollback');
   await models.Tratamiento.update({ precio_base: 999 }, { where: {} });
-  const accepted = await transitionBudget({ publicId: full.public_id, actorId: 1, action: 'accept' });
+  const accepted = await transitionBudget({ publicId: full.public_id, actorId: 1, action: 'accept',
+    payload: { expected_version: preview.version, expected_accepted_amount: preview.accepted_amount } });
   assert.equal(accepted.accepted_amount, 623.45); assert.equal(accepted.status, 'accepted');
   assert.equal((await models.EconomicBudgetEvent.findOne({ where: { budget_id: full.id, event_type: 'accepted' } })).metadata.accepted_amount, 623.45);
   let result = await read();
@@ -103,6 +124,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   report.checks.push('later-catalog-prices-do-not-reprice-accepted-budget');
   report.checks.push('old-lead-and-duplicate-appointments-count-budget-once');
   await assert.rejects(transitionBudget({ publicId: full.public_id, actorId: 1, action: 'accept' }), { code: 'budget_transition_not_allowed' });
+  await assert.rejects(previewBudgetAcceptance({ publicId: full.public_id, payload: previewPayload }), { code: 'budget_transition_not_allowed' });
   assert.equal(await models.EconomicBudgetEvent.count({ where: { budget_id: full.id, event_type: 'accepted' } }), 1);
   report.checks.push('repeated-acceptance-cannot-duplicate-audit-or-campaign-revenue');
 
@@ -166,14 +188,32 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     const url = new URL(request.public_url);
     const token = decodeURIComponent(url.pathname.split('/').pop());
     assert.ok(token, 'Only the locally signed fictitious tablet link is used');
-    await signPublicBudgetSignatureRequest(token, {
+    const shown = await getPublicBudgetSignatureRequest(token);
+    const selectedQuote = shown.payment_options.find(option => option.mode === 'single').quote;
+    const beforeSign = await models.EconomicBudget.findByPk(budget.id, { raw: true });
+    const eventsBefore = await models.EconomicBudgetEvent.count();
+    await assert.rejects(signPublicBudgetSignatureRequest(token, {
       accepted_statement: true, signature_data_url: 'data:image/png;base64,ZmFrZS1zaWduYXR1cmU=',
-      selected_payment_mode: 'single', ...options,
+      selected_payment_mode: 'single', ...options, expected_accepted_amount: selectedQuote.accepted_amount + 1,
+    }), { code: 'budget_acceptance_changed' });
+    assert.deepEqual(await models.EconomicBudget.findByPk(budget.id, { raw: true }), beforeSign);
+    assert.equal(await models.EconomicBudgetEvent.count(), eventsBefore);
+    const response = await signPublicBudgetSignatureRequest(token, {
+      accepted_statement: true, signature_data_url: 'data:image/png;base64,ZmFrZS1zaWduYXR1cmU=',
+      selected_payment_mode: 'single', ...options, expected_version: shown.request.budget_version,
+      expected_accepted_amount: selectedQuote.accepted_amount,
     });
     const signed = await models.EconomicBudgetSignatureRequest.findOne({ where: { public_id: request.id } });
     const persisted = await models.EconomicBudget.findByPk(budget.id);
     assert.equal(signed.accepted_amount, persisted.accepted_amount);
     assert.equal(signed.status, 'signed');
+    assert.deepEqual(response.acceptance_quote, selectedQuote);
+    assert.equal(response.request.accepted_amount, selectedQuote.accepted_amount);
+    // Historical signatures without a quote keep their saved amount; never reprice them on read.
+    await signed.update({ signed_payload: { ...signed.signed_payload, acceptance_quote: undefined } });
+    const historical = await getPublicBudgetSignatureRequest(token);
+    assert.equal(historical.acceptance_quote, null);
+    assert.equal(historical.request.accepted_amount, selectedQuote.accepted_amount);
     return models.EconomicBudget.findByPk(budget.id);
   };
   // Regression oracle: creation, manual acceptance and signature must agree on offered discounts.
@@ -183,14 +223,19 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
         const budget = await create({ payload: { global_discount_percent: 10,
           payment_proposal: { mode: 'single', option_discounts: { single: paymentDiscount } } } });
         const selected = { ...(partial ? { request_type: 'accept_partial', accepted_line_keys: ['one'] } : {}), selected_payment_mode: 'single' };
+        const shown = await previewBudgetAcceptance({ publicId: budget.public_id, payload: {
+          ...selected, action: partial ? 'accept_partial' : 'accept', expected_version: 1,
+        } });
         const actual = signed ? await signatureAccept(budget, selected)
           : await transitionBudget({ publicId: budget.public_id, actorId: 1,
-            action: partial ? 'accept_partial' : 'accept', payload: selected });
+            action: partial ? 'accept_partial' : 'accept', payload: { ...selected,
+              expected_version: shown.version, expected_accepted_amount: shown.accepted_amount } });
         // 623.45 - 62.35 = 561.10; global allocation assigns 111.10 to the first line.
         const expected = paymentDiscount === 100 ? 0
           : partial ? (paymentDiscount ? 105.55 : 111.10) : (paymentDiscount ? 533.05 : 561.10);
         const name = `${signed ? 'signature' : 'manual'}-${partial ? 'partial' : 'full'}-payment-discount-${paymentDiscount}`;
         verifyAmount(name, actual.accepted_amount, expected);
+        verifyAmount(`${name}-preview`, shown.accepted_amount, expected);
         const event = await models.EconomicBudgetEvent.findOne({ where: { budget_id: budget.id,
           event_type: partial ? 'partially_accepted' : 'accepted' } });
         verifyAmount(`${name}-audit`, event.metadata.accepted_amount, expected);
@@ -205,4 +250,23 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   report.amountMismatches = amountMismatches;
   assert.deepEqual(amountMismatches, [], 'Accepted budget amount must match the offered global and payment discounts');
   report.checks.push('manual-and-signed-full-and-partial-discounted-amounts-agree');
+  report.checks.push('public-signature-selected-quote-and-saved-amount-agree-including-zero');
+  report.checks.push('historical-signed-amounts-never-repriced-on-read');
+  const choiceBudget = await create({ payload: { global_discount_percent: 10, payment_proposal: {
+    mode: 'single', included_modes: ['single', 'clinic_installments'], option_discounts: { single: 5, clinic_installments: 0 },
+    schedule: [{ key: 'first', label: 'Primera fase', amount: 280.55 }, { key: 'last', label: 'Ultima fase', amount: 280.55 }],
+  } } });
+  const choiceRequest = await createBudgetSignatureRequest({ publicId: choiceBudget.public_id, actorId: 1,
+    payload: { target: 'tablet', base_url: 'http://127.0.0.1', selected_payment_mode: 'patient_choice' } });
+  const choiceToken = decodeURIComponent(new URL(choiceRequest.public_url).pathname.split('/').pop());
+  const choiceShown = await getPublicBudgetSignatureRequest(choiceToken);
+  assert.equal(choiceShown.payment_options.find(option => option.mode === 'single').quote.accepted_amount, 533.05);
+  assert.equal(choiceShown.payment_options.find(option => option.mode === 'clinic_installments').quote.accepted_amount, 561.1);
+  const choiceSigned = await signPublicBudgetSignatureRequest(choiceToken, { accepted_statement: true,
+    signature_data_url: 'data:image/png;base64,ZmFrZS1zaWduYXR1cmU=', selected_payment_mode: 'clinic_installments',
+    expected_version: 1, expected_accepted_amount: 561.1 });
+  assert.equal(choiceSigned.request.accepted_amount, 561.1);
+  assert.equal(choiceSigned.acceptance_quote.accepted_amount, 561.1);
+  assert.equal((await read()).current.accepted, 561.1);
+  report.checks.push('patient-choice-signature-prices-the-chosen-alternative-through-campaign-kpi');
 }).catch(error => { console.error(error.message); process.exitCode = 1; });

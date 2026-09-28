@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { acceptedAmount, discountedAmount, payableAmount } = require('../../lib/economicBudgetAcceptance');
+const { acceptedAmount, acceptanceQuote, discountedAmount, payableAmount } = require('../../lib/economicBudgetAcceptance');
 const prices = require('../../lib/economicPriceProfile');
 const version = (patch = {}) => ({
   lines: [{ key: 'one', total: 123.45 }, { key: 'two', total: 500 }],
@@ -26,6 +26,17 @@ test('payment discount rounds cents deterministically, including half-cent bound
   assert.equal(discountedAmount(100, 12.34), 87.66);
   assert.equal(discountedAmount(1e10, 0.01), 9999000000);
   assert.equal(discountedAmount(100, 100), 0);
+});
+
+test('display quote exposes the same allocated cents as acceptance, including partial and zero offers', () => {
+  assert.deepEqual(acceptanceQuote(version(), ['one'], 'single'), {
+    accepted_amount: 105.55, original_amount: 123.45, discount_amount: 17.9, lines: [{ key: 'one', total: 105.55 }],
+  });
+  const quote = acceptanceQuote(version(), ['one', 'two'], 'single');
+  assert.equal(quote.accepted_amount, acceptedAmount(version(), ['one', 'two'], 'single'));
+  assert.equal(quote.lines.reduce((sum, line) => sum + Math.round(line.total * 100), 0), 53305);
+  const zero = acceptanceQuote(version({ payment_proposal: { option_discounts: { single: 100 } } }), ['one'], 'single');
+  assert.equal(zero.accepted_amount, 0); assert.equal(zero.lines[0].total, 0); assert.equal(zero.discount_amount, 123.45);
 });
 
 test('accepted zero is final, not replaced by the undiscounted offer in balances or collection limits', () => {

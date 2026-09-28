@@ -1219,6 +1219,29 @@ async function activateVouchers({ budget, rule, actorId, transaction }) {
   }
 }
 
+async function previewBudgetAcceptance({ publicId, payload = {} }) {
+  const budget = await loadBudgetByPublicId(publicId);
+  if (budget.status !== 'presented') throw domainError(409, 'budget_transition_not_allowed', 'Este presupuesto ya no esta pendiente de aceptacion.');
+  if (Number(payload.expected_version) !== Number(budget.current_version)) {
+    throw domainError(409, 'budget_acceptance_changed', 'El presupuesto ha cambiado. Vuelve a abrirlo antes de aceptar.');
+  }
+  if (!['accept', 'accept_partial'].includes(payload.action)) throw domainError(400, 'budget_transition_invalid', 'Selecciona una aceptacion total o parcial.');
+  const version = await EconomicBudgetVersion.findOne({ where: { budget_id: budget.id, version_number: budget.current_version } });
+  if (!version) throw domainError(404, 'budget_version_not_found', 'Version de presupuesto no encontrada.');
+  const lines = parseJson(version.lines, []);
+  economicPrograms.assertOperational(lines);
+  const modes = offeredPaymentModes(version);
+  const mode = cleanString(payload.selected_payment_mode || (modes.length === 1 ? modes[0] : ''), 30);
+  if ((modes.length && !modes.includes(mode)) || (!modes.length && mode)) {
+    throw domainError(400, 'accepted_payment_mode_invalid', 'Selecciona una forma de pago ofrecida.');
+  }
+  const keys = payload.action === 'accept' ? lines.map(line => line.key)
+    : [...new Set((Array.isArray(payload.accepted_line_keys) ? payload.accepted_line_keys : []).map(key => cleanString(key, 80)).filter(Boolean))];
+  if (!keys.length) throw domainError(400, 'accepted_lines_required', 'Selecciona los conceptos que acepta el paciente.');
+  return { budget_id: budget.public_id, version: Number(budget.current_version), currency: 'EUR',
+    selected_payment_mode: mode || null, accepted_line_keys: keys, ...budgetAmounts.acceptanceQuote(version, keys, mode) };
+}
+
 async function transitionBudget({ publicId, actorId, action, payload = {} }) {
   const transitions = {
     present: { from: ['draft'], to: 'presented', event: 'presented' },
@@ -1232,6 +1255,9 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
   if (!transition) throw domainError(400, 'budget_transition_invalid', 'La transición solicitada no es válida.');
   return sequelize.transaction(async (transaction) => {
     const budget = await loadBudgetByPublicId(publicId, transaction);
+    if (payload.expected_version !== undefined && Number(payload.expected_version) !== Number(budget.current_version)) {
+      throw domainError(409, 'budget_acceptance_changed', 'El presupuesto ha cambiado. Vuelve a abrirlo antes de aceptar.');
+    }
     const previousStatus = budget.status;
     if (!transition.from.includes(budget.status)) {
       throw domainError(409, 'budget_transition_not_allowed', `No se puede aplicar esta acción desde ${budget.status}.`);
@@ -1376,6 +1402,11 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
         throw domainError(400, 'accepted_bank_data_status_invalid', 'El estado de datos bancarios no es válido.');
       }
       acceptedAmount = amountForAcceptedLineKeys(version, acceptedLineKeys, selectedPaymentMode);
+      if (payload.expected_accepted_amount !== undefined && (payload.expected_accepted_amount === null
+        || typeof payload.expected_accepted_amount !== 'number' || !Number.isFinite(payload.expected_accepted_amount)
+        || payload.expected_accepted_amount !== acceptedAmount)) {
+        throw domainError(409, 'budget_acceptance_changed', 'El importe ha cambiado. Revisa de nuevo el presupuesto antes de aceptar.');
+      }
       acceptance = {
         selected_payment_mode: selectedPaymentMode || null,
         selected_financing_months: selectedFinancingMonths,
@@ -1552,8 +1583,12 @@ function serializeBudgetSignatureRequest(request, { includeInternal = false } = 
 function publicBudgetSignaturePayload(request) {
   const snapshot = parseJson(request.snapshot_json, {});
   const proposal = serializePaymentProposal(snapshot.version?.payment_proposal || {});
+  const signed = request.status === 'signed';
+  const quote = signed ? parseJson(request.signed_payload, {}).acceptance_quote || null
+    : budgetAmounts.acceptanceQuote(snapshot.version, parseJson(request.accepted_line_keys, []), request.selected_payment_mode);
   const paymentOptions = (proposal.included_modes || []).map((mode) => ({
     mode,
+    quote: signed ? null : budgetAmounts.acceptanceQuote(snapshot.version, parseJson(request.accepted_line_keys, []), mode),
     label: mode === 'single'
       ? 'Pago único'
       : mode === 'clinic_installments'
@@ -1571,6 +1606,7 @@ function publicBudgetSignaturePayload(request) {
   }));
   return {
     request: serializeBudgetSignatureRequest(request),
+    acceptance_quote: quote,
     budget: snapshot.budget || null,
     version: {
       ...snapshot.version,
@@ -2012,6 +2048,11 @@ async function applyBudgetSignatureAcceptance({ request, payload = {}, requestMe
     }
     const acceptedLineKeys = acceptedLineKeysForRequest(lockedRequest, version, payload);
     const acceptedAmount = amountForAcceptedLineKeys(version, acceptedLineKeys, selectedPaymentMode);
+    if (payload.expected_version !== undefined && Number(payload.expected_version) !== Number(lockedRequest.budget_version)
+      || payload.expected_accepted_amount !== undefined && (typeof payload.expected_accepted_amount !== 'number'
+        || !Number.isFinite(payload.expected_accepted_amount) || payload.expected_accepted_amount !== acceptedAmount)) {
+      throw domainError(409, 'budget_acceptance_changed', 'El presupuesto ha cambiado. Revisa de nuevo el importe antes de firmar.');
+    }
     const transitionTo = lockedRequest.request_type === 'accept_partial' ? 'partially_accepted' : 'accepted';
     const bankData = normalizeBankDataForSignature(payload.bank_data);
     const bankDataStatus = bankData.iban
@@ -2019,6 +2060,7 @@ async function applyBudgetSignatureAcceptance({ request, payload = {}, requestMe
       : lockedRequest.bank_data_policy === 'request_now' ? 'pending' : lockedRequest.bank_data_status;
     const signerName = cleanString(payload.signer_name, 180) || parseJson(lockedRequest.snapshot_json, {}).patient?.name || 'Paciente';
     const signaturePayload = {
+      acceptance_quote: budgetAmounts.acceptanceQuote(version, acceptedLineKeys, selectedPaymentMode),
       signer_name: signerName,
       signer_role: cleanString(payload.signer_role || 'patient', 40) || 'patient',
       signed_at: new Date().toISOString(),
@@ -3727,6 +3769,7 @@ module.exports = {
   updateDraftBudget,
   reviseBudget,
   transitionBudget,
+  previewBudgetAcceptance,
   createBudgetSignatureRequest,
   getPublicBudgetSignatureRequest,
   signPublicBudgetSignatureRequest,

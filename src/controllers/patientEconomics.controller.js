@@ -181,6 +181,13 @@ exports.transitionBudget = asyncHandler(async (req, res) => {
   res.json(budget);
 });
 
+exports.previewBudgetAcceptance = asyncHandler(async (req, res) => {
+  await requireBudgetFeature(req, 'patients.edit');
+  const result = await economics.previewBudgetAcceptance({ publicId: req.params.budgetId, payload: req.body || {} });
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json(result);
+});
+
 exports.createBudgetSignatureRequest = asyncHandler(async (req, res) => {
   await requireBudgetFeature(req, 'patients.edit');
   const request = await economics.createBudgetSignatureRequest({

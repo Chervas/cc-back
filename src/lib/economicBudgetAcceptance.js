@@ -22,7 +22,7 @@ function discountedAmount(amount, percent = 0) {
   return Number((numerator + 5000n) / 10000n) / 100;
 }
 
-function acceptedAmount(version, acceptedLineKeys, paymentMode = null) {
+function acceptanceQuote(version, acceptedLineKeys, paymentMode = null) {
   const lines = parse(version.lines, []), totals = parse(version.totals, {});
   if (!Array.isArray(acceptedLineKeys)) throw invalid();
   const keys = new Set(acceptedLineKeys);
@@ -48,8 +48,15 @@ function acceptedAmount(version, acceptedLineKeys, paymentMode = null) {
   }
   // Allocate the chosen stored offer once, including residual cents, across
   // its concepts. Never reprice against today's treatment catalog.
-  return prices.budgetBreakdown(lines, quoted).lines.filter(line => keys.has(line.key))
-    .reduce((sum, line) => sum + cents(line.gross_after_global_discount), 0) / 100;
+  const selected = prices.budgetBreakdown(lines, quoted).lines.filter(line => keys.has(line.key))
+    .map(line => ({ key: line.key, total: line.gross_after_global_discount }));
+  const amount = selected.reduce((sum, line) => sum + cents(line.total), 0) / 100;
+  const original = lines.filter(line => keys.has(line.key)).reduce((sum, line) => sum + cents(line.total), 0) / 100;
+  return { accepted_amount: amount, original_amount: original, discount_amount: (cents(original) - cents(amount)) / 100, lines: selected };
+}
+
+function acceptedAmount(version, acceptedLineKeys, paymentMode = null) {
+  return acceptanceQuote(version, acceptedLineKeys, paymentMode).accepted_amount;
 }
 
 function payableAmount(budget, version) {
@@ -57,4 +64,4 @@ function payableAmount(budget, version) {
     ? budget.accepted_amount : parse(version?.totals, {}).total) / 100;
 }
 
-module.exports = { acceptedAmount, discountedAmount, payableAmount };
+module.exports = { acceptedAmount, acceptanceQuote, discountedAmount, payableAmount };

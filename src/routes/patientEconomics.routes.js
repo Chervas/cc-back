@@ -17,6 +17,7 @@ router.post('/patients/:patientId/budgets', controller.createBudget);
 router.patch('/budgets/:budgetId', controller.updateBudget);
 router.post('/budgets/:budgetId/revise', controller.reviseBudget);
 router.post('/budgets/:budgetId/transition', controller.transitionBudget);
+router.post('/budgets/:budgetId/acceptance-preview', controller.previewBudgetAcceptance);
 router.post('/budgets/:budgetId/signature-requests', controller.createBudgetSignatureRequest);
 router.post('/budgets/:budgetId/payments', controller.createPayment);
 router.post('/patients/:patientId/wallet-deposits', controller.createWalletDeposit);
