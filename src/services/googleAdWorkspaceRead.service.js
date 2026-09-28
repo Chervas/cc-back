@@ -4,6 +4,7 @@ const { Op } = require('sequelize');
 const { googleAdDeliveryStatus } = require('./googleAdDelivery.service');
 const key = row => JSON.stringify([row.customerId, row.campaignId, row.adGroupId, row.adId]);
 const dayKey = (row, date = row.date) => JSON.stringify([key(row), date]);
+const campaignKey = row => JSON.stringify([row.customerId, row.campaignId]);
 
 async function loadGoogleWorkspaceAds({ models, googleWhere, dateWhere }) {
   const inventoryQuery = { where: { [Op.or]: googleWhere },
@@ -52,13 +53,21 @@ async function loadGoogleWorkspaceAds({ models, googleWhere, dateWhere }) {
     ads.push({ ...identity(row), date: row.date, segment: [row.network || '', row.device || ''],
       spend: Number(row.costMicros) / 1e6, providerConversions: Number(row.conversions), metricsUpdatedAt: row.observedAt || row.updated_at });
   }
+  const completedByCampaign = new Map();
+  for (const checked of completed.values()) {
+    const key = campaignKey(checked);
+    if (!completedByCampaign.has(key)) completedByCampaign.set(key, []);
+    completedByCampaign.get(key).push(checked);
+  }
   // Zero is inferred only from a complete provider response, never from inventory freshness alone.
-  for (const row of byId.values()) for (const checked of completed.values()) {
-    if (checked.customerId !== row.customerId || checked.campaignId !== row.campaignId
-      || populated.has(dayKey(row, checked.date))) continue;
-    populated.add(dayKey(row, checked.date));
-    ads.push({ ...identity(row), date: checked.date, segment: ['COMPLETE_ZERO'], spend: 0, providerConversions: 0,
-      metricsUpdatedAt: checked.observedAt });
+  for (const row of byId.values()) {
+    const projected = identity(row);
+    for (const checked of completedByCampaign.get(campaignKey(row)) || []) {
+      if (populated.has(dayKey(row, checked.date))) continue;
+      populated.add(dayKey(row, checked.date));
+      ads.push({ ...projected, date: checked.date, segment: ['COMPLETE_ZERO'], spend: 0, providerConversions: 0,
+        metricsUpdatedAt: checked.observedAt });
+    }
   }
   return ads;
 }

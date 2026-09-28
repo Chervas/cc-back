@@ -287,6 +287,31 @@ test('campaign-specific date coverage cannot leak to another campaign in an aggr
   assert.equal(ads.filter(ad => !ad.inventory && ad.campaign_id === '457').length, 0);
 });
 
+test('aggregate zero-day expansion visits only the account and campaign of each ad', async () => {
+  const f = readFixture();
+  const item = f.inventory[0];
+  f.inventory.length = 0; f.args.googleWhere.length = 0;
+  let accountReads = 0;
+  const dates = Array.from({ length: 20 }, (_, i) => `2026-08-${String(i + 1).padStart(2, '0')}`);
+  for (const customerId of ['1234567890', '2234567890']) {
+    for (let i = 0; i < 80; i++) {
+      const campaignId = String(1000 + i);
+      f.args.googleWhere.push({ customerId, campaignId });
+      f.inventory.push({ ...item, campaignId, get customerId() { accountReads++; return customerId; } });
+      // The second account has proof for half the dates, despite sharing campaign/ad IDs.
+      for (const date of dates.slice(0, customerId === '1234567890' ? 20 : 10)) {
+        f.coverage.push({ customerId, campaignId, date, observedAt });
+      }
+    }
+  }
+  const ads = await loadGoogleWorkspaceAds(f.args);
+  assert.equal(ads.filter(ad => ad.inventory).length, 160);
+  assert.equal(ads.filter(ad => !ad.inventory && ad.account_id === '1234567890').length, 1600);
+  assert.equal(ads.filter(ad => !ad.inventory && ad.account_id === '2234567890').length, 800);
+  assert.ok(ads.filter(ad => !ad.inventory).every(ad => ad.spend === 0 && ad.metricsUpdatedAt === observedAt));
+  assert.ok(accountReads < 160 * dates.length * 10, `Unrelated campaign coverage rescanned: ${accountReads}`);
+});
+
 test('a more recent paused campaign prevents old enabled ad metadata from appearing active', async () => {
   const f = readFixture();
   f.inventory[0].deliveryObservation = { schemaVersion: 1, observedAt: observedAt.toISOString(),

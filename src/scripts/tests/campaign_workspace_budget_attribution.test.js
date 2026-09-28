@@ -83,3 +83,33 @@ test('loader uses exact clinic-patient pairs, loads old linked leads, and never 
   assert.deepEqual(queries[2].where.clinica_id[Op.in], [1]);
   for (const query of queries) assert.ok(!query.attributes.some(field => ['nombre', 'email', 'telefono', 'lines', 'patient_snapshot'].includes(field)));
 });
+
+test('an empty accepted-budget window does not scan the ad history or invent accepted revenue', async () => {
+  const ads = { [Symbol.iterator]() { assert.fail('No accepted budgets require no ad attribution work'); } };
+  const models = { EconomicBudget: { findAll: async () => [] } };
+  const result = await loadBudgetCampaignAttribution({ models, campaigns, ads, period });
+  assert.deepEqual(result.allocations, []);
+  assert.deepEqual(result.adAllocations, []);
+  assert.deepEqual(result.coverage, { attributed: 0, unlinked: 0, ambiguous: 0, invalid: 0 });
+  assert.equal(aggregateReport({ campaigns, period, budgetAttribution: result }).current.accepted, 0);
+});
+
+test('large account aggregates resolve ad identities linearly and retain canonical accepted-budget attribution', () => {
+  let identityReads = 0;
+  const manyCampaigns = Array.from({ length: 300 }, (_, i) => ({ ...campaigns[0], id: `campaign-${i}`,
+    get campaign_id() { identityReads++; return String(1000 + i); } }));
+  const ads = manyCampaigns.flatMap((campaign, i) => Array.from({ length: 60 }, () => ({
+    provider: 'google_ads', account_id: '123', campaign_id: String(1000 + i), id: '700', groupId: '800',
+  })));
+  identityReads = 0;
+  const linked = { ...lead, google_ads_campaign_id: '1299', external_source: 'google_lead_form', advertising_ad_identity: {
+    provider: 'google_ads',
+    account_id: '123', campaign_id: '1299', ad_id: '700', adgroup_id: '800',
+  } };
+  const result = calculate({ campaigns: manyCampaigns, ads, leads: [linked] });
+  assert.equal(result.allocations[0].campaignId, 'campaign-299');
+  assert.equal(result.allocations[0].amountCents, 12345);
+  assert.deepEqual(result.adAllocations, [{ ...result.allocations[0], adId: '800~700' }]);
+  // Deterministic complexity check instead of a timing assertion on shared CI hosts.
+  assert.ok(identityReads <= manyCampaigns.length * 10, `Unexpected repeated identity scans: ${identityReads}`);
+});

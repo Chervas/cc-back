@@ -122,13 +122,61 @@ No se habilitan jobs, permisos nuevos, OAuth, Meta, conversiones ni publicidad.
 Publicar lectura exige instalacion compatible y grant exacto; guardar fuente
 en DEV no modifica el preview, CRM o AWS.
 
+### Tercer corte: latencia del informe agregado (2026-09-28)
+
+Diagnostico sobre fuente backend `104c695e` y frontend `e4a17e16e`, sin cambios
+de runtime. El grupo no contiene solo las 26 campanas de Dental - Parallel:
+el lector actual devuelve 279 campanas visibles de varias cuentas y proyecta
+1.953 anuncios Google de inventario. No se cambia ninguna seleccion/asignacion.
+
+La atribucion economica recorria todas las campanas por cada fila diaria de
+anuncio (`ads x campaigns`), incluso con cero presupuestos aceptados. El
+diagnostico original llega a esa etapa y se cancela a los 20s. El candidato
+omite ese trabajo cuando no hay presupuestos y usa un indice de identidades
+canonicas cuando los hay. La expansion de dias sin gasto tambien se indexa por
+cuenta/campana: un dia comprobado nunca se propaga a otra cuenta o campana.
+Importes, atribucion unica lead-cita-presupuesto, cobertura, nulos y frescura
+no se sustituyen con estimaciones ni se cambian los TTL/timeouts.
+
+- Contraste local acotado con SQL `START TRANSACTION READ ONLY`, limite de
+  ejecucion 3s por SELECT y conexiones externas bloqueadas una vez conectada
+  la BD. Sin cargar el indice productivo de modelos, arrancar app/workers,
+  leer campos de contacto/respuestas de formulario ni modificar registros.
+  La consulta a digests de performance_schema fue denegada; no se elevaron
+  permisos. Se uso un diagnostico temporal con consultas reales del lector,
+  metadata de indices, recuentos y tiempos, sin volcar filas en consola.
+- Lector completo corregido: **5,8 y 6,6s** en dos ejecuciones de solo lectura,
+  279 campanas. No son tiempos HTTP del CRM publicado ni garantia bajo carga.
+  La prueba original de Chromium ya documentada sigue siendo >30s/499.
+- 58 pruebas enfocadas y **1.127 de regresion backend**, todas correctas,
+  incluyendo complejidad determinista, aceptacion parcial, atribucion por
+  anuncio y separacion de cobertura entre cuentas/campanas. Sin proveedores.
+- QA detecta una variacion porcentual grande rozando el borde de un KPI en
+  el build existente. Front adapta columnas al ancho del panel, no al ancho
+  total de la pantalla, conservando valor y porcentaje juntos. 131 pruebas
+  frontend y `ngc --noEmit` correctos; regresion Chromium SCSS/fuente Inter
+  con datos ficticios: siete combinaciones de viewport/panel, sin red ni sesion.
+- Chromium autenticado con MFA del titular: UI publica existente, sustitucion
+  **solo en la pestaña propia de QA** del GET de informe group:5 por el DTO del
+  lector candidato y CSS de KPI candidato insertado solo en esa pestaña.
+  Veinte capturas: Resumen/Campanas/Salud a 1440, 1024 y 390, cinco KPI, seis
+  bloques y paginacion de diez filas, sin desborde horizontal ni errores JS.
+  Retornos a lista en los tres anchos y retornos a resumen/salud correctos.
+  No acredita un despliegue ni la integracion HTTP del candidato. Requests
+  no GET y dominios externos bloqueados; filtros restaurados, pestaña propia
+  cerrada y sesion compartida conservada.
+- Evidencia privada: `/tmp/cc-campaign-latency-20260928-ui/`,
+  `/tmp/cc-campaign-latency-{focused,regression,profile,final-profile}-20260928.log`.
+  La captura y DTO no se publican ni se incorporan al repositorio.
+
+Sin reinicios, despliegues, migraciones, OAuth, Meta, senales ni ajustes
+publicitarios. Se conserva la cuarentena y la separacion de entornos.
+
 ### Siguiente corte
 
-Prioridad inmediata: resolver la latencia del informe agregado Propdental
-observada en Chromium (timeout 30s, API finalmente 200), sin alargar el timeout
-para ocultarla. Aislar consultas/agregacion con mediciones acotadas y datos
-sinteticos; no repetir cargas costosas en CRM mientras se investiga. QA
-responsive y Resumen/Campanas/Salud/retornos siguen pendientes en ese ambito.
+La causa de la latencia Propdental esta corregida y medida en el candidato.
+Falta instalarlo mediante un corte autorizado y repetir el HTTP real y QA sin
+intercepcion del informe; no repetir cargas lentas contra el build antiguo.
 
 1. Adaptar la ejecucion y evidencia de Optimiza al transporte tipado. La
    preparacion de compatibilidad ya esta adaptada; siguen pendientes

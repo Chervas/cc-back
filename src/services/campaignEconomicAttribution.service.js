@@ -11,6 +11,10 @@ const time = value => value && Number.isFinite(new Date(value).getTime()) ? new 
 const patientKey = (clinic, patient) => `${clinic}:${patient}`;
 
 function budgetCampaignAttribution({ campaigns, budgets, appointments, leads, ads = [], period }) {
+  const allocations = []; const adAllocations = []; const seen = new Set();
+  const coverage = { attributed: 0, unlinked: 0, ambiguous: 0, invalid: 0 };
+  const result = { currency: 'EUR', supportedProviders: ['google_ads', 'meta_ads'], method: 'accepted_budget_single_campaign_via_linked_appointment', allocations, adAllocations, coverage };
+  if (!budgets.length) return result;
   const clinics = new Set(campaigns.filter(row => row.assigned).map(row => Number(row.clinicId)));
   const byLead = new Map(leads.map(lead => [id(lead.id), lead]));
   const byPatient = new Map();
@@ -21,16 +25,20 @@ function budgetCampaignAttribution({ campaigns, budgets, appointments, leads, ad
     if (!byPatient.has(key)) byPatient.set(key, []);
     byPatient.get(key).push(appointment);
   }
+  // Daily ad rows repeat the same campaign; resolve each identity once, not by scanning the whole scope per row.
+  const campaignIndex = new Map();
+  for (const campaign of campaigns) {
+    const key = externalCampaignIdentityKey(campaign);
+    if (key && !campaignIndex.has(key)) campaignIndex.set(key, campaign);
+  }
   const adRows = new Map();
   for (const ad of ads) {
-    const campaign = campaigns.find(campaign => externalCampaignIdentityKey(campaign) === externalCampaignIdentityKey(ad));
+    const campaign = campaignIndex.get(externalCampaignIdentityKey(ad));
     if (!campaign) continue;
     if (!adRows.has(campaign.id)) adRows.set(campaign.id, []);
     adRows.get(campaign.id).push(ad);
   }
   const matchAd = createLeadAdMatcher(campaigns, adRows);
-  const allocations = []; const adAllocations = []; const seen = new Set();
-  const coverage = { attributed: 0, unlinked: 0, ambiguous: 0, invalid: 0 };
   for (const budget of budgets) {
     const budgetId = id(budget.id); const acceptedAt = time(budget.responded_at);
     if (!budgetId || seen.has(budgetId) || !clinics.has(Number(budget.clinic_id))
@@ -59,7 +67,7 @@ function budgetCampaignAttribution({ campaigns, budgets, appointments, leads, ad
     if (adCandidates.size === 1 && !adCandidates.has(null)) adAllocations.push({ ...allocation, adId: [...adCandidates][0] });
     coverage.attributed++;
   }
-  return { currency: 'EUR', supportedProviders: ['google_ads', 'meta_ads'], method: 'accepted_budget_single_campaign_via_linked_appointment', allocations, adAllocations, coverage };
+  return result;
 }
 
 async function loadBudgetCampaignAttribution({ models, campaigns, ads = [], period }) {
