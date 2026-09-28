@@ -13,6 +13,7 @@ const SAFE_CODES = new Set(['invalid_request', 'invalid_signature', 'scope_denie
   'secret_version_changed', 'oauth_state_invalid', 'oauth_identity_mismatch', 'oauth_credentials_incomplete',
   'oauth_flow_busy', 'oauth_flow_interrupted',
   'business_profile_mutation_busy', 'business_profile_regular_hours_required',
+  'optimization_conflict', 'optimization_expired', 'optimization_busy', 'optimization_cooldown',
   ...Object.values(require('../../services/integrations-broker/src/whatsapp-provider-errors').PROVIDER_ERRORS),
   ...Object.values(require('../../services/integrations-broker/src/bedrock-errors').PROVIDER_ERRORS)]);
 const error = code => Object.assign(new Error(code), { code });

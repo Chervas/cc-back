@@ -327,21 +327,64 @@ Contrato en `docs/security/google-ads-optimization-broker.md`. No hay cambios
 visuales, SQL clinico, llamadas a proveedores reales, despliegue ni activacion
 de Meta, senales, jobs o presupuestos. Plan Gestionado sigue aplazado.
 
+### Octavo corte: ejecutor conectado al escritor aislado (2026-09-28)
+
+Sobre backend `b21300c0` y frontend `b3851f9b3`. Solo fuente DEV, sin instalar
+cliente, cohorte, permisos o claves reales. No se abren gates/jobs ni se cambian
+las campanas de Dental - Parallel Campaign. Meta sigue cerrado.
+
+- Cliente apply/status separado del lector, carga diferida y rechazo de la
+  misma clave bajo nombres/rutas distintos. Contrato cerrado sin GAQL, URL,
+  tokens o cabeceras del consumidor; deadline/caducidad, scope opaco y huella
+  de escritor comprobados alrededor de la llamada.
+- El ejecutor conserva evidencia madura, baseline CPA/ROAS, recepcion,
+  seleccion, ACL, mandato y lease. El presupuesto mensual se calcula para todas
+  las campanas seleccionadas y se reserva antes de enviar; el cap diario del
+  broker no lo reemplaza.
+- `outcome.broker_submission` guarda autoridad y payload inmutable en la misma
+  transaccion que `submitted_at` y la reserva mensual. Es metadata interna sin
+  secretos, no una credencial ni un DTO publico. Reutiliza JSON existente; no DDL.
+  Apply exige el mismo run, commit confirmado y grant original; la transaccion
+  final vuelve a verificarlo junto con la identidad del escritor.
+- Acuse SQL perdido no envia. Acuse del consumidor perdido se recupera solo
+  mediante status aplicado y readback coincidente; nunca se repite apply.
+  Unknown/not_found permanece incierto aunque coincida el valor. Revocacion
+  conserva el marcador, y cambio a legacy no permite refrescar tokens antiguos.
+- La resolucion manual antigua se bloquea para estos intentos: cerrar una fila
+  CRM no libera el lock del broker. Sigue pendiente un conciliador autorizado
+  con evidencia de ambos sistemas, no borrar filas/locks ni cambiar UUID.
+- Pruebas recorren las siete clases de ajuste con cliente, firma, motor SQLite,
+  permisos y ejecutor reales; proveedor/AWS y modelos CRM ficticios. Incluyen
+  reserva mensual, perdida de ambos acuses, cambio de ACL/mandato/grant/clave,
+  lease, persistencia del marcador y ausencia de fallback legacy.
+- Regresion backend final: **1.279 pruebas correctas**. Cierre enfocado previo:
+  43 pruebas de cliente, ejecutor e historial correctas; incluidas en la amplia.
+  HTTPS local comprueba ademas que conflicto de baseline, caducidad y cooldown
+  conservan su codigo seguro al atravesar el transporte compartido, sin filtrar
+  detalle del proveedor. No se confunden con un fallo generico de conectividad.
+  Logs `/tmp/cc-opt-writer-executor-all-backend-final-20260928.log`,
+  `/tmp/cc-opt-writer-executor-final-20260928.log` y
+  `/tmp/cc-opt-writer-executor-https-final-20260928.log`.
+- Regresion completa del broker repetida tras el ajuste del transporte:
+  **866 pruebas correctas**, incluidos runtime HTTPS y resto de proveedores.
+  Log `/tmp/cc-opt-writer-executor-all-broker-final-20260928.log`.
+
+Contrato y configuracion: `docs/security/google-ads-optimization-broker.md`.
+Sin SQL clinico, llamadas reales a proveedores, reinicios, despliegue ni QA
+visual nueva; no hay cambio de interfaz en este corte. No es una validacion
+operativa con Propdental. Plan Gestionado continua aplazado.
+
 ### Siguiente corte
 
 La causa de la latencia Propdental esta corregida y medida en el candidato.
 Falta instalarlo mediante un corte autorizado y repetir el HTTP real y QA sin
 intercepcion del informe; no repetir cargas lentas contra el build antiguo.
 
-1. Conectar el motor escritor de Optimiza al ejecutor y cliente backend,
-   con permiso/clave propios, identidad durable y recuperacion. Compatibilidad,
-   rendimiento maduro, calculo
-   mensual, evidencia CPA/ROAS y lectura de resultado/recuperacion ya estan
-   adaptados; falta conservar esos controles y conectar su baseline en la ruta
-   de ejecucion tipada. Esto
-   NO significa que los ajustes sean ejecutables. Las exclusiones siguen
-   necesitando politica de relevancia. No se sustituyen con GAQL libre ni se
-   activan para demostrar la interfaz.
+1. Conciliacion autorizada de intentos desconocidos entre broker y CRM, sin
+   repetir escrituras ni afirmar autoria por una lectura coincidente. Ejecutor,
+   evidencia y contabilidad mensual estan conectados en fuente, no instalados.
+   Las exclusiones siguen necesitando politica de relevancia. No se sustituyen
+   con GAQL libre ni se activan para demostrar la interfaz.
    Preparacion de conversiones ya tiene transporte broker y no necesita duplicarse.
 2. Publicacion compatible siguiendo DEV -> staging, con los gates efectivos
    conservados. Instalar motor y grant de lectura de destinos solo en una

@@ -70,7 +70,7 @@ function publicRun(row, campaign, { canWrite = false, owner = null, job = null, 
   if (!Object.hasOwn(STATUSES, row.status) || !sameCampaign(row, campaign)) fail('workspace_optimization_history_invalid');
   const leaseActive = row.lease_token && +new Date(row.lease_until) > +now;
   const canResolve = row.status === 'uncertain' && !!row.submitted_at && !leaseActive && !ACTIVE_JOBS.includes(job?.status)
-    && canWrite && owner?.id === row.setting_id;
+    && canWrite && owner?.id === row.setting_id && !row.outcome?.broker_submission;
   return { id: row.id, revision: revision(row), campaignId: campaign.id, campaignName: campaign.name, provider: row.provider,
     action: change.target.action, actionLabel: row.evidence?.schema_version === 5
       ? change.target.unit === 'ratio' ? 'Objetivo de rentabilidad publicitaria' : 'Objetivo de coste por conversión'
@@ -134,6 +134,8 @@ async function resolveOptimizationReview({ models, scope, actorId, runId, input,
     if (!campaign) fail('workspace_campaign_not_in_scope', 404);
     if (run.status === 'resolved' && run.resolution?.expected_revision === input.expected_revision) return { success: true, changed: false };
     if (revision(run) !== input.expected_revision) fail('workspace_optimization_review_changed');
+    // Closing the CRM row alone cannot release an uncertain provider-side lock.
+    if (run.outcome?.broker_submission) fail('workspace_optimization_broker_reconciliation_required');
     const job = run.job_request_id ? await models.JobRequest.findByPk(run.job_request_id, query(transaction)) : null;
     if (!publicRun(run, campaign, { owner: setting, canWrite: true, job, now: now() }).canResolve) fail('workspace_optimization_review_busy');
     if (!await permitted()) fail('marketing_scope_forbidden', 403);

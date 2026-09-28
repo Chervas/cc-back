@@ -149,8 +149,11 @@ function desiredState(change, value) {
 
 async function mutateOptimizationChange(change, credentials, dependencies = {}) {
   if (!enabled(dependencies.env || process.env)) fail('workspace_optimization_disabled');
-  // Read permission is not mutation permission. No local-token fallback while the typed writer is pending.
-  if (credentials.deliveryMode === 'broker') fail('workspace_optimization_service_pending');
+  // Only the run-bound executor capability may cross the separate writer boundary.
+  if (credentials.deliveryMode === 'broker') {
+    if (typeof credentials.brokerExecution?.apply !== 'function') fail('workspace_optimization_service_pending');
+    return credentials.brokerExecution.apply(verifyChange(change));
+  }
   const mutation = providerMutation(change);
   if (change.reference.provider === 'meta_ads') {
     const write = dependencies.metaWrite || require('../lib/metaClient').metaUpdateAdvertisingResource;

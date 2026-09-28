@@ -46,7 +46,7 @@ function setup(t) {
     adGroupId: kind === 'pause_ad' ? '50' : null, baselineAdId: kind === 'pause_ad' ? '61' : null,
     before: kind === 'pause_ad' ? 'ENABLED' : kind === 'manual_cpc' ? '1500000' : C.ratioKind(kind) ? '4' : '20000000',
     after: kind === 'pause_ad' ? 'PAUSED' : kind === 'manual_cpc' ? '1425000' : C.ratioKind(kind) ? '3.8' : kind === 'daily_budget' ? '19000000' : '21000000' });
-  return { ...f, state, keys, readerKeys: f.keys, principal, http, command, execute, input, reset, getStore: () => store, getBroker: () => broker,
+  return { ...f, state, readState: f.state, keys, readerKeys: f.keys, principal, http, command, execute, input, reset, getStore: () => store, getBroker: () => broker,
     fork() { const other = new BrokerStore(f.filename); const peer = build(other); t.after(() => other.close());
       return { execute: value => send(peer, value), store: other }; },
     status: async executionId => (await execute(command('status', { executionId }))).data,

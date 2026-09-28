@@ -2,9 +2,10 @@
 
 ## Estado 2026-09-28
 
-Motor y contratos preparados en fuente DEV, con pruebas ficticias de transporte,
-HTTPS, firma, SQLite y auditoria. **No instalado ni conectado al ejecutor CRM.**
-El bloqueo `workspace_optimization_service_pending` del ejecutor se conserva.
+Motor, cliente tipado y ejecutor CRM conectados en fuente DEV, con pruebas
+ficticias de transporte, HTTPS, firma, SQLite y auditoria. **No instalado ni
+habilitado para cuentas reales.** Sin configuracion/permiso escritor independiente
+el ejecutor conserva `workspace_optimization_service_pending` antes de enviar.
 No se han creado permisos/configuraciones reales, migrado credenciales, abierto
 gates, reiniciado servicios ni llamado a Google, Meta o AWS.
 
@@ -30,6 +31,21 @@ El principal y la clave de firma de apply/status deben ser distintos de los de
 lectura/control. No basta otro keyId con la misma clave. Los grants siguen siendo
 por clinica, conexion, activo y operacion. Una cuenta nueva descubierta por el
 lector nunca se incorpora automaticamente a esta lista de escritura.
+
+El consumidor CRM carga el cliente escritor de forma diferida, exclusivamente
+con `GOOGLE_ADS_OPTIMIZATION_BROKER_ENABLED=true` y las variables de prefijo
+`GOOGLE_ADS_OPTIMIZATION_BROKER_`: `ORIGIN`, `AUDIENCE`, `KEY_ID`, `KEY_FILE`,
+`CA_FILE`. Tambien exige la identidad configurada del lector
+`GOOGLE_ADS_BROKER_KEY_ID/KEY_FILE` para rechazar la misma clave criptografica,
+aunque tenga otro nombre/ruta. Ficheros privados y validacion TLS existentes;
+ninguna variable contiene tokens del proveedor. Conserva los gates generales
+`CAMPAIGN_WORKSPACE_ACTIVATION_ENABLED` y `CAMPAIGN_WORKSPACE_OPTIMIZATION_ENABLED`.
+No se ha configurado ninguna de estas nuevas variables en runtime.
+
+La identidad del escritor liga origen, audiencia, keyId, clave publica y CA.
+Cambiarla no permite recuperar un intento anterior como si fuera el mismo
+escritor. Un cambio de ficheros de clave requiere reinicio controlado, como el
+lector actual; no hay rotacion implicita ni alternancia automatica de claves.
 
 ## Comando acotado
 
@@ -92,18 +108,44 @@ corte. No borrar filas/locks para reintentar. El futuro reconciliador debera
 contrastar estado/historial, conservar el executionId original y auditar una
 resolucion autorizada. Una lectura coincidente por si sola no atribuye autoria.
 
+## Integracion con el ejecutor CRM
+
+`googleAdsOptimizationBrokerClient.service` acepta solo apply/status y proyecta
+recibos acotados. `campaignWorkspaceOptimizationBrokerExecution.service` crea
+una capacidad privada ligada a un run y a su grant opaco original. Antes de
+preparar envio consulta status sin secretos; una identidad ya utilizada exige
+revision, no se reutiliza como un nuevo intento.
+
+Se conservan ACL, clinica, seleccion, mandato, lease, recepcion comprobada,
+evidencia madura y baseline especifica CPA/ROAS mediante lectores tipados.
+Presupuestos siguen recopilando todas las campanas seleccionadas y reservando
+contabilidad mensual en transaccion. El cap diario del broker no la sustituye.
+
+La misma transaccion CRM confirma `submitted_at`, la reserva mensual cuando
+corresponde y `outcome.broker_submission`: version 1, huella de autoridad y
+payload inmutable (incluido executionId original y caducidad). Reutiliza el JSON
+existente, sin nueva migracion SQL. No contiene secretos ni se publica en el DTO
+del historial. El cliente exige commit confirmado antes de enviar apply y
+comprueba grant/mandato/lease/autoridad antes y despues del transporte y en la
+transaccion final. Un marcador broker no puede cargar tokens legacy aunque
+durante la recuperacion cambie el modo de conexion.
+
+Perdida del acuse SQL: no se envia. Perdida del acuse del consumidor: status
+puede recuperar el recibo aplicado, y solo con readback coincidente se confirma
+verified. Status unknown/not_found nunca repite apply ni acredita autoria,
+aunque el valor deseado pueda leerse. El marcador se conserva ante errores,
+revocacion y recuperacion denegada. El cierre manual antiguo del CRM esta
+bloqueado para estos intentos: no puede liberar el lock desconocido del broker.
+
 ## Responsabilidades pendientes y limites
 
-- Integrar el cliente escritor con identidad separada en el ejecutor actual;
-  hoy `credentialsFor`/`mutateOptimizationChange` NO lo usan.
-- Conservar grant original, mandato/ACL/seleccion, lease, recepcion, evidencia
-  madura o recomendacion CPA/ROAS vigente y su relectura final. Un UUID y una
-  huella no demuestran al broker que esa evidencia exista en el CRM.
-- Mantener la contabilidad mensual de todas las campanas seleccionadas y su
-  reserva transaccional antes de enviar. El limite diario del broker NO sustituye
-  la previsibilidad mensual ni el presupuesto autorizado por el usuario.
-- Persistir el mismo executionId y payload antes del envio CRM, conciliar los
-  acuses y hacer readback tipado. Probar revocacion/rebind durante toda la ruta.
+- Implementar conciliacion autorizada de intentos desconocidos, con trazabilidad
+  CRM/broker; no resolverlos borrando filas ni usando otra clave/UUID.
+- Publicacion compatible y QA real siguen pendientes. No basta instalar este
+  codigo: hacen falta principal/clave/grants propios expresamente autorizados.
+- La evidencia de negocio se verifica en CRM. Un UUID y una huella no demuestran
+  por si solos al broker que esa evidencia exista; no abrir un proxy generico
+  ni permitir que la interfaz construya comandos arbitrarios.
 - La metadata releida no es un compare-and-swap del proveedor: terceros pueden
   editar en el intervalo entre lectura y escritura. No se promete exclusion
   atomica frente a Ads Manager u otras aplicaciones.
@@ -115,6 +157,12 @@ preflight, TTL, revocacion, error/acuse perdido, SQLite reabierto, concurrencia
 entre conexiones, precision decimal sin redondeo, cooldown, firma y runtime HTTPS local. Google/AWS ficticios;
 no es validacion con la cuenta Dental - Parallel Campaign. Evidencia y regresion
 completa en el corte correspondiente de `campaign-workspace-implementation.md`.
+
+El corte de integracion CRM anade pruebas de las siete clases con el ejecutor,
+reserva mensual, grants, firma y SQLite; modelos CRM/proveedores ficticios. La
+regresion final suma 1.279 pruebas backend y 866 broker correctas. HTTPS local confirma que
+conflicto, caducidad y cooldown llegan al CRM como codigos acotados, sin detalle
+del proveedor. Los controles nuevos no cambian permisos ni configuracion activa.
 
 La construccion REST sigue los [ejemplos oficiales de Google Ads](https://developers.google.com/google-ads/api/rest/examples):
 actualizaciones con mascara explicita y operaciones sin fallos parciales. La

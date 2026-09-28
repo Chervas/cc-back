@@ -29,7 +29,12 @@ test('actual isolated optimization HTTPS runtime requires its own key and preser
   await assert.rejects(reader.execute(f.command('apply', input)), { code: 'scope_denied' });
   await assert.rejects(writer.execute(f.command('status', { executionId: input.executionId }, { operation: ads.PREFIX + 'account.read.v1', payload: { pageToken: null } })), { code: 'scope_denied' });
   assert.equal(f.state.sdk.length, 0); assert.equal(f.state.calls.length, 0);
+  await assert.rejects(writer.execute(f.command('apply', { ...f.input(), expiresAt: Date.now() - 1 })), { code: 'optimization_expired' });
+  await assert.rejects(writer.execute(f.command('apply', { ...f.input('manual_cpc'), before: '1600000', after: '1520000' })), { code: 'optimization_conflict' });
+  assert.equal(f.state.writes, 0);
   const value = (await writer.execute(f.command('apply', input))).data; assert.equal(value.state, 'applied'); assert.equal(f.state.writes, 1);
+  await assert.rejects(writer.execute(f.command('apply', f.input())), { code: 'optimization_cooldown' });
+  assert.equal(f.state.writes, 1);
   const secretReads = f.state.sdk.length;
   assert.deepEqual((await writer.execute(f.command('status', { executionId: input.executionId }))).data, value);
   assert.equal(f.state.sdk.length, secretReads);

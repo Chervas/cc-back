@@ -22,6 +22,10 @@ const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 function reason(error) {
   if (/^workspace_optimization_[a-z_]{1,80}$/.test(error?.code || '')) return error.code;
+  const writerErrors = { optimization_conflict: 'workspace_optimization_resource_changed', optimization_expired: 'workspace_optimization_evidence_stale',
+    optimization_busy: 'workspace_optimization_manual_review_required', optimization_cooldown: 'workspace_optimization_cooldown',
+    outcome_unknown: 'workspace_optimization_manual_review_required', idempotency_conflict: 'workspace_optimization_plan_changed' };
+  if (Object.hasOwn(writerErrors, error?.code)) return writerErrors[error.code];
   const googleError = googleDestinationAccessError(error);
   if (googleError === 'workspace_google_service_pending' || error?.code === 'workspace_google_service_pending') return 'workspace_optimization_service_pending';
   if (googleError === 'workspace_google_permissions_required') return 'workspace_optimization_permissions_required';
@@ -190,20 +194,25 @@ async function reserve(payload, job, deps) {
   });
 }
 
-async function finish(run, token, state, outcome, deps, brokerGrant = null) {
+async function finish(run, token, state, outcome, deps, brokerGrant = null, brokerExecution = null) {
   const models = model(deps);
   return models.sequelize.transaction(async transaction => {
     if (brokerGrant && ['verified', 'observed'].includes(state)) await readbackContext(run, token, brokerGrant, deps, transaction);
     const row = await models.CampaignWorkspaceOptimizationRun.findByPk(run.id, query(transaction));
     if (!row || row.lease_token !== token) fail('workspace_optimization_lease_changed');
     if (['verified', 'observed'].includes(state)) samePlan(row, run);
+    if (['verified', 'observed'].includes(state) && row.outcome?.broker_submission) {
+      if (!brokerExecution) fail('workspace_optimization_connection_changed');
+      await brokerExecution.assert(row.outcome.broker_submission, transaction, true);
+    }
     // A transaction can commit even if its acknowledgement is lost. Trust the durable marker, not a local flag.
     if (row.submitted_at && ['queued', 'skipped'].includes(state)) {
       state = 'uncertain';
       outcome = { ...outcome, submission_reserved: true };
     }
     // Budget reservations remain part of the durable receipt, including an uncertain provider outcome.
-    const savedOutcome = row.outcome?.budget_accounting ? { ...outcome, budget_accounting: row.outcome.budget_accounting } : outcome;
+    const savedOutcome = { ...outcome, ...(row.outcome?.budget_accounting ? { budget_accounting: row.outcome.budget_accounting } : {}),
+      ...(row.outcome?.broker_submission ? { broker_submission: row.outcome.broker_submission } : {}) };
     await row.update({ status: state, outcome: savedOutcome, lease_token: null, lease_until: null,
       completed_at: TERMINAL.includes(state) ? now(deps) : null,
       next_check_at: TERMINAL.includes(state) ? null : nextCheck(row.recovery_attempts, now(deps)) }, { transaction });
@@ -229,26 +238,31 @@ async function credentialsFor(authorization, deps, reservation) {
   if (context.grant.brokerGrant) {
     const current = transaction => readbackContext(reservation.run, reservation.token, context.grant.brokerGrant, deps, transaction);
     await current();
-    return { deliveryMode: 'broker', readSection: async (section, timeoutMs) => {
+    const readSection = family => async (section, timeoutMs) => {
       const deadline = Date.now() + timeoutMs;
       const runtime = await current(); const remaining = deadline - Date.now();
       if (remaining < 1000) fail('workspace_optimization_timeout');
-      const rows = await runtime.broker.read(runtime.account, runtime.brokerContext, 'optimization',
+      const rows = await runtime.broker.read(runtime.account, runtime.brokerContext, family,
         { campaignId: context.reference.campaign_id, section }, { timeoutMs: remaining, beforeExecute: () => current() });
       await current();
       if (Date.now() >= deadline) fail('workspace_optimization_timeout');
       return rows;
-    } };
+    };
+    const brokerExecution = require('./campaignWorkspaceOptimizationBrokerExecution.service').createOptimizationBrokerExecution({
+      run: reservation.run, current, now: () => now(deps),
+      loadRun: transaction => model(deps).CampaignWorkspaceOptimizationRun.findByPk(reservation.run.id, query(transaction)),
+    });
+    return { deliveryMode: 'broker', readSection: readSection('optimization'), readTargetsSection: readSection('optimization_targets'), brokerExecution };
   }
   const token = await (deps.ensureToken || ensureGoogleConnectionAccessToken)(connection, { requiredScopes: [GOOGLE_ADS_SCOPE] });
   return { accessToken: token.accessToken, loginCustomerId: context.grant.loginCustomerId };
 }
 
-async function markSubmitted(run, token, deps, accounting = null) {
+async function markSubmitted(run, token, deps, accounting = null, broker = null) {
   const models = model(deps);
   return models.sequelize.transaction(async transaction => {
     if (!enabled(deps.env || process.env)) fail('workspace_optimization_disabled');
-    const authorization = await authorize(run, deps, transaction);
+    const authorization = await authorize(run, deps, transaction, broker?.grant);
     const fresh = await models.CampaignWorkspaceOptimizationRun.findByPk(run.id, query(transaction));
     if (!fresh || fresh.lease_token !== token || fresh.status !== 'leased' || fresh.submitted_at || +new Date(fresh.lease_until) <= +now(deps)) fail('workspace_optimization_lease_changed');
     samePlan(fresh, run);
@@ -261,8 +275,13 @@ async function markSubmitted(run, token, deps, accounting = null) {
     if (!enabled(deps.env || process.env)) fail('workspace_optimization_disabled');
     if (+new Date(fresh.lease_until) <= +now(deps)) fail('workspace_optimization_lease_changed');
     evidenceSnapshot(fresh.evidence, now(deps), fresh.change.target.action, fresh.change);
+    if (broker) {
+      await broker.execution.assert(broker.submission, transaction);
+      if (+now(deps) >= broker.submission.payload.expiresAt) fail('workspace_optimization_evidence_stale');
+    }
     await fresh.update({ status: 'submitted', submitted_at: now(deps), lease_until: new Date(+now(deps) + LEASE_MS),
-      ...(budget ? { outcome: { ...fresh.outcome, budget_accounting: budget } } : {}) }, { transaction });
+      ...((budget || broker) ? { outcome: { ...fresh.outcome, ...(budget ? { budget_accounting: budget } : {}),
+        ...(broker ? { broker_submission: broker.submission } : {}) } } : {}) }, { transaction });
   });
 }
 
@@ -286,9 +305,23 @@ async function runOptimizationAdjustmentJob(payload, job, deps = {}) {
     const { run, token, authorization } = reservation;
     if (reservation.terminal) return { status: 'completed', result: { run_id: run.id, state: run.status, idempotent: true } };
     submitted = !!run.submitted_at;
+    const brokerGrant = authorization.context.grant.brokerGrant;
+    // A durable broker attempt must never load or refresh legacy credentials during recovery.
+    if (run.outcome?.broker_submission && !brokerGrant) fail('workspace_optimization_connection_changed');
     const credentials = await credentialsFor(authorization, deps, reservation);
+    if (run.outcome?.broker_submission && credentials.deliveryMode !== 'broker') fail('workspace_optimization_connection_changed');
+    const revalidate = () => authorize(run, deps, null, brokerGrant);
+    const recovered = submitted && run.outcome?.broker_submission && credentials.deliveryMode === 'broker'
+      ? await credentials.brokerExecution.status() : null;
     const read = deps.read || readOptimizationValue;
     const value = await read(run.change, credentials, deps.providerDependencies);
+    if (recovered) {
+      if (recovered.state === 'applied' && desiredState(run.change, value)) return await finish(run, token, 'verified', {
+        reason: 'provider_change_verified', provider_mutation: true, acknowledged: true, recovered: true,
+      }, deps, brokerGrant, credentials.brokerExecution);
+      return await finish(run, token, 'uncertain', { reason: 'workspace_optimization_manual_review_required',
+        provider_mutation: false, broker_state: recovered.state, desired_state_observed: desiredState(run.change, value) }, deps);
+    }
     if (desiredState(run.change, value)) {
       await authorize(run, deps, null, authorization.context.grant.brokerGrant);
       return await finish(run, token, 'observed', { reason: 'desired_state_observed', provider_mutation: false }, deps, authorization.context.grant.brokerGrant);
@@ -296,31 +329,39 @@ async function runOptimizationAdjustmentJob(payload, job, deps = {}) {
     // A submitted marker survives a crash before/after HTTP. Never replay that write.
     if (submitted) return await finish(run, token, 'uncertain', { reason: 'workspace_optimization_manual_review_required', provider_mutation: false }, deps);
     if (deps.readOnly) fail('workspace_optimization_job_mismatch');
-    if (credentials.deliveryMode === 'broker') fail('workspace_optimization_service_pending');
+    if (credentials.deliveryMode === 'broker') await credentials.brokerExecution.ready();
     const inspection = await (deps.inspect || inspectOptimizationChange)(run.change, credentials, deps.providerDependencies);
     require('./campaignWorkspaceAdPausePolicy.service').assertPauseBaseline(inspection, run.evidence, run.change);
     if (run.evidence.schema_version === 5) await require('./campaignWorkspaceTargetBidPolicy.service').assertTargetBidBaseline({
-      evidence: run.evidence, change: run.change, credentials, now: () => now(deps), clock: deps.targetDependencies?.clock,
+      evidence: run.evidence, change: run.change,
+      credentials: credentials.deliveryMode === 'broker' ? { ...credentials, readSection: credentials.readTargetsSection } : credentials,
+      now: () => now(deps), clock: deps.targetDependencies?.clock,
       read: options => require('../lib/googleAdsSearchRows').googleAdsSearchRows({ ...options, request: async (...args) => {
-        await authorize(run, deps);
+        await revalidate();
         const result = await (deps.targetDependencies?.googleRequest || require('../lib/googleAdsClient').googleAdsRequest)(...args);
-        await authorize(run, deps); return result;
+        await revalidate(); return result;
       } }),
     });
     const accounting = run.change.target.action === 'adjust_budget'
       ? await require('./campaignWorkspaceBudgetAccounting.service').collectBudgetAccounting({ models: model(deps), run, authorization },
-        { now: () => now(deps), ...deps.budgetDependencies, revalidate: () => authorize(run, deps) }) : null;
-    const current = await authorize(run, deps);
+        { now: () => now(deps), ...deps.budgetDependencies, revalidate }) : null;
+    const current = await revalidate();
     if (current.context.grant.connection.id !== authorization.context.grant.connection.id) fail('workspace_optimization_connection_changed');
-    await markSubmitted(run, token, deps, accounting); submitted = true;
+    const broker = credentials.deliveryMode === 'broker' ? { execution: credentials.brokerExecution, grant: brokerGrant,
+      submission: await credentials.brokerExecution.prepare() } : null;
+    await markSubmitted(run, token, deps, accounting, broker); submitted = true;
     let receipt; let failure;
     try { receipt = await (deps.mutate || mutateOptimizationChange)(run.change, credentials, { ...deps.providerDependencies, env: deps.env || process.env }); }
     catch (error) { failure = error; }
-    await authorize(run, deps);
+    await revalidate();
     const observed = await read(run.change, credentials, deps.providerDependencies);
+    if (broker && !receipt?.acknowledged) return await finish(run, token, 'uncertain', {
+      reason: failure ? reason(failure) : 'workspace_optimization_response_unconfirmed', provider_mutation: true,
+      desired_state_observed: desiredState(run.change, observed),
+    }, deps);
     if (desiredState(run.change, observed)) return await finish(run, token, receipt?.acknowledged ? 'verified' : 'observed', {
       reason: receipt?.acknowledged ? 'provider_change_verified' : 'desired_state_observed', provider_mutation: true, acknowledged: receipt?.acknowledged === true,
-    }, deps);
+    }, deps, brokerGrant, credentials.brokerExecution);
     return await finish(run, token, 'uncertain', { reason: failure ? reason(failure) : 'workspace_optimization_response_unconfirmed', provider_mutation: true }, deps);
   } catch (error) {
     const code = reason(error);
@@ -372,7 +413,8 @@ async function recoverOptimizationRun(runId, deps = {}) {
       const retry = RETRYABLE.includes(denied) && attempts < RECOVERY_DELAYS.length;
       await run.update({ status: run.submitted_at ? 'uncertain' : retry ? 'queued' : 'skipped',
         outcome: { reason: denied, provider_mutation: false, submission_reserved: !!run.submitted_at,
-          ...(run.outcome?.budget_accounting ? { budget_accounting: run.outcome.budget_accounting } : {}) },
+          ...(run.outcome?.budget_accounting ? { budget_accounting: run.outcome.budget_accounting } : {}),
+          ...(run.outcome?.broker_submission ? { broker_submission: run.outcome.broker_submission } : {}) },
         lease_token: null, lease_until: null, recovery_attempts: attempts,
         next_check_at: retry ? nextCheck(attempts, now(deps)) : null,
         completed_at: !run.submitted_at && !retry ? now(deps) : null }, { transaction });

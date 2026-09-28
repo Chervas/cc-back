@@ -96,6 +96,13 @@ test('manual review is scoped, confirmed, versioned, audited and idempotent with
   assert.equal(f.state.events.length, 1);
   const dto = (await f.load()).rows[0]; assert.equal(dto.canResolve, false); assert.match(dto.detail, /No se aplicaron cambios/);
 });
+test('an uncertain broker attempt cannot be dismissed locally or expose its private submission', async () => {
+  const f = fixture(); f.row.outcome = { broker_submission: { authority: 'private-writer-authority', payload: { executionId: f.row.id } } };
+  const result = await f.load(); assert.equal(result.rows[0].canResolve, false);
+  assert.doesNotMatch(JSON.stringify(result), /broker_submission|private-writer-authority|executionId/);
+  await assert.rejects(f.resolve(), { code: 'workspace_optimization_broker_reconciliation_required' });
+  assert.equal(f.state.rows[0].status, 'uncertain'); assert.equal(f.state.setting.version, 4); assert.equal(f.state.events.length, 0);
+});
 test('resolution rejects changed revisions, foreign owners, changed scope and revoked permissions', async () => {
   for (const [mutate, code] of [
     [f => { f.row.setting_id = 'other'; }, 'workspace_optimization_run_not_found'],
