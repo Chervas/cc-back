@@ -57,9 +57,10 @@ function daysBefore(now, days) {
   return new Date(Date.parse(today + 'T12:00:00Z') - days * 86400000).toISOString().slice(0, 10);
 }
 
-async function seed(connection, filename, now = new Date()) {
+async function seed(connection, filename, now = new Date(), scenario = 'standard') {
+  assert.ok(['standard', 'report'].includes(scenario), 'UNKNOWN_FIXTURE_SCENARIO');
   const fd = fs.openSync(filename, 'wx', 0o600);
-  const manifest = { version: 1, marker: MARKER, account: ACCOUNT, createdAt: now.toISOString(), state: 'preparing', rows: [] };
+  const manifest = { version: 1, marker: MARKER, account: ACCOUNT, scenario, createdAt: now.toISOString(), state: 'preparing', rows: [] };
   const persist = () => { const data = JSON.stringify(manifest, null, 2); fs.ftruncateSync(fd); fs.writeSync(fd, data, 0, 'utf8'); fs.fsyncSync(fd); };
   const observed = sqlTime(now); let committed = false;
   try {
@@ -85,11 +86,17 @@ async function seed(connection, filename, now = new Date()) {
       { id: '999990092802', name: 'QA FICTICIA - Sin nuevos leads', cost: 4, previous: 4, state: 'ENABLED' },
       { id: '999990092803', name: 'QA FICTICIA - En pausa', cost: 0, previous: 0, state: 'PAUSED' },
     ];
+    if (scenario === 'report') for (let number = 4; number <= 15; number++) campaigns.push({
+      id: ACCOUNT + String(number).padStart(2, '0'), name: 'QA FICTICIA - Inventario ' + String(number).padStart(2, '0'),
+      state: number % 2 ? 'ENABLED' : 'PAUSED', inventoryOnly: true,
+    });
     const timestamps = { created_at: observed, updated_at: observed };
     for (const campaign of campaigns) {
       await insert('ExternalCampaignInventories', { provider: 'google_ads', customer_id: ACCOUNT, campaign_id: campaign.id,
         campaign_name: campaign.name, account_name: 'QA FICTICIA - DEV aislado', status: campaign.state, channel_type: 'SEARCH',
         source: MARKER, last_seen_at: observed, destination_detection: JSON.stringify({ kind: 'web', urls: ['https://campaign-qa.invalid/primera-visita'], fixture: MARKER }) });
+      // Additional inventory has no observed investment; the UI must not invent zeros.
+      if (campaign.inventoryOnly) continue;
       for (let ad = 1; ad <= 2; ad++) {
         await insert('GoogleAdsAdInventory', { clinicGoogleAdsAccountId: mapping, customerId: ACCOUNT, campaignId: campaign.id,
           campaignName: campaign.name, campaignStatus: campaign.state, adGroupId: campaign.id + '1', adGroupName: 'QA FICTICIA - Grupo',
@@ -244,10 +251,10 @@ async function captureDrafts(connection, filename) {
 async function main() {
   assert.equal(process.env.CC_QA_ISOLATED_CAMPAIGN_WRITES, MARKER, 'EXPLICIT_ISOLATED_FIXTURE_OPT_IN_REQUIRED');
   const [action, filename, ...rest] = process.argv.slice(2);
-  assert.ok(['seed', 'capture-drafts', 'cleanup'].includes(action) && !rest.length, 'USE_SEED_CAPTURE_DRAFTS_OR_CLEANUP_WITH_MANIFEST');
+  assert.ok(['seed', 'seed-report', 'capture-drafts', 'cleanup'].includes(action) && !rest.length, 'USE_SEED_CAPTURE_DRAFTS_OR_CLEANUP_WITH_MANIFEST');
   manifestPath(filename); runtimeSafety();
   const connection = await connectOperatorDatabase('dev');
-  try { console.log(JSON.stringify(await (action === 'seed' ? seed(connection, filename)
+  try { console.log(JSON.stringify(await (action === 'seed' || action === 'seed-report' ? seed(connection, filename, new Date(), action === 'seed-report' ? 'report' : 'standard')
     : action === 'capture-drafts' ? captureDrafts(connection, filename) : cleanup(connection, filename)))); }
   finally { await connection.end(); }
 }

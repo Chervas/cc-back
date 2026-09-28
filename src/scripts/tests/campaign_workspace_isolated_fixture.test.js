@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { MARKER, ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, cleanup, validateDraftCapture } = require('../qa/campaign-workspace-isolated-fixture');
+const { MARKER, ACCOUNT, assertClosed, assertDatabase, digest, daysBefore, manifestPath, seed, cleanup, validateDraftCapture } = require('../qa/campaign-workspace-isolated-fixture');
 
 test('isolated QA refuses business workers or activation, including absent worker-off flags', () => {
   const closed = { JOBS_WORKER_ENABLED: 'false', JOBS_CRON_LEADER: 'false' };
@@ -33,6 +33,29 @@ test('fingerprints ignore SQL JSON key order, not changed values', () => {
 test('fixture uses completed Madrid days even around UTC midnight', () => {
   assert.equal(daysBefore(new Date('2026-09-28T23:30:00Z'), 1), '2026-09-28');
   assert.equal(daysBefore(new Date('2026-09-28T12:00:00Z'), 60), '2026-07-30');
+});
+
+test('report fixture adds only bounded inventory without fabricated investment or credentials', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-campaign-fixture-test-')); const file = path.join(dir, 'manifest.json');
+  const rows = []; let last;
+  const connection = { beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, query: async (sql, values) => {
+    if (sql.includes('DATABASE() db')) return [[{ db: 'clinicaclick_dev_isolated', db_user: 'cc_dev_api@localhost' }]];
+    if (sql.includes('FROM Clinicas')) return [[{ nombre_clinica: 'Clinica ficticia DEV' }]];
+    if (sql.includes('COUNT(*)')) return [[{ n: 0 }]];
+    if (sql.startsWith('INSERT')) { rows.push({ table: values[0], row: values[1] }); last = { id: rows.length, ...values[1] }; return [{ insertId: rows.length }]; }
+    if (sql.startsWith('SELECT *')) return [[last]];
+    assert.fail('Unexpected SQL');
+  } };
+  try {
+    const result = await seed(connection, file, new Date('2026-09-28T06:00:00Z'), 'report');
+    assert.equal(result.rows, 719); assert.equal(result.campaigns, 15);
+    assert.equal(rows.filter(r => r.table === 'ExternalCampaignInventories').length, 15);
+    assert.equal(rows.filter(r => r.table === 'GoogleAdsInsightsDaily').length, 180);
+    const conn = rows.find(r => r.table === 'GoogleConnections').row;
+    assert.equal(conn.accessToken, null); assert.equal(conn.refreshToken, null); assert.equal(conn.userId, null);
+    assert.equal(JSON.parse(fs.readFileSync(file)).scenario, 'report');
+    await assert.rejects(seed(connection, file, new Date(), 'unbounded'), /UNKNOWN_FIXTURE_SCENARIO/);
+  } finally { fs.rmSync(dir, { recursive: true }); }
 });
 
 test('manifest requires a private owned directory and a bounded location', () => {
