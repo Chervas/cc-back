@@ -62,6 +62,24 @@ test('identical preferences are idempotent, and stale versions or revoked accoun
   h.state.mapped = false;
   await assert.rejects(h.run({ ...input(), expected_version: 2 }), /workspace_account_not_mapped/);
 });
+test('persisted JSON ordering preserves preferences, live activation and technical evidence on an identical save', async () => {
+  for (const mode of ['measurement', 'optimize']) {
+    const h = harness(); const body = input(); body.preferences.mode = mode;
+    if (mode === 'optimize') body.preferences.optimization = {
+      actions: ['adjust_bids', 'pause_underperforming_ads'], budget_changes: false, monthly_limit_cents: null,
+    };
+    await h.run(body); const saved = h.state.row.preferences;
+    h.state.row.preferences = { optimization: saved.optimization ? {
+      max_budget_change_pct: 10, monthly_limit_cents: null, budget_changes: false, actions: saved.optimization.actions,
+    } : null, signals: { events: saved.signals.events, enabled: saved.signals.enabled }, mode, schema_version: 1 };
+    const proof = h.state.row.signal_preparation = { google_ads: { checked: true } };
+    const activation = structuredClone(h.state.row.activation);
+    const result = await h.run({ ...body, expected_version: 2 });
+    assert.equal(result.changed, false); assert.equal(result.configuration.version, 2);
+    assert.equal(h.state.writes.length, 1); assert.equal(h.state.audits.length, 1);
+    assert.equal(h.state.row.signal_preparation, proof); assert.deepEqual(h.state.row.activation, activation);
+  }
+});
 test('new group members require fresh scope authorization before saving', async () => {
   const h = harness(); h.state.members.push({ id_clinica: 2 });
   await assert.rejects(h.run(input(), { groupId: 1, clinicIds: [1] }), /workspace_scope_changed/);

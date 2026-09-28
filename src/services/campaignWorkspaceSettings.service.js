@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { isDeepStrictEqual } = require('node:util');
 const Ajv = require('ajv');
 
 const validate = new Ajv({ allErrors: true }).compile({
@@ -74,7 +75,7 @@ async function saveWorkspaceAccounts({ models, scope, actorId, input, loadInvent
     if (Number(current?.version || 0) !== input.expected_version) throw workspaceError('workspace_version_conflict');
     const inventory = await loadInventory({ models, scope, transaction });
     const accounts = validateAccountSelection(input, inventory, current);
-    if (current && JSON.stringify(canonicalAccounts(current.accounts || [])) === JSON.stringify(accounts)) {
+    if (current && isDeepStrictEqual(canonicalAccounts(current.accounts || []), accounts)) {
       return { success: true, changed: false, configuration: publicSettings(current, scope) };
     }
     const previous = current?.accounts || [];

@@ -69,6 +69,15 @@ test('saving an unchanged selection is idempotent and does not create audit nois
   assert.equal(result.changed, false); assert.equal(result.configuration.version, 3);
   assert.equal(h.calls.some(([kind]) => kind === 'create' || kind === 'audit'), false);
 });
+test('MySQL JSON key order does not invalidate evidence or increment an unchanged selection', async () => {
+  const proof = { google_ads: { checked: true } };
+  const current = { id: '1', version: 3, signal_preparation: proof,
+    accounts: [{ campaign_ids: ['42'], include_future: true, account_id: '1234', provider: 'google_ads' }],
+    update: () => assert.fail('Reordered JSON is not a setting change') };
+  const h = harness(current); const result = await h.save({ ...input, expected_version: 3 });
+  assert.equal(result.changed, false); assert.equal(result.configuration.version, 3);
+  assert.equal(current.signal_preparation, proof); assert.equal(h.calls.some(([kind]) => kind === 'audit'), false);
+});
 test('no selected accounts excludes campaigns without changing provider configurations', () => {
   assert.equal(campaignIncluded(campaign, { accounts: [] }), false);
 });

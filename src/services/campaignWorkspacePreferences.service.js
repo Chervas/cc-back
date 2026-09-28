@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { isDeepStrictEqual } = require('node:util');
 const Ajv = require('ajv');
 const { settingScope, publicSettings, validateAccountSelection } = require('./campaignWorkspaceSettings.service');
 
@@ -56,7 +57,7 @@ async function saveWorkspacePreferences({ models, scope, actorId, input, loadInv
     if (preferences.optimization?.actions.includes('negative_keywords') && !setting.accounts.some(account => account.provider === 'google_ads')) {
       fail('workspace_google_account_required');
     }
-    if (JSON.stringify(setting.preferences) === JSON.stringify(preferences)) return { success: true, changed: false, configuration: publicSettings(setting, scope) };
+    if (isDeepStrictEqual(setting.preferences, preferences)) return { success: true, changed: false, configuration: publicSettings(setting, scope) };
     const previous = setting.preferences || null;
     const version = Number(setting.version) + 1;
     // Saving a draft cannot alter live senders, conversion targets, optimization policies or advertising.

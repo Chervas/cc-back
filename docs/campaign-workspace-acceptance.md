@@ -27,7 +27,7 @@ lectura cacheada no acredita recepcion real ni entrega a un proveedor.
 | Requisito | Fuente / evidencia disponible | Lo necesario antes de cerrarlo |
 |---|---|---|
 | Hub y objetivo conservados, breadcrumb unico y retorno al origen | Rutas/componentes productivos; `campaign_canonical_navigation.test.js`; QA anterior documentada | Repetir navegacion autenticada del build instalado, Atras/Adelante, reload y tres anchos |
-| Inicio simple: conectar, preparar, revisar | `campaign-workspace.component` y endpoints configuration/preparation/activation; tests de comandos/lifecycle | Recorrido integrado desde cuenta vacia hasta resumen con fixtures DEV, cancelar/volver sin perder origen |
+| Inicio simple: conectar, preparar, revisar | `campaign-workspace.component` y endpoints configuration/preparation/activation; recorrido HTTP/MySQL aislado desde vacio a resumen, 28 peticiones, transacciones reales | Repetir recorrido visual autenticado del candidato DEV; cancelar/volver sin perder origen. El fixture SQL no prueba OAuth, instalacion en web o envio de formularios |
 | Google/Meta, cuentas e incorporacion | WorkspaceSettings/SharedAccount/Assignment; tests de seleccion, scope y cuentas compartidas. Google: descubrimiento tipado Search/PMax -> inventario -> seleccion real probado con fixtures; nueva campana -> lead CRM sin campana local ni emparejado | Repetir el recorrido integrado con sesion DEV y comprobar la excepcion compartida en UI. Las pruebas aisladas no acreditan sincronizacion/recepcion del proveedor real. OAuth real no se ejecuta en DEV ni reactiva Meta |
 | Web, privacidad y formularios | Preparacion web reutilizable; WorkspaceReception/GoogleDestination/NativeReception; tests web/reception/destinos | Recorrer instalar/comprobar/cancelar y recibir un formulario sintetico por el circuito autorizado. Un check de metadata no prueba entrega |
 | Medicion de interesados y senales separadas de ajustes | WorkspacePreferences/SignalAuthorization/Activation; dialogos Google/Meta y tests de autorizacion | Confirmacion por destino/hito, retirada y recibo trazable en entorno autorizado; sin envios reales durante QA visual |
@@ -81,6 +81,45 @@ y `/tmp/cc-campaign-incorporation-broker-20260928.log`.
 Resultado: 1.295 pruebas de la suite canonica de campanas y 8 del contrato
 broker de sincronizacion, todas correctas. Estos conteos describen los archivos
 ejecutados en este corte, no sustituyen el alcance mas amplio del corte previo.
+
+## Ciclo Con Persistencia: 28/09
+
+`src/scripts/tests/campaign_workspace_lifecycle_mysql.integration.js` usa el
+MySQL temporal propio del fixture existente, sin TCP de BD ni sockets a otros
+servicios. Controladores HTTP, servicios, modelos, permisos por clinica,
+transacciones y lectura del informe reales. Autenticacion de prueba, observacion
+del proveedor, atestacion web y recibos son ficticios; no se fabrica sesion DEV.
+No se omiten los hooks de IntakeConfig ni se activan workers.
+El gate de activacion solo se abre en el proceso del fixture, nunca en el runtime DEV.
+
+- Vacio -> seleccion -> preferencias -> preparacion pendiente -> recibo SQL ->
+  revision nueva -> Medicion sin senales -> resumen con un lead y seis bloques.
+- Dos primeros guardados concurrentes producen una configuracion/un evento y
+  un conflicto409; releer y guardar sin cambios no incrementa la version.
+- Instalacion verificada sin recibo, evento sin lead y lead de otra clinica no
+  dan verde. Cambiar la evidencia invalida la revision que ya estaba abierta.
+- Nueva campana queda pendiente de preparacion; exclusion posterior se conserva.
+  Error de auditoria revierte el guardado completo; permiso revocado bloquea
+  nuevas lecturas/escrituras. Cero jobs y cero solicitudes a proveedores.
+- Detectado y corregido un fallo de idempotencia: MySQL puede reordenar claves
+  JSON. Las comparaciones de cuentas/preferencias ahora son estructurales, no
+  textuales, conservando version y pruebas tecnicas cuando no cambia el contenido.
+  Dos regresiones unitarias cubren orden distinto y ambos modos de preferencias.
+
+Evidencia final: 28 peticiones HTTP, siete grupos de comprobaciones correctos,
+`/tmp/cc-campaign-lifecycle-mysql-final-20260928.log` y
+`/tmp/cc-campaign-opt-mysql-veaZOQ/result.json`; mysqld temporal termina codigo0.
+Regresion canonica: 1.297 pruebas correctas, registro
+`/tmp/cc-campaign-lifecycle-regression-20260928.log`. Los datos temporales de
+estas ejecuciones se retiran tras comprobar sus procesos terminados; se
+conservan result.json y logs. No se borran copias ni evidencias anteriores.
+Los indices largos autogenerados de las tablas fixture se abrevian solo en la
+prueba; no es un test de migraciones ni se modifica el esquema de DEV/CRM.
+Comando reproducible, Node24 por compatibilidad del runtime:
+
+```bash
+CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/campaign_workspace_lifecycle_mysql.integration.js
+```
 
 ## Siguiente validacion
 
