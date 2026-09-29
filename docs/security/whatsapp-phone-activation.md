@@ -86,6 +86,11 @@ por WABA con su lease; Meta decide la aprobación. El alta conectada no garantiz
 que sus plantillas ya estén aprobadas. Los fallos del job conservan su recuperación
 habitual y no desencadenan envíos de prueba.
 
+El catálogo dinámico de activaciones sustituye el enlace base del mismo par
+`clinicId + assetId`; no se concatena como duplicado. Esto permite conservar el
+activo cuando Meta rota WABA/teléfono sin invalidar la configuración completa ni
+alterar los enlaces de otras clínicas.
+
 Las imágenes públicas de ejemplo se descargan en AWS con el identificador HTTP
 `Clinicaclick-Template-Media/1.0`. El CDN de medios devuelve 403 si falta esa
 cabecera. No se reenvían tokens al origen de la imagen ni se relajan HTTPS,

@@ -84,6 +84,10 @@ function validateConfiguration(value, namespace = 'staging') {
   if (new Set(bindings.map(b => `${b.clinicId}:${b.assetId}`)).size !== bindings.length) fail('whatsapp_authorized_configuration_invalid');
   return Object.freeze({ ...value, bindings: Object.freeze(bindings) });
 }
+function mergeActivationBindings(base, active) {
+  const replaced = new Set(active.map(binding => `${binding.clinicId}:${binding.assetId}`));
+  return [...base.filter(binding => !replaced.has(`${binding.clinicId}:${binding.assetId}`)), ...active];
+}
 function configuration(env = process.env) {
   if (!env.WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE) return null;
   const namespace = runtime.namespace(env), file = runtime.ROOTS[namespace] + '/config.json';
@@ -93,7 +97,7 @@ function configuration(env = process.env) {
     const value=JSON.parse(raw.toString('utf8'));
     if(namespace==='staging'){
       const catalog=require('./whatsappActivationCatalog');
-      value.bindings=[...value.bindings,...catalog.sendBindings(catalog.read())];
+      value.bindings=mergeActivationBindings(value.bindings,catalog.sendBindings(catalog.read()));
     }
     return validateConfiguration(value, namespace);
   }
@@ -332,5 +336,5 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
     },
   });
 }
-module.exports = { CONFIG_FILE, configuration, validateConfiguration, checkedBinding, assertMessageEligibility, createWhatsappAuthorizedBrokerClient,
+module.exports = { CONFIG_FILE, configuration, validateConfiguration, mergeActivationBindings, checkedBinding, assertMessageEligibility, createWhatsappAuthorizedBrokerClient,
   ...createWhatsappAuthorizedBrokerClient() };
