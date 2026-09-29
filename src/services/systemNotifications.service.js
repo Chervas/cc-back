@@ -1408,11 +1408,12 @@ async function runActiveChecks({ force = false } = {}) {
     snapshot: require('../lib/whatsappInboxHealth').read(),
     bindings: require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings || [],
     query: (...args) => db.sequelize.query(...args),
-  }).catch(() => [{ eventKey: 'whatsapp.reception_attention', payload: {
-    severity: 'critical', title: 'No se puede comprobar la recepción de WhatsApp',
-    detail: 'La comprobación de recepción o respuestas pendientes no está disponible.',
-    action: 'Revisar Ajustes → Monitorización → WhatsApp.',
-  }, metadata: { source: 'whatsapp_reception', check_unavailable: true } }]);
+  }).catch(error => {
+    const alert = require('../lib/whatsappReceptionAlerts').unavailable(error);
+    // Log only the allowlisted diagnostic code, never SQL, credentials or content.
+    console.warn('[whatsapp-reception] Check unavailable:', alert.metadata.check_error_code);
+    return [alert];
+  });
   for (const alert of receptionAlerts) queued.push(await queueNotification({ ...alert, force }));
   for (const alert of alerts) {
     const eventKey = cleanString(alert.key);

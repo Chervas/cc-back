@@ -291,6 +291,14 @@ No añade cron, llamadas a Meta ni correos a pacientes. Una regla de correo
 expresamente desactivada sigue desactivada. El panel de monitorización conserva
 el diagnóstico; la conciliación de identidad exige evidencia humana.
 
+El SQL de este chequeo utiliza los reemplazos de `Sequelize.query`, también en
+las pruebas. Separar el operador `<` de su parámetro (`wait_until < :until`):
+`<:until` no se sustituye con la versión instalada y produce `ER_PARSE_ERROR`.
+El fallback conserva la alerta de chequeo no disponible y registra únicamente
+un código diagnóstico permitido, nunca SQL, credenciales ni mensajes clínicos.
+Un correo de ese fallback acredita fallo del chequeo; no prueba una caída de
+recepción ni sirve como validación de la detección de revisiones pendientes.
+
 Pruebas focales: `whatsapp_contact_identity`, `whatsapp_pending_reply`,
 `whatsapp_reception_alerts`, `whatsapp_timeout_engine` y `system_notifications`.
 El cambio se publica en API DEV/staging; no requiere DDL ni modificar broker,
