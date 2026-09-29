@@ -43,7 +43,8 @@ function createRouter({ service = gateway, listing = require('../services/whatsa
   });
   for (const name of ['begin','finish','status','cancel']) router.post('/' + name, async (req, res, next) => {
     try {
-      const keys = ['requestId', ...(name === 'begin' ? ['scope', ...(Object.hasOwn(req.body || {}, 'channelRole') ? ['channelRole'] : [])] : name === 'finish' ? ['state','code','wabaId','phoneId'] : [])];
+      const keys = ['requestId', ...(name === 'begin' ? ['scope', ...(Object.hasOwn(req.body || {}, 'channelRole') ? ['channelRole'] : []),
+        ...(Object.hasOwn(req.body || {}, 'replacementAssetId') ? ['replacementAssetId'] : [])] : name === 'finish' ? ['state','code','wabaId','phoneId'] : [])];
       S.exact(req.body, keys);
       const input = { ...req.body, userId: req.userData?.userId, sessionRef: req.authSession?.id, sessionExpiresAt: req.authSession?.expiresAt };
       const result = await service[name](input);

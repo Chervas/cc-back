@@ -10,7 +10,8 @@ const { project, safe } = require('./whatsappOnboardingGateway.service');
 const phoneMetadata = require('./whatsappAuthorizationPhoneMetadata.service');
 const P = require('../../services/integrations-broker/src/whatsapp-provisioning-contract');
 const ATTRIBUTES = ['request_id','user_id','session_ref','session_expires_at','scope_type','scope_id','original_clinic_ids',
-  'scope_digest','state_hash','context_digest','state','created_at','expires_at','claimed_at','channel_role'];
+  'scope_digest','state_hash','context_digest','state','created_at','expires_at','claimed_at','channel_role',
+  'replacement_asset_id','replacement_authorization_id','replacement_phone_digest'];
 function input(value) {
   S.exact(value, ['scope','userId','sessionRef','sessionExpiresAt']);
   const { scope, ...actor } = value; S.request({ ...actor, requestId: randomUUID() }, 'status');

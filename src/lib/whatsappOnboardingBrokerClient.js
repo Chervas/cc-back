@@ -32,11 +32,16 @@ function context(value) {
   try {
     S.exact(value, ['requestId','status','scope','clinicIds','expiresAt','scopeDigest','clinicSetDigest',
       ...(Object.hasOwn(value || {}, 'channelRole') ? ['channelRole'] : []),
+      ...(Object.hasOwn(value || {}, 'replacement') ? ['replacement'] : []),
       ...(Object.hasOwn(value || {}, 'state') ? ['state'] : []), ...(Object.hasOwn(value || {}, 'mayExchange') ? ['mayExchange'] : [])]);
     S.exact(value.scope, ['type','id']);
+    if (Object.hasOwn(value, 'replacement')) S.exact(value.replacement, ['assetId','authorizationId','phoneDigest']);
   } catch { fail('whatsapp_onboarding_binding_invalid'); }
   if (!value || !S.uuid(value.requestId) || !['awaiting', 'claimed', 'cancelled', 'expired'].includes(value.status)
     || Object.hasOwn(value, 'channelRole') && !['primary','secondary'].includes(value.channelRole)
+    || Object.hasOwn(value, 'replacement') && (!S.id(value.replacement.assetId)
+      || value.replacement.authorizationId !== null && !S.uuid(value.replacement.authorizationId)
+      || !/^[a-f0-9]{64}$/.test(value.replacement.phoneDigest))
     || !value.scope || !['clinic', 'group'].includes(value.scope.type) || !S.id(value.scope.id)
     || !Array.isArray(value.clinicIds) || !value.clinicIds.length || value.clinicIds.length > 1000
     || value.clinicIds.some((id, i) => !S.id(id) || i > 0 && id <= value.clinicIds[i - 1])
@@ -122,7 +127,8 @@ function createWhatsappOnboardingBrokerClient({ client, loadBinding, prepareBind
   }
   async function completion(operation,raw,assetId) {
     guard();const row=context(raw),selected=binding(await loadBinding(row.scope),row),requestId=randomUUID();
-    const payload={flowId:row.requestId,scopeDigest:row.scopeDigest,clinicSetDigest:row.clinicSetDigest,...(operation===A.ACTIVATE?{assetId}:{})};
+    const payload={flowId:row.requestId,scopeDigest:row.scopeDigest,clinicSetDigest:row.clinicSetDigest,
+      ...(operation===A.ACTIVATE?{assetId,...(row.replacement?.authorizationId===null?{legacyPhoneDigest:row.replacement.phoneDigest}:{})}:{})};
     A.validate(payload,operation);
     const result=await client.execute({requestId,tenantRef:'clinic:'+row.clinicIds[0],assetRef:'wa-enroll:'+selected.scopeKey,
       connectionRef:selected.connectionRef,operation,payload},{timeoutMs:operation===A.ACTIVATE?100000:30000});

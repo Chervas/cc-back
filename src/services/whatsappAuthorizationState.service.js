@@ -5,6 +5,8 @@ const { randomUUID } = require('node:crypto');
 const { Op, Transaction } = require('sequelize');
 const C = require('./whatsappAuthorizationState.contract');
 const { MARKETING_WRITE_ROLES, isGlobalAdmin } = require('../lib/role-helpers');
+const { resolveWhatsappChannelRole } = require('../lib/whatsapp-channel-role');
+const { normalizePhoneDigits } = require('../lib/phone');
 const scopeBlocks = require('./metaScopeBlock.service');
 const TTL = 30 * 60 * 1000;
 const known = new Set(['whatsapp_authorization_invalid', 'whatsapp_authorization_unavailable',
@@ -23,6 +25,10 @@ function validateRow(row, input, key) {
     || !['created_at', 'expires_at'].every(k => row[k] instanceof Date && Number.isFinite(row[k].getTime()))
     || row.expires_at <= row.created_at || row.expires_at - row.created_at > TTL
     || row.expires_at > row.session_expires_at || !['awaiting', 'claimed', 'cancelled'].includes(row.state)
+    || row.replacement_asset_id == null && (row.replacement_authorization_id != null || row.replacement_phone_digest != null)
+    || row.replacement_asset_id != null && (!C.id(row.replacement_asset_id)
+      || row.replacement_authorization_id != null && !C.uuid(row.replacement_authorization_id)
+      || !/^[a-f0-9]{64}$/.test(row.replacement_phone_digest))
     || !C.equalHash(context(row), row.context_digest) || !C.equalHash(C.digest(C.stateFor(key, row)), row.state_hash)) {
     C.fail('whatsapp_authorization_unavailable', 503);
   }
@@ -51,6 +57,38 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
       : { assignmentScope: 'group', groupId: scope.id }, { models: db(), transaction, purpose: 'whatsapp' })) C.fail('whatsapp_authorization_forbidden', 403);
     return { ids, digest: C.digest(JSON.stringify({ scope, clinics: clinics.map(c => ({ id: c.id_clinica, groupId: c.grupoClinicaId })) })) };
   }
+  async function replacement(scope, clinicIds, channelRole, assetId, transaction) {
+    if (assetId === undefined) return null;
+    const options = locked(transaction);
+    const asset = await db().ClinicMetaAsset.findByPk(assetId, options);
+    const scopeId = Number(scope.type === 'group' ? asset?.grupoClinicaId : asset?.clinicaId);
+    if (!asset || asset.assetType !== 'whatsapp_phone_number' || asset.assignmentScope !== scope.type || scopeId !== scope.id)
+      C.fail('whatsapp_authorization_conflict', 409);
+    let storedRole = resolveWhatsappChannelRole(asset);
+    if (scope.type === 'clinic' && db().WhatsappChannelBinding) {
+      const bindings = await db().WhatsappChannelBinding.findAll({ where: { clinic_id: scope.id, asset_id: asset.id, is_active: true },
+        attributes: ['role'], limit: 2, ...options });
+      if (bindings.length > 1) C.fail('whatsapp_authorization_conflict', 409);
+      if (bindings.length === 1) storedRole = bindings[0].role;
+    }
+    if ((storedRole || 'primary') !== channelRole) C.fail('whatsapp_authorization_conflict', 409);
+    const activations = await db().WhatsappPhoneActivation.findAll({ where: { asset_id: asset.id, state: 'active' }, limit: 2, ...options });
+    let authorizationId = null;
+    if (C.uuid(asset.whatsappAuthorizationId)) {
+      if (activations.length !== 1) C.fail('whatsapp_authorization_conflict', 409);
+      const active = activations[0];
+      if (active.authorization_id !== asset.whatsappAuthorizationId || active.scope_type !== scope.type || active.scope_id !== scope.id
+        || JSON.stringify(active.clinic_ids) !== JSON.stringify(clinicIds)) C.fail('whatsapp_authorization_conflict', 409);
+      authorizationId = active.authorization_id;
+    } else {
+      const metadata = asset.additionalData && typeof asset.additionalData === 'object' ? asset.additionalData : {};
+      if (activations.length || Number(asset.isActive) !== 1 || metadata.whatsappConnectionMode !== 'coexistence'
+        || metadata.platformType !== 'CLOUD_API' || metadata.isOnBizApp !== true) C.fail('whatsapp_authorization_conflict', 409);
+    }
+    const digits = normalizePhoneDigits(asset.metaAssetName);
+    if (!digits) C.fail('whatsapp_authorization_conflict', 409);
+    return { assetId: asset.id, authorizationId, phoneDigest: C.digest(digits) };
+  }
   async function record(row, reason, transaction) {
     const at = now(); const health = await repo().health(at, { includeUnresolved: false, transaction });
     if (health.pending >= 10000 || health.oldestAgeSeconds >= 3600) C.fail('whatsapp_authorization_unavailable', 503);
@@ -60,10 +98,15 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
       sessionRef: row.session_ref, requestRef: row.request_id, capturePolicy: 'whatsapp-onboarding-v1' }, { transaction });
   }
   function projection(row) {
-    return { requestId: row.request_id, status: ['awaiting', 'claimed'].includes(row.state) && row.expires_at <= now() ? 'expired' : row.state,
+    const result = { requestId: row.request_id, status: ['awaiting', 'claimed'].includes(row.state) && row.expires_at <= now() ? 'expired' : row.state,
       channelRole: C.channelRole(row.channel_role), scope: { type: row.scope_type, id: row.scope_id }, clinicIds: [...row.original_clinic_ids], expiresAt: row.expires_at.toISOString(),
       // Internal binding evidence for the broker bridge; public DTOs omit hashes.
       scopeDigest: row.scope_digest, clinicSetDigest: C.digest(JSON.stringify(row.original_clinic_ids)) };
+    if (row.replacement_asset_id != null) result.replacement = {
+      assetId: row.replacement_asset_id, authorizationId: row.replacement_authorization_id,
+      phoneDigest: row.replacement_phone_digest,
+    };
+    return result;
   }
   function available(row) {
     if (row.state === 'cancelled') C.fail('whatsapp_authorization_cancelled', 409);
@@ -96,8 +139,13 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
             || await R.count({ where: { user_id: input.userId, created_at: { [Op.gte]: new Date(at.getTime() - 3600000) } }, transaction }) >= 10) {
             C.fail('whatsapp_authorization_limit', 429);
           }
+          const channelRole = C.channelRole(input.channelRole);
+          const target = await replacement(scope, current.ids, channelRole, input.replacementAssetId, transaction);
           row = { request_id: input.requestId, user_id: input.userId, session_ref: input.sessionRef,
-            channel_role: C.channelRole(input.channelRole), session_expires_at: new Date(input.sessionExpiresAt * 1000), scope_type: scope.type, scope_id: scope.id,
+            channel_role: channelRole, replacement_asset_id: target?.assetId ?? null,
+            replacement_authorization_id: target?.authorizationId ?? null,
+            replacement_phone_digest: target?.phoneDigest ?? null,
+            session_expires_at: new Date(input.sessionExpiresAt * 1000), scope_type: scope.type, scope_id: scope.id,
             original_clinic_ids: current.ids, scope_digest: current.digest, created_at: at, expires_at: expires, state: 'awaiting',
             code_hash: null, claimed_at: null, cancelled_at: null };
           row.context_digest = context(row); row.state_hash = C.digest(C.stateFor(cfg.key, row));
@@ -106,6 +154,7 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
         }
         validateRow(row, input, cfg.key);
         if (operation === 'issue' && C.channelRole(input.channelRole) !== C.channelRole(row.channel_role)) C.fail('whatsapp_authorization_conflict', 409);
+        if (operation === 'issue' && (input.replacementAssetId ?? null) !== (row.replacement_asset_id ?? null)) C.fail('whatsapp_authorization_conflict', 409);
         if (scope.type !== row.scope_type || scope.id !== row.scope_id || current && (current.digest !== row.scope_digest
           || JSON.stringify(current.ids) !== JSON.stringify(row.original_clinic_ids))) C.fail('whatsapp_authorization_conflict', 409);
         if (operation === 'cancel') {
