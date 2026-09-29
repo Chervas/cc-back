@@ -25,7 +25,14 @@ test('Gateway selected-phone mode accepts verified business discovery and the ex
   const row = context(g); await g.client.begin(row); const result = await g.client.finish(row, finish(row));
   assert.equal(result.status, 'staged'); assert.equal(result.connected, false); assert.equal(result.candidate.businessId, '501');
   g.f.restart(); assert.equal((await g.client.status(row)).status, 'staged');
-  for (const modify of [v => { v.businessId = null; }, v => { v.grantedWabaIds.push('bad'); }, v => { v.scopes.push('ads_management'); }]) {
+  g.state.after = (cmd, value) => {
+    value.data.candidate.scopes = value.data.candidate.scopes.filter(scope => scope !== 'whatsapp_business_manage_events');
+    return value;
+  };
+  assert.equal((await g.client.status(row)).status, 'staged');
+  g.state.after = null;
+  for (const modify of [v => { v.businessId = null; }, v => { v.grantedWabaIds.push('bad'); }, v => { v.scopes.push('ads_management'); },
+    v => { v.scopes = v.scopes.filter(scope => scope !== 'whatsapp_business_management'); }]) {
     g.state.after = (cmd,r) => { modify(r.data.candidate); return r; };
     await assert.rejects(g.client.status(row), { code: 'whatsapp_onboarding_result_unknown' });
   }
