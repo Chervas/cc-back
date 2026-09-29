@@ -49,6 +49,17 @@ test('Only this SDK callback plus validated Meta selection can produce one resul
   assert.equal(f.messages[1].data.code, 'FICTITIOUS_CODE'); assert(!Object.hasOwn(f.messages[1].data, 'state'));
   f.meta(); f.code({ authResponse: { code: 'FICTITIOUS_CODE_2' } }); assert.equal(f.messages.length, 2); assert.equal(f.listeners.size, 0);
 });
+test('Facebook-owned session origins and null event sources survive provider popup isolation', t => {
+  const f = fixture(t); f.start();
+  f.code({ authResponse: { code: 'FICTITIOUS_CODE' } });
+  for (const origin of ['http://business.facebook.com', 'https://business.facebook.com:444', 'https://business.facebook.com.evil.invalid'])
+    f.meta(f.finishEvent(), origin, null);
+  assert.equal(f.messages.length, 1);
+  f.meta(f.finishEvent(), 'https://business.facebook.com', null);
+  assert.equal(f.messages.length, 2);
+  assert.equal(f.messages.at(-1).data.type, 'cc.wa.result');
+  assert.equal(f.messages.at(-1).data.wabaId, '301');
+});
 test('Successful authorization leaves Meta payment steps open and releases the window after either callback order', t => {
   for (const first of ['code', 'selection']) {
     const f = fixture(t); f.start(); const popup = f.opened[0].popup;

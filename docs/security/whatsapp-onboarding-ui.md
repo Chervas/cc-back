@@ -2,7 +2,7 @@
 
 > **Tipo:** procedimiento técnico de interfaz y QA.
 > **Fuente de verdad:** ventana, intercambio, recuperación y validación de la UI; instalación en el manual central 19/99.
-> **Última revisión:** 2026-09-15 (Europe/Madrid).
+> **Última revisión:** 2026-09-29 (Europe/Madrid).
 
 Las pruebas con proveedores ficticios se distinguen de las pruebas reales. Consultar
 [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones)
@@ -92,8 +92,11 @@ canjea esos códigos con URI vacía; véase [transporte](whatsapp-oauth-transpor
 El SDK solo se inicia tras ese intercambio y FB.login requiere pulsación del
 usuario. Solicita respuesta code y rechaza respuestas que contengan un bearer.
 El código solo se acepta en el callback SDK de esa ventana. Los eventos
-WA_EMBEDDED_SIGNUP admiten orígenes Meta exactos, JSON acotado y IDs de texto;
-IDs contradictorios cancelan el resultado. **No se ha acreditado la correlación
+WA_EMBEDDED_SIGNUP admiten exclusivamente orígenes HTTPS sin puerto cuyo host sea
+`facebook.com` o un subdominio suyo, JSON acotado e IDs de texto; dominios
+parecidos e IDs contradictorios se rechazan. No se exige un `MessageEvent.source`
+no nulo: COOP puede separar el WindowProxy aunque Meta haya terminado. El padre
+CRM y la propia ventana siguen excluidos. **No se ha acreditado la correlación
 con el WindowProxy exacto de la ventana interna de Meta**: esos IDs son pistas
 no confiables. La identidad, grants, WABA única y pertenencia del número se
 comprueban de forma independiente en el broker antes de guardar una candidata.
@@ -117,6 +120,14 @@ orden. La ventana indica cuál falta y, tras 25 segundos con respuesta parcial,
 avisa de que Meta no devolvió todos los datos. No publica códigos parciales,
 no repite el login y sigue aceptando la segunda parte hasta el plazo original.
 Finalizar en Meta no acredita por sí solo que CRM haya guardado la candidata.
+
+Incidente Nou Barris de 2026-09-29: dos intentos `primary` emitieron estado y
+terminaron cancelados sin `claim`; no alcanzaron `finish`, activación ni
+materialización local. El receptor desplegado descartaba eventos válidos de
+subdominios Facebook distintos de `www`/`web` o con `source=null`. Se corrigió
+sin tocar activos ni reutilizar códigos. La ausencia de `state_claimed` permite
+ubicar el fallo antes del broker, pero no distingue retrospectivamente cuál de
+las dos señales del navegador faltó.
 
 SessionStorage conserva únicamente la referencia del intento, modalidad y dos
 indicadores de envío/cancelación, en una clave vinculada a usuario, sesión y
