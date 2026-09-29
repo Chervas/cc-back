@@ -137,6 +137,17 @@ Publicar lectores de auditoría antes de escritores v26; después recepción y
 transporte, esquema/catálogo, importador y gateway. Flags: broker de alta y envío
 `activationEnabled`; gateway `WHATSAPP_ACTIVATION_ENABLED=true`.
 
+Antes de publicar cualquier productor que añada un motivo a v26, validar el
+evento exacto contra las candidatas de lector y escritor que se van a ejecutar.
+Una release parcial debe partir de las releases vivas y contrastar también el
+hash de `whatsapp-connection-event.js`; no basta comprobar únicamente los codecs
+de la funcionalidad que motiva esa publicación. En particular,
+`connection_reauthorized` y `connection_identity_rotated` deben permanecer
+admitidos aunque la actualización posterior solo afecte a disponibilidad u otro
+dominio. Si el writer responde `audit_writer_invalid`, conservar el evento en el
+outbox, restaurar primero la compatibilidad lector -> escritor y reanudar la misma
+entrega; no borrar el evento ni relajar el bloqueo de auditoría.
+
 Migración `20260922153000-create-whatsapp-phone-activations.js`: columna nullable
 para la conexión general, autorización única, triggers de identidad y journal.
 MySQL con binary log requiere identidad de mantenimiento para crear esos triggers.
