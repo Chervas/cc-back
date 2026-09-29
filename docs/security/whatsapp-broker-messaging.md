@@ -267,7 +267,9 @@ por el sufijo. Abrir una ficha no cambia el destinatario de su conversación ni
 fusiona los historiales de dos números. Una propiedad contradictoria devuelve
 `409 whatsapp_contact_identity_conflict`; tampoco se reasigna un chat de otro
 paciente. En el envío manual, una discrepancia entre ficha y chat detiene la
-operación antes de crear el mensaje y obliga a revisar los teléfonos.
+operación antes de crear el mensaje y obliga a revisar los teléfonos. Los
+productores de automatizaciones y campañas exigen también coincidencia exacta
+del destino con el chat; no usan el historial de otro número del paciente.
 
 El vencimiento de `wait_response` de citas consulta mensajes durables pendientes
 de reclamar en esa conversación. Incluye el vencimiento terminal sin salida

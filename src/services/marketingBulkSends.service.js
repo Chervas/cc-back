@@ -8496,6 +8496,7 @@ async function sendTest(scope, campaignId, body = {}) {
   const templateCommercial = body.template_commercial === true
     || (body.template_commercial !== false && (listCriteria.template_commercial === true || isCommercialTemplateUsage(templateUsage)));
   const conversation = await findCanonicalWhatsappConversation({
+    requireExactContact: true,
     clinicId,
     contactId: targetPhone,
     createIfMissing: true,
@@ -9612,6 +9613,7 @@ async function sendDispatchItem({
   });
   const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
   const conversation = await findCanonicalWhatsappConversation({
+    requireExactContact: true,
     clinicId: clinicConfig.clinicId || getClinicIdForList(list),
     contactId: item.phone,
     patientId: item.paciente_id || null,

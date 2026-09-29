@@ -32,3 +32,9 @@ test('even without a requested patient, conflicting owners are never merged',asy
  await assert.rejects(f.run({contactId:'+34665519703'}),e=>e.code==='whatsapp_contact_identity_conflict');
  assert.equal(f.changes.length,0);assert.equal(f.deletions.length,0);
 });
+
+test('an automated sender cannot use a different phone history as its target chat',async()=>{
+ const f=fixture([{id:3,patient_id:4,contact_id:'+213555902016'}]);
+ await assert.rejects(f.run({patientId:4,contactId:'+34665519703',requireExactContact:true}),e=>e.code==='whatsapp_contact_identity_conflict');
+ assert.equal(f.changes.length,0);assert.equal(f.deletions.length,0);
+});

@@ -165,6 +165,7 @@ async function findCanonicalWhatsappConversation({
   patientId = null,
   leadId = null,
   createIfMissing = false,
+  requireExactContact = false,
   lastMessageAt = null,
   transaction = null,
 } = {}) {
@@ -225,6 +226,10 @@ async function findCanonicalWhatsappConversation({
   const exact = conversations.filter(c => normalizePhoneE164(c.contact_id) === requestedPhone);
   // Looking up a patient's existing chat must not change its destination or
   // merge a second number into it. Different numbers remain separate records.
+  if (requireExactContact && !exact.length) {
+    throw Object.assign(new Error('El teléfono de destino no coincide con la conversación. Revisa la ficha antes de enviar.'),
+      { code: 'whatsapp_contact_identity_conflict', status: 409 });
+  }
   const candidates = exact.length ? exact : conversations;
   const owners = new Set(candidates.map(c => Number(c.patient_id)).filter(Boolean));
   if (owners.size > 1 || candidates.some(c => patientId && c.patient_id && Number(c.patient_id) !== Number(patientId))) {

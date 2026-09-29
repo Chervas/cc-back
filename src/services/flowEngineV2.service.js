@@ -4188,6 +4188,7 @@ async function handleSendWhatsapp(node, context, runtime) {
   let conversation = null;
 
   conversation = await findCanonicalWhatsappConversation({
+    requireExactContact: true,
     clinicId,
     contactId: recipientData.recipient,
     patientId: targetPatientId,
@@ -4231,6 +4232,7 @@ async function handleSendWhatsapp(node, context, runtime) {
       }
     }
     conversation = await findCanonicalWhatsappConversation({
+      requireExactContact: true,
       clinicId,
       contactId: recipientData.recipient,
       patientId: targetPatientId,
@@ -4883,6 +4885,7 @@ async function materializeFailedAutomationWhatsappMessage({ node, context, execu
     const targetPatientId = toIntOrNull(targets.patient_id);
     const targetLeadId = toIntOrNull(targets.lead_intake_id);
     const conversation = await findCanonicalWhatsappConversation({
+      requireExactContact: true,
       clinicId,
       contactId: recipientData.recipient,
       patientId: targetPatientId,
