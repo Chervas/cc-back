@@ -4,9 +4,11 @@ const express = require('express');
 const router = express.Router();
 const authMiddleware = require('./auth.middleware');
 const consentimientosController = require('../controllers/consentimientos.controller');
+const intakeController = require('../controllers/patientIntake.controller');
 
 router.get('/public/:token', consentimientosController.getPublicPackage);
 router.post('/public/:token/sign', consentimientosController.signPublicPackage);
+router.post('/public/:token/intake', intakeController.submit);
 router.post('/tablet/login', consentimientosController.loginTabletKiosk);
 router.get('/tablet/session', consentimientosController.getTabletKioskSession);
 router.get('/tablet/packages', consentimientosController.listTabletKioskPackages);
@@ -35,6 +37,9 @@ router.put('/treatments/:id/requirements', consentimientosController.saveTreatme
 
 router.get('/patients/:id/documents', consentimientosController.listPatientDocuments);
 router.post('/patients/:id/intake-package', consentimientosController.createPatientIntakePackage);
+router.post('/patients/:id/intake-questionnaire', intakeController.prepare);
+router.get('/patients/:id/intake-questionnaire', intakeController.review);
+router.post('/patients/:id/intake-questionnaire/confirm', intakeController.confirm);
 router.get('/patients/:id/external-attestations', consentimientosController.listPatientExternalAttestations);
 router.post('/patients/:id/external-attestations', consentimientosController.createPatientExternalAttestation);
 router.get('/patients/:id/treatments-without-consent', consentimientosController.listPatientTreatmentsWithoutConsentRequirements);

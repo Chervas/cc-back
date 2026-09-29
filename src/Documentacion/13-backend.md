@@ -13,6 +13,29 @@ Las formulaciones anteriores al espejo conciliado se conservan en [98](https://g
 
 > **Módulo:** Arquitectura del Backend
 
+## Recepción y formulario inicial (capa DEV 2026-09-29)
+
+- `POST /api/citas/:id/care/arrive` registra llegada desde la hora de inicio;
+  `/care/start` exige llegada vigente y consentimientos clínicos obligatorios.
+  Ambas operaciones bloquean la cita y son idempotentes. Exigen
+  `appointments.manage`; iniciar exige además `clinical.reports.manage`.
+- Se persisten fecha, actor y horario al que corresponde la llegada. Reprogramar
+  invalida la llegada anterior sin borrar su auditoría. No escriben `estado`,
+  no consumen sesiones, no cobran ni generan recordatorios.
+- `POST /api/consentimientos/patients/:id/intake-questionnaire` prepara el
+  formulario inicial y documentación de alta por clínica (`consents.manage`).
+  `GET` exige `clinical.reports.view`; `POST .../confirm` exige
+  `clinical.reports.manage`, versión de respuesta y huella de ficha vigentes.
+- `POST /api/consentimientos/public/:token/intake` admite exclusivamente el
+  cuestionario versionado del paquete activo. Respuestas e identificación
+  propuestas quedan separadas de Paciente hasta confirmación profesional.
+  Los cambios de identidad necesitan una confirmación explícita adicional.
+  Enviar respuestas no firma documentos ni los da por válidos.
+- Migración aditiva `20260929180000-appointment-reception-and-intake.js`.
+  La reversión conserva evidencias: retirar código, no eliminar tablas clínicas.
+  Preparación/pruebas/publicación efectiva: [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md).
+  No es el constructor de formularios por especialidad ni el nuevo editor clínico.
+
 ## Plantillas por AWS, monitor de seguridad y tarifas IA
 
 El transporte operativo `whatsapp-authorized-v1` conserva el ámbito de clínica,

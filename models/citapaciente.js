@@ -70,7 +70,12 @@ module.exports = (sequelize, DataTypes) => {
     inicio: { type: DataTypes.DATE, allowNull: false },
     fin: { type: DataTypes.DATE, allowNull: false },
     es_provisional: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: false },
-    hold_expires_at: { type: DataTypes.DATE, allowNull: true }
+    hold_expires_at: { type: DataTypes.DATE, allowNull: true },
+    arrived_at: { type: DataTypes.DATE, allowNull: true },
+    arrived_by: { type: DataTypes.INTEGER, allowNull: true },
+    care_started_at: { type: DataTypes.DATE, allowNull: true },
+    care_started_by: { type: DataTypes.INTEGER, allowNull: true },
+    care_schedule_start: { type: DataTypes.DATE, allowNull: true },
   }, {
     sequelize,
     modelName: 'CitaPaciente',

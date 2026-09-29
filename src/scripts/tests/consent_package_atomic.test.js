@@ -39,7 +39,7 @@ function harness() {
   } }, CitaPaciente: { findByPk: async (id, options) => {
     state.calls.push(['appointment', options]);
     return Number(id) === 1 ? appointment : null;
-  } }, Paciente: {}, Clinica: {}, Tratamiento: {}, Usuario: {},
+  } }, Paciente: {}, Clinica: {}, Tratamiento: {}, Usuario: {}, PatientIntakeRequest: { findOne: async () => null },
   ClinicConsentTemplate: {}, ClinicConsentTemplateVersion: { findOne: async () => null }, ConsentTemplateCatalog: {}, ConsentTemplateCatalogVersion: {},
   TreatmentConsentRequirement: { findAll: async options => { state.calls.push(['requirements', options]); return requirements; } },
   ConsentSignaturePackage: {

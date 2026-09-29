@@ -28,6 +28,9 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: 'package_id',
         as: 'documents',
       });
+      if (models.PatientIntakeRequest) ConsentSignaturePackage.hasOne(models.PatientIntakeRequest, {
+        foreignKey: 'package_id', as: 'intakeRequest',
+      });
       ConsentSignaturePackage.hasMany(models.ConsentDeliveryEvent, {
         foreignKey: 'package_id',
         as: 'deliveryEvents',

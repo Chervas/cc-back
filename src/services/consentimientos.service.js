@@ -2407,7 +2407,10 @@ async function refreshPackageCounts(packageIdRaw, transaction = null) {
     const requiredCount = currentDocuments.filter((doc) => !!doc.required).length;
     const signedCount = currentDocuments.filter((doc) => !!doc.required && doc.status === 'signed' && !doc.revoked_at).length;
     const pending = currentDocuments.some((doc) => DOCUMENT_PENDING_STATUSES.has(doc.status));
-    const status = requiredCount > 0 && signedCount >= requiredCount ? 'signed' : (pending ? 'pending' : 'draft');
+    const intake = await db.PatientIntakeRequest.findOne({ where: { package_id: packageId }, transaction });
+    const status = intake?.status === 'pending' ? 'pending'
+        : !currentDocuments.length && intake ? 'signed'
+        : requiredCount > 0 && signedCount >= requiredCount ? 'signed' : (pending ? 'pending' : 'draft');
     await db.ConsentSignaturePackage.update(
         { required_count: requiredCount, signed_count: signedCount, status },
         { where: { id: packageId }, transaction }
@@ -2443,7 +2446,8 @@ async function sendPackageMock(packageIdRaw, payload = {}) {
 
     const documents = Array.isArray(packageRow.documents) ? packageRow.documents : [];
     const pendingDocuments = documents.filter((doc) => DOCUMENT_PENDING_STATUSES.has(getPlain(doc).status));
-    if (!pendingDocuments.length) {
+    const intake = await db.PatientIntakeRequest.findOne({ where: { package_id: packageRow.id, status: 'pending' } });
+    if (!pendingDocuments.length && !intake) {
         const err = new Error('consent_package_has_no_pending_documents');
         err.statusCode = 409;
         throw err;
@@ -2805,6 +2809,7 @@ function serializeKioskPackage(packageRow) {
         required_count: plain.required_count,
         signed_count: plain.signed_count,
         pending_count: pendingDocuments.length,
+        intake_pending: plain.intakeRequest?.status === 'pending',
         blocking_pending: blockingPending,
         clinic: { id_clinica: plain.clinica_id, nombre_clinica: plain.clinica?.nombre_clinica || '' },
         paciente: {
@@ -2868,7 +2873,8 @@ async function listTabletKioskPackages(tokenRaw, filters = {}) {
             ],
         },
         include: [
-            { model: db.PatientConsentDocument, as: 'documents', required: true },
+            { model: db.PatientConsentDocument, as: 'documents', required: false },
+            { model: db.PatientIntakeRequest, as: 'intakeRequest', required: false, attributes: ['id', 'status'] },
             { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
             { model: db.Paciente, as: 'paciente', required: false },
             { model: db.CitaPaciente, as: 'cita', required: false },
@@ -2882,7 +2888,7 @@ async function listTabletKioskPackages(tokenRaw, filters = {}) {
     });
     const items = packageRows
         .map(serializeKioskPackage)
-        .filter((item) => item.pending_count > 0)
+        .filter((item) => item.pending_count > 0 || item.intake_pending)
         .filter((item) => {
             if (!q) return true;
             const haystack = [
@@ -2975,6 +2981,14 @@ function serializePublicPackage(packageRow) {
     };
 }
 
+async function resolveActivePublicPackage(tokenRaw) {
+    const token = verifyPackageToken(tokenRaw);
+    const packageRow = await getPackageWithDocumentsByPublicId(token.package_public_id);
+    if (!packageRow) throw Object.assign(new Error('consent_package_not_found'), { statusCode: 404 });
+    requireActiveConsentPackage(packageRow);
+    return packageRow;
+}
+
 async function getPublicPackage(tokenRaw, requestMeta = {}) {
     const token = verifyPackageToken(tokenRaw);
     const packageRow = await getPackageWithDocumentsByPublicId(token.package_public_id);
@@ -3006,7 +3020,7 @@ async function getPublicPackage(tokenRaw, requestMeta = {}) {
     await packageRow.update({ status: 'viewed' });
     await refreshPackageCounts(packageRow.id);
     const refreshed = await getPackageWithDocumentsById(packageRow.id);
-    return serializePublicPackage(refreshed);
+    return { ...serializePublicPackage(refreshed), intake: await require('./patientIntake.service').publicView(refreshed) };
 }
 
 async function findDocumentByIdentifier(identifier) {
@@ -3218,6 +3232,8 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
         throw err;
     }
     requireActiveConsentPackage(packageRow);
+    const intake = await db.PatientIntakeRequest.findOne({ where: { package_id: packageRow.id } });
+    if (intake?.status === 'pending') throw Object.assign(new Error('Completa primero tus datos y el formulario de salud.'), { statusCode: 409 });
     const plain = getPlain(packageRow);
     const documents = Array.isArray(plain.documents) ? plain.documents : [];
     const requestedDocumentIds = Array.isArray(payload.document_ids)
@@ -3383,6 +3399,8 @@ async function exportPatientConsentAudit(identifier, filters = {}) {
 }
 
 module.exports = {
+    resolveActivePublicPackage,
+    refreshPackageCounts,
     listAdminTemplates,
     createAdminTemplate,
     updateAdminTemplate,

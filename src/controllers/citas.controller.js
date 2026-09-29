@@ -167,6 +167,7 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
     if (!citaLike) return citaLike;
     const plain = citaLike?.toJSON ? citaLike.toJSON() : { ...citaLike };
     const protectedPayload = { ...plain };
+    protectedPayload.care = plain.care || require('../lib/appointment-care').careState(plain);
     protectedPayload.import_review = plain.import_review || appointmentImportReview(plain);
     if (bookingCapabilities().simple) {
         protectedPayload.additional_staff = plain.additional_staff || additionalStaffPayload(plain);
@@ -1146,6 +1147,7 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
     const plain = plainCita(cita);
     if (!plain) return null;
     return {
+        care: require('../lib/appointment-care').careState(plain),
         id_cita: plain.id_cita,
         created_by: plain.created_by || null,
         clinica_id: plain.clinica_id,
@@ -2345,7 +2347,7 @@ exports.getAppointmentHubList = asyncHandler(async (req, res) => {
         inicio: { [q.past ? Op.lt : Op.gte]: new Date() },
     };
     const rows = await CitaPaciente.findAll({ where,
-        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'inicio', 'fin', 'estado', 'motivo', 'tipo_cita', 'tratamiento_id', 'doctor_id', 'instalacion_id'],
+        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'inicio', 'fin', 'estado', 'motivo', 'tipo_cita', 'tratamiento_id', 'doctor_id', 'instalacion_id', 'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional'],
         include: [
             { model: Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] },
             { model: Instalacion, as: 'instalacion', required: false, attributes: ['id', 'nombre'] },
@@ -2474,6 +2476,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
         attributes: [
             'id_cita',
             'created_by',
+            'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional',
             'clinica_id',
             'paciente_id',
             'lead_intake_id',
@@ -2547,7 +2550,7 @@ exports.getAppointmentHubActivity = asyncHandler(async (req, res) => {
     const service = require('../services/appointmentActivity.service');
     const rows = await db.PatientOperationalEvent.findAll({
         where: { clinic_id: cita.clinica_id, patient_id: cita.paciente_id || null,
-            event_type: { [Op.in]: [service.APPOINTMENT_STATUS_EVENT_TYPE, service.APPOINTMENT_STAFF_EVENT_TYPE, service.APPOINTMENT_IMPORT_EVENT_TYPE] },
+            event_type: { [Op.in]: [service.APPOINTMENT_STATUS_EVENT_TYPE, service.APPOINTMENT_STAFF_EVENT_TYPE, service.APPOINTMENT_IMPORT_EVENT_TYPE, 'appointment_care_changed'] },
             'metadata.appointment_id': id },
         include: [{ model: db.Usuario, as: 'actor', required: false, attributes: ['nombre', 'apellidos'] }],
         order: [['occurred_at', 'DESC'], ['id', 'DESC']], limit: 31, offset: (page - 1) * 30,
@@ -2621,6 +2624,25 @@ exports.getCitaById = asyncHandler(async (req, res) => {
         fin_local: formatDateTimeLocal(cita.fin, timeZone),
         hub_permissions: { manage: canManage },
     }));
+});
+
+exports.recordAppointmentCare = asyncHandler(async (req, res) => {
+    const id = Number(req.params.id), action = req.params.action;
+    if (!Number.isSafeInteger(id) || id <= 0 || !['arrive', 'start'].includes(action)) return res.status(400).json({ message: 'Acción de cita no válida.' });
+    const cita = await CitaPaciente.findByPk(id, { attributes: ['id_cita', 'clinica_id'] });
+    if (!cita) return res.status(404).json({ message: 'Cita no encontrada.' });
+    if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
+    if (action === 'start' && !await canUserAccessFeature({ actorId: Number(req.userData.userId), featureKey: 'clinical.reports.manage', clinicId: cita.clinica_id })) {
+        return res.status(403).json({ message: 'No tienes permiso para iniciar la atención clínica.' });
+    }
+    try {
+        const result = await require('../services/appointmentCare.service').record({ appointmentId: id, clinicId: cita.clinica_id, actorId: Number(req.userData.userId), action });
+        if (!result.replayed) emitAppointmentSocketEvent('appointment:updated', result.appointment);
+        return res.json({ care: result.care, replayed: result.replayed });
+    } catch (error) {
+        if ([400, 404, 409].includes(error.statusCode)) return res.status(error.statusCode).json({ code: error.code, message: error.message });
+        throw error;
+    }
 });
 
 exports.updateCitaNota = asyncHandler(async (req, res) => {

@@ -10,7 +10,7 @@ function harness({ document = {}, packageRow = {} } = {}) {
     let writes = 0;
     const doc = { id: 1, public_id: 'qa_document', status: 'pending', ...document, update: async () => { writes++; } };
     const pack = { id: 1, public_id: 'qa_package', status: 'pending', documents: [doc], ...packageRow };
-    const db = { Sequelize: { Op: {} }, PatientConsentDocument: { findByPk: async () => doc },
+    const db = { Sequelize: { Op: {} }, PatientConsentDocument: { findByPk: async () => doc }, PatientIntakeRequest: { findOne: async () => null },
         ConsentSignaturePackage: { findOne: async () => pack, findByPk: async () => pack },
         ConsentDeliveryEvent: { create: async () => { writes++; } } };
     const nativeRequire = createRequire(servicePath), module = { exports: {} };
