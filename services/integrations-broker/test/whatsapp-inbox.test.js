@@ -146,10 +146,15 @@ test('a crashed consumer rotates failed leases behind newly arrived work',t=>{
 test('review health attributes signed contact events without importing them and retains unknown review barriers',t=>{
  const scopeBindings=[{wabaId:'301',phoneId:'401',clinicIds:[71]}];
  const f=fixture(t,{scopeBindings});
+ for(let n=0;n<101;n++) {
+  const administrative=f.inbox.accept(packet(body({field:'account_update',value:{sequence:n}})));
+  const l=f.inbox.lease(administrative.receipt);l.raw.fill(0);
+  f.inbox.defer({receipt:l.receipt,lease:l.lease,reason:'review_required'});f.advance(1);
+ }
  const input=body();input.entry[0].changes[0].value.messaging_product='whatsapp';
  const one=f.inbox.accept(packet(input)),lease=f.inbox.lease(one.receipt);lease.raw.fill(0);
  f.inbox.defer({receipt:lease.receipt,lease:lease.lease,reason:'review_required'});
- const health=f.inbox.health();const group=health.groups[0];
+ const health=f.inbox.health();const group=health.groups.find(g=>g.scopes.includes('301:401'));
  assert.equal(group.blockingReview,1);assert.equal(group.reviewIsolation.scopedReviews,1);
  assert.equal(group.reviewIsolation.contacts[0].clinicId,71);
  assert.match(group.reviewIsolation.contacts[0].contactKey,/^[a-f0-9]{64}$/);
@@ -157,6 +162,7 @@ test('review health attributes signed contact events without importing them and 
  assert.deepEqual(f.inbox.health(),health);f.restart();assert.deepEqual(f.inbox.health(),health);
  const unknown=f.inbox.accept(packet(body({field:'smb_app_state_sync'}))),other=f.inbox.lease(unknown.receipt);other.raw.fill(0);
  f.inbox.defer({receipt:other.receipt,lease:other.lease,reason:'review_required'});
- assert.equal(f.inbox.health().groups[0].blockingReview,2);assert.equal(f.inbox.health().groups[0].reviewIsolation.scopedReviews,1);
+ const later=f.inbox.health().groups.find(g=>g.scopes.includes('301:401'));
+ assert.equal(later.blockingReview,2);assert.equal(later.reviewIsolation.scopedReviews,1);
  assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n,0);
 });

@@ -157,7 +157,9 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
     health() {
       refreshScopes();
       const groups = store.db.prepare("SELECT i.scopes,COUNT(*) pending,MIN(CASE WHEN r.reason IS NULL OR r.reason='import_retry' THEN i.received_at END) oldestPendingAt,SUM(CASE WHEN r.reason='review_required' THEN 1 ELSE 0 END) blockingReview,SUM(CASE WHEN r.reason IN ('unsupported_event','unmatched_status') THEN 1 ELSE 0 END) review FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' GROUP BY i.scopes").all(appId);
-      const reviews = store.db.prepare("SELECT i.receipt,i.digest,i.scopes,i.kinds,i.received_at,i.key_id,i.app_id,i.byte_count FROM whatsapp_inbox i JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' AND r.reason='review_required' ORDER BY i.received_at LIMIT 100").all(appId);
+      // Account-wide events cannot be attributed to a contact. Keep their
+      // counters without letting them consume the bounded phone review budget.
+      const reviews = store.db.prepare("SELECT i.receipt,i.digest,i.scopes,i.kinds,i.received_at,i.key_id,i.app_id,i.byte_count FROM whatsapp_inbox i JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' AND r.reason='review_required' AND i.scopes NOT LIKE '%:account%' ORDER BY i.received_at LIMIT 100").all(appId);
       const present = new Set(reviews.map(r => r.receipt));
       for (const receipt of reviewCache.keys()) if (!present.has(receipt)) reviewCache.delete(receipt);
       const scopeVersion = JSON.stringify(scopeBindings);
