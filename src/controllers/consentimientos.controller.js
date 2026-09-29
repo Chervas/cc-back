@@ -563,7 +563,9 @@ exports.signDocument = asyncHandler(async (req, res) => {
 
 exports.signProfessionalDocument = asyncHandler(async (req, res) => {
     try {
-        await requireConsentFeature(req, 'consents.manage', await resolveDocumentClinicId(req.params.id));
+        const clinicId = await resolveDocumentClinicId(req.params.id);
+        await requireConsentFeature(req, 'consents.manage', clinicId);
+        await requireConsentFeature(req, 'clinical.reports.manage', clinicId);
         const item = await consentimientosService.signProfessionalConsentDocument(req.params.id, req.body || {}, getUserId(req), {
             ip: req.ip,
             userAgent: req.get('user-agent'),

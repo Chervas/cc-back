@@ -528,11 +528,28 @@ function normalizeRevocationEvidence(payload = {}, requestMeta = {}) {
 }
 
 function normalizeProfessionalSignatureEvidence(payload = {}, requestMeta = {}, userId = null) {
+    const actorId = toIntOrNull(userId);
+    if (!actorId || actorId <= 0) {
+        const err = new Error('professional_signature_actor_required');
+        err.statusCode = 401;
+        throw err;
+    }
+    const requestedId = toIntOrNull(payload.professional_id ?? payload.profesional_id);
+    if (requestedId && requestedId !== actorId) {
+        const err = new Error('professional_signature_actor_mismatch');
+        err.statusCode = 400;
+        throw err;
+    }
+    if ((payload.accepted_statement ?? payload.declaracion_aceptada) !== true) {
+        const err = new Error('professional_signature_statement_required');
+        err.statusCode = 400;
+        throw err;
+    }
     return {
-        method: toCleanString(payload.method ?? payload.metodo) || 'professional_confirmation',
-        professional_id: toIntOrNull(payload.professional_id ?? payload.profesional_id) || toIntOrNull(userId),
-        professional_name: toCleanString(payload.professional_name ?? payload.nombre_profesional),
-        accepted_statement: normalizeBoolean(payload.accepted_statement ?? payload.declaracion_aceptada, true),
+        method: 'professional_confirmation',
+        professional_id: actorId,
+        professional_name: null,
+        accepted_statement: true,
         signed_at: new Date().toISOString(),
         ip: toCleanString(requestMeta.ip),
         user_agent: toCleanString(requestMeta.userAgent),
@@ -3137,17 +3154,18 @@ async function signProfessionalConsentDocument(identifier, payload = {}, userId 
         err.statusCode = 400;
         throw err;
     }
-    if (DOCUMENT_CLOSED_STATUSES.has(plainDoc.status) && plainDoc.status !== 'signed') {
+    if ((DOCUMENT_CLOSED_STATUSES.has(plainDoc.status) && plainDoc.status !== 'signed')
+        || (plainDoc.expires_at && new Date(plainDoc.expires_at).getTime() <= Date.now())) {
         const err = new Error('consent_document_already_closed');
         err.statusCode = 409;
         throw err;
     }
+    const evidence = normalizeProfessionalSignatureEvidence(payload, requestMeta, userId);
     if (plainDoc.professional_signed_at) {
         return findDocumentByIdentifier(plainDoc.id);
     }
 
     const snapshot = plainDoc.snapshot_json && typeof plainDoc.snapshot_json === 'object' ? plainDoc.snapshot_json : {};
-    const evidence = normalizeProfessionalSignatureEvidence(payload, requestMeta, userId);
     const nextSnapshot = {
         ...snapshot,
         professional_signature_evidence: evidence,

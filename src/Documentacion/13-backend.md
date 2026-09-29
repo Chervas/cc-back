@@ -31,6 +31,11 @@ Las formulaciones anteriores al espejo conciliado se conservan en [98](https://g
   propuestas quedan separadas de Paciente hasta confirmación profesional.
   Los cambios de identidad necesitan una confirmación explícita adicional.
   Enviar respuestas no firma documentos ni los da por válidos.
+- La contrafirma profesional exige `consents.manage` y
+  `clinical.reports.manage` en la clínica del documento. Actor y método se
+  fijan en servidor; se rechaza la suplantación de profesional, la aceptación
+  omitida/no booleana y la contrafirma de documentos caducados. No se modifica
+  la evidencia previamente firmada al endurecer esas validaciones.
 - Migración aditiva `20260929180000-appointment-reception-and-intake.js`.
   La reversión conserva evidencias: retirar código, no eliminar tablas clínicas.
   Preparación/pruebas/publicación efectiva: [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md).
