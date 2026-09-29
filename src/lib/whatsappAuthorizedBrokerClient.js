@@ -117,10 +117,14 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
     attributes: ['id','clinicaId','grupoClinicaId','assignmentScope','assetType','phoneNumberId','wabaId','isActive'], raw: true }),
   loadClinic = clinicId => models().Clinica.findByPk(clinicId, { attributes: ['id_clinica','grupoClinicaId'], raw: true }),
   loadMessage = messageId => models().Message.findByPk(messageId, { attributes: ['id','conversation_id','direction','status','createdAt','metadata'], raw: true }),
-  loadConversation = conversationId => models().Conversation.findByPk(conversationId, { attributes: ['id','clinic_id','patient_id'], raw: true }),
+  loadConversation = conversationId => models().Conversation.findByPk(conversationId, { attributes: ['id','clinic_id','patient_id','channel','contact_id'], raw: true }),
   loadExecution = executionId => models().FlowExecutionV2.findByPk(executionId, { attributes: ['id','clinic_id','trigger_entity_type','trigger_entity_id','context'], raw: true }),
   loadAppointment = appointmentId => models().CitaPaciente.findByPk(appointmentId, { raw: true }),
   patientHeld = patientId => require('./whatsappAppointmentEligibility').patientImportHeld(patientId),
+  loadReceptionState = (conversation, bindings) => {
+    const health = require('./whatsappInboxHealth');
+    return health.forConversation(health.read(), conversation, bindings, (...args) => models().sequelize.query(...args));
+  },
   isBlocked = clinicId => require('../services/metaScopeBlock.service').blocked({ assignmentScope: 'clinic', clinicId }, { purpose: 'whatsapp' }),
   createTransport = configuredTransport } = {}) {
   function read() {
@@ -162,7 +166,8 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       }
       assertMessageEligibility(message, bindingCutoff(config, selectedBinding));
       await require('./whatsappAppointmentEligibility').assertAutomatedMessageEligibility({ message, conversation,
-        payload: intent.message, loadExecution, loadAppointment, patientHeld });
+        payload: intent.message, loadExecution, loadAppointment, patientHeld,
+        getReceptionState: () => loadReceptionState(conversation, config.bindings) });
     } catch { fail('whatsapp_authorized_message_ineligible'); }
   }
   return Object.freeze({

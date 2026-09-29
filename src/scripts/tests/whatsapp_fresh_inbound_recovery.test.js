@@ -2,17 +2,19 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 require('./fixtures/campaign_offline_runtime.cjs');
 const health=require('../../lib/whatsappInboxHealth'),fresh=require('../../lib/whatsappFreshInboundEligibility');
-function fixture({hold=false,beforeCut=false,reaction=false}={}) {
+function fixture({hold=false,beforeCut=false,reaction=false,review=false,affected=false,unscoped=false,stale=false}={}) {
  const now=Date.now(),cut=new Date(now-60000).toISOString();
  const b={clinicId:2,assetId:4,phoneId:'123',wabaId:'456',sendEnabled:true,authorizationId:'synthetic'};
  const config={bindings:[b],messageNotBefore:new Date(now-86400000).toISOString()};
  const snapshot={version:1,observedAt:now,recoveryHold:hold,recoveryNotBefore:cut,clinics:[{clinicId:2,oldestPendingAt:null,blockingReview:0}]};
- const conversation={id:3,clinic_id:2,channel:'whatsapp'};
+ if(stale)snapshot.observedAt=now-100000;
+ if(review)Object.assign(snapshot.clinics[0],{blockingReview:4,unscopedBlockingReview:unscoped?1:0,blockingContactKeys:['a'.repeat(64)]});
+ const conversation={id:3,clinic_id:2,channel:'whatsapp',contact_id:'19995550101'};
  const message={id:5,conversation_id:3,direction:'inbound',message_type:reaction?'reaction':'text',sent_at:new Date(now-(beforeCut?120000:5000)),
   metadata:{passive_recovery:true,historical:false,provider_type:reaction?'reaction':'text',phone_number_id:'123',waba_id:'456',wamid:'wamid.SYNTHETIC',inbox_receipt:'a1234567-1234-4234-8234-123456789abc',...(reaction?{reaction:{emoji:'thumbs_up',message_id:'wamid.TARGET'}}:{})},
   async update(p){Object.assign(this,p)}};
  let dispatched=0,queried=0;
- const db={sequelize:{query:async(_sql,{replacements})=>{queried++;assert.equal(replacements.cutoff.toISOString(),cut);assert.match(_sql,/m\.message_type='reaction'/);return [[{id:5}]]},transaction:work=>work({LOCK:{UPDATE:'UPDATE'}})},
+ const db={sequelize:{query:async(_sql,{replacements})=>{if(_sql.includes('SELECT /*+ MAX_EXECUTION_TIME(3000) */ k.contact_key'))return [affected?[{contact_key:'a'.repeat(64)}]:[]];queried++;assert.equal(replacements.cutoff.toISOString(),cut);assert.match(_sql,/m\.message_type='reaction'/);return [[{id:5}]]},transaction:work=>work({LOCK:{UPDATE:'UPDATE'}})},
   Message:{findByPk:async()=>message},Conversation:{findByPk:async()=>conversation}};
  const c={module:{exports:{}},Date,require:name=>{
   if(name==='../lib/whatsappFreshInboundEligibility')return fresh;
@@ -37,4 +39,10 @@ test('fresh replies after reopening resume the ordinary flow exactly once',async
 test('fresh reactions after reopening reach the same ordinary flow exactly once',async()=>{
  const f=fixture({reaction:true});await f.run();assert.equal(f.dispatched,1);assert.equal(f.message.metadata.automatic_actions_allowed,true);
  await f.run();assert.equal(f.dispatched,1);
+});
+test('four reviews for another contact do not hold an already imported reply; original alias remains protected',async()=>{
+ const unrelated=fixture({review:true});await unrelated.run();await unrelated.run();assert.equal(unrelated.dispatched,1);
+ for(const options of [{review:true,affected:true},{review:true,unscoped:true},{review:true,hold:true},{review:true,stale:true}]){
+  const f=fixture(options);await f.run();assert.equal(f.dispatched,0);
+ }
 });

@@ -51,6 +51,13 @@ test('passive importer commits complete batches once, preserves contacts, rolls 
    await sql.query("UPDATE Messages SET status='sent' WHERE direction='outbound'");
    await importLease(c,lease(null,[{field:'messages',value:{messaging_product:'whatsapp',metadata:{phone_number_id:'201'},statuses:[{id:'wamid.out',status:'failed',errors:[{code:131026,title:'Message undeliverable'}]}]}}]),scope);
    const [[failed]]=await sql.query("SELECT status,metadata FROM Messages WHERE direction='outbound'");assert.equal(failed.status,'failed');assert.equal(failed.metadata.wa_error[0].code,131026);
+   // A saved binding must never attach old-phone replies to a conversation
+   // whose contact has changed. Isolation must not weaken this ownership check.
+   const [[bound]]=await sql.query("SELECT id FROM Conversations WHERE contact_id='19995550101'");
+   await sql.query("UPDATE Conversations SET contact_id='19995550777' WHERE id=?",{replacements:[bound.id]});
+   await assert.rejects(importLease(c,lease([m('old_contact','19995550101')]),scope),e=>e.inboxReason==='review_required'&&e.reviewDetail==='contact_binding_mismatch');
+   const [[blocked]]=await sql.query("SELECT COUNT(*) n FROM Messages WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.wamid'))='wamid.old_contact'");assert.equal(blocked.n,0);
+   await importLease(c,lease([m('unrelated_contact','19995550888')]),scope);
   }finally{await sql.connectionManager.releaseConnection(rawConnection);}
  });
 });

@@ -33,7 +33,7 @@ function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, 
   if (before ? suppression.day_before || suppression.dayBefore : suppression.same_day || suppression.sameDay) fail('whatsapp_appointment_suppressed');
   return true;
 }
-async function assertAutomatedMessageEligibility({ message, conversation, payload, loadExecution, loadAppointment, patientHeld }) {
+async function assertAutomatedMessageEligibility({ message, conversation, payload, loadExecution, loadAppointment, patientHeld, getReceptionState }) {
   const m = object(message.metadata), executionId = Number(m.execution_id);
   const automated = Number.isSafeInteger(executionId) && executionId > 0 || !!m.communication_scope;
   if (!automated) return true;
@@ -47,7 +47,8 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
   if (!patientId && appointment?.paciente_id && await patientHeld(Number(appointment.paciente_id))) fail('whatsapp_patient_import_held');
   if (m.appointment_timeout === true) {
     const health = require('./whatsappInboxHealth');
-    if (!health.state(health.read(), conversation.clinic_id).healthy) fail('whatsapp_inbox_reception_delayed');
+    const receptionState = getReceptionState ? await getReceptionState() : health.state(health.read(), conversation.clinic_id);
+    if (!receptionState.readyForTimeout) fail('whatsapp_inbox_reception_delayed');
   }
   return assertAppointmentEligibility({ appointment, execution, clinicId: conversation.clinic_id, patientId,
     confirmationTimeout: m.appointment_timeout === true,

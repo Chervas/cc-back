@@ -28,7 +28,9 @@ async function tick() {
         const b = bindings.find(b => b.clinicId === Number(conversation?.clinic_id)
           && b.phoneId === message?.metadata?.phone_number_id && b.wabaId === message?.metadata?.waba_id);
         const currentHealth = reception.read();
-        if (!reception.state(currentHealth, Number(conversation?.clinic_id)).healthy
+        const messageHealth = await reception.forConversation(currentHealth, conversation, bindings,
+          (...args) => db.sequelize.query(...args), { transaction });
+        if (!messageHealth.readyForReplies
           || Date.parse(currentHealth?.recoveryNotBefore || '') > Date.parse(cutoff)
           || !eligible(message, conversation, b, cutoff)) { held++; return; }
         if (conversation.patient_id && await patientImportHeld(Number(conversation.patient_id), db)) { held++; return; }

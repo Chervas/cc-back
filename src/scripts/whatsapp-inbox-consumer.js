@@ -35,7 +35,9 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
     }catch(error){
       const reason=['unsupported_event','unmatched_status','review_required','import_retry'].includes(error.inboxReason)?error.inboxReason:'import_retry';
       if(lease?.lease)await client.request('POST','/defer',{receipt:lease.receipt,lease:lease.lease,reason}).catch(()=>{});
-      process.stderr.write(JSON.stringify({event:'whatsapp_inbox_item_deferred',reason})+'\n');
+      process.stderr.write(JSON.stringify({event:'whatsapp_inbox_item_deferred',reason,
+        ...(typeof item.receipt==='string'&&/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(item.receipt)?{receipt:item.receipt}:{}),
+        ...(error.reviewDetail==='contact_binding_mismatch'?{detail:error.reviewDetail}:{})})+'\n');
     }
     finally{raw?.fill(0);}
   }

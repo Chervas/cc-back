@@ -45,3 +45,11 @@ test('a text followup after timeout has the same current-appointment protection 
  v.now=Date.parse('2026-09-16T10:00Z');assert.throws(()=>check(v));
  v.now=now;v.appointment.estado='recordatorio_confirmado';assert.throws(()=>check(v));
 });
+test('final timeout transport uses scoped reception readiness and still blocks pending input',async()=>{
+ const start=new Date(Date.now()+3600000).toISOString();
+ const input={message:{metadata:{execution_id:1,appointment_timeout:true}},conversation:{clinic_id:2,patient_id:3},patientHeld:async()=>false,
+  loadExecution:async()=>({id:1,clinic_id:2,trigger_entity_type:'appointment',trigger_entity_id:1,context:{appointment:{inicio:start}}}),
+  loadAppointment:async()=>({id_cita:1,clinica_id:2,paciente_id:3,inicio:start,estado:'info_enviada'})};
+ assert.equal(await dispatch({...input,getReceptionState:async()=>({healthy:true,readyForTimeout:true})}),true);
+ await assert.rejects(dispatch({...input,getReceptionState:async()=>({healthy:true,readyForTimeout:false})}),{code:'whatsapp_inbox_reception_delayed'});
+});

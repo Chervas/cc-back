@@ -7181,7 +7181,22 @@ async function resumeWaitingNode(execution, node, context, {
       const policy = require('../lib/whatsappAppointmentTimeout');
       const health = require('../lib/whatsappInboxHealth');
       const next = execution.templateVersion?.nodes?.find(n => n.id === nextNode);
-      const decision = await policy.decide({ execution, context, nextNode: next, snapshot: health.read(),
+      const snapshot = health.read();
+      let receptionState = health.state(snapshot, Number(execution.clinic_id));
+      const clinicHealth = snapshot?.clinics?.find(c => c.clinicId === Number(execution.clinic_id));
+      if (clinicHealth?.blockingReview && Array.isArray(clinicHealth.blockingContactKeys)) {
+        const anchor = resolveWaitResponseAnchor(context, {
+          ...node.config, listens_to_node_id: execution.waiting_meta?.listens_to_node_id || node.config?.listens_to_node_id,
+        });
+        const conversationId = toIntOrNull(anchor.listened_output?.conversation_id || anchor.listened_output?.chat_conversation_id);
+        const conversation = conversationId ? await Conversation.findByPk(conversationId, { raw: true,
+          attributes: ['id', 'clinic_id', 'channel', 'contact_id'] }) : null;
+        if (Number(conversation?.clinic_id) === Number(execution.clinic_id)) {
+          receptionState = await health.forConversation(snapshot, conversation, whatsappAuthorizedBroker.bindingsForClinic(Number(execution.clinic_id)),
+            (...args) => db.sequelize.query(...args));
+        }
+      }
+      const decision = await policy.decide({ execution, context, nextNode: next, snapshot, receptionState,
         loadAppointment: id => CitaPaciente.findByPk(id, { raw: true }),
         hasAskedToday: async appointment => {
           const [rows] = await db.sequelize.query("SELECT /*+ MAX_EXECUTION_TIME(3000) */ m.sent_at,m.createdAt,JSON_UNQUOTE(JSON_EXTRACT(e.context,'$.appointment.inicio')) appointment_start FROM FlowExecutionsV2 e JOIN Messages m ON JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.execution_id'))=CAST(e.id AS CHAR) JOIN Conversations c ON c.id=m.conversation_id WHERE e.clinic_id=:clinicId AND c.clinic_id=:clinicId AND e.trigger_entity_type='appointment' AND e.trigger_entity_id=:appointmentId AND m.direction='outbound' AND m.message_type<>'event' AND m.createdAt>=:since AND (m.status IN ('pending','sending','sent','delivered','read') OR JSON_EXTRACT(m.metadata,'$.wamid') IS NOT NULL) LIMIT 100", {

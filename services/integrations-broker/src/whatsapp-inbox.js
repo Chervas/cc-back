@@ -111,6 +111,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
   const aad = row => JSON.stringify(['cc-wa-inbox-v1', row.app_id, row.receipt, row.key_id, row.digest, row.scopes, row.kinds, row.received_at]);
   const receiptFor = row => ({ receipt: row.receipt, persisted: true, businessProcessed: row.state === 'imported' });
   const clean = error => new BrokerError(error instanceof BrokerError ? error.code : 'audit_unavailable');
+  const reviewCache = new Map(); // Only hashed contact references, never plaintext.
   return {
     accept({ raw, signature, appSecret }) {
       refreshScopes();
@@ -156,6 +157,34 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
     health() {
       refreshScopes();
       const groups = store.db.prepare("SELECT i.scopes,COUNT(*) pending,MIN(CASE WHEN r.reason IS NULL OR r.reason='import_retry' THEN i.received_at END) oldestPendingAt,SUM(CASE WHEN r.reason='review_required' THEN 1 ELSE 0 END) blockingReview,SUM(CASE WHEN r.reason IN ('unsupported_event','unmatched_status') THEN 1 ELSE 0 END) review FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' GROUP BY i.scopes").all(appId);
+      const reviews = store.db.prepare("SELECT i.receipt,i.digest,i.scopes,i.kinds,i.received_at,i.key_id,i.app_id,i.byte_count FROM whatsapp_inbox i JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' AND r.reason='review_required' ORDER BY i.received_at LIMIT 100").all(appId);
+      const present = new Set(reviews.map(r => r.receipt));
+      for (const receipt of reviewCache.keys()) if (!present.has(receipt)) reviewCache.delete(receipt);
+      const scopeVersion = JSON.stringify(scopeBindings);
+      let bytes = 0;
+      for (const row of reviews) {
+        const identity = row.digest + scopeVersion;
+        let cached = reviewCache.get(row.receipt);
+        if (cached?.identity !== identity) {
+          if (bytes + row.byte_count > 8 * 1024 * 1024) continue;
+          bytes += row.byte_count;
+          let raw;
+          try {
+            const sealed = store.db.prepare('SELECT body FROM whatsapp_inbox WHERE receipt=?').get(row.receipt);
+            raw = cipher.open(sealed.body, aad(row));
+            cached = { identity, contacts: require('./whatsapp-inbox-review').reviewContacts(raw, scopeBindings) };
+            reviewCache.set(row.receipt, cached);
+          } catch { continue; } finally { raw?.fill(0); }
+        }
+        if (!cached.contacts) continue;
+        const group = groups.find(g => g.scopes === row.scopes);
+        if (!group) continue;
+        const isolation = group.reviewIsolation ||= { version: 1, scopedReviews: 0, contacts: [] };
+        const contacts = new Map([...isolation.contacts, ...cached.contacts].map(c => [c.contactKey, c]));
+        if (contacts.size > 128) continue;
+        isolation.scopedReviews++;
+        isolation.contacts = [...contacts.values()];
+      }
       return { observedAt: now(), groups: groups.map(row => ({ ...row, scopes: JSON.parse(row.scopes) })) };
     },
     // No automatic consumer. The caller must have a separately authenticated,

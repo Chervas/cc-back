@@ -143,3 +143,20 @@ test('a crashed consumer rotates failed leases behind newly arrived work',t=>{
  f.inbox.lease(a.receipt).raw.fill(0);f.advance(60001);f.restart();
  assert.equal(f.inbox.pending()[0].receipt,b.receipt);
 });
+test('review health attributes signed contact events without importing them and retains unknown review barriers',t=>{
+ const scopeBindings=[{wabaId:'301',phoneId:'401',clinicIds:[71]}];
+ const f=fixture(t,{scopeBindings});
+ const input=body();input.entry[0].changes[0].value.messaging_product='whatsapp';
+ const one=f.inbox.accept(packet(input)),lease=f.inbox.lease(one.receipt);lease.raw.fill(0);
+ f.inbox.defer({receipt:lease.receipt,lease:lease.lease,reason:'review_required'});
+ const health=f.inbox.health();const group=health.groups[0];
+ assert.equal(group.blockingReview,1);assert.equal(group.reviewIsolation.scopedReviews,1);
+ assert.equal(group.reviewIsolation.contacts[0].clinicId,71);
+ assert.match(group.reviewIsolation.contacts[0].contactKey,/^[a-f0-9]{64}$/);
+ assert(!JSON.stringify(health).includes('34000000001'));assert(!JSON.stringify(health).includes('FICTITIOUS_CANCEL_REQUEST'));
+ assert.deepEqual(f.inbox.health(),health);f.restart();assert.deepEqual(f.inbox.health(),health);
+ const unknown=f.inbox.accept(packet(body({field:'smb_app_state_sync'}))),other=f.inbox.lease(unknown.receipt);other.raw.fill(0);
+ f.inbox.defer({receipt:other.receipt,lease:other.lease,reason:'review_required'});
+ assert.equal(f.inbox.health().groups[0].blockingReview,2);assert.equal(f.inbox.health().groups[0].reviewIsolation.scopedReviews,1);
+ assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n,0);
+});

@@ -3,8 +3,8 @@ const { state } = require('./whatsappInboxHealth');
 const day = value => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value));
 // A no-response timeout is a business decision. A transport outage is never
 // evidence of silence, and recovering a timer is not permission to replay it.
-async function decide({ execution, context, nextNode, snapshot, loadAppointment, hasAskedToday, now = Date.now() }) {
-  const health = state(snapshot, execution.clinic_id, now);
+async function decide({ execution, context, nextNode, snapshot, receptionState, loadAppointment, hasAskedToday, now = Date.now() }) {
+  const health = receptionState || state(snapshot, execution.clinic_id, now);
   if (!health.healthy) return { action: 'wait', reason: health.reason, recovery: true };
   if (!health.readyForTimeout) return { action: 'wait', reason: 'inbox_reception_pending' };
   const appointment = await loadAppointment(execution.trigger_entity_id);

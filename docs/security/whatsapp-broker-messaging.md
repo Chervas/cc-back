@@ -160,6 +160,33 @@ administrativos conocidos (`played`, `edit`, `revoke`) y estados sin mensaje loc
 se conservan para revisión sin bloquear todos los recordatorios. Un lote mixto
 que también contiene una respuesta real sí bloquea hasta resolverse.
 
+Desde el 29/09, las revisiones atribuibles a contactos concretos se aíslan por
+contacto, sin descartar eventos ni relajar su importación. AWS deriva del cuerpo
+firmado/cifrado claves SHA-256 de `[clínica, número receptor, contacto]`; el pulso
+solo transporta esas referencias y contadores, nunca teléfonos ni mensajes. El
+cálculo se limita a 100 recibos, 8 MiB descifrados por pulso y 128 claves por grupo,
+con caché de referencias. Lo que no pueda atribuirse conserva el bloqueo general.
+Los consumidores antiguos también mantienen el bloqueo general durante una
+publicación gradual.
+
+El dispatcher, el vencimiento nativo y la comprobación previa al envío consultan
+la conversación concreta. Se comprueba tanto su teléfono actual como los vínculos
+anteriores de `WhatsappInboxContactKeys`, con una búsqueda acotada por clave
+primaria. Así, cambiar el teléfono de una conversación no oculta la revisión de
+su teléfono anterior. Una discrepancia de vínculo conserva `review_required` y
+se registra como `contact_binding_mismatch`, con recibo técnico y sin contenido.
+No se reasignan mensajes ni pacientes automáticamente. Las respuestas ya
+importadas de otros contactos pueden continuar; decidir silencio sigue exigiendo
+que no haya atraso ordinario pendiente. Pulso caducado, recuperación pausada y
+revisiones sin atribución mantienen sus barreras. Monitorización distingue la
+revisión de contactos de una incidencia general de recepción.
+
+Para publicar esta corrección con respuestas retenidas, actualizar primero AWS
+y el publicador del pulso; después el dispatcher. Conservar el motor anterior
+durante el procesamiento de respuestas válidas y comprobar sus claims/ejecuciones
+antes de reiniciar la API con el aislamiento de temporizadores. No adelantar
+reintentos, confirmar recibos ambiguos ni quitar los HOLD de ClinicCloud.
+
 Los timeouts de citas con WhatsApp autorizado vuelven a una espera durable de
 un minuto mientras falla la recepción; no mandan el segundo mensaje ni cancelan
 la cita por silencio. Al recuperarse comprueban la cita actual. Desde el 23/09

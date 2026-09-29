@@ -3,7 +3,7 @@ const { createHash, randomUUID } = require('node:crypto');
 const D = require('./whatsappInboundDetails');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
-function held(inboxReason = 'review_required') { throw Object.assign(Error('whatsapp_inbox_review_required'), { inboxReason }); }
+function held(inboxReason = 'review_required', reviewDetail) { throw Object.assign(Error('whatsapp_inbox_review_required'), { inboxReason, reviewDetail }); }
 function contact(value) { if (typeof value !== 'string' || !/^[1-9][0-9]{6,14}$/.test(value)) held(); return value; }
 function normalize(raw, scope, now = Date.now()) {
   if (!Buffer.isBuffer(raw) || raw.length > 3 * 1024 * 1024 || !Number.isSafeInteger(scope.clinicId)
@@ -129,7 +129,7 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
         await query('INSERT INTO WhatsappInboxContactKeys VALUES(?,?,NOW(3))',[contactKey,conversationId]);
       }
       const c=await query("SELECT id FROM Conversations WHERE id=? AND clinic_id=? AND channel='whatsapp' AND contact_id IN (?,?) FOR UPDATE",[conversationId,scope.clinicId,m.peer,'+'+m.peer]);
-      if (c.length !== 1) held();
+      if (c.length !== 1) held('review_required', 'contact_binding_mismatch');
       // Legacy messages lack the new unique key. Adopt only one matching WAMID
       // in this exact conversation; never import it twice on a history replay.
       const legacy=await query("SELECT id,direction,content FROM Messages WHERE conversation_id=? AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.wamid'))=? LIMIT 2",[conversationId,m.wamid]);
@@ -161,7 +161,7 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
     await query('INSERT INTO WhatsappInboxImports VALUES(?,?,?,?,?,?,NOW(3))',[lease.receipt,digest,importReceipt,scope.clinicId,scope.phoneId,inserted]);
     await validateScope?.(connection);
     await connection.commit();tx=false;return { importReceipt,replayed:false };
-  } catch (error) { if(tx) await connection.rollback().catch(()=>{}); held(error.inboxReason || 'import_retry'); }
+  } catch (error) { if(tx) await connection.rollback().catch(()=>{}); held(error.inboxReason || 'import_retry', error.reviewDetail); }
   finally { if(locked) await query('SELECT RELEASE_LOCK(?)',[lock]).catch(()=>{}); }
 }
 module.exports={ normalize,importLease,SCHEMA };
