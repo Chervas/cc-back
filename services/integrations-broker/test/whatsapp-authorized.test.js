@@ -14,6 +14,12 @@ test('Same verified BISU candidate sends selected phone, preserving held status 
   for(const token of a.f.state.heldTokens)assert(token.every(v=>v===0));
   assert.deepEqual(a.state.calls.map(c=>c.action), ['send']);
 });
+test('Authorized sends accept a staged credential whose optional events permission Meta omitted',async t=>{
+  const a=await fixture(t,{omitEventsGrant:true});await a.execute();assert.equal(a.sends().length,1);
+  const metadata=JSON.parse(a.f.current.store.db.prepare('SELECT credential_metadata FROM whatsapp_onboarding_flows WHERE id=?')
+    .get(a.definition.authorizationId).credential_metadata);
+  assert.deepEqual(metadata.scopes,['public_profile','whatsapp_business_management','whatsapp_business_messaging']);
+});
 test('Signed authorized profile read crosses the full broker registry without widening its scope',async t=>{
   const a=await fixture(t);const request=a.request(textMessage(),{operation:P.READ,
     payload:{authorizationId:a.definition.authorizationId,phoneId:a.definition.phoneId}});

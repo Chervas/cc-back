@@ -47,6 +47,23 @@ test('Optional events permission without targets does not block a proven WhatsAp
     assert.deepEqual(f.current.store.db.prepare('SELECT phone_id FROM whatsapp_onboarding_assets').all().map(r => r.phone_id), ['401']);
   }
 });
+test('Meta may omit the configured optional events permission without weakening the stored operational grant', async t => {
+  const f = selected(t); const original = f.state.afterGraph;
+  f.state.afterGraph = (req, response) => {
+    const r = original(req, response);
+    if (req.action === 'inspect') {
+      r.data.scopes = r.data.scopes.filter(scope => scope !== 'whatsapp_business_manage_events');
+      r.data.granular_scopes = r.data.granular_scopes.filter(scope => scope.scope !== 'whatsapp_business_manage_events');
+    }
+    return r;
+  };
+  const flow = await f.begin(); const result = await f.finish(flow);
+  const expected = ['public_profile','whatsapp_business_management','whatsapp_business_messaging'];
+  assert.deepEqual(result.data.candidate.scopes, expected);
+  assert.deepEqual(JSON.parse(f.current.store.db.prepare('SELECT credential_metadata FROM whatsapp_onboarding_flows WHERE id=?')
+    .get(flow.flowId).credential_metadata).scopes, expected);
+  f.restart(); assert.deepEqual((await f.status(flow)).data.candidate.scopes, expected);
+});
 test('Untargeted events never replace mandatory messaging or management proof, and malformed targets still reject', async t => {
   const mutations = [
     r => { delete r.data.granular_scopes.find(g => g.scope === 'whatsapp_business_management').target_ids; },

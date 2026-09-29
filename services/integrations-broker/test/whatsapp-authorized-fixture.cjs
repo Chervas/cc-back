@@ -18,8 +18,15 @@ const templateMessage = () => ({ messaging_product: 'whatsapp', to: '34000000123
   { type: 'button', sub_type: 'quick_reply', index: '0', parameters: [{ type: 'payload', payload: 'FICTITIOUS_CONFIRM' }] },
   { type: 'button', sub_type: 'url', index: '1', parameters: [{ type: 'text', text: 'qa' }] },
 ] } });
-async function fixture(t, { enabled = true, ongoing = false } = {}) {
+async function fixture(t, { enabled = true, ongoing = false, omitEventsGrant = false } = {}) {
   const f = onboardingFixture(t, { customer: { selectionOnly: true }, scopes: ['whatsapp_business_management','whatsapp_business_messaging','public_profile','whatsapp_business_manage_events'] });
+  if (omitEventsGrant) f.state.afterGraph = (request, response) => {
+    if (request.action === 'inspect') {
+      response.data.scopes = response.data.scopes.filter(scope => scope !== 'whatsapp_business_manage_events');
+      response.data.granular_scopes = response.data.granular_scopes.filter(scope => scope.scope !== 'whatsapp_business_manage_events');
+    }
+    return response;
+  };
   const flow = await f.begin(); await f.finish(flow); const row = f.current.store.db.prepare('SELECT * FROM whatsapp_onboarding_flows WHERE id=?').get(flow.flowId);
   if (ongoing) {
     f.binding.expiresAt = null;
