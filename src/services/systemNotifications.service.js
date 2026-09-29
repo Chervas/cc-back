@@ -179,6 +179,13 @@ const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
     description: 'Meta ha comunicado que el negocio no ha superado la verificación empresarial.',
     defaults: { panel: true, email: true, whatsapp: false },
   },
+  {
+    key: 'whatsapp.reception_attention', category: 'whatsapp', severity: 'warning',
+    label: 'WhatsApp: recepción o respuestas pendientes de revisión',
+    description: 'Identidades ambiguas, fallos de recepción o respuestas guardadas pendientes del motor.',
+    minimumThrottleMinutes: 60,
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
 ]);
 
 function cleanString(value) {
@@ -1397,6 +1404,16 @@ async function runActiveChecks({ force = false } = {}) {
   const overview = await emailMonitoring.getOverview();
   const alerts = Array.isArray(overview?.alerts) ? overview.alerts : [];
   const queued = [];
+  const receptionAlerts = await require('../lib/whatsappReceptionAlerts').collect({
+    snapshot: require('../lib/whatsappInboxHealth').read(),
+    bindings: require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings || [],
+    query: (...args) => db.sequelize.query(...args),
+  }).catch(() => [{ eventKey: 'whatsapp.reception_attention', payload: {
+    severity: 'critical', title: 'No se puede comprobar la recepción de WhatsApp',
+    detail: 'La comprobación de recepción o respuestas pendientes no está disponible.',
+    action: 'Revisar Ajustes → Monitorización → WhatsApp.',
+  }, metadata: { source: 'whatsapp_reception', check_unavailable: true } }]);
+  for (const alert of receptionAlerts) queued.push(await queueNotification({ ...alert, force }));
   for (const alert of alerts) {
     const eventKey = cleanString(alert.key);
     if (!eventKey || !eventDefinition(eventKey)) continue;
@@ -1416,7 +1433,7 @@ async function runActiveChecks({ force = false } = {}) {
   return {
     status: 'completed',
     checkedAt: new Date().toISOString(),
-    alertCount: alerts.length,
+    alertCount: alerts.length + receptionAlerts.length,
     queued,
   };
 }

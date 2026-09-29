@@ -259,6 +259,42 @@ recupera su salud; un estado atrasado anterior, `CONNECTED`, una reconexión loc
 o un diagnóstico realizado con otra credencial no bastan. No se debe probar el
 pago saltándose el broker o el cortacircuitos.
 
+## Identidad del contacto, respuestas durables y aviso operativo (29/09/2026)
+
+La identidad usa el teléfono completo E.164. Solo el legado nacional español
+admite su variante local de nueve dígitos; nunca se equiparan países distintos
+por el sufijo. Abrir una ficha no cambia el destinatario de su conversación ni
+fusiona los historiales de dos números. Una propiedad contradictoria devuelve
+`409 whatsapp_contact_identity_conflict`; tampoco se reasigna un chat de otro
+paciente. En el envío manual, una discrepancia entre ficha y chat detiene la
+operación antes de crear el mensaje y obliga a revisar los teléfonos.
+
+El vencimiento de `wait_response` de citas consulta mensajes durables pendientes
+de reclamar en esa conversación. Incluye el vencimiento terminal sin salida
+`on_timeout`, respuestas encoladas y audios aún pendientes. Si hay una respuesta
+válida o no puede verificarse la consulta, conserva el propietario nativo de la
+espera, aplaza 60 segundos y registra `inbound_response_dispatch_pending`.
+No clasifica respuestas, no confirma citas ni reproduce mensajes. Se conservan
+los HOLD, límites de recuperación, emisores autorizados e idempotencia; una
+respuesta caducada conserva la revisión y no obtiene permiso para reproducirse.
+Consulta acotada a conversación, 50 filas y tres segundos; consulta fallida o
+límite sin resolver requieren revisión, nunca se interpretan como silencio.
+
+El chequeo `system_notification_check` existente de cinco minutos incorpora
+`whatsapp.reception_attention` para revisiones de recepción y esperas retenidas
+por respuestas durables. Usa panel y correo administrativo habilitados en
+`SystemNotificationSettings`, con mínimo 60 minutos entre avisos de este tipo.
+El aviso incluye clínicas y cantidades, sin identidad ni texto de pacientes.
+No añade cron, llamadas a Meta ni correos a pacientes. Una regla de correo
+expresamente desactivada sigue desactivada. El panel de monitorización conserva
+el diagnóstico; la conciliación de identidad exige evidencia humana.
+
+Pruebas focales: `whatsapp_contact_identity`, `whatsapp_pending_reply`,
+`whatsapp_reception_alerts`, `whatsapp_timeout_engine` y `system_notifications`.
+El cambio se publica en API DEV/staging; no requiere DDL ni modificar broker,
+importador, plantillas, prompts o modelos. Para rollback revertir el código en
+DEV y promover; conservar los datos de identidad ya conciliados y recibos.
+
 ## Contrato y autoridad
 
 Runtime `services/integrations-broker/src/whatsapp-main.js`, Node 24, cohorte

@@ -114,10 +114,22 @@ function getPhoneLookupCandidates(raw, options = {}) {
   ].filter(Boolean)));
 }
 
+// Identity comparisons retain the country code. Suffixes are useful for a
+// search suggestion, never for merging or moving a WhatsApp conversation.
+function getPhoneIdentityCandidates(raw, options = {}) {
+  const normalized = normalizePhoneDigits(raw, options);
+  if (!normalized) return [];
+  const country = String(options.defaultCountryCode || DEFAULT_COUNTRY_CODE).replace(/\D/g, '');
+  return [...new Set([`+${normalized}`, normalized,
+    ...(country === '34' && /^34[0-9]{9}$/.test(normalized) ? [normalized.slice(2)] : []),
+  ])];
+}
+
 module.exports = {
   DEFAULT_COUNTRY_CODE,
   extractPhoneCandidates,
   normalizePhoneDigits,
   normalizePhoneE164,
   getPhoneLookupCandidates,
+  getPhoneIdentityCandidates,
 };

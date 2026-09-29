@@ -7176,6 +7176,25 @@ async function resumeWaitingNode(execution, node, context, {
       ? readOutputTarget(node, 'on_response')
       : readOutputTarget(node, 'on_timeout');
 
+    if (!useResponse && execution.trigger_entity_type === 'appointment'
+      && whatsappAuthorizedBroker.bindingsForClinic(Number(execution.clinic_id)).some(b => b.sendEnabled)) {
+      const anchor = resolveWaitResponseAnchor(context, {
+        ...node.config, listens_to_node_id: execution.waiting_meta?.listens_to_node_id || node.config?.listens_to_node_id,
+      });
+      const pending = await require('../lib/whatsappPendingReply').pendingReply({
+        clinicId: execution.clinic_id, anchor, waitingMeta: execution.waiting_meta,
+        bindings: whatsappAuthorizedBroker.bindingsForClinic(Number(execution.clinic_id)),
+        snapshot: require('../lib/whatsappInboxHealth').read(), query: (...args) => db.sequelize.query(...args),
+      }).catch(() => 'review_required');
+      if (pending) {
+        await updateExecutionAndEmit(execution, { status: 'waiting', wait_until: new Date(Date.now() + 60000),
+          waiting_meta: { ...execution.waiting_meta,
+            inbox_original_due_at: execution.waiting_meta?.inbox_original_due_at || execution.wait_until },
+          last_error: 'inbound_response_dispatch_pending' });
+        return { resumed: false, context };
+      }
+    }
+
     if (!useResponse && nextNode && execution.trigger_entity_type === 'appointment'
       && whatsappAuthorizedBroker.bindingsForClinic(Number(execution.clinic_id)).some(b => b.sendEnabled)) {
       const policy = require('../lib/whatsappAppointmentTimeout');

@@ -61,6 +61,9 @@ test('normaliza reglas y declara la plantilla admin-only de WhatsApp', () => {
   assert.equal(rules['whatsapp.webhook_subscription_missing'].email, true);
   assert.equal(rules['whatsapp.webhook_subscription_recovered'].whatsapp, false);
   assert.equal(rules['whatsapp.business_verification_rejected'].severity, 'warning');
+  assert.equal(rules['whatsapp.reception_attention'].email, true);
+  assert.equal(rules['whatsapp.reception_attention'].panel, true);
+  assert.equal(rules['whatsapp.reception_attention'].whatsapp, false);
 
   const payload = systemNotifications._test.systemWhatsappTemplatePayload({
     name: 'clinicaclick_admin_alerta_sistema',
@@ -68,6 +71,22 @@ test('normaliza reglas y declara la plantilla admin-only de WhatsApp', () => {
   assert.equal(payload.category, 'UTILITY');
   assert.match(payload.components[0].text, /Alerta operativa de Clinicaclick: \{\{1\}\}/);
   assert.match(payload.components[0].text, /Revisa Monitorizacion del sistema\./);
+});
+
+test('la revisión de recepción usa correo existente, respeta desactivación y no repite antes de una hora', async () => {
+  const setting = settingStub({ email_enabled: true, whatsapp_enabled: false, admin_email: 'test@example.invalid', throttle_minutes: 0 });
+  const restores = [
+    patchProperty(db.SystemNotificationSetting, 'findOrCreate', async () => [setting, false]),
+    patchProperty(db.SystemNotificationDelivery, 'count', async () => 1),
+  ];
+  try {
+    const result = await systemNotifications.queueNotification({ eventKey: 'whatsapp.reception_attention' });
+    assert.deepEqual(result.channels, ['panel', 'email']);
+    assert.equal(result.created.length, 0);
+    assert.equal(systemNotifications._test.throttleMinutesForEvent(setting, 'whatsapp.reception_attention'), 60);
+    setting.email_enabled = false;
+    assert.deepEqual(systemNotifications._test.enabledChannelsForEvent(setting, 'whatsapp.reception_attention'), ['panel']);
+  } finally { restores.reverse().forEach(r => r()); }
 });
 
 test('los indicadores SES semanales permanecen en panel y no se repiten cada hora', async () => {

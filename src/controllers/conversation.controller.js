@@ -1507,6 +1507,7 @@ exports.listConversations = async (req, res) => {
     res.set('X-Total-Unread', String(totalUnread || 0));
     return res.json(payload);
   } catch (err) {
+    if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error listConversations', err);
     return res.status(500).json({ error: 'Error obteniendo conversaciones' });
   }
@@ -1617,6 +1618,7 @@ exports.getMessages = async (req, res) => {
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
     return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
   } catch (err) {
+    if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getMessages', err);
     return res.status(500).json({ error: 'Error obteniendo mensajes' });
   }
@@ -1740,6 +1742,7 @@ exports.getConversationByPatient = async (req, res) => {
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
     return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
   } catch (err) {
+    if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getConversationByPatient', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
   }
@@ -1800,6 +1803,7 @@ exports.getConversationByLead = async (req, res) => {
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
     return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
   } catch (err) {
+    if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getConversationByLead', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
   }
@@ -2087,6 +2091,11 @@ exports.postMessage = async (req, res) => {
         return res.status(400).json({ error: 'contacto_sin_numero' });
       }
       if (conversation.contact_id !== to) {
+        if (whatsappService.normalizePhoneNumber(conversation.contact_id) !== to) {
+          await transaction.rollback();
+          return res.status(409).json({ code: 'whatsapp_contact_identity_conflict',
+            error: 'El teléfono de la ficha no coincide con este chat. Revisa a quién pertenece cada número antes de enviar.' });
+        }
         conversation.contact_id = to;
         await conversation.save({ transaction });
       }
@@ -2440,6 +2449,7 @@ exports.postMessage = async (req, res) => {
     return res.json({ message: msg });
   } catch (err) {
     await transaction.rollback();
+    if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error postMessage', err);
     return res.status(500).json({ error: 'Error enviando mensaje' });
   }

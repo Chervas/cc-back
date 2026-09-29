@@ -1,5 +1,5 @@
 'use strict';
-function eligible(message, conversation, binding, cutoff, now = Date.now()) {
+function eligible(message, conversation, binding, cutoff, now = Date.now(), { includeExpired = false } = {}) {
   const m = message?.metadata;
   const sent = new Date(message?.sent_at || '').getTime(), since = Math.max(Date.parse(cutoff),
     binding?.messageNotBefore ? Date.parse(binding.messageNotBefore) : 0);
@@ -16,6 +16,6 @@ function eligible(message, conversation, binding, cutoff, now = Date.now()) {
     && /^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(m.wamid || '')
     && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(m.inbox_receipt || '')
     && Number.isFinite(since) && Number.isFinite(sent) && sent >= since && sent <= now + 300000
-    && now - sent <= 86400000 && !m.fresh_inbound_dispatched_at);
+    && (includeExpired || now - sent <= 86400000) && !m.fresh_inbound_dispatched_at);
 }
 module.exports = { eligible };

@@ -2,13 +2,13 @@
 
 const db = require('../../models');
 const whatsappService = require('../services/whatsapp.service');
-const { getPhoneLookupCandidates } = require('./phone');
+const { getPhoneIdentityCandidates, normalizePhoneE164 } = require('./phone');
 
 const { Op } = db.Sequelize;
 const { Conversation, Message, ConversationRead, WhatsAppWebOrigin } = db;
 
 function normalizeContactCandidates(raw) {
-  return getPhoneLookupCandidates(raw, {
+  return getPhoneIdentityCandidates(raw, {
     defaultCountryCode: String(
       process.env.META_WHATSAPP_DEFAULT_COUNTRY_CODE || '+34'
     ).replace(/\D/g, '') || '34',
@@ -221,7 +221,17 @@ async function findCanonicalWhatsappConversation({
     }, { transaction });
   }
 
-  const sorted = [...conversations].sort((left, right) => {
+  const requestedPhone = normalizePhoneE164(contactId);
+  const exact = conversations.filter(c => normalizePhoneE164(c.contact_id) === requestedPhone);
+  // Looking up a patient's existing chat must not change its destination or
+  // merge a second number into it. Different numbers remain separate records.
+  const candidates = exact.length ? exact : conversations;
+  const owners = new Set(candidates.map(c => Number(c.patient_id)).filter(Boolean));
+  if (owners.size > 1 || candidates.some(c => patientId && c.patient_id && Number(c.patient_id) !== Number(patientId))) {
+    throw Object.assign(new Error('Este WhatsApp está vinculado a otro paciente. Revisa las fichas antes de continuar.'),
+      { code: 'whatsapp_contact_identity_conflict', status: 409 });
+  }
+  const sorted = [...candidates].sort((left, right) => {
     const scoreDiff = scoreConversation(right, { patientId, leadId }) - scoreConversation(left, { patientId, leadId });
     if (scoreDiff !== 0) return scoreDiff;
     const messageDiff = compareDatesDesc(left.last_message_at, right.last_message_at);
@@ -230,16 +240,13 @@ async function findCanonicalWhatsappConversation({
   });
 
   const canonical = sorted[0];
-  const duplicates = sorted.slice(1);
+  const duplicates = exact.length ? sorted.slice(1) : [];
 
   const patch = {};
-  if (contactCandidates.length && contactCandidates[0] && canonical.contact_id !== contactCandidates[0]) {
+  if (exact.length && contactCandidates[0] && canonical.contact_id !== contactCandidates[0]) {
     patch.contact_id = contactCandidates[0];
   }
-  // Regla canónica en integración: una única conversación WhatsApp por
-  // `clinic_id + contact_id`. Si reentra el mismo teléfono vinculado a un nuevo
-  // lead/paciente de la misma clínica, la conversación debe re-vincularse al
-  // contexto actual en lugar de quedarse colgada de una entidad antigua.
+  // Attach an unowned conversation, but never replace another patient's owner.
   if (patientId && Number(canonical.patient_id || 0) !== Number(patientId)) {
     patch.patient_id = patientId;
   }

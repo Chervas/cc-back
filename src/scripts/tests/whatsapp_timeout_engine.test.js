@@ -4,7 +4,7 @@ require('./fixtures/campaign_offline_runtime.cjs');
 const policy=require('../../lib/whatsappAppointmentTimeout');
 const text=fs.readFileSync(require.resolve('../../services/flowEngineV2.service'),'utf8');
 const source=text.slice(text.indexOf('async function resumeWaitingNode('),text.indexOf('\nfunction findClassifyIntentOutput('));
-function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,affected=false}={}) {
+function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,affected=false,pending=false,next=true}={}) {
  const now=Date.now(),start=new Date(now+3600000).toISOString();
  const context={appointment:{id_cita:1,clinica_id:2,inicio:start,estado:'info_enviada'}};
  const execution={id:4,clinic_id:2,trigger_entity_type:'appointment',trigger_entity_id:1,status:'running',current_node_id:'wait',
@@ -14,6 +14,7 @@ function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,
  if(review)Object.assign(snapshot.clinics[0],{blockingReview:4,unscopedBlockingReview:0,blockingContactKeys:['a'.repeat(64)]});
  const c={Date,require:name=>{
    if(name==='../lib/whatsappAppointmentTimeout')return policy;
+   if(name==='../lib/whatsappPendingReply')return {pendingReply:async()=>pending?8:null};
    if(name==='../lib/whatsappInboxHealth')return {...require('../../lib/whatsappInboxHealth'),read:()=>healthy?snapshot:null};
    throw Error('unexpected dependency');
  },cleanString:v=>v||null,readOutputTarget:(n,k)=>n.outputs[k],whatsappAuthorizedBroker:{bindingsForClinic:()=>[{sendEnabled:true,clinicId:2,phoneId:'123'}]},
@@ -25,7 +26,7 @@ function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,
  mergeNodeOutput:(c,n,o)=>({...c,outputs:{[n]:o}}),resolveRuntimeTargets:()=>({}),backfillRuntimeTargets:async(e,t)=>t,
  enrichConversationContext:async c=>c};
  vm.createContext(c);vm.runInContext(source+'\nthis.resume=resumeWaitingNode',c);
- return {execution,run:()=>c.resume(execution,{id:'wait',type:'delay/wait_response',outputs:{on_timeout:'send'}},context,{mode:'timeout'})};
+ return {execution,run:()=>c.resume(execution,{id:'wait',type:'delay/wait_response',outputs:{on_timeout:next?'send':null}},context,{mode:'timeout'})};
 }
 test('real engine timeout branch returns to a durable wait when reception health is unavailable',async()=>{
  const f=fixture({healthy:false});const due=f.execution.wait_until;await f.run();
@@ -48,4 +49,10 @@ test('normal flow retains its next node and marks text followups for final trans
 test('real timeout engine isolates another contact review while retaining the affected alias barrier',async()=>{
  const other=fixture({review:true});await other.run();assert.equal(other.execution.current_node_id,'send');
  const own=fixture({review:true,affected:true});await own.run();assert.equal(own.execution.status,'waiting');assert.equal(own.execution.current_node_id,'wait');
+});
+
+test('a durable reply awaiting native dispatch preserves both a followup wait and a terminal wait',async()=>{
+ for(const next of [true,false]){const f=fixture({pending:true,next});await f.run();
+ assert.equal(f.execution.status,'waiting');assert.equal(f.execution.current_node_id,'wait');
+ assert.equal(f.execution.last_error,'inbound_response_dispatch_pending');}
 });
