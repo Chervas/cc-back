@@ -5,7 +5,7 @@ function fixture({automatic=null}={}){
  const now=new Date('2026-09-15T12:00:00.000Z'),key=Buffer.alloc(32,7),viewer={userId:501,sessionRef:randomUUID(),sessionExpiresAt:Math.floor(now.getTime()/1000)+3600};
  const state={clinics:[{id_clinica:19,grupoClinicaId:5},{id_clinica:35,grupoClinicaId:5},{id_clinica:66,grupoClinicaId:29},{id_clinica:72,grupoClinicaId:29}],
   memberships:new Set([19,35,66,72]),blocked:new Set(),sessions:[],brokerCalls:[],queries:[],keys:[],revoked:false,afterBroker:null,onSnapshot:null,snapshots:0,remoteState:'staged',clock:0,rows:[],
-  assets:[],assetQueries:[],onAssetRead:null,phoneIds:new Map()};
+  assets:[],assetQueries:[],onAssetRead:null,phoneIds:new Map(),superseded:new Set(),active:new Set()};
  const bindings=[{scopeKey:'clinic:19',clinicIds:[19],connectionRef:'enrollment:19'},{scopeKey:'clinic:35',clinicIds:[35],connectionRef:'enrollment:35'},
   {scopeKey:'group:29',clinicIds:[66,72],connectionRef:'enrollment:29'}];
  function row(scope,age=0){
@@ -27,6 +27,8 @@ function fixture({automatic=null}={}){
    return state.assets.filter(a=>Object.entries(q.where).every(([k,v])=>a[k]===v)).slice(0,q.limit)
     .map(a=>Object.fromEntries(q.attributes.map(attr=>{const name=Array.isArray(attr)?attr[1]:attr;return[name,a[name]];})));}},
   UsuarioClinica:{findAll:async q=>{assert(q.where.rol_clinica[Op.in].includes('personaldeclinica'));return q.where.id_clinica[Op.in].filter(id=>state.memberships.has(id)).map(id=>({id_clinica:id}));}},
+  WhatsappPhoneActivation:{findAll:async q=>q.where.authorization_id[Op.in].flatMap(authorization_id=>state.superseded.has(authorization_id)
+   ?[{authorization_id,asset_id:382,state:'superseded'}]:state.active.has(authorization_id)?[{authorization_id,asset_id:382,state:'active'}]:[])},
   WhatsappAuthorizationState:{findAll:async q=>{state.queries.push(q);
    if(q.group)return [...new Map(state.rows.map(r=>[r.scope_type+':'+r.scope_id,{scope_type:r.scope_type,scope_id:r.scope_id}])).values()];
    return structuredClone(state.rows.filter(r=>q.where[Op.or].some(s=>s.scope_type===r.scope_type&&s.scope_id===r.scope_id)).slice(0,q.limit));},
@@ -105,6 +107,22 @@ test('Changed group snapshot, binding config or original MAC never yields a succ
 test('Scope block preserves the staged receipt as blocked with no sending or selected-phone assertion',async()=>{
  const f=fixture();f.state.blocked.add('clinic:19');const result=await f.call({type:'clinic',id:19});
  assert.equal(result.authorizations[0].authorizationStatus,'blocked');assert.equal(result.authorizations[0].connected,false);assert.equal(result.authorizations[0].selected,null);assert.equal(result.authorizations[0].phoneState,null);
+});
+test('A superseded credential receipt is retained for audit but no longer shown as reconnectable',async()=>{
+ const f=fixture();f.state.superseded.add(f.state.rows[0].request_id);const result=await f.call({type:'clinic',id:19});
+ assert.deepEqual(result,{authorizations:[],incomplete:false});assert.equal(f.state.brokerCalls.length,0);
+});
+test('A connected activation retires its receipt and older receipts for the same scope and role',async()=>{
+ const f=fixture(),current=f.state.rows[0],older=f.row({type:'clinic',id:19},1000);f.state.rows=[current,older];
+ f.state.active.add(current.request_id);f.state.assets=[localAsset()];
+ const result=await f.call({type:'clinic',id:19});assert.deepEqual(result,{authorizations:[],incomplete:false});
+ assert.equal(f.state.brokerCalls.length,1);
+});
+test('A newer staged receipt remains visible after an older activation completed',async()=>{
+ const f=fixture(),newer=f.state.rows[0],completed=f.row({type:'clinic',id:19},1000);f.state.rows=[newer,completed];
+ f.state.active.add(completed.request_id);f.state.assets=[localAsset()];
+ const result=await f.call({type:'clinic',id:19});assert.equal(result.incomplete,false);assert.equal(result.authorizations.length,1);
+ assert.equal(result.authorizations[0].requestId,newer.request_id);
 });
 test('Status errors are incomplete; limits are bounded and newest receipt wins per scope and phone',async()=>{
  const f=fixture();f.state.afterBroker=()=>{throw Error('FICTITIOUS_PROVIDER_TOKEN');};assert.deepEqual(await f.call({type:'clinic',id:19}),{authorizations:[],incomplete:true});
