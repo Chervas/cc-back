@@ -3,7 +3,13 @@
 // or legacy Meta SDK state is shared with the application window.
 (function (win, doc) {
   const parents = new Set(['https://app.clinicaclick.com', 'https://crm.clinicaclick.com']);
-  const meta = new Set(['https://www.facebook.com', 'https://web.facebook.com']);
+  const metaOrigin = value => {
+    try {
+      const uri = new URL(value);
+      return uri.protocol === 'https:' && !uri.port
+        && (uri.hostname === 'facebook.com' || uri.hostname.endsWith('.facebook.com'));
+    } catch { return false; }
+  };
   const uuid = v => typeof v === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v);
   const id = v => typeof v === 'string' && /^[1-9][0-9]{0,29}$/.test(v);
   const exact = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === keys.sort().join(',');
@@ -36,7 +42,7 @@
         let allowed = args[0] === undefined || args[0] === '' || args[0] === 'about:blank';
         try {
           const uri = typeof args[0] === 'string' ? new URL(args[0]) : null;
-          allowed ||= !!uri && meta.has(uri.origin) && /^\/(?:v[0-9]+\.[0-9]+\/)?dialog\/oauth\/?$/.test(uri.pathname);
+          allowed ||= !!uri && metaOrigin(uri.origin) && /^\/(?:v[0-9]+\.[0-9]+\/)?dialog\/oauth\/?$/.test(uri.pathname);
         } catch {}
         // COOP may sever this WindowProxy and report `closed` while Meta is
         // visibly open. Retain it only for best-effort cleanup; cancellation
@@ -99,7 +105,11 @@
     // Session logging IDs are untrusted selection hints, not identity proof.
     // Only the SDK callback supplies this attempt's code; the broker separately
     // verifies the code's app/grant/WABA and the selected phone's membership.
-    if (!started || !meta.has(event.origin) || !event.source || event.source === win.parent || event.source === win) return;
+    // Meta's documented listener authenticates the Facebook origin. Under
+    // Cross-Origin-Opener-Policy the MessageEvent source may be null even when
+    // the provider flow completed, so it cannot be required as identity proof.
+    // The broker still verifies the OAuth code, WABA and phone membership.
+    if (!started || !metaOrigin(event.origin) || event.source === win.parent || event.source === win) return;
     let v; try { if (typeof event.data !== 'string' || event.data.length > 16384) return; v = JSON.parse(event.data); } catch { return; }
     if (v?.type !== 'WA_EMBEDDED_SIGNUP') return;
     if (['FINISH','FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING'].includes(v.event)) {
