@@ -6,6 +6,7 @@
 // account comes from signup and is proven against authenticated Meta evidence.
 const { BrokerError, fail } = require('./errors');
 const { tokenText } = require('./whatsapp-secrets');
+const { grantedScopes } = require('./whatsapp-onboarding-contract');
 const id = v => typeof v === 'string' && /^[1-9][0-9]{0,29}$/.test(v);
 const required = ['whatsapp_business_management', 'whatsapp_business_messaging'];
 const permitted = [...required, 'public_profile'];
@@ -30,7 +31,7 @@ function inspectCustomerGrant(response, expected, now) {
   if (!data || typeof data !== 'object' || Array.isArray(data) || response.error) fail('oauth_credentials_incomplete');
   if (data.is_valid !== true) fail('credential_revoked');
   if (data.app_id !== expected.appId || !id(data.user_id) || data.type !== 'SYSTEM_USER') fail('oauth_identity_mismatch');
-  if (!uniqueStrings(data.scopes, allowedScopes.length, s => expected.scopes.includes(s)) || data.scopes.length !== expected.scopes.length) fail('oauth_credentials_incomplete');
+  const checkedScopes = grantedScopes(data.scopes, expected.scopes, selectedOnly);
   const granular = data.granular_scopes;
   if (!Array.isArray(granular) || !granular.length || granular.length > (selectedOnly ? 3 : 2)
     || granular.some(g => !g || typeof g !== 'object' || Array.isArray(g))
@@ -52,7 +53,7 @@ function inspectCustomerGrant(response, expected, now) {
     const g = granular.find(g => g.scope === s);
     if (!g || !g.target_ids.includes(expected.selectedWabaId)) fail('scope_denied');
   }
-  return { appId: data.app_id, subjectId: data.user_id, tokenType: data.type, scopes: [...data.scopes].sort(),
+  return { appId: data.app_id, subjectId: data.user_id, tokenType: data.type, scopes: checkedScopes,
     expiresAt: expiry(data.expires_at, now), dataAccessExpiresAt: expiry(data.data_access_expires_at, now),
     businessId: expected.businessId || null, wabaIds: [...wabas].sort() };
 }

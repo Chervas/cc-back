@@ -51,6 +51,12 @@ opcionales permitidos siguen siendo `public_profile` y
 `whatsapp_business_manage_events` según el contrato de alta. No ampliar a Ads,
 páginas, leads ni `business_management`.
 
+Si la política existente incluye `whatsapp_business_manage_events`, Meta puede
+no devolverlo en una autorización válida. El broker acepta únicamente esa
+omisión en modo seleccionado; gestión, mensajería y cualquier otro permiso
+configurado siguen siendo obligatorios. La credencial conserva el conjunto real
+observado y no obtiene operaciones adicionales por tener el permiso en política.
+
 En el fichero privado del gateway, `automatic` contiene únicamente `appId`,
 `configId`, `redirectUri` y `scopes` iguales. No contiene ARN, versión ni secreto.
 Conserva `bindings` para todas las conexiones existentes. El listado de Ajustes

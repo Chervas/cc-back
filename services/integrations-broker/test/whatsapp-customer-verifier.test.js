@@ -57,6 +57,15 @@ test('Events permission remains outside customer enrollment even if added to exp
   f.expected.scopes.push('whatsapp_business_manage_events');
   assert.throws(() => inspectCustomerGrant(f.response, f.expected, at), { code: 'invalid_request' });
 });
+test('Selected-phone enrollment accepts only the configured omission of the optional events permission', () => {
+  const f = fixture(); f.expected.selectionOnly = true; f.expected.scopes.push('whatsapp_business_manage_events');
+  const grant = inspectCustomerGrant(f.response, f.expected, at);
+  assert.deepEqual(grant.scopes, ['public_profile','whatsapp_business_management','whatsapp_business_messaging']);
+
+  f.response.data.scopes = f.response.data.scopes.filter(scope => scope !== 'whatsapp_business_messaging');
+  f.response.data.granular_scopes = f.response.data.granular_scopes.filter(scope => scope.scope !== 'whatsapp_business_messaging');
+  assert.throws(() => inspectCustomerGrant(f.response, f.expected, at), { code: 'oauth_credentials_incomplete' });
+});
 test('Missing owner, non-owner relationship and mismatched requested WABA do not prove ownership', async () => {
   for (const response of [{ id: '301' }, { id: '301', on_behalf_of_business_info: { id: '201' } },
     { id: '999', owner_business_info: { id: '201' } }, { id: '301', owner_business_info: { id: 201 } }]) {

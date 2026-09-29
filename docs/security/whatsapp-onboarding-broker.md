@@ -82,8 +82,11 @@ sin comprobar. La candidata conserva la evidencia de todo el grant.
 
 Solo este modo puede declarar explícitamente `whatsapp_business_manage_events`
 además de los dos permisos WhatsApp y `public_profile`. El conjunto devuelto
-por Meta debe coincidir exactamente con el configurado. El permiso de eventos
-no crea ninguna operación HTTP nueva de eventos/publicidad. Su entrada granular
+por Meta debe contener todos los permisos configurados salvo
+`whatsapp_business_manage_events`, que Meta puede omitir porque no interviene en
+el alta ni en el envío. No se admite omitir ningún otro permiso ni recibir uno
+no configurado. El permiso de eventos no crea ninguna operación HTTP nueva de
+eventos/publicidad. Su entrada granular
 puede faltar o no traer destinos: eso no invalida la prueba de mensajes y gestión
 ni concede ningún activo. Si declara destinos, se validan como antes. Los dos
 permisos operativos deben seguir incluyendo expresamente el WABA seleccionado.
