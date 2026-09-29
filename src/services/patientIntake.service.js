@@ -15,12 +15,15 @@ async function scopedPatient(patientId, clinicId, transaction) {
 
 async function prepare({ patientId, clinicId, actorId }) {
   await scopedPatient(patientId, clinicId);
+  const pendingReview = await db.PatientIntakeRequest.findOne({ where: { patient_id: patientId, clinic_id: clinicId }, order: [['id', 'DESC']] });
+  if (pendingReview?.status === 'submitted') throw q.error('intake_review_pending', 'El paciente ya ha enviado sus respuestas. El profesional debe revisarlas antes de solicitar otro formulario.', 409);
   // Privacy signature and clinical answers remain distinct. Reuses valid signed
   // privacy evidence; a returning patient can update answers without re-signing it.
   await require('./consentimientos.service').createPatientIntakePackage(patientId, { clinicId, createdBy: actorId, structuredQuestionnaire: true });
   return db.sequelize.transaction(async transaction => {
     const patient = await scopedPatient(patientId, clinicId, transaction);
     const previous = await db.PatientIntakeRequest.findOne({ where: { patient_id: patientId, clinic_id: clinicId }, order: [['id', 'DESC']], transaction });
+    if (previous?.status === 'submitted') throw q.error('intake_review_pending', 'El paciente ya ha enviado sus respuestas. El profesional debe revisarlas antes de solicitar otro formulario.', 409);
     if (previous?.status === 'pending') {
       const pkg = await db.ConsentSignaturePackage.findByPk(previous.package_id, { transaction });
       if (pkg && !['expired', 'cancelled'].includes(pkg.status) && new Date(pkg.expires_at) > new Date()) return { package_id: pkg.id, intake_id: previous.id, reused: true };
