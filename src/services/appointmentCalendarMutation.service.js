@@ -74,7 +74,9 @@ async function uncoveredPhases({ db, rows, transaction, installationMapping = nu
 }
 
 async function withCalendarMutation({ db, doctorId = null, installationId = null, clinicId = null, clinic = null, mutate,
-  enabled = bookingCapabilities().simple, now = new Date(), transaction: suppliedTransaction = null }) {
+  enabled = bookingCapabilities().simple, now = new Date(), transaction: suppliedTransaction = null,
+  realtimeEnabled = process.env.AVAILABILITY_REALTIME_ENABLED === 'true',
+  notify = require('../lib/calendar-availability-invalidation').notifyCalendarAvailability }) {
   if ((!doctorId && !installationId && !clinicId) || [doctorId, installationId, clinicId].filter(v => v !== null)
     .some(v => !Number.isSafeInteger(Number(v)) || Number(v) <= 0)) throw Error('CALENDAR_MUTATION_SCOPE_INVALID');
   const execute = async transaction => {
@@ -112,7 +114,15 @@ async function withCalendarMutation({ db, doctorId = null, installationId = null
       { affected_appointments: new Set(introduced.map(key => key.split(':')[0])).size });
     return value;
   };
-  return suppliedTransaction ? execute(suppliedTransaction) : db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, execute);
+  const executeAndNotify = async transaction => {
+    const result = await execute(transaction);
+    if (realtimeEnabled) transaction.afterCommit(async () => {
+      try { await notify({ db, doctorId, installationId, clinicId }); }
+      catch (_) { console.warn('[availability-realtime] calendar_refresh_failed'); }
+    });
+    return result;
+  };
+  return suppliedTransaction ? executeAndNotify(suppliedTransaction) : db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, executeAndNotify);
 }
 
 // Account merges must not rewrite a doctor's identity underneath immutable

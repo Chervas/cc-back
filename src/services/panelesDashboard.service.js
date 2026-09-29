@@ -406,6 +406,7 @@ function mapAppointment(row, maps, now) {
   const end = row.fin instanceof Date ? row.fin : new Date(row.fin || row.inicio);
   const date = dateOnly(start, timeZone);
   const appointmentId = Number(row.id_cita);
+  const care = require('../lib/appointment-care').careState(row, now);
 
   return {
     id: String(appointmentId),
@@ -424,6 +425,7 @@ function mapAppointment(row, maps, now) {
     treatment: treatment?.nombre || row.motivo || row.titulo || null,
     specialty: treatment?.especialidad || treatment?.disciplina || null,
     timeLabel: timeLabel(start, timeZone),
+    timeRangeLabel: `${timeLabel(start, timeZone)} - ${timeLabel(end, timeZone)}`,
     timeISO: Number.isNaN(start.getTime()) ? null : start.toISOString(),
     endTimeISO: Number.isNaN(end.getTime()) ? null : end.toISOString(),
     date,
@@ -431,7 +433,11 @@ function mapAppointment(row, maps, now) {
     statusLabel: ui.label,
     rawStatus: row.estado || null,
     visualType: 'normal',
+    care,
+    canManage: row.can_manage === true,
+    consentSummary: row.consent_summary || null,
     attendanceDue:
+      care.can_arrive &&
       ATTENDANCE_OPEN_STATUSES.has(String(row.estado || '').toLowerCase()) &&
       !Number.isNaN(end.getTime()) &&
       end.getTime() <= now.getTime(),
@@ -467,6 +473,8 @@ async function loadAppointments({
   includePastAttendance = true,
   includeNext = true,
   includeClosedToday = false,
+  manageClinicIds = [],
+  consentClinicIds = [],
 }) {
   if (!clinicIds.length || !CitaPaciente || (!includeToday && !includePastAttendance && !includeNext)) {
     return { today: [], inactiveToday: [], pastAttendance: [], next: [] };
@@ -481,6 +489,7 @@ async function loadAppointments({
   const appointmentAttributes = [
     'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
     'tratamiento_id', 'titulo', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
+    'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional', 'source_system',
   ];
   const doctorScope = doctorId ? { doctor_id: doctorId } : {};
 
@@ -525,6 +534,8 @@ async function loadAppointments({
   ]);
 
   const allRows = [...todayRows, ...pastRows, ...nextRows];
+  await require('./appointmentCardIndicators.service').attach(db, allRows.filter(row => consentClinicIds.includes(Number(row.clinica_id))));
+  for (const row of allRows) row.can_manage = manageClinicIds.includes(Number(row.clinica_id));
   const maps = await loadAppointmentMaps(allRows, clinicMap);
 
   const mappedToday = todayRows.map((row) => mapAppointment(row, maps, now));
@@ -1439,6 +1450,7 @@ async function getMainDashboard({ userId, query = {} }) {
     || (context.role === 'personaldeclinica' && context.subrolCode === 'admin_staff');
   const presentation = rolePresentation(context.role, context.subrolCode, sections);
   const doctorId = sections.doctor ? userId : null;
+  const appointmentManageClinicIds = await getAccessibleClinicIdsForFeature({ actorId: userId, featureKey: 'appointments.manage', clinicIds: dashboardAccess.appointmentClinicIds });
   const appointments = await loadAppointments({
     clinicIds: dashboardAccess.appointmentClinicIds,
     clinicMap: scope.clinicMap,
@@ -1449,6 +1461,8 @@ async function getMainDashboard({ userId, query = {} }) {
     includePastAttendance: sections.operations,
     includeNext: sections.operations,
     includeClosedToday: sections.doctor,
+    manageClinicIds: appointmentManageClinicIds,
+    consentClinicIds: dashboardAccess.consentClinicIds,
   });
   const counts = sections.operations
     ? await countTasks({

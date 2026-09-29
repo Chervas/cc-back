@@ -79,8 +79,21 @@ async function run() {
     fin: new Date('2026-07-22T14:30:00.000Z'),
   }, appointmentMaps, new Date('2026-07-22T12:00:00.000Z'));
   assert.equal(mappedAppointment.timeLabel, '16:15');
+  assert.equal(mappedAppointment.timeRangeLabel, '16:15 - 16:30');
   assert.equal(mappedAppointment.date, '2026-07-22');
   assert.equal(mappedAppointment.agendaQuery.fecha, '2026-07-22');
+  const arrivalRow = { id_cita: 2702, clinica_id: 59, paciente_id: 2700, estado: 'pendiente',
+    inicio: new Date('2026-07-22T14:15:00Z'), fin: new Date('2026-07-22T14:30:00Z'), can_manage: true };
+  const arrivalNow = new Date('2026-07-22T15:00:00Z');
+  const notArrived = __testing.mapAppointment(arrivalRow, appointmentMaps, arrivalNow);
+  assert.equal(notArrived.care.can_arrive, true);
+  assert.equal(notArrived.canManage, true);
+  assert.equal(notArrived.attendanceDue, true);
+  const arrived = __testing.mapAppointment({ ...arrivalRow, arrived_at: new Date('2026-07-22T14:16:00Z'),
+    care_schedule_start: arrivalRow.inicio }, appointmentMaps, arrivalNow);
+  assert.equal(arrived.care.can_arrive, false);
+  assert.equal(arrived.attendanceDue, false);
+  assert.equal(arrived.rawStatus, 'pendiente', 'Arrival is not clinical completion');
 
   const afterUtcMidnight = __testing.mapAppointment({
     id_cita: 2703,
