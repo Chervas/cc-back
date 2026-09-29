@@ -2128,7 +2128,14 @@ async function getConsentSummaryForAppointment(citaLike) {
     const signingPolicy = pickSigningPolicy(signingPolicies);
     return {
         ...summary,
-        pending_document_titles: [...requirementTitles].filter(([key]) => !latest.has(key) || !signed(latest.get(key))).map(([, item]) => item),
+        pending_document_titles: [...requirementTitles].filter(([key]) => !latest.has(key) || !signed(latest.get(key))).map(([key, item]) => {
+            const doc = latest.get(key);
+            const patientSigned = doc && require('./appointmentConsentEligibility.service').isCurrentSignedDocument({
+                ...doc, snapshot_json: { ...doc.snapshot_json, template: { ...doc.snapshot_json?.template, requires_professional_signature: false } },
+            }, {}, now);
+            return { ...item, document_id: doc?.id || null,
+                pending_party: patientSigned && documentRequiresProfessionalSignature(doc) ? 'professional' : 'patient' };
+        }),
         status: summary.has_pending ? 'pending' : 'ok',
         package_id: packageRow?.id || null,
         package_public_id: packageRow?.public_id || null,
