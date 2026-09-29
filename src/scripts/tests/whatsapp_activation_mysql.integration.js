@@ -64,13 +64,47 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   assert.equal(await models.WhatsappPhoneActivation.count(),2);assert.equal(published.connections.length,1);
   assert.equal(published.connections[0].authorizationId,context.requestId);assert.equal(published.connections[0].assetId,asset.id);
   assert.equal(published.connections[0].messageNotBefore,cutoff);assert.equal(await models.ActivationTestJob.count(),1);
+  const renewedAuthorization=context.requestId;
+  const renewedActivation=await models.WhatsappPhoneActivation.findByPk(renewedAuthorization);
+  await renewedActivation.update({profile:{...renewedActivation.profile,isOnBizApp:true,platformType:'CLOUD_API',status:'CONNECTED'}});
+  context.requestId=randomUUID();context.replacement={assetId:asset.id,authorizationId:renewedAuthorization,phoneDigest:'0'.repeat(64)};
+  remote.flowId=context.requestId;remote.connectionRef=A.connectionRef(context.requestId);remote.assetId=null;remote.state='prepared';remote.activatedAt=null;
+  remote.phoneId='501';remote.wabaId='601';remote.profile={...remote.profile,phoneId:'501',displayPhoneNumber:'+34999999999',
+    status:'CONNECTED',platformType:'CLOUD_API',isOnBizApp:true};
+  await assert.rejects(make().complete({...actor,requestId:context.requestId}),/whatsapp_reconnection_identity_mismatch/);
+  assert.equal((await models.ClinicMetaAsset.findByPk(asset.id)).phoneNumberId,'401');
+  assert.equal((await models.WhatsappPhoneActivation.findByPk(renewedAuthorization)).state,'active');
+  context.requestId=randomUUID();remote.flowId=context.requestId;remote.connectionRef=A.connectionRef(context.requestId);
+  remote.profile={...remote.profile,displayPhoneNumber:'+34000000000'};
+  const rotated=await make().complete({...actor,requestId:context.requestId});assert.equal(rotated.assetId,asset.id);assert.equal(rotated.connected,true);
+  asset=await models.ClinicMetaAsset.findByPk(asset.id);assert.equal(asset.phoneNumberId,'501');assert.equal(asset.wabaId,'601');
+  assert.equal(asset.whatsappAuthorizationId,context.requestId);assert.equal(await models.ActivationTestJob.count(),2);
+  assert.equal((await models.WhatsappPhoneActivation.findByPk(renewedAuthorization)).state,'superseded');
+  assert.equal(published.connections[0].phoneId,'501');assert.equal(published.connections[0].wabaId,'601');
+  assert.equal(published.connections[0].messageNotBefore,cutoff);
+  const groupAsset=asset;
+  const legacyAsset=await models.ClinicMetaAsset.create({metaConnectionId:1,assetType:'whatsapp_phone_number',metaAssetId:'701',
+    metaAssetName:'+34 682 14 52 82',phoneNumberId:'701',wabaId:'801',assignmentScope:'clinic',clinicaId:73,isActive:true,
+    additionalData:{whatsappConnectionMode:'coexistence',platformType:'CLOUD_API',isOnBizApp:true,whatsapp_channel_role:'primary'}});
+  context.scope={type:'clinic',id:73};context.clinicIds=[73];context.replacement={assetId:legacyAsset.id,authorizationId:null,phoneDigest:'0'.repeat(64)};
+  context.requestId=randomUUID();remote.flowId=context.requestId;remote.connectionRef=A.connectionRef(context.requestId);remote.scopeKey='clinic:73';remote.clinicIds=[73];
+  remote.phoneId='702';remote.wabaId='802';remote.assetId=null;remote.state='prepared';remote.activatedAt=null;
+  remote.profile={...remote.profile,phoneId:'702',displayPhoneNumber:'+34600000000',status:'CONNECTED',platformType:'CLOUD_API',isOnBizApp:true};
+  await assert.rejects(make().complete({...actor,requestId:context.requestId}),/whatsapp_reconnection_identity_mismatch/);
+  assert.equal((await legacyAsset.reload()).phoneNumberId,'701');assert.equal(await models.WhatsappPhoneActivation.count({where:{asset_id:legacyAsset.id}}),0);
+  context.requestId=randomUUID();remote.flowId=context.requestId;remote.connectionRef=A.connectionRef(context.requestId);
+  remote.profile={...remote.profile,displayPhoneNumber:'+34 682 14 52 82'};
+  const adopted=await make().complete({...actor,requestId:context.requestId});assert.equal(adopted.assetId,legacyAsset.id);assert.equal(adopted.connected,true);
+  await legacyAsset.reload();assert.equal(legacyAsset.phoneNumberId,'702');assert.equal(legacyAsset.wabaId,'802');
+  assert.equal(legacyAsset.whatsappAuthorizationId,context.requestId);assert.equal((await models.WhatsappPhoneActivation.findByPk(context.requestId)).state,'active');
+  asset=groupAsset;context.scope={type:'group',id:9};context.clinicIds=[71,72];delete context.replacement;
   await assert.rejects(historyMigration.down(qi),/Preserve WhatsApp activation history/);
   await assert.rejects(models.ClinicMetaAsset.create({assetType:'ad_account',metaAssetId:'701',metaConnectionId:null}));
   await assert.rejects(migration.down(qi),/Preserve WhatsApp/);
-  report.checks.push('Migration up/up/down/up, independent catalog identity, exact-phone credential renewal, restart recovery without provider reactivation, immutable cutoff, no secrets, audit and rollback guard');
+  report.checks.push('Migration up/up/down/up, exact renewal, native ID rotation and legacy coexistence adoption; another visible phone is rejected without mutating the active asset, routing cutoff remains immutable');
   }
   const own=await models.ClinicMetaAsset.create({metaConnectionId:1,assetType:'whatsapp_phone_number',metaAssetId:'402',phoneNumberId:'402',wabaId:'302',assignmentScope:'clinic',clinicaId:71,isActive:true,additionalData:{whatsapp_channel_role:'primary'}});
-  const bindings=id=>[{assetId:asset.id,phoneId:'401',wabaId:'301',sendEnabled:true},...(id===71?[{assetId:own.id,phoneId:'402',wabaId:'302',sendEnabled:true}]:[])];
+  const bindings=id=>[{assetId:asset.id,phoneId:asset.phoneNumberId,wabaId:asset.wabaId,sendEnabled:true},...(id===71?[{assetId:own.id,phoneId:'402',wabaId:'302',sendEnabled:true}]:[])];
   let blocked=false,sessionValid=true;
   const routing=require('../../services/whatsappRouting.service').createService({models,audit:injectedAudit,sessions:{verifyReference:async()=>{if(!sessionValid)throw Error('SESSION_REVOKED')}},broker:{bindingsForClinic:bindings},scopeBlocks:{blocked:async()=>blocked}});
   const input={scope:{type:'clinic',id:71},primaryAssetId:asset.id,secondaryAssetId:own.id,purposes:['review_requests'],unavailableAction:'pause'};

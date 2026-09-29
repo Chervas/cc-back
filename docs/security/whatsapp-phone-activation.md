@@ -19,6 +19,18 @@ con `whatsappAuthorizationId`, sin fingir que pertenece al OAuth general de Meta
 `WhatsappPhoneActivations` conserva su estado y el corte temporal por número.
 Los secretos permanecen en AWS.
 
+Una reconexión queda vinculada al activo y a la autorización vigentes al emitir
+el estado. Si Meta conserva el teléfono visible pero recrea sus identificadores
+internos después de un reinicio, CRM y broker permiten sustituir `phoneId` y WABA
+solo cuando ambos perfiles autenticados corresponden al mismo número, ambos son
+Cloud API en coexistencia, y siguen coincidiendo ámbito, clínicas y rol. Se
+actualiza el activo existente, se conserva su enrutamiento y corte temporal, y
+se prepara el catálogo para el WABA nuevo. Otro teléfono o un cambio de modo se
+rechazan antes de sustituir la credencial; el frontend cancela esa candidata.
+Los activos anteriores al broker siguen la misma regla mediante una adopción
+única: deben estar activos, en coexistencia, sin recibo previo y conservar el
+mismo teléfono visible. No se backfillean ni se activan en bloque.
+
 Antes de suscribir el WABA, el broker registra la pertenencia de recepción y
 publica una proyección sin secretos para el receptor. Registra el teléfono si
 Meta confirma que está verificado y requiere registro; un teléfono ya conectado
@@ -98,7 +110,9 @@ los placeholders fallidos se conservan sin fingir aprobación.
   ambos. No cambia la adscripción del activo propio. En ámbito grupo se conserva
   la configuración particular de las clínicas.
 - Auditoría v26: `integration.whatsapp.activate` y `integration.whatsapp.routing`,
-  solo referencias de actor, sesión, ámbito, activos y motivo permitido.
+  solo referencias de actor, sesión, ámbito, activos y motivo permitido. Una
+  rotación verificada usa `connection_identity_rotated`; una renovación con IDs
+  estables conserva `connection_reauthorized`.
 
 La activación no libera comunicaciones retenidas ni modifica el corte de
 recuperación del 22/09 a las 14:00:37.706955Z. No reproduce mensajes históricos,
@@ -117,6 +131,11 @@ Usar la credencial administrativa local, sin dar SUPER a la aplicación ni cambi
 `log_bin_trust_function_creators`. La DDL no es transaccional: ante un fallo
 conservar evidencia del punto alcanzado y retomar únicamente la misma migración
 revisada. DEV usa plan, checksum y journal del operador, con su servicio detenido.
+
+La migración `20260929123000-bind-whatsapp-reconnection-target.js` añade dos
+referencias nullable al estado de autorización. Debe aplicarse después de publicar
+el broker compatible y antes de reiniciar gateway/API. No modifica filas previas
+ni activa números; su `down` se niega cuando ya existen intenciones firmadas.
 
 Rollback de código conserva catálogos, secretos y recepción. La migración rechaza
 su retirada si hay activos independientes o activaciones; no desregistrar el
