@@ -2167,6 +2167,7 @@ async function createPatientIntakePackage(identifier, options = {}) {
     if (!patient) throw Object.assign(new Error('patient_not_found'), { statusCode: 404 });
     return require('../lib/patient-intake-consents').preparePatientIntake({
         db, patientId: patient.id_paciente, clinicId: options.clinicId, actorId: options.createdBy,
+        structuredQuestionnaire: options.structuredQuestionnaire === true,
         snapshot: ({ template: templateRow, version: versionRow, patient: patientRow, clinic: clinicRow }) => {
             const template = getPlain(templateRow), version = getPlain(versionRow), paciente = getPlain(patientRow);
             const context = buildTemplateContext({ paciente, clinica: getPlain(clinicRow) });
@@ -2813,6 +2814,7 @@ function serializeKioskPackage(packageRow) {
         signed_count: plain.signed_count,
         pending_count: pendingDocuments.length,
         intake_pending: plain.intakeRequest?.status === 'pending',
+        time_zone: require('../lib/availability-calendar').resolveClinicTimezone(plain.clinica),
         blocking_pending: blockingPending,
         clinic: { id_clinica: plain.clinica_id, nombre_clinica: plain.clinica?.nombre_clinica || '' },
         paciente: {
@@ -2878,7 +2880,7 @@ async function listTabletKioskPackages(tokenRaw, filters = {}) {
         include: [
             { model: db.PatientConsentDocument, as: 'documents', required: false },
             { model: db.PatientIntakeRequest, as: 'intakeRequest', required: false, attributes: ['id', 'status'] },
-            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica', 'configuracion'] },
             { model: db.Paciente, as: 'paciente', required: false },
             { model: db.CitaPaciente, as: 'cita', required: false },
             { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] },

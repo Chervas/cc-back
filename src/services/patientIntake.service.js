@@ -17,7 +17,7 @@ async function prepare({ patientId, clinicId, actorId }) {
   await scopedPatient(patientId, clinicId);
   // Privacy signature and clinical answers remain distinct. Reuses valid signed
   // privacy evidence; a returning patient can update answers without re-signing it.
-  await require('./consentimientos.service').createPatientIntakePackage(patientId, { clinicId, createdBy: actorId });
+  await require('./consentimientos.service').createPatientIntakePackage(patientId, { clinicId, createdBy: actorId, structuredQuestionnaire: true });
   return db.sequelize.transaction(async transaction => {
     const patient = await scopedPatient(patientId, clinicId, transaction);
     const previous = await db.PatientIntakeRequest.findOne({ where: { patient_id: patientId, clinic_id: clinicId }, order: [['id', 'DESC']], transaction });

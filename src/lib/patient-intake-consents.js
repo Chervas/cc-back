@@ -4,7 +4,7 @@ const error = (message, statusCode = 400) => Object.assign(new Error(message), {
 
 // Called only after the controller checks consents.manage for the patient's
 // primary clinic. A patient row lock serialises double clicks across processes.
-async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot, now = new Date() }) {
+async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot, structuredQuestionnaire = false, now = new Date() }) {
   const { Op } = db.Sequelize;
   return db.sequelize.transaction(async transaction => {
     const patient = await db.Paciente.findByPk(patientId, { transaction, lock: transaction.LOCK.UPDATE,
@@ -19,6 +19,9 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
     });
     const prepared = [], reused = [], missing = [];
     for (const template of templates) {
+      // The editable questionnaire already captures these answers separately;
+      // never ask the patient to sign the old unfilled medical questionnaire.
+      if (structuredQuestionnaire && template.catalog_key === 'cc_base_formulario_medico_alta_v1') continue;
       const version = await db.ClinicConsentTemplateVersion.findOne({
         where: { clinic_template_id: template.id, status: 'published', locale: 'es' },
         order: [['version', 'DESC'], ['id', 'DESC']], transaction,
