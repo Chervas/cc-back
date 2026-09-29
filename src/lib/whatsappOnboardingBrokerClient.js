@@ -76,9 +76,11 @@ function response(result, name, row, b, requestId, selection) {
       S.exact(d.candidate, ['versionId', 'appId', 'subjectId', 'wabaId', 'phoneId', 'tokenType', 'scopes', 'expiresAt', 'dataAccessExpiresAt',
         ...(b.customer ? ['businessId','grantedWabaIds'] : [])]);
       const v = d.candidate;
+      let candidateScopesValid = true;
+      try { C.grantedScopes(v.scopes, b.scopes, b.customer?.selectionOnly); }
+      catch { candidateScopesValid = false; }
       if (v.versionId !== row.requestId || v.appId !== b.appId || ![v.subjectId, v.wabaId, v.phoneId].every(C.id)
-        || !['USER', 'SYSTEM_USER'].includes(v.tokenType) || !Array.isArray(v.scopes)
-        || JSON.stringify([...v.scopes].sort()) !== JSON.stringify([...b.scopes].sort())
+        || !['USER', 'SYSTEM_USER'].includes(v.tokenType) || !candidateScopesValid
         || ![v.expiresAt, v.dataAccessExpiresAt].every(t => t === null || Number.isSafeInteger(t) && t > 0)
         || selection && (v.wabaId !== selection.wabaId || selection.phoneId !== null && v.phoneId !== selection.phoneId)) throw Error();
       if (b.customer && (!C.id(v.businessId) || b.customer.businessId && v.businessId !== b.customer.businessId || v.tokenType !== 'SYSTEM_USER'
