@@ -2095,10 +2095,12 @@ async function getConsentSummaryForAppointment(citaLike) {
     let missingOptional = 0;
     let missingBlocking = 0;
     const signingPolicies = [];
+    const requirementTitles = new Map();
     for (const requirement of requirements) {
         const plain = getPlain(requirement);
         const key = `${plain.tratamiento_id}:` + (plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`);
         const resolved = await resolveRequirementTemplate(requirement);
+        if (resolved?.template) requirementTitles.set(key, { title: resolved.version?.title || resolved.template.name, required: !!plain.required });
         if (resolved?.template && resolved?.version) {
             signingPolicies.push(getSigningPolicyFromVersion(resolved.version, resolved.template));
         }
@@ -2126,6 +2128,7 @@ async function getConsentSummaryForAppointment(citaLike) {
     const signingPolicy = pickSigningPolicy(signingPolicies);
     return {
         ...summary,
+        pending_document_titles: [...requirementTitles].filter(([key]) => !latest.has(key) || !signed(latest.get(key))).map(([, item]) => item),
         status: summary.has_pending ? 'pending' : 'ok',
         package_id: packageRow?.id || null,
         package_public_id: packageRow?.public_id || null,

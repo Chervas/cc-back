@@ -1174,6 +1174,7 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
         precio_cita_resuelto: resolveCitaAppointmentPrice(plain),
         conversation_id: plain.conversation_id || null,
         unread_count: Number(plain.unread_count || 0) || 0,
+        consent_summary: plain.consent_summary || null,
         nutrition_latest_measurement: plain.nutrition_latest_measurement || null,
         paciente: plain.paciente ? {
             id_paciente: plain.paciente.id_paciente,
@@ -2525,6 +2526,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
     });
 
     await attachCalendarUnreadCountsToCitas(citas, req.userData?.userId || null);
+    await require('../services/appointmentCardIndicators.service').attach(db, citas);
     await attachNutritionLatestMeasurementsToCitas(citas);
     await attachAppointmentProgramContexts(db, citas);
 
