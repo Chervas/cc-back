@@ -1,6 +1,6 @@
 'use strict';
 const test = require('node:test'); const assert = require('node:assert/strict');
-const { createWhatsappAuthorizedBrokerClient, validateConfiguration, configuration } = require('../../lib/whatsappAuthorizedBrokerClient');
+const { createWhatsappAuthorizedBrokerClient, validateConfiguration, mergeActivationBindings, configuration } = require('../../lib/whatsappAuthorizedBrokerClient');
 const { requestIdFor } = require('../../lib/whatsappBrokerClient');
 const { buildWhatsappOutboundRetryDecision } = require('../../lib/whatsapp-outbound-retry');
 const staging = () => ({ RUNTIME_ROLE: 'api', JOB_RUNTIME_NAMESPACE: 'staging', QUEUE_PREFIX: 'staging', JOBS_WORKER_ENABLED: 'true' });
@@ -150,6 +150,14 @@ test('configuration forbids secret values, foreign paths, duplicate clinic asset
     assert.throws(() => validateConfiguration({ ...config(), ...change }));
   }
   assert.throws(() => configuration({ ...staging(), WHATSAPP_AUTHORIZED_BROKER_CONFIG_FILE: '/tmp/config.json' }), { code: 'whatsapp_authorized_configuration_invalid' });
+});
+test('an activated binding replaces only its stale base entry after Meta rotates IDs', () => {
+  const unchanged = { ...binding(), clinicId: 124, assetId: 457, phoneId: '402', wabaId: '502' };
+  const rotated = { ...binding(), authorizationId: 'b1234567-1234-4234-8234-123456789abc',
+    connectionRef: 'wa:qa:rotated', phoneId: '403', wabaId: '503', messageNotBefore: '2026-09-29T14:31:20.461Z' };
+  const merged = mergeActivationBindings([binding(), unchanged], [rotated]);
+  assert.deepEqual(merged, [unchanged, rotated]);
+  assert.doesNotThrow(() => validateConfiguration({ ...config(), bindings: merged }));
 });
 test('raw database and configuration diagnostics do not escape binding preflight', async () => {
   for (const target of ['loadAsset', 'loadClinic', 'isBlocked']) {
