@@ -436,6 +436,7 @@ function mapAppointment(row, maps, now) {
     care,
     canManage: row.can_manage === true,
     consentSummary: row.consent_summary || null,
+    note: row.nota || null,
     attendanceDue:
       care.can_arrive &&
       ATTENDANCE_OPEN_STATUSES.has(String(row.estado || '').toLowerCase()) &&
@@ -488,7 +489,7 @@ async function loadAppointments({
 
   const appointmentAttributes = [
     'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
-    'tratamiento_id', 'titulo', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
+    'tratamiento_id', 'titulo', 'motivo', 'nota', 'tipo_cita', 'estado', 'inicio', 'fin',
     'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional', 'source_system',
   ];
   const doctorScope = doctorId ? { doctor_id: doctorId } : {};

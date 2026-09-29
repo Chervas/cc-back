@@ -75,10 +75,12 @@ async function run() {
     instalacion_id: null,
     tratamiento_id: null,
     estado: 'recordatorio_confirmado',
+    nota: 'Nota operativa de prueba',
     inicio: new Date('2026-07-22T14:15:00.000Z'),
     fin: new Date('2026-07-22T14:30:00.000Z'),
   }, appointmentMaps, new Date('2026-07-22T12:00:00.000Z'));
   assert.equal(mappedAppointment.timeLabel, '16:15');
+  assert.equal(mappedAppointment.note, 'Nota operativa de prueba');
   assert.equal(mappedAppointment.timeRangeLabel, '16:15 - 16:30');
   assert.equal(mappedAppointment.date, '2026-07-22');
   assert.equal(mappedAppointment.agendaQuery.fecha, '2026-07-22');
