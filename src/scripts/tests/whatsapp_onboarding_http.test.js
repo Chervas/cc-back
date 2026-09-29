@@ -104,5 +104,7 @@ test('Only begin accepts optional channel intent and forwards it without a clien
     assert.equal((await f.request('begin',{requestId,scope:{type:'clinic',id:71},channelRole})).status,200);
     assert.equal(f.state.calls.at(-1).input.channelRole,channelRole);
   }
+  assert.equal((await f.request('begin',{requestId:randomUUID(),scope:{type:'clinic',id:71},channelRole:'primary',replacementAssetId:382})).status,200);
+  assert.equal(f.state.calls.at(-1).input.replacementAssetId,382);
   for(const name of ['finish','status','cancel'])assert.equal((await f.request(name,{requestId,channelRole:'secondary'})).status,400);
 });

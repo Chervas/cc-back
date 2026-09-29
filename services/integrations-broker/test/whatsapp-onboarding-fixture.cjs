@@ -27,6 +27,7 @@ function fixture(t, { customer, scopes } = {}) {
   seed(binding.secretArn, binding.whatsappOnboarding.slotVersionId, { version: 1, provider: 'meta-whatsapp-onboarding-slot', connectionRef: binding.connectionRef, scopeKey: 'group:9', appId: '101' });
   seed(binding.clientSecretArn, binding.whatsappOnboarding.appVersionId, { version: 1, provider: 'meta-app', appId: '101', appSecret: APP });
   const state = { clock: Date.now(), awsCalls: [], httpCalls: [], codes: 0, puts: 0, heldTokens: [], records,
+    selectedWabaId: '301', selectedPhoneId: '401',
     beforeAws: null, afterAws: null, beforeCode: null, afterGraph: null, failPut: false, losePut: false };
   const now = () => state.clock;
   const aws = { async send(command, options) {
@@ -56,10 +57,10 @@ function fixture(t, { customer, scopes } = {}) {
     if (request.action === 'inspect') response = { data: { app_id: '101', user_id: '201', type: 'SYSTEM_USER', is_valid: true,
       expires_at: 0, data_access_expires_at: 0, scopes: [...binding.whatsappOnboarding.scopes],
       granular_scopes: binding.whatsappOnboarding.scopes.filter(scope => scope !== 'public_profile')
-      .map(scope => ({ scope, target_ids: [...(customer?.wabaIds || ['301'])] })) } };
+      .map(scope => ({ scope, target_ids: [...(customer?.wabaIds || [state.selectedWabaId])] })) } };
     else if (request.action === 'waba_owner') response = { id: request.id, owner_business_info: { id: customer.businessId || '501' } };
     else if (request.action === 'phone_state') response = { id: request.id, is_on_biz_app: true, platform_type: 'CLOUD_API' };
-    else { assert.equal(request.action, 'phones'); assert.equal(request.id, '301'); response = { data: [{ id: '401' }] }; }
+    else { assert.equal(request.action, 'phones'); assert.equal(request.id, state.selectedWabaId); response = { data: [{ id: state.selectedPhoneId }] }; }
     return state.afterGraph ? state.afterGraph(request, response) : response;
   };
   const exchangeFactory = options => createWhatsappOAuthHttp({ ...options, request: (settings, callback) => {

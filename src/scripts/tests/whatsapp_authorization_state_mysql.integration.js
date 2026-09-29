@@ -11,6 +11,14 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     id_usuario: D.INTEGER, id_clinica: D.INTEGER, rol_clinica: D.STRING, estado_invitacion: D.STRING });
   await table('MetaConnectionAssignment', 'MetaConnectionAssignments', { id: { type: D.INTEGER, primaryKey: true },
     scopeKey: D.STRING, status: D.STRING, metaConnectionId: D.INTEGER, authorizedByUserId: D.INTEGER });
+  await table('ClinicMetaAsset', 'ClinicMetaAssets', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true },
+    assetType: D.STRING, assignmentScope: D.STRING, clinicaId: D.INTEGER, grupoClinicaId: D.INTEGER,
+    whatsappAuthorizationId: D.UUID, phoneNumberId: D.STRING, wabaId: D.STRING, metaAssetName: D.STRING,
+    isActive: D.BOOLEAN, additionalData: D.JSON });
+  await table('WhatsappPhoneActivation', 'WhatsappPhoneActivations', { authorization_id: { type: D.UUID, primaryKey: true },
+    asset_id: D.INTEGER, state: D.STRING, scope_type: D.STRING, scope_id: D.INTEGER, clinic_ids: D.JSON, profile: D.JSON });
+  await table('WhatsappChannelBinding', 'WhatsappChannelBindings', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true },
+    clinic_id: D.INTEGER, asset_id: D.INTEGER, role: D.STRING, is_active: D.BOOLEAN });
   for (const file of ['20260912210000-create-platform-audit-events', '20260913003000-add-platform-audit-result-part',
     '20260912220000-create-auth-sessions', '20260913130000-create-auth-email-challenges',
     '20260914220000-create-auth-trusted-devices', '20260913140000-create-meta-scope-blocks']) {
@@ -20,6 +28,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await migration.up(qi, D); await migration.down(qi, D); await migration.up(qi, D);
   const roleMigration = require('../../../migrations/20260915190000-add-whatsapp-authorization-channel-role');
   await roleMigration.up(qi, D); await roleMigration.down(qi, D); await roleMigration.up(qi, D);
+  const replacementMigration = require('../../../migrations/20260929123000-bind-whatsapp-reconnection-target');
+  await replacementMigration.up(qi, D); await replacementMigration.down(qi, D); await replacementMigration.up(qi, D);
   for (const [name, file] of [['PlatformAuditEvent', 'platformauditevent'], ['AuthSession', 'authsession'],
     ['MetaScopeBlock', 'metascopeblock'], ['WhatsappAuthorizationState', 'whatsappauthorizationstate']]) models[name] = require('../../../models/' + file)(sql, D);
   const R = models.WhatsappAuthorizationState; const A = models.PlatformAuditEvent;
@@ -239,13 +249,37 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await R.update({ channel_role: 'secondary' }, { where: { request_id: secondRole.requestId } });
   await claim(roleWho, secondRole); await service.cancel(inputFor(roleWho, secondRole));
   assert.equal((await service.status(inputFor(roleWho, firstRole))).status, 'awaiting');
+  const priorAuthorization=randomUUID();
+  const replacementAsset=await models.ClinicMetaAsset.create({assetType:'whatsapp_phone_number',assignmentScope:'group',grupoClinicaId:9,
+    whatsappAuthorizationId:priorAuthorization,phoneNumberId:'401',wabaId:'301',metaAssetName:'+34682145282',isActive:true,
+    additionalData:{whatsapp_channel_role:'primary'}});
+  await models.WhatsappPhoneActivation.create({authorization_id:priorAuthorization,asset_id:replacementAsset.id,state:'active',
+    scope_type:'group',scope_id:9,clinic_ids:[71,72],profile:{displayPhoneNumber:'+34682145282',isOnBizApp:true,platformType:'CLOUD_API'}});
+  const replacementFlow=await service.issue({...roleWho,requestId:randomUUID(),scope,channelRole:'primary',replacementAssetId:replacementAsset.id});
+  const expectedPhoneDigest=require('../../services/whatsappAuthorizationState.contract').digest('34682145282');
+  assert.deepEqual(replacementFlow.replacement,{assetId:replacementAsset.id,authorizationId:priorAuthorization,phoneDigest:expectedPhoneDigest});
+  assert.deepEqual((await make().status(inputFor(roleWho,replacementFlow))).replacement,replacementFlow.replacement);
+  await assert.rejects(service.issue({...roleWho,requestId:replacementFlow.requestId,scope,channelRole:'primary'}),codeIs('whatsapp_authorization_conflict'));
+  await assert.rejects(service.issue({...roleWho,requestId:randomUUID(),scope,channelRole:'secondary',replacementAssetId:replacementAsset.id}),codeIs('whatsapp_authorization_conflict'));
+  const legacyAsset=await models.ClinicMetaAsset.create({assetType:'whatsapp_phone_number',assignmentScope:'clinic',clinicaId:73,
+    whatsappAuthorizationId:null,phoneNumberId:'501',wabaId:'601',metaAssetName:'+34 682 14 52 82',isActive:true,
+    additionalData:{whatsappConnectionMode:'coexistence',platformType:'CLOUD_API',isOnBizApp:true,whatsapp_channel_role:'primary'}});
+  await legacyAsset.reload();assert.equal(legacyAsset.isActive,true);assert.equal(legacyAsset.additionalData.isOnBizApp,true);
+  assert.equal(legacyAsset.additionalData.whatsappConnectionMode,'coexistence');assert.equal(legacyAsset.additionalData.platformType,'CLOUD_API');
+  assert.equal(await models.WhatsappPhoneActivation.count({where:{asset_id:legacyAsset.id,state:'active'}}),0);
+  assert.equal(await models.WhatsappChannelBinding.count({where:{clinic_id:73,asset_id:legacyAsset.id,is_active:true}}),0);
+  const legacyFlow=await service.issue({...roleWho,requestId:randomUUID(),scope:{type:'clinic',id:73},channelRole:'primary',replacementAssetId:legacyAsset.id});
+  assert.deepEqual(legacyFlow.replacement,{assetId:legacyAsset.id,authorizationId:null,phoneDigest:expectedPhoneDigest});
+  await legacyAsset.update({additionalData:{whatsappConnectionMode:'cloud_api',platformType:'CLOUD_API',isOnBizApp:false,whatsapp_channel_role:'primary'}});
+  await assert.rejects(service.issue({...roleWho,requestId:randomUUID(),scope:{type:'clinic',id:73},channelRole:'primary',replacementAssetId:legacyAsset.id}),codeIs('whatsapp_authorization_conflict'));
   const SC = require('../../services/whatsappAuthorizationState.contract');
   const legacy = (await R.findByPk(firstRole.requestId, { raw:true })); legacy.channel_role = null;
   legacy.context_digest = SC.contextDigest(legacy); legacy.state_hash = SC.digest(SC.stateFor(Buffer.alloc(32,7),legacy));
   await R.update({ channel_role:null,context_digest:legacy.context_digest,state_hash:legacy.state_hash },{where:{request_id:firstRole.requestId}});
   assert.equal((await make().status(inputFor(roleWho, firstRole))).channelRole,'primary');
   await assert.rejects(roleMigration.down(qi,D),/Preserve signed WhatsApp channel intents/);
-  report.checks.push('Additive nullable role migration preserves legacy v1 MAC, new roles survive restart, role mutation/null downgrade fails closed and cancelling secondary leaves primary untouched');
+  await assert.rejects(replacementMigration.down(qi,D),/Preserve signed WhatsApp reconnection targets/);
+  report.checks.push('Additive nullable role migration preserves legacy v1 MAC; reconnection target is scope/role/phone bound, supports only verified legacy coexistence, survives restart and cannot be omitted or changed');
   const rows = await A.findAll({ raw: true }); const bodies = rows.map(r => r.body).join('\n');
   assert(!bodies.includes(flow.state)); assert(!bodies.includes('FICTITIOUS_OAUTH_CODE')); assert(!bodies.includes('FICTITIOUS_JWT_KEY'));
   assert(rows.every(r => JSON.parse(r.body).version === 15));

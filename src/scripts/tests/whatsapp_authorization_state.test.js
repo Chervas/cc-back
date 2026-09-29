@@ -57,6 +57,8 @@ test('Email step-up preserves the authenticated session and stops before scope o
 test('Channel intent is optional primary by default, strict when supplied and cryptographically bound for new states', () => {
   for (const channelRole of ['primary','secondary']) assert.equal(C.request({...input(),channelRole},'issue').channelRole,channelRole);
   for (const channelRole of [null,'PRIMARY','other',false,{},['secondary']]) assert.throws(()=>C.request({...input(),channelRole},'issue'));
+  assert.equal(C.request({...input(),replacementAssetId:382},'issue').replacementAssetId,382);
+  for (const replacementAssetId of [null,0,'382',{},[]]) assert.throws(()=>C.request({...input(),replacementAssetId},'issue'));
   const row = {request_id:randomUUID(),user_id:501,session_ref:randomUUID(),session_expires_at:new Date('2030-01-01T01:00:00Z'),
     scope_type:'clinic',scope_id:71,original_clinic_ids:[71],scope_digest:C.digest('fixture'),
     created_at:new Date('2030-01-01T00:00:00Z'),expires_at:new Date('2030-01-01T00:10:00Z')};
@@ -65,5 +67,11 @@ test('Channel intent is optional primary by default, strict when supplied and cr
   assert.equal(C.contextDigest(row),v1); assert.equal(C.contextDigest({...row,channel_role:null}),v1);
   const primary=C.contextDigest({...row,channel_role:'primary'}),secondary=C.contextDigest({...row,channel_role:'secondary'});
   assert.notEqual(primary,v1);assert.notEqual(primary,secondary);assert.notEqual(secondary,v1);
+  const phoneDigest='a'.repeat(64);
+  const replacement=C.contextDigest({...row,channel_role:'primary',replacement_asset_id:382,replacement_authorization_id:randomUUID(),replacement_phone_digest:phoneDigest});
+  assert.notEqual(replacement,primary);
+  const legacyReplacement=C.contextDigest({...row,channel_role:'primary',replacement_asset_id:382,replacement_authorization_id:null,replacement_phone_digest:phoneDigest});
+  assert.notEqual(legacyReplacement,replacement);
+  assert.throws(()=>C.contextDigest({...row,channel_role:'primary',replacement_asset_id:382,replacement_authorization_id:null}));
   assert.throws(()=>C.contextDigest({...row,channel_role:'invalid'}));
 });

@@ -52,7 +52,7 @@ URI/cuenta de proveedor arbitraria ni selección del runtime desde el cuerpo.
 
 | Ruta | Cuerpo JSON exacto |
 | --- | --- |
-| `/begin` | `requestId`, `scope:{type:'clinic'|'group',id:entero}` y opcional `channelRole:'primary'|'secondary'` |
+| `/begin` | `requestId`, `scope:{type:'clinic'|'group',id:entero}`, opcional `channelRole:'primary'|'secondary'` y, solo al reconectar, `replacementAssetId:entero` |
 | `/finish` | `requestId`, `state`, `code`, `wabaId`, `phoneId` |
 | `/status` | `requestId` |
 | `/cancel` | `requestId` |
@@ -112,13 +112,26 @@ añade una columna nullable sin backfill. Las filas anteriores con NULL conserva
 su contexto/MAC v1 exacto; las nuevas incluyen el rol en el contexto v2. No
 cambiar roles de estados existentes: se invalidaría su firma.
 
+Una reconexión añade `replacementAssetId`. El gateway comprueba que ese activo
+es el WhatsApp vigente del mismo ámbito y rol, que conserva una única activación
+activa y que esta coincide con su autorización local. Guarda activo y autorización
+anterior y la huella del teléfono dentro del contexto/MAC v3; el navegador no puede convertir después el
+intento en un alta nueva ni apuntarlo a otro activo. Las filas v1/v2 siguen siendo
+legibles sin backfill. La migración aditiva es
+`20260929123000-bind-whatsapp-reconnection-target.js`.
+
+Un activo legacy sin recibo nativo solo puede adoptarse si permanece activo,
+de coexistencia y sin ninguna activación previa. Su número visible local queda
+firmado y el broker vuelve a contrastarlo con el perfil autenticado antes de
+suscribir; un número o modo distinto no modifica el activo ni su enrutamiento.
+
 El broker añade la misma columna nullable a SQLite. Un alta `staged` no impide
 autorizar otro número, pero `exchanging`, `staging` y `awaiting` vigente continúan
 serializados por ámbito. Cada versión candidata se fija por UUID y digest; no
 depender de la etiqueta móvil AWSPENDING para recuperar una versión anterior.
 Añadir otra candidata no cambia activos, rutas ni autorización operativa.
 
-Orden de publicación: migración aditiva, broker compatible, gateway y frontend;
+Orden de publicación: broker compatible, migración aditiva, gateway y frontend;
 comprobar que el recibo anterior sigue legible y pausado. El rollback conserva
 las columnas y los recibos: retirar la columna con intenciones nuevas está
 prohibido por la migración. Un gateway antiguo no entiende estados nuevos con

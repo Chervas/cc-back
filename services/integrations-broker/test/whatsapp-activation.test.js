@@ -1,5 +1,6 @@
 'use strict';
 const {test}=require('node:test');const assert=require('node:assert/strict');
+const {createHash}=require('node:crypto');
 const {fixture}=require('./whatsapp-onboarding-fixture.cjs');
 const {createWhatsappActivation}=require('../src/whatsapp-activation');
 const {createActivationReader}=require('../src/whatsapp-activation-reader');
@@ -54,6 +55,16 @@ test('already connected coexistence never registers or changes its PIN',async t=
   const f=await setup(t);Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
   await f.prepare();assert.equal((await f.execute()).data.state,'active');assert(!f.state.calls.includes('register_phone'));
 });
+test('legacy coexistence adoption is bound to the expected visible phone before subscription',async t=>{
+  const f=await setup(t);Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
+  await f.prepare();
+  const digest=value=>createHash('sha256').update(value).digest('hex');
+  await assert.rejects(f.execute(A.ACTIVATE,{legacyPhoneDigest:digest('34600000000')}),/scope_denied/);
+  assert.equal(f.row().asset_id,null);assert.equal(f.state.subscribed,false);
+  const result=await f.execute(A.ACTIVATE,{legacyPhoneDigest:digest('34000000000')});
+  assert.equal(result.data.state,'active');assert.equal(result.data.assetId,991);assert.equal(f.state.subscribed,true);
+  await assert.rejects(f.execute(A.ACTIVATE,{legacyPhoneDigest:digest('34600000000')}),/idempotency_conflict/);
+});
 test('a lost registration response is reconciled from Meta without repeating registration',async t=>{
   const f=await setup(t);await f.prepare();f.state.afterRegister=()=>{throw Error('LOST_RESPONSE')};
   await assert.rejects(f.execute(),/secret_unavailable/);assert.equal(f.row().state,'registration_uncertain');
@@ -93,4 +104,29 @@ test('reauthorizing the exact same phone atomically supersedes the prior credent
   assert.deepEqual(reader.definitions().map(value=>value.authorizationId),[replacement.flowId]);
   assert.deepEqual(reader.scopes('101'),[{phoneId:'401',wabaId:'301',clinicIds:[71,72]}]);
   await assert.rejects(f.execute(A.STATUS),/asset_revoked/);
+});
+test('coexistence reauthorization accepts rotated Meta IDs only for the same authenticated phone',async t=>{
+  const f=await setup(t);Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
+  await f.prepare();await f.execute();
+  f.f.state.selectedWabaId='302';f.f.state.selectedPhoneId='402';
+  const replacement=await f.f.begin();await f.f.finish(replacement,{wabaId:'302',phoneId:'402'});
+  f.state.profile={...f.state.profile,id:'402'};
+  await f.executeFlow(replacement,A.PROFILE);const result=await f.executeFlow(replacement);
+  assert.equal(result.data.state,'active');assert.equal(result.data.assetId,991);
+  const rows=f.f.current.store.db.prepare('SELECT flow_id,state,asset_id FROM whatsapp_activations ORDER BY started_at').all();
+  assert.deepEqual(rows.map(row=>[row.flow_id,row.state,row.asset_id]),[[f.flow.flowId,'superseded',991],[replacement.flowId,'active',991]]);
+  const reader=createActivationReader(f.f.filename);t.after(()=>reader.close());
+  assert.deepEqual(reader.scopes('101'),[{phoneId:'402',wabaId:'302',clinicIds:[71,72]}]);
+});
+test('rotated IDs cannot supersede an asset when Meta authenticates another visible phone',async t=>{
+  const f=await setup(t);Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
+  await f.prepare();await f.execute();
+  f.f.state.selectedWabaId='302';f.f.state.selectedPhoneId='402';
+  const replacement=await f.f.begin();await f.f.finish(replacement,{wabaId:'302',phoneId:'402'});
+  f.state.profile={...f.state.profile,id:'402',display_phone_number:'+34600000000'};
+  await f.executeFlow(replacement,A.PROFILE);await assert.rejects(f.executeFlow(replacement),/scope_denied/);
+  const rows=f.f.current.store.db.prepare('SELECT flow_id,state,asset_id FROM whatsapp_activations ORDER BY started_at').all();
+  assert.deepEqual(rows.map(row=>[row.flow_id,row.state,row.asset_id]),[[f.flow.flowId,'active',991],[replacement.flowId,'prepared',null]]);
+  const reader=createActivationReader(f.f.filename);t.after(()=>reader.close());
+  assert.deepEqual(reader.scopes('101'),[{phoneId:'401',wabaId:'301',clinicIds:[71,72]}]);
 });
