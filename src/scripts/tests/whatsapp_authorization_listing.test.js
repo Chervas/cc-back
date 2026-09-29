@@ -124,6 +124,18 @@ test('A superseded credential receipt is retained for audit but no longer shown 
  const f=fixture();f.state.superseded.add(f.state.rows[0].request_id);const result=await f.call({type:'clinic',id:19});
  assert.deepEqual(result,{authorizations:[],incomplete:false});assert.equal(f.state.brokerCalls.length,0);
 });
+test('A connected activation retires its receipt and older receipts for the same scope and role',async()=>{
+ const f=fixture(),current=f.state.rows[0],older=f.row({type:'clinic',id:19},1000);f.state.rows=[current,older];
+ f.state.active.add(current.request_id);f.state.assets=[localAsset()];
+ const result=await f.call({type:'clinic',id:19});assert.deepEqual(result,{authorizations:[],incomplete:false});
+ assert.equal(f.state.brokerCalls.length,1);assert.deepEqual(f.state.authorizedCalls,[{clinicId:19,assetId:382}]);
+});
+test('A newer staged receipt remains visible after an older activation completed',async()=>{
+ const f=fixture(),newer=f.state.rows[0],completed=f.row({type:'clinic',id:19},1000);f.state.rows=[newer,completed];
+ f.state.active.add(completed.request_id);f.state.assets=[localAsset()];
+ const result=await f.call({type:'clinic',id:19});assert.equal(result.incomplete,false);assert.equal(result.authorizations.length,1);
+ assert.equal(result.authorizations[0].requestId,newer.request_id);
+});
 test('Status errors are incomplete; limits are bounded and newest receipt wins per scope and phone',async()=>{
  const f=fixture();f.state.afterBroker=()=>{throw Error('FICTITIOUS_PROVIDER_TOKEN');};assert.deepEqual(await f.call({type:'clinic',id:19}),{authorizations:[],incomplete:true});
  const g=fixture();g.state.rows=Array.from({length:55},(_,i)=>g.row({type:'clinic',id:19},i*1000));const result=await g.call();

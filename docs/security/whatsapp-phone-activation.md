@@ -44,6 +44,10 @@ paso; no se repite ciegamente el registro. Se suscribe y verifica la aplicación
 esperada en el WABA. Solo después se publica el estado activo y el remitente local.
 La interfaz intenta completar el alta tras OAuth y permite retomarla mediante
 «Completar conexión», sin repetir el consentimiento.
+Una activación `active` con permiso operativo `connected` retira de la lista el
+recibo completado y los intentos anteriores del mismo ámbito y rol. Una candidata
+posterior sigue visible; si el permiso operativo está desconectado, el recibo
+actual permanece disponible para renovar la autorización.
 
 Si el registro agotó el plazo local, `registration_uncertain` no significa que
 Meta lo haya rechazado: el proveedor puede haberlo completado. La consulta del
@@ -95,6 +99,10 @@ los placeholders fallidos se conservan sin fingir aprobación.
   aplicación, teléfono, WABA y pertenencias. Escritor `cc-wa-onboarding`, lector
   `cc-whatsapp-inbox`; directorio 2750 y fichero 0640. El receptor no obtiene
   acceso a la base privada de altas ni a Secrets Manager por esta proyección.
+- La unidad systemd del broker de alta usa `ProtectSystem=strict` y debe declarar
+  `/var/lib/clinicaclick-whatsapp-capture-scopes` en `ReadWritePaths`, además de
+  su directorio privado. Validar la escritura desde el sandbox efectivo de la
+  unidad; permisos Unix correctos por sí solos no acreditan que pueda publicar.
 - Servidor: `/var/lib/clinicaclick-whatsapp-catalog/connections.json`, directorio
   `ubuntu:cc-wa-importer` 2750 y fichero 0640. Escritura atómica bajo lock SQL;
   CRM e importador leen el catálogo, DEV no obtiene grants operativos.

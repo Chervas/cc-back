@@ -109,10 +109,26 @@ function createService({ models, sessions, broker = configuredClient(), config =
       const activationRows = await activationSnapshot(rows.map(row=>row.request_id));
       const retired = new Set(activationRows.filter(row=>row.state==='superseded').map(row=>row.authorization_id));
       const active = new Map(activationRows.filter(row=>row.state==='active').map(row=>[row.authorization_id,row]));
+      const rowById = new Map(rows.map(row=>[row.request_id,row]));
+      const completedThrough = new Map();
+      for (const activation of active.values()) {
+        const completed = rowById.get(activation.authorization_id);
+        try {
+          integrity(completed,cfg.key);
+          if (!S.id(activation.asset_id)) throw Error();
+          const key = completed.scope_type+':'+completed.scope_id+':'+S.channelRole(completed.channel_role);
+          const previous = completedThrough.get(key);
+          if (!previous || completed.created_at > previous.createdAt) completedThrough.set(key,{
+            requestId:completed.request_id,createdAt:completed.created_at,
+          });
+        } catch { incomplete = true; }
+      }
       const seen = new Set(); const authorizations = []; const metadataDigests = new Map(); const remoteDeadline = clock()+12000;
       for (const row of rows) {
         if (retired.has(row.request_id)) continue;
         const scopeKey = row.scope_type + ':' + row.scope_id;
+        const completed = completedThrough.get(scopeKey+':'+S.channelRole(row.channel_role));
+        if (completed && row.request_id !== completed.requestId && row.created_at <= completed.createdAt) continue;
         const selected = allowed.get(scopeKey); if (!selected) { incomplete = true; continue; }
         try {
           integrity(row,cfg.key);
@@ -144,6 +160,7 @@ function createService({ models, sessions, broker = configuredClient(), config =
           // Receipt identity is verified before any local metadata query. A
           // blocked receipt never exposes its phone, including historical data.
           result.localPhone = null;
+          let activationConnected = false;
           if (result.authorizationStatus === 'awaiting_activation') {
             try {
               const metadata = await phoneMetadata.read({models:db(),authorization:result,now:now()});
@@ -155,10 +172,12 @@ function createService({ models, sessions, broker = configuredClient(), config =
               else try {
                 const permission = await authorizedBroker.permissionStatus(result.scope.type==='clinic'?result.scope.id:row.original_clinic_ids[0],activation.asset_id);
                 if (permission === 'disconnected') result.permissionStatus = 'disconnected';
-                else if (permission !== 'connected') incomplete = true;
+                else if (permission === 'connected') activationConnected = true;
+                else incomplete = true;
               } catch { incomplete = true; }
             }
           }
+          if (activationConnected) { seen.add(phoneKey); continue; }
           seen.add(phoneKey); authorizations.push(result);
         } catch (error) {
           // Revoked viewer sessions fail the whole request, never disclose stale results.
