@@ -2,6 +2,7 @@
 const { eligible } = require('../lib/whatsappFreshInboundEligibility');
 const broker = require('../lib/whatsappAuthorizedBrokerClient');
 const { patientImportHeld } = require('../lib/whatsappAppointmentEligibility');
+let afterMessageId = 0;
 async function tick() {
   const config = broker.configuration();
   if (!config) throw Error('whatsapp_fresh_inbound_unconfigured');
@@ -12,13 +13,16 @@ async function tick() {
   if (!snapshot || snapshot.recoveryHold || Date.now()-snapshot.observedAt>90000) return { dispatched: 0, receptionHeld: true };
   const cutoff = new Date(Math.max(Date.parse(config.messageNotBefore), Date.parse(snapshot.recoveryNotBefore || '') || 0)).toISOString();
   const db = require('../../models');
-  const replacements = { cutoff: new Date(cutoff) };
+  const replacements = { cutoff: new Date(cutoff), afterMessageId };
   const scopes = bindings.map((b, i) => {
     replacements['clinic' + i] = b.clinicId; replacements['phone' + i] = b.phoneId;
     replacements['since' + i] = new Date(Math.max(Date.parse(cutoff), b.messageNotBefore ? Date.parse(b.messageNotBefore) : 0));
     return `(c.clinic_id=:clinic${i} AND i.phone_id=:phone${i} AND m.sent_at>=:since${i})`;
   });
-  const [rows] = await db.sequelize.query("SELECT m.id FROM Messages m JOIN Conversations c ON c.id=m.conversation_id JOIN WhatsappInboxMessageKeys k ON k.message_id=m.id JOIN WhatsappInboxImports i ON i.receipt=JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.inbox_receipt')) AND i.clinic_id=c.clinic_id AND i.phone_id=JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.phone_number_id')) WHERE (" + scopes.join(' OR ') + ") AND m.direction='inbound' AND ((m.message_type='text' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.provider_type')) IN ('text','button','interactive')) OR (m.message_type='reaction' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.provider_type'))='reaction' AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.reaction.emoji')),'')<>'') OR (JSON_CONTAINS_PATH(m.metadata,'one','$.media.id') AND COALESCE(JSON_EXTRACT(m.metadata,'$.media_recovered_without_automation'),CAST('false' AS JSON))=CAST('false' AS JSON) AND (JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.provider_type'))<>'audio' OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.audio_transcription.status')) IN ('success','unavailable')))) AND m.sent_at >= :cutoff AND m.sent_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 24 HOUR) AND JSON_EXTRACT(m.metadata,'$.historical')=CAST('false' AS JSON) AND JSON_EXTRACT(m.metadata,'$.passive_recovery')=CAST('true' AS JSON) AND COALESCE(JSON_EXTRACT(m.metadata,'$.recovery_without_automation'),CAST('false' AS JSON))=CAST('false' AS JSON) AND JSON_EXTRACT(m.metadata,'$.fresh_inbound_dispatched_at') IS NULL ORDER BY m.id LIMIT 50", { replacements });
+  const [rows] = await db.sequelize.query("SELECT m.id FROM Messages m JOIN Conversations c ON c.id=m.conversation_id JOIN WhatsappInboxMessageKeys k ON k.message_id=m.id JOIN WhatsappInboxImports i ON i.receipt=JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.inbox_receipt')) AND i.clinic_id=c.clinic_id AND i.phone_id=JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.phone_number_id')) WHERE (" + scopes.join(' OR ') + ") AND m.id>:afterMessageId AND m.direction='inbound' AND ((m.message_type='text' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.provider_type')) IN ('text','button','interactive')) OR (m.message_type='reaction' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.provider_type'))='reaction' AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.reaction.emoji')),'')<>'') OR (JSON_CONTAINS_PATH(m.metadata,'one','$.media.id') AND COALESCE(JSON_EXTRACT(m.metadata,'$.media_recovered_without_automation'),CAST('false' AS JSON))=CAST('false' AS JSON) AND (JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.provider_type'))<>'audio' OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.audio_transcription.status')) IN ('success','unavailable')))) AND m.sent_at >= :cutoff AND m.sent_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 24 HOUR) AND JSON_EXTRACT(m.metadata,'$.historical')=CAST('false' AS JSON) AND JSON_EXTRACT(m.metadata,'$.passive_recovery')=CAST('true' AS JSON) AND COALESCE(JSON_EXTRACT(m.metadata,'$.recovery_without_automation'),CAST('false' AS JSON))=CAST('false' AS JSON) AND JSON_EXTRACT(m.metadata,'$.fresh_inbound_dispatched_at') IS NULL ORDER BY m.id LIMIT 50", { replacements });
+  // A held page must not starve newer conversations. Revisit retained rows on
+  // the next pass, keeping every eligibility and import-HOLD check unchanged.
+  afterMessageId = rows.length ? Number(rows[rows.length - 1].id) : 0;
   let dispatched = 0, held = 0;
   for (const row of rows) {
     try {

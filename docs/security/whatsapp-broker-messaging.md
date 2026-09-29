@@ -180,6 +180,10 @@ importadas de otros contactos pueden continuar; decidir silencio sigue exigiendo
 que no haya atraso ordinario pendiente. Pulso caducado, recuperación pausada y
 revisiones sin atribución mantienen sus barreras. Monitorización distingue la
 revisión de contactos de una incidencia general de recepción.
+El dispatcher recorre los candidatos por ID en lotes de 50 y vuelve al inicio
+al acabar el recorrido. Una página completa de pacientes con HOLD o respuestas
+retenidas no puede impedir revisar las conversaciones posteriores; avanzar el
+cursor no cambia elegibilidad, metadata ni estado de los mensajes retenidos.
 
 Para publicar esta corrección con respuestas retenidas, actualizar primero AWS
 y el publicador del pulso; después el dispatcher. Conservar el motor anterior
