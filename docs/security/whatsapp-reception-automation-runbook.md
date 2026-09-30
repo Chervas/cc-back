@@ -89,6 +89,11 @@ de ejecutarlo. La importación no aplica las propiedades de seguridad; actualiza
 después el stack con la plantilla completa y verificar cifrado, bloqueo público,
 versionado, ciclo de vida, política y permiso del rol antes de habilitar
 `recoveryArchive`. Nunca borrar el bucket retenido para repetir la creación.
+El rol CloudFormation necesita las acciones IAM `s3:PutEncryptionConfiguration`,
+`s3:GetEncryptionConfiguration`, `s3:PutBucketPublicAccessBlock` y
+`s3:GetBucketPublicAccessBlock` sobre ese bucket. Los nombres de API
+`PutBucketEncryption` y `PutPublicAccessBlock` no son permisos IAM válidos
+para esas llamadas; comprobar la política efectiva antes del ChangeSet.
 Durante un despliegue gradual, un broker anterior no publica `capacity`:
 el importador la deja en `null` y no se emite una falsa alerta de capacidad.
 La alarma solo queda operativa tras desplegar broker, importador y API.
