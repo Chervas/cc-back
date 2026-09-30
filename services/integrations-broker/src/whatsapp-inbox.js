@@ -150,8 +150,16 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
       refreshScopes();
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid_request');
       try {
-        return store.db.prepare("SELECT i.receipt,i.received_at FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND (i.state='held' OR (i.state='leased' AND i.lease_until<=?)) AND COALESCE(r.next_attempt_at,0)<=? ORDER BY COALESCE(r.last_attempt_at,i.received_at),i.received_at,i.receipt LIMIT ?")
-          .all(appId, now(), now(), limit).map(row => ({ receipt: row.receipt, receivedAt: row.received_at }));
+        const at = now();
+        const base = "SELECT i.receipt,i.received_at FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND (i.state='held' OR (i.state='leased' AND i.lease_until<=?)) AND COALESCE(r.next_attempt_at,0)<=?";
+        const fresh = store.db.prepare(base + " AND r.receipt IS NULL ORDER BY CASE WHEN i.kinds LIKE '%\"messages\"%' THEN 0 ELSE 1 END,i.received_at,i.receipt LIMIT ?")
+          .all(appId, at, at, limit);
+        const retry = store.db.prepare(base + " AND r.receipt IS NOT NULL ORDER BY CASE WHEN r.reason IS NULL OR r.reason='import_retry' THEN 0 ELSE 1 END,r.last_attempt_at,i.received_at,i.receipt LIMIT ?")
+          .all(appId, at, at, limit);
+        const retrySlots = Math.min(Math.max(1, Math.floor(limit / 5)), retry.length);
+        const freshSelected = fresh.slice(0, limit - retrySlots);
+        return [...freshSelected, ...retry.slice(0, limit - freshSelected.length)]
+          .map(row => ({ receipt: row.receipt, receivedAt: row.received_at }));
       } catch (error) { throw clean(error); }
     },
     health() {

@@ -150,6 +150,9 @@ principal consumidor mTLS, registra una razón acotada y espera exponencial de
 1 a 60 minutos. La selección gira por último intento, de modo que un evento
 antiguo tampoco acapara el turno si el consumidor cae antes de diferirlo.
 La tabla aditiva `whatsapp_inbox_retry` no altera ciphertext, AAD ni recibos.
+`GET /pending` reserva una parte acotada del lote para reintentos y prioriza
+los recibos nuevos de mensajes de paciente. Las revisiones periódicas no pueden
+retrasar la importación de una respuesta nueva; siguen conservadas para análisis.
 
 `GET /pending` incorpora salud por ámbito, sin texto ni contactos. El consumidor
 publica atómicamente `/run/clinicaclick-whatsapp-inbox-health/health.json` en su
@@ -204,6 +207,13 @@ concurrentes. Se descartan los timeouts obsoletos y las cancelaciones nocturnas
 atrasadas, sin cancelar la cita. El flujo futuro conserva sus plazos configurados.
 Los mensajes de texto generados por timeout también vuelven a comprobar vigencia
 de la cita y salud inmediatamente antes del envío.
+Si durante la espera llegó una respuesta que se importó con
+`recovery_without_automation`, el timeout no la interpreta como silencio:
+cancela ese seguimiento y crea una alerta persistente para revisión manual.
+La comprobación usa la conversación, el número receptor y el inicio de la espera,
+aunque el corte de recuperación sea posterior. No retira la marca de recuperación
+del mensaje ni lo entrega al motor. Si no puede registrar la revisión, mantiene
+la espera y reintenta al minuto, sin enviar el seguimiento.
 
 El dispatcher admite texto/botón/interactivo, adjuntos recuperables y reacciones
 frescas. Para una reacción exige dirección entrante, `message_type` y
