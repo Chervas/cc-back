@@ -316,16 +316,46 @@ async function run() {
     });
     assert.equal(await __testing.loadSelectedTemplate({ whatsapp_template_id: 3559 }, 56), null);
 
+    const oldTemplate = {
+      id: 3558,
+      clinic_id: null,
+      waba_id: 'waba-old',
+      name: 'clinicaclick_lead_primera_visita_programar_v35',
+      language: 'es',
+      status: 'APPROVED',
+      is_active: true,
+      catalog_template_id: 108,
+      components: [{ type: 'BODY', text: 'Hola {{1}}, te escribo desde {{2}}.' }],
+    };
+    const replacement = {
+      ...oldTemplate,
+      id: 4881,
+      waba_id: 'waba-sant-marti',
+      name: 'clinicaclick_lead_primera_visita_programar_v52',
+    };
+    db.WhatsappTemplate.findOne = async () => oldTemplate;
+    db.WhatsappTemplate.findAll = async () => [replacement];
+    assert.equal((await __testing.loadSelectedTemplate({ whatsapp_template_id: 3558 }, 56)).id, 4881);
+
+    db.WhatsappTemplate.findAll = async () => [{
+      ...replacement,
+      components: [{ type: 'BODY', text: 'Un mensaje distinto.' }],
+    }];
+    assert.equal(await __testing.loadSelectedTemplate({ whatsapp_template_id: 3558 }, 56), null);
+
     db.WhatsappTemplate.findOne = async () => ({
+      ...oldTemplate,
       id: 1858,
       clinic_id: 56,
       waba_id: null,
-      status: 'APPROVED',
-      is_active: true,
     });
-    assert.equal((await __testing.loadSelectedTemplate({ whatsapp_template_id: 1858 }, 56)).id, 1858);
+    db.WhatsappTemplate.findAll = async () => [replacement];
+    assert.equal((await __testing.loadSelectedTemplate({ whatsapp_template_id: 1858 }, 56)).id, 4881);
+    db.WhatsappTemplate.findAll = async () => [];
+    assert.equal(await __testing.loadSelectedTemplate({ whatsapp_template_id: 1858 }, 56), null);
   } finally {
     db.WhatsappTemplate.findOne = originalTemplateFindOne;
+    db.WhatsappTemplate.findAll = originalTemplateFindAll;
     whatsappService.getClinicConfig = originalGetClinicConfig;
   }
 
