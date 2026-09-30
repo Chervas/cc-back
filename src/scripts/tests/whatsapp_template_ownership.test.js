@@ -8,6 +8,7 @@ const { Op } = require('sequelize');
 
 const db = require('../../../models');
 const whatsappController = require('../../controllers/whatsapp.controller');
+const whatsappService = require('../../services/whatsapp.service');
 const { queues, connection: queueConnection } = require('../../services/queue.service');
 
 // Loading the application also loads its .env. Remove the real registry only
@@ -241,6 +242,68 @@ test('un phone_number_id ajeno no permite leer plantillas aunque el actor sea pr
     db.Clinica.findAll = originals.clinicFindAll;
     db.ClinicMetaAsset.findOne = originals.assetFindOne;
     db.WhatsappTemplate.findAll = originals.templateFindAll;
+  }
+});
+
+test('el listado de clínica usa su primario configurado aunque exista un WABA de grupo', async () => {
+  const originals = {
+    membershipFindAll: db.UsuarioClinica.findAll,
+    clinicFindAll: db.Clinica.findAll,
+    clinicFindOne: db.Clinica.findOne,
+    templateFindAll: db.WhatsappTemplate.findAll,
+    flowFindAll: db.AutomationFlowTemplateV2.findAll,
+    treatmentFindAll: db.Tratamiento.findAll,
+    resolvePhoneAssetByClinic: whatsappService.resolvePhoneAssetByClinic,
+  };
+  const queriedWabas = [];
+  db.UsuarioClinica.findAll = async () => [{ id_clinica: 56, rol_clinica: 'personaldeclinica' }];
+  db.Clinica.findAll = async () => [{ grupoClinicaId: 5 }];
+  db.Clinica.findOne = async () => ({ grupoClinicaId: 5 });
+  whatsappService.resolvePhoneAssetByClinic = async () => ({
+    id: 374,
+    assignmentScope: 'clinic',
+    clinicaId: 56,
+    grupoClinicaId: 5,
+    phoneNumberId: 'phone-primary',
+    wabaId: 'waba-primary',
+  });
+  db.WhatsappTemplate.findAll = async ({ where }) => {
+    if (!where.waba_id) return [];
+    queriedWabas.push(where.waba_id);
+    return [{
+      id: 906,
+      waba_id: 'waba-primary',
+      clinic_id: 56,
+      name: 'primary_template',
+      language: 'es',
+      status: 'APPROVED',
+      is_active: true,
+      catalog_template_id: null,
+      created_by_user_id: null,
+      toJSON() { return { ...this, toJSON: undefined }; },
+    }];
+  };
+  db.AutomationFlowTemplateV2.findAll = async () => [];
+  db.Tratamiento.findAll = async () => [];
+
+  try {
+    const res = responseRecorder();
+    await whatsappController.listTemplatesForClinic({
+      query: { clinic_id: '56' },
+      userData: { userId: 76 },
+    }, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(queriedWabas, ['waba-primary']);
+    assert.equal(res.body[0].effective_waba_shared, false);
+    assert.equal(res.body[0].effective_phone_number_id, 'phone-primary');
+  } finally {
+    db.UsuarioClinica.findAll = originals.membershipFindAll;
+    db.Clinica.findAll = originals.clinicFindAll;
+    db.Clinica.findOne = originals.clinicFindOne;
+    db.WhatsappTemplate.findAll = originals.templateFindAll;
+    db.AutomationFlowTemplateV2.findAll = originals.flowFindAll;
+    db.Tratamiento.findAll = originals.treatmentFindAll;
+    whatsappService.resolvePhoneAssetByClinic = originals.resolvePhoneAssetByClinic;
   }
 });
 

@@ -1270,6 +1270,19 @@ async function resolveWabaFromContext({ clinicId, phoneNumberId, wabaId, userId 
     );
   }
 
+  if (clinicId && !phoneNumberId && !wabaId) {
+    const routedAsset = await whatsappService.resolvePhoneAssetByClinic(clinicId);
+    if (routedAsset) {
+      return canUserAccessWhatsappTemplateAsset({
+        asset: routedAsset,
+        userId,
+        accessibleClinicIds: clinicIds,
+        accessibleGroupIds: userGroupIds,
+        isGlobalAdmin,
+      }) ? routedAsset : null;
+    }
+  }
+
   if (phoneNumberId) {
     where.phoneNumberId = phoneNumberId;
   }
@@ -2063,6 +2076,26 @@ exports.listPhones = async (req, res) => {
           .filter((id) => id && String(id).trim().length > 0)
       )
     );
+    const templateCounts = new Map();
+    if (wabaIds.length) {
+      const counts = await WhatsappTemplate.findAll({
+        where: { waba_id: { [Op.in]: wabaIds }, is_active: true },
+        attributes: [
+          'waba_id',
+          'status',
+          [db.sequelize.fn('COUNT', db.sequelize.col('id')), 'count'],
+        ],
+        group: ['waba_id', 'status'],
+        raw: true,
+      });
+      for (const row of counts) {
+        const current = templateCounts.get(row.waba_id) || { total: 0, approved: 0 };
+        const count = Number(row.count) || 0;
+        current.total += count;
+        if (String(row.status).toUpperCase() === 'APPROVED') current.approved += count;
+        templateCounts.set(row.waba_id, current);
+      }
+    }
     const wabaBusinessMap = new Map();
     if (wabaIds.length) {
       const wabaAssets = await ClinicMetaAsset.findAll({
@@ -2195,6 +2228,8 @@ exports.listPhones = async (req, res) => {
         payment_last_error_href: payment.last_error_href || null,
         payment_last_detected_at: payment.last_detected_at || null,
         payment_last_success_at: payment.last_success_at || null,
+        template_count: templateCounts.get(p.wabaId)?.total || 0,
+        approved_template_count: templateCounts.get(p.wabaId)?.approved || 0,
         meta_billed_by: p.meta_billed_by ?? null,
         is_test_number: !!additionalData.isTestNumber,
         account_mode: additionalData.accountMode || null,
