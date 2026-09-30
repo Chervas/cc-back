@@ -24,10 +24,15 @@ function configuration(env = process.env) {
   try {
     const stat = fs.statSync(CONFIG_FILE);
     if (fs.realpathSync(CONFIG_FILE) !== CONFIG_FILE || !stat.isFile() || stat.mode & 0o077 || stat.size > 1048576) held();
-    raw = fs.readFileSync(CONFIG_FILE);const value=JSON.parse(raw);
+    raw = fs.readFileSync(CONFIG_FILE);const value=validateConfiguration(JSON.parse(raw));
     const catalog=require('./whatsappActivationCatalog');
-    value.scopes=[...value.scopes,...catalog.scopes(catalog.read())];
-    return validateConfiguration(value);
+    const activated=catalog.scopes(catalog.read());
+    const activatedAssets=new Set(activated.map(scope=>scope.assetId));
+    // A renewed number keeps its local asset ID while Meta can rotate both
+    // provider IDs. The verified activation supersedes its static entry.
+    return validateConfiguration({version:1,scopes:[
+      ...value.scopes.filter(scope=>!activatedAssets.has(scope.assetId)),...activated,
+    ]});
   } catch { held('import_retry'); } finally { raw?.fill(0); }
 }
 const ownership = s => JSON.stringify({wabaId:s.wabaId,phoneId:s.phoneId,clinicIds:s.clinicIds});

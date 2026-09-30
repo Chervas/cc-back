@@ -14,6 +14,22 @@ test('a native wait with a durable reply is reported independently of broker hea
  query:async sql=>[sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[{id:12,clinic_id:2}]]});
  assert.equal(alerts.length,1);assert.deepEqual(alerts[0].metadata.waiting_execution_ids,[12]);
 });
+test('stale heartbeat names the monitoring outage without presenting clinics as patient replies',async()=>{
+ const stale={...snapshot,observedAt:now-3600000};
+ const alerts=await collect({snapshot:stale,bindings,now,
+  query:async sql=>[sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[]]});
+ assert.equal(alerts[0].payload.severity,'critical');
+ assert.match(alerts[0].payload.title,/no se actualiza/i);
+ assert.match(alerts[0].payload.detail,/control de recepción no se actualiza/);
+ assert.match(alerts[0].payload.detail,/No hay respuestas ya registradas pendientes/);
+ assert.doesNotMatch(alerts[0].payload.detail,/incidencias de recepción/);
+});
+test('fresh backlog is reported as events pending import or review',async()=>{
+ const delayed={...snapshot,clinics:[{clinicId:2,blockingReview:0,oldestPendingAt:now-300000}]};
+ const alerts=await collect({snapshot:delayed,bindings,now,
+  query:async sql=>[sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[]]});
+ assert.match(alerts[0].payload.detail,/eventos de WhatsApp pendientes de importar o revisar/);
+});
 test('unconfigured environments do not inspect or notify clinical reception',async()=>{
  assert.deepEqual(await collect({snapshot:null,bindings:[],query:async()=>{throw Error('unexpected query')}}),[]);
 });

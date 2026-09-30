@@ -81,6 +81,12 @@ El listener se ejecuta mediante `services/integrations-broker/src/whatsapp-inbox
 y el consumidor separado mediante `src/scripts/whatsapp-inbox-consumer.js`.
 La operación, unidades, certificados y rollback se mantienen en
 [31](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/31-roadmap-arquitectura-entornos-gateway.md#recepción-y-alta-whatsapp-en-el-entorno-público).
+El consumidor une los ámbitos estáticos con el catálogo de activaciones. Si Meta
+rota WABA o phone ID durante una reconexión y se conserva el mismo `assetId`,
+la entrada activada sustituye a la estática; una colisión entre activos distintos
+sigue bloqueando la importación. Si el pulso de recepción caduca, comprobar
+ambas fuentes y la unidad del importador antes de atribuirlo a Meta. Los recibos
+pendientes permanecen retenidos y no se descartan para apagar la alerta.
 Antes de habilitar una app real:
 
 1. Comprobar servicios, versiones y certificados de gateway/receptor/importador.
