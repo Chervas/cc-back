@@ -8,6 +8,7 @@ const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact, isEffectiveContactAttempt } = require('./leadContactState.service');
 const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
 const { isApprovedTemplateInWaba } = require('../lib/whatsapp-template-scope');
+const { resolveTemplateInWaba } = require('./whatsappTemplateScope.service');
 const whatsappService = require('./whatsapp.service');
 
 const { Op } = db.Sequelize;
@@ -262,15 +263,18 @@ async function loadSelectedTemplate(config, clinicId) {
   if (!template) return null;
 
   const row = template.toJSON ? template.toJSON() : template;
-  if (Number(row.clinic_id) === Number(clinicId)) return template;
-
   const clinicConfig = await whatsappService.getClinicConfig(clinicId, {
     purpose: 'lead_first_contact',
   });
-  return isApprovedTemplateInWaba(row, {
+  if (isApprovedTemplateInWaba(row, {
     wabaId: clinicConfig?.wabaId,
     clinicId,
-  }) ? template : null;
+  })) return template;
+  return resolveTemplateInWaba({
+    template,
+    wabaId: clinicConfig?.wabaId,
+    clinicId,
+  });
 }
 
 async function buildReadiness(config, clinicId) {
@@ -367,6 +371,7 @@ async function saveConfig({ clinicId, actorUserId, input }) {
     error.code = 'whatsapp_template_not_for_lead_auto_reply';
     throw error;
   }
+  config.whatsapp_template_id = Number(selectedTemplate.id);
   config.whatsapp_template_name = selectedTemplate.name;
   config.whatsapp_catalog_template_id = toIntOrNull(selectedTemplate.catalog_template_id);
   config.whatsapp_template_language = cleanString(selectedTemplate.language) || 'es';
