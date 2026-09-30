@@ -25,12 +25,18 @@ async function collect({ snapshot, bindings, query, now = Date.now() }) {
     ? `El control de recepción no se actualiza desde ${checkedAt || 'hace más de 90 segundos'}. Afecta a ${affected.length} clínicas: ${shown}.`
     : issues.length ? `${issues.length} clínicas tienen eventos de WhatsApp pendientes de importar o revisar: ${shown}.`
       : `${waiting.length} respuestas recibidas siguen pendientes del motor en: ${shown}.`;
+  const oldest = (Array.isArray(snapshot?.clinics) ? snapshot.clinics : [])
+    .filter(clinic => affected.includes(clinic.clinicId))
+    .map(clinic => clinic.oldestPendingAt).filter(Number.isFinite).reduce((min, time) => Math.min(min, time), Infinity);
+  const oldestDetail = Number.isFinite(oldest)
+    ? ` El evento pendiente más antiguo es del ${new Date(oldest).toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'short', timeStyle: 'short' })}.`
+    : '';
   const waits = waiting.length ? ` ${waiting.length}${waiting.length === 50 ? ' o más' : ''} respuestas ya registradas esperan al motor.`
     : ' No hay respuestas ya registradas pendientes del motor.';
   return [{ eventKey: 'whatsapp.reception_attention', payload: {
     severity: issues.some(x => x.severity === 'critical') ? 'critical' : 'warning',
     title: stale ? 'No se actualiza el control de recepción de WhatsApp' : 'WhatsApp tiene eventos pendientes de recepción',
-    detail: `${summary}${waits} Las acciones por falta de respuesta permanecen en espera hasta comprobar la recepción.`,
+    detail: `${summary}${oldestDetail}${waits} Las acciones por falta de respuesta permanecen en espera hasta comprobar la recepción.`,
     action: 'Revisar Ajustes → Monitorización → WhatsApp. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp',
   }, metadata: { source: 'whatsapp_reception', clinic_ids: affected,
     waiting_execution_ids: waiting.map(x => x.id), issue_types: [...new Set(issues.map(x => x.type))] } }];
