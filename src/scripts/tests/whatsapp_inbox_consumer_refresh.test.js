@@ -29,3 +29,15 @@ test('configuration drift inside a batch defers without acknowledging, then a fr
  await f.poll();assert.equal(f.calls.filter(c=>c.path==='/confirm').length,0);assert.equal(f.calls.at(-1).body.reason,'import_retry');
  f.options.importScoped=normal;await f.poll();assert.equal(f.imports[0].config.scopes[0].assetId,3);assert.equal(f.calls.filter(c=>c.path==='/confirm').length,1);
 });
+test('poll failures expose only a bounded technical stage and never raw provider details',async()=>{
+ const f=fixture();f.client.request=async()=>{throw Error('private provider detail')};
+ await assert.rejects(f.poll(),error=>error.code==='inbox_pending_transport_unavailable'
+  && error.pollStage==='pending'&&!error.message.includes('private'));
+ f.client.request=async()=>({status:503,data:{secret:'private'}});
+ await assert.rejects(f.poll(),error=>error.code==='inbox_pending_http_error'
+  && error.httpStatus===503&&!error.message.includes('private'));
+ f.client.request=async()=>({status:200,data:{automaticActionsAllowed:false,receipts:[]}});
+ f.options.publish=()=>{throw Error('private filesystem detail')};
+ await assert.rejects(f.poll(),error=>error.code==='inbox_health_publish_failed'
+  && error.pollStage==='health'&&!error.message.includes('private'));
+});

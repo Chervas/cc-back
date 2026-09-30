@@ -164,6 +164,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
     },
     health() {
       refreshScopes();
+      const storage = store.db.prepare('SELECT COUNT(*) AS rows,COALESCE(SUM(byte_count),0) AS bytes FROM whatsapp_inbox').get();
       const groups = store.db.prepare("SELECT i.scopes,COUNT(*) pending,MIN(CASE WHEN r.reason IS NULL OR r.reason='import_retry' THEN i.received_at END) oldestPendingAt,SUM(CASE WHEN r.reason='review_required' THEN 1 ELSE 0 END) blockingReview,SUM(CASE WHEN r.reason IN ('unsupported_event','unmatched_status') THEN 1 ELSE 0 END) review FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' GROUP BY i.scopes").all(appId);
       // Account-wide events cannot be attributed to a contact. Keep their
       // counters without letting them consume the bounded phone review budget.
@@ -195,7 +196,9 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
         isolation.scopedReviews++;
         isolation.contacts = [...contacts.values()];
       }
-      return { observedAt: now(), groups: groups.map(row => ({ ...row, scopes: JSON.parse(row.scopes) })) };
+      return { observedAt: now(), groups: groups.map(row => ({ ...row, scopes: JSON.parse(row.scopes) })),
+        capacity: { rows: storage.rows, bytes: storage.bytes, maxRows, maxBytes,
+          auditPending: store.backlog().pending, maxAuditBacklog } };
     },
     // No automatic consumer. The caller must have a separately authenticated,
     // approved import grant and commit the business transaction before confirm.

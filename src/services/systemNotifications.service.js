@@ -186,6 +186,20 @@ const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
     minimumThrottleMinutes: 60,
     defaults: { panel: true, email: true, whatsapp: false },
   },
+  {
+    key: 'whatsapp.inbox_capacity_warning', category: 'whatsapp', severity: 'warning',
+    label: 'WhatsApp: capacidad del inbox al 75%',
+    description: 'El almacén de recibos, bytes o auditoría se acerca a su límite.',
+    minimumThrottleMinutes: 60,
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
+    key: 'whatsapp.inbox_capacity_critical', category: 'whatsapp', severity: 'critical',
+    label: 'WhatsApp: capacidad del inbox al 90%',
+    description: 'La recepción de Meta puede quedarse sin espacio para nuevos recibos.',
+    minimumThrottleMinutes: 60,
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
 ]);
 
 function cleanString(value) {

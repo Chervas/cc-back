@@ -6,6 +6,8 @@ const {createInboxClient,clientFiles}=require('../lib/whatsappInboxClient');
 const {importLease}=require('../lib/whatsappInboxImport');
 const scoped=require('../lib/whatsappInboxScopes');
 const health=require('../lib/whatsappInboxHealth');
+const pollError=(code,stage,status)=>Object.assign(Error(code),{code,pollStage:stage,
+  ...(Number.isInteger(status)&&status>=100&&status<=599?{httpStatus:status}:{})});
 // Each poll takes a fresh snapshot so activation does not require a restart.
 // The importer still rechecks that snapshot before every clinical transaction.
 async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requiresScoped,
@@ -13,10 +15,15 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
   importScoped=scoped.importScopedLease, publish=health.publish}) {
   const scopes=loadConfiguration();
   if(requiresScoped && !scopes)throw Error('inbox_consumer_configuration_invalid');
-  const listed=await client.request('GET','/pending');
-  if(listed.status!==200 || listed.data?.automaticActionsAllowed!==false || !Array.isArray(listed.data.receipts) || listed.data.receipts.length>20)throw Error();
-  publish(listed.data.health,scopes?.scopes || [{...scope,clinicIds:[scope.clinicId]}],{
-    recoveryNotBefore,recoveryHold:env.WHATSAPP_INBOX_RECOVERY_HOLD==='true'});
+  let listed;
+  try{listed=await client.request('GET','/pending');}
+  catch{throw pollError('inbox_pending_transport_unavailable','pending');}
+  if(!listed || listed.status!==200)throw pollError('inbox_pending_http_error','pending',listed?.status);
+  if(listed.data?.automaticActionsAllowed!==false || !Array.isArray(listed.data.receipts) || listed.data.receipts.length>20)
+    throw pollError('inbox_pending_invalid_response','pending');
+  try{publish(listed.data.health,scopes?.scopes || [{...scope,clinicIds:[scope.clinicId]}],{
+    recoveryNotBefore,recoveryHold:env.WHATSAPP_INBOX_RECOVERY_HOLD==='true'});}
+  catch{throw pollError('inbox_health_publish_failed','health');}
   for(const item of listed.data.receipts){
     if(isStopping())break;let raw;let lease;
     try{
@@ -62,7 +69,12 @@ async function main(env=process.env) {
     while(!stopping){
       try{
         await pollOnce(connection,client,{env,scope,recoveryNotBefore,requiresScoped:!!scopes,isStopping:()=>stopping});
-      }catch{process.stderr.write('WHATSAPP_INBOX_POLL_UNAVAILABLE\n');}
+      }catch(error){
+        const code=['inbox_pending_transport_unavailable','inbox_pending_http_error','inbox_pending_invalid_response',
+          'inbox_health_publish_failed'].includes(error?.code)?error.code:'inbox_poll_unavailable';
+        process.stderr.write(JSON.stringify({event:'WHATSAPP_INBOX_POLL_UNAVAILABLE',code,
+          ...(error?.pollStage?{stage:error.pollStage}:{}),...(error?.httpStatus?{http_status:error.httpStatus}:{})})+'\n');
+      }
       if(!stopping)await new Promise(resolve=>{timer=setTimeout(resolve,5000);active=resolve;});
     }
   }finally{client.close();await connection?.end().catch(()=>{});}

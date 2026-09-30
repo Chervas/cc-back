@@ -3,6 +3,15 @@ const fs = require('node:fs');
 const { createHash } = require('node:crypto');
 const contactKey = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const FILE = '/run/clinicaclick-whatsapp-inbox-health/health.json';
+function capacityOf(health) {
+  if (health.capacity === undefined) return null; // Older broker during a rolling deployment.
+  const value = health.capacity;
+  if (!value || !['rows', 'bytes', 'maxRows', 'maxBytes', 'auditPending', 'maxAuditBacklog']
+    .every(key => Number.isSafeInteger(value[key]) && value[key] >= 0)
+    || !value.maxRows || !value.maxBytes || !value.maxAuditBacklog) throw Error('inbox_health_capacity_invalid');
+  return Object.fromEntries(['rows', 'bytes', 'maxRows', 'maxBytes', 'auditPending', 'maxAuditBacklog']
+    .map(key => [key, value[key]]));
+}
 function read() {
   try {
     const stat = fs.lstatSync(FILE);
@@ -51,7 +60,8 @@ function publish(health, scopes, { recoveryNotBefore = null, recoveryHold = fals
     }
     clinics.set(clinicId, value);
   }
-  const snapshot = { version: 1, observedAt: health.observedAt, clinics: [...clinics.values()], recoveryNotBefore, recoveryHold };
+  const snapshot = { version: 1, observedAt: health.observedAt, clinics: [...clinics.values()],
+    capacity: capacityOf(health), recoveryNotBefore, recoveryHold };
   fs.writeFileSync(FILE + '.next', JSON.stringify(snapshot), { mode: 0o644 });
   fs.chmodSync(FILE + '.next', 0o644); fs.renameSync(FILE + '.next', FILE);
   return snapshot;
