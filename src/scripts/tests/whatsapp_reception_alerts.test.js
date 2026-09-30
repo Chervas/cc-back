@@ -47,6 +47,21 @@ test('storage capacity warns independently before a full inbox rejects Meta webh
   query:async sql=>[sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[]]})
   .then(alerts=>alerts.map(a=>a.eventKey)),['whatsapp.reception_attention']);
 });
+test('archive delay warns without patient content and does not mask a healthy clinical importer',async()=>{
+ const clean={...snapshot,clinics:[{clinicId:2,blockingReview:0,oldestPendingAt:null}],
+  archive:{pending:3,oldestAt:now-121000}};
+ const alerts=await collect({snapshot:clean,bindings,now,query:async()=>[[]]});
+ assert.equal(alerts.length,1);
+ assert.equal(alerts[0].eventKey,'whatsapp.inbox_archive_delayed');
+ assert.equal(alerts[0].payload.severity,'critical');
+ assert.equal(alerts[0].metadata.pending,3);
+  assert.doesNotMatch(JSON.stringify(alerts),/phone|contact|content/);
+  assert.deepEqual(await collect({snapshot:{...clean,archive:{pending:0,oldestAt:null}},bindings,now,query:async()=>[[]]}),[]);
+  const tagging=await collect({snapshot:{...clean,archive:{pending:0,oldestAt:null,
+    untaggedImported:2,oldestUntaggedAt:now-121000}},bindings,now,query:async()=>[[]]});
+  assert.equal(tagging[0].eventKey,'whatsapp.inbox_archive_delayed');
+  assert.equal(tagging[0].metadata.untagged_imported,2);
+});
 test('unconfigured environments do not inspect or notify clinical reception',async()=>{
  assert.deepEqual(await collect({snapshot:null,bindings:[],query:async()=>{throw Error('unexpected query')}}),[]);
 });

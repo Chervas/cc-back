@@ -64,12 +64,13 @@ function scopeOf(raw, bindings) {
 }
 
 function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now = () => Date.now(),
-  maxRows = 100000, maxBytes = 1024 * 1024 * 1024, maxAuditBacklog = 10000, scopeBindings, loadScopeBindings }) {
+  maxRows = 100000, maxBytes = 1024 * 1024 * 1024, maxAuditBacklog = 10000, scopeBindings, loadScopeBindings,
+  archiveEnabled = false }) {
   if (!store?.db || !cipher || !id(appId) || !Array.isArray(bindings) || !bindings.length
     || bindings.length > 64 || new Set(bindings.map(b => b.wabaId)).size !== bindings.length
     || bindings.some(b => !id(b.wabaId) || !Array.isArray(b.phoneIds) || !b.phoneIds.length || b.phoneIds.some(p => !id(p)))
     || !Number.isSafeInteger(maxRows) || maxRows < 1 || !Number.isSafeInteger(maxBytes) || maxBytes < 1
-    || !Number.isSafeInteger(maxAuditBacklog) || maxAuditBacklog < 1 || !auditContext
+    || !Number.isSafeInteger(maxAuditBacklog) || maxAuditBacklog < 1 || typeof archiveEnabled !== 'boolean' || !auditContext
     || Object.keys(auditContext).sort().join(',') !== 'connectionRef,operation,policyVersion,resourceRef,tenantRef') fail('invalid_request');
   bindings = structuredClone(bindings); auditContext = structuredClone(auditContext);
   if (scopeBindings !== undefined) {
@@ -104,12 +105,31 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
     lease TEXT, lease_until INTEGER, imported_at INTEGER, import_receipt TEXT,
     UNIQUE(app_id,digest));
     CREATE INDEX IF NOT EXISTS whatsapp_inbox_pending ON whatsapp_inbox(state,received_at);
+    CREATE TABLE IF NOT EXISTS whatsapp_inbox_receipts (
+      app_id TEXT NOT NULL, digest TEXT NOT NULL, receipt TEXT NOT NULL,
+      key_id TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(app_id,digest));
+    CREATE INDEX IF NOT EXISTS whatsapp_inbox_receipts_expiry ON whatsapp_inbox_receipts(expires_at);
     CREATE TABLE IF NOT EXISTS whatsapp_inbox_retry (
       receipt TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0,
       next_attempt_at INTEGER NOT NULL DEFAULT 0, reason TEXT,
       last_attempt_at INTEGER NOT NULL DEFAULT 0);`);
+  if (!store.db.prepare('PRAGMA table_info(whatsapp_inbox)').all().some(column => column.name === 'archived_at')) {
+    store.db.exec('ALTER TABLE whatsapp_inbox ADD COLUMN archived_at INTEGER');
+  }
+  if (!store.db.prepare('PRAGMA table_info(whatsapp_inbox)').all().some(column => column.name === 'archive_tagged_at')) {
+    store.db.exec('ALTER TABLE whatsapp_inbox ADD COLUMN archive_tagged_at INTEGER');
+  }
+  for (const column of ['archive_attempts', 'archive_next_attempt_at', 'tag_attempts', 'tag_next_attempt_at']) {
+    if (!store.db.prepare('PRAGMA table_info(whatsapp_inbox)').all().some(item => item.name === column)) {
+      store.db.exec(`ALTER TABLE whatsapp_inbox ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+    }
+  }
+  store.db.exec(`CREATE INDEX IF NOT EXISTS whatsapp_inbox_archive_due
+    ON whatsapp_inbox(app_id,archived_at,archive_next_attempt_at,received_at);
+    CREATE INDEX IF NOT EXISTS whatsapp_inbox_tag_due
+    ON whatsapp_inbox(app_id,state,archive_tagged_at,tag_next_attempt_at,imported_at);`);
   const aad = row => JSON.stringify(['cc-wa-inbox-v1', row.app_id, row.receipt, row.key_id, row.digest, row.scopes, row.kinds, row.received_at]);
-  const receiptFor = row => ({ receipt: row.receipt, persisted: true, businessProcessed: row.state === 'imported' });
+  const receiptFor = row => ({ receipt: row.receipt, persisted: true, businessProcessed: row.state === 'imported', archived: !!row.archived_at });
   const clean = error => new BrokerError(error instanceof BrokerError ? error.code : 'audit_unavailable');
   const reviewCache = new Map(); // Only hashed contact references, never plaintext.
   return {
@@ -132,6 +152,9 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
             try { if (!saved.equals(raw)) fail('idempotency_conflict'); } finally { saved.fill(0); }
             return { ...receiptFor(existing), replayed: true };
           }
+          const previous = store.db.prepare('SELECT receipt,key_id FROM whatsapp_inbox_receipts WHERE app_id=? AND digest=? AND expires_at>?')
+            .get(appId, digest, now());
+          if (previous) return { receipt: previous.receipt, persisted: true, businessProcessed: true, archived: true, replayed: true };
           const capacity = store.db.prepare('SELECT COUNT(*) AS rows, COALESCE(SUM(byte_count),0) AS bytes FROM whatsapp_inbox').get();
           if (capacity.rows >= maxRows || capacity.bytes + raw.length > maxBytes || store.backlog().pending + contextsFor(scope.scopes).length > maxAuditBacklog) fail('audit_unavailable');
           const row = { receipt: randomUUID(), app_id: appId, digest, key_id: cipher.keyId,
@@ -146,6 +169,80 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
         });
       } catch (error) { throw clean(error); }
     },
+    async archive(receipt, sink) {
+      if (!uuid(receipt) || typeof sink?.put !== 'function') fail('invalid_request');
+      const row = store.db.prepare('SELECT * FROM whatsapp_inbox WHERE app_id=? AND receipt=?').get(appId, receipt);
+      if (!row) fail('scope_denied');
+      if (row.archived_at) return { receipt, archived: true };
+      let envelope; let plaintext;
+      try {
+        plaintext = cipher.open(row.body, aad(row));
+        if (plaintext.length !== row.byte_count) fail('secret_unavailable');
+        plaintext.fill(0); plaintext = null;
+        envelope = Buffer.from(JSON.stringify({ version: 1, receipt: row.receipt, appId: row.app_id,
+          digest: row.digest, keyId: row.key_id, scopes: JSON.parse(row.scopes), kinds: JSON.parse(row.kinds),
+          receivedAt: row.received_at, byteCount: row.byte_count, body: Buffer.from(row.body).toString('base64') }));
+        await sink.put(receipt, envelope);
+        store.db.prepare('UPDATE whatsapp_inbox SET archived_at=? WHERE receipt=? AND archived_at IS NULL')
+          .run(now(), receipt);
+        return { receipt, archived: true };
+      } catch (error) {
+        try {
+          const delay = Math.min(3600000, 60000 * 2 ** Math.min(6, row.archive_attempts));
+          store.db.prepare('UPDATE whatsapp_inbox SET archive_attempts=archive_attempts+1,archive_next_attempt_at=? WHERE receipt=? AND archived_at IS NULL')
+            .run(now() + delay, receipt);
+        } catch {}
+        throw clean(error);
+      }
+      finally { plaintext?.fill(0); envelope?.fill(0); }
+    },
+    unarchived(limit = 10) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid_request');
+      return store.db.prepare('SELECT receipt FROM whatsapp_inbox WHERE app_id=? AND archived_at IS NULL AND archive_next_attempt_at<=? ORDER BY received_at,receipt LIMIT ?')
+        .all(appId, now(), limit).map(row => row.receipt);
+    },
+    untaggedImported(limit = 10) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid_request');
+      return store.db.prepare("SELECT receipt FROM whatsapp_inbox WHERE app_id=? AND state='imported' AND archived_at IS NOT NULL AND archive_tagged_at IS NULL AND tag_next_attempt_at<=? ORDER BY imported_at,receipt LIMIT ?")
+        .all(appId, now(), limit).map(row => row.receipt);
+    },
+    async tagImported(receipt, sink) {
+      if (!uuid(receipt) || typeof sink?.tagImported !== 'function') fail('invalid_request');
+      const row = store.db.prepare('SELECT state,archived_at,archive_tagged_at,tag_attempts FROM whatsapp_inbox WHERE app_id=? AND receipt=?').get(appId, receipt);
+      if (!row || row.state !== 'imported' || !row.archived_at) fail('scope_denied');
+      if (row.archive_tagged_at) return { receipt, tagged: true };
+      try {
+        await sink.tagImported(receipt);
+        store.db.prepare("UPDATE whatsapp_inbox SET archive_tagged_at=? WHERE receipt=? AND state='imported' AND archived_at IS NOT NULL AND archive_tagged_at IS NULL")
+          .run(now(), receipt);
+        return { receipt, tagged: true };
+      } catch (error) {
+        try {
+          const delay = Math.min(3600000, 60000 * 2 ** Math.min(6, row.tag_attempts));
+          store.db.prepare("UPDATE whatsapp_inbox SET tag_attempts=tag_attempts+1,tag_next_attempt_at=? WHERE receipt=? AND state='imported' AND archive_tagged_at IS NULL")
+            .run(now() + delay, receipt);
+        } catch {}
+        throw clean(error);
+      }
+    },
+    maintain(limit = 100) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) fail('invalid_request');
+      const at = now();
+      return store.transaction(() => {
+        const rows = store.db.prepare("SELECT receipt,digest,key_id,received_at FROM whatsapp_inbox WHERE app_id=? AND state='imported' AND archived_at IS NOT NULL AND archive_tagged_at IS NOT NULL AND imported_at<=? ORDER BY imported_at,receipt LIMIT ?")
+          .all(appId, at - 24 * 3600000, limit);
+        const keep = store.db.prepare('INSERT INTO whatsapp_inbox_receipts(app_id,digest,receipt,key_id,expires_at) VALUES (?,?,?,?,?)');
+        const remove = store.db.prepare("DELETE FROM whatsapp_inbox WHERE receipt=? AND state='imported' AND archived_at IS NOT NULL AND archive_tagged_at IS NOT NULL");
+        const clearRetry = store.db.prepare('DELETE FROM whatsapp_inbox_retry WHERE receipt=?');
+        for (const row of rows) {
+          keep.run(appId, row.digest, row.receipt, row.key_id, row.received_at + 7 * 24 * 3600000);
+          clearRetry.run(row.receipt);
+          remove.run(row.receipt);
+        }
+        store.db.prepare('DELETE FROM whatsapp_inbox_receipts WHERE expires_at<=?').run(at);
+        return { released: rows.length };
+      });
+    },
     pending(limit = 20) {
       refreshScopes();
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid_request');
@@ -154,17 +251,24 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
         const base = "SELECT i.receipt,i.received_at FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND (i.state='held' OR (i.state='leased' AND i.lease_until<=?)) AND COALESCE(r.next_attempt_at,0)<=?";
         const fresh = store.db.prepare(base + " AND r.receipt IS NULL ORDER BY CASE WHEN i.kinds LIKE '%\"messages\"%' THEN 0 ELSE 1 END,i.received_at,i.receipt LIMIT ?")
           .all(appId, at, at, limit);
-        const retry = store.db.prepare(base + " AND r.receipt IS NOT NULL ORDER BY CASE WHEN r.reason IS NULL OR r.reason='import_retry' THEN 0 ELSE 1 END,r.last_attempt_at,i.received_at,i.receipt LIMIT ?")
+        const retry = store.db.prepare(base + " AND r.receipt IS NOT NULL AND (r.reason IS NULL OR r.reason IN ('import_retry','unmatched_status')) ORDER BY CASE WHEN r.reason IS NULL OR r.reason='import_retry' THEN 0 ELSE 1 END,r.last_attempt_at,i.received_at,i.receipt LIMIT ?")
           .all(appId, at, at, limit);
-        const retrySlots = Math.min(Math.max(1, Math.floor(limit / 5)), retry.length);
-        const freshSelected = fresh.slice(0, limit - retrySlots);
-        return [...freshSelected, ...retry.slice(0, limit - freshSelected.length)]
+        const review = store.db.prepare(base + " AND r.reason IN ('review_required','unsupported_event') ORDER BY r.last_attempt_at,i.received_at,i.receipt LIMIT 1")
+          .all(appId, at, at);
+        const reviewSlot = review.length && limit > 1 ? 1 : 0;
+        const retrySlots = Math.min(retry.length, Math.max(0, Math.max(1, Math.floor(limit / 5)) - reviewSlot),
+          Math.max(0, limit - reviewSlot - 1));
+        const freshSelected = fresh.slice(0, limit - reviewSlot - retrySlots);
+        const remaining = limit - freshSelected.length;
+        const retrySelected = retry.slice(0, remaining - (review.length && remaining > 1 ? 1 : 0));
+        return [...freshSelected, ...retrySelected, ...review.slice(0, limit - freshSelected.length - retrySelected.length)]
           .map(row => ({ receipt: row.receipt, receivedAt: row.received_at }));
       } catch (error) { throw clean(error); }
     },
     health() {
       refreshScopes();
       const storage = store.db.prepare('SELECT COUNT(*) AS rows,COALESCE(SUM(byte_count),0) AS bytes FROM whatsapp_inbox').get();
+      const archive = archiveEnabled ? store.db.prepare("SELECT SUM(CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END) AS pending,MIN(CASE WHEN archived_at IS NULL THEN received_at END) AS oldestAt,SUM(CASE WHEN state='imported' AND archived_at IS NOT NULL AND archive_tagged_at IS NULL THEN 1 ELSE 0 END) AS untaggedImported,MIN(CASE WHEN state='imported' AND archived_at IS NOT NULL AND archive_tagged_at IS NULL THEN imported_at END) AS oldestUntaggedAt FROM whatsapp_inbox WHERE app_id=?").get(appId) : null;
       const groups = store.db.prepare("SELECT i.scopes,COUNT(*) pending,MIN(CASE WHEN r.reason IS NULL OR r.reason='import_retry' THEN i.received_at END) oldestPendingAt,SUM(CASE WHEN r.reason='review_required' THEN 1 ELSE 0 END) blockingReview,SUM(CASE WHEN r.reason IN ('unsupported_event','unmatched_status') THEN 1 ELSE 0 END) review FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' GROUP BY i.scopes").all(appId);
       // Account-wide events cannot be attributed to a contact. Keep their
       // counters without letting them consume the bounded phone review budget.
@@ -198,7 +302,9 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
       }
       return { observedAt: now(), groups: groups.map(row => ({ ...row, scopes: JSON.parse(row.scopes) })),
         capacity: { rows: storage.rows, bytes: storage.bytes, maxRows, maxBytes,
-          auditPending: store.backlog().pending, maxAuditBacklog } };
+          auditPending: store.backlog().pending, maxAuditBacklog },
+        ...(archive ? { archive: { pending: archive.pending || 0, oldestAt: archive.oldestAt,
+          untaggedImported: archive.untaggedImported || 0, oldestUntaggedAt: archive.oldestUntaggedAt } } : {}) };
     },
     // No automatic consumer. The caller must have a separately authenticated,
     // approved import grant and commit the business transaction before confirm.
@@ -232,7 +338,8 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
         const row = store.db.prepare('SELECT state,lease,lease_until FROM whatsapp_inbox WHERE app_id=? AND receipt=?').get(appId, receipt);
         if (!row || row.state !== 'leased' || row.lease !== lease || row.lease_until <= now()) fail('scope_denied');
         const retry = store.db.prepare('SELECT attempts FROM whatsapp_inbox_retry WHERE receipt=?').get(receipt);
-        const delay = Math.min(3600000, 60000 * 2 ** Math.min(6, retry.attempts - 1));
+        const delay = reason === 'review_required' || reason === 'unsupported_event'
+          ? 24 * 3600000 : Math.min(3600000, 60000 * 2 ** Math.min(6, retry.attempts - 1));
         store.db.prepare('UPDATE whatsapp_inbox_retry SET reason=?,next_attempt_at=? WHERE receipt=?').run(reason, now() + delay, receipt);
         return { receipt, deferred: true, businessProcessed: false };
       });

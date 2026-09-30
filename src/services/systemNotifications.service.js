@@ -200,6 +200,13 @@ const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
     minimumThrottleMinutes: 60,
     defaults: { panel: true, email: true, whatsapp: false },
   },
+  {
+    key: 'whatsapp.inbox_archive_delayed', category: 'whatsapp', severity: 'critical',
+    label: 'WhatsApp: copia externa de recepción retrasada',
+    description: 'Hay recibos custodiados localmente cuya copia externa aún no se ha confirmado.',
+    minimumThrottleMinutes: 60,
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
 ]);
 
 function cleanString(value) {

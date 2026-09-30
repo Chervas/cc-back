@@ -19,18 +19,37 @@ function capacityAlert(snapshot, now) {
     action: 'Revisar capacidad y archivado controlado del inbox AWS. No borrar recibos ni forzar confirmaciones.',
   }, metadata: { source: 'whatsapp_inbox_capacity', utilization_percent: percent } };
 }
+function archiveAlert(snapshot, now) {
+  if (!snapshot || !Number.isFinite(snapshot.observedAt) || now - snapshot.observedAt > 90000
+    || snapshot.observedAt > now + 5000) return null;
+  const archive = snapshot.archive;
+  if (!archive) return null;
+  const pending = Number.isSafeInteger(archive.pending) && archive.pending > 0
+    && Number.isSafeInteger(archive.oldestAt) && now - archive.oldestAt >= 120000;
+  const untagged = Number.isSafeInteger(archive.untaggedImported) && archive.untaggedImported > 0
+    && Number.isSafeInteger(archive.oldestUntaggedAt) && now - archive.oldestUntaggedAt >= 120000;
+  if (!pending && !untagged) return null;
+  const count = (pending ? archive.pending : 0) + (untagged ? archive.untaggedImported : 0);
+  return { eventKey: 'whatsapp.inbox_archive_delayed', payload: {
+    severity: 'critical', title: 'La copia de seguridad de recepción de WhatsApp está retrasada',
+    detail: `${count} recibos requieren copia externa o marcado de importación. Si falla la copia para un evento nuevo, Meta recibirá un error reintentable.`,
+    action: 'Revisar el archivo S3 y el servicio de recepción. No eliminar ni confirmar recibos manualmente.',
+  }, metadata: { source: 'whatsapp_inbox_archive', pending: archive.pending,
+    untagged_imported: archive.untaggedImported || 0 } };
+}
 
 // Runs inside the existing five-minute system check. No Meta API request,
 // message body or patient identity is needed to notify an administrator.
 async function collect({ snapshot, bindings, query, now = Date.now() }) {
   const clinicIds = [...new Set(bindings.filter(b => b.sendEnabled).map(b => b.clinicId))];
   const capacity = capacityAlert(snapshot, now);
-  if (!clinicIds.length) return capacity ? [capacity] : [];
+  const archive = archiveAlert(snapshot, now);
+  if (!clinicIds.length) return [capacity, archive].filter(Boolean);
   const issues = health.issues(snapshot, clinicIds, now);
   const [waiting] = await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ id,clinic_id FROM FlowExecutionsV2
     WHERE status='waiting' AND clinic_id IN (:clinicIds) AND last_error='inbound_response_dispatch_pending'
     AND wait_until < :until ORDER BY id LIMIT 50`, { replacements: { clinicIds, until: new Date(now + 120000) } });
-  if (!issues.length && !waiting.length) return capacity ? [capacity] : [];
+  if (!issues.length && !waiting.length) return [capacity, archive].filter(Boolean);
   const affected = [...new Set([...issues.map(x => x.data.clinic_id), ...waiting.map(x => x.clinic_id)])];
   const [clinics] = await query('SELECT id_clinica,nombre_clinica FROM Clinicas WHERE id_clinica IN (:clinicIds)',
     { replacements: { clinicIds: affected } });
@@ -53,7 +72,7 @@ async function collect({ snapshot, bindings, query, now = Date.now() }) {
     : '';
   const waits = waiting.length ? ` ${waiting.length}${waiting.length === 50 ? ' o más' : ''} respuestas ya registradas esperan al motor.`
     : ' No hay respuestas ya registradas pendientes del motor.';
-  return [...(capacity ? [capacity] : []), { eventKey: 'whatsapp.reception_attention', payload: {
+  return [...[capacity, archive].filter(Boolean), { eventKey: 'whatsapp.reception_attention', payload: {
     severity: issues.some(x => x.severity === 'critical') ? 'critical' : 'warning',
     title: stale ? 'No se actualiza el control de recepción de WhatsApp' : 'WhatsApp tiene eventos pendientes de recepción',
     detail: `${summary}${oldestDetail}${waits} Las acciones por falta de respuesta permanecen en espera hasta comprobar la recepción.`,

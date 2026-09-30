@@ -39,11 +39,11 @@ async function jsonBody(req, keys) {
   } catch { fail('invalid_request'); }
   finally { raw?.fill(0); for (const chunk of chunks) chunk.fill(0); }
 }
-function createInboxServer({ inbox, withApplicationSecret, principals, cert, key, ca, consumerEnabled = false, now = () => Date.now() }) {
+function createInboxServer({ inbox, withApplicationSecret, archive, principals, cert, key, ca, consumerEnabled = false, now = () => Date.now() }) {
   const allowed = validatePrincipals(principals); const windows = new Map();
   if (!Buffer.isBuffer(cert) || !Buffer.isBuffer(key) || !Buffer.isBuffer(ca) || typeof consumerEnabled !== 'boolean'
     || ['accept', 'pending', 'lease', 'confirm'].some(name => typeof inbox?.[name] !== 'function')) fail('invalid_request');
-  const receive = createWhatsappInboxHandler({ inbox, withApplicationSecret });
+  const receive = createWhatsappInboxHandler({ inbox, withApplicationSecret, archive });
   let inFlight = 0;
   const server = https.createServer({ cert, key, ca, requestCert: true, rejectUnauthorized: true, minVersion: 'TLSv1.2',
     maxHeaderSize: 8192 }, async (req, res) => {

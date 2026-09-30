@@ -80,6 +80,15 @@ async function fixture(t, { keyPins = false } = {}) {
 }
 const BASE = '/v1/whatsapp/inbox';
 const packet = raw => ({ body: raw, signature: 'sha256=' + createHmac('sha256', APP).update(raw).digest('hex') });
+test('recovery archive is opt-in and pinned to the dedicated bucket', async t => {
+  const f = await fixture(t);
+  assert.equal(runtime.validateConfig(f.config).recoveryArchive, undefined);
+  assert.throws(() => runtime.validateConfig({ ...f.config,
+    recoveryArchive: { bucket: 'foreign-patient-bucket' } }), { code: 'invalid_request' });
+  assert.equal(runtime.validateConfig({ ...f.config,
+    recoveryArchive: { bucket: require('../src/whatsapp-inbox-archive').BUCKET } }).recoveryArchive.bucket,
+  require('../src/whatsapp-inbox-archive').BUCKET);
+});
 test('mTLS rejects absent/unlisted certificates and cross-role routes before any secret read', async t => {
   const f = await fixture(t); const baseline = f.awsCalls.length;
   await assert.rejects(f.send(null, BASE, packet(f.raw)));

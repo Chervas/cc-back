@@ -4,7 +4,7 @@ const { BrokerError, publicError } = require('./errors');
 
 // Compose only with the dedicated TLS ingress route. This does not attach a
 // listener, alter subscriptions or replace the closed legacy webhook by itself.
-function createWhatsappInboxHandler({ inbox, withApplicationSecret }) {
+function createWhatsappInboxHandler({ inbox, withApplicationSecret, archive }) {
   if (typeof inbox?.accept !== 'function' || typeof withApplicationSecret !== 'function') throw Error('invalid_request');
   return async (req, res) => {
     let raw; const chunks = [];
@@ -31,6 +31,7 @@ function createWhatsappInboxHandler({ inbox, withApplicationSecret }) {
       raw = Buffer.concat(chunks);
       const result = await withApplicationSecret(secret => inbox.accept({ raw, signature: signatures[0], appSecret: secret }));
       if (!result?.persisted || typeof result.receipt !== 'string') throw new BrokerError('audit_unavailable');
+      if (archive && !result.archived) await inbox.archive(result.receipt, archive);
       return respond(200, { received: true });
     } catch (error) {
       const safe = publicError(error instanceof BrokerError ? error : new BrokerError('audit_unavailable'));
