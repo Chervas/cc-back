@@ -29,6 +29,7 @@ test('fresh backlog is reported as events pending import or review',async()=>{
  const alerts=await collect({snapshot:delayed,bindings,now,
   query:async sql=>[sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[]]});
  assert.match(alerts[0].payload.detail,/eventos de WhatsApp pendientes de importar o revisar/);
+ assert.match(alerts[0].payload.detail,/evento pendiente más antiguo es del/);
 });
 test('unconfigured environments do not inspect or notify clinical reception',async()=>{
  assert.deepEqual(await collect({snapshot:null,bindings:[],query:async()=>{throw Error('unexpected query')}}),[]);
