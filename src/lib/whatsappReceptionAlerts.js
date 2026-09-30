@@ -15,10 +15,22 @@ async function collect({ snapshot, bindings, query, now = Date.now() }) {
   const [clinics] = await query('SELECT id_clinica,nombre_clinica FROM Clinicas WHERE id_clinica IN (:clinicIds)',
     { replacements: { clinicIds: affected } });
   const names = affected.map(id => clinics.find(c => Number(c.id_clinica) === Number(id))?.nombre_clinica || `Clínica ${id}`);
+  const shown = names.slice(0, 4).join(', ') + (names.length > 4 ? ` y ${names.length - 4} más` : '');
+  const stale = !snapshot || snapshot.version !== 1 || !Number.isFinite(snapshot.observedAt)
+    || now - snapshot.observedAt > 90000 || snapshot.observedAt > now + 5000;
+  const checkedAt = stale && Number.isFinite(snapshot?.observedAt) && snapshot.observedAt <= now
+    ? new Date(snapshot.observedAt).toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'short', timeStyle: 'short' })
+    : null;
+  const summary = stale
+    ? `El control de recepción no se actualiza desde ${checkedAt || 'hace más de 90 segundos'}. Afecta a ${affected.length} clínicas: ${shown}.`
+    : issues.length ? `${issues.length} clínicas tienen eventos de WhatsApp pendientes de importar o revisar: ${shown}.`
+      : `${waiting.length} respuestas recibidas siguen pendientes del motor en: ${shown}.`;
+  const waits = waiting.length ? ` ${waiting.length}${waiting.length === 50 ? ' o más' : ''} respuestas ya registradas esperan al motor.`
+    : ' No hay respuestas ya registradas pendientes del motor.';
   return [{ eventKey: 'whatsapp.reception_attention', payload: {
     severity: issues.some(x => x.severity === 'critical') ? 'critical' : 'warning',
-    title: 'WhatsApp requiere revisión de recepción',
-    detail: `${names.join(', ')}. ${issues.length} incidencias de recepción; ${waiting.length}${waiting.length === 50 ? ' o más' : ''} esperas con respuesta recibida pendiente de procesar. No se debe interpretar esa espera como silencio del paciente.`,
+    title: stale ? 'No se actualiza el control de recepción de WhatsApp' : 'WhatsApp tiene eventos pendientes de recepción',
+    detail: `${summary}${waits} Las acciones por falta de respuesta permanecen en espera hasta comprobar la recepción.`,
     action: 'Revisar Ajustes → Monitorización → WhatsApp. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp',
   }, metadata: { source: 'whatsapp_reception', clinic_ids: affected,
     waiting_execution_ids: waiting.map(x => x.id), issue_types: [...new Set(issues.map(x => x.type))] } }];
