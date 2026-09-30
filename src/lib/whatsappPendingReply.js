@@ -17,20 +17,26 @@ async function pendingReply({ clinicId, anchor, waitingMeta, bindings, snapshot,
     WHERE c.id=:conversationId AND c.clinic_id=:clinicId AND c.channel='whatsapp'
       AND m.direction='inbound' AND m.sent_at>=:since AND (a.message_id IS NULL OR a.status<>'completed')
       AND JSON_EXTRACT(m.metadata,'$.historical')=CAST('false' AS JSON)
-      AND COALESCE(JSON_EXTRACT(m.metadata,'$.recovery_without_automation'),CAST('false' AS JSON))=CAST('false' AS JSON)
     ORDER BY m.id DESC LIMIT 50`, { replacements: { conversationId, clinicId: Number(clinicId), since: new Date(started) } });
+  let recoveredMessageId = null;
   for (const row of rows) {
     const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
     const binding = own.find(b => b.phoneId === metadata?.phone_number_id && b.wabaId === metadata?.waba_id);
-    // Removing this marker is only for the guard, never for dispatch. A queued
-    // native job still needs its chance to claim the response before timeout.
+    const recovered = metadata?.recovery_without_automation === true || metadata?.media_recovered_without_automation === true;
+    // These markers are removed only from the timeout guard's copy. Recovery
+    // messages remain ineligible for dispatch and must be reviewed by a human.
     const message = { ...row, metadata: { ...metadata, fresh_inbound_dispatched_at: undefined,
+      recovery_without_automation: false, media_recovered_without_automation: false,
       ...(metadata?.provider_type === 'audio' ? { audio_transcription: { status: 'unavailable' } } : {}),
     } };
-    const cutoff = new Date(Math.max(started, Date.parse(snapshot?.recoveryNotBefore || '') || 0)).toISOString();
-    if (eligible(message, { id: conversationId, clinic_id: Number(clinicId), channel: 'whatsapp' }, binding, cutoff, now,
-      { includeExpired: true })) return Number(row.id);
+    const cutoff = new Date(recovered ? started : Math.max(started, Date.parse(snapshot?.recoveryNotBefore || '') || 0)).toISOString();
+    const guardBinding = recovered ? { ...binding, messageNotBefore: null } : binding;
+    if (!eligible(message, { id: conversationId, clinic_id: Number(clinicId), channel: 'whatsapp' }, guardBinding, cutoff, now,
+      { includeExpired: true })) continue;
+    if (recovered) recoveredMessageId ||= Number(row.id);
+    else return Number(row.id);
   }
-  return rows.length === 50 ? 'review_required' : null;
+  return recoveredMessageId ? { kind: 'recovered', messageId: recoveredMessageId }
+    : rows.length === 50 ? 'review_required' : null;
 }
 module.exports = { pendingReply };

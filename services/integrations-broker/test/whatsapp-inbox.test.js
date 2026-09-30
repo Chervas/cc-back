@@ -137,6 +137,28 @@ test('poison backlog cannot starve new receipts, survives restart, and never fak
   assert.throws(()=>f.inbox.lease(retry.receipt),{code:'scope_denied'});
   assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n,1);
 });
+test('due review retries cannot delay new patient messages and retain a bounded retry share',t=>{
+ const f=fixture(t),old=new Set(),fresh=new Set();
+ for(let n=0;n<25;n++) {
+  const receipt=f.inbox.accept(packet(body({field:'account_update',value:{sequence:n}}))).receipt;
+  const lease=f.inbox.lease(receipt);lease.raw.fill(0);
+  f.inbox.defer({receipt,lease:lease.lease,reason:'review_required'});old.add(receipt);
+ }
+ f.advance(60001);
+ for(let n=0;n<25;n++) {
+  const input=body();input.entry[0].changes[0].value.messages[0].id='synthetic-'+n;
+  fresh.add(f.inbox.accept(packet(input)).receipt);
+ }
+ const assertPending=inbox=>{
+  const next=inbox.pending(20);
+  assert.equal(next.length,20);
+  assert.equal(next.filter(row=>fresh.has(row.receipt)).length,16);
+  assert.equal(next.filter(row=>old.has(row.receipt)).length,4);
+  assert(next.slice(0,16).every(row=>fresh.has(row.receipt)));
+ };
+ assertPending(f.inbox);f.restart();assertPending(f.inbox);
+ assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n,0);
+});
 test('a crashed consumer rotates failed leases behind newly arrived work',t=>{
  const f=fixture(t),a=f.inbox.accept(packet());f.advance(1);
  const b=f.inbox.accept(packet(body({field:'history'})));f.advance(1);

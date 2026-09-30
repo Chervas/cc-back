@@ -7160,6 +7160,35 @@ async function processNode(node, context, runtime = {}) {
   }
 }
 
+async function notifyRecoveredReply(execution, conversationId, messageId) {
+  let userIds = await resolveTaskAssigneeUserIds({
+    clinicId: execution.clinic_id, assigneeType: 'role', assigneeId: 'recepcion', subrole: 'recepcion',
+  });
+  const adminFallback = !userIds.length;
+  if (adminFallback) userIds = await resolveTaskAssigneeUserIds({
+    clinicId: execution.clinic_id, assigneeType: 'role', assigneeId: 'admin', roleCode: 'admin',
+  });
+  if (!userIds.length) throw new Error('recovered_reply_assignee_missing');
+  for (const userId of userIds) {
+    const [notification, created] = await Notification.findOrCreate({
+      where: { dedupeKey: `automation:recovered-reply:${execution.id}:${messageId}:${userId}` },
+      defaults: {
+        userId, role: adminFallback ? 'admin' : 'personaldeclinica',
+        subrole: adminFallback ? '' : 'recepcion', category: 'general',
+        event: 'automation.persistent_alert', title: 'Respuesta pendiente de revisión',
+        message: 'El paciente respondió mientras se recuperaban mensajes de WhatsApp. Revisa la conversación y resuelve la cita; no se enviará otro recordatorio automático.',
+        icon: 'heroicons_outline:bell-alert', level: 'warning', clinicaId: execution.clinic_id,
+        dedupeKey: `automation:recovered-reply:${execution.id}:${messageId}:${userId}`,
+        data: { source: 'automations_v2', execution_id: execution.id,
+          trigger_entity_type: 'appointment', trigger_entity_id: execution.trigger_entity_id,
+          quickChatConversationId: conversationId, quickChatResponseMessageId: messageId,
+          clinicId: execution.clinic_id, displayMode: 'persistent_alert', requiresAcknowledgement: true },
+      },
+    });
+    if (created) emitNotificationCreated(notification);
+  }
+}
+
 async function resumeWaitingNode(execution, node, context, {
   mode,
   responseText,
@@ -7189,6 +7218,29 @@ async function resumeWaitingNode(execution, node, context, {
         bindings: whatsappAuthorizedBroker.bindingsForClinic(Number(execution.clinic_id)),
         snapshot: require('../lib/whatsappInboxHealth').read(), query: (...args) => db.sequelize.query(...args),
       }).catch(() => 'review_required');
+      if (pending?.kind === 'recovered') {
+        const conversationId = toIntOrNull(anchor?.listened_output?.conversation_id || anchor?.listened_output?.chat_conversation_id);
+        try {
+          await notifyRecoveredReply(execution, conversationId, pending.messageId);
+          await conversationAutomationState.setState({
+            clinicId: execution.clinic_id, conversationId, stage: 'review', status: 'review',
+            sourceMessageId: pending.messageId, executionId: execution.id,
+            appointmentId: toIntOrNull(execution.trigger_entity_id),
+            manualActionRequired: true, needsResponse: false,
+            failureCode: 'inbound_recovery_requires_review', completedAt: new Date(),
+          });
+          await updateExecutionAndEmit(execution, {
+            status: 'cancelled', current_node_id: null, wait_until: null, waiting_meta: null,
+            last_error: 'inbound_recovery_requires_review',
+          }, 'flow_execution:cancelled');
+        } catch (error) {
+          await updateExecutionAndEmit(execution, {
+            status: 'waiting', wait_until: new Date(Date.now() + 60000),
+            last_error: 'inbound_recovery_review_pending',
+          });
+        }
+        return { resumed: false, context };
+      }
       if (pending) {
         await updateExecutionAndEmit(execution, { status: 'waiting', wait_until: new Date(Date.now() + 60000),
           waiting_meta: { ...execution.waiting_meta,
@@ -7627,6 +7679,7 @@ async function syncConversationAutomationStateAfterExecution(execution) {
   if (!state || Number(state.execution_id) !== Number(execution.id)) return;
 
   const executionStatus = cleanString(execution.status)?.toLowerCase();
+  if (executionStatus === 'cancelled' && execution.last_error === 'inbound_recovery_requires_review') return;
   if (executionStatus === 'waiting') {
     if (cleanString(execution?.waiting_meta?.type) === 'delay/wait_response') {
       const classification = findClassifyIntentOutput(context);

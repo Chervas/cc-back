@@ -9,16 +9,25 @@ async function check(row=message,changes={}) {
  return pendingReply({clinicId:2,anchor:{listened_output:{conversation_id:3,at:new Date(now-172800000).toISOString()}},
  bindings:[binding],snapshot:{},now,query:async(sql,opts)=>{
  assert.match(sql,/a.status<>'completed'/);assert.match(sql,/c.clinic_id=:clinicId/);
- assert.equal(opts.replacements.conversationId,3);return [[row]];},...changes});
+ assert.equal(opts.replacements.conversationId,3);return [Array.isArray(row)?row:[row]];},...changes});
 }
 test('durable unclaimed and queued replies prevent silence without dispatching anything',async()=>{
  assert.equal(await check(),9);
  assert.equal(await check({...message,metadata:{...message.metadata,fresh_inbound_dispatched_at:new Date().toISOString()}}),9);
  assert.equal(message.metadata.fresh_inbound_dispatched_at,undefined);
 });
+test('a recovered reply holds the timeout for human review without becoming dispatchable',async()=>{
+ const recovered={...message,metadata:{...message.metadata,recovery_without_automation:true}};
+ assert.deepEqual(await check(recovered),{kind:'recovered',messageId:9});
+ assert.deepEqual(await check(recovered,{snapshot:{recoveryNotBefore:new Date(now-1000).toISOString()},
+  bindings:[{...binding,messageNotBefore:new Date(now-1000).toISOString()}]}),{kind:'recovered',messageId:9});
+ assert.equal(recovered.metadata.recovery_without_automation,true);
+ assert.equal(await check([{...recovered,id:10},message]),9);
+});
 test('historical recovery, another sender and out-of-window replies do not own this wait',async()=>{
- for(const patch of [{historical:true},{recovery_without_automation:true},{phone_number_id:'999'},{waba_id:'999'}])
+ for(const patch of [{historical:true},{phone_number_id:'999'},{waba_id:'999'}])
  assert.equal(await check({...message,metadata:{...message.metadata,...patch}}),null);
+ assert.equal(await check({...message,metadata:{...message.metadata,historical:true,recovery_without_automation:true}}),null);
  assert.equal(await check(message,{waitingMeta:{wait_starts_at:new Date(now).toISOString()}}),null);
 });
 test('a reply older than the dispatch limit needs review, never a false silence decision',async()=>{
