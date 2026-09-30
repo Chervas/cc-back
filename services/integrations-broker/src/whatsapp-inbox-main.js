@@ -131,8 +131,8 @@ async function main(filename, { awsFactory = connectInboxAws } = {}) {
             ...inbox.unarchived(5).map(receipt => inbox.archive(receipt, archive)),
             ...inbox.untaggedImported(5).map(receipt => inbox.tagImported(receipt, archive)),
           ];
-          if (!work.length) return inbox.maintain(100);
           const outcomes = await Promise.allSettled(work);
+          inbox.maintain(100);
           if (outcomes.some(result => result.status === 'rejected')) throw Error('archive_unavailable');
         })().catch(() => {
           archiveRetryAt = Date.now() + 60000;
