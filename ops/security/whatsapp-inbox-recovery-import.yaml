@@ -1,0 +1,9 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Adopt the retained WhatsApp inbox recovery bucket before configuring it
+Resources:
+  RecoveryBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: clinicaclick-whatsapp-inbox-recovery-137819318729-eu-west-3-a

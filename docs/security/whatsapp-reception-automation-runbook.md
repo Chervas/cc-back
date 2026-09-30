@@ -82,6 +82,13 @@ objetos importados expiran a los ocho días; los no importados no expiran
 automáticamente. Antes de habilitarlo hay que probar restauración e integridad
 con datos sintéticos. No borrar filas de SQLite ni aumentar límites sin
 comprobar espacio, auditoría y recuperación.
+Si el primer despliegue de `ops/security/whatsapp-inbox-recovery.yaml` dejó el
+bucket retenido tras un rollback, importar **ese mismo bucket** con
+`ops/security/whatsapp-inbox-recovery-import.yaml` y revisar el ChangeSet antes
+de ejecutarlo. La importación no aplica las propiedades de seguridad; actualizar
+después el stack con la plantilla completa y verificar cifrado, bloqueo público,
+versionado, ciclo de vida, política y permiso del rol antes de habilitar
+`recoveryArchive`. Nunca borrar el bucket retenido para repetir la creación.
 Durante un despliegue gradual, un broker anterior no publica `capacity`:
 el importador la deja en `null` y no se emite una falsa alerta de capacidad.
 La alarma solo queda operativa tras desplegar broker, importador y API.
