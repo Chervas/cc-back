@@ -64,6 +64,10 @@ test('normaliza reglas y declara la plantilla admin-only de WhatsApp', () => {
   assert.equal(rules['whatsapp.reception_attention'].email, true);
   assert.equal(rules['whatsapp.reception_attention'].panel, true);
   assert.equal(rules['whatsapp.reception_attention'].whatsapp, false);
+  assert.equal(rules['whatsapp.inbox_capacity_warning'].email, true);
+  assert.equal(rules['whatsapp.inbox_capacity_warning'].whatsapp, false);
+  assert.equal(rules['whatsapp.inbox_capacity_critical'].email, true);
+  assert.equal(rules['whatsapp.inbox_capacity_critical'].severity, 'critical');
 
   const payload = systemNotifications._test.systemWhatsappTemplatePayload({
     name: 'clinicaclick_admin_alerta_sistema',
@@ -84,6 +88,8 @@ test('la revisión de recepción usa correo existente, respeta desactivación y 
     assert.deepEqual(result.channels, ['panel', 'email']);
     assert.equal(result.created.length, 0);
     assert.equal(systemNotifications._test.throttleMinutesForEvent(setting, 'whatsapp.reception_attention'), 60);
+    assert.equal(systemNotifications._test.throttleMinutesForEvent(setting, 'whatsapp.inbox_capacity_warning'), 60);
+    assert.equal(systemNotifications._test.throttleMinutesForEvent(setting, 'whatsapp.inbox_capacity_critical'), 60);
     setting.email_enabled = false;
     assert.deepEqual(systemNotifications._test.enabledChannelsForEvent(setting, 'whatsapp.reception_attention'), ['panel']);
   } finally { restores.reverse().forEach(r => r()); }

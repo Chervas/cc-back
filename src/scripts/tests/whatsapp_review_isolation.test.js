@@ -28,6 +28,12 @@ test('health publishing preserves total reviews and falls back conservatively fo
   assert.equal(s.clinics[0].blockingReview,4);assert.equal(s.clinics[0].unscopedBlockingReview,isolation?.scopedReviews===4?0:4);
  }
  assert.equal(writes.length,3);
+ const capacity={rows:80,bytes:1024,maxRows:100,maxBytes:2048,auditPending:2,maxAuditBacklog:10};
+ const measured=sandbox.module.exports.publish({observedAt:now,groups:[],capacity},scopes);
+ assert.deepEqual(JSON.parse(JSON.stringify(measured.capacity)),capacity);
+ assert.throws(()=>sandbox.module.exports.publish({observedAt:now,groups:[],capacity:{...capacity,maxRows:0}},scopes),
+  /inbox_health_capacity_invalid/);
+ assert.equal(writes.length,4);
 });
 test('known-contact review affects only that contact, including old aliases after its current phone changes',async()=>{
  const s=snapshot(),bindings=[{clinicId:72,phoneId:'201'}];

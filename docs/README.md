@@ -52,6 +52,7 @@ sincroniza el espejo frontend. Este índice no mantiene otro roadmap ni diario.
 
 - [WhatsApp y acceso: condiciones de reconexión](security/whatsapp-reconnection-readiness.md).
 - [WhatsApp: motor de envío aislado y cliente staging](security/whatsapp-broker-messaging.md).
+- [WhatsApp: recepción, automatizaciones y capacidad](security/whatsapp-reception-automation-runbook.md).
 - [Estado durable para el alta específica de WhatsApp](security/whatsapp-authorization-state.md).
 - [Transporte privado de canje y prueba de pertenencia WhatsApp](security/whatsapp-oauth-transport.md).
 - [Alta WhatsApp: registro del broker y credencial candidata](security/whatsapp-onboarding-broker.md).

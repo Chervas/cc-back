@@ -31,6 +31,22 @@ test('fresh backlog is reported as events pending import or review',async()=>{
  assert.match(alerts[0].payload.detail,/eventos de WhatsApp pendientes de importar o revisar/);
  assert.match(alerts[0].payload.detail,/evento pendiente más antiguo es del/);
 });
+test('storage capacity warns independently before a full inbox rejects Meta webhooks',async()=>{
+ const clean={...snapshot,clinics:[{clinicId:2,blockingReview:0,oldestPendingAt:null}],
+  capacity:{rows:800,bytes:100,maxRows:1000,maxBytes:1000,auditPending:0,maxAuditBacklog:100}};
+ const query=async()=>[[]];
+ const warning=await collect({snapshot:clean,bindings,now,query});
+ assert.equal(warning.length,1);assert.equal(warning[0].eventKey,'whatsapp.inbox_capacity_warning');
+ assert.equal(warning[0].payload.severity,'warning');assert.match(warning[0].payload.detail,/800\/1000 recibos/);
+ assert.equal((await collect({snapshot:clean,bindings:[],now,query:async()=>{throw Error('unexpected query')}}))[0].eventKey,
+  'whatsapp.inbox_capacity_warning');
+ const critical=await collect({snapshot:{...clean,capacity:{...clean.capacity,auditPending:91}},bindings,now,query});
+ assert.equal(critical[0].payload.severity,'critical');
+ assert.equal(critical[0].eventKey,'whatsapp.inbox_capacity_critical');
+ assert.deepEqual(await collect({snapshot:{...clean,observedAt:now-3600000},bindings,now,
+  query:async sql=>[sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[]]})
+  .then(alerts=>alerts.map(a=>a.eventKey)),['whatsapp.reception_attention']);
+});
 test('unconfigured environments do not inspect or notify clinical reception',async()=>{
  assert.deepEqual(await collect({snapshot:null,bindings:[],query:async()=>{throw Error('unexpected query')}}),[]);
 });

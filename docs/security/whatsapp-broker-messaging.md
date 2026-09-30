@@ -6,6 +6,9 @@ en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado
 y [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md).
 Los apartados del motor separado posterior conservan su alcance de preparación;
 no acreditan por sí solos [las condiciones de reapertura](whatsapp-reconnection-readiness.md).
+El recorrido completo Meta -> inbox -> CRM -> IA -> envío, sus señales de salud
+y el diagnóstico de capacidad se mantienen en el
+[runbook de recepción y automatizaciones](whatsapp-reception-automation-runbook.md).
 
 ## Envío con autorización de Embedded Signup
 

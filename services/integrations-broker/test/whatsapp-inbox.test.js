@@ -30,6 +30,8 @@ test('signed batch is encrypted and audited before ACK, survives restart and ded
   assert.equal(first.persisted, true); assert.equal(first.businessProcessed, false);
   assert.equal(f.store.db.prepare('SELECT state FROM whatsapp_inbox').get().state, 'held');
   assert.equal(f.store.backlog().pending, 1);
+  assert.deepEqual(f.inbox.health().capacity, { rows: 1, bytes: input.raw.length,
+    maxRows: 100000, maxBytes: 1024 * 1024 * 1024, auditPending: 1, maxAuditBacklog: 10000 });
   for (const suffix of ['', '-wal']) {
     const file = f.filename + suffix;
     if (fs.existsSync(file)) assert(!fs.readFileSync(file).includes(Buffer.from('FICTITIOUS_CANCEL_REQUEST')));
