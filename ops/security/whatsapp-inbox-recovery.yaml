@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private recovery archive for signed WhatsApp inbox receipts
+Resources:
+  RecoveryBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: clinicaclick-whatsapp-inbox-recovery-137819318729-eu-west-3-a
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireImportedReceipts
+            Status: Enabled
+            Prefix: v1/
+            TagFilters:
+              - Key: clinicaclick-state
+                Value: imported
+            ExpirationInDays: 8
+            NoncurrentVersionExpirationInDays: 1
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+  RecoveryBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref RecoveryBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt RecoveryBucket.Arn
+              - !Sub '${RecoveryBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: RequireWriteOnce
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource:
+              - !Sub '${RecoveryBucket.Arn}/v1/*'
+              - !Sub '${RecoveryBucket.Arn}/meta/*'
+            Condition:
+              StringNotEquals:
+                s3:if-none-match: '*'
+  RuntimeArchivePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: clinicaclick-whatsapp-inbox-recovery-writer
+      Roles:
+        - clinicaclick-integrations-prod-ec2-role
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: WriteOnceAndVerify
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:PutObjectTagging
+            Resource:
+              - !Sub '${RecoveryBucket.Arn}/v1/*'
+              - !Sub '${RecoveryBucket.Arn}/meta/*'
+Outputs:
+  BucketName:
+    Value: !Ref RecoveryBucket

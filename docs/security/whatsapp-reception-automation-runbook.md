@@ -46,7 +46,9 @@ conservan su versión. Las respuestas recuperadas con
 
 `GET /pending` entrega hasta 20 recibos: primero nuevos, dando precedencia a
 `messages`, y reserva como máximo una quinta parte para reintentos que ya
-vencieron. Los reintentos se ordenan por último intento; un recibo antiguo o
+vencieron, con una sola plaza para `review_required` o `unsupported_event`.
+Los reintentos recuperables siguen cada 1-60 minutos; las revisiones sin una
+acción nueva esperan 24 horas. Los reintentos se ordenan por último intento; un recibo antiguo o
 una caída del consumidor no puede monopolizar el lote. `review_required`,
 `unsupported_event` y `unmatched_status` nunca equivalen a silencio del
 paciente. Un lote mixto que contenga una respuesta real conserva la barrera.
@@ -66,10 +68,20 @@ los tres límites y emite un aviso crítico
 independiente `whatsapp.inbox_capacity_critical` desde 90%, incluso sin un
 remitente activo. Así la espera entre avisos no oculta la escalada. Si se
 agota un límite, el webhook deja de confirmar para permitir reintentos de
-Meta. No existe todavía un archivado automático de recibos ya importados:
-antes de acercarse al límite hay que acordar retención, respaldo cifrado,
-verificación de integridad y procedimiento de restauración. No borrar filas
-de SQLite ni aumentar límites sin comprobar espacio, auditoría y recuperación.
+Meta. El archivo externo está preparado, no activo hasta verificar la
+infraestructura y el despliegue. Con `recoveryArchive` habilitado, un 200
+requiere copia S3 cifrada verificada; `archive.pending`,
+`archive.untaggedImported` y la alerta de dos minutos comprueban atrasos aun
+cuando la importación CRM esté al día. Una copia o etiqueta fallida espera
+por recibo de uno a sesenta minutos sin monopolizar el barrido. La
+apertura del listener exige primero respaldar el manifiesto de clave envuelto
+por KMS en `meta/<keyId>.json`; restaurar requiere ese manifiesto y la misma
+clave KMS, nunca generar otra. La
+limpieza local exige importación, copia y etiqueta S3, más 24 horas. Los
+objetos importados expiran a los ocho días; los no importados no expiran
+automáticamente. Antes de habilitarlo hay que probar restauración e integridad
+con datos sintéticos. No borrar filas de SQLite ni aumentar límites sin
+comprobar espacio, auditoría y recuperación.
 Durante un despliegue gradual, un broker anterior no publica `capacity`:
 el importador la deja en `null` y no se emite una falsa alerta de capacidad.
 La alarma solo queda operativa tras desplegar broker, importador y API.

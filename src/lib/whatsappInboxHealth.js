@@ -12,6 +12,16 @@ function capacityOf(health) {
   return Object.fromEntries(['rows', 'bytes', 'maxRows', 'maxBytes', 'auditPending', 'maxAuditBacklog']
     .map(key => [key, value[key]]));
 }
+function archiveOf(health) {
+  if (health.archive === undefined) return null;
+  const value = health.archive;
+  if (!value || !Number.isSafeInteger(value.pending) || value.pending < 0
+    || !Number.isSafeInteger(value.untaggedImported) || value.untaggedImported < 0
+    || (value.oldestAt !== null && !Number.isSafeInteger(value.oldestAt))
+    || (value.oldestUntaggedAt !== null && !Number.isSafeInteger(value.oldestUntaggedAt))) throw Error('inbox_health_archive_invalid');
+  return { pending: value.pending, oldestAt: value.oldestAt,
+    untaggedImported: value.untaggedImported, oldestUntaggedAt: value.oldestUntaggedAt };
+}
 function read() {
   try {
     const stat = fs.lstatSync(FILE);
@@ -61,7 +71,7 @@ function publish(health, scopes, { recoveryNotBefore = null, recoveryHold = fals
     clinics.set(clinicId, value);
   }
   const snapshot = { version: 1, observedAt: health.observedAt, clinics: [...clinics.values()],
-    capacity: capacityOf(health), recoveryNotBefore, recoveryHold };
+    capacity: capacityOf(health), archive: archiveOf(health), recoveryNotBefore, recoveryHold };
   fs.writeFileSync(FILE + '.next', JSON.stringify(snapshot), { mode: 0o644 });
   fs.chmodSync(FILE + '.next', 0o644); fs.renameSync(FILE + '.next', FILE);
   return snapshot;

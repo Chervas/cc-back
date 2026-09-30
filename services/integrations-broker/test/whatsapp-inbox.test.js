@@ -6,6 +6,7 @@ const { randomBytes, randomUUID, createHmac } = require('node:crypto');
 const { BrokerStore } = require('../src/store');
 const { createInboxCipher, createWhatsappInbox, MAX_BYTES } = require('../src/whatsapp-inbox');
 const { createWhatsappInboxHandler } = require('../src/whatsapp-inbox-http');
+const { verifyArchiveEnvelope } = require('../src/whatsapp-inbox-archive');
 const network = require('./offline-guard.cjs');
 const APP = Buffer.from('FICTITIOUS_APP_SECRET_FOR_INBOX_QA');
 const body = (changes = {}) => ({ object: 'whatsapp_business_account', entry: [{ id: '301', changes: [{ field: 'messages',
@@ -22,7 +23,7 @@ function fixture(t, options = {}) {
         policyVersion: 'wa-inbox-qa-v1', operation: 'whatsapp.webhook.capture' }, now: () => clock, ...options });
   };
   open(); t.after(() => { cipher.close(); store.close(); key.fill(0); fs.rmSync(dir, { recursive: true, force: true }); });
-  return { dir, filename, get store() { return store; }, get inbox() { return inbox; }, advance(ms) { clock += ms; },
+  return { dir, filename, get store() { return store; }, get inbox() { return inbox; }, get cipher() { return cipher; }, advance(ms) { clock += ms; },
     restart() { cipher.close(); store.close(); open(); } };
 }
 test('signed batch is encrypted and audited before ACK, survives restart and deduplicates without a business action', t => {
@@ -105,6 +106,89 @@ test('HTTP returns 200 only after durable storage; duplicate signatures and unav
   assert.equal((await send([packet().signature, packet().signature])).status, 401);
   allowed = false; const failed = await send(); assert.equal(failed.status, 503); assert.equal(failed.retry, '60'); assert(!failed.body.includes('FICTITIOUS'));
 });
+test('archive failure keeps the signed receipt retryable and cannot produce an HTTP 200', async t => {
+  const f = fixture(t); let available = false; let copies = 0;
+  const archive = { async put(receipt, envelope) {
+    assert.match(receipt, /^[a-f0-9-]{36}$/);
+    assert(!envelope.includes(Buffer.from('FICTITIOUS_CANCEL_REQUEST')));
+    if (!available) throw Error('synthetic_archive_outage');
+    copies++;
+  } };
+  const server = http.createServer(createWhatsappInboxHandler({ inbox: f.inbox,
+    withApplicationSecret: work => work(APP), archive }));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  network.allowPort(server.address().port);
+  t.after(() => new Promise(resolve => { network.removePort(server.address().port); server.close(resolve); }));
+  const send = () => new Promise((resolve, reject) => {
+    const input = packet();
+    const req = http.request({ hostname: '127.0.0.1', port: server.address().port, method: 'POST', agent: false,
+      headers: { 'content-type': 'application/json', 'x-hub-signature-256': input.signature } }, res => {
+      res.resume(); res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', reject); req.end(input.raw);
+  });
+  assert.equal(await send(), 503);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM whatsapp_inbox').get().n, 1);
+  assert.equal(f.store.db.prepare('SELECT archived_at FROM whatsapp_inbox').get().archived_at, null);
+  available = true;
+  assert.equal(await send(), 200);
+  assert.equal(await send(), 200);
+  assert.equal(copies, 1);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM whatsapp_inbox').get().n, 1);
+});
+test('only imported archived receipts leave the hot inbox after 24 hours and deduplicate for seven days', async t => {
+  const f = fixture(t, { maxRows: 2 });
+  const first = packet(); const received = f.inbox.accept(first);
+  const held = f.inbox.accept(packet(body({ field: 'history' })));
+  assert.equal(f.inbox.maintain().released, 0);
+  let envelope;
+  await f.inbox.archive(received.receipt, { async put(receipt, body) { envelope = Buffer.from(body); } });
+  const archived = JSON.parse(envelope);
+  assert.equal(archived.receipt, received.receipt);
+  assert.equal(archived.byteCount, first.raw.length);
+  assert(!envelope.includes(Buffer.from('FICTITIOUS_CANCEL_REQUEST')));
+  const checked = verifyArchiveEnvelope(envelope, f.cipher, archived.appId);
+  assert(checked.raw.equals(first.raw)); checked.raw.fill(0);
+  const lease = f.inbox.lease(received.receipt); lease.raw.fill(0);
+  f.inbox.confirm({ receipt: received.receipt, lease: lease.lease, importReceipt: randomUUID() });
+  f.advance(24 * 3600000 + 1);
+  assert.equal(f.inbox.maintain().released, 0);
+  assert.deepEqual(f.inbox.untaggedImported(), [received.receipt]);
+  await f.inbox.tagImported(received.receipt, { async tagImported() {} });
+  assert.equal(f.inbox.maintain().released, 1);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM whatsapp_inbox').get().n, 1);
+  assert.equal(f.store.db.prepare('SELECT state FROM whatsapp_inbox WHERE receipt=?').get(held.receipt).state, 'held');
+  assert.equal(f.inbox.accept(first).receipt, received.receipt);
+  f.restart();
+  assert.equal(f.inbox.accept(first).receipt, received.receipt);
+  f.advance(7 * 24 * 3600000);
+  f.inbox.maintain();
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM whatsapp_inbox_receipts').get().n, 0);
+});
+test('a failed archive or import tag rotates behind other receipts without deleting any', async t => {
+  const f = fixture(t, { archiveEnabled: true });
+  const first = f.inbox.accept(packet());
+  f.advance(1);
+  const second = f.inbox.accept(packet(body({ field: 'history' })));
+  await assert.rejects(f.inbox.archive(first.receipt, { async put() { throw Error('synthetic outage'); } }),
+    { code: 'audit_unavailable' });
+  assert.deepEqual(f.inbox.unarchived(), [second.receipt]);
+  f.advance(60001);
+  assert.deepEqual(f.inbox.unarchived(), [first.receipt,second.receipt]);
+  for (const receipt of [first.receipt,second.receipt]) {
+    await f.inbox.archive(receipt, { async put() {} });
+    const lease = f.inbox.lease(receipt); lease.raw.fill(0);
+    f.inbox.confirm({ receipt, lease: lease.lease, importReceipt: randomUUID() });
+  }
+  await assert.rejects(f.inbox.tagImported(first.receipt, { async tagImported() { throw Error('synthetic tag outage'); } }),
+    { code: 'audit_unavailable' });
+  assert.deepEqual(f.inbox.untaggedImported(), [second.receipt]);
+  assert.equal(f.inbox.maintain().released, 0);
+  assert.deepEqual(f.inbox.health().archive, { pending: 0, oldestAt: null,
+    untaggedImported: 2, oldestUntaggedAt: f.store.db.prepare('SELECT imported_at FROM whatsapp_inbox WHERE receipt=?').get(first.receipt).imported_at });
+  f.restart();
+  assert.deepEqual(f.inbox.untaggedImported(), [second.receipt]);
+});
 
 test('Additive onboarding role upgrade preserves held inbox ciphertext and passive replay without business work', t => {
   const f=fixture(t),input=packet(),first=f.inbox.accept(input);
@@ -132,7 +216,7 @@ test('poison backlog cannot starve new receipts, survives restart, and never fak
   f.restart();assert.equal(f.inbox.pending(20)[0].receipt,fresh.receipt);
   const taken=f.inbox.lease(fresh.receipt);taken.raw.fill(0);
   f.inbox.confirm({receipt:taken.receipt,lease:taken.lease,importReceipt:randomUUID()});
-  f.advance(60001);
+  f.advance(24 * 3600000 + 1);
   const retry=f.inbox.lease(old[0].receipt);retry.raw.fill(0);
   assert.throws(()=>f.inbox.defer({receipt:retry.receipt,lease:old[0].lease,reason:'unsupported_event'}),{code:'scope_denied'});
   assert.equal(f.inbox.defer({receipt:retry.receipt,lease:retry.lease,reason:'unsupported_event'}).businessProcessed,false);
@@ -146,7 +230,7 @@ test('due review retries cannot delay new patient messages and retain a bounded 
   const lease=f.inbox.lease(receipt);lease.raw.fill(0);
   f.inbox.defer({receipt,lease:lease.lease,reason:'review_required'});old.add(receipt);
  }
- f.advance(60001);
+ f.advance(24 * 3600000 + 1);
  for(let n=0;n<25;n++) {
   const input=body();input.entry[0].changes[0].value.messages[0].id='synthetic-'+n;
   fresh.add(f.inbox.accept(packet(input)).receipt);
@@ -154,12 +238,52 @@ test('due review retries cannot delay new patient messages and retain a bounded 
  const assertPending=inbox=>{
   const next=inbox.pending(20);
   assert.equal(next.length,20);
-  assert.equal(next.filter(row=>fresh.has(row.receipt)).length,16);
-  assert.equal(next.filter(row=>old.has(row.receipt)).length,4);
-  assert(next.slice(0,16).every(row=>fresh.has(row.receipt)));
+  assert.equal(next.filter(row=>fresh.has(row.receipt)).length,19);
+  assert.equal(next.filter(row=>old.has(row.receipt)).length,1);
+  assert(next.slice(0,19).every(row=>fresh.has(row.receipt)));
  };
  assertPending(f.inbox);f.restart();assertPending(f.inbox);
  assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n,0);
+});
+test('recoverable retries retain throughput while review retries use one slot',t=>{
+ const f=fixture(t),recoverable=new Set(),review=new Set(),fresh=new Set();
+ for(let n=0;n<25;n++) {
+  for(const [reason,sequence,target] of [['import_retry',n,recoverable],['review_required',n+25,review]]) {
+   const receipt=f.inbox.accept(packet(body({field:'account_update',value:{sequence}}))).receipt;
+   const lease=f.inbox.lease(receipt);lease.raw.fill(0);
+   f.inbox.defer({receipt,lease:lease.lease,reason});target.add(receipt);
+  }
+ }
+ f.advance(24 * 3600000 + 1);
+ for(let n=0;n<25;n++) {
+  const input=body();input.entry[0].changes[0].value.messages[0].id='recoverable-test-'+n;
+  fresh.add(f.inbox.accept(packet(input)).receipt);
+ }
+ const next=f.inbox.pending(20);
+ assert.equal(next.filter(row=>fresh.has(row.receipt)).length,16);
+ assert.equal(next.filter(row=>recoverable.has(row.receipt)).length,3);
+ assert.equal(next.filter(row=>review.has(row.receipt)).length,1);
+ for(const receipt of fresh) {
+  const lease=f.inbox.lease(receipt);lease.raw.fill(0);
+  f.inbox.confirm({receipt,lease:lease.lease,importReceipt:randomUUID()});
+ }
+ const after=f.inbox.pending(20);
+ assert.equal(after.filter(row=>recoverable.has(row.receipt)).length,19);
+ assert.equal(after.filter(row=>review.has(row.receipt)).length,1);
+ f.restart();assert.deepEqual(f.inbox.pending(20),after);
+});
+test('review retries wait a day while transient retries remain available after a minute',t=>{
+ const f=fixture(t);
+ const review=f.inbox.accept(packet(body({field:'account_update'})));
+ const reviewLease=f.inbox.lease(review.receipt);reviewLease.raw.fill(0);
+ f.inbox.defer({receipt:review.receipt,lease:reviewLease.lease,reason:'review_required'});
+ const transient=f.inbox.accept(packet(body({field:'history'})));
+ const transientLease=f.inbox.lease(transient.receipt);transientLease.raw.fill(0);
+ f.inbox.defer({receipt:transient.receipt,lease:transientLease.lease,reason:'import_retry'});
+ f.advance(60001);
+ assert.deepEqual(f.inbox.pending().map(row=>row.receipt),[transient.receipt]);
+ f.advance(24 * 3600000);
+ assert(f.inbox.pending().some(row=>row.receipt===review.receipt));
 });
 test('a crashed consumer rotates failed leases behind newly arrived work',t=>{
  const f=fixture(t),a=f.inbox.accept(packet());f.advance(1);

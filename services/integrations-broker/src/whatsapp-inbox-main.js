@@ -15,6 +15,11 @@ function validateConfig(c) {
   const keys = 'application,auditContext,bindings,cohort,consumerEnabled,enabled,keyManifestFile,limits,listenAddress,port,principals,stateFile,tlsCaFile,tlsCertFile,tlsKeyFile'.split(',');
   if (c && Object.hasOwn(c, 'tlsRenewal')) { tlsReload.validateSettings(c.tlsRenewal); keys.push('tlsRenewal'); }
   if (c && Object.hasOwn(c, 'scopes')) keys.push('scopes', 'previousScopesDigest');
+  if (c && Object.hasOwn(c, 'recoveryArchive')) {
+    keys.push('recoveryArchive');
+    if (c.recoveryArchive?.bucket !== require('./whatsapp-inbox-archive').BUCKET
+      || Object.keys(c.recoveryArchive).sort().join(',') !== 'bucket') fail('invalid_request');
+  }
   if(c&&Object.hasOwn(c,'activationScopesFile')) {keys.push('activationScopesFile');if(typeof c.activationScopesFile!=='string'||!path.isAbsolute(c.activationScopesFile)||!c.scopes)fail('invalid_request');}
   if (!c || Object.keys(c).sort().join(',') !== keys.sort().join(',')
     || c.cohort !== COHORT || c.enabled !== true || typeof c.consumerEnabled !== 'boolean' || !net.isIP(c.listenAddress)
@@ -74,6 +79,7 @@ async function main(filename, { awsFactory = connectInboxAws } = {}) {
   const cert = privateFile(config.tlsCertFile, 65536); const key = privateFile(config.tlsKeyFile, 65536);
   const ca = privateFile(config.tlsCaFile, 65536); const manifest = JSON.parse(privateFile(config.keyManifestFile, 16384));
   let aws; let cipher; let store; let secret; let server; let timer; let draining; let activations;
+  let archiveClient; let archive; let archiveTimer; let archiving; let archiveRetryAt = 0;
   try {
     aws = await awsFactory(); cipher = await createInboxKeyProvider(aws.kms).open(manifest, config.application.appId);
     // No key bootstrap or implicit migration on startup. Preserve files on a
@@ -96,22 +102,53 @@ async function main(filename, { awsFactory = connectInboxAws } = {}) {
     };
     if(activations)loadScopes();else pinIdentity(store, config, cipher);
     const inbox = createWhatsappInbox({ store, cipher, appId: config.application.appId, bindings: config.bindings,
-      auditContext: config.auditContext, scopeBindings: config.scopes, ...config.limits,loadScopeBindings:activations?loadScopes:undefined });
+      auditContext: config.auditContext, scopeBindings: config.scopes, ...config.limits,
+      loadScopeBindings:activations?loadScopes:undefined, archiveEnabled: !!config.recoveryArchive });
+    if (config.recoveryArchive) {
+      const { S3Client } = require('@aws-sdk/client-s3');
+      const { fromInstanceMetadata } = require('@aws-sdk/credential-providers');
+      const { NodeHttpHandler } = require('@smithy/node-http-handler');
+      archiveClient = new S3Client({ region: 'eu-west-3', endpoint: 'https://s3.eu-west-3.amazonaws.com',
+        followRegionRedirects: false, maxAttempts: 1,
+        credentials: fromInstanceMetadata({ timeout: 1500, maxRetries: 1, ec2MetadataV1Disabled: true }),
+        requestHandler: new NodeHttpHandler({ connectionTimeout: 2000, requestTimeout: 10000, throwOnRequestTimeout: true }) });
+      archive = require('./whatsapp-inbox-archive').createInboxArchive({ client: archiveClient,
+        bucket: config.recoveryArchive.bucket });
+      await archive.putManifest(manifest, config.application.appId);
+    }
     secret = createInboxApplicationSecret(aws.secrets, config.application);
     server = createInboxServer({ inbox, withApplicationSecret: work => secret.withSecret(work), principals: config.principals,
-      cert, key, ca, consumerEnabled: config.consumerEnabled });
+      cert, key, ca, archive, consumerEnabled: config.consumerEnabled });
     tlsReload.install(server, config, { cert, key, ca, requestCert: true, rejectUnauthorized: true });
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.listenAddress, resolve); });
     const tick = () => { if (!draining) draining = drainAudit(store, aws.sink, { limit: 20 }).catch(() => null).finally(() => { draining = null; }); };
     tick(); timer = setInterval(tick, 1000); timer.unref(); let closing;
+    if (archive) {
+      archiveTimer = setInterval(() => {
+        if (archiving || Date.now() < archiveRetryAt) return;
+        archiving = (async () => {
+          const work = [
+            ...inbox.unarchived(5).map(receipt => inbox.archive(receipt, archive)),
+            ...inbox.untaggedImported(5).map(receipt => inbox.tagImported(receipt, archive)),
+          ];
+          if (!work.length) return inbox.maintain(100);
+          const outcomes = await Promise.allSettled(work);
+          if (outcomes.some(result => result.status === 'rejected')) throw Error('archive_unavailable');
+        })().catch(() => {
+          archiveRetryAt = Date.now() + 60000;
+          process.stderr.write('WHATSAPP_INBOX_ARCHIVE_FAILED\n');
+        }).finally(() => { archiving = null; });
+      }, 1000);
+      archiveTimer.unref();
+    }
     const close = () => closing ||= (async () => {
-      clearInterval(timer); secret.close();
+      clearInterval(timer); clearInterval(archiveTimer); secret.close();
       await new Promise(resolve => { server.close(resolve); server.closeIdleConnections?.(); });
-      await draining; activations?.close();cipher.close(); store.close(); aws.close(); key.fill(0);
+      await draining; await archiving; activations?.close();cipher.close(); store.close(); archiveClient?.destroy(); aws.close(); key.fill(0);
     })();
     return { server, store, inbox, close };
   } catch (error) {
-    clearInterval(timer); server?.close(); secret?.close();activations?.close(); cipher?.close(); store?.close(); aws?.close(); key.fill(0); throw error;
+    clearInterval(timer); clearInterval(archiveTimer); server?.close(); secret?.close();activations?.close(); cipher?.close(); store?.close(); archiveClient?.destroy(); aws?.close(); key.fill(0); throw error;
   }
 }
 if (require.main === module) main(process.argv[2]).then(runtime => {
