@@ -211,8 +211,9 @@ inventario estable con el receptor detenido.
 
 En staging, la tabla `WhatsappInboxAdminSync` y el permiso `SELECT,INSERT` del
 usuario SQL restringido estaban preparados antes de activar el interruptor.
-El importador usa el release `admin-sync-b0bc4fc6-20261001` por drop-in de
-systemd; `WHATSAPP_INBOX_ADMIN_SYNC_ENABLED=true` está presente en ese servicio
+El importador se activó con el release `admin-sync-b0bc4fc6-20261001` por drop-in
+de systemd; las releases vigentes figuran al final.
+`WHATSAPP_INBOX_ADMIN_SYNC_ENABLED=true` está presente en ese servicio
 y en la API de staging. Para rollback, poner el interruptor a `false`, reiniciar
 los dos procesos y volver al `WorkingDirectory` anterior, sin borrar tabla,
 recibos ni filas conciliadas.
@@ -266,3 +267,71 @@ colector de alertas con un transporte local aislado que falla y se recupera.
 Verifica 503, recibo conservado, aviso sin contenido, archivo único, marcado
 obligatorio antes de limpieza y deduplicación tras limpieza. No se ha
 provocado un fallo del bucket productivo ni un envío de correo de prueba.
+
+### Corte operativo de las 09:05 UTC
+
+La migración de playback se aplicó y registró de forma dirigida; no se
+ejecutaron otras migraciones. El usuario `cc_wa_inbox` recibió únicamente
+`SELECT,INSERT` sobre `WhatsappInboxPlaybackImports`. La primera release fue
+`playback-93bbad81-20261001`, con ambos flags activos. Un estado real `played`
+de las 08:52:09.881 UTC produjo una fila/evento, digest y ámbito coincidentes
+con el sobre descifrado en memoria y marcado S3 `imported`. La comprobación
+encontró cero filas en `WhatsappInboxImports` y cero mensajes para ese recibo.
+
+Releases vigentes, verificadas por código y servicio:
+
+- Receptor AWS: `/opt/clinicaclick-whatsapp-inbox/release-retention-audit-20261001`.
+  Drop-in `zzzzzzzzz-audit-retention.conf`. SHA-256 de `whatsapp-inbox.js`:
+  `183cfe004cd5ba3261e58b83346df1da4f2989222a766ac866d4971915d22f40`.
+- Importador staging: `/opt/clinicaclick-whatsapp-inbox-consumer/releases/adaptive-drain-71e46583-20261001`.
+  Drop-in `zzzzzzzz-adaptive-drain.conf`; flags administrativos y playback activos.
+  SHA-256 de `whatsapp-inbox-consumer.js`:
+  `5747fa791d7705fe805db0a6d0a18aae1e3df747519074a8788ee0623be36f2f`.
+  Tras resolver un lote lleno de veinte recibos, espera 100 ms en vez de cinco
+  segundos. Lotes parciales, leases fallidos o defer sin confirmar conservan
+  los cinco segundos. Sigue usando el mismo propietario SQL y procesamiento
+  secuencial, sin paralelizar cambios clínicos ni reinterpretar históricos.
+
+La retención local borra como máximo cien auditorías por mantenimiento,
+solo de recepción/importación, entregadas hace siete días y con JSON válido,
+digest coincidente y versión S3 no vacía. No borra auditoría sin entregar,
+otros tipos de auditoría ni payloads pendientes. El almacén externo de
+auditoría conserva su propia retención. El agregado local pasó de 40.919
+filas a 12.094, con cero pendientes y cero filas antiguas elegibles al terminar.
+No se ejecutó ninguna limpieza SQL manual. El bucket versionado conserva
+`ExpireImportedReceipts` con expiración de importados a ocho días y versiones
+no actuales a un día; no aplicar esa regla a pendientes.
+
+El pulso posterior tenía antigüedad de 2,1 segundos, 3.016 recibos locales,
+1.649.570 bytes y cero copias, marcados o auditorías pendientes. Los dos
+servicios estaban `active/running`, sin reinicios automáticos ni avisos de
+journal. La sesión SSM no-root se cerró y su stream contenía eventos en
+CloudWatch. Los 174 jobs entrantes de staging del día estaban completados;
+Nova Lite registraba once clasificaciones correctas, cero errores y cero
+fallback. El monitor se comprobó a las 09:05:19, con panel/correo habilitados
+y sin alertas actuales. Los dos avisos de archivo anteriores a este corte
+constaban entregados por correo; no se ha inducido un fallo productivo nuevo
+para probar correo.
+
+Pruebas del corte: 54 tests del broker y 59 tests nativos de recepción,
+dispatcher, timeouts y admisión IA. La prueba MySQL se ejecuta por separado
+con `CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1`, en instancia privada sin TCP,
+incluyendo permisos restringidos, ámbito, lotes mixtos y replay; pasó con
+cierre limpio y sin conexiones externas. Las pruebas
+aisladas no acreditan un rendimiento máximo de extremo a extremo.
+
+Para rollback del último receptor, retirar únicamente el drop-in de retención,
+hacer `daemon-reload` y reiniciar ese servicio. Para rollback del drenaje,
+retirar únicamente el drop-in adaptativo y reiniciar el consumidor: vuelve a
+la release playback anterior. Para desactivar también playback, cerrar su
+flag y volver a la release administrativa. No borrar tablas, SQLite, S3,
+cortes ni recibos; la poda local ya efectuada no se revierte recuperando una
+SQLite antigua. Conservar los releases anteriores para el cambio controlado.
+
+Pendiente de observación: el descenso de los 748 avisos históricos de estado
+y 30 de categoría cuando venza su defer, a partir de las 22:44 UTC del 01/10.
+Los avisos de ámbitos obsoletos, ediciones, borrados y estados sin mensaje
+local siguen custodiados; no representan respuestas de pacientes a reanudar.
+No marcar el cierre de esta observación por una prueba sintética ni adelantar
+confirmaciones del lote antiguo. Repetir métricas de carga al ampliar la cohorte:
+el límite de catálogo no equivale a capacidad probada de 1.000 números activos.
