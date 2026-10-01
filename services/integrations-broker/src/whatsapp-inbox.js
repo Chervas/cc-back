@@ -251,7 +251,15 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
           remove.run(row.receipt);
         }
         store.db.prepare('DELETE FROM whatsapp_inbox_receipts WHERE expires_at<=?').run(at);
-        return { released: rows.length };
+        const auditReleased = store.db.prepare(`DELETE FROM audit_outbox WHERE seq IN (
+          SELECT seq FROM audit_outbox WHERE delivered_at<=?
+          AND CASE WHEN json_valid(event) THEN json_extract(event,'$.reason') END
+            IN ('whatsapp_inbox_stored','whatsapp_inbox_imported')
+          AND CASE WHEN json_valid(receipt) THEN json_extract(receipt,'$.digest') END=digest
+          AND CASE WHEN json_valid(receipt) THEN length(json_extract(receipt,'$.versionId')) END>0
+          ORDER BY delivered_at,seq LIMIT ?)`)
+          .run(at - 7 * 24 * 3600000, limit).changes;
+        return { released: rows.length, auditReleased };
       });
     },
     pending(limit = 20) {
