@@ -157,3 +157,24 @@ test('a revoked selective provisioning request cannot fall back to the legacy qu
   await assert.rejects(service.enqueueCreateTemplatesJob({ wabaId: 'revoked', catalogTemplateIds: [9] }),
     /whatsapp_authorized_binding_unavailable/);
 });
+
+test('broker throttling and uncertain template outcomes are retryable, not provider template rejections', () => {
+  for (const code of ['rate_limited', 'provider_timeout', 'outcome_unknown']) {
+    assert.equal(service._test.isRetryableMetaError({ code, retryable: false }), true);
+  }
+  for (const code of ['credential_revoked', 'provider_unauthorized', 'whatsapp_authorized_binding_changed']) {
+    assert.equal(service._test.isRetryableMetaError({ code, retryable: false }), false);
+  }
+});
+
+test('an uncertain review creation pins the same technical name and exact WABA/content for reconciliation', () => {
+  const row = { ...replacement, meta_template_id: null, origin: 'catalog', is_active: true, waba_id: 'test-waba',
+    rejection_reason: service._test.REVIEW_SUBMISSION_UNCONFIRMED };
+  const find = rows => service._test.findPreparedReviewSubmission({ familyRows: rows, wabaId: 'test-waba', template: catalog });
+  assert.equal(find([row]).name, replacement.name);
+  for (const other of [{ ...row, waba_id: 'other-waba' }, { ...row, origin: 'custom' },
+    { ...row, meta_template_id: 'already-tracked' }, { ...row, language: 'en' },
+    { ...row, components: prior.components }, { ...row, rejection_reason: 'real_rejection' }]) {
+    assert.equal(find([other]), null);
+  }
+});
