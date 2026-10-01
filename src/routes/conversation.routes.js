@@ -13,6 +13,7 @@ router.get('/conversations/by-lead/:leadId', conversationController.getConversat
 router.post('/conversations/start-patient-contact', conversationController.startPatientContact);
 router.get('/conversations/messages/:messageId/media', conversationController.streamMessageMedia);
 router.post('/conversations/messages/:messageId/send-now', conversationController.sendScheduledMessageNow);
+router.post('/conversations/messages/:messageId/retry-template', conversationController.retryFailedTemplate);
 router.get('/conversations/:id/messages', conversationController.getMessages);
 router.post('/conversations/:id/messages', conversationController.postMessage);
 router.patch('/conversations/:id/read', conversationController.markAsRead);
