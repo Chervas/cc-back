@@ -20,6 +20,16 @@ test('new activation is visible on the next poll without restarting and stale me
  assert.equal(f.health[1].length,2);assert.equal(f.calls.filter(c=>c.path==='/confirm').length,2);
  assert(f.imports.every(i=>i.lease.recoveryWithoutAutomation));assert(f.imports.every(i=>i.lease.raw.every(b=>b===0)));
 });
+test('a freshly restored receipt remains passive even inside the fresh-inbound window',async()=>{
+ const f=fixture();f.options.recoveryNotBefore=null;
+ const request=f.client.request;
+ f.client.request=async(method,path,body)=>path==='/lease'
+  ? {status:200,data:{receipt:'receipt',lease:'lease',receivedAt:Date.now(),recoveryWithoutAutomation:true,
+   rawBase64:Buffer.from('FICTITIOUS').toString('base64')}}
+  : request(method,path,body);
+ await f.poll();assert.equal(f.imports[0].lease.recoveryWithoutAutomation,true);
+ assert.equal(f.calls.filter(c=>c.path==='/confirm').length,1);
+});
 test('a missing or unreadable scoped catalogue fails before leasing and never falls back to the pilot',async()=>{
  const f=fixture();await f.poll();f.calls.length=0;f.setConfig(null);await assert.rejects(f.poll(),/configuration_invalid/);assert.equal(f.calls.length,0);
  f.options.loadConfiguration=()=>{throw Error('unreadable')};await assert.rejects(f.poll(),/unreadable/);assert.equal(f.calls.length,0);

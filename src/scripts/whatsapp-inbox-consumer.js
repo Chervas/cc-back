@@ -31,7 +31,8 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
       if(result.status!==200)continue;lease=result.data;
       if(lease.receipt!==item.receipt || typeof lease.rawBase64!=='string' || lease.rawBase64.length>4*1024*1024)throw Error();
       raw=Buffer.from(lease.rawBase64,'base64');delete lease.rawBase64;
-      lease.recoveryWithoutAutomation=env.WHATSAPP_INBOX_RECOVERY_HOLD==='true'
+      lease.recoveryWithoutAutomation=lease.recoveryWithoutAutomation===true
+        || env.WHATSAPP_INBOX_RECOVERY_HOLD==='true'
         || !Number.isFinite(lease.receivedAt) || lease.receivedAt < Date.now()-120000
         || !!recoveryNotBefore && lease.receivedAt < Date.parse(recoveryNotBefore);
       const imported=scopes
