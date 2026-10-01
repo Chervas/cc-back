@@ -143,6 +143,7 @@ async function restoreFromArchive({ s3, output, scopes, appId = APP, openCipher 
   } finally {
     store?.close();
     for (const cipher of ciphers.values()) cipher?.close?.();
+    for (const suffix of ['', '-wal', '-shm']) fs.rmSync(partial + suffix, { force: true });
   }
 }
 
