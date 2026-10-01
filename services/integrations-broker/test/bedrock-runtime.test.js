@@ -20,7 +20,7 @@ const { createIntegrationsBrokerClient } = require('../../../src/lib/integration
 const { drainAudit } = require('../src/audit');
 const { createServer } = require('../src/server');
 
-async function setup(t) {
+async function setup(t, { excludedUses = [] } = {}) {
   const f = fixture(t), cert = path.join(f.dir, 'bedrock.crt'), key = path.join(f.dir, 'bedrock.key');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert,
     '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
@@ -30,7 +30,7 @@ async function setup(t) {
   const policy = structuredClone(f.policy); policy.audience = 'clinicaclick:bedrock:staging:v1';
   const binding = { connectionRef: 'bedrock:staging', provider: 'aws_bedrock', initialState: 'active', bedrock: { region: 'eu-south-2', models: [MODELS[0], MODELS[1]] },
     secretArn: 'arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/ai/bedrock/key-abcdef' };
-  policy.connections = [binding]; policy.grants = USE_CASES.map(use => ({ principalId: 'api:test', tenantRef: 'platform:staging',
+  policy.connections = [binding]; policy.grants = USE_CASES.filter(use => !excludedUses.includes(use)).map(use => ({ principalId: 'api:test', tenantRef: 'platform:staging',
     connectionRef: binding.connectionRef, assetRef: `ai:${use}`, operations: [OPERATION] }));
   const config = { enabled: true, cohort: 'bedrock-conversation-v1', environment: 'staging', policy, listenAddress: '127.0.0.1', port,
     stateFile: path.join(f.dir, 'bedrock.sqlite'), tlsCertFile: cert, tlsKeyFile: key };
@@ -54,6 +54,20 @@ async function setup(t) {
   const client = createBedrockBroker({ env });
   return { ...f, config, env, client, runtime, sink, calls, secretCalls, buffers, events, secrets };
 }
+
+test('late attention reconciliation preserves its native purpose and requires an exact grant', async t => {
+  const purpose = 'automation_attention_late_follow_up';
+  const permitted = await setup(t);
+  const request = { ...payload(), useCase: purpose };
+  const result = await permitted.client.execute(purpose, request.body, { timeoutMs: request.timeoutMs });
+  assert.equal(result.output.message.content[0].toolUse.input.confirmado, true);
+  assert.deepEqual(permitted.calls, [request]);
+
+  const denied = await setup(t, { excludedUses: [purpose] });
+  await assert.rejects(denied.client.execute(purpose, request.body), { code: 'scope_denied' });
+  assert.equal(denied.calls.length, 0);
+  assert.equal(denied.secretCalls.length, 0);
+});
 
 test('signed TLS Bedrock preserves context, scopes access, has no content persistence and cannot replay a completed inference', async t => {
   const f = await setup(t), p = payload(), requestId = randomUUID();
