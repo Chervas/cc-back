@@ -439,7 +439,7 @@ async function recordObservationForAsset({
       }, transaction);
     }
 
-    const shouldNotify = eventResult.created && (
+    const shouldNotify = !require('../lib/whatsappManualDisconnect').current(asset) && eventResult.created && (
       (!hadProjection && isBlockingState(projection.state))
       || (transitioned && isBlockingState(previousState) !== isBlockingState(projection.state))
     );

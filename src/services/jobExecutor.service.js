@@ -309,6 +309,7 @@ async function runWhatsappTemplateCreateJob(payload = {}) {
     clinicId,
     groupId,
     assignmentScope,
+    ...(payload.catalogTemplateIds !== undefined ? { catalogTemplateIds: payload.catalogTemplateIds } : {}),
   });
 
   return {

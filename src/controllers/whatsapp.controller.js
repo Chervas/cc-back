@@ -2183,7 +2183,7 @@ exports.listPhones = async (req, res) => {
           && require('../services/whatsappDisconnectControl.service').available(),
         disconnect_state: manualDisconnect?.state || null,
         profile_observed_at: additionalData.authorizedProfileObservedAt || null,
-        sending_enabled: p.whatsappAuthorizationId ? !!p.isActive : undefined,
+        sending_enabled: p.whatsappAuthorizationId ? !!p.isActive && !manualDisconnect : undefined,
         permission_status: manualDisconnect ? 'disconnected' : permissionStatuses.get(Number(p.id)) || undefined,
         requires_clinic_selection: additionalData.requireClinicSelection === true,
         routing_disabled: additionalData.routing_disabled === true,

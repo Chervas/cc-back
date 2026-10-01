@@ -655,6 +655,29 @@ test('las alertas de pago conservan causa, emisor y ambito de clinica durante bl
   } finally { restores.reverse().forEach(restore => restore()); }
 });
 
+test('voluntary disconnection retains technical observations without operational failure emails', async () => {
+  const systemNotifications = require('../../services/systemNotifications.service');
+  const asset = { id: 400, assetType: 'whatsapp_phone_number', isActive: true,
+    phoneNumberId: 'test-phone', wabaId: 'test-waba', whatsappAuthorizationId: 'test-authorization',
+    additionalData: { whatsappManualDisconnect: { state: 'disconnected', phoneId: 'test-phone',
+      wabaId: 'test-waba', localAuthorizationId: 'test-authorization' },
+      whatsappHealth: { state: 'healthy', can_send: true } },
+    changed() {}, async save() {}, get() { return this; } };
+  const queued = [];
+  const restores = [patchProperty(db.ClinicMetaAsset, 'findByPk', async () => asset),
+    patchProperty(db.WhatsappAccountHealthEvent, 'findOrCreate', async () => [null, true]),
+    patchProperty(db.sequelize, 'transaction', async callback => callback({ LOCK: { UPDATE: 'UPDATE' } })),
+    patchProperty(systemNotifications, 'queueNotification', async input => { queued.push(input); })];
+  try {
+    const result = await whatsappAccountHealthService.recordObservationForAsset({ assetId: 400,
+      signal: { phoneUnavailable: true }, source: 'test_late_provider_observation' });
+    assert.equal(result.event_created, true);
+    assert.equal(result.health.can_send, false);
+    assert.equal(asset.additionalData.whatsappManualDisconnect.state, 'disconnected');
+    assert.equal(queued.length, 0);
+  } finally { restores.reverse().forEach(restore => restore()); }
+});
+
 test('una proyección saludable antigua no oculta un BANNED persistido', () => {
   const now = new Date('2026-08-31T12:00:00.000Z');
   const health = effectiveStoredHealth({
