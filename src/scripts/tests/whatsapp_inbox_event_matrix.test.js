@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const { scopeOf } = require('../../../services/integrations-broker/src/whatsapp-inbox');
-const { splitLease } = require('../../lib/whatsappInboxScopes');
+const { splitLease, accountSyncWabas } = require('../../lib/whatsappInboxScopes');
 const { normalize } = require('../../lib/whatsappInboxImport');
 
 const scope = { assetId: 81, wabaId: '101', phoneId: '201', clinicIds: [71] };
@@ -47,18 +47,28 @@ test('known phone events have one scoped child and no account fallback', () => {
   }
 });
 
-test('account events are retained, and a mixed batch cannot partially import a patient reply', () => {
-  const accountCases = [
+test('template account events request WABA reconciliation, while a mixed batch cannot partially import', () => {
+  const templateCases = [
     change('message_template_status_update', { message_template_id: '301', event: 'APPROVED' }),
     change('template_category_update', { message_template_id: '301', new_category: 'MARKETING' }),
     change('message_template_quality_update', { message_template_id: '301', new_quality_score: 'YELLOW' }),
+  ];
+  for (const item of templateCases) {
+    const raw = packet(item);
+    assert.deepEqual(scopeOf(raw, bindings).scopes, ['101:account'], item.field);
+    assert.deepEqual(accountSyncWabas(lease(raw), config), ['101'], item.field);
+    const mixed = packet(change('messages', phoneValue({ messages: [message('text', { text: { body: 'Synthetic reply' } })] })), item);
+    assert.throws(() => accountSyncWabas(lease(mixed), config), error => error.inboxReason === 'review_required', item.field);
+  }
+  const heldCases = [
     change('business_capability_update', { max_daily_conversation_per_phone: 1000 }),
     change('account_alerts', { alert_type: 'synthetic' }),
     change('phone_number_name_update', { phone_number_id: '201', status: 'synthetic' }),
   ];
-  for (const item of accountCases) {
+  for (const item of heldCases) {
     const raw = packet(item);
     assert.deepEqual(scopeOf(raw, bindings).scopes, ['101:account'], item.field);
+    assert.equal(accountSyncWabas(lease(raw), config), null, item.field);
     assert.throws(() => splitLease(lease(raw), config), error => error.inboxReason === 'review_required', item.field);
     const mixed = packet(change('messages', phoneValue({ messages: [message('text', { text: { body: 'Synthetic reply' } })] })), item);
     assert.deepEqual(scopeOf(mixed, bindings).scopes, ['101:201', '101:account'], item.field);

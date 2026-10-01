@@ -53,11 +53,25 @@ async function collect({ snapshot, bindings, query, now = Date.now() }) {
   const capacity = capacityAlert(snapshot, now);
   const archive = archiveAlert(snapshot, now);
   if (!clinicIds.length) return [capacity, archive].filter(Boolean);
+  const [adminRows] = await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ COUNT(*) pending
+    FROM WhatsappInboxAdminSync WHERE reconciled_at IS NULL AND created_at < :cutoff`,
+  { replacements: { cutoff: new Date(now - 10 * 60 * 1000) } });
+  const adminPending = Number(adminRows[0]?.pending || 0);
+  const adminAlert = adminPending > 0 ? {
+    eventKey: 'whatsapp.template_reconciliation_delayed',
+    payload: {
+      severity: 'warning',
+      title: 'Cambios de plantillas WhatsApp pendientes de conciliar',
+      detail: `${adminPending} ${adminPending === 1 ? 'cambio de plantilla lleva' : 'cambios de plantilla llevan'} más de 10 minutos sin confirmación desde Meta.`,
+      action: 'Revisar la sincronización de plantillas y los permisos del WABA. No marcar los eventos como conciliados manualmente.',
+    },
+    metadata: { source: 'whatsapp_template_reconciliation', pending: adminPending },
+  } : null;
   const issues = health.issues(snapshot, clinicIds, now);
   const [waiting] = await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ id,clinic_id FROM FlowExecutionsV2
     WHERE status='waiting' AND clinic_id IN (:clinicIds) AND last_error='inbound_response_dispatch_pending'
     AND wait_until < :until ORDER BY id LIMIT 50`, { replacements: { clinicIds, until: new Date(now + 120000) } });
-  if (!issues.length && !waiting.length) return [capacity, archive].filter(Boolean);
+  if (!issues.length && !waiting.length) return [capacity, archive, adminAlert].filter(Boolean);
   const affected = [...new Set([...issues.map(x => x.data.clinic_id), ...waiting.map(x => x.clinic_id)])];
   const [clinics] = await query('SELECT id_clinica,nombre_clinica FROM Clinicas WHERE id_clinica IN (:clinicIds)',
     { replacements: { clinicIds: affected } });
@@ -80,7 +94,7 @@ async function collect({ snapshot, bindings, query, now = Date.now() }) {
     : '';
   const waits = waiting.length ? ` ${waiting.length}${waiting.length === 50 ? ' o más' : ''} respuestas ya registradas esperan al motor.`
     : ' No hay respuestas ya registradas pendientes del motor.';
-  return [...[capacity, archive].filter(Boolean), { eventKey: 'whatsapp.reception_attention', payload: {
+  return [...[capacity, archive, adminAlert].filter(Boolean), { eventKey: 'whatsapp.reception_attention', payload: {
     severity: issues.some(x => x.severity === 'critical') ? 'critical' : 'warning',
     title: stale ? 'No se actualiza el control de recepción de WhatsApp' : 'WhatsApp tiene eventos pendientes de recepción',
     detail: `${summary}${oldestDetail}${waits} Las acciones por falta de respuesta permanecen en espera hasta comprobar la recepción.`,

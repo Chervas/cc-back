@@ -14,6 +14,7 @@ const db = require('../../../models');
 const jobRequestsService = require('../../services/jobRequests.service');
 const whatsappController = require('../../controllers/whatsapp.controller');
 const whatsappTemplatesService = require('../../services/whatsappTemplates.service');
+const whatsappInboxAdminSync = require('../../lib/whatsappInboxAdminSync');
 const {
   shouldKeepRemoteTemplateActive,
 } = require('../../lib/whatsapp-template-pending-resubmission');
@@ -264,7 +265,9 @@ test('una plantilla personalizada de reseñas conserva la cabecera de imagen pre
   }
 });
 
-test('el sync de Meta no reactiva plantillas retiradas ni reemplazadas', async () => {
+test('el sync de Meta no reactiva plantillas retiradas ni reemplazadas', async (t) => {
+  const reconciled = [];
+  t.mock.method(whatsappInboxAdminSync, 'markReconciled', async (...args) => reconciled.push(args));
   const originals = {
     axiosGet: axios.get,
     catalogFindAll: db.WhatsappTemplateCatalog.findAll,
@@ -338,6 +341,9 @@ test('el sync de Meta no reactiva plantillas retiradas ni reemplazadas', async (
     assert.equal(rows.get('version_reemplazada').superseded_by_template_id, 1003);
     assert.equal(updates.get('rechazada_remota').is_active, true);
     assert.equal(updates.get('rechazada_remota').status, 'REJECTED');
+    assert.equal(reconciled.length, 1);
+    assert.equal(reconciled[0][0], 'waba-propdental');
+    assert.ok(reconciled[0][1] instanceof Date);
   } finally {
     axios.get = originals.axiosGet;
     db.WhatsappTemplateCatalog.findAll = originals.catalogFindAll;
@@ -396,4 +402,39 @@ test('el refresco periódico admite el binding sin token y solo encola jobs nuev
   t.mock.method(jobRequestsService,'enqueueUniqueJobRequest',async value=>{calls.push(value);return {job:{id:9903}};});
   const result=await whatsappTemplatesService.enqueueSyncForAllWabas();
   assert.equal(result.queued,1);assert.equal(calls[0].type,'whatsapp_template_sync_delayed');assert.equal(calls[0].payload.wabaId,'301');assert(!JSON.stringify(calls).includes('accessToken'));
+});
+
+test('un cambio de estado recibido en WABA encola una sincronización sin datos clínicos', async t => {
+  const broker = require('../../lib/whatsappAuthorizedBrokerClient');
+  const calls = [];
+  t.mock.method(whatsappInboxAdminSync, 'pendingWabaIds', async () => ['301']);
+  t.mock.method(broker, 'configuration', () => ({ bindings: [{ clinicId: 57, wabaId: '301', sendEnabled: true }] }));
+  t.mock.method(broker, 'templateBinding', async () => ({ clinicId: 57, wabaId: '301' }));
+  t.mock.method(db.ClinicMetaAsset, 'findAll', async () => []);
+  t.mock.method(db.WhatsappTemplate, 'findAll', async () => { throw Error('No debe consultar plantillas pendientes'); });
+  t.mock.method(db.MarketingPatientList, 'findAll', async () => { throw Error('No debe consultar campañas'); });
+  t.mock.method(jobRequestsService, 'enqueueUniqueJobRequest', async value => {
+    calls.push(value);
+    return { job: { id: 9904 } };
+  });
+
+  const result = await whatsappTemplatesService.enqueueSyncForAllWabas({ onlyAccountEvents: true });
+  assert.equal(result.queued, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].type, 'whatsapp_template_sync_delayed');
+  assert.deepEqual(calls[0].payload.wabaId, '301');
+  assert.ok(!JSON.stringify(calls).includes('accessToken'));
+});
+
+test('la conciliación solo marca avisos existentes al iniciar la consulta a Meta', async t => {
+  const queries = [];
+  t.mock.method(db.sequelize, 'query', async (sql, options) => {
+    queries.push({ sql, options });
+    return [];
+  });
+  const startedAt = new Date('2026-10-01T06:00:00.000Z');
+  await whatsappInboxAdminSync.markReconciled('301', startedAt);
+  assert.equal(queries.length, 1);
+  assert.match(queries[0].sql, /reconciled_at IS NULL AND created_at<=:syncStartedAt/);
+  assert.deepEqual(queries[0].options.replacements, { wabaId: '301', syncStartedAt: startedAt });
 });

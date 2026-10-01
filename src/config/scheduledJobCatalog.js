@@ -191,6 +191,11 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     priority: 'normal',
     executorMethod: 'executeWhatsappTemplatesSync',
   }),
+  whatsappTemplateAccountSync: Object.freeze({
+    type: 'whatsapp_template_account_sync',
+    priority: 'normal',
+    executorMethod: 'executeWhatsappTemplateAccountSync',
+  }),
   whatsappPhonesSync: Object.freeze({
     type: 'whatsapp_phones_sync',
     priority: 'normal',

@@ -432,6 +432,7 @@ class MetaSyncJobs {
       competitionSync: 'Actualiza semanalmente los competidores introducidos manualmente y sus anuncios públicos; el descubrimiento y ranking local solo se ejecutan si existe un proveedor con licencia y los gates contractuales están activos.',
       webEventsAggregate: 'Agrega WebEvents propios en tablas diarias para informes sin recalcular desde el front.',
       whatsappTemplatesSync: 'Sincroniza estados de plantillas WhatsApp para todos los WABA activos.',
+      whatsappTemplateAccountSync: 'Concilia cambios de estado de plantillas recibidos de Meta sin procesar mensajes de pacientes.',
       whatsappPhonesSync: 'Sincroniza números WhatsApp (existencia/estado) para evitar datos desactualizados.',
       automationHealthCheck: 'Barrido funcional de automatizaciones críticas: flujos fallidos, jobs vencidos y ejecuciones atascadas.',
       opsGlobalDiscovery: 'Descubre y actualiza en OPS las cuentas y campañas accesibles de Google Ads y Meta.',
@@ -494,6 +495,7 @@ class MetaSyncJobs {
         competitionSync: process.env.JOBS_COMPETITION_SCHEDULE || '0 6 * * 1',
         webEventsAggregate: process.env.JOBS_WEB_EVENTS_AGGREGATE_SCHEDULE || '*/15 * * * *',
         whatsappTemplatesSync: process.env.JOBS_WHATSAPP_TEMPLATES_SCHEDULE || '*/20 * * * *',
+        whatsappTemplateAccountSync: process.env.JOBS_WHATSAPP_TEMPLATE_ACCOUNT_SCHEDULE || '*/2 * * * *',
         whatsappPhonesSync: process.env.JOBS_WHATSAPP_PHONES_SCHEDULE || '0 * * * *',
         automationHealthCheck: process.env.JOBS_AUTOMATION_HEALTH_CHECK_SCHEDULE || '0 10,16 * * *',
         opsGlobalDiscovery: process.env.JOBS_OPS_GLOBAL_DISCOVERY_SCHEDULE || '17 */4 * * *',
@@ -1868,6 +1870,10 @@ class MetaSyncJobs {
       console.error('❌ Error sincronizando plantillas WhatsApp:', error);
       throw error;
     }
+  }
+
+  async executeWhatsappTemplateAccountSync() {
+    return enqueueSyncForAllWabas({ onlyAccountEvents: true });
   }
 
   async executeWhatsappPhonesSync() {

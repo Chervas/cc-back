@@ -2,6 +2,7 @@
 const fs = require('node:fs'); const { createHash } = require('node:crypto');
 const { normalize, importLease } = require('./whatsappInboxImport');
 const CONFIG_FILE = '/etc/clinicaclick-whatsapp-inbox/staging/scopes.json';
+const TEMPLATE_ACCOUNT_FIELDS = new Set(['message_template_status_update','template_category_update','message_template_quality_update']);
 const id = v => Number.isInteger(v) && v > 0 && v <= 2147483647;
 const providerId = v => typeof v === 'string' && /^[1-9][0-9]{0,29}$/.test(v);
 const exact = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === keys;
@@ -60,12 +61,40 @@ function childId(receipt, index) {
   const h = createHash('sha256').update(JSON.stringify(['cc-wa-inbox-child-v1',receipt,index])).digest('hex');
   return h.slice(0,8)+'-'+h.slice(8,12)+'-4'+h.slice(13,16)+'-8'+h.slice(17,20)+'-'+h.slice(20,32);
 }
-function splitLease(lease, config) {
+function leaseBody(lease) {
   if (!/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(lease?.receipt) || !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(lease?.lease)
     || !Buffer.isBuffer(lease?.raw) || lease.raw.length > 3*1024*1024 || lease.automaticActionsAllowed !== false
     || !Array.isArray(lease.scopeBindings)) held();
   let body; try { body = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(lease.raw)); } catch { held(); }
   if (body?.object !== 'whatsapp_business_account' || !Array.isArray(body.entry) || !body.entry.length || body.entry.length > 100) held();
+  return body;
+}
+function accountSyncWabas(lease, config) {
+  const body = leaseBody(lease);
+  const changes = body.entry.flatMap(entry => Array.isArray(entry.changes) ? entry.changes : []);
+  if (!changes.some(change => TEMPLATE_ACCOUNT_FIELDS.has(change?.field))) return null;
+  if (body.entry.some(entry => !Array.isArray(entry.changes) || !entry.changes.length || entry.changes.length > 100)
+    || changes.some(change => !TEMPLATE_ACCOUNT_FIELDS.has(change?.field))) held();
+  const selected = [];
+  for (const entry of body.entry) {
+    const scopes = config.scopes.filter(scope => scope.wabaId === entry.id);
+    if (!scopes.length) held();
+    for (const change of entry.changes) {
+      const value = change.value;
+      if (!value || typeof value !== 'object' || Array.isArray(value)
+        || value.messaging_product && value.messaging_product !== 'whatsapp'
+        || value.metadata?.phone_number_id
+        || ['messages','statuses','history','message_echoes','state_sync'].some(key => key in value)) held();
+    }
+    selected.push(...scopes);
+  }
+  const expected = [...new Map(selected.map(scope => [scope.phoneId,scope])).values()];
+  if (lease.scopeBindings.length !== expected.length
+    || expected.some(scope => !lease.scopeBindings.some(binding => ownership(binding) === ownership(scope)))) held();
+  return [...new Set(body.entry.map(entry => entry.id))].sort();
+}
+function splitLease(lease, config) {
+  const body = leaseBody(lease);
   const parts = []; const covered = new Set();
   for (const entry of body.entry) {
     if (!Array.isArray(entry?.changes) || !entry.changes.length || entry.changes.length > 100) held();
@@ -124,7 +153,10 @@ async function routeClinic(connection, part) {
   if (rows.length !== 1 || !ids.includes(rows[0].clinic_id)) held(); return rows[0].clinic_id;
 }
 async function importScopedLease(connection, lease, config, { importer = importLease, loadConfiguration = () => config, now = Date.now() } = {}) {
-  config = validateConfiguration(config); const parts = splitLease(lease, config); const prepared = [];
+  config = validateConfiguration(config);
+  const accountWabas = accountSyncWabas(lease, config);
+  if (accountWabas) return importAccountSyncLease(connection,lease,config,accountWabas,{loadConfiguration});
+  const parts = splitLease(lease, config); const prepared = [];
   const checkConfig = () => { if (JSON.stringify(validateConfiguration(loadConfiguration())) !== JSON.stringify(config)) held('import_retry'); };
   try {
     // Resolve and validate the ENTIRE batch before the first clinical write.
@@ -152,4 +184,35 @@ async function importScopedLease(connection, lease, config, { importer = importL
     checkConfig(); return {importReceipt:childId(lease.receipt,'complete'),replayed:false};
   } finally { for (const p of prepared) p.lease.raw.fill(0); }
 }
-module.exports = {CONFIG_FILE,validateConfiguration,configuration,assertScope,splitLease,routeClinic,childId,importScopedLease};
+async function importAccountSyncLease(connection, lease, config, wabas, { loadConfiguration }) {
+  const digest = createHash('sha256').update(lease.raw).digest('hex');
+  const importReceipt = childId(lease.receipt,'account-sync');
+  const scopes = config.scopes.filter(scope => wabas.includes(scope.wabaId));
+  const checkConfig = () => { if (JSON.stringify(validateConfiguration(loadConfiguration())) !== JSON.stringify(config)) held('import_retry'); };
+  let transaction = false;
+  let replayed = true;
+  try {
+    checkConfig();
+    await connection.beginTransaction(); transaction = true;
+    for (const scope of scopes) await assertScope(connection,scope,{lock:true});
+    for (const wabaId of wabas) {
+      const [rows] = await connection.execute('SELECT digest,import_receipt FROM WhatsappInboxAdminSync WHERE receipt=? AND waba_id=? FOR SHARE',[lease.receipt,wabaId]);
+      if (rows.length) {
+        if (rows.length !== 1 || rows[0].digest !== digest || rows[0].import_receipt !== importReceipt) held();
+      } else {
+        await connection.execute('INSERT INTO WhatsappInboxAdminSync(receipt,waba_id,digest,import_receipt,created_at) VALUES(?,?,?,?,NOW(3))',
+          [lease.receipt,wabaId,digest,importReceipt]);
+        replayed = false;
+      }
+    }
+    checkConfig();
+    for (const scope of scopes) await assertScope(connection,scope,{lock:true});
+    await connection.commit(); transaction = false;
+    return {importReceipt,replayed};
+  } catch (error) {
+    if (transaction) await connection.rollback().catch(()=>{});
+    held(error.inboxReason || 'import_retry');
+  }
+}
+module.exports = {CONFIG_FILE,validateConfiguration,configuration,assertScope,splitLease,accountSyncWabas,
+  routeClinic,childId,importScopedLease};

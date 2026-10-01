@@ -28,6 +28,7 @@ const {
 const {
   acquireWabaCatalogCreationLease,
 } = require('../lib/waba-catalog-creation-lease');
+const whatsappInboxAdminSync = require('../lib/whatsappInboxAdminSync');
 
 const {
   ClinicMetaAsset,
@@ -2970,6 +2971,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     throw new Error('missing_waba_or_token');
   }
 
+  const syncStartedAt = new Date();
   const items = await fetchTemplatesFromMeta({ wabaId, accessToken });
   const now = new Date();
   const catalogs = await WhatsappTemplateCatalog.findAll({
@@ -3110,6 +3112,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     .filterClinicsForWaba(Array.from(clinicIds).filter(Number.isFinite), wabaId);
   if (!clinicIdList.length) {
     await enqueueStalePendingTemplateResubmissions({ wabaId, now });
+    await whatsappInboxAdminSync.markReconciled(wabaId, syncStartedAt);
     return;
   }
 
@@ -3191,6 +3194,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   }
 
   await enqueueStalePendingTemplateResubmissions({ wabaId, now });
+  await whatsappInboxAdminSync.markReconciled(wabaId, syncStartedAt);
 }
 
 async function enqueueCreateTemplatesJob(data) {
@@ -3308,53 +3312,60 @@ async function runDelayedSyncTemplatesJob(payload = {}) {
 
 async function enqueueSyncForAllWabas(options = {}) {
   const onlyPending = options?.onlyPending === true;
+  const onlyAccountEvents = options?.onlyAccountEvents === true;
   let targetWabaIds = null;
 
-  if (onlyPending) {
-    const pendingRows = await WhatsappTemplate.findAll({
-      where: {
-        is_active: true,
-        waba_id: { [Op.ne]: null },
-        status: { [Op.in]: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'] },
-      },
-      attributes: ['waba_id'],
-      raw: true,
-      group: ['waba_id'],
-    });
-    const pendingWabaIds = pendingRows
-      .map((row) => String(row?.waba_id || '').trim())
-      .filter(Boolean);
-
-    const liveLists = await MarketingPatientList.findAll({
-      where: {
-        objective_id: 'mass_sends',
-        status: { [Op.in]: ['prepared', 'queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused'] },
-      },
-      attributes: ['criteria', 'template_snapshot'],
-      raw: true,
-    });
-    const liveTemplateIds = Array.from(new Set(liveLists
-      .filter((row) => String(parseMaybeJson(row?.criteria)?.dispatch?.status || '').toLowerCase() !== 'paused_review')
-      .map((row) => Number(
-        parseMaybeJson(row?.criteria)?.dispatch?.whatsapp_template_id
-        || parseMaybeJson(row?.criteria)?.whatsapp_template_id
-        || parseMaybeJson(row?.template_snapshot)?.id
-        || 0
-      ))
-      .filter((id) => Number.isInteger(id) && id > 0)));
-    const liveTemplateRows = liveTemplateIds.length
-      ? await WhatsappTemplate.findAll({
-        where: { id: { [Op.in]: liveTemplateIds }, is_active: true, waba_id: { [Op.ne]: null } },
+  if (onlyPending || onlyAccountEvents) {
+    const adminWabaIds = await whatsappInboxAdminSync.pendingWabaIds();
+    if (onlyAccountEvents) {
+      targetWabaIds = adminWabaIds;
+    } else {
+      const pendingRows = await WhatsappTemplate.findAll({
+        where: {
+          is_active: true,
+          waba_id: { [Op.ne]: null },
+          status: { [Op.in]: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'] },
+        },
         attributes: ['waba_id'],
         raw: true,
-      })
-      : [];
-    targetWabaIds = Array.from(new Set([
-      ...pendingWabaIds,
-      ...liveTemplateRows.map((row) => String(row?.waba_id || '').trim()).filter(Boolean),
-    ]));
+        group: ['waba_id'],
+      });
+      const pendingWabaIds = pendingRows
+        .map((row) => String(row?.waba_id || '').trim())
+        .filter(Boolean);
+
+      const liveLists = await MarketingPatientList.findAll({
+        where: {
+          objective_id: 'mass_sends',
+          status: { [Op.in]: ['prepared', 'queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused'] },
+        },
+        attributes: ['criteria', 'template_snapshot'],
+        raw: true,
+      });
+      const liveTemplateIds = Array.from(new Set(liveLists
+        .filter((row) => String(parseMaybeJson(row?.criteria)?.dispatch?.status || '').toLowerCase() !== 'paused_review')
+        .map((row) => Number(
+          parseMaybeJson(row?.criteria)?.dispatch?.whatsapp_template_id
+          || parseMaybeJson(row?.criteria)?.whatsapp_template_id
+          || parseMaybeJson(row?.template_snapshot)?.id
+          || 0
+        ))
+        .filter((id) => Number.isInteger(id) && id > 0)));
+      const liveTemplateRows = liveTemplateIds.length
+        ? await WhatsappTemplate.findAll({
+          where: { id: { [Op.in]: liveTemplateIds }, is_active: true, waba_id: { [Op.ne]: null } },
+          attributes: ['waba_id'],
+          raw: true,
+        })
+        : [];
+      targetWabaIds = Array.from(new Set([
+        ...adminWabaIds,
+        ...pendingWabaIds,
+        ...liveTemplateRows.map((row) => String(row?.waba_id || '').trim()).filter(Boolean),
+      ]));
+    }
     if (!targetWabaIds.length) {
-      return { queued: 0, only_pending: true };
+      return { queued: 0, only_pending: onlyPending, only_account_events: onlyAccountEvents };
     }
   }
 
@@ -3392,7 +3403,7 @@ async function enqueueSyncForAllWabas(options = {}) {
     queued += 1;
   }
 
-  return { queued, only_pending: onlyPending, relevant_wabas: targetWabaIds?.length || null };
+  return { queued, only_pending: onlyPending, only_account_events: onlyAccountEvents, relevant_wabas: targetWabaIds?.length || null };
 }
 
 module.exports = {

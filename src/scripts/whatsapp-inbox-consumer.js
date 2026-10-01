@@ -66,7 +66,7 @@ async function main(env=process.env) {
     // A dedicated connection lock prevents a second runtime from importing.
     const [[owner]]=await connection.execute("SELECT GET_LOCK('cc-whatsapp-inbox-staging-v1',0) acquired");
     if(owner.acquired!==1)throw Error('inbox_consumer_owner_exists');
-    for(const table of ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys']) await connection.query('SELECT 1 FROM '+table+' LIMIT 0');
+    for(const table of ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys','WhatsappInboxAdminSync']) await connection.query('SELECT 1 FROM '+table+' LIMIT 0');
     while(!stopping){
       try{
         await pollOnce(connection,client,{env,scope,recoveryNotBefore,requiresScoped:!!scopes,isStopping:()=>stopping});
