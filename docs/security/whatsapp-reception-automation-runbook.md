@@ -227,3 +227,17 @@ de automatización para ese recibo. A las 08:09 UTC, los 748 avisos históricos
 de estado y 30 cambios de categoría tenían cero reintentos elegibles; el
 primero vence a las 22:44 UTC por el `defer` de 24 horas. No adelantar ni
 confirmar estos recibos manualmente.
+
+El receptor AWS pasó de `release-archive-e297c7cd` a
+`release-archive-progress-a0402a4c-20261001` mediante un drop-in nuevo
+`zzzzzzzz-archive-progress.conf`. Se copiaron únicamente
+`whatsapp-inbox.js` y `whatsapp-inbox-scopes.js`, cotejando SHA-256 de origen
+y destino, y se verificó sintaxis con el usuario del servicio. Los 52 tests
+del inbox pasaron antes del reinicio. Después, el servicio quedó `active`, sin
+errores de journal y con pulso fresco que incluía `lastArchivedAt` y
+`lastTaggedAt`; archivo, etiquetado y auditoría tenían cero pendientes. En CRM
+entraron nueve recibos nuevos, dos con mensaje y ambos despachos completados.
+Para rollback, desactivar solo ese drop-in, hacer `daemon-reload` y reiniciar
+el servicio; conservar ambos releases y toda la SQLite. La columna aditiva
+`restored_at` no requiere reversión. No se ha provocado un fallo real de S3,
+por lo que la escalada de la alerta ante fallo sigue sin prueba operativa.
