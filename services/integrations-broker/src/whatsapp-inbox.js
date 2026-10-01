@@ -121,6 +121,9 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
   if (!store.db.prepare('PRAGMA table_info(whatsapp_inbox)').all().some(column => column.name === 'archive_tagged_at')) {
     store.db.exec('ALTER TABLE whatsapp_inbox ADD COLUMN archive_tagged_at INTEGER');
   }
+  if (!store.db.prepare('PRAGMA table_info(whatsapp_inbox)').all().some(column => column.name === 'restored_at')) {
+    store.db.exec('ALTER TABLE whatsapp_inbox ADD COLUMN restored_at INTEGER');
+  }
   for (const column of ['archive_attempts', 'archive_next_attempt_at', 'tag_attempts', 'tag_next_attempt_at']) {
     if (!store.db.prepare('PRAGMA table_info(whatsapp_inbox)').all().some(item => item.name === column)) {
       store.db.exec(`ALTER TABLE whatsapp_inbox ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
@@ -334,6 +337,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
             committed = true;
             return { receipt, lease, leaseUntil: until, raw, receivedAt: row.received_at,
               scopes: JSON.parse(row.scopes), kinds: JSON.parse(row.kinds), automaticActionsAllowed: false,
+              recoveryWithoutAutomation: row.restored_at !== null,
               ...(scopeBindings ? { scopeBindings: scopesFor(JSON.parse(row.scopes)) } : {}) };
           } finally { if (!committed) raw.fill(0); }
         });
