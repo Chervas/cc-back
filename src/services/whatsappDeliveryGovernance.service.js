@@ -240,9 +240,33 @@ function getTemplateRefFromList(list) {
 function listMatchesTemplate(list, template = {}) {
   const ref = getTemplateRefFromList(list);
   if (template.id && ref.id && Number(template.id) === Number(ref.id)) return true;
-  if (template.metaTemplateId && ref.metaTemplateId && clean(template.metaTemplateId) === ref.metaTemplateId) return true;
+  if (template.metaTemplateId && ref.metaTemplateId) return clean(template.metaTemplateId) === ref.metaTemplateId;
+  if (template.id && ref.id) return false;
   return Boolean(template.name && ref.name && clean(template.name).toLowerCase() === ref.name.toLowerCase()
     && (!template.language || !ref.language || clean(template.language).toLowerCase() === ref.language.toLowerCase()));
+}
+
+async function reconcileCurrentTemplateState({ template, occurredAt = new Date() } = {}) {
+  const status = upper(template?.status);
+  const quality = upper(template?.quality_score);
+  if (!TERMINAL_TEMPLATE_STATUSES.has(status) && quality !== 'RED') return { paused: 0 };
+  const ref = {
+    id: template.id,
+    metaTemplateId: clean(template.meta_template_id) || null,
+    name: clean(template.name) || null,
+    language: clean(template.language) || null,
+  };
+  const terminal = TERMINAL_TEMPLATE_STATUSES.has(status);
+  const paused = await pauseMatchingQueues({
+    template: ref,
+    status: terminal ? 'paused_template' : 'paused_quality',
+    reason: terminal
+      ? status === 'DISABLED' ? 'template_disabled_by_meta' : 'template_paused_by_meta'
+      : 'template_quality_red',
+    severity: 'error',
+    occurredAt,
+  });
+  return { paused };
 }
 
 async function pauseMatchingQueues({ template = {}, status, reason, severity = 'warning', providerPayload = null, occurredAt = new Date() } = {}) {
@@ -1187,6 +1211,7 @@ module.exports = {
   getDispatchGate,
   resolvePausedQueue,
   handleWebhookChange,
+  reconcileCurrentTemplateState,
   materializeFinalMessageStatus,
   parseCapacity,
   recordCapabilitySnapshot,

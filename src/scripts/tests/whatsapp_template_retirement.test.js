@@ -267,7 +267,11 @@ test('una plantilla personalizada de reseñas conserva la cabecera de imagen pre
 
 test('el sync de Meta no reactiva plantillas retiradas ni reemplazadas', async (t) => {
   const reconciled = [];
+  const governed = [];
+  const bulkApprovals = [];
   t.mock.method(whatsappInboxAdminSync, 'markReconciled', async (...args) => reconciled.push(args));
+  t.mock.method(require('../../services/whatsappDeliveryGovernance.service'), 'reconcileCurrentTemplateState', async input => governed.push(input.template.id));
+  t.mock.method(require('../../services/marketingBulkSends.service'), 'enqueueAutoDispatchForApprovedTemplate', async row => bulkApprovals.push(row.id));
   const originals = {
     axiosGet: axios.get,
     catalogFindAll: db.WhatsappTemplateCatalog.findAll,
@@ -304,6 +308,14 @@ test('el sync de Meta no reactiva plantillas retiradas ni reemplazadas', async (
       retired_at: null,
       superseded_by_template_id: null,
     }],
+    ['calidad_roja', {
+      id: 1005,
+      name: 'calidad_roja',
+      language: 'es',
+      status: 'APPROVED',
+      quality_score: 'RED',
+      is_active: true,
+    }],
   ]);
   const updates = new Map();
   for (const row of rows.values()) {
@@ -320,6 +332,7 @@ test('el sync de Meta no reactiva plantillas retiradas ni reemplazadas', async (
         { id: 'meta-1001', name: 'retirada_manual', language: 'es', status: 'APPROVED' },
         { id: 'meta-1002', name: 'version_reemplazada', language: 'es', status: 'APPROVED' },
         { id: 'meta-1004', name: 'rechazada_remota', language: 'es', status: 'REJECTED' },
+        { id: 'meta-1005', name: 'calidad_roja', language: 'es', status: 'APPROVED' },
         { id: 'meta-9999', name: 'externa_desconocida', language: 'es', status: 'APPROVED' },
       ],
     },
@@ -341,6 +354,9 @@ test('el sync de Meta no reactiva plantillas retiradas ni reemplazadas', async (
     assert.equal(rows.get('version_reemplazada').superseded_by_template_id, 1003);
     assert.equal(updates.get('rechazada_remota').is_active, true);
     assert.equal(updates.get('rechazada_remota').status, 'REJECTED');
+    assert.equal(rows.get('calidad_roja').quality_score, 'RED');
+    assert.ok(governed.includes(1005));
+    assert.equal(bulkApprovals.includes(1005), false);
     assert.equal(reconciled.length, 1);
     assert.equal(reconciled[0][0], 'waba-propdental');
     assert.ok(reconciled[0][1] instanceof Date);
