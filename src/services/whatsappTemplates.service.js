@@ -258,6 +258,16 @@ function hasApprovedReviewReplacement(template, catalog, items, managedMetaIds) 
   return !!findApprovedReviewReplacement(template, catalog, items, managedMetaIds);
 }
 
+const REVIEW_SUBMISSION_UNCONFIRMED = 'review_catalog_submission_unconfirmed';
+function findPreparedReviewSubmission({ familyRows, wabaId, template }) {
+  if (!isReviewRequestTemplateFamily(template) || isReviewReminderTemplateFamily(template)) return null;
+  return familyRows.find(row => String(row.waba_id || '') === String(wabaId)
+    && row.origin === 'catalog' && row.is_active && !row.meta_template_id
+    && row.rejection_reason === REVIEW_SUBMISSION_UNCONFIRMED
+    && normalizeWhatsappLocale(row.language) === normalizeWhatsappLocale(getCatalogTemplateLanguage(template))
+    && hasSameProviderAcceptedContent(template, row)) || null;
+}
+
 async function notifyReviewPhotoTemplateApproved(template, catalog = null) {
   if (!isReviewPhotoTemplate(template, catalog)) return;
   if (Number(template?.catalog_template_id || catalog?.id || 0) > 0) return;
@@ -655,6 +665,9 @@ function templateAppliesToDisciplines(template, disciplinas) {
 
 function isRetryableMetaError(err) {
   if (err?.retryable === true) return true;
+  // Template jobs reconcile their pinned technical name before retrying. This
+  // does not relax the separate, non-retryable patient-message send contract.
+  if (['rate_limited', 'provider_timeout', 'outcome_unknown'].includes(err?.code)) return true;
   const status = err?.response?.status;
   if (status && (status >= 500 || status === 429)) {
     return true;
@@ -2546,9 +2559,10 @@ async function createTemplatesFromCatalogWithLease({
 
     const familyName = getCatalogTechnicalFamilyName(template);
     const language = getCatalogTemplateLanguage(template);
-    const technicalName = familyRows.length
+    const preparedSubmission = findPreparedReviewSubmission({ familyRows, wabaId, template });
+    const technicalName = preparedSubmission?.name || (familyRows.length
       ? resolveNextTechnicalTemplateName(familyName, familyRows)
-      : familyName;
+      : familyName);
     const preparedTemplate = await prepareTemplateImageHeaderForMeta({
       template: buildTemplateForTechnicalName(template, technicalName),
       wabaId, accessToken: asset.waAccessToken,
@@ -2586,6 +2600,11 @@ async function createTemplatesFromCatalogWithLease({
     }
 
     try {
+      if (isReviewRequestTemplateFamily(template) && !isReviewReminderTemplateFamily(template)) {
+        await upsertConnectedTemplateForWaba({ wabaId, template, technicalName,
+          status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, metaTemplateId: null,
+          rejectionReason: REVIEW_SUBMISSION_UNCONFIRMED });
+      }
       const metaResp = await createTemplateInMeta({
         wabaId,
         accessToken: asset.waAccessToken,
@@ -2776,9 +2795,10 @@ async function propagateCatalogTemplateToAllClinics({
           continue;
         }
 
-        const technicalName = familyRows.length
+        const preparedSubmission = findPreparedReviewSubmission({ familyRows, wabaId, template });
+        const technicalName = preparedSubmission?.name || (familyRows.length
           ? resolveNextTechnicalTemplateName(familyName, familyRows)
-          : familyName;
+          : familyName);
         pendingTechnicalName = cleanString(technicalName) || pendingTechnicalName;
         const preparedTemplate = await prepareTemplateImageHeaderForMeta({
           template: buildTemplateForTechnicalName(template, technicalName),
@@ -2822,6 +2842,11 @@ async function propagateCatalogTemplateToAllClinics({
 
         let metaResp;
         try {
+          if (isReviewRequestTemplateFamily(template) && !isReviewReminderTemplateFamily(template)) {
+            await upsertConnectedTemplateForWaba({ wabaId, template, technicalName,
+              status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, metaTemplateId: null,
+              rejectionReason: REVIEW_SUBMISSION_UNCONFIRMED });
+          }
           metaResp = await createTemplateInMeta({
             wabaId,
             accessToken: clinicConfig.accessToken,
@@ -3528,6 +3553,9 @@ module.exports = {
     isStaleReviewRequestTemplate,
     hasApprovedReviewReplacement,
     findApprovedReviewReplacement,
+    findPreparedReviewSubmission,
+    isRetryableMetaError,
+    REVIEW_SUBMISSION_UNCONFIRMED,
     isDuplicateTemplateNameError,
     buildMetaTemplateCheckpointPendingError,
   },
