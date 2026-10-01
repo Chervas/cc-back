@@ -36,7 +36,8 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
         || !Number.isFinite(lease.receivedAt) || lease.receivedAt < Date.now()-120000
         || !!recoveryNotBefore && lease.receivedAt < Date.parse(recoveryNotBefore);
       const imported=scopes
-        ? await importScoped(connection,{...lease,raw},scopes,{loadConfiguration})
+        ? await importScoped(connection,{...lease,raw},scopes,{loadConfiguration,
+          accountSyncEnabled:env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED==='true'})
         : await importLease(connection,{...lease,raw},scope);
       const ack=await client.request('POST','/confirm',{receipt:lease.receipt,lease:lease.lease,importReceipt:imported.importReceipt});
       if(ack.status!==200 || ack.data?.businessProcessed!==true)throw Error();
