@@ -37,7 +37,8 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
         || !!recoveryNotBefore && lease.receivedAt < Date.parse(recoveryNotBefore);
       const imported=scopes
         ? await importScoped(connection,{...lease,raw},scopes,{loadConfiguration,
-          accountSyncEnabled:env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED==='true'})
+          accountSyncEnabled:env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED==='true',
+          playbackEnabled:env.WHATSAPP_INBOX_PLAYBACK_ENABLED==='true'})
         : await importLease(connection,{...lease,raw},scope);
       const ack=await client.request('POST','/confirm',{receipt:lease.receipt,lease:lease.lease,importReceipt:imported.importReceipt});
       if(ack.status!==200 || ack.data?.businessProcessed!==true)throw Error();
@@ -69,6 +70,7 @@ async function main(env=process.env) {
     if(owner.acquired!==1)throw Error('inbox_consumer_owner_exists');
     const tables = ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys'];
     if(env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED==='true')tables.push('WhatsappInboxAdminSync');
+    if(env.WHATSAPP_INBOX_PLAYBACK_ENABLED==='true')tables.push('WhatsappInboxPlaybackImports');
     for(const table of tables) await connection.query('SELECT 1 FROM '+table+' LIMIT 0');
     while(!stopping){
       try{

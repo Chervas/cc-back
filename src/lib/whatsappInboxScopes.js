@@ -93,6 +93,38 @@ function accountSyncWabas(lease, config) {
     || expected.some(scope => !lease.scopeBindings.some(binding => ownership(binding) === ownership(scope)))) held();
   return [...new Set(body.entry.map(entry => entry.id))].sort();
 }
+function playbackScopes(lease, config, now) {
+  const body = leaseBody(lease);
+  const changes = body.entry.flatMap(entry => Array.isArray(entry.changes) ? entry.changes : []);
+  if (!changes.length || changes.some(change => change?.field !== 'messages'
+    || !Array.isArray(change.value?.statuses) || !change.value.statuses.length
+    || change.value.statuses.some(status => status?.status !== 'played')
+    || change.value.messages !== undefined)) return null;
+  const selected = new Map();
+  let total = 0;
+  for (const entry of body.entry) {
+    if (!Array.isArray(entry.changes) || !entry.changes.length || entry.changes.length > 100) held();
+    for (const change of entry.changes) {
+      const value = change.value;
+      const scope = config.scopes.find(s => s.wabaId === entry.id && s.phoneId === value.metadata?.phone_number_id);
+      if (!scope || value.messaging_product !== 'whatsapp'
+        || ['history','message_echoes','state_sync'].some(key => key in value)) held();
+      for (const status of value.statuses) {
+        const at = Number(status.timestamp) * 1000;
+        if (typeof status.id !== 'string' || !/^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(status.id)
+          || typeof status.timestamp !== 'string' || !/^[0-9]{1,12}$/.test(status.timestamp)
+          || !Number.isSafeInteger(at) || at < Date.UTC(2000,0,1) || at > now + 300000
+          || ++total > 2000) held();
+      }
+      const previous = selected.get(scope.phoneId);
+      selected.set(scope.phoneId, { scope, count: (previous?.count || 0) + value.statuses.length });
+    }
+  }
+  const scopes = [...selected.values()];
+  if (lease.scopeBindings.length !== scopes.length
+    || scopes.some(({scope}) => !lease.scopeBindings.some(binding => ownership(binding) === ownership(scope)))) held();
+  return scopes;
+}
 function splitLease(lease, config) {
   const body = leaseBody(lease);
   const parts = []; const covered = new Set();
@@ -153,10 +185,13 @@ async function routeClinic(connection, part) {
   if (rows.length !== 1 || !ids.includes(rows[0].clinic_id)) held(); return rows[0].clinic_id;
 }
 async function importScopedLease(connection, lease, config, { importer = importLease, loadConfiguration = () => config,
-  accountSyncEnabled = process.env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED === 'true', now = Date.now() } = {}) {
+  accountSyncEnabled = process.env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED === 'true',
+  playbackEnabled = process.env.WHATSAPP_INBOX_PLAYBACK_ENABLED === 'true', now = Date.now() } = {}) {
   config = validateConfiguration(config);
   const accountWabas = accountSyncEnabled ? accountSyncWabas(lease, config) : null;
   if (accountWabas) return importAccountSyncLease(connection,lease,config,accountWabas,{loadConfiguration});
+  const playbacks = playbackEnabled ? playbackScopes(lease,config,now) : null;
+  if (playbacks) return importPlaybackLease(connection,lease,config,playbacks,{loadConfiguration});
   const parts = splitLease(lease, config); const prepared = [];
   const checkConfig = () => { if (JSON.stringify(validateConfiguration(loadConfiguration())) !== JSON.stringify(config)) held('import_retry'); };
   try {
@@ -184,6 +219,38 @@ async function importScopedLease(connection, lease, config, { importer = importL
     // without replaying any business handler or acknowledging partial imports.
     checkConfig(); return {importReceipt:childId(lease.receipt,'complete'),replayed:false};
   } finally { for (const p of prepared) p.lease.raw.fill(0); }
+}
+async function importPlaybackLease(connection, lease, config, playbacks, { loadConfiguration }) {
+  const digest = createHash('sha256').update(lease.raw).digest('hex');
+  const importReceipt = childId(lease.receipt,'playback');
+  const checkConfig = () => { if (JSON.stringify(validateConfiguration(loadConfiguration())) !== JSON.stringify(config)) held('import_retry'); };
+  let transaction = false;
+  let replayed = true;
+  try {
+    checkConfig();
+    await connection.beginTransaction(); transaction = true;
+    for (const {scope} of playbacks) await assertScope(connection,scope,{lock:true});
+    for (const {scope,count} of playbacks) {
+      const [rows] = await connection.execute('SELECT digest,import_receipt,waba_id,clinic_ids,event_count FROM WhatsappInboxPlaybackImports WHERE receipt=? AND phone_id=? FOR SHARE',[lease.receipt,scope.phoneId]);
+      if (rows.length) {
+        const clinics = typeof rows[0].clinic_ids === 'string' ? JSON.parse(rows[0].clinic_ids) : rows[0].clinic_ids;
+        if (rows.length !== 1 || rows[0].digest !== digest || rows[0].import_receipt !== importReceipt
+          || rows[0].waba_id !== scope.wabaId || JSON.stringify(clinics) !== JSON.stringify(scope.clinicIds)
+          || rows[0].event_count !== count) held();
+      } else {
+        await connection.execute('INSERT INTO WhatsappInboxPlaybackImports(receipt,phone_id,waba_id,digest,import_receipt,clinic_ids,event_count,created_at) VALUES(?,?,?,?,?,?,?,NOW(3))',
+          [lease.receipt,scope.phoneId,scope.wabaId,digest,importReceipt,JSON.stringify(scope.clinicIds),count]);
+        replayed = false;
+      }
+    }
+    checkConfig();
+    for (const {scope} of playbacks) await assertScope(connection,scope,{lock:true});
+    await connection.commit(); transaction = false;
+    return {importReceipt,replayed};
+  } catch (error) {
+    if (transaction) await connection.rollback().catch(()=>{});
+    held(error.inboxReason || 'import_retry');
+  }
 }
 async function importAccountSyncLease(connection, lease, config, wabas, { loadConfiguration }) {
   const digest = createHash('sha256').update(lease.raw).digest('hex');
@@ -215,5 +282,5 @@ async function importAccountSyncLease(connection, lease, config, wabas, { loadCo
     held(error.inboxReason || 'import_retry');
   }
 }
-module.exports = {CONFIG_FILE,validateConfiguration,configuration,assertScope,splitLease,accountSyncWabas,
+module.exports = {CONFIG_FILE,validateConfiguration,configuration,assertScope,splitLease,accountSyncWabas,playbackScopes,
   routeClinic,childId,importScopedLease};
