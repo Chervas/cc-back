@@ -1,11 +1,12 @@
 'use strict';
 const { createHash } = require('node:crypto');
 const { fail } = require('./errors');
+const MAX_SCOPES = 1000;
 const id = value => typeof value === 'string' && /^[1-9][0-9]{0,29}$/.test(value);
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join(',') === keys;
 function validateScopes(scopes) {
-  if (!Array.isArray(scopes) || !scopes.length || scopes.length > 1000) fail('invalid_request');
+  if (!Array.isArray(scopes) || !scopes.length || scopes.length > MAX_SCOPES) fail('invalid_request');
   const found = new Set();
   for (const scope of scopes) {
     if (!exact(scope, 'clinicIds,phoneId,wabaId') || !id(scope.wabaId) || !id(scope.phoneId) || found.has(scope.phoneId)
@@ -18,7 +19,6 @@ function validateScopes(scopes) {
 function bindingsFor(scopes) {
   const grouped = new Map();
   for (const s of validateScopes(scopes)) { const phones = grouped.get(s.wabaId) || []; phones.push(s.phoneId); grouped.set(s.wabaId, phones); }
-  if (grouped.size > 64) fail('invalid_request');
   return [...grouped].sort(([a],[b]) => a.localeCompare(b)).map(([wabaId,phoneIds]) => ({wabaId,phoneIds:phoneIds.sort()}));
 }
 function validateBindings(bindings, scopes) {
@@ -64,4 +64,4 @@ function pinScopes(store, config, cipher, cohort) {
   });
   return next;
 }
-module.exports = { validateScopes, bindingsFor, validateBindings, pinScopes };
+module.exports = { MAX_SCOPES, validateScopes, bindingsFor, validateBindings, pinScopes };
