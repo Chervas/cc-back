@@ -24,18 +24,26 @@ function archiveAlert(snapshot, now) {
     || snapshot.observedAt > now + 5000) return null;
   const archive = snapshot.archive;
   if (!archive) return null;
+  const archiveStalled = !Number.isSafeInteger(archive.lastArchivedAt)
+    || now - archive.lastArchivedAt >= 120000;
+  const taggingStalled = !Number.isSafeInteger(archive.lastTaggedAt)
+    || now - archive.lastTaggedAt >= 120000;
   const pending = Number.isSafeInteger(archive.pending) && archive.pending > 0
-    && Number.isSafeInteger(archive.oldestAt) && now - archive.oldestAt >= 120000;
+    && Number.isSafeInteger(archive.oldestAt) && now - archive.oldestAt >= 120000
+    && (archive.failedArchive > 0 || archiveStalled);
   const untagged = Number.isSafeInteger(archive.untaggedImported) && archive.untaggedImported > 0
-    && Number.isSafeInteger(archive.oldestUntaggedAt) && now - archive.oldestUntaggedAt >= 120000;
+    && Number.isSafeInteger(archive.oldestUntaggedAt) && now - archive.oldestUntaggedAt >= 120000
+    && (archive.failedTag > 0 || taggingStalled);
   if (!pending && !untagged) return null;
-  const count = (pending ? archive.pending : 0) + (untagged ? archive.untaggedImported : 0);
+  const count = (pending ? archiveStalled ? archive.pending : archive.failedArchive : 0)
+    + (untagged ? taggingStalled ? archive.untaggedImported : archive.failedTag : 0);
   return { eventKey: 'whatsapp.inbox_archive_delayed', payload: {
     severity: 'critical', title: 'La copia de seguridad de recepción de WhatsApp está retrasada',
-    detail: `${count} recibos requieren copia externa o marcado de importación. Si falla la copia para un evento nuevo, Meta recibirá un error reintentable.`,
+    detail: `${count} ${count === 1 ? 'recibo requiere' : 'recibos requieren'} copia externa o marcado de importación. Si falla la copia para un evento nuevo, Meta recibirá un error reintentable.`,
     action: 'Revisar el archivo S3 y el servicio de recepción. No eliminar ni confirmar recibos manualmente.',
   }, metadata: { source: 'whatsapp_inbox_archive', pending: archive.pending,
-    untagged_imported: archive.untaggedImported || 0 } };
+    untagged_imported: archive.untaggedImported || 0, failed_archive: archive.failedArchive || 0,
+    failed_tag: archive.failedTag || 0 } };
 }
 
 // Runs inside the existing five-minute system check. No Meta API request,

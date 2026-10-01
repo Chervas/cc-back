@@ -73,6 +73,8 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
     || !Number.isSafeInteger(maxAuditBacklog) || maxAuditBacklog < 1 || typeof archiveEnabled !== 'boolean' || !auditContext
     || Object.keys(auditContext).sort().join(',') !== 'connectionRef,operation,policyVersion,resourceRef,tenantRef') fail('invalid_request');
   bindings = structuredClone(bindings); auditContext = structuredClone(auditContext);
+  let lastArchivedAt = null;
+  let lastTaggedAt = null;
   if (scopeBindings !== undefined) {
     const contract = require('./whatsapp-inbox-scopes');
     scopeBindings = contract.validateScopes(scopeBindings); contract.validateBindings(bindings, scopeBindings);
@@ -183,8 +185,10 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
           digest: row.digest, keyId: row.key_id, scopes: JSON.parse(row.scopes), kinds: JSON.parse(row.kinds),
           receivedAt: row.received_at, byteCount: row.byte_count, body: Buffer.from(row.body).toString('base64') }));
         await sink.put(receipt, envelope);
+        const archivedAt = now();
         store.db.prepare('UPDATE whatsapp_inbox SET archived_at=? WHERE receipt=? AND archived_at IS NULL')
-          .run(now(), receipt);
+          .run(archivedAt, receipt);
+        lastArchivedAt = archivedAt;
         return { receipt, archived: true };
       } catch (error) {
         try {
@@ -213,8 +217,10 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
       if (row.archive_tagged_at) return { receipt, tagged: true };
       try {
         await sink.tagImported(receipt);
+        const taggedAt = now();
         store.db.prepare("UPDATE whatsapp_inbox SET archive_tagged_at=? WHERE receipt=? AND state='imported' AND archived_at IS NOT NULL AND archive_tagged_at IS NULL")
-          .run(now(), receipt);
+          .run(taggedAt, receipt);
+        lastTaggedAt = taggedAt;
         return { receipt, tagged: true };
       } catch (error) {
         try {
@@ -268,7 +274,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
     health() {
       refreshScopes();
       const storage = store.db.prepare('SELECT COUNT(*) AS rows,COALESCE(SUM(byte_count),0) AS bytes FROM whatsapp_inbox').get();
-      const archive = archiveEnabled ? store.db.prepare("SELECT SUM(CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END) AS pending,MIN(CASE WHEN archived_at IS NULL THEN received_at END) AS oldestAt,SUM(CASE WHEN state='imported' AND archived_at IS NOT NULL AND archive_tagged_at IS NULL THEN 1 ELSE 0 END) AS untaggedImported,MIN(CASE WHEN state='imported' AND archived_at IS NOT NULL AND archive_tagged_at IS NULL THEN imported_at END) AS oldestUntaggedAt FROM whatsapp_inbox WHERE app_id=?").get(appId) : null;
+      const archive = archiveEnabled ? store.db.prepare("SELECT SUM(CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END) AS pending,MIN(CASE WHEN archived_at IS NULL THEN received_at END) AS oldestAt,SUM(CASE WHEN archived_at IS NULL AND archive_attempts>0 THEN 1 ELSE 0 END) AS failedArchive,SUM(CASE WHEN state='imported' AND archived_at IS NOT NULL AND archive_tagged_at IS NULL THEN 1 ELSE 0 END) AS untaggedImported,MIN(CASE WHEN state='imported' AND archived_at IS NOT NULL AND archive_tagged_at IS NULL THEN imported_at END) AS oldestUntaggedAt,SUM(CASE WHEN state='imported' AND archive_tagged_at IS NULL AND tag_attempts>0 THEN 1 ELSE 0 END) AS failedTag FROM whatsapp_inbox WHERE app_id=?").get(appId) : null;
       const groups = store.db.prepare("SELECT i.scopes,COUNT(*) pending,MIN(CASE WHEN r.reason IS NULL OR r.reason='import_retry' THEN i.received_at END) oldestPendingAt,SUM(CASE WHEN r.reason='review_required' THEN 1 ELSE 0 END) blockingReview,SUM(CASE WHEN r.reason IN ('unsupported_event','unmatched_status') THEN 1 ELSE 0 END) review FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' GROUP BY i.scopes").all(appId);
       // Account-wide events cannot be attributed to a contact. Keep their
       // counters without letting them consume the bounded phone review budget.
@@ -304,7 +310,9 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
         capacity: { rows: storage.rows, bytes: storage.bytes, maxRows, maxBytes,
           auditPending: store.backlog().pending, maxAuditBacklog },
         ...(archive ? { archive: { pending: archive.pending || 0, oldestAt: archive.oldestAt,
-          untaggedImported: archive.untaggedImported || 0, oldestUntaggedAt: archive.oldestUntaggedAt } } : {}) };
+          untaggedImported: archive.untaggedImported || 0, oldestUntaggedAt: archive.oldestUntaggedAt,
+          failedArchive: archive.failedArchive || 0, failedTag: archive.failedTag || 0,
+          lastArchivedAt, lastTaggedAt } } : {}) };
     },
     // No automatic consumer. The caller must have a separately authenticated,
     // approved import grant and commit the business transaction before confirm.
