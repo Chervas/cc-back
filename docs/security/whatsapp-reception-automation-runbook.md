@@ -335,3 +335,19 @@ local siguen custodiados; no representan respuestas de pacientes a reanudar.
 No marcar el cierre de esta observación por una prueba sintética ni adelantar
 confirmaciones del lote antiguo. Repetir métricas de carga al ampliar la cohorte:
 el límite de catálogo no equivale a capacidad probada de 1.000 números activos.
+
+La observación posterior de una respuesta nueva (09:08:17 UTC) correlacionó
+su recibo padre AWS, sobre S3 marcado, recibo hijo y digest SQL. Se recibió
+en AWS a las 09:08:18.594 y se importó en SQL a las 09:08:21.579; el
+dispatcher registró el claim `wait_response` a las 09:08:21.777. El análisis
+Nova Lite comenzó a las 09:09:51, después de su buffer nativo, y terminó
+correctamente. La ejecución completó a las 09:09:54 y dejó `info_confirmada`,
+sin inferir asistencia confirmada. Su agradecimiento constaba entregado por
+Meta. No se modificó la cita manualmente ni se reanudó un histórico. La
+verificación S3/KMS se hizo en memoria, sin persistir o imprimir el contenido.
+
+Veinte consultas reales `GET /pending` sin lease ni escrituras clínicas
+midieron p50 32,54 ms, p95 34,38 ms y máximo 80,25 ms. No acreditan por sí
+solas capacidad de importación o IA. La prueba MySQL de publicación fresca
+también pasó con el bus simulado: conserva notificaciones ante fallo, aísla
+número/clínica, reconcilia ecos tras commit y no reproduce acciones clínicas.
