@@ -8,8 +8,8 @@ function fixture(){
   if(path==='/lease')return {status:200,data:{receipt:'receipt',lease:'lease',receivedAt:Date.now()-300000,rawBase64:Buffer.from('FICTITIOUS').toString('base64')}};
   if(path==='/confirm')return {status:200,data:{businessProcessed:true}};return {status:200};}};
  const options={env:{},scope:{clinicId:19},requiresScoped:true,recoveryNotBefore:'2026-09-22T14:00:37Z',
-  loadConfiguration:()=>config,publish:(_,s)=>health.push(s),importScoped:async(c,lease,s,{loadConfiguration})=>{
-   assert.deepEqual(s,loadConfiguration());imports.push({config:s,lease});return {importReceipt:'committed'};
+  loadConfiguration:()=>config,publish:(_,s)=>health.push(s),importScoped:async(c,lease,s,{loadConfiguration,accountSyncEnabled})=>{
+   assert.deepEqual(s,loadConfiguration());imports.push({config:s,lease,accountSyncEnabled});return {importReceipt:'committed'};
   }};
  return {calls,imports,health,options,client,setConfig:c=>{config=c},poll:()=>pollOnce({},client,options)};
 }
@@ -29,6 +29,11 @@ test('a freshly restored receipt remains passive even inside the fresh-inbound w
   : request(method,path,body);
  await f.poll();assert.equal(f.imports[0].lease.recoveryWithoutAutomation,true);
  assert.equal(f.calls.filter(c=>c.path==='/confirm').length,1);
+});
+test('account-event rollout uses the supplied runtime flag on every poll',async()=>{
+ const f=fixture();await f.poll();
+ f.options.env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED='true';await f.poll();
+ assert.deepEqual(f.imports.map(item=>item.accountSyncEnabled),[false,true]);
 });
 test('a missing or unreadable scoped catalogue fails before leasing and never falls back to the pilot',async()=>{
  const f=fixture();await f.poll();f.calls.length=0;f.setConfig(null);await assert.rejects(f.poll(),/configuration_invalid/);assert.equal(f.calls.length,0);
