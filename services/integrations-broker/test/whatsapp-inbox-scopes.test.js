@@ -51,6 +51,23 @@ test('Bindings outside declared owners and duplicate/unsorted owners fail config
  assert.throws(()=>C.validateScopes([{wabaId:'301',phoneId:'401',clinicIds:[72,71]}]));
  assert.throws(()=>C.validateScopes([...scopes,{wabaId:'999',phoneId:'401',clinicIds:[71]}]));
 });
+test('More than 64 WABAs remain scoped, while the catalogue stays bounded',t=>{
+ const f=fixture(t);
+ const many=Array.from({length:65},(_,i)=>({wabaId:String(1001+i),phoneId:String(2001+i),clinicIds:[i+1]}));
+ const bindings=C.bindingsFor(many);
+ assert.equal(bindings.length,65);
+ const inbox=createWhatsappInbox({store:f.store,cipher:f.cipher,appId:'101',bindings,
+  scopeBindings:many,auditContext:f.config.auditContext});
+ const last=many.at(-1);
+ const raw=Buffer.from(JSON.stringify({object:'whatsapp_business_account',entry:[{id:last.wabaId,
+  changes:[{field:'messages',value:{metadata:{phone_number_id:last.phoneId},messages:[]}}]}]}));
+ const appSecret=Buffer.from('FICTITIOUS_INBOX_APP_SECRET');
+ const receipt=inbox.accept({raw,appSecret,signature:'sha256='+createHmac('sha256',appSecret).update(raw).digest('hex')});
+ const lease=inbox.lease(receipt.receipt);
+ assert.deepEqual(lease.scopeBindings,[last]);lease.raw.fill(0);
+ assert.throws(()=>C.validateScopes(Array.from({length:C.MAX_SCOPES+1},(_,i)=>
+  ({wabaId:String(1001+i),phoneId:String(2001+i),clinicIds:[i+1]}))),{code:'invalid_request'});
+});
 test('A real encrypted pending receipt survives expansion with the same plaintext, receipt and original clinic owner',t=>{
  const f=fixture(t);pinIdentity(f.store,f.config,f.cipher);
  const legacy=createWhatsappInbox({store:f.store,cipher:f.cipher,appId:'101',bindings:f.config.bindings,auditContext:f.config.auditContext});

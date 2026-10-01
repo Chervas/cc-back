@@ -4,6 +4,7 @@ const { createHmac, timingSafeEqual, randomUUID, randomBytes, hkdfSync,
 const { TextDecoder } = require('node:util');
 const { BrokerError, fail } = require('./errors');
 const { audit } = require('./contracts');
+const { MAX_SCOPES } = require('./whatsapp-inbox-scopes');
 const MAX_BYTES = 3 * 1024 * 1024;
 const id = value => typeof value === 'string' && /^[1-9][0-9]{0,29}$/.test(value);
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
@@ -67,7 +68,8 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
   maxRows = 100000, maxBytes = 1024 * 1024 * 1024, maxAuditBacklog = 10000, scopeBindings, loadScopeBindings,
   archiveEnabled = false }) {
   if (!store?.db || !cipher || !id(appId) || !Array.isArray(bindings) || !bindings.length
-    || bindings.length > 64 || new Set(bindings.map(b => b.wabaId)).size !== bindings.length
+    || bindings.length > MAX_SCOPES
+    || new Set(bindings.map(b => b.wabaId)).size !== bindings.length
     || bindings.some(b => !id(b.wabaId) || !Array.isArray(b.phoneIds) || !b.phoneIds.length || b.phoneIds.some(p => !id(p)))
     || !Number.isSafeInteger(maxRows) || maxRows < 1 || !Number.isSafeInteger(maxBytes) || maxBytes < 1
     || !Number.isSafeInteger(maxAuditBacklog) || maxAuditBacklog < 1 || typeof archiveEnabled !== 'boolean' || !auditContext
