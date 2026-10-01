@@ -123,6 +123,9 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
       // The broker reply cannot reassign a previously created local identity.
       const state=existing?.state==='active'?'active':remote.state;
       const additionalData={...(asset.additionalData||{}),...metadata({...remote,state})};
+      // A new, committed active authorization is the only way to clear a
+      // manual disconnect. Re-reading the old active receipt must not undo it.
+      if (state === 'active' && replacing && context.requestId !== asset.whatsappAuthorizationId) delete additionalData.whatsappManualDisconnect;
       // Keep user-selected role and policies after the first successful activation.
       if(existing?.state==='active'||replacing)for(const key of ['routing','whatsapp_channel_role'])if(asset.additionalData?.[key])additionalData[key]=asset.additionalData[key];
       await asset.update({metaAssetName:remote.profile.displayPhoneNumber,waVerifiedName:remote.profile.verifiedName,

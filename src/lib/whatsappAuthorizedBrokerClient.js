@@ -118,7 +118,8 @@ function configuredTransport(config, { timeoutMs = 30000 } = {}) {
 const models = () => require('../../models');
 function createWhatsappAuthorizedBrokerClient({ environment = () => process.env, loadConfiguration = () => configuration(environment()),
   loadAsset = assetId => models().ClinicMetaAsset.findOne({ where: { id: assetId, assetType: 'whatsapp_phone_number' },
-    attributes: ['id','clinicaId','grupoClinicaId','assignmentScope','assetType','phoneNumberId','wabaId','isActive'], raw: true }),
+    attributes: ['id','clinicaId','grupoClinicaId','assignmentScope','assetType','phoneNumberId','wabaId','isActive',
+      'whatsappAuthorizationId', [models().sequelize.literal("JSON_EXTRACT(`additionalData`, '$.whatsappManualDisconnect')"), 'manualDisconnect']], raw: true }),
   loadClinic = clinicId => models().Clinica.findByPk(clinicId, { attributes: ['id_clinica','grupoClinicaId'], raw: true }),
   loadMessage = messageId => models().Message.findByPk(messageId, { attributes: ['id','conversation_id','direction','status','createdAt','metadata'], raw: true }),
   loadConversation = conversationId => models().Conversation.findByPk(conversationId, { attributes: ['id','clinic_id','patient_id','channel','contact_id'], raw: true }),
@@ -157,7 +158,17 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       runtime.namespace(environment());
       const latest = read();
       if (!latest || JSON.stringify(latest) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
-      return value;
+      // A durable local stop also applies while the remote revocation result is
+      // uncertain. Custody/profile reads remain available; sends and fresh inbound do not.
+      const persisted = assetHint ? await loadAsset(assetId) : asset;
+      if (!persisted || persisted.phoneNumberId !== asset.phoneNumberId || persisted.wabaId !== asset.wabaId
+        || persisted.assignmentScope !== asset.assignmentScope || Number(persisted.clinicaId) !== Number(asset.clinicaId)
+        || Number(persisted.grupoClinicaId) !== Number(asset.grupoClinicaId)) fail('whatsapp_authorized_binding_changed');
+      const metadata = persisted.manualDisconnect;
+      const projected = metadata === undefined ? persisted : { ...persisted, additionalData: {
+        whatsappManualDisconnect: typeof metadata === 'string' ? JSON.parse(metadata) : metadata } };
+      return require('./whatsappManualDisconnect').current(projected, value)
+        ? Object.freeze({ ...value, sendEnabled: false }) : value;
     } catch (error) { fail(PREFLIGHT_CODES.has(error?.code) ? error.code : 'whatsapp_authorized_binding_invalid'); }
   }
   async function eligibleIntent(intent, config, selectedBinding) {
