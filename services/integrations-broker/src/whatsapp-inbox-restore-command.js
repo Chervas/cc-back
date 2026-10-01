@@ -66,13 +66,47 @@ async function objectTagState(s3, key, versionId) {
   return state.length ? 'imported' : 'not_imported';
 }
 
-async function restoreFromArchive({ s3, output, scopes, appId = APP, openCipher }) {
+async function restoreFromArchive({ s3, output, scopes, appId = APP, openCipher, quarantine = [] }) {
   if (!s3?.send || !path.isAbsolute(output) || fs.existsSync(output)
     || appId !== APP || typeof openCipher !== 'function') throw Error('restore_configuration_invalid');
+  if (!Array.isArray(quarantine) || quarantine.length > 100) throw Error('restore_configuration_invalid');
+  const excluded = new Map();
+  for (const item of quarantine) {
+    if (!item || Object.keys(item).sort().join(',') !== 'etag,key,sha256,versionId'
+      || !RECEIPT_KEY.test(item.key) || typeof item.etag !== 'string'
+      || typeof item.versionId !== 'string' || !item.versionId
+      || !/^[a-f0-9]{64}$/.test(item.sha256) || excluded.has(item.key)) {
+      throw Error('restore_configuration_invalid');
+    }
+    excluded.set(item.key, item);
+  }
   const config = validateScopes(scopes);
   const bindings = bindingsFor(config);
   const before = await inventory(s3);
   if (!before.keys.length) throw Error('restore_inventory_empty');
+  for (const item of excluded.values()) {
+    const listed = before.keys.find(entry => entry.key === item.key);
+    if (!listed || listed.etag !== item.etag) throw Error('restore_quarantine_mismatch');
+    const object = await objectBytes(s3, item.key, 5 * 1024 * 1024, item.etag);
+    try {
+      if (object.versionId !== item.versionId
+        || createHash('sha256').update(object.bytes).digest('hex') !== item.sha256
+        || await objectTagState(s3, item.key, object.versionId) !== 'imported') {
+        throw Error('restore_quarantine_mismatch');
+      }
+      let foreignOrMalformed = false;
+      try {
+        const record = JSON.parse(object.bytes.toString('utf8'));
+        foreignOrMalformed = record && Object.keys(record).sort().join(',') ===
+          'appId,body,byteCount,digest,keyId,kinds,receipt,receivedAt,scopes,version'
+          && record.version === 1 && typeof record.appId === 'string' && record.appId !== appId
+          && record.receipt === item.key.slice(3, -5);
+      } catch (error) { if (error instanceof SyntaxError) foreignOrMalformed = true; else throw error; }
+      if (!foreignOrMalformed) throw Error('restore_quarantine_mismatch');
+    } finally { object.bytes.fill(0); }
+  }
+  const restoreKeys = before.keys.filter(entry => !excluded.has(entry.key));
+  if (!restoreKeys.length) throw Error('restore_inventory_empty');
   const partial = output + '.incomplete-' + randomUUID();
   const ciphers = new Map();
   const tagStates = [];
@@ -81,7 +115,7 @@ async function restoreFromArchive({ s3, output, scopes, appId = APP, openCipher 
   let store;
   let count = 0;
   try {
-    const first = await objectBytes(s3, before.keys[0].key, 5 * 1024 * 1024, before.keys[0].etag);
+    const first = await objectBytes(s3, restoreKeys[0].key, 5 * 1024 * 1024, restoreKeys[0].etag);
     let firstKeyId;
     try { firstKeyId = JSON.parse(first.bytes.toString('utf8')).keyId; }
     finally { first.bytes.fill(0); }
@@ -95,10 +129,10 @@ async function restoreFromArchive({ s3, output, scopes, appId = APP, openCipher 
     store = new BrokerStore(partial);
     createWhatsappInbox({ store, cipher: ciphers.get(firstKeyId), appId, bindings,
       scopeBindings: config, auditContext: context, archiveEnabled: true });
-    for (let offset = 0; offset < before.keys.length; offset += 100) {
+    for (let offset = 0; offset < restoreKeys.length; offset += 100) {
       const records = [];
       try {
-        for (const entry of before.keys.slice(offset, offset + 100)) {
+        for (const entry of restoreKeys.slice(offset, offset + 100)) {
           const object = await objectBytes(s3, entry.key, 5 * 1024 * 1024, entry.etag);
           let retained = false;
           try {
@@ -124,7 +158,7 @@ async function restoreFromArchive({ s3, output, scopes, appId = APP, openCipher 
       } finally { for (const item of records) item.envelope.fill(0); }
     }
     const after = await inventory(s3);
-    if (before.digest !== after.digest || before.keys.length !== after.keys.length || count !== before.keys.length
+    if (before.digest !== after.digest || before.keys.length !== after.keys.length || count !== restoreKeys.length
       || store.db.prepare('SELECT COUNT(*) n FROM whatsapp_inbox').get().n !== count
       || store.db.prepare('PRAGMA integrity_check').get().integrity_check !== 'ok') {
       throw Error('restore_inventory_changed');
@@ -134,12 +168,24 @@ async function restoreFromArchive({ s3, output, scopes, appId = APP, openCipher 
         throw Error('restore_inventory_changed');
       }
     }
+    for (const item of excluded.values()) {
+      const object = await objectBytes(s3, item.key, 5 * 1024 * 1024, item.etag);
+      try {
+        if (object.versionId !== item.versionId
+          || createHash('sha256').update(object.bytes).digest('hex') !== item.sha256
+          || await objectTagState(s3, item.key, object.versionId) !== 'imported') {
+          throw Error('restore_inventory_changed');
+        }
+      } finally { object.bytes.fill(0); }
+    }
     store.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     store.close(); store = null;
     if (fs.existsSync(partial + '-wal') && fs.statSync(partial + '-wal').size) throw Error('restore_checkpoint_failed');
     fs.linkSync(partial, output); // Fails rather than replacing an existing database.
     fs.unlinkSync(partial);
-    return { restored: count, inventoryDigest: before.digest };
+    return { restored: count, quarantined: excluded.size,
+      quarantineDigest: createHash('sha256').update(JSON.stringify([...excluded.values()])).digest('hex'),
+      inventoryDigest: before.digest };
   } finally {
     store?.close();
     for (const cipher of ciphers.values()) cipher?.close?.();
@@ -147,20 +193,27 @@ async function restoreFromArchive({ s3, output, scopes, appId = APP, openCipher 
   }
 }
 
-async function main(argv = process.argv.slice(2)) {
-  if (argv.length !== 2) throw Error('usage: whatsapp-inbox-restore-command OUTPUT.sqlite SCOPES.json');
-  const [output, scopesFile] = argv;
-  if (!path.isAbsolute(scopesFile)) throw Error('restore_configuration_invalid');
-  const stat = fs.lstatSync(scopesFile);
+function privateJson(file) {
+  if (!path.isAbsolute(file)) throw Error('restore_configuration_invalid');
+  const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.mode & 0o077 || stat.size > 1048576) {
     throw Error('restore_configuration_invalid');
   }
-  const scopes = JSON.parse(fs.readFileSync(scopesFile, 'utf8'));
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+async function main(argv = process.argv.slice(2)) {
+  if (argv.length < 2 || argv.length > 3) {
+    throw Error('usage: whatsapp-inbox-restore-command OUTPUT.sqlite SCOPES.json [QUARANTINE.json]');
+  }
+  const [output, scopesFile, quarantineFile] = argv;
+  const scopes = privateJson(scopesFile);
+  const quarantine = quarantineFile ? privateJson(quarantineFile) : [];
   const s3 = new S3Client({ region: 'eu-west-3' });
   const kms = new KMSClient({ region: 'eu-west-3' });
   const provider = createInboxKeyProvider(kms);
   try {
-    const result = await restoreFromArchive({ s3, output, scopes,
+    const result = await restoreFromArchive({ s3, output, scopes, quarantine,
       openCipher: async keyId => {
         const manifestObject = await objectBytes(s3, 'meta/' + keyId + '.json', 8192);
         try { return await provider.open(JSON.parse(manifestObject.bytes.toString('utf8')), APP); }

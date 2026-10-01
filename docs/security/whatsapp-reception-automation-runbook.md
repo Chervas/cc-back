@@ -68,20 +68,31 @@ los tres límites y emite un aviso crítico
 independiente `whatsapp.inbox_capacity_critical` desde 90%, incluso sin un
 remitente activo. Así la espera entre avisos no oculta la escalada. Si se
 agota un límite, el webhook deja de confirmar para permitir reintentos de
-Meta. El archivo externo está preparado, no activo hasta verificar la
-infraestructura y el despliegue. Con `recoveryArchive` habilitado, un 200
+Meta. El archivo externo está activo desde el 01/10. Con `recoveryArchive`
+habilitado, un 200
 requiere copia S3 cifrada verificada; `archive.pending`,
 `archive.untaggedImported` y la alerta de dos minutos comprueban atrasos aun
-cuando la importación CRM esté al día. Una copia o etiqueta fallida espera
+cuando la importación CRM esté al día. El ensayo de reconstrucción completa
+sobre el inventario real aún debe cerrarse antes de considerar validada la
+recuperación. Una copia o etiqueta fallida espera
 por recibo de uno a sesenta minutos sin monopolizar el barrido. La
 apertura del listener exige primero respaldar el manifiesto de clave envuelto
 por KMS en `meta/<keyId>.json`; restaurar requiere ese manifiesto y la misma
 clave KMS, nunca generar otra. La
 limpieza local exige importación, copia y etiqueta S3, más 24 horas. Los
 objetos importados expiran a los ocho días; los no importados no expiran
-automáticamente. Antes de habilitarlo hay que probar restauración e integridad
-con datos sintéticos. No borrar filas de SQLite ni aumentar límites sin
+automáticamente. La restauración e integridad con datos sintéticos ya se probó.
+No borrar filas de SQLite ni aumentar límites sin
 comprobar espacio, auditoría y recuperación.
+El restaurador estricto se detiene ante cualquier objeto ilegible o de otra
+aplicación. Solo un manifiesto privado opcional con clave S3, ETag, versión y
+SHA-256 exactos permite excluir un objeto **ya importado** que no sea JSON o
+que declare otra App ID. El operador debe verificar fuera del restaurador que
+no existe recibo clínico en CRM y registrar la exclusión. Un sobre válido de
+ClinicaClick o un recibo pendiente no son excluibles. El 01/10 se localizaron
+dos artefactos sintéticos: 64 bytes no JSON y un sobre `appId=101`; ambos
+marcados importados y sin recibo en CRM. No borrar esos objetos ni relajar el
+restaurador para omitir otros fallos.
 Si el primer despliegue de `ops/security/whatsapp-inbox-recovery.yaml` dejó el
 bucket retenido tras un rollback, importar **ese mismo bucket** con
 `ops/security/whatsapp-inbox-recovery-import.yaml` y revisar el ChangeSet antes
@@ -185,3 +196,34 @@ La auditoría de jobs encontró 415 claims frescos del día completados, con
 al worker `staging` vigente. No promoverlos ni cambiarles el namespace para
 "vaciar la cola": antes se debe conciliar cada conversación, corte de
 recuperación y estado de cita, sin generar acciones retrospectivas.
+
+## Verificación del 01/10/2026
+
+La sesión SSO de mantenimiento no-root abrió Session Manager y su marcador
+apareció en CloudWatch Logs. La lectura S3 se limitó al archivo y a la clave
+KMS de payload. Una instantánea en memoria de 20.536 objetos se restauró a una
+SQLite privada nueva: 20.534 recibos, de los cuales 19.194 `imported` y 1.340
+`held`; `PRAGMA integrity_check=ok`. Se excluyeron explícitamente dos objetos
+sintéticos ya importados, fijados por clave, ETag, versión y SHA-256. La SQLite
+temporal se eliminó. No se detuvo el receptor y los objetos nuevos que llegaron
+después del inventario no se incluyeron; una recuperación real requiere un
+inventario estable con el receptor detenido.
+
+En staging, la tabla `WhatsappInboxAdminSync` y el permiso `SELECT,INSERT` del
+usuario SQL restringido estaban preparados antes de activar el interruptor.
+El importador usa el release `admin-sync-b0bc4fc6-20261001` por drop-in de
+systemd; `WHATSAPP_INBOX_ADMIN_SYNC_ENABLED=true` está presente en ese servicio
+y en la API de staging. Para rollback, poner el interruptor a `false`, reiniciar
+los dos procesos y volver al `WorkingDirectory` anterior, sin borrar tabla,
+recibos ni filas conciliadas.
+
+Un webhook nuevo de aprobación de la plantilla técnica de BS Capilar, Meta ID
+`1990184844992231`, entró a las 08:13 UTC. La verificación del payload
+descifrado en memoria confirmó `message_template_id` y `APPROVED`; el recibo S3
+quedó etiquetado `imported`. Se insertó y después se concilió una fila
+administrativa a las 08:14:24 UTC. La plantilla local estaba `APPROVED` a las
+08:14:15 UTC. No hubo fila clínica en `WhatsappInboxImports` ni job de despacho
+de automatización para ese recibo. A las 08:09 UTC, los 748 avisos históricos
+de estado y 30 cambios de categoría tenían cero reintentos elegibles; el
+primero vence a las 22:44 UTC por el `defer` de 24 horas. No adelantar ni
+confirmar estos recibos manualmente.
