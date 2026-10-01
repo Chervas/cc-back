@@ -24,11 +24,21 @@ function createActivationReader(filename) {
   }
   return {
     definitions:()=>rows().filter(r=>r.state==='active').map(r=>({...r.definition,enabled:true})),
-    scopes:(appId)=>rows().filter(r=>!['prepared','superseded'].includes(r.state)).map(r=>{
-      const b=E.bindingFor(r.definition.enrollmentBinding);
-      if(!E.id(appId)||b.appId!==appId)fail('scope_denied');
-      return {wabaId:r.definition.wabaId,phoneId:r.definition.phoneId,clinicIds:[...b.clinicIds]};
-    }),
+    scopes:(appId)=>{
+      const scopes=new Map();
+      for(const r of rows().filter(r=>!['prepared','superseded'].includes(r.state))){
+        const b=E.bindingFor(r.definition.enrollmentBinding);
+        if(!E.id(appId)||b.appId!==appId)fail('scope_denied');
+        const scope={wabaId:r.definition.wabaId,phoneId:r.definition.phoneId,clinicIds:[...b.clinicIds]};
+        const previous=scopes.get(scope.phoneId);
+        // The old credential stays active while its replacement prepares capture.
+        // Coalesce only the same asset and ownership; never merge clinic grants.
+        if(previous&&(previous.assetId!==r.asset_id||previous.scopeKey!==b.scopeKey
+          ||JSON.stringify(previous.scope)!==JSON.stringify(scope)))fail('scope_denied');
+        if(!previous)scopes.set(scope.phoneId,{scope,assetId:r.asset_id,scopeKey:b.scopeKey});
+      }
+      return [...scopes.values()].map(value=>value.scope);
+    },
     resolve(request,principal,policy,store) {
       if(policy.connections.some(b=>b.connectionRef===request.connectionRef))return policy;
       const definition=this.definitions().find(d=>d.connectionRef===request.connectionRef);
