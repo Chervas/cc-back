@@ -79,6 +79,11 @@ const SCHEMA = [
  waba_id VARCHAR(30) CHARACTER SET ascii NOT NULL,digest CHAR(64) CHARACTER SET ascii NOT NULL,
  import_receipt CHAR(36) CHARACTER SET ascii NOT NULL,created_at DATETIME(3) NOT NULL,
  reconciled_at DATETIME(3) NULL,PRIMARY KEY(receipt,waba_id),INDEX wa_inbox_admin_pending(reconciled_at,waba_id,created_at)) ENGINE=InnoDB`,
+ `CREATE TABLE IF NOT EXISTS WhatsappInboxPlaybackImports (receipt CHAR(36) CHARACTER SET ascii NOT NULL,
+ phone_id VARCHAR(30) CHARACTER SET ascii NOT NULL,waba_id VARCHAR(30) CHARACTER SET ascii NOT NULL,
+ digest CHAR(64) CHARACTER SET ascii NOT NULL,import_receipt CHAR(36) CHARACTER SET ascii NOT NULL,
+ clinic_ids JSON NOT NULL,event_count INT NOT NULL,created_at DATETIME(3) NOT NULL,
+ PRIMARY KEY(receipt,phone_id)) ENGINE=InnoDB`,
 ];
 async function importLease(connection, lease, scope, now = Date.now(), { validateScope } = {}) {
   if (!uuid(lease?.receipt) || !uuid(lease?.lease) || lease.automaticActionsAllowed !== false || !Buffer.isBuffer(lease.raw)) held();

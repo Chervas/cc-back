@@ -8,8 +8,8 @@ function fixture(){
   if(path==='/lease')return {status:200,data:{receipt:'receipt',lease:'lease',receivedAt:Date.now()-300000,rawBase64:Buffer.from('FICTITIOUS').toString('base64')}};
   if(path==='/confirm')return {status:200,data:{businessProcessed:true}};return {status:200};}};
  const options={env:{},scope:{clinicId:19},requiresScoped:true,recoveryNotBefore:'2026-09-22T14:00:37Z',
-  loadConfiguration:()=>config,publish:(_,s)=>health.push(s),importScoped:async(c,lease,s,{loadConfiguration,accountSyncEnabled})=>{
-   assert.deepEqual(s,loadConfiguration());imports.push({config:s,lease,accountSyncEnabled});return {importReceipt:'committed'};
+  loadConfiguration:()=>config,publish:(_,s)=>health.push(s),importScoped:async(c,lease,s,{loadConfiguration,accountSyncEnabled,playbackEnabled})=>{
+   assert.deepEqual(s,loadConfiguration());imports.push({config:s,lease,accountSyncEnabled,playbackEnabled});return {importReceipt:'committed'};
   }};
  return {calls,imports,health,options,client,setConfig:c=>{config=c},poll:()=>pollOnce({},client,options)};
 }
@@ -34,6 +34,12 @@ test('account-event rollout uses the supplied runtime flag on every poll',async(
  const f=fixture();await f.poll();
  f.options.env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED='true';await f.poll();
  assert.deepEqual(f.imports.map(item=>item.accountSyncEnabled),[false,true]);
+});
+test('playback rollout uses the supplied runtime flag and keeps clinical recovery cuts',async()=>{
+ const f=fixture();await f.poll();
+ f.options.env.WHATSAPP_INBOX_PLAYBACK_ENABLED='true';await f.poll();
+ assert.deepEqual(f.imports.map(item=>item.playbackEnabled),[false,true]);
+ assert(f.imports.every(item=>item.lease.recoveryWithoutAutomation));
 });
 test('a missing or unreadable scoped catalogue fails before leasing and never falls back to the pilot',async()=>{
  const f=fixture();await f.poll();f.calls.length=0;f.setConfig(null);await assert.rejects(f.poll(),/configuration_invalid/);assert.equal(f.calls.length,0);

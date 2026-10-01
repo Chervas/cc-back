@@ -241,3 +241,28 @@ Para rollback, desactivar solo ese drop-in, hacer `daemon-reload` y reiniciar
 el servicio; conservar ambos releases y toda la SQLite. La columna aditiva
 `restored_at` no requiere reversión. No se ha provocado un fallo real de S3,
 por lo que la escalada de la alerta ante fallo sigue sin prueba operativa.
+
+La inspección privada de las 08:37 UTC verificó en memoria los 1.356 sobres
+retenidos: 778 avisos de plantillas, 294 `played`, 103 ediciones, 92 borrados
+y 89 estados de entrega/lectura. Ninguno contenía un texto o audio nuevo
+pendiente del motor. 159 correspondían a ámbitos antiguos; no reparar esos
+ámbitos automáticamente ni cambiar citas a partir de controles de mensaje.
+La auditoría de la hora anterior entregó 494 eventos con p95 0,99 s y cero
+pendientes.
+
+El registro pasivo de `played` requiere la migración
+`20261001085000-whatsapp-inbox-playback-imports.js`, `SELECT,INSERT` sobre
+`WhatsappInboxPlaybackImports` para el usuario restringido y
+`WHATSAPP_INBOX_PLAYBACK_ENABLED=true` en el importador. Aplicar únicamente
+esa migración; no ejecutar las pendientes ajenas. La API no necesita el flag.
+La ruta confirma solo lotes puros y con titularidad vigente; no escribe
+mensajes, conversaciones ni jobs. Los 268 lotes archivados de ámbitos
+actuales pasaron el parser en una comprobación de solo lectura. Para rollback,
+desactivar el flag y volver al release previo del importador; conservar la
+tabla y sus recibos, sin modificar la SQLite AWS.
+
+La prueba `whatsapp-inbox-recovery-alerts.test.js` conecta receptor, SDK S3 y
+colector de alertas con un transporte local aislado que falla y se recupera.
+Verifica 503, recibo conservado, aviso sin contenido, archivo único, marcado
+obligatorio antes de limpieza y deduplicación tras limpieza. No se ha
+provocado un fallo del bucket productivo ni un envío de correo de prueba.

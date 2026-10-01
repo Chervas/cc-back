@@ -10,12 +10,14 @@ test('multiclinic passive importer preserves parent on partial failure, retries 
   await sql.query('CREATE TABLE PatientDirectionSettings(clinic_id INT,director_phone_asset_id INT)');await sql.query('CREATE TABLE MetaScopeBlocks(scope_key VARCHAR(100) PRIMARY KEY)');
   await sql.query("CREATE TABLE Conversations(id INT PRIMARY KEY AUTO_INCREMENT,clinic_id INT,channel VARCHAR(20),contact_id VARCHAR(32),unread_count INT,last_message_at DATETIME(3),last_inbound_at DATETIME(3),createdAt DATETIME(3),updatedAt DATETIME(3))");
   await sql.query("CREATE TABLE Messages(id INT PRIMARY KEY AUTO_INCREMENT,conversation_id INT,direction VARCHAR(20),content TEXT,message_type VARCHAR(20),status VARCHAR(20),metadata JSON,sent_at DATETIME(3),createdAt DATETIME(3),updatedAt DATETIME(3))");
-  for(const ddl of SCHEMA.filter(ddl=>!ddl.includes('WhatsappInboxAdminSync')))await sql.query(ddl);
+  for(const ddl of SCHEMA.filter(ddl=>!ddl.includes('WhatsappInboxAdminSync')&&!ddl.includes('WhatsappInboxPlaybackImports')))await sql.query(ddl);
   const adminMigration=require('../../../migrations/20261001070000-whatsapp-inbox-admin-sync');
   await adminMigration.up(sql.getQueryInterface());await adminMigration.up(sql.getQueryInterface());
   assert.ok((await sql.getQueryInterface().showIndex('WhatsappInboxAdminSync'))
     .some(index=>index.name==='wa_inbox_admin_pending'));
   report.checks.push('account-event migration creates an idempotent indexed table');
+  const playbackMigration=require('../../../migrations/20261001085000-whatsapp-inbox-playback-imports');
+  await playbackMigration.up(sql.getQueryInterface());await playbackMigration.up(sql.getQueryInterface());
   const rawConnection=await sql.connectionManager.getConnection();const c=rawConnection.promise();
   const config={version:1,scopes:[{assetId:81,wabaId:'101',phoneId:'201',clinicIds:[71]},{assetId:82,wabaId:'102',phoneId:'202',clinicIds:[72]}]};
   const m=(id,from)=>({id:'wamid.'+id,from,timestamp:'1789430400',type:'text',text:{body:'FICTITIOUS PASSIVE TEXT'}});
@@ -32,7 +34,7 @@ test('multiclinic passive importer preserves parent on partial failure, retries 
    finally{await readOnly.end();}
    await sql.query("CREATE USER 'inbox_importer_only'@'localhost' IDENTIFIED BY 'FICTITIOUS_Importer_Only_2026!'");
    for(const table of ['Conversations','Messages'])await sql.query("GRANT SELECT,INSERT,UPDATE ON campaign_optimization_qa."+table+" TO 'inbox_importer_only'@'localhost'");
-   for(const table of ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys','WhatsappInboxAdminSync'])await sql.query("GRANT SELECT,INSERT ON campaign_optimization_qa."+table+" TO 'inbox_importer_only'@'localhost'");
+   for(const table of ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys','WhatsappInboxAdminSync','WhatsappInboxPlaybackImports'])await sql.query("GRANT SELECT,INSERT ON campaign_optimization_qa."+table+" TO 'inbox_importer_only'@'localhost'");
    await sql.query("GRANT SELECT (id,assignmentScope,clinicaId,grupoClinicaId,assetType,phoneNumberId,wabaId) ON campaign_optimization_qa.ClinicMetaAssets TO 'inbox_importer_only'@'localhost'");
    await sql.query("GRANT SELECT ON campaign_optimization_qa.Clinicas TO 'inbox_importer_only'@'localhost'");
    await sql.query("GRANT SELECT (clinic_id,director_phone_asset_id) ON campaign_optimization_qa.PatientDirectionSettings TO 'inbox_importer_only'@'localhost'");
@@ -84,6 +86,34 @@ test('multiclinic passive importer preserves parent on partial failure, retries 
       value:{messaging_product:'whatsapp',metadata:{phone_number_id:'201'},messages:[m('mixed','19995550121')]}});
     await assert.rejects(S.importScopedLease(restricted,{...administrative,receipt:randomUUID(),raw:Buffer.from(JSON.stringify(mixedBody))},config,{accountSyncEnabled:true}),/review_required/);
     assert.equal(await count('WhatsappInboxAdminSync'),1);assert.equal(await count('Messages'),6);
+    const clinicalImportsBeforePlayback=await count('WhatsappInboxImports');
+    const playback={receipt:randomUUID(),lease:randomUUID(),automaticActionsAllowed:false,
+      scopeBindings:config.scopes.map(({assetId,...scope})=>scope),raw:Buffer.from(JSON.stringify({
+        object:'whatsapp_business_account',entry:config.scopes.map(scope=>({id:scope.wabaId,
+          changes:[{field:'messages',value:{messaging_product:'whatsapp',metadata:{phone_number_id:scope.phoneId},
+            statuses:[{id:'wamid.synthetic_playback',status:'played',timestamp:'1789430400'}]}}]}))}))};
+    await assert.rejects(S.importScopedLease(restricted,playback,config),/review_required/);
+    const importedPlayback=await S.importScopedLease(restricted,playback,config,{playbackEnabled:true});
+    const replayedPlayback=await S.importScopedLease(restricted,playback,config,{playbackEnabled:true});
+    assert.equal(importedPlayback.replayed,false);assert.equal(replayedPlayback.replayed,true);
+    assert.equal(replayedPlayback.importReceipt,importedPlayback.importReceipt);
+    assert.equal(await count('WhatsappInboxPlaybackImports'),2);
+    assert.equal(await count('Messages'),6);assert.equal(await count('WhatsappInboxImports'),clinicalImportsBeforePlayback);
+    const changedPlayback=JSON.parse(playback.raw);changedPlayback.entry[0].changes[0].value.statuses[0].id='wamid.changed';
+    await assert.rejects(S.importScopedLease(restricted,{...playback,raw:Buffer.from(JSON.stringify(changedPlayback))},config,{playbackEnabled:true}),/review_required/);
+    const mixedPlayback=JSON.parse(playback.raw);mixedPlayback.entry[0].changes[0].value.messages=[m('mixed_playback','19995550121')];
+    await assert.rejects(S.importScopedLease(restricted,{...playback,receipt:randomUUID(),raw:Buffer.from(JSON.stringify(mixedPlayback))},config,{playbackEnabled:true}),/review_required/);
+    const foreignPlayback={...playback,receipt:randomUUID(),scopeBindings:[playback.scopeBindings[0]]};
+    await assert.rejects(S.importScopedLease(restricted,foreignPlayback,config,{playbackEnabled:true}),/review_required/);
+    const blockedPlayback={...playback,receipt:randomUUID()};
+    await sql.query("INSERT INTO MetaScopeBlocks VALUES('group:9')");
+    await assert.rejects(S.importScopedLease(restricted,blockedPlayback,config,{playbackEnabled:true}),/review_required/);
+    await sql.query('DELETE FROM MetaScopeBlocks');
+    let playbackChecks=0;const changedPlaybackConfig=structuredClone(config);changedPlaybackConfig.scopes[0].assetId=999;
+    await assert.rejects(S.importScopedLease(restricted,blockedPlayback,config,{playbackEnabled:true,
+      loadConfiguration:()=>++playbackChecks===1?config:changedPlaybackConfig}),/review_required/);
+    assert.equal(await count('WhatsappInboxPlaybackImports'),2);assert.equal(await count('Messages'),6);
+    report.checks.push('played events commit only a receipt ledger under restricted grants; duplicate, mixed, foreign, blocked and drifting batches stay safe');
     }finally{await restricted.end();}
    // The rest exercises failure/replay independently of the privilege check.
    for(const table of ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys','WhatsappInboxAdminSync','Messages','Conversations'])await sql.query('DELETE FROM '+table);
