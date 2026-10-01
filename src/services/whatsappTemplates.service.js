@@ -3056,7 +3056,10 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
       syncedRow = await WhatsappTemplate.create(payload);
     }
     if (payload.is_active) {
-      await notifyBulkSendsTemplateApproval(syncedRow);
+      await require('./whatsappDeliveryGovernance.service').reconcileCurrentTemplateState({ template: syncedRow, occurredAt: now });
+      if (cleanString(syncedRow.quality_score).toUpperCase() !== 'RED') {
+        await notifyBulkSendsTemplateApproval(syncedRow);
+      }
     }
   }
 

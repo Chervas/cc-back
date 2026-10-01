@@ -9,6 +9,7 @@ const {
   HOLD_STATUS,
   buildRouteKey,
   handleWebhookChange,
+  reconcileCurrentTemplateState,
   materializeFinalMessageStatus,
   parseCapacity,
   recordImmediateSendResponse,
@@ -232,6 +233,39 @@ test('materializa señales Meta de calidad, pausa, capacidad, pacing y descarte'
   } finally {
     originals.forEach(([model, method, original]) => { model[method] = original; });
   }
+});
+
+test('la conciliación actual pausa solo colas de su plantilla y es idempotente', async t => {
+  const notifications = require('../../services/notifications.service');
+  const updates = [];
+  const events = [];
+  const makeList = (id, templateId) => ({
+    id,
+    clinica_id: id,
+    status: 'sending',
+    criteria: { dispatch: { whatsapp_template_id: templateId,
+      template_snapshot: { id: templateId, name: 'same_catalog_name', language: 'es' } } },
+    async update(patch) { updates.push({ id, patch }); Object.assign(this, patch); },
+  });
+  const own = makeList(700, 51);
+  const other = makeList(701, 52);
+  t.mock.method(db.MarketingPatientList, 'findAll', async () => [own, other]);
+  t.mock.method(db.MarketingPatientContactEvent, 'create', async payload => events.push(payload));
+  t.mock.method(notifications, 'dispatchEvent', async () => {});
+
+  const template = { id: 51, meta_template_id: 'meta-51', name: 'same_catalog_name',
+    language: 'es', status: 'APPROVED', quality_score: 'RED' };
+  assert.deepStrictEqual(await reconcileCurrentTemplateState({ template }), { paused: 1 });
+  assert.deepStrictEqual(await reconcileCurrentTemplateState({ template }), { paused: 0 });
+  assert.strictEqual(updates.length, 1);
+  assert.strictEqual(updates[0].id, 700);
+  assert.strictEqual(updates[0].patch.criteria.dispatch.status, 'paused_quality');
+  assert.strictEqual(events.length, 1);
+  assert.strictEqual(__testing.listMatchesTemplate(other, { id: 51, name: 'same_catalog_name' }), false);
+  const sharedRemote = makeList(702, 52);
+  sharedRemote.criteria.dispatch.template_snapshot.meta_template_id = 'meta-51';
+  assert.strictEqual(__testing.listMatchesTemplate(sharedRemote,
+    { id: 51, metaTemplateId: 'meta-51', name: 'same_catalog_name' }), true);
 });
 
 console.log('campaign_whatsapp_delivery_governance.test.js OK');
