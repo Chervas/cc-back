@@ -48,14 +48,15 @@ function archiveAlert(snapshot, now) {
 
 // Runs inside the existing five-minute system check. No Meta API request,
 // message body or patient identity is needed to notify an administrator.
-async function collect({ snapshot, bindings, query, now = Date.now() }) {
+async function collect({ snapshot, bindings, query, now = Date.now(),
+  accountSyncEnabled = process.env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED === 'true' }) {
   const clinicIds = [...new Set(bindings.filter(b => b.sendEnabled).map(b => b.clinicId))];
   const capacity = capacityAlert(snapshot, now);
   const archive = archiveAlert(snapshot, now);
   if (!bindings.length) return [capacity, archive].filter(Boolean);
-  const [adminRows] = await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ COUNT(*) pending
+  const [adminRows] = accountSyncEnabled ? await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ COUNT(*) pending
     FROM WhatsappInboxAdminSync WHERE reconciled_at IS NULL AND created_at < :cutoff`,
-  { replacements: { cutoff: new Date(now - 10 * 60 * 1000) } });
+  { replacements: { cutoff: new Date(now - 10 * 60 * 1000) } }) : [[]];
   const adminPending = Number(adminRows[0]?.pending || 0);
   const adminAlert = adminPending > 0 ? {
     eventKey: 'whatsapp.template_reconciliation_delayed',

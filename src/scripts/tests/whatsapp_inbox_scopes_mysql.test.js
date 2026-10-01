@@ -74,14 +74,15 @@ test('multiclinic passive importer preserves parent on partial failure, retries 
       scopeBindings:[{wabaId:'101',phoneId:'201',clinicIds:[71]}],raw:Buffer.from(JSON.stringify({
         object:'whatsapp_business_account',entry:[{id:'101',changes:[{field:'message_template_status_update',
           value:{message_template_id:'301',event:'APPROVED'}}]}]}))};
-    const importedAdmin=await S.importScopedLease(restricted,administrative,config);
+    await assert.rejects(S.importScopedLease(restricted,administrative,config),/review_required/);
+    const importedAdmin=await S.importScopedLease(restricted,administrative,config,{accountSyncEnabled:true});
     assert.equal(importedAdmin.replayed,false);
-    const replayedAdmin=await S.importScopedLease(restricted,administrative,config);
+    const replayedAdmin=await S.importScopedLease(restricted,administrative,config,{accountSyncEnabled:true});
     assert.equal(replayedAdmin.importReceipt,importedAdmin.importReceipt);assert.equal(replayedAdmin.replayed,true);
     assert.equal(await count('WhatsappInboxAdminSync'),1);assert.equal(await count('Messages'),6);
     const mixedBody=JSON.parse(administrative.raw);mixedBody.entry[0].changes.push({field:'messages',
       value:{messaging_product:'whatsapp',metadata:{phone_number_id:'201'},messages:[m('mixed','19995550121')]}});
-    await assert.rejects(S.importScopedLease(restricted,{...administrative,receipt:randomUUID(),raw:Buffer.from(JSON.stringify(mixedBody))},config),/review_required/);
+    await assert.rejects(S.importScopedLease(restricted,{...administrative,receipt:randomUUID(),raw:Buffer.from(JSON.stringify(mixedBody))},config,{accountSyncEnabled:true}),/review_required/);
     assert.equal(await count('WhatsappInboxAdminSync'),1);assert.equal(await count('Messages'),6);
     }finally{await restricted.end();}
    // The rest exercises failure/replay independently of the privilege check.

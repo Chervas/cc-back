@@ -152,9 +152,10 @@ async function routeClinic(connection, part) {
   }
   if (rows.length !== 1 || !ids.includes(rows[0].clinic_id)) held(); return rows[0].clinic_id;
 }
-async function importScopedLease(connection, lease, config, { importer = importLease, loadConfiguration = () => config, now = Date.now() } = {}) {
+async function importScopedLease(connection, lease, config, { importer = importLease, loadConfiguration = () => config,
+  accountSyncEnabled = process.env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED === 'true', now = Date.now() } = {}) {
   config = validateConfiguration(config);
-  const accountWabas = accountSyncWabas(lease, config);
+  const accountWabas = accountSyncEnabled ? accountSyncWabas(lease, config) : null;
   if (accountWabas) return importAccountSyncLease(connection,lease,config,accountWabas,{loadConfiguration});
   const parts = splitLease(lease, config); const prepared = [];
   const checkConfig = () => { if (JSON.stringify(validateConfiguration(loadConfiguration())) !== JSON.stringify(config)) held('import_retry'); };
