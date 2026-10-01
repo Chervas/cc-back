@@ -3,6 +3,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { buildHealthTransitionContent } = require('../../lib/whatsappHealthNotification');
 
+test('a lost phone access alert states the exact evidence without claiming a ban or missing card', () => {
+  const content = buildHealthTransitionContent({asset:{metaAssetName:'+34 600 000 401'},
+    health:{reason_code:'provider_phone_unavailable'},blocked:true});
+  assert.match(content.detail,/100\/33/); assert.match(content.detail,/\+34600000401/);
+  assert.match(content.action,/reconectar el permiso/);
+  assert.doesNotMatch(content.detail,/banead|tarjeta|131042/);
+});
+
 test('payment alerts name the emitter and confirmed error without guessing card failure', () => {
   const content = buildHealthTransitionContent({
     asset: { metaAssetName: '+34 618 12 77 29' },

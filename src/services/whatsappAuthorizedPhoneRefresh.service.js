@@ -12,7 +12,21 @@ function createService({
       throw Object.assign(new Error('whatsapp_authorized_refresh_invalid'), { code: 'whatsapp_authorized_refresh_invalid' });
     }
     const previousHealth = healthService.summarizeAssetHealth(asset);
-    const profile = await broker.profile(Number(clinicId), Number(asset.id));
+    let profile;
+    const expectedIdentity = { whatsappAuthorizationId: asset.whatsappAuthorizationId,
+      phoneNumberId: asset.phoneNumberId, wabaId: asset.wabaId };
+    try {
+      profile = await broker.profile(Number(clinicId), Number(asset.id));
+    } catch (error) {
+      if (error?.code !== 'whatsapp_authorized_phone_unavailable') throw error;
+      const result = await healthService.recordObservationForAsset({
+        assetId: asset.id, expectedIdentity,
+        signal: { phoneUnavailable: true },
+        source: 'whatsapp_authorized_profile_refresh', observedAt: now(), previousHealth,
+      });
+      if (!result) throw Object.assign(new Error('whatsapp_authorized_binding_changed'), { code: 'whatsapp_authorized_binding_changed' });
+      return { profile: null, health: result.health };
+    }
     const observedAt = now();
     const connected = profile.status === 'CONNECTED';
     const additionalData = { ...(asset.additionalData || {}) };

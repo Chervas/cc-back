@@ -168,6 +168,13 @@ function deriveHealthCandidate(input = {}) {
     };
   }
 
+  if (input.phoneUnavailable === true) {
+    return {
+      state: 'disconnected', can_send: false, severity: 'critical',
+      reason_code: 'provider_phone_unavailable', provider_status: null, provider_error_code: 100,
+    };
+  }
+
   if (DISCONNECTED_EVENTS.has(providerEvent)) {
     return {
       state: 'disconnected',
@@ -339,6 +346,7 @@ function deriveAssetSignal(asset = {}, overrides = {}) {
       ?? effectiveComplianceStatus(compliance, overrides.now || new Date()),
     providerEvent: overrides.providerEvent,
     providerErrorCode: overrides.providerErrorCode,
+    phoneUnavailable: overrides.phoneUnavailable,
     qualityRating: overrides.qualityRating ?? asset.quality_rating,
     accountReviewStatus: overrides.accountReviewStatus ?? businessHealth.account_review_status,
     wabaCanSendMessage: overrides.wabaCanSendMessage ?? businessHealth.can_send_message,
@@ -452,7 +460,7 @@ function effectiveStoredHealth(asset = {}, { now = new Date(), staleMinutes = 30
     can_send: health.can_send === undefined ? derived.can_send : health.can_send,
     severity: isStale ? 'warning' : (health.severity || derived.severity || 'warning'),
     reason_code: isStale ? 'monitoring_stale' : (health.reason_code || derived.reason_code),
-    provider_status: health.provider_status || derived.provider_status || null,
+    provider_status: health.reason_code === 'provider_phone_unavailable' ? null : (health.provider_status || derived.provider_status || null),
     provider_error_code: health.provider_error_code || null,
     source: health.source || 'derived_from_asset',
     observed_at: observedAt,

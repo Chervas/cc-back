@@ -331,6 +331,7 @@ async function recordObservationForAsset({
   previousHealth = null,
   dedupeIdentity = null,
   details = {},
+  expectedIdentity = null,
 } = {}) {
   const parsedAssetId = Number(assetId || 0);
   if (!Number.isInteger(parsedAssetId) || parsedAssetId <= 0) return null;
@@ -343,6 +344,8 @@ async function recordObservationForAsset({
       lock: transaction.LOCK.UPDATE,
     });
     if (!asset || asset.assetType !== 'whatsapp_phone_number') return null;
+    if (expectedIdentity && ['whatsappAuthorizationId', 'phoneNumberId', 'wabaId'].some(key =>
+      typeof expectedIdentity[key] !== 'string' || !expectedIdentity[key] || asset[key] !== expectedIdentity[key])) return null;
 
     const additionalData = { ...safeObject(asset.additionalData) };
     const stored = safeObject(additionalData.whatsappHealth);
