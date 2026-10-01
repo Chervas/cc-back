@@ -32,6 +32,11 @@ Resources:
             Status: Enabled
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 1
+          - Id: ExpireSyntheticNetworkCanaries
+            Status: Enabled
+            Prefix: meta/qa-network/
+            ExpirationInDays: 1
+            NoncurrentVersionExpirationInDays: 1
   RecoveryBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
