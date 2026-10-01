@@ -449,7 +449,7 @@ test('la conciliación solo marca avisos existentes al iniciar la consulta a Met
     return [];
   });
   const startedAt = new Date('2026-10-01T06:00:00.000Z');
-  await whatsappInboxAdminSync.markReconciled('301', startedAt);
+  await whatsappInboxAdminSync.markReconciled('301', startedAt, { enabled: true });
   assert.equal(queries.length, 1);
   assert.match(queries[0].sql, /reconciled_at IS NULL AND created_at<=:syncStartedAt/);
   assert.deepEqual(queries[0].options.replacements, { wabaId: '301', syncStartedAt: startedAt });

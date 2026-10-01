@@ -82,7 +82,7 @@ test('production Sequelize parser replaces every parameter in reception SQL',asy
  const {injectReplacements}=require('sequelize/lib/utils/sql');
  const sqlEngine=new Sequelize('synthetic','synthetic','synthetic',{dialect:'mysql',logging:false});
  let queries=0;
- const alerts=await collect({snapshot,bindings,now,query:async(sql,options)=>{
+ const alerts=await collect({snapshot,bindings,now,accountSyncEnabled:true,query:async(sql,options)=>{
   const rendered=injectReplacements(sql,sqlEngine.dialect,options.replacements);
   assert.doesNotMatch(rendered,/:[a-zA-Z][a-zA-Z0-9_]*/);
   if(sql.includes('FlowExecutionsV2'))assert.match(rendered,/wait_until\s*<\s*'\d{4}-\d{2}-\d{2}/);
@@ -93,13 +93,13 @@ test('production Sequelize parser replaces every parameter in reception SQL',asy
 });
 test('stale WABA template notices are reported without patient data', async () => {
  const clean={...snapshot,clinics:[{clinicId:2,blockingReview:0,oldestPendingAt:null}]};
- const alerts=await collect({snapshot:clean,bindings,now,query:async sql=>[
+ const alerts=await collect({snapshot:clean,bindings,now,accountSyncEnabled:true,query:async sql=>[
   sql.includes('WhatsappInboxAdminSync')?[{pending:3}]:[]]});
  assert.equal(alerts.length,1);
  assert.equal(alerts[0].eventKey,'whatsapp.template_reconciliation_delayed');
  assert.equal(alerts[0].metadata.pending,3);
  assert.doesNotMatch(JSON.stringify(alerts),/phone|contact|content/);
- const paused=await collect({snapshot:clean,bindings:[{clinicId:2,sendEnabled:false}],now,query:async sql=>[
+ const paused=await collect({snapshot:clean,bindings:[{clinicId:2,sendEnabled:false}],now,accountSyncEnabled:true,query:async sql=>[
   sql.includes('WhatsappInboxAdminSync')?[{pending:3}]:[]]});
  assert.equal(paused.length,1);
  assert.equal(paused[0].eventKey,'whatsapp.template_reconciliation_delayed');
