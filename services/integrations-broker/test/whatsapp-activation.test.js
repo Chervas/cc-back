@@ -1,18 +1,27 @@
 'use strict';
 const {test}=require('node:test');const assert=require('node:assert/strict');
 const {createHash}=require('node:crypto');
+const fs=require('node:fs'),path=require('node:path');
 const {fixture}=require('./whatsapp-onboarding-fixture.cjs');
 const {createWhatsappActivation}=require('../src/whatsapp-activation');
 const {createActivationReader}=require('../src/whatsapp-activation-reader');
+const capture=require('../src/whatsapp-capture-catalog');
 const A=require('../src/whatsapp-activation-contract');
 const {ACCOUNT,SECRET_KEY}=require('../src/google-main');
 async function setup(t,{legacyCaller=false,channelRole='primary'}={}){
   const f=fixture(t,{customer:{selectionOnly:true}}),flow=await f.begin({channelRole});await f.finish(flow);
-  const state={calls:[],subscribed:false,registerError:null,afterRegister:null,profile:{id:'401',status:'PENDING',
+  const captureFile=path.join(f.dir,'capture.json');
+  fs.writeFileSync(captureFile,JSON.stringify({version:1,appId:'101',scopes:[]}),{mode:0o640});
+  const state={calls:[],subscribed:false,registerError:null,afterRegister:null,captureError:null,profile:{id:'401',status:'PENDING',
     platform_type:'NOT_APPLICABLE',is_on_biz_app:false,code_verification_status:'VERIFIED',quality_rating:'UNKNOWN',
     display_phone_number:'+34000000000',verified_name:'Fictitious QA'}};
   const make=()=>createWhatsappActivation({store:f.current.store,filename:f.filename,policy:f.policy,client:f.aws,
     accountId:ACCOUNT,kmsKeyArn:SECRET_KEY,now:f.now,pinFactory:()=>async(options,fn)=>fn(Buffer.from('123456')),
+    publishCapture:appId=>{
+      const reader=createActivationReader(f.filename);
+      try{capture.publish(captureFile,appId,reader.scopes(appId));}finally{reader.close();}
+      if(state.captureError)throw state.captureError;
+    },
     http:async r=>{
       state.calls.push(r.action);
       if(r.action==='profile')return {...state.profile};
@@ -30,7 +39,7 @@ async function setup(t,{legacyCaller=false,channelRole='primary'}={}){
     {flowId:selected.flowId,scopeDigest:selected.payload.scopeDigest,clinicSetDigest:selected.payload.clinicSetDigest,
       ...(operation===A.ACTIVATE?{assetId:991}:{}),...changes}),principal:f.policy.principals[0],binding:f.binding,policy:legacyCaller?undefined:f.policy});
   const execute=(operation=A.ACTIVATE,changes={})=>executeFlow(flow,operation,changes);
-  return {f,flow,state,execute,executeFlow,async prepare(){return execute(A.PROFILE)},restart(){f.restart();engine=make();},
+  return {f,flow,state,execute,executeFlow,captureFile,async prepare(){return execute(A.PROFILE)},restart(){f.restart();engine=make();},
     row:()=>f.current.store.db.prepare('SELECT * FROM whatsapp_activations WHERE flow_id=?').get(flow.flowId)};
 }
 test('Cloud registration completes subscription and exposes only exact activated clinic grants after restart',async t=>{
@@ -104,6 +113,47 @@ test('reauthorizing the exact same phone atomically supersedes the prior credent
   assert.deepEqual(reader.definitions().map(value=>value.authorizationId),[replacement.flowId]);
   assert.deepEqual(reader.scopes('101'),[{phoneId:'401',wabaId:'301',clinicIds:[71,72]}]);
   await assert.rejects(f.execute(A.STATUS),/asset_revoked/);
+});
+test('same-phone reconnection preserves capture and the old credential after a lost capture acknowledgement',async t=>{
+  const f=await setup(t);Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:false});
+  await f.prepare();await f.execute();f.state.calls.length=0;
+  const before=capture.read(f.captureFile,'101');
+  const replacement=await f.f.begin({channelRole:'secondary'});await f.f.finish(replacement);
+  await f.executeFlow(replacement,A.PROFILE);f.state.captureError=Error('FICTITIOUS_CAPTURE_ACK_LOST');
+  await assert.rejects(f.executeFlow(replacement));
+  const pending=f.f.current.store.db.prepare('SELECT state FROM whatsapp_activations WHERE flow_id=?').get(replacement.flowId);
+  assert.equal(pending.state,'capture_ready');assert.equal(f.row().state,'active');
+  let reader=createActivationReader(f.f.filename);
+  try{
+    assert.deepEqual(reader.scopes('101'),before);
+    assert.deepEqual(reader.definitions().map(v=>v.authorizationId),[f.flow.flowId]);
+    assert.deepEqual(capture.read(f.captureFile,'101'),before);
+  }finally{reader.close();}
+  f.state.captureError=null;f.restart();
+  assert.equal((await f.executeFlow(replacement)).data.state,'active');
+  assert.equal(f.state.calls.includes('register_phone'),false);assert.equal(f.state.calls.includes('subscribe'),false);
+  assert.equal(f.f.state.codes,2);
+  reader=createActivationReader(f.f.filename);
+  try{
+    assert.deepEqual(reader.scopes('101'),before);
+    assert.deepEqual(reader.definitions().map(v=>v.authorizationId),[replacement.flowId]);
+  }finally{reader.close();}
+});
+test('capture rejects overlapping phone ownership instead of merging incompatible grants',async t=>{
+  for(const mismatch of ['asset','waba','clinics','scope'])await t.test(mismatch,async t=>{
+    const f=await setup(t);await f.prepare();await f.execute();
+    const replacement=await f.f.begin();await f.f.finish(replacement);await f.executeFlow(replacement,A.PROFILE);
+    const original=JSON.parse(f.row().definition),definition=JSON.parse(JSON.stringify(original));
+    definition.authorizationId=replacement.flowId;definition.connectionRef=A.connectionRef(replacement.flowId);
+    if(mismatch==='waba')definition.wabaId='302';
+    if(mismatch==='clinics')definition.enrollmentBinding.whatsappOnboarding.clinicIds=[71,73];
+    if(mismatch==='scope')definition.enrollmentBinding.whatsappOnboarding.scopeKey='group:10';
+    f.f.current.store.db.prepare('UPDATE whatsapp_activations SET state=?,asset_id=?,definition=? WHERE flow_id=?')
+      .run('capture_ready',mismatch==='asset'?992:991,JSON.stringify(definition),replacement.flowId);
+    const reader=createActivationReader(f.f.filename);
+    try{assert.throws(()=>reader.scopes('101'),/scope_denied/);}finally{reader.close();}
+    assert.equal(f.row().state,'active');
+  });
 });
 test('exact Cloud API reauthorization preserves the gateway-pinned current role without registering again',async t=>{
   for(const [oldRole,currentRole] of [['primary','secondary'],['secondary','primary']]){
