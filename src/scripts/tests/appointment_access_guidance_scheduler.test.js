@@ -333,7 +333,7 @@ test('el disparo omite citas canceladas y recordatorios que siguen sin confirmar
   const originals = {
     appointmentFind: db.CitaPaciente.findByPk,
     clinicFind: db.Clinica.findByPk,
-    templateFind: db.AutomationFlowTemplateV2.findOne,
+    templateFindAll: db.AutomationFlowTemplateV2.findAll,
     executionCreate: db.FlowExecutionV2.create,
   };
   let currentAppointment = futureAppointment({ status: 'cancelada' });
@@ -342,10 +342,10 @@ test('el disparo omite citas canceladas y recordatorios que siguen sin confirmar
   try {
     db.CitaPaciente.findByPk = async () => currentAppointment;
     db.Clinica.findByPk = async () => ({ id_clinica: 66, configuracion: { timezone: 'UTC' } });
-    db.AutomationFlowTemplateV2.findOne = async () => reminderTemplate({
+    db.AutomationFlowTemplateV2.findAll = async () => [reminderTemplate({
       exclude_if_booked_same_day: false,
       exclude_if_not_confirmed: true,
-    });
+    })];
     db.FlowExecutionV2.create = async () => {
       executionCreates += 1;
       throw new Error('execution_must_not_be_created');
@@ -371,7 +371,7 @@ test('el disparo omite citas canceladas y recordatorios que siguen sin confirmar
   } finally {
     db.CitaPaciente.findByPk = originals.appointmentFind;
     db.Clinica.findByPk = originals.clinicFind;
-    db.AutomationFlowTemplateV2.findOne = originals.templateFind;
+    db.AutomationFlowTemplateV2.findAll = originals.templateFindAll;
     db.FlowExecutionV2.create = originals.executionCreate;
   }
 });
