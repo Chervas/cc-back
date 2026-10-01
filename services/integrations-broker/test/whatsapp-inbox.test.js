@@ -173,6 +173,7 @@ test('a failed archive or import tag rotates behind other receipts without delet
   await assert.rejects(f.inbox.archive(first.receipt, { async put() { throw Error('synthetic outage'); } }),
     { code: 'audit_unavailable' });
   assert.deepEqual(f.inbox.unarchived(), [second.receipt]);
+  assert.equal(f.inbox.health().archive.failedArchive, 1);
   f.advance(60001);
   assert.deepEqual(f.inbox.unarchived(), [first.receipt,second.receipt]);
   for (const receipt of [first.receipt,second.receipt]) {
@@ -183,9 +184,12 @@ test('a failed archive or import tag rotates behind other receipts without delet
   await assert.rejects(f.inbox.tagImported(first.receipt, { async tagImported() { throw Error('synthetic tag outage'); } }),
     { code: 'audit_unavailable' });
   assert.deepEqual(f.inbox.untaggedImported(), [second.receipt]);
+  assert.equal(f.inbox.health().archive.failedTag, 1);
   assert.equal(f.inbox.maintain().released, 0);
   assert.deepEqual(f.inbox.health().archive, { pending: 0, oldestAt: null,
-    untaggedImported: 2, oldestUntaggedAt: f.store.db.prepare('SELECT imported_at FROM whatsapp_inbox WHERE receipt=?').get(first.receipt).imported_at });
+    untaggedImported: 2, oldestUntaggedAt: f.store.db.prepare('SELECT imported_at FROM whatsapp_inbox WHERE receipt=?').get(first.receipt).imported_at,
+    lastArchivedAt: f.store.db.prepare('SELECT archived_at FROM whatsapp_inbox WHERE receipt=?').get(second.receipt).archived_at,
+    failedArchive: 0, failedTag: 1, lastTaggedAt: null });
   f.restart();
   assert.deepEqual(f.inbox.untaggedImported(), [second.receipt]);
 });

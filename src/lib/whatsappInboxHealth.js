@@ -18,9 +18,15 @@ function archiveOf(health) {
   if (!value || !Number.isSafeInteger(value.pending) || value.pending < 0
     || !Number.isSafeInteger(value.untaggedImported) || value.untaggedImported < 0
     || (value.oldestAt !== null && !Number.isSafeInteger(value.oldestAt))
-    || (value.oldestUntaggedAt !== null && !Number.isSafeInteger(value.oldestUntaggedAt))) throw Error('inbox_health_archive_invalid');
+    || (value.oldestUntaggedAt !== null && !Number.isSafeInteger(value.oldestUntaggedAt))
+    || (value.failedArchive !== undefined && (!Number.isSafeInteger(value.failedArchive) || value.failedArchive < 0))
+    || (value.failedTag !== undefined && (!Number.isSafeInteger(value.failedTag) || value.failedTag < 0))
+    || (value.lastArchivedAt !== undefined && value.lastArchivedAt !== null && !Number.isSafeInteger(value.lastArchivedAt))
+    || (value.lastTaggedAt !== undefined && value.lastTaggedAt !== null && !Number.isSafeInteger(value.lastTaggedAt))) throw Error('inbox_health_archive_invalid');
   return { pending: value.pending, oldestAt: value.oldestAt,
-    untaggedImported: value.untaggedImported, oldestUntaggedAt: value.oldestUntaggedAt };
+    untaggedImported: value.untaggedImported, oldestUntaggedAt: value.oldestUntaggedAt,
+    failedArchive: value.failedArchive ?? 0, failedTag: value.failedTag ?? 0,
+    lastArchivedAt: value.lastArchivedAt ?? null, lastTaggedAt: value.lastTaggedAt ?? null };
 }
 function read() {
   try {

@@ -61,6 +61,15 @@ test('archive delay warns without patient content and does not mask a healthy cl
     untaggedImported:2,oldestUntaggedAt:now-121000}},bindings,now,query:async()=>[[]]});
   assert.equal(tagging[0].eventKey,'whatsapp.inbox_archive_delayed');
   assert.equal(tagging[0].metadata.untagged_imported,2);
+  const progressing={...clean,archive:{...clean.archive,lastArchivedAt:now-1000}};
+  assert.deepEqual(await collect({snapshot:progressing,bindings,now,query:async()=>[[]]}),[]);
+  const stopped={...progressing,archive:{...progressing.archive,lastArchivedAt:now-121000}};
+  assert.equal((await collect({snapshot:stopped,bindings,now,query:async()=>[[]]}))[0].eventKey,
+    'whatsapp.inbox_archive_delayed');
+  const retrying={...progressing,archive:{...progressing.archive,failedArchive:1}};
+  const retryAlert=(await collect({snapshot:retrying,bindings,now,query:async()=>[[]]}))[0];
+  assert.equal(retryAlert.eventKey,'whatsapp.inbox_archive_delayed');
+  assert.match(retryAlert.payload.detail,/1 recibo requiere/);
 });
 test('unconfigured environments do not inspect or notify clinical reception',async()=>{
  assert.deepEqual(await collect({snapshot:null,bindings:[],query:async()=>{throw Error('unexpected query')}}),[]);
