@@ -132,8 +132,17 @@ function createWhatsappOnboardingBrokerClient({ client, loadBinding, prepareBind
     const payload={flowId:row.requestId,scopeDigest:row.scopeDigest,clinicSetDigest:row.clinicSetDigest,
       ...(operation===A.ACTIVATE?{assetId,...(row.replacement?.authorizationId===null?{legacyPhoneDigest:row.replacement.phoneDigest}:{})}:{})};
     A.validate(payload,operation);
-    const result=await client.execute({requestId,tenantRef:'clinic:'+row.clinicIds[0],assetRef:'wa-enroll:'+selected.scopeKey,
-      connectionRef:selected.connectionRef,operation,payload},{timeoutMs:operation===A.ACTIVATE?100000:30000});
+    let result;
+    try {
+      result=await client.execute({requestId,tenantRef:'clinic:'+row.clinicIds[0],assetRef:'wa-enroll:'+selected.scopeKey,
+        connectionRef:selected.connectionRef,operation,payload},{timeoutMs:operation===A.ACTIVATE?100000:30000});
+    } catch (error) {
+      // Preparation resumes the same durable flow; uncertainty is not a
+      // configuration failure or permission to exchange the OAuth code again.
+      if (['rate_limited','provider_timeout','outcome_unknown','broker_unavailable'].includes(error?.code))
+        fail('whatsapp_onboarding_result_unknown', true);
+      throw error;
+    }
     guard();if(JSON.stringify(binding(await loadBinding(row.scope),row))!==JSON.stringify(selected))fail('whatsapp_onboarding_binding_invalid');
     S.exact(result,['requestId','data','replayed']);
     const d=result.data;S.exact(d,['flowId','connectionRef','scopeKey','clinicIds','phoneId','wabaId','channelRole','assetId','state','profile','observedAt','activatedAt']);
