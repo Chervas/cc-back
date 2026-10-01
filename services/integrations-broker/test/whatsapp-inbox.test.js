@@ -206,6 +206,28 @@ test('a failed archive or import tag rotates behind other receipts without delet
   assert.deepEqual(f.inbox.untaggedImported(), [second.receipt]);
 });
 
+test('local WhatsApp audit copies expire after seven days only with a verified S3 receipt', t => {
+  const f = fixture(t);
+  const created = [];
+  for (let n=0;n<5;n++) {
+    f.inbox.accept(packet(body({field:'synthetic_'+String.fromCharCode(97+n)})));
+    created.push(f.store.claim(Date.now()));
+    f.store.acknowledge(created[n],{versionId:'synthetic-audit-version',digest:created[n].digest},Date.now());
+  }
+  f.store.db.prepare('UPDATE audit_outbox SET receipt=? WHERE id=?')
+    .run(JSON.stringify({versionId:'synthetic-audit-version',digest:'0'.repeat(64)}),created[1].id);
+  f.store.db.prepare('UPDATE audit_outbox SET receipt=? WHERE id=?').run('corrupt-json',created[2].id);
+  const outside = JSON.parse(created[3].event); outside.reason='synthetic_other_operation';
+  f.store.db.prepare('UPDATE audit_outbox SET event=? WHERE id=?').run(JSON.stringify(outside),created[3].id);
+  f.store.db.prepare('UPDATE audit_outbox SET delivered_at=NULL WHERE id=?').run(created[4].id);
+  assert.equal(f.inbox.maintain().auditReleased,0);
+  f.advance(7 * 24 * 3600000 + 10000);
+  assert.equal(f.inbox.maintain(1).auditReleased,1);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM audit_outbox').get().n,4);
+  assert.equal(f.store.backlog().pending,1);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM whatsapp_inbox').get().n,5);
+});
+
 test('Additive onboarding role upgrade preserves held inbox ciphertext and passive replay without business work', t => {
   const f=fixture(t),input=packet(),first=f.inbox.accept(input);
   f.store.db.exec('ALTER TABLE whatsapp_onboarding_flows DROP COLUMN channel_role');
