@@ -629,6 +629,7 @@ function ensureDispatchableCampaignRecord(list) {
 }
 
 function computeCounters(items) {
+  items = items.filter(item => item.status !== 'test_sample' && item.custom_fields?.test_sample !== true);
   const total = items.length;
   const readyTotal = items.filter((item) => item.status === 'ready').length;
   const selectedReady = items.filter((item) => item.status === 'ready' && item.selected !== false).length;
@@ -2697,13 +2698,19 @@ function isReviewRatingTriggerMessage(triggerMessage) {
   return normalizeKey(metadata.dispatch_context) === 'review_request' && isReviewTemplateUsage(metadata.template_usage);
 }
 
+function isBulkSendTestMessage(message) {
+  const metadata = asPlainObject(message?.metadata);
+  return metadata.source === 'marketing_bulk_sends'
+    && (normalizeKey(metadata.kind) === 'mass_campaign_test' || metadata.test_send === true);
+}
+
 function shouldScheduleReviewReminder({ message, list, mappedStatus }) {
   const metadata = asPlainObject(message?.metadata);
   return mappedStatus === 'sent'
     && !!list
     && isReviewRequestList(list)
     && isReviewRatingTriggerMessage(message)
-    && normalizeKey(metadata.kind) !== 'mass_campaign_test'
+    && !isBulkSendTestMessage(message)
     && normalizeDispatchContext(metadata.dispatch_context) !== 'review_reminder';
 }
 
@@ -2712,11 +2719,12 @@ async function storeReviewPrivateFeedbackEvent({ list, item, inboundMessage, tri
   if (!isReviewRequestList(list) || !normalizedContent) return { applied: false, reason: 'not_review_feedback' };
 
   const inboundMessageId = Number(inboundMessage?.id || 0);
+  const eventType = isBulkSendTestMessage(triggerMessage) ? 'review_test_private_feedback_received' : 'review_private_feedback_received';
   const recentFeedback = await MarketingPatientContactEvent.findAll({
     where: {
       list_id: list.id,
       item_id: item.id,
-      event_type: 'review_private_feedback_received',
+      event_type: eventType,
     },
     order: [['occurred_at', 'DESC']],
     limit: 25,
@@ -2729,8 +2737,8 @@ async function storeReviewPrivateFeedbackEvent({ list, item, inboundMessage, tri
   await MarketingPatientContactEvent.create({
     list_id: list.id,
     item_id: item.id,
-    paciente_id: item.paciente_id || null,
-    event_type: 'review_private_feedback_received',
+    paciente_id: isBulkSendTestMessage(triggerMessage) ? null : item.paciente_id || null,
+    event_type: eventType,
     channel: 'whatsapp',
     payload: {
       inbound_message_id: inboundMessage?.id || null,
@@ -2793,11 +2801,13 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
     return { sent: false, reason: 'not_private_feedback_reply' };
   }
 
+  const isTestSend = isBulkSendTestMessage(triggerMessage);
+  const ackEventType = isTestSend ? 'review_test_private_feedback_ack_sent' : 'review_private_feedback_ack_sent';
   const recentAck = await MarketingPatientContactEvent.findAll({
     where: {
       list_id: list.id,
       item_id: item.id,
-      event_type: 'review_private_feedback_ack_sent',
+      event_type: ackEventType,
     },
     order: [['occurred_at', 'DESC']],
     limit: 25,
@@ -2814,8 +2824,8 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
     await MarketingPatientContactEvent.create({
       list_id: list.id,
       item_id: item.id,
-      paciente_id: item.paciente_id || null,
-      event_type: 'review_private_feedback_ack_skipped',
+      paciente_id: isTestSend ? null : item.paciente_id || null,
+      event_type: isTestSend ? 'review_test_private_feedback_ack_skipped' : 'review_private_feedback_ack_skipped',
       channel: 'whatsapp',
       payload: {
         status: 'skipped',
@@ -2823,9 +2833,7 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
         inbound_message_id: inboundMessage.id,
         trigger_message_id: triggerMessage?.id || null,
         recipient,
-        phoneNumberId: clinicConfig.phoneNumberId || null,
-        wabaId: clinicConfig.wabaId || null,
-        whatsapp_channel_role: resolveWhatsappChannelRole(clinicConfig),
+        test_send: isTestSend,
       },
       occurred_at: new Date(),
     });
@@ -2862,6 +2870,7 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
         inbound_message_id: inboundMessage.id,
         trigger_message_id: triggerMessage?.id || null,
         recipient,
+        test_send: isTestSend,
       },
       sent_at: new Date(),
     });
@@ -2920,8 +2929,8 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
   await MarketingPatientContactEvent.create({
     list_id: list.id,
     item_id: item.id,
-    paciente_id: item.paciente_id || null,
-    event_type: 'review_private_feedback_ack_sent',
+    paciente_id: isTestSend ? null : item.paciente_id || null,
+    event_type: ackEventType,
     channel: 'whatsapp',
     payload: {
       status,
@@ -2930,6 +2939,7 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
       app_message_id: appMessage?.id || null,
       provider_message_id: providerMessageId,
       recipient,
+      test_send: isTestSend,
       error: errorPayload || null,
     },
     occurred_at: occurredAt,
@@ -3002,7 +3012,8 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   if (!isReviewRequestList(list) || !rating) return { sent: false, reason: 'not_review_rating' };
 
   const triggerMetadata = asPlainObject(triggerMessage?.metadata);
-  const isTestSend = triggerMetadata.kind === 'mass_campaign_test';
+  const isTestSend = isBulkSendTestMessage(triggerMessage);
+  const followUpEventType = isTestSend ? 'review_test_rating_followup_sent' : 'review_rating_followup_sent';
   const followUpRecipient = whatsappService.normalizePhoneNumber(
     isTestSend
       ? (triggerMetadata.recipient || item.phone || '')
@@ -3018,7 +3029,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
     where: {
       list_id: list.id,
       item_id: item.id,
-      event_type: 'review_rating_followup_sent',
+      event_type: followUpEventType,
     },
     order: [['occurred_at', 'DESC']],
   });
@@ -3069,8 +3080,8 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
     await MarketingPatientContactEvent.create({
       list_id: list.id,
       item_id: item.id,
-      paciente_id: item.paciente_id || null,
-      event_type: 'review_rating_followup_skipped',
+      paciente_id: isTestSend ? null : item.paciente_id || null,
+      event_type: isTestSend ? 'review_test_rating_followup_skipped' : 'review_rating_followup_skipped',
       channel: 'whatsapp',
       payload: {
         status: 'skipped',
@@ -3081,9 +3092,6 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
         trigger_message_id: triggerMessage?.id || null,
         recipient: followUpRecipient,
         test_send: isTestSend,
-        phoneNumberId: clinicConfig.phoneNumberId || null,
-        wabaId: clinicConfig.wabaId || null,
-        whatsapp_channel_role: resolveWhatsappChannelRole(clinicConfig),
         google_review_url_available: isPositive && !!googleReviewUrl,
       },
       occurred_at: new Date(),
@@ -3168,8 +3176,8 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   await MarketingPatientContactEvent.create({
     list_id: list.id,
     item_id: item.id,
-    paciente_id: item.paciente_id || null,
-    event_type: 'review_rating_followup_sent',
+    paciente_id: isTestSend ? null : item.paciente_id || null,
+    event_type: followUpEventType,
     channel: 'whatsapp',
     payload: {
       status,
@@ -7247,7 +7255,7 @@ async function getOrCreateReviewTestSampleItem(list, clinicId, listCriteria = {}
   if (!list?.id || !MarketingPatientListItem) return null;
   const safeClinicId = Number(clinicId || 0) || null;
   const existing = await MarketingPatientListItem.findOne({
-    where: { list_id: list.id, status: 'test_sample' },
+    where: { list_id: list.id, clinica_id: safeClinicId, status: 'test_sample' },
     order: [['id', 'ASC']],
   });
   if (existing) {
@@ -8439,7 +8447,7 @@ async function sendTest(scope, campaignId, body = {}) {
     err.status = 400;
     throw err;
   }
-  if (!item && isReviewTemplateUsage(templateUsage)) {
+  if (isReviewTemplateUsage(templateUsage)) {
     item = await getOrCreateReviewTestSampleItem(list, clinicId, listCriteria);
   }
   if (!item) {
@@ -10309,6 +10317,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
 async function materializeMessageStatusFromWebhook({ message, status, mappedStatus }) {
   const metadata = message?.metadata || {};
   if (metadata.source !== 'marketing_bulk_sends') return { applied: false, reason: 'not_bulk_send' };
+  if (isBulkSendTestMessage(message)) return { applied: false, reason: 'test_send_isolated' };
   const listId = Number(metadata.list_id || 0);
   const itemId = Number(metadata.item_id || 0);
   if (!listId || !itemId) return { applied: false, reason: 'missing_ids' };
@@ -10401,6 +10410,48 @@ async function materializeMessageStatusFromWebhook({ message, status, mappedStat
   return { applied: true, list_id: listId, item_id: itemId, status: mappedStatus };
 }
 
+async function materializeTestInboundReply({ list, item, conversation, inboundMessage, triggerMessage, repliedAt, ratingDetails }) {
+  const previous = await MarketingPatientContactEvent.findAll({
+    where: { list_id: list.id, item_id: item.id, event_type: 'mass_campaign_test_replied' },
+    order: [['occurred_at', 'DESC']],
+    limit: 25,
+  });
+  if (previous.some(event => Number(event.payload?.inbound_message_id) === Number(inboundMessage.id))) {
+    return { applied: false, reason: 'test_reply_already_processed', test_send: true };
+  }
+  const rating = isReviewRequestList(list) && isReviewRatingTriggerMessage(triggerMessage)
+    ? ratingDetails.rating || null : null;
+  await MarketingPatientContactEvent.create({
+    list_id: list.id, item_id: item.id, paciente_id: null,
+    event_type: 'mass_campaign_test_replied', channel: 'whatsapp',
+    payload: { inbound_message_id: inboundMessage.id, trigger_message_id: triggerMessage.id, test_send: true, rating },
+    occurred_at: repliedAt,
+  });
+  const privateFeedback = await materializeReviewPrivateFeedback({
+    list, item, inboundMessage, triggerMessage, occurredAt: repliedAt,
+  });
+  let followUp = null;
+  if (privateFeedback.applied || privateFeedback.reason === 'already_feedback_received') {
+    followUp = await sendReviewPrivateFeedbackAcknowledgement({
+      list, item, conversation, inboundMessage, triggerMessage, occurredAt: repliedAt,
+    });
+  } else if (rating) {
+    await MarketingPatientContactEvent.create({
+      list_id: list.id, item_id: item.id, paciente_id: null,
+      event_type: 'review_test_rating_received', channel: 'whatsapp',
+      payload: { inbound_message_id: inboundMessage.id, trigger_message_id: triggerMessage.id, test_send: true, rating },
+      occurred_at: repliedAt,
+    });
+    followUp = await sendReviewRatingFollowUpOrStoreInlineFeedback({
+      list, item, conversation, rating,
+      clinicId: conversation.clinic_id,
+      triggerMessage, inboundMessage, occurredAt: repliedAt,
+      inlineFeedbackReason: ratingDetails.reason || '',
+    });
+  }
+  return { applied: true, test_send: true, list_id: list.id, item_id: item.id, review_rating: rating, follow_up: followUp };
+}
+
 async function materializeInboundReply({ conversation, inboundMessage }) {
   if (!conversation?.id || !inboundMessage) return { applied: false, reason: 'missing_context' };
   let triggerMessage = await Message.findOne({
@@ -10454,6 +10505,9 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
   const item = await MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } });
   if (!item) return { applied: false, reason: 'item_not_found' };
   const repliedAt = inboundMessage.sent_at || inboundMessage.createdAt || new Date();
+  if (isBulkSendTestMessage(triggerMessage)) {
+    return materializeTestInboundReply({ list, item, conversation, inboundMessage, triggerMessage, repliedAt, ratingDetails: inboundRatingDetails });
+  }
   const preclassifiedContactAction = asPlainObject(inboundMessage?.metadata?.marketing_opt_out);
   const listCriteria = asPlainObject(list.criteria);
   const delegatesAmbiguousReviewToV2 = Number(listCriteria.review_automation_template_id || 0) > 0;
@@ -10882,6 +10936,8 @@ module.exports = {
     resolveVariableValue,
     parseReviewImportListId,
     shouldScheduleReviewReminder,
+    isBulkSendTestMessage,
+    materializeTestInboundReply,
     buildItemDedupeKeyForChannels,
     buildItemChannelEligibilityPatch,
     cloneRecipientItemForCampaign,

@@ -13,6 +13,7 @@ const FlowExecutionLogV2 = db.FlowExecutionLogV2;
 const JobRequest = db.JobRequest;
 const { getIO } = require('./socket.service');
 const { normalizeWhatsappLocale } = require('../lib/whatsapp-template-locale');
+const { selectEffectiveAppointmentTemplates } = require('../lib/appointment-template-scope');
 const {
   REVIEW_AUTOMATION_TRIGGER,
   REVIEW_AUTOMATION_ACTION,
@@ -554,17 +555,9 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
 
   if (!templateKey) return null;
 
-  const where = {
-    template_key: templateKey,
-    published_at: { [db.Sequelize.Op.ne]: null },
-    is_active: true,
-    trigger_type: normalizedEventName,
-  };
-
-  const template = await AutomationFlowTemplateV2.findOne({
-    where,
-    order: [['version', 'DESC']],
-  });
+  const { candidates } = await fetchClinicScopedTemplates(cita, normalizedEventName);
+  const template = candidates.find(row => cleanString(row.template_key) === templateKey)
+    || candidates.find(row => stripCatalogClinicScopeSuffixes(row.template_key) === templateKey);
   if (!template) return null;
 
   if (
@@ -750,33 +743,9 @@ function isRescheduleTemplateEligible(template, cita) {
 }
 
 async function resolveClinicFallbackTemplate(cita, eventName) {
-  const clinicId = toIntOrNull(cita?.clinica_id);
+  const { clinicId, groupId, clinic, candidates } = await fetchClinicScopedTemplates(cita, eventName);
   if (!clinicId) return null;
-
-  const clinic = await Clinica.findByPk(clinicId, {
-    attributes: ['id_clinica', 'grupoClinicaId'],
-    raw: true,
-  });
-  const groupId = toIntOrNull(clinic?.grupoClinicaId);
   const timeZone = resolveClinicTimezone(clinic);
-
-  const candidates = await AutomationFlowTemplateV2.findAll({
-    where: {
-      trigger_type: eventName,
-      is_active: true,
-      published_at: { [db.Sequelize.Op.ne]: null },
-      [db.Sequelize.Op.or]: [
-        { clinic_id: clinicId },
-        ...(groupId ? [{ group_id: groupId }] : []),
-        { is_system: true },
-      ],
-    },
-    order: [
-      ['published_at', 'DESC'],
-      ['version', 'DESC'],
-      ['id', 'DESC'],
-    ],
-  });
 
   if (!Array.isArray(candidates) || !candidates.length) {
     return null;
@@ -885,12 +854,11 @@ async function fetchClinicScopedTemplates(cita, eventName) {
   const candidates = await AutomationFlowTemplateV2.findAll({
     where: {
       trigger_type: eventName,
-      is_active: true,
       published_at: { [Op.ne]: null },
       [Op.or]: [
         { clinic_id: clinicId },
-        ...(groupId ? [{ group_id: groupId }] : []),
-        { is_system: true },
+        ...(groupId ? [{ clinic_id: null, group_id: groupId }] : []),
+        { clinic_id: null, group_id: null, is_system: true },
       ],
     },
     order: [
@@ -900,7 +868,7 @@ async function fetchClinicScopedTemplates(cita, eventName) {
     ],
   });
 
-  return { clinicId, groupId, clinic, candidates };
+  return { clinicId, groupId, clinic, candidates: selectEffectiveAppointmentTemplates(candidates, clinicId, groupId) };
 }
 
 function getScopeScoreForTemplate(template, clinicId, groupId) {
@@ -1694,15 +1662,8 @@ async function fireScheduledTrigger(payload = {}) {
     : null;
   const timeZone = resolveClinicTimezone(clinic);
 
-  const template = await AutomationFlowTemplateV2.findOne({
-    where: {
-      template_key: templateKey,
-      trigger_type: triggerType,
-      is_active: true,
-      published_at: { [Op.ne]: null },
-    },
-    order: [['version', 'DESC']],
-  });
+  const effectiveTemplates = await resolveScheduledTemplatesForCita(cita, triggerType);
+  const template = effectiveTemplates.find(row => cleanString(row.template_key) === templateKey);
   if (!template) {
     return { success: true, skipped: true, reason: 'template_not_active' };
   }
