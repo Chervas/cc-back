@@ -2129,6 +2129,10 @@ exports.listPhones = async (req, res) => {
     const payload = [];
 
     for (const p of phones) {
+      const managementClinicId = routingScopeClinicId || clinicIdFilter || Number(p.clinicaId);
+      let managementBinding = null;
+      try { if (managementClinicId) managementBinding = await require('../lib/whatsappAuthorizedBrokerClient').binding(managementClinicId, Number(p.id), p); } catch { /* Keep unverified capabilities closed. */ }
+      const manualDisconnect = require('../lib/whatsappManualDisconnect').current(p, managementBinding);
       const clinica = p.clinica || {};
       const grupoDirecto = p.grupoClinica || {};
       const grupoClinica = clinica.grupoClinica || {};
@@ -2174,8 +2178,13 @@ exports.listPhones = async (req, res) => {
         base_whatsapp_channel_role: baseChannelRouting.role,
         whatsapp_channel_role: channelRouting.role,
         authorization_id: p.whatsappAuthorizationId || null,
+        can_refresh: !!managementBinding,
+        can_disconnect: !!managementBinding && !manualDisconnect
+          && require('../services/whatsappDisconnectControl.service').available(),
+        disconnect_state: manualDisconnect?.state || null,
+        profile_observed_at: additionalData.authorizedProfileObservedAt || null,
         sending_enabled: p.whatsappAuthorizationId ? !!p.isActive : undefined,
-        permission_status: permissionStatuses.get(Number(p.id)) || undefined,
+        permission_status: manualDisconnect ? 'disconnected' : permissionStatuses.get(Number(p.id)) || undefined,
         requires_clinic_selection: additionalData.requireClinicSelection === true,
         routing_disabled: additionalData.routing_disabled === true,
         activation_state: additionalData.activationState || null,
@@ -3695,7 +3704,7 @@ exports.refreshPhoneStatus = async (req, res) => {
       return res.status(403).json({ success: false, error: 'forbidden' });
     }
 
-    if (phone.whatsappAuthorizationId) {
+    {
       const requestedClinicId = Number(req.body?.clinic_id || phone.clinicaId || 0);
       if (!Number.isInteger(requestedClinicId) || requestedClinicId <= 0) {
         return res.status(400).json({ success: false, error: 'clinic_id_required' });
@@ -3706,17 +3715,30 @@ exports.refreshPhoneStatus = async (req, res) => {
         raw: true,
       });
       if ((phone.assignmentScope === 'clinic' && Number(phone.clinicaId) !== requestedClinicId)
-        || (phone.assignmentScope === 'group' && Number(requestedClinic?.grupoClinicaId) !== Number(phone.grupoClinicaId))) {
+        || (phone.assignmentScope === 'group' && Number(requestedClinic?.grupoClinicaId) !== Number(phone.grupoClinicaId))
+        || !['clinic', 'group'].includes(phone.assignmentScope)) {
         return res.status(400).json({ success: false, error: 'whatsapp_scope_invalid' });
+      }
+      const binding = await require('../lib/whatsappAuthorizedBrokerClient').binding(requestedClinicId, Number(phone.id), phone);
+      if (!binding) return res.status(503).json({ success: false, error: 'whatsapp_authorized_refresh_unavailable' });
+      const stopped = require('../lib/whatsappManualDisconnect').current(phone, binding);
+      if (stopped) {
+        // Reconcile the same durable revocation IDs; never start a second intent.
+        if (stopped.state === 'pending') await require('../services/whatsappPhoneDisconnect.service').disconnect({
+          assetId: Number(phone.id), clinicId: requestedClinicId, scopeToken: stopped.scopeToken,
+        }, { userId, sessionRef: req.authSession?.id, sessionExpiresAt: req.authSession?.expiresAt });
+        return res.json({ success: true, mode: 'authorized', permission_status: 'disconnected',
+          health: whatsappAccountHealthService.summarizeAssetHealth(phone) });
       }
       const result = await whatsappAuthorizedPhoneRefreshService.refresh({
         asset: phone,
         clinicId: requestedClinicId,
       });
-      return res.json({ success: true, mode: 'authorized', health: result.health });
+      return res.json({ success: true, mode: 'authorized', health: result.health,
+        checked_at: new Date().toISOString(), permission_status: result.profile ? 'connected' : 'disconnected',
+        payment_status: whatsappPaymentStatusService.derivePaymentSnapshot(phone.additionalData || {}).status });
     }
 
-    return res.status(503).json({ success: false, error: 'meta_security_quarantine' });
   } catch (err) {
     if (err?.statusCode === 403 || err?.code === 'whatsapp_template_clinic_scope_forbidden') {
       return res.status(403).json({ success: false, error: 'forbidden' });

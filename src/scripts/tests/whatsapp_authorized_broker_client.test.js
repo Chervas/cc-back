@@ -52,6 +52,20 @@ test('every paused binding fails before constructing an HTTP transport', async (
   await assert.rejects(f.client.send({ ...input(), expectedBinding: { ...binding(), sendEnabled: false } }), { code: 'whatsapp_authorized_send_paused' });
   assert.equal(f.counters.transports, 0); assert.equal(f.calls.length, 0);
 });
+
+test('pending and confirmed local disconnects pause sends and inbound eligibility even with a stale caller hint', async () => {
+  for (const state of ['pending', 'disconnected']) {
+    const f = fixture();
+    const stale = structuredClone(f.state.asset);
+    f.state.asset.additionalData = { whatsappManualDisconnect: { state, authorizationId:binding().authorizationId,
+      connectionRef:binding().connectionRef,localAuthorizationId:null,phoneId:'401',wabaId:'501' } };
+    assert.equal((await f.client.binding(123,456,stale)).sendEnabled,false);
+    await assert.rejects(f.client.send(input()),{code:'whatsapp_authorized_binding_changed'});
+    assert.equal(f.calls.length,0);
+    f.state.asset.additionalData.whatsappManualDisconnect.authorizationId='c1234567-1234-4234-8234-123456789abc';
+    assert.equal((await f.client.binding(123,456)).sendEnabled,true,'An old marker cannot stop a new binding');
+  }
+});
 test('reconnecting one number holds its previous messages without changing other bindings', async () => {
   const f = fixture();
   f.state.config.bindings[0].messageNotBefore = '2026-09-16T10:00:00Z';

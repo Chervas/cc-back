@@ -1,0 +1,2 @@
+Defaults!/usr/bin/node env_delete += "NODE_OPTIONS NODE_PATH"
+ubuntu ALL=(root) NOPASSWD: /usr/bin/node /opt/clinicaclick-whatsapp-disconnect/src/scripts/whatsapp_disconnect_control.js

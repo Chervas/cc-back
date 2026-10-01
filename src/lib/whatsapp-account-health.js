@@ -124,6 +124,10 @@ function extractProviderErrorCode(error) {
 }
 
 function deriveHealthCandidate(input = {}) {
+  if (input.manualDisconnect === true) return {
+    state: 'disconnected', can_send: false, severity: 'warning',
+    reason_code: 'clinicaclick_manual_disconnect', provider_status: null, provider_error_code: null,
+  };
   const providerStatus = upper(input.providerStatus);
   const registrationStatus = lower(input.registrationStatus);
   const complianceStatus = lower(input.complianceStatus);
@@ -341,14 +345,19 @@ function deriveAssetSignal(asset = {}, overrides = {}) {
   const storedHealth = safeObject(additionalData.whatsappHealth);
   const retainedUnavailable = (storedHealth.blocking_reason_code || storedHealth.reason_code) === 'provider_phone_unavailable';
   const freshProviderSignal = overrides.providerStatus != null || Boolean(overrides.providerEvent) || overrides.providerErrorCode != null;
+  const payment = safeObject(additionalData.payment);
+  const successAt = Date.parse(payment.last_success_at), failedAt = Date.parse(payment.last_detected_at);
+  const paymentBlocked = (payment.status === 'missing_payment_method' || Number(payment.last_error_code) === 131042)
+    && !(Number.isFinite(successAt) && (!Number.isFinite(failedAt) || successAt >= failedAt));
   return {
+    manualDisconnect: !!require('./whatsappManualDisconnect').current(asset),
     assetActive: overrides.assetActive ?? asset.isActive,
     providerStatus: overrides.providerStatus ?? registration.phoneStatus,
     registrationStatus: overrides.registrationStatus ?? registration.status,
     complianceStatus: overrides.complianceStatus
       ?? effectiveComplianceStatus(compliance, overrides.now || new Date()),
     providerEvent: overrides.providerEvent,
-    providerErrorCode: overrides.providerErrorCode,
+    providerErrorCode: overrides.providerErrorCode ?? (paymentBlocked ? 131042 : undefined),
     // Local reconciliation is not a new provider observation.
     phoneUnavailable: overrides.phoneUnavailable ?? (retainedUnavailable && !freshProviderSignal),
     qualityRating: overrides.qualityRating ?? asset.quality_rating,

@@ -7,13 +7,12 @@ function createService({
 } = {}) {
   async function refresh({ asset, clinicId }) {
     if (!asset || !Number.isInteger(Number(asset.id)) || Number(asset.id) <= 0
-      || !Number.isInteger(Number(clinicId)) || Number(clinicId) <= 0
-      || !asset.whatsappAuthorizationId) {
+      || !Number.isInteger(Number(clinicId)) || Number(clinicId) <= 0) {
       throw Object.assign(new Error('whatsapp_authorized_refresh_invalid'), { code: 'whatsapp_authorized_refresh_invalid' });
     }
     const previousHealth = healthService.summarizeAssetHealth(asset);
     let profile;
-    const expectedIdentity = { whatsappAuthorizationId: asset.whatsappAuthorizationId,
+    const expectedIdentity = { whatsappAuthorizationId: asset.whatsappAuthorizationId || null,
       phoneNumberId: asset.phoneNumberId, wabaId: asset.wabaId };
     try {
       profile = await broker.profile(Number(clinicId), Number(asset.id));
@@ -29,24 +28,15 @@ function createService({
     }
     const observedAt = now();
     const connected = profile.status === 'CONNECTED';
-    const additionalData = { ...(asset.additionalData || {}) };
-    if (profile.platformType !== null) additionalData.platformType = profile.platformType;
-    if (profile.isOnBizApp !== null) additionalData.isOnBizApp = profile.isOnBizApp;
-    additionalData.registration = {
-      ...(additionalData.registration || {}),
+    const profilePatch = { ...profile, authorizedProfileObservedAt: observedAt.toISOString(), registration: {
       status: connected ? 'registered' : 'pending',
       phoneStatus: profile.status,
       codeVerificationStatus: profile.codeVerificationStatus,
-    };
-    additionalData.authorizedProfileObservedAt = observedAt.toISOString();
-    await asset.update({
-      metaAssetName: profile.displayPhoneNumber || asset.metaAssetName,
-      waVerifiedName: profile.verifiedName || asset.waVerifiedName,
-      quality_rating: profile.qualityRating || asset.quality_rating,
-      additionalData,
-    });
+    } };
     const health = await healthService.recordObservationForAsset({
       assetId: asset.id,
+      expectedIdentity,
+      profilePatch,
       signal: {
         providerStatus: profile.status,
         registrationStatus: connected ? 'registered' : 'pending',
@@ -56,7 +46,8 @@ function createService({
       observedAt,
       previousHealth,
     });
-    return { profile, health: health?.health || null };
+    if (!health) throw Object.assign(new Error('whatsapp_authorized_binding_changed'), { code: 'whatsapp_authorized_binding_changed' });
+    return { profile, health: health.health };
   }
   return Object.freeze({ refresh });
 }

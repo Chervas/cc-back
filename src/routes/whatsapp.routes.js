@@ -20,7 +20,8 @@ router.use((req, res, next) => {
     || (req.method === 'PUT' && /^\/template-catalog\/[1-9][0-9]*\/toggle$/.test(path))
     || (req.method === 'POST' && /^\/template-catalog\/[1-9][0-9]*\/(duplicate|translations|disciplines|propagate)$/.test(path));
   const authorizedProfileRefresh = req.method === 'POST' && /^\/phones\/[1-9][0-9]*\/refresh$/.test(path);
-  if (templateRoute || authorizedProfileRefresh || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
+  const authorizedDisconnect = req.method === 'POST' && path === '/phones/disconnect';
+  if (templateRoute || authorizedProfileRefresh || authorizedDisconnect || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
   return authMiddleware(req, res, () => metaQuarantine.middleware(req, res));
 });
 
@@ -62,6 +63,18 @@ router.get('/templates/summary', authMiddleware, whatsappController.templatesSum
 
 // Listado de números de WhatsApp (con estado de asignación)
 router.get('/phones', authMiddleware, whatsappController.listPhones);
+router.post('/phones/disconnect', authMiddleware, async (req, res) => {
+  try {
+    const { confirm, ...input } = req.body || {};
+    if (typeof confirm !== 'boolean') return res.status(400).json({ error: 'whatsapp_disconnect_invalid' });
+    const actor = { userId: req.userData?.userId, sessionRef: req.authSession?.id, sessionExpiresAt: req.authSession?.expiresAt };
+    res.json(await require('../services/whatsappPhoneDisconnect.service')[confirm ? 'disconnect' : 'preview'](input, actor));
+  } catch (error) {
+    const status = [400, 403, 409].includes(error?.httpStatus) ? error.httpStatus : 503;
+    res.status(status).json({ error: status === 403 ? 'whatsapp_disconnect_forbidden'
+      : status === 409 ? 'whatsapp_disconnect_changed' : status === 400 ? 'whatsapp_disconnect_invalid' : 'whatsapp_disconnect_unavailable' });
+  }
+});
 for(const [path,method] of [['/routing','save'],['/routing/secondary','saveSecondary']])router.put(path,authMiddleware,async(req,res)=>{
   try { res.json(await require('../services/whatsappRouting.service')[method](req.body,{userId:req.userData?.userId,
     sessionRef:req.authSession?.id,sessionExpiresAt:req.authSession?.expiresAt})); }

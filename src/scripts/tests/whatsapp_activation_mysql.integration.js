@@ -53,12 +53,15 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   const result=await make().complete({...actor,requestId:context.requestId});assert.equal(result.connected,true);assert.equal(activations,1);
   asset=await models.ClinicMetaAsset.findByPk(result.assetId);assert.equal(asset.metaConnectionId,null);assert.equal(asset.waAccessToken,null);assert.equal(asset.additionalData.requireClinicSelection,true);
   const cutoff=published.connections[0].messageNotBefore;
+  await asset.update({additionalData:{...asset.additionalData,whatsappManualDisconnect:{state:'disconnected'}}});
   await make().complete({...actor,requestId:context.requestId});assert.equal(activations,1);assert.equal(await models.WhatsappPhoneActivation.count(),1);assert.equal(published.connections[0].messageNotBefore,cutoff);
+  assert.equal((await models.ClinicMetaAsset.findByPk(asset.id)).additionalData.whatsappManualDisconnect.state,'disconnected');
   assert.equal(await models.PlatformAuditEvent.count(),2);assert.equal(await models.ActivationTestJob.count(),1);
   const previousAuthorization=context.requestId;context.requestId=randomUUID();remote.flowId=context.requestId;
   remote.connectionRef=A.connectionRef(context.requestId);remote.assetId=null;remote.state='prepared';remote.activatedAt=null;
   const renewed=await make().complete({...actor,requestId:context.requestId});assert.equal(renewed.assetId,asset.id);assert.equal(renewed.connected,true);assert.equal(activations,2);
   assert.equal((await models.ClinicMetaAsset.findByPk(asset.id)).whatsappAuthorizationId,context.requestId);
+  assert.equal((await models.ClinicMetaAsset.findByPk(asset.id)).additionalData.whatsappManualDisconnect,undefined);
   assert.equal((await models.WhatsappPhoneActivation.findByPk(previousAuthorization)).state,'superseded');
   assert.equal((await models.WhatsappPhoneActivation.findByPk(context.requestId)).state,'active');
   assert.equal(await models.WhatsappPhoneActivation.count(),2);assert.equal(published.connections.length,1);

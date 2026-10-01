@@ -332,6 +332,7 @@ async function recordObservationForAsset({
   dedupeIdentity = null,
   details = {},
   expectedIdentity = null,
+  profilePatch = null,
 } = {}) {
   const parsedAssetId = Number(assetId || 0);
   if (!Number.isInteger(parsedAssetId) || parsedAssetId <= 0) return null;
@@ -345,9 +346,24 @@ async function recordObservationForAsset({
     });
     if (!asset || asset.assetType !== 'whatsapp_phone_number') return null;
     if (expectedIdentity && ['whatsappAuthorizationId', 'phoneNumberId', 'wabaId'].some(key =>
-      typeof expectedIdentity[key] !== 'string' || !expectedIdentity[key] || asset[key] !== expectedIdentity[key])) return null;
+      key === 'whatsappAuthorizationId' && expectedIdentity[key] === null
+        ? (asset[key] || null) !== null
+        : typeof expectedIdentity[key] !== 'string' || !expectedIdentity[key] || asset[key] !== expectedIdentity[key])) return null;
 
     const additionalData = { ...safeObject(asset.additionalData) };
+    if (profilePatch) {
+      // Materialize a profile and its health under the same identity lock. Do
+      // not overwrite newer payment, routing or disconnect metadata.
+      if (!expectedIdentity || require('../lib/whatsappManualDisconnect').current(asset)) return null;
+      for (const key of ['platformType', 'isOnBizApp', 'authorizedProfileObservedAt']) {
+        if (profilePatch[key] !== null && profilePatch[key] !== undefined) additionalData[key] = profilePatch[key];
+      }
+      additionalData.registration = { ...safeObject(additionalData.registration), ...profilePatch.registration };
+      if (profilePatch.displayPhoneNumber) asset.metaAssetName = profilePatch.displayPhoneNumber;
+      if (profilePatch.verifiedName) asset.waVerifiedName = profilePatch.verifiedName;
+      if (profilePatch.qualityRating) asset.quality_rating = profilePatch.qualityRating;
+      asset.additionalData = additionalData;
+    }
     const stored = safeObject(additionalData.whatsappHealth);
     const hadProjection = Boolean(Object.keys(stored).length);
     const fallback = previousHealth || summarizeAssetHealth(asset, { now: at });
