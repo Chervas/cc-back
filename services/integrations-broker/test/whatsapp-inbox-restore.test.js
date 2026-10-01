@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createHmac, randomBytes, randomUUID } = require('node:crypto');
+const { createHash, createHmac, randomBytes, randomUUID } = require('node:crypto');
 const { BrokerStore } = require('../src/store');
 const { createInboxCipher, createWhatsappInbox } = require('../src/whatsapp-inbox');
 const { restoreArchiveBatch } = require('../src/whatsapp-inbox-restore');
@@ -157,6 +157,60 @@ test('offline inventory restores only S3-tagged imports and publishes no partial
   assert.equal(reopened.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported' AND archive_tagged_at IS NOT NULL").get().n, 1);
   reopened.close();
   assert(!fs.readdirSync(f.dir).some(name => name.includes('.incomplete-')));
+});
+
+test('a pinned malformed imported object can be quarantined, but a valid or changed object cannot', async t => {
+  const f = fixture(t);
+  const receipt = f.sourceInbox.accept(signed('synthetic_quarantine_guard')).receipt;
+  let envelope;
+  await f.sourceInbox.archive(receipt, { async put(_id, body) { envelope = Buffer.from(body); } });
+  const validKey = `v1/${receipt}.json`;
+  const badKey = `v1/${randomUUID()}.json`;
+  const foreignKey = `v1/${randomUUID()}.json`;
+  const bad = randomBytes(64);
+  const foreign = Buffer.from(JSON.stringify({ ...JSON.parse(envelope.toString('utf8')),
+    appId: '101', receipt: foreignKey.slice(3, -5) }));
+  const etag = '"synthetic-etag"';
+  const objects = new Map([[validKey, envelope], [badKey, bad], [foreignKey, foreign]]);
+  const s3 = { async send(command) {
+    if (command.constructor.name === 'ListObjectsV2Command') return {
+      IsTruncated: false, Contents: [...objects].map(([Key, value]) =>
+        ({ Key, ETag: etag, Size: value.length })),
+    };
+    if (command.constructor.name === 'GetObjectCommand') {
+      const value = objects.get(command.input.Key);
+      assert(value);
+      return { ContentLength: value.length, VersionId: 'synthetic-version',
+        Body: { transformToByteArray: async () => Uint8Array.from(value) } };
+    }
+    if (command.constructor.name === 'GetObjectTaggingCommand') return {
+      TagSet: command.input.Key === badKey || command.input.Key === foreignKey
+        ? [{ Key: 'clinicaclick-state', Value: 'imported' }] : [],
+    };
+    throw Error('unexpected_command');
+  } };
+  const quarantine = [
+    { key: badKey, etag, versionId: 'synthetic-version',
+      sha256: createHash('sha256').update(bad).digest('hex') },
+    { key: foreignKey, etag, versionId: 'synthetic-version',
+      sha256: createHash('sha256').update(foreign).digest('hex') },
+  ];
+  const args = { s3, appId, scopes: [{ wabaId: '301', phoneId: '401', clinicIds: [71] }],
+    openCipher: async () => f.cipher };
+  const output = path.join(f.dir, 'quarantined.sqlite');
+  const result = await restoreFromArchive({ ...args, output, quarantine });
+  assert.equal(result.restored, 1);
+  assert.equal(result.quarantined, 2);
+  const restored = new BrokerStore(output);
+  assert.equal(restored.db.prepare('SELECT COUNT(*) n FROM whatsapp_inbox').get().n, 1);
+  restored.close();
+  await assert.rejects(restoreFromArchive({ ...args, output: path.join(f.dir, 'wrong-hash.sqlite'),
+    quarantine: [{ ...quarantine[0], sha256: '0'.repeat(64) }] }), /restore_quarantine_mismatch/);
+  await assert.rejects(restoreFromArchive({ ...args, output: path.join(f.dir, 'valid-object.sqlite'),
+    quarantine: [{ ...quarantine[0], key: validKey,
+      sha256: createHash('sha256').update(envelope).digest('hex') }] }), /restore_quarantine_mismatch/);
+  assert(!fs.existsSync(path.join(f.dir, 'wrong-hash.sqlite')));
+  assert(!fs.existsSync(path.join(f.dir, 'valid-object.sqlite')));
 });
 
 test('a tag change during the offline inventory leaves the final database unpublished', async t => {
