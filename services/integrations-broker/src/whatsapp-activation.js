@@ -50,8 +50,10 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
     const currentBinding=E.bindingFor(definition.enrollmentBinding),oldBinding=E.bindingFor(old.enrollmentBinding);
     const oldFlow=store.db.prepare('SELECT channel_role FROM whatsapp_onboarding_flows WHERE id=?').get(previous[0].flow_id);
     const oldRole=oldFlow?.channel_role||'primary',exact=old.phoneId===definition.phoneId&&old.wabaId===definition.wabaId;
+    // The MFA gateway pins the current local role. Older enrollments may predate
+    // that assignment; only an exact provider identity may reconcile its role.
     if(oldBinding.scopeKey!==currentBinding.scopeKey||JSON.stringify(oldBinding.clinicIds)!==JSON.stringify(currentBinding.clinicIds)
-      ||oldRole!==currentRole||!exact&&(!(phoneDigits(oldProfile.displayPhoneNumber)&&phoneDigits(oldProfile.displayPhoneNumber)===phoneDigits(currentProfile.displayPhoneNumber))
+      ||!exact&&(oldRole!==currentRole||!(phoneDigits(oldProfile.displayPhoneNumber)&&phoneDigits(oldProfile.displayPhoneNumber)===phoneDigits(currentProfile.displayPhoneNumber))
         ||!coexistence(oldProfile)||!coexistence(currentProfile)))fail('scope_denied');
     return previous[0].flow_id;
   }
