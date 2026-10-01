@@ -52,7 +52,7 @@ async function collect({ snapshot, bindings, query, now = Date.now() }) {
   const clinicIds = [...new Set(bindings.filter(b => b.sendEnabled).map(b => b.clinicId))];
   const capacity = capacityAlert(snapshot, now);
   const archive = archiveAlert(snapshot, now);
-  if (!clinicIds.length) return [capacity, archive].filter(Boolean);
+  if (!bindings.length) return [capacity, archive].filter(Boolean);
   const [adminRows] = await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ COUNT(*) pending
     FROM WhatsappInboxAdminSync WHERE reconciled_at IS NULL AND created_at < :cutoff`,
   { replacements: { cutoff: new Date(now - 10 * 60 * 1000) } });
@@ -67,6 +67,7 @@ async function collect({ snapshot, bindings, query, now = Date.now() }) {
     },
     metadata: { source: 'whatsapp_template_reconciliation', pending: adminPending },
   } : null;
+  if (!clinicIds.length) return [capacity, archive, adminAlert].filter(Boolean);
   const issues = health.issues(snapshot, clinicIds, now);
   const [waiting] = await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ id,clinic_id FROM FlowExecutionsV2
     WHERE status='waiting' AND clinic_id IN (:clinicIds) AND last_error='inbound_response_dispatch_pending'

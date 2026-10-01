@@ -99,6 +99,10 @@ test('stale WABA template notices are reported without patient data', async () =
  assert.equal(alerts[0].eventKey,'whatsapp.template_reconciliation_delayed');
  assert.equal(alerts[0].metadata.pending,3);
  assert.doesNotMatch(JSON.stringify(alerts),/phone|contact|content/);
+ const paused=await collect({snapshot:clean,bindings:[{clinicId:2,sendEnabled:false}],now,query:async sql=>[
+  sql.includes('WhatsappInboxAdminSync')?[{pending:3}]:[]]});
+ assert.equal(paused.length,1);
+ assert.equal(paused[0].eventKey,'whatsapp.template_reconciliation_delayed');
 });
 test('query failure retains a safe diagnostic code without SQL or error details',()=>{
  const {unavailable}=require('../../lib/whatsappReceptionAlerts');
