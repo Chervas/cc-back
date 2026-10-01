@@ -207,6 +207,13 @@ const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
     minimumThrottleMinutes: 60,
     defaults: { panel: true, email: true, whatsapp: false },
   },
+  {
+    key: 'whatsapp.template_reconciliation_delayed', category: 'whatsapp', severity: 'warning',
+    label: 'WhatsApp: cambios de plantillas pendientes de conciliar',
+    description: 'Meta notificó cambios de plantillas que todavía no se han confirmado mediante sincronización.',
+    minimumThrottleMinutes: 60,
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
 ]);
 
 function cleanString(value) {

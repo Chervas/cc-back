@@ -89,7 +89,16 @@ test('production Sequelize parser replaces every parameter in reception SQL',asy
   queries++;
   return [sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[]];
  }});
- assert.equal(queries,2);assert.equal(alerts[0].payload.severity,'warning');
+ assert.equal(queries,3);assert.equal(alerts[0].payload.severity,'warning');
+});
+test('stale WABA template notices are reported without patient data', async () => {
+ const clean={...snapshot,clinics:[{clinicId:2,blockingReview:0,oldestPendingAt:null}]};
+ const alerts=await collect({snapshot:clean,bindings,now,query:async sql=>[
+  sql.includes('WhatsappInboxAdminSync')?[{pending:3}]:[]]});
+ assert.equal(alerts.length,1);
+ assert.equal(alerts[0].eventKey,'whatsapp.template_reconciliation_delayed');
+ assert.equal(alerts[0].metadata.pending,3);
+ assert.doesNotMatch(JSON.stringify(alerts),/phone|contact|content/);
 });
 test('query failure retains a safe diagnostic code without SQL or error details',()=>{
  const {unavailable}=require('../../lib/whatsappReceptionAlerts');

@@ -32,7 +32,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 52, 'the canonical scheduler retains existing jobs and the gated AWS cost/audit/session/revocation/OAuth/enrollment jobs');
+  assert.equal(definitions.length, 53, 'the canonical scheduler retains existing jobs and the gated AWS cost/audit/session/revocation/OAuth/enrollment jobs');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [
