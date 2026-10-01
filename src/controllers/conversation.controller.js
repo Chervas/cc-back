@@ -2553,6 +2553,42 @@ exports.sendScheduledMessageNow = async (req, res) => {
   }
 };
 
+exports.retryFailedTemplate = async (req, res) => {
+  try {
+    const userId = req.userData?.userId, messageId = Number(req.params.messageId);
+    if (!Number.isSafeInteger(messageId) || messageId <= 0 || !req.body || Object.keys(req.body).length) {
+      return res.status(400).json({ error: 'message_retry_request_invalid' });
+    }
+    const access = await getUserClinics(userId);
+    const result = await require('../services/whatsappTemplateResend.service').resend({ messageId, userId,
+      authorize: async conversation => {
+        if (!ensureAccess(access, conversation.clinic_id)) throw Object.assign(Error('clinic_forbidden'), { code: 'clinic_forbidden', status: 403 });
+        await ensureQuickChatConversationReadAccess(userId, conversation);
+      } });
+    const io = getIO(), room = `clinic:${result.conversation.clinic_id}`;
+    if (io) {
+      io.to(room).emit('message:updated', { id: result.original.id, conversation_id: result.conversation.id,
+        status: result.original.status, metadata: result.original.metadata });
+      if (!result.reused) io.to(room).emit('message:created', result.message.toJSON());
+    }
+    return res.json({ message: result.message, original: { id: result.original.id, metadata: result.original.metadata }, reused: result.reused });
+  } catch (error) {
+    const code = error?.code;
+    const messages = {
+      whatsapp_template_retry_not_safe: 'No se puede reenviar: falta confirmar que el envío anterior falló.',
+      whatsapp_template_not_available: 'La plantilla debe estar activa y aprobada en la cuenta de WhatsApp de origen.',
+      WHATSAPP_SENDER_HEALTH_BLOCKED: 'Este WhatsApp sigue bloqueado. Resuelve el problema del número antes de reenviar.',
+      AUTOMATION_COMMUNICATIONS_RESTRICTED: 'Este contacto tiene una baja o una cuarentena que impide el envío.',
+      whatsapp_appointment_already_confirmed: 'La cita ya está confirmada. No se enviará otra petición de confirmación.',
+    };
+    if (error?.status === 403) return res.status(403).json({ error: 'conversation_forbidden' });
+    const status = code && (messages[code] || /^whatsapp_|^clinic_forbidden$|^conversation_not_found$|^message_not_found$/.test(code))
+      ? error.status || error.statusCode || 409 : 500;
+    return res.status(status).json({ error: status === 500 ? 'whatsapp_template_retry_unavailable' : code,
+      message: messages[code] || 'No se pudo reenviar. Revisa la cita, el destinatario, la plantilla y el número de origen.' });
+  }
+};
+
 exports.createInternalMessage = async (req, res) => {
   const transaction = await db.sequelize.transaction();
   try {

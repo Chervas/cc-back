@@ -781,6 +781,11 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
     let providerAccepted = false;
     try {
         const messageMetadata = msg.metadata && typeof msg.metadata === 'object' ? msg.metadata : {};
+        if (messageMetadata.manual_retry_of_message_id) {
+            await require('../services/whatsappTemplateResend.service').assertReady({
+                message: msg, conversation: await Conversation.findByPk(conversationId),
+            });
+        }
         if (messageMetadata.communication_scope) {
             await marketingOptOutService.assertAutomationCommunicationAllowed({
                 clinicId: Number(clinicId || msg?.conversation?.clinic_id || 0) || null,

@@ -585,6 +585,7 @@ const JOB_HANDLERS = {
   ),
   automations_v2_execute: async (payload = {}, job, claim) => runAutomationFlowV2Job(payload, job, claim),
   automation_whatsapp_quiet_send: async (payload = {}) => flowEngineV2Service.runScheduledWhatsappSendJob(payload),
+  whatsapp_manual_template_resend: async (payload = {}) => require('./whatsappTemplateResend.service').dispatch(payload),
   appointment_automation_schedule_fire: async (payload = {}) => runAppointmentAutomationScheduleJob(payload),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),
   lead_auto_reply_backfill: async (payload = {}, jobRequest) => (
