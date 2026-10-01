@@ -185,4 +185,5 @@ test('a tag change during the offline inventory leaves the final database unpubl
     openCipher: async () => f.cipher }), /restore_inventory_changed/);
   assert.equal(reads, 2);
   assert.equal(fs.existsSync(output), false);
+  assert(!fs.readdirSync(f.dir).some(name => name.startsWith('must-not-publish.sqlite.incomplete-')));
 });
