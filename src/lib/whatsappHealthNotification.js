@@ -1,6 +1,7 @@
 'use strict';
 
 const REASONS = Object.freeze({
+  provider_phone_unavailable: ['Meta ya no permite consultar este n\u00famero con su permiso actual (100/33). Puede haberse eliminado o perdido su vinculaci\u00f3n.', 'Revisar la cuenta en Meta y reconectar el permiso de este n\u00famero en Ajustes > WhatsApp.'],
   meta_error_131042_payment_missing: ['Meta ha rechazado un env\u00edo por un problema de pago (c\u00f3digo 131042). No confirma que falte la tarjeta.', 'Revisar el m\u00e9todo de pago y la facturaci\u00f3n de esta cuenta en Meta.'],
   meta_error_131031_account_locked: ['Meta ha bloqueado la cuenta de WhatsApp (c\u00f3digo 131031).', 'Revisar la restricci\u00f3n de esta cuenta en Meta y contactar con su soporte.'],
   account_event_account_offboarded: ['Meta ha desvinculado el acceso de la aplicaci\u00f3n a WhatsApp (ACCOUNT_OFFBOARDED). No significa por s\u00ed solo que el n\u00famero est\u00e9 baneado.', 'Reconectar el permiso del n\u00famero en Ajustes > WhatsApp.'],

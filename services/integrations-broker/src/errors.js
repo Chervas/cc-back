@@ -9,7 +9,7 @@ const STATUS = Object.freeze({
   business_profile_mutation_busy: 409, business_profile_regular_hours_required: 409,
   idempotency_conflict: 409, outcome_unknown: 409, rate_limited: 429,
   provider_disabled: 503, provider_failed: 502, provider_timeout: 504,
-  provider_unauthorized: 502, credential_revoked: 423,
+  provider_unauthorized: 502, credential_revoked: 423, whatsapp_authorized_phone_unavailable: 423,
   secret_unavailable: 503, audit_unavailable: 503, internal_error: 500,
   ...Object.fromEntries(Object.values(require('./whatsapp-provider-errors').PROVIDER_ERRORS).map(code => [code, 502])),
   ...Object.fromEntries(Object.values(require('./bedrock-errors').PROVIDER_ERRORS).map(code=>[code,502])),

@@ -33,6 +33,25 @@ test('Authorized transport refuses arbitrary Graph payloads, endpoints and token
     {json:{...message(),interactive:{...message().interactive,type:'flow'}}}])await assert.rejects(http({...input(),...change}),{code:'invalid_request'});
   assert.equal(f.calls.length,0);
 });
+
+test('only the exact profile GET 100/33 means this phone is unavailable; other errors keep their semantics', async () => {
+  for (const [action,status,subcode,expected] of [
+    ['profile',400,33,'whatsapp_authorized_phone_unavailable'],
+    ['profile',400,1,'whatsapp_provider_100'],
+    ['profile',500,33,'provider_failed'],
+    ['send',400,33,'whatsapp_provider_100'],
+    ['phones',400,33,'whatsapp_provider_100'],
+  ]) {
+    const f = fixture({ status, response: { error: { code: 100, error_subcode: subcode, message: TOKEN } } });
+    await assert.rejects(createWhatsappAuthorizedHttp({ request:f.request })({ ...input(), action,
+      ...(action !== 'send' ? { json:undefined } : {}) }), error => {
+      assert.equal(error.code, expected); assert(!error.stack.includes(TOKEN));
+      assert.deepEqual(require('../src/errors').publicError(error).body, { error: { code:expected } });
+      return true;
+    });
+    assert.equal(f.calls.length,1);
+  }
+});
 for(const setup of [{status:302,headers:{location:'https://other.invalid'}},{headers:{'content-encoding':'gzip'}},{response:{error:{code:190,message:TOKEN}}}])
 test('Authorized transport rejects redirect/compression/provider revocation without retry or secret disclosure',async()=>{
   const f=fixture(setup);await assert.rejects(createWhatsappAuthorizedHttp({request:f.request})(input()),e=>!e.stack.includes(TOKEN)&&['provider_failed','credential_revoked'].includes(e.code));assert.equal(f.calls.length,1);

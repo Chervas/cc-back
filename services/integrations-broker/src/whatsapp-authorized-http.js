@@ -60,6 +60,10 @@ function createWhatsappAuthorizedHttp({ request = https.request, timeoutMs = 800
             try {
               const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
               if (!value || typeof value !== 'object' || Array.isArray(value)) fail('provider_failed');
+              // Graph 100/33 means this exact object is no longer readable, not
+              // that the token or every other number has been revoked.
+              if (action === 'profile' && res.statusCode === 400 && value.error?.code === 100
+                && value.error?.error_subcode === 33) fail('whatsapp_authorized_phone_unavailable');
               const providerError = require('./whatsapp-provider-errors').fromGraphError(value, res.statusCode);
               if (providerError) fail(providerError);
               if ([190, 102].includes(value.error?.code)) fail('credential_revoked');

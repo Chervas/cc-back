@@ -22,6 +22,29 @@ function patchProperty(object, key, value) {
   return () => { object[key] = previous; };
 }
 
+test('unavailable Graph object blocks only its phone without pretending Meta reported DISCONNECTED', () => {
+  const asset = { additionalData:{registration:{status:'registered',phoneStatus:'CONNECTED'}} };
+  const health = deriveHealthCandidate(deriveAssetSignal(asset,{phoneUnavailable:true}));
+  assert.equal(health.state,'disconnected'); assert.equal(health.can_send,false);
+  assert.equal(health.reason_code,'provider_phone_unavailable'); assert.equal(health.provider_status,null);
+  asset.additionalData.whatsappHealth = {...health,observed_at:new Date().toISOString()};
+  const persisted = effectiveStoredHealth(asset);
+  assert.equal(persisted.state,'disconnected'); assert.equal(persisted.provider_status,null);
+  assert.equal(deriveHealthCandidate(deriveAssetSignal({additionalData:asset.additionalData})).state,'healthy');
+});
+
+test('a profile observation cannot block a replacement authorization after a concurrent reconnect', async () => {
+  const asset = {id:400,assetType:'whatsapp_phone_number',whatsappAuthorizationId:'new',phoneNumberId:'401',wabaId:'301',
+    save:() => assert.fail('Changed identity must not be saved')};
+  const restores = [patchProperty(db.ClinicMetaAsset,'findByPk',async () => asset),
+    patchProperty(db.sequelize,'transaction',async callback => callback({LOCK:{UPDATE:'UPDATE'}}))];
+  try {
+    const result = await whatsappAccountHealthService.recordObservationForAsset({assetId:400,signal:{phoneUnavailable:true},
+      expectedIdentity:{whatsappAuthorizationId:'old',phoneNumberId:'401',wabaId:'301'}});
+    assert.equal(result,null);
+  } finally { restores.reverse().forEach(restore=>restore()); }
+});
+
 test('BANNED y 131031 prevalecen sobre registro y calidad GREEN', () => {
   const banned = deriveHealthCandidate({
     providerStatus: 'BANNED',
