@@ -338,6 +338,9 @@ function deriveAssetSignal(asset = {}, overrides = {}) {
   const compliance = safeObject(additionalData.whatsappCompliance);
   const businessHealth = safeObject(additionalData.whatsappBusinessHealth);
   const webhookSubscription = safeObject(additionalData.whatsappWebhookSubscription);
+  const storedHealth = safeObject(additionalData.whatsappHealth);
+  const retainedUnavailable = (storedHealth.blocking_reason_code || storedHealth.reason_code) === 'provider_phone_unavailable';
+  const freshProviderSignal = overrides.providerStatus != null || Boolean(overrides.providerEvent) || overrides.providerErrorCode != null;
   return {
     assetActive: overrides.assetActive ?? asset.isActive,
     providerStatus: overrides.providerStatus ?? registration.phoneStatus,
@@ -346,7 +349,8 @@ function deriveAssetSignal(asset = {}, overrides = {}) {
       ?? effectiveComplianceStatus(compliance, overrides.now || new Date()),
     providerEvent: overrides.providerEvent,
     providerErrorCode: overrides.providerErrorCode,
-    phoneUnavailable: overrides.phoneUnavailable,
+    // Local reconciliation is not a new provider observation.
+    phoneUnavailable: overrides.phoneUnavailable ?? (retainedUnavailable && !freshProviderSignal),
     qualityRating: overrides.qualityRating ?? asset.quality_rating,
     accountReviewStatus: overrides.accountReviewStatus ?? businessHealth.account_review_status,
     wabaCanSendMessage: overrides.wabaCanSendMessage ?? businessHealth.can_send_message,
