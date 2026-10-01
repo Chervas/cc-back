@@ -563,6 +563,55 @@ test('una baja explícita reemplaza causas bloqueantes antiguas en la proyecció
   }
 });
 
+test('las alertas de pago conservan causa, emisor y ambito de clinica durante bloqueo y recuperacion', async () => {
+  const systemNotifications = require('../../services/systemNotifications.service');
+  const asset = {
+    id: 393, assetType: 'whatsapp_phone_number', isActive: true, assignmentScope: 'clinic',
+    clinicaId: 66, grupoClinicaId: 29, metaAssetName: '+34 618 12 77 29', wabaId: '358450834017696',
+    additionalData: {
+      registration: { status: 'registered', phoneStatus: 'CONNECTED' },
+      payment: {
+        last_error_href: 'https://business.facebook.com/latest/billing_hub/accounts/details/?asset_id=358450834017696&business_id=1765761600270544&external_flow_id=' + 'x'.repeat(400),
+      },
+      whatsappHealth: { state: 'healthy', reason_code: 'provider_connected', can_send: true },
+    },
+    changed() {}, async save() {}, get() { return this; },
+  };
+  const queued = [];
+  const restores = [
+    patchProperty(db.ClinicMetaAsset, 'findByPk', async () => asset),
+    patchProperty(db.Clinica, 'findByPk', async () => ({ nombre_clinica: 'BS Capilar' })),
+    patchProperty(db.GrupoClinica, 'findByPk', async () => ({ nombre_grupo: 'BS Medical & Capilar' })),
+    patchProperty(db.WhatsappAccountHealthEvent, 'findOrCreate', async () => [null, true]),
+    patchProperty(db.sequelize, 'transaction', async callback => callback({ LOCK: { UPDATE: 'UPDATE' } })),
+    patchProperty(systemNotifications, 'queueNotification', async input => { queued.push(input); return input; }),
+  ];
+  try {
+    await whatsappAccountHealthService.recordObservationForAsset({
+      assetId: 393, signal: { providerErrorCode: 131042 }, source: 'secure_inbox_status',
+    });
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].payload.title, 'WhatsApp bloqueado en BS Capilar');
+    assert.match(queued[0].payload.detail, /131042/);
+    assert.match(queued[0].payload.action, /billing_hub\/accounts\/details/);
+    assert.doesNotMatch(queued[0].payload.action, /external_flow_id/);
+    assert(queued[0].payload.action.length <= 220);
+    assert.equal(queued[0].metadata.provider_error_code, 131042);
+    asset.additionalData.payment.last_success_status = 'delivered';
+    await whatsappAccountHealthService.recordObservationForAsset({
+      assetId: 393, signal: { providerStatus: 'CONNECTED' }, source: 'secure_inbox_status_payment_recovered', explicitRecovery: true,
+    });
+    assert.equal(queued.length, 2);
+    assert.equal(queued[1].metadata.previous_reason_code, 'meta_error_131042_payment_missing');
+    assert.match(queued[1].payload.detail, /mensaje posterior al error de pago/);
+    asset.assignmentScope = 'group';
+    await whatsappAccountHealthService.recordObservationForAsset({
+      assetId: 393, signal: { providerErrorCode: 131042 }, source: 'secure_inbox_status',
+    });
+    assert.equal(queued[2].payload.title, 'WhatsApp bloqueado en BS Medical & Capilar');
+  } finally { restores.reverse().forEach(restore => restore()); }
+});
+
 test('una proyección saludable antigua no oculta un BANNED persistido', () => {
   const now = new Date('2026-08-31T12:00:00.000Z');
   const health = effectiveStoredHealth({

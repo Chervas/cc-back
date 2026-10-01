@@ -237,7 +237,7 @@ async function createEvent({ asset, eventType, source, previousState, health, ob
   return { row, created };
 }
 
-async function queueTransitionNotification({ asset, previousState, health }) {
+async function queueTransitionNotification({ asset, previousState, previousReason = null, health }) {
   const wasBlocked = isBlockingState(previousState);
   const isBlocked = isBlockingState(health.state);
   if (!isBlocked && !wasBlocked) return null;
@@ -251,8 +251,26 @@ async function queueTransitionNotification({ asset, previousState, health }) {
       ? GrupoClinica.findByPk(asset.grupoClinicaId, { attributes: ['nombre_grupo'], raw: true })
       : null,
   ]);
-  const scopeName = group?.nombre_grupo || clinic?.nombre_clinica || asset.waVerifiedName || 'una cuenta';
+  const scopeName = (asset.assignmentScope === 'group'
+    ? group?.nombre_grupo || clinic?.nombre_clinica
+    : clinic?.nombre_clinica || group?.nombre_grupo) || asset.waVerifiedName || 'una cuenta';
   const blocked = isBlockingState(health.state);
+  let paymentHref = null;
+  if (blocked && (health.blocking_reason_code || health.reason_code) === 'meta_error_131042_payment_missing') {
+    const payments = require('./whatsappPaymentStatus.service');
+    const data = safeObject(asset.additionalData);
+    const href = payments.normalizeMetaPaymentHref(data.payment?.last_error_href)
+      || payments.buildWhatsappManagerHref({ wabaId: asset.wabaId, businessId: data.whatsappBusinessHealth?.business_id });
+    const url = new URL(href);
+    // Keep the account identity, not transient flow parameters which can truncate the email link.
+    for (const key of [...url.searchParams.keys()]) {
+      if (!['asset_id', 'business_id', 'payment_account_id'].includes(key)) url.searchParams.delete(key);
+    }
+    if (url.toString().length <= 190) paymentHref = url.toString();
+  }
+  const content = require('../lib/whatsappHealthNotification').buildHealthTransitionContent({
+    asset, health, previousReason, blocked, paymentHref,
+  });
   const systemNotifications = require('./systemNotifications.service');
   return systemNotifications.queueNotification({
     eventKey: blocked ? 'whatsapp.account_health_blocked' : 'whatsapp.account_health_recovered',
@@ -260,14 +278,12 @@ async function queueTransitionNotification({ asset, previousState, health }) {
       ? {
           severity: 'critical',
           title: `WhatsApp bloqueado en ${scopeName}`,
-          detail: 'Clinicaclick ha detenido los nuevos envíos antes de contactar con Meta.',
-          action: 'Revisar el estado y el historial en Monitorización > WhatsApp.',
+          ...content,
         }
       : {
           severity: 'info',
           title: `WhatsApp restablecido en ${scopeName}`,
-          detail: 'Meta vuelve a informar de un estado operativo confirmado para el número.',
-          action: 'Comprobar el historial antes de reactivar manualmente campañas pausadas.',
+          ...content,
         },
     force: true,
     metadata: {
@@ -277,6 +293,9 @@ async function queueTransitionNotification({ asset, previousState, health }) {
       group_id: Number(asset.grupoClinicaId || 0) || null,
       health_state: health.state,
       reason_code: health.reason_code || null,
+      previous_reason_code: previousReason,
+      provider_error_code: health.provider_error_code || null,
+      observation_source: health.source || null,
     },
   });
 }
@@ -409,6 +428,7 @@ async function recordObservationForAsset({
       notification = {
         asset: asset.get({ plain: true }),
         previousState: hadProjection ? previousState : 'unknown',
+        previousReason: stored.blocking_reason_code || previousReason,
         health: projection,
       };
     }

@@ -6,8 +6,8 @@ const {createWhatsappActivation}=require('../src/whatsapp-activation');
 const {createActivationReader}=require('../src/whatsapp-activation-reader');
 const A=require('../src/whatsapp-activation-contract');
 const {ACCOUNT,SECRET_KEY}=require('../src/google-main');
-async function setup(t,{legacyCaller=false}={}){
-  const f=fixture(t,{customer:{selectionOnly:true}}),flow=await f.begin();await f.finish(flow);
+async function setup(t,{legacyCaller=false,channelRole='primary'}={}){
+  const f=fixture(t,{customer:{selectionOnly:true}}),flow=await f.begin({channelRole});await f.finish(flow);
   const state={calls:[],subscribed:false,registerError:null,afterRegister:null,profile:{id:'401',status:'PENDING',
     platform_type:'NOT_APPLICABLE',is_on_biz_app:false,code_verification_status:'VERIFIED',quality_rating:'UNKNOWN',
     display_phone_number:'+34000000000',verified_name:'Fictitious QA'}};
@@ -104,6 +104,47 @@ test('reauthorizing the exact same phone atomically supersedes the prior credent
   assert.deepEqual(reader.definitions().map(value=>value.authorizationId),[replacement.flowId]);
   assert.deepEqual(reader.scopes('101'),[{phoneId:'401',wabaId:'301',clinicIds:[71,72]}]);
   await assert.rejects(f.execute(A.STATUS),/asset_revoked/);
+});
+test('exact Cloud API reauthorization preserves the gateway-pinned current role without registering again',async t=>{
+  for(const [oldRole,currentRole] of [['primary','secondary'],['secondary','primary']]){
+    await t.test(`${oldRole} enrollment, ${currentRole} current assignment`,async t=>{
+      const f=await setup(t,{channelRole:oldRole});
+      Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:false});
+      await f.prepare();await f.execute();f.state.calls.length=0;
+      const replacement=await f.f.begin({channelRole:currentRole});await f.f.finish(replacement);
+      await f.executeFlow(replacement,A.PROFILE);const result=await f.executeFlow(replacement);
+      assert.equal(result.data.state,'active');assert.equal(result.data.assetId,991);
+      assert.equal(result.data.channelRole,currentRole);
+      assert.equal(f.row().state,'superseded');
+      assert.equal(f.state.calls.filter(v=>v==='register_phone').length,0);
+      assert.equal(f.state.calls.filter(v=>v==='subscribe').length,0);
+      const reader=createActivationReader(f.f.filename);t.after(()=>reader.close());
+      assert.deepEqual(reader.definitions().map(value=>value.authorizationId),[replacement.flowId]);
+      assert.deepEqual(reader.scopes('101'),[{phoneId:'401',wabaId:'301',clinicIds:[71,72]}]);
+    });
+  }
+});
+test('role reconciliation never allows rotated IDs or another clinic scope',async t=>{
+  for(const mismatch of ['rotated_ids','clinic_scope']){
+    await t.test(mismatch,async t=>{
+      const f=await setup(t);Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
+      await f.prepare();await f.execute();f.state.calls.length=0;
+      if(mismatch==='rotated_ids'){f.f.state.selectedWabaId='302';f.f.state.selectedPhoneId='402';}
+      const replacement=await f.f.begin({channelRole:'secondary'});
+      await f.f.finish(replacement,mismatch==='rotated_ids'?{wabaId:'302',phoneId:'402'}:{});
+      if(mismatch==='rotated_ids')f.state.profile={...f.state.profile,id:'402'};
+      else {
+        const definition=JSON.parse(f.row().definition);definition.enrollmentBinding.whatsappOnboarding.clinicIds=[71,73];
+        f.f.current.store.db.prepare('UPDATE whatsapp_activations SET definition=? WHERE flow_id=?')
+          .run(JSON.stringify(definition),f.flow.flowId);
+      }
+      await f.executeFlow(replacement,A.PROFILE);await assert.rejects(f.executeFlow(replacement),/scope_denied/);
+      assert.equal(f.row().state,'active');
+      assert.equal(f.state.calls.includes('register_phone'),false);assert.equal(f.state.calls.includes('subscribe'),false);
+      const next=f.f.current.store.db.prepare('SELECT state,asset_id FROM whatsapp_activations WHERE flow_id=?').get(replacement.flowId);
+      assert.equal(next.state,'prepared');assert.equal(next.asset_id,null);
+    });
+  }
 });
 test('coexistence reauthorization accepts rotated Meta IDs only for the same authenticated phone',async t=>{
   const f=await setup(t);Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
