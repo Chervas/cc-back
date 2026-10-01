@@ -61,6 +61,18 @@ test('full storage and audit failure remain retryable and roll back the cipherte
   assert.throws(() => g.inbox.accept(packet()), e => e.code === 'audit_unavailable' && !e.stack.includes('FICTITIOUS_STORAGE_ERROR'));
   assert.equal(g.store.db.prepare('SELECT COUNT(*) AS n FROM whatsapp_inbox').get().n, 0);
 });
+test('audit backlog limit rejects new receipts atomically and resumes after audit delivery', t => {
+  const f = fixture(t, { maxAuditBacklog: 1 });
+  f.inbox.accept(packet());
+  const second = packet(body({ field: 'history' }));
+  assert.throws(() => f.inbox.accept(second), { code: 'audit_unavailable' });
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM whatsapp_inbox').get().n, 1);
+  const claimed = f.store.claim(Date.now());
+  f.store.acknowledge(claimed, { versionId: 'synthetic-audit-version', digest: claimed.digest }, Date.now());
+  assert.equal(f.store.backlog().pending, 0);
+  assert.equal(f.inbox.accept(second).persisted, true);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM whatsapp_inbox').get().n, 2);
+});
 test('bulk history retains every contact with no automatic business actions', t => {
   const f = fixture(t); const input = packet(body({ field: 'history', value: { metadata: { phone_number_id: '401' },
     history: [{ threads: Array.from({ length: 2000 }, (_, i) => ({ id: String(34000000001 + i), messages: [{ id: 'synthetic-' + i, text: { body: 'synthetic history' } }] })) }] } }));
