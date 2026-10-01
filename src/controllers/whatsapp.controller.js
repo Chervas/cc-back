@@ -2089,10 +2089,12 @@ exports.listPhones = async (req, res) => {
         raw: true,
       });
       for (const row of counts) {
-        const current = templateCounts.get(row.waba_id) || { total: 0, approved: 0 };
+        const current = templateCounts.get(row.waba_id) || { total: 0, approved: 0, pending: 0, rejected: 0 };
         const count = Number(row.count) || 0;
         current.total += count;
         if (String(row.status).toUpperCase() === 'APPROVED') current.approved += count;
+        if (['PENDING', 'IN_REVIEW'].includes(String(row.status).toUpperCase())) current.pending += count;
+        if (String(row.status).toUpperCase() === 'REJECTED') current.rejected += count;
         templateCounts.set(row.waba_id, current);
       }
     }
@@ -2239,6 +2241,8 @@ exports.listPhones = async (req, res) => {
         payment_last_success_at: payment.last_success_at || null,
         template_count: templateCounts.get(p.wabaId)?.total || 0,
         approved_template_count: templateCounts.get(p.wabaId)?.approved || 0,
+        pending_template_count: templateCounts.get(p.wabaId)?.pending || 0,
+        rejected_template_count: templateCounts.get(p.wabaId)?.rejected || 0,
         meta_billed_by: p.meta_billed_by ?? null,
         is_test_number: !!additionalData.isTestNumber,
         account_mode: additionalData.accountMode || null,

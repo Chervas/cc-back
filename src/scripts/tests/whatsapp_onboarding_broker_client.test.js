@@ -4,12 +4,27 @@ const fs = require('node:fs'); const { randomUUID, randomBytes } = require('node
 const { brokerForGateway } = require('./fixtures/whatsapp_onboarding_gateway.fixture.cjs');
 const { createWhatsappOnboardingBrokerClient, configuredClient, configuration } = require('../../lib/whatsappOnboardingBrokerClient');
 const C = require('../../../services/integrations-broker/src/whatsapp-onboarding-contract');
+const A = require('../../../services/integrations-broker/src/whatsapp-activation-contract');
 function context(g) {
   return { requestId: randomUUID(), status: 'awaiting', scope: { type: 'group', id: 9 }, clinicIds: [71,72],
     expiresAt: new Date(g.f.now() + 600000).toISOString(), scopeDigest: C.hash('FICTITIOUS_GATEWAY_SCOPE'),
     clinicSetDigest: C.hash('[71,72]'), state: randomBytes(32).toString('base64url') };
 }
 const finish = row => ({ state: row.state, code: 'FICTITIOUS_GATEWAY_CODE_' + row.requestId, wabaId: '301', phoneId: '401' });
+test('preparation timeouts and busy leases report uncertainty without transport retry or weakening identity failures', async t => {
+  const g = brokerForGateway(t); const row = context(g);
+  for (const [name, operation] of [['profile', A.PROFILE], ['activate', A.ACTIVATE], ['activationStatus', A.STATUS]]) {
+    for (const code of ['rate_limited', 'provider_timeout', 'outcome_unknown', 'broker_unavailable']) {
+      let attempts = 0;
+      g.state.before = command => { assert.equal(command.operation, operation); attempts++; throw Object.assign(Error('FICTITIOUS_SECRET'), { code }); };
+      await assert.rejects(g.client[name](row, 991), { code: 'whatsapp_onboarding_result_unknown', outcomeUnknown: true });
+      assert.equal(attempts, 1);
+    }
+    g.state.before = () => { throw Object.assign(Error('FICTITIOUS_SECRET'), { code: 'scope_denied' }); };
+    await assert.rejects(g.client[name](row, 991), { code: 'scope_denied' });
+  }
+  assert.equal(g.f.state.codes, 0); assert.equal(g.f.state.puts, 0);
+});
 test('Settings client sends exact read-only status and never reconciles or exposes an incomplete credential', async t => {
   const g = brokerForGateway(t); const row = context(g); await g.client.begin(row); g.f.state.losePut = true;
   await assert.rejects(g.client.finish(row, finish(row))); g.f.restart();
