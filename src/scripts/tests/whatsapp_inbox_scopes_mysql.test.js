@@ -10,7 +10,13 @@ test('multiclinic passive importer preserves parent on partial failure, retries 
   await sql.query('CREATE TABLE PatientDirectionSettings(clinic_id INT,director_phone_asset_id INT)');await sql.query('CREATE TABLE MetaScopeBlocks(scope_key VARCHAR(100) PRIMARY KEY)');
   await sql.query("CREATE TABLE Conversations(id INT PRIMARY KEY AUTO_INCREMENT,clinic_id INT,channel VARCHAR(20),contact_id VARCHAR(32),unread_count INT,last_message_at DATETIME(3),last_inbound_at DATETIME(3),createdAt DATETIME(3),updatedAt DATETIME(3))");
   await sql.query("CREATE TABLE Messages(id INT PRIMARY KEY AUTO_INCREMENT,conversation_id INT,direction VARCHAR(20),content TEXT,message_type VARCHAR(20),status VARCHAR(20),metadata JSON,sent_at DATETIME(3),createdAt DATETIME(3),updatedAt DATETIME(3))");
-  for(const ddl of SCHEMA)await sql.query(ddl);const rawConnection=await sql.connectionManager.getConnection();const c=rawConnection.promise();
+  for(const ddl of SCHEMA.filter(ddl=>!ddl.includes('WhatsappInboxAdminSync')))await sql.query(ddl);
+  const adminMigration=require('../../../migrations/20261001070000-whatsapp-inbox-admin-sync');
+  await adminMigration.up(sql.getQueryInterface());await adminMigration.up(sql.getQueryInterface());
+  assert.ok((await sql.getQueryInterface().showIndex('WhatsappInboxAdminSync'))
+    .some(index=>index.name==='wa_inbox_admin_pending'));
+  report.checks.push('account-event migration creates an idempotent indexed table');
+  const rawConnection=await sql.connectionManager.getConnection();const c=rawConnection.promise();
   const config={version:1,scopes:[{assetId:81,wabaId:'101',phoneId:'201',clinicIds:[71]},{assetId:82,wabaId:'102',phoneId:'202',clinicIds:[72]}]};
   const m=(id,from)=>({id:'wamid.'+id,from,timestamp:'1789430400',type:'text',text:{body:'FICTITIOUS PASSIVE TEXT'}});
   const make=(scopes=config.scopes,peer='19995550101')=>({receipt:randomUUID(),lease:randomUUID(),automaticActionsAllowed:false,scopeBindings:scopes.map(({assetId,...s})=>s),raw:Buffer.from(JSON.stringify({object:'whatsapp_business_account',entry:scopes.map((s,i)=>({id:s.wabaId,changes:[{field:'messages',value:{messaging_product:'whatsapp',metadata:{phone_number_id:s.phoneId},messages:[m('message'+i,peer)]}}]}))}))});
