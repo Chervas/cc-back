@@ -62,3 +62,35 @@ test('poll failures expose only a bounded technical stage and never raw provider
  await assert.rejects(f.poll(),error=>error.code==='inbox_health_publish_failed'
   && error.pollStage==='health'&&!error.message.includes('private'));
 });
+test('a full poll reports its bounded batch size only after every lease is committed or deferred',async()=>{
+ const f=fixture();let listed=20,confirmed=0,deferred=0;
+ f.client.request=async(method,path,body)=>{
+  if(path==='/pending')return {status:200,data:{automaticActionsAllowed:false,receipts:Array.from({length:listed},(_,n)=>({receipt:'receipt-'+n}))}};
+  if(path==='/lease')return {status:200,data:{receipt:body.receipt,lease:'lease',receivedAt:Date.now(),rawBase64:Buffer.from('FICTITIOUS').toString('base64')}};
+  if(path==='/confirm'){confirmed++;return {status:200,data:{businessProcessed:true}};}
+  if(path==='/defer'){deferred++;return {status:200};}
+ };
+ f.options.importScoped=async(_,lease)=>{
+  if(lease.receipt==='receipt-3')throw Object.assign(Error('FICTITIOUS'),{inboxReason:'import_retry'});
+  return {importReceipt:'committed'};
+ };
+ assert.equal(await f.poll(),20);assert.equal(confirmed,19);assert.equal(deferred,1);
+ listed=0;assert.equal(await f.poll(),0);assert.equal(confirmed,19);
+ listed=21;await assert.rejects(f.poll(),error=>error.code==='inbox_pending_invalid_response');
+});
+test('unsettled full batches keep the normal retry delay after a lease or defer failure',async()=>{
+ const f=fixture();let failLease=true,confirmed=0;
+ f.client.request=async(method,path,body)=>{
+  if(path==='/pending')return {status:200,data:{automaticActionsAllowed:false,receipts:Array.from({length:20},(_,n)=>({receipt:'receipt-'+n}))}};
+  if(path==='/lease')return failLease&&body.receipt==='receipt-3' ? {status:503}
+   : {status:200,data:{receipt:body.receipt,lease:'lease',receivedAt:Date.now(),rawBase64:Buffer.from('FICTITIOUS').toString('base64')}};
+  if(path==='/confirm'){confirmed++;return {status:200,data:{businessProcessed:true}};}
+  if(path==='/defer')throw Error('FICTITIOUS');
+ };
+ assert.equal(await f.poll(),0);assert.equal(confirmed,19);
+ failLease=false;f.options.importScoped=async(_,lease)=>{
+  if(lease.receipt==='receipt-3')throw Object.assign(Error('FICTITIOUS'),{inboxReason:'import_retry'});
+  return {importReceipt:'committed'};
+ };
+ assert.equal(await f.poll(),0);assert.equal(confirmed,38);
+});
