@@ -30,7 +30,27 @@ test('unavailable Graph object blocks only its phone without pretending Meta rep
   asset.additionalData.whatsappHealth = {...health,observed_at:new Date().toISOString()};
   const persisted = effectiveStoredHealth(asset);
   assert.equal(persisted.state,'disconnected'); assert.equal(persisted.provider_status,null);
-  assert.equal(deriveHealthCandidate(deriveAssetSignal({additionalData:asset.additionalData})).state,'healthy');
+  assert.equal(deriveHealthCandidate(deriveAssetSignal({additionalData:asset.additionalData})).state,'disconnected');
+  assert.equal(deriveHealthCandidate(deriveAssetSignal(asset,{providerStatus:'CONNECTED'})).state,'healthy');
+});
+
+test('cached CONNECTED never counts as recovery from lost phone access, including after the first fresh observation', () => {
+  const asset = {isActive:true,additionalData:{registration:{status:'registered',phoneStatus:'CONNECTED'},
+    whatsappHealth:{state:'disconnected',can_send:false,reason_code:'provider_phone_unavailable'}}};
+  const derive = signal => deriveHealthCandidate(deriveAssetSignal(asset,signal));
+  for (let i=0;i<3;i++) assert.equal(derive().state,'disconnected');
+  const first = applyRecoveryPolicy({previousState:'disconnected',previousReason:'provider_phone_unavailable',
+    candidate:derive({providerStatus:'CONNECTED'})});
+  assert.equal(first.recovery_pending,true);
+  asset.additionalData.whatsappHealth = first.health;
+  assert.equal(derive().state,'disconnected');
+  assert.equal(derive().provider_status,null);
+  const second = applyRecoveryPolicy({previousState:'disconnected',previousReason:'provider_phone_unavailable',
+    previousRecoveryCount:first.recovery_count,candidate:derive({providerStatus:'CONNECTED'})});
+  assert.equal(second.health.state,'healthy');
+  assert.equal(second.health.can_send,true);
+  assert.equal(second.recovery_pending,false);
+  assert.equal(derive({providerStatus:'BANNED'}).state,'blocked');
 });
 
 test('a profile observation cannot block a replacement authorization after a concurrent reconnect', async () => {
