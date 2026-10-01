@@ -239,9 +239,23 @@ function isStaleReviewRequestTemplate(template, catalog = null) {
   if (!isReviewRequestTemplateFamily(template, catalog)) return false;
   const templateBody = cleanString(extractTemplateBodyText(template?.components));
   const catalogBody = cleanString(catalog?.body_text);
-  if (catalogBody && templateBody && templateBody !== catalogBody) return true;
+  if (catalogBody && templateBody) return templateBody !== catalogBody;
   if (isReviewReminderTemplateFamily(template, catalog)) return false;
   return !reviewTemplateBodyHasSender(templateBody);
+}
+
+function findApprovedReviewReplacement(template, catalog, items, managedMetaIds) {
+  if (!isStaleReviewRequestTemplate(template, catalog) || isReviewReminderTemplateFamily(template, catalog)) return null;
+  return items.find(item =>
+    managedMetaIds.has(String(item.id))
+    && normalizeWhatsappLocale(item.language) === normalizeWhatsappLocale(template.language)
+    && isTechnicalTemplateFamilyName(getCatalogTechnicalFamilyName(catalog), item.name)
+    && cleanString(item.status).toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED
+    && hasSameProviderAcceptedContent(catalog, item)) || null;
+}
+
+function hasApprovedReviewReplacement(template, catalog, items, managedMetaIds) {
+  return !!findApprovedReviewReplacement(template, catalog, items, managedMetaIds);
 }
 
 async function notifyReviewPhotoTemplateApproved(template, catalog = null) {
@@ -452,7 +466,9 @@ async function findLatestLocalTemplateForClinic({ clinicId, template }) {
       clinic_id: clinicId,
       waba_id: null,
       language,
-      is_active: true,
+      origin: { [Op.ne]: 'custom' },
+      ...(isReviewRequestTemplateFamily(template) && !isReviewReminderTemplateFamily(template)
+        ? { superseded_by_template_id: null } : { is_active: true }),
       [Op.or]: [
         ...(Number.isFinite(Number(template.id)) && Number(template.id) > 0
           ? [{ catalog_template_id: Number(template.id) }]
@@ -480,6 +496,7 @@ async function loadTemplateFamilyRows({ clinicId, wabaId, template }) {
   const rows = await WhatsappTemplate.findAll({
     where: {
       language,
+      origin: { [Op.ne]: 'custom' },
       is_active: true,
       [Op.or]: [
         ...(Number.isFinite(Number(template.id)) && Number(template.id) > 0
@@ -959,7 +976,8 @@ async function upsertPlaceholderTemplateForClinic({ clinicId, template }) {
     variables: parseMaybeJson(template.variables) || [],
     catalog_template_id: template.id,
     origin: 'catalog',
-    is_active: !!template.is_active,
+    is_active: isReviewRequestTemplateFamily(template) && !isReviewReminderTemplateFamily(template)
+      && existing && !existing.is_active ? false : !!template.is_active,
     rejection_reason: null,
   };
 
@@ -984,6 +1002,13 @@ async function upsertClinicOverrideTemplateForClinic({
   if (!clinicId || !template) return { action: 'skipped' };
 
   const existing = await findLatestLocalTemplateForClinic({ clinicId, template });
+  const initialReview = isReviewRequestTemplateFamily(template) && !isReviewReminderTemplateFamily(template);
+  if (initialReview && existing
+    && cleanString(existing.status).toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED
+    && cleanString(status).toUpperCase() !== WHATSAPP_TEMPLATE_STATUS.APPROVED
+    && !hasSameProviderAcceptedContent(template, existing)) {
+    return { action: 'approval_pending' };
+  }
 
   const payload = {
     clinic_id: clinicId,
@@ -996,7 +1021,7 @@ async function upsertClinicOverrideTemplateForClinic({
     variables: parseMaybeJson(template.variables) || [],
     catalog_template_id: template.id,
     origin: 'catalog',
-    is_active: !!template.is_active,
+    is_active: initialReview && existing && !existing.is_active ? false : !!template.is_active,
     pending_since_at: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'].includes(
       cleanString(status).toUpperCase(),
     ) ? (existing?.pending_since_at || new Date()) : null,
@@ -2412,8 +2437,12 @@ async function createCustomTemplateForClinic({
   return { row, submitted: true, meta_template_id: metaTemplateId };
 }
 
-async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmentScope }) {
+async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmentScope, catalogTemplateIds = null }) {
   if (!wabaId) return;
+  if (catalogTemplateIds !== null && (!Array.isArray(catalogTemplateIds) || !catalogTemplateIds.length
+    || catalogTemplateIds.some(id => !Number.isSafeInteger(id) || id <= 0))) {
+    throw new Error('catalog_template_ids_invalid');
+  }
 
   const asset = await resolveWabaAssetById(wabaId);
   if (!asset?.waAccessToken && !asset?.whatsappAuthorizedBinding) {
@@ -2424,6 +2453,11 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
     sequelizeInstance: db.sequelize,
   });
   if (!lease.acquired) {
+    if (catalogTemplateIds !== null) {
+      const error = new Error('waba_catalog_creation_in_progress');
+      error.retryable = true;
+      throw error;
+    }
     return {
       skipped: true,
       reason: 'waba_catalog_creation_in_progress',
@@ -2441,6 +2475,7 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
       groupId,
       assignmentScope,
       asset,
+      catalogTemplateIds,
     });
   } finally {
     await lease.release();
@@ -2453,13 +2488,16 @@ async function createTemplatesFromCatalogWithLease({
   groupId,
   assignmentScope,
   asset,
+  catalogTemplateIds = null,
 }) {
   const disciplinas = await resolveDisciplines({
     clinicId: assignmentScope === 'clinic' ? clinicId : null,
     groupId: assignmentScope === 'group' ? groupId : null,
   });
 
-  const templates = await selectCatalogTemplatesByDisciplines(disciplinas);
+  const applicableTemplates = await selectCatalogTemplatesByDisciplines(disciplinas);
+  const templates = catalogTemplateIds === null ? applicableTemplates
+    : applicableTemplates.filter(template => catalogTemplateIds.includes(Number(template.id)));
   const targetClinicIds = await resolveTargetClinicIdsForTemplateProvisioning({
     clinicId,
     groupId,
@@ -2898,6 +2936,36 @@ async function propagateCatalogTemplateToAllClinics({
       }
     }
 
+    // A review may leave through the clinic's secondary or a shared group WABA.
+    // Provision these accounts separately without overwriting primary editor references.
+    if (isReviewRequestTemplateFamily(template) && !isReviewReminderTemplateFamily(template)) {
+      const broker = require('../lib/whatsappAuthorizedBrokerClient');
+      const seen = new Set(syncedWabas);
+      for (const candidate of broker.configuration()?.bindings || []) {
+        if (!candidate.sendEnabled || seen.has(candidate.wabaId)
+          || scopedClinicIds && !scopedClinicIds.includes(candidate.clinicId)
+          || scopedWabaIds && !scopedWabaIds.has(candidate.wabaId)) continue;
+        try {
+          const binding = await brokerTemplateBinding(candidate.wabaId, candidate.clinicId);
+          if (!binding) continue;
+          const asset = await ClinicMetaAsset.findByPk(binding.assetId);
+          if (!asset || require('../lib/whatsappManualDisconnect').current(asset, binding)
+            || asset.additionalData?.whatsappHealth?.can_send === false) continue;
+          await enqueueCreateTemplatesJob({ wabaId: candidate.wabaId,
+            clinicId: asset.assignmentScope === 'clinic' ? Number(asset.clinicaId) : null,
+            groupId: asset.grupoClinicaId || null, assignmentScope: asset.assignmentScope,
+            catalogTemplateIds: [Number(template.id)] });
+          seen.add(candidate.wabaId);
+          summary.additional_wabas_queued = (summary.additional_wabas_queued || 0) + 1;
+        } catch (error) {
+          // Contained or revoked connections stay closed; do not use legacy credentials.
+          summary.additional_wabas_unavailable = (summary.additional_wabas_unavailable || 0) + 1;
+          logger.warn?.('Review catalog account unavailable', { wabaId: candidate.wabaId,
+            code: error?.code || 'whatsapp_authorized_binding_unavailable' });
+        }
+      }
+    }
+
     for (const templateInstance of affectedTemplateInstances.values()) {
       try {
         const syncResult = await recomposeAutomationsUsingTemplate({ templateInstance, logger });
@@ -2975,17 +3043,23 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   const items = await fetchTemplatesFromMeta({ wabaId, accessToken });
   const now = new Date();
   const catalogs = await WhatsappTemplateCatalog.findAll({
-    attributes: ['id', 'name', 'family_key', 'locale', 'display_name', 'body_text', 'is_active'],
+    attributes: ['id', 'name', 'family_key', 'locale', 'display_name', 'body_text', 'is_active', 'category', 'components', 'variables'],
     raw: true,
   });
   const catalogById = new Map(
     catalogs.map((catalog) => [Number(catalog.id), catalog]),
   );
+  const managed = await WhatsappTemplate.findAll({ where: { waba_id: String(wabaId),
+    origin: 'catalog', is_active: true, catalog_template_id: { [Op.ne]: null } },
+    attributes: ['meta_template_id'], raw: true });
+  const managedMetaIds = new Set(managed.map(row => String(row.meta_template_id || '')).filter(Boolean));
 
   for (const tpl of items) {
     const catalog = resolveCatalogTemplateByTechnicalName(catalogs, tpl.name, tpl.language);
     const catalogIsActive = !catalog || (catalog.is_active !== false && Number(catalog.is_active) !== 0);
-    const isStaleReviewTemplate = isStaleReviewRequestTemplate(tpl, catalog);
+    // Retain the approved previous version until this exact WABA has an approved
+    // replacement. Approval in another account (or a pending version) is insufficient.
+    const isStaleReviewTemplate = hasApprovedReviewReplacement(tpl, catalog, items, managedMetaIds);
     const remoteRejectionReason = tpl.rejected_reason || tpl.rejection_reason || null;
     const rejectionReason = isStaleReviewTemplate
       ? [
@@ -3136,6 +3210,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   });
 
   for (const override of overrides) {
+    if (override.origin === 'custom') continue;
     const key = `${String(override.name || '').trim().toLowerCase()}|${String(override.language || DEFAULT_LANGUAGE).trim().toLowerCase()}`;
     const remote = remoteByKey.get(key);
     if (!remote) continue;
@@ -3182,6 +3257,8 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     const wasApproved = String(override.status || '').trim().toUpperCase() === WHATSAPP_TEMPLATE_STATUS.APPROVED;
     await override.update({
       status: nextStatus,
+      ...(sameTrackedMetaTemplate || sameTrackedVersionedName || sameComponents
+        ? { category: remote.category || override.category } : {}),
       meta_template_id: nextMetaTemplateId,
       rejection_reason: nextRejectionReason,
       pending_since_at: [WHATSAPP_TEMPLATE_STATUS.PENDING, 'IN_REVIEW'].includes(
@@ -3196,16 +3273,39 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     }
   }
 
+  // Only primary-WABA clinic references are switched, and only after approval.
+  // Keep the local ID so existing automation bindings retain their identity.
+  for (const override of overrides) {
+    const catalog = catalogById.get(Number(override.catalog_template_id));
+    if (!catalog?.is_active || override.origin !== 'catalog') continue;
+    const replacement = findApprovedReviewReplacement(override, catalog, items, managedMetaIds);
+    if (!replacement) continue;
+    const result = await upsertClinicOverrideTemplateForClinic({
+      clinicId: override.clinic_id,
+      template: { ...catalog, category: replacement.category || catalog.category },
+      technicalName: replacement.name,
+      status: WHATSAPP_TEMPLATE_STATUS.APPROVED,
+      metaTemplateId: replacement.id,
+      rejectionReason: replacement.rejected_reason || replacement.rejection_reason || null,
+    });
+    if (result.row) await recomposeAutomationsUsingTemplate({ templateInstance: result.row, logger: console });
+  }
+
   await enqueueStalePendingTemplateResubmissions({ wabaId, now });
   await whatsappInboxAdminSync.markReconciled(wabaId, syncStartedAt);
 }
 
 async function enqueueCreateTemplatesJob(data) {
-  if (await brokerTemplateBinding(data?.wabaId)) {
+  const binding = await brokerTemplateBinding(data?.wabaId);
+  if (binding) {
     const {job}=await jobRequestsService.enqueueUniqueJobRequest({type:'whatsapp_template_create',priority:'normal',origin:'whatsapp_template_create',maxAttempts:3,
       dedupeScope:'create:'+require('node:crypto').createHash('sha256').update(JSON.stringify(data)).digest('hex')+':'+Math.floor(Date.now()/60000),
-      payload:{wabaId:data.wabaId,clinicId:data.clinicId,groupId:data.groupId,assignmentScope:data.assignmentScope}});
+      payload:{wabaId:data.wabaId,clinicId:data.clinicId,groupId:data.groupId,assignmentScope:data.assignmentScope,
+        ...(data.catalogTemplateIds ? { catalogTemplateIds: data.catalogTemplateIds } : {})}});
     return job;
+  }
+  if (data.catalogTemplateIds && require('../lib/whatsappAuthorizedBrokerClient').configuration()) {
+    throw new Error('whatsapp_authorized_binding_unavailable');
   }
   return queues.whatsappTemplateCreate.add('create', data, {
     attempts: 5,
@@ -3425,6 +3525,9 @@ module.exports = {
   upsertClinicOverrideTemplateForClinic,
   _test: {
     findSameContractRemoteTemplate,
+    isStaleReviewRequestTemplate,
+    hasApprovedReviewReplacement,
+    findApprovedReviewReplacement,
     isDuplicateTemplateNameError,
     buildMetaTemplateCheckpointPendingError,
   },
