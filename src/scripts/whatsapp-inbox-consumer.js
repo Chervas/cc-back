@@ -24,6 +24,7 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
   try{publish(listed.data.health,scopes?.scopes || [{...scope,clinicIds:[scope.clinicId]}],{
     recoveryNotBefore,recoveryHold:env.WHATSAPP_INBOX_RECOVERY_HOLD==='true'});}
   catch{throw pollError('inbox_health_publish_failed','health');}
+  let settled=0;
   for(const item of listed.data.receipts){
     if(isStopping())break;let raw;let lease;
     try{
@@ -42,15 +43,20 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
         : await importLease(connection,{...lease,raw},scope);
       const ack=await client.request('POST','/confirm',{receipt:lease.receipt,lease:lease.lease,importReceipt:imported.importReceipt});
       if(ack.status!==200 || ack.data?.businessProcessed!==true)throw Error();
+      settled++;
     }catch(error){
       const reason=['unsupported_event','unmatched_status','review_required','import_retry'].includes(error.inboxReason)?error.inboxReason:'import_retry';
-      if(lease?.lease)await client.request('POST','/defer',{receipt:lease.receipt,lease:lease.lease,reason}).catch(()=>{});
+      if(lease?.lease){
+        const deferred=await client.request('POST','/defer',{receipt:lease.receipt,lease:lease.lease,reason}).catch(()=>null);
+        if(deferred?.status===200)settled++;
+      }
       process.stderr.write(JSON.stringify({event:'whatsapp_inbox_item_deferred',reason,
         ...(typeof item.receipt==='string'&&/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(item.receipt)?{receipt:item.receipt}:{}),
         ...(error.reviewDetail==='contact_binding_mismatch'?{detail:error.reviewDetail}:{})})+'\n');
     }
     finally{raw?.fill(0);}
   }
+  return settled===listed.data.receipts.length ? settled : 0;
 }
 async function main(env=process.env) {
   const scopes=scoped.configuration(env);
@@ -73,15 +79,17 @@ async function main(env=process.env) {
     if(env.WHATSAPP_INBOX_PLAYBACK_ENABLED==='true')tables.push('WhatsappInboxPlaybackImports');
     for(const table of tables) await connection.query('SELECT 1 FROM '+table+' LIMIT 0');
     while(!stopping){
+      let nextPollMs=5000;
       try{
-        await pollOnce(connection,client,{env,scope,recoveryNotBefore,requiresScoped:!!scopes,isStopping:()=>stopping});
+        const listedCount=await pollOnce(connection,client,{env,scope,recoveryNotBefore,requiresScoped:!!scopes,isStopping:()=>stopping});
+        if(listedCount===20)nextPollMs=100;
       }catch(error){
         const code=['inbox_pending_transport_unavailable','inbox_pending_http_error','inbox_pending_invalid_response',
           'inbox_health_publish_failed'].includes(error?.code)?error.code:'inbox_poll_unavailable';
         process.stderr.write(JSON.stringify({event:'WHATSAPP_INBOX_POLL_UNAVAILABLE',code,
           ...(error?.pollStage?{stage:error.pollStage}:{}),...(error?.httpStatus?{http_status:error.httpStatus}:{})})+'\n');
       }
-      if(!stopping)await new Promise(resolve=>{timer=setTimeout(resolve,5000);active=resolve;});
+      if(!stopping)await new Promise(resolve=>{timer=setTimeout(resolve,nextPollMs);active=resolve;});
     }
   }finally{client.close();await connection?.end().catch(()=>{});}
 }
