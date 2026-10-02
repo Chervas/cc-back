@@ -214,6 +214,34 @@ function trimConversationLines(lines, { maxLines, maxChars }) {
   return [...prefix, ...output].join('\n');
 }
 
+function precedingConversationMessages(context = {}, { maxMessages = 16, maxChars = 6000, window = 'all' } = {}) {
+  const response = context.last_response_context || {};
+  const batchItems = Array.isArray(response.response_items) ? response.response_items : [];
+  const batchIds = [response.response_message_id, ...batchItems.map((item) => item.message_id)]
+    .map(toIntOrNull).filter(Boolean);
+  const firstBatchId = batchIds.length ? Math.min(...batchIds) : null;
+  const cutoff = response.responded_at ? new Date(response.responded_at).getTime() : null;
+  const reference = cleanString(response.reaction_target_message_preview || response.listened_message_preview || context.last_prompt);
+  const anchor = response.responded_at || null;
+  const messages = (Array.isArray(context.conversation_context_messages) ? context.conversation_context_messages : [])
+    .filter((message) => (!firstBatchId || Number(message.id) < firstBatchId)
+      && (!Number.isFinite(cutoff) || new Date(message.sent_at).getTime() <= cutoff)
+      && (window !== 'day' || (anchor && sameMadridDay(message.sent_at, anchor)))
+      && (window !== 'year' || (anchor && sameMadridYear(message.sent_at, anchor)))
+      && ['inbound', 'outbound'].includes(message.direction)
+      && !(message.direction === 'outbound' && cleanString(message.text) === reference));
+  const result = [];
+  let size = 0;
+  for (const message of messages.slice().reverse()) {
+    const item = { at: message.sent_at, author: message.direction === 'inbound' ? 'patient' : 'clinic', text: message.text };
+    const length = JSON.stringify(item).length;
+    if (result.length >= maxMessages || size + length > maxChars) break;
+    result.unshift(item);
+    size += length;
+  }
+  return result;
+}
+
 async function resolveConversationRecord({
   Conversation,
   conversationId,
@@ -333,6 +361,9 @@ async function buildConversationContext({
   const allTimeLines = normalizedMessages.map((message) => message.line);
 
   return {
+    conversation_context_messages: normalizedMessages.slice(-240).map((message) => ({
+      id: message.id, direction: message.direction, sent_at: message.sent_at, text: message.text,
+    })),
     conversation: {
       id: toIntOrNull(conversation.id),
       clinic_id: toIntOrNull(conversation.clinic_id),
@@ -353,6 +384,7 @@ async function buildConversationContext({
 
 module.exports = {
   buildConversationContext,
+  precedingConversationMessages,
   formatInboundAnalysisItem,
   formatInboundAnalysisText,
   formatInboundResponseText,

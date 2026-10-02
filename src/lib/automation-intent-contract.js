@@ -7,38 +7,54 @@ const CONFIRM_APPOINTMENT_DECISION_TEMPLATE_KEY = 'confirm_appointment_v2';
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.85;
 const RESPONSE_NEED_CONFIDENCE_THRESHOLD = 0.75;
 const CLASSIFY_INTENT_REFERENCE_INSTRUCTION = [
-  'Antes de clasificar una respuesta breve, identifica exactamente que pregunta la clinica en listened_message_preview, reaction_target_message_preview o clinic_message_replied_to y a que asunto responde el paciente.',
-  'Anunciar o recordar una cita no equivale a pedir que se confirme la asistencia. No sustituyas una pregunta sobre indicaciones, ubicacion, ayuda o datos de contacto por una pregunta sobre si acudira.',
-  'Una respuesta negativa a necesitar indicaciones rechaza esa ayuda, no la cita. Por ejemplo, "No es necesario, ya he ido varias veces" no pide cancelar ni cambiar. Una respuesta afirmativa a saber llegar tampoco confirma de nuevo la asistencia.',
-  'Si la unica pregunta es si necesita indicaciones y la respuesta las rechaza sin ninguna otra peticion, clasifica el acuse como otra o agradecimiento con necesita_respuesta=false. No inventes una duda sobre la asistencia. Saber llegar no es confirmar asistencia: confirmar_cita exige que lo afirmado sea acudir o recibir los datos solicitados, no conocer la ubicacion.',
-  'Si el mensaje pregunta "Sabes llegar? Necesitas alguna indicacion?" y el lote solo dice "No", hay ambiguedad sobre la ayuda o la ubicacion, no una negativa explicita a acudir: conserva esa distincion y solicita revision cuando haga falta aclararla.',
-  'Para devolver cancelar_cita debe existir evidencia de que el paciente cancela o rechaza asistir, no solo una negacion dirigida a otro asunto. Un rechazo a confirmar el telefono o la recepcion de datos tampoco es una cancelacion.',
-  'Una peticion explicita de cancelar o una afirmacion como "No puedo ir" puede cancelar aunque el mensaje de referencia trate de indicaciones. Si pide otra fecha u hora, distingue la solicitud de cambio de una cancelacion sin nueva fecha.',
-  'Los datos de appointment y trigger describen la cita, no lo que acaba de preguntar la clinica. Una cita ya confirmada no se revoca porque el paciente no necesite ayuda para llegar.',
-  'Antes de elegir la intencion, completa asunto_preguntado y significado_de_respuesta. La intencion y necesita_respuesta deben ser coherentes con ese significado, no con el mero hecho de existir una cita.',
+  'patient_message_batch contiene el lote nuevo completo en orden. clinic_message_replied_to y preceding_messages aportan referencia; appointment y trigger son datos de contexto, nunca decisiones nuevas del paciente.',
+  'Antes de escoger la intencion, resume lo que el paciente acaba de expresar y selecciona lectura_respuesta. Distingue decisiones actuales de consultas sobre gestiones pasadas. Mantener la cita a falta de una alternativa no pide cambiarla. Una pregunta sobre una fecha ya acordada exige verificarla, no aplicar otro cambio.',
+  'Ejemplos de lectura semantica (no son mensajes recibidos): "La recepcionista ya me atendio y explique el motivo" -> consulta_gestion_previa. "Habiamos quedado para el jueves, verdad?" -> consulta_gestion_previa. "Conozco el camino" -> solo_indicaciones. "Alli estare, se donde es" -> compromiso_asistencia. "Me la cambiais? No puedo llegar" -> solicitud_nueva_cambio. "No podre asistir" sin alternativa -> rechazo_asistencia.',
+  'Un si/no/acuse escrito depende de la pregunta literal. "No" a "Sabes llegar? Necesitas ayuda?" -> ambigua, necesita_respuesta=true, sin cancelar. A una unica pregunta de ayuda, rechazarla no cancela. Una reaccion sin texto no aporta evidencia escrita para cambiar el estado: sin_decision. No transformes conocer la ubicacion en prometer asistencia.',
+  'Copia evidencia_decision_actual solo del texto actual y no inventes la decision. Conserva todas las preguntas del lote, aun junto a una confirmacion. Una peticion de nueva fecha seguida de no poder acudir sigue siendo cambio, no cancelar. Si queda incertidumbre, devuelve ambigua y necesita_respuesta=true. Devuelve los valores exactos configurados.',
+].join(' ');
+const CLASSIFY_INTENT_REFERENCE_SYSTEM_INSTRUCTION = [
+  'Para classify_intent, analiza primero el significado actual del lote nuevo. No atribuyas al paciente palabras de la clinica, ejemplos, decisiones historicas ni el estado almacenado de la cita.',
+  'No toda respuesta al recordatorio confirma asistencia. Solo conocer la ubicacion es solo_indicaciones. Un compromiso espontaneo escrito de acudir es compromiso_asistencia, aunque tambien comente indicaciones. Un si/acuse solo es acuse_confirmacion_solicitada cuando responde a una pregunta de asistencia, recepcion de datos o telefono.',
+  'Informar que antes hablo con recepcion, o preguntar por una fecha antes acordada, es consulta_gestion_previa sin decision nueva. Una solicitud nueva de cambiar fecha/hora es solicitud_nueva_cambio; explicar que no puede llegar no la convierte en cancelar. Una preferencia condicional que mantiene la cita original es ambigua y se revisa.',
+  'Aceptar programar una primera visita no confirma una cita existente: otra y necesita_respuesta=true. Ante una interpretacion dudosa, ambigua y revision sin accion. No diagnostiques.',
 ].join(' ');
 
 const CLASSIFY_INTENT_REFERENCE_FIELDS = Object.freeze([
   {
     name: 'asunto_preguntado',
     type: 'string',
-    description: 'Describe brevemente todas las preguntas reales del mensaje de referencia: asistencia, recepcion de datos, telefono, indicaciones, proponer una cita nueva u otro asunto. Si hay dos preguntas, conserva ambas; no elijas arbitrariamente una. Recordar una cita no convierte cualquier pregunta en confirmar asistencia',
+    description: 'Asunto de la pregunta literal de la clinica, no del recordatorio completo. Recordar una cita y preguntar como llegar es indicaciones, no asistencia. Usa varios si hay preguntas de asuntos distintos',
+    allowed_values: ['asistencia', 'datos_contacto', 'indicaciones', 'proponer_cita', 'varios', 'otro'],
   },
   {
     name: 'significado_de_respuesta',
     type: 'string',
-    description: 'Explica brevemente que afirma, niega o solicita el paciente sobre ese asunto concreto y si queda algo por resolver. Un No a Sabes llegar? Necesitas indicaciones? es ambiguo y requiere aclarar la ayuda, no la asistencia. Negar necesitar indicaciones a una unica pregunta no exige respuesta ni cancela. Negar que el telefono sea correcto o recibir datos exige una respuesta para resolverlo, no cancelar. Aceptar programar una primera visita exige respuesta, no cambia una cita existente. Una peticion explicita de cancelar, no asistir o cambiar prevalece sobre el asunto preguntado',
+    description: 'Resume lo que el paciente afirma o pregunta ahora, antes de escoger una accion. Distingue acudir en el futuro, conocer el camino y haber avisado antes a recepcion; no son lo mismo',
   },
   {
-    name: 'rechaza_asistir_o_pide_cancelar',
-    type: 'boolean',
-    description: 'true solo cuando el paciente pide cancelar o expresa que no asistira a la cita. Evalua respecto a todas las preguntas reales del mensaje de referencia. Negar necesitar indicaciones, recibir datos o validar un telefono devuelve false: esas negaciones no rechazan asistir',
+    name: 'lectura_respuesta',
+    type: 'string',
+    description: 'Naturaleza del lote actual completo: compromiso_asistencia promete acudir; acuse_confirmacion_solicitada responde afirmativamente a una pregunta de asistencia/datos/telefono; solicitud_nueva_cambio pide mover una cita existente; rechazo_asistencia pide cancelar/no acudir sin alternativa; consulta_gestion_previa cuestiona un acuerdo previo o remite a recepcion sin explicar resultado; solo_indicaciones sabe llegar/rechaza ayuda; sin_decision no contiene decision escrita; ambigua es dudosa o condicionada. Una pregunta diferente junto a un compromiso claro no anula ese compromiso',
+    allowed_values: ['compromiso_asistencia', 'acuse_confirmacion_solicitada', 'solicitud_nueva_cambio',
+      'rechazo_asistencia', 'consulta_gestion_previa', 'solo_indicaciones', 'sin_decision', 'ambigua'],
     include_confidence: true,
   },
   {
-    name: 'pide_modificar_cita_existente',
+    name: 'evidencia_decision_actual',
+    type: 'string',
+    description: 'Copia literalmente un fragmento continuo de response_text que aporta la decision actual de confirmar, cancelar o solicitar un cambio. No parafrasees, no tomes palabras de la clinica ni del historial. Vacio si no existe decision escrita; una reaccion no contiene texto escrito',
+  },
+  {
+    name: 'rechazo_asistencia_explicito',
     type: 'boolean',
-    description: 'true si el paciente solicita mover, cambiar o buscar otra fecha u hora para una cita existente. Aceptar que le programen una primera visita devuelve false: todavia no hay una cita que modificar',
+    description: 'true solo si el texto declara explicitamente que no asistira o pide cancelar. false para un No breve cuya interpretacion depende de la pregunta de la clinica; rechazar ayuda no es rechazar acudir. Esta señal no autoriza cancelar si tambien pide otra fecha',
+    include_confidence: true,
+  },
+  {
+    name: 'requiere_verificar_gestion_o_condicion',
+    type: 'boolean',
+    description: 'true si hay que verificar una gestion previa con recepcion, una fecha que antes se acordo, o una alternativa condicionada a mantener la cita original. No los conviertas en decision nueva. false cuando la decision actual es independiente y explicita, incluso seguida de una pregunta diferente. Su confianza mide certeza del true O del false devuelto',
     include_confidence: true,
   },
   {
@@ -56,8 +72,13 @@ function buildClassifyIntentInstruction(instruction) {
     : [configured, CLASSIFY_INTENT_REFERENCE_INSTRUCTION].filter(Boolean).join(' ');
 }
 
-function projectClassifyIntentReferenceOutput(value = {}) {
+function projectClassifyIntentReferenceOutput(value = {}, { patientText = '' } = {}) {
   const output = { ...value };
+  const normalizeEvidence = (text) => String(text || '').normalize('NFC').replace(/\s+/g, ' ').trim();
+  const text = normalizeEvidence(patientText);
+  const evidence = normalizeEvidence(output.evidencia_decision_actual);
+  // Verify provenance, not meaning: semantic interpretation stays with the model.
+  const hasWrittenEvidence = !!evidence && text.includes(evidence);
   const replyConfidence = Number(output.confianza_hay_asunto_por_resolver) || 0;
   if (typeof output.hay_asunto_por_resolver === 'boolean' && replyConfidence >= AUTO_APPLY_CONFIDENCE_THRESHOLD) {
     output.necesita_respuesta = output.hay_asunto_por_resolver;
@@ -66,13 +87,27 @@ function projectClassifyIntentReferenceOutput(value = {}) {
     output.necesita_respuesta = true;
     if (Object.hasOwn(output, 'confianza_necesita_respuesta')) output.confianza_necesita_respuesta = 0;
   }
-  const actionSignals = {
-    cancelar_cita: 'rechaza_asistir_o_pide_cancelar',
-    solicitar_cambio_cita: 'pide_modificar_cita_existente',
+  const actionReadings = {
+    confirmar_cita: ['compromiso_asistencia', 'acuse_confirmacion_solicitada'],
+    cancelar_cita: ['rechazo_asistencia'],
+    solicitar_cambio_cita: ['solicitud_nueva_cambio'],
   };
-  const signal = actionSignals[output.intencion_principal];
-  if (signal && (output[signal] !== true || Number(output[`confianza_${signal}`]) < AUTO_APPLY_CONFIDENCE_THRESHOLD
-    || !Number.isFinite(Number(output[`confianza_${signal}`])))) {
+  const readings = actionReadings[output.intencion_principal];
+  const matches = readings?.includes(output.lectura_respuesta);
+  const incompatibleSecondary = readings && Object.hasOwn(actionReadings, output.intencion_secundaria)
+    && output.intencion_secundaria !== output.intencion_principal;
+  const unrelatedAcknowledgement = output.lectura_respuesta === 'acuse_confirmacion_solicitada'
+    && !['asistencia', 'datos_contacto'].includes(output.asunto_preguntado);
+  const unsupportedCancellation = output.intencion_principal === 'cancelar_cita'
+    && (output.rechazo_asistencia_explicito !== true
+      || !(Number(output.confianza_rechazo_asistencia_explicito) >= AUTO_APPLY_CONFIDENCE_THRESHOLD));
+  if (readings && (!hasWrittenEvidence || !matches || incompatibleSecondary || unrelatedAcknowledgement
+    || !['asistencia', 'datos_contacto'].includes(output.asunto_preguntado)
+    || unsupportedCancellation || output.requiere_verificar_gestion_o_condicion !== false
+    || !(Number(output.confianza_requiere_verificar_gestion_o_condicion) >= AUTO_APPLY_CONFIDENCE_THRESHOLD)
+    || !(Number(output.confianza_lectura_respuesta) >= AUTO_APPLY_CONFIDENCE_THRESHOLD)
+    || output.necesita_respuesta === true
+    || output.posible_urgencia === true)) {
     output.intencion_principal = 'otra';
     output.intencion_secundaria = '';
     output.confianza = 0;
@@ -90,7 +125,7 @@ const CONFIRM_APPOINTMENT_ANALYSIS_FIELDS = Object.freeze([
   {
     name: 'respuesta_afirmativa_a_la_clinica',
     type: 'boolean',
-    description: 'Devuelve true solo si alguna parte del lote contiene una afirmación o acuse que responde a la petición concreta de confirmación de la clínica. Una pregunta o petición sin afirmación explícita devuelve false aunque presuponga la cita o sea compatible con asistir',
+    description: 'Devuelve true si alguna parte del lote contiene una afirmación o acuse contextual que responde a lo que la clínica pidió confirmar; un agradecimiento breve también acusa recibo cuando se pidió confirmar recepción. Una pregunta o petición aislada devuelve false aunque presuponga la cita o sea compatible con asistir',
     include_confidence: true,
   },
   {
@@ -116,7 +151,7 @@ const CONFIRM_APPOINTMENT_ANALYSIS_FIELDS = Object.freeze([
 const CONFIRM_APPOINTMENT_PRESET_CONFIG = Object.freeze({
   preset_contract_version: CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION,
   instruction: [
-    'Analiza exclusivamente patient_message_batch respecto al mensaje concreto de la clínica incluido como listened_message_preview o reaction_target_message_preview.',
+    'Analiza exclusivamente patient_message_batch respecto al mensaje concreto de la clínica en clinic_message_replied_to, listened_message_preview o reaction_target_message_preview. El mensaje de la clinica es referencia separada, nunca evidencia de una respuesta afirmativa del paciente.',
     'Evalúa por separado: (1) si existe una respuesta afirmativa a lo que la clínica pidió confirmar, (2) si existe una negación explícita posterior de esa misma confirmación y (3) si queda una pregunta, petición o actuación pendiente.',
     'Un sí, confirmo, podré ir, allí estaré, ok, vale, recibido o agradecimiento breve cuenta como respuesta afirmativa cuando responde directamente a una petición clara de confirmación.',
     'Una reacción positiva vinculada al mensaje de confirmación también cuenta como respuesta afirmativa.',
@@ -322,6 +357,7 @@ module.exports = {
   CLASSIFY_INTENT_PRESET_CONFIG,
   CLASSIFY_INTENT_PRESET_KEY,
   CLASSIFY_INTENT_REFERENCE_INSTRUCTION,
+  CLASSIFY_INTENT_REFERENCE_SYSTEM_INSTRUCTION,
   CLASSIFY_INTENT_REFERENCE_FIELDS,
   CONFIRM_APPOINTMENT_DECISION_TEMPLATE,
   CONFIRM_APPOINTMENT_DECISION_TEMPLATE_KEY,
