@@ -85,6 +85,9 @@ const {
   AUTO_APPLY_CONFIDENCE_THRESHOLD,
   CONFIRM_APPOINTMENT_ANALYSIS_FIELDS,
   CONFIRM_APPOINTMENT_PRESET_CONFIG,
+  buildClassifyIntentInstruction,
+  projectClassifyIntentReferenceOutput,
+  CLASSIFY_INTENT_REFERENCE_FIELDS,
 } = require('../lib/automation-intent-contract');
 const {
   emitAutomationResponseProcessing,
@@ -1925,6 +1928,21 @@ function buildScopedConfirmAppointmentBatch(context = {}) {
   if (reactionEmoji && cleanString(responseContext.reaction_target_message_preview)) {
     batch.reaction_target_message_preview = cleanString(responseContext.reaction_target_message_preview);
   }
+  return batch;
+}
+
+function buildScopedClassifyIntentBatch(context = {}) {
+  const batch = buildScopedConfirmAppointmentBatch(context);
+  if (!batch.response_messages && !batch.response_text) {
+    const responseContext = context?.last_response_context || {};
+    const textItem = Array.isArray(responseContext.response_items)
+      ? responseContext.response_items.find((item) => normalizeKey(item?.content_type) === 'text')
+      : null;
+    const responseLine = Array.isArray(responseContext.response_lines) ? responseContext.response_lines[0] : null;
+    batch.response_text = cleanString(textItem?.text || responseLine || recentPatientTextFromConversation(context));
+  }
+  delete batch.listened_message_preview;
+  delete batch.reaction_target_message_preview;
   return batch;
 }
 
@@ -6918,7 +6936,12 @@ async function processNode(node, context, runtime = {}) {
       const usesConfirmSignalContract = presetKey === 'confirm_appointment'
         && usesStructuredConfirmAppointmentContract(config);
 
-      const resolvedSources = sourceEntries
+      const resolvedSources = presetKey === 'classify_intent'
+        ? [
+          { key: 'clinic_message_replied_to', value: resolveClassifyIntentPrompt(aiContext) },
+          { key: 'patient_message_batch', value: buildScopedClassifyIntentBatch(aiContext) },
+        ]
+        : sourceEntries
         .filter((source) => !usesConfirmSignalContract
           || cleanString(source?.key) === 'patient_message_batch'
           || cleanString(source?.path).replace(/\s+/g, '') === '{{last_response_context}}')
@@ -6928,10 +6951,7 @@ async function processNode(node, context, runtime = {}) {
           if (!path) return null;
           return {
             key,
-            value: presetKey === 'classify_intent'
-              && (key === 'conversation_today' || path.replace(/\s+/g, '') === '{{conversation_today}}')
-              ? buildScopedClassifyIntentConversation(aiContext)
-              : presetKey === 'confirm_appointment'
+            value: presetKey === 'confirm_appointment'
                 && (key === 'patient_message_batch' || path.replace(/\s+/g, '') === '{{last_response_context}}')
                 ? buildScopedConfirmAppointmentBatch(aiContext)
                 : resolveTemplateValue(path, aiContext),
@@ -7000,10 +7020,12 @@ async function processNode(node, context, runtime = {}) {
 
       const analysisOutputFields = usesConfirmSignalContract
         ? normalizeOutputFieldEntries(CONFIRM_APPOINTMENT_ANALYSIS_FIELDS)
-        : normalizedOutputFields;
+        : presetKey === 'classify_intent'
+          ? [...normalizeOutputFieldEntries(CLASSIFY_INTENT_REFERENCE_FIELDS), ...normalizedOutputFields]
+          : normalizedOutputFields;
       const outputFormat = normalizeOutputFieldsToFormat(normalizedOutputFields);
       const outputFormatSimple = normalizeAiOutputFormat(outputFormat);
-      const analysisOutputFormatSimple = usesConfirmSignalContract
+      const analysisOutputFormatSimple = usesConfirmSignalContract || presetKey === 'classify_intent'
         ? normalizeAiOutputFormat(normalizeOutputFieldsToFormat(analysisOutputFields))
         : outputFormatSimple;
       const analysisMode = normalizeAiAnalysisMode(resolveTemplateValue(config?.mode, context));
@@ -7056,7 +7078,9 @@ async function processNode(node, context, runtime = {}) {
           systemPrompt: buildAiSystemPrompt(analysisOutputFormatSimple, analysisOutputFields),
           prompt: usesConfirmSignalContract
             ? CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction
-            : resolvedInstruction,
+            : presetKey === 'classify_intent'
+              ? buildClassifyIntentInstruction(resolvedInstruction)
+              : resolvedInstruction,
           inputText,
           outputFormat: analysisOutputFormatSimple,
           analysisMode,
@@ -7073,7 +7097,13 @@ async function processNode(node, context, runtime = {}) {
       }
 
       if (presetKey === 'classify_intent') {
-        aiOutput = normalizeClassifyIntentOutput(aiOutput, aiContext);
+        aiOutput = normalizeClassifyIntentOutput(projectClassifyIntentReferenceOutput(aiOutput), aiContext);
+        for (const field of CLASSIFY_INTENT_REFERENCE_FIELDS) {
+          if (!normalizedOutputFields.some((configured) => configured.name === field.name)) {
+            delete aiOutput[field.name];
+            delete aiOutput[`confianza_${field.name}`];
+          }
+        }
       } else if (usesConfirmSignalContract) {
         aiOutput = deriveConfirmAppointmentOutput(aiOutput);
       }
