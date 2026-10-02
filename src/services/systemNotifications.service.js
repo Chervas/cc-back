@@ -1436,6 +1436,8 @@ async function runActiveChecks({ force = false } = {}) {
     snapshot: require('../lib/whatsappInboxHealth').read(),
     bindings: require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings || [],
     query: (...args) => db.sequelize.query(...args),
+    resolveTemplateBinding: wabaId => require('../lib/whatsappAuthorizedBrokerClient').templateBinding(wabaId),
+    namespace: jobRequestsService.getCurrentRuntimeNamespace(),
   }).catch(error => {
     const alert = require('../lib/whatsappReceptionAlerts').unavailable(error);
     // Log only the allowlisted diagnostic code, never SQL, credentials or content.
