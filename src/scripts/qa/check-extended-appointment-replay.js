@@ -9,7 +9,7 @@ function requiresReview(item) {
     || (item.planned || []).some((action) => action.type==='action/send_system_notification');
 }
 
-function check({report,expectations,cases,previous,casesBytes,previousCases}) {
+function check({report,expectations,cases,previous,casesBytes,previousCases,expectedCandidate,minimumRealInferences=200,regression=false}) {
   assert.equal(report.complete,true,'partial replay is not a completed validation');
   assert.equal(report.clinicalWrites,false);
   assert.equal(report.sends,false);
@@ -18,7 +18,16 @@ function check({report,expectations,cases,previous,casesBytes,previousCases}) {
   assert.equal(report.sourceLogs,cases.cases.length);
   assert.equal(expectations.reviewedBeforeInference,true);
   assert.equal(expectations.casesSha256,crypto.createHash('sha256').update(casesBytes).digest('hex'));
-  assert.deepEqual(report.candidate,previous.candidate,'runtime must be the previously validated published candidate');
+  assert.deepEqual(report.candidate,expectedCandidate || previous.candidate,'runtime must match the explicitly selected candidate');
+  assert.ok(Number.isInteger(minimumRealInferences) && minimumRealInferences>0);
+  if (regression) assert.ok(expectedCandidate,'regression must explicitly verify the current candidate');
+  if (expectedCandidate) {
+    for (const item of cases.cases) {
+      assert.ok(item.currentPathEvidence,'current native path evidence is required');
+      if (!item.currentPathError) assert.equal(item.currentPathEvidence.graphHash,
+        crypto.createHash('sha256').update(JSON.stringify(item.nodes)).digest('hex'),'current graph changed after selection');
+    }
+  }
   const oldIds = new Set(previous.results.map((item) => item.id));
   const labels = new Map(expectations.expectations.map((item) => [item.id,item]));
   const byId = new Map(report.results.map((item) => [item.id,item]));
@@ -26,7 +35,7 @@ function check({report,expectations,cases,previous,casesBytes,previousCases}) {
   assert.equal(labels.size,expectations.expectations.length);
   assert.equal(labels.size,byId.size);
   const conversations = new Set(cases.cases.map((item) => item.context.conversation.id));
-  assert.equal(conversations.size,cases.cases.length,'new sample must not count a conversation twice');
+  if (!regression) assert.equal(conversations.size,cases.cases.length,'new sample must not count a conversation twice');
   if (previousCases) {
     const previousConversations=new Set(previousCases.cases.map((item)=>item.context.conversation.id));
     assert.ok([...conversations].every((id)=>!previousConversations.has(id)),'previous conversation reused');
@@ -37,7 +46,7 @@ function check({report,expectations,cases,previous,casesBytes,previousCases}) {
   const models={};
   for (const item of report.results) {
     const expected = labels.get(item.id);
-    if (oldIds.has(item.id)) failures.push({id:item.id,reason:'previous_case_reused'});
+    if (!regression && oldIds.has(item.id)) failures.push({id:item.id,reason:'previous_case_reused'});
     if (!expected) {failures.push({id:item.id,reason:'human_expectation_missing'});continue;}
     groups[expected.kind]=(groups[expected.kind]||0)+1;
     if (item.error) {
@@ -63,6 +72,9 @@ function check({report,expectations,cases,previous,casesBytes,previousCases}) {
     if (planned.some((state) => !expected.allowedStates.includes(state))) {
       failures.push({id:item.id,reason:'wrong_clinical_state',expected:expected.allowedStates,planned});
     }
+    if (expected.requiredStates?.some((state)=>!planned.includes(state))) {
+      failures.push({id:item.id,reason:'independent_confirmation_not_preserved',required:expected.requiredStates,planned});
+    }
     const review = requiresReview(item);
     if (review) reviews++;
     if (expected.requiresDecisionOrReview && !planned.length) {
@@ -71,9 +83,10 @@ function check({report,expectations,cases,previous,casesBytes,previousCases}) {
     }
     if (expected.needsResponse && !review) failures.push({id:item.id,reason:'unresolved_question_lost'});
   }
-  if (realCalls<200) failures.push({reason:'fewer_than_200_additional_real_inferences',realCalls});
-  if (realLiteCalls<200) failures.push({reason:'fewer_than_200_additional_nova_lite_inferences',realLiteCalls});
-  return {cases:report.results.length,distinctConversations:conversations.size,realCalls,realLiteCalls,providers,models,groups,
+  if (realCalls<minimumRealInferences) failures.push({reason:'fewer_than_200_additional_real_inferences',realCalls,minimumRealInferences});
+  if (realLiteCalls<minimumRealInferences) failures.push({reason:'fewer_than_200_additional_nova_lite_inferences',realLiteCalls,minimumRealInferences});
+  return {validationKind:regression?'current_native_path_regression':'additional_distinct_conversations',
+    cases:report.results.length,distinctConversations:conversations.size,realCalls,realLiteCalls,providers,models,groups,
     projectedStates:states,reviews,conservative,legacyNonInference,expectedSafetyHolds,failures,
     cutoff:report.cutoff,clinicalWrites:false,sends:false,
     limitation:'Human-reviewed simulations on reconstructed inputs, not an exact original-input replay or an assertion about current production review state.'};
@@ -84,9 +97,17 @@ if (require.main===module) {
   const [reportFile,expectationsFile,casesFile,previousFile] = process.argv.slice(2);
   const read = (file) => JSON.parse(fs.readFileSync(file));
   const priorCasesIndex=process.argv.indexOf('--previous-cases');
+  const candidateIndex=process.argv.indexOf('--candidate-backend');
+  const expectedCandidate=candidateIndex>=0 ? Object.fromEntries([
+    'src/services/flowEngineV2.service.js','src/lib/automation-intent-contract.js',
+    'src/lib/automation-conversation-context.js','src/lib/same-day-canonical-flow.js',
+  ].map((path)=>[path,crypto.createHash('sha256').update(fs.readFileSync(process.argv[candidateIndex+1]+'/'+path)).digest('hex')])) : null;
+  const minimumIndex=process.argv.indexOf('--minimum-real-inferences');
   const result = check({report:read(reportFile),expectations:read(expectationsFile),cases:read(casesFile),
     previous:read(previousFile),casesBytes:fs.readFileSync(casesFile),
-    previousCases:priorCasesIndex>=0 ? read(process.argv[priorCasesIndex+1]) : null});
+    previousCases:priorCasesIndex>=0 ? read(process.argv[priorCasesIndex+1]) : null,expectedCandidate,
+    minimumRealInferences:minimumIndex>=0 ? Number(process.argv[minimumIndex+1]) : 200,
+    regression:process.argv.includes('--regression')});
   const out = process.argv.indexOf('--report');
   if (out>=0) fs.writeFileSync(process.argv[out+1],JSON.stringify(result,null,2),{mode:0o600,flag:'wx'});
   console.log(JSON.stringify(result));

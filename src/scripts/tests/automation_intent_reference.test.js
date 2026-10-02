@@ -34,7 +34,8 @@ test('clinical actions require a compatible AI reading and evidence, not just hi
       {confianza_lectura_respuesta:undefined}, {confianza_lectura_respuesta:0.4},
       {evidencia_decision_actual:''}, {evidencia_decision_actual:'Invented text'},
       {requiere_verificar_gestion_o_condicion:true}, {confianza_requiere_verificar_gestion_o_condicion:undefined},
-      {hay_asunto_por_resolver:true}, {confianza_hay_asunto_por_resolver:0.2},
+      ...(intent === 'confirmar_cita' ? [] : [{hay_asunto_por_resolver:true}]),
+      {confianza_hay_asunto_por_resolver:0.2},
       {asunto_preguntado:'indicaciones'}, {asunto_preguntado:undefined},
     ]) {
       const result = projectClassifyIntentReferenceOutput({...explicit,...invalid}, {patientText:'Patient decision'});
@@ -104,10 +105,93 @@ test('an independently identified unresolved matter preserves the native pending
   }).necesita_respuesta, true);
   assert.equal(projectClassifyIntentReferenceOutput({
     intencion_principal:'otra', necesita_respuesta:true, hay_asunto_por_resolver:false, confianza_hay_asunto_por_resolver:0.99,
-  }).necesita_respuesta, false);
+  }).necesita_respuesta, true);
   assert.equal(projectClassifyIntentReferenceOutput({
     intencion_principal:'otra', necesita_respuesta:false, hay_asunto_por_resolver:false, confianza_hay_asunto_por_resolver:0.1,
   }).necesita_respuesta, true);
+});
+
+test('an independent confirmation and a pending request keep both native branches available', () => {
+  const value = {
+    intencion_principal:'confirmar_cita', intencion_secundaria:'pregunta', confianza_intencion_principal:0.99,
+    asunto_preguntado:'asistencia', lectura_respuesta:'compromiso_asistencia', confianza_lectura_respuesta:0.99,
+    evidencia_decision_actual:'I will attend', accion_inequivoca:true,
+    requiere_verificar_gestion_o_condicion:false, confianza_requiere_verificar_gestion_o_condicion:0.99,
+    hay_asunto_por_resolver:true, confianza_hay_asunto_por_resolver:0.99, necesita_respuesta:true,
+  };
+  const output = projectClassifyIntentReferenceOutput(value, { patientText:'I will attend. Please correct my name.' });
+  assert.equal(output.intencion_principal,'confirmar_cita');
+  assert.equal(output.necesita_respuesta,true);
+  for (const uncertainty of [
+    {requiere_verificar_gestion_o_condicion:true},
+    {confianza_requiere_verificar_gestion_o_condicion:0.5},
+    {lectura_respuesta:'ambigua'},
+    {confianza_hay_asunto_por_resolver:0.4},
+  ]) {
+    const review = projectClassifyIntentReferenceOutput({...value,...uncertainty}, { patientText:'I will attend' });
+    assert.equal(review.intencion_principal,'otra');
+    assert.equal(review.necesita_respuesta,true);
+  }
+});
+
+test('confirmation signal projection fails closed on conditional, missing or low-certainty readings', () => {
+  const {deriveConfirmAppointmentOutput}=require('../../services/flowEngineV2.service');
+  const signal={lectura_confirmacion:'afirmacion_incondicional',confianza_lectura_confirmacion:0.99,
+    confirmacion_condicionada_o_incierta:false,confianza_confirmacion_condicionada_o_incierta:0.99,
+    respuesta_afirmativa_a_la_clinica:true,confianza_respuesta_afirmativa_a_la_clinica:0.99,
+    negacion_explicita_de_la_confirmacion:false,confianza_negacion_explicita_de_la_confirmacion:0.99,
+    requiere_respuesta:false,confianza_requiere_respuesta:0.99};
+  assert.equal(deriveConfirmAppointmentOutput(signal).confirma_asistencia,true);
+  for(const uncertain of [
+    {lectura_confirmacion:'decision_condicionada'}, {lectura_confirmacion:'incierta'},
+    {lectura_confirmacion:undefined}, {confianza_lectura_confirmacion:0.4},
+    {confirmacion_condicionada_o_incierta:true}, {confianza_confirmacion_condicionada_o_incierta:0.2},
+  ]) {
+    const output=deriveConfirmAppointmentOutput({...signal,...uncertain});
+    assert.equal(output.confirma_asistencia,false);
+    assert.equal(output.requiere_respuesta,true);
+  }
+  assert.equal(deriveConfirmAppointmentOutput({...signal,confianza_requiere_respuesta:0.2}).requiere_respuesta,true);
+});
+
+test('an AI-identified pending fragment cannot be erased by another false flag', () => {
+  const {deriveConfirmAppointmentOutput}=require('../../services/flowEngineV2.service');
+  const patientText='Please correct the registered name';
+  const output=deriveConfirmAppointmentOutput({
+    lectura_confirmacion:'acuse_recepcion',confianza_lectura_confirmacion:0.99,
+    confirmacion_condicionada_o_incierta:false,confianza_confirmacion_condicionada_o_incierta:0.99,
+    respuesta_afirmativa_a_la_clinica:true,confianza_respuesta_afirmativa_a_la_clinica:0.99,
+    negacion_explicita_de_la_confirmacion:false,confianza_negacion_explicita_de_la_confirmacion:0.99,
+    requiere_respuesta:false,confianza_requiere_respuesta:0.99,
+    evidencia_asunto_pendiente:patientText,confianza_evidencia_asunto_pendiente:0.99,
+  },{patientText});
+  assert.equal(output.confirma_asistencia,true);
+  assert.equal(output.requiere_respuesta,true);
+  assert.equal(projectClassifyIntentReferenceOutput({
+    intencion_principal:'agradecimiento',necesita_respuesta:false,
+    hay_asunto_por_resolver:false,confianza_hay_asunto_por_resolver:0.99,
+    evidencia_asunto_pendiente:patientText,confianza_evidencia_asunto_pendiente:0.99,
+  },{patientText}).necesita_respuesta,true);
+});
+
+test('even a historical reaction uses one AI call rather than a deterministic confirmation', async () => {
+  const engine=require('../../services/flowEngineV2.service');
+  const ai=require('../../services/aiOrchestrator.service');
+  const original=ai.analyzeStructured;
+  let calls=0;
+  ai.analyzeStructured=async()=>{calls++;return {decision:'dudas',confianza:0.99,motivo:'Review the referenced reaction.',_ai_provider:'bedrock_test'};};
+  try {
+    const result=await engine._processNode({id:'AI',type:'condition/ai_analysis',config:{
+      preset_key:'confirm_appointment',instruction:'Historical response contract',
+      context_sources:[{key:'patient_message_batch',path:'{{last_response_context}}'}],
+      output_fields:[{name:'decision',type:'string'},{name:'confianza',type:'number'},{name:'motivo',type:'string'}],
+    },outputs:{on_success:'COMPARE',on_fail:'REVIEW'}},{
+      last_response_context:{response_message_type:'reaction',reaction_emoji:'\u{1f44d}',listened_message_preview:'Do you know the way?'},
+    },{simulation:false});
+    assert.equal(calls,1);
+    assert.equal(result.output.decision,'dudas');
+    assert.equal(result.output._ai_provider,'bedrock_test');
+  }finally{ai.analyzeStructured=original;}
 });
 
 test('old and customized preset instructions retain their text and receive the same grounding', () => {
@@ -165,7 +249,7 @@ test('the real classification node adds grounding once and preserves legacy outp
       assert.match(request.inputText, /Sabes llegar\? Necesitas alguna indicacion\?/);
       assert.match(request.inputText, /"response_text":"No"/);
       assert.equal(request.inputText.split('patient_message_batch:').length - 1, 1);
-      assert.deepEqual(Object.keys(request.outputFormat).slice(0, 3), ['asunto_preguntado', 'significado_de_respuesta', 'lectura_respuesta']);
+    assert.deepEqual(Object.keys(request.outputFormat).slice(0, 4), ['evidencia_asunto_pendiente', 'asunto_preguntado', 'significado_de_respuesta', 'lectura_respuesta']);
     }
     assert.equal(calls[0].outputFormat.accion_inequivoca, 'boolean');
     assert.equal(calls[0].outputFormat.confianza, 'number');

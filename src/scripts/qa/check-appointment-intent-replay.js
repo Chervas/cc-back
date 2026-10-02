@@ -68,7 +68,10 @@ function check(report) {
     allCurrentConversationsClaim:false, cutoff:report.cutoff};
 }
 
-module.exports = { check };
+module.exports = { check, expectations: {
+  NO_STATE_CHANGE, CHANGE_REQUEST, CONFIRM_ATTENDANCE, CANCEL_WITHOUT_ALTERNATIVE,
+  CONFIRM_DATA, OPTIONAL_ATTENDANCE, OPTIONAL_DATA, NEEDS_RESPONSE,
+} };
 if (require.main === module) {
   const report = JSON.parse(fs.readFileSync(process.argv[2]));
   const result = check(report);
