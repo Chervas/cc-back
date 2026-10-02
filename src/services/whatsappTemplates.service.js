@@ -29,6 +29,7 @@ const {
   acquireWabaCatalogCreationLease,
 } = require('../lib/waba-catalog-creation-lease');
 const whatsappInboxAdminSync = require('../lib/whatsappInboxAdminSync');
+const templateSyncState = require('../lib/whatsappTemplateSyncState');
 
 const {
   ClinicMetaAsset,
@@ -3388,7 +3389,7 @@ async function enqueueSyncTemplatesJob(data, options = {}) {
       origin: 'whatsapp_template_followup',
       maxAttempts: 5,
       nextRunAt,
-      dedupeScope: jobId || `waba:${wabaId}:sync:${Math.floor(nextRunAt.getTime()/60000)}`,
+      dedupeScope: jobId || `waba:${wabaId}:sync`,
       // Nunca persistir accessToken en JobRequests: el handler resuelve el
       // asset activo y sus credenciales justo antes de consultar Meta.
       payload: {
@@ -3423,12 +3424,20 @@ async function runDelayedSyncTemplatesJob(payload = {}) {
     };
   }
 
-  const asset = await resolveWabaAssetById(wabaId);
-  if (!asset?.waAccessToken && !asset?.whatsappAuthorizedBinding) {
-    throw new Error('whatsapp_template_sync_delayed missing active WABA credentials');
+  try {
+    const asset = await resolveWabaAssetById(wabaId);
+    if (!asset?.waAccessToken && !asset?.whatsappAuthorizedBinding) {
+      throw Object.assign(new Error('whatsapp_template_connection_unavailable'), { code: 'whatsapp_template_connection_unavailable' });
+    }
+    await syncTemplatesForWaba({ wabaId, accessToken: asset.waAccessToken });
+  } catch (error) {
+    const code = templateSyncState.blockedCode(error);
+    if (!code) throw error;
+    // Retain pending notices. A security denial is not a transport retry and
+    // must not multiply five attempts inside every two-minute sweep.
+    return { status: 'failed', retryable: false, error: Object.assign(new Error(code), { code }),
+      result: { wabaId, reason: code, notices_preserved: true } };
   }
-
-  await syncTemplatesForWaba({ wabaId, accessToken: asset.waAccessToken });
   return {
     status: 'completed',
     result: {
@@ -3515,10 +3524,18 @@ async function enqueueSyncForAllWabas(options = {}) {
 
   let queued = 0;
   const seenWabas = new Set();
+  const configuredBindings = require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings || [];
+  const candidateIds = targetWabaIds || [...configuredBindings.map(binding => binding.wabaId), ...assets.map(asset => asset.wabaId)];
+  const syncStates = await templateSyncState.recentJobs({ query: (...args) => db.sequelize.query(...args),
+    wabaIds: candidateIds, namespace: jobRequestsService.getCurrentRuntimeNamespace() });
+  const deferredWabas = new Set();
   // Authorized connections have intentionally inactive legacy rows and no token.
   // Queue only fresh metadata-only jobs; never resume the quarantined Bull backlog.
-  for (const candidate of require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings || []) {
+  for (const candidate of configuredBindings) {
     if (!candidate.sendEnabled || targetWabaIds && !targetWabaIds.includes(candidate.wabaId) || seenWabas.has(candidate.wabaId)) continue;
+    if (templateSyncState.deferReason(syncStates.get(candidate.wabaId))) {
+      seenWabas.add(candidate.wabaId); deferredWabas.add(candidate.wabaId); continue;
+    }
     if (!await brokerTemplateBinding(candidate.wabaId,candidate.clinicId)) continue;
     await enqueueSyncTemplatesJob({wabaId:candidate.wabaId});
     seenWabas.add(candidate.wabaId); queued++;
@@ -3526,12 +3543,15 @@ async function enqueueSyncForAllWabas(options = {}) {
   for (const asset of assets) {
     if (!asset.wabaId || !asset.waAccessToken) continue;
     if (seenWabas.has(asset.wabaId)) continue;
+    if (templateSyncState.deferReason(syncStates.get(String(asset.wabaId)))) {
+      seenWabas.add(asset.wabaId); deferredWabas.add(asset.wabaId); continue;
+    }
     seenWabas.add(asset.wabaId);
     await enqueueSyncTemplatesJob({ wabaId: asset.wabaId, accessToken: asset.waAccessToken });
     queued += 1;
   }
 
-  return { queued, only_pending: onlyPending, only_account_events: onlyAccountEvents, relevant_wabas: targetWabaIds?.length || null };
+  return { queued, deferred: deferredWabas.size, only_pending: onlyPending, only_account_events: onlyAccountEvents, relevant_wabas: targetWabaIds?.length || null };
 }
 
 module.exports = {

@@ -15,6 +15,7 @@ const jobRequestsService = require('../../services/jobRequests.service');
 const whatsappController = require('../../controllers/whatsapp.controller');
 const whatsappTemplatesService = require('../../services/whatsappTemplates.service');
 const whatsappInboxAdminSync = require('../../lib/whatsappInboxAdminSync');
+const templateSyncState = require('../../lib/whatsappTemplateSyncState');
 const {
   shouldKeepRemoteTemplateActive,
 } = require('../../lib/whatsapp-template-pending-resubmission');
@@ -411,6 +412,7 @@ test('la creación con imagen usa AWS sin token local ni HTTP legacy', async t =
 });
 
 test('el refresco periódico admite el binding sin token y solo encola jobs nuevos',async t=>{
+  t.mock.method(templateSyncState,'recentJobs',async()=>new Map());
   const broker=require('../../lib/whatsappAuthorizedBrokerClient');const calls=[];
   t.mock.method(broker,'configuration',()=>({bindings:[{clinicId:57,wabaId:'301',sendEnabled:true},{clinicId:99,wabaId:'999',sendEnabled:false}]}));
   t.mock.method(broker,'templateBinding',async()=>({clinicId:57,wabaId:'301'}));
@@ -418,9 +420,11 @@ test('el refresco periódico admite el binding sin token y solo encola jobs nuev
   t.mock.method(jobRequestsService,'enqueueUniqueJobRequest',async value=>{calls.push(value);return {job:{id:9903}};});
   const result=await whatsappTemplatesService.enqueueSyncForAllWabas();
   assert.equal(result.queued,1);assert.equal(calls[0].type,'whatsapp_template_sync_delayed');assert.equal(calls[0].payload.wabaId,'301');assert(!JSON.stringify(calls).includes('accessToken'));
+  assert.equal(calls[0].dedupeScope,'waba:301:sync');
 });
 
 test('un cambio de estado recibido en WABA encola una sincronización sin datos clínicos', async t => {
+  t.mock.method(templateSyncState, 'recentJobs', async () => new Map());
   const broker = require('../../lib/whatsappAuthorizedBrokerClient');
   const calls = [];
   t.mock.method(whatsappInboxAdminSync, 'pendingWabaIds', async () => ['301']);
@@ -453,4 +457,57 @@ test('la conciliación solo marca avisos existentes al iniciar la consulta a Met
   assert.equal(queries.length, 1);
   assert.match(queries[0].sql, /reconciled_at IS NULL AND created_at<=:syncStartedAt/);
   assert.deepEqual(queries[0].options.replacements, { wabaId: '301', syncStartedAt: startedAt });
+});
+
+test('los barridos de dos y veinte minutos no multiplican consultas activas ni bloqueadas', async t => {
+  const broker = require('../../lib/whatsappAuthorizedBrokerClient');
+  t.mock.method(templateSyncState, 'recentJobs', async () => new Map([
+    ['301', { active_count: 2 }],
+    ['302', { error_message: 'connection_blocked', updated_at: new Date() }],
+  ]));
+  t.mock.method(whatsappInboxAdminSync, 'pendingWabaIds', async () => ['301', '302']);
+  t.mock.method(broker, 'configuration', () => ({ bindings: ['301', '302'].map(wabaId => ({ clinicId: 57, wabaId, sendEnabled: true })) }));
+  t.mock.method(broker, 'templateBinding', async () => { throw Error('No new binding or remote query expected'); });
+  t.mock.method(db.ClinicMetaAsset, 'findAll', async () => []);
+  t.mock.method(jobRequestsService, 'enqueueUniqueJobRequest', async () => { throw Error('No new job expected'); });
+  assert.deepEqual(await whatsappTemplatesService.enqueueSyncForAllWabas({ onlyAccountEvents: true }),
+    { queued: 0, deferred: 2, only_pending: false, only_account_events: true, relevant_wabas: 2 });
+});
+
+test('el permiso bloqueado termina un intento sin reintentos rápidos ni conciliación falsa', async t => {
+  const broker = require('../../lib/whatsappAuthorizedBrokerClient');
+  t.mock.method(broker, 'templateBinding', async () => ({ clinicId: 57, assetId: 12, wabaId: '301' }));
+  t.mock.method(db.ClinicMetaAsset, 'findByPk', async () => ({ id: 12 }));
+  t.mock.method(broker, 'templates', async () => { throw Object.assign(new Error('private details'), { code: 'connection_blocked' }); });
+  t.mock.method(whatsappInboxAdminSync, 'markReconciled', async () => { throw Error('No reconciliation expected'); });
+  const result = await whatsappTemplatesService.runDelayedSyncTemplatesJob({ wabaId: '301' });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.retryable, false);
+  assert.equal(result.error.code, 'connection_blocked');
+  assert.equal(result.result.notices_preserved, true);
+  assert.doesNotMatch(result.error.message, /private/);
+});
+
+test('un timeout de transporte conserva los reintentos y no concilia los avisos', async t => {
+  const broker = require('../../lib/whatsappAuthorizedBrokerClient');
+  t.mock.method(broker, 'templateBinding', async () => ({ clinicId: 57, assetId: 12, wabaId: '301' }));
+  t.mock.method(db.ClinicMetaAsset, 'findByPk', async () => ({ id: 12 }));
+  const timeout = Object.assign(new Error('provider_timeout'), { code: 'provider_timeout' });
+  t.mock.method(broker, 'templates', async () => { throw timeout; });
+  t.mock.method(whatsappInboxAdminSync, 'markReconciled', async () => { throw Error('No reconciliation expected'); });
+  await assert.rejects(whatsappTemplatesService.runDelayedSyncTemplatesJob({ wabaId: '301' }), error => error === timeout);
+});
+
+test('los disparos sin demora mantienen la misma identidad al cambiar el minuto', async t => {
+  const broker = require('../../lib/whatsappAuthorizedBrokerClient');
+  t.mock.method(broker, 'templateBinding', async () => ({ clinicId: 57, assetId: 12, wabaId: '301' }));
+  let now = Date.parse('2026-10-02T06:00:00Z');
+  t.mock.method(Date, 'now', () => now);
+  const calls = [];
+  t.mock.method(jobRequestsService, 'enqueueUniqueJobRequest', async options => { calls.push(options); return { job: { id: 9904 } }; });
+  await whatsappTemplatesService.enqueueSyncTemplatesJob({ wabaId: '301' });
+  now += 2 * 60 * 1000;
+  await whatsappTemplatesService.enqueueSyncTemplatesJob({ wabaId: '301' });
+  assert.equal(calls[0].dedupeScope, 'waba:301:sync');
+  assert.equal(calls[1].dedupeScope, calls[0].dedupeScope);
 });

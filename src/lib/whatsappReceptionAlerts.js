@@ -1,5 +1,50 @@
 'use strict';
 const health = require('./whatsappInboxHealth');
+const templateSyncState = require('./whatsappTemplateSyncState');
+
+async function templateAlert({ rows, query, bindings, resolveTemplateBinding, namespace, now }) {
+  const wabaIds = rows.map(row => String(row.waba_id || '')).filter(Boolean);
+  const states = await templateSyncState.recentJobs({ query, wabaIds, namespace, now });
+  const totals = { pending: 0, active: 0, blocked: 0, disconnected: 0, blocked_wabas: 0, disconnected_wabas: 0 };
+  let oldest = Infinity;
+  for (const row of rows) {
+    const pending = Number(row.pending || 0);
+    if (!pending) continue;
+    const wabaId = String(row.waba_id || '');
+    let available = !wabaId || bindings.some(binding => binding.wabaId === wabaId && binding.sendEnabled);
+    let denied = false;
+    if (wabaId && resolveTemplateBinding) {
+      try { available = !!await resolveTemplateBinding(wabaId); }
+      catch (error) { if (!templateSyncState.blockedCode(error)) throw error; denied = true; }
+    }
+    totals.pending += pending;
+    if (!available && !denied) { totals.disconnected += pending; totals.disconnected_wabas++; }
+    else if (denied || templateSyncState.blockedCode(states.get(wabaId)?.error_message)) {
+      totals.blocked += pending; totals.blocked_wabas++;
+    } else totals.active += pending;
+    const date = new Date(row.oldest_pending || '').getTime();
+    if (Number.isFinite(date)) oldest = Math.min(oldest, date);
+  }
+  // A deliberately disconnected account retains evidence, not an operational
+  // approval failure. Never mark it reconciled merely to silence an alert.
+  if (!totals.active && !totals.blocked) return null;
+  const cause = totals.blocked
+    ? ` La última consulta de ${totals.blocked} avisos en ${totals.blocked_wabas} cuentas fue bloqueada por el control de acceso del broker; esto no demuestra un nuevo bloqueo de Meta.` : '';
+  const inactive = totals.disconnected
+    ? ` Otros ${totals.disconnected} avisos pertenecen a ${totals.disconnected_wabas} cuentas sin conexión autorizada activa y se conservan para una futura conciliación.` : '';
+  const active = totals.active ? ` ${totals.active} avisos de cuentas disponibles siguen pendientes de sincronización.` : '';
+  const since = Number.isFinite(oldest) ? ` Pendientes en CRM desde ${new Date(oldest).toLocaleString('es-ES',
+    { timeZone: 'Europe/Madrid', dateStyle: 'short', timeStyle: 'short' })}.` : '';
+  return { eventKey: 'whatsapp.template_reconciliation_delayed', payload: {
+    severity: 'warning',
+    title: totals.active ? 'Sincronización de cambios de plantillas WhatsApp retrasada'
+      : 'No se pueden conciliar avisos de plantillas de cuentas bloqueadas',
+    detail: `Meta ya entregó ${totals.pending} avisos técnicos de cambios de plantillas, pero CRM todavía no ha contrastado su estado actual.${cause}${inactive}${active}${since} No son ${totals.pending} plantillas pendientes de aprobación ni mensajes de pacientes. Este aviso no acredita un fallo de recepción de pacientes.`,
+    action: totals.blocked
+      ? 'Revisar el permiso de las cuentas bloqueadas en Ajustes > Cuentas conectadas. No reconectar cuentas retiradas ni dar avisos por conciliados manualmente. https://crm.clinicaclick.com/ajustes?panel=connected-accounts'
+      : 'Revisar la sincronización de plantillas en Monitorización > WhatsApp. No dar avisos por conciliados manualmente. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp',
+  }, metadata: { source: 'whatsapp_template_reconciliation', ...totals } };
+}
 
 function capacityAlert(snapshot, now) {
   if (!snapshot || !Number.isFinite(snapshot.observedAt) || now - snapshot.observedAt > 90000
@@ -49,25 +94,16 @@ function archiveAlert(snapshot, now) {
 // Runs inside the existing five-minute system check. No Meta API request,
 // message body or patient identity is needed to notify an administrator.
 async function collect({ snapshot, bindings, query, now = Date.now(),
-  accountSyncEnabled = process.env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED === 'true' }) {
+  accountSyncEnabled = process.env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED === 'true',
+  resolveTemplateBinding, namespace = process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE || 'staging' }) {
   const clinicIds = [...new Set(bindings.filter(b => b.sendEnabled).map(b => b.clinicId))];
   const capacity = capacityAlert(snapshot, now);
   const archive = archiveAlert(snapshot, now);
   if (!bindings.length) return [capacity, archive].filter(Boolean);
-  const [adminRows] = accountSyncEnabled ? await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ COUNT(*) pending
-    FROM WhatsappInboxAdminSync WHERE reconciled_at IS NULL AND created_at < :cutoff`,
+  const [adminRows] = accountSyncEnabled ? await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ waba_id,COUNT(*) pending,MIN(created_at) oldest_pending
+    FROM WhatsappInboxAdminSync WHERE reconciled_at IS NULL AND created_at < :cutoff GROUP BY waba_id`,
   { replacements: { cutoff: new Date(now - 10 * 60 * 1000) } }) : [[]];
-  const adminPending = Number(adminRows[0]?.pending || 0);
-  const adminAlert = adminPending > 0 ? {
-    eventKey: 'whatsapp.template_reconciliation_delayed',
-    payload: {
-      severity: 'warning',
-      title: 'Cambios de plantillas WhatsApp pendientes de conciliar',
-      detail: `${adminPending} ${adminPending === 1 ? 'cambio de plantilla lleva' : 'cambios de plantilla llevan'} más de 10 minutos sin confirmación desde Meta.`,
-      action: 'Revisar la sincronización de plantillas y los permisos del WABA. No marcar los eventos como conciliados manualmente.',
-    },
-    metadata: { source: 'whatsapp_template_reconciliation', pending: adminPending },
-  } : null;
+  const adminAlert = await templateAlert({ rows: adminRows, query, bindings, resolveTemplateBinding, namespace, now });
   if (!clinicIds.length) return [capacity, archive, adminAlert].filter(Boolean);
   const issues = health.issues(snapshot, clinicIds, now);
   const [waiting] = await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ id,clinic_id FROM FlowExecutionsV2
