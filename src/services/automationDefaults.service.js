@@ -496,7 +496,7 @@ async function repairClinicDraftFamily({ clinicId, expectedTemplateKey, sourcePu
   );
 }
 
-async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUserId = null }) {
+async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUserId = null, backfillScheduled = true }) {
   const clinicScope = await resolveClinicScope(clinicId);
   if (!clinicScope) {
     return { status: 'failed', reason: 'clinic_not_found' };
@@ -610,7 +610,8 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
         isActive: targetActive,
       });
     });
-    const scheduledBackfill = await backfillScheduledTriggersForPublishedTemplate(existingDraft, { actorUserId });
+    const scheduledBackfill = backfillScheduled
+      ? await backfillScheduledTriggersForPublishedTemplate(existingDraft, { actorUserId }) : null;
     return {
       status: familyExists ? 'updated' : 'created',
       template_key: existingDraft.template_key,
@@ -638,7 +639,8 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     return row;
   });
 
-  const scheduledBackfill = await backfillScheduledTriggersForPublishedTemplate(created, { actorUserId });
+  const scheduledBackfill = backfillScheduled
+    ? await backfillScheduledTriggersForPublishedTemplate(created, { actorUserId }) : null;
   return {
     status: familyExists ? 'updated' : 'created',
     template_key: created.template_key,
@@ -678,7 +680,7 @@ async function createDefaultAutomationsForClinic({ clinicId }) {
   };
 }
 
-async function propagateCatalogAutomationToClinics({ catalogId, actorUserId = null }) {
+async function propagateCatalogAutomationToClinics({ catalogId, actorUserId = null, backfillScheduled = true }) {
   const item = await AutomationFlowCatalog.findByPk(catalogId, {
     include: [{ model: AutomationFlowCatalogDiscipline, as: 'disciplinas' }],
   });
@@ -711,6 +713,7 @@ async function propagateCatalogAutomationToClinics({ catalogId, actorUserId = nu
       clinicId: clinic.id_clinica,
       catalogFlow: item,
       actorUserId,
+      backfillScheduled,
     });
     if (result.status === 'created') created += 1;
     else if (result.status === 'updated') updated += 1;
