@@ -151,6 +151,8 @@ async function reconstructClinicalContext() {
 async function replay() {
   if (!args.includes('--real-ai')) throw new Error('replay_requires_explicit_real_ai_flag');
   const data = JSON.parse(fs.readFileSync(file));
+  const output = argument('--report', file.replace('.cases.json', '.replay.json'));
+  if (fs.existsSync(output)) throw Error('replay_report_already_exists');
   const candidate = Object.fromEntries([
     'src/services/flowEngineV2.service.js', 'src/lib/automation-intent-contract.js',
     'src/lib/automation-conversation-context.js', 'src/lib/same-day-canonical-flow.js',
@@ -170,11 +172,14 @@ async function replay() {
     return activeCase.messages.filter((message) => !['event', 'reaction'].includes(message.message_type));
   };
   db.CitaPaciente.findByPk = async () => activeCase.context.appointment || null;
+  const restoreClock = require('./historical-replay-context').installHistoricalConversationClock(
+    require(backend + '/src/lib/automation-conversation-context'), () => activeCase);
   const engine = require(backend + '/src/services/flowEngineV2.service');
   const ai = require(backend + '/src/services/aiOrchestrator.service');
   const analyze = ai.analyzeStructured;
-  let inference;
+  let inference, inferenceCalls;
   ai.analyzeStructured = async (request) => {
+    inferenceCalls++;
     const raw = await analyze(request);
     inference = { input: request.inputText, systemPrompt:request.systemPrompt, instruction:request.prompt, raw };
     return raw;
@@ -188,6 +193,8 @@ async function replay() {
       if (args.includes('--ids') && !argument('--ids', '').split(',').map(Number).includes(item.id)) continue;
       activeCase = item;
       inference = null;
+      inferenceCalls = 0;
+      const startedAt = Date.now();
       const context = structuredClone(item.context);
       const before = JSON.stringify(context.appointment);
       let result;
@@ -216,22 +223,30 @@ async function replay() {
           clinicalContextEvidence:item.clinicalContextEvidence || null,
           response: item.context.last_response_context.response_text, reference: item.context.last_prompt,
           previous: item.original_output, output: result.output, route, planned, inference,
+          inferenceCalls, elapsedMs:Date.now()-startedAt,
           clinicalWrites: false, sends: false });
       } catch (error) {
-        results.push({ id: item.id, preset: item.preset, error: error.message });
+        results.push({ id: item.id, preset: item.preset, error: error.message,
+          inferenceCalls, elapsedMs:Date.now()-startedAt });
       }
       const last = results.at(-1);
       console.log(JSON.stringify({ id: last.id, preset: item.preset, intent: last.output?.intencion_principal,
         state: last.planned?.find((action) => action.state)?.state, error: last.error || null }));
+      const checkpoint = argument('--checkpoint');
+      if (checkpoint) {
+        const temporary = checkpoint + '.tmp';
+        fs.writeFileSync(temporary, JSON.stringify({complete:false,cutoff:data.cutoff,candidate,backend,results,
+          clinicalWrites:false,sends:false}), {mode:0o600});
+        fs.renameSync(temporary,checkpoint);
+      }
     }
-    const output = argument('--report', file.replace('.cases.json', '.replay.json'));
     const canonicalGraphHashes = [...new Set(data.cases.filter((item) => item.canonicalSameDay)
       .map((item) => crypto.createHash('sha256').update(JSON.stringify(item.nodes)).digest('hex')))];
-    fs.writeFileSync(output, JSON.stringify({ cutoff: data.cutoff, sourceLogs: data.sourceLogs, skipped: data.skipped, candidate,
+    fs.writeFileSync(output, JSON.stringify({ complete:true, cutoff: data.cutoff, sourceLogs: data.sourceLogs, skipped: data.skipped, candidate,
       canonicalGraphHashes, backend, results, clinicalWrites: false, sends: false }), { mode: 0o600, flag: 'wx' });
     console.log(JSON.stringify({ cases: results.length, errors: results.filter((result) => result.error).length, output }));
     if (results.some((result) => result.error)) process.exitCode = 1;
-  } finally { await db.sequelize.close(); }
+  } finally { restoreClock(); await db.sequelize.close(); }
 }
 
 (args.includes('--prepare') ? prepare() : args.includes('--reconstruct-clinical-context') ? reconstructClinicalContext() : replay()).catch((error) => {
