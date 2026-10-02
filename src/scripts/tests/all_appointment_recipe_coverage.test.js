@@ -2,7 +2,17 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { nativeReference, configurationSignature, contextualConfirmationStates } = require('../qa/prepare-all-appointment-recipes');
+const { nativeReference, configurationSignature, contextualConfirmationStates,
+  syntheticTriggerData } = require('../qa/prepare-all-appointment-recipes');
+
+test('virtual received-message triggers identify the current inbound batch without bypassing scope checks', () => {
+  assert.deepEqual(syntheticTriggerData('message_received', 35, 81, 97), {
+    clinic_id: 35, conversation_id: 81, inbound_message_ids: [97],
+  });
+  assert.deepEqual(syntheticTriggerData('appointment_created', 35, 81, 97), {
+    clinic_id: 35, conversation_id: 81,
+  });
+});
 
 test('a native wait may listen to the event after the actual WhatsApp send', () => {
   const send = { id: 'SEND', type: 'action/send_whatsapp', outputs: { on_success: 'EVENT' } };

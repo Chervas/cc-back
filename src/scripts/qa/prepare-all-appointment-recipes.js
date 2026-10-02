@@ -91,6 +91,11 @@ function contextualConfirmationStates(row, node) {
   return attendance.has(row.name) ? ['recordatorio_confirmado'] : data.has(row.name) ? ['info_confirmada'] : [];
 }
 
+function syntheticTriggerData(type, clinicId, conversationId, responseId) {
+  return { clinic_id: clinicId, conversation_id: conversationId,
+    ...(type === 'message_received' ? { inbound_message_ids: [responseId] } : {}) };
+}
+
 async function prepare({ output, expectations, inventory, historicalFixtures }) {
   for (const file of [output, expectations, inventory]) {
     if (!file || !path.resolve(file).startsWith('/home/ubuntu/secure-imports/') || fs.existsSync(file)) {
@@ -143,7 +148,8 @@ async function prepare({ output, expectations, inventory, historicalFixtures }) 
         appointment: { id_cita: ++id, clinica_id: clinicId, estado: 'sin_confirmar',
           fecha: '2026-10-05', hora: '12:30:00', fecha_hora: '2026-10-05T10:30:00Z' },
         conversation: { id: conversationId, clinic_id: clinicId, patient_id: null },
-        trigger: { type: row.trigger_type, data: { clinic_id: clinicId, conversation_id: conversationId } },
+        trigger: { type: row.trigger_type,
+          data: syntheticTriggerData(row.trigger_type, clinicId, conversationId, responseId) },
         last_prompt: reference.text, last_response: scenario.text, outputs: {},
         last_response_context: { response_text: scenario.text, response_message_id: responseId,
           response_message_type: scenario.reaction ? 'reaction' : 'text',
@@ -227,7 +233,8 @@ async function prepare({ output, expectations, inventory, historicalFixtures }) 
   } finally { await c.rollback(); await c.end(); }
 }
 
-module.exports = { SCENARIOS, nativeReference, prepare, configurationSignature, contextualConfirmationStates };
+module.exports = { SCENARIOS, nativeReference, prepare, configurationSignature, contextualConfirmationStates,
+  syntheticTriggerData };
 if (require.main === module) {
   const args = process.argv.slice(2);
   const arg = (key) => args[args.indexOf(key) + 1];
