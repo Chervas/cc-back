@@ -556,13 +556,23 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
           !isManagedLeadAutoReply
           && (!isMessageReceivedAutomation || catalogFlow.is_default_for_trigger === true)
         );
-  const nodes = mergeLocalReviewConfigIntoCatalogNodes(linkedTemplate.nodes, latestPublished);
+  let nodes = mergeLocalReviewConfigIntoCatalogNodes(linkedTemplate.nodes, latestPublished);
   let triggerConfig = (
     (isManagedLeadAutoReply && latestPublished?.trigger_config?.managed_feature === 'lead_auto_reply')
     || (isManagedReviewAutomation && reviewConfiguration?.configured === true)
   )
     ? cloneJson(latestPublished.trigger_config)
     : linkedTemplate.trigger_config ?? null;
+  if (isManagedLeadAutoReply) {
+    const leadAutoReply = require('./leadAutoReply.service');
+    triggerConfig = leadAutoReply.normalizeConfig(
+      latestPublished?.trigger_config || linkedTemplate.trigger_config || {},
+    );
+    if (!triggerConfig.configured && !triggerConfig.whatsapp_catalog_template_id) {
+      triggerConfig.whatsapp_catalog_template_id = linkedTemplate.trigger_config?.whatsapp_catalog_template_id || null;
+    }
+    nodes = leadAutoReply.buildManagedNodes(triggerConfig);
+  }
   if (isMessageReceivedAutomation) {
     triggerConfig = mergeLocalMessageReceivedTriggerConfig(
       linkedTemplate.trigger_config,
