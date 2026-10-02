@@ -11,16 +11,21 @@ function isReviewAutomation(template) {
   return nodes.some((node) => String(node?.type || '') === REVIEW_AUTOMATION_ACTION);
 }
 
+function isManagedLeadAutomation(template) {
+  return template?.trigger_config?.managed_feature === 'lead_auto_reply';
+}
+
 function selectCatalogSourceCandidates(templates) {
   const rows = Array.isArray(templates) ? templates : [];
   const active = rows.filter(isActive);
   if (active.length) return active;
 
-  // Review masters stay inactive because activation belongs to each clinic.
-  return rows.filter(isReviewAutomation);
+  // Managed masters stay inactive because configuration and activation are local.
+  return rows.filter((template) => isReviewAutomation(template) || isManagedLeadAutomation(template));
 }
 
 module.exports = {
   isReviewAutomation,
+  isManagedLeadAutomation,
   selectCatalogSourceCandidates,
 };
