@@ -28,12 +28,16 @@ async function verify(file) {
       if (!current || hash(parse(current.nodes)) !== old.nodesHash
         || hash(parse(current.trigger_config)) !== old.triggerHash || current.public_id !== old.public_id) {
         failures.push({id:old.id,reason:'historical_version_changed'});
-      } else if (!family.test(old.template_key) && Boolean(current.is_active) !== Boolean(old.is_active)) {
+      } else if ((!family.test(old.template_key) || (old.clinic_id == null && old.template_key.includes('__clinic_')))
+        && Boolean(current.is_active) !== Boolean(old.is_active)) {
         failures.push({id:old.id,reason:'unrelated_activation_changed'});
       }
     }
     const previous = latest(before.rows.filter((row) => family.test(row.template_key)));
-    const current = latest(rows.filter((row) => family.test(row.template_key)));
+    const detached = latest(rows.filter((row) => family.test(row.template_key)
+      && row.clinic_id == null && row.template_key.includes('__clinic_')));
+    const current = latest(rows.filter((row) => family.test(row.template_key)
+      && (row.clinic_id != null || !row.template_key.includes('__clinic_'))));
     const source = [...current.values()].find((row) => row.clinic_id == null && row.group_id == null);
     const deliveryIds = require('../../lib/same-day-canonical-flow').DELIVERY_NODE_IDS;
     const decisions = (row) => parse(row.nodes).filter((node) => !deliveryIds.includes(node.id));
@@ -55,6 +59,7 @@ async function verify(file) {
     }
     return {readOnly:true,historicalVersionsChecked:before.rows.length,
       clinicInstances:current.size - (source ? 1 : 0),sourceVersion:source?.version,
+      detachedFormerClinicFamiliesPreserved:detached.size,
       newPublishedVersions:rows.filter((row) => !before.rows.some((old) => old.id === row.id)).length,failures};
   } finally {await connection.rollback();await connection.end();}
 }
