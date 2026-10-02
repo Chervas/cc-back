@@ -5,6 +5,7 @@ const assert=require('node:assert/strict');
 const crypto=require('node:crypto');
 const {check}=require('../qa/check-extended-appointment-replay');
 const {installHistoricalConversationClock}=require('../qa/historical-replay-context');
+const {currentAnalysisNode}=require('../qa/hydrate-current-automation-paths');
 
 function fixture() {
   const cases={cases:Array.from({length:200},(_,i)=>({id:i+1,context:{conversation:{id:i+1}}}))};
@@ -71,4 +72,26 @@ test('scope holds are not counted as real model decisions',()=>{
 test('previous conversations are rejected even under a different analysis ID',()=>{
   const input=fixture();input.previousCases={cases:[{id:500,context:{conversation:{id:1}}}]};
   assert.throws(()=>check(input),/previous conversation reused/);
+});
+
+test('a removed historical AI node is replaced only through the same native wait and reference',()=>{
+  const item={id:1,node:{id:'OLD'},nodes:[{id:'WAIT',type:'delay/wait_response',config:{listens_to_node_id:'SEND'}}]};
+  const template={nodes:[{id:'WAIT',type:'delay/wait_response',config:{listens_to_node_id:'SEND'},outputs:{on_response:'CURRENT'}},
+    {id:'CURRENT',type:'condition/ai_analysis'}]};
+  assert.equal(currentAnalysisNode(item,template,'WAIT').id,'CURRENT');
+  template.nodes[0].config.listens_to_node_id='OTHER_SEND';
+  assert.throws(()=>currentAnalysisNode(item,template,'WAIT'),/reference_not_equivalent/);
+});
+
+test('baseline regression is separate from new coverage and still verifies current graphs and code',()=>{
+  const input=fixture();
+  input.previous.results=[{id:1}];input.regression=true;
+  assert.throws(()=>check(input),/current candidate/);
+  input.expectedCandidate=input.report.candidate;
+  for(const item of input.cases.cases){item.nodes=[];item.currentPathEvidence={graphHash:crypto.createHash('sha256').update('[]').digest('hex')};}
+  const result=check(input);
+  assert.equal(result.validationKind,'current_native_path_regression');
+  assert.equal(result.failures.length,0);
+  input.cases.cases[1].context.conversation.id=1;
+  assert.equal(check(input).distinctConversations,199);
 });

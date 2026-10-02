@@ -199,6 +199,7 @@ async function replay() {
       const before = JSON.stringify(context.appointment);
       let result;
       try {
+        if (item.currentPathError) throw Error(item.currentPathError);
         result = await engine._processNode(item.node, context, { simulation: false });
         context.outputs[item.node.id] = result.output;
         let next = result.next_node_id;
@@ -221,6 +222,7 @@ async function replay() {
         results.push({ id: item.id, execution: item.execution_id, clinic: item.clinic, patient: item.patient,
           automation: item.automation, canonicalSameDay: item.canonicalSameDay, preset: item.preset,
           clinicalContextEvidence:item.clinicalContextEvidence || null,
+          currentPathEvidence:item.currentPathEvidence || null,
           response: item.context.last_response_context.response_text, reference: item.context.last_prompt,
           previous: item.original_output, output: result.output, route, planned, inference,
           inferenceCalls, elapsedMs:Date.now()-startedAt,

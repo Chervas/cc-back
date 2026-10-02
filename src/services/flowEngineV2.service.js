@@ -1674,46 +1674,6 @@ function isPositiveConfirmationEmojiText(value) {
   return consumedAny && remaining.length === 0;
 }
 
-function buildDeterministicConfirmAppointmentOutput(context = {}) {
-  const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
-  const responseMediaKind = normalizeKey(responseContext.response_media_kind);
-  if (responseMediaKind === 'sticker') {
-    return {
-      decision: 'incongruente',
-      confianza: 0.2,
-      motivo: 'El paciente respondio con un sticker. No se puede confirmar la intencion automaticamente.',
-      _ai_provider: 'deterministic_rule',
-      _ai_model: 'confirm_appointment_unreadable_sticker',
-      _ai_analysis_mode: 'rule',
-    };
-  }
-
-  const responseMessageType = normalizeKey(
-    responseContext.response_message_type
-    || responseContext.message_type
-  );
-  if (responseMessageType !== 'reaction') return null;
-
-  const reactionEmoji = cleanString(responseContext.reaction_emoji);
-  if (!reactionEmoji || !isPositiveConfirmationEmojiText(reactionEmoji)) return null;
-
-  const targetPreview = cleanString(
-    responseContext.reaction_target_message_preview
-    || responseContext.listened_message_preview
-    || context?.last_prompt
-  );
-  return {
-    decision: 'confirmado',
-    confianza: 0.99,
-    motivo: targetPreview
-      ? `Paciente reacciono ${reactionEmoji} de forma positiva al mensaje "${targetPreview}".`
-      : `Paciente reacciono ${reactionEmoji} de forma positiva al ultimo mensaje de la clinica.`,
-    _ai_provider: 'deterministic_rule',
-    _ai_model: 'confirm_appointment_positive_reaction',
-    _ai_analysis_mode: 'rule',
-  };
-}
-
 function buildSafeAppointmentAiFailureOutput(presetKey, error) {
   const errorCode = cleanString(error?.code || error?.name || 'ai_provider_unavailable');
   if (presetKey === 'confirm_appointment') {
@@ -1976,11 +1936,21 @@ function buildScopedClassifyIntentBatch(context = {}) {
   return batch;
 }
 
-function deriveConfirmAppointmentOutput(signalOutput = {}) {
+function deriveConfirmAppointmentOutput(signalOutput = {}, { patientText = '' } = {}) {
   const affirmative = signalOutput.respuesta_afirmativa_a_la_clinica === true;
   const contradiction = signalOutput.negacion_explicita_de_la_confirmacion === true;
-  const confirms = affirmative && !contradiction;
-  const requiresReply = contradiction || signalOutput.requiere_respuesta === true;
+  const certainDecision = signalOutput.confirmacion_condicionada_o_incierta === false
+    && Number(signalOutput.confianza_confirmacion_condicionada_o_incierta) >= AUTO_APPLY_CONFIDENCE_THRESHOLD
+    && ['afirmacion_incondicional', 'acuse_recepcion'].includes(signalOutput.lectura_confirmacion)
+    && Number(signalOutput.confianza_lectura_confirmacion) >= AUTO_APPLY_CONFIDENCE_THRESHOLD;
+  const normalizeEvidence = (text) => String(text || '').normalize('NFC').replace(/\s+/g, ' ').trim();
+  const pendingEvidence = normalizeEvidence(signalOutput.evidencia_asunto_pendiente);
+  const hasPendingEvidence = !!pendingEvidence && normalizeEvidence(patientText).includes(pendingEvidence);
+  const certainReplyAssessment = typeof signalOutput.requiere_respuesta === 'boolean'
+    && Number(signalOutput.confianza_requiere_respuesta) >= AUTO_APPLY_CONFIDENCE_THRESHOLD;
+  const confirms = affirmative && !contradiction && certainDecision;
+  const requiresReply = contradiction || !certainDecision || !certainReplyAssessment
+    || hasPendingEvidence || signalOutput.requiere_respuesta === true;
   const affirmativeConfidence = Math.max(
     0,
     Math.min(1, Number(signalOutput.confianza_respuesta_afirmativa_a_la_clinica) || 0),
@@ -1990,7 +1960,9 @@ function deriveConfirmAppointmentOutput(signalOutput = {}) {
     Math.min(1, Number(signalOutput.confianza_negacion_explicita_de_la_confirmacion) || 0),
   );
   const confirmationConfidence = confirms
-    ? Math.min(affirmativeConfidence, contradictionConfidence)
+    ? Math.min(affirmativeConfidence, contradictionConfidence,
+      Number(signalOutput.confianza_confirmacion_condicionada_o_incierta),
+      Number(signalOutput.confianza_lectura_confirmacion))
     : contradiction
       ? contradictionConfidence
       : affirmativeConfidence;
@@ -2000,7 +1972,10 @@ function deriveConfirmAppointmentOutput(signalOutput = {}) {
     requiere_respuesta: requiresReply,
     motivo: cleanString(signalOutput.motivo),
     confianza_confirma_asistencia: confirmationConfidence,
-    confianza_requiere_respuesta: contradiction
+    confianza_requiere_respuesta: hasPendingEvidence
+      ? Math.max(Number(signalOutput.confianza_evidencia_asunto_pendiente) || 0,
+          Number(signalOutput.confianza_requiere_respuesta) || 0)
+      : contradiction
       ? Math.max(
           contradictionConfidence,
           Math.max(0, Math.min(1, Number(signalOutput.confianza_requiere_respuesta) || 0)),
@@ -7049,9 +7024,6 @@ async function processNode(node, context, runtime = {}) {
           _ai_provider: result.source === 'ai' ? (result.provider || 'bedrock') : result.source,
           _ai_model: result.model || null,
         }))
-        : presetKey === 'confirm_appointment'
-          && !usesStructuredConfirmAppointmentContract(config)
-        ? buildDeterministicConfirmAppointmentOutput(aiContext)
         : null;
       if (deterministicPresetOutput) {
         const presetNormalizedOutput = presetKey === 'classify_intent'
@@ -7160,7 +7132,9 @@ async function processNode(node, context, runtime = {}) {
           }
         }
       } else if (usesConfirmSignalContract) {
-        aiOutput = deriveConfirmAppointmentOutput(aiOutput);
+        aiOutput = deriveConfirmAppointmentOutput(aiOutput, {
+          patientText: cleanString(buildScopedClassifyIntentBatch(aiContext).response_text),
+        });
       }
       aiOutput = normalizeConfiguredAiOutput(aiOutput, normalizedOutputFields);
       if (presetKey === 'classify_intent') {
@@ -8378,7 +8352,6 @@ module.exports = {
   resolveWhatsappLanguageRouting,
   scoreWhatsappTemplateCandidate,
   selectBestWhatsappTemplateCandidate,
-  buildDeterministicConfirmAppointmentOutput,
   buildDeterministicClassifyIntentOutput,
   buildScopedClassifyIntentConversation,
   buildScopedConfirmAppointmentBatch,

@@ -95,6 +95,8 @@ function testConfirmAppointmentContextIsCompactAndKeepsNonTextEvidence() {
   assert.doesNotMatch(JSON.stringify(compact.response_items), /tema brackets/);
 
   const derived = flowEngine.deriveConfirmAppointmentOutput({
+    lectura_confirmacion: 'afirmacion_incondicional', confianza_lectura_confirmacion: 0.99,
+    confirmacion_condicionada_o_incierta: false, confianza_confirmacion_condicionada_o_incierta: 0.99,
     respuesta_afirmativa_a_la_clinica: true,
     negacion_explicita_de_la_confirmacion: false,
     requiere_respuesta: true,
@@ -498,7 +500,7 @@ async function testBinaryConfirmationPresetIsExecutable() {
   let providerCalled = false;
   aiOrchestrator.analyzeStructured = async () => {
     providerCalled = true;
-    throw new Error('provider must not be called for a positive reaction');
+    return { decision: 'dudas', confianza: 0.99, motivo: 'La reaccion requiere contexto.' };
   };
   const reactionContext = contextWithConversation('');
   reactionContext.last_response_context = {
@@ -509,8 +511,8 @@ async function testBinaryConfirmationPresetIsExecutable() {
   try {
     const reaction = await flowEngine._processNode(legacyNode, reactionContext, { simulation: false });
     assert.equal(reaction.next_node_id, 'N-success');
-    assert.equal(reaction.output.decision, 'confirmado');
-    assert.equal(providerCalled, false);
+    assert.equal(reaction.output.decision, 'dudas');
+    assert.equal(providerCalled, true);
   } finally {
     aiOrchestrator.analyzeStructured = originalAnalyzeStructured;
   }
