@@ -86,6 +86,20 @@ test('renaming does not cancel reservations or overwrite their historical labels
   assert.equal(f.units[0].revision, 2);
   assert(f.calls.includes('equipment:1'));
 });
+test('attention defaults are editable with reservations, but omitted fields never erase the policy', async () => {
+  const f = fixture({ busy:true });
+  const policy={mode:'start_end',start_minutes:5,start_window_minutes:10,end_minutes:5,end_window_minutes:10};
+  await f.service.saveUnit(72,1,{...payload,attention_policy:policy});
+  assert.deepEqual(f.units[0].attention_policy,policy);
+  await f.service.saveUnit(72,1,{...payload,name:'EXION renombrado',revision:2});
+  assert.deepEqual(f.units[0].attention_policy,policy);
+  assert.deepEqual((await f.service.read(72)).units[0].attention_policy,policy);
+});
+test('invalid staff intervention policy cannot be saved', async () => {
+  const f=fixture();
+  await assert.rejects(f.service.saveUnit(72,1,{...payload,attention_policy:{mode:'start_end',start_minutes:15,start_window_minutes:10,end_minutes:5,end_window_minutes:10}}),{code:'booking_attention_invalid'});
+  assert.equal(f.units[0].revision,1);
+});
 test('cannot disable equipment management while shared units remain assigned', async () => {
   await assert.rejects(fixture().service.setEnabled(72, false), { code: 'booking_equipment_in_use' });
 });

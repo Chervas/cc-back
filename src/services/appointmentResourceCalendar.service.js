@@ -1,7 +1,7 @@
 'use strict';
 
 const { bookingCapabilities } = require('./treatmentBookingProfile.service');
-const { resolveInstallationKeys, permitsLegacyOverlap, protectedBookingAttribute } = require('./appointmentBookingAvailability.service');
+const { resolveInstallationKeys, permitsLegacyOverlap, protectedBookingAttribute, nonShareableBookingAttribute, shareableInterval } = require('./appointmentBookingAvailability.service');
 
 /** One bounded resource read for old availability screens and schedule impact.
  * A segmented appointment occupies each resource only for its actual phase.
@@ -32,7 +32,7 @@ async function resourceAppointments({ db, clinic = null, doctorId = null, instal
     ...(ignoreAppointmentId ? { id_cita: { [Op.ne]: ignoreAppointmentId } } : {}),
     [Op.or]: [...(doctors.length ? [{ doctor_id: { [Op.in]: doctors } }] : []), ...(physicalIds.length ? [{ instalacion_id: { [Op.in]: physicalIds } }] : [])],
   }, attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin',
-    ...(enabled ? ['source_system', protectedBookingAttribute(db, 'CitaPaciente')] : [])], transaction, raw: true });
+    ...(enabled ? ['source_system', protectedBookingAttribute(db, 'CitaPaciente'), nonShareableBookingAttribute(db, 'CitaPaciente')] : [])], transaction, raw: true });
   if (!enabled) return legacy;
   const occupancy = await db.AppointmentBookingOccupancy.findAll({ where: {
     ...(ignoreAppointmentId ? { appointment_id: { [Op.ne]: ignoreAppointmentId } } : {}),
@@ -41,15 +41,15 @@ async function resourceAppointments({ db, clinic = null, doctorId = null, instal
       ...(legacy.length ? [{ appointment_id: { [Op.in]: legacy.map(r => r.id_cita) } }] : []),
     ],
   }, include: [{ model: db.CitaPaciente, as: 'appointment', required: true,
-    attributes: ['id_cita', 'clinica_id', 'source_system', protectedBookingAttribute(db, 'appointment')], where: { estado: { [Op.ne]: 'cancelada' } } }], transaction });
+    attributes: ['id_cita', 'clinica_id', 'source_system', protectedBookingAttribute(db, 'appointment'), nonShareableBookingAttribute(db, 'appointment')], where: { estado: { [Op.ne]: 'cancelada' } } }], transaction });
   const segmented = new Set(occupancy.map(r => Number(r.appointment_id)));
   const project = row => {
     const targets = row.instalacion_id && mapping ? installations.filter(id => mapping.keys.get(id) === mapping.keys.get(Number(row.instalacion_id))) : [];
     return targets.length ? targets.map(id => ({ ...row, instalacion_id: id })) : [row];
   };
   const result = legacy.filter(r => !segmented.has(Number(r.id_cita))).flatMap(row => {
-    const { source_system, booking_protected, ...safe } = row;
-    return project({ ...safe, can_force_legacy: permitsLegacyOverlap(row, row.clinica_id) });
+    const { source_system, booking_protected, booking_nonshareable, ...safe } = row;
+    return project({ ...safe, can_share: shareableInterval(row, Number(row.clinica_id)), can_force_legacy: permitsLegacyOverlap(row, row.clinica_id) });
   });
   const seen = new Set();
   for (const row of occupancy) {
@@ -59,6 +59,7 @@ async function resourceAppointments({ db, clinic = null, doctorId = null, instal
     seen.add(key);
     result.push(...project({ id_cita: Number(row.appointment_id), clinica_id: Number(row.appointment.clinica_id),
       doctor_id: row.doctor_id, instalacion_id: row.installation_id, inicio: row.start_at, fin: row.end_at, segmented: true,
+      can_share: shareableInterval(row.appointment, Number(row.appointment.clinica_id)),
       can_force_legacy: permitsLegacyOverlap(row.appointment, row.appointment.clinica_id) }));
   }
   return result;

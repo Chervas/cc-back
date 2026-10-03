@@ -1,6 +1,7 @@
 'use strict';
 
 const { normalizeEquipmentRequirements, equipmentIds } = require('./booking-equipment');
+const { normalizeAttentionPolicy } = require('./booking-attention');
 
 function invalid(field, message) {
   const error = new Error(message);
@@ -23,7 +24,7 @@ function ids(value, field) {
 /** Normalizes only the booking_profile subtree; callers retain clinical_config. */
 function normalizeBookingProfile(value, { allowIncomplete = false } = {}) {
   if (value == null) return null;
-  if (typeof value !== 'object' || Array.isArray(value) || ![1, 2].includes(value.version)) {
+  if (typeof value !== 'object' || Array.isArray(value) || ![1, 2, 3].includes(value.version)) {
     invalid('version', 'La versión del perfil de agenda no es válida.');
   }
   if (!Array.isArray(value.phases) || !value.phases.length || value.phases.length > 12) {
@@ -44,9 +45,13 @@ function normalizeBookingProfile(value, { allowIncomplete = false } = {}) {
     const installationIds = ids(phase.installation_ids, `${field}.installation_ids`);
     // v2 is deliberate: old writers must reject, never silently strip a machine.
     const equipmentRequirements = normalizeEquipmentRequirements(phase.equipment_requirements);
-    if (equipmentRequirements.length && value.version !== 2) invalid('version', 'Los equipos requieren la versión 2 del perfil de agenda.');
+    if (equipmentRequirements.length && value.version < 2) invalid('version', 'Los equipos requieren la versión 2 del perfil de agenda.');
+    if (phase.staff_attention != null && (value.version !== 3 || !Array.isArray(phase.staff_attention)
+      || !phase.staff_attention.length || phase.staff_attention.length > 8)) invalid(`${field}.staff_attention`, 'La intervención del personal requiere un perfil compatible de versión 3.');
+    const attention = phase.staff_attention?.map(normalizeAttentionPolicy);
     const staff = phase.professionals || { mode: 'any', ids: [] };
     if (typeof staff !== 'object' || !['any', 'all'].includes(staff.mode)) invalid(`${field}.professionals.mode`, 'Elige si puede atender cualquiera o deben estar todos.');
+    if (attention && (!equipmentRequirements.length || staff.mode !== 'any')) invalid(`${field}.staff_attention`, 'Las intervenciones parciales requieren maquinaria y un profesional por fase; los equipos obligatorios conservan la reserva completa.');
     const professionalIds = ids(staff.ids, `${field}.professionals.ids`);
     let preferredId = staff.preferred_id == null || staff.preferred_id === '' ? null : Number(staff.preferred_id);
     if (preferredId !== null && (!Number.isSafeInteger(preferredId) || !professionalIds.includes(preferredId))) {
@@ -66,6 +71,7 @@ function normalizeBookingProfile(value, { allowIncomplete = false } = {}) {
       installation_ids: installationIds,
       professionals: { mode: staff.mode, ids: professionalIds, preferred_id: preferredId },
       ...(equipmentRequirements.length ? { equipment_requirements: equipmentRequirements } : {}),
+      ...(attention ? { staff_attention: attention } : {}),
     };
   });
   if (phases.reduce((sum, phase) => sum + (phase.duration_minutes || 0), 0) > 1440) {

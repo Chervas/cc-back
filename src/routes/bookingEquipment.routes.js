@@ -15,7 +15,7 @@ const handler = work => async (req, res, next) => {
       assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey, clinicId }) });
     res.json(await work(service, req));
   } catch (error) {
-    if (error.code?.startsWith('booking_equipment_')) return res.status(error.statusCode || 422).json({ code: error.code, message: error.message, can_force: false });
+    if (/^booking_(equipment|attention)_/.test(error.code || '')) return res.status(error.statusCode || 422).json({ code: error.code, message: error.message, can_force: false });
     if (error.status === 403 || error.message === 'access_policy_forbidden') return res.status(403).json({ message: 'No tienes permiso para gestionar equipos en estas clínicas.' });
     next(error);
   }

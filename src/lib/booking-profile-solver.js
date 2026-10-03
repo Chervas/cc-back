@@ -2,6 +2,7 @@
 
 const { normalizeBookingProfile } = require('./booking-profile');
 const { installationAllowsStaff } = require('./installation-professionals');
+const { normalizeAttentionPolicy, isDefaultAttention, planStaffAttention, resourceForConfirmedOverlap } = require('./booking-attention');
 
 const overlap = (start, end, interval) => start < new Date(interval.end) && new Date(interval.start) < end;
 
@@ -15,7 +16,7 @@ function isFree(resource, start, end) {
  * ALL staff are required for the entire appointment, not merely their phase.
  * Inputs contain only schedules/occupancy, never patients or clinical notes.
  */
-function solveBookingProfile({ profile: input, start, doctors, installations, equipment = null, clinicWindows = null, selections = {} }) {
+function solveBookingProfile({ profile: input, start, doctors, installations, equipment = null, clinicWindows = null, selections = {}, allowOverlap = false }) {
   const profile = normalizeBookingProfile(input);
   const appointmentStart = new Date(start);
   const appointmentEnd = new Date(appointmentStart.getTime()
@@ -34,7 +35,7 @@ function solveBookingProfile({ profile: input, start, doctors, installations, eq
     const equipmentChoices = new Map();
     const requirements = phase.equipment_requirements || [];
     const freeInstallations = installationIds.filter((id) => {
-      if (!isFree(installations.get(id), phaseStart, phaseEnd)) return false;
+      if (!isFree(resourceForConfirmedOverlap(installations.get(id), phaseStart, phaseEnd, allowOverlap), phaseStart, phaseEnd)) return false;
       if (!requirements.length) return true;
       if (!equipment) return false;
       const chosen = [];
@@ -56,6 +57,8 @@ function solveBookingProfile({ profile: input, start, doctors, installations, eq
     let installationId;
     const staff = phase.professionals;
     let doctorIds;
+    let attentionPolicies = null;
+    let staffIntervals = null;
     if (staff.mode === 'all') {
       if ((selection.doctor_id != null && (staff.ids.length !== 1 || Number(selection.doctor_id) !== staff.ids[0]))
         || !staff.ids.every((id) => isFree(doctors.get(id), appointmentStart, appointmentEnd))) return null;
@@ -66,12 +69,26 @@ function solveBookingProfile({ profile: input, start, doctors, installations, eq
       const preferredFirst = [staff.preferred_id, ...staff.ids.filter((id) => id !== staff.preferred_id)].filter(Boolean);
       const eligible = selection.doctor_id == null ? preferredFirst
         : preferredFirst.filter((id) => id === Number(selection.doctor_id));
-      const fits = id => isFree(doctors.get(id), phaseStart, phaseEnd)
-        && freeInstallations.some(roomId => installationAllowsStaff(installations.get(roomId), [id]));
+      const attentionFor = roomId => phase.staff_attention || (equipmentChoices.get(roomId) || []).map(unit => normalizeAttentionPolicy(unit.attention_policy));
+      const plans = new Map();
+      const fitsRoom = (id, roomId) => {
+        if (!installationAllowsStaff(installations.get(roomId), [id])) return false;
+        const policies = attentionFor(roomId);
+        if (!policies.some(policy => !isDefaultAttention(policy))) {
+          return isFree(resourceForConfirmedOverlap(doctors.get(id), phaseStart, phaseEnd, allowOverlap), phaseStart, phaseEnd);
+        }
+        const plan = planStaffAttention({ resource: doctors.get(id), start: phaseStart, end: phaseEnd, policies });
+        if (!plan) return false;
+        plans.set(`${id}:${roomId}`, plan);
+        return true;
+      };
+      const fits = id => freeInstallations.some(roomId => fitsRoom(id, roomId));
       const doctorId = eligible.find(fits);
       if (!doctorId) return null;
       doctorIds = [doctorId];
-      installationId = freeInstallations.find(id => installationAllowsStaff(installations.get(id), doctorIds));
+      installationId = freeInstallations.find(roomId => fitsRoom(doctorId, roomId));
+      staffIntervals = plans.get(`${doctorId}:${installationId}`) || null;
+      if (staffIntervals) attentionPolicies = attentionFor(installationId);
       if (staff.preferred_id && doctorId !== staff.preferred_id) {
         warnings.push({
           code: 'NON_PREFERRED_PROFESSIONAL', phase_key: phase.key, doctor_id: doctorId,
@@ -86,6 +103,7 @@ function solveBookingProfile({ profile: input, start, doctors, installations, eq
       installation_id: installationId, installation_name: installations.get(installationId)?.name || '',
       doctor_ids: doctorIds, doctor_names: doctorIds.map((id) => doctors.get(id)?.name || ''),
       staff_time_scope: staff.mode === 'all' ? 'appointment' : 'phase',
+      ...(staffIntervals ? { staff_intervals: staffIntervals, staff_attention: attentionPolicies } : {}),
       ...(requirements.length ? { equipment: equipmentChoices.get(installationId).map(unit => ({
         id: unit.id, name: unit.name, turnaround_minutes: unit.turnaround_minutes,
       })) } : {}) });
@@ -95,7 +113,10 @@ function solveBookingProfile({ profile: input, start, doctors, installations, eq
     phaseStart = phaseEnd;
   }
   return { start_at: appointmentStart.toISOString(), end_at: appointmentEnd.toISOString(), phases, warnings,
-    requires_priority_acknowledgement: warnings.length > 0 };
+    requires_priority_acknowledgement: warnings.length > 0,
+    ...(allowOverlap ? { requires_overlap_acknowledgement: phases.some(phase =>
+      !isFree(installations.get(phase.installation_id), new Date(phase.start_at), new Date(phase.end_at))
+      || (!phase.staff_intervals && phase.doctor_ids.some(id => !isFree(doctors.get(id), new Date(phase.start_at), new Date(phase.end_at))))) } : {}) };
 }
 
 function occupancyForSolution(solution, installationKeys = new Map()) {
@@ -103,10 +124,12 @@ function occupancyForSolution(solution, installationKeys = new Map()) {
   solution.phases.forEach((phase) => {
     rows.push({ phase_key: phase.key, resource_kind: 'installation', resource_key: installationKeys.get(phase.installation_id) || `installation:${phase.installation_id}`,
       installation_id: phase.installation_id, doctor_id: null, start_at: phase.start_at, end_at: phase.end_at });
-    phase.doctor_ids.forEach((doctorId) => rows.push({ phase_key: phase.key, resource_kind: 'doctor', resource_key: `doctor:${doctorId}`,
-      doctor_id: doctorId, installation_id: null,
+    phase.doctor_ids.forEach((doctorId) => (phase.staff_intervals || [{
       start_at: phase.staff_time_scope === 'appointment' ? solution.start_at : phase.start_at,
-      end_at: phase.staff_time_scope === 'appointment' ? solution.end_at : phase.end_at }));
+      end_at: phase.staff_time_scope === 'appointment' ? solution.end_at : phase.end_at,
+    }]).forEach(interval => rows.push({ phase_key: phase.key, resource_kind: 'doctor', resource_key: `doctor:${doctorId}`,
+      doctor_id: doctorId, installation_id: null,
+      start_at: interval.start_at, end_at: interval.end_at })));
     (phase.equipment || []).forEach(unit => rows.push({ phase_key: phase.key, resource_kind: 'equipment', resource_key: `equipment:${unit.id}`,
       installation_id: null, doctor_id: null, start_at: phase.start_at,
       end_at: new Date(new Date(phase.end_at).getTime() + unit.turnaround_minutes * 60000).toISOString() }));

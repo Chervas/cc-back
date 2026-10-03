@@ -1,5 +1,6 @@
 'use strict';
 const { normalizeBookingProfile } = require('./booking-profile');
+const { validStaffIntervals, normalizeAttentionPolicy } = require('./booking-attention');
 
 // Segments are projections of ONE appointment, never independent appointments.
 function bookingSegments(appointment, { includeClinicalLabels = true } = {}) {
@@ -22,6 +23,15 @@ function bookingSegments(appointment, { includeClinicalLabels = true } = {}) {
       || new Set(phase.doctor_ids.map(Number)).size !== phase.doctor_ids.length
       || phase.staff_time_scope !== (requirement.professionals.mode === 'all' ? 'appointment' : 'phase')) return [];
     previousEnd = end;
+    if (requirement.staff_attention) {
+      // MySQL JSON reorders object keys. Compare normalized contracts, not the
+      // serialization returned by the driver, and fail closed on bad snapshots.
+      let attention;
+      try { attention = phase.staff_attention?.map(normalizeAttentionPolicy); } catch { return []; }
+      if (JSON.stringify(requirement.staff_attention) !== JSON.stringify(attention)
+        || !validStaffIntervals(phase, requirement.staff_attention)) return [];
+    }
+    if (!requirement.staff_attention && phase.staff_intervals != null) return [];
     const requirements = requirement.equipment_requirements || [];
     if ((phase.equipment != null && !Array.isArray(phase.equipment))
       || (phase.equipment?.length || 0) !== requirements.length
@@ -43,6 +53,7 @@ function bookingSegments(appointment, { includeClinicalLabels = true } = {}) {
     doctor_ids: phase.doctor_ids,
     doctor_names: phase.doctor_names || [],
     staff_time_scope: phase.staff_time_scope,
+    ...(phase.staff_intervals ? { staff_intervals: phase.staff_intervals.map(interval => ({ ...interval })) } : {}),
     ...(phase.equipment?.length ? { equipment: phase.equipment.map(unit => ({ id: unit.id, name: includeClinicalLabels ? unit.name || '' : '' })) } : {}),
   }));
 }

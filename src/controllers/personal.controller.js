@@ -2838,6 +2838,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             grupo_clinica_id: row.clinica?.grupoClinicaId ?? null,
             activo: !!row.activo,
             recibe_citas: normalizeRecibeCitas(row.recibe_citas, false),
+            allow_overlap_confirmation: row.allow_overlap_confirmation === true || row.allow_overlap_confirmation === 1,
             horarios: row.horarios || [],
             rol_clinica: null,
             subrol_clinica: null,
@@ -2927,6 +2928,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
 
     const scheduleClinicIds = clinicasBase.map((c) => Number(c.clinica_id)).filter((id) => Number.isFinite(id));
     const scheduleTimezoneMap = await buildClinicTimezoneMap(scheduleClinicIds);
+    const overlapEditableIds = new Set(await getAccessibleClinicIdsForFeature({ actorId, featureKey: 'clinic.settings.edit' }));
     const scheduleAppointmentRows = await loadAppointmentsForScheduleRange({
         doctorId: targetUserId,
         clinicIds: scheduleClinicIds,
@@ -2958,6 +2960,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             permissions: {
                 can_edit_horarios: canEditClinic,
                 can_edit_disponibilidad_config: canEditClinic,
+                can_edit_overlap_confirmation: overlapEditableIds.has(clinicId),
             },
         };
     });
@@ -4506,14 +4509,15 @@ exports.updateDisponibilidadConfigClinica = async (req, res) => {
         }
 
         const hasRecibeCitasInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'recibe_citas');
-        if (!hasRecibeCitasInput) {
+        const hasOverlapInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'allow_overlap_confirmation');
+        if (!hasRecibeCitasInput && !hasOverlapInput) {
             return res.status(400).json({
-                message: 'recibe_citas es obligatorio',
+                message: 'Indica recibe_citas o allow_overlap_confirmation',
             });
         }
 
         const recibeCitas = parseRecibeCitasInput(req.body?.recibe_citas);
-        if (recibeCitas == null) {
+        if (hasRecibeCitasInput && recibeCitas == null) {
             return res.status(400).json({
                 message: 'recibe_citas inválido',
                 allowed: [true, false],
@@ -4522,13 +4526,17 @@ exports.updateDisponibilidadConfigClinica = async (req, res) => {
 
         // Reglas MVP: same gate as horarios (self in clinic, or owner/admin for others).
         const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
-        if (!canEdit) {
+        const canEditOverlap = !hasOverlapInput || await canUserAccessFeature({ actorId, featureKey: 'clinic.settings.edit', clinicId: clinicaId });
+        if (!canEdit || !canEditOverlap) {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
+        if (hasOverlapInput && typeof req.body.allow_overlap_confirmation !== 'boolean') return res.status(400).json({ message: 'allow_overlap_confirmation debe ser verdadero o falso.' });
+
         const dc = await withDoctorCalendarMutation(targetUserId, async transaction => {
             const link = await getOrCreateDoctorClinica(targetUserId, clinicaId, { transaction });
-            await link.update({ recibe_citas: recibeCitas }, { transaction });
+            await link.update({ ...(hasRecibeCitasInput ? { recibe_citas: recibeCitas } : {}),
+                ...(hasOverlapInput ? { allow_overlap_confirmation: req.body.allow_overlap_confirmation } : {}) }, { transaction });
             return link;
         });
 
@@ -4538,6 +4546,7 @@ exports.updateDisponibilidadConfigClinica = async (req, res) => {
             clinica_id: dc.clinica_id,
             activo: !!dc.activo,
             recibe_citas: normalizeRecibeCitas(dc.recibe_citas, false),
+            allow_overlap_confirmation: !!dc.allow_overlap_confirmation,
         });
     } catch (error) {
         if (sendCalendarMutationError(error, res)) return;

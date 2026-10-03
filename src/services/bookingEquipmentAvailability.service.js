@@ -1,6 +1,7 @@
 'use strict';
 
 const { equipmentIds, equipmentError, clinicUsesEquipment, normalizeRoomEquipmentPolicy, equipmentFitsRoom } = require('../lib/booking-equipment');
+const { normalizeAttentionPolicy } = require('../lib/booking-attention');
 
 function equipmentRuntimeEnabled(env = process.env) {
   return env.BOOKING_EQUIPMENT_ENABLED === 'true' && env.BOOKING_PROFILES_ENABLED === 'true'
@@ -13,7 +14,7 @@ function assertEquipmentEnabled(clinic, enabled = equipmentRuntimeEnabled()) {
 
 // Exactly three bulk metadata reads for a profile using equipment; ZERO for
 // all other profiles, including psychology in a multidisciplinary clinic.
-async function loadEquipmentContext({ db, clinic, profile, mapping, transaction = null, enabled = equipmentRuntimeEnabled() }) {
+async function loadEquipmentContext({ db, clinic, profile, mapping, transaction = null, enabled = equipmentRuntimeEnabled(), inheritEquipmentAttention = true }) {
   const ids = equipmentIds(profile);
   if (!ids.length) return null;
   assertEquipmentEnabled(clinic, enabled);
@@ -39,6 +40,7 @@ async function loadEquipmentContext({ db, clinic, profile, mapping, transaction 
   const equipment = new Map(rows.map(row => [Number(row.id), {
     id: Number(row.id), name: row.name, family_key: row.family_key, status: row.status, mobility: row.mobility,
     turnaround_minutes: Number(row.turnaround_minutes), busy: [],
+    attention_policy: normalizeAttentionPolicy(inheritEquipmentAttention ? row.attention_policy : null),
     fixed_resource_key: row.home_installation_id ? (mapping.keys.get(Number(row.home_installation_id)) || `installation:${row.home_installation_id}`) : null,
   }]));
   for (const phase of profile.phases) for (const group of phase.equipment_requirements || []) {

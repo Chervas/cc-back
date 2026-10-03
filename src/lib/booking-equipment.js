@@ -1,5 +1,7 @@
 'use strict';
 
+const { normalizeAttentionPolicy } = require('./booking-attention');
+
 // Pure contracts. No ORM, timers, caches or provider calls on the ordinary path.
 function equipmentError(code, message, status = 422) {
   const error = new Error(message);
@@ -60,7 +62,8 @@ function normalizeEquipmentUnit(value) {
   const home = value.home_installation_id ?? null;
   if ((home !== null && (!Number.isSafeInteger(home) || home < 1)) || (value.mobility === 'fixed' && !home)) throw equipmentError('invalid', 'Un equipo fijo necesita su cabina.');
   return { name, family_key: family, aliases: [...new Set(aliases.map(s => s.trim()))], mobility: value.mobility,
-    status: value.status, home_installation_id: home, turnaround_minutes: minutes };
+    status: value.status, home_installation_id: home, turnaround_minutes: minutes,
+    ...(Object.hasOwn(value, 'attention_policy') ? { attention_policy: normalizeAttentionPolicy(value.attention_policy) } : {}) };
 }
 
 module.exports = { equipmentError, positiveIds, normalizeEquipmentRequirements, equipmentIds,

@@ -7,6 +7,7 @@ const { bookingError, bookingCapabilities, requireOperationalProfile, loadScoped
 const { normalizeAdditionalStaff, additionalStaffSnapshot } = require('../lib/appointment-additional-staff');
 const { installationAllowsStaff } = require('../lib/installation-professionals');
 const { equipmentIds } = require('../lib/booking-equipment');
+const { resourceForConfirmedOverlap } = require('../lib/booking-attention');
 
 function metadataObject(value) {
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = null; } }
@@ -39,8 +40,9 @@ function solveLegacy(values, context, force = false) {
   const end = new Date(values.fin);
   if (values.instalacion_id && !installationAllowsStaff(context.installations.get(Number(values.instalacion_id)),
     values.doctor_id ? [Number(values.doctor_id)] : [])) return null;
-  const checked = resource => resource && ({ ...resource,
-    busy: force ? (resource.busy || []).filter(interval => interval.can_force_legacy !== true) : resource.busy });
+  const checked = resource => resource && (resource.explicit_overlap_policy
+    ? resourceForConfirmedOverlap(resource, start, end, force)
+    : ({ ...resource, busy: force ? (resource.busy || []).filter(interval => interval.can_force_legacy !== true) : resource.busy }));
   if ((context.clinicWindows && !isFree({ windows: context.clinicWindows }, start, end))
     || (values.doctor_id && !isFree(checked(context.doctors.get(Number(values.doctor_id))), start, end))
     || (values.instalacion_id && !isFree(checked(context.installations.get(Number(values.instalacion_id))), start, end))) return null;
@@ -206,7 +208,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     if (values.estado !== 'cancelada') {
       const context = ((!extraStaff.length || preparedSeries) && preparedContext) || await loadBookingContext({ db, clinic, profile, start, end, transaction: tx,
         ignoreAppointmentId: existing?.id_cita, occupancyEnabled: true, installationMapping: mapping, patientId: values.paciente_id,
-        additionalStaffIds: extraStaff, equipmentEnabled: capabilities.equipment });
+        additionalStaffIds: extraStaff, equipmentEnabled: capabilities.equipment,
+        inheritEquipmentAttention: !snapshot || Number(previous.tratamiento_id) !== Number(values.tratamiento_id) || configuredProfile?.version === 3 });
       const existingSelections = previousMetadata.booking?.phases && configuredProfile
         ? Object.fromEntries(previousMetadata.booking.phases.map((phase) => [phase.key, {
           installation_id: phase.installation_id,
@@ -218,7 +221,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
           ? { [configuredProfile.phases[0].key]: { doctor_id: values.doctor_id, installation_id: values.instalacion_id } }
           : existingSelections || {});
       const supportFree = extraStaff.every(id => isFree(context.doctors.get(id), start, end));
-      solution = supportFree ? (configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen })
+      const permitsProfileForce = !extraStaff.length && !session && !trustedProgramSession && !preparedSeries;
+      solution = supportFree ? (configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen, allowOverlap: permitsProfileForce && force === true })
         : solveLegacy(values, context, !extraStaff.length && force === true)) : null;
       if (solution && extraStaff.length && solution.phases.some(phase =>
         !require('../lib/installation-professionals').installationAllowsStaff(context.installations.get(phase.installation_id),extraStaff))) solution=null;
@@ -227,7 +231,9 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
         // Re-evaluated under the same resource locks. Force is only available
         // between ordinary appointments in this clinic, never for a profile,
         // mandatory team, blocked schedule, foreign clinic or patient overlap.
-        const canForce = !extraStaff.length && !configuredProfile && !patientConflict && !!solveLegacy(values, context, true);
+        const canForce = !extraStaff.length && !patientConflict && (configuredProfile
+          ? permitsProfileForce && !!solveBookingProfile({ profile, start, ...context, selections: chosen, allowOverlap: true })
+          : !!solveLegacy(values, context, true));
         throw bookingError('booking_unavailable', 'El hueco ya no está disponible o no cumple el perfil del tratamiento. Actualiza las propuestas.', { can_force: canForce });
       }
       const acknowledged = priorityAcknowledged || (supportOnly && previousMetadata.booking?.priority_acknowledged === true);
@@ -235,8 +241,14 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       if (configuredProfile) {
         values.doctor_id = solution.phases[0].doctor_ids[0];
         values.instalacion_id = solution.phases[0].installation_id;
-        importMetadata.booking = { version: 1, profile: configuredProfile, phases: solution.phases,
-          warnings: solution.warnings, priority_acknowledged: acknowledged === true };
+        const frozenProfile = solution.phases.some(phase => phase.staff_attention) ? normalizeBookingProfile({
+          ...configuredProfile, version: 3,
+          phases: configuredProfile.phases.map((phase, index) => ({ ...phase,
+            ...(solution.phases[index].staff_attention ? { staff_attention: solution.phases[index].staff_attention } : {}) })),
+        }) : configuredProfile;
+        importMetadata.booking = { version: 1, profile: frozenProfile, phases: solution.phases,
+          warnings: solution.warnings, priority_acknowledged: acknowledged === true,
+          ...(solution.requires_overlap_acknowledgement ? { overlap_confirmed: true, overlap_confirmed_by: values.updated_by || values.created_by || null } : {}) };
         values.import_metadata = importMetadata;
       }
       if (extraStaff.length) {
