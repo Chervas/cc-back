@@ -48,6 +48,15 @@ test('missing scope is an unknown reception signal, never a claim of zero patien
  assert.match(alerts[0].metadata.operational_summary,/cantidad de eventos pendientes desconocida/);
  assert.doesNotMatch(alerts[0].payload.detail,/0 respuestas|No hay respuestas/);
 });
+test('one physical group receipt produces one shared alert, not one email per clinic',async()=>{
+ const clinics=[2,3,4].map(clinicId=>({clinicId,blockingReview:1,unscopedBlockingReview:1,oldestPendingAt:null,
+  blockingReviewScopeKeys:['b'.repeat(64)],reviewSummary:[{category:'incoming_messages',count:1,oldestAt:now-300000,newestAt:now-300000,errorCodes:[]}]}));
+ const alerts=await collect({snapshot:{...snapshot,clinics},bindings:clinics.map(c=>({clinicId:c.clinicId,sendEnabled:true})),now,
+  query:async sql=>[sql.includes('FROM Clinicas')?clinics.map(c=>({id_clinica:c.clinicId,nombre_clinica:'Ficticia '+c.clinicId})):[]]});
+ assert.equal(alerts.length,1);assert.match(alerts[0].metadata.incident_scope,/^review:[a-f0-9]{64}$/);
+ assert.deepEqual(alerts[0].metadata.clinic_ids,[2,3,4]);assert.equal(alerts[0].metadata.blocking_review,1);
+ assert.match(alerts[0].payload.detail,/mismo evento compartido/);assert.match(alerts[0].metadata.operational_summary,/1 mensaje entrante/);
+});
 test('storage capacity warns independently before a full inbox rejects Meta webhooks',async()=>{
  const clean={...snapshot,clinics:[{clinicId:2,blockingReview:0,oldestPendingAt:null}],
   capacity:{rows:800,bytes:100,maxRows:1000,maxBytes:1000,auditPending:0,maxAuditBacklog:100}};

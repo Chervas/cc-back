@@ -25,6 +25,12 @@ test('actual MySQL locks survive concurrent sweeps, transactional failure and ad
   fail=true;await assert.rejects(create().sync([{...a,metadata:{...a.metadata,incident_scope:'clinic:66'}}]),/synthetic_enqueue_failure/);
   assert.equal(await Incident.count(),1);assert.equal((await sql.query('SELECT COUNT(*) n FROM SyntheticNotificationOutbox'))[0][0].n,1);
   fail=false;
+  await create().sync([{...a,metadata:{...a.metadata,incident_scope:'clinic:66'}}]);
+  const shared={...a,metadata:{...a.metadata,incident_scope:'review:shared-synthetic',clinic_ids:[72,66],supersedes_scopes:['clinic:72','clinic:66']}};
+  await create().sync([shared]);
+  assert.equal((await sql.query('SELECT COUNT(*) n FROM SyntheticNotificationOutbox'))[0][0].n,2);
+  assert.equal(await Incident.count({where:{state:'superseded'}}),2);
+  assert.equal(await Incident.count({where:{state:'open'}}),1);
   const receipts=['11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222'];
   for(const receipt of receipts)await sql.query('INSERT INTO WhatsappInboxAdminSync(receipt,waba_id) VALUES(?,?)',{replacements:[receipt,'synthetic']});
   await sql.transaction(async transaction=>{
@@ -34,6 +40,6 @@ test('actual MySQL locks survive concurrent sweeps, transactional failure and ad
   });
   const [archived]=await sql.query('SELECT archived_at,reconciled_at FROM WhatsappInboxAdminSync');
   assert(archived.every(row=>row.archived_at&&row.reconciled_at===null));
-  report.checks.push('Eight concurrent incident sweeps enqueue once; restart deduplicates; jobs and incidence rollback together; archive preserves unreconciled evidence');
+  report.checks.push('Eight concurrent sweeps enqueue once; restart deduplicates; rollback is atomic; shared incidents inherit existing notification clocks without fake recovery; archive preserves unreconciled evidence');
  });
 });

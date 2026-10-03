@@ -46,12 +46,29 @@ function createIncidentNotifier({ sequelize, Incident, queue, channels, namespac
       const phase = closing ? 'closed' : 'open';
       const reopened = !closing && row.state === 'closed';
       const channelState = reopened ? {} : { ...json(row.channel_state) };
+      let openedAt = millis(row.opened_at);
+      const supersedes = alert.metadata.supersedes_scopes;
+      if (row.state === 'new' && Array.isArray(supersedes) && supersedes.length > 1 && supersedes.length <= 100
+        && supersedes.every(scope => /^clinic:[1-9][0-9]*$/.test(scope))) {
+        const [legacy] = await sequelize.query(`SELECT incident_key,opened_at,channel_state FROM SystemNotificationIncidents
+          WHERE namespace=:namespace AND event_key=:eventKey AND state='open' AND scope_key IN (:scopes)
+          ORDER BY incident_key FOR UPDATE`, { transaction, replacements: { namespace, eventKey: alert.eventKey, scopes: supersedes } });
+        for (const previous of legacy) {
+          openedAt = Math.min(openedAt, millis(previous.opened_at));
+          for (const [channel, state] of Object.entries(json(previous.channel_state))) {
+            if (!channelState[channel] || state.at > channelState[channel].at) channelState[channel] = state;
+          }
+        }
+        if (legacy.length) await sequelize.query(`UPDATE SystemNotificationIncidents SET state='superseded',closed_at=:observed
+          WHERE incident_key IN (:keys) AND state='open'`, { transaction,
+          replacements: { observed: new Date(time), keys: legacy.map(previous => previous.incident_key) } });
+      }
       const selected = channels(alert).filter(channel => notificationDecision(channelState[channel], alert,
         phase, time, reminderMinutes).notify);
       const deliveryAlert = { ...alert, payload: { ...alert.payload,
-        occurredAt: new Date(closing ? time : reopened ? opened : millis(row.opened_at)).toISOString() },
+        occurredAt: new Date(closing ? time : reopened ? opened : openedAt).toISOString() },
       metadata: { ...alert.metadata, incident_key: key, incident_phase: phase,
-        incident_opened_at: new Date(reopened ? opened : millis(row.opened_at)).toISOString() } };
+        incident_opened_at: new Date(reopened ? opened : openedAt).toISOString() } };
       const queued = selected.length ? await queue({ ...deliveryAlert, transaction, force: true,
         channelsOverride: Object.fromEntries(['panel', 'email', 'whatsapp'].map(channel => [channel, selected.includes(channel)])) })
         : { created: [], skipped: [] };
@@ -59,7 +76,7 @@ function createIncidentNotifier({ sequelize, Incident, queue, channels, namespac
         signature: notificationDecision(channelState[created.channel], alert, phase, time, reminderMinutes).signature, at: time,
       };
       await row.update({ state: phase, severity: alert.payload.severity, observed_at: new Date(time),
-        opened_at: reopened ? new Date(opened) : row.opened_at, closed_at: closing ? new Date(time) : null,
+        opened_at: new Date(reopened ? opened : openedAt), closed_at: closing ? new Date(time) : null,
         snapshot: alert, channel_state: channelState }, { transaction });
       return { ...queued, incidentKey: key };
     });

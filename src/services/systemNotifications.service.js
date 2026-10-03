@@ -1478,11 +1478,11 @@ async function runActiveChecks({ force = false } = {}) {
         detail: 'Esta cuenta ya no tiene avisos abiertos en la cola de seguimiento. Los avisos conciliados o archivados conservan su historial; esto no confirma un cambio de permisos de Meta.',
         action: 'No necesitas reconectar un número ni realizar acciones sobre pacientes.' };
     }
-    const clinicId = original.metadata?.clinic_ids?.[0];
     if (original.metadata?.incident_scope === 'monitor:whatsapp') {
       if (!snapshot || Date.now() - snapshot.observedAt > 90000 || snapshot.observedAt > Date.now() + 5000) return null;
-    } else if (!bindings.some(binding => binding.sendEnabled && Number(binding.clinicId) === Number(clinicId))
-      || !inboxHealth.state(snapshot, clinicId).healthy) return null;
+    } else if (!(original.metadata?.clinic_ids || []).every(id =>
+      bindings.some(binding => binding.sendEnabled && Number(binding.clinicId) === Number(id))
+      && inboxHealth.state(snapshot, id).healthy)) return null;
     return { severity: 'info', title: 'Comprobación de recepción de WhatsApp restablecida',
       detail: 'El monitor confirma que ha desaparecido el motivo de este aviso. No se reproducen mensajes históricos ni se modifican citas por cerrar la incidencia.',
       action: 'No requiere acción por este aviso. Las campañas pausadas manualmente no se reactivan.' };

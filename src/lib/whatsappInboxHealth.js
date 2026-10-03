@@ -84,10 +84,12 @@ function publish(health, scopes, { recoveryNotBefore = null, recoveryHold = fals
   const clinics = new Map();
   for (const scope of scopes) for (const clinicId of scope.clinicIds) {
     const value = clinics.get(clinicId) || { clinicId, oldestPendingAt: null, blockingReview: 0, review: 0,
-      unscopedBlockingReview: 0, blockingContactKeys: [], reviewSummary: [] };
+      unscopedBlockingReview: 0, blockingContactKeys: [], reviewSummary: [], blockingReviewScopeKeys: [] };
     for (const group of health.groups.filter(g => g.scopes.includes(scope.wabaId + ':' + scope.phoneId))) {
       if (group.oldestPendingAt !== null) value.oldestPendingAt = Math.min(value.oldestPendingAt ?? Infinity, group.oldestPendingAt);
       value.blockingReview += Number(group.blockingReview) || 0; value.review += Number(group.review) || 0;
+      if (group.blockingReview > 0) value.blockingReviewScopeKeys = [...new Set([...value.blockingReviewScopeKeys,
+        createHash('sha256').update(JSON.stringify([...group.scopes].sort())).digest('hex')])];
       const summary = summaryOf(group);
       value.reviewSummary = mergeSummaries([...value.reviewSummary, ...(summary || (group.blockingReview > 0
         ? [{ category: 'unknown', count: group.blockingReview, oldestAt: null, newestAt: null, errorCodes: [] }] : []))]);

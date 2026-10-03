@@ -1,4 +1,5 @@
 'use strict';
+const { createHash } = require('node:crypto');
 const health = require('./whatsappInboxHealth');
 const templateSyncState = require('./whatsappTemplateSyncState');
 
@@ -48,13 +49,38 @@ function reviewBrief(clinic) {
   if (!count) return '';
   const items = health.summaryOf({ blockingReview: count, reviewSummary: clinic?.reviewSummary });
   if (!items) return `${count} eventos retenidos cuyo tipo aún no está clasificado.`;
-  const names = { incoming_messages: 'mensajes entrantes', delivery_updates: 'actualizaciones de entrega',
-    provider_errors: 'errores técnicos de Meta', mobile_echoes: 'ecos de mensajes enviados desde el móvil',
-    app_state_changes: 'cambios de estado de la app', history: 'eventos de historial',
-    mixed: 'lotes mixtos', unknown: 'eventos sin clasificar' };
+  const names = { incoming_messages: ['mensaje entrante', 'mensajes entrantes'], delivery_updates: ['actualización de entrega', 'actualizaciones de entrega'],
+    provider_errors: ['error técnico de Meta', 'errores técnicos de Meta'], mobile_echoes: ['eco de un mensaje enviado desde el móvil', 'ecos de mensajes enviados desde el móvil'],
+    app_state_changes: ['cambio de estado de la app', 'cambios de estado de la app'], history: ['evento de historial', 'eventos de historial'],
+    mixed: ['lote mixto', 'lotes mixtos'], unknown: ['evento sin clasificar', 'eventos sin clasificar'] };
   const counts = new Map();
   for (const item of items) counts.set(item.category, (counts.get(item.category) || 0) + item.count);
-  return `Resumen: ${[...counts].map(([category, total]) => `${total} ${names[category]}`).join('; ')}.`;
+  return `Resumen: ${[...counts].map(([category, total]) => `${total} ${names[category][total === 1 ? 0 : 1]}`).join('; ')}.`;
+}
+function groupSharedReviews(alerts) {
+  const groups = new Map(), result = [];
+  for (const alert of alerts) {
+    const keys = alert.metadata.review_scope_keys;
+    if (alert.metadata.engine_pending || !alert.metadata.blocking_review || !Array.isArray(keys) || !keys.length
+      || keys.length > 16 || keys.some(key => !/^[a-f0-9]{64}$/.test(key))) { result.push(alert); continue; }
+    const scope = createHash('sha256').update(JSON.stringify([...keys].sort())).digest('hex');
+    const key = JSON.stringify([scope, alert.payload.severity, alert.metadata.blocking_review,
+      alert.metadata.incident_impact, alert.metadata.operational_summary]);
+    const group = groups.get(key) || []; group.push(alert); groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    if (group.length === 1) { result.push(group[0]); continue; }
+    const first = group[0], clinicIds = group.flatMap(alert => alert.metadata.clinic_ids);
+    const scope = createHash('sha256').update(JSON.stringify([[...first.metadata.review_scope_keys].sort(), [...clinicIds].sort((a,b)=>a-b)])).digest('hex');
+    const names = group.map(alert => alert.metadata.clinic_name);
+    const label = names.slice(0, 2).join(', ') + (names.length > 2 ? ` y ${names.length - 2} clínicas` : '');
+    result.push({ ...first, payload: { ...first.payload,
+      title: `${label}: ${first.metadata.blocking_review} ${first.metadata.blocking_review === 1 ? 'evento retenido' : 'eventos retenidos'}`,
+      detail: `${first.payload.detail} Es el mismo evento compartido entre ${names.join(', ')}; no se suman sus copias por clínica.` },
+    metadata: { ...first.metadata, incident_scope: `review:${scope}`, clinic_ids: clinicIds,
+      supersedes_scopes: group.map(alert => alert.metadata.incident_scope) } });
+  }
+  return result;
 }
 
 function capacityAlert(snapshot, now) {
@@ -137,7 +163,7 @@ async function collect({ snapshot, bindings, query, now = Date.now(),
     action: 'El equipo técnico debe revisar el monitor de recepción. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp',
   }, metadata: { source: 'whatsapp_reception', incident_scope: 'monitor:whatsapp', incident_impact: ['health_unavailable'],
     clinic_ids: affected, check_unavailable: true, operational_summary: 'Falla la comprobación de recepción; cantidad de mensajes pendientes desconocida.' } }];
-  return [...base, ...affected.map((clinicId, index) => {
+  return [...base, ...groupSharedReviews(affected.map((clinicId, index) => {
     const clinic = snapshot.clinics.find(clinic => clinic.clinicId === Number(clinicId));
     const issue = issues.find(issue => issue.data.clinic_id === clinicId);
     const enginePending = waiting.filter(row => Number(row.clinic_id) === Number(clinicId))
@@ -160,16 +186,17 @@ async function collect({ snapshot, bindings, query, now = Date.now(),
     const issueTypes = [issue?.type, enginePending ? 'engine_pending' : null].filter(Boolean);
     return { eventKey: 'whatsapp.reception_attention', payload: {
       severity: issue?.severity || 'warning',
-      title: `${names[index]}: ${retained ? `${retained} eventos retenidos` : enginePending ? `${enginePending} respuestas pendientes` : 'recepción pendiente de revisión'}`,
+      title: `${names[index]}: ${retained ? `${retained} ${retained === 1 ? 'evento retenido' : 'eventos retenidos'}` : enginePending ? `${enginePending} respuestas pendientes` : 'recepción pendiente de revisión'}`,
       detail: `${brief}${age}${waits} ${impact}`,
       action: 'El equipo técnico debe revisar estos eventos; recepción no debe confirmar ni cancelar citas por este aviso. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp',
       occurredAt: Number.isFinite(oldest) ? new Date(oldest).toISOString() : null,
     }, metadata: { source: 'whatsapp_reception', incident_scope: `clinic:${clinicId}`, clinic_ids: [clinicId],
+      clinic_name: names[index], review_scope_keys: clinic?.blockingReviewScopeKeys,
       engine_pending: enginePending, blocking_review: retained, incident_impact: [...issueTypes,
         ...[...new Set((health.summaryOf({ blockingReview: retained, reviewSummary: clinic?.reviewSummary }) || [])
           .map(item => item.category))]],
       issue_types: issueTypes, operational_summary: brief } };
-  })];
+  }))];
 }
 function unavailable(error) {
   const knownCodes = new Set(['ER_PARSE_ERROR', 'ER_QUERY_TIMEOUT', 'ER_QUERY_INTERRUPTED',
@@ -185,4 +212,4 @@ function unavailable(error) {
     incident_scope: 'monitor:whatsapp', incident_impact: ['check_failed'],
     check_error_code: knownCodes.has(code) ? code : 'CHECK_FAILED' } };
 }
-module.exports = { collect, unavailable, reviewBrief };
+module.exports = { collect, unavailable, reviewBrief, groupSharedReviews };
