@@ -8,6 +8,7 @@ const { resolveClinicTimezone, formatDateLocal, formatLocal, dayIndexFromLocalDa
 const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
 const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staff');
 const { installationAllowsStaff } = require('../lib/installation-professionals');
+const { installationOverlapCapacity } = require('../lib/installation-overlap');
 const { loadEquipmentContext, attachEquipmentContext } = require('./bookingEquipmentAvailability.service');
 const { bookingError, bookingCapabilities, requireOperationalProfile, loadScopedTreatment } = require('./treatmentBookingProfile.service');
 
@@ -111,7 +112,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
   const canonicalIds = [...new Set([...mapping.keys.values()].map(key => Number(key.split(':')[1])))];
   const missingCanonicalIds = canonicalIds.filter(id => !installations.some(room => Number(room.id) === id));
   const canonicalRooms = missingCanonicalIds.length ? await db.Instalacion.findAll({ where: { id: { [Op.in]: missingCanonicalIds } },
-    attributes: ['id', 'capacidad', 'allow_overlap_confirmation'], transaction }) : [];
+    attributes: ['id', 'capacidad', 'allow_overlap_confirmation', 'overlap_capacity_unlimited'], transaction }) : [];
   const overlapPolicies = new Map([...installations, ...canonicalRooms].map(room => [Number(room.id), room]));
   const occupancies = occupancyEnabled ? await db.AppointmentBookingOccupancy.findAll({ where: {
     ...ignore('appointment_id'),
@@ -160,7 +161,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
       if (!cabins.has(id)) cabins.set(id, { name: installation.nombre || '',
         allow_overlap_confirmation: physical.allow_overlap_confirmation === true || physical.allow_overlap_confirmation === 1,
         explicit_overlap_policy: physical.allow_overlap_confirmation != null,
-        overlap_capacity: Number(physical.capacidad) || 1,
+        overlap_capacity: installationOverlapCapacity(physical),
         profesionales_permitidos: installation.profesionales_permitidos,
         windows: [], busy: busy.get(mapping.keys.get(id)) || [] });
       if (!additionalStaffIds.length || installationAllowsStaff(installation, additionalStaffIds)) {

@@ -9,6 +9,7 @@ const {
 } = require('../lib/access-policy');
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
 const { normalizeInstallationProfessionals, installationAllowsStaff } = require('../lib/installation-professionals');
+const { normalizeInstallationOverlap: overlapSettings } = require('../lib/installation-overlap');
 
 async function validateProfessionals(value, clinicId, transaction) {
   const ids = normalizeInstallationProfessionals(value);
@@ -26,15 +27,6 @@ async function validateProfessionals(value, clinicId, transaction) {
 function sendProfessionalError(error, res) {
   if (!['installation_professionals_invalid', 'installation_overlap_invalid'].includes(error.code)) return false;
   res.status(400).json({ message: error.message, code: error.code }); return true;
-}
-
-function overlapSettings(body, previous = {}) {
-  const enabled = body.allow_overlap_confirmation ?? previous.allow_overlap_confirmation ?? false;
-  const capacity = body.capacidad !== undefined ? Number(body.capacidad) : Number(previous.capacidad || 1);
-  if (typeof enabled !== 'boolean' || !Number.isInteger(capacity) || capacity < 1 || capacity > 20 || (enabled && capacity < 2)) {
-    throw Object.assign(new Error('Indica una capacidad entre 1 y 20; una consulta compartida necesita al menos 2 citas simultáneas.'), { code: 'installation_overlap_invalid', status: 400 });
-  }
-  return { allow_overlap_confirmation: enabled, capacidad: capacity };
 }
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
@@ -289,13 +281,13 @@ exports.update = asyncHandler(async (req, res) => {
       await item.reload({ transaction: t, lock: t.LOCK.UPDATE });
       // Update only the shared-occupancy fields on aliases, never their names,
       // clinical scopes, schedules or permitted professionals.
-      if (body.allow_overlap_confirmation !== undefined || body.capacidad !== undefined) {
+      if (body.allow_overlap_confirmation !== undefined || body.overlap_capacity_unlimited !== undefined || body.capacidad !== undefined) {
         const clinic = await db.Clinica.findByPk(item.clinica_id, { transaction: t });
         const mapping = await require('../services/appointmentBookingAvailability.service').resolveInstallationKeys({ db, clinic, installationIds: [id], transaction: t, enabled: true });
         const aliases = await db.Instalacion.findAll({ where: { id: { [Op.in]: mapping.physicalInstallationIds } }, transaction: t });
         for (const alias of aliases) {
           await assertClinicFeature(req, 'clinic.settings.edit', Number(alias.clinica_id));
-          if (Number(alias.id) !== id) await alias.update(overlapSettings(body, { capacidad: item.capacidad, allow_overlap_confirmation: !!item.allow_overlap_confirmation }), { transaction: t });
+          if (Number(alias.id) !== id) await alias.update(overlapSettings(body, { capacidad: item.capacidad, allow_overlap_confirmation: !!item.allow_overlap_confirmation, overlap_capacity_unlimited: !!item.overlap_capacity_unlimited }), { transaction: t });
         }
       }
       await item.update({
@@ -306,7 +298,7 @@ exports.update = asyncHandler(async (req, res) => {
       piso: body.piso ?? item.piso,
       color: body.color ?? item.color,
       capacidad: body.capacidad != null ? Number(body.capacidad) : item.capacidad,
-      ...overlapSettings(body, { capacidad: item.capacidad, allow_overlap_confirmation: !!item.allow_overlap_confirmation }),
+      ...overlapSettings(body, { capacidad: item.capacidad, allow_overlap_confirmation: !!item.allow_overlap_confirmation, overlap_capacity_unlimited: !!item.overlap_capacity_unlimited }),
       activo: body.activo !== undefined ? Boolean(body.activo) : item.activo,
       requiere_preparacion: body.requiere_preparacion !== undefined ? Boolean(body.requiere_preparacion) : item.requiere_preparacion,
       tiempo_preparacion_minutos: body.tiempo_preparacion_minutos != null ? Number(body.tiempo_preparacion_minutos) : item.tiempo_preparacion_minutos,
