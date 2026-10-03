@@ -16,7 +16,6 @@ function confirmedOverlapRows(rows, start, end, clinicId, allowed, capacity = nu
   return resourceForConfirmedOverlap(resource, start, end, true).busy.length === 0;
 }
 const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staff');
-const { requiresMultiResourceBooking } = require('../lib/booking-profile');
 const { bookingCapabilities, bookingError, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
 const { resourceAppointments, resourceInstallationBlocks } = require('../services/appointmentResourceCalendar.service');
 const {
@@ -934,10 +933,7 @@ exports.slots = asyncHandler(async (req, res) => {
     const treatment = await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic: clinica });
     const profile = requireOperationalProfile(treatment);
     if (profile) {
-      if (requiresMultiResourceBooking(profile)) {
-        return res.status(409).json({ code: 'booking_profile_use_treatment_slots', can_force: false,
-          message: 'Este tratamiento usa disponibilidad por fases o equipo. Utiliza la búsqueda de huecos del tratamiento.' });
-      }
+      assertGridProfile(profile);
       if (stepMin < 5 || stepMin > 120) return res.status(400).json({ message: 'granularity_min debe estar entre 5 y 120' });
       const installationIds = parseIntArray(instalacion_ids || req.query['instalacion_ids[]']);
       const professionalIds = parseIntArray(doctor_ids || req.query['doctor_ids[]']);
@@ -949,16 +945,7 @@ exports.slots = asyncHandler(async (req, res) => {
       const context = await loadBookingContext({ db, clinic: clinica, profile,
         start: resolveLocalInstant(fecha_local, '00:00:00', timezone),
         end: resolveLocalInstant(addDays(fecha_local, 1), '00:00:00', timezone), occupancyEnabled: true, additionalStaffIds });
-      const getSolutions = (doctor, installation) => solutionsForCalendar({ profile, context, date: fecha_local,
-        stepMinutes: stepMin, limit: Math.min(requestedLimit > 0 ? requestedLimit : 500, 500), additionalStaffIds,
-        selections: { [profile.phases[0].key]: { doctor_id: doctor, installation_id: installation } },
-        fromLocal: typeof from_local === 'string' ? from_local : '00:00', toLocal: typeof to_local === 'string' ? to_local : null });
-      const response = { timezone, clinica_id: clinicaId, fecha_local, duracion_min: profile.phases[0].duration_minutes, granularity_min: stepMin };
-      if (installationIds.length) return res.json({ ...response, doctor_id: Number(doctor_id), instalacion_ids: installationIds,
-        slots_by_instalacion: Object.fromEntries(installationIds.map((id) => [id, getSolutions(Number(doctor_id), id)])), unavailable_by_instalacion: {} });
-      if (professionalIds.length) return res.json({ ...response, instalacion_id: Number(instalacion_id), doctor_ids: professionalIds,
-        slots_by_doctor: Object.fromEntries(professionalIds.map((id) => [id, getSolutions(id, Number(instalacion_id))])), unavailable_by_doctor: {} });
-      return res.json({ ...response, slots: getSolutions(doctor_id ? Number(doctor_id) : null, instalacion_id ? Number(instalacion_id) : null), unavailable_intervals: [] });
+      return res.json(profileSlotsPayload({ query: req.query, profile, context, clinic: clinica, additionalStaffIds }));
     }
   }
   const clinicTimezone = resolveClinicTimezone(clinica);
@@ -1513,6 +1500,32 @@ exports.grid = asyncHandler(async (req, res) => {
   const additionalStaffIds = requestedAdditionalStaff(req);
   if (additionalStaffIds.length) baseQuery.additional_staff_ids = additionalStaffIds;
 
+  // Request-local snapshot for the entire treatment grid: one ACL, one catalog
+  // read and one bulk occupancy load, independent of days × visible columns.
+  // No global cache: a subsequent request sees newly booked/cancelled visits.
+  let treatmentGrid = null;
+  if (tratamiento_id) {
+    await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
+    const clinic = await db.Clinica.findByPk(clinicaId);
+    if (!clinic) return res.status(404).json({ message: 'Clínica no encontrada' });
+    const treatment = await loadScopedTreatment({ db, treatmentId: tratamiento_id, clinic });
+    const profile = requireOperationalProfile(treatment);
+    if (profile) {
+      assertGridProfile(profile);
+      if (stepMin < 5 || stepMin > 120 || peerInstalacionIds.length > 50 || peerDoctorIds.length > 50) {
+        return res.status(400).json({ message: 'Rango o recursos de disponibilidad inválidos' });
+      }
+      const sortedDates = [...dateList].sort();
+      const timezone = resolveClinicTimezone(clinic);
+      const start = resolveLocalInstant(sortedDates[0], '00:00:00', timezone);
+      const end = resolveLocalInstant(addDays(sortedDates[sortedDates.length - 1], 1), '00:00:00', timezone);
+      if (end - start > 32 * 86400000) return res.status(400).json({ message: 'El rango no puede superar 31 días' });
+      const context = await loadBookingContext({ db, clinic, profile, start, end, dates: dateList,
+        occupancyEnabled: true, additionalStaffIds });
+      treatmentGrid = { profile, context, clinic, additionalStaffIds };
+    }
+  }
+
   const tasks = [];
   dateList.forEach((dateIso) => {
     columnIds.forEach((columnId) => {
@@ -1545,7 +1558,8 @@ exports.grid = asyncHandler(async (req, res) => {
     }
 
     try {
-      const payload = await invokeSlotsForSummary(query, req.userData);
+      const payload = treatmentGrid ? profileSlotsPayload({ ...treatmentGrid, query })
+        : await invokeSlotsForSummary(query, req.userData);
       return {
         day_id: dateIso,
         column_id: String(columnId),
