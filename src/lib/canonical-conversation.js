@@ -65,6 +65,9 @@ async function mergeDuplicateConversations(canonical, duplicates, { transaction 
     throw Object.assign(new Error('No se pueden fusionar conversaciones con identidades diferentes.'),
       { code: 'whatsapp_contact_identity_conflict', status: 409 });
   }
+  // Use the locked rows, not instances cached before a rollback or new message.
+  canonical = target;
+  duplicates = locked.filter(row => Number(row.id) !== Number(target.id));
 
   // Import bindings must follow the surviving chat in the same transaction.
   const [tables] = await db.sequelize.query(
@@ -274,7 +277,7 @@ async function findCanonicalWhatsappConversation({
     return Number(left.id) - Number(right.id);
   });
 
-  const canonical = sorted[0];
+  let canonical = sorted[0];
   const duplicates = exact.length ? sorted.slice(1) : [];
 
   const patch = {};
@@ -297,7 +300,7 @@ async function findCanonicalWhatsappConversation({
   }
 
   if (duplicates.length) {
-    await mergeDuplicateConversations(canonical, duplicates, { transaction });
+    canonical = await mergeDuplicateConversations(canonical, duplicates, { transaction });
   }
 
   return canonical;

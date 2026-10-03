@@ -64,7 +64,10 @@ test('merges preserve inbox bindings atomically; explicit orphan repair preserve
     assert.equal((await sql.query('SELECT DISTINCT conversation_id FROM WhatsappInboxContactKeys'))[0][0].conversation_id, duplicate.id);
     assert.equal((await Message.findByPk(existing.id)).conversation_id, duplicate.id);
     assert.ok(await Conversation.findByPk(duplicate.id));
-    await merge(first, [duplicate]);
+    assert.equal((await Conversation.findByPk(first.id)).unread_count, 1);
+    const surviving = await merge(first, [duplicate]);
+    assert.equal(surviving.unread_count, 2);
+    assert.equal((await Conversation.findByPk(first.id)).unread_count, 2);
     assert.equal(await Conversation.findByPk(duplicate.id), null);
     assert.deepEqual((await sql.query('SELECT conversation_id FROM WhatsappInboxContactKeys'))[0].map(row => row.conversation_id), [first.id, first.id]);
     assert.equal((await Message.findByPk(existing.id)).conversation_id, first.id);
