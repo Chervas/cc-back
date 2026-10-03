@@ -46,6 +46,36 @@ async function mergeDuplicateConversations(canonical, duplicates, { transaction 
     return canonical;
   }
 
+  if (!transaction) {
+    return db.sequelize.transaction(owned =>
+      mergeDuplicateConversations(canonical, duplicates, { transaction: owned }));
+  }
+
+  const locked = await Conversation.findAll({
+    where: { id: { [Op.in]: [Number(canonical.id), ...duplicateIds] } },
+    order: [['id', 'ASC']], transaction, lock: transaction.LOCK.UPDATE,
+  });
+  const target = locked.find(row => Number(row.id) === Number(canonical.id));
+  if (!target || locked.length !== duplicateIds.length + 1
+    || locked.some(row => row.channel !== 'whatsapp'
+      || Number(row.clinic_id) !== Number(target.clinic_id)
+      || !normalizePhoneE164(row.contact_id)
+      || normalizePhoneE164(row.contact_id) !== normalizePhoneE164(target.contact_id))
+    || new Set(locked.map(row => Number(row.patient_id)).filter(Boolean)).size > 1) {
+    throw Object.assign(new Error('No se pueden fusionar conversaciones con identidades diferentes.'),
+      { code: 'whatsapp_contact_identity_conflict', status: 409 });
+  }
+
+  // Import bindings must follow the surviving chat in the same transaction.
+  const [tables] = await db.sequelize.query(
+    "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='WhatsappInboxContactKeys'",
+    { transaction });
+  if (tables.length) {
+    await db.sequelize.query(
+      'UPDATE WhatsappInboxContactKeys SET conversation_id=:canonicalId WHERE conversation_id IN (:duplicateIds)',
+      { replacements: { canonicalId: Number(canonical.id), duplicateIds }, transaction });
+  }
+
   await Message.update(
     { conversation_id: canonical.id },
     { where: { conversation_id: { [Op.in]: duplicateIds } }, transaction }
