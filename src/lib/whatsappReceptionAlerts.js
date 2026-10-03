@@ -2,11 +2,14 @@
 const health = require('./whatsappInboxHealth');
 const templateSyncState = require('./whatsappTemplateSyncState');
 
-async function templateAlert({ rows, query, bindings, resolveTemplateBinding, namespace, now }) {
+async function templateAlerts({ rows, query, bindings, resolveTemplateBinding, namespace, now }) {
   const wabaIds = rows.map(row => String(row.waba_id || '')).filter(Boolean);
   const states = await templateSyncState.recentJobs({ query, wabaIds, namespace, now });
-  const totals = { pending: 0, active: 0, blocked: 0, disconnected: 0, blocked_wabas: 0, disconnected_wabas: 0 };
-  let oldest = Infinity;
+  const alerts = [];
+  const [labels] = wabaIds.length ? await query(`SELECT DISTINCT a.wabaId,w.nombre_clinica
+    FROM ClinicMetaAssets a LEFT JOIN Clinicas w ON w.id_clinica=a.clinicaId
+    WHERE a.wabaId IN (:wabaIds) AND a.assetType='whatsapp_phone_number'`,
+  { replacements: { wabaIds } }) : [[]];
   for (const row of rows) {
     const pending = Number(row.pending || 0);
     if (!pending) continue;
@@ -17,33 +20,41 @@ async function templateAlert({ rows, query, bindings, resolveTemplateBinding, na
       try { available = !!await resolveTemplateBinding(wabaId); }
       catch (error) { if (!templateSyncState.blockedCode(error)) throw error; denied = true; }
     }
-    totals.pending += pending;
-    if (!available && !denied) { totals.disconnected += pending; totals.disconnected_wabas++; }
-    else if (denied || templateSyncState.blockedCode(states.get(wabaId)?.error_message)) {
-      totals.blocked += pending; totals.blocked_wabas++;
-    } else totals.active += pending;
-    const date = new Date(row.oldest_pending || '').getTime();
-    if (Number.isFinite(date)) oldest = Math.min(oldest, date);
+    const blocked = denied || available && !!templateSyncState.blockedCode(states.get(wabaId)?.error_message);
+    const inactive = !available && !denied;
+    const names = [...new Set(labels.filter(label => String(label.wabaId) === wabaId).map(label => label.nombre_clinica).filter(Boolean))];
+    const name = names.slice(0, 3).join(', ') || 'cuenta de WhatsApp';
+    const cause = inactive ? 'Esta cuenta concreta no tiene un permiso operativo de consulta en Clinicaclick.'
+      : blocked ? 'El control de acceso del broker deniega la consulta de esta cuenta; no demuestra un bloqueo nuevo de Meta.'
+        : 'La consulta del estado actual de las plantillas sigue pendiente.';
+    const summary = `${pending} avisos técnicos de aprobación, categoría o calidad de plantillas; no son respuestas de pacientes.`;
+    alerts.push({ eventKey: 'whatsapp.template_reconciliation_delayed', payload: {
+      severity: inactive ? 'info' : 'warning',
+      title: `Plantillas de ${name}: ${inactive ? 'avisos conservados' : blocked ? 'revisar permiso de consulta' : 'sincronización retrasada'}`,
+      detail: `${summary} ${cause} No son ${pending} plantillas pendientes de aprobación.`,
+      action: inactive ? 'No necesitas reconectar el número por este aviso. El historial se conserva sin acciones sobre pacientes.'
+        : 'El equipo técnico debe revisar esta cuenta en Ajustes > Cuentas conectadas. https://crm.clinicaclick.com/ajustes?panel=connected-accounts',
+      occurredAt: Number.isFinite(new Date(row.oldest_pending).getTime()) ? new Date(row.oldest_pending).toISOString() : null,
+    }, metadata: { source: 'whatsapp_template_reconciliation', waba_id: wabaId,
+      incident_scope: `waba:${wabaId || 'unknown'}`, incident_impact: [inactive ? 'inactive' : blocked ? 'blocked' : 'sync_delayed'],
+      panel_only: inactive, pending, active: available && !blocked ? pending : 0,
+      blocked: blocked ? pending : 0, disconnected: inactive ? pending : 0, operational_summary: summary } });
   }
-  // A deliberately disconnected account retains evidence, not an operational
-  // approval failure. Never mark it reconciled merely to silence an alert.
-  if (!totals.active && !totals.blocked) return null;
-  const cause = totals.blocked
-    ? ` La última consulta de ${totals.blocked} avisos en ${totals.blocked_wabas} cuentas fue bloqueada por el control de acceso del broker; esto no demuestra un nuevo bloqueo de Meta.` : '';
-  const inactive = totals.disconnected
-    ? ` Otros ${totals.disconnected} avisos pertenecen a ${totals.disconnected_wabas} cuentas sin conexión autorizada activa y se conservan para una futura conciliación.` : '';
-  const active = totals.active ? ` ${totals.active} avisos de cuentas disponibles siguen pendientes de sincronización.` : '';
-  const since = Number.isFinite(oldest) ? ` Pendientes en CRM desde ${new Date(oldest).toLocaleString('es-ES',
-    { timeZone: 'Europe/Madrid', dateStyle: 'short', timeStyle: 'short' })}.` : '';
-  return { eventKey: 'whatsapp.template_reconciliation_delayed', payload: {
-    severity: 'warning',
-    title: totals.active ? 'Sincronización de cambios de plantillas WhatsApp retrasada'
-      : 'No se pueden conciliar avisos de plantillas de cuentas bloqueadas',
-    detail: `Meta ya entregó ${totals.pending} avisos técnicos de cambios de plantillas, pero CRM todavía no ha contrastado su estado actual.${cause}${inactive}${active}${since} No son ${totals.pending} plantillas pendientes de aprobación ni mensajes de pacientes. Este aviso no acredita un fallo de recepción de pacientes.`,
-    action: totals.blocked
-      ? 'Revisar el permiso de las cuentas bloqueadas en Ajustes > Cuentas conectadas. No reconectar cuentas retiradas ni dar avisos por conciliados manualmente. https://crm.clinicaclick.com/ajustes?panel=connected-accounts'
-      : 'Revisar la sincronización de plantillas en Monitorización > WhatsApp. No dar avisos por conciliados manualmente. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp',
-  }, metadata: { source: 'whatsapp_template_reconciliation', ...totals } };
+  return alerts;
+}
+
+function reviewBrief(clinic) {
+  const count = Number(clinic?.blockingReview) || 0;
+  if (!count) return '';
+  const items = health.summaryOf({ blockingReview: count, reviewSummary: clinic?.reviewSummary });
+  if (!items) return `${count} eventos retenidos cuyo tipo aún no está clasificado.`;
+  const names = { incoming_messages: 'mensajes entrantes', delivery_updates: 'actualizaciones de entrega',
+    provider_errors: 'errores técnicos de Meta', mobile_echoes: 'ecos de mensajes enviados desde el móvil',
+    app_state_changes: 'cambios de estado de la app', history: 'eventos de historial',
+    mixed: 'lotes mixtos', unknown: 'eventos sin clasificar' };
+  const counts = new Map();
+  for (const item of items) counts.set(item.category, (counts.get(item.category) || 0) + item.count);
+  return `Resumen: ${[...counts].map(([category, total]) => `${total} ${names[category]}`).join('; ')}.`;
 }
 
 function capacityAlert(snapshot, now) {
@@ -101,44 +112,64 @@ async function collect({ snapshot, bindings, query, now = Date.now(),
   const archive = archiveAlert(snapshot, now);
   if (!bindings.length) return [capacity, archive].filter(Boolean);
   const [adminRows] = accountSyncEnabled ? await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ waba_id,COUNT(*) pending,MIN(created_at) oldest_pending
-    FROM WhatsappInboxAdminSync WHERE reconciled_at IS NULL AND created_at < :cutoff GROUP BY waba_id`,
+    FROM WhatsappInboxAdminSync WHERE reconciled_at IS NULL AND archived_at IS NULL AND created_at < :cutoff GROUP BY waba_id`,
   { replacements: { cutoff: new Date(now - 10 * 60 * 1000) } }) : [[]];
-  const adminAlert = await templateAlert({ rows: adminRows, query, bindings, resolveTemplateBinding, namespace, now });
-  if (!clinicIds.length) return [capacity, archive, adminAlert].filter(Boolean);
+  const adminAlerts = await templateAlerts({ rows: adminRows, query, bindings, resolveTemplateBinding, namespace, now });
+  if (!clinicIds.length) return [...[capacity, archive].filter(Boolean), ...adminAlerts];
   const issues = health.issues(snapshot, clinicIds, now);
-  const [waiting] = await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ id,clinic_id FROM FlowExecutionsV2
+  const [waiting] = await query(`SELECT /*+ MAX_EXECUTION_TIME(3000) */ clinic_id,COUNT(*) pending FROM FlowExecutionsV2
     WHERE status='waiting' AND clinic_id IN (:clinicIds) AND last_error='inbound_response_dispatch_pending'
-    AND wait_until < :until ORDER BY id LIMIT 50`, { replacements: { clinicIds, until: new Date(now + 120000) } });
-  if (!issues.length && !waiting.length) return [capacity, archive, adminAlert].filter(Boolean);
+    AND wait_until < :until GROUP BY clinic_id`, { replacements: { clinicIds, until: new Date(now + 120000) } });
+  const base = [...[capacity, archive].filter(Boolean), ...adminAlerts];
+  if (!issues.length && !waiting.length) return base;
   const affected = [...new Set([...issues.map(x => x.data.clinic_id), ...waiting.map(x => x.clinic_id)])];
   const [clinics] = await query('SELECT id_clinica,nombre_clinica FROM Clinicas WHERE id_clinica IN (:clinicIds)',
     { replacements: { clinicIds: affected } });
   const names = affected.map(id => clinics.find(c => Number(c.id_clinica) === Number(id))?.nombre_clinica || `Clínica ${id}`);
-  const shown = names.slice(0, 4).join(', ') + (names.length > 4 ? ` y ${names.length - 4} más` : '');
   const stale = !snapshot || snapshot.version !== 1 || !Number.isFinite(snapshot.observedAt)
     || now - snapshot.observedAt > 90000 || snapshot.observedAt > now + 5000;
   const checkedAt = stale && Number.isFinite(snapshot?.observedAt) && snapshot.observedAt <= now
     ? new Date(snapshot.observedAt).toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'short', timeStyle: 'short' })
     : null;
-  const summary = stale
-    ? `El control de recepción no se actualiza desde ${checkedAt || 'hace más de 90 segundos'}. Afecta a ${affected.length} clínicas: ${shown}.`
-    : issues.length ? `${issues.length} clínicas tienen eventos de WhatsApp pendientes de importar o revisar: ${shown}.`
-      : `${waiting.length} respuestas recibidas siguen pendientes del motor en: ${shown}.`;
-  const oldest = (Array.isArray(snapshot?.clinics) ? snapshot.clinics : [])
-    .filter(clinic => affected.includes(clinic.clinicId))
-    .map(clinic => clinic.oldestPendingAt).filter(Number.isFinite).reduce((min, time) => Math.min(min, time), Infinity);
-  const oldestDetail = Number.isFinite(oldest)
-    ? ` El evento pendiente más antiguo es del ${new Date(oldest).toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'short', timeStyle: 'short' })}.`
-    : '';
-  const waits = waiting.length ? ` ${waiting.length}${waiting.length === 50 ? ' o más' : ''} respuestas ya registradas esperan al motor.`
-    : ' No hay respuestas ya registradas pendientes del motor.';
-  return [...[capacity, archive, adminAlert].filter(Boolean), { eventKey: 'whatsapp.reception_attention', payload: {
-    severity: issues.some(x => x.severity === 'critical') ? 'critical' : 'warning',
-    title: stale ? 'No se actualiza el control de recepción de WhatsApp' : 'WhatsApp tiene eventos pendientes de recepción',
-    detail: `${summary}${oldestDetail}${waits} Las acciones por falta de respuesta permanecen en espera hasta comprobar la recepción.`,
-    action: 'Revisar Ajustes → Monitorización → WhatsApp. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp',
-  }, metadata: { source: 'whatsapp_reception', clinic_ids: affected,
-    waiting_execution_ids: waiting.map(x => x.id), issue_types: [...new Set(issues.map(x => x.type))] } }];
+  if (stale) return [...base, { eventKey: 'whatsapp.reception_attention', payload: {
+    severity: 'critical', title: 'No se actualiza el control de recepción de WhatsApp',
+    detail: `El control de recepción no se actualiza desde ${checkedAt || 'hace más de 90 segundos'}. No se puede determinar si hay mensajes pendientes; no demuestra una caída de Meta.`,
+    action: 'El equipo técnico debe revisar el monitor de recepción. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp',
+  }, metadata: { source: 'whatsapp_reception', incident_scope: 'monitor:whatsapp', incident_impact: ['health_unavailable'],
+    clinic_ids: affected, check_unavailable: true, operational_summary: 'Falla la comprobación de recepción; cantidad de mensajes pendientes desconocida.' } }];
+  return [...base, ...affected.map((clinicId, index) => {
+    const clinic = snapshot.clinics.find(clinic => clinic.clinicId === Number(clinicId));
+    const issue = issues.find(issue => issue.data.clinic_id === clinicId);
+    const enginePending = waiting.filter(row => Number(row.clinic_id) === Number(clinicId))
+      .reduce((total, row) => total + Number(row.pending || 1), 0);
+    const retained = Number(clinic?.blockingReview) || 0;
+    const reviewDates = (health.summaryOf({ blockingReview: retained, reviewSummary: clinic?.reviewSummary }) || [])
+      .map(item => item.oldestAt).filter(Number.isFinite);
+    const oldest = Number.isFinite(clinic?.oldestPendingAt) ? clinic.oldestPendingAt
+      : reviewDates.length ? Math.min(...reviewDates) : null;
+    const brief = !clinic ? 'No hay una señal de recepción válida para esta clínica; cantidad de eventos pendientes desconocida.'
+      : reviewBrief(clinic) || (Number.isFinite(oldest) ? 'Hay eventos nuevos pendientes de importación.'
+      : `${enginePending} respuestas guardadas pendientes del motor.`);
+    const age = Number.isFinite(oldest) ? ` El evento pendiente más antiguo es del ${new Date(oldest).toLocaleString('es-ES',
+      { timeZone: 'Europe/Madrid', dateStyle: 'short', timeStyle: 'short' })}.` : '';
+    const impact = issue?.severity === 'critical' ? 'Las automatizaciones afectadas se mantienen en espera hasta verificar la recepción.'
+      : issue ? 'La revisión se limita a contactos concretos; las demás conversaciones mantienen sus automatizaciones.'
+        : 'La importación está operativa, pero estas respuestas todavía no han llegado al motor.';
+    const waits = enginePending ? ` ${enginePending} respuestas guardadas esperan al motor.`
+      : clinic ? ' No hay respuestas guardadas pendientes del motor.' : '';
+    const issueTypes = [issue?.type, enginePending ? 'engine_pending' : null].filter(Boolean);
+    return { eventKey: 'whatsapp.reception_attention', payload: {
+      severity: issue?.severity || 'warning',
+      title: `${names[index]}: ${retained ? `${retained} eventos retenidos` : enginePending ? `${enginePending} respuestas pendientes` : 'recepción pendiente de revisión'}`,
+      detail: `${brief}${age}${waits} ${impact}`,
+      action: 'El equipo técnico debe revisar estos eventos; recepción no debe confirmar ni cancelar citas por este aviso. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp',
+      occurredAt: Number.isFinite(oldest) ? new Date(oldest).toISOString() : null,
+    }, metadata: { source: 'whatsapp_reception', incident_scope: `clinic:${clinicId}`, clinic_ids: [clinicId],
+      engine_pending: enginePending, blocking_review: retained, incident_impact: [...issueTypes,
+        ...[...new Set((health.summaryOf({ blockingReview: retained, reviewSummary: clinic?.reviewSummary }) || [])
+          .map(item => item.category))]],
+      issue_types: issueTypes, operational_summary: brief } };
+  })];
 }
 function unavailable(error) {
   const knownCodes = new Set(['ER_PARSE_ERROR', 'ER_QUERY_TIMEOUT', 'ER_QUERY_INTERRUPTED',
@@ -151,6 +182,7 @@ function unavailable(error) {
     detail: 'La comprobación de recepción o respuestas pendientes no está disponible.',
     action: 'Revisar Ajustes → Monitorización → WhatsApp.',
   }, metadata: { source: 'whatsapp_reception', check_unavailable: true,
+    incident_scope: 'monitor:whatsapp', incident_impact: ['check_failed'],
     check_error_code: knownCodes.has(code) ? code : 'CHECK_FAILED' } };
 }
-module.exports = { collect, unavailable };
+module.exports = { collect, unavailable, reviewBrief };

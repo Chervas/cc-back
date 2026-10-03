@@ -6,13 +6,15 @@ const snapshot={version:1,observedAt:now,clinics:[{clinicId:2,blockingReview:4,u
 test('scoped identity warnings reach the email event even without a critical clinic-wide outage',async()=>{
  const alerts=await collect({snapshot,bindings,now,query:async sql=>[sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[]]});
  assert.equal(alerts.length,1);assert.equal(alerts[0].eventKey,'whatsapp.reception_attention');
- assert.equal(alerts[0].payload.severity,'warning');assert.match(alerts[0].payload.detail,/Ficticia/);
+ assert.equal(alerts[0].payload.severity,'warning');assert.match(alerts[0].payload.title,/Ficticia/);
+ assert.equal(alerts[0].metadata.incident_scope,'clinic:2');
  assert.doesNotMatch(JSON.stringify(alerts),/a{64}/);
 });
 test('a native wait with a durable reply is reported independently of broker health',async()=>{
  const alerts=await collect({snapshot:{...snapshot,clinics:[{clinicId:2,blockingReview:0,oldestPendingAt:null}]},bindings,now,
  query:async sql=>[sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[{id:12,clinic_id:2}]]});
- assert.equal(alerts.length,1);assert.deepEqual(alerts[0].metadata.waiting_execution_ids,[12]);
+ assert.equal(alerts.length,1);assert.equal(alerts[0].metadata.engine_pending,1);
+ assert.equal(alerts[0].metadata.waiting_execution_ids,undefined);
 });
 test('stale heartbeat names the monitoring outage without presenting clinics as patient replies',async()=>{
  const stale={...snapshot,observedAt:now-3600000};
@@ -21,15 +23,30 @@ test('stale heartbeat names the monitoring outage without presenting clinics as 
  assert.equal(alerts[0].payload.severity,'critical');
  assert.match(alerts[0].payload.title,/no se actualiza/i);
  assert.match(alerts[0].payload.detail,/control de recepción no se actualiza/);
- assert.match(alerts[0].payload.detail,/No hay respuestas ya registradas pendientes/);
+ assert.match(alerts[0].payload.detail,/No se puede determinar si hay mensajes pendientes/);
  assert.doesNotMatch(alerts[0].payload.detail,/incidencias de recepción/);
 });
 test('fresh backlog is reported as events pending import or review',async()=>{
  const delayed={...snapshot,clinics:[{clinicId:2,blockingReview:0,oldestPendingAt:now-300000}]};
  const alerts=await collect({snapshot:delayed,bindings,now,
   query:async sql=>[sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[]]});
- assert.match(alerts[0].payload.detail,/eventos de WhatsApp pendientes de importar o revisar/);
+ assert.match(alerts[0].payload.detail,/eventos nuevos pendientes de importación/);
  assert.match(alerts[0].payload.detail,/evento pendiente más antiguo es del/);
+});
+test('brief separates inbound messages, mobile echoes and delivery failures without patient data',async()=>{
+ const clinic={clinicId:2,blockingReview:10,oldestPendingAt:null,reviewSummary:[
+  {category:'incoming_messages',count:4,oldestAt:now-86400000,newestAt:now-5000,errorCodes:[]},
+  {category:'mobile_echoes',count:6,oldestAt:now-86400000,newestAt:now-5000,errorCodes:[]} ]};
+ const alerts=await collect({snapshot:{...snapshot,clinics:[clinic]},bindings,now,
+  query:async sql=>[sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[]]});
+ assert.match(alerts[0].metadata.operational_summary,/4 mensajes entrantes; 6 ecos/);
+ assert.match(alerts[0].payload.detail,/automatizaciones afectadas se mantienen en espera/);
+ assert.doesNotMatch(JSON.stringify(alerts),/a{64}|contact_id|wamid|body/);
+});
+test('missing scope is an unknown reception signal, never a claim of zero patient replies',async()=>{
+ const alerts=await collect({snapshot:{...snapshot,clinics:[]},bindings,now,query:async()=>[[]]});
+ assert.match(alerts[0].metadata.operational_summary,/cantidad de eventos pendientes desconocida/);
+ assert.doesNotMatch(alerts[0].payload.detail,/0 respuestas|No hay respuestas/);
 });
 test('storage capacity warns independently before a full inbox rejects Meta webhooks',async()=>{
  const clean={...snapshot,clinics:[{clinicId:2,blockingReview:0,oldestPendingAt:null}],

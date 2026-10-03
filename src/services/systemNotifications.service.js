@@ -882,7 +882,7 @@ async function recentlyQueued(
   return count > 0;
 }
 
-async function createSkippedDelivery({ setting, eventKey, severity, channel, content, reason, metadata }) {
+async function createSkippedDelivery({ setting, eventKey, severity, channel, content, reason, metadata, transaction }) {
   const recipient = channel === 'email' ? setting.admin_email : (channel === 'whatsapp' ? setting.admin_phone : 'panel');
   return db.SystemNotificationDelivery.create({
     event_key: eventKey,
@@ -902,7 +902,7 @@ async function createSkippedDelivery({ setting, eventKey, severity, channel, con
     error_message: reason,
     metadata,
     completed_at: new Date(),
-  });
+  }, { transaction });
 }
 
 async function createQueuedDelivery({
@@ -913,8 +913,9 @@ async function createQueuedDelivery({
   content,
   metadata,
   runtimeNamespace,
+  transaction,
 }) {
-  return db.sequelize.transaction(async (transaction) => {
+  const create = async (transaction) => {
     const recipient = channel === 'email' ? setting.admin_email : (channel === 'whatsapp' ? setting.admin_phone : 'panel');
     const delivery = await db.SystemNotificationDelivery.create({
       event_key: eventKey,
@@ -943,7 +944,8 @@ async function createQueuedDelivery({
     }, { transaction });
     await delivery.update({ job_request_id: job.id }, { transaction });
     return { delivery, job };
-  });
+  };
+  return transaction ? create(transaction) : db.sequelize.transaction(create);
 }
 
 function buildNotificationContent(eventKey, payload = {}) {
@@ -971,8 +973,8 @@ function buildNotificationContent(eventKey, payload = {}) {
   return {
     severity,
     title: safeText(payload.title, 140) || definition?.label || 'Alerta de sistema',
-    message: safeText(payload.message || payload.detail, 500) || definition?.description || 'Se ha detectado una condición que requiere revisión.',
-    action: safeText(payload.action, 220) || 'Revisar Monitorización del sistema.',
+    message: safeText(payload.message || payload.detail, 4000) || definition?.description || 'Se ha detectado una condición que requiere revisión.',
+    action: safeText(payload.action, 1000) || 'Revisar Monitorización del sistema.',
   };
 }
 
@@ -983,6 +985,7 @@ async function queueNotification({
   channelsOverride = null,
   metadata = {},
   runtimeNamespace = null,
+  transaction = null,
 } = {}) {
   const definition = eventDefinition(eventKey);
   if (!definition) {
@@ -1000,6 +1003,8 @@ async function queueNotification({
     ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
     source: metadata?.source || 'system_monitoring',
     dry_run: metadata?.dry_run === true,
+    ...(payload.occurredAt && Number.isFinite(new Date(payload.occurredAt).getTime())
+      ? { occurred_at: new Date(payload.occurredAt).toISOString() } : {}),
   };
 
   for (const channel of channels) {
@@ -1018,6 +1023,7 @@ async function queueNotification({
         content,
         reason,
         metadata: enrichedMetadata,
+        transaction,
       });
       skipped.push({ reason, delivery });
       continue;
@@ -1049,6 +1055,7 @@ async function queueNotification({
             compliance_incident_id: compliance.complianceIncidentId,
             restriction_expires_at: compliance.restrictionExpiresAt,
           },
+          transaction,
         });
         skipped.push({ reason, delivery });
         continue;
@@ -1066,6 +1073,7 @@ async function queueNotification({
       content,
       metadata: enrichedMetadata,
       runtimeNamespace: dispatchRuntimeNamespace,
+      transaction,
     }));
   }
 
@@ -1125,7 +1133,11 @@ async function sendEmailDelivery(delivery) {
       title: delivery.title,
       message: delivery.message,
       action: delivery.action,
-      occurred_at: nowMadridLabel(),
+      occurred_at: delivery.metadata?.occurred_at
+        ? new Date(delivery.metadata.occurred_at).toLocaleString('es-ES', { timeZone: 'Europe/Madrid' }) : nowMadridLabel(),
+      incident_phase: delivery.metadata?.incident_phase || null,
+      operational_summary: delivery.metadata?.operational_summary || null,
+      event_key: delivery.event_key,
     },
     metadata: {
       contains_clinical_data: false,
@@ -1432,19 +1444,52 @@ async function runActiveChecks({ force = false } = {}) {
   const overview = await emailMonitoring.getOverview();
   const alerts = Array.isArray(overview?.alerts) ? overview.alerts : [];
   const queued = [];
+  const inboxHealth = require('../lib/whatsappInboxHealth');
+  const snapshot = inboxHealth.read();
+  const bindings = require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings || [];
+  let receptionCheckComplete = true;
   const receptionAlerts = await require('../lib/whatsappReceptionAlerts').collect({
-    snapshot: require('../lib/whatsappInboxHealth').read(),
-    bindings: require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings || [],
+    snapshot,
+    bindings,
     query: (...args) => db.sequelize.query(...args),
     resolveTemplateBinding: wabaId => require('../lib/whatsappAuthorizedBrokerClient').templateBinding(wabaId),
     namespace: jobRequestsService.getCurrentRuntimeNamespace(),
   }).catch(error => {
+    receptionCheckComplete = false;
     const alert = require('../lib/whatsappReceptionAlerts').unavailable(error);
     // Log only the allowlisted diagnostic code, never SQL, credentials or content.
     console.warn('[whatsapp-reception] Check unavailable:', alert.metadata.check_error_code);
     return [alert];
   });
-  for (const alert of receptionAlerts) queued.push(await queueNotification({ ...alert, force }));
+  const incidents = require('../lib/operationalNotificationIncidents');
+  const notifier = incidents.createIncidentNotifier({ sequelize: db.sequelize, Incident: db.SystemNotificationIncident,
+    namespace: jobRequestsService.getCurrentRuntimeNamespace(), queue: queueNotification,
+    reminderMinutes: {
+      criticalMinutes: Math.max(60, Number(process.env.SYSTEM_NOTIFICATIONS_CRITICAL_REMINDER_MINUTES) || 360),
+      warningMinutes: Math.max(360, Number(process.env.SYSTEM_NOTIFICATIONS_WARNING_REMINDER_MINUTES) || 1440),
+    },
+    channels: alert => enabledChannelsForEvent(setting, alert.eventKey)
+      .filter(channel => !alert.metadata?.panel_only || channel === 'panel') });
+  queued.push(...await notifier.sync(receptionAlerts, { resolution: async original => {
+    if (!receptionCheckComplete || !bindings.length) return null;
+    if (original.eventKey === 'whatsapp.template_reconciliation_delayed') {
+      if (process.env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED !== 'true') return null;
+      return { severity: 'info', title: 'Seguimiento de avisos de plantillas cerrado',
+        detail: 'Esta cuenta ya no tiene avisos abiertos en la cola de seguimiento. Los avisos conciliados o archivados conservan su historial; esto no confirma un cambio de permisos de Meta.',
+        action: 'No necesitas reconectar un número ni realizar acciones sobre pacientes.' };
+    }
+    const clinicId = original.metadata?.clinic_ids?.[0];
+    if (original.metadata?.incident_scope === 'monitor:whatsapp') {
+      if (!snapshot || Date.now() - snapshot.observedAt > 90000 || snapshot.observedAt > Date.now() + 5000) return null;
+    } else if (!bindings.some(binding => binding.sendEnabled && Number(binding.clinicId) === Number(clinicId))
+      || !inboxHealth.state(snapshot, clinicId).healthy) return null;
+    return { severity: 'info', title: 'Comprobación de recepción de WhatsApp restablecida',
+      detail: 'El monitor confirma que ha desaparecido el motivo de este aviso. No se reproducen mensajes históricos ni se modifican citas por cerrar la incidencia.',
+      action: 'No requiere acción por este aviso. Las campañas pausadas manualmente no se reactivan.' };
+  } }));
+  for (const alert of receptionAlerts.filter(alert => !incidents.MANAGED.has(alert.eventKey))) {
+    queued.push(await queueNotification({ ...alert, force }));
+  }
   for (const alert of alerts) {
     const eventKey = cleanString(alert.key);
     if (!eventKey || !eventDefinition(eventKey)) continue;

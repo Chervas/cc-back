@@ -3,6 +3,29 @@ const fs = require('node:fs');
 const { createHash } = require('node:crypto');
 const contactKey = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const FILE = '/run/clinicaclick-whatsapp-inbox-health/health.json';
+const REVIEW_CATEGORIES = new Set(['incoming_messages', 'delivery_updates', 'provider_errors',
+  'mobile_echoes', 'app_state_changes', 'history', 'mixed', 'unknown']);
+function summaryOf(group) {
+  const items = group.reviewSummary;
+  if (!Array.isArray(items) || items.length > 9 || items.some(item => !REVIEW_CATEGORIES.has(item.category)
+    || !Number.isSafeInteger(item.count) || item.count < 1
+    || ['oldestAt', 'newestAt'].some(key => item[key] !== null && !Number.isSafeInteger(item[key]))
+    || !Array.isArray(item.errorCodes) || item.errorCodes.length > 10
+    || item.errorCodes.some(code => !Number.isSafeInteger(code) || code < 1 || code > 9999999))
+    || items.reduce((total, item) => total + item.count, 0) !== group.blockingReview) return null;
+  return items.map(item => Object.fromEntries(['category', 'count', 'oldestAt', 'newestAt', 'errorCodes'].map(key => [key, item[key]])));
+}
+function mergeSummaries(items) {
+  const merged = new Map();
+  for (const item of items) {
+    const previous = merged.get(item.category);
+    merged.set(item.category, previous ? { category: item.category, count: previous.count + item.count,
+      oldestAt: previous.oldestAt === null || item.oldestAt === null ? null : Math.min(previous.oldestAt, item.oldestAt),
+      newestAt: previous.newestAt === null || item.newestAt === null ? null : Math.max(previous.newestAt, item.newestAt),
+      errorCodes: [...new Set([...previous.errorCodes, ...item.errorCodes])].sort((a, b) => a - b).slice(0, 10) } : item);
+  }
+  return [...merged.values()];
+}
 function capacityOf(health) {
   if (health.capacity === undefined) return null; // Older broker during a rolling deployment.
   const value = health.capacity;
@@ -61,10 +84,13 @@ function publish(health, scopes, { recoveryNotBefore = null, recoveryHold = fals
   const clinics = new Map();
   for (const scope of scopes) for (const clinicId of scope.clinicIds) {
     const value = clinics.get(clinicId) || { clinicId, oldestPendingAt: null, blockingReview: 0, review: 0,
-      unscopedBlockingReview: 0, blockingContactKeys: [] };
+      unscopedBlockingReview: 0, blockingContactKeys: [], reviewSummary: [] };
     for (const group of health.groups.filter(g => g.scopes.includes(scope.wabaId + ':' + scope.phoneId))) {
       if (group.oldestPendingAt !== null) value.oldestPendingAt = Math.min(value.oldestPendingAt ?? Infinity, group.oldestPendingAt);
       value.blockingReview += Number(group.blockingReview) || 0; value.review += Number(group.review) || 0;
+      const summary = summaryOf(group);
+      value.reviewSummary = mergeSummaries([...value.reviewSummary, ...(summary || (group.blockingReview > 0
+        ? [{ category: 'unknown', count: group.blockingReview, oldestAt: null, newestAt: null, errorCodes: [] }] : []))]);
       const isolation = group.reviewIsolation;
       const valid = isolation?.version === 1 && Number.isSafeInteger(isolation.scopedReviews)
         && isolation.scopedReviews > 0 && isolation.scopedReviews <= group.blockingReview
@@ -122,4 +148,4 @@ async function forConversation(snapshot, conversation, bindings, query, { transa
   }
   return state(snapshot, clinicId, now, { contactKeys: keys });
 }
-module.exports = { FILE, read, state, publish, issues, forConversation };
+module.exports = { FILE, read, state, publish, issues, forConversation, summaryOf };

@@ -292,11 +292,17 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
       // Account-wide events cannot be attributed to a contact. Keep their
       // counters without letting them consume the bounded phone review budget.
       const reviews = store.db.prepare("SELECT i.receipt,i.digest,i.scopes,i.kinds,i.received_at,i.key_id,i.app_id,i.byte_count FROM whatsapp_inbox i JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' AND r.reason='review_required' AND i.scopes NOT LIKE '%:account%' ORDER BY i.received_at LIMIT 100").all(appId);
-      const present = new Set(reviews.map(r => r.receipt));
+      // Recent diagnostics do not enlarge the contact-isolation budget or
+      // release any receipt. Keep the existing barrier decision unchanged.
+      const recent = store.db.prepare("SELECT i.receipt,i.digest,i.scopes,i.kinds,i.received_at,i.key_id,i.app_id,i.byte_count FROM whatsapp_inbox i JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' AND r.reason='review_required' AND i.scopes NOT LIKE '%:account%' ORDER BY i.received_at DESC LIMIT 100").all(appId);
+      const isolationReceipts = new Set(reviews.map(row => row.receipt));
+      const analysisReviews = [...new Map([...reviews, ...recent].map(row => [row.receipt, row])).values()];
+      const summaries = new Map();
+      const present = new Set(analysisReviews.map(r => r.receipt));
       for (const receipt of reviewCache.keys()) if (!present.has(receipt)) reviewCache.delete(receipt);
       const scopeVersion = JSON.stringify(scopeBindings);
       let bytes = 0;
-      for (const row of reviews) {
+      for (const row of analysisReviews) {
         const identity = row.digest + scopeVersion;
         let cached = reviewCache.get(row.receipt);
         if (cached?.identity !== identity) {
@@ -306,20 +312,34 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
           try {
             const sealed = store.db.prepare('SELECT body FROM whatsapp_inbox WHERE receipt=?').get(row.receipt);
             raw = cipher.open(sealed.body, aad(row));
-            cached = { identity, contacts: require('./whatsapp-inbox-review').reviewContacts(raw, scopeBindings) };
+            const diagnostics = require('./whatsapp-inbox-review');
+            cached = { identity, contacts: diagnostics.reviewContacts(raw, scopeBindings), summary: diagnostics.reviewSummary(raw) };
             reviewCache.set(row.receipt, cached);
           } catch { continue; } finally { raw?.fill(0); }
         }
-        if (!cached.contacts) continue;
         const group = groups.find(g => g.scopes === row.scopes);
         if (!group) continue;
+        const summary = cached.summary || { category: 'unknown', errorCodes: [] };
+        const items = summaries.get(group.scopes) || new Map();
+        const item = items.get(summary.category) || { category: summary.category, count: 0, oldestAt: row.received_at,
+          newestAt: row.received_at, errorCodes: [] };
+        item.count++; item.oldestAt = Math.min(item.oldestAt, row.received_at);
+        item.newestAt = Math.max(item.newestAt, row.received_at);
+        item.errorCodes = [...new Set([...item.errorCodes, ...summary.errorCodes])].sort((a, b) => a - b).slice(0, 10);
+        items.set(summary.category, item); summaries.set(group.scopes, items);
+        if (!isolationReceipts.has(row.receipt) || !cached.contacts) continue;
         const isolation = group.reviewIsolation ||= { version: 1, scopedReviews: 0, contacts: [] };
         const contacts = new Map([...isolation.contacts, ...cached.contacts].map(c => [c.contactKey, c]));
         if (contacts.size > 128) continue;
         isolation.scopedReviews++;
         isolation.contacts = [...contacts.values()];
       }
-      return { observedAt: now(), groups: groups.map(row => ({ ...row, scopes: JSON.parse(row.scopes) })),
+      return { observedAt: now(), groups: groups.map(row => {
+        const reviewSummary = [...(summaries.get(row.scopes)?.values() || [])];
+        const unknown = row.blockingReview - reviewSummary.reduce((total, item) => total + item.count, 0);
+        if (unknown > 0) reviewSummary.push({ category: 'unknown', count: unknown, oldestAt: null, newestAt: null, errorCodes: [] });
+        return { ...row, scopes: JSON.parse(row.scopes), reviewSummary };
+      }),
         capacity: { rows: storage.rows, bytes: storage.bytes, maxRows, maxBytes,
           auditPending: store.backlog().pending, maxAuditBacklog },
         ...(archive ? { archive: { pending: archive.pending || 0, oldestAt: archive.oldestAt,

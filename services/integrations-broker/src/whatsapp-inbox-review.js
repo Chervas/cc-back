@@ -33,4 +33,29 @@ function reviewContacts(raw, scopes) {
     return contacts.size ? [...contacts.values()] : null;
   } catch { return null; }
 }
-module.exports = { reviewContacts };
+function reviewSummary(raw) {
+  try {
+    const body = JSON.parse(raw);
+    if (body?.object !== 'whatsapp_business_account' || !Array.isArray(body.entry)) return { category: 'unknown', errorCodes: [] };
+    const categories = new Set(); const errors = new Set();
+    for (const entry of body.entry) for (const change of entry.changes || []) {
+      const value = change.value || {};
+      if (change.field === 'messages') {
+        if (value.messages?.length) categories.add('incoming_messages');
+        if (value.statuses?.length) categories.add('delivery_updates');
+        if (value.errors?.length && !value.messages?.length && !value.statuses?.length) categories.add('provider_errors');
+        if (!value.messages?.length && !value.statuses?.length && !value.errors?.length) categories.add('unknown');
+        for (const error of [...(value.errors || []), ...(value.statuses || []).flatMap(status => status.errors || [])]) {
+          if (Number.isSafeInteger(error.code) && error.code > 0 && error.code <= 9999999) errors.add(error.code);
+        }
+      } else if (change.field === 'smb_message_echoes') categories.add('mobile_echoes');
+      else if (change.field === 'smb_app_state_sync') categories.add('app_state_changes');
+      else if (change.field === 'history') categories.add('history');
+      else categories.add('unknown');
+    }
+    return { category: categories.size === 1 ? [...categories][0] : categories.size ? 'mixed' : 'unknown',
+      errorCodes: [...errors].sort((a, b) => a - b).slice(0, 10) };
+  } catch { return { category: 'unknown', errorCodes: [] }; }
+}
+
+module.exports = { reviewContacts, reviewSummary };

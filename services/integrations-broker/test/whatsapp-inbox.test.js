@@ -352,3 +352,20 @@ test('review health attributes signed contact events without importing them and 
  assert.equal(later.blockingReview,2);assert.equal(later.reviewIsolation.scopedReviews,1);
  assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n,0);
 });
+test('recent review diagnostics include late events without enlarging the original clinical isolation budget',t=>{
+ const scopeBindings=[{wabaId:'301',phoneId:'401',clinicIds:[71]}];
+ const f=fixture(t,{scopeBindings});
+ for(let n=0;n<121;n++) {
+  const input=body();const value=input.entry[0].changes[0].value;
+  value.messaging_product='whatsapp';value.messages[0].id='synthetic-review-'+n;
+  const r=f.inbox.accept(packet(input)),lease=f.inbox.lease(r.receipt);lease.raw.fill(0);
+  f.inbox.defer({receipt:r.receipt,lease:lease.lease,reason:'review_required'});f.advance(1);
+ }
+ const h=f.inbox.health(),g=h.groups.find(group=>group.scopes.includes('301:401'));
+ assert.equal(g.blockingReview,121);assert.equal(g.reviewIsolation.scopedReviews,100);
+ assert.equal(g.reviewSummary[0].category,'incoming_messages');assert.equal(g.reviewSummary[0].count,121);
+ assert.equal(g.reviewSummary.reduce((total,item)=>total+item.count,0),g.blockingReview);
+ assert(!JSON.stringify(h).includes('FICTITIOUS_CANCEL_REQUEST'));assert(!JSON.stringify(h).includes('34000000001'));
+ assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n,0);
+ assert.deepEqual(f.inbox.health(),h);f.restart();assert.deepEqual(f.inbox.health(),h);
+});

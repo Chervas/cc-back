@@ -45,11 +45,13 @@ test('template alerts separate blocked and disconnected accounts without claimin
     resolveTemplateBinding: async id => ['304', '305'].includes(id) ? null : { wabaId: id },
     query: async sql => [sql.includes('WhatsappInboxAdminSync') ? rows : sql.includes('FROM JobRequests')
       ? rows.slice(0, 3).map(row => ({ waba_id: row.waba_id, error_message: 'connection_blocked' })) : []] });
-  assert.equal(alerts.length, 1);
-  assert.deepEqual(alerts[0].metadata, { source: 'whatsapp_template_reconciliation', pending: 459,
-    active: 0, blocked: 289, disconnected: 170, blocked_wabas: 3, disconnected_wabas: 2 });
-  assert.match(alerts[0].payload.detail, /Meta ya entregó 459 avisos/);
-  assert.match(alerts[0].payload.detail, /No son 459 plantillas pendientes de aprobación/);
+  assert.equal(alerts.length, 5);
+  assert.equal(alerts.reduce((sum,a)=>sum+a.metadata.blocked,0),289);
+  assert.equal(alerts.reduce((sum,a)=>sum+a.metadata.disconnected,0),170);
+  assert.equal(alerts.filter(a=>a.metadata.panel_only).length,2);
+  assert.equal(alerts[0].metadata.incident_scope,'waba:301');
+  assert.match(alerts[0].payload.detail, /59 avisos técnicos/);
+  assert.match(alerts[0].payload.detail, /No son 59 plantillas pendientes de aprobación/);
   assert.match(alerts[0].payload.detail, /control de acceso del broker/);
   assert.doesNotMatch(JSON.stringify(alerts), /phone|contact|content|token|secret/);
 });
@@ -58,7 +60,10 @@ test('deliberately disconnected accounts retain evidence without sending an oper
   const alerts = await collect({ now, bindings: [{ clinicId: 2, sendEnabled: false }], accountSyncEnabled: true,
     resolveTemplateBinding: async () => null,
     query: async sql => [sql.includes('WhatsappInboxAdminSync') ? [{ waba_id: '301', pending: 5 }] : []] });
-  assert.deepEqual(alerts, []);
+  assert.equal(alerts.length,1);
+  assert.equal(alerts[0].metadata.panel_only,true);
+  assert.equal(alerts[0].payload.severity,'info');
+  assert.match(alerts[0].payload.action,/No necesitas reconectar/);
 });
 
 test('an active synchronization outage remains visible alongside disconnected historical accounts', async () => {

@@ -158,23 +158,39 @@ function renderOpsSystemAlert(context = {}) {
   const message = cleanString(context.message) || 'Se ha detectado un evento operativo en Clinicaclick.';
   const action = cleanString(context.action) || 'Revisar Monitorización del sistema.';
   const occurredAt = cleanString(context.occurred_at) || '';
-  const subject = assertSafeSubject('[Clinicaclick] Alerta operativa');
+  let subject = '[Clinicaclick] Alerta operativa';
+  const managed = ['whatsapp.reception_attention', 'whatsapp.template_reconciliation_delayed'].includes(context.event_key);
+  if (managed) {
+    const phase = context.incident_phase === 'closed' ? 'Resuelto' : 'Revisar';
+    try { subject = assertSafeSubject(`[Clinicaclick] ${phase}: ${title}`); }
+    catch { subject = `[Clinicaclick] ${phase}: estado de WhatsApp`; }
+  }
+  subject = assertSafeSubject(subject);
+  const summary = managed ? cleanString(context.operational_summary) : null;
   const body = [
+    summary,
     `${title}`,
-    `Severidad: ${severity}`,
+    `Prioridad: ${{ critical: 'alta', warning: 'revisión', info: 'informativa' }[severity] || severity}`,
     message,
     occurredAt ? `Hora: ${occurredAt}` : null,
     `Acción: ${action}`,
   ].filter(Boolean).join('\n');
-  return {
-    subject,
-    html: layout({
+  let html = layout({
       title: subject,
       intro: body,
       ctaLabel: null,
       ctaUrl: null,
       footer: 'Notificación técnica para administradores. No incluye datos clínicos sensibles.',
-    }),
+    });
+  if (managed) {
+    html = html.replace(escapeHtml(body), body.split('\n')
+      .map(line => `<p style="margin:0 0 12px;">${escapeHtml(line)}</p>`).join(''));
+    if (summary) html = html.replace(/(<body[^>]*>)/i,
+      `$1<div style="display:none;max-height:0;overflow:hidden;">${escapeHtml(summary)}</div>`);
+  }
+  return {
+    subject,
+    html,
     text: body,
   };
 }
