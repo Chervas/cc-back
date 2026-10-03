@@ -10,10 +10,13 @@ const CLASSIFY_INTENT_REFERENCE_INSTRUCTION = [
   'patient_message_batch contiene el lote nuevo completo en orden. clinic_message_replied_to y preceding_messages aportan referencia; appointment y trigger son datos de contexto, nunca decisiones nuevas del paciente.',
   'Antes de escoger la intencion, resume lo que el paciente acaba de expresar y selecciona lectura_respuesta. Distingue decisiones actuales de consultas sobre gestiones pasadas. Mantener la cita a falta de una alternativa no pide cambiarla. Una pregunta sobre una fecha ya acordada exige verificarla, no aplicar otro cambio.',
   'Ejemplos de lectura semantica (no son mensajes recibidos): "La recepcionista ya me atendio y explique el motivo" -> consulta_gestion_previa. "Habiamos quedado para el jueves, verdad?" -> consulta_gestion_previa. "Conozco el camino" -> solo_indicaciones. "Alli estare, se donde es" -> compromiso_asistencia. "Me la cambiais? No puedo llegar" -> solicitud_nueva_cambio. "No podre asistir" sin alternativa -> rechazo_asistencia.',
-  'Un si/no/acuse escrito depende de la pregunta literal. "No" a "Sabes llegar? Necesitas ayuda?" -> ambigua, necesita_respuesta=true, sin cancelar. A una unica pregunta de ayuda, rechazarla no cancela. Una reaccion sin texto no aporta evidencia escrita para cambiar el estado: sin_decision. No transformes conocer la ubicacion en prometer asistencia.',
+  'Un si/no/acuse depende de la pregunta literal. "No" a "Sabes llegar? Necesitas ayuda?" -> ambigua, necesita_respuesta=true, sin cancelar. A una unica pregunta de ayuda, rechazarla no cancela. Una reaccion positiva puede confirmar lo que pide el mensaje concreto al que reacciona, sin exigir texto escrito. Reaccionar a un agradecimiento, a conocer la ubicacion o a unas indicaciones no promete asistir. Si el destino es desconocido o la lectura es dudosa, revision sin cambiar estado.',
+  'Distingue contestar la pregunta de corresponder al saludo, agradecimiento o despedida de la clinica. Devolver un deseo amable o una formula de cortesia sin aceptar lo preguntado es sin_decision, no un acuse de confirmacion. Haber respondido demuestra una respuesta, no una decision. Si el significado admite ambas lecturas, ambigua y revision sin cambiar estado.',
   'Copia evidencia_decision_actual solo del texto actual y no inventes la decision. Conserva todas las preguntas del lote, aun junto a una confirmacion. Una peticion de nueva fecha seguida de no poder acudir sigue siendo cambio, no cancelar. Si queda incertidumbre, devuelve ambigua y necesita_respuesta=true. Devuelve los valores exactos configurados.',
   'Cuestionar que se haya reservado una cita no solicita cancelarla: primero recepcion debe comprobar la reserva. Negar haberla pedido o acordado es consulta_gestion_previa, requiere_verificar_gestion_o_condicion=true, rechazo_asistencia_explicito=false y necesita_respuesta=true. No deduzcas una cancelacion de appointment ni de que exista un recordatorio.',
   'Antes de cerrar el analisis, revisa todo el lote en busca de actuaciones pendientes, incluso sin signos de pregunta: corregir un nombre o dato, avisar si queda un hueco, comprobar una gestion, o revisar una incidencia del contestador. Un acuse, agradecimiento o confirmacion no resuelve esas peticiones. Si la confirmacion es clara e independiente, conservala junto con necesita_respuesta=true; si la propia decision esta condicionada o es dudosa, no apliques un estado y deriva a recepcion.',
+  'Diferencia haber decidido de anunciar que decidira o contestara mas tarde. Aplazar la respuesta deja la confirmacion pendiente aunque termine dando las gracias: lectura_respuesta=ambigua, requiere_verificar_gestion_o_condicion=true y necesita_respuesta=true. Un agradecimiento no puede confirmar en lugar de la respuesta que el propio paciente deja para despues.',
+  'Una queja sobre reiteracion de avisos, el contestador o retrasos de atencion pide revisar la incidencia, aunque tambien confirme. Pedir que le atiendan puntualmente es una actuacion para la clinica, no una cortesia ni una confirmacion sin asuntos pendientes. Copia esa frase completa en evidencia_asunto_pendiente y conserva necesita_respuesta=true. Ejemplo ajeno al lote: "Iremos; por favor, atendednos a la hora" conserva asistencia y deja la peticion de puntualidad pendiente. Repetir la pregunta de la clinica sin contestarla no es una afirmacion del paciente. Comprueba que el resumen, la lectura y la decision final expresan el mismo significado del lote completo.',
 ].join(' ');
 const CLASSIFY_INTENT_REFERENCE_SYSTEM_INSTRUCTION = [
   'Para classify_intent, analiza primero el significado actual del lote nuevo. No atribuyas al paciente palabras de la clinica, ejemplos, decisiones historicas ni el estado almacenado de la cita.',
@@ -21,13 +24,21 @@ const CLASSIFY_INTENT_REFERENCE_SYSTEM_INSTRUCTION = [
   'Informar que antes hablo con recepcion, o preguntar por una fecha antes acordada, es consulta_gestion_previa sin decision nueva. Una solicitud nueva de cambiar fecha/hora es solicitud_nueva_cambio; explicar que no puede llegar no la convierte en cancelar. Una preferencia condicional que mantiene la cita original es ambigua y se revisa.',
   'Aceptar programar una primera visita no confirma una cita existente: otra y necesita_respuesta=true. Ante una interpretacion dudosa, ambigua y revision sin accion. No diagnostiques.',
   'Una reserva cuestionada requiere verificar lo ocurrido, no cancelar. Una disculpa por no contestar y una afirmacion condicionada no prueban asistencia. Una correccion de identidad, solicitud de aviso o queja que pide revision son asuntos pendientes aunque el paciente tambien confirme o agradezca.',
+  'La confirmacion aplazada sigue pendiente: no conviertas en asistencia un aviso de que respondera despues, ni sus saludos o agradecimientos. Antes de decidir, conserva toda incidencia sobre avisos repetidos, contestador o puntualidad que requiera actuacion. Estas salvaguardas prevalecen sobre ejemplos de acuses breves: esos ejemplos solo valen si el resto del lote no aplaza ni contradice la decision.',
+  'Una cortesia reciproca que solo devuelve el saludo, agradecimiento o despedida no responde la pregunta clinica y es sin_decision. No deduzcas recepcion confirmada solo porque el paciente haya contestado. Si hay duda sobre a que parte responde, revision sin cambiar estado.',
 ].join(' ');
 
 const CLASSIFY_INTENT_REFERENCE_FIELDS = Object.freeze([
   {
+    name: 'decision_pospuesta',
+    type: 'boolean',
+    description: 'Lee TODO response_text en orden antes de interpretar el saludo o agradecimiento final. true si el paciente anuncia que contestara, decidira o confirmara despues y aun no aporta la decision pedida. Agradecer despues de posponer no decide. false solo si no aplaza la decision actual; una confirmacion actual con una pregunta independiente tampoco la aplaza. Ejemplo ajeno al lote: "Estoy ocupado; cuando termine te respondo. Gracias" devuelve true, sin confirmar',
+    include_confidence: true,
+  },
+  {
     name: 'evidencia_asunto_pendiente',
     type: 'string',
-    description: 'Antes de clasificar, copia literalmente del lote actual la frase que recepcion debe atender, corregir, comprobar o aclarar, aunque no sea pregunta: identidad incorrecta, aviso solicitado, reserva cuestionada o incidencia. Una confirmacion o agradecimiento no la borra. Vacio solo si no queda ninguna actuacion pendiente. No copies la pregunta de la clinica ni ejemplos',
+    description: 'Antes de clasificar, copia literalmente del lote actual la frase que recepcion debe atender, corregir, comprobar o aclarar, aunque no sea pregunta: identidad incorrecta, aviso solicitado, reserva cuestionada, contestador, avisos repetidos o peticion de atencion puntual. Pedir ser atendido a la hora no es solo cortesia: copia esa peticion completa, aunque el lote confirme y agradezca. Vacio solo si no queda ninguna actuacion pendiente. No copies la pregunta de la clinica ni ejemplos',
     include_confidence: true,
   },
   {
@@ -44,7 +55,7 @@ const CLASSIFY_INTENT_REFERENCE_FIELDS = Object.freeze([
   {
     name: 'lectura_respuesta',
     type: 'string',
-    description: 'Naturaleza del lote actual completo: compromiso_asistencia promete acudir; acuse_confirmacion_solicitada responde afirmativamente a una pregunta de asistencia/datos/telefono; solicitud_nueva_cambio pide mover una cita existente; rechazo_asistencia pide cancelar/no acudir sin alternativa; consulta_gestion_previa cuestiona un acuerdo previo o remite a recepcion sin explicar resultado; solo_indicaciones sabe llegar/rechaza ayuda; sin_decision no contiene decision escrita; ambigua es dudosa o condicionada. Una pregunta diferente junto a un compromiso claro no anula ese compromiso',
+    description: 'Naturaleza del lote actual completo: compromiso_asistencia promete acudir; acuse_confirmacion_solicitada responde afirmativamente a una pregunta de asistencia/datos/telefono mediante texto o reaccion contextual; solicitud_nueva_cambio pide mover una cita existente; rechazo_asistencia pide cancelar/no acudir sin alternativa; consulta_gestion_previa cuestiona un acuerdo previo o remite a recepcion sin explicar resultado; solo_indicaciones sabe llegar/rechaza ayuda; sin_decision no aporta decision actual; ambigua es dudosa o condicionada. Una pregunta diferente junto a un compromiso claro no anula ese compromiso',
     allowed_values: ['compromiso_asistencia', 'acuse_confirmacion_solicitada', 'solicitud_nueva_cambio',
       'rechazo_asistencia', 'consulta_gestion_previa', 'solo_indicaciones', 'sin_decision', 'ambigua'],
     include_confidence: true,
@@ -52,7 +63,13 @@ const CLASSIFY_INTENT_REFERENCE_FIELDS = Object.freeze([
   {
     name: 'evidencia_decision_actual',
     type: 'string',
-    description: 'Copia literalmente un fragmento continuo de response_text que aporta la decision actual de confirmar, cancelar o solicitar un cambio. No parafrasees, no tomes palabras de la clinica ni del historial. Vacio si no existe decision escrita; una reaccion no contiene texto escrito',
+    description: 'Copia literalmente un fragmento continuo de response_text que aporta la decision actual de confirmar, cancelar o solicitar un cambio. No parafrasees, no tomes palabras de la clinica ni del historial. Vacio si no existe decision escrita; una confirmacion por reaccion usa id_confirmacion_por_reaccion',
+  },
+  {
+    name: 'id_confirmacion_por_reaccion',
+    type: 'number',
+    description: 'message_id de una reaccion del lote actual que confirma claramente lo solicitado en su target_message_preview. Interpreta el emoji y el mensaje de destino juntos: asistencia o recepcion/datos, no agradecimientos ni indicaciones. Devuelve 0 si no hay una reaccion confirmatoria inequivoca. Una reaccion positiva contextual es acuse_confirmacion_solicitada y puede confirmar sin texto escrito. No uses IDs del historial ni de la clinica',
+    include_confidence: true,
   },
   {
     name: 'rechazo_asistencia_explicito',
@@ -63,7 +80,7 @@ const CLASSIFY_INTENT_REFERENCE_FIELDS = Object.freeze([
   {
     name: 'requiere_verificar_gestion_o_condicion',
     type: 'boolean',
-    description: 'true si hay que verificar si la cita fue reservada o acordada, una gestion previa, una fecha anterior, o si la propia decision es condicionada, incierta o depende de una alternativa. No los conviertas en decision nueva. false cuando la decision actual es independiente y explicita, incluso seguida de otro asunto pendiente que no condiciona esa decision. Su confianza mide certeza del true O del false devuelto',
+    description: 'true si hay que verificar si la cita fue reservada o acordada, una gestion previa, una fecha anterior, o si la propia decision queda aplazada, es condicionada, incierta o depende de una alternativa. Anunciar que respondera despues no es confirmar, aunque agradezca. false cuando la decision actual es independiente y explicita, incluso seguida de otro asunto pendiente que no condiciona esa decision. Su confianza mide certeza del true O del false devuelto',
     include_confidence: true,
   },
   {
@@ -81,16 +98,29 @@ function buildClassifyIntentInstruction(instruction) {
     : [configured, CLASSIFY_INTENT_REFERENCE_INSTRUCTION].filter(Boolean).join(' ');
 }
 
-function projectClassifyIntentReferenceOutput(value = {}, { patientText = '' } = {}) {
+function projectClassifyIntentReferenceOutput(value = {}, { patientText = '', responseItems = [] } = {}) {
   const output = { ...value };
   const normalizeEvidence = (text) => String(text || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const text = normalizeEvidence(patientText);
   const evidence = normalizeEvidence(output.evidencia_decision_actual);
   // Verify provenance, not meaning: semantic interpretation stays with the model.
   const hasWrittenEvidence = !!evidence && text.includes(evidence);
+  const reactionId = Number(output.id_confirmacion_por_reaccion);
+  // Verify which current event the model selected, not the meaning of its emoji.
+  const hasReactionEvidence = output.intencion_principal === 'confirmar_cita'
+    && Number.isSafeInteger(reactionId) && reactionId > 0
+    && Number(output.confianza_id_confirmacion_por_reaccion) >= AUTO_APPLY_CONFIDENCE_THRESHOLD
+    && responseItems.some((item) => item.content_type === 'reaction'
+      && Number(item.message_id) === reactionId && item.emoji && item.target_message_preview);
   const pendingEvidence = normalizeEvidence(output.evidencia_asunto_pendiente);
   const hasPendingEvidence = !!pendingEvidence && text.includes(pendingEvidence);
   const replyConfidence = Number(output.confianza_hay_asunto_por_resolver) || 0;
+  const decisionNotPostponed = output.decision_pospuesta === false
+    && Number(output.confianza_decision_pospuesta) >= AUTO_APPLY_CONFIDENCE_THRESHOLD;
+  if (!decisionNotPostponed) {
+    output.necesita_respuesta = true;
+    if (Object.hasOwn(output, 'confianza_necesita_respuesta')) output.confianza_necesita_respuesta = 0;
+  }
   if (typeof output.hay_asunto_por_resolver === 'boolean' && replyConfidence >= AUTO_APPLY_CONFIDENCE_THRESHOLD) {
     output.necesita_respuesta = output.necesita_respuesta === true || output.hay_asunto_por_resolver;
     if (Object.hasOwn(output, 'confianza_necesita_respuesta')) output.confianza_necesita_respuesta = replyConfidence;
@@ -124,7 +154,7 @@ function projectClassifyIntentReferenceOutput(value = {}, { patientText = '' } =
   const independentConfirmationWithReply = output.intencion_principal === 'confirmar_cita'
     && ((output.hay_asunto_por_resolver === true && replyConfidence >= AUTO_APPLY_CONFIDENCE_THRESHOLD)
       || (hasPendingEvidence && Number(output.confianza_evidencia_asunto_pendiente) >= AUTO_APPLY_CONFIDENCE_THRESHOLD));
-  if (readings && (!hasWrittenEvidence || !matches || incompatibleSecondary || unrelatedAcknowledgement
+  if (readings && (!decisionNotPostponed || !(hasWrittenEvidence || hasReactionEvidence) || !matches || incompatibleSecondary || unrelatedAcknowledgement
     || !['asistencia', 'datos_contacto'].includes(output.asunto_preguntado)
     || unsupportedCancellation || output.requiere_verificar_gestion_o_condicion !== false
     || !(Number(output.confianza_requiere_verificar_gestion_o_condicion) >= AUTO_APPLY_CONFIDENCE_THRESHOLD)
@@ -146,6 +176,23 @@ function projectClassifyIntentReferenceOutput(value = {}, { patientText = '' } =
 
 const CONFIRM_APPOINTMENT_ANALYSIS_FIELDS = Object.freeze([
   {
+    name: 'evidencia_confirmacion',
+    type: 'string',
+    description: 'Copia literalmente del texto ACTUAL del paciente el fragmento que confirma lo preguntado. Vacio si solo aporta informacion, consulta, aplaza o condiciona su decision, o corresponde al saludo, agradecimiento o despedida sin contestar la pregunta. No copies texto de la clinica ni deduzcas recepcion por haber contestado. Un agradecimiento dentro de otro mensaje no es por si solo una confirmacion independiente. Para una reaccion sin palabras usa id_confirmacion_por_reaccion',
+  },
+  {
+    name: 'id_confirmacion_por_reaccion',
+    type: 'number',
+    description: 'message_id de la reaccion ACTUAL que confirma lo solicitado en su target_message_preview. Debe existir en response_items, con emoji y destino legibles. No inventes una reaccion a partir de emojis de la clinica o de texto en otro idioma. 0 si no existe una reaccion confirmatoria inequivoca',
+  },
+  {
+    name: 'asunto_confirmacion',
+    type: 'string',
+    description: 'Asunto de la pregunta literal de la clinica: asistencia pide acudir/disponibilidad; recepcion_datos pide confirmar haber recibido el mensaje o datos; datos_contacto pide validar telefono/identidad; indicaciones pregunta si conoce el camino o necesita ayuda para llegar; otro no pide esas confirmaciones. Un recordatorio de cita que pregunta si sabe llegar es indicaciones, no asistencia. No decidas el asunto por el estado almacenado de la cita',
+    allowed_values: ['asistencia', 'recepcion_datos', 'datos_contacto', 'indicaciones', 'otro'],
+    include_confidence: true,
+  },
+  {
     name: 'evidencia_asunto_pendiente',
     type: 'string',
     description: 'Revisa primero TODAS las frases del lote actual. Copia literalmente la frase pendiente de corregir, comprobar, avisar o aclarar aunque tambien confirme: nombre/datos incorrectos, solicitud de aviso, reserva cuestionada, condicion o incidencia. Vacio solo si no queda ninguna actuacion pendiente. No copies la pregunta de la clinica ni ejemplos',
@@ -154,8 +201,8 @@ const CONFIRM_APPOINTMENT_ANALYSIS_FIELDS = Object.freeze([
   {
     name: 'lectura_confirmacion',
     type: 'string',
-    description: 'Clasifica la propia decision: afirmacion_incondicional promete lo preguntado sin depender de otra opcion; acuse_recepcion solo confirma haber recibido los datos/contacto; decision_condicionada espera una alternativa o mantiene la cita solo si no hay otra opcion; sin_confirmacion no contesta afirmativamente; incierta admite lecturas distintas. Una pregunta independiente tras confirmar no condiciona la confirmacion',
-    allowed_values: ['afirmacion_incondicional', 'acuse_recepcion', 'decision_condicionada', 'sin_confirmacion', 'incierta'],
+    description: 'Clasifica la propia decision: compromiso_asistencia requiere una promesa ESCRITA explicita de acudir, no un si o reaccion a una pregunta sobre el camino; afirmacion_incondicional afirma lo preguntado sin depender de otra opcion; acuse_recepcion confirma expresamente haber recibido datos/contacto, nunca se deduce de que haya leido el mensaje; solo_indicaciones solo conoce el camino o acepta/rechaza ayuda; decision_condicionada espera una alternativa o mantiene la cita solo si no hay otra opcion; sin_confirmacion no contesta afirmativamente; incierta admite lecturas distintas. Una pregunta independiente tras confirmar no condiciona la confirmacion',
+    allowed_values: ['compromiso_asistencia', 'afirmacion_incondicional', 'acuse_recepcion', 'solo_indicaciones', 'decision_condicionada', 'sin_confirmacion', 'incierta'],
     include_confidence: true,
   },
   {
@@ -196,16 +243,25 @@ const CONFIRM_APPOINTMENT_PRESET_CONFIG = Object.freeze({
     'Analiza exclusivamente patient_message_batch respecto al mensaje concreto de la clínica en clinic_message_replied_to, listened_message_preview o reaction_target_message_preview. El mensaje de la clinica es referencia separada, nunca evidencia de una respuesta afirmativa del paciente.',
     'Evalúa por separado: (1) si existe una respuesta afirmativa a lo que la clínica pidió confirmar, (2) si existe una negación explícita posterior de esa misma confirmación y (3) si queda una pregunta, petición o actuación pendiente.',
     'Un sí, confirmo, podré ir, allí estaré, ok, vale, recibido o agradecimiento breve cuenta como respuesta afirmativa cuando responde directamente a una petición clara de confirmación.',
+    'Responder a la cortesia no es responder a la pregunta. Si el paciente solo corresponde al saludo, agradecimiento o despedida, devuelve evidencia_confirmacion vacia, lectura_confirmacion=sin_confirmacion y respuesta_afirmativa_a_la_clinica=false. No conviertas haber contestado en recepcion confirmada. Un agradecimiento solo cuenta como acuse si claramente acepta lo preguntado, no si devuelve la cortesia; ante ambas lecturas posibles, incierta y revision sin confirmar. Ejemplo ajeno al lote: clinica="Confirmas que recibes los datos? Que tengas buen dia", paciente="Tu tambien" -> sin_confirmacion. paciente="Recibido, gracias" -> acuse_recepcion. Una reaccion positiva vinculada a una peticion clara sigue siendo valida.',
     'Una reacción positiva vinculada al mensaje de confirmación también cuenta como respuesta afirmativa.',
+    'La reaccion y su mensaje de destino son evidencia legible aunque response_text este vacio. Evalua la certeza de cada señal con esos datos; la ausencia de palabras escritas no obliga a dejar sus confianzas vacias ni a cero.',
+    'Interpreta la reaccion respecto a su mensaje concreto: confirma lo pedido, no cualquier cita del historial. Una reaccion a un agradecimiento o a indicaciones no confirma asistencia. Si no conoces el mensaje de destino o su significado es dudoso, no confirmes y conserva revision.',
+    'Identifica primero asunto_confirmacion a partir de la pregunta literal COMPLETA. La frase final "Nos confirmas?" no cambia el asunto expresado antes: "Necesitamos saber que sabes llegar. Nos confirmas?" sigue siendo indicaciones. Un si o reaccion a esa pregunta es solo_indicaciones, NO compromiso_asistencia, y respuesta_afirmativa_a_la_clinica=false para esta receta de citas. compromiso_asistencia exige palabras del paciente que prometan acudir; no un acuse a la pregunta sobre el camino. Una reaccion positiva a una peticion de asistencia o de recepcion sigue siendo valida como afirmacion_incondicional o acuse_recepcion, sin exigir palabras escritas.',
     'No confundas contexto compatible con confirmación: una pregunta o petición aislada, como preguntar qué debe llevar, dónde acudir o a qué hora es la cita, no afirma lo preguntado y debe devolver respuesta_afirmativa_a_la_clinica=false.',
     'Solo una negación o revocación expresa de esa misma confirmación marca negacion_explicita_de_la_confirmacion=true y exige requiere_respuesta=true. Pero o además seguidos de otro asunto, pregunta, queja o petición deben dejar esa señal en false.',
     'Si existe una respuesta afirmativa y después otro asunto pendiente, conserva la señal afirmativa, marca negacion_explicita_de_la_confirmacion=false y requiere_respuesta=true.',
     'Si el paciente rechaza lo preguntado, pide cancelar o cambiar, todavía no puede confirmar o no aporta confirmación, no marques respuesta afirmativa.',
     'Una respuesta condicionada, una preferencia pendiente o una disculpa por no haber respondido no es una confirmacion incondicional. Ante duda sobre la propia confirmacion devuelve respuesta_afirmativa_a_la_clinica=false y requiere_respuesta=true. Negar haber reservado exige revisar la reserva, no inferir asistencia ni cancelacion.',
+    'Si anuncia que respondera o decidira despues, la confirmacion queda pendiente: no la deduzcas de un agradecimiento final. Repetir la pregunta de la clinica sin contestarla tampoco confirma. Una queja sobre avisos repetidos, contestador o puntualidad sigue pendiente incluso junto a una confirmacion valida.',
     'Antes de devolver requiere_respuesta=false, comprueba todas las frases: una correccion de nombre o datos, pedir que le avisen de un hueco, o reclamar que revisen el contestador exige actuacion aunque tambien confirme o agradezca. Confirma solo la parte inequivoca y conserva esos asuntos pendientes para recepcion.',
+    'response_text es el lote completo en orden, tambien cuando contiene varias lineas. Lee hasta el final antes de escribir evidencia_asunto_pendiente: pedir adelantar la hora, aunque se formule brevemente como una posibilidad tras un si y un agradecimiento, es una peticion pendiente. No basta con analizar la primera frase.',
+    'Separa informar a la clinica de confirmar: aportar preferencias o datos clinicos y disculparse por no haberlos comentado no confirma recepcion por el mero hecho de responder. evidencia_confirmacion debe citar una afirmacion independiente real del paciente; si no existe, queda vacia y respuesta_afirmativa_a_la_clinica=false. No inventes una reaccion cuando response_items no contiene ninguna. Si no entiendes el texto, revision sin confirmar.',
     'Evalua primero evidencia_asunto_pendiente y lectura_confirmacion. No basta con que sea compatible con acudir: la propia decision debe ser clara e incondicional. Una opcion subsidiaria a conseguir otra fecha es decision_condicionada, no afirmacion_incondicional, aunque diga que acudira si no se consigue la alternativa. lectura_confirmacion=decision_condicionada o incierta exige confirmacion_condicionada_o_incierta=true y revision sin confirmar. Ejemplos ajenos a la conversacion: "Si es posible" -> decision_condicionada; "Preferiria otra tarde; si no puede ser, vengo hoy" -> decision_condicionada; "Si, este es mi telefono, pero mi nombre esta mal" -> acuse_recepcion y correccion pendiente.',
+    'Ejemplos de interpretacion, NO mensajes del paciente: Clinica="La cita es ahora y necesitamos saber si sabes llegar. Nos confirmas?", paciente="Si" o reaccion positiva -> asunto_confirmacion=indicaciones, lectura_confirmacion=solo_indicaciones, respuesta_afirmativa_a_la_clinica=false. Misma clinica, paciente="Alli estare" -> compromiso_asistencia. Clinica="Confirmas que recibes los datos y que vienes hoy?", paciente="Me iria mejor otro dia pero si no me organizo y vengo hoy" -> decision_condicionada, confirmacion_condicionada_o_incierta=true, respuesta_afirmativa_a_la_clinica=false, requiere_respuesta=true: no presume una confirmacion de recepcion independiente. Clinica="Confirmas que recibes los datos?", paciente=reaccion positiva -> asunto_confirmacion=recepcion_datos, lectura_confirmacion=acuse_recepcion, respuesta_afirmativa_a_la_clinica=true.',
     'Marca requiere_respuesta=true solo por contenido real del lote que exija actuación o por un adjunto no interpretable; no lo marques para una confirmación, acuse, saludo o agradecimiento sin nada pendiente.',
     'No uses mensajes históricos, appointment, trigger ni ejemplos como palabras del paciente. Devuelve exactamente las señales solicitadas y un motivo breve basado en el lote actual.',
+    `Todas estas claves del objeto JSON son obligatorias, incluidas las puntuaciones de certeza: ${CONFIRM_APPOINTMENT_ANALYSIS_FIELDS.flatMap((field) => [field.name, ...(field.include_confidence ? [`confianza_${field.name}`] : [])]).join(', ')}. No omitas ninguna puntuacion.`,
   ].join(' '),
   context_sources: [
     { key: 'patient_message_batch', path: '{{last_response_context}}' },

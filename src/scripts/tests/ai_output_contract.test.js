@@ -5,6 +5,9 @@ const assert = require('node:assert/strict');
 const flowEngine = require('../../services/flowEngineV2.service');
 const {
   CLASSIFY_INTENT_PRESET_CONFIG,
+  CLASSIFY_INTENT_REFERENCE_FIELDS,
+  CONFIRM_APPOINTMENT_ANALYSIS_FIELDS,
+  CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION,
   CONFIRM_APPOINTMENT_DECISION_TEMPLATE,
   CONFIRM_APPOINTMENT_PRESET_CONFIG,
   RESPONSE_NEED_CONFIDENCE_THRESHOLD,
@@ -94,7 +97,8 @@ assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /"sí podré ir" es una 
 assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /Debes poder señalar esa evidencia; no inventes una necesidad de respuesta/);
 assert.match(CLASSIFY_INTENT_PRESET_CONFIG.instruction, /Evalúa posible_urgencia de forma independiente a la intención principal/);
 
-assert.equal(CONFIRM_APPOINTMENT_PRESET_CONFIG.preset_contract_version, 3);
+assert.equal(CONFIRM_APPOINTMENT_PRESET_CONFIG.preset_contract_version, 4);
+assert.equal(CONFIRM_APPOINTMENT_PRESET_CONFIG.preset_contract_version, CONFIRM_APPOINTMENT_PRESET_CONTRACT_VERSION);
 assert.deepEqual(
   CONFIRM_APPOINTMENT_PRESET_CONFIG.output_fields.map((field) => field.name),
   ['confirma_asistencia', 'requiere_respuesta', 'motivo'],
@@ -110,15 +114,28 @@ assert.deepEqual(
 );
 assert.doesNotMatch(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /Usa conversation_today/);
 assert.doesNotMatch(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /tengo que llevar algo/i);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /No uses mensajes anteriores/);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /una pregunta o petición real posterior no borra una confirmación explícita anterior/);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /confirma_asistencia=true y requiere_respuesta=true/);
+assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /No uses mensajes históricos/);
+assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /conserva la señal afirmativa[\s\S]*requiere_respuesta=true/);
+assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /lectura_confirmacion=decision_condicionada o incierta/);
 assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /requiere_respuesta=false/);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /response_message_type=reaction/);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /"sí podré ir" es una afirmación declarativa y no una pregunta/i);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /No inventes ni recuperes una pregunta o petición/);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /seguro de ese false/);
-assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /no conviertas esa duda en una necesidad de respuesta inexistente/);
+assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /reacción positiva vinculada al mensaje de confirmación/);
+assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /no la deduzcas de un agradecimiento final/);
+const classifierPrompt = flowEngine.buildAiSystemPrompt({}, CLASSIFY_INTENT_REFERENCE_FIELDS, 'classify_intent');
+assert.doesNotMatch(classifierPrompt, /Una reaccion sin texto se revisa/);
+assert.match(classifierPrompt, /reaccion vinculada a una peticion clara de confirmacion/);
+const confirmationPrompt = flowEngine.buildAiSystemPrompt({}, CONFIRM_APPOINTMENT_ANALYSIS_FIELDS, 'confirm_appointment');
+assert.match(confirmationPrompt, /Saber llegar NO es asistencia ni recepcion de datos/);
+assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /La frase final "Nos confirmas\?" no cambia el asunto/);
+for (const field of CONFIRM_APPOINTMENT_ANALYSIS_FIELDS) {
+  assert(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction.includes(field.name));
+  if (field.include_confidence) assert(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction.includes(`confianza_${field.name}`));
+}
+assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /no lo marques para una confirmación, acuse, saludo o agradecimiento sin nada pendiente/);
+assert.deepEqual(CLASSIFY_INTENT_REFERENCE_FIELDS.filter(field =>
+  ['decision_pospuesta', 'id_confirmacion_por_reaccion'].includes(field.name)).map(field => field.name),
+['decision_pospuesta', 'id_confirmacion_por_reaccion']);
+assert.equal(CONFIRM_APPOINTMENT_ANALYSIS_FIELDS.some(field => field.name === 'lectura_confirmacion'), true);
+assert.equal(CONFIRM_APPOINTMENT_ANALYSIS_FIELDS.some(field => field.name === 'evidencia_asunto_pendiente'), true);
 assert.equal(RESPONSE_NEED_CONFIDENCE_THRESHOLD, 0.75);
 
 assert.deepEqual(
