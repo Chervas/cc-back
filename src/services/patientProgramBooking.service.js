@@ -112,7 +112,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const installationIds = [...new Set(profile.phases.flatMap(row => row.installation_ids))];
     const doctorIds = [...new Set(profile.phases.flatMap(row => row.professionals.ids))];
     const machineIds = equipmentIds(profile);
-    profile.version = machineIds.length ? 2 : 1;
+    profile.version = profile.phases.some(phase => phase.staff_attention) ? 3 : machineIds.length ? 2 : 1;
     if (installationIds.length + doctorIds.length + machineIds.length > 100) fail('program_search_resources_too_many', 'Este conjunto utiliza demasiados recursos. Planifica menos sesiones a la vez.', null, 400);
     const mapping = await resolveInstallationKeys({ db, clinic: plan.clinic, installationIds, transaction, enabled: true });
     if (lock) {

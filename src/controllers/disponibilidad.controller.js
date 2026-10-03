@@ -6,6 +6,15 @@ const { searchTreatmentSlots, loadBookingContext, solutionsForCalendar } = requi
 const { addDays } = require('../lib/personal-schedule-recurring');
 const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
 const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
+const { resourceForConfirmedOverlap } = require('../lib/booking-attention');
+
+function confirmedOverlapRows(rows, start, end, clinicId, allowed, capacity = null) {
+  if (allowed === false || allowed === 0) return false;
+  const resource = { allow_overlap_confirmation: true, overlap_capacity: allowed == null ? null : capacity,
+    busy: rows.map(row => ({ start: row.inicio, end: row.fin, appointment_id: row.id_cita,
+      can_share: Number(row.clinica_id) === Number(clinicId) && (row.can_share === true || (row.can_share == null && row.can_force_legacy !== false)) })) };
+  return resourceForConfirmedOverlap(resource, start, end, true).busy.length === 0;
+}
 const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staff');
 const { bookingCapabilities, bookingError, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
 const { resourceAppointments, resourceInstallationBlocks } = require('../services/appointmentResourceCalendar.service');
@@ -61,6 +70,7 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
       || (installation && !phase.installation_ids.includes(installation))) return [];
     return solutionsForCalendar({ profile, context, date: query.fecha_local, stepMinutes: stepMin,
       limit: Math.min(parseIntSafe(query.limit) > 0 ? parseIntSafe(query.limit) : 500, 500), additionalStaffIds,
+      allowConfirmedOverlap: true,
       selections: { [phase.key]: { doctor_id: doctor, installation_id: installation } },
       fromLocal: typeof query.from_local === 'string' ? query.from_local : '00:00',
       toLocal: typeof query.to_local === 'string' ? query.to_local : null });
@@ -300,6 +310,9 @@ const conflictsForSlot = ({
   instCitas,
   docBlocks,
   docCitas,
+  installationOverlapAllowed,
+  installationCapacity,
+  doctorOverlapAllowed,
   start,
   end
 }) => {
@@ -373,7 +386,7 @@ const conflictsForSlot = ({
         resource_id: instalacionId,
         clinica_id: clinicaId,
         code: 'INSTALLATION_OVERLAP',
-        can_force: true,
+        can_force: confirmedOverlapRows(instCitas.filter(row => row.start < end && row.end > start).map(row => ({...row,inicio:row.start,fin:row.end})),start,end,clinicaId,installationOverlapAllowed,installationCapacity),
         details: { message: 'Instalación ocupada' }
       });
     }
@@ -414,7 +427,7 @@ const conflictsForSlot = ({
           resource_id: doctorId,
           clinica_id: clinicaId,
           code: 'STAFF_OVERLAP',
-          can_force: sameClinic,
+          can_force: sameClinic && confirmedOverlapRows(docCitas.filter(row => row.start < end && row.end > start).map(row => ({...row,inicio:row.start,fin:row.end})),start,end,clinicaId,doctorOverlapAllowed),
           details: {
             message: sameClinic ? 'Doctor ocupado' : 'Doctor ocupado en otra clínica',
             clinica_id: Number.isFinite(citaClinicId) ? citaClinicId : null
@@ -501,6 +514,9 @@ const buildUnavailableIntervals = ({
       docWins,
       dcMissing,
       doctorOutOfHoursMessage: doctorCtx.outOfHoursMessage,
+      installationOverlapAllowed: inst?.allow_overlap_confirmation,
+      installationCapacity: Number(inst?.capacidad) || 1,
+      doctorOverlapAllowed: dc?.allow_overlap_confirmation,
       instBlocks,
       instCitas,
       docBlocks,
@@ -631,10 +647,19 @@ exports.check = asyncHandler(async (req, res) => {
     const selections = bookingProfile.phases.length === 1 && bookingProfile.phases[0].professionals.mode === 'any'
       ? { [bookingProfile.phases[0].key]: { doctor_id, installation_id: instalacion_id } } : {};
     const solution = solveBookingProfile({ profile: bookingProfile, start, ...context, selections });
-    if (!solution || new Date(solution.end_at).getTime() !== end.getTime()) return res.status(409).json({ available: false,
+    if (!solution || new Date(solution.end_at).getTime() !== end.getTime()) {
+      const overlapSolution = !additionalStaffIds.length ? solveBookingProfile({ profile: bookingProfile, start, ...context, selections, allowOverlap: true }) : null;
+      const canForce = !!overlapSolution && new Date(overlapSolution.end_at).getTime() === end.getTime();
+      if (canForce) return res.status(409).json({ available: false, reason: 'overlap', can_force: true,
+        message: 'La cita se superpone con otra reserva. Confirma la superposición antes de guardar.',
+        conflicts: [{ type: 'overlap', message: 'Profesional o consulta compartida ocupados' }],
+        resource_conflicts: [{ resource_type: 'staff_pool', code: 'STAFF_OVERLAP', can_force: true,
+          details: { message: 'Superposición autorizada por la configuración del profesional y la consulta.' } }] });
+      return res.status(409).json({ available: false,
       reason: 'blocked', message: 'No hay disponibilidad para el perfil del tratamiento.', can_force: false,
       resource_conflicts: [{ resource_type: 'staff_pool', code: 'BOOKING_UNAVAILABLE', can_force: false,
         details: { message: 'El rango no cumple el perfil de cabinas y profesionales del tratamiento.' } }] });
+    }
     return res.json({ available: true, clinica: { clinica_id: clinicaId, timezone: clinicTimezone },
       resources: { doctor_id: solution.phases[0].doctor_ids[0], instalacion_id: solution.phases[0].installation_id },
       warnings: solution.warnings, booking: solution,
@@ -719,7 +744,7 @@ exports.check = asyncHandler(async (req, res) => {
         resource_id: instalacionId,
         clinica_id: clinicaId,
         code: 'INSTALLATION_OVERLAP',
-        can_force: citasInst.every(c => Number(c.clinica_id) === clinicaId && c.can_force_legacy !== false),
+        can_force: confirmedOverlapRows(citasInst,start,end,clinicaId,inst.allow_overlap_confirmation,Number(inst.capacidad)||1),
         details: { cita_ids: [...new Set(citasInst.filter(c => Number(c.clinica_id) === clinicaId).map(c => c.id_cita))], message: 'Instalación ocupada' }
       });
     }
@@ -810,7 +835,7 @@ exports.check = asyncHandler(async (req, res) => {
         clinica_id: clinicaId,
         code: 'STAFF_OVERLAP',
         // Overbooking doctor permitido -> forzable
-        can_force: citasDocSameClinic.every(c => c.can_force_legacy !== false),
+        can_force: confirmedOverlapRows(citasDocSameClinic,start,end,clinicaId,dc?.allow_overlap_confirmation),
         details: { cita_ids: citasDocSameClinic.map((c) => c.id_cita), message: 'Doctor ocupado' }
       });
     }

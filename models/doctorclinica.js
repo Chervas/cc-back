@@ -15,6 +15,7 @@ module.exports = (sequelize, DataTypes) => {
     rol_en_clinica: DataTypes.STRING(64),
     // Eje 1: si el profesional recibe citas en esta clínica (agenda).
     recibe_citas: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    allow_overlap_confirmation: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     activo: { type: DataTypes.BOOLEAN, defaultValue: true }
   }, {
     sequelize,

@@ -3,13 +3,25 @@
 const { equipmentError, positiveIds, normalizeEquipmentUnit, normalizeRoomEquipmentPolicy, clinicUsesEquipment, equipmentFitsRoom } = require('../lib/booking-equipment');
 const { equipmentRuntimeEnabled, assertEquipmentEnabled } = require('./bookingEquipmentAvailability.service');
 const { lockBookingResources } = require('./appointmentBookingCommand.service');
+const { normalizeAttentionPolicy } = require('../lib/booking-attention');
 const { resolveInstallationKeys } = require('./appointmentBookingAvailability.service');
 const plain = row => row?.toJSON ? row.toJSON() : row;
 const numeric = values => [...new Set(values.map(Number))].sort((a, b) => a - b);
 
-function createBookingEquipmentRegistry({ db, authorize, enabled = equipmentRuntimeEnabled, now = () => new Date() }) {
+function createBookingEquipmentRegistry({ db, authorize, enabled = equipmentRuntimeEnabled, now = () => new Date(),
+  realtimeEnabled = process.env.AVAILABILITY_REALTIME_ENABLED === 'true',
+  notify = require('../lib/calendar-availability-invalidation').notifyCalendarAvailability }) {
   const { Op } = db.Sequelize;
   const transaction = work => db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, work);
+  function invalidateAfterCommit(tx, clinicIds) {
+    if (!realtimeEnabled) return;
+    tx.afterCommit(async () => {
+      for (const clinicId of numeric(clinicIds)) {
+        try { await notify({ db, clinicId }); }
+        catch (_) { console.warn('[availability-realtime] equipment_refresh_failed'); }
+      }
+    });
+  }
   async function canEdit(clinicId) {
     try { await authorize('clinic.settings.edit', clinicId); return true; }
     catch (error) {
@@ -84,6 +96,7 @@ function createBookingEquipmentRegistry({ db, authorize, enabled = equipmentRunt
         fixed_resource_key: mapping.keys.get(Number(u.home_installation_id)) || `installation:${u.home_installation_id}` };
       return { id: unit.id, name: u.name, family_key: u.family_key, aliases: u.aliases || [], mobility: u.mobility, status: u.status,
         home_installation_id: u.home_installation_id, turnaround_minutes: u.turnaround_minutes, revision: u.revision,
+        attention_policy: normalizeAttentionPolicy(u.attention_policy),
         owned_here: Number(u.owner_clinic_id) === clinicId,
         can_edit: Number(u.owner_clinic_id) === clinicId && result.can_edit
           && ownedShares.filter(s => Number(s.equipment_id) === unit.id).every(s => editable.has(Number(s.clinic_id))),
@@ -102,6 +115,7 @@ function createBookingEquipmentRegistry({ db, authorize, enabled = equipmentRunt
         if (linked) throw equipmentError('in_use', 'Revisa y retira las asignaciones de equipos antes de desactivar la función. No se ocultarán reservas existentes.', 409);
       }
       await clinic.update({ equipment_booking_enabled: value }, { transaction: tx });
+      invalidateAfterCommit(tx, [clinicId]);
       return { clinic_id: clinicId, enabled: value };
     });
   }
@@ -143,6 +157,7 @@ function createBookingEquipmentRegistry({ db, authorize, enabled = equipmentRunt
       } else unit = await db.BookingEquipment.create({ ...data, owner_clinic_id: clinicId, group_id: owner.grupoClinicaId || null }, { transaction: tx });
       await db.BookingEquipmentClinic.destroy({ where: { equipment_id: unit.id }, transaction: tx });
       await db.BookingEquipmentClinic.bulkCreate(requestedClinics.map(cid => ({ equipment_id: unit.id, clinic_id: cid })), { transaction: tx });
+      invalidateAfterCommit(tx, affectedIds);
       return { id: Number(unit.id), revision: unit.revision };
     });
   }
@@ -181,6 +196,7 @@ function createBookingEquipmentRegistry({ db, authorize, enabled = equipmentRunt
       }
       const revision = (current?.revision || 0) + 1;
       await db.BookingEquipmentRoomPolicy.upsert({ installation_id: canonicalId, ...policy, revision }, { transaction: tx });
+      invalidateAfterCommit(tx, rooms.map(r => r.clinica_id));
       return { installation_id: roomId, policy, revision };
     });
   }
@@ -202,6 +218,7 @@ function createBookingEquipmentRegistry({ db, authorize, enabled = equipmentRunt
       // Existing treatments still requiring it fail closed, never book without it.
       await unit.update({ status: 'unavailable', revision: unit.revision + 1 }, { transaction: tx });
       await db.BookingEquipmentClinic.destroy({ where: { equipment_id: id }, transaction: tx });
+      invalidateAfterCommit(tx, affectedIds);
       return { id: Number(id), archived: true, revision: unit.revision };
     });
   }

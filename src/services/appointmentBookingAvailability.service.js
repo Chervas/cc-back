@@ -24,6 +24,13 @@ const protectedBookingAttribute = (db, alias) => [db.Sequelize.fn('COALESCE', db
   db.Sequelize.col(`${alias}.import_metadata`), 'one', db.Sequelize.literal("'$.booking'"), db.Sequelize.literal("'$.program_session'"),
   db.Sequelize.literal("'$.additional_staff'")), 0), 'booking_protected'];
 
+const nonShareableBookingAttribute = (db, alias) => [db.Sequelize.literal(`(COALESCE(JSON_CONTAINS_PATH(${alias}.import_metadata, 'one', '$.program_session', '$.additional_staff'), 0) OR COALESCE(JSON_EXTRACT(${alias}.import_metadata, '$.booking.profile.version'), 0) >= 3)`), 'booking_nonshareable'];
+function shareableInterval(row, clinicId) {
+  const marker = row?.get ? row.get('booking_nonshareable') : row?.booking_nonshareable;
+  return Number(row?.clinica_id) === clinicId && row?.source_system !== 'treatment_program'
+    && (marker === 0 || marker === false || (marker == null && permitsLegacyOverlap(row, clinicId)));
+}
+
 /** Alias reads only exist behind the explicit migration/deployment gate. */
 async function resolveInstallationKeys({ db, clinic, installationIds, transaction, enabled }) {
   const keys = new Map(installationIds.map((id) => [id, `installation:${id}`]));
@@ -58,7 +65,7 @@ async function resolveInstallationKeys({ db, clinic, installationIds, transactio
 /** Bounded, bulk read model. No patient names, notes, foreign clinic IDs or SQL per candidate. */
 async function loadBookingContext({ db, clinic, profile, start, end, transaction = null, ignoreAppointmentId = null,
   occupancyEnabled = false, installationMapping = null, dates = null, patientId = null, additionalStaffIds = [], equipmentEnabled = undefined,
-  ignoreAppointmentIds = [] }) {
+  ignoreAppointmentIds = [], inheritEquipmentAttention = true }) {
   const { Op } = db.Sequelize;
   // Server-owned batch only. HTTP callers never forward this option; program
   // continuation derives the IDs from the scoped purchase, not the request.
@@ -75,7 +82,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
   const doctorIds = uniqueIds([...profile.phases.flatMap((phase) => phase.professionals.ids), ...normalizeAdditionalStaff(additionalStaffIds)]);
   const installationIds = uniqueIds(profile.phases.flatMap((phase) => phase.installation_ids));
   const mapping = installationMapping || await resolveInstallationKeys({ db, clinic, installationIds, transaction, enabled: occupancyEnabled });
-  const equipmentContext = await loadEquipmentContext({ db, clinic, profile, mapping, transaction, enabled: equipmentEnabled });
+  const equipmentContext = await loadEquipmentContext({ db, clinic, profile, mapping, transaction, enabled: equipmentEnabled, inheritEquipmentAttention });
   const resources = [...doctorIds.map((id) => `doctor:${id}`), ...new Set(installationIds.map((id) => mapping.keys.get(id))), ...(equipmentContext?.keys || [])];
   const occupancyEnd = equipmentContext ? new Date(new Date(end).getTime() + 120 * 60000) : end;
   const [doctorLinks, installations, clinicHours, doctorBlocks, installationBlocks, legacyAppointments] = await Promise.all([
@@ -94,8 +101,14 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     db.CitaPaciente.findAll({ where: { estado: { [Op.ne]: 'cancelada' }, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start },
       ...ignore('id_cita'),
       [Op.or]: [{ doctor_id: { [Op.in]: doctorIds } }, { instalacion_id: { [Op.in]: mapping.physicalInstallationIds } }],
-    }, attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin', 'source_system', protectedBookingAttribute(db, 'CitaPaciente')], transaction }),
+    }, attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin', 'source_system', protectedBookingAttribute(db, 'CitaPaciente'), nonShareableBookingAttribute(db, 'CitaPaciente')], transaction }),
   ]);
+  // One physical room has one simultaneous-occupancy policy across aliases.
+  const canonicalIds = [...new Set([...mapping.keys.values()].map(key => Number(key.split(':')[1])))];
+  const missingCanonicalIds = canonicalIds.filter(id => !installations.some(room => Number(room.id) === id));
+  const canonicalRooms = missingCanonicalIds.length ? await db.Instalacion.findAll({ where: { id: { [Op.in]: missingCanonicalIds } },
+    attributes: ['id', 'capacidad', 'allow_overlap_confirmation'], transaction }) : [];
+  const overlapPolicies = new Map([...installations, ...canonicalRooms].map(room => [Number(room.id), room]));
   const occupancies = occupancyEnabled ? await db.AppointmentBookingOccupancy.findAll({ where: {
     ...ignore('appointment_id'),
     [Op.or]: [
@@ -104,17 +117,17 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
       // legacy primary cabin/doctor for the entire appointment as well.
       ...(legacyAppointments.length ? [{ appointment_id: { [Op.in]: legacyAppointments.map((row) => row.id_cita) } }] : []),
     ],
-  }, include: [{ model: db.CitaPaciente, as: 'appointment', attributes: ['clinica_id', 'source_system', protectedBookingAttribute(db, 'appointment')], required: true, where: { estado: { [Op.ne]: 'cancelada' } } }], transaction }) : [];
+  }, include: [{ model: db.CitaPaciente, as: 'appointment', attributes: ['id_cita', 'clinica_id', 'source_system', protectedBookingAttribute(db, 'appointment'), nonShareableBookingAttribute(db, 'appointment')], required: true, where: { estado: { [Op.ne]: 'cancelada' } } }], transaction }) : [];
   const segmented = new Set(occupancies.map((row) => Number(row.appointment_id)));
   const busy = new Map(resources.map((key) => [key, []]));
   const addBusy = (key, interval) => { if (busy.has(key)) busy.get(key).push(interval); };
   legacyAppointments.filter((row) => !segmented.has(Number(row.id_cita))).forEach((row) => {
-    const interval = { start: row.inicio, end: row.fin, can_force_legacy: permitsLegacyOverlap(row, clinicId) };
+    const interval = { start: row.inicio, end: row.fin, appointment_id: Number(row.id_cita), can_share: shareableInterval(row, clinicId), can_force_legacy: permitsLegacyOverlap(row, clinicId) };
     addBusy(`doctor:${row.doctor_id}`, interval);
     addBusy(mapping.keys.get(Number(row.instalacion_id)), interval);
   });
   occupancies.forEach((row) => addBusy(row.resource_key, { start: row.start_at, end: row.end_at,
-    can_force_legacy: permitsLegacyOverlap(row.appointment, clinicId) }));
+    appointment_id: Number(row.appointment_id), can_share: shareableInterval(row.appointment, clinicId), can_force_legacy: permitsLegacyOverlap(row.appointment, clinicId) }));
   installationBlocks.forEach((row) => addBusy(mapping.keys.get(Number(row.instalacion_id)), { start: row.fecha_inicio, end: row.fecha_fin }));
   const doctors = new Map();
   const cabins = new Map();
@@ -129,6 +142,8 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     doctorLinks.forEach((doctor) => {
       const id = Number(doctor.doctor_id);
       if (!doctors.has(id)) doctors.set(id, { name: [doctor.doctor?.nombre, doctor.doctor?.apellidos].filter(Boolean).join(' '),
+        allow_overlap_confirmation: doctor.allow_overlap_confirmation === true || doctor.allow_overlap_confirmation === 1,
+        explicit_overlap_policy: doctor.allow_overlap_confirmation != null,
         windows: [], busy: [...(busy.get(`doctor:${id}`) || [])] });
       const target = doctors.get(id);
       target.windows.push(...buildDoctorAvailabilityContext({ doctorId: id, clinicaId: clinicId, dc: doctor, dow, fechaLocal: date, timeZone }).docWins);
@@ -137,7 +152,11 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     });
     installations.forEach((installation) => {
       const id = Number(installation.id);
+      const physical = overlapPolicies.get(Number(mapping.keys.get(id)?.split(':')[1])) || installation;
       if (!cabins.has(id)) cabins.set(id, { name: installation.nombre || '',
+        allow_overlap_confirmation: physical.allow_overlap_confirmation === true || physical.allow_overlap_confirmation === 1,
+        explicit_overlap_policy: physical.allow_overlap_confirmation != null,
+        overlap_capacity: Number(physical.capacidad) || 1,
         profesionales_permitidos: installation.profesionales_permitidos,
         windows: [], busy: busy.get(mapping.keys.get(id)) || [] });
       if (!additionalStaffIds.length || installationAllowsStaff(installation, additionalStaffIds)) {
@@ -175,12 +194,12 @@ async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, s
   const selections = profile.phases.length === 1 ? { [profile.phases[0].key]: {
     ...(doctorId ? { doctor_id: doctorId } : {}), ...(installationId ? { installation_id: installationId } : {}),
   } } : {};
-  const slots = solutionsForCalendar({ profile, context, date, days, stepMinutes, limit, selections, now, additionalStaffIds });
+  const slots = solutionsForCalendar({ profile, context, date, days, stepMinutes, limit, selections, now, additionalStaffIds, allowConfirmedOverlap: true });
   return { clinic_id: Number(clinic.id_clinica), treatment_id: Number(treatmentId), timezone: timeZone,
     duration_minutes: profile.phases.reduce((sum, phase) => sum + phase.duration_minutes, 0), capabilities, slots };
 }
 
-function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 15, limit = 500, selections = {}, now = new Date(), fromLocal = '00:00', toLocal = null, additionalStaffIds = [] }) {
+function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 15, limit = 500, selections = {}, now = new Date(), fromLocal = '00:00', toLocal = null, additionalStaffIds = [], allowConfirmedOverlap = false }) {
   additionalStaffIds = normalizeAdditionalStaff(additionalStaffIds);
   const timeZone = context.timeZone;
   const end = resolveLocalInstant(addDays(date, days), '00:00:00', timeZone);
@@ -193,7 +212,8 @@ function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 
       if (candidate < now) continue;
       const localTime = `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
       if (localTime < fromLocal || (toLocal && localTime >= toLocal)) continue;
-      const solution = solveBookingProfile({ profile, start: candidate, ...context, selections });
+      const solution = solveBookingProfile({ profile, start: candidate, ...context, selections })
+        || (allowConfirmedOverlap && !additionalStaffIds.length ? solveBookingProfile({ profile, start: candidate, ...context, selections, allowOverlap: true }) : null);
       const localEnd = solution ? formatLocal(new Date(solution.end_at), timeZone) : '';
       const patientFree = solution && !(context.patientBusy || []).some(busy => new Date(busy.start) < new Date(solution.end_at) && new Date(busy.end) > candidate);
       const supportFree = solution && additionalStaffIds.every(id => isFree(context.doctors.get(id), candidate, new Date(solution.end_at)));
@@ -207,4 +227,4 @@ function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 
 }
 
 module.exports = { resolveInstallationKeys, loadBookingContext, searchTreatmentSlots, solutionsForCalendar,
-  permitsLegacyOverlap, protectedBookingAttribute };
+  permitsLegacyOverlap, protectedBookingAttribute, nonShareableBookingAttribute, shareableInterval };
