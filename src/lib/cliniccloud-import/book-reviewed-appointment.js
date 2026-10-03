@@ -7,12 +7,25 @@ const { lockBookingResources, mutateAppointmentBooking } = require('../../servic
 const { resolveInstallationKeys } = require('../../services/appointmentBookingAvailability.service');
 const { importReviewVersion } = require('../appointment-import-review');
 const { assertSourcePatientUnambiguous } = require('./source-patient-notes');
+const { occupancyForSolution } = require('../booking-profile-solver');
 const COLUMNS = Object.freeze(['clinica_id','paciente_id','doctor_id','instalacion_id','tratamiento_id',
   'titulo','nota','motivo','tipo_cita','estado','inicio','fin','source_system','source_reference',
   'es_provisional','created_at','updated_at','import_metadata']);
 const fail = code => { throw Error(code); };
 const object = value => typeof value === 'string' ? JSON.parse(value) : value;
 const positive = value => Number.isSafeInteger(value) && value > 0;
+function verifyDocumentedOccupancies(rows, solution, installationKeys) {
+  // Machine attention may reserve only setup/removal windows for the clinician.
+  // Compare the persisted rows to the authoritative solution, not to an assumed
+  // full-appointment clinician interval. Room and equipment remain fully booked.
+  const fields = ['phase_key','resource_kind','resource_key','doctor_id','installation_id','start_at','end_at'];
+  const project = row => Object.fromEntries(fields.map(key => [key,
+    key === 'start_at' || key === 'end_at' ? new Date(row[key]).toISOString() : row[key] ?? null]));
+  const hashes = values => values.map(row => hash(project(row))).sort();
+  if (!solution || hash(hashes(rows)) !== hash(hashes(occupancyForSolution(solution, installationKeys)))) {
+    fail('DOCUMENTED_BOOKING_OCCUPANCY_MISMATCH');
+  }
+}
 function validatePayload(payload, equipmentIds, sourceSha256) {
   if (!payload || hash(Object.keys(payload).sort()) !== hash([...COLUMNS].sort())
     || !['clinica_id','paciente_id','doctor_id','instalacion_id'].every(k => positive(payload[k]))
@@ -58,6 +71,7 @@ async function bookReviewedAppointment({ db, payload, equipmentIds = [], sourceS
   const inserted = await db.CitaPaciente.create(payload, { transaction, fields: [...COLUMNS], hooks: false, silent: true });
   await inserted.reload({ transaction });
   const previous = inserted.toJSON();
+  let canonicalSolution;
   const saved = await mutateAppointmentBooking({ db, existingAppointmentId: inserted.id_cita,
     appointmentValues: {}, transaction, force: false, allowObsolete: true,
     capabilities: { simple: true, multi: true, equipment: true },
@@ -71,17 +85,13 @@ async function bookReviewedAppointment({ db, payload, equipmentIds = [], sourceS
       const metadata = { ...object(values.import_metadata) };
       delete metadata.booking;
       if (hash(metadata) !== hash(payload.import_metadata)) fail('DOCUMENTED_BOOKING_METADATA_CHANGED');
+      canonicalSolution = solution;
       return equipmentIds.length ? existing.update({ import_metadata: values.import_metadata }, {
         transaction, fields: ['import_metadata'], hooks: false, silent: true,
       }) : existing;
     } });
   const rows = await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: saved.id_cita }, transaction });
-  const expectedKeys = resourceKeys.filter(key => !key.startsWith('patient:')).sort();
-  if (hash(rows.map(row => row.resource_key).sort()) !== hash(expectedKeys)
-    || rows.some(row => new Date(row.start_at).getTime() !== new Date(payload.inicio).getTime()
-      || (row.resource_kind === 'equipment'
-        ? new Date(row.end_at).getTime() < new Date(payload.fin).getTime()
-        : new Date(row.end_at).getTime() !== new Date(payload.fin).getTime()))) fail('DOCUMENTED_BOOKING_OCCUPANCY_MISMATCH');
+  verifyDocumentedOccupancies(rows, canonicalSolution, mapping.keys);
   return saved;
 }
-module.exports = { bookReviewedAppointment, validatePayload, COLUMNS };
+module.exports = { bookReviewedAppointment, validatePayload, verifyDocumentedOccupancies, COLUMNS };

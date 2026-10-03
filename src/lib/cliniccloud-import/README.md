@@ -123,6 +123,15 @@ Este último requiere la fixture clínica aislada existente y comprueba reserva,
 conflictos de paciente/recursos, una unidad móvil entre dos salas, preservación
 de fechas/HOLD y rechazo de sustitución de perfiles del catálogo.
 
+La comprobación posterior del alta documental contrasta todas las ocupaciones
+persistidas con `occupancyForSolution` del comando canónico. No presupone que
+el profesional deba ocupar todo el intervalo: los equipos con intervención
+inicial/final pueden producir varias ocupaciones de profesional dentro de la
+cita, conservando la ocupación completa de sala y máquina. Se siguen rechazando
+ocupaciones ausentes, duplicadas, recursos distintos y duraciones divergentes.
+Esto no habilita `force`, no cambia perfiles clínicos ni resuelve asignaciones
+pendientes; tampoco implica que un delta se haya aplicado.
+
 ### Otros ejecutores
 
 `source-refresh.js` conserva actualizaciones sucesivas de una cita importada
