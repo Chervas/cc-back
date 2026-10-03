@@ -521,7 +521,7 @@ async function recoverLateTimedOutResponseMatches({
     });
     if (!recovery) continue;
 
-    await execution.update({
+    try { await require('../lib/automation-runtime-stop').updateExecution(execution, {
       status: 'waiting',
       current_node_id: recovery.waitNodeId,
       wait_until: null,
@@ -539,7 +539,10 @@ async function recoverLateTimedOutResponseMatches({
         response_buffer_enabled: parseBool(recovery.waitNode?.config?.response_buffer_enabled, true),
       },
       last_error: null,
-    });
+    }, { allowCompleted: true }); } catch (error) {
+      if (require('../lib/automation-runtime-stop').isStop(error)) continue;
+      throw error;
+    }
 
     recovered.push(execution);
   }
@@ -1176,7 +1179,7 @@ async function enqueueInboundFormSubmissionResume({
         ? execution.waiting_meta
         : {};
 
-      await execution.update({
+      await require('../lib/automation-runtime-stop').updateExecution(execution, {
         status: 'waiting',
         wait_until: new Date(),
         waiting_meta: {

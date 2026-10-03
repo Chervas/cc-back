@@ -907,7 +907,7 @@ async function runMessageReceivedFireJob(payload = {}, jobRequest = null) {
       __simulation: false,
     };
     try {
-      execution = await db.FlowExecutionV2.create({
+      execution = await require('../lib/automation-runtime-stop').createExecution({
         idempotency_key: idempotencyKey,
         template_version_id: template.id,
         engine_version: template.engine_version || 'v2',
@@ -923,6 +923,14 @@ async function runMessageReceivedFireJob(payload = {}, jobRequest = null) {
       });
       created = true;
     } catch (error) {
+      if (require('../lib/automation-runtime-stop').isStop(error)) {
+        await Promise.all(claims.map(claim => markClaimCompleted(claim, 'unclaimed', null, {
+          reason: 'message_received_automation_disabled_before_fire',
+        })));
+        await conversationAutomationState.updateOwnedState({ clinicId, conversationId, stage: 'review', status: 'review',
+          manualActionRequired: true, failureCode: 'automation_deactivated', completedAt: new Date() }, { expectedJobRequestId: jobRequestId });
+        return { status: 'completed', result: { skipped: true, reason: 'template_not_active' } };
+      }
       if (error?.name !== 'SequelizeUniqueConstraintError') throw error;
       execution = await db.FlowExecutionV2.findOne({ where: { idempotency_key: idempotencyKey } });
       if (!execution) throw error;

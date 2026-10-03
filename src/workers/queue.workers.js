@@ -774,6 +774,12 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
         return;
     }
 
+    try { await require('../lib/automation-runtime-stop').assertMessageCanDispatch(msg.id); }
+    catch (error) {
+        if (!require('../lib/automation-runtime-stop').isStop(error)) throw error;
+        await require('../lib/automation-runtime-stop').cancelMessage(msg.id);
+        return;
+    }
     whatsappAuthorizedBroker.assertMessageEligible(msg);
     msg.status = 'sending';
     await msg.save();
@@ -912,6 +918,10 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             }
         }
     } catch (err) {
+        if (require('../lib/automation-runtime-stop').isStop(err)) {
+            await require('../lib/automation-runtime-stop').cancelMessage(msg.id);
+            return;
+        }
         if (providerAccepted) {
             // Meta ya devolvio WAMID. Un fallo posterior de DB/socket no debe
             // volver a ejecutar el POST y duplicar el recordatorio.

@@ -480,6 +480,7 @@ class WhatsAppService {
             });
             await require('./securityMonitoring.service').assertTemplateAllowed(clinicConfig.wabaId, payload.template.name, payload.template.language.code);
         }
+        await require('../lib/automation-runtime-stop').assertMessageCanDispatch(healthContext.messageId);
         if (clinicConfig.authorizedBroker) {
             const binding = clinicConfig.authorizedBroker;
             const messageId = Number.isSafeInteger(healthContext.messageId) && healthContext.messageId > 0

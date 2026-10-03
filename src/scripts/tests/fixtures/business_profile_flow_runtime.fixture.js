@@ -26,3 +26,4 @@ module.exports = ({ models, local, requests, automation, timeoutMs = 30000, onEx
     './jobClaim.service': require('../../../services/jobClaim.service') }, env);
   return { engine, executor };
 };
+module.exports.loadSource = loadSource;

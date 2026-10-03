@@ -1202,7 +1202,7 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
   let createdExecution = null;
   let executionCreated = false;
   try {
-    createdExecution = await FlowExecutionV2.create({
+    createdExecution = await require('../lib/automation-runtime-stop').createExecution({
       idempotency_key: idempotencyKey,
       template_version_id: template.id,
       engine_version: template.engine_version || 'v2',
@@ -1215,9 +1215,12 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
       clinic_id: scope.clinic_id,
       group_id: scope.group_id,
       created_by: requestedBy,
-    });
+    }, { jobClaim: options.jobClaim });
     executionCreated = true;
   } catch (error) {
+    if (require('../lib/automation-runtime-stop').isStop(error)) {
+      return { success: true, skipped: true, reason: 'template_not_active' };
+    }
     const uniqueConflict = error?.name === 'SequelizeUniqueConstraintError'
       || /idempotency/i.test(String(error?.message || ''));
     if (!uniqueConflict) throw error;
@@ -1632,7 +1635,7 @@ async function getExecutionLogs(executionId, limit = 100) {
   });
 }
 
-async function fireScheduledTrigger(payload = {}) {
+async function fireScheduledTrigger(payload = {}, options = {}) {
   const citaId = toIntOrNull(payload.appointment_id);
   const triggerType = normalizeEventName(payload.trigger_type);
   const templateKey = cleanString(payload.template_key);
@@ -1726,6 +1729,7 @@ async function fireScheduledTrigger(payload = {}) {
     user_id: payload.user_id || null,
     user_name: payload.user_name || 'scheduler',
     user_role: payload.user_role || 'system',
+    jobClaim: options.jobClaim,
   });
 }
 

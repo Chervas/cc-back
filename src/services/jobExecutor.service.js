@@ -448,7 +448,7 @@ async function runLeadCallbackReminderJob(payload = {}, jobRequest = null) {
   };
 }
 
-async function runAppointmentAutomationScheduleJob(payload = {}) {
+async function runAppointmentAutomationScheduleJob(payload = {}, jobClaim) {
   const appointmentId = Number(payload.appointment_id || 0);
   if (!Number.isInteger(appointmentId) || appointmentId <= 0) {
     throw new Error('appointment_automation_schedule_fire requires payload.appointment_id');
@@ -456,7 +456,7 @@ async function runAppointmentAutomationScheduleJob(payload = {}) {
 
   // Carga diferida para evitar circularidad con appointmentAutomationV2Runtime -> jobScheduler -> jobExecutor.
   const appointmentAutomationV2Runtime = require('./appointmentAutomationV2Runtime.service');
-  const result = await appointmentAutomationV2Runtime.fireScheduledTrigger(payload);
+  const result = await appointmentAutomationV2Runtime.fireScheduledTrigger(payload, { jobClaim });
 
   if (result?.waiting && result?.scheduled_for) {
     return {
@@ -587,7 +587,7 @@ const JOB_HANDLERS = {
   automations_v2_execute: async (payload = {}, job, claim) => runAutomationFlowV2Job(payload, job, claim),
   automation_whatsapp_quiet_send: async (payload = {}) => flowEngineV2Service.runScheduledWhatsappSendJob(payload),
   whatsapp_manual_template_resend: async (payload = {}) => require('./whatsappTemplateResend.service').dispatch(payload),
-  appointment_automation_schedule_fire: async (payload = {}) => runAppointmentAutomationScheduleJob(payload),
+  appointment_automation_schedule_fire: async (payload = {}, _job, claim) => runAppointmentAutomationScheduleJob(payload, claim),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),
   lead_auto_reply_backfill: async (payload = {}, jobRequest) => (
     require('./leadAutoReply.service').runPendingBatchJob(payload, jobRequest)
