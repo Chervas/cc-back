@@ -7,6 +7,7 @@ const { addDays } = require('../lib/personal-schedule-recurring');
 const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
 const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
 const { resourceForConfirmedOverlap } = require('../lib/booking-attention');
+const { installationOverlapCapacity } = require('../lib/installation-overlap');
 
 function confirmedOverlapRows(rows, start, end, clinicId, allowed, capacity = null) {
   if (allowed === false || allowed === 0) return false;
@@ -515,7 +516,7 @@ const buildUnavailableIntervals = ({
       dcMissing,
       doctorOutOfHoursMessage: doctorCtx.outOfHoursMessage,
       installationOverlapAllowed: inst?.allow_overlap_confirmation,
-      installationCapacity: Number(inst?.capacidad) || 1,
+      installationCapacity: installationOverlapCapacity(inst),
       doctorOverlapAllowed: dc?.allow_overlap_confirmation,
       instBlocks,
       instCitas,
@@ -744,7 +745,7 @@ exports.check = asyncHandler(async (req, res) => {
         resource_id: instalacionId,
         clinica_id: clinicaId,
         code: 'INSTALLATION_OVERLAP',
-        can_force: confirmedOverlapRows(citasInst,start,end,clinicaId,inst.allow_overlap_confirmation,Number(inst.capacidad)||1),
+        can_force: confirmedOverlapRows(citasInst,start,end,clinicaId,inst.allow_overlap_confirmation,installationOverlapCapacity(inst)),
         details: { cita_ids: [...new Set(citasInst.filter(c => Number(c.clinica_id) === clinicaId).map(c => c.id_cita))], message: 'Instalación ocupada' }
       });
     }

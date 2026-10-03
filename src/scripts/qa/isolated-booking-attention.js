@@ -79,6 +79,13 @@ async function main() {
     checks.push('consultation capacity remains a hard limit');
     await assert.rejects(reserve(3,{appointmentValues:values(3,1,'2031-01-06T12:00:00Z'),force:true}),error=>error.code==='booking_unavailable'&&!error.details.can_force);
     checks.push('the same patient cannot be booked simultaneously');
+    await rooms[3].update({overlap_capacity_unlimited:true},{transaction:tx});
+    await assert.rejects(reserve(3,{appointmentValues:values(3,2,'2031-01-06T12:00:00Z')}),error=>error.code==='booking_unavailable'&&error.details.can_force);
+    await reserve(3,{appointmentValues:values(3,2,'2031-01-06T12:00:00Z'),force:true});
+    await reserve(3,{appointmentValues:values(3,3,'2031-01-06T12:00:00Z'),force:true});
+    checks.push('explicit unlimited room exceeds its saved finite capacity only with operator confirmation');
+    await assert.rejects(reserve(3,{appointmentValues:values(3,1,'2031-01-06T12:00:00Z'),force:true}),error=>error.code==='booking_unavailable'&&!error.details.can_force);
+    checks.push('unlimited room does not bypass the same patient conflict');
     await reserve(1,{existingAppointmentId:wave.id_cita,appointmentValues:{estado:'cancelada'},stateOnly:true});
     checks.push('cancellation uses canonical state and releases occupancy');
     await tx.rollback();tx=null;

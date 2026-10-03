@@ -18,6 +18,7 @@ module.exports = (sequelize, DataTypes) => {
     color: DataTypes.STRING(16),
     capacidad: { type: DataTypes.INTEGER, defaultValue: 1 },
     allow_overlap_confirmation: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    overlap_capacity_unlimited: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     activo: { type: DataTypes.BOOLEAN, defaultValue: true },
     requiere_preparacion: { type: DataTypes.BOOLEAN, defaultValue: false },
     tiempo_preparacion_minutos: { type: DataTypes.INTEGER, defaultValue: 0 },
