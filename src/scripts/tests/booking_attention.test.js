@@ -5,6 +5,7 @@ const { solveBookingProfile, occupancyForSolution } = require('../../lib/booking
 const { normalizeBookingProfile } = require('../../lib/booking-profile');
 const { mergeClinicalConfig } = require('../../lib/treatment-catalog-contract');
 const { bookingSegments } = require('../../lib/appointment-booking-segments');
+const { nonShareableBookingAttribute, shareableInterval } = require('../../services/appointmentBookingAvailability.service');
 const auto = { mode: 'start_end', start_minutes: 5, start_window_minutes: 10, end_minutes: 5, end_window_minutes: 10 };
 const waves = { mode: 'continuous', patient_preparation_minutes: 5 };
 const start = '2030-01-07T09:30:00Z', end = '2030-01-07T10:00:00Z';
@@ -117,4 +118,15 @@ test('SQL object-key ordering never hides a valid attention segment; malformed i
 test('partial staff attention cannot remove mandatory full-team reservations', () => {
   assert.throws(()=>normalizeBookingProfile({version:3,phases:[{...phase(9,1),professionals:{mode:'all',ids:[5]},staff_attention:[auto]}]}),{code:'booking_profile_invalid'});
   assert.throws(()=>normalizeBookingProfile({version:3,phases:[{...phase(9,1),equipment_requirements:[],staff_attention:[auto]}]}),{code:'booking_profile_invalid'});
+});
+
+test('SQL protection covers historical continuous machines and mandatory teams, not only v3', () => {
+  const [expression,alias]=nonShareableBookingAttribute({Sequelize:{literal:sql=>sql}},'appointment');
+  assert.equal(alias,'booking_nonshareable');
+  assert(expression.includes('$.booking.profile.phases[*].equipment_requirements'));
+  assert(expression.includes('$.booking.profile.phases[*].professionals.mode'));
+  assert(expression.includes('JSON_CONTAINS('));
+  assert.equal(shareableInterval({clinica_id:72,booking_nonshareable:1},72),false);
+  assert.equal(shareableInterval({clinica_id:72,booking_nonshareable:0},72),true);
+  assert.equal(shareableInterval({clinica_id:66,booking_nonshareable:0},72),false);
 });

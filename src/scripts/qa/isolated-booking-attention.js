@@ -18,6 +18,14 @@ async function main() {
   try {
     assert.equal(db.sequelize.config.database,'clinicaclick_dev_isolated');
     tx=await db.sequelize.transaction({isolationLevel:'READ COMMITTED'});
+    const [protection]=require('../../services/appointmentBookingAvailability.service').nonShareableBookingAttribute(db,'fixture');
+    for(const [metadata,expected]of [[null,0],[{booking:{profile:{version:1,phases:[{professionals:{mode:'any'}}]}}},0],
+      [{booking:{profile:{version:2,phases:[{professionals:{mode:'any'},equipment_requirements:[{equipment_ids:[1]}]}]}}},1],
+      [{booking:{profile:{version:1,phases:[{professionals:{mode:'all'}}]}}},1],
+      [{booking:{profile:{version:3,phases:[{professionals:{mode:'any'}}]}}},1]]) {
+      const [[row]]=await db.sequelize.query(`SELECT ${protection.val} AS protected FROM (SELECT CAST(:metadata AS JSON) AS import_metadata) fixture`,{replacements:{metadata:metadata===null?null:JSON.stringify(metadata)},transaction:tx});
+      assert.equal(Number(row.protected),expected,'SQL must protect machine/team snapshots before v3');
+    }
     const clinic=await db.Clinica.findByPk(1,{transaction:tx});
     assert.equal(clinic.nombre_clinica,'Clinica ficticia DEV');
     await clinic.update({equipment_booking_enabled:true},{transaction:tx});

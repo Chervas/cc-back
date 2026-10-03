@@ -24,7 +24,11 @@ const protectedBookingAttribute = (db, alias) => [db.Sequelize.fn('COALESCE', db
   db.Sequelize.col(`${alias}.import_metadata`), 'one', db.Sequelize.literal("'$.booking'"), db.Sequelize.literal("'$.program_session'"),
   db.Sequelize.literal("'$.additional_staff'")), 0), 'booking_protected'];
 
-const nonShareableBookingAttribute = (db, alias) => [db.Sequelize.literal(`(COALESCE(JSON_CONTAINS_PATH(${alias}.import_metadata, 'one', '$.program_session', '$.additional_staff'), 0) OR COALESCE(JSON_EXTRACT(${alias}.import_metadata, '$.booking.profile.version'), 0) >= 3)`), 'booking_nonshareable'];
+const nonShareableBookingAttribute = (db, alias) => [db.Sequelize.literal(`(
+  COALESCE(JSON_CONTAINS_PATH(${alias}.import_metadata, 'one', '$.program_session', '$.additional_staff', '$.booking.profile.phases[*].equipment_requirements'), 0)
+  OR COALESCE(JSON_CONTAINS(JSON_EXTRACT(${alias}.import_metadata, '$.booking.profile.phases[*].professionals.mode'), '"all"'), 0)
+  OR COALESCE(JSON_EXTRACT(${alias}.import_metadata, '$.booking.profile.version'), 0) >= 3
+)`), 'booking_nonshareable'];
 function shareableInterval(row, clinicId) {
   const marker = row?.get ? row.get('booking_nonshareable') : row?.booking_nonshareable;
   return Number(row?.clinica_id) === clinicId && row?.source_system !== 'treatment_program'
