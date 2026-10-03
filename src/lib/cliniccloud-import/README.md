@@ -339,6 +339,15 @@ tanto del contenido como del directorio.
 
 ## Invariantes efectivas
 
+Las etiquetas exactas `PRIMERA CONSULTA NUTRICIÓN` y `SESIÓN SEGUIMIENTO
+NUTRICIONISTA` de la exportación actual pueden pertenecer a la categoría fuente
+`BLOQUEO` sin ser un cierre de agenda. Solo con un contacto fuente único y no
+administrativo se planifican como citas de paciente, conservando la categoría
+original y su procedencia en `appointment_classification`. La identidad reservada
+`BLOQUEO AGENDA` siempre prevalece. No se reclasifican por menciones libres a
+nutrición ni se cambian históricos, estados, precios o cobros. Esta corrección
+del plan no asigna profesional/cabina ni autoriza por sí misma un alta.
+
 - IDCONTACTO es identidad externa; NUM es número de historia. Alertas usan NUM.
 - Una fila CSV sin IDCITA no adquiere un ID externo inventado. Coincidencias
   únicas recuperan el histórico; huella/fila permiten trazabilidad y repetición.

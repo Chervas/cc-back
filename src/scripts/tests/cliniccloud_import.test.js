@@ -65,6 +65,24 @@ function administrativeAppointment(contacts, extra = {}) {
 }
 const administrativeContacts = () => normalizeContacts([contactRecord({ IDCONTACTO: 'synthetic-block',
   NOMBRE: 'Bloqueo agenda', APELLIDOS: 'BLOQUEO AGENDA A' })], 'administrative-contact-file');
+test('exact nutrition consultation labels under BLOQUEO remain patient visits only with one non-administrative contact', () => {
+  const contacts=sourceContacts();
+  for (const service of ['PRIMERA CONSULTA NUTRICIÓN','SESIÓN SEGUIMIENTO NUTRICIONISTA']) {
+    const record={source_row:8,values:{IDCONTACTO:'source-1',FECHA:'07/09/2026','HORA INICIO':'10:00','HORA FIN':'10:30',ESTADO:'Pendiente','TIPO SERVICIO':'BLOQUEO',SERVICIOS:service,AGENDA:'Agenda sintética'}};
+    const row=normalizeAppointments([record],'appointment-file',{contacts})[0];
+    assert.equal(row.kind,'appointment');assert.equal(row.status,'pendiente');
+    assert.equal(row.appointment_classification.reason,'PERSONAL_NUTRITION_VISIT_IN_BLOCK_SERVICE_CATEGORY');
+    assert.equal(row.appointment_classification.source_service_category,'BLOQUEO');
+    assert.deepEqual(row.appointment_classification.contact_provenance,contacts[0].provenance);
+    for (const context of [[],[...contacts,contacts[0]],
+      [{...contacts[0],fields:{...contacts[0].fields,name:'Bloqueo agenda',surname:'BLOQUEO AGENDA A'}}]]) {
+      const blocked=normalizeAppointments([record],'appointment-file',{contacts:context})[0];
+      assert.equal(blocked.kind,'block');assert.equal(blocked.appointment_classification,undefined);
+    }
+    const unknown=normalizeAppointments([{...record,values:{...record.values,SERVICIOS:'Bloqueo para preparar consulta de nutrición'}}],'appointment-file',{contacts})[0];
+    assert.equal(unknown.kind,'block');
+  }
+});
 test('reserved agenda-block contact overrides a clinical placeholder without creating a patient or reserving resources', () => {
   const contacts = administrativeContacts(), row = administrativeAppointment(contacts);
   assert.equal(row.kind, 'block');

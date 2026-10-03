@@ -92,11 +92,22 @@ function normalizeAppointments(records, fileHash, { historical = false, agendas 
     const linkedContacts = contactsById.get(sourceContactId) || [];
     const administrativeContact = !historical && linkedContacts.length === 1 && isAgendaBlockContact(linkedContacts[0]);
     const serviceIsBlock = historical ? norm(serviceType || service?.nombre) === 'BLOQUEO' : norm(r['TIPO SERVICIO']) === 'BLOQUEO';
-    const kind = serviceIsBlock || administrativeContact ? 'block' : 'appointment';
+    // The source catalog filed these two nutrition consultations under BLOQUEO.
+    // A unique non-administrative person and the exact clinical label prevent
+    // classifying their visits as absences. Unknown labels still fail closed;
+    // the reserved agenda-block identity always takes precedence.
+    const nutritionVisit = !historical && serviceIsBlock && !administrativeContact
+      && linkedContacts.length === 1 && norm(linkedContacts[0].fields?.name)
+      && ['PRIMERA CONSULTA NUTRICION', 'SESION SEGUIMIENTO NUTRICIONISTA'].includes(norm(r.SERVICIOS));
+    const kind = administrativeContact || (serviceIsBlock && !nutritionVisit) ? 'block' : 'appointment';
     const sourceId = historical ? clean(r.idCita) : clean(r.IDCITA);
     const result = {
       kind, source_external_id: sourceId || null,
       source_contact_id: sourceContactId,
+      ...(nutritionVisit ? { appointment_classification: {
+        reason: 'PERSONAL_NUTRITION_VISIT_IN_BLOCK_SERVICE_CATEGORY',
+        source_service_category: clean(r['TIPO SERVICIO']), contact_provenance: linkedContacts[0].provenance,
+      } } : {}),
       ...(administrativeContact && !serviceIsBlock ? { block_classification: {
         reason: 'RESERVED_AGENDA_BLOCK_CONTACT', contact_provenance: linkedContacts[0].provenance,
       } } : {}),
