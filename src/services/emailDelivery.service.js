@@ -438,6 +438,7 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       if (!current || current.status !== 'sending') {
         throw Object.assign(Error('email_outbox_no_longer_sending'), { code: 'email_outbox_no_longer_sending', retryable: false });
       }
+      await require('../lib/automation-runtime-stop').assertEmailCanDispatch(current);
       const dispatchState = await marketingDispatchDeliveryState(current);
       if (dispatchState === 'paused') {
         await settleMessageIfActive(message, { status: 'queued', completed_at: null });
@@ -512,6 +513,11 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       },
     };
   } catch (error) {
+    if (require('../lib/automation-runtime-stop').isStop(error)) {
+      await settleMessageIfActive(message, { status: 'cancelled', completed_at: new Date(),
+        last_error_code: 'automation_deactivated', last_error_message: 'La automatización se desactivó antes del envío.' });
+      return { status: 'completed', result: { email_message_id: message.id, skipped: true, reason: 'automation_deactivated' } };
+    }
     if (error?.code === 'email_marketing_dispatch_paused') return pausedEmailResult(message);
     if (error?.code === 'email_marketing_dispatch_cancelled') {
       const current = await db.EmailMessage.findByPk(message.id);

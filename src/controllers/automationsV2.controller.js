@@ -6124,9 +6124,8 @@ exports.updateTemplateDraft = async (req, res) => {
         }
       }
 
-      await row.update({
-        is_active: nextActive,
-      });
+      const stopSummary = await require('../lib/automation-runtime-stop').setActive(row, nextActive);
+      await row.reload();
 
       const scheduledBackfill = nextActive && !wasActive
         ? await runScheduledTemplateBackfill(row, req, access)
@@ -6145,6 +6144,7 @@ exports.updateTemplateDraft = async (req, res) => {
           latestActivePublishedVersionMap,
         }),
         ...(scheduledBackfill ? { scheduled_backfill: scheduledBackfill } : {}),
+        ...(!nextActive ? { stopped: stopSummary } : {}),
       });
     }
 
@@ -6729,7 +6729,7 @@ exports.executeTemplateVersion = async (req, res) => {
       || hydratedContext?.clinica?.grupo_id
     );
 
-    const createdExecution = await FlowExecutionV2.create({
+    const createdExecution = await require('../lib/automation-runtime-stop').createExecution({
       idempotency_key: idempotencyKey,
       template_version_id: row.id,
       engine_version: row.engine_version || 'v2',

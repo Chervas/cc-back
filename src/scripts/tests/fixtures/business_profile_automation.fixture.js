@@ -101,7 +101,8 @@ module.exports = async ({ sql, models, report, local, consumer, resolved, actor,
     assert.equal(writes(), prior); assert.equal(await models.BusinessProfileMutation.findByPk(disabled.operationId), null);
     assert.equal(disabled.execution.current_node_id, 'apply_hours');
     await disabled.template.update({ is_active: false }); await retry(disabled);
-    assert.equal((await run(disabled)).result.status, 'failed'); assert.equal(writes(), prior);
+    assert.equal((await run(disabled)).result.status, 'completed'); assert.equal(disabled.execution.status, 'cancelled');
+    assert.equal(disabled.execution.last_error, 'automation_deactivated'); assert.equal(writes(), prior);
     assert.equal(disabled.execution.current_node_id, 'apply_hours');
     report.checks.push('disabled worker and inactive template reject before admission/provider without fabricating node success or reactivating automation');
 

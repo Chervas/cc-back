@@ -446,7 +446,7 @@ async function setActive({ clinicId, active }) {
       throw error;
     }
   }
-  await flow.update({ is_active: active === true });
+  await require('../lib/automation-runtime-stop').setActive(flow, active === true);
   return getStatus(clinicId);
 }
 
@@ -514,7 +514,7 @@ async function enqueueForLead({
   let created = false;
   if (!execution) {
     try {
-      execution = await db.FlowExecutionV2.create({
+      execution = await require('../lib/automation-runtime-stop').createExecution({
         idempotency_key: idempotencyKey,
         template_version_id: flow.id,
         engine_version: 'v2',
@@ -530,6 +530,7 @@ async function enqueueForLead({
       });
       created = true;
     } catch (error) {
+      if (require('../lib/automation-runtime-stop').isStop(error)) return { skipped: true, reason: 'no_active_flow' };
       if (error?.name !== 'SequelizeUniqueConstraintError') throw error;
       execution = await db.FlowExecutionV2.findOne({ where: { idempotency_key: idempotencyKey } });
     }

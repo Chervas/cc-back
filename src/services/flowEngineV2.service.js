@@ -985,12 +985,12 @@ async function assertExecutionJobClaim(execution, transaction) {
 }
 
 async function withExecutionJobClaim(execution, work) {
-  if (!execution[executionJobClaim]) return work(undefined);
   return db.sequelize.transaction(async transaction => {
     // Match GBP acceptance's execution -> job lock order. Never wrap node or
     // provider execution in this transaction: only persist engine state here.
     const current = await FlowExecutionV2.findByPk(execution.id, { transaction, lock: transaction.LOCK.UPDATE });
     await assertExecutionJobClaim(execution, transaction);
+    if (current?.status === 'cancelled') throw require('../lib/automation-runtime-stop').stopped('automation_execution_stopped');
     if (!current || current.status !== execution.status || current.current_node_id !== execution.current_node_id) {
       throw Object.assign(Error('flow_execution_changed'), { code: 'flow_execution_changed', preserveFlowState: true });
     }
@@ -2514,6 +2514,10 @@ async function handleChangeStatus(node, context, runtime) {
     let previousStatus = null;
     let skippedReason = null;
     await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
+      if (runtime?.execution?.id) {
+        await require('../lib/automation-runtime-stop').assertExecutionActive(runtime.execution, transaction);
+        await assertExecutionJobClaim(runtime.execution, transaction);
+      }
       appointment = await CitaPaciente.findByPk(targets.appointment_id, {
         transaction,
         lock: transaction.LOCK.UPDATE,
@@ -2684,7 +2688,13 @@ async function handleChangeStatus(node, context, runtime) {
     }
 
     const previousStatus = cleanString(lead.status_lead);
-    await lead.update({ status_lead: leadStatus });
+    await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+      if (runtime?.execution?.id) {
+        await require('../lib/automation-runtime-stop').assertExecutionActive(runtime.execution, transaction);
+        await assertExecutionJobClaim(runtime.execution, transaction);
+      }
+      await lead.update({ status_lead: leadStatus }, { transaction });
+    });
 
     return {
       kind: 'success',
@@ -3240,10 +3250,9 @@ async function enqueueAutomationWhatsappTransport({
   // El snapshot y el id determinista se guardan antes de publicar el job. Asi
   // un worker rapido nunca puede ser pisado de sent a pending por el productor.
   whatsappAuthorizedBroker.assertMessageEligible(msg);
-  await msg.update({
+  await require('../lib/automation-runtime-stop').prepareMessageForDispatch(msg, {
     status: 'pending',
     metadata: {
-      ...metadata,
       automation_transport_dispatch_kind: normalizedDispatchKind,
       automation_transport_dispatched_at: dispatchedAt,
       automation_transport_job_id: transportJobId,
@@ -3304,6 +3313,13 @@ async function runScheduledWhatsappSendJob(payload = {}) {
       status: 'completed',
       result: { skipped: true, reason: 'already_sent', message_id: messageId },
     };
+  }
+
+  try { await require('../lib/automation-runtime-stop').assertMessageCanDispatch(msg.id); }
+  catch (error) {
+    if (!require('../lib/automation-runtime-stop').isStop(error)) throw error;
+    await require('../lib/automation-runtime-stop').cancelMessage(msg.id);
+    return { status: 'completed', result: { skipped: true, reason: 'automation_deactivated', message_id: messageId } };
   }
 
   const metadata = msg.metadata && typeof msg.metadata === 'object' ? msg.metadata : {};
@@ -4687,6 +4703,10 @@ async function handleSendWhatsapp(node, context, runtime) {
       else io.emit('message:updated', payload);
     }
     } catch (sendErr) {
+      if (require('../lib/automation-runtime-stop').isStop(sendErr)) {
+        await require('../lib/automation-runtime-stop').cancelMessage(msg.id);
+        throw sendErr;
+      }
       const providerError = sendErr?.response?.data || sendErr?.message || 'whatsapp_send_failed';
       await msg.update({
       status: 'failed',
@@ -6742,15 +6762,17 @@ async function processNode(node, context, runtime = {}) {
         period,
         timeZone,
       });
+      let autoDeactivatedAt = null;
       if (parseBool(config?.auto_deactivate_after_execution, false)) {
         const triggerConfig = template.trigger_config && typeof template.trigger_config === 'object'
           ? template.trigger_config
           : {};
+        autoDeactivatedAt = new Date().toISOString();
         await template.update({
           is_active: false,
           trigger_config: {
             ...triggerConfig,
-            last_executed_at: new Date().toISOString(),
+            last_executed_at: autoDeactivatedAt,
           },
         });
       }
@@ -6763,6 +6785,7 @@ async function processNode(node, context, runtime = {}) {
           period,
           time_zone: result?.timeZone || timeZone,
           synced_at: result?.syncedAt || new Date().toISOString(),
+          ...(autoDeactivatedAt ? { auto_deactivated_at: autoDeactivatedAt } : {}),
         },
         next_node_id: readOutputTarget(node, 'on_success'),
       };
@@ -7756,6 +7779,17 @@ async function syncConversationAutomationStateAfterExecution(execution) {
 
   const executionStatus = cleanString(execution.status)?.toLowerCase();
   if (executionStatus === 'cancelled' && execution.last_error === 'inbound_recovery_requires_review') return;
+  if (executionStatus === 'cancelled' && execution.last_error === 'automation_deactivated') {
+    // Stopping a flow must not mark an unanswered patient reply as attended.
+    if (state.source_message_id || context?.last_response_context?.response_message_id) {
+      await conversationAutomationState.failState({ clinicId: execution.clinic_id, conversationId,
+        failureCode: 'automation_deactivated' }, { expectedExecutionId: execution.id });
+    } else {
+      await conversationAutomationState.completeState({ clinicId: execution.clinic_id, conversationId,
+        failureCode: 'automation_deactivated' }, { expectedExecutionId: execution.id });
+    }
+    return;
+  }
   if (executionStatus === 'waiting') {
     if (cleanString(execution?.waiting_meta?.type) === 'delay/wait_response') {
       const classification = findClassifyIntentOutput(context);
@@ -7971,6 +8005,8 @@ async function runExecution(executionId, options = {}) {
     return execution;
   }
 
+  await require('../lib/automation-runtime-stop').assertExecutionActive(execution, undefined, { allowSelfDeactivatedEnd: true });
+
   const nodes = Array.isArray(template.nodes) ? template.nodes : [];
   const nodeMap = new Map(nodes.map((node) => [cleanString(node?.id), node]));
 
@@ -8067,6 +8103,7 @@ async function runExecution(executionId, options = {}) {
 
   for (let step = 0; step < maxSteps; step += 1) {
     if (localStatus !== 'running') break;
+    await require('../lib/automation-runtime-stop').assertExecutionActive(execution, undefined, { allowSelfDeactivatedEnd: true });
     await assertExecutionJobClaim(execution);
 
     if (!currentNodeId) {
@@ -8222,6 +8259,11 @@ async function runExecution(executionId, options = {}) {
         last_error: null,
       }, 'flow_execution:updated');
     } catch (error) {
+      if (require('../lib/automation-runtime-stop').isStop(error)) {
+        await FlowExecutionLogV2.update({ status: 'error', finished_at: new Date(), error_message: error.code },
+          { where: { id: log.id, status: 'running' } });
+        throw error;
+      }
       try { await assertExecutionJobClaim(execution); }
       catch (claimError) { error = claimError; }
       const finishedAt = new Date();
@@ -8322,6 +8364,11 @@ async function runExecution(executionId, options = {}) {
 
   await execution.reload();
   return execution;
+  } catch (error) {
+    if (!require('../lib/automation-runtime-stop').isStop(error)) throw error;
+    const stoppedExecution = await require('../lib/automation-runtime-stop').stopExecution(execution);
+    emitExecutionEvent(stoppedExecution, 'flow_execution:cancelled');
+    return stoppedExecution;
   } finally {
     clearResponseProcessingState();
     const freshExecution = await FlowExecutionV2.findByPk(execution.id).catch(() => execution);
