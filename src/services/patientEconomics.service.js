@@ -7,6 +7,7 @@ const db = require('../../models');
 const whatsappService = require('./whatsapp.service');
 const economicPrograms = require('../lib/economicProgramSnapshot');
 const economicPrices = require('../lib/economicPriceProfile');
+const commercialPolicy = require('../lib/economic-commercial-policy');
 const budgetAmounts = require('../lib/economicBudgetAcceptance');
 const fiscalPrices = require('../lib/economicFiscalPriceSource');
 const treatmentPrograms = require('./treatmentPrograms.service');
@@ -448,7 +449,8 @@ function mapCatalogItem(treatment) {
     specialty: treatment.especialidad || null,
     category: treatment.categoria || null,
     product_type: normalizeProductType(treatment),
-    base_price: roundMoney(treatment.precio_base),
+    base_price: treatment.precio_base == null ? null : roundMoney(treatment.precio_base),
+    standalone_sellable: require('../lib/treatment-commercial-policy').saleMode(treatment) === 'standalone',
     price_profile: economicPrices.profileFromTreatment(treatment),
     price_semantics: config.price_profile ? 'gross_tax_included' : 'existing_catalog_price',
     default_units: Math.max(1, Number(treatment.sesiones_defecto) || 1),
@@ -488,6 +490,7 @@ async function resolveCatalogItemForClinic(treatmentId, context) {
       'El servicio seleccionado no está disponible en el catálogo de esta clínica.',
     );
   }
+  require('../lib/treatment-commercial-policy').assertStandalone(treatment);
   return mapCatalogItem(treatment);
 }
 
@@ -533,6 +536,7 @@ async function listCatalog({ clinicId, patientIdentifier, query = {} }) {
   let items = treatments
     .filter((treatment) => {
       if (['draft', 'obsolete'].includes(parseJson(treatment.clinical_config, {}).catalog_status)) return false;
+      if (require('../lib/treatment-commercial-policy').saleMode(treatment) === 'program_component_only') return false;
       const hiddenFor = parseJson(treatment.eliminado_por_clinica, []);
       return !Array.isArray(hiddenFor) || !hiddenFor.map(Number).includes(clinicIdNumber);
     })
@@ -546,7 +550,7 @@ async function listCatalog({ clinicId, patientIdentifier, query = {} }) {
       let response;
       do {
         response = await treatmentPrograms.list({ clinicId, query: { status: 'active', q: search, page, page_size: 50 } });
-        items.push(...response.items.filter((program) => program.summary.issues.length === 0 && program.total_price != null)
+        items.push(...response.items.filter((program) => program.summary.issues.length === 0 && program.total_price != null && program.commercial_ready !== false)
           .map(economicPrograms.catalogItem)
           .filter((item) => !query.category || item.category === query.category));
         page += 1;
@@ -590,7 +594,8 @@ async function listCatalog({ clinicId, patientIdentifier, query = {} }) {
 
 function normalizeLine(raw, index) {
   const quantity = Number(raw.quantity ?? raw.cantidad);
-  const unitPrice = Number(raw.unit_price ?? raw.precio_unitario ?? raw.precioUnitario);
+  const rawUnitPrice = raw.unit_price ?? raw.precio_unitario ?? raw.precioUnitario;
+  const unitPrice = !['number', 'string'].includes(typeof rawUnitPrice) || (typeof rawUnitPrice === 'string' && rawUnitPrice.trim() === '') ? NaN : Number(rawUnitPrice);
   const discountPercent = Number(raw.discount_percent ?? raw.descuento ?? 0);
   if (!Number.isFinite(quantity) || quantity <= 0) {
     throw domainError(400, 'budget_line_quantity_invalid', `La cantidad de la línea ${index + 1} no es válida.`);
@@ -892,6 +897,24 @@ async function nextBudgetNumber(clinicId, transaction) {
   return `${prefix}${String(lastSequence + 1).padStart(4, '0')}`;
 }
 
+async function assertBudgetCommercial(lines, { clinicId, clinic, transaction, selling = true } = {}) {
+  const owner = clinic || await Clinica.findByPk(clinicId, { transaction });
+  if (!owner) throw domainError(404, 'clinic_not_found', 'Clínica no encontrada.');
+  await commercialPolicy.assertCommercialLines(lines, {
+    selling,
+    resolveTreatments: async ids => {
+      const scopes = [{ origen: 'sistema' }, { origen: 'clinica', clinica_id: owner.id_clinica }];
+      if (owner.grupoClinicaId) scopes.push({ origen: 'grupo', grupo_clinica_id: owner.grupoClinicaId });
+      const result = new Map();
+      for (let start = 0; start < ids.length; start += 200) {
+        const rows = await Tratamiento.findAll({ where: { id_tratamiento: { [Op.in]: ids.slice(start, start + 200) }, [Op.or]: scopes }, transaction });
+        for (const row of rows) if (treatmentIsAvailableForClinic(row, { clinicId: owner.id_clinica, clinic: owner })) result.set(Number(row.id_tratamiento), row);
+      }
+      return result;
+    },
+  });
+}
+
 async function createVersion({ budget, payload, patient, clinic, actorId, versionNumber, transaction, changeSummary }) {
   const previous = versionNumber > 1 ? await EconomicBudgetVersion.findOne({
     where: { budget_id: budget.id, version_number: versionNumber - 1 }, transaction,
@@ -900,6 +923,7 @@ async function createVersion({ budget, payload, patient, clinic, actorId, versio
     previousLines: parseJson(previous?.lines, []),
     resolve: (id, version) => treatmentPrograms.resolveForBudget({ id, version, clinicId: clinic.id_clinica, transaction }),
   });
+  await assertBudgetCommercial(programLines, { clinic, transaction, selling: budget.status !== 'draft' });
   const lines = await economicPrices.resolveBudgetPriceProfiles(programLines, {
     previousLines: parseJson(previous?.lines, []),
     resolveTreatments: async ids => {
@@ -1020,6 +1044,7 @@ async function createBudget({ patientIdentifier, clinicId, actorId, payload }) {
         return serializeBudget(existing, version, [], []);
       }
     }
+    await assertBudgetCommercial((payload.lines || payload.lineas || []).filter(line => !line.program_id), { clinic, transaction, selling: false });
     const budget = await EconomicBudget.create({
       public_id: crypto.randomUUID(),
       clinic_id: clinic.id_clinica,
@@ -1134,6 +1159,7 @@ async function reviseBudget({ publicId, actorId }) {
       transaction,
       lock: transaction.LOCK.UPDATE,
     });
+    await assertBudgetCommercial(parseJson(sourceVersion.lines, []), { clinic, transaction, selling: false });
     const revision = await EconomicBudget.create({
       public_id: crypto.randomUUID(),
       clinic_id: original.clinic_id,
@@ -1230,6 +1256,7 @@ async function previewBudgetAcceptance({ publicId, payload = {} }) {
   if (!version) throw domainError(404, 'budget_version_not_found', 'Version de presupuesto no encontrada.');
   const lines = parseJson(version.lines, []);
   economicPrograms.assertOperational(lines);
+  await assertBudgetCommercial(lines, { clinicId: budget.clinic_id });
   const modes = offeredPaymentModes(version);
   const mode = cleanString(payload.selected_payment_mode || (modes.length === 1 ? modes[0] : ''), 30);
   if ((modes.length && !modes.includes(mode)) || (!modes.length && mode)) {
@@ -1266,7 +1293,10 @@ async function transitionBudget({ publicId, actorId, action, payload = {} }) {
       where: { budget_id: budget.id, version_number: budget.current_version },
       transaction,
     });
-    if (['present', 'present_again', 'accept', 'accept_partial'].includes(action)) economicPrograms.assertOperational(parseJson(version.lines, []));
+    if (['present', 'present_again', 'accept', 'accept_partial'].includes(action)) {
+      economicPrograms.assertOperational(parseJson(version.lines, []));
+      await assertBudgetCommercial(parseJson(version.lines, []), { clinicId: budget.clinic_id, transaction });
+    }
     const totals = parseJson(version.totals, {});
     const proposal = parseJson(version.payment_proposal, {});
     let acceptedAmount = 0;
@@ -1781,6 +1811,7 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
   const ttlHours = Number.parseInt(String(payload.ttl_hours ?? payload.validez_horas ?? 168), 10);
   const { budget, version, patient, clinic } = await loadBudgetSignatureContext(publicId);
   economicPrograms.assertOperational(parseJson(version.lines, []));
+  await assertBudgetCommercial(parseJson(version.lines, []), { clinic });
   if (!['draft', 'presented'].includes(budget.status)) {
     throw domainError(
       409,
@@ -1851,6 +1882,10 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
     },
   };
   const request = await sequelize.transaction(async (transaction) => {
+    const lockedBudget = await EconomicBudget.findOne({ where: { id: budget.id }, transaction, lock: transaction.LOCK.UPDATE });
+    if (!lockedBudget || Number(lockedBudget.current_version) !== Number(version.version_number)
+      || !['draft', 'presented'].includes(lockedBudget.status)) throw domainError(409, 'budget_acceptance_changed', 'El presupuesto ha cambiado. Vuelve a abrirlo antes de enviar la firma.');
+    await assertBudgetCommercial(parseJson(version.lines, []), { clinic, transaction });
     const startsSent = ['email', 'custom_email', 'tablet'].includes(normalizedChannel);
     const row = await EconomicBudgetSignatureRequest.create({
       public_id: crypto.randomUUID(),
@@ -1982,6 +2017,10 @@ async function findBudgetSignatureRequestFromToken(tokenRaw, { markViewed = fals
     });
   }
   if (markViewed && ['pending', 'sent'].includes(request.status) && !request.viewed_at) {
+    const budget = await EconomicBudget.findByPk(request.budget_id);
+    const version = budget && await EconomicBudgetVersion.findOne({ where: { budget_id: budget.id, version_number: request.budget_version } });
+    if (!budget || !version || budget.status !== 'presented' || Number(budget.current_version) !== Number(request.budget_version)) throw domainError(409, 'budget_acceptance_changed', 'El presupuesto ha cambiado. Solicita un enlace actualizado.');
+    await assertBudgetCommercial(parseJson(version.lines, []), { clinicId: budget.clinic_id });
     const viewedAt = new Date();
     await request.update({ status: 'viewed', viewed_at: viewedAt });
     await recordBudgetSignatureEvent(request, 'signature_request_viewed', {
@@ -2034,6 +2073,7 @@ async function applyBudgetSignatureAcceptance({ request, payload = {}, requestMe
     });
     if (!version) throw domainError(404, 'budget_version_not_found', 'Versión de presupuesto no encontrada.');
     economicPrograms.assertOperational(parseJson(version.lines, []));
+    await assertBudgetCommercial(parseJson(version.lines, []), { clinicId: budget.clinic_id, transaction });
 
     const selectedPaymentMode = resolveSignedPaymentMode({ request: lockedRequest, payload, version });
     const proposal = serializePaymentProposal(version.payment_proposal);
@@ -2721,7 +2761,6 @@ async function createVoucher({ patientIdentifier, clinicId, actorId, payload }) 
   const context = await loadContext(patientIdentifier, clinicId);
   const { patient } = context;
   const treatmentId = optionalPositiveInteger(payload.treatment_id);
-  await resolveCatalogItemForClinic(treatmentId, context);
   const totalUnits = roundMoney(payload.total_units);
   const availableUnits = payload.available_units == null
     ? totalUnits
@@ -2757,6 +2796,7 @@ async function createVoucher({ patientIdentifier, clinicId, actorId, payload }) 
         transaction,
       });
       if (existing) {
+        if (Number(existing.patient_id) !== Number(patient.id_paciente)) throw domainError(409, 'voucher_source_conflict', 'La referencia de este bono ya pertenece a otro paciente.');
         const movements = await PatientVoucherMovement.findAll({
           where: { voucher_id: existing.id },
           order: [['occurred_at', 'ASC']],
@@ -2765,6 +2805,7 @@ async function createVoucher({ patientIdentifier, clinicId, actorId, payload }) 
         return serializeVoucher(existing, movements);
       }
     }
+    await resolveCatalogItemForClinic(treatmentId, context);
     const voucher = await PatientVoucher.create({
       public_id: crypto.randomUUID(),
       clinic_id: clinicId,
@@ -2802,22 +2843,38 @@ async function createVoucher({ patientIdentifier, clinicId, actorId, payload }) 
 async function sellVoucher({ patientIdentifier, clinicId, actorId, payload }) {
   const context = await loadContext(patientIdentifier, clinicId);
   const treatmentId = optionalPositiveInteger(payload.treatment_id);
-  const catalogItem = await resolveCatalogItemForClinic(treatmentId, context);
+  const saleToken = cleanString(payload.sale_reference, 80) || crypto.randomUUID();
+  const sourceReference = `voucher-sale:${saleToken}`;
+  const lineKey = `voucher-${saleToken}`.slice(0, 80);
+  // An accepted receipt is not a new catalogue sale. Replays and collection
+  // keep its purchased amounts/profile even if the current service is hidden,
+  // inactive or has subsequently become an included-only component.
+  const historical = await EconomicBudget.findOne({ where: { clinic_id: context.clinicId, source_system: 'clinicaclick', source_reference: sourceReference } });
+  if (historical && Number(historical.patient_id) !== Number(context.patient.id_paciente)) throw domainError(409, 'budget_source_conflict', 'La referencia de esta venta ya pertenece a otro paciente.');
+  const historicalVersion = historical && ['accepted', 'partially_accepted'].includes(historical.status)
+    ? await EconomicBudgetVersion.findOne({ where: { budget_id: historical.id, version_number: historical.current_version } }) : null;
+  const historicalLine = parseJson(historicalVersion?.lines, []).find(line => line.key === lineKey);
+  if (historicalVersion && !historicalLine) throw domainError(409, 'voucher_request_conflict', 'No se puede identificar la línea de la venta guardada.');
+  if (historicalLine && Number(historicalLine.treatment_id) !== Number(treatmentId)) throw domainError(409, 'voucher_request_conflict', 'Esta venta ya se guardó para otro servicio.');
+  const catalogItem = historicalLine ? { name: historicalLine.name, code: historicalLine.code, description: historicalLine.description,
+    default_units: historicalLine.quantity, unit_label: historicalLine.unit_label, base_price: historicalLine.total,
+    product_type: historicalLine.product_type, area_code: historicalLine.area_code, specialty: historicalLine.specialty, category: historicalLine.category }
+    : await resolveCatalogItemForClinic(treatmentId, context);
   const name = cleanString(payload.name || catalogItem?.name, 180);
   const totalUnits = roundMoney(payload.total_units ?? catalogItem?.default_units);
   const unitLabel = cleanString(payload.unit_label || catalogItem?.unit_label, 40) || 'sesiones';
-  const requestedTotal = roundMoney(payload.sold_amount ?? catalogItem?.base_price);
+  const rawTotal = payload.sold_amount ?? catalogItem?.base_price;
+  if (!['number', 'string'].includes(typeof rawTotal) || (typeof rawTotal === 'string' && rawTotal.trim() === '')
+    || !Number.isFinite(Number(rawTotal))) throw domainError(422, 'voucher_price_required', 'Indica un precio de venta; una tarifa sin definir no es gratuita.');
+  const requestedTotal = roundMoney(rawTotal);
   if (!name) throw domainError(400, 'voucher_name_required', 'El bono necesita un nombre.');
   if (totalUnits <= 0 || requestedTotal < 0) {
     throw domainError(400, 'voucher_sale_invalid', 'Revisa las sesiones y el precio del bono.');
   }
-  const saleToken = cleanString(payload.sale_reference, 80) || crypto.randomUUID();
-  const sourceReference = `voucher-sale:${saleToken}`;
-  const lineKey = `voucher-${saleToken}`.slice(0, 80);
   const productType = ['voucher', 'pack'].includes(catalogItem?.product_type)
     ? catalogItem.product_type
     : 'voucher';
-  let budget = await createBudget({
+  let budget = historicalLine ? serializeBudget(historical, historicalVersion, [], []) : await createBudget({
     patientIdentifier,
     clinicId,
     actorId,

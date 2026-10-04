@@ -1,0 +1,31 @@
+'use strict';
+// Synthetic, private MySQL8 socket. No application DB, HTTP or providers.
+const assert = require('node:assert/strict');
+const Sequelize = require('sequelize');
+const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
+const { NAME, capture, verifyAfter, validateBefore, boundedQueryInterface } = require('../program-commercial-schema-release');
+const migration = require('../../../migrations/20261004180000-program-commercial-price-profile');
+withIsolatedCampaignMysql(async ({ sql, report }) => {
+  await sql.query('CREATE TABLE TreatmentPrograms (id INT PRIMARY KEY, name VARCHAR(255), appointments JSON, notes TEXT) ENGINE=InnoDB');
+  await sql.query('CREATE TABLE TreatmentProgramRevisions (id INT PRIMARY KEY, snapshot JSON) ENGINE=InnoDB');
+  await sql.query('CREATE TABLE SequelizeMeta (name VARCHAR(255) PRIMARY KEY) ENGINE=InnoDB');
+  await sql.query('INSERT INTO TreatmentPrograms VALUES (1,?,?,?)', { replacements: ['Programa ficticio', JSON.stringify([{ key: 's1', treatment_ids: [5], offset_days: null }]), 'Dos líneas\nTarifa final pendiente'] });
+  await sql.query('INSERT INTO TreatmentProgramRevisions VALUES (1,?)', { replacements: [JSON.stringify({ prior: true, total_price: 120, price_profile: null })] });
+  await sql.query('INSERT INTO SequelizeMeta VALUES (?)', { replacements: ['previous-migration.js'] });
+  const connection = { query: (text, values = []) => sql.query(text, { replacements: values }) };
+  const before = await capture(connection);
+  await migration.up(boundedQueryInterface(connection, Sequelize), Sequelize);
+  const afterDdl = await capture(connection);
+  verifyAfter(before, afterDdl);
+  report.checks.push({ name: 'INSTANT nullable JSON preserves every previous program/revision and metadata value', passed: true });
+  const info = { commit: 'a'.repeat(40), migration_sha256: 'b'.repeat(64) };
+  const partial = { version: 1, target: 'crm', migration: NAME, source_commit: info.commit, migration_sha256: info.migration_sha256, generated_at: new Date().toISOString(), before: afterDdl };
+  assert.throws(() => validateBefore(partial, afterDdl, info, 'crm'), /PARTIAL/);
+  report.checks.push({ name: 'DDL without migration registration is not blindly retried or rolled back', passed: true });
+  await connection.query('INSERT INTO SequelizeMeta(name) VALUES (?)', [NAME]);
+  verifyAfter(before, await capture(connection), { registered: true });
+  await migration.up(boundedQueryInterface(connection, Sequelize), Sequelize);
+  verifyAfter(before, await capture(connection), { registered: true });
+  await assert.rejects(migration.down(), /./);
+  report.checks.push({ name: 'Exact one migration registration and idempotent add; destructive down refused', passed: true });
+}).catch(error => { console.error(error); process.exitCode = 1; });

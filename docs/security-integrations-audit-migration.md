@@ -185,6 +185,45 @@ CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node --test src/scripts/tests/security_schema
 
 ## Fuentes del contrato y registro
 
+### Columna fiscal propia de programas — corte acotado 04/10/2026
+
+`src/scripts/program-commercial-schema-release.js` aplica únicamente
+`20261004180000-program-commercial-price-profile.js`: añade
+`TreatmentPrograms.price_profile JSON NULL` con `ALGORITHM=INSTANT`, sin
+rellenar datos ni hacer `sync()` o ejecutar el conjunto de migraciones.
+
+Requiere fuente `back-dev` limpia y comprometida. `--mode prepare --target
+dev|crm --private-output ...` captura en lectura la identidad de la BD, todas
+las columnas previas, la metadata completa, programas y revisiones. El plan y
+una copia completa verificada del mismo destino deben tener menos de dos horas.
+El backup se prepara con `cliniccloud-operator-backup.js`; no basta una copia de
+las tablas afectadas ni una copia de código.
+
+`--mode apply` exige `--plan`, `--approved-migration-sha256`,
+`--backup-manifest` y `--private-journal` nuevo bajo `secure-imports`. DEV exige
+detener previamente API y worker de seguridad; conservar cuáles estaban activos
+para restaurarlos tras publicar. CRM conserva escritores antiguos compatibles:
+el ADD nullable es online y no tiene fallback a copiar/reconstruir la tabla.
+
+Comprueba el plan sin deriva antes de DDL y conserva un journal exclusivo con
+hashes y fsync. Antes y después del único INSERT en `SequelizeMeta` verifica que
+programas, revisiones y columnas anteriores siguen idénticos, todos los nuevos
+perfiles son NULL y la metadata sólo ha añadido esa migración. `--mode verify`
+requiere el plan original y la misma fuente; no acredita un corte por ver sólo
+que exista una columna.
+
+Un fallo después de DDL requiere inspeccionar el journal: no ejecutar `down`,
+no reintentar una columna sin registro y no restaurar globalmente la BD. Mantener
+el esquema aditivo al revertir código. El preflight de API/DEV/gateway incluye
+este campo incluso con gates de programas desactivados, porque el modelo puede
+seleccionarlo. Publicar todos los consumidores compatibles antes de aprobar
+componentes reales o activar nuevas ventas.
+
+Pruebas offline: `program_commercial_schema_release.test.js` e integración
+`program_commercial_schema_mysql.integration.js` en MySQL ficticio aislado.
+La aplicación no clasifica IVA, activa tratamientos, cambia firmas ni reescribe
+documentos económicos. Estado y evidencias efectivos se registran en 19 y 99.
+
 - **Contrato de producto:** frontend 39, 04 y documentos del dominio afectado.
 - **API:** `src/Documentacion/13-backend.md`, seguido del espejo frontend.
 - **Estado verificable de un corte:** acta con SHAs, flags, DDL y evidencia.

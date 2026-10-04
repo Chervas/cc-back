@@ -62,6 +62,27 @@ test('draft definitions normalize simple fields without inventing appointments o
   assert.throws(() => contract.normalizeValues(body({ appointments: [{ key: 'a', treatment_ids: [10, 10] }] })), /repetir/);
   assert.throws(() => contract.normalizeValues(body({ appointments: [{ key: 'a', treatment_ids: [10], offset_days: true }] })), /días/);
 });
+test('included-only components allow active clinical definition but explicit programme fiscal profile gates new sales', async () => {
+  const commercial = require('../../lib/treatment-commercial-policy');
+  const included = treatment({ precio_base: null, clinical_config: { catalog_status: 'active', booking_profile: profile, fiscal_mapping_pending: true,
+    source_price: { mode: 'included', gross_amount: null }, commercial: { sale_mode: 'program_component_only' } } });
+  included.clinical_config = commercial.approveComponent(included, { confirm: true, actorId: 7 });
+  const { service, state } = harness({ treatments: [included] });
+  const created = await service.create({ clinicId: 72, actorId: 7, payload: body({ status: 'active' }) });
+  assert.equal(created.item.summary.issues.length, 0); assert.equal(created.item.status, 'active');
+  assert.equal(created.item.commercial_ready, false); assert.equal(created.item.purchase_enabled, false);
+  assert.equal(created.item.commercial_issues[0].code, 'program_price_profile_required');
+  assert.equal(created.item.appointments[0].treatments[0].sale_mode, 'program_component_only');
+  assert.equal(created.item.appointments[0].treatments[0].stored_catalog_price, null);
+  const own = { schema_version: 1, price_semantics: 'gross_tax_included', tax_percent: 21, exemption_reason: null };
+  const updated = await service.update({ clinicId: 72, id: created.item.id, actorId: 7, payload: { expected_version: 1, price_profile: own } });
+  assert.equal(updated.item.commercial_ready, true); assert.deepEqual(updated.item.price_profile, own);
+  assert.equal(state.revisions.length, 2); assert.equal(state.revisions[0].snapshot.price_profile, null);
+  assert.deepEqual(state.revisions[1].snapshot.price_profile, own);
+  await assert.rejects(service.update({ clinicId: 66, id: created.item.id, actorId: 7, payload: { expected_version: 2, price_profile: own } }), { code: 'program_not_found' });
+  await assert.rejects(service.update({ clinicId: 72, id: created.item.id, actorId: 7, payload: { expected_version: 1, price_profile: own } }), { code: 'program_version_conflict' });
+  assert.equal(state.revisions.length, 2);
+});
 test('backend resolves names, durations and profiles; preview never writes', async () => {
   const { service, state } = harness();
   const result = await service.preview({ clinicId: 72, payload: body() });
@@ -143,6 +164,21 @@ test('revision failure rolls back definition creation', async () => {
   const { service, state } = harness(); state.failRevision = true;
   await assert.rejects(() => service.create({ clinicId: 72, actorId: 1, payload: body() }));
   assert.equal(state.programs.length, 0); assert.equal(state.revisions.length, 0);
+});
+test('upgrade retry accepts the exact legacy NULL-profile request hash, never a different price/profile', async () => {
+  const { service, state } = harness();
+  const payload = body({ idempotency_key: 'legacy-key' });
+  const created = await service.create({ clinicId: 72, actorId: 1, payload });
+  const legacyValues = contract.normalizeValues(payload); delete legacyValues.price_profile;
+  state.programs[0].request_payload_hash = contract.payloadHash(legacyValues);
+  const retry = await service.create({ clinicId: 72, actorId: 1, payload });
+  assert.equal(retry.created, false); assert.equal(retry.item.id, created.item.id); assert.equal(state.revisions.length, 1);
+  await assert.rejects(service.create({ clinicId: 72, actorId: 1, payload: { ...payload, total_price: 621 } }), { code: 'program_idempotency_conflict' });
+  const own = { schema_version: 1, price_semantics: 'gross_tax_included', tax_percent: 21, exemption_reason: null };
+  await assert.rejects(service.create({ clinicId: 72, actorId: 1, payload: { ...payload, price_profile: own } }), { code: 'program_idempotency_conflict' });
+  state.programs[0].price_profile = own;
+  await assert.rejects(service.create({ clinicId: 72, actorId: 1, payload }), { code: 'program_idempotency_conflict' });
+  assert.equal(state.programs.length, 1); assert.equal(state.revisions.length, 1);
 });
 test('get/update enforce definition clinic and cannot move it across clinics', async () => {
   const { service } = harness();

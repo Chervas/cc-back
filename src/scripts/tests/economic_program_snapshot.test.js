@@ -212,6 +212,7 @@ test('budget creation retries produce one sale, reject changed request data and 
     EconomicBudgetEvent: { create: async (event) => events.push(event) },
     createVersion: async ({ budget, payload }) => { const row = { budget_id: budget.id, design_config: { program_request_hash: contract.requestHash(payload) } }; versions.push(row); return row; },
     syncVoucherDefinitions: async () => {}, nextBudgetNumber: async () => 'PRES-TEST',
+    assertBudgetCommercial: async () => {}, // Tested independently by program_commercial_policy: this fixture isolates retry semantics.
     serializeBudget: (budget) => ({ id: budget.public_id }),
     cleanString: (value) => String(value || '').trim(), dateOrNull: () => null,
     domainError: (statusCode, code, message) => Object.assign(new Error(message), { statusCode, code }),

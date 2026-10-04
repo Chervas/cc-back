@@ -42,7 +42,8 @@ function mergeClinicalConfig(previous, patch) {
   if (result.booking_profile != null) {
     result.booking_profile = normalizeBookingProfile(result.booking_profile, { allowIncomplete: result.catalog_status === 'draft' });
   }
-  return Object.keys(result).length ? result : null;
+  const commercial = require('./treatment-commercial-policy').mergeCommercialConfig(previous, result);
+  return Object.keys(commercial).length ? commercial : null;
 }
 
 function applyImportedPriceReview(previous, next, { confirm, amount, actorId, now = new Date() } = {}) {
@@ -104,6 +105,11 @@ function catalogPrice(treatment) {
   }
   return { amount: treatment.precio_base == null ? null : Number(treatment.precio_base), label: 'habitual', semantics: 'existing_catalog_price', review_required: false };
 }
-function catalogDto(treatment) { const value = treatment?.toJSON ? treatment.toJSON() : treatment; return { ...value, catalog_price: catalogPrice(value) }; }
+function catalogDto(treatment) { const value = treatment?.toJSON ? treatment.toJSON() : treatment;
+  const component_policy = require('./treatment-commercial-policy').policy(value);
+  return { ...value, catalog_price: component_policy.sale_mode === 'program_component_only'
+    ? { amount: null, label: 'Incluido en programas · no se vende por separado', semantics: 'included_in_program', review_required: component_policy.requires_component_approval }
+    : catalogPrice(value), standalone_sellable: component_policy.sale_mode === 'standalone', component_policy };
+}
 
 module.exports = { mergeClinicalConfig, applyImportedPriceReview, assertCatalogEditable, isObsolete, catalogState, catalogError, catalogPrice, catalogDto };

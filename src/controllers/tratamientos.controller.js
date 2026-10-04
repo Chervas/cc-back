@@ -280,10 +280,15 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         ? normalizeInstallationIds(instalaciones_habilitadas)
         : null;
 
+    require('../lib/treatment-commercial-policy').assertNoClientImportEvidence(null, clinical_config);
     const normalizedClinicalConfig = applyImportedPriceReview(null, mergeClinicalConfig(null, clinical_config), { confirm: req.body.confirm_imported_price });
-    await validateCatalogResources({ origen, clinica_id: clinicaIdNum, grupo_clinica_id, clinical_config: normalizedClinicalConfig }, db);
+    const component = normalizedClinicalConfig?.commercial?.sale_mode === 'program_component_only';
+    if (req.body.confirm_program_component != null && typeof req.body.confirm_program_component !== 'boolean') throw require('../lib/treatment-catalog-contract').catalogError('La aprobación del componente debe ser explícita.', 'component_confirmation_invalid');
+    if (component && precio_base !== null) throw require('../lib/treatment-catalog-contract').catalogError('El componente incluido debe tener tarifa individual NULL.', 'component_standalone_price_forbidden', 422);
+    const approveNewComponent = component && req.body.confirm_program_component === true;
+    if (!approveNewComponent) await validateCatalogResources({ origen, clinica_id: clinicaIdNum, grupo_clinica_id, precio_base, clinical_config: normalizedClinicalConfig }, db);
     await treatmentAutomationScope.assertReferenceScope({ origen, clinica_id: clinicaIdNum, grupo_clinica_id, appointment_automation_template_key });
-    const tratamiento = await Tratamiento.create({
+    const treatmentValues = {
         nombre,
         codigo: codigo || null,
         disciplina,
@@ -312,7 +317,18 @@ exports.createTratamiento = asyncHandler(async (req, res) => {
         instalaciones_habilitadas: enabledInstallationIds,
         clinica_id: clinicaIdNum || null,
         grupo_clinica_id: grupo_clinica_id || null
-    });
+    };
+    const tratamiento = approveNewComponent ? await db.sequelize.transaction(async transaction => {
+        const created = await Tratamiento.create({ ...treatmentValues, activo: false,
+            clinical_config: { ...normalizedClinicalConfig, catalog_status: 'draft' } }, { transaction });
+        created.clinical_config = require('../lib/treatment-commercial-policy').approveComponent({ ...created.toJSON(), clinical_config: normalizedClinicalConfig }, {
+            confirm: true, actorId: req.userData?.userId,
+        });
+        created.activo = treatmentValues.activo;
+        await validateCatalogResources(created, db, { transaction });
+        await created.save({ transaction });
+        return created;
+    }) : await Tratamiento.create(treatmentValues);
 
     res.status(201).json(catalogDto(tratamiento));
 });
@@ -326,6 +342,7 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
     }
     assertCatalogEditable(tratamiento);
     const previousClinicalConfig = tratamiento.clinical_config;
+    require('../lib/treatment-commercial-policy').assertNoClientImportEvidence(previousClinicalConfig, req.body?.clinical_config);
     const updatableFields = [
         'nombre',
         'codigo',
@@ -401,6 +418,16 @@ exports.updateTratamiento = asyncHandler(async (req, res) => {
     }
     tratamiento.clinical_config = applyImportedPriceReview(previousClinicalConfig, tratamiento.clinical_config, {
         confirm: req.body.confirm_imported_price, amount: req.body.precio_base, actorId: req.userData?.userId,
+    });
+    const commercialPolicy = require('../lib/treatment-commercial-policy');
+    if (previousClinicalConfig?.commercial?.sale_mode === 'program_component_only'
+        && commercialPolicy.saleMode(tratamiento) === 'standalone'
+        && (typeof req.body.precio_base !== 'number' || !Number.isFinite(req.body.precio_base) || req.body.precio_base < 0
+            || !require('../lib/economicPriceProfile').profileFromTreatment(tratamiento))) {
+        throw require('../lib/treatment-catalog-contract').catalogError('Define expresamente una tarifa individual y su fiscalidad antes de ofrecer este componente por separado.', 'component_standalone_review_required', 422);
+    }
+    tratamiento.clinical_config = commercialPolicy.approveComponent(tratamiento, {
+        confirm: req.body.confirm_program_component, actorId: req.userData?.userId,
     });
     if (['draft', 'obsolete'].includes(tratamiento.clinical_config?.catalog_status)) tratamiento.activo = false;
     await validateCatalogResources(tratamiento, db);

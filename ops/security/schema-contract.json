@@ -4287,6 +4287,12 @@
       ],
       "checks": [],
       "foreignKeys": []
+    },
+    "TreatmentPrograms": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [{"COLUMN_NAME":"price_profile","COLUMN_TYPE":"json","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}],
+      "indexes": []
     }
   },
   "migrations": [
@@ -4336,6 +4342,7 @@
     {"name": "20260919200000-create-business-profile-mutation-journal.js", "sha256": "3c13134c86ab24e753115e1292e473504ebbf6307f2b4a9582f0c79d08ab055b"},
     {"name": "20260919210000-create-business-profile-cache-coordination.js", "sha256": "d05ec2f4efb1deea3a9c8a5aeb889d5202d0bcd45f915458f2f709adc34e6825"},
     {"name": "20260922153000-create-whatsapp-phone-activations.js", "sha256": "243e65409413549b47a1befc2570d1f2164235324592b93465ff12c2ad003d12"},
-    {"name": "20260925113000-whatsapp-activation-history.js", "sha256": "44befbf80817e894c95cbc0429c221f671b9e77cab13b7ec52bf768ceddcb0bc"}
+    {"name": "20260925113000-whatsapp-activation-history.js", "sha256": "44befbf80817e894c95cbc0429c221f671b9e77cab13b7ec52bf768ceddcb0bc"},
+    {"name": "20261004180000-program-commercial-price-profile.js", "sha256": "c25968779c302bcf22504d39668718f4f55e836f42e0485af7d987a0a65e37e5"}
   ]
 }

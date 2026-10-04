@@ -165,7 +165,19 @@ El permiso para decidir autónomamente no se registra como prueba de una
 finalidad clínica. No fijar un tipo masivo ni fabricar una exención. Conserva
 la revisión fiscal mientras falte el supuesto de hecho del servicio, no porque
 no se haya investigado la norma. Mantener precios finales y economía anterior.
-El contrato vigente tampoco admite `standalone_sales_enabled=false` como
-política efectiva: es una propuesta, no una protección implementada. Las
-variantes incluidas con `precio_base=null` requieren una política comercial
-canónica antes de activarse; no usar un cero ficticio para superar el guard.
+La política comercial canónica de la capa adicional del 04/10 es
+`clinical_config.commercial.sale_mode=program_component_only`. Conserva
+`precio_base=null` y exige aprobación autenticada con evidencia server-owned
+para disponer de la prestación como componente de un programa. La excepción
+no aprueba fiscalidad, habilitación profesional, documentación ni asignaciones
+clínicas. No usar `standalone_sales_enabled=false` como flag decorativo ni un
+cero ficticio para superar la validación.
+
+La venta individual está bloqueada también por los consumidores financieros.
+Los programas con componentes incluidos requieren fiscalidad propia del precio
+total, guardada en `TreatmentPrograms.price_profile`, versionada y congelada en
+la oferta. No reparte impuestos mezclados ni decide la indicación fiscal de cada
+paciente. Una deuda o compra ya aceptada conserva su snapshot; cobrarla no
+reinterpreta el catálogo. La DDL nullable no hace backfill de datos de negocio.
+Publicación efectiva y evidencias: documentación central 19 y 99; no confundir
+este contrato técnico con la activación de las cinco definiciones reales BS.

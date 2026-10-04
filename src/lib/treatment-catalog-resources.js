@@ -3,7 +3,14 @@ const { catalogError } = require('./treatment-catalog-contract');
 const { requiresMultiResourceBooking } = require('./booking-profile');
 
 async function validateCatalogResources(treatment, db, { transaction, environment = process.env } = {}) {
-  if (treatment.clinical_config?.fiscal_mapping_pending === true && !['draft', 'obsolete'].includes(treatment.clinical_config.catalog_status)) {
+  const commercial = require('./treatment-commercial-policy');
+  const included = commercial.saleMode(treatment) === 'program_component_only';
+  if (included && treatment.precio_base !== null) throw catalogError('Un componente incluido no tiene tarifa individual.', 'component_standalone_price_forbidden', 422);
+  if (included && !['draft', 'obsolete'].includes(treatment.clinical_config.catalog_status) && !commercial.componentApproved(treatment)) {
+    throw catalogError('Aprueba expresamente el componente incluido antes de activarlo.', 'component_approval_required', 422);
+  }
+  if (treatment.clinical_config?.fiscal_mapping_pending === true && !['draft', 'obsolete'].includes(treatment.clinical_config.catalog_status)
+      && !(included && commercial.componentApproved(treatment))) {
     throw catalogError('El precio del archivo incluye impuestos. Completa su revisión fiscal antes de ofrecer el tratamiento; puedes conservarlo como Borrador.', 'imported_treatment_fiscal_review_pending', 422);
   }
   const profile = treatment.clinical_config?.booking_profile;

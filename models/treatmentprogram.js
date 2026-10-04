@@ -9,6 +9,7 @@ module.exports = (sequelize, DataTypes) => {
     kind: { type: DataTypes.STRING(16), allowNull: false },
     status: { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'draft' },
     total_price: { type: DataTypes.DECIMAL(12, 2), allowNull: true },
+    price_profile: { type: DataTypes.JSON, allowNull: true },
     notes: { type: DataTypes.TEXT, allowNull: true },
     appointments: { type: DataTypes.JSON, allowNull: false },
     version_number: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 1 },

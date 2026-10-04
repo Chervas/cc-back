@@ -363,8 +363,9 @@ function resolveCitaAppointmentPrice(cita) {
     if (!tratamiento) {
         return null;
     }
+    if (require('../lib/treatment-commercial-policy').saleMode(tratamiento) === 'program_component_only') return null;
 
-    const basePrice = normalizeMoneyValue(tratamiento.precio_base) ?? 0;
+    const basePrice = normalizeMoneyValue(tratamiento.precio_base);
     const priceCode = appointmentTypePriceCode(plain.tipo_cita);
     if (!priceCode) {
         return basePrice;
