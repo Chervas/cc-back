@@ -1,8 +1,9 @@
 'use strict';
 const { hash } = require('./adapter');
 const { instant } = require('./appointments-apply');
+const { storedBirthDateHold } = require('./reviewed-contact-resolutions');
 const sqlDate = value => value == null ? null : instant(value).replace('T', ' ').replace('Z', '');
-async function createNewPatientsStore(connection, { groupId, readOnly = true }) {
+async function createNewPatientsStore(connection, { groupId, readOnly = true, databaseTarget = null }) {
   if (!Number.isSafeInteger(groupId) || groupId <= 0) throw new Error('NEW_PATIENT_GROUP_REQUIRED');
   const query = async (sql, values = []) => (await connection.query(sql, values))[0];
   const triggers = await query("SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE IN ('Pacientes','PatientCustomFields','PacienteClinicas')");
@@ -30,6 +31,7 @@ async function createNewPatientsStore(connection, { groupId, readOnly = true }) 
     },
     async insertPatient(operation, payload, marker) {
       if (readOnly || !inTransaction) throw new Error('NEW_PATIENT_WRITE_TRANSACTION_REQUIRED');
+      if(operation.operator_resolution&&databaseTarget!=='crm') throw Error('REVIEWED_CONTACT_CRM_TARGET_REQUIRED');
       const columns = ['public_id', 'nombre', 'apellidos', 'dni', 'telefono_movil', 'telefono_secundario', 'email', 'fecha_nacimiento', 'fecha_alta', 'clinica_id', 'idioma_preferido', 'paciente_conocido'];
       if (Object.keys(payload).sort().join('|') !== [...columns].sort().join('|')) throw new Error('NEW_PATIENT_COLUMN_ALLOWLIST_VIOLATION');
       const values = columns.map(key => ['fecha_alta', 'fecha_nacimiento'].includes(key) ? sqlDate(payload[key]) : payload[key]);
@@ -41,7 +43,12 @@ async function createNewPatientsStore(connection, { groupId, readOnly = true }) 
       const snapshot = { version: 'cliniccloud_contact_snapshot/1', source_account: marker.source_account,
         contact: { idContacto: operation.source_contact_id, num: String(operation.history_number), alta: operation.source_created.raw }, fields, stored_fields: storedFieldsBaseline,
         source_created: operation.source_created, provenance: operation.provenance,
-        import: { ...marker, operation_sha256: operation.operation_sha256, primary_rule: operation.primary_rule, primary_evidence: operation.primary_evidence, automation_policy: 'hold', messages_enabled: false } };
+        import: { ...marker, operation_sha256: operation.operation_sha256, primary_rule: operation.primary_rule, primary_evidence: operation.primary_evidence,
+          ...(operation.operator_resolution?{operator_resolution:operation.operator_resolution}:{}),automation_policy: 'hold', messages_enabled: false } };
+      if(operation.operator_resolution?.kind==='invalid_birth_date_omission'){
+        snapshot.import.birth_date_hold={version:1,active:true,decision_sha256:operation.operator_resolution.decision_sha256,age_status:'unknown',later_demographic_review_required:true};
+        storedBirthDateHold(snapshot);
+      }
       const entries = [
         { key: 'cliniccloud_source_contact_id', label: 'ID ClinicCloud', column: 'idContacto', type: 'text', value: String(operation.source_contact_id) },
         { key: 'cliniccloud_contact_snapshot', label: 'Datos de importación ClinicCloud', column: 'cliniccloud_contact_snapshot', type: 'json', value: JSON.stringify(snapshot) },

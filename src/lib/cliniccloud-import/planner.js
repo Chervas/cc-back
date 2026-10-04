@@ -56,6 +56,14 @@ function planContacts(contacts, historical, patients) {
       const localBaseline = local.last_imported_local_fields || baseline;
       for (const [field, value] of Object.entries(contact.fields)) {
         const current = local.fields?.[field];
+        if(field==='birth_date'&&local.birth_date_hold){
+          if(value&&value!==current&&value!==baseline?.[field]){
+            action.reasons.push('REVIEWED_INVALID_SOURCE_BIRTH_DATE_HELD');
+            action.demographic_review={field:'birth_date',current_source_value:value,provenance:contact.provenance,
+              decision_sha256:local.birth_date_hold.decision_sha256,age_status:'unknown'};
+          }
+          continue;
+        }
         if (!value || value === current || value === baseline?.[field]) continue;
         if (current === undefined || !baseline || (current !== localBaseline[field] && current !== value)) action.reasons.push(`LOCAL_FIELD_CONFLICT:${field}`);
         else action.fields_patch[field] = value;

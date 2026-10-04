@@ -15,6 +15,7 @@ const { storedReviewedSourcePair } = require('../lib/cliniccloud-import/reviewed
 const { storedConfirmedSelection, selectionLocalChanged } = require('../lib/cliniccloud-import/confirmed-source-selection');
 const { storedSourceRefresh, sourceRefreshChanged } = require('../lib/cliniccloud-import/source-refresh');
 const { duplicateVisitLinks } = require('../lib/cliniccloud-import/duplicate-visits');
+const { storedBirthDateHold } = require('../lib/cliniccloud-import/reviewed-contact-resolutions');
 
 function importedDeltaBaseline(row, metadata) {
   const delta = metadata.cliniccloud_delta;
@@ -45,6 +46,15 @@ function canonicalImportedBaseline(rows, fieldName = 'fields') {
   });
   if (new Set(fields.map(hash)).size !== 1) throw new Error('CANONICAL_CONTACT_BASELINE_AMBIGUOUS');
   return fields[0];
+}
+
+function canonicalImportedBirthDateHold(rows){
+  const holds=rows.filter(row=>row.source_column==='cliniccloud_contact_snapshot').map(row=>{
+    const value=typeof row.canonical_snapshot==='string'?JSON.parse(row.canonical_snapshot):row.canonical_snapshot;
+    return storedBirthDateHold(value);
+  }).filter(Boolean);
+  if(new Set(holds.map(hash)).size>1) throw Error('CANONICAL_CONTACT_BIRTH_HOLD_AMBIGUOUS');
+  return holds[0]||null;
 }
 
 async function run(args) {
@@ -91,7 +101,7 @@ async function run(args) {
     snapshot = {
       version: 1, database_target: target, source_account: options['--source-account'], captured_at: new Date().toISOString(), database_group_id: clinics[0].grupoClinicaId,
       complete_for: { clinic_ids: clinicIds, start, end, all_later_appointments_included: true },
-      patients: patients.map((p) => ({ id: p.id_paciente, clinic_id: p.clinica_id, source_contact_ids: [...new Set([...(byPatient.get(String(p.id_paciente)) || []).map((r) => String(r.value).trim()), ...(rawByPatient.get(String(p.id_paciente)) || []).map((r) => r.source_contact_id).filter((v) => v && v !== 'null')])], source_history_numbers: [...new Set((rawByPatient.get(String(p.id_paciente)) || []).map((r) => r.history_number).filter((v) => v && v !== 'null'))], last_imported_fields: canonicalImportedBaseline(rawByPatient.get(String(p.id_paciente)) || []), last_imported_local_fields: canonicalImportedBaseline(rawByPatient.get(String(p.id_paciente)) || [], 'stored_fields'), fields: { name: p.nombre || '', surname: p.apellidos || '', email: p.email || '', phone: p.telefono_movil || '', national_id: p.dni || '', birth_date: dateOnly(p.fecha_nacimiento) || '' } })),
+      patients: patients.map((p) => ({ id: p.id_paciente, clinic_id: p.clinica_id, source_contact_ids: [...new Set([...(byPatient.get(String(p.id_paciente)) || []).map((r) => String(r.value).trim()), ...(rawByPatient.get(String(p.id_paciente)) || []).map((r) => r.source_contact_id).filter((v) => v && v !== 'null')])], source_history_numbers: [...new Set((rawByPatient.get(String(p.id_paciente)) || []).map((r) => r.history_number).filter((v) => v && v !== 'null'))], last_imported_fields: canonicalImportedBaseline(rawByPatient.get(String(p.id_paciente)) || []), last_imported_local_fields: canonicalImportedBaseline(rawByPatient.get(String(p.id_paciente)) || [], 'stored_fields'), ...(canonicalImportedBirthDateHold(rawByPatient.get(String(p.id_paciente))||[])?{birth_date_hold:canonicalImportedBirthDateHold(rawByPatient.get(String(p.id_paciente))||[])}:{}), fields: { name: p.nombre || '', surname: p.apellidos || '', email: p.email || '', phone: p.telefono_movil || '', national_id: p.dni || '', birth_date: dateOnly(p.fecha_nacimiento) || '' } })),
       appointments: rows.map((r) => {
         const metadata = metadataOf(r);
         const delta = importedDeltaBaseline(r, metadata);
@@ -139,4 +149,4 @@ if (require.main === module) run(process.argv.slice(2)).then((summary) => proces
   process.stderr.write(`${/^[A-Z][A-Z0-9_:]+$/.test(error.message) ? error.message : 'CLINICCLOUD_SNAPSHOT_FAILED'}\n`);
   process.exitCode = 1;
 });
-module.exports = { run, canonicalImportedBaseline, importedDeltaBaseline };
+module.exports = { run, canonicalImportedBaseline, importedDeltaBaseline, canonicalImportedBirthDateHold };

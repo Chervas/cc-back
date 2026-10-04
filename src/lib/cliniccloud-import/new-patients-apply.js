@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const { hash, norm, dateOnly, localDateTime, localToUtc, normalizeContacts } = require('./adapter');
 const { normalizeHumanName } = require('../name');
 const { isIntakePlaceholderName } = require('./intake-placeholder-name');
+const { validateReviewedContactResolutions, contactResolution, validateOperationResolution, assertReviewedOperationsFresh, KINDS } = require('./reviewed-contact-resolutions');
 const VERSION = 'cliniccloud-new-patients/1';
 const ACCOUNT = 'cliniccloud-5880';
 const fail = code => { throw new Error(code); };
@@ -36,28 +37,38 @@ function sourceCreated(raw, coverage = { start: '2026-08-01', end: '2026-09-05' 
 }
 function verifyAudit(audit, sources) {
   const { plan_sha256, ...body } = audit;
-  const observed=audit.manifest.version==='cliniccloud-new-patients-audit/3';
-  if (hash(body) !== plan_sha256 || !['cliniccloud-new-patients-audit/1', 'cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3'].includes(audit.manifest.version) || audit.manifest.source_account !== ACCOUNT
+  const reviewed=audit.manifest.version==='cliniccloud-new-patients-audit/4';
+  const observed=reviewed||audit.manifest.version==='cliniccloud-new-patients-audit/3';
+  if (hash(body) !== plan_sha256 || !['cliniccloud-new-patients-audit/1', 'cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3','cliniccloud-new-patients-audit/4'].includes(audit.manifest.version) || audit.manifest.source_account !== ACCOUNT
     || audit.manifest.policy.whatsapp_ignored !== true || (observed
       ?audit.manifest.policy.primary_requires_export_or_observed_history_coverage!==true
       :audit.manifest.policy.primary_requires_source_creation_inside_export_coverage!==true)) fail('NEW_PATIENT_AUDIT_INTEGRITY_MISMATCH');
-  if (['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3'].includes(audit.manifest.version)) {
+  if (['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3','cliniccloud-new-patients-audit/4'].includes(audit.manifest.version)) {
     const roles = audit.manifest.source_files.map(file => file.role).sort();
-    const expected=['appointments','contacts','historic_contacts','historic_types',...(observed?['historic_services','live_histories','live_state_labels']:[])].sort();
+    const expected=['appointments','contacts','historic_contacts','historic_types',...(observed?['historic_services','live_histories','live_state_labels']:[]),...(reviewed?['reviewed_contact_resolutions']:[])].sort();
     if (hash(roles) !== hash(expected)) fail('NEW_PATIENT_SOURCE_MANIFEST_INCOMPLETE');
     require('./new-patients-audit').sourceWindow(audit.manifest);
   }
   for (const file of audit.manifest.source_files) if (sources[file.role]?.file.sha256 !== file.sha256) fail('SOURCE_FILE_HASH_MISMATCH');
+  const operatorReview=validateReviewedContactResolutions(sources);
+  if(reviewed){
+    if(!operatorReview||audit.manifest.policy.operator_reviewed_scope_only!==true||audit.manifest.policy.max_batch!==3
+      ||audit.manifest.policy.reviewed_contact_resolutions_sha256!==operatorReview.resolutions_sha256
+      ||hash(audit.manifest.policy.reviewed_source_contact_ids)!==hash(operatorReview.decisions.map(row=>row.source_contact_id).sort())
+      ||hash(audit.rows.map(row=>row.source_contact_id).sort())!==hash(audit.manifest.policy.reviewed_source_contact_ids)) fail('REVIEWED_CONTACT_AUDIT_SCOPE_CHANGED');
+  }else if(operatorReview) fail('REVIEWED_CONTACT_RESOLUTIONS_REQUIRE_V4_AUDIT');
   const safe = audit.rows.filter(row => row.status === 'safe_candidate_for_reviewed_creation');
   if (!safe.length || safe.length > 70 || new Set(safe.map(row => row.source_contact_id)).size !== safe.length) fail('NEW_PATIENT_BATCH_SCOPE_INVALID');
+  if(reviewed&&safe.length!==3) fail('REVIEWED_CONTACT_RESOLUTIONS_SCOPE_NOT_READY');
   return safe;
 }
 function operationsFromAudit(audit, sources, { sourceIds = null } = {}) {
   const audited = verifyAudit(audit, sources);
-  const currentAudit = ['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3'].includes(audit.manifest.version);
+  const currentAudit = ['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3','cliniccloud-new-patients-audit/4'].includes(audit.manifest.version);
   const coverage = currentAudit ? require('./new-patients-audit').sourceWindow(audit.manifest) : undefined;
   if (sourceIds && sourceIds.some(id => !audited.some(row => row.source_contact_id === id))) fail('REVIEWED_SOURCE_ID_OUTSIDE_AUDIT');
   const safe = sourceIds ? audited.filter(row => sourceIds.includes(row.source_contact_id)) : audited;
+  if(audit.manifest.version==='cliniccloud-new-patients-audit/4'&&safe.length!==3) fail('REVIEWED_CONTACT_COMPLETE_RETAIN_REQUIRED');
   const contacts = sources.contacts.rows.map(row => row.values), historic = sources.historic_contacts.rows.map(row => row.values);
   const allIdentities = contacts.map(raw => ({ id: raw.IDCONTACTO, keys: sourceIdentity(raw) }));
   const historicIdentities = historic.map(raw => ({ id: raw.idContacto, keys: identityKeys({ name: raw.nombre, surname: raw.apellidos, phones: [raw.tele1, raw.tele2], email: raw.email, national_id: raw.dni }) }));
@@ -65,6 +76,8 @@ function operationsFromAudit(audit, sources, { sourceIds = null } = {}) {
     const matches = sources.contacts.rows.filter(contact => contact.values.IDCONTACTO === row.source_contact_id);
     if (matches.length !== 1 || row.reasons.length || historic.some(contact => contact.idContacto === row.source_contact_id)) fail('SOURCE_ID_NOT_NEW_UNIQUE');
     const record = matches[0], raw = record.values, keys = sourceIdentity(raw);
+    const resolution=contactResolution(sources,row.source_contact_id);
+    if(hash(resolution)!==hash(row.operator_resolution||null)) fail('REVIEWED_CONTACT_AUDITED_RESOLUTION_CHANGED');
     const proof=currentAudit?require('./new-patients-audit').primaryProof(sources,row.source_contact_id):null;
     const created=currentAudit?require('./new-patients-audit').creationWithProof(raw,audit.manifest,proof):sourceCreated(raw,coverage);
     if (!/^[1-9]\d*$/.test(String(raw.NUM)) || String(raw.NUM) !== String(row.history_number)
@@ -75,7 +88,9 @@ function operationsFromAudit(audit, sources, { sourceIds = null } = {}) {
     if (allIdentities.some(other => other.id !== row.source_contact_id && intersects(keys, other.keys)) || historicIdentities.some(other => intersects(keys, other.keys))) fail('SOURCE_OR_HISTORIC_IDENTITY_COLLISION');
     if (![66, 72].includes(row.proposed_primary_clinic_id) || !row.membership_clinic_ids.includes(row.proposed_primary_clinic_id)
       || row.membership_clinic_ids.some(id => ![66, 72].includes(id)) || !row.primary_evidence.length
-      || !['oldest_paid_treatment', 'oldest_recorded_treatment'].includes(row.primary_rule)) fail('PRIMARY_CLINIC_EVIDENCE_REQUIRED');
+      || (!['oldest_paid_treatment', 'oldest_recorded_treatment'].includes(row.primary_rule)
+        &&!(resolution?.kind==='primary_clinic_from_observed_agenda'&&row.primary_rule==='operator_reviewed_observed_agenda'
+          &&row.proposed_primary_clinic_id===66))) fail('PRIMARY_CLINIC_EVIDENCE_REQUIRED');
     if (currentAudit) {
       if (proof.reasons.length || proof.first_evidence_date < created.local.slice(0, 10)
         || (!proof.coverage_basis&&proof.primary_evidence.some(item => item.treatment_date < audit.manifest.coverage.start || item.treatment_date > audit.manifest.coverage.end))
@@ -86,16 +101,18 @@ function operationsFromAudit(audit, sources, { sourceIds = null } = {}) {
     const normalized = normalizeContacts([record], sources.contacts.file.sha256)[0];
     if (hash(normalized.fields) !== hash(row.fields)) fail('AUDITED_CONTACT_FIELDS_CHANGED');
     if (String(raw['F. NACIMIENTO'] || '').trim() && !normalized.fields.birth_date) fail('SOURCE_BIRTH_DATE_INVALID');
-    if (normalized.fields.birth_date && normalized.fields.birth_date > created.local.slice(0, 10)) fail('BIRTH_DATE_AFTER_SOURCE_CREATION');
+    if (normalized.fields.birth_date && normalized.fields.birth_date > created.local.slice(0, 10)
+      &&resolution?.kind!=='invalid_birth_date_omission') fail('BIRTH_DATE_AFTER_SOURCE_CREATION');
     const payload = { nombre: normalizeHumanName(raw.NOMBRE), apellidos: normalizeHumanName(raw.APELLIDOS), dni: normalized.fields.national_id || null,
       telefono_movil: phoneKey(raw['TELF. MOVIL']) || null, telefono_secundario: phoneKey(raw['TELF. FIJO']) || phoneKey(raw['TELF. ADICIONAL']) || null,
-      email: emailKey(raw.EMAIL) || null, fecha_nacimiento: normalized.fields.birth_date ? `${normalized.fields.birth_date}T00:00:00.000Z` : null,
+      email: emailKey(raw.EMAIL) || null, fecha_nacimiento: resolution?.kind==='invalid_birth_date_omission'?null:normalized.fields.birth_date ? `${normalized.fields.birth_date}T00:00:00.000Z` : null,
       fecha_alta: created.utc, clinica_id: row.proposed_primary_clinic_id, idioma_preferido: 'es', paciente_conocido: true };
     if (!payload.nombre || !payload.apellidos || Object.values(payload).some(value => typeof value === 'string' && (value.length > 255 || /[\u0000-\u001f]/.test(value)))) fail('PATIENT_DEMOGRAPHICS_INVALID');
     if (!payload.telefono_movil && !payload.telefono_secundario && !payload.email) fail('CONTACT_CHANNEL_OR_GUARDIAN_REQUIRED');
     const value = { action_key: row.action_key, source_contact_id: row.source_contact_id, history_number: row.history_number, provenance: row.provenance,
       identity: keys, source_fields: normalized.fields, payload, memberships: [...new Set(row.membership_clinic_ids)].sort((a, b) => a - b), source_created: created,
-      primary_rule: row.primary_rule, primary_evidence: row.primary_evidence };
+      primary_rule: row.primary_rule, primary_evidence: row.primary_evidence,
+      ...(resolution?{operator_resolution:resolution}:{} ) };
     return { ...value, operation_sha256: hash(value) };
   }).sort((a, b) => a.source_contact_id.localeCompare(b.source_contact_id));
 }
@@ -131,25 +148,30 @@ function prepareNewPatients({ audit, sources, review, live, now = new Date().toI
     if (sourceMatches(live, operation.source_contact_id).length) fail('NEW_PATIENT_SOURCE_NOW_EXISTS');
     if (historyMatches(live, operation.history_number).length) fail('NEW_PATIENT_HISTORY_NUMBER_NOW_EXISTS');
     if (collisions(operation, live).length) fail('NEW_PATIENT_LOCAL_IDENTITY_COLLISION');
-    if (['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3'].includes(audit.manifest.version)
+    if (['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3','cliniccloud-new-patients-audit/4'].includes(audit.manifest.version)
       && live.patients.some(row => require('./new-patients-audit').nearName(operation.identity.name, localIdentity(row).name))) fail('POSSIBLE_LOCAL_NAME_VARIANT_REQUIRES_REVIEW');
   }
   const value = { version: VERSION, source_account: ACCOUNT, source_audit_sha256: audit.plan_sha256, source_files: audit.manifest.source_files,
     generated_at: now, group_id: live.group_id, clinic_ids: live.clinic_ids, automation_policy: 'hold', messages_enabled: false, appointments_created: false,
-    native_create_uniqueness_guaranteed: false, expected_global_guard: globalGuard(live), identity_review_sha256: hash(review), excluded, operations };
+    native_create_uniqueness_guaranteed: false, expected_global_guard: globalGuard(live), identity_review_sha256: hash(review), excluded, operations,
+    ...(audit.manifest.version==='cliniccloud-new-patients-audit/4'?{database_target:'crm'}:{}) };
   return { ...value, package_sha256: hash(value) };
 }
 function verifyPackage(pkg) {
   if (pkg.version !== VERSION || digestBody(pkg) !== pkg.package_sha256 || pkg.source_account !== ACCOUNT || pkg.automation_policy !== 'hold'
     || pkg.messages_enabled !== false || pkg.native_create_uniqueness_guaranteed !== false || !pkg.operations.length || pkg.operations.length > 70) fail('NEW_PATIENT_PACKAGE_INTEGRITY_MISMATCH');
   if (new Set(pkg.operations.map(row => row.source_contact_id)).size !== pkg.operations.length) fail('DUPLICATE_SOURCE_OPERATION');
+  if(pkg.operations.some(row=>row.operator_resolution)&&(pkg.database_target!=='crm'||pkg.operations.length!==3
+    ||hash(pkg.operations.map(row=>row.operator_resolution?.kind).sort())!==hash([...KINDS].sort()))) fail('REVIEWED_CONTACT_PACKAGE_SCOPE_INVALID');
   for (const operation of pkg.operations) {
     const { operation_sha256, ...body } = operation;
     if (hash(body) !== operation_sha256) fail('NEW_PATIENT_OPERATION_INTEGRITY_MISMATCH');
+    validateOperationResolution(operation);
   }
 }
 async function executeNewPatients({ pkg, approval, store, journal, now = () => Date.now(), publicId = () => `pac_${crypto.randomBytes(10).toString('hex')}` }) {
   verifyPackage(pkg);
+  assertReviewedOperationsFresh(pkg.operations,now());
   if (approval.package_sha256 !== pkg.package_sha256 || !String(approval.reviewed_by || '').trim() || approval.acknowledge_native_create_race !== true
     || approval.automation_policy !== 'hold' || !/^[a-f0-9]{64}$/.test(approval.backup_manifest_sha256 || '') || !/T.*Z$/.test(approval.expires_at || '')
     || !Number.isFinite(Date.parse(approval.expires_at)) || Date.parse(approval.expires_at) <= now()) fail('NEW_PATIENT_EXPLICIT_APPROVAL_REQUIRED');
@@ -188,6 +210,7 @@ async function executeNewPatients({ pkg, approval, store, journal, now = () => D
       if (ownCreated && historyMatches(fresh, operation.history_number).some(id => id !== ownCreated.patient_id)) fail('NEW_PATIENT_PRECOMMIT_HISTORY_COLLISION');
     }
     if (Date.parse(approval.expires_at) <= now()) fail('NEW_PATIENT_APPROVAL_EXPIRED_BEFORE_COMMIT');
+    assertReviewedOperationsFresh(pkg.operations,now());
     await journal.append({ phase: 'validated_before_commit', package_sha256: pkg.package_sha256, created, preserved, after_global_guard: globalGuard(fresh) });
   });
   await journal.append({ phase: 'committed_new_patients', package_sha256: pkg.package_sha256, created, preserved });

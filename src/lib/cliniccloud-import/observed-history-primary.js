@@ -2,10 +2,12 @@
 const {hash,norm,dateOnly}=require('./adapter');
 const {serviceClinic}=require('./primary-clinics');
 const {choosePrimaryClinic}=require('./planner');
+const {contactResolution,reviewedZeroConceptAllowed}=require('./reviewed-contact-resolutions');
 
 // A separate source adapter, not a reinterpretation of the old ZIP's numeric
 // statuses. State labels must have been observed in the current source UI.
 function observedHistoryPrimary(sources,sourceId,now=Date.now()) {
+  const resolution=contactResolution(sources,sourceId,null,now);
   const history=sources.live_histories?.data;
   if(!history?.patients?.some(p=>p.contact_id===sourceId)) return null;
   const labels=sources.live_state_labels?.data,captured=Date.parse(history.captured_at),labelTime=Date.parse(labels?.captured_at);
@@ -31,7 +33,8 @@ function observedHistoryPrimary(sources,sourceId,now=Date.now()) {
     if([-1,-2].includes(state)) continue;
     if(!appointment.conceptos.length) reasons.push('OBSERVED_HISTORY_CONCEPTS_MISSING');
     for(const concept of appointment.conceptos){
-      if(String(concept.idContacto)!==sourceId||String(concept.idCita)!==String(appointment.idCita)) throw Error('OBSERVED_HISTORY_CONCEPT_SCOPE_INVALID');
+      if((String(concept.idContacto)!==sourceId&&!reviewedZeroConceptAllowed(resolution,appointment,concept))
+        ||String(concept.idCita)!==String(appointment.idCita)) throw Error('OBSERVED_HISTORY_CONCEPT_SCOPE_INVALID');
       const classification=serviceClinic(services.get(String(concept.idServicio)));
       if(classification.blocked) continue;
       const conceptPaid=Number(concept.pagado??0),appointmentPaid=Number(appointment.pagado??0);
@@ -43,8 +46,24 @@ function observedHistoryPrimary(sources,sourceId,now=Date.now()) {
         payment_evidence_kind:state===3?'observed_source_state_pagada_not_money':conceptPaid>0||appointmentPaid>0?'observed_source_paid_amount_not_ledger':null,
         provenance:{file_sha256:sources.live_histories.file.sha256,source_appointment_sha256:hash(appointment),
           source_concept_sha256:hash(concept),state_labels_sha256:sources.live_state_labels.file.sha256,
-          services_sha256:sources.historic_services.file.sha256}});
+          services_sha256:sources.historic_services.file.sha256},
+        ...(String(concept.idContacto)==='0'?{scope_resolution:{kind:resolution.kind,decision_sha256:resolution.decision_sha256,
+          original_concept_contact_id:'0',authenticated_parent_contact_id:sourceId}}:{})});
     }
+  }
+  if(resolution?.kind==='primary_clinic_from_observed_agenda'){
+    if(reasons.length||!evidence.length||evidence.some(row=>row.clinic_id
+      ||row.classification!=='FACIAL_OR_CAPILAR_SERVICE_AMBIGUOUS'
+      ||row.treatment_id!==resolution.expected.ambiguous_service_id)) throw Error('REVIEWED_PRIMARY_AMBIGUOUS_HISTORY_CHANGED');
+    const anchor=patient.rows.find(row=>String(row.idCita)===resolution.expected.source_appointment_id);
+    return {proposed_primary_clinic_id:66,membership_clinic_ids:[66],primary_rule:'operator_reviewed_observed_agenda',
+      primary_evidence:[{source:'reviewed_observed_agenda_administrative',source_contact_id:sourceId,
+        source_appointment_id:String(anchor.idCita),source_service_id:resolution.expected.ambiguous_service_id,
+        treatment_date:dateOnly(anchor.fechaIni),clinic_id:66,administrative_only:true,
+        retained_service_ambiguity:true,decision_sha256:resolution.decision_sha256}],reasons:[],
+      first_evidence_date:evidence.map(row=>row.treatment_date).sort()[0]||null,
+      coverage_basis:{kind:'observed_patient_history_unfiltered_read_endpoint',contact_id:sourceId,appointment_count:patient.rows.length,
+        file_sha256:sources.live_histories.file.sha256,captured_at:history.captured_at}};
   }
   const choice=choosePrimaryClinic(evidence),first=choice.evidence?.[0]?.treatment_date;
   if(choice.reason) reasons.push(choice.reason);

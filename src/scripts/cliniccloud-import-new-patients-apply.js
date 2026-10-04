@@ -28,10 +28,16 @@ function loadSources(options) {
       sources[role]={file:{role,name:path.basename(options[key]),sha256:hash(bytes)},data};
     }
   }
+  if(options['--operator-resolutions']){
+    const filename=options['--operator-resolutions'],data=privateJson(filename),bytes=readBytes(filename);
+    if(hash(JSON.parse(bytes.toString('utf8')))!==hash(data)) throw Error('REVIEWED_CONTACT_RESOLUTIONS_FILE_CHANGED_WHILE_READING');
+    sources.reviewed_contact_resolutions={file:{role:'reviewed_contact_resolutions',name:path.basename(filename),sha256:hash(bytes)},data};
+    require('../lib/cliniccloud-import/reviewed-contact-resolutions').validateReviewedContactResolutions(sources);
+  }
   return sources;
 }
 function validateReviewEvidence(review, filename, audit = null) {
-  const current = ['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3'].includes(audit?.manifest?.version);
+  const current = ['cliniccloud-new-patients-audit/2','cliniccloud-new-patients-audit/3','cliniccloud-new-patients-audit/4'].includes(audit?.manifest?.version);
   // V1 retains its original peer-review requirement. V2 records the actual
   // operator review method; it does not label an automated audit as a peer.
   if (current && review.review_method !== 'deterministic_source_and_live_identity_checks') throw Error('IDENTITY_REVIEW_METHOD_REQUIRED');
@@ -46,9 +52,10 @@ function validateReviewEvidence(review, filename, audit = null) {
   }
 }
 async function run(args) {
-  const options = parseArgs(args, ['--target', '--mode', '--audit', '--review', '--global-snapshot', '--source-dir', '--historical-dir', '--contacts-csv', '--appointments-csv', '--private-output', '--package', '--approval', '--backup-manifest', '--private-journal','--live-histories','--live-state-labels']);
+  const options = parseArgs(args, ['--target', '--mode', '--audit', '--review', '--global-snapshot', '--source-dir', '--historical-dir', '--contacts-csv', '--appointments-csv', '--private-output', '--package', '--approval', '--backup-manifest', '--private-journal','--live-histories','--live-state-labels','--operator-resolutions']);
   const target = options['--target'];
   if (!['dev', 'crm'].includes(target)) throw Error('EXPLICIT_DATABASE_TARGET_REQUIRED');
+  if(options['--operator-resolutions']&&target!=='crm') throw Error('REVIEWED_CONTACT_CRM_TARGET_REQUIRED');
   if (!['prepare', 'apply'].includes(options['--mode'])) throw new Error('EXPLICIT_PREPARE_OR_APPLY_REQUIRED');
   for (const key of ['--audit', '--review', '--source-dir', '--historical-dir']) if (!options[key]) throw new Error('AUDIT_REVIEW_AND_SOURCES_REQUIRED');
   if (path.resolve(__dirname, '../..') !== '/home/ubuntu/wt/back-dev' || process.cwd() !== '/home/ubuntu/wt/back-dev'
@@ -82,7 +89,7 @@ async function run(args) {
     if (options['--mode'] === 'prepare') {
       await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
       await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
-      const store = await createNewPatientsStore(connection, { groupId });
+      const store = await createNewPatientsStore(connection, { groupId, databaseTarget:target });
       const live = await store.captureGroup();
       pkg = prepareNewPatients({ audit, sources, review, live });
       const { package_sha256: unboundHash, ...body } = pkg;
@@ -98,7 +105,7 @@ async function run(args) {
     const canonicalJournal = path.join(fs.realpathSync(path.dirname(options['--private-journal'])), path.basename(options['--private-journal']));
     await acquireExecutorLocks(connection, pkg.package_sha256, canonicalJournal);
     journal = openJournal(options['--private-journal'], pkg.package_sha256);
-    const store = await createNewPatientsStore(connection, { groupId, readOnly: false });
+    const store = await createNewPatientsStore(connection, { groupId, readOnly: false, databaseTarget:target });
     return await executeNewPatients({ pkg, approval, store, journal });
   } finally { journal?.close(); await connection.end(); }
 }

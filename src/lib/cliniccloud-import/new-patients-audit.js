@@ -6,6 +6,7 @@ const { hash, norm, dateOnly, normalizeContacts, index } = require('./adapter');
 const { newEvidence } = require('./primary-clinics');
 const { choosePrimaryClinic } = require('./planner');
 const { isIntakePlaceholderName } = require('./intake-placeholder-name');
+const { validateReviewedContactResolutions, contactResolution } = require('./reviewed-contact-resolutions');
 const VERSION = 'cliniccloud-new-patients-audit/2';
 
 function sourceWindow(manifest) {
@@ -38,7 +39,7 @@ function primaryProof(sources, sourceId) {
 
 function creationWithProof(raw,manifest,proof){
   const core=require('./new-patients-apply'),window=sourceWindow(manifest);
-  if(manifest.version==='cliniccloud-new-patients-audit/3'&&proof.coverage_basis&&!proof.reasons.length){
+  if(['cliniccloud-new-patients-audit/3','cliniccloud-new-patients-audit/4'].includes(manifest.version)&&proof.coverage_basis&&!proof.reasons.length){
     const created=core.sourceCreated(raw,{start:'1900-01-01',end:window.end});
     if(!proof.first_evidence_date||proof.first_evidence_date<created.local.slice(0,10)) throw Error('TREATMENT_PRECEDES_SOURCE_CREATION');
     return {...created,coverage_basis:proof.coverage_basis};
@@ -68,12 +69,15 @@ function nearName(left, right) {
 
 function buildNewPatientsAudit({ sources, live, coverage, contactsAsOf, now = new Date().toISOString() }) {
   const core = require('./new-patients-apply');
+  const operatorReview=validateReviewedContactResolutions(sources);
   const observed=Boolean(sources.live_histories);
-  const manifest = { version: observed?'cliniccloud-new-patients-audit/3':VERSION, source_account: core.ACCOUNT, coverage, contacts_as_of: contactsAsOf,
+  const manifest = { version: operatorReview?'cliniccloud-new-patients-audit/4':observed?'cliniccloud-new-patients-audit/3':VERSION, source_account: core.ACCOUNT, coverage, contacts_as_of: contactsAsOf,
     generated_at: now, local_snapshot_sha256: hash(live), source_files: Object.values(sources).map(source => source.file),
     policy: { whatsapp_ignored: true, primary_requires_source_creation_inside_export_coverage: !observed,
       ...(observed?{primary_requires_export_or_observed_history_coverage:true}:{}),
-      identity_collisions_are_deferrals: true, no_automatic_merges: true, max_batch: 70 } };
+      identity_collisions_are_deferrals: true, no_automatic_merges: true, max_batch: operatorReview?3:70,
+      ...(operatorReview?{reviewed_contact_resolutions_sha256:operatorReview.resolutions_sha256,
+        operator_reviewed_scope_only:true,reviewed_source_contact_ids:operatorReview.decisions.map(row=>row.source_contact_id).sort()}:{} ) } };
   const window = sourceWindow(manifest);
   if (!live.group_id || !live.clinic_ids.includes(66) || !live.clinic_ids.includes(72)) throw Error('NEW_PATIENT_GROUP_SCOPE_CHANGED');
   const contacts = sources.contacts.rows, historic = sources.historic_contacts.rows;
@@ -90,6 +94,7 @@ function buildNewPatientsAudit({ sources, live, coverage, contactsAsOf, now = ne
   const rows = []; let remaining = 70, alreadyLinked = 0;
   for (let i = 0; i < contacts.length; i++) {
     const record = contacts[i], raw = record.values, row = normalized[i], id = String(row.source_contact_id);
+    if(operatorReview&&!operatorReview.decisions.some(decision=>decision.source_contact_id===id)) continue;
     if (linkedIds.has(id)) { alreadyLinked++; continue; }
     const reasons = [];
     if (!/^[1-9]\d*$/.test(id) || ids.get(id)?.length !== 1 || historicIds.has(id)) reasons.push('SOURCE_ID_NOT_NEW_UNIQUE');
@@ -100,7 +105,9 @@ function buildNewPatientsAudit({ sources, live, coverage, contactsAsOf, now = ne
     if (norm(raw.ESTADO) !== 'ACTIVO' || /BLOQUEO AGENDA|VISITA COMERCIAL/.test(norm(`${raw.NOMBRE} ${raw.APELLIDOS}`))) reasons.push('CONTACT_NOT_ACTIVE_PERSON');
     if (!String(raw.NOMBRE || '').trim() || !String(raw.APELLIDOS || '').trim()) reasons.push('PATIENT_NAME_INCOMPLETE');
     if (String(raw['F. NACIMIENTO'] || '').trim() && !row.fields.birth_date) reasons.push('SOURCE_BIRTH_DATE_INVALID');
-    if (created && row.fields.birth_date > created.local.slice(0, 10)) reasons.push('BIRTH_DATE_AFTER_SOURCE_CREATION');
+    const resolution=contactResolution(sources,id);
+    if (created && row.fields.birth_date > created.local.slice(0, 10)
+      &&resolution?.kind!=='invalid_birth_date_omission') reasons.push('BIRTH_DATE_AFTER_SOURCE_CREATION');
     const keys = core.sourceIdentity(raw);
     if (!keys.phones.length && !keys.email) reasons.push('CONTACT_CHANNEL_OR_GUARDIAN_REQUIRED');
     reasons.push(...proof.reasons);
@@ -116,7 +123,8 @@ function buildNewPatientsAudit({ sources, live, coverage, contactsAsOf, now = ne
     const status = reasons.length ? 'defer' : remaining-- > 0 ? 'safe_candidate_for_reviewed_creation' : 'ready_for_next_batch';
     rows.push({ ...row, action_key: hash([core.ACCOUNT, 'new_patient', id]), status, reasons: [...new Set(reasons)],
       proposed_primary_clinic_id: proof.proposed_primary_clinic_id, membership_clinic_ids: proof.membership_clinic_ids,
-      primary_rule: proof.primary_rule, primary_evidence: proof.primary_evidence });
+      primary_rule: proof.primary_rule, primary_evidence: proof.primary_evidence,
+      ...(resolution?{operator_resolution:resolution}:{} ) });
   }
   const count = (items, key) => items.reduce((out, item) => { out[item[key]] = (out[item[key]] || 0) + 1; return out; }, {});
   const result = { manifest, summary: { source_contacts: contacts.length, already_linked: alreadyLinked,

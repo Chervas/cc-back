@@ -3,6 +3,7 @@
 // Deliberately narrow: three-way, non-empty corrections of ALREADY linked
 // patients. No creates, merges, primary-clinic, clinical or consent changes.
 const { hash, dateOnly } = require('./adapter');
+const { storedBirthDateHold } = require('./reviewed-contact-resolutions');
 const COLUMNS = Object.freeze({ name: 'nombre', surname: 'apellidos', email: 'email', phone: 'telefono_movil', national_id: 'dni', birth_date: 'fecha_nacimiento' });
 const VERSION = 'cliniccloud-contact-patches/1';
 function assert(condition, code) { if (!condition) throw new Error(code); }
@@ -32,6 +33,7 @@ function candidates(plan, snapshot) {
     assert(!action.requires_review && !action.reasons.length && validPatch(action.fields_patch), 'UNREVIEWED_OR_INVALID_CONTACT_PATCH');
     const patient = patients.get(Number(action.local_id));
     assert(patient && [66, 72].includes(Number(patient.clinic_id)) && patient.source_contact_ids.map(String).includes(String(action.source_contact_id)), 'PATIENT_IDENTITY_MISMATCH');
+    assert(!patient.birth_date_hold||!Object.hasOwn(action.fields_patch,'birth_date'),'REVIEWED_INVALID_SOURCE_BIRTH_DATE_HELD');
     if (identityReplacementRequiresReview(patient, action.fields_patch)) continue;
     assert(!seen.has(patient.id), 'MULTIPLE_PATCHES_ONE_PATIENT');
     seen.add(patient.id);
@@ -55,6 +57,10 @@ function validateCurrent(candidate, row, links) {
   assert(hash(fieldsOf(row)) === hash(candidate.expected_fields), 'PATIENT_FIELDS_DRIFT');
   assert(sourceIds(links).includes(String(candidate.source_contact_id)), 'PATIENT_SOURCE_IDENTITY_DRIFT');
   assert(validPatch(candidate.fields_patch), 'INVALID_CONTACT_PATCH');
+  for(const link of (Object.hasOwn(candidate.fields_patch,'birth_date')?links:[]).filter(item=>item.source==='cliniccloud'&&item.source_column==='cliniccloud_contact_snapshot')){
+    let snapshot;try{snapshot=typeof link.value==='string'?JSON.parse(link.value):link.value;}catch{throw Error('CANONICAL_CONTACT_SNAPSHOT_INVALID');}
+    if(storedBirthDateHold(snapshot)) assert(!Object.hasOwn(candidate.fields_patch,'birth_date'),'REVIEWED_INVALID_SOURCE_BIRTH_DATE_HELD');
+  }
   assert(!identityReplacementRequiresReview({ fields: fieldsOf(row) }, candidate.fields_patch), 'MULTIPLE_IDENTITY_REPLACEMENTS_REQUIRE_REVIEW');
 }
 function packageHash(value) { const { package_sha256, ...body } = value; return hash(body); }
