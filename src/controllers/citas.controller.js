@@ -28,6 +28,7 @@ const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile, boo
 const { mutateAppointmentBooking } = require('../services/appointmentBookingCommand.service');
 const { normalizeAdditionalStaff, additionalStaffPayload } = require('../lib/appointment-additional-staff');
 const { bookingSegments } = require('../lib/appointment-booking-segments');
+const { attachAppointmentProgramContexts } = require('../services/appointmentProgramRead.service');
 const { appointmentImportReview } = require('../lib/appointment-import-review');
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const { getIO } = require('../services/socket.service');
@@ -179,8 +180,11 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
         protectedPayload.motivo = null;
         protectedPayload.import_metadata = null;
         protectedPayload.import_review = null;
+        protectedPayload.program_link_revision = null;
         protectedPayload.tratamiento_id = null;
         protectedPayload.tratamiento = null;
+        protectedPayload.program_context = null;
+        protectedPayload.precio_cita_resuelto = null;
         protectedPayload.conversation_id = null;
         protectedPayload.unread_count = 0;
         protectedPayload.appointment_flow = null;
@@ -352,6 +356,7 @@ function appointmentTypePriceCode(tipoCita) {
 
 function resolveCitaAppointmentPrice(cita) {
     const plain = plainCita(cita);
+    if (plain?.source_system === 'treatment_program' || plain?.program_context?.kind === 'program') return null;
     const tratamiento = plain?.tratamiento;
     if (!tratamiento) {
         return null;
@@ -1193,6 +1198,7 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
         fin_local: formatDateTimeLocal(plain.fin, timeZone),
         time_zone: timeZone,
         import_review: appointmentImportReview(plain),
+        program_context: plain.program_context || null,
         ...(bookingCapabilities().simple ? { additional_staff: additionalStaffPayload(plain) } : {}),
         ...(bookingCapabilities().simple ? { booking_segments: bookingSegments(plain).map((segment) => ({ ...segment,
             start_local: formatDateTimeLocal(segment.start_at, timeZone), end_local: formatDateTimeLocal(segment.end_at, timeZone) })) } : {}),
@@ -2356,6 +2362,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         await attachFlowSummaryToCitas(citaCreada);
         await attachUnreadCountsToCitas(citaCreada, req.userData?.userId || null);
         await consentimientosService.attachConsentSummaryToCitas(citaCreada);
+        await attachAppointmentProgramContexts(db, citaCreada);
         attachResolvedAppointmentPricesToCitas(citaCreada);
         emitAppointmentSocketEvent('appointment:created', citaCreada?.toJSON ? citaCreada.toJSON() : citaCreada);
 
@@ -2426,6 +2433,7 @@ exports.getCitas = asyncHandler(async (req, res) => {
     await attachFlowSummaryToCitas(citas);
     await attachUnreadCountsToCitas(citas, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citas);
+    await attachAppointmentProgramContexts(db, citas);
     attachResolvedAppointmentPricesToCitas(citas);
     res.json(await protectAppointmentsForRequest(req, citas));
 });
@@ -2509,6 +2517,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
             'inicio',
             'fin',
             'source_system',
+            'voucher_id',
             'import_metadata',
             'created_at',
             'updated_at',
@@ -2543,6 +2552,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
 
     await attachCalendarUnreadCountsToCitas(citas, req.userData?.userId || null);
     await attachNutritionLatestMeasurementsToCitas(citas);
+    await attachAppointmentProgramContexts(db, citas);
 
     res.set('X-Agenda-Endpoint', 'calendar-lite');
     const calendarRows = citas
@@ -2583,6 +2593,7 @@ exports.getCitaById = asyncHandler(async (req, res) => {
     await attachUnreadCountsToCitas(cita, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(cita);
     await attachNutritionLatestMeasurementsToCitas(cita);
+    await attachAppointmentProgramContexts(db, cita);
     attachResolvedAppointmentPricesToCitas(cita);
 
     let conversation_id = null;
@@ -2604,6 +2615,7 @@ exports.getCitaById = asyncHandler(async (req, res) => {
     return res.json(await protectAppointmentsForRequest(req, {
         ...cita.toJSON(),
         conversation_id,
+        program_link_revision: require('../lib/appointment-import-review').importReviewVersion(cita.toJSON()),
     }));
 });
 
@@ -2705,7 +2717,7 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     let previousStatus = cita.estado;
-    if (cita.source_system === 'treatment_program' && !require('../lib/program-booking').programBookingEnabled()) {
+    if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
     }
     cita.updated_by = req.userData?.userId || null;
@@ -2845,7 +2857,7 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
     const current = await CitaPaciente.findByPk(citaId);
     if (!current) return res.status(404).json({ message: 'Cita no encontrada' });
     if (await denyAppointmentManageAccessIfNeeded(req, res, current.clinica_id)) return;
-    if (current.source_system === 'treatment_program' && !require('../lib/program-booking').programBookingEnabled()) {
+    if (require('../lib/program-appointment-context').hasProgramAppointmentReference(current) && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
     }
     if (String(current.estado || '').toLowerCase() !== 'cambio_solicitado') {
@@ -2972,7 +2984,7 @@ exports.deleteCita = asyncHandler(async (req, res) => {
         return res.status(404).json({ message: 'Cita no encontrada' });
     }
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
-    if (cita.source_system === 'treatment_program') return res.status(409).json({ code: 'program_history_preserved', message: 'Las citas de un programa se cancelan; su historial no se elimina.' });
+    if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) || cita.voucher_id && await db.PatientProgramSession.findOne({ where: { appointment_id: cita.id_cita } })) return res.status(409).json({ code: 'program_history_preserved', message: 'Las citas de un programa se cancelan; su historial no se elimina.' });
 
     if (String(cita.estado || '').trim().toLowerCase() !== 'cancelada') {
         return res.status(409).json({ message: 'Solo se pueden eliminar citas canceladas' });
@@ -3030,7 +3042,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
 
     let previousStatus = cita.estado;
     const rescheduleReason = String(req.body?.reschedule_reason || 'clinic_schedule').trim().toLowerCase();
-    if (cita.source_system === 'treatment_program' && !require('../lib/program-booking').programBookingEnabled()) {
+    if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
     }
     if (!['patient_request', 'clinic_schedule'].includes(rescheduleReason)) {

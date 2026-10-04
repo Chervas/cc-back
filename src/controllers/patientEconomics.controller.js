@@ -121,6 +121,24 @@ exports.reserveProgramPlan = asyncHandler(async (req, res) => {
   }
   res.status(201).json({ ...result, documentation_pending: documentationPending });
 });
+exports.linkProgramAppointment = asyncHandler(async (req, res) => {
+  const context = await programContext(req, true);
+  const result = await programBooking.linkAppointment(context);
+  const documentationPending = [];
+  if (!result.replayed) {
+    try {
+      await require('../services/programBookingRealtime.service').publishProgramBookings({ db, result, clinicId: context.clinicId });
+    } catch (_) { console.warn('[program-booking] committed link invalidation pending'); }
+    for (const session of result.sessions) {
+      try {
+        await require('../services/consentimientos.service').ensurePackageForAppointment(session.appointment_id, {
+          createdBy: context.actorId, triggerSource: 'program_appointment_link',
+        });
+      } catch (_) { documentationPending.push(session.appointment_id); }
+    }
+  }
+  res.json({ ...result, documentation_pending: documentationPending });
+});
 
 exports.listCatalog = asyncHandler(async (req, res) => {
   const clinicId = await requireClinicFeature(

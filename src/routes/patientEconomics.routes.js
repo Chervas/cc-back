@@ -37,6 +37,7 @@ router.post('/vouchers/:voucherId/appointments', controller.createVoucherAppoint
 router.get('/vouchers/:voucherId/program-plan', controller.getProgramPlan);
 router.post('/vouchers/:voucherId/program-proposals', controller.proposeProgramPlan);
 router.post('/vouchers/:voucherId/program-appointments', controller.reserveProgramPlan);
+router.post('/vouchers/:voucherId/program-appointment-links', controller.linkProgramAppointment);
 router.get('/templates', controller.listTemplates);
 router.post('/templates', controller.createTemplate);
 router.patch('/templates/:templateId', controller.updateTemplate);

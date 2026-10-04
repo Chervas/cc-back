@@ -24,11 +24,25 @@ function normalizeCadence(value) {
 
 // Treatment order is explicit. No permutation of rooms, double billing or
 // guessing shorter clinical times when combining treatments.
-function composeAppointmentProfile(appointment) {
+function normalizeProgramProfile(value, { allowMissingDuration = false } = {}) {
+  if (!allowMissingDuration) return normalizeBookingProfile(value);
+  const template = normalizeBookingProfile(value, { allowIncomplete: true });
+  if (!template) return null;
+  // Only duration may be deferred. The incomplete normalizer alone would also
+  // permit missing rooms/professionals, which must never become sellable.
+  normalizeBookingProfile({ ...template, phases: template.phases.map(phase => ({ ...phase,
+    duration_minutes: phase.duration_minutes ?? 1 })) });
+  return template;
+}
+function schedulingMode(value) {
+  return value.kind === 'program' && !value.cadence
+    && value.appointments.some(appointment => appointment.offset_days == null) ? 'manual' : 'automatic';
+}
+function composeAppointmentProfile(appointment, { allowMissingDuration = false } = {}) {
   if (!appointment?.treatments?.length || appointment.treatments.length > 8) error('program_composition_invalid', 'Faltan los tratamientos de esta cita.');
   const phases = [], treatmentIds = [];
   appointment.treatments.forEach((treatment, treatmentIndex) => {
-    const profile = normalizeBookingProfile(treatment.booking_profile);
+    const profile = normalizeProgramProfile(treatment.booking_profile, { allowMissingDuration });
     if (!profile) error('program_profile_missing', 'Completa las cabinas y profesionales de cada tratamiento.');
     if (!Number.isSafeInteger(treatment.id) || treatmentIds.includes(treatment.id)) error('program_composition_invalid', 'Tratamientos no válidos o repetidos en la misma cita.');
     treatmentIds.push(treatment.id);
@@ -38,10 +52,48 @@ function composeAppointmentProfile(appointment) {
       treatment_id: treatment.id, treatment_name: treatment.name,
     }));
   });
-  const profile = normalizeBookingProfile({ version: phases.some(p => p.staff_attention) ? 3 : phases.some(p => p.equipment_requirements?.length) ? 2 : 1, phases });
+  const profile = normalizeProgramProfile({ version: phases.some(p => p.staff_attention) ? 3 : phases.some(p => p.equipment_requirements?.length) ? 2 : 1, phases }, { allowMissingDuration });
   return { profile, treatment_ids: treatmentIds,
     phase_treatments: phases.map(({ key, treatment_id, treatment_name }) => ({ key, treatment_id, treatment_name })),
-    duration_minutes: profile.phases.reduce((total, phase) => total + phase.duration_minutes, 0) };
+    duration_minutes: profile.phases.some(phase => phase.duration_minutes == null) ? null
+      : profile.phases.reduce((total, phase) => total + phase.duration_minutes, 0) };
+}
+
+function durationChoice(row) {
+  const result = {};
+  if (row.duration_minutes != null) {
+    if (!Number.isInteger(row.duration_minutes) || row.duration_minutes < 1 || row.duration_minutes > 1440) error('program_duration_invalid', 'Elige una duración entre 1 y 1440 minutos.');
+    result.duration_minutes = row.duration_minutes;
+  }
+  if (row.phase_durations != null) {
+    if (!row.phase_durations || typeof row.phase_durations !== 'object' || Array.isArray(row.phase_durations)
+      || Object.keys(row.phase_durations).length > 12) error('program_duration_invalid', 'Revisa la duración de cada fase.');
+    result.phase_durations = Object.fromEntries(Object.entries(row.phase_durations).sort(([a], [b]) => a.localeCompare(b)).map(([key, minutes]) => {
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(key) || !Number.isInteger(minutes) || minutes < 1 || minutes > 1440) error('program_duration_invalid', 'Revisa la duración de cada fase.');
+      return [key, minutes];
+    }));
+  }
+  return result;
+}
+function materializeSession(session, choice = {}) {
+  const supplied = durationChoice(choice);
+  const template = normalizeProgramProfile(session.booking_profile, { allowMissingDuration: true });
+  if (!template) error('program_profile_missing', 'Falta configurar la sala y el profesional de esta sesión.');
+  const missing = template.phases.filter(phase => phase.duration_minutes == null);
+  const knownMinutes = template.phases.reduce((total, phase) => total + (phase.duration_minutes || 0), 0);
+  const durations = supplied.phase_durations || {};
+  if (Object.keys(durations).some(key => !missing.some(phase => phase.key === key))) error('program_duration_locked', 'Solo puedes elegir la duración de las fases que no la tienen definida.');
+  const phases = template.phases.map(phase => {
+    if (phase.duration_minutes != null) return phase;
+    const duration = durations[phase.key] ?? (missing.length === 1 && supplied.duration_minutes != null ? supplied.duration_minutes - knownMinutes : null);
+    if (!Number.isInteger(duration) || duration < 1) error('program_duration_required', 'Elige la duración de esta sesión antes de buscar o reservar su cita.', { key: session.key, phase_key: phase.key });
+    return { ...phase, duration_minutes: duration };
+  });
+  const profile = normalizeBookingProfile({ ...template, phases });
+  const total = profile.phases.reduce((minutes, phase) => minutes + phase.duration_minutes, 0);
+  if (supplied.duration_minutes != null && supplied.duration_minutes !== total) error('program_duration_locked', 'La duración debe respetar las fases ya definidas del tratamiento.');
+  return { ...session, booking_profile: profile, duration_minutes: total,
+    ...(missing.length ? { duration_selection: { ...supplied, duration_minutes: total } } : {}) };
 }
 
 function weekKey(date) {
@@ -53,10 +105,21 @@ function seriesIssues(appointments, cadence, timeZone) {
     date: formatDateLocal(new Date(item.start_at), timeZone) }));
   const issues = [], weeks = new Map();
   const rule = normalizeCadence(cadence);
+  let previousTimed = null;
   selected.forEach((item, index) => {
     const previous = selected[index - 1];
     if (previous && new Date(previous.end_at) > new Date(item.start_at)) issues.push({ key: item.key, code: 'program_session_order', message: 'Las sesiones deben conservar su orden y no solaparse.' });
     if (rule && previous && item.date < addDays(previous.date, rule.min_days_between)) issues.push({ key: item.key, code: 'program_minimum_gap', message: `Deja al menos ${rule.min_days_between} días entre sesiones.` });
+    if (!rule && Number.isSafeInteger(item.offset_days)) {
+      // Missing offsets do not license erasing the known part of a protocol.
+      // Compare only documented relative days; do not invent a day-0 anchor if
+      // the patient enters at a later unit or the first visit is still pending.
+      if (previousTimed && item.offset_days > previousTimed.offset_days
+        && item.date < addDays(previousTimed.date, item.offset_days - previousTimed.offset_days)) {
+        issues.push({ key: item.key, code: 'program_offset_gap', message: `Deja al menos ${item.offset_days - previousTimed.offset_days} días desde la sesión anterior con intervalo definido.` });
+      }
+      previousTimed = item;
+    }
     if (rule) {
       const key = weekKey(item.date), count = (weeks.get(key) || 0) + 1; weeks.set(key, count);
       if (count > rule.sessions_per_week) issues.push({ key: item.key, code: 'program_weekly_limit', message: `La pauta admite como máximo ${rule.sessions_per_week} sesiones por semana.` });
@@ -88,11 +151,13 @@ function bookingRequest(payload) {
       }
     }
     if (row.priority_acknowledged != null && typeof row.priority_acknowledged !== 'boolean') error('program_booking_selection_invalid', 'Confirma expresamente el cambio de profesional.');
-    return { key: row.key, start_at: new Date(row.start_at).toISOString(), selections: normalized, priority_acknowledged: row.priority_acknowledged === true };
+    return { key: row.key, start_at: new Date(row.start_at).toISOString(), selections: normalized, priority_acknowledged: row.priority_acknowledged === true,
+      ...durationChoice(row) };
   }).sort((a, b) => a.key.localeCompare(b.key));
   const resume = require('./program-replan').resumeInput(payload);
   const contents = { snapshot_sha256: payload.snapshot_sha256, sessions, ...(resume || {}) };
   return { request_key: payload.request_key, ...contents, request_sha256: hash(contents) };
 }
 
-module.exports = { normalizeCadence, composeAppointmentProfile, seriesIssues, weekKey, bookingRequest, programBookingEnabled };
+module.exports = { normalizeCadence, composeAppointmentProfile, normalizeProgramProfile, schedulingMode, durationChoice,
+  materializeSession, seriesIssues, weekKey, bookingRequest, programBookingEnabled };

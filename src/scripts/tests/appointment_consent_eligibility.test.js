@@ -110,3 +110,21 @@ test('missing transactions and missing canonical program composition fail closed
   f.db.PatientVoucher = { findOne: async () => null };
   await assert.rejects(assessDb({ ...f, appointment: { ...appointment, source_system: 'treatment_program', voucher_id: 8 } }), { code: 'program_session_not_found' });
 });
+
+test('linked imported completion checks purchased treatments, not untrusted reference metadata', async () => {
+  const f = databaseFixture();
+  f.db.PatientVoucher = { findOne: async options => {
+    assert.equal(options.where.clinic_id, 3); assert.equal(options.where.patient_id, 2); return { id: 8 };
+  } };
+  f.db.PatientProgramSession = { findOne: async () => ({ snapshot: { treatment_ids: [4, 9] } }) };
+  f.db.TreatmentConsentRequirement.findAll = async options => {
+    assert.deepEqual(options.where.tratamiento_id[f.Op.in], [4, 9]);
+    return [requirement, { ...requirement, tratamiento_id: 9 }];
+  };
+  f.db.PatientConsentDocument.findAll = async () => [signed];
+  const linked = { ...appointment, source_system: 'cliniccloud', voucher_id: 8,
+    import_metadata: { program_session: { session_id: 15, key: 's1', treatment_ids: [4] } } };
+  assert.equal((await assessDb({ ...f, appointment: linked, now })).blocking_count, 1);
+  f.db.PatientVoucher.findOne = async () => null;
+  await assert.rejects(assessDb({ ...f, appointment: linked, now }), { code: 'program_session_not_found' });
+});

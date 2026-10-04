@@ -3,6 +3,7 @@
 const APPOINTMENT_STATUS_EVENT_TYPE = 'appointment.status_changed';
 const APPOINTMENT_STAFF_EVENT_TYPE = 'appointment.staff_changed';
 const APPOINTMENT_IMPORT_EVENT_TYPE = 'appointment.import_resolved';
+const APPOINTMENT_PROGRAM_EVENT_TYPE = 'appointment.program_linked';
 
 const APPOINTMENT_STATUS_LABELS = Object.freeze({
   pendiente: 'Pendiente',
@@ -98,6 +99,12 @@ function buildAppointmentStatusDescription(event) {
 
 function serializeAppointmentStatusActivity(event, { patientId = null, leadId = null, actorName = 'Sistema' } = {}) {
   const metadata = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
+  if (event.event_type === APPOINTMENT_PROGRAM_EVENT_TYPE) return {
+    id: `appointment-program-event-${event.id}`, citaId: String(metadata.appointment_id), fecha: event.occurred_at || event.created_at,
+    tipo: 'appointment_program_linked', titulo: 'Cita vinculada a un programa',
+    descripcion: `${metadata.program_name || 'Programa'} · Sesión ${metadata.session_number}. Se conservan el horario y el estado; no se registra ningún cobro ni consumo.`,
+    icono: 'heroicons_outline:link', color: 'info', usuarioNombre: actorName,
+  };
   if (event.event_type === APPOINTMENT_IMPORT_EVENT_TYPE) {
     return { id: `appointment-import-event-${event.id}`,
       ...(patientId !== null ? { pacienteId: String(patientId) } : {}), ...(leadId !== null ? { leadId: String(leadId) } : {}),
@@ -199,6 +206,7 @@ module.exports = {
   APPOINTMENT_STATUS_EVENT_TYPE,
   APPOINTMENT_STAFF_EVENT_TYPE,
   APPOINTMENT_IMPORT_EVENT_TYPE,
+  APPOINTMENT_PROGRAM_EVENT_TYPE,
   appointmentStatusLabel,
   serializeAppointmentStatusActivity,
   recordAppointmentStatusChange,
