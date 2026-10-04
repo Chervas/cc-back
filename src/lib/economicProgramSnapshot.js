@@ -44,11 +44,14 @@ function snapshot(program) {
     schema_version: 2, program_id: program.id, program_version: program.version, cadence: normalizeCadence(program.cadence),
     kind: program.kind, name: program.name, currency: 'EUR',
     catalog_total_price: program.total_price, price_semantics: 'gross_tax_included',
-    price_profile: require('./economicPriceProfile').commonProfile(program.appointments.flatMap(a => a.treatments.map(t => t.price_profile))),
+    price_profile: program.price_profile ? require('./economicPriceProfile').normalizeProfile(program.price_profile)
+      : require('./economicPriceProfile').commonProfile(program.appointments.flatMap(a => a.treatments.map(t => t.price_profile))),
+    ...(program.price_profile ? { price_profile_source: 'program' } : {}),
     appointments: program.appointments.map((a) => ({
       key: a.key, label: a.label, offset_days: a.offset_days,
       treatment_ids: [...a.treatment_ids], duration_minutes: a.duration_minutes,
-      treatments: a.treatments.map((t) => ({ id: t.id, name: t.name, duration_minutes: t.duration_minutes, booking_profile: copy(t.booking_profile) })),
+      treatments: a.treatments.map((t) => ({ id: t.id, name: t.name, duration_minutes: t.duration_minutes, booking_profile: copy(t.booking_profile),
+        ...(t.sale_mode === 'program_component_only' ? { sale_mode: t.sale_mode } : {}) })),
     })),
   };
   return { ...value, sha256: canonicalHash(value) };

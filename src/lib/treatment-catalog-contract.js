@@ -30,12 +30,49 @@ function mergeClinicalConfig(previous, patch) {
       else result[key] = value;
     }
   }
+  // Import provenance and its approval are server-owned. Old clients may echo
+  // these values, but cannot erase a hold or manufacture an approval in JSON.
+  for (const key of Object.keys(previous || {})) {
+    if (key.startsWith('source_') || ['import_batch', 'catalog_import_package', 'fiscal_mapping_pending'].includes(key)) result[key] = previous[key];
+  }
+  if (previous?.imported_price_review) result.imported_price_review = previous.imported_price_review;
+  else delete result.imported_price_review;
   if (result.catalog_status != null && !STATUSES.has(result.catalog_status)) throw catalogError('Estado de catálogo no válido.');
   if (result.price_profile != null) result.price_profile = require('./economicPriceProfile').normalizeProfile(result.price_profile);
   if (result.booking_profile != null) {
     result.booking_profile = normalizeBookingProfile(result.booking_profile, { allowIncomplete: result.catalog_status === 'draft' });
   }
-  return Object.keys(result).length ? result : null;
+  const commercial = require('./treatment-commercial-policy').mergeCommercialConfig(previous, result);
+  return Object.keys(commercial).length ? commercial : null;
+}
+
+function applyImportedPriceReview(previous, next, { confirm, amount, actorId, now = new Date() } = {}) {
+  if (confirm == null || confirm === false) {
+    // Later edits must not turn an approved gross price back into an ambiguous
+    // legacy net amount, or silently coerce a cleared amount into a free service.
+    if (previous?.imported_price_review && previous.fiscal_mapping_pending === false) {
+      if (!next?.price_profile) throw catalogError('Conserva el IVA incluido o un motivo de exención para este precio final.', 'imported_price_profile_required', 422);
+      if (amount !== undefined) assertImportedPriceAmount(amount);
+    }
+    return next;
+  }
+  if (confirm !== true) throw catalogError('La confirmación del precio debe ser explícita.', 'imported_price_confirmation_invalid', 422);
+  if (previous?.fiscal_mapping_pending !== true) throw catalogError('Este precio no tiene una revisión pendiente. Actualiza el tratamiento.', 'imported_price_not_pending', 409);
+  const priceProfile = require('./economicPriceProfile').normalizeProfile(next?.price_profile);
+  if (!priceProfile) throw catalogError('Indica el IVA incluido o el motivo de exención antes de confirmar.', 'imported_price_profile_required', 422);
+  assertImportedPriceAmount(amount);
+  if (!Number.isSafeInteger(Number(actorId)) || Number(actorId) <= 0) throw catalogError('Falta el usuario que confirma el precio.', 'imported_price_actor_required', 401);
+  return { ...next, fiscal_mapping_pending: false, imported_price_review: {
+    version: 1, reviewed_at: now.toISOString(), reviewed_by: Number(actorId),
+    gross_amount: amount, price_profile: priceProfile,
+  } };
+}
+
+function assertImportedPriceAmount(amount) {
+  // Match DECIMAL(10,2). In particular, null/empty must never become free.
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0 || amount > 99999999.99 || Math.round(amount * 100) / 100 !== amount) {
+    throw catalogError('Indica un precio final válido, con un máximo de dos decimales.', 'imported_price_amount_invalid', 422);
+  }
 }
 
 function catalogState(treatment) {
@@ -68,6 +105,11 @@ function catalogPrice(treatment) {
   }
   return { amount: treatment.precio_base == null ? null : Number(treatment.precio_base), label: 'habitual', semantics: 'existing_catalog_price', review_required: false };
 }
-function catalogDto(treatment) { const value = treatment?.toJSON ? treatment.toJSON() : treatment; return { ...value, catalog_price: catalogPrice(value) }; }
+function catalogDto(treatment) { const value = treatment?.toJSON ? treatment.toJSON() : treatment;
+  const component_policy = require('./treatment-commercial-policy').policy(value);
+  return { ...value, catalog_price: component_policy.sale_mode === 'program_component_only'
+    ? { amount: null, label: 'Incluido en programas · no se vende por separado', semantics: 'included_in_program', review_required: component_policy.requires_component_approval }
+    : catalogPrice(value), standalone_sellable: component_policy.sale_mode === 'standalone', component_policy };
+}
 
-module.exports = { mergeClinicalConfig, assertCatalogEditable, isObsolete, catalogState, catalogError, catalogPrice, catalogDto };
+module.exports = { mergeClinicalConfig, applyImportedPriceReview, assertCatalogEditable, isObsolete, catalogState, catalogError, catalogPrice, catalogDto };

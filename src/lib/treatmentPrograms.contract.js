@@ -41,7 +41,9 @@ function normalizeValues(input, { current = null } = {}) {
   });
   const cadence = require('./program-booking').normalizeCadence(value('cadence', null));
   if (kind === 'voucher' && cadence) throw domainError(400, 'voucher_cadence_invalid', 'Un bono no tiene pauta semanal; utiliza Programa.');
-  return { name: boundedText(value('name', ''), 'name', 255, true), kind, status, total_price: money(value('total_price', null)), notes: boundedText(value('notes', null), 'notes', 10000), cadence, appointments: normalized };
+  return { name: boundedText(value('name', ''), 'name', 255, true), kind, status, total_price: money(value('total_price', null)),
+    price_profile: require('./economicPriceProfile').normalizeProfile(value('price_profile', null)),
+    notes: boundedText(value('notes', null), 'notes', 10000), cadence, appointments: normalized };
 }
 function filters(query = {}) {
   const page = query.page == null ? 1 : positiveInteger(query.page, 'page');
@@ -56,6 +58,8 @@ function treatmentDto(raw) {
   let config = value.clinical_config || {};
   if (typeof config === 'string') { try { config = JSON.parse(config); } catch { config = {}; } }
   const issues = [];
+  const component_policy = require('./treatment-commercial-policy').policy(value);
+  if (component_policy.requires_component_approval) issues.push({ code: 'component_approval_required', message: 'Aprueba expresamente el componente incluido antes de utilizarlo en un programa.' });
   if (Number(value.sesiones_defecto || 1) > 1) issues.push({ code: 'legacy_voucher_requires_unit_mapping', message: 'Esta oferta antigua contiene varias sesiones. Vincula su tratamiento individual antes de reutilizarla.' });
   const status = config.catalog_status || (value.activo ? 'active' : 'inactive');
   if (!value.activo || status === 'obsolete' || status === 'draft') issues.push({ code: 'treatment_not_active', message: 'El tratamiento no está activo en el catálogo.' });
@@ -65,7 +69,9 @@ function treatmentDto(raw) {
   if (profile && requiresMultiResourceBooking(profile) && !require('../services/treatmentBookingProfile.service').bookingCapabilities().multi) issues.push({ code: 'multi_resource_writer_pending', message: 'La reserva conjunta de fases o equipos necesita activar el comando de agenda compatible en todos los entornos.' });
   const duration = profile ? profile.phases.every(phase => phase.duration_minutes != null) ? profile.phases.reduce((sum, phase) => sum + phase.duration_minutes, 0) : null : Number(value.duracion_min) > 0 ? Number(value.duracion_min) : null;
   if (!duration) issues.push({ code: 'missing_duration', message: 'El tratamiento no tiene una duración definida.' });
-  return { id: Number(value.id_tratamiento), name: value.nombre, code: value.codigo || null, clinic_id: value.clinica_id ? Number(value.clinica_id) : null, catalog_status: status, duration_minutes: duration, stored_catalog_price: value.precio_base == null ? null : Number(value.precio_base), stored_price_semantics: config.price_profile ? 'gross_tax_included' : 'existing_catalog_field_unclassified', price_profile: require('./economicPriceProfile').profileFromTreatment(value), default_sessions: Number(value.sesiones_defecto || 1), legacy_voucher_offer: Number(value.sesiones_defecto || 1) > 1, booking_profile: profile, issues, booking_ready: issues.length === 0 };
+  return { id: Number(value.id_tratamiento), name: value.nombre, code: value.codigo || null, clinic_id: value.clinica_id ? Number(value.clinica_id) : null,
+    sale_mode: component_policy.sale_mode, standalone_sellable: component_policy.sale_mode === 'standalone', component_policy,
+    catalog_status: status, duration_minutes: duration, stored_catalog_price: value.precio_base == null ? null : Number(value.precio_base), stored_price_semantics: config.price_profile ? 'gross_tax_included' : 'existing_catalog_field_unclassified', price_profile: require('./economicPriceProfile').profileFromTreatment(value), default_sessions: Number(value.sesiones_defecto || 1), legacy_voucher_offer: Number(value.sesiones_defecto || 1) > 1, booking_profile: profile, issues, booking_ready: issues.length === 0 };
 }
 function summarize(values, treatmentsById) {
   const issues = [];
@@ -112,4 +118,9 @@ function summarize(values, treatmentsById) {
     automatic_scheduling_available: ready && scheduling !== 'manual' && appointments.every(a => a.duration_minutes != null) } };
 }
 const payloadHash = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
-module.exports = { domainError, positiveInteger, boundedText, normalizeValues, filters, treatmentDto, summarize, payloadHash };
+function commercialReadiness(program) {
+  const required = program.appointments.some(a => (a.treatments || []).some(t => t.sale_mode === 'program_component_only'));
+  const commercial_issues = required && !program.price_profile ? [{ code: 'program_price_profile_required', message: 'Define expresamente la fiscalidad del precio total antes de ofrecer este programa con componentes incluidos.' }] : [];
+  return { commercial_ready: commercial_issues.length === 0, commercial_issues };
+}
+module.exports = { domainError, positiveInteger, boundedText, normalizeValues, filters, treatmentDto, summarize, payloadHash, commercialReadiness };

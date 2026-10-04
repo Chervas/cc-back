@@ -6067,6 +6067,12 @@
           "DELETE_RULE": "RESTRICT"
         }
       ]
+    },
+    "TreatmentPrograms": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [{"COLUMN_NAME":"price_profile","COLUMN_TYPE":"json","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}],
+      "indexes": []
     }
   },
   "migrations": [
@@ -6157,6 +6163,10 @@
     {
       "name": "20260922153000-create-whatsapp-phone-activations.js",
       "sha256": "243e65409413549b47a1befc2570d1f2164235324592b93465ff12c2ad003d12"
+    },
+    {
+      "name": "20261004180000-program-commercial-price-profile.js",
+      "sha256": "c25968779c302bcf22504d39668718f4f55e836f42e0485af7d987a0a65e37e5"
     }
   ]
 }

@@ -69,10 +69,13 @@ function createTreatmentProgramsService({ db, now = () => new Date(), newId = ()
   }
   function serialize(row, map) {
     const value = plain(row);
-    const normalized = { name: value.name, kind: value.kind, status: value.status, total_price: value.total_price == null ? null : Number(value.total_price), notes: value.notes || null, cadence: decode(value.cadence, null), appointments: decode(value.appointments, []) };
+    const normalized = { name: value.name, kind: value.kind, status: value.status, total_price: value.total_price == null ? null : Number(value.total_price),
+      price_profile: require('../lib/economicPriceProfile').normalizeProfile(decode(value.price_profile, null)),
+      notes: value.notes || null, cadence: decode(value.cadence, null), appointments: decode(value.appointments, []) };
     const resolved = summarize(normalized, map);
+    const commercial = contract.commercialReadiness({ ...normalized, appointments: resolved.appointments });
     return { id: value.public_id, clinic_id: Number(value.clinic_id), ...normalized, appointments: resolved.appointments, version: Number(value.version_number), price_semantics: 'gross_tax_included', currency: 'EUR', summary: resolved.summary, can_schedule: false,
-      purchase_enabled: require('../lib/program-booking').programBookingEnabled() && value.status === 'active' && resolved.summary.issues.length === 0,
+      ...commercial, purchase_enabled: require('../lib/program-booking').programBookingEnabled() && value.status === 'active' && resolved.summary.issues.length === 0 && commercial.commercial_ready,
       created_at: value.created_at, updated_at: value.updated_at };
   }
   async function scopedRow(id, clinicId, transaction, lock = false) {
@@ -142,7 +145,10 @@ function createTreatmentProgramsService({ db, now = () => new Date(), newId = ()
       if (requestKey) {
         const existing = await TreatmentProgram.findOne({ where: { request_key: requestKey, clinic_id: clinicId }, transaction });
         if (existing) {
-          if (existing.request_payload_hash !== requestHash) throw domainError(409, 'program_idempotency_conflict', 'Esta solicitud ya creó un catálogo con otros datos.');
+          const legacyValues = { ...values }; delete legacyValues.price_profile;
+          const legacyRetry = values.price_profile === null && decode(existing.price_profile, null) === null
+            && existing.request_payload_hash === payloadHash(legacyValues);
+          if (existing.request_payload_hash !== requestHash && !legacyRetry) throw domainError(409, 'program_idempotency_conflict', 'Esta solicitud ya creó un catálogo con otros datos.');
           return { created: false, item: serialize(existing, await treatmentMap([existing], clinic, transaction)) };
         }
       }
