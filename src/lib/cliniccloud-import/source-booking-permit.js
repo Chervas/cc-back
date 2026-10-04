@@ -74,7 +74,7 @@ function inspectSourceBookingPermit(token, appointment, now = Date.now()) {
     || now < Date.parse(permit.receipt.live_captured_at) || now - Date.parse(permit.receipt.live_captured_at) > 3600000) fail();
   return structuredClone(permit);
 }
-function sourcePreservedContext(context, start, end) {
+function sourcePreservedContext(context, start, end, {preserveBusy=false} = {}) {
   const conflicts = [], outside = [];
   const window = { start: instant(start), end: instant(end) };
   const intersects = b => new Date(b.start) < end && start < new Date(b.end);
@@ -83,7 +83,7 @@ function sourcePreservedContext(context, start, end) {
     for (const b of r.busy || []) if (intersects(b)) conflicts.push({ resource_kind:kind,resource_id:id,
       appointment_id:b.appointment_id || b.id_cita || null,start_at:instant(b.start),end_at:instant(b.end),
       kind:b.appointment_id || b.id_cita ? 'appointment_overlap' : 'schedule_block' });
-    return [id,{ ...r,windows:[window],busy:[] }];
+    return [id,{ ...r,windows:[window],busy:preserveBusy?[...(r.busy||[])]:[] }];
   }));
   const doctors = clean(context.doctors,'doctor'), installations = clean(context.installations,'installation');
   const equipment = context.equipment && clean(context.equipment,'equipment');
@@ -122,6 +122,16 @@ function preservesConfiguredConsultationSharing(context, profile, units) {
   return doctor?.allow_overlap_confirmation===true && room?.allow_overlap_confirmation===true
     && room.overlap_capacity===null;
 }
+function solveSourceSchedule(original,profile,start,end) {
+  // Respect existing setup/removal reservations whenever the source interval
+  // fits. Only an actual conflict uses the source-preservation exception.
+  let solution=solveBookingProfile({profile,start,...original});
+  if(solution)return {solution,strategy:'normal_availability'};
+  solution=solveBookingProfile({profile,start,...sourcePreservedContext(original,start,end,{preserveBusy:true}).context});
+  if(solution)return {solution,strategy:'preserve_source_outside_schedule'};
+  return {solution:solveBookingProfile({profile,start,...sourcePreservedContext(original,start,end).context}),
+    strategy:'preserve_source_conflict'};
+}
 async function mutateSourceImportedBooking({ db, existing, values, transaction, sourceImportPermit, persist }) {
   if (!transaction || transaction.options?.isolationLevel !== 'READ COMMITTED' || !existing?.id_cita || typeof persist !== 'function') fail();
   const permit = inspectSourceBookingPermit(sourceImportPermit,values);
@@ -140,8 +150,7 @@ async function mutateSourceImportedBooking({ db, existing, values, transaction, 
     ...roomIds.map(id=>mapping.keys.get(id)),...permit.units.map(id=>`equipment:${id}`),...oldRows.map(r=>r.resource_key)],transaction});
   const original = await loadBookingContext({db,clinic,profile,start,end,transaction,ignoreAppointmentId:existing.id_cita,
     occupancyEnabled:true,installationMapping:mapping,patientId:values.paciente_id,equipmentEnabled:true,inheritEquipmentAttention:true});
-  const preserved = sourcePreservedContext(original,start,end);
-  const solution = solveBookingProfile({profile,start,...preserved.context});
+  const {solution,strategy}=solveSourceSchedule(original,profile,start,end);
   // Do not override missing equipment, room/staff eligibility or malformed
   // machine attention merely because the source is authoritative for time.
   if (!solution || instant(solution.end_at) !== instant(end)) throw Error('SOURCE_BOOKING_RESOURCES_REQUIRE_REVIEW');
@@ -149,7 +158,7 @@ async function mutateSourceImportedBooking({ db, existing, values, transaction, 
     !==hash([...permit.units].sort((a,b)=>a-b))) fail();
   const m = {...obj(values.import_metadata)}, receipt = { ...permit.receipt,
     recorded_at:new Date().toISOString(),...sourceSolutionExceptions(original,solution),
-    nonshareable:!preservesConfiguredConsultationSharing(original,profile,permit.units) };
+    nonshareable:!preservesConfiguredConsultationSharing(original,profile,permit.units),strategy };
   receipt.receipt_sha256 = hash(receipt);
   m.cliniccloud_source_booking = receipt;
   // Compound visits render and reserve their source-duration phases. These are
@@ -164,4 +173,4 @@ async function mutateSourceImportedBooking({ db, existing, values, transaction, 
   await db.AppointmentBookingOccupancy.bulkCreate(rows.map(r=>({...r,appointment_id:saved.id_cita})),{transaction});
   return saved;
 }
-module.exports = {createSourceBookingPermit,inspectSourceBookingPermit,sourcePreservedContext,sourceSolutionExceptions,preservesConfiguredConsultationSharing,mutateSourceImportedBooking};
+module.exports = {createSourceBookingPermit,inspectSourceBookingPermit,sourcePreservedContext,sourceSolutionExceptions,preservesConfiguredConsultationSharing,solveSourceSchedule,mutateSourceImportedBooking};

@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
-const {createSourceBookingPermit,inspectSourceBookingPermit,sourcePreservedContext,sourceSolutionExceptions,preservesConfiguredConsultationSharing}=require('../../lib/cliniccloud-import/source-booking-permit');
+const {createSourceBookingPermit,inspectSourceBookingPermit,sourcePreservedContext,sourceSolutionExceptions,preservesConfiguredConsultationSharing,solveSourceSchedule}=require('../../lib/cliniccloud-import/source-booking-permit');
 function fixture(){const now=Date.now(),start='2030-01-07T10:00:00.000Z',end='2030-01-07T10:30:00.000Z';
  return {now,appointment:{clinica_id:66,paciente_id:1,doctor_id:50,instalacion_id:75,tratamiento_id:null,
   inicio:start,fin:end,nota:'Synthetic source',estado:'pendiente',source_system:'cliniccloud',source_reference:'delta:synthetic',
@@ -73,4 +73,23 @@ test('source exception cannot enable room sharing but preserves explicitly confi
  assert.equal(preservesConfiguredConsultationSharing(context,profile,[]),false);
  context.installations.get(76).overlap_capacity=null;context.doctors.get(120).allow_overlap_confirmation=false;
  assert.equal(preservesConfiguredConsultationSharing(context,profile,[]),false);
+});
+test('source scheduling first fits real machine interventions before preserving a genuine conflict',()=>{
+ const start=new Date('2030-01-07T10:00Z'),end=new Date('2030-01-07T10:30Z');
+ const window={start,end},busy=[{start:'2030-01-07T10:00Z',end:'2030-01-07T10:05Z',appointment_id:9},
+  {start:'2030-01-07T10:20Z',end:'2030-01-07T10:25Z',appointment_id:9}];
+ const original={doctors:new Map([[50,{windows:[window],busy}]]),
+  installations:new Map([[75,{windows:[window],busy:[],resource_key:'installation:75'}]]),
+  equipment:new Map([[11,{id:11,status:'available',installation_ids:new Set([75]),busy:[],turnaround_minutes:0,
+   attention_policy:{mode:'start_end',start_minutes:5,start_window_minutes:10,end_minutes:5,end_window_minutes:10}}]]),clinicWindows:[window],patientBusy:[]};
+ const profile={version:2,phases:[{key:'one',duration_minutes:30,installation_ids:[75],
+  professionals:{mode:'any',ids:[50],preferred_id:50},equipment_requirements:[{equipment_ids:[11]}]}]};
+ const normal=solveSourceSchedule(original,profile,start,end);
+ assert.equal(normal.strategy,'normal_availability');
+ assert.equal(normal.solution.phases[0].staff_intervals[0].start_at,'2030-01-07T10:05:00.000Z');
+ assert.deepEqual(sourceSolutionExceptions(original,normal.solution).conflicts,[]);
+ original.installations.get(75).busy=[{start,end,appointment_id:10}];
+ const conflict=solveSourceSchedule(original,profile,start,end);
+ assert.equal(conflict.strategy,'preserve_source_conflict');
+ assert(sourceSolutionExceptions(original,conflict.solution).conflicts.some(r=>r.appointment_id===10));
 });
