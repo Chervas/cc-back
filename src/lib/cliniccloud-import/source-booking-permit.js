@@ -145,7 +145,7 @@ async function mutateSourceImportedBooking({ db, existing, values, transaction, 
   // Do not override missing equipment, room/staff eligibility or malformed
   // machine attention merely because the source is authoritative for time.
   if (!solution || instant(solution.end_at) !== instant(end)) throw Error('SOURCE_BOOKING_RESOURCES_REQUIRE_REVIEW');
-  if(hash([...new Set(solution.phases.flatMap(p=>p.equipment_ids||[]))].sort((a,b)=>a-b))
+  if(hash([...new Set(solution.phases.flatMap(p=>(p.equipment||[]).map(unit=>Number(unit.id))))].sort((a,b)=>a-b))
     !==hash([...permit.units].sort((a,b)=>a-b))) fail();
   const m = {...obj(values.import_metadata)}, receipt = { ...permit.receipt,
     recorded_at:new Date().toISOString(),...sourceSolutionExceptions(original,solution),
