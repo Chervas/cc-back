@@ -3,7 +3,7 @@
 const { createHash } = require('node:crypto');
 const { importReviewVersion, importTreatmentPending, importResourcesInScope, importResourceFingerprint } = require('../lib/appointment-import-review');
 const { bookingError, bookingCapabilities } = require('./treatmentBookingProfile.service');
-const { mutateAppointmentBooking } = require('./appointmentBookingCommand.service');
+const { mutateAppointmentBooking, classifyImportedAppointment } = require('./appointmentBookingCommand.service');
 
 const plain = row => row?.toJSON ? row.toJSON() : row;
 const metadata = row => typeof row.import_metadata === 'string' ? JSON.parse(row.import_metadata) : (row.import_metadata || {});
@@ -81,9 +81,11 @@ async function resolveImportedTreatment({ db, appointmentId, clinicId, actorId, 
         fail('history_exists', 'La cita ya tiene documentación clínica o económica. Revisa esa documentación antes de cambiar su clasificación.');
       }
     }
-    const appointment = await mutateAppointmentBooking({ db, existingAppointmentId: appointmentId, transaction: tx,
-      capabilities, priorityAcknowledged: input.priority_acknowledged === true,
-      ...(resourcesOnly ? { allowObsolete: true } : {}),
+    const command = resourcesOnly ? mutateAppointmentBooking : classifyImportedAppointment;
+    const appointment = await command({ db, existingAppointmentId: appointmentId, transaction: tx,
+      capabilities,
+      ...(resourcesOnly ? { allowObsolete: true, priorityAcknowledged: input.priority_acknowledged === true }
+        : { expectedVersion: decision.expected_version }),
       appointmentValues: { updated_by: actorId, ...(resourcesOnly ? {} : decision.mode === 'treatment'
         ? { tratamiento_id: decision.treatment_id } : { tipo_cita: decision.visit_type }) },
       persist: async ({ values, existing, transaction: bookingTx }) => {

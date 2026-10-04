@@ -38,11 +38,12 @@ function fixture({ failEvent = false, dependency = null, bookingError = null, bo
   const exports = { exports: {} };
   vm.runInNewContext(fs.readFileSync(require.resolve('../../services/appointmentImportResolution.service'), 'utf8'), {
     module: exports, Date, Number, JSON,
-    require: name => name === './appointmentBookingCommand.service' ? { mutateAppointmentBooking: async args => {
+    require: name => name === './appointmentBookingCommand.service' ? Object.fromEntries(['mutateAppointmentBooking', 'classifyImportedAppointment'].map(command => [command, async args => {
       bookings.push(args); if (bookingError) throw Object.assign(Error(bookingError), { code: bookingError });
+      assert.equal(command, args.expectedVersion ? 'classifyImportedAppointment' : 'mutateAppointmentBooking');
       const existing = await db.CitaPaciente.findByPk(51, { transaction: args.transaction, lock: 'UPDATE' });
       return args.persist({ values: { ...existing.toJSON(), ...args.appointmentValues, ...bookingValues }, existing, transaction: args.transaction });
-    } } : name === 'node:crypto' ? require(name)
+    }])) : name === 'node:crypto' ? require(name)
       : name === '../lib/appointment-import-review' ? review : require('../../services/treatmentBookingProfile.service'),
   });
   const request = () => ({ mode: 'treatment', treatment_id: 3, reason: 'Revisado con clínica', expected_version: review.importReviewVersion(state) });

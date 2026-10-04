@@ -7,7 +7,8 @@ const { bookingError, bookingCapabilities, requireOperationalProfile, loadScoped
 const { normalizeAdditionalStaff, additionalStaffSnapshot } = require('../lib/appointment-additional-staff');
 const { installationAllowsStaff } = require('../lib/installation-professionals');
 const { equipmentIds } = require('../lib/booking-equipment');
-const { resourceForConfirmedOverlap } = require('../lib/booking-attention');
+const { resourceForConfirmedOverlap, validStaffIntervals, normalizeAttentionPolicy } = require('../lib/booking-attention');
+const { importTreatmentPending, importReviewVersion } = require('../lib/appointment-import-review');
 
 function metadataObject(value) {
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = null; } }
@@ -50,6 +51,130 @@ function solveLegacy(values, context, force = false) {
     phases: [{ key: 'appointment', label: '', start_at: start.toISOString(), end_at: end.toISOString(),
       installation_id: values.instalacion_id ? Number(values.instalacion_id) : null,
       doctor_ids: values.doctor_id ? [Number(values.doctor_id)] : [], staff_time_scope: 'phase' }] };
+}
+
+function importClassificationError(message) {
+  return bookingError('booking_import_reservation_invalid', message);
+}
+
+function phaseFitsClassification(required, actual, { preserveSourceDuration = false, inheritAttention = false } = {}) {
+  const duration = (new Date(actual.end_at) - new Date(actual.start_at)) / 60000;
+  const staff = required.professionals;
+  const doctors = actual.doctor_ids || [];
+  const units = (actual.equipment || []).map(unit => Number(unit.id));
+  const groups = required.equipment_requirements || [];
+  const attentionMatches = inheritAttention && !required.staff_attention
+    || JSON.stringify(required.staff_attention || []) === JSON.stringify((actual.staff_attention || []).map(normalizeAttentionPolicy))
+      && (required.staff_attention ? validStaffIntervals(actual, required.staff_attention) : !actual.staff_intervals);
+  return (preserveSourceDuration || duration === required.duration_minutes)
+    && required.installation_ids.includes(Number(actual.installation_id))
+    && (staff.mode === 'all'
+      ? doctors.length === staff.ids.length && doctors.every(id => staff.ids.includes(Number(id)))
+      : doctors.length === 1 && staff.ids.includes(Number(doctors[0])))
+    && units.length === groups.length
+    && groups.every(group => units.filter(id => group.equipment_ids.includes(id)).length === 1)
+    && (actual.staff_time_scope || 'phase') === (staff.mode === 'all' ? 'appointment' : 'phase')
+    && attentionMatches;
+}
+
+function occupancySignature(rows) {
+  return JSON.stringify(rows.map(record => {
+    const row = record.toJSON ? record.toJSON() : record;
+    return [row.phase_key, row.resource_kind, row.resource_key,
+      row.installation_id == null ? null : Number(row.installation_id),
+      row.doctor_id == null ? null : Number(row.doctor_id),
+      new Date(row.start_at).toISOString(), new Date(row.end_at).toISOString()];
+  }).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+}
+
+/**
+ * Internal classification command, not a booking option or an HTTP flag.
+ * The authenticated import-review service owns the decision and audit event.
+ * Existing source reservations (including overlaps) are neither released nor
+ * re-solved: linking a label must not erase machines, phases or staff windows.
+ */
+async function classifyImportedAppointment({ db, existingAppointmentId, appointmentValues, expectedVersion,
+  transaction: tx, persist, capabilities = bookingCapabilities(), ...unsupported }) {
+  if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
+  const keys = Object.keys(appointmentValues || {});
+  const treatmentChoice = Number.isSafeInteger(appointmentValues?.tratamiento_id) && appointmentValues.tratamiento_id > 0;
+  const reviewChoice = ['revision', 'primera_sin_trat'].includes(appointmentValues?.tipo_cita);
+  if (!tx || tx.options?.isolationLevel !== 'READ COMMITTED' || !existingAppointmentId
+    || Object.keys(unsupported).length || !/^[a-f0-9]{64}$/.test(expectedVersion || '')
+    || !Number.isSafeInteger(appointmentValues?.updated_by) || appointmentValues.updated_by < 1
+    || treatmentChoice === reviewChoice
+    || keys.some(key => !['updated_by', treatmentChoice ? 'tratamiento_id' : 'tipo_cita'].includes(key))) {
+    throw bookingError('booking_import_invalid', 'La clasificación no puede modificar la reserva de la cita.', null, 400);
+  }
+  const existing = await db.CitaPaciente.findByPk(existingAppointmentId, { transaction: tx, lock: tx.LOCK.UPDATE });
+  if (!existing) throw bookingError('appointment_not_found', 'Cita no encontrada.', null, 404);
+  const previous = existing.toJSON ? existing.toJSON() : existing;
+  const metadata = metadataObject(previous.import_metadata);
+  if (!importTreatmentPending(previous) || metadata.import_treatment_resolution || previous.voucher_id
+    || metadata.program_session || previous.es_provisional || previous.hold_expires_at
+    || ['cancelada', 'completada', 'no_asistio'].includes(previous.estado)) {
+    throw bookingError('booking_import_not_resolvable', 'Esta acción solo clasifica citas importadas abiertas sin tratamiento ni programa.');
+  }
+  if (importReviewVersion(previous) !== expectedVersion) {
+    throw bookingError('booking_import_changed', 'La cita ha cambiado. Vuelve a abrirla antes de confirmar.');
+  }
+  const clinic = await db.Clinica.findByPk(previous.clinica_id, { transaction: tx, lock: tx.LOCK.SHARE });
+  if (!clinic) throw bookingError('clinic_not_found', 'Clínica no encontrada.', null, 404);
+  if (treatmentChoice) await db.Tratamiento.findByPk(appointmentValues.tratamiento_id, { transaction: tx, lock: tx.LOCK.SHARE });
+  const treatment = treatmentChoice ? await loadScopedTreatment({ db, treatmentId: appointmentValues.tratamiento_id,
+    clinic, transaction: tx }) : null;
+  if (treatment && ![true, 1].includes(treatment.activo)) {
+    throw bookingError('treatment_not_bookable', 'Selecciona un tratamiento activo.');
+  }
+  const required = requireOperationalProfile(treatment, { capabilities });
+  const booking = metadata.booking;
+  const profile = booking?.profile && requireOperationalProfile({ activo: true,
+    clinical_config: { booking_profile: booking.profile } }, { capabilities });
+  const phases = booking?.phases;
+  if (!profile || !Array.isArray(phases) || phases.length !== profile.phases.length
+    || new Date(previous.fin) <= new Date(previous.inicio)) {
+    throw importClassificationError('Revisa la reserva original antes de vincular el tratamiento.');
+  }
+  for (let index = 0; index < phases.length; index++) {
+    const phase = phases[index];
+    const start = index ? phases[index - 1].end_at : previous.inicio;
+    if (phase.key !== profile.phases[index].key || !phaseFitsClassification(profile.phases[index], phase)
+      || new Date(phase.start_at).getTime() !== new Date(start).getTime()
+      || !Number.isFinite(new Date(phase.end_at).getTime())) {
+      throw importClassificationError('Las fases originales necesitan revisión; no se ha cambiado la reserva.');
+    }
+  }
+  if (new Date(phases.at(-1).end_at).getTime() !== new Date(previous.fin).getTime()
+    || Number(phases[0].installation_id) !== Number(previous.instalacion_id)
+    || Number(phases[0].doctor_ids[0]) !== Number(previous.doctor_id)) {
+    throw importClassificationError('La reserva original no coincide con el horario, profesional o cabina de la cita.');
+  }
+  if (required && (required.phases.length !== phases.length
+    || required.phases.some((phase, index) => !phaseFitsClassification(phase, phases[index],
+      { preserveSourceDuration: true, inheritAttention: true })))) {
+    throw bookingError('booking_import_profile_mismatch',
+      'El tratamiento requiere otra reserva. Revisa sus fases y recursos desde Editar antes de vincularlo.');
+  }
+  const support = additionalStaffSnapshot(previous);
+  if (metadata.additional_staff && !support) throw importClassificationError('Revisa el personal de apoyo de la reserva original.');
+  const occupancies = await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: existingAppointmentId },
+    transaction: tx, lock: tx.LOCK.SHARE });
+  const installationIds = [...new Set(phases.map(phase => Number(phase.installation_id)))];
+  const mapping = await resolveInstallationKeys({ db, clinic, installationIds, transaction: tx, enabled: true });
+  const expected = occupancyForSolution({ start_at: previous.inicio, end_at: previous.fin, phases }, mapping.keys);
+  for (const id of support?.ids || []) {
+    for (let index = expected.length - 1; index >= 0; index--) if (expected[index].doctor_id === id) expected.splice(index, 1);
+    expected.push({ phase_key: 'additional_staff', resource_kind: 'doctor', resource_key: `doctor:${id}`,
+      doctor_id: id, installation_id: null, start_at: previous.inicio, end_at: previous.fin });
+  }
+  if (!occupancies.length || occupancySignature(expected) !== occupancySignature(occupancies)) {
+    throw importClassificationError('La ocupación de la reserva original necesita revisión; no se han cambiado sus recursos.');
+  }
+  await lockBookingResources({ db, resourceKeys: [...occupancies.map(row => row.resource_key),
+    ...expected.map(row => row.resource_key), `patient:${previous.paciente_id}`], transaction: tx });
+  // No occupancy UPDATE/DELETE/INSERT, availability search, force or completion
+  // hooks. Preserve even the original occupancy row IDs and all HOLD evidence.
+  return persist({ values: { ...previous, ...appointmentValues }, existing, transaction: tx, solution: null });
 }
 
 /**
@@ -300,4 +425,4 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
   return transaction ? execute(transaction) : db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, execute);
 }
 
-module.exports = { lockBookingResources, mutateAppointmentBooking };
+module.exports = { lockBookingResources, mutateAppointmentBooking, classifyImportedAppointment };
