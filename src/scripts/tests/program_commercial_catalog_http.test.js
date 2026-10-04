@@ -60,3 +60,32 @@ test('HTTP included-to-standalone transition requires a new explicit amount and 
     price_profile: { schema_version: 1, price_semantics: 'gross_tax_included', tax_percent: 0, exemption_reason: 'Explicit synthetic free/exempt offer' } } }), f.response);
   assert.equal(f.rows[0].precio_base, 0); assert.equal(f.response.body.standalone_sellable, true);
 });
+test('HTTP personalization cannot turn an included component into an unpriced standalone offer', async () => {
+  const priceProfile = { schema_version: 1, price_semantics: 'gross_tax_included', tax_percent: 21, exemption_reason: null };
+  for (const patch of [
+    {},
+    { precio_base: null },
+    { precio_base: '90' },
+    { precio_base: '   ' },
+    { precio_base: false },
+    { precio_base: Infinity },
+    { precio_base: -1 },
+    { precio_base: 90, clinical_config: { price_profile: null } },
+  ]) {
+    const f = setup(); await f.handlers.createTratamiento(f.request(f.payload), f.response);
+    const saves = f.state.saves;
+    await assert.rejects(f.handlers.personalizarTratamiento(f.request({
+      clinica_id: 73, ...patch,
+      clinical_config: { price_profile: priceProfile, ...patch.clinical_config, commercial: { sale_mode: 'standalone' } },
+    }), f.response), { code: 'component_standalone_review_required' });
+    assert.equal(f.rows.length, 1); assert.equal(f.state.saves, saves);
+    assert.equal(f.rows[0].precio_base, null);
+    assert.equal(f.rows[0].clinical_config.commercial.sale_mode, 'program_component_only');
+  }
+  const f = setup(); await f.handlers.createTratamiento(f.request(f.payload), f.response);
+  await f.handlers.personalizarTratamiento(f.request({ clinica_id: 73, precio_base: 90,
+    clinical_config: { commercial: { sale_mode: 'standalone' }, price_profile: priceProfile } }), f.response);
+  assert.equal(f.response.code, 201); assert.equal(f.rows.length, 2);
+  assert.equal(f.rows[1].precio_base, 90); assert.equal(f.rows[1].clinical_config.price_profile.tax_percent, 21);
+  assert.equal(f.rows[0].precio_base, null); assert.equal(f.rows[0].clinical_config.commercial.sale_mode, 'program_component_only');
+});
