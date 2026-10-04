@@ -526,6 +526,13 @@ exports.personalizarTratamiento = asyncHandler(async (req, res) => {
     const nuevoCodigo = tratamientoBase.codigo ? `${tratamientoBase.codigo}-C${clinica_id}` : null;
     datosCopia.codigo = nuevoCodigo;
 
+    const commercialPolicy = require('../lib/treatment-commercial-policy');
+    if (commercialPolicy.saleMode(tratamientoBase) === 'program_component_only'
+        && commercialPolicy.saleMode(datosCopia) === 'standalone'
+        && (typeof cambios.precio_base !== 'number' || !Number.isFinite(cambios.precio_base) || cambios.precio_base < 0
+            || !require('../lib/economicPriceProfile').profileFromTreatment(datosCopia))) {
+        throw require('../lib/treatment-catalog-contract').catalogError('Define expresamente una tarifa individual y su fiscalidad antes de ofrecer este componente por separado.', 'component_standalone_review_required', 422);
+    }
     await validateCatalogResources(datosCopia, db);
     const copia = await Tratamiento.create(datosCopia);
 
