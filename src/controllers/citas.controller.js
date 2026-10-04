@@ -2350,8 +2350,11 @@ exports.getAppointmentHubList = asyncHandler(async (req, res) => {
         inicio: { [q.past ? Op.lt : Op.gte]: new Date() },
     };
     const rows = await CitaPaciente.findAll({ where,
-        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'inicio', 'fin', 'estado', 'motivo', 'tipo_cita', 'tratamiento_id', 'doctor_id', 'instalacion_id', 'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional'],
+        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'inicio', 'fin', 'estado', 'nota', 'motivo', 'tipo_cita', 'tratamiento_id', 'doctor_id', 'instalacion_id', 'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional'],
         include: [
+            // Only card identity; contact/clinical data still belongs to detail.
+            { model: Paciente, as: 'paciente', required: false, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos'] },
+            { model: LeadIntake, as: 'lead', required: false, attributes: ['id', 'nombre'] },
             { model: Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] },
             { model: Instalacion, as: 'instalacion', required: false, attributes: ['id', 'nombre'] },
             ...(db.Usuario ? [{ model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos'] }] : []),
