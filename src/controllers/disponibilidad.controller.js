@@ -19,6 +19,7 @@ function confirmedOverlapRows(rows, start, end, clinicId, allowed, capacity = nu
 const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staff');
 const { bookingCapabilities, bookingError, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
 const { resourceAppointments, resourceInstallationBlocks } = require('../services/appointmentResourceCalendar.service');
+const { buildLegacySlots, loadLegacyAvailabilitySnapshot } = require('../lib/availability-request-snapshot');
 const {
   parseClinicConfig,
   isValidTimeZone,
@@ -78,6 +79,16 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
   };
   const response = { timezone: resolveClinicTimezone(clinic), clinica_id: Number(clinic.id_clinica),
     fecha_local: query.fecha_local, duracion_min: phase.duration_minutes, granularity_min: stepMin };
+  if (query.summary_only === true) {
+    const pairs = installationIds.length ? installationIds.map(id => [Number(query.doctor_id), id])
+      : professionalIds.length ? professionalIds.map(id => [id, Number(query.instalacion_id)])
+        : [[query.doctor_id ? Number(query.doctor_id) : null, query.instalacion_id ? Number(query.instalacion_id) : null]];
+    for (const [doctor, installation] of pairs) {
+      const slots = getSolutions(doctor, installation);
+      if (slots.length) return { ...response, slots };
+    }
+    return { ...response, slots: [] };
+  }
   if (installationIds.length) return { ...response, doctor_id: Number(query.doctor_id), instalacion_ids: installationIds,
     slots_by_instalacion: Object.fromEntries(installationIds.map(id => [id, getSolutions(Number(query.doctor_id), id)])), unavailable_by_instalacion: {} };
   if (professionalIds.length) return { ...response, instalacion_id: Number(query.instalacion_id), doctor_ids: professionalIds,
@@ -230,35 +241,6 @@ const fetchClinicHorarios = async (clinicaId) => {
     throw error;
   }
 };
-
-const subtractIntervals = (windows, blocks) => {
-  let res = [...windows];
-  blocks.forEach((b) => {
-    res = res.flatMap((w) => {
-      if (!overlap(w.start, w.end, b.start, b.end)) return [w];
-      const out = [];
-      if (w.start < b.start) out.push({ start: w.start, end: b.start });
-      if (b.end < w.end) out.push({ start: b.end, end: w.end });
-      return out;
-    });
-  });
-  return res.filter((w) => w.start < w.end);
-};
-
-const intersectWindows = (a, b) => {
-  if (!a.length || !b.length) return [];
-  return a
-    .flatMap((w) =>
-      b.map((d) => ({
-        start: new Date(Math.max(w.start, d.start)),
-        end: new Date(Math.min(w.end, d.end))
-      }))
-    )
-    .filter((w) => w.start < w.end);
-};
-
-
-
 
 const build409 = ({ message, conflicts }) => {
   const canForce = conflicts.length > 0 && conflicts.every((c) => !!c.can_force);
@@ -420,18 +402,21 @@ const conflictsForSlot = ({
     if (!staffOutOfHours) {
       const dc = firstOverlap(docCitas, start, end);
       if (dc) {
-        const citaClinicId = Number(dc.clinica_id);
-        const sameClinic = Number.isFinite(citaClinicId) && citaClinicId === Number(clinicaId);
+        const overlappingRows = docCitas.filter(row => row.start < end && row.end > start);
+        const originClinics = [...new Set(overlappingRows.map(row => Number(row.clinica_id)).filter(Number.isFinite))].sort((a, b) => a - b);
+        const sameClinic = originClinics.length > 0 && originClinics.every(id => id === Number(clinicaId));
+        const citaClinicId = originClinics.find(id => id !== Number(clinicaId)) ?? Number(dc.clinica_id);
         conflicts.push({
           resource_type: 'staff',
           resource_role: 'doctor',
           resource_id: doctorId,
           clinica_id: clinicaId,
           code: 'STAFF_OVERLAP',
-          can_force: sameClinic && confirmedOverlapRows(docCitas.filter(row => row.start < end && row.end > start).map(row => ({...row,inicio:row.start,fin:row.end})),start,end,clinicaId,doctorOverlapAllowed),
+          can_force: sameClinic && confirmedOverlapRows(overlappingRows.map(row => ({...row,inicio:row.start,fin:row.end})),start,end,clinicaId,doctorOverlapAllowed),
           details: {
             message: sameClinic ? 'Doctor ocupado' : 'Doctor ocupado en otra clínica',
-            clinica_id: Number.isFinite(citaClinicId) ? citaClinicId : null
+            clinica_id: Number.isFinite(citaClinicId) ? citaClinicId : null,
+            clinica_ids: originClinics,
           }
         });
       }
@@ -444,12 +429,13 @@ const conflictsForSlot = ({
 const conflictSetKey = (conflicts) => {
   return (conflicts || [])
     .map((c) => {
-      const base = `${c.resource_type}|${c.code}|${c.resource_id ?? ''}|${c.clinica_id ?? ''}`;
-      if (c.code === 'STAFF_BLOCKED' || c.code === 'INSTALLATION_BLOCKED') {
+      const base = `${c.resource_type}|${c.code}|${c.resource_id ?? ''}|${c.clinica_id ?? ''}|${c.can_force === true}`;
+      if (c.code === 'STAFF_BLOCKED' || c.code === 'INSTALLATION_BLOCKED' || c.code === 'STAFF_OVERLAP') {
         const t = c.details && c.details.tipo ? String(c.details.tipo) : '';
         const m = c.details && c.details.message ? String(c.details.message) : '';
         const cd = c.details && c.details.clinica_id != null ? String(c.details.clinica_id) : '';
-        return `${base}|${t}|${m}|${cd}`;
+        const origins = Array.isArray(c.details?.clinica_ids) ? [...c.details.clinica_ids].sort((a, b) => a - b).join(',') : '';
+        return `${base}|${t}|${m}|${cd}|${origins}`;
       }
       return base;
     })
@@ -547,6 +533,9 @@ const buildUnavailableIntervals = ({
         end_local: formatLocal(end, timeZone),
         start_utc: start.toISOString(),
         end_utc: end.toISOString(),
+        // This is the union of rejected candidate appointment spans, not raw
+        // occupied resource intervals. Keep the historical painting semantics.
+        interval_kind: 'unavailable_candidate_span',
         resource_conflicts: conflicts,
         _key: key
       };
@@ -837,7 +826,8 @@ exports.check = asyncHandler(async (req, res) => {
         code: 'STAFF_OVERLAP',
         // Overbooking doctor permitido -> forzable
         can_force: confirmedOverlapRows(citasDocSameClinic,start,end,clinicaId,dc?.allow_overlap_confirmation),
-        details: { cita_ids: citasDocSameClinic.map((c) => c.id_cita), message: 'Doctor ocupado' }
+        details: { cita_ids: citasDocSameClinic.map((c) => c.id_cita), message: 'Doctor ocupado',
+          clinica_id: clinicaId, clinica_ids: [clinicaId] }
       });
     }
 
@@ -851,7 +841,8 @@ exports.check = asyncHandler(async (req, res) => {
         // No se permite forzar cuando el choque es en otra clínica.
         can_force: false,
         details: {
-          message: 'Doctor ocupado en otra clínica'
+          message: 'Doctor ocupado en otra clínica',
+          clinica_ids: [...new Set(citasDocOtherClinics.map(c => Number(c.clinica_id)).filter(Number.isFinite))].sort((a, b) => a - b),
         }
       });
     }
@@ -973,7 +964,6 @@ exports.slots = asyncHandler(async (req, res) => {
   const maxSlots = requestedLimit && requestedLimit > 0 ? requestedLimit : Math.min(theoreticalMax, 2000);
 
   const dow = dayIndexFromLocalDate(fecha_local);
-  const baseWindows = [{ start: baseStart, end: baseEnd }];
   const clinicHorarios = await fetchClinicHorarios(clinicaId);
   const clinicHasSchedule = hasActiveSchedule(clinicHorarios);
   const clinicWins = clinicHasSchedule
@@ -1027,55 +1017,10 @@ exports.slots = asyncHandler(async (req, res) => {
     docBlocksRows,
     docCitasRows
   }) => {
-    if (inst && !installationAllowsStaff(inst, [doctorCtx?.doctorId, ...additionalStaffIds].filter(Boolean))) return [];
-    let windows = [...baseWindows];
-
-    if (clinicHasSchedule) {
-      windows = clinicWins.length ? intersectWindows(windows, clinicWins) : [];
-    }
-
-    if (inst) {
-      const instWins = buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local, clinicTimezone);
-      windows = intersectWindows(windows, instWins);
-    }
-    if (doctorCtx && doctorCtx.dcMissing) {
-      // Se pidió doctor, pero no existe asignación en la clínica
-      windows = [];
-    } else if (doctorCtx && Array.isArray(doctorCtx.docWins)) {
-      windows = intersectWindows(windows, doctorCtx.docWins);
-    }
-
-    const blocks = [];
-    for (const id of additionalStaffIds) {
-      const person = supportContext.doctors.get(id);
-      windows = intersectWindows(windows, person?.windows || []);
-      blocks.push(...(person?.busy || []).map(row => ({ start: new Date(row.start), end: new Date(row.end) })));
-    }
-    (instBlocksRows || []).forEach((b) => blocks.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
-    (instCitasRows || []).forEach((c) => blocks.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
-    (docBlocksRows || []).forEach((b) => blocks.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
-    (docCitasRows || []).forEach((c) => blocks.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
-
-    const free = subtractIntervals(windows, blocks);
-
-    const slots = [];
-    for (const w of free) {
-      let cursor = new Date(w.start);
-      while (cursor.getTime() + durMin * 60000 <= w.end.getTime()) {
-        const s = new Date(cursor);
-        const e = new Date(cursor.getTime() + durMin * 60000);
-        slots.push({
-          start_local: formatLocal(s, clinicTimezone),
-          end_local: formatLocal(e, clinicTimezone),
-          start_utc: s.toISOString(),
-          end_utc: e.toISOString()
-        });
-        if (slots.length >= maxSlots) break;
-        cursor = new Date(cursor.getTime() + stepMin * 60000);
-      }
-      if (slots.length >= maxSlots) break;
-    }
-    return slots;
+    return buildLegacySlots({ baseStart, baseEnd, clinicHasSchedule, clinicWins, inst,
+      instWins: inst ? buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local, clinicTimezone) : [],
+      doctorCtx, additionalStaffIds, supportContext, timeZone: clinicTimezone, durMin, stepMin, maxSlots,
+      instBlocksRows, instCitasRows, docBlocksRows, docCitasRows });
   };
 
   // ========== Batch: doctor_id + instalacion_ids[] ==========
@@ -1420,29 +1365,157 @@ exports.slots = asyncHandler(async (req, res) => {
   });
 });
 
-const invokeSlotsForSummary = (query, userData) => new Promise((resolve, reject) => {
-  const req = { query, userData };
-  const res = {
-    statusCode: 200,
-    status(code) {
-      this.statusCode = code;
-      return this;
-    },
-    json(payload) {
-      if (this.statusCode >= 400) {
-        const error = new Error(payload?.message || 'slots_summary_failed');
-        error.statusCode = this.statusCode;
-        error.payload = payload;
-        reject(error);
-        return this;
-      }
-      resolve(payload);
-      return this;
-    }
-  };
+const availabilityInputError = (message, statusCode = 400) => Object.assign(Error(message), { statusCode });
 
-  Promise.resolve(exports.slots(req, res, reject)).catch(reject);
-});
+// Identical response shapes to legacy /slots, but every column/date consumes
+// the same request-local SQL snapshot. The actual legacy slot constructor is
+// shared with /slots; unavailable geometry remains unchanged.
+function legacySnapshotPayload(snapshot, query) {
+  const date = query.fecha_local, day = snapshot.day(date), timeZone = snapshot.timeZone;
+  const clinicId = Number(snapshot.clinic.id_clinica), durMin = parseIntSafe(query.duracion_min);
+  const stepMin = parseIntSafe(query.granularity_min) || 15;
+  const includeUnavailable = parseBool(query.include_unavailable);
+  const doctorId = query.doctor_id ? parseIntSafe(query.doctor_id) : null;
+  const installationId = query.instalacion_id ? parseIntSafe(query.instalacion_id) : null;
+  const doctorIds = parseIntArray(query.doctor_ids || query['doctor_ids[]']);
+  const installationIds = parseIntArray(query.instalacion_ids || query['instalacion_ids[]']);
+  if (stepMin <= 0 || installationIds.length > 100 || doctorIds.length > 100
+    || (installationIds.length && doctorIds.length) || (installationIds.length && (installationId || !doctorId))
+    || (doctorIds.length && (doctorId || !installationId))) throw availabilityInputError('Batch de cabinas/profesionales inválido');
+  let baseStart = localDateTimeToUtc(date, '00:00:00', timeZone);
+  let baseEnd = localDateTimeToUtc(date, '23:59:59', timeZone);
+  if (typeof query.from_local === 'string' && /^\d{2}:\d{2}$/.test(query.from_local)) baseStart = localDateTimeToUtc(date, `${query.from_local}:00`, timeZone);
+  if (typeof query.to_local === 'string' && /^\d{2}:\d{2}$/.test(query.to_local)) baseEnd = localDateTimeToUtc(date, `${query.to_local}:00`, timeZone);
+  if (!baseStart || !baseEnd || baseEnd <= baseStart) throw availabilityInputError('rango from_local/to_local inválido');
+  const rangeMinutes = Math.floor((baseEnd - baseStart) / 60000);
+  const theoreticalMax = rangeMinutes >= durMin ? Math.floor((rangeMinutes - durMin) / stepMin) + 1 : 0;
+  const requestedLimit = parseIntSafe(query.limit);
+  const maxSlots = requestedLimit > 0 ? requestedLimit : Math.min(theoreticalMax, 2000);
+  const response = { timezone: timeZone, clinica_id: clinicId, fecha_local: date, duracion_min: durMin, granularity_min: stepMin };
+  // Preserve the legacy missing-doctor batch behavior (including full-window
+  // diagnostics); an invalid/archived installation is never queried for data.
+  if (doctorId && installationIds.length && !snapshot.doctorMap.has(doctorId)) {
+    return { ...response, doctor_id: doctorId, instalacion_ids: installationIds,
+      slots_by_instalacion: Object.fromEntries(installationIds.map(id => [id, []])),
+      ...(includeUnavailable ? { unavailable_by_instalacion: Object.fromEntries(installationIds.map(id => [id, [{
+        start_local: formatLocal(baseStart, timeZone), end_local: formatLocal(baseEnd, timeZone),
+        start_utc: baseStart.toISOString(), end_utc: baseEnd.toISOString(), interval_kind: 'resource_schedule_window',
+        resource_conflicts: [{ resource_type: 'staff', resource_role: 'doctor', resource_id: doctorId, clinica_id: clinicId,
+          code: 'STAFF_OUT_OF_HOURS', can_force: false, details: { message: 'Doctor no asignado a la clínica' } }],
+      }]])) } : {}) };
+  }
+  const pair = (doctor, installation) => {
+    const inst = installation ? snapshot.installationMap.get(installation) : null;
+    if (installation && !inst) throw availabilityInputError('Instalación no encontrada o no pertenece a la clínica', installationIds.length ? 400 : 404);
+    const doctorCtx = doctor ? day.doctorContexts.get(doctor) : null;
+    const rows = { instBlocksRows: day.installationBlocks.get(installation) || [],
+      instCitasRows: day.installationAppointments.get(installation) || [], docBlocksRows: day.doctorBlocks.get(doctor) || [],
+      docCitasRows: day.doctorAppointments.get(doctor) || [] };
+    return { slots: buildLegacySlots({ baseStart, baseEnd, clinicHasSchedule: day.clinicHasSchedule, clinicWins: day.clinicWins,
+      inst, instWins: day.installationWindows.get(installation) || [], doctorCtx, additionalStaffIds: snapshot.additionalStaffIds,
+      supportContext: snapshot.supportContext, timeZone, durMin, stepMin, maxSlots, ...rows }),
+      ...(includeUnavailable ? { unavailable: buildUnavailableIntervals({ clinicaId: clinicId, timeZone, fecha_local: date,
+        dow: day.dow, clinicHasSchedule: day.clinicHasSchedule, clinicWins: day.clinicWins, baseStart, baseEnd, durMin, stepMin,
+        instalacionId: installation, doctorId: doctor, inst, dc: doctor ? snapshot.doctorMap.get(doctor) || null : undefined, ...rows }) } : {}) };
+  };
+  if (query.summary_only === true) {
+    // Validate the whole requested installation footprint before early OR.
+    // A valid room must not hide an invalid/foreign column in the same batch.
+    if ([installationId, ...installationIds].filter(Boolean).some(id => !snapshot.installationMap.has(id))) {
+      throw availabilityInputError('Instalación no encontrada o no pertenece a la clínica', installationIds.length ? 400 : 404);
+    }
+    const pairs = installationIds.length ? installationIds.map(id => [doctorId, id])
+      : doctorIds.length ? doctorIds.map(id => [id, installationId]) : [[doctorId, installationId]];
+    for (const [doctor, installation] of pairs) {
+      const result = pair(doctor, installation);
+      if (result.slots.length) return { ...response, slots: result.slots };
+    }
+    return { ...response, slots: [] };
+  }
+  if (installationIds.length) {
+    const pairs = installationIds.map(id => [id, pair(doctorId, id)]);
+    return { ...response, doctor_id: doctorId, instalacion_ids: installationIds,
+      slots_by_instalacion: Object.fromEntries(pairs.map(([id, p]) => [id, p.slots])),
+      ...(includeUnavailable ? { unavailable_by_instalacion: Object.fromEntries(pairs.map(([id, p]) => [id, p.unavailable])) } : {}) };
+  }
+  if (doctorIds.length) {
+    const pairs = doctorIds.map(id => [id, pair(id, installationId)]);
+    return { ...response, instalacion_id: installationId, doctor_ids: doctorIds,
+      slots_by_doctor: Object.fromEntries(pairs.map(([id, p]) => [id, p.slots])),
+      ...(includeUnavailable ? { unavailable_by_doctor: Object.fromEntries(pairs.map(([id, p]) => [id, p.unavailable])) } : {}) };
+  }
+  const result = pair(doctorId, installationId);
+  return { ...response, slots: result.slots, ...(includeUnavailable ? { unavailable_intervals: result.unavailable } : {}) };
+}
+
+function matrixColumnQuery(baseQuery, query, columnId) {
+  const normalizedMode = query.mode === 'doctor' ? 'doctor' : 'installation';
+  const contextDoctorId = query.context_doctor_id !== 'todos' ? parseIntSafe(query.context_doctor_id) : null;
+  const contextInstallationId = query.context_instalacion_id !== 'todos' ? parseIntSafe(query.context_instalacion_id) : null;
+  if (normalizedMode === 'doctor') {
+    const installation = contextInstallationId || parseIntSafe(query.preferred_instalacion_id);
+    const peers = parseIntArray(query.peer_instalacion_ids || query['peer_instalacion_ids[]']);
+    return { ...baseQuery, doctor_id: String(columnId), ...(installation ? { instalacion_id: String(installation) }
+      : peers.length ? { instalacion_ids: peers } : {}) };
+  }
+  const peers = parseIntArray(query.peer_doctor_ids || query['peer_doctor_ids[]']);
+  return { ...baseQuery, instalacion_id: String(contextInstallationId || columnId),
+    ...(contextDoctorId ? { doctor_id: String(contextDoctorId) } : peers.length ? { doctor_ids: peers } : {}) };
+}
+
+async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) {
+  const clinicId = parseIntSafe(req.query.clinica_id);
+  if (!clinicId || clinicId <= 0) throw availabilityInputError('clinica_id requerido');
+  if (!(parseIntSafe(req.query.duracion_min) > 0)) throw availabilityInputError('duracion_min requerido');
+  const requestStep = req.query.granularity_min == null ? 15 : parseIntSafe(req.query.granularity_min);
+  if (!(requestStep > 0 && requestStep <= 120)) throw availabilityInputError('granularity_min debe estar entre 1 y 120');
+  await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId });
+  const clinic = await db.Clinica.findByPk(clinicId, { attributes: ['id_clinica', 'nombre_clinica', 'configuracion', 'grupoClinicaId', 'equipment_booking_enabled'] });
+  if (!clinic) throw availabilityInputError('Clínica no encontrada', 404);
+  const additionalStaffIds = requestedAdditionalStaff(req);
+  let profile = null;
+  if (req.query.tratamiento_id) {
+    profile = requireOperationalProfile(await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic }));
+    if (profile) {
+      assertGridProfile(profile);
+      const step = parseIntSafe(req.query.granularity_min) || 15;
+      if (step < 5 || step > 120 || queries.some(query => parseIntArray(query.instalacion_ids).length > 50 || parseIntArray(query.doctor_ids).length > 50)) {
+        throw availabilityInputError('Rango o recursos de disponibilidad inválidos');
+      }
+    }
+  }
+  const timeZone = resolveClinicTimezone(clinic), sortedDates = [...dates].sort();
+  if (grid && profile && resolveLocalInstant(addDays(sortedDates[sortedDates.length - 1], 1), '00:00:00', timeZone)
+    - resolveLocalInstant(sortedDates[0], '00:00:00', timeZone) > 32 * 86400000) throw availabilityInputError('El rango no puede superar 31 días');
+  // Normal 42-day calendar needs one range. Disjoint legacy requests spanning
+  // years retain compatibility without asking the canonical readers to load
+  // more than their bounded 367-day resource range.
+  const groups = [];
+  for (const date of sortedDates) {
+    let group = groups[groups.length - 1];
+    if (!group || resolveLocalInstant(addDays(date, 1), '00:00:00', timeZone)
+      - resolveLocalInstant(group[0], '00:00:00', timeZone) > 367 * 86400000) groups.push(group = []);
+    group.push(date);
+  }
+  const doctors = [...new Set(queries.flatMap(query => [parseIntSafe(query.doctor_id), ...parseIntArray(query.doctor_ids || query['doctor_ids[]'])]).filter(Boolean))];
+  const installations = [...new Set(queries.flatMap(query => [parseIntSafe(query.instalacion_id), ...parseIntArray(query.instalacion_ids || query['instalacion_ids[]'])]).filter(Boolean))];
+  const byDate = new Map();
+  for (const group of groups) {
+    if (profile) {
+      const context = await loadBookingContext({ db, clinic, profile, dates: group,
+        start: resolveLocalInstant(group[0], '00:00:00', timeZone),
+        end: resolveLocalInstant(addDays(group[group.length - 1], 1), '00:00:00', timeZone), occupancyEnabled: true, additionalStaffIds });
+      const getPayload = query => profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds });
+      group.forEach(date => byDate.set(date, getPayload));
+    } else {
+      const snapshot = await loadLegacyAvailabilitySnapshot({ db, clinic, dates: group, doctorIds: doctors,
+        installationIds: installations, additionalStaffIds, fetchClinicHorarios,
+        readers: { resourceAppointments, resourceInstallationBlocks, loadBookingContext } });
+      group.forEach(date => byDate.set(date, query => legacySnapshotPayload(snapshot, query)));
+    }
+  }
+  return query => byDate.get(query.fecha_local)(query);
+}
 
 exports.grid = asyncHandler(async (req, res) => {
   const {
@@ -1454,9 +1527,6 @@ exports.grid = asyncHandler(async (req, res) => {
     to_local,
     tratamiento_id,
     mode,
-    context_doctor_id,
-    context_instalacion_id,
-    preferred_instalacion_id,
   } = req.query || {};
 
   const clinicaId = parseIntSafe(clinica_id);
@@ -1482,12 +1552,7 @@ exports.grid = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'column_ids[] excede el máximo (80)' });
   }
 
-  const peerInstalacionIds = parseIntArray(req.query.peer_instalacion_ids || req.query['peer_instalacion_ids[]']);
-  const peerDoctorIds = parseIntArray(req.query.peer_doctor_ids || req.query['peer_doctor_ids[]']);
   const normalizedMode = mode === 'doctor' ? 'doctor' : 'installation';
-  const contextDoctorId = context_doctor_id && context_doctor_id !== 'todos' ? parseIntSafe(context_doctor_id) : null;
-  const contextInstalacionId = context_instalacion_id && context_instalacion_id !== 'todos' ? parseIntSafe(context_instalacion_id) : null;
-  const preferredInstalacionId = preferred_instalacion_id ? parseIntSafe(preferred_instalacion_id) : null;
 
   const baseQuery = {
     clinica_id: String(clinicaId),
@@ -1501,30 +1566,13 @@ exports.grid = asyncHandler(async (req, res) => {
   const additionalStaffIds = requestedAdditionalStaff(req);
   if (additionalStaffIds.length) baseQuery.additional_staff_ids = additionalStaffIds;
 
-  // Request-local snapshot for the entire treatment grid: one ACL, one catalog
-  // read and one bulk occupancy load, independent of days × visible columns.
-  // No global cache: a subsequent request sees newly booked/cancelled visits.
-  let treatmentGrid = null;
-  if (tratamiento_id) {
-    await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
-    const clinic = await db.Clinica.findByPk(clinicaId);
-    if (!clinic) return res.status(404).json({ message: 'Clínica no encontrada' });
-    const treatment = await loadScopedTreatment({ db, treatmentId: tratamiento_id, clinic });
-    const profile = requireOperationalProfile(treatment);
-    if (profile) {
-      assertGridProfile(profile);
-      if (stepMin < 5 || stepMin > 120 || peerInstalacionIds.length > 50 || peerDoctorIds.length > 50) {
-        return res.status(400).json({ message: 'Rango o recursos de disponibilidad inválidos' });
-      }
-      const sortedDates = [...dateList].sort();
-      const timezone = resolveClinicTimezone(clinic);
-      const start = resolveLocalInstant(sortedDates[0], '00:00:00', timezone);
-      const end = resolveLocalInstant(addDays(sortedDates[sortedDates.length - 1], 1), '00:00:00', timezone);
-      if (end - start > 32 * 86400000) return res.status(400).json({ message: 'El rango no puede superar 31 días' });
-      const context = await loadBookingContext({ db, clinic, profile, start, end, dates: dateList,
-        occupancyEnabled: true, additionalStaffIds });
-      treatmentGrid = { profile, context, clinic, additionalStaffIds };
-    }
+  let getPayload;
+  try {
+    getPayload = await prepareRangePayloads(req, dateList,
+      columnIds.map(id => matrixColumnQuery(baseQuery, req.query, id)), { grid: true });
+  } catch (error) {
+    if (!error.code && (error.statusCode === 400 || error.statusCode === 404)) return res.status(error.statusCode).json({ message: error.message });
+    throw error;
   }
 
   const tasks = [];
@@ -1535,32 +1583,10 @@ exports.grid = asyncHandler(async (req, res) => {
   });
 
   const rows = await runWithConcurrency(tasks, 4, async ({ dateIso, columnId }) => {
-    const query = {
-      ...baseQuery,
-      fecha_local: dateIso,
-    };
-
-    if (normalizedMode === 'doctor') {
-      query.doctor_id = String(columnId);
-      const resolvedInstalacionId = contextInstalacionId || preferredInstalacionId || null;
-      if (resolvedInstalacionId) {
-        query.instalacion_id = String(resolvedInstalacionId);
-      } else if (peerInstalacionIds.length) {
-        query.instalacion_ids = peerInstalacionIds.join(',');
-      }
-    } else {
-      const resolvedInstalacionId = contextInstalacionId || columnId;
-      query.instalacion_id = String(resolvedInstalacionId);
-      if (contextDoctorId) {
-        query.doctor_id = String(contextDoctorId);
-      } else if (peerDoctorIds.length) {
-        query.doctor_ids = peerDoctorIds.join(',');
-      }
-    }
+    const query = { ...matrixColumnQuery(baseQuery, req.query, columnId), fecha_local: dateIso };
 
     try {
-      const payload = treatmentGrid ? profileSlotsPayload({ ...treatmentGrid, query })
-        : await invokeSlotsForSummary(query, req.userData);
+      const payload = getPayload(query);
       return {
         day_id: dateIso,
         column_id: String(columnId),
@@ -1611,7 +1637,7 @@ exports.summary = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'dates[] excede el máximo (42)' });
   }
 
-  if (!parseIntSafe(duracion_min)) {
+  if (!(parseIntSafe(duracion_min) > 0)) {
     return res.status(400).json({ message: 'duracion_min requerido' });
   }
 
@@ -1619,28 +1645,32 @@ exports.summary = asyncHandler(async (req, res) => {
   const baseQuery = { ...req.query };
   delete baseQuery.dates;
   delete baseQuery['dates[]'];
-
-  const summaryRows = await runWithConcurrency(uniqueDates, 8, async (dateIso) => {
-    try {
-      const payload = await invokeSlotsForSummary({
-        ...baseQuery,
-        fecha_local: dateIso,
-        limit: '1',
-      }, req.userData);
-      return {
-        date: dateIso,
-        has_availability: responseHasAnySlots(payload),
-      };
-    } catch (error) {
-      console.warn('[Disponibilidad][summary] No se pudo calcular disponibilidad diaria.', {
-        dateIso,
-        message: error?.message || error,
-      });
-      return {
-        date: dateIso,
-        has_availability: null,
-      };
+  baseQuery.limit = '1';
+  baseQuery.include_unavailable = 'false';
+  baseQuery.summary_only = true;
+  const columnIds = parseIntArray(req.query.column_ids || req.query['column_ids[]']);
+  if (columnIds.length > 80) return res.status(400).json({ message: 'column_ids[] excede el máximo (80)' });
+  const queries = columnIds.length ? columnIds.map(id => matrixColumnQuery(baseQuery, req.query, id)) : [baseQuery];
+  let getPayload;
+  try {
+    getPayload = await prepareRangePayloads(req, uniqueDates, queries);
+  } catch (error) {
+    if (!error.code && (error.statusCode === 400 || error.statusCode === 404)) return res.status(error.statusCode).json({ message: error.message });
+    throw error;
+  }
+  const summaryRows = uniqueDates.map(dateIso => {
+    let hasUnknown = false;
+    for (const query of queries) {
+      try {
+        const available = responseHasAnySlots(getPayload({ ...query, fecha_local: dateIso }));
+        if (available === true) return { date: dateIso, has_availability: true };
+        if (available == null) hasUnknown = true;
+      } catch (error) {
+        hasUnknown = true;
+        console.warn('[Disponibilidad][summary] No se pudo calcular disponibilidad diaria.', { dateIso, message: error?.message || error });
+      }
     }
+    return { date: dateIso, has_availability: hasUnknown ? null : false };
   });
 
   const byDay = {};
