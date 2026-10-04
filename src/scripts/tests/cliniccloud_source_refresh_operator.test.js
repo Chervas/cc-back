@@ -172,7 +172,7 @@ test('refresh regenerates canonical machine attention under locks and preserves 
         replacements[i] instanceof Date?replacements[i].toISOString():replacements[i];
     }}};
   const permit=Object.freeze({opaque:'synthetic permit'});
-  const command={inspectSourceBookingPermit:()=>({profile:null}),lockBookingResources:async({resourceKeys})=>{state.calls.push('locks');
+  const command={inspectSourceBookingPermit:()=>({profile:null,units:[7]}),lockBookingResources:async({resourceKeys})=>{state.calls.push('locks');
     assert(resourceKeys.includes('doctor:3'));assert(resourceKeys.includes('installation:6'));assert(resourceKeys.includes('equipment:7'));},
     mutateSourceImportedBooking:async options=>{
       state.calls.push('canonical');assert.equal(options.transaction,transaction);
@@ -228,7 +228,7 @@ test('a source permit persists its audit and booking snapshot when the appointme
       for(const[i,k]of fields.entries())state.row[k]=k==='import_metadata'?JSON.parse(replacements[i]):
         replacements[i] instanceof Date?replacements[i].toISOString():replacements[i];
     }}};
-  const helper=refreshModule({inspectSourceBookingPermit:()=>({profile:null}),lockBookingResources:async()=>{},mutateSourceImportedBooking:async({values,existing,persist})=>{
+  const helper=refreshModule({inspectSourceBookingPermit:()=>({profile:null,units:[]}),lockBookingResources:async()=>{},mutateSourceImportedBooking:async({values,existing,persist})=>{
     const solution={start_at:values.inicio,end_at:values.fin,warnings:[],phases:[{key:'appointment',label:'',
       start_at:values.inicio,end_at:values.fin,doctor_ids:[3],installation_id:6}]};
     const audit={version:'cliniccloud-source-booking/1',policy:'preserve_source_interval_report_conflicts'};

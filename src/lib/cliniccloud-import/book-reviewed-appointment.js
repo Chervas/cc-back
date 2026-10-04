@@ -62,6 +62,9 @@ async function bookReviewedAppointment({ db, payload, equipmentIds = [], sourceS
     if (!treatment || object(treatment.clinical_config)?.booking_profile) fail('DOCUMENTED_BOOKING_CONFIGURED_TREATMENT_REQUIRES_PROFILE');
   }
   const sourcePermit = sourceImportPermit && require('./source-booking-permit').inspectSourceBookingPermit(sourceImportPermit,payload);
+  if(sourcePermit && hash([...sourcePermit.units].sort((a,b)=>a-b))!==hash([...equipmentIds].sort((a,b)=>a-b))) {
+    fail('DOCUMENTED_BOOKING_PERMIT_EQUIPMENT_MISMATCH');
+  }
   const sourcePhases = sourcePermit?.profile?.phases;
   const rooms = sourcePhases ? [...new Set(sourcePhases.flatMap(p=>p.installation_ids))] : [payload.instalacion_id];
   const doctors = sourcePhases ? [...new Set(sourcePhases.flatMap(p=>p.professionals.ids))] : [payload.doctor_id];

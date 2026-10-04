@@ -36,6 +36,9 @@ async function refreshReviewedAppointment({ db, receipt, transaction, beforeUpda
   const mapping = await resolveInstallationKeys({ db, clinic, installationIds: installations, transaction, enabled: true });
   const oldOccupancy = await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: row.id_cita }, transaction });
   const equipmentIds = receipt.resources.equipment_ids.map(Number);
+  if(permit && hash([...permit.units].sort((a,b)=>a-b))!==hash([...equipmentIds].sort((a,b)=>a-b))) {
+    fail('SOURCE_REFRESH_PERMIT_EQUIPMENT_MISMATCH');
+  }
   await lockBookingResources({ db, transaction, resourceKeys: [
     `patient:${before.paciente_id}`, ...doctors.map(id => `doctor:${id}`),
     ...installations.map(id => mapping.keys.get(id)), ...oldOccupancy.map(item => item.resource_key),
