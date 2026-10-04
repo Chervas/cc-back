@@ -299,6 +299,24 @@ function buildPlan({ sourceAccount, coverage, files = [], contacts = [], appoint
       }
     } else claimedLocal.add(id);
   }
+  // A later local confirmation protects the state; it does not make a separate
+  // source visit on another day a possible reschedule of this exact slot.
+  // Do not clear unknown local edits, conflicting claims, cancellations or any
+  // changed interval. This is identity accounting only, never a state update.
+  for (const decision of normalMatches) {
+    const local = localAppointments.find(r => String(r.id) === String(decision.local_id));
+    const baseline = local?.last_imported;
+    if (decision.reasons.length !== 1 || decision.reasons[0] !== 'LOCAL_EDIT_REQUIRES_REVIEW'
+      || !local || local.local_modified === true || !isImported(local)
+      || !['info_confirmada', 'recordatorio_confirmado'].includes(local.status)
+      || !baseline || baseline.status !== 'pendiente' || decision.source.status !== 'pendiente'
+      || local.start_local !== decision.source.start_local || local.end_local !== decision.source.end_local
+      || baseline.start_local !== local.start_local || baseline.end_local !== local.end_local
+      || norm(local.agenda_key) !== decision.source.agenda_key
+      || norm(local.service_key) !== decision.source.service_key
+      || decisions.some(other => other !== decision && String(other.local_id) === String(local.id))) continue;
+    claimedLocal.add(String(local.id));
+  }
   for (const { decision, patient, targets, atSameTime, old } of unmatched) {
     const row = decision.source;
     // A matched visit remains occupied; another agenda with a partially

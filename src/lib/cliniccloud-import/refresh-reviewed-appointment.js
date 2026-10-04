@@ -8,6 +8,7 @@ const { patchSourceRefresh, storedSourceRefresh, sourceRefreshChanged, normalize
 const { lockBookingResources, mutateAppointmentBooking } = require('../../services/appointmentBookingCommand.service');
 const { resolveInstallationKeys } = require('../../services/appointmentBookingAvailability.service');
 const { importReviewVersion } = require('../appointment-import-review');
+const { verifyDocumentedOccupancies } = require('./book-reviewed-appointment');
 const FIELDS = ['inicio', 'fin', 'doctor_id', 'instalacion_id', 'updated_at', 'import_metadata'];
 const plain = value => JSON.parse(JSON.stringify(value?.toJSON ? value.toJSON() : value));
 const fail = code => { throw Error(code); };
@@ -51,12 +52,14 @@ async function refreshReviewedAppointment({ db, receipt, transaction, beforeUpda
       .filter(key => hash(intermediate[key]) !== hash(after[key]));
     throw error;
   }
+  let canonicalSolution;
   const saved = await mutateAppointmentBooking({ db, existingAppointmentId: row.id_cita, appointmentValues: {},
     transaction, force: false, allowObsolete: true, capabilities: { simple: true, multi: true, equipment: true },
     ...(equipmentIds.length ? { importEquipmentAssignment: { equipment_ids: equipmentIds,
       expected_version: importReviewVersion(plain(row)), source_sha256: receipt.resources.evidence_sha256 } } : {}),
     persist: async ({ existing, values, solution }) => {
       if (!solution) fail('SOURCE_REFRESH_SOLUTION_MISSING');
+      canonicalSolution = solution;
       const candidate = normalizedRow(plain(values));
       const metadata = { ...candidate.import_metadata }; delete metadata.booking;
       if (hash({ ...candidate, import_metadata: metadata }) !== hash(after)) fail('SOURCE_REFRESH_CANONICAL_ROW_CHANGED');
@@ -69,11 +72,14 @@ async function refreshReviewedAppointment({ db, receipt, transaction, beforeUpda
   const persisted = normalizedRow(plain(saved)), latest = storedSourceRefresh(persisted, persisted.import_metadata);
   if (sourceRefreshChanged(persisted, latest)) fail('SOURCE_REFRESH_AFTER_WRITE_CHANGED');
   const occupancy = await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: row.id_cita }, transaction });
-  const keys = [`doctor:${after.doctor_id}`, mapping.keys.get(after.instalacion_id), ...equipmentIds.map(id => `equipment:${id}`)];
-  if (hash(occupancy.map(item => item.resource_key).sort()) !== hash(keys.sort())
-    || occupancy.some(item => new Date(item.start_at).getTime() !== Date.parse(after.inicio)
-      || (item.resource_kind === 'equipment' ? new Date(item.end_at).getTime() < Date.parse(after.fin)
-        : new Date(item.end_at).getTime() !== Date.parse(after.fin)))) fail('SOURCE_REFRESH_OCCUPANCY_MISMATCH');
+  verifySourceRefreshOccupancies(plain(occupancy), canonicalSolution, mapping.keys);
   return saved;
 }
-module.exports = { refreshReviewedAppointment };
+function verifySourceRefreshOccupancies(rows, solution, installationKeys) {
+  // The same authoritative occupancy contract as creation: machine attention
+  // can reserve separate setup/removal intervals, without releasing its room
+  // or shortening equipment occupation. Validate all rows, not just keys.
+  try { verifyDocumentedOccupancies(rows, solution, installationKeys); }
+  catch { fail('SOURCE_REFRESH_OCCUPANCY_MISMATCH'); }
+}
+module.exports = { refreshReviewedAppointment, verifySourceRefreshOccupancies };

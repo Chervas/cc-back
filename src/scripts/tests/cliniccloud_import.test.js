@@ -198,6 +198,34 @@ test('an exact match still requiring review cannot clear an unmatched visit', ()
     assert.deepEqual(next.candidate_local_ids, [101]);
   }
 });
+test('a protected local confirmation does not misclassify an independent source visit as a reschedule', () => {
+  const matched = sourceAppointment(), additional = sourceAppointment({ FECHA:'08/09/2026' }, 3);
+  for (const status of ['info_confirmada','recordatorio_confirmado']) {
+    const local=localAppointment({status,last_imported:localAppointment()});
+    for (const rows of [[matched,additional],[additional,matched]]) {
+      const before=hash(local);
+      const decisions=appointmentActions(plan({appointments:rows,snapshot:snapshot([local])}));
+      assert.deepEqual(decisions.find(r=>r.provenance?.source_row===2).reasons,['LOCAL_EDIT_REQUIRES_REVIEW']);
+      const next=decisions.find(r=>r.provenance?.source_row===3);
+      assert.equal(next.action,'create_appointment_candidate');
+      assert.deepEqual(next.candidate_local_ids,[]);
+      assert.deepEqual(next.reasons,['RESOURCE_AND_SERVICE_MAP_REQUIRED']);
+      assert.equal(hash(local),before);
+    }
+  }
+});
+test('a protected confirmation still blocks overlapping patient intervals and does not clear unknown edits', () => {
+  const local=localAppointment({status:'recordatorio_confirmado',last_imported:localAppointment()});
+  const overlap=sourceAppointment({AGENDA:'Otra agenda','HORA INICIO':'10:15','HORA FIN':'10:45'},3);
+  const decisions=appointmentActions(plan({appointments:[sourceAppointment(),overlap],snapshot:snapshot([local])}));
+  assert(decisions.find(r=>r.provenance?.source_row===3).reasons.includes('CLAIMED_PATIENT_INTERVAL_OVERLAP'));
+  for (const extra of [{local_modified:true},{start_local:'2026-09-07T09:00:00'},
+    {last_imported:{...local.last_imported,end_local:'2026-09-07T11:00:00'}}, {status:'cancelada'}]) {
+    const input=plan({appointments:[sourceAppointment(),sourceAppointment({FECHA:'08/09/2026'},3)],
+      snapshot:snapshot([{...local,...extra}])});
+    assert(appointmentActions(input).find(r=>r.provenance?.source_row===3).reasons.includes('POSSIBLE_RESCHEDULE_OR_NATIVE_DUPLICATE'));
+  }
+});
 test('two source claims of one local appointment both require review, without first-row-wins', () => {
   const matched = sourceAppointment();
   const moved = sourceAppointment({ IDCITA: 'old-1', FECHA: '08/09/2026' }, 3);
