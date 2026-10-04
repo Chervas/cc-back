@@ -14,9 +14,10 @@ function metadata(value) {
 // At most two bounded queries per batch; ordinary appointments cost no query.
 async function attachAppointmentProgramContexts(db, appointments) {
   const rows = (Array.isArray(appointments) ? appointments : [appointments]).filter(Boolean);
-  for (const row of rows) setContext(row, plain(row).source_system === 'treatment_program'
+  const hasReference = require('../lib/program-appointment-context').hasProgramAppointmentReference;
+  for (const row of rows) setContext(row, hasReference(row)
     ? { kind: 'program', status: 'unavailable' } : null);
-  const programRows = rows.filter(row => plain(row).source_system === 'treatment_program' && positiveId(plain(row).id_cita));
+  const programRows = rows.filter(row => hasReference(row) && positiveId(plain(row).id_cita));
   if (!db.PatientProgramSession || !db.PatientVoucher) return appointments;
   for (let offset = 0; offset < programRows.length; offset += 200) {
     const batch = programRows.slice(offset, offset + 200);

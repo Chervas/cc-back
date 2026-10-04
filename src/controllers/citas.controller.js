@@ -182,6 +182,7 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
         protectedPayload.motivo = null;
         protectedPayload.import_metadata = null;
         protectedPayload.import_review = null;
+        protectedPayload.program_link_revision = null;
         protectedPayload.tratamiento_id = null;
         protectedPayload.tratamiento = null;
         protectedPayload.program_context = null;
@@ -2552,7 +2553,7 @@ exports.getAppointmentHubActivity = asyncHandler(async (req, res) => {
     const service = require('../services/appointmentActivity.service');
     const rows = await db.PatientOperationalEvent.findAll({
         where: { clinic_id: cita.clinica_id, patient_id: cita.paciente_id || null,
-            event_type: { [Op.in]: [service.APPOINTMENT_STATUS_EVENT_TYPE, service.APPOINTMENT_STAFF_EVENT_TYPE, service.APPOINTMENT_IMPORT_EVENT_TYPE, 'appointment_care_changed'] },
+            event_type: { [Op.in]: [service.APPOINTMENT_STATUS_EVENT_TYPE, service.APPOINTMENT_STAFF_EVENT_TYPE, service.APPOINTMENT_IMPORT_EVENT_TYPE, service.APPOINTMENT_PROGRAM_EVENT_TYPE, 'appointment_care_changed'] },
             'metadata.appointment_id': id },
         include: [{ model: db.Usuario, as: 'actor', required: false, attributes: ['nombre', 'apellidos'] }],
         order: [['occurred_at', 'DESC'], ['id', 'DESC']], limit: 31, offset: (page - 1) * 30,
@@ -2625,6 +2626,7 @@ exports.getCitaById = asyncHandler(async (req, res) => {
         inicio_local: formatDateTimeLocal(cita.inicio, timeZone),
         fin_local: formatDateTimeLocal(cita.fin, timeZone),
         hub_permissions: { manage: canManage },
+        program_link_revision: require('../lib/appointment-import-review').importReviewVersion(cita.toJSON()),
     }));
 });
 
@@ -2745,7 +2747,7 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     let previousStatus = cita.estado;
-    if (cita.source_system === 'treatment_program' && !require('../lib/program-booking').programBookingEnabled()) {
+    if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
     }
     cita.updated_by = req.userData?.userId || null;
@@ -2885,7 +2887,7 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
     const current = await CitaPaciente.findByPk(citaId);
     if (!current) return res.status(404).json({ message: 'Cita no encontrada' });
     if (await denyAppointmentManageAccessIfNeeded(req, res, current.clinica_id)) return;
-    if (current.source_system === 'treatment_program' && !require('../lib/program-booking').programBookingEnabled()) {
+    if (require('../lib/program-appointment-context').hasProgramAppointmentReference(current) && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
     }
     if (String(current.estado || '').toLowerCase() !== 'cambio_solicitado') {
@@ -3012,7 +3014,7 @@ exports.deleteCita = asyncHandler(async (req, res) => {
         return res.status(404).json({ message: 'Cita no encontrada' });
     }
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
-    if (cita.source_system === 'treatment_program') return res.status(409).json({ code: 'program_history_preserved', message: 'Las citas de un programa se cancelan; su historial no se elimina.' });
+    if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) || cita.voucher_id && await db.PatientProgramSession.findOne({ where: { appointment_id: cita.id_cita } })) return res.status(409).json({ code: 'program_history_preserved', message: 'Las citas de un programa se cancelan; su historial no se elimina.' });
 
     if (String(cita.estado || '').trim().toLowerCase() !== 'cancelada') {
         return res.status(409).json({ message: 'Solo se pueden eliminar citas canceladas' });
@@ -3070,7 +3072,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
 
     let previousStatus = cita.estado;
     const rescheduleReason = String(req.body?.reschedule_reason || 'clinic_schedule').trim().toLowerCase();
-    if (cita.source_system === 'treatment_program' && !require('../lib/program-booking').programBookingEnabled()) {
+    if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
     }
     const { RESCHEDULE_REASONS, statusForReschedule } = require('../lib/appointment-reschedule-reason');

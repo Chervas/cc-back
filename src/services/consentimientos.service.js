@@ -1776,7 +1776,7 @@ async function resolveRequirementsForAppointment(citaLike, transaction = null) {
     let tratamientoIds = [tratamientoId];
     // Look up the canonical purchased unit, never take treatment IDs from HTTP
     // metadata. Ordinary appointments retain their existing single-treatment path.
-    if (plain.source_system === 'treatment_program' && plain.voucher_id) {
+    if (require('../lib/program-appointment-context').hasProgramAppointmentReference(plain)) {
         const frozen = await require('../lib/program-appointment-context').programAppointmentContext(db, plain, transaction);
         tratamientoIds = frozen.treatment_ids;
     }
@@ -2283,7 +2283,7 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
 
     const requirementTreatmentIds = [...new Set(requirements.map(row => Number(getPlain(row).tratamiento_id)).filter(Boolean))];
     const requirementTreatments = requirementTreatmentIds.some(id => id !== Number(plainCita.tratamiento_id)) ? await db.Tratamiento.findAll({ where: { id_tratamiento: { [Op.in]: requirementTreatmentIds } }, transaction }) : [];
-    const programContext = plainCita.source_system === 'treatment_program' && plainCita.voucher_id
+    const programContext = require('../lib/program-appointment-context').hasProgramAppointmentReference(plainCita)
         ? await require('../lib/program-appointment-context').programAppointmentContext(db, plainCita, transaction) : null;
     const doctorsByTreatment = new Map(programContext ? requirementTreatmentIds.map(id => [id,
         require('../lib/program-appointment-context').programTreatmentDoctorIds(programContext, plainCita, id)]) : []);

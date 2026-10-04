@@ -59,7 +59,7 @@ function harness() {
   const nativeRequire = createRequire(servicePath), module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(servicePath, 'utf8'), { require: name => name === '../../models' ? db : nativeRequire(name),
     module, exports: module.exports, __dirname: path.dirname(servicePath), process: { env: {} }, Buffer, console });
-  return { state, appointment, requirements, prepare: () => module.exports.createPackageForAppointment(1, { createdBy: 7, triggerSource: 'synthetic' }) };
+  return { db, state, appointment, requirements, prepare: () => module.exports.createPackageForAppointment(1, { createdBy: 7, triggerSource: 'synthetic' }) };
 }
 
 test('two preparations serialize on the appointment and reuse one complete package', async () => {
@@ -118,4 +118,49 @@ test('patient signature pending professional signature is retained, not replaced
   const original = JSON.stringify(doc);
   await h.prepare();
   assert.equal(h.state.documents.length, 2); assert.equal(JSON.stringify(doc), original);
+});
+
+test('actual package preparation resolves a linked ClinicCloud unit and its booked professional canonically', async () => {
+  const h = harness();
+  Object.assign(h.appointment, { source_system: 'cliniccloud', voucher_id: 8, doctor_id: 99,
+    doctor: { id_usuario: 99, nombre: 'No corresponde a estas fases' } });
+  h.appointment.import_metadata.program_session = { session_id: '15', key: 's1' };
+  h.appointment.import_metadata.booking = { phases: [{ key: 'original-care', doctor_ids: [7] }] };
+  const calls = [];
+  h.db.PatientVoucher = { findOne: async options => {
+    calls.push(['voucher', options]);
+    assert.equal(options.where.id, 8); assert.equal(options.where.patient_id, 2);
+    assert.equal(options.where.clinic_id, 3); assert.equal(options.where.source_system, 'treatment_program');
+    return { id: 8 };
+  } };
+  h.db.PatientProgramSession = { findOne: async options => {
+    calls.push(['session', options]);
+    assert.equal(options.where.voucher_id, 8); assert.equal(options.where.appointment_id, 1);
+    return { id: 15, snapshot: { treatment_ids: [4], linked_appointment: { id: 1 } } };
+  } };
+  h.db.Usuario.findAll = async options => {
+    calls.push(['professional', options]);
+    assert.deepEqual(Array.from(options.where.id_usuario[require('sequelize').Op.in]), [7]);
+    return [{ id_usuario: 7, nombre: 'Profesional de la reserva' }];
+  };
+  const before = JSON.stringify(h.appointment);
+  await h.prepare();
+  assert(calls.filter(([name]) => name === 'session').length >= 2, 'requirements and professional context use the ledger');
+  assert(calls.every(([, options]) => options.transaction));
+  assert.equal(h.state.documents.length, 2);
+  h.state.documents.forEach(document => {
+    assert.equal(document.snapshot_json.context.profesional.id, 7);
+    assert.equal(document.snapshot_json.context.profesional.nombre, 'Profesional de la reserva');
+    assert.doesNotMatch(JSON.stringify(document.snapshot_json.context), /No corresponde/);
+  });
+  assert.equal(JSON.stringify(h.appointment), before);
+});
+
+test('linked-source packages fail closed before producing documents if canonical purchase ownership is missing', async () => {
+  const h = harness();
+  Object.assign(h.appointment, { source_system: 'cliniccloud', voucher_id: 8 });
+  h.appointment.import_metadata.program_session = { session_id: '15', key: 's1', treatment_ids: [4] };
+  h.db.PatientVoucher = { findOne: async () => null };
+  await assert.rejects(h.prepare(), { code: 'program_session_not_found' });
+  assert.equal(h.state.packages.length, 0); assert.equal(h.state.documents.length, 0);
 });

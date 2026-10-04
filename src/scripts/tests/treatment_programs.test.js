@@ -80,14 +80,30 @@ test('missing or cross-clinic treatment references remain explicit in drafts, no
   assert.ok(result.item.summary.issues.some((i) => i.code === 'treatment_unavailable'));
   assert.ok(!JSON.stringify(result).includes('Foreign hidden'));
 });
-test('active definitions require valid treatments, cadence and resource eligibility', async () => {
+test('active definitions require valid treatments/resources; absent intervals require manual dates, not a draft', async () => {
   const { service, state } = harness({ installations: [] });
   await assert.rejects(() => service.create({ clinicId: 72, actorId: 1, payload: body({ status: 'active' }) }), (e) => e.statusCode === 422 && e.details.issues.some((i) => i.code === 'installation_unavailable'));
   assert.equal(state.programs.length, 0);
   const normal = harness();
-  await assert.rejects(() => normal.service.create({ clinicId: 72, actorId: 1, payload: body({ status: 'active', appointments: [{ key: 'a', treatment_ids: [10], offset_days: null }] }) }), (e) => e.details.issues.some((i) => i.code === 'cadence_required'));
+  const manual = await normal.service.create({ clinicId: 72, actorId: 1, payload: body({ status: 'active', appointments: [{ key: 'a', treatment_ids: [10], offset_days: null }] }) });
+  assert.equal(manual.item.summary.scheduling_mode, 'manual');
+  assert.equal(manual.item.summary.automatic_scheduling_available, false);
+  assert.equal(manual.item.summary.ready_for_activation, true);
+  assert.equal(manual.item.summary.issues.length, 0);
+  assert.equal(manual.item.summary.warnings[0].code, 'manual_date_required');
   const valid = await normal.service.create({ clinicId: 72, actorId: 1, payload: body({ status: 'active' }) });
   assert.equal(valid.item.status, 'active'); assert.equal(valid.item.summary.ready_for_scheduling, true); assert.equal(valid.item.can_schedule, false);
+});
+test('undefined duration is a manual-booking warning only when all room and staff requirements remain valid', async () => {
+  const noDuration = { ...profile, phases: [{ ...profile.phases[0], duration_minutes: null }] };
+  const fixture = harness({ treatments: [treatment({ duracion_min: null, clinical_config: { catalog_status: 'active', booking_profile: noDuration } })] });
+  const result = await fixture.service.create({ clinicId: 72, actorId: 1, payload: body({ status: 'active' }) });
+  assert.equal(result.item.summary.ready_for_activation, true);
+  assert.equal(result.item.summary.automatic_scheduling_available, false);
+  assert.equal(result.item.appointments[0].duration_required, true);
+  assert.equal(result.item.appointments[0].booking_profile.phases[0].duration_minutes, null);
+  const missingRoom = { ...noDuration, phases: [{ ...noDuration.phases[0], installation_ids: [] }] };
+  await assert.rejects(harness({ treatments: [treatment({ clinical_config: { booking_profile: missingRoom } })] }).service.create({ clinicId: 72, actorId: 1, payload: body({ status: 'active' }) }), { code: 'program_not_ready' });
 });
 test('voucher may omit cadence but must repeat exactly one treatment', async () => {
   const { service } = harness({ treatments: [treatment(), treatment({ id_tratamiento: 11 })] });

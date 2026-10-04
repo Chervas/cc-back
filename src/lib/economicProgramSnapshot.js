@@ -8,7 +8,7 @@ const stable = (value) => Array.isArray(value) ? value.map(stable) : value && ty
   ? Object.fromEntries(Object.keys(value).sort().filter((key) => !['program_snapshot', 'price_snapshot', 'entitlement_units', 'base', 'total', 'expected_version', 'source_reference'].includes(key)).map((key) => [key, stable(value[key])])) : value;
 const requestHash = (payload) => hash(stable(payload));
 const economicsEnabled = (environment = process.env) => environment.TREATMENT_PROGRAM_ECONOMICS_ENABLED === 'true';
-const { programBookingEnabled, composeAppointmentProfile, normalizeCadence } = require('./program-booking');
+const { programBookingEnabled, composeAppointmentProfile, normalizeCadence, schedulingMode } = require('./program-booking');
 const canonicalHash = require('./cliniccloud-import/adapter').hash;
 function assertIntegrationEnabled(lines = [], { enabled = economicsEnabled() } = {}) {
   if (!enabled && Array.isArray(lines) && lines.some((line) => line?.program_id || line?.program_snapshot)) {
@@ -63,7 +63,7 @@ function operationalSnapshot(value) {
   return { ...value, appointments: unsigned.appointments.map(appointment => {
     if (keys.has(appointment.key)) throw domainError(409, 'program_snapshot_not_operational', 'Las citas del programa deben tener claves únicas.');
     keys.add(appointment.key);
-    const composed = composeAppointmentProfile(appointment);
+    const composed = composeAppointmentProfile(appointment, { allowMissingDuration: true });
     return { ...appointment, booking_profile: composed.profile, phase_treatments: composed.phase_treatments, duration_minutes: composed.duration_minutes };
   }) };
 }
@@ -143,6 +143,8 @@ function programPlans({ budget, lines, events = [], vouchers = [], sessions = nu
       can_schedule: Boolean(included && voucher?.status === 'active' && bookingEnabled && counts?.pending > 0 && !counts.review_required
         && (!voucher.expires_at || new Date(voucher.expires_at) > now)),
       can_view_schedule: Boolean(included && voucher && bookingEnabled), scheduling_counts: counts, timezone,
+      scheduling_mode: schedulingMode(line.program_snapshot),
+      automatic_scheduling_available: schedulingMode(line.program_snapshot) !== 'manual' && line.program_snapshot.appointments.every(a => a.duration_minutes != null),
       capability_reason: bookingEnabled ? null : 'program_batch_booking_pending',
       appointments: planned,
       voucher_id: voucher?.public_id || null };

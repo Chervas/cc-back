@@ -79,7 +79,7 @@ async function assessAppointmentClinicalConsent({ db, appointment, transaction, 
     throw consentError('appointment_consent_import_review_required', 'Completa el tratamiento importado o confirma que es una visita sin tratamiento antes de marcarla como realizada.');
   }
   let treatmentIds = positive(cita.tratamiento_id) ? [Number(cita.tratamiento_id)] : [];
-  if (cita.source_system === 'treatment_program' && cita.voucher_id) {
+  if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita)) {
     const context = await require('../lib/program-appointment-context').programAppointmentContext(db, cita, transaction);
     treatmentIds = context.treatment_ids;
     if (!Array.isArray(treatmentIds) || !treatmentIds.length) throw consentError('appointment_consent_configuration_required', 'Falta la composición comprada del programa.');

@@ -31,7 +31,7 @@ function fixture() {
     },
     TreatmentProtocolRevision: { findAll: async options => { calls.push(options); return state.revisions.filter(revision => options.where[Sequelize.Op.or].some(pair => pair.protocol_id === revision.protocol_id && pair.version === revision.version)); } },
   };
-  return { state, calls, service: createTreatmentDocumentationService(db) };
+  return { db, state, calls, service: createTreatmentDocumentationService(db) };
 }
 
 test('appointment context returns only exact approved snapshots, not mutable text or patient PII', async () => {
@@ -91,6 +91,25 @@ test('contextual documents are bounded and paginated', async () => {
   assert.equal(second.items[0].kind, 'aftercare');
   assert.equal(second.has_more, false);
   await assert.rejects(service.forAppointment({ clinicId: 10, appointmentId: 100, query: { page_size: 11 } }), { statusCode: 400 });
+});
+
+test('linked-source documentation uses only the purchased session verified in this clinic and patient', async () => {
+  const { db, service, state, calls } = fixture();
+  Object.assign(state.appointment, { clinica_id: 10, source_system: 'cliniccloud', voucher_id: 8,
+    import_metadata: { program_session: { session_id: 15, key: 's1', treatment_ids: [999] } } });
+  db.PatientVoucher = { findOne: async options => {
+    assert.equal(options.where.patient_id, 20); assert.equal(options.where.clinic_id, 10); return { id: 8 };
+  } };
+  db.PatientProgramSession = { findOne: async () => ({ snapshot: { treatment_ids: [30, 31] } }) };
+  db.Tratamiento.findAll = async options => {
+    assert.deepEqual(options.where.id_tratamiento[Sequelize.Op.in], [30, 31]);
+    return [{ id_tratamiento: 30 }, { id_tratamiento: 31 }];
+  };
+  assert.equal((await service.forAppointment({ clinicId: 10, appointmentId: 100 })).items.length, 2);
+  const where = calls.find(call => call.where.status === 'approved').where;
+  assert.equal(where[Sequelize.Op.and][0][Sequelize.Op.or].length, 2);
+  db.PatientVoucher.findOne = async () => null;
+  await assert.rejects(service.forAppointment({ clinicId: 10, appointmentId: 100 }), { code: 'program_session_not_found' });
 });
 
 test('HTTP contextual route demands sensitive and clinical permissions before reaching the service', async () => {

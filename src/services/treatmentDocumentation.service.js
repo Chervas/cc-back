@@ -107,7 +107,7 @@ function createTreatmentDocumentationService(db = require('../../models')) {
       };
       if (!appointment.tratamiento_id) return { ...base, documentation_status: 'no_treatment' };
       let treatmentIds = [Number(appointment.tratamiento_id)];
-      if (appointment.source_system === 'treatment_program' && appointment.voucher_id) {
+      if (require('../lib/program-appointment-context').hasProgramAppointmentReference(appointment)) {
         const frozen = await require('../lib/program-appointment-context').programAppointmentContext(db, appointment);
         treatmentIds = frozen.treatment_ids;
         const allowed = await db.Tratamiento.findAll({ where: { ...(await scope(clinicId)), id_tratamiento: { [Op.in]: treatmentIds } }, attributes: ['id_tratamiento'], raw: true });

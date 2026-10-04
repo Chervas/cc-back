@@ -837,3 +837,69 @@ test('failed documentary occupancy write rolls back the row and does not leave a
   assert.equal(f.state.occupancies.length, 0);
   assert.equal(f.state.events.length, 0);
 });
+
+function linkedReservationFixture(phaseCount = 2) {
+  const original = profile(...Array.from({ length: phaseCount }, (_, index) => phase(`original${index}`, [9, 10], [5, 6])));
+  const originalSelections = Object.fromEntries(original.phases.map(row => [row.key, { doctor_id: 6, installation_id: 10 }]));
+  const actual = solveBookingProfile({ profile: original, start, selections: originalSelections,
+    doctors: new Map([[5, free()], [6, free()]]), installations: new Map([[9, free()], [10, free()]]) });
+  const purchased = require('../../lib/program-booking').composeAppointmentProfile({
+    treatments: [{ id: 3, name: 'Tratamiento sintético', booking_profile: original }] });
+  const row = { id_cita: 80, clinica_id: 72, paciente_id: 1, tratamiento_id: 3, doctor_id: 6,
+    instalacion_id: 10, voucher_id: 8, inicio: start, fin: actual.end_at, estado: 'info_confirmada', source_system: 'cliniccloud',
+    import_metadata: { automation_policy: 'hold', program_session: { session_id: '15', key: 's1' },
+      booking: { version: 1, profile: original, phases: actual.phases, priority_acknowledged: true } } };
+  const f = fixture({ bookingProfile: original, appointments: [row],
+    occupancies: occupancyForSolution(actual).map(occupancy => ({ ...occupancy, appointment_id: row.id_cita })) });
+  const snapshot = { treatment_ids: [3], booking_profile: purchased.profile, offset_days: null,
+    program_cadence: null, linked_appointment: { id: 80, source_system: 'cliniccloud' } };
+  const session = { id: 15, voucher_id: 8, appointment_id: 80, session_key: 's1', snapshot, reload: async () => session };
+  f.db.PatientVoucher = { findByPk: async () => ({ id: 8, patient_id: 1, clinic_id: 72 }) };
+  f.db.PatientProgramSession = { findOne: async () => session, findAll: async () => [session] };
+  return { ...f, row, snapshot, originalSelections, canonicalSelections: Object.fromEntries(purchased.profile.phases.map(phase =>
+    [phase.key, { doctor_id: 6, installation_id: 10 }])),
+    newEnd: new Date(new Date('2030-01-07T11:00:00Z').getTime() + phaseCount * 30 * 60000).toISOString() };
+}
+
+test('linked single/multiphase rescheduling preserves selected staff and rooms with original keys, canonical keys and implicit selections', async t => {
+  const keys = ['TREATMENT_PROGRAM_BOOKING_ENABLED', 'TREATMENT_PROGRAM_ECONOMICS_ENABLED', 'BOOKING_PROFILES_ENABLED', 'BOOKING_MULTI_RESOURCE_ENABLED'];
+  const previous = keys.map(key => process.env[key]);
+  keys.forEach(key => { process.env[key] = 'true'; });
+  t.after(() => keys.forEach((key, index) => { if (previous[index] == null) delete process.env[key]; else process.env[key] = previous[index]; }));
+  for (const count of [1, 2]) for (const choice of ['originalSelections', 'canonicalSelections', null]) {
+    const f = linkedReservationFixture(count), before = structuredClone(f.row);
+    const saved = await f.reserve({ existingAppointmentId: 80, priorityAcknowledged: true,
+      selections: choice ? f[choice] : {},
+      appointmentValues: { inicio: '2030-01-07T11:00:00Z', fin: f.newEnd, estado: 'reprogramada' } });
+    assert.equal(saved.source_system, 'cliniccloud'); assert.equal(saved.voucher_id, 8);
+    assert.equal(saved.import_metadata.automation_policy, 'hold');
+    assert.deepEqual(saved.import_metadata.program_session, before.import_metadata.program_session);
+    assert.equal(saved.import_metadata.booking.phases.length, count);
+    saved.import_metadata.booking.phases.forEach(phase => {
+      assert.deepEqual(phase.doctor_ids, [6]); assert.equal(phase.installation_id, 10);
+    });
+    assert.equal(bookingSegments(saved).length, count);
+    assert.equal(f.state.persists, 1);
+  }
+});
+
+test('linked phase selections reject unknown, duplicate aliases and ambiguous mappings instead of silently reassigning', async t => {
+  const keys = ['TREATMENT_PROGRAM_BOOKING_ENABLED', 'TREATMENT_PROGRAM_ECONOMICS_ENABLED', 'BOOKING_PROFILES_ENABLED', 'BOOKING_MULTI_RESOURCE_ENABLED'];
+  const previous = keys.map(key => process.env[key]);
+  keys.forEach(key => { process.env[key] = 'true'; });
+  t.after(() => keys.forEach((key, index) => { if (previous[index] == null) delete process.env[key]; else process.env[key] = previous[index]; }));
+  for (const selections of [{ unknown: { doctor_id: 6, installation_id: 10 } },
+    { original0: { doctor_id: 6, installation_id: 10 }, t1_p1: { doctor_id: 6, installation_id: 10 } }]) {
+    const f = linkedReservationFixture();
+    await assert.rejects(f.reserve({ existingAppointmentId: 80, priorityAcknowledged: true, selections,
+      appointmentValues: { inicio: '2030-01-07T11:00:00Z', fin: f.newEnd } }), { code: 'program_selection_invalid' });
+    assert.equal(f.state.persists, 0); assert.equal(f.state.commits, 0);
+  }
+  const { programBookingSelections } = require('../../lib/program-appointment-link');
+  const f = linkedReservationFixture();
+  const ambiguous = structuredClone(f.row);
+  ambiguous.import_metadata.booking.phases[0].key = 't1_p2';
+  ambiguous.import_metadata.booking.profile.phases[0].key = 't1_p2';
+  assert.throws(() => programBookingSelections(f.snapshot, ambiguous, { t1_p2: { doctor_id: 6 } }), { code: 'program_selection_invalid' });
+  assert.deepEqual(programBookingSelections(f.snapshot, { ...f.row, import_metadata: JSON.stringify(f.row.import_metadata) }, f.originalSelections), f.canonicalSelections);
+});

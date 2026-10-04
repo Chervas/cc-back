@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { normalizeBookingProfile, requiresMultiResourceBooking } = require('./booking-profile');
+const { requiresMultiResourceBooking } = require('./booking-profile');
 function domainError(statusCode, code, message, details = null) { return Object.assign(new Error(message), { statusCode, code, details }); }
 function positiveInteger(value, field = 'id') {
   const number = Number(value);
@@ -60,47 +60,56 @@ function treatmentDto(raw) {
   const status = config.catalog_status || (value.activo ? 'active' : 'inactive');
   if (!value.activo || status === 'obsolete' || status === 'draft') issues.push({ code: 'treatment_not_active', message: 'El tratamiento no está activo en el catálogo.' });
   let profile = null;
-  try { profile = normalizeBookingProfile(config.booking_profile); } catch { issues.push({ code: 'invalid_booking_profile', message: 'Completa el perfil de agenda del tratamiento.' }); }
+  try { profile = require('./program-booking').normalizeProgramProfile(config.booking_profile, { allowMissingDuration: true }); } catch { issues.push({ code: 'invalid_booking_profile', message: 'Completa el perfil de agenda del tratamiento.' }); }
   if (!profile) issues.push({ code: 'missing_booking_profile', message: 'Falta configurar cabina, duración y profesionales.' });
   if (profile && requiresMultiResourceBooking(profile) && !require('../services/treatmentBookingProfile.service').bookingCapabilities().multi) issues.push({ code: 'multi_resource_writer_pending', message: 'La reserva conjunta de fases o equipos necesita activar el comando de agenda compatible en todos los entornos.' });
-  const duration = profile ? profile.phases.reduce((sum, phase) => sum + phase.duration_minutes, 0) : Number(value.duracion_min) > 0 ? Number(value.duracion_min) : null;
+  const duration = profile ? profile.phases.every(phase => phase.duration_minutes != null) ? profile.phases.reduce((sum, phase) => sum + phase.duration_minutes, 0) : null : Number(value.duracion_min) > 0 ? Number(value.duracion_min) : null;
   if (!duration) issues.push({ code: 'missing_duration', message: 'El tratamiento no tiene una duración definida.' });
   return { id: Number(value.id_tratamiento), name: value.nombre, code: value.codigo || null, clinic_id: value.clinica_id ? Number(value.clinica_id) : null, catalog_status: status, duration_minutes: duration, stored_catalog_price: value.precio_base == null ? null : Number(value.precio_base), stored_price_semantics: config.price_profile ? 'gross_tax_included' : 'existing_catalog_field_unclassified', price_profile: require('./economicPriceProfile').profileFromTreatment(value), default_sessions: Number(value.sesiones_defecto || 1), legacy_voucher_offer: Number(value.sesiones_defecto || 1) > 1, booking_profile: profile, issues, booking_ready: issues.length === 0 };
 }
 function summarize(values, treatmentsById) {
   const issues = [];
+  const warnings = [];
+  const scheduling = require('./program-booking').schedulingMode(values);
   if (!values.appointments.length) issues.push({ code: 'appointments_required', message: 'Añade al menos una cita.' });
   if (values.total_price == null) issues.push({ code: 'price_required', message: 'Indica el precio total, impuestos incluidos.' });
   let lastOffset = -1;
   const appointments = values.appointments.map((appointment, appointmentIndex) => {
     const appointmentIssues = [];
     if (!appointment.treatment_ids.length) appointmentIssues.push({ code: 'treatment_required', message: 'Selecciona un tratamiento para esta cita.' });
-    if (values.kind === 'program' && !values.cadence && appointment.offset_days == null) appointmentIssues.push({ code: 'cadence_required', message: 'Indica una pauta semanal o cuándo corresponde esta cita desde el inicio del programa.' });
+    if (values.kind === 'program' && !values.cadence && appointment.offset_days == null) warnings.push({ code: 'manual_date_required', appointment_key: appointment.key, message: 'Esta sesión queda pendiente de citar; elige su fecha manualmente.' });
     if (values.kind === 'program' && appointmentIndex === 0 && appointment.offset_days != null && appointment.offset_days !== 0) appointmentIssues.push({ code: 'first_appointment_starts_program', message: 'La primera cita debe corresponder al día 0 del programa.' });
     if (appointment.offset_days != null && appointment.offset_days < lastOffset) appointmentIssues.push({ code: 'cadence_not_ordered', message: 'Las citas deben mantener el orden del programa.' });
     if (appointment.offset_days != null) lastOffset = appointment.offset_days;
     const treatments = appointment.treatment_ids.map((id) => {
       const treatment = treatmentsById.get(id);
       if (!treatment) { appointmentIssues.push({ code: 'treatment_unavailable', treatment_id: id, message: 'Tratamiento no disponible en esta clínica.' }); return { id, name: null, unavailable: true }; }
-      for (const issue of treatment.issues) appointmentIssues.push({ ...issue, treatment_id: id });
+      for (const issue of treatment.issues) {
+        if (issue.code === 'missing_duration' && treatment.booking_profile) warnings.push({ ...issue, treatment_id: id, appointment_key: appointment.key });
+        else appointmentIssues.push({ ...issue, treatment_id: id });
+      }
       return treatment;
     });
     let composed = null;
     if (treatments.length && treatments.every(treatment => treatment.booking_profile)) {
-      try { composed = require('./program-booking').composeAppointmentProfile({ treatments }); }
+      try { composed = require('./program-booking').composeAppointmentProfile({ treatments }, { allowMissingDuration: true }); }
       catch (error) { appointmentIssues.push({ code: error.code || 'program_composition_invalid', message: error.message }); }
     }
     if (appointment.treatment_ids.length > 1 && !require('../services/treatmentBookingProfile.service').bookingCapabilities().multi) appointmentIssues.push({ code: 'combined_appointment_writer_pending', message: 'La reserva de varios tratamientos en una cita requiere activar el comando de agenda conjunto.' });
     issues.push(...appointmentIssues.map((issue) => ({ ...issue, appointment_key: appointment.key })));
     const duration = treatments.every((t) => t.duration_minutes) ? treatments.reduce((sum, t) => sum + t.duration_minutes, 0) : null;
-    return { ...appointment, treatments, duration_minutes: duration, booking_profile: composed?.profile || null,
+    return { ...appointment, treatments, duration_minutes: duration, duration_required: duration == null,
+      requires_manual_date: scheduling === 'manual', booking_profile: composed?.profile || null,
       phase_treatments: composed?.phase_treatments || [], issues: appointmentIssues };
   });
   if (values.kind === 'voucher') {
     const sets = appointments.map((a) => a.treatment_ids.join(','));
     if (new Set(sets).size > 1 || appointments.some((a) => a.treatment_ids.length !== 1)) issues.push({ code: 'voucher_homogeneous_treatment_required', message: 'Un bono repite un único tratamiento. Usa Programa para combinar tratamientos.' });
   }
-  return { appointments, summary: { appointment_count: appointments.length, duration_minutes: appointments.length && appointments.every((a) => a.duration_minutes) ? appointments.reduce((sum, a) => sum + a.duration_minutes, 0) : null, issues, ready_for_scheduling: issues.length === 0 } };
+  const ready = issues.length === 0;
+  return { appointments, summary: { appointment_count: appointments.length, duration_minutes: appointments.length && appointments.every((a) => a.duration_minutes) ? appointments.reduce((sum, a) => sum + a.duration_minutes, 0) : null,
+    issues, warnings, scheduling_mode: scheduling, ready_for_activation: ready, ready_for_scheduling: ready,
+    automatic_scheduling_available: ready && scheduling !== 'manual' && appointments.every(a => a.duration_minutes != null) } };
 }
 const payloadHash = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 module.exports = { domainError, positiveInteger, boundedText, normalizeValues, filters, treatmentDto, summarize, payloadHash };

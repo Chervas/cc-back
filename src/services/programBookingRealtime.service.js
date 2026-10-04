@@ -7,7 +7,7 @@ async function publishProgramBookings({ db, result, clinicId, io = require('./so
   if (result.sessions.length > 30) throw Error('program_realtime_batch_invalid');
   const actions = new Map(result.sessions.map(row => [Number(row.appointment_id), row.action]));
   const rows = await db.CitaPaciente.findAll({ where: { id_cita: { [db.Sequelize.Op.in]: [...actions.keys()] }, clinica_id: clinicId } });
-  for (const row of rows) io.to(`clinic:${Number(row.clinica_id)}`).emit(actions.get(Number(row.id_cita)) === 'rescheduled' ? 'appointment:updated' : 'appointment:created', {
+  for (const row of rows) io.to(`clinic:${Number(row.clinica_id)}`).emit(actions.get(Number(row.id_cita)) === 'created' ? 'appointment:created' : 'appointment:updated', {
     appointment_id: Number(row.id_cita), clinic_id: Number(row.clinica_id), patient_id: Number(row.paciente_id) || null,
     lead_intake_id: Number(row.lead_intake_id) || null, doctor_id: Number(row.doctor_id) || null,
     instalacion_id: Number(row.instalacion_id) || null, tratamiento_id: Number(row.tratamiento_id) || null,

@@ -131,7 +131,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
           const appointments = await db.CitaPaciente.findAll({ where: { voucher_id: session.voucher_id, estado: { [db.Sequelize.Op.notIn]: ['cancelada','no_asistio'] } }, transaction: tx });
           series = records.map(record => {
             const appointment = Number(record.id) === Number(session.id) ? values : appointments.find(row => Number(row.id_cita) === Number(record.appointment_id));
-            return { key: record.session_key, start_at: appointment?.inicio, end_at: appointment?.fin };
+            return { key: record.session_key, offset_days: metadataObject(record.snapshot).offset_days, start_at: appointment?.inicio, end_at: appointment?.fin };
           });
           const clinic = await db.Clinica.findByPk(values.clinica_id, { transaction: tx });
           timeZone = require('../lib/availability-calendar').resolveClinicTimezone(clinic);
@@ -139,7 +139,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
         const issues = require('../lib/program-booking').seriesIssues(series, metadataObject(session.snapshot).program_cadence, timeZone);
         if (issues.length) throw bookingError('program_cadence_conflict', 'El cambio no respeta el orden o la pauta del programa.', { issues });
       }
-    } else if (existing && metadataObject(previous.import_metadata).program_session) {
+    } else if (existing && require('../lib/program-appointment-context').hasProgramAppointmentReference(previous)) {
       throw bookingError('program_session_replaced', 'Esta cita pertenece al historial de una sesión que ya tiene otra reserva.');
     }
     await require('./appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous,
@@ -228,13 +228,17 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       const existingSelections = previousMetadata.booking?.phases && configuredProfile
         ? Object.fromEntries(previousMetadata.booking.phases.map((phase) => [phase.key, {
           installation_id: phase.installation_id,
-          ...(configuredProfile.phases.find((candidate) => candidate.key === phase.key)?.professionals.mode === 'any'
+          ...((session ? normalizeBookingProfile(previousMetadata.booking.profile) : configuredProfile)?.phases.find((candidate) => candidate.key === phase.key)?.professionals.mode === 'any'
             ? { doctor_id: phase.doctor_ids?.[0] } : {}),
         }])) : null;
-      const chosen = Object.keys(selections || {}).length ? selections
+      let chosen = Object.keys(selections || {}).length ? selections
         : (configuredProfile?.phases.length === 1 && configuredProfile.phases[0].professionals.mode === 'any'
           ? { [configuredProfile.phases[0].key]: { doctor_id: values.doctor_id, installation_id: values.instalacion_id } }
           : existingSelections || {});
+      if (session || trustedProgramSession) {
+        chosen = require('../lib/program-appointment-link').programBookingSelections(
+          metadataObject((session || trustedProgramSession).snapshot), previous, chosen);
+      }
       const supportFree = extraStaff.every(id => isFree(context.doctors.get(id), start, end));
       const permitsProfileForce = !extraStaff.length && !session && !trustedProgramSession && !preparedSeries;
       solution = supportFree ? (configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen, allowOverlap: permitsProfileForce && force === true })

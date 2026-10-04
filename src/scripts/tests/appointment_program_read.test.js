@@ -1,6 +1,7 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
+const { createRequire } = require('node:module');
 const { Op } = require('sequelize');
 const { attachAppointmentProgramContexts } = require('../../services/appointmentProgramRead.service');
 const appointment = (id = 10) => ({ id_cita: id, clinica_id: 82, paciente_id: 2812, voucher_id: 942,
@@ -27,6 +28,12 @@ test('ordinary appointments have no added queries and stale read models are clea
   await attachAppointmentProgramContexts(db, rows);
   assert.equal(db.calls.length, 0); rows.forEach(r => assert.equal(r.program_context, null));
   await attachAppointmentProgramContexts(db, null); assert.equal(db.calls.length, 0);
+});
+test('a linked individual appointment retains its original ClinicCloud source while exposing the verified purchased-unit context', async () => {
+  const row = { ...appointment(), source_system: 'cliniccloud' }, db = database();
+  await attachAppointmentProgramContexts(db, row);
+  assert.equal(row.source_system, 'cliniccloud'); assert.equal(row.program_context.status, 'linked');
+  assert.equal(db.calls.length, 2);
 });
 test('missing, ambiguous and cross-patient/clinic/purchase relations fail closed', async () => {
   const scenarios = [
@@ -62,6 +69,7 @@ test('large lists use bounded batches rather than N+1 queries', async () => {
 const source = fs.readFileSync(path.resolve(__dirname, '../../controllers/citas.controller.js'), 'utf8');
 function code(start, end) { const a = source.indexOf(start), b = source.indexOf(end, a); assert(a >= 0 && b > a); return source.slice(a, b); }
 const context = { module: { exports: {} }, plainCita: x => x, DEFAULT_TIMEZONE: 'Europe/Madrid',
+  require: createRequire(path.resolve(__dirname, '../../controllers/citas.controller.js')),
   appointmentImportReview: () => null, bookingCapabilities: () => ({ simple: false }),
   redactAppointmentPatient: () => ({ privacy_redacted: true }), redactAppointmentLead: () => null,
   preferredLanguagePayload: () => ({}), formatDateTimeLocal: x => x };

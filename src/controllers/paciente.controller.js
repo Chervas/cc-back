@@ -41,6 +41,7 @@ const {
   APPOINTMENT_STATUS_EVENT_TYPE,
   APPOINTMENT_STAFF_EVENT_TYPE,
   APPOINTMENT_IMPORT_EVENT_TYPE,
+  APPOINTMENT_PROGRAM_EVENT_TYPE,
   serializeAppointmentStatusActivity,
 } = require('../services/appointmentActivity.service');
 const {
@@ -1311,7 +1312,7 @@ exports.getPacienteActivity = async (req, res) => {
             where: {
               patient_id: pacienteId,
               clinic_id: { [Op.in]: readableClinicIds },
-              event_type: { [Op.in]: [...Object.values(PATIENT_EVENT_TYPES), APPOINTMENT_STATUS_EVENT_TYPE, APPOINTMENT_STAFF_EVENT_TYPE, APPOINTMENT_IMPORT_EVENT_TYPE] },
+              event_type: { [Op.in]: [...Object.values(PATIENT_EVENT_TYPES), APPOINTMENT_STATUS_EVENT_TYPE, APPOINTMENT_STAFF_EVENT_TYPE, APPOINTMENT_IMPORT_EVENT_TYPE, APPOINTMENT_PROGRAM_EVENT_TYPE] },
             },
             attributes: [
               'id',
@@ -1379,7 +1380,7 @@ exports.getPacienteActivity = async (req, res) => {
     };
 
     for (const event of operationalEvents) {
-      if ([APPOINTMENT_STATUS_EVENT_TYPE, APPOINTMENT_STAFF_EVENT_TYPE, APPOINTMENT_IMPORT_EVENT_TYPE].includes(event.event_type)) {
+      if ([APPOINTMENT_STATUS_EVENT_TYPE, APPOINTMENT_STAFF_EVENT_TYPE, APPOINTMENT_IMPORT_EVENT_TYPE, APPOINTMENT_PROGRAM_EVENT_TYPE].includes(event.event_type)) {
         const actor = usuariosById.get(Number(event.actor_user_id));
         items.push(serializeAppointmentStatusActivity(event, {
           patientId: pacienteId,
