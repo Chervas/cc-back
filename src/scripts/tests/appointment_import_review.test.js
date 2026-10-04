@@ -57,6 +57,7 @@ test('the actual appointment response guard removes the source label without cli
   const end=source.indexOf('\nasync function protectAppointmentsForRequest(',start);
   assert(start>=0&&end>start);
   const context={module:{exports:null},appointmentImportReview,bookingCapabilities:()=>({simple:false}),
+    require:id=>{assert.equal(id,'../lib/appointment-care');return require('../../lib/appointment-care');},
     redactAppointmentPatient:()=>({privacy_redacted:true}),redactAppointmentLead:()=>null};
   vm.runInNewContext(source.slice(start,end)+'\nmodule.exports=protectAppointmentPayload;',context);
   const row={source_system:'cliniccloud',titulo:'CLINICAL SOURCE SENTINEL',import_metadata:{cliniccloud_delta:{source:{service_key:'CLINICAL SOURCE SENTINEL'}}}};

@@ -13,7 +13,7 @@ const FIELDS = ['inicio', 'fin', 'doctor_id', 'instalacion_id', 'updated_at', 'i
 const plain = value => JSON.parse(JSON.stringify(value?.toJSON ? value.toJSON() : value));
 const fail = code => { throw Error(code); };
 
-async function refreshReviewedAppointment({ db, receipt, transaction, beforeUpdate, now = Date.now() }) {
+async function refreshReviewedAppointment({ db, receipt, transaction, beforeUpdate, sourceImportPermit = null, now = Date.now() }) {
   if (!transaction || transaction.options?.isolationLevel !== 'READ COMMITTED' || typeof beforeUpdate !== 'function') {
     fail('SOURCE_REFRESH_TRANSACTION_AND_GUARD_REQUIRED');
   }
@@ -23,8 +23,8 @@ async function refreshReviewedAppointment({ db, receipt, transaction, beforeUpda
   const after = patchSourceRefresh(before, receipt, now); // Full-row CAS and receipt validation, before writes.
   const clinic = await db.Clinica.findByPk(before.clinica_id, { transaction, lock: transaction.LOCK.SHARE });
   if (!clinic) fail('SOURCE_REFRESH_CLINIC_MISSING');
-  if (before.tratamiento_id) {
-    const treatment = await db.Tratamiento.findByPk(before.tratamiento_id, { transaction, lock: transaction.LOCK.SHARE });
+  if (after.tratamiento_id) {
+    const treatment = await db.Tratamiento.findByPk(after.tratamiento_id, { transaction, lock: transaction.LOCK.SHARE });
     const config = typeof treatment?.clinical_config === 'string' ? JSON.parse(treatment.clinical_config) : treatment?.clinical_config;
     if (!treatment || config?.booking_profile) fail('SOURCE_REFRESH_CONFIGURED_TREATMENT_REQUIRES_PROFILE');
   }
@@ -38,10 +38,13 @@ async function refreshReviewedAppointment({ db, receipt, transaction, beforeUpda
     ...equipmentIds.map(id => `equipment:${id}`),
   ] });
   await beforeUpdate({ transaction, before, after, oldOccupancy: plain(oldOccupancy) });
+  await row.reload({ transaction });
+  if (hash(normalizedRow(plain(row))) !== receipt.before_sha256) fail('SOURCE_REFRESH_GUARDED_ROW_CHANGED');
   // Sequelize's silent option removes updated_at even when explicitly supplied.
   // A parameterized SQL patch keeps the reviewed timestamp and invokes no hooks.
-  await db.sequelize.query(`UPDATE CitasPacientes SET ${FIELDS.map(key => `${key}=?`).join(',')} WHERE id_cita=?`, {
-    transaction, replacements: [...FIELDS.map(key => key === 'import_metadata' ? JSON.stringify(after[key])
+  const fields = receipt.operator_review ? [...FIELDS, 'nota', 'titulo', 'tratamiento_id'] : FIELDS;
+  await db.sequelize.query(`UPDATE CitasPacientes SET ${fields.map(key => `${key}=?`).join(',')} WHERE id_cita=?`, {
+    transaction, replacements: [...fields.map(key => key === 'import_metadata' ? JSON.stringify(after[key])
       : ['inicio','fin','updated_at'].includes(key) ? new Date(after[key]) : after[key]), before.id_cita],
   });
   await row.reload({ transaction });
@@ -53,21 +56,24 @@ async function refreshReviewedAppointment({ db, receipt, transaction, beforeUpda
     throw error;
   }
   let canonicalSolution;
-  const saved = await mutateAppointmentBooking({ db, existingAppointmentId: row.id_cita, appointmentValues: {},
-    transaction, force: false, allowObsolete: true, capabilities: { simple: true, multi: true, equipment: true },
-    ...(equipmentIds.length ? { importEquipmentAssignment: { equipment_ids: equipmentIds,
-      expected_version: importReviewVersion(plain(row)), source_sha256: receipt.resources.evidence_sha256 } } : {}),
-    persist: async ({ existing, values, solution }) => {
+  const persist = async ({ existing, values, solution }) => {
       if (!solution) fail('SOURCE_REFRESH_SOLUTION_MISSING');
       canonicalSolution = solution;
       const candidate = normalizedRow(plain(values));
       const metadata = { ...candidate.import_metadata }; delete metadata.booking;
+      if (sourceImportPermit) delete metadata.cliniccloud_source_booking;
       if (hash({ ...candidate, import_metadata: metadata }) !== hash(after)) fail('SOURCE_REFRESH_CANONICAL_ROW_CHANGED');
-      return equipmentIds.length ? existing.update({ import_metadata: values.import_metadata }, {
+      return equipmentIds.length || sourceImportPermit ? existing.update({ import_metadata: values.import_metadata }, {
         transaction, fields: ['import_metadata'], hooks: false, silent: true,
       }) : existing;
-    },
-  });
+    };
+  const saved = sourceImportPermit
+    ? await require('./source-booking-permit').mutateSourceImportedBooking({ db, existing:row, values:plain(row),
+      transaction, sourceImportPermit, persist, equipmentIds })
+    : await mutateAppointmentBooking({ db, existingAppointmentId: row.id_cita, appointmentValues: {},
+      transaction, force: false, allowObsolete: true, capabilities: { simple: true, multi: true, equipment: true },
+      ...(equipmentIds.length ? { importEquipmentAssignment: { equipment_ids: equipmentIds,
+        expected_version: importReviewVersion(plain(row)), source_sha256: receipt.resources.evidence_sha256 } } : {}), persist });
   await saved.reload({ transaction });
   const persisted = normalizedRow(plain(saved)), latest = storedSourceRefresh(persisted, persisted.import_metadata);
   if (sourceRefreshChanged(persisted, latest)) fail('SOURCE_REFRESH_AFTER_WRITE_CHANGED');

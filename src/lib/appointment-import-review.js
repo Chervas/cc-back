@@ -41,15 +41,31 @@ function hasReviewedNoTreatment(appointment) {
 
 function importTreatmentPending(appointment) {
   const pending = object(appointment.import_metadata).cliniccloud_delta?.pending_assignment;
+  const refresh = reviewedSourceRefresh(appointment);
   return appointment.source_system === 'cliniccloud' && !appointment.tratamiento_id
-    && Array.isArray(pending) && pending.includes('treatment_id')
+    && (Array.isArray(pending) && pending.includes('treatment_id') || refresh?.treatment_pending === true)
     && !hasReviewedNoTreatment(appointment);
+}
+
+// A source refresh supplements the immutable original import evidence. Only
+// its validated latest receipt may identify an unresolved replacement act.
+// Lazy loading avoids the importer/review module initialization cycle.
+function reviewedSourceRefresh(appointment) {
+  const metadata = object(appointment.import_metadata);
+  if (!metadata.cliniccloud_source_refreshes) return null;
+  try {
+    const { storedSourceRefresh, sourceRefreshChanged } = require('./cliniccloud-import/source-refresh');
+    const refresh = storedSourceRefresh(appointment, metadata);
+    return refresh && !sourceRefreshChanged(appointment, refresh) ? { ...refresh,
+      treatment_pending:metadata.cliniccloud_source_refreshes.receipts.some(r=>r.operator_review?.clear_treatment===true) } : null;
+  } catch { return null; }
 }
 
 function importResourcesInScope(appointment) {
   const metadata = object(appointment.import_metadata);
   return appointment.source_system === 'cliniccloud'
-    && Array.isArray(metadata.cliniccloud_delta?.pending_assignment)
+    && (Array.isArray(metadata.cliniccloud_delta?.pending_assignment)
+      || reviewedSourceRefresh(appointment)?.treatment_pending === true)
     && !appointment.voucher_id && !metadata.program_session && !appointment.es_provisional && !appointment.hold_expires_at;
 }
 
@@ -95,6 +111,7 @@ function appointmentImportReview(appointment) {
     && [false, 0].includes(appointment.instalacion?.activo);
   const pendingAssignment = Object.keys(fields).filter(key => Array.isArray(pending) && pending.includes(key)
     && !appointment[columns[key]] && !(key === 'treatment_id' && hasReviewedNoTreatment(appointment))).map(key => fields[key]);
+  if (importTreatmentPending(appointment) && !pendingAssignment.includes('treatment')) pendingAssignment.push('treatment');
   if (installationInactive && !pendingAssignment.includes('installation')) pendingAssignment.push('installation');
   const resourcesNeedReview = importResourcesInScope(appointment)
     && !['cancelada', 'completada', 'no_asistio'].includes(appointment.estado) && !hasReviewedImportResources(appointment);
@@ -104,8 +121,8 @@ function appointmentImportReview(appointment) {
   // A display label only, never a catalog link or a reason to infer a price,
   // protocol or consent. Do not copy notes, patient identity or the raw import
   // payload. The controller removes the whole summary without clinical access.
-  const sourceService = typeof metadata?.cliniccloud_delta?.source?.service_key === 'string'
-    ? metadata.cliniccloud_delta.source.service_key.trim().slice(0, 255) : '';
+  const currentService = reviewedSourceRefresh(appointment)?.current.service_key ?? metadata?.cliniccloud_delta?.source?.service_key;
+  const sourceService = typeof currentService === 'string' ? currentService.trim().slice(0, 255) : '';
   return { source: 'cliniccloud', reminders_held: true,
     pending_assignment: pendingAssignment,
     ...(importTreatmentPending(appointment) && importReviewVersion(appointment)

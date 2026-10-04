@@ -48,7 +48,7 @@ function validatePayload(payload, equipmentIds, sourceSha256) {
     || new Set(equipmentIds).size !== equipmentIds.length || !/^[a-f0-9]{64}$/.test(sourceSha256 || '')) fail('DOCUMENTED_BOOKING_EVIDENCE_INVALID');
 }
 
-async function bookReviewedAppointment({ db, payload, equipmentIds = [], sourceSha256, transaction, beforeInsert }) {
+async function bookReviewedAppointment({ db, payload, equipmentIds = [], sourceSha256, transaction, beforeInsert, sourceImportPermit = null }) {
   validatePayload(payload, equipmentIds, sourceSha256);
   if (!transaction || transaction.options?.isolationLevel !== 'READ COMMITTED' || typeof beforeInsert !== 'function') {
     fail('DOCUMENTED_BOOKING_TRANSACTION_AND_IDENTITY_GUARD_REQUIRED');
@@ -61,9 +61,13 @@ async function bookReviewedAppointment({ db, payload, equipmentIds = [], sourceS
     // with a source-duration snapshot or an operator-authored equipment list.
     if (!treatment || object(treatment.clinical_config)?.booking_profile) fail('DOCUMENTED_BOOKING_CONFIGURED_TREATMENT_REQUIRES_PROFILE');
   }
-  const mapping = await resolveInstallationKeys({ db, clinic, installationIds: [payload.instalacion_id], transaction, enabled: true });
-  const resourceKeys = [`patient:${payload.paciente_id}`, `doctor:${payload.doctor_id}`,
-    mapping.keys.get(payload.instalacion_id), ...equipmentIds.map(id => `equipment:${id}`)];
+  const sourcePermit = sourceImportPermit && require('./source-booking-permit').inspectSourceBookingPermit(sourceImportPermit,payload);
+  const sourcePhases = sourcePermit?.profile?.phases;
+  const rooms = sourcePhases ? [...new Set(sourcePhases.flatMap(p=>p.installation_ids))] : [payload.instalacion_id];
+  const doctors = sourcePhases ? [...new Set(sourcePhases.flatMap(p=>p.professionals.ids))] : [payload.doctor_id];
+  const mapping = await resolveInstallationKeys({ db, clinic, installationIds: rooms, transaction, enabled: true });
+  const resourceKeys = [`patient:${payload.paciente_id}`, ...doctors.map(id=>`doctor:${id}`),
+    ...rooms.map(id=>mapping.keys.get(id)), ...equipmentIds.map(id => `equipment:${id}`)];
   await lockBookingResources({ db, resourceKeys, transaction });
   // The caller rechecks source ownership, memberships, duplicates and current
   // row hashes under these locks. Only then may the transaction create its row.
@@ -72,6 +76,22 @@ async function bookReviewedAppointment({ db, payload, equipmentIds = [], sourceS
   await inserted.reload({ transaction });
   const previous = inserted.toJSON();
   let canonicalSolution;
+  if (sourceImportPermit) {
+    const { mutateSourceImportedBooking } = require('./source-booking-permit');
+    const saved = await mutateSourceImportedBooking({db,existing:inserted,values:previous,transaction,sourceImportPermit,
+      persist:async({values,existing,solution})=>{
+        canonicalSolution=solution;
+        const stripped={...object(values.import_metadata)};
+        delete stripped.booking; delete stripped.cliniccloud_source_booking;
+        if(hash(stripped)!==hash(payload.import_metadata)) fail('DOCUMENTED_BOOKING_METADATA_CHANGED');
+        return existing.update({import_metadata:values.import_metadata},{transaction,fields:['import_metadata'],hooks:false,silent:true});
+      }});
+    const ids=[...new Set(canonicalSolution.phases.map(p=>p.installation_id))];
+    const allKeys=await resolveInstallationKeys({db,clinic,installationIds:ids,transaction,enabled:true});
+    const rows=await db.AppointmentBookingOccupancy.findAll({where:{appointment_id:saved.id_cita},transaction});
+    verifyDocumentedOccupancies(rows,canonicalSolution,allKeys.keys);
+    return saved;
+  }
   const saved = await mutateAppointmentBooking({ db, existingAppointmentId: inserted.id_cita,
     appointmentValues: {}, transaction, force: false, allowObsolete: true,
     capabilities: { simple: true, multi: true, equipment: true },
