@@ -150,7 +150,8 @@ function refreshModule(command,availability) {
   const localRequire=createRequire(filename),context={module:{exports:{}},require:id=>{
     if(id==='../../services/appointmentBookingCommand.service')return command;
     if(id==='../../services/appointmentBookingAvailability.service')return availability;
-    if(id==='./source-booking-permit')return {mutateSourceImportedBooking:command.mutateSourceImportedBooking};
+    if(id==='./source-booking-permit')return {mutateSourceImportedBooking:command.mutateSourceImportedBooking,
+      inspectSourceBookingPermit:command.inspectSourceBookingPermit};
     return localRequire(id);
   },Date};
   vm.runInNewContext(fs.readFileSync(filename,'utf8'),context,{filename});return context.module.exports;
