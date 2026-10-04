@@ -28,12 +28,16 @@ async function refreshReviewedAppointment({ db, receipt, transaction, beforeUpda
     const config = typeof treatment?.clinical_config === 'string' ? JSON.parse(treatment.clinical_config) : treatment?.clinical_config;
     if (!treatment || config?.booking_profile) fail('SOURCE_REFRESH_CONFIGURED_TREATMENT_REQUIRES_PROFILE');
   }
-  const installations = [...new Set([before.instalacion_id, after.instalacion_id].filter(Boolean))];
+  const permit = sourceImportPermit && require('./source-booking-permit').inspectSourceBookingPermit(sourceImportPermit,after,now);
+  const installations = [...new Set([before.instalacion_id, after.instalacion_id,
+    ...(permit?.profile?.phases.flatMap(p=>p.installation_ids) || [])].filter(Boolean))];
+  const doctors = [...new Set([before.doctor_id, after.doctor_id,
+    ...(permit?.profile?.phases.flatMap(p=>p.professionals.ids) || [])].filter(Boolean))];
   const mapping = await resolveInstallationKeys({ db, clinic, installationIds: installations, transaction, enabled: true });
   const oldOccupancy = await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: row.id_cita }, transaction });
   const equipmentIds = receipt.resources.equipment_ids.map(Number);
   await lockBookingResources({ db, transaction, resourceKeys: [
-    `patient:${before.paciente_id}`, ...[before.doctor_id, after.doctor_id].filter(Boolean).map(id => `doctor:${id}`),
+    `patient:${before.paciente_id}`, ...doctors.map(id => `doctor:${id}`),
     ...installations.map(id => mapping.keys.get(id)), ...oldOccupancy.map(item => item.resource_key),
     ...equipmentIds.map(id => `equipment:${id}`),
   ] });

@@ -160,6 +160,7 @@ test('SQL protection covers historical continuous machines and mandatory teams, 
   assert(expression.includes('$.booking.profile.phases[*].equipment_requirements'));
   assert(expression.includes('$.booking.profile.phases[*].professionals.mode'));
   assert(expression.includes('JSON_CONTAINS('));
+  assert(expression.includes('$.cliniccloud_source_booking.nonshareable'));
   assert.equal(shareableInterval({clinica_id:72,booking_nonshareable:1},72),false);
   assert.equal(shareableInterval({clinica_id:72,booking_nonshareable:0},72),true);
   assert.equal(shareableInterval({clinica_id:66,booking_nonshareable:0},72),false);

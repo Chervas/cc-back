@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
-const {createSourceBookingPermit,inspectSourceBookingPermit,sourcePreservedContext,sourceSolutionExceptions}=require('../../lib/cliniccloud-import/source-booking-permit');
+const {createSourceBookingPermit,inspectSourceBookingPermit,sourcePreservedContext,sourceSolutionExceptions,preservesConfiguredConsultationSharing}=require('../../lib/cliniccloud-import/source-booking-permit');
 function fixture(){const now=Date.now(),start='2030-01-07T10:00:00.000Z',end='2030-01-07T10:30:00.000Z';
  return {now,appointment:{clinica_id:66,paciente_id:1,doctor_id:50,instalacion_id:75,tratamiento_id:null,
   inicio:start,fin:end,nota:'Synthetic source',estado:'pendiente',source_system:'cliniccloud',source_reference:'delta:synthetic',
@@ -54,4 +54,23 @@ test('report compares exact phase intervals, not the entire visit against every 
   start_at:'2030-01-07T10:15Z',end_at:'2030-01-07T10:30Z',installation_id:75,doctor_ids:[50]}]};
  assert.deepEqual(sourceSolutionExceptions(context,solution),{conflicts:[],outside_schedule:[]});
  solution.phases[0].start_at='2030-01-07T10:14Z';assert.equal(sourceSolutionExceptions(context,solution).conflicts.length,1);
+});
+test('explicit physical units cannot become one alternative machine',()=>{
+ const f=fixture();f.equipmentIds=[14,15];f.profile={version:2,phases:[{key:'one',duration_minutes:30,
+  installation_ids:[75],professionals:{mode:'any',ids:[50],preferred_id:50},
+  equipment_requirements:[{equipment_ids:[14,15]}]}]};
+ assert.throws(()=>createSourceBookingPermit(f),/PERMIT_INVALID/);
+ f.profile.phases[0].equipment_requirements=[{equipment_ids:[14]},{equipment_ids:[15]}];
+ assert(createSourceBookingPermit(f));
+});
+test('source exception cannot enable room sharing but preserves explicitly configured unlimited consultations',()=>{
+ const context={doctors:new Map([[120,{allow_overlap_confirmation:true}]]),
+  installations:new Map([[76,{allow_overlap_confirmation:true,overlap_capacity:null}]])};
+ const profile={phases:[{installation_ids:[76],professionals:{mode:'any',ids:[120]}}]};
+ assert.equal(preservesConfiguredConsultationSharing(context,profile,[]),true);
+ assert.equal(preservesConfiguredConsultationSharing(context,profile,[14]),false);
+ context.installations.get(76).overlap_capacity=2;
+ assert.equal(preservesConfiguredConsultationSharing(context,profile,[]),false);
+ context.installations.get(76).overlap_capacity=null;context.doctors.get(120).allow_overlap_confirmation=false;
+ assert.equal(preservesConfiguredConsultationSharing(context,profile,[]),false);
 });

@@ -29,6 +29,7 @@ const nonShareableBookingAttribute = (db, alias) => [db.Sequelize.literal(`(
   COALESCE(JSON_CONTAINS_PATH(${alias}.import_metadata, 'one', '$.program_session', '$.additional_staff', '$.booking.profile.phases[*].equipment_requirements'), 0)
   OR COALESCE(JSON_CONTAINS(JSON_EXTRACT(${alias}.import_metadata, '$.booking.profile.phases[*].professionals.mode'), '"all"'), 0)
   OR COALESCE(JSON_EXTRACT(${alias}.import_metadata, '$.booking.profile.version'), 0) >= 3
+  OR COALESCE(JSON_EXTRACT(${alias}.import_metadata, '$.cliniccloud_source_booking.nonshareable'), 0) = TRUE
 )`), 'booking_nonshareable'];
 function shareableInterval(row, clinicId) {
   const marker = row?.get ? row.get('booking_nonshareable') : row?.booking_nonshareable;

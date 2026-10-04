@@ -55,7 +55,8 @@ function createSourceBookingPermit({ appointment, source, sourceAppointmentId, l
   if (profile && (!normalized || normalized.phases.reduce((n,p) => n + p.duration_minutes,0) !== duration
     || normalized.phases[0].installation_ids.length !== 1 || normalized.phases[0].installation_ids[0] !== sealed.room
     || normalized.phases[0].professionals.ids.length !== 1 || normalized.phases[0].professionals.ids[0] !== sealed.doctor
-    || normalized.phases.some(p => p.installation_ids.length !== 1 || p.professionals.ids.length !== 1)
+    || normalized.phases.some(p => p.installation_ids.length !== 1 || p.professionals.ids.length !== 1
+      || p.equipment_requirements?.some(g=>g.equipment_ids.length!==1))
     || hash(equipmentIds(normalized).sort((a,b)=>a-b)) !== hash([...units].sort((a,b)=>a-b)))) fail();
   const receipt = { version: 'cliniccloud-source-booking/1', source_account: 'cliniccloud-5880',
     source_appointment_id: String(sourceAppointmentId), source_contact_id: sealed.contact,
@@ -112,6 +113,15 @@ function sourceSolutionExceptions(context, solution) {
   const unique = a => [...new Map(a.map(v=>[hash(v),v])).values()];
   return {conflicts:unique(conflicts),outside_schedule:unique(outside_schedule)};
 }
+function preservesConfiguredConsultationSharing(context, profile, units) {
+  if (units.length || profile.phases.length!==1 || profile.phases[0].professionals.mode!=='any') return false;
+  const phase=profile.phases[0],doctor=context.doctors.get(phase.professionals.ids[0]);
+  const room=context.installations.get(phase.installation_ids[0]);
+  // Keep the clinic's already-approved unlimited consultation sharing (Loza).
+  // A source error itself cannot confer a new shared-room policy or capacity.
+  return doctor?.allow_overlap_confirmation===true && room?.allow_overlap_confirmation===true
+    && room.overlap_capacity===null;
+}
 async function mutateSourceImportedBooking({ db, existing, values, transaction, sourceImportPermit, persist }) {
   if (!transaction || transaction.options?.isolationLevel !== 'READ COMMITTED' || !existing?.id_cita || typeof persist !== 'function') fail();
   const permit = inspectSourceBookingPermit(sourceImportPermit,values);
@@ -135,8 +145,11 @@ async function mutateSourceImportedBooking({ db, existing, values, transaction, 
   // Do not override missing equipment, room/staff eligibility or malformed
   // machine attention merely because the source is authoritative for time.
   if (!solution || instant(solution.end_at) !== instant(end)) throw Error('SOURCE_BOOKING_RESOURCES_REQUIRE_REVIEW');
+  if(hash([...new Set(solution.phases.flatMap(p=>p.equipment_ids||[]))].sort((a,b)=>a-b))
+    !==hash([...permit.units].sort((a,b)=>a-b))) fail();
   const m = {...obj(values.import_metadata)}, receipt = { ...permit.receipt,
-    recorded_at:new Date().toISOString(),...sourceSolutionExceptions(original,solution) };
+    recorded_at:new Date().toISOString(),...sourceSolutionExceptions(original,solution),
+    nonshareable:!preservesConfiguredConsultationSharing(original,profile,permit.units) };
   receipt.receipt_sha256 = hash(receipt);
   m.cliniccloud_source_booking = receipt;
   // Compound visits render and reserve their source-duration phases. These are
@@ -151,4 +164,4 @@ async function mutateSourceImportedBooking({ db, existing, values, transaction, 
   await db.AppointmentBookingOccupancy.bulkCreate(rows.map(r=>({...r,appointment_id:saved.id_cita})),{transaction});
   return saved;
 }
-module.exports = {createSourceBookingPermit,inspectSourceBookingPermit,sourcePreservedContext,sourceSolutionExceptions,mutateSourceImportedBooking};
+module.exports = {createSourceBookingPermit,inspectSourceBookingPermit,sourcePreservedContext,sourceSolutionExceptions,preservesConfiguredConsultationSharing,mutateSourceImportedBooking};
