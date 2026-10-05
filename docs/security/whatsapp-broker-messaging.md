@@ -34,6 +34,16 @@ el día de semana actual e ignora la semana navegada (`_getClickedDate` y
 Marshall (127/116) el día 12 y con nueve reservas el día 5. No se modifica este
 flujo en la operación de recordatorios; requiere corrección posterior de interfaz.
 
+Resultado de la operación: 58 ejecuciones nuevas para el 6 de octubre; 57
+recordatorios aceptados (27 BS Capilar, 30 BS Medical). La reserva 77723 de Laura
+Roeseberg queda sin enviar por discrepancia entre teléfono de ficha y conversación;
+no se altera la identidad ni se fuerza el transporte. Las siete reservas restantes
+del día se excluyen por cancelación/confirmación o comunicación previa. Se preparan
+547 disparos de día anterior para otras reservas importadas futuras, sin ejecutar
+retroactivos. Verificación: cero envíos nuevos para citas del 5, ambos flujos de
+mismo día inactivos/sin cola y las nueve citas de Marshall intactas. La causa de
+fecha se reproduce con el JS realmente servido por CRM, no solo el checkout.
+
 Contrato del transporte WhatsApp. El runtime de autorización descrito primero
 conserva las pausas y exige revisión por número. Madurez y despliegues vigentes
 en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones)
