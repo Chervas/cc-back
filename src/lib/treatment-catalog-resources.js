@@ -3,6 +3,8 @@ const { catalogError } = require('./treatment-catalog-contract');
 const { requiresMultiResourceBooking } = require('./booking-profile');
 
 async function validateCatalogResources(treatment, db, { transaction, environment = process.env } = {}) {
+  const historical = require('./historical-treatment-reference');
+  if (historical.isHistoricalTreatment(treatment)) { historical.validateHistoricalReference(treatment); return; }
   const commercial = require('./treatment-commercial-policy');
   const included = commercial.saleMode(treatment) === 'program_component_only';
   if (included && treatment.precio_base !== null) throw catalogError('Un componente incluido no tiene tarifa individual.', 'component_standalone_price_forbidden', 422);

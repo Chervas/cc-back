@@ -30,6 +30,15 @@ async function lockBookingResources({ db, resourceKeys, transaction }) {
   }
 }
 
+async function lockExistingBookingResources({ db, resourceKeys, transaction }) {
+  if (!transaction) throw new Error('booking_transaction_required');
+  for (const key of [...new Set(resourceKeys)].sort()) {
+    if (!/^(doctor|installation|patient|equipment):[1-9]\d*$/.test(key)) throw new Error('booking_resource_key_invalid');
+    const anchor = await db.AppointmentBookingResource.findByPk(key, { transaction, lock: transaction.LOCK.UPDATE });
+    if (!anchor) throw importClassificationError('Falta un anclaje de la reserva original; revisa sus recursos antes de clasificarla.');
+  }
+}
+
 function legacyProfile(values, duration) {
   return { version: 1, phases: [{ key: 'appointment', label: '', duration_minutes: duration,
     installation_ids: values.instalacion_id ? [Number(values.instalacion_id)] : [],
@@ -123,10 +132,14 @@ async function classifyImportedAppointment({ db, existingAppointmentId, appointm
   if (treatmentChoice) await db.Tratamiento.findByPk(appointmentValues.tratamiento_id, { transaction: tx, lock: tx.LOCK.SHARE });
   const treatment = treatmentChoice ? await loadScopedTreatment({ db, treatmentId: appointmentValues.tratamiento_id,
     clinic, transaction: tx }) : null;
-  if (treatment && ![true, 1].includes(treatment.activo)) {
+  const historical = treatment && require('../lib/historical-treatment-reference').isHistoricalTreatment(treatment);
+  // A historical label is bound to this exact source reservation, never an
+  // inactive-catalog bypass for ordinary bookings or a clinical authorization.
+  if (historical) require('../lib/historical-treatment-reference').assertReviewedHistoricalTreatment({ treatment, row: previous });
+  if (treatment && !historical && ![true, 1].includes(treatment.activo)) {
     throw bookingError('treatment_not_bookable', 'Selecciona un tratamiento activo.');
   }
-  const required = requireOperationalProfile(treatment, { capabilities });
+  const required = historical ? null : requireOperationalProfile(treatment, { capabilities });
   const booking = metadata.booking;
   const profile = booking?.profile && requireOperationalProfile({ activo: true,
     clinical_config: { booking_profile: booking.profile } }, { capabilities });
@@ -170,11 +183,12 @@ async function classifyImportedAppointment({ db, existingAppointmentId, appointm
   if (!occupancies.length || occupancySignature(expected) !== occupancySignature(occupancies)) {
     throw importClassificationError('La ocupación de la reserva original necesita revisión; no se han cambiado sus recursos.');
   }
-  await lockBookingResources({ db, resourceKeys: [...occupancies.map(row => row.resource_key),
+  await lockExistingBookingResources({ db, resourceKeys: [...occupancies.map(row => row.resource_key),
     ...expected.map(row => row.resource_key), `patient:${previous.paciente_id}`], transaction: tx });
   // No occupancy UPDATE/DELETE/INSERT, availability search, force or completion
   // hooks. Preserve even the original occupancy row IDs and all HOLD evidence.
-  return persist({ values: { ...previous, ...appointmentValues }, existing, transaction: tx, solution: null });
+  return persist({ values: { ...previous, ...appointmentValues }, existing, transaction: tx, solution: null,
+    ...(historical ? { classification: 'historical_reference' } : {}) });
 }
 
 /**
@@ -297,6 +311,13 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     if (previousMetadata.import_treatment_resolution) importMetadata.import_treatment_resolution = previousMetadata.import_treatment_resolution;
     delete importMetadata.import_resource_resolution;
     if (previousMetadata.import_resource_resolution) importMetadata.import_resource_resolution = previousMetadata.import_resource_resolution;
+    // Reciprocal clinical-component receipts and their audit are server-owned.
+    // A generic edit preserves the receipt; a source/resource change will make
+    // its fingerprint invalid and require review rather than authorizing care.
+    for (const key of ['clinical_component_parent', 'clinical_component_children']) {
+      delete importMetadata[key];
+      if (previousMetadata[key]) importMetadata[key] = previousMetadata[key];
+    }
     if (values.estado === 'cancelada' && previousStaff) {
       if (requestedStaff !== undefined && JSON.stringify(requestedStaff) !== JSON.stringify(previousStaff.ids)) {
         throw bookingError('booking_additional_staff_invalid', 'Reabre la cita para cambiar su personal de apoyo.', null, 400);
@@ -425,4 +446,4 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
   return transaction ? execute(transaction) : db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, execute);
 }
 
-module.exports = { lockBookingResources, mutateAppointmentBooking, classifyImportedAppointment };
+module.exports = { lockBookingResources, lockExistingBookingResources, mutateAppointmentBooking, classifyImportedAppointment };

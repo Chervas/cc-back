@@ -1,7 +1,7 @@
 'use strict';
 
 const { normalizeBookingProfile, requiresMultiResourceBooking } = require('./booking-profile');
-const STATUSES = new Set(['active', 'draft', 'obsolete']);
+const STATUSES = new Set(['active', 'draft', 'obsolete', 'historical_reference']);
 
 function catalogError(message, code = 'invalid_treatment_catalog', status = 400) {
   return Object.assign(new Error(message), { status, statusCode: status, code });
@@ -12,12 +12,14 @@ function isObsolete(treatment) {
 }
 
 function assertCatalogEditable(treatment) {
+  if (require('./historical-treatment-reference').isHistoricalTreatment(treatment)) throw catalogError('Esta referencia histórica es inmutable y no se ofrece para nuevas reservas o ventas.', 'treatment_historical_reference', 409);
   if (isObsolete(treatment)) throw catalogError('Este tratamiento está obsoleto. Su historia se conserva y no se modifica desde el catálogo.', 'treatment_obsolete', 409);
 }
 
 // Omitted keys are preserved for older clients. Explicit null removes an individual key.
 // Never clear the full JSON because a client does not know newer configuration fields.
 function mergeClinicalConfig(previous, patch) {
+  if (patch && Object.hasOwn(patch, 'historical_reference') && !previous?.historical_reference) throw catalogError('La referencia histórica sólo la puede derivar el servicio de importación desde reservas existentes.', 'historical_reference_server_owned', 422);
   if (previous?.booking_profile?.version >= 2 && patch && Object.hasOwn(patch, 'booking_profile') && (patch.booking_profile?.version ?? 0) < previous.booking_profile.version) {
     throw catalogError('Este tratamiento utiliza el configurador de equipos. Actualiza la aplicación antes de modificar su reserva.', 'booking_equipment_client_outdated', 409);
   }
@@ -37,6 +39,7 @@ function mergeClinicalConfig(previous, patch) {
   }
   if (previous?.imported_price_review) result.imported_price_review = previous.imported_price_review;
   else delete result.imported_price_review;
+  if (previous?.historical_reference) result.historical_reference = previous.historical_reference;
   if (result.catalog_status != null && !STATUSES.has(result.catalog_status)) throw catalogError('Estado de catálogo no válido.');
   if (result.price_profile != null) result.price_profile = require('./economicPriceProfile').normalizeProfile(result.price_profile);
   if (result.booking_profile != null) {
@@ -76,6 +79,7 @@ function assertImportedPriceAmount(amount) {
 }
 
 function catalogState(treatment) {
+  if (require('./historical-treatment-reference').isHistoricalTreatment(treatment)) return { status: 'historical_reference', editable: false, booking_ready: false, booking_issues: ['historical_reference'] };
   const config = treatment?.clinical_config || {};
   const status = config.catalog_status || (treatment?.activo === false ? 'inactive' : 'active');
   const reasons = [];
@@ -92,6 +96,7 @@ function catalogState(treatment) {
 // Display only: never reinterpret an imported tax-inclusive amount as a net
 // accounting price. Fiscal resolution remains an explicit, separate task.
 function catalogPrice(treatment) {
+  if (require('./historical-treatment-reference').isHistoricalTreatment(treatment)) return { amount: null, label: 'Referencia histórica · sin tarifa · no comercial', semantics: 'historical_nonbillable', review_required: false };
   const config = treatment.clinical_config || {};
   if (config.fiscal_mapping_pending === true) {
     const source = config.source_price || {};
@@ -107,7 +112,14 @@ function catalogPrice(treatment) {
 }
 function catalogDto(treatment) { const value = treatment?.toJSON ? treatment.toJSON() : treatment;
   const component_policy = require('./treatment-commercial-policy').policy(value);
-  return { ...value, catalog_price: component_policy.sale_mode === 'program_component_only'
+  // Catalogue access does not imply patient-sensitive access. Exact source and
+  // appointment bindings remain internal to the historical classification.
+  const cfg = value.clinical_config;
+  const clinical_config = require('./historical-treatment-reference').isHistoricalTreatment(value)
+    ? { ...cfg, historical_reference: { version: cfg?.historical_reference?.version, nonbillable: true,
+      required_clinical_document_review: cfg?.historical_reference?.required_clinical_document_review !== false,
+      clinical_approval_inferred: false } } : cfg;
+  return { ...value, clinical_config, catalog_price: component_policy.sale_mode === 'program_component_only'
     ? { amount: null, label: 'Incluido en programas · no se vende por separado', semantics: 'included_in_program', review_required: component_policy.requires_component_approval }
     : catalogPrice(value), standalone_sellable: component_policy.sale_mode === 'standalone', component_policy };
 }

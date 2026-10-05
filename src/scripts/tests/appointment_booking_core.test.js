@@ -362,6 +362,7 @@ test('occupancy failure rolls the canonical appointment back too; no partial res
 
 test('unsigned clinical completion fails before appointment persistence or occupancy mutation', async () => {
   const f = fixture();
+  f.db.Tratamiento.findAll = async () => [];
   const original = await f.reserve();
   f.db.TreatmentConsentRequirement.findAll = async () => [{ tratamiento_id: 3, clinic_template_id: 7,
     required: true, blocking_policy: 'hard', clinicTemplate: { purpose: 'clinical', status: 'active', validity_mode: 'single_act' } }];

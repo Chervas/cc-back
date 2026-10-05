@@ -65,6 +65,7 @@ function databaseFixture() {
   const transaction = { LOCK: { SHARE: 'SHARE' } };
   const Op = { in: Symbol('in'), or: Symbol('or') };
   const db = { Sequelize: { Op }, ClinicConsentTemplate: {}, ConsentTemplateCatalog: {},
+    Tratamiento: { findAll: async () => [] },
     TreatmentConsentRequirement: { findAll: async options => { calls.push(['requirements', options]); return [requirement]; } },
     PatientConsentDocument: { findAll: async options => { calls.push(['documents', options]); return []; } },
   };
@@ -127,4 +128,25 @@ test('linked imported completion checks purchased treatments, not untrusted refe
   assert.equal((await assessDb({ ...f, appointment: linked, now })).blocking_count, 1);
   f.db.PatientVoucher.findOne = async () => null;
   await assert.rejects(assessDb({ ...f, appointment: linked, now }), { code: 'program_session_not_found' });
+});
+
+test('a validated planned extraction fails closed if the primary clinical requirement is missing', async () => {
+  const service = require('../../services/appointmentClinicalComponents.service');
+  const original = service.getValidatedClinicalComponentParent;
+  service.getValidatedClinicalComponentParent = async () => ({ parent: appointment });
+  try {
+    const f = databaseFixture();
+    f.db.TreatmentConsentRequirement.findAll = async () => [];
+    const extraction = { ...appointment, id_cita: 12, tratamiento_id: null,
+      import_metadata: { clinical_component_parent: { role: 'prp_extraction' } } };
+    await assert.rejects(assessDb({ ...f, appointment: extraction, now }),
+      { code: 'appointment_consent_configuration_required' });
+    f.db.TreatmentConsentRequirement.findAll = async () => [requirement];
+    assert.equal((await assessDb({ ...f, appointment: extraction, now })).allowed, false);
+    f.db.PatientConsentDocument.findAll = async () => [signed];
+    assert.deepEqual(await assessDb({ ...f, appointment: extraction, now }),
+      { allowed: true, blocking_count: 0, required_clinical_count: 1 });
+  } finally {
+    service.getValidatedClinicalComponentParent = original;
+  }
 });

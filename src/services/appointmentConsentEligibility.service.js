@@ -67,7 +67,7 @@ function assessClinicalConsentEvidence({ appointment, requirements, documents, n
 }
 
 /** Authoritative completion check, called under the appointment transaction.
- * Two bulk reads regardless of phase count; shared document locks serialize
+ * Bounded bulk reads regardless of phase count; shared document locks serialize
  * against revocation/signature updates until the appointment write commits.
  * This service does not create documents, packages, jobs or provider deliveries.
  */
@@ -75,6 +75,22 @@ async function assessAppointmentClinicalConsent({ db, appointment, transaction, 
   if (!transaction) throw Error('consent_completion_transaction_required');
   const cita = plain(appointment);
   if (!positive(cita?.paciente_id) || !positive(cita?.clinica_id)) throw consentError('appointment_consent_configuration_required', 'Falta el ámbito de paciente y clínica de la cita.');
+  // A planned extraction is not a second PRP treatment. Validate both current
+  // reservations and their audit in this transaction, then check the parent's
+  // actual treatment requirements and signatures instead of inferring consent.
+  if (object(cita.import_metadata).clinical_component_parent) {
+    const linked = await require('./appointmentClinicalComponents.service').getValidatedClinicalComponentParent({ db,
+      appointment: cita, transaction });
+    if (!linked || object(plain(linked.parent).import_metadata).clinical_component_parent) {
+      throw consentError('appointment_consent_configuration_required', 'Revisa la relación clínica entre la extracción y su cita principal.');
+    }
+    const assessment = await assessAppointmentClinicalConsent({ db, appointment: linked.parent, transaction, now });
+    if (!assessment.required_clinical_count) {
+      throw consentError('appointment_consent_configuration_required',
+        'Falta configurar el consentimiento clínico del tratamiento PRP principal.');
+    }
+    return assessment;
+  }
   if (require('../lib/appointment-import-review').importTreatmentPending(cita)) {
     throw consentError('appointment_consent_import_review_required', 'Completa el tratamiento importado o confirma que es una visita sin tratamiento antes de marcarla como realizada.');
   }
@@ -88,6 +104,22 @@ async function assessAppointmentClinicalConsent({ db, appointment, transaction, 
   treatmentIds = [...new Set(treatmentIds.map(Number))];
   if (!treatmentIds.length) return { allowed: true, blocking_count: 0, required_clinical_count: 0 };
   const { Op } = db.Sequelize;
+  // Historical references classify what was reserved, not what is safe to
+  // perform. An absent hard requirement must not silently approve an imported
+  // act whose exact consent/configuration has not yet been established.
+  const treatments = await db.Tratamiento.findAll({ where: { id_tratamiento: { [Op.in]: treatmentIds } },
+    attributes: ['id_tratamiento', 'clinica_id', 'origen', 'activo', 'precio_base', 'clinical_config',
+      'appointment_automation_template_key', 'automation_template_bindings'],
+    transaction, lock: transaction.LOCK.SHARE });
+  const historical = require('../lib/historical-treatment-reference');
+  for (const treatment of treatments) {
+    if (!historical.isHistoricalTreatment(treatment)) continue;
+    historical.assertReviewedHistoricalTreatment({ treatment, row: cita });
+    if (historical.clinicalDocumentReviewRequired(treatment)) {
+      throw consentError('appointment_consent_configuration_required',
+        'Esta reserva histórica necesita revisar el tratamiento y sus consentimientos clínicos antes de iniciar o finalizar la cita.');
+    }
+  }
   const attributes = ['id', 'purpose', 'status', 'validity_mode', 'requires_professional_signature'];
   const requirements = await db.TreatmentConsentRequirement.findAll({ where: {
     tratamiento_id: { [Op.in]: treatmentIds }, required: true, blocking_policy: 'hard',
@@ -116,7 +148,7 @@ async function assessAppointmentClinicalConsent({ db, appointment, transaction, 
 
 async function assertAppointmentClinicalConsent(options) {
   const result = await assessAppointmentClinicalConsent(options);
-  if (!result.allowed) throw consentError('appointment_consent_required', 'Faltan consentimientos clínicos obligatorios con firma vigente. Revisa los consentimientos de la cita antes de marcarla como realizada.', result.blocking_count);
+  if (!result.allowed) throw consentError('appointment_consent_required', 'Faltan consentimientos clínicos obligatorios con firma vigente. Revisa las firmas pendientes antes de finalizar la cita.', result.blocking_count);
   return result;
 }
 

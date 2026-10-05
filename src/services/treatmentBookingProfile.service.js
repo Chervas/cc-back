@@ -26,6 +26,9 @@ function parseClinicalConfig(treatment) {
 
 function requireOperationalProfile(treatment, { capabilities = bookingCapabilities(), allowObsolete = false } = {}) {
   const config = parseClinicalConfig(treatment);
+  if (require('../lib/historical-treatment-reference').isHistoricalTreatment(treatment)) {
+    throw bookingError('treatment_not_bookable', 'Esta referencia conserva una reserva importada; no puede utilizarse para dar nuevas citas.');
+  }
   if (!allowObsolete && (config.catalog_status === 'obsolete' || config.catalog_status === 'draft' || treatment?.activo === false)) {
     throw bookingError('treatment_not_bookable', 'Este tratamiento está obsoleto o en borrador. Selecciona un tratamiento vigente.');
   }
@@ -78,7 +81,7 @@ function assertPriorityAcknowledgement(solution, acknowledged) {
 }
 
 function bookingErrorMiddleware(error, req, res, next) {
-  if (!/^(booking_|program_|appointment_consent_|treatment_not_|treatment_not_found)/.test(String(error?.code || ''))) return next(error);
+  if (!/^(booking_|program_|appointment_consent_|appointment_clinical_component_|historical_reference_|treatment_not_|treatment_not_found)/.test(String(error?.code || ''))) return next(error);
   return res.status(error.statusCode || 409).json(bookingErrorPayload(error));
 }
 

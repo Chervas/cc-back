@@ -7,9 +7,10 @@ const object = value => {
 const hash = value => require('./cliniccloud-import/adapter').hash(value);
 function config(treatment) { return object((treatment?.toJSON ? treatment.toJSON() : treatment)?.clinical_config); }
 function saleMode(treatment) {
+  if (require('./historical-treatment-reference').isHistoricalTreatment(treatment)) return 'historical_reference';
   const mode = object(config(treatment).commercial).sale_mode;
   if (mode == null || mode === 'standalone') return 'standalone';
-  if (mode !== 'program_component_only') throw catalogError('Modalidad comercial no válida.', 'treatment_sale_mode_invalid');
+  if (!['program_component_only', 'historical_reference'].includes(mode)) throw catalogError('Modalidad comercial no válida.', 'treatment_sale_mode_invalid');
   return mode;
 }
 function componentEvidence(treatment) {
@@ -36,6 +37,9 @@ function componentApproved(treatment) {
   } catch { return false; }
 }
 function mergeCommercialConfig(previous, next) {
+  const historical = require('./historical-treatment-reference');
+  if (!previous?.historical_reference && (object(next.commercial).sale_mode === historical.MODE || next.catalog_status === historical.MODE)) throw catalogError('La referencia histórica sólo la puede registrar el servicio de importación.', 'historical_reference_server_owned', 422);
+  if (previous?.historical_reference) return { ...previous, commercial: { ...object(previous.commercial), sale_mode: historical.MODE } };
   const result = { ...next }, commercial = { ...object(next.commercial) };
   const previousReview = object(previous?.commercial).component_review;
   if (previousReview) commercial.component_review = previousReview;
@@ -49,6 +53,7 @@ function mergeCommercialConfig(previous, next) {
 }
 function assertNoClientImportEvidence(previous, incoming) {
   previous = object(previous); incoming = object(incoming);
+  if (incoming.historical_reference != null && !previous.historical_reference) throw catalogError('La referencia histórica sólo la puede registrar el servicio de importación.', 'historical_reference_server_owned', 422);
   for (const key of Object.keys(incoming).filter(key => key.startsWith('source_') || ['import_batch', 'import_source'].includes(key))) {
     if (!Object.hasOwn(previous, key)) throw catalogError('La procedencia importada sólo la puede registrar el importador, no el formulario del catálogo.', 'component_import_source_untrusted', 422);
   }
@@ -70,10 +75,12 @@ function approveComponent(treatment, { confirm, actorId, now = new Date() } = {}
   } } };
 }
 function policy(treatment) {
+  if (require('./historical-treatment-reference').isHistoricalTreatment(treatment)) return { sale_mode: 'historical_reference', component_approved: false, requires_component_approval: false, nonbillable: true, historical_reference: true };
   const mode = saleMode(treatment), approved = mode === 'program_component_only' && componentApproved(treatment);
   return { sale_mode: mode, component_approved: approved, requires_component_approval: mode === 'program_component_only' && !approved };
 }
 function assertStandalone(treatment) {
+  if (require('./historical-treatment-reference').isHistoricalTreatment(treatment)) throw catalogError('Esta referencia histórica no admite tarifas, presupuestos, bonos ni nuevas ventas.', 'treatment_historical_reference', 422);
   if (saleMode(treatment) === 'program_component_only') throw catalogError('Este tratamiento está incluido en programas y no se vende por separado.', 'treatment_program_component_only', 422);
 }
 module.exports = { saleMode, componentApproved, mergeCommercialConfig, approveComponent, policy, assertStandalone, assertNoClientImportEvidence };

@@ -75,7 +75,7 @@ function fixture({ treatmentProfile = null, treatmentPatch = {}, failEvent = fal
     }, destroy: async () => { state.occupancyWrites++; throw Error('Classification must not remove occupancy'); },
     bulkCreate: async () => { state.occupancyWrites++; throw Error('Classification must not recreate occupancy'); } },
     AppointmentBookingResource: { upsert: async (row, options) => { assert(options.transaction); state.locks.push(row.resource_key); },
-      findByPk: async (_key, options) => { assert.equal(options.lock, 'UPDATE'); return {}; } },
+      findByPk: async (key, options) => { assert.equal(options.lock, 'UPDATE'); state.locks.push(key); return {}; } },
     PatientOperationalEvent: { create: async (event, { transaction: tx }) => {
       if (failEvent) throw Error('Audit unavailable'); tx.events.push(event); } },
   };
@@ -215,4 +215,75 @@ test('classification command requires a transaction, strict choice, CAS and cann
 test('HTTP does not forward any classification-only preservation option to ordinary booking', () => {
   const controller = fs.readFileSync(require.resolve('../../controllers/citas.controller'), 'utf8');
   assert.doesNotMatch(controller, /classifyImportedAppointment|preserveImportReservation|trustedImportClassification/);
+});
+
+function historicalFixture() {
+  const f = fixture(), row = f.state.row;
+  row.source_reference = 'delta:cliniccloud-5880:fixture-51';
+  Object.assign(row.import_metadata, { source_account: 'cliniccloud-5880', source_appointment_id: '1051' });
+  Object.assign(row.import_metadata.cliniccloud_delta.source, { kind: 'appointment', source_external_id: '1051',
+    agenda_key: 'Fuente', details: row.nota, start_utc: start, end_utc: end });
+  const values = require('../../lib/historical-treatment-reference').buildHistoricalReferenceValues({ rows: [row],
+    actorId: 7, discipline: 'sin_clasificar' });
+  Object.assign(f.treatment, values);
+  return f;
+}
+
+test('exact historical source classification preserves all phases and remains inactive, nonbillable and clinically unapproved', async () => {
+  const f = historicalFixture(), before = structuredClone(f.state);
+  await f.run();
+  assert.equal(f.state.row.tratamiento_id, 3);
+  assert.equal(f.treatment.activo, false); assert.equal(f.treatment.precio_base, null);
+  assert.deepEqual(f.state.occupancy, before.occupancy);
+  assert.deepEqual(f.state.row.import_metadata.booking, before.row.import_metadata.booking);
+  assert.equal(f.state.row.import_metadata.import_treatment_resolution.classification, 'historical_reference');
+  assert.equal(f.state.events[0].metadata.clinical_approval_inferred, false);
+});
+
+test('historical labels cannot bypass a changed source reservation or ordinary booking even with allowObsolete', async () => {
+  const f = historicalFixture(); f.state.row.nota = 'Otro procedimiento';
+  await assert.rejects(f.run(), { code: 'historical_reference_reservation_mismatch' });
+  assert.equal(f.state.persisted, 0);
+  assert.throws(() => require('../../services/treatmentBookingProfile.service').requireOperationalProfile(f.treatment,
+    { capabilities, allowObsolete: true }), { code: 'treatment_not_bookable' });
+});
+
+test('missing resource anchors fail closed instead of writing new anchors during classification', async () => {
+  const f = fixture(); f.db.AppointmentBookingResource.findByPk = async () => null;
+  await assert.rejects(f.run(), { code: 'booking_import_reservation_invalid' });
+  assert.equal(f.state.persisted, 0); assert.equal(f.state.events.length, 0);
+});
+
+test('historical create and source classification share one transaction; replay cannot create a second reference', async () => {
+  const f = historicalFixture();
+  let created = 0;
+  f.db.CitaPaciente.findAll = async ({ transaction: tx }) => [{ ...tx.row, toJSON: () => structuredClone(tx.row) }];
+  f.db.Tratamiento.create = async (values, options) => {
+    assert(options.transaction); created++; Object.assign(f.treatment, values); return f.treatment;
+  };
+  const service = require('../../services/appointmentHistoricalImport.service');
+  const input = { expected_version: importReviewVersion(f.state.row), reason: 'Reserva fuente revisada sin inferir administración ni tarifa.' };
+  const result = await service.resolveHistoricalAppointment({ db: f.db, appointmentId: 51, clinicId: 72, actorId: 7, input, capabilities });
+  assert.equal(result.replayed, false); assert.equal(created, 1); assert.equal(f.state.events.length, 1);
+  assert.equal(f.state.row.import_metadata.import_treatment_resolution.historical_expected_version, input.expected_version);
+  const retry = await service.resolveHistoricalAppointment({ db: f.db, appointmentId: 51, clinicId: 72, actorId: 7, input, capabilities });
+  assert.equal(retry.replayed, true); assert.equal(created, 1); assert.equal(f.state.events.length, 1);
+});
+
+test('historical API rejects caller-authored evidence, clinical approval, price, profile, tenant and act fields', () => {
+  const normalize = require('../../services/appointmentHistoricalImport.service').normalizeHistoricalResolution;
+  const input = { expected_version: 'a'.repeat(64), reason: 'Reserva fuente revisada sin autorización clínica.' };
+  assert.deepEqual(normalize(input), input);
+  for (const key of ['precio_base', 'clinical_config', 'requiredClinicalDocumentReview', 'source', 'name', 'treatment_id', 'clinicId', 'actorId', 'force']) {
+    assert.throws(() => normalize({ ...input, [key]: true }), { code: 'booking_import_invalid' });
+  }
+});
+
+test('historical reference with unknown exact consent cannot start or complete care even with zero configured requirements', async () => {
+  const f = historicalFixture();
+  const transaction = { LOCK: { SHARE: 'SHARE' } };
+  f.db.Tratamiento.findAll = async options => { assert.equal(options.lock, 'SHARE'); return [f.treatment]; };
+  f.db.TreatmentConsentRequirement = { findAll: async () => { throw Error('Missing consent must not authorize care'); } };
+  await assert.rejects(require('../../services/appointmentConsentEligibility.service').assessAppointmentClinicalConsent({ db: f.db,
+    appointment: { ...f.state.row, tratamiento_id: 3 }, transaction }), { code: 'appointment_consent_configuration_required' });
 });

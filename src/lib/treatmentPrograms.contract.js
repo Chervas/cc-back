@@ -59,6 +59,7 @@ function treatmentDto(raw) {
   if (typeof config === 'string') { try { config = JSON.parse(config); } catch { config = {}; } }
   const issues = [];
   const component_policy = require('./treatment-commercial-policy').policy(value);
+  if (component_policy.sale_mode === 'historical_reference') issues.push({ code: 'treatment_historical_reference', message: 'La referencia histórica no puede ofrecerse ni reservarse en un programa o bono nuevo.' });
   if (component_policy.requires_component_approval) issues.push({ code: 'component_approval_required', message: 'Aprueba expresamente el componente incluido antes de utilizarlo en un programa.' });
   if (Number(value.sesiones_defecto || 1) > 1) issues.push({ code: 'legacy_voucher_requires_unit_mapping', message: 'Esta oferta antigua contiene varias sesiones. Vincula su tratamiento individual antes de reutilizarla.' });
   const status = config.catalog_status || (value.activo ? 'active' : 'inactive');

@@ -182,6 +182,7 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
         protectedPayload.motivo = null;
         protectedPayload.import_metadata = null;
         protectedPayload.import_review = null;
+        protectedPayload.clinical_component_context = null;
         protectedPayload.program_link_revision = null;
         protectedPayload.tratamiento_id = null;
         protectedPayload.tratamiento = null;
@@ -205,6 +206,17 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
 
 async function protectAppointmentsForRequest(req, citas) {
     const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
+    // Precomputed calendar summaries are already server-owned. Full records
+    // validate reciprocal clinical-component relations with bounded bulk reads.
+    const full = list.filter(row => row?.import_metadata);
+    if (full.length) {
+        await require('../services/appointmentClinicalComponents.service').attachClinicalComponentContexts({ db, appointments: full });
+        for (const row of full) {
+            const context = row.getDataValue ? row.getDataValue('clinical_component_context') : row.clinical_component_context;
+            const review = appointmentImportReview(plainCita(row), { clinicalComponentContext: context });
+            setCitaDataValue(row, 'import_review', review);
+        }
+    }
     const capabilities = await appointmentPrivacyCapabilities(
         req,
         list.map((cita) => cita?.clinica_id ?? cita?.clinic_id),
@@ -1168,7 +1180,8 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
         inicio_local: formatDateTimeLocal(plain.inicio, timeZone),
         fin_local: formatDateTimeLocal(plain.fin, timeZone),
         time_zone: timeZone,
-        import_review: appointmentImportReview(plain),
+        import_review: plain.import_review || appointmentImportReview(plain),
+        clinical_component_context: plain.clinical_component_context || null,
         program_context: plain.program_context || null,
         ...(bookingCapabilities().simple ? { additional_staff: additionalStaffPayload(plain) } : {}),
         ...(bookingCapabilities().simple ? { booking_segments: bookingSegments(plain).map((segment) => ({ ...segment,
@@ -2115,6 +2128,8 @@ exports.createCita = asyncHandler(async (req, res) => {
         delete baseImportMetadata.additional_staff;
         delete baseImportMetadata.import_treatment_resolution;
         delete baseImportMetadata.import_resource_resolution;
+        delete baseImportMetadata.clinical_component_parent;
+        delete baseImportMetadata.clinical_component_children;
         const appointmentImportMetadata = {
             ...baseImportMetadata,
             ...(isHistoricalRegistration ? {
@@ -2350,12 +2365,12 @@ exports.getAppointmentHubList = asyncHandler(async (req, res) => {
         inicio: { [q.past ? Op.lt : Op.gte]: new Date() },
     };
     const rows = await CitaPaciente.findAll({ where,
-        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'inicio', 'fin', 'estado', 'nota', 'motivo', 'tipo_cita', 'tratamiento_id', 'doctor_id', 'instalacion_id', 'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional'],
+        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'inicio', 'fin', 'estado', 'nota', 'motivo', 'tipo_cita', 'tratamiento_id', 'doctor_id', 'instalacion_id', 'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional', 'source_system', 'source_reference', 'import_metadata', 'voucher_id', 'hold_expires_at', 'updated_at'],
         include: [
             // Only card identity; contact/clinical data still belongs to detail.
             { model: Paciente, as: 'paciente', required: false, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos'] },
             { model: LeadIntake, as: 'lead', required: false, attributes: ['id', 'nombre'] },
-            { model: Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] },
+            { model: Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre', 'clinical_config'] },
             { model: Instalacion, as: 'instalacion', required: false, attributes: ['id', 'nombre'] },
             ...(db.Usuario ? [{ model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos'] }] : []),
         ],
@@ -2497,6 +2512,8 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
             'inicio',
             'fin',
             'source_system',
+            'source_reference',
+            'hold_expires_at',
             'voucher_id',
             'import_metadata',
             'created_at',
@@ -2535,6 +2552,12 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
     await attachNutritionLatestMeasurementsToCitas(citas);
     await attachAppointmentProgramContexts(db, citas);
 
+    await require('../services/appointmentClinicalComponents.service').attachClinicalComponentContexts({ db, appointments: citas });
+    for (const row of citas) {
+        const context = row.getDataValue('clinical_component_context');
+        setCitaDataValue(row, 'import_review', appointmentImportReview(plainCita(row), { clinicalComponentContext: context }));
+    }
+
     res.set('X-Agenda-Endpoint', 'calendar-lite');
     const calendarRows = citas
         .map((cita) => mapCalendarCitaRow(
@@ -2557,8 +2580,9 @@ exports.getAppointmentHubActivity = asyncHandler(async (req, res) => {
     const service = require('../services/appointmentActivity.service');
     const rows = await db.PatientOperationalEvent.findAll({
         where: { clinic_id: cita.clinica_id, patient_id: cita.paciente_id || null,
-            event_type: { [Op.in]: [service.APPOINTMENT_STATUS_EVENT_TYPE, service.APPOINTMENT_STAFF_EVENT_TYPE, service.APPOINTMENT_IMPORT_EVENT_TYPE, service.APPOINTMENT_PROGRAM_EVENT_TYPE, 'appointment_care_changed'] },
-            'metadata.appointment_id': id },
+            event_type: { [Op.in]: [service.APPOINTMENT_STATUS_EVENT_TYPE, service.APPOINTMENT_STAFF_EVENT_TYPE, service.APPOINTMENT_IMPORT_EVENT_TYPE, service.APPOINTMENT_PROGRAM_EVENT_TYPE, service.APPOINTMENT_COMPONENT_EVENT_TYPE, 'appointment_care_changed'] },
+            [Op.or]: [{ 'metadata.appointment_id': id },
+                { event_type: service.APPOINTMENT_COMPONENT_EVENT_TYPE, 'metadata.parent_appointment_id': id }] },
         include: [{ model: db.Usuario, as: 'actor', required: false, attributes: ['nombre', 'apellidos'] }],
         order: [['occurred_at', 'DESC'], ['id', 'DESC']], limit: 31, offset: (page - 1) * 30,
     });
@@ -3309,6 +3333,47 @@ exports.updateCitaSupport = asyncHandler(async (req, res) => {
     ] });
     emitAppointmentSocketEvent('appointment:updated', updated.toJSON());
     return res.json(await protectAppointmentsForRequest(req, updated));
+});
+
+exports.resolveHistoricalAppointment = asyncHandler(async (req, res) => {
+    const citaId = Number(req.params.id);
+    if (!Number.isSafeInteger(citaId) || citaId < 1) return res.status(400).json({ message: 'Cita inválida' });
+    const existing = await CitaPaciente.findByPk(citaId);
+    if (!existing) return res.status(404).json({ message: 'Cita no encontrada' });
+    if (await denyAppointmentManageAccessIfNeeded(req, res, existing.clinica_id)) return;
+    const actorId = Number(req.userData?.userId);
+    if (!await canUserAccessFeature({ actorId, featureKey: 'patients.sensitive.view', clinicId: existing.clinica_id })) {
+        return res.status(403).json({ message: 'No tienes acceso a los datos clínicos de esta cita.' });
+    }
+    const result = await require('../services/appointmentHistoricalImport.service').resolveHistoricalAppointment({ db,
+        appointmentId: citaId, clinicId: Number(existing.clinica_id), actorId, input: req.body });
+    const updated = await CitaPaciente.findByPk(citaId, { include: [
+        { model: Paciente, as: 'paciente' }, { model: Instalacion, as: 'instalacion', required: false },
+        { model: Tratamiento, as: 'tratamiento', required: false },
+        { model: db.Usuario, as: 'doctor', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'] },
+    ] });
+    if (!result.replayed) emitAppointmentSocketEvent('appointment:updated', updated.toJSON());
+    return res.json(await protectAppointmentsForRequest(req, updated));
+});
+
+exports.linkClinicalComponent = asyncHandler(async (req, res) => {
+    const citaId = Number(req.params.id);
+    if (!Number.isSafeInteger(citaId) || citaId < 1) return res.status(400).json({ message: 'Cita inválida' });
+    const existing = await CitaPaciente.findByPk(citaId);
+    if (!existing) return res.status(404).json({ message: 'Cita no encontrada' });
+    if (await denyAppointmentManageAccessIfNeeded(req, res, existing.clinica_id)) return;
+    const actorId = Number(req.userData?.userId);
+    if (!await canUserAccessFeature({ actorId, featureKey: 'patients.sensitive.view', clinicId: existing.clinica_id })) {
+        return res.status(403).json({ message: 'No tienes acceso a los datos clínicos de esta cita.' });
+    }
+    const result = await require('../services/appointmentClinicalComponents.service').linkExistingComponent({ db,
+        appointmentId: citaId, clinicId: Number(existing.clinica_id), actorId, input: req.body });
+    if (!result.replayed) {
+        emitAppointmentSocketEvent('appointment:updated', result.component.toJSON());
+        emitAppointmentSocketEvent('appointment:updated', result.parent.toJSON());
+    }
+    return res.json({ replayed: result.replayed, relation: result.relation,
+        appointments: await protectAppointmentsForRequest(req, [result.component, result.parent]) });
 });
 
 exports.__testing = Object.freeze({

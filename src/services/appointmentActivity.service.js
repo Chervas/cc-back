@@ -4,6 +4,7 @@ const APPOINTMENT_STATUS_EVENT_TYPE = 'appointment.status_changed';
 const APPOINTMENT_STAFF_EVENT_TYPE = 'appointment.staff_changed';
 const APPOINTMENT_IMPORT_EVENT_TYPE = 'appointment.import_resolved';
 const APPOINTMENT_PROGRAM_EVENT_TYPE = 'appointment.program_linked';
+const APPOINTMENT_COMPONENT_EVENT_TYPE = 'appointment.clinical_component_linked';
 
 const APPOINTMENT_STATUS_LABELS = Object.freeze({
   pendiente: 'Pendiente',
@@ -99,6 +100,12 @@ function buildAppointmentStatusDescription(event) {
 
 function serializeAppointmentStatusActivity(event, { patientId = null, leadId = null, actorName = 'Sistema' } = {}) {
   const metadata = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
+  if (event.event_type === APPOINTMENT_COMPONENT_EVENT_TYPE) return {
+    id: `appointment-component-event-${event.id}`, citaId: String(metadata.component_appointment_id), fecha: event.occurred_at || event.created_at,
+    tipo: 'appointment_clinical_component_linked', titulo: 'Extracción PRP vinculada a su cita principal',
+    descripcion: 'Se han relacionado las dos reservas existentes. No se ha registrado una intervención, un programa, un cobro ni una firma.',
+    icono: 'heroicons_outline:link', color: 'info', usuarioNombre: actorName,
+  };
   if (event.event_type === APPOINTMENT_PROGRAM_EVENT_TYPE) return {
     id: `appointment-program-event-${event.id}`, citaId: String(metadata.appointment_id), fecha: event.occurred_at || event.created_at,
     tipo: 'appointment_program_linked', titulo: 'Cita vinculada a un programa',
@@ -115,9 +122,11 @@ function serializeAppointmentStatusActivity(event, { patientId = null, leadId = 
     return { id: `appointment-import-event-${event.id}`,
       ...(patientId !== null ? { pacienteId: String(patientId) } : {}), ...(leadId !== null ? { leadId: String(leadId) } : {}),
       fecha: event.occurred_at || event.created_at, tipo: 'appointment_import_resolved',
-      titulo: metadata.mode === 'resources' ? 'Cabina y profesional revisados' : 'Tratamiento importado revisado',
+      titulo: metadata.mode === 'resources' ? 'Cabina y profesional revisados' : metadata.classification === 'historical_reference' ? 'Servicio de origen conservado' : 'Tratamiento importado revisado',
       descripcion: metadata.mode === 'resources'
         ? 'Se han confirmado la cabina y el profesional de la cita importada. Se conservan el horario y la configuración de avisos.'
+        : metadata.classification === 'historical_reference'
+        ? 'Se ha conservado el servicio reservado como referencia histórica sin tarifa. No acredita administración ni aprobación clínica.'
         : metadata.mode === 'no_treatment'
         ? 'Se ha confirmado una visita sin tratamiento. Se conservan el horario y la configuración de avisos.'
         : 'Se ha vinculado un tratamiento del catálogo. Se conservan el horario y la configuración de avisos.',
@@ -213,6 +222,7 @@ module.exports = {
   APPOINTMENT_STAFF_EVENT_TYPE,
   APPOINTMENT_IMPORT_EVENT_TYPE,
   APPOINTMENT_PROGRAM_EVENT_TYPE,
+  APPOINTMENT_COMPONENT_EVENT_TYPE,
   appointmentStatusLabel,
   serializeAppointmentStatusActivity,
   recordAppointmentStatusChange,

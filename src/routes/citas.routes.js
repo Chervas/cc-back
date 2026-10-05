@@ -22,6 +22,8 @@ router.patch('/:id/nota', authMiddleware, citasController.updateCitaNota);
 router.patch('/:id/reagendar', authMiddleware, citasController.reagendarCita);
 router.patch('/:id/personal-apoyo', authMiddleware, citasController.updateCitaSupport);
 router.patch('/:id/importacion/tratamiento', authMiddleware, citasController.resolveImportedTreatment);
+router.post('/:id/importacion/referencia-historica', authMiddleware, citasController.resolveHistoricalAppointment);
+router.post('/:id/importacion/componente-clinico', authMiddleware, citasController.linkClinicalComponent);
 router.delete('/:id', authMiddleware, citasController.deleteCita);
 router.get('/:id', authMiddleware, citasController.getCitaById);
 router.get('/', authMiddleware, citasController.getCitas);

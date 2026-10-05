@@ -39,12 +39,16 @@ function hasReviewedNoTreatment(appointment) {
     && /^[a-f0-9]{64}$/.test(resolution.request_hash || '');
 }
 
-function importTreatmentPending(appointment) {
+function hasReviewedClinicalComponent(appointment, context) {
+  return !!context && require('./appointment-clinical-components').isValidatedClinicalComponentContext(context, appointment);
+}
+
+function importTreatmentPending(appointment, { clinicalComponentContext = null } = {}) {
   const pending = object(appointment.import_metadata).cliniccloud_delta?.pending_assignment;
   const refresh = reviewedSourceRefresh(appointment);
   return appointment.source_system === 'cliniccloud' && !appointment.tratamiento_id
     && (Array.isArray(pending) && pending.includes('treatment_id') || refresh?.treatment_pending === true)
-    && !hasReviewedNoTreatment(appointment);
+    && !hasReviewedNoTreatment(appointment) && !hasReviewedClinicalComponent(appointment, clinicalComponentContext);
 }
 
 // A source refresh supplements the immutable original import evidence. Only
@@ -95,7 +99,7 @@ function hasReviewedImportResources(appointment) {
 
 // Small server-owned operational summary. Never expose import evidence, patient
 // identity snapshots or raw source notes through the calendar's lightweight DTO.
-function appointmentImportReview(appointment) {
+function appointmentImportReview(appointment, { clinicalComponentContext = null } = {}) {
   if (appointment.source_system !== 'cliniccloud') return null;
   let metadata = appointment.import_metadata;
   if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
@@ -110,8 +114,9 @@ function appointmentImportReview(appointment) {
   const installationInactive = !!appointment.instalacion_id
     && [false, 0].includes(appointment.instalacion?.activo);
   const pendingAssignment = Object.keys(fields).filter(key => Array.isArray(pending) && pending.includes(key)
-    && !appointment[columns[key]] && !(key === 'treatment_id' && hasReviewedNoTreatment(appointment))).map(key => fields[key]);
-  if (importTreatmentPending(appointment) && !pendingAssignment.includes('treatment')) pendingAssignment.push('treatment');
+    && !appointment[columns[key]] && !(key === 'treatment_id' && (hasReviewedNoTreatment(appointment)
+      || hasReviewedClinicalComponent(appointment, clinicalComponentContext)))).map(key => fields[key]);
+  if (importTreatmentPending(appointment, { clinicalComponentContext }) && !pendingAssignment.includes('treatment')) pendingAssignment.push('treatment');
   if (installationInactive && !pendingAssignment.includes('installation')) pendingAssignment.push('installation');
   const resourcesNeedReview = importResourcesInScope(appointment)
     && !['cancelada', 'completada', 'no_asistio'].includes(appointment.estado) && !hasReviewedImportResources(appointment);
@@ -125,9 +130,14 @@ function appointmentImportReview(appointment) {
   const sourceService = typeof currentService === 'string' ? currentService.trim().slice(0, 255) : '';
   return { source: 'cliniccloud', reminders_held: true,
     pending_assignment: pendingAssignment,
-    ...(importTreatmentPending(appointment) && importReviewVersion(appointment)
+    ...(importTreatmentPending(appointment, { clinicalComponentContext }) && importReviewVersion(appointment)
       ? { review_version: importReviewVersion(appointment) } : {}),
     ...(hasReviewedNoTreatment(appointment) ? { treatment_resolution: 'no_treatment' } : {}),
+    ...(hasReviewedClinicalComponent(appointment, clinicalComponentContext)
+      ? { treatment_resolution: 'planned_clinical_component', clinical_component_role: 'prp_extraction' } : {}),
+    ...(appointment.tratamiento && require('./historical-treatment-reference').isHistoricalTreatment(appointment.tratamiento)
+      ? { treatment_resolution: 'historical_reference', clinical_document_review_required: true,
+        commercial_use_allowed: false, clinical_approval_inferred: false } : {}),
     ...(resourcesNeedReview ? { resources_need_review: true } : {}),
     ...(resourcesNeedReview && appointment.doctor_id && appointment.instalacion_id && !installationInactive
       && !['cancelada', 'completada', 'no_asistio'].includes(appointment.estado) && importReviewVersion(appointment)
@@ -136,4 +146,4 @@ function appointmentImportReview(appointment) {
     ...(installationInactive ? { installation_inactive: true } : {}) };
 }
 module.exports = { appointmentImportReview, importReviewVersion, hasReviewedNoTreatment, importTreatmentPending,
-  importResourcesInScope, importResourceFingerprint, hasReviewedImportResources };
+  importResourcesInScope, importResourceFingerprint, hasReviewedImportResources, hasReviewedClinicalComponent };

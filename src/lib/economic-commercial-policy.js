@@ -26,8 +26,10 @@ async function assertCommercialLines(lines, { resolveTreatments, selling = true,
       if (treatment) assertStandalone(treatment);
       continue;
     }
-    if (!selling) continue;
     const snapshot = object(line.program_snapshot);
+    if ((snapshot?.appointments || []).some(appointment => (appointment.treatment_ids || []).some(id => saleMode(treatments.get(Number(id))) === 'historical_reference')
+      || (appointment.treatments || []).some(treatment => treatment.sale_mode === 'historical_reference'))) throw catalogError('Una referencia histórica no puede incorporarse a una oferta comercial nueva.', 'treatment_historical_reference', 422);
+    if (!selling) continue;
     const included = (snapshot?.appointments || []).some(appointment => (appointment.treatment_ids || []).some(id => saleMode(treatments.get(Number(id))) === 'program_component_only')
       || (appointment.treatments || []).some(treatment => treatment.sale_mode === 'program_component_only'));
     if (included && (snapshot?.price_profile_source !== 'program' || !normalizeProfile(snapshot.price_profile))) {

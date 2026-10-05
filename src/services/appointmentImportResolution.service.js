@@ -88,7 +88,7 @@ async function resolveImportedTreatment({ db, appointmentId, clinicId, actorId, 
         : { expectedVersion: decision.expected_version }),
       appointmentValues: { updated_by: actorId, ...(resourcesOnly ? {} : decision.mode === 'treatment'
         ? { tratamiento_id: decision.treatment_id } : { tipo_cita: decision.visit_type }) },
-      persist: async ({ values, existing, transaction: bookingTx }) => {
+      persist: async ({ values, existing, transaction: bookingTx, classification }) => {
         for (const field of ['doctor_id', 'instalacion_id']) {
           if (before[field] && Number(before[field]) !== Number(values[field])) {
             fail('resource_change', 'El tratamiento necesita otros recursos. Revisa el profesional y la cabina desde Editar antes de vincularlo.');
@@ -118,6 +118,10 @@ async function resolveImportedTreatment({ db, appointmentId, clinicId, actorId, 
           visit_type: values.tipo_cita, previous_visit_type: before.tipo_cita, appointment_id: appointmentId,
           patient_id: Number(before.paciente_id), clinic_id: Number(before.clinica_id), actor_id: actorId,
           reason: decision.reason, reviewed_at: new Date().toISOString(), request_hash: requestHash };
+        if (classification === 'historical_reference') {
+          resolution.classification = classification;
+          resolution.clinical_approval_inferred = false;
+        }
         const saved = await existing.update({ tratamiento_id: values.tratamiento_id,
           tipo_cita: values.tipo_cita, doctor_id: values.doctor_id, instalacion_id: values.instalacion_id,
           updated_by: actorId, import_metadata: { ...metadata(values), import_treatment_resolution: resolution } },
@@ -125,6 +129,7 @@ async function resolveImportedTreatment({ db, appointmentId, clinicId, actorId, 
         await db.PatientOperationalEvent.create({ patient_id: before.paciente_id, clinic_id: before.clinica_id,
           actor_user_id: actorId, event_type: 'appointment.import_resolved', source: 'agenda', channel: null,
           metadata: { appointment_id: appointmentId, mode: decision.mode, treatment_id: resolution.treatment_id,
+            ...(classification ? { classification, clinical_approval_inferred: false } : {}),
             previous_visit_type: before.tipo_cita, visit_type: values.tipo_cita, reason: decision.reason,
             previous_doctor_id: before.doctor_id || null, doctor_id: values.doctor_id || null,
             previous_installation_id: before.instalacion_id || null, installation_id: values.instalacion_id || null,
