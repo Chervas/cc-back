@@ -102,3 +102,51 @@ test('the supporting clinician is still required for the whole appointment', asy
     assert.equal(grid.body.rows[0].slots_by_doctor[5].length, supportBusy ? 0 : 1);
   }
 });
+
+function reasonAt(intervals, time) {
+  const value = day + 'T' + time;
+  return intervals.find(interval => interval.start_local <= value && value < interval.end_local)?.resource_conflicts[0]?.details;
+}
+
+for (const mode of ['doctor', 'installation']) test(`${mode}: rejected starts have compressed, specific reasons without extra context reads`, async () => {
+  const f = fixture(); f.context.doctors.get(5).name = 'Fictitious clinician';
+  const query = { dates: [day], mode, column_ids: mode === 'doctor' ? [5,7] : [9,10],
+    ...(mode === 'doctor' ? { peer_instalacion_ids: [9,10] } : { peer_doctor_ids: [5,7] }) };
+  const grid = await f.call('grid', query), allowed = grid.body.rows[0], excluded = grid.body.rows[1];
+  const intervals = mode === 'doctor' ? allowed.unavailable_by_instalacion[9] : allowed.unavailable_by_doctor[5];
+  assert.equal(reasonAt(intervals, '09:00').reason_key, 'clinic_schedule');
+  assert.equal(reasonAt(intervals, '12:40').reason_key, 'resource_busy');
+  assert.match(reasonAt(intervals, '12:40').message, /Fictitious clinician.*45 min/);
+  assert.equal(reasonAt(intervals, '12:45'), undefined, 'a valid starting position is not painted unavailable');
+  assert.equal(reasonAt(intervals, '12:50').reason_key, 'clinic_schedule', 'the duration crosses closing, not an invented machine collision');
+  assert(intervals.length < 10, 'adjacent equal reasons are compressed, not one node per grid cell');
+  const excludedIntervals = mode === 'doctor' ? excluded.unavailable_by_instalacion[9] : excluded.unavailable_by_doctor[5];
+  assert.equal(reasonAt(excludedIntervals, '12:45').reason_key, mode === 'doctor' ? 'incompatible_staff' : 'incompatible_installation');
+  assert.equal(f.calls.context, 1);
+  assert.doesNotMatch(JSON.stringify(grid.body), /appointment_id|paciente_id|patient_id|notes|clinica_ids/);
+  for (const interval of intervals) {
+    assert.equal(interval.interval_kind, 'appointment_start');
+    assert.equal(interval.resource_conflicts[0].can_force, false);
+  }
+});
+
+for (const resource of ['roomBusy', 'equipmentBusy', 'staffBusy', 'supportBusy']) test(`${resource}: diagnostics name the actual binding resource`, async () => {
+  const f = fixture({ [resource]: true });
+  const query = { dates: [day], mode: 'installation', column_ids: [9], context_doctor_id: '5',
+    ...(resource === 'supportBusy' ? { additional_staff_ids: [8] } : {}) };
+  const grid = await f.call('grid', query), reason = reasonAt(grid.body.rows[0].unavailable_intervals, '12:45');
+  assert.equal(reason.reason_key, resource === 'equipmentBusy' ? 'equipment_busy' : 'resource_busy');
+  assert.match(reason.message, resource === 'equipmentBusy' ? /Fictitious equipment/ : resource === 'roomBusy' ? /Fictitious room/ : /profesional/);
+  assert.equal(grid.body.rows[0].slots.length, 0);
+});
+
+test('diagnostics are opt-in, summaries remain early OR and do not change the canonical slots', async () => {
+  const f = fixture(), selections = { care: { doctor_id: 5, installation_id: 9 } }, reasons = [];
+  const input = { profile: f.profile, context: f.context, date: day, stepMinutes: 5, selections,
+    fromLocal: '09:00', toLocal: '20:00' };
+  assert.deepEqual(solutionsForCalendar(input), solutionsForCalendar({ ...input, onUnavailable: (start, conflict) => reasons.push({ start, conflict }) }));
+  assert(reasons.length > 0);
+  const summary = await f.call('summary', { dates: [day], doctor_id: '5', instalacion_id: '9' });
+  assert.equal(summary.body.by_day[day], true);
+  assert.doesNotMatch(JSON.stringify(summary.body), /resource_conflicts|unavailable_intervals/);
+});

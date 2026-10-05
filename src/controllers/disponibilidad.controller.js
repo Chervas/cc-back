@@ -8,6 +8,7 @@ const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
 const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
 const { resourceForConfirmedOverlap } = require('../lib/booking-attention');
 const { installationOverlapCapacity } = require('../lib/installation-overlap');
+const { incompatibleStart, appendStartInterval } = require('../lib/booking-grid-diagnostics');
 
 function confirmedOverlapRows(rows, start, end, clinicId, allowed, capacity = null) {
   if (allowed === false || allowed === 0) return false;
@@ -66,16 +67,30 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
     throw Object.assign(Error('Batch de cabinas/profesionales inválido'), { statusCode: 400 });
   }
   const phase = profile.phases[0];
-  const getSolutions = (doctor, installation) => {
+  const timeZone = resolveClinicTimezone(clinic);
+  const rangeEnd = query.to_local ? resolveLocalInstant(query.fecha_local, `${query.to_local}:00`, timeZone)
+    : resolveLocalInstant(addDays(query.fecha_local, 1), '00:00:00', timeZone);
+  const getResult = (doctor, installation) => {
+    const unavailable = [];
+    const includeUnavailable = parseBool(query.include_unavailable) && query.summary_only !== true;
     // Skip incompatible columns before iterating times; no SQL per column/slot.
     if ((doctor && !phase.professionals.ids.includes(doctor))
-      || (installation && !phase.installation_ids.includes(installation))) return [];
-    return solutionsForCalendar({ profile, context, date: query.fecha_local, stepMinutes: stepMin,
+      || (installation && !phase.installation_ids.includes(installation))) {
+      if (includeUnavailable) appendStartInterval(unavailable,
+        resolveLocalInstant(query.fecha_local, `${query.from_local || '00:00'}:00`, response.timezone),
+        rangeEnd,
+        incompatibleStart(profile, doctor, installation), response.timezone, formatLocal);
+      return { slots: [], unavailable };
+    }
+    const slots = solutionsForCalendar({ profile, context, date: query.fecha_local, stepMinutes: stepMin,
       limit: Math.min(parseIntSafe(query.limit) > 0 ? parseIntSafe(query.limit) : 500, 500), additionalStaffIds,
       allowConfirmedOverlap: true,
       selections: { [phase.key]: { doctor_id: doctor, installation_id: installation } },
       fromLocal: typeof query.from_local === 'string' ? query.from_local : '00:00',
-      toLocal: typeof query.to_local === 'string' ? query.to_local : null });
+      toLocal: typeof query.to_local === 'string' ? query.to_local : null,
+      onUnavailable: includeUnavailable ? (start, conflict) => appendStartInterval(unavailable, start,
+        new Date(Math.min(+start + stepMin * 60000, +rangeEnd)), conflict, response.timezone, formatLocal) : null });
+    return { slots, unavailable };
   };
   const response = { timezone: resolveClinicTimezone(clinic), clinica_id: Number(clinic.id_clinica),
     fecha_local: query.fecha_local, duracion_min: phase.duration_minutes, granularity_min: stepMin };
@@ -84,17 +99,25 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
       : professionalIds.length ? professionalIds.map(id => [id, Number(query.instalacion_id)])
         : [[query.doctor_id ? Number(query.doctor_id) : null, query.instalacion_id ? Number(query.instalacion_id) : null]];
     for (const [doctor, installation] of pairs) {
-      const slots = getSolutions(doctor, installation);
+      const { slots } = getResult(doctor, installation);
       if (slots.length) return { ...response, slots };
     }
     return { ...response, slots: [] };
   }
-  if (installationIds.length) return { ...response, doctor_id: Number(query.doctor_id), instalacion_ids: installationIds,
-    slots_by_instalacion: Object.fromEntries(installationIds.map(id => [id, getSolutions(Number(query.doctor_id), id)])), unavailable_by_instalacion: {} };
-  if (professionalIds.length) return { ...response, instalacion_id: Number(query.instalacion_id), doctor_ids: professionalIds,
-    slots_by_doctor: Object.fromEntries(professionalIds.map(id => [id, getSolutions(id, Number(query.instalacion_id))])), unavailable_by_doctor: {} };
-  return { ...response, slots: getSolutions(query.doctor_id ? Number(query.doctor_id) : null,
-    query.instalacion_id ? Number(query.instalacion_id) : null), unavailable_intervals: [] };
+  if (installationIds.length) {
+    const pairs = installationIds.map(id => [id, getResult(Number(query.doctor_id), id)]);
+    return { ...response, doctor_id: Number(query.doctor_id), instalacion_ids: installationIds,
+      slots_by_instalacion: Object.fromEntries(pairs.map(([id, value]) => [id, value.slots])),
+      unavailable_by_instalacion: Object.fromEntries(pairs.map(([id, value]) => [id, value.unavailable])) };
+  }
+  if (professionalIds.length) {
+    const pairs = professionalIds.map(id => [id, getResult(id, Number(query.instalacion_id))]);
+    return { ...response, instalacion_id: Number(query.instalacion_id), doctor_ids: professionalIds,
+      slots_by_doctor: Object.fromEntries(pairs.map(([id, value]) => [id, value.slots])),
+      unavailable_by_doctor: Object.fromEntries(pairs.map(([id, value]) => [id, value.unavailable])) };
+  }
+  const result = getResult(query.doctor_id ? Number(query.doctor_id) : null, query.instalacion_id ? Number(query.instalacion_id) : null);
+  return { ...response, slots: result.slots, unavailable_intervals: result.unavailable };
 }
 
 exports.bookingCapabilities = asyncHandler(async (req, res) => res.json(bookingCapabilities()));

@@ -6,6 +6,7 @@ const { resolveClinicTimezone, formatDateLocal, formatLocal, dayIndexFromLocalDa
   buildWindowsFromHorarios, buildDoctorAvailabilityContext, buildDoctorBloqueoRowsForDate,
   hasActiveSchedule } = require('../lib/availability-calendar');
 const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
+const { startConflict, explainUnavailableStart } = require('../lib/booking-grid-diagnostics');
 const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staff');
 const { installationAllowsStaff } = require('../lib/installation-professionals');
 const { installationOverlapCapacity } = require('../lib/installation-overlap');
@@ -205,7 +206,7 @@ async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, s
     duration_minutes: profile.phases.reduce((sum, phase) => sum + phase.duration_minutes, 0), capabilities, slots };
 }
 
-function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 15, limit = 500, selections = {}, now = new Date(), fromLocal = '00:00', toLocal = null, additionalStaffIds = [], allowConfirmedOverlap = false }) {
+function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 15, limit = 500, selections = {}, now = new Date(), fromLocal = '00:00', toLocal = null, additionalStaffIds = [], allowConfirmedOverlap = false, onUnavailable = null }) {
   additionalStaffIds = normalizeAdditionalStaff(additionalStaffIds);
   const timeZone = context.timeZone;
   const end = resolveLocalInstant(addDays(date, days), '00:00:00', timeZone);
@@ -215,9 +216,12 @@ function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 
       let candidate;
       try { candidate = resolveLocalInstant(localDate, `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}:00`, timeZone); }
       catch (error) { if (error.code === 'voucher_schedule_dst_conflict') continue; throw error; }
-      if (candidate < now) continue;
       const localTime = `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
       if (localTime < fromLocal || (toLocal && localTime >= toLocal)) continue;
+      if (candidate < now) {
+        onUnavailable?.(candidate, startConflict('past_start', 'Esta hora de inicio ya ha pasado.', 'clinic'));
+        continue;
+      }
       const solution = solveBookingProfile({ profile, start: candidate, ...context, selections })
         || (allowConfirmedOverlap && !additionalStaffIds.length ? solveBookingProfile({ profile, start: candidate, ...context, selections, allowOverlap: true }) : null);
       const localEnd = solution ? formatLocal(new Date(solution.end_at), timeZone) : '';
@@ -227,6 +231,16 @@ function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 
         doctor_id: solution.phases[0].doctor_ids[0], installation_id: solution.phases[0].installation_id,
         start_local: formatLocal(new Date(solution.start_at), timeZone), end_local: formatLocal(new Date(solution.end_at), timeZone),
         start_utc: solution.start_at, end_utc: solution.end_at });
+      else if (onUnavailable) {
+        const duration = profile.phases.reduce((sum, phase) => sum + phase.duration_minutes, 0);
+        const reason = solution && (!toLocal || localEnd > `${localDate}T${toLocal}` || new Date(solution.end_at) > end) && patientFree && supportFree
+          ? startConflict('duration_outside_range', `No caben ${duration} min completos antes del final del horario mostrado.`, 'clinic', null, duration)
+          : solution && !patientFree
+            ? startConflict('patient_busy', 'El paciente ya tiene otra cita durante este intervalo.', 'clinic', null, duration)
+            : explainUnavailableStart({ profile, context, start: candidate, selections, additionalStaffIds,
+              allowOverlap: allowConfirmedOverlap && !additionalStaffIds.length });
+        onUnavailable(candidate, reason);
+      }
     }
   }
   return slots;
