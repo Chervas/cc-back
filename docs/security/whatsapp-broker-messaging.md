@@ -1,5 +1,39 @@
 # WhatsApp: motor de envío aislado y cliente staging
 
+## Liberación operativa de recordatorios importados (2026-10-05)
+
+La liberación autorizada de reservas existentes usa el registro privado
+`/etc/clinicaclick-whatsapp-authorized/staging/imported-day-before-release.json`.
+No elimina `source_system`, referencias ni los HOLD de la importación, ni cambia
+`import_metadata`: estos forman parte de las huellas de vinculación clínica PRP.
+
+El registro versionado contiene aprobación/actor, caducidad, corte de inicio y
+tuplas exactas de cita, clínica, paciente, horario, procedencia y versión publicada
+del flujo de **día anterior**. Solo staging operativo lo lee. Ausencia, permisos
+incorrectos, cambio de horario/ámbito/procedencia, otra plantilla, ejecución anterior
+a la aprobación o caducidad mantienen la retención. No concede envíos de mismo día,
+reenvíos históricos, confirmaciones iniciales o una excepción global de paciente.
+La comprobación se repite en planificación y justo antes del broker. Se mantienen
+opt-out, salud, pausas de automatización e idempotencia de Message/ejecución.
+
+Una respuesta nueva de un paciente con HOLD solo puede llegar al procesamiento
+normal cuando hay un recordatorio aceptado de esa reserva liberada, anterior al
+mensaje entrante y en la misma conversación. Las demás retenciones de recepción
+y los cortes de recuperación siguen vigentes. Nunca se liberan mensajes antiguos.
+
+Operación BS autorizada: clínicas 66/72, reservas futuras importadas desde el
+6 de octubre; disparo revisado del recordatorio del día anterior para el día 6,
+excluyendo confirmadas/canceladas, ya comunicadas y resultados inciertos. Los flujos
+de mismo día 1777/1782 permanecen desactivados. No mover citas/bloqueos de Marshall.
+La lista y sus recibos se conservan fuera de Git en `secure-imports`. La retirada
+del registro revoca la excepción conservando las evidencias; no borra datos.
+
+Diagnóstico de personal: crear bloqueo desde el bubble/panel calcula la fecha con
+el día de semana actual e ignora la semana navegada (`_getClickedDate` y
+`onBubbleCreateBlock`). El lunes 12 puede enviar lunes 5. Confirmado sin citas de
+Marshall (127/116) el día 12 y con nueve reservas el día 5. No se modifica este
+flujo en la operación de recordatorios; requiere corrección posterior de interfaz.
+
 Contrato del transporte WhatsApp. El runtime de autorización descrito primero
 conserva las pausas y exige revisión por número. Madurez y despliegues vigentes
 en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones)

@@ -123,7 +123,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
   loadClinic = clinicId => models().Clinica.findByPk(clinicId, { attributes: ['id_clinica','grupoClinicaId'], raw: true }),
   loadMessage = messageId => models().Message.findByPk(messageId, { attributes: ['id','conversation_id','direction','status','createdAt','metadata'], raw: true }),
   loadConversation = conversationId => models().Conversation.findByPk(conversationId, { attributes: ['id','clinic_id','patient_id','channel','contact_id'], raw: true }),
-  loadExecution = executionId => models().FlowExecutionV2.findByPk(executionId, { attributes: ['id','clinic_id','trigger_entity_type','trigger_entity_id','context'], raw: true }),
+  loadExecution = executionId => models().FlowExecutionV2.findByPk(executionId, { attributes: ['id','clinic_id','trigger_entity_type','trigger_entity_id','trigger_type','template_version_id','created_at','context'], raw: true }),
   loadAppointment = appointmentId => models().CitaPaciente.findByPk(appointmentId, { raw: true }),
   patientHeld = patientId => require('./whatsappAppointmentEligibility').patientImportHeld(patientId),
   loadReceptionState = (conversation, bindings) => {

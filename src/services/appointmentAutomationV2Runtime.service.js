@@ -117,6 +117,13 @@ function isImportedHistoricalAppointment(cita) {
     || title.startsWith('histórico:');
 }
 
+function importedTriggerHeld(cita, template) {
+  if (!isImportedHistoricalAppointment(cita)) return false;
+  const config = template && getTemplateTriggerConfig(template);
+  return !template || template.trigger_type !== 'appointment_reminder_window' || config?.schedule_moment !== 'day_before'
+    || !require('../lib/whatsappImportedReminderRelease').permits(cita, { templateVersionId: Number(template.id) });
+}
+
 function parsePlainObject(value) {
   if (!value) return {};
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -1123,7 +1130,7 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
   if (!citaId || !template) {
     return { success: false, skipped: true, reason: 'invalid_cita' };
   }
-  if (isImportedHistoricalAppointment(cita)) {
+  if (importedTriggerHeld(cita, template)) {
     return { success: true, skipped: true, reason: 'imported_historical_appointment' };
   }
 
@@ -1146,7 +1153,10 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
   if (!APPOINTMENT_TRIGGER_TYPES.has(cleanString(template.trigger_type))) {
     return { success: false, skipped: true, reason: 'no_template_for_event' };
   }
-  if (shouldSuppressAppointmentTrigger(cita, eventName)) {
+  const templateConfig = getTemplateTriggerConfig(template);
+  if (shouldSuppressAppointmentTrigger(cita, eventName, templateConfig)
+    && !(eventName === 'appointment_reminder_window' && templateConfig.schedule_moment === 'day_before'
+      && require('../lib/whatsappImportedReminderRelease').permits(cita, { templateVersionId: Number(template.id) }))) {
     return { success: true, skipped: true, reason: 'appointment_notification_suppressed' };
   }
 
@@ -1369,7 +1379,7 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
 async function syncScheduledTriggersForCita(cita, options = {}) {
   const citaId = toIntOrNull(cita?.id_cita);
   if (!citaId) return { success: false, skipped: true, reason: 'invalid_cita' };
-  if (isImportedHistoricalAppointment(cita)) {
+  if (isImportedHistoricalAppointment(cita) && !require('../lib/whatsappImportedReminderRelease').permits(cita)) {
     const existingJobs = await listExistingScheduledJobs(citaId);
     await Promise.all(existingJobs.map((job) => jobRequestsService.markCancelled(job.id, {
       errorMessage: 'imported_historical_appointment_cancelled_schedule',
@@ -1411,8 +1421,11 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
   for (const triggerType of Array.from(SCHEDULED_APPOINTMENT_TRIGGER_TYPES)) {
     const templates = await resolveScheduledTemplatesForCita(cita, triggerType);
     templates.forEach((template) => {
+      if (importedTriggerHeld(cita, template)) return;
       const triggerConfig = getTemplateTriggerConfig(template);
-      if (shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig)) return;
+      const released = triggerType === 'appointment_reminder_window' && triggerConfig.schedule_moment === 'day_before'
+        && require('../lib/whatsappImportedReminderRelease').permits(cita, { templateVersionId: Number(template.id) });
+      if (shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig) && !released) return;
       const scheduledFor = computeScheduledRunAt({
         cita,
         triggerType,
@@ -1649,9 +1662,6 @@ async function fireScheduledTrigger(payload = {}, options = {}) {
     return { success: false, skipped: true, reason: 'appointment_not_found' };
   }
   const cita = citaModel.toJSON ? citaModel.toJSON() : citaModel;
-  if (isImportedHistoricalAppointment(cita)) {
-    return { success: true, skipped: true, reason: 'imported_historical_appointment' };
-  }
   const normalizedStatus = cleanString(cita?.estado).toLowerCase();
   if (['cambio_solicitado', 'cancelada', 'no_asistio'].includes(normalizedStatus)) {
     return { success: true, skipped: true, reason: `appointment_${normalizedStatus}` };
@@ -1670,9 +1680,14 @@ async function fireScheduledTrigger(payload = {}, options = {}) {
   if (!template) {
     return { success: true, skipped: true, reason: 'template_not_active' };
   }
+  if (importedTriggerHeld(cita, template)) {
+    return { success: true, skipped: true, reason: 'imported_historical_appointment' };
+  }
 
   const triggerConfig = getTemplateTriggerConfig(template);
-  if (shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig)) {
+  const released = triggerType === 'appointment_reminder_window' && triggerConfig.schedule_moment === 'day_before'
+    && require('../lib/whatsappImportedReminderRelease').permits(cita, { templateVersionId: Number(template.id) });
+  if (shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig) && !released) {
     return { success: true, skipped: true, reason: 'appointment_notification_suppressed' };
   }
   if (

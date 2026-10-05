@@ -19,7 +19,8 @@ test('imports, nested holds, cancellations, past appointments and scope changes 
   const v=base();v.now=Date.parse('2026-09-16T10:00Z');assert.throws(()=>check(v));
 });
 test('imported patient hold is checked even for native appointments', async () => {
-  await assert.rejects(dispatch({message:{metadata:{execution_id:1}},conversation:{patient_id:3},patientHeld:async()=>true}),{code:'whatsapp_patient_import_held'});
+  await assert.rejects(dispatch({message:{metadata:{execution_id:1}},conversation:{patient_id:3,clinic_id:2},patientHeld:async()=>true,
+    loadExecution:async()=>({id:1,clinic_id:2,trigger_entity_type:'entity'})}),{code:'whatsapp_patient_import_held'});
   assert.equal(importHeld({import:{automation_policy:'hold'}}),true);
 });
 test('an import hold prevents automation even with no patient link on the conversation', async () => {

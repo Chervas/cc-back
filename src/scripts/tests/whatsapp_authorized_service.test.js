@@ -40,6 +40,7 @@ function fixture() {
     } }, './securityMonitoring.service': { assertTemplateAllowed: async () => {} }, '../lib/metaQuarantineHttp': { post: async (...args) => { calls.graph.push(args); throw Object.assign(Error('meta_integration_quarantined'), { code: 'META_INTEGRATION_QUARANTINED' }); } },
     '../../models': db, '../lib/phone': require('../../lib/phone'), '../lib/whatsapp-channel-role': roles, sequelize: { Op },
     '../lib/whatsappAuthorizedBrokerClient': broker,
+    '../lib/automation-runtime-stop': { assertMessageCanDispatch: async () => {} },
     './whatsappChannelBindings.service': { applyClinicBindings: async (_id, assets) => assets },
     './whatsappAccountHealth.service': { summarizeAssetHealth: () => ({ can_send: !state.healthBlocked }),
       assertCanSend: async context => { calls.health.push(context); if (state.healthBlocked) throw Object.assign(Error('health_blocked'), { code: 'health_blocked' }); },

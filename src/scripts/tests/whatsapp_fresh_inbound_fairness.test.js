@@ -14,6 +14,7 @@ test('a full page of imported-patient HOLDs cannot starve a later ordinary reply
   if(name==='../lib/whatsappFreshInboundEligibility')return require('../../lib/whatsappFreshInboundEligibility');
   if(name==='../lib/whatsappAuthorizedBrokerClient')return {configuration:()=>config,binding:async()=>binding};
   if(name==='../lib/whatsappAppointmentEligibility')return {patientImportHeld:async id=>id<=50};
+  if(name==='../lib/whatsappImportedReminderRelease')return {permitsReply:async()=>false};
   if(name==='../lib/whatsappInboxHealth')return {...require('../../lib/whatsappInboxHealth'),read:()=>snapshot};
   if(name==='../../models')return db;
   if(name==='./automationInboundMessage.service')return {enqueueInboundDispatch:async({inboundMessage})=>sent.push(inboundMessage.id)};
