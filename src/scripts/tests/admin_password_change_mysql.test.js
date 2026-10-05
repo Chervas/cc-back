@@ -63,6 +63,34 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(successful.status_report.actor_id,1);assert.equal(successful.status_report.target_id,44);
   for(const m of await models.SyncLog.findAll())for(const secret of [password,body.password,beforeHash])assert(!JSON.stringify(m).includes(secret));
   report.checks.push('Password accepted; old sessions/codes/reset links rejected; actor stays signed in; operational actor/target audit contains no credentials');
+  const credentials = make({credentials:true});
+  const accessBody={email:'new-target@example.invalid',expectedEmail:target.email_usuario,administratorPassword:password};
+  const access=(body=accessBody)=>credentials({actor,targetId:44,body});
+  for(const bad of [{...accessBody,email:'invalid'},{...accessBody,unexpected:true},{...accessBody,password:'short'},{...accessBody,administratorPassword:''}])
+    await assert.rejects(access(bad),{code:'admin_password_request_invalid'});
+  await assert.rejects(credentials({actor:{...actor,userId:2},targetId:44,body:accessBody}),{code:'admin_password_forbidden'});
+  await assert.rejects(access({...accessBody,expectedEmail:'stale@example.invalid'}),{code:'admin_password_email_stale'});
+  const other=await models.Usuario.create({id_usuario:45,nombre:'Other QA',email_usuario:'owned@example.invalid',
+    emails_alternativos:['alias@example.invalid'],password_usuario:await bcrypt.hash(password,4)});
+  for(const email of [' OWNED@example.invalid ','ALIAS@example.invalid'])await assert.rejects(access({...accessBody,email}),{code:'admin_password_email_in_use'});
+  const hashBeforeEmail=target.password_usuario;
+  await assert.rejects(make({credentials:true,audit:{...audit,append:async()=>{throw Error('FICTITIOUS_AUDIT_FAILURE')}}})({actor,targetId:44,body:accessBody}));
+  assert.equal((await target.reload()).email_usuario,accessBody.expectedEmail);
+  const emailResult=await access();assert.equal(emailResult.email,accessBody.email);
+  assert.equal((await target.reload()).password_usuario,hashBeforeEmail);
+  assert.equal(target.email_usuario,accessBody.email);
+  await assert.rejects(access(),{code:'admin_password_email_stale'});
+  await assert.rejects(access({...accessBody,expectedEmail:target.email_usuario,email:target.email_usuario}),{code:'admin_password_request_invalid'});
+  const collision='single-owner@example.invalid';
+  const races=await Promise.allSettled([access({...accessBody,expectedEmail:target.email_usuario,email:collision}),
+    credentials({actor,targetId:45,body:{...accessBody,expectedEmail:other.email_usuario,email:collision}})]);
+  assert.equal(races.filter(r=>r.status==='fulfilled').length,1);
+  assert.equal(await models.Usuario.count({where:{email_usuario:collision}}),1);
+  await target.reload();
+  const combined=await access({...accessBody,expectedEmail:target.email_usuario,email:'combined@example.invalid',password:'FICTITIOUS_COMBINED_PASSWORD'});
+  assert.equal(combined.email,'combined@example.invalid');assert(await bcrypt.compare('FICTITIOUS_COMBINED_PASSWORD',(await target.reload()).password_usuario));
+  await sessions.verifyReference(actor);
+  report.checks.push('Reauthenticated email/optional password changes: stale forms, primary and alternate ownership rejected; email-only keeps hash; audit rollback; concurrent claims have one owner');
   clock+=61000;
   const newLogin=await login(target);assert.equal((await sessions.verify(newLogin.token)).userId,44);
   const adminHash=(await admin.reload()).password_usuario;

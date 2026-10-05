@@ -12317,3 +12317,18 @@ Cuatro capturas del login anónimo servido DEV/CRM, cero JS/5xx/desbordamiento;
 50,4 s de observación:82 SELECT DEV, cero errores, ocho sentencias/cuatro conexiones.
 No sustituye aceptación de Google ni sesión autenticada. Acta/recuperación:
 `docs/security/google-schema-readiness.md`, `google-gbp-dev-schema.json`.
+
+### Acceso de usuarios: cambio administrativo reautenticado — 05/10/2026
+
+`POST /api/users/:id/credentials` amplía la operación segura de cambio de
+contraseña: `email`, `expectedEmail`, `administratorPassword`, y `password`
+opcional. Solo administrador global y sesión gestionada vigente, con MFA
+enforce. No habilita credenciales en los PATCH de Usuarios/Personal.
+Transacción con identidades bloqueadas en orden, unicidad frente a correos
+primarios/alternativos y guardia de formulario desactualizado. El cambio de
+correo solo mantiene el hash de contraseña. Revoca pruebas anteriores y guarda
+auditoría durable; fallo de auditoría revierte todo. Ningún permiso, membresía,
+cita ni recordatorio cambia. El siguiente login verifica el correo nuevo.
+Ambas rutas comparten límite de intentos de reautenticación; sesión del actor
+revalidada bajo el mismo bloqueo transaccional. Pruebas MySQL aisladas cubren
+colisión concurrente, alias, stale form, rollback y contraseña opcional.
