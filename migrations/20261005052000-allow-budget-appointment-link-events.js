@@ -1,8 +1,11 @@
 'use strict';
 const TABLE='EconomicBudgetEvents', EVENT='appointment_linked';
 function values(column) {
-  const result=[...String(column?.type || '').matchAll(/'([a-z_]+)'/g)].map(match=>match[1]);
-  if(!/^ENUM\(/i.test(String(column?.type)) || !result.length) throw Error('Expected budget event enum; refusing to replace an unknown schema.');
+  const type=String(column?.type || '');
+  // Preserve every existing value, including future names with digits/hyphens.
+  // Exotic escaped schemas must fail closed, never silently lose audit types.
+  if(!/^ENUM\('[^'\\]*'(?:,\s*'[^'\\]*')*\)$/i.test(type)) throw Error('Expected budget event enum; refusing to replace an unknown schema.');
+  const result=[...type.matchAll(/'([^']*)'/g)].map(match=>match[1]);
   return result;
 }
 module.exports={

@@ -1,5 +1,5 @@
 'use strict';
-const { Op } = require('sequelize');
+const { Op, literal } = require('sequelize');
 
 const plain = row => row?.toJSON ? row.toJSON() : row;
 const positiveId = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
@@ -23,13 +23,14 @@ async function attachAppointmentProgramContexts(db, appointments) {
     const batch = programRows.slice(offset, offset + 200);
     const sessions = (await db.PatientProgramSession.findAll({
       where: { appointment_id: { [Op.in]: [...new Set(batch.map(row => Number(plain(row).id_cita)))] } },
-      attributes: ['id', 'appointment_id', 'voucher_id', 'session_key', 'position'], raw: true,
+      attributes: ['id', 'appointment_id', 'voucher_id', 'session_key', 'position',
+        [literal("JSON_EXTRACT(`snapshot`, '$.treatment_ids')"), 'consent_treatment_ids']], raw: true,
     })).map(plain);
     const voucherIds = [...new Set(sessions.map(row => positiveId(row.voucher_id)).filter(Boolean))];
     if (!voucherIds.length) continue;
     const vouchers = (await db.PatientVoucher.findAll({
       where: { id: { [Op.in]: voucherIds } },
-      attributes: ['id', 'clinic_id', 'patient_id', 'name', 'total_units'], raw: true,
+      attributes: ['id', 'clinic_id', 'patient_id', 'name', 'total_units', 'source_system'], raw: true,
     })).map(plain);
     const byVoucher = new Map(vouchers.map(row => [Number(row.id), row]));
     const byAppointment = new Map();
@@ -51,8 +52,15 @@ async function attachAppointmentProgramContexts(db, appointments) {
         || reference.key !== session.session_key
         || !Number.isSafeInteger(position) || position < 0 || !Number.isSafeInteger(count) || count < 1 || position >= count
         || typeof voucher.name !== 'string' || !voucher.name.trim()) continue;
+      // Only the verified purchased session supplies these IDs. Reading this
+      // small JSON field avoids loading a large snapshot for every agenda card.
+      const rawIds = metadata(session.consent_treatment_ids);
+      const treatmentIds = voucher.source_system === 'treatment_program'
+        && Array.isArray(rawIds) && rawIds.length > 0 && rawIds.length <= 250
+        && rawIds.every(id => positiveId(id)) ? [...new Set(rawIds.map(Number))] : null;
       setContext(row, { kind: 'program', status: 'linked', name: voucher.name.trim().slice(0, 180),
-        session_number: position + 1, session_count: count });
+        session_number: position + 1, session_count: count,
+        ...(treatmentIds ? { treatment_ids: treatmentIds } : {}) });
     }
   }
   return appointments;

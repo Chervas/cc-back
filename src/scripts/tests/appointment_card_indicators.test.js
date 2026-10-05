@@ -24,3 +24,23 @@ test('over-limit, missing treatment and program projections remain unknown', asy
   const rows = [appointment()]; await attach(fake([], Array(5001).fill({})), rows); assert.equal(rows[0].consent_summary, undefined);
   const db = fake([]); const others = [{ ...appointment(), tratamiento_id: null }, { ...appointment(), source_system: 'treatment_program' }]; await attach(db, others); assert.equal(db.calls.length, 0);
 });
+test('verified programme composition includes all pending signatures with no per-card queries', async () => {
+  const rows = [{ ...appointment(), source_system: 'treatment_program',
+    program_context: { status: 'linked', treatment_ids: [4, 6] } }];
+  const db = fake([signed()], [
+    { tratamiento_id: 4, clinic_template_id: 5, required: true, clinicTemplate: { status: 'active', validity_mode: 'manual' } },
+    { tratamiento_id: 6, clinic_template_id: 7, required: false, clinicTemplate: { status: 'active' } },
+    { tratamiento_id: 6, clinic_template_id: 8, required: true, clinicTemplate: { status: 'inactive' } },
+    { tratamiento_id: 6, clinica_id: 99, clinic_template_id: 9, required: true, clinicTemplate: { status: 'active' } },
+  ]);
+  await attach(db, rows);
+  assert.equal(db.calls.length, 2);
+  assert.deepEqual(db.calls[0][1].where.tratamiento_id[Sequelize.Op.in], [4, 6]);
+  assert.deepEqual(rows[0].consent_summary, { required_total: 1, signed_required: 1,
+    pending_required: 0, pending_optional: 1, has_pending: true });
+});
+test('inactive requirements do not invent pending signatures', async () => {
+  const rows = [appointment()];
+  await attach(fake([], [{ tratamiento_id: 4, required: true, clinicTemplate: { status: 'inactive' } }]), rows);
+  assert.equal(rows[0].consent_summary.has_pending, false);
+});

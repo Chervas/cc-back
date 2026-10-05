@@ -1173,6 +1173,7 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
         doctor_id: plain.doctor_id,
         instalacion_id: plain.instalacion_id,
         tratamiento_id: plain.tratamiento_id,
+        voucher_id: plain.voucher_id || null,
         titulo: plain.titulo,
         nota: plain.nota,
         motivo: plain.motivo,
@@ -2551,9 +2552,9 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
     });
 
     await attachCalendarUnreadCountsToCitas(citas, req.userData?.userId || null);
+    await attachAppointmentProgramContexts(db, citas);
     await require('../services/appointmentCardIndicators.service').attach(db, citas);
     await attachNutritionLatestMeasurementsToCitas(citas);
-    await attachAppointmentProgramContexts(db, citas);
 
     await require('../services/appointmentClinicalComponents.service').attachClinicalComponentContexts({ db, appointments: citas });
     for (const row of citas) {

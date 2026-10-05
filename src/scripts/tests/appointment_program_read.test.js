@@ -66,6 +66,18 @@ test('large lists use bounded batches rather than N+1 queries', async () => {
   assert.deepEqual(db.calls.filter(c => c[0] === 'sessions').map(c => c[1].where.appointment_id[Op.in].length), [200, 200, 1]);
   rows.forEach(row => assert.equal(row.program_context.status, 'linked'));
 });
+test('consent composition comes only from a verified purchased session, never HTTP metadata', async () => {
+  const row = appointment(); row.import_metadata.treatment_ids = [999];
+  await attachAppointmentProgramContexts(database([{ ...session(), consent_treatment_ids: '[4,6,4]' }],
+    [{ ...voucher(), source_system: 'treatment_program' }]), row);
+  assert.deepEqual(row.program_context.treatment_ids, [4, 6]);
+  for (const invalid of ['[0,4]', '[4,"wrong"]', '{}', '[4]']) {
+    const other = appointment();
+    await attachAppointmentProgramContexts(database([{ ...session(), consent_treatment_ids: invalid }],
+      [{ ...voucher(), source_system: invalid === '[4]' ? 'catalog' : 'treatment_program' }]), other);
+    assert.equal(other.program_context.treatment_ids, undefined);
+  }
+});
 const source = fs.readFileSync(path.resolve(__dirname, '../../controllers/citas.controller.js'), 'utf8');
 function code(start, end) { const a = source.indexOf(start), b = source.indexOf(end, a); assert(a >= 0 && b > a); return source.slice(a, b); }
 const context = { module: { exports: {} }, plainCita: x => x, DEFAULT_TIMEZONE: 'Europe/Madrid',
@@ -88,6 +100,7 @@ test('calendar DTO preserves backend program context, privacy guard removes it a
   const row = { ...appointment(), tratamiento: { precio_base: 50 } };
   await attachAppointmentProgramContexts(database(), row);
   const mapped = context.module.exports.mapCalendarCitaRow(row);
+  assert.equal(mapped.voucher_id, 942, 'Calendar retains the purchased voucher for its scoped unpaid balance projection');
   assert.equal(mapped.program_context.name, 'Programa comprado'); assert.equal(mapped.precio_cita_resuelto, null);
   const hidden = context.module.exports.protectAppointmentPayload(mapped, { patientSensitive: false });
   assert.equal(hidden.program_context, null); assert.equal(hidden.precio_cita_resuelto, null);

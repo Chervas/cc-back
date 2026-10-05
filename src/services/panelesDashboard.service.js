@@ -492,7 +492,7 @@ async function loadAppointments({
   const appointmentAttributes = [
     'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
     'tratamiento_id', 'titulo', 'motivo', 'nota', 'tipo_cita', 'estado', 'inicio', 'fin',
-    'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional', 'source_system', 'voucher_id',
+    'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional', 'source_system', 'voucher_id', 'import_metadata',
   ];
   const doctorScope = doctorId ? { doctor_id: doctorId } : {};
 
@@ -537,6 +537,7 @@ async function loadAppointments({
   ]);
 
   const allRows = [...todayRows, ...pastRows, ...nextRows];
+  await require('./appointmentProgramRead.service').attachAppointmentProgramContexts(db, allRows);
   await require('./appointmentCardIndicators.service').attach(db, allRows.filter(row => consentClinicIds.includes(Number(row.clinica_id))));
   for (const row of allRows) row.can_manage = manageClinicIds.includes(Number(row.clinica_id));
   await require('./appointmentPaymentSummary.service').attach(allRows);
