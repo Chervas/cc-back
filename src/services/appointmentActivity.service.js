@@ -114,7 +114,7 @@ function serializeAppointmentStatusActivity(event, { patientId = null, leadId = 
   };
   if (event.event_type === 'appointment_care_changed') return {
     id: `appointment-care-${event.id}`, citaId: String(metadata.appointment_id), fecha: event.occurred_at || event.created_at,
-    tipo: 'appointment_care_changed', titulo: metadata.action === 'arrive' ? 'Llegada registrada' : 'Cita iniciada',
+    tipo: 'appointment_care_changed', titulo: metadata.action === 'arrival_corrected' ? 'Llegada corregida' : metadata.action === 'arrive' ? 'Llegada registrada' : 'Cita iniciada',
     descripcion: metadata.action === 'arrive' ? 'El paciente ha llegado. La cita todavía no ha finalizado.' : 'Se ha abierto la atención clínica de esta cita.',
     icono: 'heroicons_outline:user', color: 'info', usuarioNombre: actorName,
   };

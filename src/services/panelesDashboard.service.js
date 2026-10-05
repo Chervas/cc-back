@@ -436,6 +436,8 @@ function mapAppointment(row, maps, now) {
     care,
     canManage: row.can_manage === true,
     consentSummary: row.consent_summary || null,
+    paymentPending: Number(row.payment_summary?.pending || 0) > 0,
+    paymentSummary: row.payment_summary || null,
     note: row.nota || null,
     attendanceDue:
       care.can_arrive &&
@@ -490,7 +492,7 @@ async function loadAppointments({
   const appointmentAttributes = [
     'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
     'tratamiento_id', 'titulo', 'motivo', 'nota', 'tipo_cita', 'estado', 'inicio', 'fin',
-    'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional', 'source_system',
+    'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional', 'source_system', 'voucher_id',
   ];
   const doctorScope = doctorId ? { doctor_id: doctorId } : {};
 
@@ -537,6 +539,7 @@ async function loadAppointments({
   const allRows = [...todayRows, ...pastRows, ...nextRows];
   await require('./appointmentCardIndicators.service').attach(db, allRows.filter(row => consentClinicIds.includes(Number(row.clinica_id))));
   for (const row of allRows) row.can_manage = manageClinicIds.includes(Number(row.clinica_id));
+  await require('./appointmentPaymentSummary.service').attach(allRows);
   const maps = await loadAppointmentMaps(allRows, clinicMap);
 
   const mappedToday = todayRows.map((row) => mapAppointment(row, maps, now));

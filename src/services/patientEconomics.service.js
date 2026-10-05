@@ -364,21 +364,23 @@ function mapPatientSnapshot(patient) {
   };
 }
 
-function mapClinicSnapshot(clinic) {
+async function mapClinicSnapshot(clinic) {
+  const avatar = await require('./clinicBranding.service').resolveClinicAvatar(clinic);
+  clinic.effective_avatar_url = avatar.url;
   const fiscal = parseJson(clinic.datos_fiscales_clinica, {});
   return {
     id: Number(clinic.id_clinica),
     name: clinic.nombre_clinica || '',
     legal_name: fiscal.denominacion_social || fiscal.razon_social || clinic.nombre_clinica || '',
-    tax_id: fiscal.nif || fiscal.cif || fiscal.identificacion_fiscal || null,
-    address: fiscal.direccion || clinic.direccion || null,
-    postal_code: fiscal.codigo_postal || clinic.codigo_postal || null,
-    city: fiscal.ciudad || clinic.ciudad || null,
-    province: fiscal.provincia || clinic.provincia || null,
-    country: fiscal.pais || clinic.pais || 'España',
+    tax_id: fiscal.cif_nif || fiscal.nif || fiscal.cif || fiscal.identificacion_fiscal || null,
+    address: fiscal.billing_same_as_clinic === true ? clinic.direccion || null : fiscal.direccion_facturacion || fiscal.direccion || clinic.direccion || null,
+    postal_code: fiscal.billing_same_as_clinic === true ? clinic.codigo_postal || null : fiscal.codigo_postal_facturacion || fiscal.codigo_postal || clinic.codigo_postal || null,
+    city: fiscal.billing_same_as_clinic === true ? clinic.ciudad || null : fiscal.ciudad_facturacion || fiscal.ciudad || clinic.ciudad || null,
+    province: fiscal.billing_same_as_clinic === true ? clinic.provincia || null : fiscal.provincia_facturacion || fiscal.provincia || clinic.provincia || null,
+    country: fiscal.billing_same_as_clinic === true ? clinic.pais || 'España' : fiscal.pais_facturacion || fiscal.pais || clinic.pais || 'España',
     email: fiscal.email || clinic.email || null,
     phone: clinic.telefono || clinic.telefono_fijo || clinic.telefono_movil || null,
-    logo_url: clinic.url_avatar || null,
+    logo_url: clinic.url_avatar || clinic.effective_avatar_url || null,
     bank_account: fiscal.iban || fiscal.numero_cuenta || null,
   };
 }
@@ -579,7 +581,7 @@ async function listCatalog({ clinicId, patientIdentifier, query = {} }) {
   const specialties = Array.from(new Set(items.map((item) => item.specialty).filter(Boolean))).sort();
   return {
     patient: mapPatientSnapshot(patient),
-    clinic: mapClinicSnapshot(clinic),
+    clinic: await mapClinicSnapshot(clinic),
     items: items.slice(start, start + pageSize),
     pagination: {
       page,
@@ -851,6 +853,8 @@ function normalizeDesignConfig(payload, template) {
     conditions: cleanString(requested.conditions, 4000) || null,
     clinic_message: cleanString(requested.clinic_message, 4000) || null,
     custom_title: cleanString(requested.custom_title, 180) || null,
+    header_clinic_name: cleanString(requested.header_clinic_name, 180) || null,
+    header_subtitle: cleanString(requested.header_subtitle, 500) || null,
   };
 }
 
@@ -950,7 +954,7 @@ async function createVersion({ budget, payload, patient, clinic, actorId, versio
     totals: calculated.totals,
     payment_proposal: paymentProposal,
     design_config: designConfig,
-    clinic_snapshot: mapClinicSnapshot(clinic),
+    clinic_snapshot: await mapClinicSnapshot(clinic),
     patient_snapshot: mapPatientSnapshot(patient),
     notes: cleanString(payload.notes || payload.notas, 10000) || null,
     internal_notes: cleanString(payload.internal_notes || payload.notasInternas, 10000) || null,
@@ -1181,7 +1185,7 @@ async function reviseBudget({ publicId, actorId }) {
       totals: cloneJson(sourceVersion.totals),
       payment_proposal: cloneJson(sourceVersion.payment_proposal),
       design_config: cloneJson(sourceVersion.design_config),
-      clinic_snapshot: mapClinicSnapshot(clinic),
+      clinic_snapshot: await mapClinicSnapshot(clinic),
       patient_snapshot: mapPatientSnapshot(patient),
       notes: sourceVersion.notes,
       internal_notes: sourceVersion.internal_notes,
@@ -1869,7 +1873,7 @@ async function createBudgetSignatureRequest({ publicId, actorId, payload = {} })
     },
     version: serializeVersion(version),
     patient: mapPatientSnapshot(patient),
-    clinic: mapClinicSnapshot(clinic),
+    clinic: await mapClinicSnapshot(clinic),
     request: {
       request_type: requestType,
       selected_payment_mode: selectedPaymentMode,
@@ -3252,7 +3256,7 @@ async function createPatientFiscalDocument({
     if (!['draft', 'issued'].includes(status)) {
       throw domainError(400, 'fiscal_document_status_invalid', 'Estado fiscal no válido.');
     }
-    const issuer = normalizeFiscalParty(payload.issuer, mapClinicSnapshot(clinic));
+    const issuer = normalizeFiscalParty(payload.issuer, await mapClinicSnapshot(clinic));
     const recipient = normalizeFiscalParty(payload.recipient, mapPatientSnapshot(patient));
     const fiscalProjection = await fiscalPriceProjection({ budget, version, payment, payload, transaction });
     if (!fiscalProjection) economicPrograms.assertFiscalReady({ lines: parseJson(version?.lines, []), status, fiscalLines: payload.lines || [] });
@@ -3400,7 +3404,7 @@ async function updateFiscalDocument({ publicId, actorId, payload }) {
       : null;
     const issuer = normalizeFiscalParty(
       payload.issuer,
-      parseJson(document.issuer_snapshot, mapClinicSnapshot(clinic))
+      parseJson(document.issuer_snapshot, await mapClinicSnapshot(clinic))
     );
     const recipient = normalizeFiscalParty(
       payload.recipient,
@@ -3570,6 +3574,8 @@ function serializeBudget(budget, version, events, payments, walletApplied = 0, s
     updated_at: budget.updated_at,
     current: serializedVersion,
     program_preparation_only: serializedVersion.lines.some((line) => !!line.program_snapshot) && !economicPrograms.integrationCapabilities().program_batch_booking,
+    appointment_links: require('./budgetAppointmentLinks.service').linksFromEvents(events).map(link => ({ ...link,
+      status: (programLedger.appointments || []).find(row => Number(row.id_cita) === link.appointment_id)?.estado || 'unknown' })),
     program_plans: economicPrograms.programPlans({ budget, lines: serializedVersion.lines, events, vouchers: programVouchers, ...programLedger }),
     events: events.map(serializeEvent),
     signature_requests: signatureRequests.map((request) => serializeBudgetSignatureRequest(request)),
@@ -3727,6 +3733,12 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
     ]);
     programLedger = { ...programLedger, sessions, appointments };
   }
+  const linkedAppointmentIds = require('./budgetAppointmentLinks.service').linksFromEvents(events).map(link => link.appointment_id);
+  if (linkedAppointmentIds.length) {
+    const linkedRows = await CitaPaciente.findAll({ where: { id_cita: { [Op.in]: linkedAppointmentIds },
+      clinica_id: resolvedClinicId, paciente_id: patient.id_paciente }, attributes: ['id_cita', 'voucher_id', 'estado', 'inicio'], raw: true });
+    programLedger.appointments = [...(programLedger.appointments || []), ...linkedRows];
+  }
   const voucherMovements = voucherIds.length
     ? await PatientVoucherMovement.findAll({
       where: { voucher_id: { [Op.in]: voucherIds } },
@@ -3788,7 +3800,7 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
     .reduce((sum, entry) => sum + numberValue(entry.amount), 0));
   return {
     patient: mapPatientSnapshot(patient),
-    clinic: mapClinicSnapshot(clinic),
+    clinic: await mapClinicSnapshot(clinic),
     budgets: serializedBudgets,
     clinical_service_count: vouchers.length + serializedBudgets
       .filter(budget => ['accepted', 'partially_accepted'].includes(budget.status))

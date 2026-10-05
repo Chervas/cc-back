@@ -308,9 +308,14 @@ function budgetHtml(budget, version, events = []) {
         <strong class="budget-brand-name">${escapeHtml(clinic.legal_name || clinic.name)}</strong>
         <div class="budget-ref"><span>Presupuesto</span><strong>${escapeHtml(budget.number)}</strong><small>Versión ${escapeHtml(budget.current_version)}</small></div>
       </header>
+      <section class="budget-section" style="padding:10px 0;font-size:11px;color:#475569">
+        <strong>${escapeHtml(clinic.legal_name || clinic.name || '')}</strong>
+        ${clinic.tax_id ? '<span> · CIF/NIF: '+escapeHtml(clinic.tax_id)+'</span>' : ''}
+        <span> · ${escapeHtml([clinic.address, clinic.postal_code, clinic.city, clinic.province, clinic.country].filter(Boolean).join(' · '))}</span>
+      </section>
       <section class="budget-intro"${introStyle}>
         <div class="budget-intro-shade"></div>
-        <div class="budget-intro-copy">${logo ? `<img class="budget-hero-logo" src="${escapeHtml(logo)}" alt="">` : ''}<span class="kicker">${escapeHtml(clinic.name || clinic.legal_name || '')}</span><h1>${escapeHtml(design.custom_title || 'Plan de tratamiento')}</h1><p>Preparado para ${escapeHtml(patient.name || '')}</p></div>
+        <div class="budget-intro-copy">${logo ? `<img class="budget-hero-logo" src="${escapeHtml(logo)}" alt="">` : ''}<span class="kicker">${escapeHtml(design.header_clinic_name || clinic.name || clinic.legal_name || '')}</span><h1>${escapeHtml(design.custom_title || 'Plan de tratamiento')}</h1><p>${escapeHtml((design.header_subtitle || 'Preparado para {paciente}').replaceAll('{paciente}', patient.name || ''))}</p></div>
       </section>
       <section class="budget-meta"><div><span>Paciente</span><strong>${escapeHtml(patient.name)}</strong></div><div><span>Fecha</span><strong>${escapeHtml(date(budget.created_at))}</strong></div><div><span>Válido hasta</span><strong>${escapeHtml(date(budget.valid_until))}</strong></div></section>
       <section class="budget-section"><h2>Tratamientos y servicios</h2><div class="budget-table"><table><thead><tr><th>Concepto</th><th class="right">Cantidad</th><th class="right">Precio</th><th class="right">Importe</th></tr></thead><tbody>${lines.map((line) => `<tr><td><strong>${escapeHtml(line.name)}</strong>${line.tooth ? `<small>Pieza ${escapeHtml(line.tooth)}</small>` : ''}${line.discount_percent ? `<small>${escapeHtml(line.discount_percent)}% de descuento</small>` : ''}</td><td class="right">${escapeHtml(line.quantity)}</td><td class="right">${escapeHtml(money(line.unit_price))}</td><td class="right"><strong>${escapeHtml(money(line.total))}</strong></td></tr>`).join('')}</tbody></table></div><div class="budget-grand-total"><span>Total tratamientos</span><strong>${escapeHtml(money(totals.total))}</strong></div></section>

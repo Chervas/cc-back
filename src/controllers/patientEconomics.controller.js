@@ -93,6 +93,21 @@ exports.getWorkspace = asyncHandler(async (req, res) => {
   res.json(workspace);
 });
 
+exports.getBudgetAppointmentLinks = asyncHandler(async (req, res) => {
+  const clinicId = await requireBudgetFeature(req, 'patients.view');
+  await requireClinicFeature(req, 'appointments.view', clinicId);
+  res.json(await require('../services/budgetAppointmentLinks.service').plan(req.params.budgetId));
+});
+exports.linkBudgetAppointment = asyncHandler(async (req, res) => {
+  const clinicId = await requireBudgetFeature(req, 'patients.edit');
+  await requireClinicFeature(req, 'appointments.manage', clinicId);
+  const result = await require('../services/budgetAppointmentLinks.service').link({ publicId: req.params.budgetId,
+    appointmentId: req.body?.appointment_id, lineKey: req.body?.line_key, expectedVersion: req.body?.expected_version,
+    association: req.body?.association, actorId: actorId(req) });
+  await require('../services/appointmentPaymentSummary.service').notify(req.params.budgetId).catch(() => {});
+  res.json(result);
+});
+
 exports.getAppointmentPurchaseOptions = asyncHandler(async (req, res) => {
   const clinicId = await requireClinicFeature(req, 'patients.view', req.query.clinic_id);
   await requireClinicFeature(req, 'patients.sensitive.view', clinicId);
@@ -247,6 +262,7 @@ exports.createPayment = asyncHandler(async (req, res) => {
     actorId: actorId(req),
     payload: req.body,
   });
+  await require('../services/appointmentPaymentSummary.service').notify(req.params.budgetId).catch(() => {});
   res.status(201).json(payment);
 });
 
@@ -267,11 +283,16 @@ exports.createWalletDeposit = asyncHandler(async (req, res) => {
 
 exports.voidPayment = asyncHandler(async (req, res) => {
   await requirePaymentFeature(req, 'patients.edit');
+  const storedPayment = await db.EconomicPayment.findOne({ where: { public_id:req.params.paymentId }, attributes:['budget_id'] });
   const payment = await economics.voidPayment({
     publicId: req.params.paymentId,
     actorId: actorId(req),
     payload: req.body,
   });
+  if (storedPayment?.budget_id) {
+    const budget = await db.EconomicBudget.findByPk(storedPayment.budget_id, { attributes:['public_id'] });
+    if (budget) await require('../services/appointmentPaymentSummary.service').notify(budget.public_id).catch(() => {});
+  }
   res.json(payment);
 });
 
@@ -282,6 +303,7 @@ exports.applyWallet = asyncHandler(async (req, res) => {
     actorId: actorId(req),
     payload: req.body,
   });
+  await require('../services/appointmentPaymentSummary.service').notify(req.params.budgetId).catch(() => {});
   res.status(201).json(result);
 });
 

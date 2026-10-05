@@ -193,6 +193,7 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
         protectedPayload.appointment_flow = null;
         protectedPayload.nutrition_latest_measurement = null;
         protectedPayload.consent_summary = null;
+        protectedPayload.payment_summary = null;
         protectedPayload.privacy_redacted = true;
     }
     if (!capabilities.leadSensitive) {
@@ -221,6 +222,8 @@ async function protectAppointmentsForRequest(req, citas) {
         req,
         list.map((cita) => cita?.clinica_id ?? cita?.clinic_id),
     );
+    await require('../services/appointmentPaymentSummary.service').attach(list.filter(cita =>
+        capabilities.get(Number(cita?.clinica_id ?? cita?.clinic_id))?.patientSensitive));
     const protectedList = list.map((cita) => protectAppointmentPayload(
         cita,
         capabilities.get(Number(cita?.clinica_id ?? cita?.clinic_id)) || {},
@@ -2785,7 +2788,9 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
             priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
             persist: async ({ values, existing, transaction }) => {
                 previousStatus = existing.estado;
-                return existing.update(values, { transaction });
+                const correction = await require('../services/appointmentCare.service').confirmedCorrection({ cita: existing,
+                    nextStatus: estadoRaw, actorId: cita.updated_by, transaction });
+                return existing.update({ ...values, ...correction }, { transaction });
             },
         });
     } else {
@@ -2800,7 +2805,9 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
             }
             await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: locked,
                 appointment: { ...locked.toJSON(), estado: estadoRaw }, transaction });
-            return locked.update({ estado: estadoRaw, updated_by: req.userData?.userId || null }, { transaction });
+            const correction = await require('../services/appointmentCare.service').confirmedCorrection({ cita: locked,
+                nextStatus: estadoRaw, actorId: req.userData?.userId || null, transaction });
+            return locked.update({ estado: estadoRaw, updated_by: req.userData?.userId || null, ...correction }, { transaction });
         });
     }
     try {

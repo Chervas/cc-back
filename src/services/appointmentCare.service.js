@@ -35,4 +35,22 @@ async function record({ appointmentId, clinicId, actorId, action }) {
     return { appointment: cita, care: careState(cita, now), replayed: false };
   });
 }
-module.exports = { record };
+// A reception correction is audited separately from the canonical status
+// transition. Never silently undo clinical work or voucher consumption.
+async function confirmedCorrection({ cita, nextStatus, actorId, transaction, models = db }) {
+  if (!['info_confirmada', 'recordatorio_confirmado'].includes(nextStatus)) return {};
+  const state = careState(cita);
+  if (!state.arrived_at) return {};
+  if (state.started_at) throw Object.assign(new Error('La cita ya se ha iniciado. No se puede deshacer su llegada desde recepción; conserva la atención clínica.'), {
+    statusCode: 409, code: 'care_already_started',
+  });
+  const now = new Date();
+  await models.AppointmentCareEvent.create({ appointment_id: cita.id_cita, clinic_id: cita.clinica_id, actor_id: actorId,
+    action: 'arrival_corrected', schedule_start: cita.inicio, created_at: now }, { transaction });
+  await models.PatientOperationalEvent.create({ patient_id: cita.paciente_id, clinic_id: cita.clinica_id, actor_user_id: actorId,
+    event_type: 'appointment_care_changed', source: 'agenda', occurred_at: now,
+    metadata: { appointment_id: cita.id_cita, action: 'arrival_corrected', previous_arrived_at: state.arrived_at,
+      next_status: nextStatus, schedule_start: cita.inicio } }, { transaction });
+  return { arrived_at: null, arrived_by: null, care_started_at: null, care_started_by: null, care_schedule_start: null };
+}
+module.exports = { record, confirmedCorrection };

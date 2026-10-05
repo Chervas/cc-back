@@ -21,6 +21,8 @@ router.post('/budgets/:budgetId/transition', controller.transitionBudget);
 router.post('/budgets/:budgetId/acceptance-preview', controller.previewBudgetAcceptance);
 router.post('/budgets/:budgetId/signature-requests', controller.createBudgetSignatureRequest);
 router.post('/budgets/:budgetId/payments', controller.createPayment);
+router.get('/budgets/:budgetId/appointment-links', controller.getBudgetAppointmentLinks);
+router.post('/budgets/:budgetId/appointment-links', controller.linkBudgetAppointment);
 router.post('/patients/:patientId/wallet-deposits', controller.createWalletDeposit);
 router.post('/patients/:patientId/fiscal-documents', controller.createPatientFiscalDocument);
 router.post('/patients/:patientId/fiscal-documents/preview', controller.previewPatientFiscalDocument);

@@ -367,7 +367,7 @@ exports.getAllClinicas = async (req, res) => {
             where: { id_clinica: { [Op.in]: accessibleClinicIds } },
             order: [['nombre_clinica', 'ASC']]
         });
-        const payload = clinicas.map(normalizeClinicDataForResponse);
+        const payload = (await require('../services/clinicBranding.service').enrichClinicAvatars(clinicas)).map(normalizeClinicDataForResponse);
         res.json(payload);
     } catch (error) {
         return respondControllerError(res, error, 'Error retrieving clinicas');
@@ -390,7 +390,7 @@ exports.searchClinicas = async (req, res) => {
             },
             order: [['nombre_clinica', 'ASC']]
         });
-        res.status(200).json(clinicas.map(normalizeClinicDataForResponse));
+        res.status(200).json((await require('../services/clinicBranding.service').enrichClinicAvatars(clinicas)).map(normalizeClinicDataForResponse));
     } catch (error) {
         console.error('Error al buscar clínicas:', error);
         return respondControllerError(res, error, 'Error al procesar la búsqueda');
@@ -441,7 +441,8 @@ exports.getClinicaById = async (req, res) => {
             featureKey: CLINIC_EDIT_FEATURE,
             clinicId,
         });
-        const clinicaData = normalizeClinicDataForResponse(clinica, {
+        const [brandedClinic] = await require('../services/clinicBranding.service').enrichClinicAvatars([clinica]);
+        const clinicaData = normalizeClinicDataForResponse(brandedClinic, {
             includeSensitive: canEdit,
         });
         await enrichClinicContactFields(clinicaData);
@@ -910,7 +911,8 @@ exports.updateClinica = async (req, res) => {
                 console.error('❌ Error actualizando assignmentScope post cambio de grupo:', assignmentError);
             }
         }
-        const updatedData = normalizeClinicDataForResponse(updatedClinica, { includeSensitive: true });
+        const [brandedClinic] = await require('../services/clinicBranding.service').enrichClinicAvatars([updatedClinica]);
+        const updatedData = normalizeClinicDataForResponse(brandedClinic, { includeSensitive: true });
         await enrichClinicContactFields(updatedData);
         res.status(200).json(updatedData);
 
