@@ -74,7 +74,7 @@ test('payment indicators are scoped to the real patient and disappear when there
   const models={ EconomicBudgetEvent:{ findAll:async () => [{ budget_id:8,metadata:{ appointment_id:42,budget_version:1 } },{ budget_id:8,metadata:{ appointment_id:43,budget_version:1 } }] },
     PatientVoucher:{ findAll:async () => [] }, EconomicBudget:{ findAll:async () => [{ id:8,public_id:'budget',current_version:1,patient_id:11,clinic_id:72,accepted_amount:100 }] },
     EconomicPayment:{ findAll:async () => [] }, PatientWalletEntry:{ findAll:async () => [] } };
-  await payment.attach(rows,models); assert.equal(rows[0].payment_summary.pending,100); assert.equal(rows[1].payment_summary,undefined);
+  await payment.attach(rows,models); assert.equal(rows[0].payment_summary.pending,100); assert.equal(rows[0].payment_summary.status,'pending'); assert.equal(rows[1].payment_summary,undefined);
 });
 test('correcting arrival to confirmed is audited and does not erase clinical work', async () => {
   const service=load('appointmentCare.service'), events=[];

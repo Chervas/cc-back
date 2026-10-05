@@ -33,8 +33,8 @@ async function attach(appointments, models = db) {
     const budget=budgets.find(item => Number(item.id) === Number(link?.budget_id || voucher?.budget_id)
       && Number(item.clinic_id) === Number(row.clinica_id) && String(item.patient_id) === String(row.paciente_id));
     if (!budget || (link && Number(parse(link.metadata).budget_version) !== Number(budget.current_version))) continue;
-    const summary={ budget_id:budget.public_id, pending:pendingAmount(budget,
-      payments.filter(item => Number(item.budget_id) === Number(budget.id)), wallet.filter(item => Number(item.budget_id) === Number(budget.id))),
+    const pending = pendingAmount(budget, payments.filter(item => Number(item.budget_id) === Number(budget.id)), wallet.filter(item => Number(item.budget_id) === Number(budget.id)));
+    const summary={ budget_id:budget.public_id, pending, status:pending > 0 ? 'pending' : 'settled',
       method:parse(events.find(item => Number(item.budget_id) === Number(budget.id))?.metadata).collection_method || null };
     if (appointments[index].setDataValue) appointments[index].setDataValue('payment_summary',summary);
     else appointments[index].payment_summary=summary;
