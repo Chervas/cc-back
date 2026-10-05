@@ -2,7 +2,9 @@
 
 // Read-only explanations for START positions rejected by the canonical solver.
 // Never use these messages to grant availability, force a booking, or expose
-// appointments/patients from the shared resource snapshot.
+// patients, notes or foreign appointment details from the shared resource snapshot.
+// Own-clinic catalog names may explain a reservation; a recorded full interval
+// is NOT proof that the machine's current policy requires continuous attention.
 const { isFree } = require('./booking-profile-solver');
 const { installationAllowsStaff } = require('./installation-professionals');
 const { resourceForConfirmedOverlap, normalizeAttentionPolicy, isDefaultAttention, planStaffAttention } = require('./booking-attention');
@@ -12,6 +14,25 @@ function startConflict(reason, message, resourceType = 'installation', resourceI
     code: 'BOOKING_UNAVAILABLE', can_force: false,
     details: { availability_semantics: 'appointment_start', reason_key: reason,
       ...(duration ? { duration_minutes: duration } : {}), message } };
+}
+
+function busyExplanation(resource, start, end, type) {
+  const busy = (resource?.busy || []).find(interval => +new Date(interval.start) < +end && +new Date(interval.end) > +start);
+  const detail = busy?.diagnostic;
+  if (!detail) return 'ocupado por otra cita o por un bloqueo horario';
+  if (detail.kind === 'other_clinic') return `ocupado en otra clínica (${detail.time_range})`;
+  const treatment = detail.treatment_name ? `una cita de ${detail.treatment_name}` : 'otra cita';
+  const reservation = type === 'staff'
+    ? detail.full_interval ? ' Esa cita reserva al profesional durante todo ese intervalo.' : ' Tiene una intervención de personal reservada en ese intervalo.'
+    : '';
+  return `ocupado con ${treatment} (${detail.time_range}).${reservation}`;
+}
+
+function attentionExplanation(policies) {
+  return policies.map(policy => policy.mode === 'start_end'
+    ? `${policy.start_minutes} min de puesta en marcha dentro de los primeros ${policy.start_window_minutes} min y ${policy.end_minutes} min de retirada dentro de los últimos ${policy.end_window_minutes} min`
+    : policy.patient_preparation_minutes ? `atención continua después de los ${policy.patient_preparation_minutes} min de preparación del paciente` : 'atención continua durante toda la cita')
+    .filter((value, index, values) => values.indexOf(value) === index).join('; ');
 }
 
 function resourceFailure(resource, start, end, type, id, duration) {
@@ -24,7 +45,8 @@ function resourceFailure(resource, start, end, type, id, duration) {
       startsInside ? `No caben ${duration} min completos en el horario de ${label}.` : `${label}: fuera de su horario disponible.`, type, id, duration);
   }
   if (!isFree(resource, start, end)) return startConflict('resource_busy',
-    `${label}: ocupado o bloqueado durante parte de los ${duration} min de la cita.`, type, id, duration);
+    `${label}: ${busyExplanation(resource, start, end, type)}${type === 'staff'
+      ? ` Para esta cita necesita ${duration} min seguidos de disponibilidad.` : ` La sala debe quedar libre durante los ${duration} min completos de esta cita.`}`, type, id, duration);
   return null;
 }
 
@@ -60,7 +82,8 @@ function explainUnavailableStart({ profile, context, start, selections = {}, add
       if (!unit) {
         const name = usable.map(item => item.name).filter(Boolean).join(' / ') || 'La máquina requerida';
         failures.push(startConflict(usable.length ? 'equipment_busy' : 'equipment_not_available',
-          usable.length ? `${name}: ocupada durante la cita o su tiempo de preparación.` : 'La sala no tiene disponible la máquina requerida para este tratamiento.',
+          usable.length ? `${name}: no está libre durante los ${duration} min completos de la cita${usable.some(item => item.turnaround_minutes > 0)
+            ? ` y el tiempo posterior de preparación de la máquina (${Math.max(...usable.map(item => item.turnaround_minutes))} min)` : ''}.` : 'La sala no tiene disponible la máquina requerida para este tratamiento.',
           'installation', roomId, duration));
         break;
       }
@@ -78,7 +101,7 @@ function explainUnavailableStart({ profile, context, start, selections = {}, add
       const policies = phase.staff_attention || chosen.map(unit => normalizeAttentionPolicy(unit.attention_policy));
       if (policies.some(policy => !isDefaultAttention(policy))) {
         if (!planStaffAttention({ resource: staff, start, end, policies })) failures.push(startConflict('staff_intervention',
-          `${staff?.name || 'El profesional'}: no puede encajar la intervención requerida durante esta cita.`, 'staff', staffId, duration));
+          `${staff?.name || 'El profesional'}: no puede encajar ${attentionExplanation(policies)}${chosen.length ? ` para ${chosen.map(unit => unit.name).filter(Boolean).join(' / ')}` : ''}. Las intervenciones deben caber dentro de la cita, sin solaparse con sus otras reservas y dentro de su horario.`, 'staff', staffId, duration));
       } else {
         const failure = resourceFailure(resourceForConfirmedOverlap(staff, start, end, allowOverlap), start, end, 'staff', staffId, duration);
         if (failure) failures.push(failure);

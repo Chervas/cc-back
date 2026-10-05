@@ -72,7 +72,7 @@ async function resolveInstallationKeys({ db, clinic, installationIds, transactio
 /** Bounded, bulk read model. No patient names, notes, foreign clinic IDs or SQL per candidate. */
 async function loadBookingContext({ db, clinic, profile, start, end, transaction = null, ignoreAppointmentId = null,
   occupancyEnabled = false, installationMapping = null, dates = null, patientId = null, additionalStaffIds = [], equipmentEnabled = undefined,
-  ignoreAppointmentIds = [], inheritEquipmentAttention = true }) {
+  ignoreAppointmentIds = [], inheritEquipmentAttention = true, includeDiagnosticLabels = false }) {
   const { Op } = db.Sequelize;
   // Server-owned batch only. HTTP callers never forward this option; program
   // continuation derives the IDs from the scoped purchase, not the request.
@@ -108,7 +108,8 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     db.CitaPaciente.findAll({ where: { estado: { [Op.ne]: 'cancelada' }, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start },
       ...ignore('id_cita'),
       [Op.or]: [{ doctor_id: { [Op.in]: doctorIds } }, { instalacion_id: { [Op.in]: mapping.physicalInstallationIds } }],
-    }, attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin', 'source_system', protectedBookingAttribute(db, 'CitaPaciente'), nonShareableBookingAttribute(db, 'CitaPaciente')], transaction }),
+    }, attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin', 'source_system',
+      ...(includeDiagnosticLabels ? ['tratamiento_id'] : []), protectedBookingAttribute(db, 'CitaPaciente'), nonShareableBookingAttribute(db, 'CitaPaciente')], transaction }),
   ]);
   // One physical room has one simultaneous-occupancy policy across aliases.
   const canonicalIds = [...new Set([...mapping.keys.values()].map(key => Number(key.split(':')[1])))];
@@ -124,17 +125,37 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
       // legacy primary cabin/doctor for the entire appointment as well.
       ...(legacyAppointments.length ? [{ appointment_id: { [Op.in]: legacyAppointments.map((row) => row.id_cita) } }] : []),
     ],
-  }, include: [{ model: db.CitaPaciente, as: 'appointment', attributes: ['id_cita', 'clinica_id', 'source_system', protectedBookingAttribute(db, 'appointment'), nonShareableBookingAttribute(db, 'appointment')], required: true, where: { estado: { [Op.ne]: 'cancelada' } } }], transaction }) : [];
+  }, include: [{ model: db.CitaPaciente, as: 'appointment', attributes: ['id_cita', 'clinica_id', 'source_system',
+    ...(includeDiagnosticLabels ? ['tratamiento_id', 'inicio', 'fin'] : []), protectedBookingAttribute(db, 'appointment'), nonShareableBookingAttribute(db, 'appointment')], required: true, where: { estado: { [Op.ne]: 'cancelada' } } }], transaction }) : [];
+  // Optional catalog labels for a read-only grid: one scoped bulk query, never
+  // patient/title/note data or labels belonging to a foreign appointment.
+  const diagnosticAppointments = includeDiagnosticLabels
+    ? [...legacyAppointments, ...occupancies.map(row => row.appointment)].filter(row => Number(row.clinica_id) === clinicId) : [];
+  const treatmentIds = uniqueIds(diagnosticAppointments.map(row => row.tratamiento_id).filter(Boolean));
+  const diagnosticTreatments = treatmentIds.length ? await db.Tratamiento.findAll({
+    where: { id_tratamiento: { [Op.in]: treatmentIds }, [Op.or]: [
+      { clinica_id: clinicId }, ...(Number(clinic.grupoClinicaId) ? [{ origen: 'grupo', grupo_clinica_id: Number(clinic.grupoClinicaId) }] : []),
+    ] }, attributes: ['id_tratamiento', 'nombre'], transaction,
+  }) : [];
+  const treatmentNames = new Map(diagnosticTreatments.map(row => [Number(row.id_tratamiento), String(row.nombre || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 160)]));
+  const diagnostic = (appointment, first, last) => includeDiagnosticLabels ? {
+    kind: Number(appointment.clinica_id) === clinicId ? 'appointment' : 'other_clinic',
+    ...(Number(appointment.clinica_id) === clinicId ? { treatment_name: treatmentNames.get(Number(appointment.tratamiento_id)) || null,
+      full_interval: +new Date(first) === +new Date(appointment.inicio) && +new Date(last) === +new Date(appointment.fin) } : {}),
+    time_range: `${formatLocal(new Date(first), timeZone).slice(11, 16)}–${formatLocal(new Date(last), timeZone).slice(11, 16)}`,
+  } : undefined;
   const segmented = new Set(occupancies.map((row) => Number(row.appointment_id)));
   const busy = new Map(resources.map((key) => [key, []]));
   const addBusy = (key, interval) => { if (busy.has(key)) busy.get(key).push(interval); };
   legacyAppointments.filter((row) => !segmented.has(Number(row.id_cita))).forEach((row) => {
-    const interval = { start: row.inicio, end: row.fin, appointment_id: Number(row.id_cita), can_share: shareableInterval(row, clinicId), can_force_legacy: permitsLegacyOverlap(row, clinicId) };
+    const interval = { start: row.inicio, end: row.fin, appointment_id: Number(row.id_cita), can_share: shareableInterval(row, clinicId), can_force_legacy: permitsLegacyOverlap(row, clinicId),
+      ...(includeDiagnosticLabels ? { diagnostic: diagnostic(row, row.inicio, row.fin) } : {}) };
     addBusy(`doctor:${row.doctor_id}`, interval);
     addBusy(mapping.keys.get(Number(row.instalacion_id)), interval);
   });
   occupancies.forEach((row) => addBusy(row.resource_key, { start: row.start_at, end: row.end_at,
-    appointment_id: Number(row.appointment_id), can_share: shareableInterval(row.appointment, clinicId), can_force_legacy: permitsLegacyOverlap(row.appointment, clinicId) }));
+    appointment_id: Number(row.appointment_id), can_share: shareableInterval(row.appointment, clinicId), can_force_legacy: permitsLegacyOverlap(row.appointment, clinicId),
+    ...(includeDiagnosticLabels ? { diagnostic: diagnostic(row.appointment, row.start_at, row.end_at) } : {}) }));
   installationBlocks.forEach((row) => addBusy(mapping.keys.get(Number(row.instalacion_id)), { start: row.fecha_inicio, end: row.fecha_fin }));
   const doctors = new Map();
   const cabins = new Map();

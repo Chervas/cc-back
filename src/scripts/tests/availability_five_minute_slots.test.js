@@ -150,3 +150,42 @@ test('diagnostics are opt-in, summaries remain early OR and do not change the ca
   assert.equal(summary.body.by_day[day], true);
   assert.doesNotMatch(JSON.stringify(summary.body), /resource_conflicts|unavailable_intervals/);
 });
+
+test('continuous staff rejection explains the stored reservation without claiming presotherapy is inherently continuous', async () => {
+  const f = fixture({ staffBusy: true }), staff = f.context.doctors.get(5);
+  staff.name = 'Piedad ficticia';
+  staff.busy[0].diagnostic = { kind: 'appointment', treatment_name: 'PRESOTERAPIA FICTICIA', full_interval: true, time_range: '09:30–13:30' };
+  const grid = await f.call('grid', { dates: [day], mode: 'installation', column_ids: [9], context_doctor_id: '5' });
+  const reason = reasonAt(grid.body.rows[0].unavailable_intervals, '12:45');
+  assert.match(reason.message, /Piedad ficticia.*PRESOTERAPIA FICTICIA.*09:30–13:30/);
+  assert.match(reason.message, /Esa cita reserva al profesional.*45 min seguidos/);
+  assert.doesNotMatch(reason.message, /presoterapia requiere|tratamiento que requiere todo el tiempo/i);
+  assert.equal(grid.body.rows[0].slots.length, 0);
+});
+
+test('partial staff rejection spells out the initial and final machine windows', async () => {
+  const f = fixture({ staffBusy: true });
+  f.context.equipment.get(6).attention_policy = { mode: 'start_end', start_minutes: 5, start_window_minutes: 10, end_minutes: 5, end_window_minutes: 10 };
+  const grid = await f.call('grid', { dates: [day], mode: 'installation', column_ids: [9], context_doctor_id: '5' });
+  const reason = reasonAt(grid.body.rows[0].unavailable_intervals, '12:45');
+  assert.equal(reason.reason_key, 'staff_intervention');
+  assert.match(reason.message, /5 min de puesta en marcha.*primeros 10 min.*5 min de retirada.*últimos 10 min.*Fictitious equipment/);
+  assert.equal(grid.body.rows[0].slots.length, 0);
+});
+
+test('equipment rejection spells out visit duration and turnaround separately from staff attention', async () => {
+  const f = fixture({ equipmentBusy: true });
+  f.context.equipment.get(6).turnaround_minutes = 10;
+  const grid = await f.call('grid', { dates: [day], mode: 'installation', column_ids: [9], context_doctor_id: '5' });
+  const reason = reasonAt(grid.body.rows[0].unavailable_intervals, '12:45');
+  assert.equal(reason.reason_key, 'equipment_busy');
+  assert.match(reason.message, /Fictitious equipment.*45 min.*preparación.*10 min/);
+});
+
+test('foreign reservations never disclose their catalog name or other private fields in explanations', async () => {
+  const f = fixture({ staffBusy: true });
+  f.context.doctors.get(5).busy[0].diagnostic = { kind: 'other_clinic', treatment_name: 'Foreign treatment', time_range: '09:30–13:30', patient_name: 'Private patient' };
+  const grid = await f.call('grid', { dates: [day], mode: 'installation', column_ids: [9], context_doctor_id: '5' });
+  assert.match(reasonAt(grid.body.rows[0].unavailable_intervals, '12:45').message, /ocupado en otra clínica/);
+  assert.doesNotMatch(JSON.stringify(grid.body), /Foreign treatment|Private patient|diagnostic|appointment_id/);
+});

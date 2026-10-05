@@ -959,7 +959,8 @@ exports.slots = asyncHandler(async (req, res) => {
       const timezone = resolveClinicTimezone(clinica);
       const context = await loadBookingContext({ db, clinic: clinica, profile,
         start: resolveLocalInstant(fecha_local, '00:00:00', timezone),
-        end: resolveLocalInstant(addDays(fecha_local, 1), '00:00:00', timezone), occupancyEnabled: true, additionalStaffIds });
+        end: resolveLocalInstant(addDays(fecha_local, 1), '00:00:00', timezone), occupancyEnabled: true, additionalStaffIds,
+        includeDiagnosticLabels: includeUnavailable });
       return res.json(profileSlotsPayload({ query: req.query, profile, context, clinic: clinica, additionalStaffIds }));
     }
   }
@@ -1527,7 +1528,8 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
     if (profile) {
       const context = await loadBookingContext({ db, clinic, profile, dates: group,
         start: resolveLocalInstant(group[0], '00:00:00', timeZone),
-        end: resolveLocalInstant(addDays(group[group.length - 1], 1), '00:00:00', timeZone), occupancyEnabled: true, additionalStaffIds });
+        end: resolveLocalInstant(addDays(group[group.length - 1], 1), '00:00:00', timeZone), occupancyEnabled: true, additionalStaffIds,
+        includeDiagnosticLabels: grid });
       const getPayload = query => profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds });
       group.forEach(date => byDate.set(date, getPayload));
     } else {

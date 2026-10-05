@@ -80,7 +80,9 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
     } },
     Clinica: { findByPk: async (value) => clinics.find((row) => row.id_clinica === Number(value)) },
     TreatmentConsentRequirement: { findAll: async () => [] },
-    Tratamiento: { findByPk: async () => ({ id_tratamiento: 3, clinica_id: 72, grupo_clinica_id: 2, origen: equipmentEnabled ? 'grupo' : 'clinica', activo: true, clinical_config: { booking_profile: bookingProfile } }) },
+    Tratamiento: { findByPk: async () => ({ id_tratamiento: 3, clinica_id: 72, grupo_clinica_id: 2, origen: equipmentEnabled ? 'grupo' : 'clinica', activo: true, clinical_config: { booking_profile: bookingProfile } }),
+      findAll: async options => query('diagnostic-treatments', [{ id_tratamiento: 3, clinica_id: 72, nombre: 'Presoterapia ficticia' },
+        { id_tratamiento: 999, clinica_id: 73, nombre: 'Foreign private treatment' }], options) },
     DoctorClinica: { findAll: async (options) => query('doctors', (equipmentEnabled ? [72, 73] : [72]).flatMap(clinicId => [5, 6].map((doctorId) => ({ doctor_id: doctorId, clinica_id: clinicId, activo: true, recibe_citas: true, horarios: hours }))), options) },
     DoctorHorario: {}, DoctorHorarioExcepcion: {}, InstalacionHorario: {}, DoctorBloqueoExcepcion: {},
     Instalacion: { findAll: async (options) => query('installations', installations, options) },
@@ -141,6 +143,38 @@ test('internal batch exclusions cover legacy, canonical and patient occupancy, b
   const context=await loadBookingContext(options);
   assert.equal(context.patientBusy.length,1);assert.equal(context.doctors.get(5).busy.length,1);
   for(const ignoreAppointmentIds of [[0],['101'],Array.from({length:31},(_,i)=>i+1)]) await assert.rejects(loadBookingContext({...options,ignoreAppointmentIds}),{code:'booking_ignore_invalid'});
+});
+
+test('grid labels use one scoped catalog read; normal search/mutations load no diagnostic labels', async () => {
+  const appointments = [
+    { id_cita: 101, clinica_id: 72, tratamiento_id: 3, doctor_id: 5, instalacion_id: 10, inicio: start, fin: end, estado: 'pendiente', nota: 'Private note', titulo: 'Private patient' },
+    { id_cita: 102, clinica_id: 73, tratamiento_id: 999, doctor_id: 5, instalacion_id: 19, inicio: start, fin: end, estado: 'pendiente' },
+  ];
+  const f = fixture({ appointments });
+  const options = { db: f.db, clinic: f.clinic, profile: profile(phase('one')), start: new Date(start), end: new Date(end), occupancyEnabled: true };
+  const ordinary = await loadBookingContext(options);
+  assert.equal(f.state.calls.filter(([name]) => name === 'diagnostic-treatments').length, 0);
+  assert(ordinary.doctors.get(5).busy.every(row => !row.diagnostic));
+  const labeled = await loadBookingContext({ ...options, includeDiagnosticLabels: true });
+  const calls = f.state.calls.filter(([name]) => name === 'diagnostic-treatments');
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0][1].where.id_tratamiento[Op.in], [3], 'foreign treatment IDs are not queried');
+  assert.deepEqual(calls[0][1].attributes, ['id_tratamiento', 'nombre']);
+  const own = labeled.doctors.get(5).busy.find(row => row.appointment_id === 101).diagnostic;
+  assert.deepEqual(own, { kind: 'appointment', treatment_name: 'Presoterapia ficticia', full_interval: true, time_range: '10:00–10:30' });
+  const foreign = labeled.doctors.get(5).busy.find(row => row.appointment_id === 102).diagnostic;
+  assert.deepEqual(foreign, { kind: 'other_clinic', time_range: '10:00–10:30' });
+  assert.doesNotMatch(JSON.stringify(labeled.doctors.get(5).busy), /Private note|Private patient|Foreign private treatment/);
+});
+
+test('diagnostics distinguish a saved intervention from a full imported staff reservation', async () => {
+  const appointments = [{ id_cita: 101, clinica_id: 72, tratamiento_id: 3, doctor_id: 5, instalacion_id: 9, inicio: start, fin: end, estado: 'pendiente' }];
+  const occupancies = [{ appointment_id: 101, resource_key: 'doctor:5', doctor_id: 5, start_at: start, end_at: '2030-01-07T09:05:00Z' }];
+  const f = fixture({ appointments, occupancies });
+  const context = await loadBookingContext({ db: f.db, clinic: f.clinic, profile: profile(phase('one')), start: new Date(start), end: new Date(end), occupancyEnabled: true, includeDiagnosticLabels: true });
+  assert.equal(context.doctors.get(5).busy.length, 1, 'no full appointment double counting');
+  assert.equal(context.doctors.get(5).busy[0].diagnostic.full_interval, false);
+  assert.equal(context.doctors.get(5).busy[0].diagnostic.time_range, '10:00–10:05');
 });
 
 test('solver prefers primary, uses a secondary only when needed and reports the actual alternatives', () => {
