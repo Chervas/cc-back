@@ -10,16 +10,16 @@ const localRequire = createRequire(controllerPath);
 const code = fs.readFileSync(controllerPath, 'utf8');
 const start = new Date('2030-01-07T09:00:00Z'), end = new Date('2030-01-07T09:30:00Z');
 
-function fixture({ busy = false, denied = false, enabled = true, foreignIgnore = false } = {}) {
+function fixture({ busy = false, denied = false, enabled = true, foreignIgnore = false, roomAllowsSupport = false } = {}) {
   const calls = { acl: 0, context: 0, writes: 0 };
   const clinic = { id_clinica: 72, grupoClinicaId: 29, configuracion: { timezone: 'Europe/Madrid' } };
   const db = { Sequelize: { Op: {} }, Clinica: { findByPk: async () => clinic },
-    Instalacion: { findByPk: async () => ({ id: 9, clinica_id: 72, activo: true, profesionales_permitidos: [5],
+    Instalacion: { findByPk: async () => ({ id: 9, nombre: 'C2', clinica_id: 72, activo: true, profesionales_permitidos: roomAllowsSupport ? [5, 6] : [5],
       horarios: [{ dia_semana: 1, activo: true, hora_inicio: '09:00', hora_fin: '18:00' }], bloqueos: [] }) },
     CitaPaciente: { findByPk: async () => ({ id_cita: 2, clinica_id: foreignIgnore ? 99 : 72 }) },
     ClinicaHorario: { findAll: async () => [] } };
-  const context = { doctors: new Map([[6, { windows: [{ start: new Date('2030-01-07T07:00:00Z'), end: new Date('2030-01-07T19:00:00Z') }],
-    busy: busy ? [{ start, end }] : [] }]]) };
+  const context = { doctors: new Map([[6, { name: 'Celia', windows: [{ start: new Date('2030-01-07T07:00:00Z'), end: new Date('2030-01-07T19:00:00Z') }],
+    busy: busy ? [{ start, end, appointment_id: 123, diagnostic: { kind: 'other_clinic' } }] : [] }]]) };
   const exported = {};
   vm.runInNewContext(code, { exports: exported, console, Date, Map, Set, Promise,
     require: name => {
@@ -63,6 +63,22 @@ test('HTTP rejects a disallowed installation/support pairing with 409, including
   assert.equal(f.response.statusCode, 409);
   assert.equal(f.response.body.can_force, false);
   assert(f.response.body.resource_conflicts.some(row => row.code === 'INSTALLATION_PROFESSIONAL_NOT_ALLOWED'));
+});
+
+test('HTTP returns both the support occupation and room permission, never a false clinic closure', async () => {
+  const f = fixture({ busy: true });
+  await f.check({ instalacion_id: '9' });
+  const conflicts = f.response.body.resource_conflicts;
+  assert.equal(f.response.statusCode, 409);
+  assert(conflicts.some(c => c.code === 'STAFF_OVERLAP' && /Celia.*10:00.*10:30/.test(c.details.message)));
+  assert(conflicts.some(c => c.code === 'INSTALLATION_PROFESSIONAL_NOT_ALLOWED' && /Celia.*C2/.test(c.details.message)));
+  assert(!conflicts.some(c => c.code === 'CLINIC_OUT_OF_HOURS'));
+  assert.equal(f.response.body.can_force, false);
+  assert.doesNotMatch(JSON.stringify(f.response.body), /appointment_id|123|clinica_ids/);
+  const g = fixture({ roomAllowsSupport: true });
+  await g.check({ instalacion_id: '9' });
+  assert.equal(g.response.statusCode, 200);
+  assert.equal(g.response.body.available, true);
 });
 
 test('HTTP check authorizes clinic before reading supporting staff availability', async () => {

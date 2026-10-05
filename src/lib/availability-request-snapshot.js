@@ -115,7 +115,7 @@ async function loadLegacyAvailabilitySnapshot({ db, clinic, dates, doctorIds = [
     validInstallations.length ? appointmentsReader({ db, clinic, installationIds: validInstallations, start, end }) : [],
     validDoctors.length ? appointmentsReader({ db, doctorIds: validDoctors, start, end }) : [],
     additionalStaffIds.length ? supportReader({ db, clinic, profile: { phases: [] }, start, end, dates: sortedDates,
-      additionalStaffIds, occupancyEnabled: true }) : null,
+      additionalStaffIds, occupancyEnabled: true, includeDiagnosticLabels: true }) : null,
   ]);
   const installationMap = new Map(installationsRows.map(row => [Number(row.id), row]));
   const doctorMap = new Map(doctorRows.map(row => [Number(row.doctor_id), row]));

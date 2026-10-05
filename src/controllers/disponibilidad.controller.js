@@ -19,6 +19,7 @@ const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staf
 const { bookingCapabilities, bookingError, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
 const { resourceAppointments, resourceInstallationBlocks } = require('../services/appointmentResourceCalendar.service');
 const { buildLegacySlots, loadLegacyAvailabilitySnapshot } = require('../lib/availability-request-snapshot');
+const { supportConflictsForSlot, installationStaffConflicts } = require('../lib/availability-support-conflicts');
 const {
   parseClinicConfig,
   isValidTimeZone,
@@ -448,6 +449,9 @@ const conflictSetKey = (conflicts) => {
   return (conflicts || [])
     .map((c) => {
       const base = `${c.resource_type}|${c.code}|${c.resource_id ?? ''}|${c.clinica_id ?? ''}|${c.can_force === true}`;
+      if (c.resource_role === 'additional_staff' || c.code === 'INSTALLATION_PROFESSIONAL_NOT_ALLOWED') {
+        return `${base}|${c.resource_role || ''}|${c.details?.message || ''}`;
+      }
       if (c.code === 'STAFF_BLOCKED' || c.code === 'INSTALLATION_BLOCKED' || c.code === 'STAFF_OVERLAP') {
         const t = c.details && c.details.tipo ? String(c.details.tipo) : '';
         const m = c.details && c.details.message ? String(c.details.message) : '';
@@ -481,7 +485,9 @@ const buildUnavailableIntervals = ({
   instBlocksRows,
   instCitasRows,
   docBlocksRows,
-  docCitasRows
+  docCitasRows,
+  additionalStaffIds = [],
+  supportContext
 }) => {
   const instWins = inst ? buildWindowsFromHorarios(inst.horarios || [], dow, fecha_local, timeZone) : [];
   const doctorCtx = buildDoctorAvailabilityContext({
@@ -526,11 +532,8 @@ const buildUnavailableIntervals = ({
       start,
       end
     });
-    if (inst && !installationAllowsStaff(inst, doctorId ? [doctorId] : [])) {
-      conflicts.push({ resource_type: 'installation', resource_id: instalacionId, clinica_id: clinicaId,
-        code: 'INSTALLATION_PROFESSIONAL_NOT_ALLOWED', can_force: false,
-        details: { message: 'Este profesional no está autorizado para utilizar esta instalación.' } });
-    }
+    conflicts.push(...installationStaffConflicts({ inst, doctorId, additionalStaffIds, supportContext, clinicaId }),
+      ...supportConflictsForSlot({ additionalStaffIds, supportContext, start, end, clinicaId, timeZone }));
 
     if (!conflicts.length) {
       if (current) {
@@ -628,21 +631,22 @@ exports.check = asyncHandler(async (req, res) => {
   }
 
   const additionalStaffIds = requestedAdditionalStaff(req);
+  let supportContext = null;
+  let supportConflicts = [];
   if (additionalStaffIds.length) {
     await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
     if (ignore_cita_id) {
       const ignored = await db.CitaPaciente.findByPk(Number(ignore_cita_id), { attributes: ['id_cita', 'clinica_id'] });
       if (!ignored || Number(ignored.clinica_id) !== clinicaId) return res.status(404).json({ message: 'Cita no encontrada' });
     }
-    const support = await loadBookingContext({ db, clinic: clinica, profile: { phases: [] }, start, end,
-      additionalStaffIds, ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, occupancyEnabled: true });
-    if (!additionalStaffIds.every(id => isFree(support.doctors.get(id), start, end))) return res.status(409).json({ available: false,
-      reason: 'blocked', message: 'El personal de apoyo no está disponible durante toda la cita.', can_force: false,
-      resource_conflicts: [{ resource_type: 'staff_pool', code: 'BOOKING_UNAVAILABLE', can_force: false,
-        details: { message: 'Cambia la hora o selecciona otro personal de apoyo.' } }] });
+    supportContext = await loadBookingContext({ db, clinic: clinica, profile: { phases: [] }, start, end,
+      additionalStaffIds, ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, occupancyEnabled: true,
+      includeDiagnosticLabels: true });
+    supportConflicts = supportConflictsForSlot({ additionalStaffIds, supportContext, start, end, clinicaId, timeZone: clinicTimezone });
   }
 
   if (bookingProfile) {
+    if (supportConflicts.length) return res.status(409).json(build409({ conflicts: supportConflicts }));
     if (ignore_cita_id) {
       const ignored = await db.CitaPaciente.findByPk(Number(ignore_cita_id), { attributes: ['id_cita', 'clinica_id'] });
       if (!ignored || Number(ignored.clinica_id) !== clinicaId) return res.status(404).json({ message: 'Cita no encontrada' });
@@ -671,7 +675,7 @@ exports.check = asyncHandler(async (req, res) => {
       range: { inicio_local: formatLocal(start, clinicTimezone), fin_local: formatLocal(end, clinicTimezone), inicio_utc: start.toISOString(), fin_utc: end.toISOString() } });
   }
 
-  const conflicts = [];
+  const conflicts = [...supportConflicts];
   const warnings = [];
   const fechaLocalCheck = formatDateLocal(start, clinicTimezone);
   const dow = dayIndexFromLocalDate(fechaLocalCheck);
@@ -710,11 +714,7 @@ exports.check = asyncHandler(async (req, res) => {
     }
 
     const instWins = buildWindowsFromHorarios(inst.horarios || [], dow, fechaLocalCheck, clinicTimezone);
-    if (!installationAllowsStaff(inst, [doctor_id, ...(additionalStaffIds || [])].filter(Boolean).map(Number))) {
-      conflicts.push({ resource_type: 'installation', resource_id: instalacionId, clinica_id: clinicaId,
-        code: 'INSTALLATION_PROFESSIONAL_NOT_ALLOWED', can_force: false,
-        details: { message: 'Selecciona profesionales autorizados para utilizar esta instalación.' } });
-    }
+    conflicts.push(...installationStaffConflicts({ inst, doctorId: Number(doctor_id) || null, additionalStaffIds, supportContext, clinicaId }));
     const inRange = inAnyWindow(instWins, start, end);
     if (!inRange) {
       conflicts.push({
@@ -1023,7 +1023,8 @@ exports.slots = asyncHandler(async (req, res) => {
 
   // One bulk read per date/request, never SQL per suggested slot or participant.
   const supportContext = additionalStaffIds.length ? await loadBookingContext({ db, clinic: clinica,
-    profile: { phases: [] }, start: baseStart, end: baseEnd, additionalStaffIds, occupancyEnabled: true }) : null;
+    profile: { phases: [] }, start: baseStart, end: baseEnd, additionalStaffIds, occupancyEnabled: true,
+    includeDiagnosticLabels: includeUnavailable }) : null;
 
   const buildSlots = ({
     inst,
@@ -1168,7 +1169,8 @@ exports.slots = asyncHandler(async (req, res) => {
           instBlocksRows: instBloqById.get(id) || [],
           instCitasRows: instCitasById.get(id) || [],
           docBlocksRows: docBloqRows,
-          docCitasRows: docCitasRows
+          docCitasRows: docCitasRows,
+          additionalStaffIds, supportContext
         });
       }
     });
@@ -1272,7 +1274,8 @@ exports.slots = asyncHandler(async (req, res) => {
           instBlocksRows: instBloqRows,
           instCitasRows: instCitasRows,
           docBlocksRows: docBloqById.get(id) || [],
-          docCitasRows: docCitasById.get(id) || []
+          docCitasRows: docCitasById.get(id) || [],
+          additionalStaffIds, supportContext
         });
       }
     });
@@ -1375,7 +1378,8 @@ exports.slots = asyncHandler(async (req, res) => {
         instBlocksRows: instBloqRows,
         instCitasRows: instCitasRows,
         docBlocksRows: docBloqRows,
-        docCitasRows: docCitasRows
+        docCitasRows: docCitasRows,
+        additionalStaffIds, supportContext
       })
     } : {})
   });
@@ -1432,7 +1436,8 @@ function legacySnapshotPayload(snapshot, query) {
       supportContext: snapshot.supportContext, timeZone, durMin, stepMin, maxSlots, ...rows }),
       ...(includeUnavailable ? { unavailable: buildUnavailableIntervals({ clinicaId: clinicId, timeZone, fecha_local: date,
         dow: day.dow, clinicHasSchedule: day.clinicHasSchedule, clinicWins: day.clinicWins, baseStart, baseEnd, durMin, stepMin,
-        instalacionId: installation, doctorId: doctor, inst, dc: doctor ? snapshot.doctorMap.get(doctor) || null : undefined, ...rows }) } : {}) };
+        instalacionId: installation, doctorId: doctor, inst, dc: doctor ? snapshot.doctorMap.get(doctor) || null : undefined,
+        additionalStaffIds: snapshot.additionalStaffIds, supportContext: snapshot.supportContext, ...rows }) } : {}) };
   };
   if (query.summary_only === true) {
     // Validate the whole requested installation footprint before early OR.

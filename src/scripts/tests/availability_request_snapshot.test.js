@@ -15,7 +15,7 @@ const json = value => JSON.parse(JSON.stringify(value));
 const Op = Object.fromEntries(['in', 'or', 'ne', 'lt', 'gt', 'lte'].map(key => [key, Symbol(key)]));
 const horarios = Array.from({ length: 7 }, (_, dia_semana) => ({ dia_semana, activo: true, hora_inicio: '09:00', hora_fin: '18:00' }));
 
-function fixture({ denied = false, profile = null, supportBusy = false, treatmentError = null } = {}) {
+function fixture({ denied = false, profile = null, supportBusy = false, supportPerson = null, clinicHours = [], treatmentError = null } = {}) {
   const counts = { acl: 0, clinic: 0, clinicHours: 0, rooms: 0, doctorLinks: 0, doctorBlocks: 0,
     roomBlocks: 0, roomAppointments: 0, doctorAppointments: 0, profileContext: 0, catalog: 0, solve: 0 };
   const clinic = { id_clinica: 72, grupoClinicaId: 29, equipment_booking_enabled: true, configuracion: { timezone: 'Europe/Madrid' } };
@@ -26,7 +26,7 @@ function fixture({ denied = false, profile = null, supportBusy = false, treatmen
   const scoped = (rows, ids, field, from, to) => rows.filter(row => ids.includes(Number(row[field]))
     && new Date(row.inicio || row.fecha_inicio) < to && new Date(row.fin || row.fecha_fin) > from);
   const db = { Sequelize: { Op }, Clinica: { findByPk: async id => { counts.clinic++; return id === 72 ? clinic : null; } },
-    ClinicaHorario: { findAll: async () => { counts.clinicHours++; return []; } },
+    ClinicaHorario: { findAll: async () => { counts.clinicHours++; return clinicHours; } },
     Instalacion: { findAll: async q => { counts.rooms++; assert.equal(q.where.clinica_id, 72); assert.equal(q.where.activo, true);
       return rooms.filter(row => q.where.id[Op.in].includes(row.id)); }, findByPk: async id => { counts.rooms++; return rooms.find(row => row.id === id) || null; } },
     DoctorClinica: { findAll: async q => { counts.doctorLinks++; assert.equal(q.where.clinica_id, 72); assert.equal(q.where.activo, true);
@@ -47,7 +47,7 @@ function fixture({ denied = false, profile = null, supportBusy = false, treatmen
     resourceInstallationBlocks: async args => { counts.roomBlocks++; return scoped(state.roomBlocks, args.installationIds, 'instalacion_id', args.start, args.end); },
     loadBookingContext: async args => {
       counts.profileContext++; assert.equal(args.occupancyEnabled, true);
-      return { doctors: new Map([[8, { windows: [{ start: args.start, end: args.end }], busy: supportBusy
+      return { doctors: new Map([[8, supportPerson || { windows: [{ start: args.start, end: args.end }], busy: supportBusy
         ? [{ start: new Date('2030-01-07T08:00:00Z'), end: new Date('2030-01-07T17:00:00Z') }] : [] }]]) };
     },
   };
@@ -237,6 +237,41 @@ test('support windows/busy are read once for a range and restrict slots consiste
   assert(result.body.rows.filter(row => row.day_id === '2030-01-08').every(row => row.slots.length > 0));
   const legacy = await f.call('slots', { fecha_local: '2030-01-07', doctor_id: '5', instalacion_id: '9', additional_staff_ids: [8] });
   assert.deepEqual(result.body.rows[0].slots, legacy.body.slots);
+});
+
+test('Oct 14 support + C2 permission report real reasons inside opening hours, in both orientations and legacy', async () => {
+  const date = '2026-10-14', tz = 'Europe/Madrid';
+  const at = hm => localDateTimeToUtc(date, hm, tz);
+  for (const mode of ['doctor', 'installation']) {
+    const f = fixture({ clinicHours: [{ dia_semana: 3, activo: true, hora_inicio: '09:30', hora_fin: '20:00' }],
+      supportPerson: { name: 'Celia', windows: [{ start: at('09:30'), end: at('17:30') }], busy: [{
+        start: at('11:00'), end: at('11:45'), appointment_id: 77811,
+        diagnostic: { kind: 'other_clinic', time_range: '11:00–11:45' },
+      }] } });
+    f.rooms[0].nombre = 'C2'; f.rooms[0].profesionales_permitidos = [5];
+    const context = mode === 'doctor' ? { column_ids: [5], context_instalacion_id: '9' }
+      : { column_ids: [9], context_doctor_id: '5' };
+    const base = { dates: [date], mode, ...context, duracion_min: '5', granularity_min: '5', from_local: '09:00', to_local: '18:00' };
+    const free = await f.call('grid', base);
+    assert(free.body.rows[0].slots.some(slot => slot.start_local === date + 'T11:00'));
+    const result = await f.call('grid', { ...base, additional_staff_ids: [8] });
+    assert.equal(result.body.rows[0].slots.length, 0);
+    assert.equal(f.counts.profileContext, 1, 'one support snapshot per matrix');
+    const intervals = result.body.rows[0].unavailable_intervals;
+    const conflictsAt = hm => intervals.filter(i => i.start_local <= date + 'T' + hm && i.end_local > date + 'T' + hm)
+      .flatMap(i => i.resource_conflicts);
+    assert(conflictsAt('09:00').some(c => c.code === 'CLINIC_OUT_OF_HOURS'));
+    const eleven = conflictsAt('11:00');
+    assert(!eleven.some(c => c.code === 'CLINIC_OUT_OF_HOURS'));
+    assert(eleven.some(c => c.code === 'INSTALLATION_PROFESSIONAL_NOT_ALLOWED' && /Celia.*C2/.test(c.details.message)));
+    assert(eleven.some(c => c.code === 'STAFF_OVERLAP' && c.details.other_clinic === true && /11:00.*11:45/.test(c.details.message)));
+    assert(!conflictsAt('12:00').some(c => c.code === 'STAFF_OVERLAP'));
+    assert(!conflictsAt('12:00').some(c => c.code === 'CLINIC_OUT_OF_HOURS'));
+    assert.doesNotMatch(JSON.stringify(result.body), /77811|patient_id|paciente_id|treatment_name|appointment_id/);
+    const legacy = await f.call('slots', { fecha_local: date, doctor_id: '5', instalacion_id: '9',
+      additional_staff_ids: [8], include_unavailable: 'true', duracion_min: '5', granularity_min: '5', from_local: '09:00', to_local: '18:00' });
+    assert.deepEqual(intervals, legacy.body.unavailable_intervals);
+  }
 });
 
 test('snapshot windows memoize per date, not globally, and slot alignment matches the legacy free-span rule', async () => {

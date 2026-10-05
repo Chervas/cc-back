@@ -73,6 +73,14 @@ function explainUnavailableStart({ profile, context, start, selections = {}, add
   const failures = [], readyRooms = [];
   for (const roomId of roomIds) {
     const room = context.installations.get(roomId);
+    // Support eligibility can intentionally remove the room's windows. Explain
+    // that restriction before interpreting the empty windows as a timetable.
+    if (room && staffIds.every(id => !installationAllowsStaff(room, [id, ...additionalStaffIds]))) {
+      failures.push(startConflict('room_staff_incompatible',
+        'El profesional o el personal de apoyo no está incluido entre los profesionales permitidos de esta sala.',
+        'installation', roomId, duration));
+      continue;
+    }
     const failure = resourceFailure(resourceForConfirmedOverlap(room, start, end, allowOverlap), start, end, 'installation', roomId, duration);
     if (failure) { failures.push(failure); continue; }
     const chosen = [];
