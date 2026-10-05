@@ -96,14 +96,17 @@ function createTreatmentProgramsService({ db, now = () => new Date(), newId = ()
     clinicId = positiveInteger(clinicId, 'clinic_id');
     const clinic = await clinicContext(clinicId);
     const paging = filters(query);
-    const where = { clinic_id: clinicId, ...(paging.kind ? { kind: paging.kind } : {}), ...(paging.status ? { status: paging.status } : {}) };
+    const bookingCatalogue = query.booking === 'true' || query.booking === true;
+    const where = { clinic_id: clinicId, ...(paging.kind ? { kind: paging.kind } : {}), ...(bookingCatalogue ? { status: 'active' } : paging.status ? { status: paging.status } : {}) };
     if (paging.q) where.name = { [Op.like]: `%${paging.q.replace(/[\\%_]/g, '\\$&')}%` };
     const [rows, total] = await Promise.all([
-      TreatmentProgram.findAll({ where, order: [['id', 'DESC']], offset: (paging.page - 1) * paging.pageSize, limit: paging.pageSize }),
-      TreatmentProgram.count({ where }),
+      TreatmentProgram.findAll({ where, order: [['id', 'DESC']], ...(!bookingCatalogue ? { offset: (paging.page - 1) * paging.pageSize, limit: paging.pageSize } : {}) }),
+      bookingCatalogue ? 0 : TreatmentProgram.count({ where }),
     ]);
     const map = await treatmentMap(rows, clinic);
-    return { items: rows.map((r) => serialize(r, map)), total: Number(total), page: paging.page, page_size: paging.pageSize };
+    const items = rows.map((r) => serialize(r, map));
+    if (bookingCatalogue) return require('../lib/appointment-program-catalog').appointmentProgramPage(items, paging);
+    return { items, total: Number(total), page: paging.page, page_size: paging.pageSize };
   }
   async function get({ id, clinicId }) {
     clinicId = positiveInteger(clinicId, 'clinic_id');
