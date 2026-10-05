@@ -57,7 +57,7 @@ function fixture({ failEvent = false, failParentUpdate = false, corruptUpdate = 
       } };
     return instance;
   };
-  const db = { Sequelize: { Op: { in: inSymbol } }, sequelize: { async transaction(options, callback) {
+  const db = { Sequelize: { Op: { in: inSymbol, or: Symbol('or') } }, sequelize: { async transaction(options, callback) {
     const tx = { options, LOCK: { UPDATE: 'UPDATE', SHARE: 'SHARE' }, rows: clone(state), events: [] };
     const result = await callback(tx); state = tx.rows; events.push(...tx.events); return result;
   } }, CitaPaciente: { async findByPk(id, options) { calls.push({ table: 'appointments', id: Number(id), ...options }); return model(Number(id), options?.transaction); },
@@ -77,6 +77,9 @@ function fixture({ failEvent = false, failParentUpdate = false, corruptUpdate = 
     assert(transaction); assert.equal(lock, 'SHARE'); assert.equal(Object.keys(where)[0], field);
     calls.push({ table: name, id: where[field] }); return name === dependency ? { id: 1 } : null;
   } };
+  db.PatientConsentDocument.findAll = async () => [];
+  db.TreatmentConsentRequirement = { findAll: async () => [] };
+  db.ClinicConsentTemplate = { findAll: async () => [] };
   const request = () => ({ parent_appointment_id: 102, expected_version: c.reviewVersion(state.get(101)),
     expected_parent_version: c.reviewVersion(state.get(102)), reason: 'Revisión explícita de ambas reservas fuente PRP', confirm_source_roles: true,
     source_acknowledgements: { component: c.sourceAcknowledgement(state.get(101)), parent: c.sourceAcknowledgement(state.get(102)) } });
@@ -289,4 +292,35 @@ test('care parent lookup re-reads reciprocal records with shared locks and never
   f.change(102, row => { delete row.import_metadata[c.CHILDREN_KEY]; });
   await assert.rejects(f.db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, transaction => service.getValidatedClinicalComponentParent({ db: f.db,
     appointment: f.rows.get(101), transaction })), { code: 'appointment_clinical_component_relation_unproven' });
+});
+
+const unsignedDoc = () => ({ id: 501, cita_id: 102, paciente_id: 8, clinica_id: 66, tratamiento_id: 688,
+  clinic_template_id: 301, catalog_template_id: null, purpose: 'clinical', status: 'pending', signed_at: null,
+  professional_signed_at: null, signed_by_patient_id: null, signed_by_representative_id: null, professional_signed_by: null, revoked_at: null });
+const consentRequirement = () => ({ id: 201, tratamiento_id: 688, clinica_id: 66, clinic_template_id: 301,
+  catalog_template_id: null, required: true, blocking_policy: 'hard' });
+const consentTemplate = () => ({ id: 301, clinic_id: 66, purpose: 'clinical', status: 'active',
+  requires_patient_signature: true, requires_professional_signature: true });
+test('only parent pending/superseded unsigned PRP documents under its own active hard clinical requirement are preserved', async () => {
+  const f = fixture(), documents = [unsignedDoc(), { ...unsignedDoc(), id: 502, status: 'superseded' }], before = clone(documents);
+  f.db.PatientConsentDocument.findAll = async query => { assert.equal(query.where.cita_id, 102); assert.equal(query.lock, 'SHARE'); return documents; };
+  f.db.TreatmentConsentRequirement.findAll = async query => { assert.equal(query.lock, 'SHARE'); return [consentRequirement()]; };
+  f.db.ClinicConsentTemplate.findAll = async query => { assert.equal(query.where.clinic_id, 66); assert.equal(query.lock, 'SHARE'); return [consentTemplate()]; };
+  await f.run(); assert.deepEqual(documents, before); assert.equal(f.events.length, 1);
+  assert.deepEqual(f.rows.get(101).import_metadata[c.PARENT_KEY].preserved_parent_consent_documents,
+    documents.map(doc => ({ id: String(doc.id), before_sha256: hash(doc) })));
+});
+test('signed/revoked/out-of-scope/other-treatment/doc kinds or removed/soft/inactive signature rules fail closed for parent', async () => {
+  for (const patch of [{ status: 'signed' }, { status: 'sent' }, { signed_at: '2030-01-07' }, { professional_signed_at: '2030-01-07' },
+    { signed_by_patient_id: 8 }, { signed_by_representative_id: 8 }, { professional_signed_by: 7 }, { revoked_at: '2030-01-07' },
+    { paciente_id: 9 }, { clinica_id: 72 }, { tratamiento_id: 1999 }, { cita_id: 101 }, { purpose: 'marketing' }, { catalog_template_id: 301 }]) {
+    const f = fixture(); f.db.PatientConsentDocument.findAll = async () => [{ ...unsignedDoc(), ...patch }];
+    f.db.TreatmentConsentRequirement.findAll = async () => [consentRequirement()]; f.db.ClinicConsentTemplate.findAll = async () => [consentTemplate()];
+    await assert.rejects(f.run(), { code: 'appointment_clinical_component_history_exists' }); assert.equal(f.events.length, 0);
+  }
+  for (const [requirements,templates] of [[[],[consentTemplate()]],[[{...consentRequirement(),blocking_policy:'soft'}],[consentTemplate()]],
+    [[consentRequirement()],[{...consentTemplate(),status:'archived'}]],[[consentRequirement()],[{...consentTemplate(),requires_professional_signature:false}]]]) {
+    const f=fixture();f.db.PatientConsentDocument.findAll=async()=>[unsignedDoc()];f.db.TreatmentConsentRequirement.findAll=async()=>requirements;
+    f.db.ClinicConsentTemplate.findAll=async()=>templates;await assert.rejects(f.run(),{code:'appointment_clinical_component_history_exists'});
+  }
 });

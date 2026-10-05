@@ -12,6 +12,45 @@ const DEPENDENCIES = Object.freeze([['AppointmentClinicalReport', 'appointment_i
   ['PatientNutritionMeasurement', 'appointment_id'], ['PatientNutritionReport', 'appointment_id'],
   ['PatientConsentDocument', 'cita_id'], ['PatientVoucherMovement', 'appointment_id'], ['PatientProgramSession', 'appointment_id']]);
 const permission = context => require('../lib/access-policy').canUserAccessFeature(context);
+function preservableParentConsent(document, parent, requirements, templates) {
+  const doc = plain(document), value = plain(parent);
+  const template = templates.map(plain).find(item => Number(item.id) === Number(doc.clinic_template_id));
+  return Number(doc.cita_id) === Number(value.id_cita) && Number(doc.paciente_id) === Number(value.paciente_id)
+    && Number(doc.clinica_id) === Number(value.clinica_id) && Number(doc.tratamiento_id) === 688
+    && doc.purpose === 'clinical' && ['pending', 'superseded'].includes(doc.status)
+    && !doc.signed_at && !doc.professional_signed_at && !doc.signed_by_patient_id && !doc.signed_by_representative_id
+    && !doc.professional_signed_by && !doc.revoked_at && doc.catalog_template_id == null
+    && positive(doc.clinic_template_id) && template && Number(template.clinic_id) === Number(value.clinica_id)
+    && template.status === 'active' && template.purpose === 'clinical'
+    && [1,true].includes(template.requires_patient_signature) && [1,true].includes(template.requires_professional_signature)
+    && requirements.map(plain).some(item => Number(item.tratamiento_id) === 688
+      && (item.clinica_id == null || Number(item.clinica_id) === Number(value.clinica_id))
+      && Number(item.clinic_template_id) === Number(doc.clinic_template_id) && item.catalog_template_id == null
+      && [1,true].includes(item.required) && item.blocking_policy === 'hard');
+}
+async function readPreservableParentConsents({ db, parent, transaction }) {
+  if (!db.PatientConsentDocument?.findAll || !db.TreatmentConsentRequirement?.findAll || !db.ClinicConsentTemplate?.findAll) {
+    fail('history_guard_unavailable', 'Falta una comprobación documental del procedimiento principal.');
+  }
+  const docs = await db.PatientConsentDocument.findAll({ where: { cita_id: parent.id_cita }, order: [['id','ASC']],
+    limit: 101, transaction, lock: transaction.LOCK.SHARE });
+  if (docs.length > 100) fail('history_exists', 'Revisa la documentación existente del procedimiento principal.');
+  if (!docs.length) return [];
+  const { Op } = db.Sequelize;
+  const requirements = await db.TreatmentConsentRequirement.findAll({ where: { tratamiento_id: 688,
+    required: true, blocking_policy: 'hard', [Op.or]: [{ clinica_id: parent.clinica_id }, { clinica_id: null }] },
+    order: [['id','ASC']], limit: 101, transaction, lock: transaction.LOCK.SHARE });
+  if (requirements.length > 100) fail('history_exists', 'Revisa los requisitos clínicos del procedimiento principal.');
+  const ids = [...new Set(docs.map(doc => Number(plain(doc).clinic_template_id)).filter(positive))];
+  const templates = ids.length ? await db.ClinicConsentTemplate.findAll({ where: { id: { [Op.in]: ids },
+    clinic_id: parent.clinica_id }, transaction, lock: transaction.LOCK.SHARE }) : [];
+  if (docs.some(doc => !preservableParentConsent(doc, parent, requirements, templates))) {
+    fail('history_exists', 'La reserva principal contiene documentación firmada, incompatible o fuera del requisito PRP. No se reinterpreta desde este recorrido.');
+  }
+  // Only a sealed record of existing full rows. No document is updated,
+  // replaced, reissued, signed, superseded or otherwise mutated here.
+  return docs.map(doc => ({ id: String(plain(doc).id), before_sha256: hash(jsonPlain(plain(doc))) }));
+}
 function occupancySignature(rows) {
   return hash(rows.map(raw => { const row = plain(raw); return [row.phase_key, row.resource_kind, row.resource_key,
     row.installation_id == null ? null : Number(row.installation_id), row.doctor_id == null ? null : Number(row.doctor_id),
@@ -82,8 +121,13 @@ async function linkExistingComponent({ db, appointmentId, clinicId, actorId, inp
     const roles = assertPairRoles(before, parentBefore, treatment);
     if (hash(decision.source_acknowledgements.component) !== hash(roles.component)
       || hash(decision.source_acknowledgements.parent) !== hash(roles.parent)) fail('source_changed', 'Las referencias fuente ya no coinciden con las reservas.');
+    let preservedParentConsents = [];
     for (const id of [appointmentId, decision.parent_appointment_id]) for (const [model, field] of DEPENDENCIES) {
       if (!db[model]) fail('history_guard_unavailable', 'Falta una comprobación de historia clínica o económica.');
+      if (id === decision.parent_appointment_id && model === 'PatientConsentDocument') {
+        preservedParentConsents = await readPreservableParentConsents({ db, parent: parentBefore, transaction: tx });
+        continue;
+      }
       if (await db[model].findOne({ where: { [field]: id }, attributes: ['id'], transaction: tx, lock: tx.LOCK.SHARE })) {
         fail('history_exists', 'La reserva ya tiene historia clínica, documental o económica. Usa su recorrido de revisión.');
       }
@@ -100,6 +144,7 @@ async function linkExistingComponent({ db, appointmentId, clinicId, actorId, inp
       reason: decision.reason, reviewed_at: new Date().toISOString(), request_hash: requestHash,
       component_fingerprint: reservationFingerprint(before), parent_fingerprint: reservationFingerprint(parentBefore),
       source_acknowledgements: { component: roles.component, parent: roles.parent }, primary_treatment_evidence: roles.treatment,
+      preserved_parent_consent_documents: preservedParentConsents,
       planned_only: true, administration_inferred: false, individual_price_assigned: false,
       purchase_or_program_inferred: false, source_prices_preserved: true, primary_clinical_consent_required: true };
     const event = await db.PatientOperationalEvent.create({ patient_id: before.paciente_id, clinic_id: clinicId,
@@ -176,6 +221,7 @@ async function getValidatedClinicalComponentParent({ db, appointment, transactio
   return { parent, context, component };
 }
 
-module.exports = { DEPENDENCIES, occupancySignature, assertReservationOccupancy, unchangedAppointment,
+module.exports = { DEPENDENCIES, preservableParentConsent, readPreservableParentConsents,
+  occupancySignature, assertReservationOccupancy, unchangedAppointment,
   lockExistingReservationResources, linkExistingComponent, attachClinicalComponentContexts,
   loadClinicalComponentContexts: attachClinicalComponentContexts, getValidatedClinicalComponentParent };
