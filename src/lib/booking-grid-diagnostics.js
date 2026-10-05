@@ -7,7 +7,7 @@
 // is NOT proof that the machine's current policy requires continuous attention.
 const { isFree } = require('./booking-profile-solver');
 const { installationAllowsStaff } = require('./installation-professionals');
-const { resourceForConfirmedOverlap, normalizeAttentionPolicy, isDefaultAttention, planStaffAttention } = require('./booking-attention');
+const { resourceForConfirmedOverlap, normalizeAttentionPolicy, isDefaultAttention, planStaffAttention, ordinaryPhaseCanOverlap } = require('./booking-attention');
 
 function startConflict(reason, message, resourceType = 'installation', resourceId = null, duration = null) {
   return { resource_type: resourceType, ...(resourceId ? { resource_id: resourceId } : {}),
@@ -61,6 +61,7 @@ function incompatibleStart(profile, doctor, installation) {
 
 function explainUnavailableStart({ profile, context, start, selections = {}, additionalStaffIds = [], allowOverlap = false }) {
   const phase = profile.phases[0], duration = phase.duration_minutes;
+  allowOverlap = allowOverlap && ordinaryPhaseCanOverlap(phase);
   const end = new Date(+start + duration * 60000), selection = selections[phase.key] || {};
   const incompatible = incompatibleStart(profile, Number(selection.doctor_id) || null, Number(selection.installation_id) || null);
   if (incompatible) return incompatible;

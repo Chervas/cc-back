@@ -49,8 +49,13 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
   equipment = [], equipmentClinics = [], roomPolicies = [], equipmentEnabled = false } = {}) {
   const withBookingMarker = row => {
     let metadata = row.import_metadata;
-    if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = { booking: true }; } }
-    return { ...row, booking_protected: metadata && ('booking' in metadata || 'program_session' in metadata || 'additional_staff' in metadata) ? 1 : 0 };
+    let malformed=false;
+    if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = { booking: true }; malformed=true; } }
+    const snapshot=metadata?.booking?.profile;
+    return { ...row, booking_protected: metadata && ('booking' in metadata || 'program_session' in metadata || 'additional_staff' in metadata) ? 1 : 0,
+      booking_nonshareable: Number(malformed || !!metadata?.program_session || !!metadata?.additional_staff
+        || snapshot?.version>=3 || !!metadata?.cliniccloud_source_booking?.nonshareable
+        || !!snapshot?.phases?.some(phase=>phase.equipment_requirements?.length || phase.professionals?.mode==='all')) };
   };
   const state = { appointments: [...appointments], occupancies: [...occupancies], events: [], commits: 0, rollbacks: 0, calls: [], locks: [], persists: 0 };
   let id = 100;
@@ -420,10 +425,10 @@ test('ordinary overlap requires confirmation and remains forceable after occupan
   assert.equal(f.state.occupancies.length, 4);
 });
 
-test('force never bypasses a profiled reservation, another clinic, a patient overlap or a calendar block', async () => {
+test('force never bypasses technical reservations, another clinic, a patient overlap or a calendar block', async () => {
   const ordinary = { id_cita: 88, clinica_id: 72, paciente_id: 2, doctor_id: 5, instalacion_id: 9,
     inicio: start, fin: end, estado: 'pendiente' };
-  for (const change of [ { clinica_id: 73 }, { paciente_id: 1 }, { import_metadata: { booking: { profile: profile(phase('one')) } } },
+  for (const change of [ { clinica_id: 73 }, { paciente_id: 1 }, { import_metadata: { booking: { profile: profile(phase('one',[9],[5],'all')) } } },
     { source_system: 'treatment_program' }, { import_metadata: '{invalid' } ]) {
     const f = fixture({ bookingProfile: null, appointments: [{ ...ordinary, ...change }] });
     await assert.rejects(f.reserve({ force: true }), error => error.code === 'booking_unavailable' && error.details.can_force === false);
@@ -433,7 +438,28 @@ test('force never bypasses a profiled reservation, another clinic, a patient ove
   f.db.InstalacionBloqueo.findAll = async () => [{ instalacion_id: 9, fecha_inicio: start, fecha_fin: end }];
   await assert.rejects(f.reserve({ force: true }), error => error.code === 'booking_unavailable' && error.details.can_force === false);
   const profiled = fixture({ appointments: [ordinary] });
-  await assert.rejects(profiled.reserve({ force: true }), error => error.code === 'booking_unavailable' && error.details.can_force === false);
+  await assert.rejects(profiled.reserve(), error => error.code === 'booking_unavailable' && error.details.can_force === true);
+  await profiled.reserve({ force: true });
+  assert.equal(profiled.state.appointments.at(-1).import_metadata.booking.overlap_confirmed,true);
+});
+
+test('legacy/profile bookings and edits can double with both stored permission flags off and capacity one', async () => {
+  for(const bookingProfile of [null,profile(phase('one'))]) {
+    const f=fixture({bookingProfile});
+    for(const model of [f.db.DoctorClinica,f.db.Instalacion]) {
+      const original=model.findAll;
+      model.findAll=async options=>(await original(options)).map(row=>({...row,allow_overlap_confirmation:false,overlap_capacity_unlimited:false,capacidad:1}));
+    }
+    await f.reserve();
+    const values={...f.values,paciente_id:2};
+    await assert.rejects(f.reserve({appointmentValues:values}),error=>error.code==='booking_unavailable'&&error.details.can_force===true);
+    await f.reserve({appointmentValues:values,force:true});
+    const id=f.state.appointments.at(-1).id_cita;
+    await assert.rejects(f.reserve({existingAppointmentId:id,appointmentValues:values}),error=>error.details.can_force===true);
+    await f.reserve({existingAppointmentId:id,appointmentValues:values,force:true});
+    assert.equal(f.state.appointments.length,2);
+    assert.equal(f.state.occupancies.length,4);
+  }
 });
 
 test('force retains opening hours and does not leak conflict identities in HTTP', async () => {

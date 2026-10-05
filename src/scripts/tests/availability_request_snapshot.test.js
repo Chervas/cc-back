@@ -160,6 +160,18 @@ test('same/other-clinic and force/nonforce conflicts cannot merge and disclose n
   assert.doesNotMatch(JSON.stringify(result.body), /id_cita|paciente_id|patient_id|source_reference/);
 });
 
+test('ordinary legacy grid conflicts remain forceable with professional and consultation permissions off', async () => {
+  const f=fixture();
+  for(const row of [...f.doctors,...f.rooms])Object.assign(row,{allow_overlap_confirmation:false,overlap_capacity_unlimited:false,capacidad:1});
+  const row={id_cita:1,clinica_id:72,doctor_id:5,instalacion_id:9,inicio:'2030-01-07T09:00:00Z',fin:'2030-01-07T10:00:00Z',can_share:true};
+  f.state.doctorAppointments=[row];f.state.roomAppointments=[row];
+  const result=await f.call('grid',{dates:['2030-01-07'],mode:'doctor',column_ids:[5],context_instalacion_id:'9',duracion_min:'10'});
+  const conflicts=result.body.rows[0].unavailable_intervals.flatMap(row=>row.resource_conflicts).filter(row=>/OVERLAP$/.test(row.code));
+  assert(conflicts.some(row=>row.code==='STAFF_OVERLAP'));
+  assert(conflicts.some(row=>row.code==='INSTALLATION_OVERLAP'));
+  assert(conflicts.every(row=>row.can_force===true));
+});
+
 test('permission denial precedes resource reads and foreign/archived columns never reach alias readers', async () => {
   const f = fixture({ denied: true });
   for (const route of ['grid', 'summary']) await assert.rejects(f.call(route, { dates: ['2030-01-07'], column_ids: [9], mode: 'installation' }), { statusCode: 403 });

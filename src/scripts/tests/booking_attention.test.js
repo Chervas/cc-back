@@ -74,18 +74,18 @@ test('old attention snapshots retain their rules after equipment defaults change
   assert.throws(()=>mergeClinicalConfig({booking_profile:frozen},{booking_profile:profile(9,1)}),{code:'booking_equipment_client_outdated'});
   assert.throws(()=>normalizeBookingProfile({...frozen,version:2}),{code:'booking_profile_invalid'});
 });
-test('confirmed overlap requires both professional and room policy and respects room capacity', () => {
+test('ordinary overlap requires operator confirmation, not professional/room flags or capacity', () => {
   const c = context(), p = {version:1,phases:[{...phase(9,1),equipment_requirements:[]}]};
   const busy = {start,end,appointment_id:1,can_share:true};
   c.doctors.get(5).busy=[busy];c.installations.get(9).busy=[busy];
-  assert.equal(solveBookingProfile({profile:p,start,...c,allowOverlap:true}),null);
-  c.doctors.get(5).allow_overlap_confirmation=true;
-  assert.equal(solveBookingProfile({profile:p,start,...c,allowOverlap:true}),null);
-  Object.assign(c.installations.get(9),{allow_overlap_confirmation:true,overlap_capacity:2});
-  assert(solveBookingProfile({profile:p,start,...c,allowOverlap:true}).requires_overlap_acknowledgement);
   assert.equal(solveBookingProfile({profile:p,start,...c}),null);
+  for (const flag of [undefined, false, 0, true, 1]) {
+    c.doctors.get(5).allow_overlap_confirmation=flag;
+    Object.assign(c.installations.get(9),{allow_overlap_confirmation:flag,overlap_capacity:1});
+    assert(solveBookingProfile({profile:p,start,...c,allowOverlap:true}).requires_overlap_acknowledgement);
+  }
   c.installations.get(9).busy.push({...busy,appointment_id:2});
-  assert.equal(solveBookingProfile({profile:p,start,...c,allowOverlap:true}),null);
+  assert(solveBookingProfile({profile:p,start,...c,allowOverlap:true}).requires_overlap_acknowledgement);
 });
 test('unlimited consultation is explicit and older clients preserve the setting', () => {
   assert.deepEqual(normalizeInstallationOverlap({}), { allow_overlap_confirmation:false, overlap_capacity_unlimited:false, capacidad:1 });
@@ -97,7 +97,7 @@ test('unlimited consultation is explicit and older clients preserve the setting'
   assert.equal(installationOverlapCapacity({overlap_capacity_unlimited:'true',capacidad:2}),2);
   for(const body of [{overlap_capacity_unlimited:'true'},{overlap_capacity_unlimited:1},{allow_overlap_confirmation:true},{capacidad:21}])assert.throws(()=>normalizeInstallationOverlap(body),{code:'installation_overlap_invalid'});
 });
-test('unlimited consultation allows more than twenty ordinary appointments only after confirmation', () => {
+test('ordinary consultation has no arbitrary configured overlap limit, but always requires confirmation', () => {
   const c=context(),p={version:1,phases:[{...phase(9,1),equipment_requirements:[]}]};
   const busy=Array.from({length:25},(_,i)=>({start,end,appointment_id:i+1,can_share:true}));
   Object.assign(c.doctors.get(5),{allow_overlap_confirmation:true,busy});
@@ -105,7 +105,7 @@ test('unlimited consultation allows more than twenty ordinary appointments only 
   assert.equal(solveBookingProfile({profile:p,start,...c}),null);
   assert(solveBookingProfile({profile:p,start,...c,allowOverlap:true}).requires_overlap_acknowledgement);
   c.installations.get(9).overlap_capacity=2;
-  assert.equal(solveBookingProfile({profile:p,start,...c,allowOverlap:true}),null);
+  assert(solveBookingProfile({profile:p,start,...c,allowOverlap:true}).requires_overlap_acknowledgement);
 });
 test('unlimited does not override machines, hours or protected/foreign appointments', () => {
   const c=context();
@@ -120,12 +120,26 @@ test('unlimited does not override machines, hours or protected/foreign appointme
   c.doctors.get(5).busy=[{start,end,can_share:false}];
   assert.equal(solveBookingProfile({profile:p,start,...c,allowOverlap:true}),null);
 });
-test('capacity counts distinct patients at each instant, not all phase rows in a range', () => {
-  const r={...resource(),allow_overlap_confirmation:true,overlap_capacity:2};
+test('confirmed consultation sharing ignores historical flags and limits without changing the input', () => {
+  const r={...resource(),allow_overlap_confirmation:false,overlap_capacity:1};
   r.busy=[{start,end:'2030-01-07T09:45:00Z',appointment_id:1,can_share:true},{start:'2030-01-07T09:45:00Z',end,appointment_id:2,can_share:true}];
   assert.equal(resourceForConfirmedOverlap(r,new Date(start),new Date(end),true).busy.length,0);
   r.busy.push({...r.busy[0]});
   assert.equal(resourceForConfirmedOverlap(r,new Date(start),new Date(end),true).busy.length,0);
+  assert.equal(r.busy.length,3);
+  assert.strictEqual(resourceForConfirmedOverlap(r,new Date(start),new Date(end),false),r);
+});
+test('a new machine or mandatory-team appointment cannot force an ordinary staff/room overlap', () => {
+  for (const kind of ['doctor','installation']) {
+    const c=context(),target=kind==='doctor'?c.doctors.get(5):c.installations.get(9);
+    target.busy=[{start,end,can_share:true,appointment_id:1}];
+    // Even the old explicitly-enabled flags must not bypass technical needs.
+    Object.assign(target,{allow_overlap_confirmation:true,overlap_capacity:null});
+    c.equipment.get(1).attention_policy={mode:'continuous',patient_preparation_minutes:0};
+    assert.equal(solveBookingProfile({profile:profile(9,1),start,...c,allowOverlap:true}),null);
+    const team={version:1,phases:[{...phase(9,1),equipment_requirements:[],professionals:{mode:'all',ids:[5]}}]};
+    assert.equal(solveBookingProfile({profile:team,start,...c,allowOverlap:true}),null);
+  }
 });
 test('no confirmation overrides an absence, a foreign appointment or a protected intervention', () => {
   for(const busy of [{start,end},{start,end,can_share:false}]) {

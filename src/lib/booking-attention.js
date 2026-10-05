@@ -113,19 +113,22 @@ function validStaffIntervals(phase, policies) {
   return match(0);
 }
 
-/** Confirmation never removes schedule blocks, other-clinic occupancy or machine reservations. */
+/** Ordinary consultations can be doubled by the booking operator, not by a
+ * prior professional/room permission. Keep old policy columns as historical
+ * data, but never use their flags or capacity to gate this confirmation.
+ * Blocks, foreign occupancy and technical reservations remain non-shareable. */
 function resourceForConfirmedOverlap(resource, start, end, enabled) {
-  if (!enabled || !resource?.allow_overlap_confirmation) return resource;
+  if (!enabled || !resource) return resource;
   const relevant = (resource.busy || []).filter(busy => +new Date(busy.start) < +end && +new Date(busy.end) > +start);
   if (!relevant.length || relevant.some(busy => busy.can_share !== true)) return resource;
-  if (resource.overlap_capacity != null) {
-    const points = new Set([+start, ...relevant.map(busy => Math.max(+start, +new Date(busy.start)))]);
-    for (const point of points) {
-      const appointments = new Set(relevant.filter(busy => +new Date(busy.start) <= point && point < +new Date(busy.end)).map((busy, index) => busy.appointment_id ?? `row:${index}`));
-      if (appointments.size + 1 > resource.overlap_capacity) return resource;
-    }
-  }
   return { ...resource, busy: (resource.busy || []).filter(busy => busy.can_share !== true) };
 }
 
-module.exports = { normalizeAttentionPolicy, isDefaultAttention, planStaffAttention, validStaffIntervals, resourceForConfirmedOverlap };
+// The new appointment's technical requirements are protected too: a manual
+// consultation override cannot invent free staff time for a machine or team.
+function ordinaryPhaseCanOverlap(phase) {
+  return phase.professionals.mode === 'any' && !(phase.equipment_requirements || []).length
+    && !(phase.staff_attention || []).length;
+}
+
+module.exports = { normalizeAttentionPolicy, isDefaultAttention, planStaffAttention, validStaffIntervals, resourceForConfirmedOverlap, ordinaryPhaseCanOverlap };

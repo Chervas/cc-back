@@ -12332,3 +12332,25 @@ cita ni recordatorio cambia. El siguiente login verifica el correo nuevo.
 Ambas rutas comparten límite de intentos de reautenticación; sesión del actor
 revalidada bajo el mismo bloqueo transaccional. Pruebas MySQL aisladas cubren
 colisión concurrente, alias, stale form, rollback y contraseña opcional.
+
+### 05/10/2026 — Recuperar superposición ordinaria con aviso, sin doble permiso
+
+La disponibilidad genérica y el solver canónico dejan de exigir los flags de
+profesional/instalación y su máximo de ocupación para doblar consultas ordinarias.
+El check devuelve 409 + `can_force=true`; solo la confirmación explícita de quien
+agenda (`force=true` booleano) permite guardar, con los mismos anclajes y
+revalidación transaccional. Grid y resumen pueden ofrecer esas posiciones,
+marcando `requires_overlap_acknowledgement` en las propuestas con perfil.
+
+Se conserva `can_share` como protección de reservas de maquinaria, intervenciones,
+equipos obligatorios, programas y excepciones documentales no compartibles.
+Una nueva cita técnica tampoco puede ocupar tiempo de otra consulta por force.
+Horarios, bloqueos, ocupación en otra clínica, paciente y personal de apoyo
+siguen siendo restricciones duras. No se toca esquema, configuración guardada,
+reservas anteriores, estados, automatizaciones ni recordatorios.
+
+Las columnas anteriores y el permiso documental de importación se mantienen
+por compatibilidad/trazabilidad; no son permisos previos de la reserva ordinaria.
+Frontend retira ambos switches y no envía esos campos al guardar una instalación.
+Pruebas ejecutan los handlers reales de confirmación, solver, check, grid,
+resumen, creación y edición; incluyen flags apagados/capacidad 1 y casos técnicos.

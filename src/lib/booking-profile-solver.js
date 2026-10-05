@@ -2,7 +2,7 @@
 
 const { normalizeBookingProfile } = require('./booking-profile');
 const { installationAllowsStaff } = require('./installation-professionals');
-const { normalizeAttentionPolicy, isDefaultAttention, planStaffAttention, resourceForConfirmedOverlap } = require('./booking-attention');
+const { normalizeAttentionPolicy, isDefaultAttention, planStaffAttention, resourceForConfirmedOverlap, ordinaryPhaseCanOverlap } = require('./booking-attention');
 
 const overlap = (start, end, interval) => start < new Date(interval.end) && new Date(interval.start) < end;
 
@@ -34,8 +34,9 @@ function solveBookingProfile({ profile: input, start, doctors, installations, eq
       : phase.installation_ids.filter((id) => id === Number(selection.installation_id));
     const equipmentChoices = new Map();
     const requirements = phase.equipment_requirements || [];
+    const confirmOrdinaryOverlap = allowOverlap && ordinaryPhaseCanOverlap(phase);
     const freeInstallations = installationIds.filter((id) => {
-      if (!isFree(resourceForConfirmedOverlap(installations.get(id), phaseStart, phaseEnd, allowOverlap), phaseStart, phaseEnd)) return false;
+      if (!isFree(resourceForConfirmedOverlap(installations.get(id), phaseStart, phaseEnd, confirmOrdinaryOverlap), phaseStart, phaseEnd)) return false;
       if (!requirements.length) return true;
       if (!equipment) return false;
       const chosen = [];
@@ -75,7 +76,7 @@ function solveBookingProfile({ profile: input, start, doctors, installations, eq
         if (!installationAllowsStaff(installations.get(roomId), [id])) return false;
         const policies = attentionFor(roomId);
         if (!policies.some(policy => !isDefaultAttention(policy))) {
-          return isFree(resourceForConfirmedOverlap(doctors.get(id), phaseStart, phaseEnd, allowOverlap), phaseStart, phaseEnd);
+          return isFree(resourceForConfirmedOverlap(doctors.get(id), phaseStart, phaseEnd, confirmOrdinaryOverlap), phaseStart, phaseEnd);
         }
         const plan = planStaffAttention({ resource: doctors.get(id), start: phaseStart, end: phaseEnd, policies });
         if (!plan) return false;

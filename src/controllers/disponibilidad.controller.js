@@ -7,12 +7,10 @@ const { addDays } = require('../lib/personal-schedule-recurring');
 const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
 const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
 const { resourceForConfirmedOverlap } = require('../lib/booking-attention');
-const { installationOverlapCapacity } = require('../lib/installation-overlap');
 const { incompatibleStart, appendStartInterval } = require('../lib/booking-grid-diagnostics');
 
-function confirmedOverlapRows(rows, start, end, clinicId, allowed, capacity = null) {
-  if (allowed === false || allowed === 0) return false;
-  const resource = { allow_overlap_confirmation: true, overlap_capacity: allowed == null ? null : capacity,
+function confirmedOverlapRows(rows, start, end, clinicId) {
+  const resource = {
     busy: rows.map(row => ({ start: row.inicio, end: row.fin, appointment_id: row.id_cita,
       can_share: Number(row.clinica_id) === Number(clinicId) && (row.can_share === true || (row.can_share == null && row.can_force_legacy !== false)) })) };
   return resourceForConfirmedOverlap(resource, start, end, true).busy.length === 0;
@@ -316,9 +314,6 @@ const conflictsForSlot = ({
   instCitas,
   docBlocks,
   docCitas,
-  installationOverlapAllowed,
-  installationCapacity,
-  doctorOverlapAllowed,
   start,
   end
 }) => {
@@ -392,7 +387,7 @@ const conflictsForSlot = ({
         resource_id: instalacionId,
         clinica_id: clinicaId,
         code: 'INSTALLATION_OVERLAP',
-        can_force: confirmedOverlapRows(instCitas.filter(row => row.start < end && row.end > start).map(row => ({...row,inicio:row.start,fin:row.end})),start,end,clinicaId,installationOverlapAllowed,installationCapacity),
+        can_force: confirmedOverlapRows(instCitas.filter(row => row.start < end && row.end > start).map(row => ({...row,inicio:row.start,fin:row.end})),start,end,clinicaId),
         details: { message: 'Instalación ocupada' }
       });
     }
@@ -435,7 +430,7 @@ const conflictsForSlot = ({
           resource_id: doctorId,
           clinica_id: clinicaId,
           code: 'STAFF_OVERLAP',
-          can_force: sameClinic && confirmedOverlapRows(overlappingRows.map(row => ({...row,inicio:row.start,fin:row.end})),start,end,clinicaId,doctorOverlapAllowed),
+          can_force: sameClinic && confirmedOverlapRows(overlappingRows.map(row => ({...row,inicio:row.start,fin:row.end})),start,end,clinicaId),
           details: {
             message: sameClinic ? 'Doctor ocupado' : 'Doctor ocupado en otra clínica',
             clinica_id: Number.isFinite(citaClinicId) ? citaClinicId : null,
@@ -524,9 +519,6 @@ const buildUnavailableIntervals = ({
       docWins,
       dcMissing,
       doctorOutOfHoursMessage: doctorCtx.outOfHoursMessage,
-      installationOverlapAllowed: inst?.allow_overlap_confirmation,
-      installationCapacity: installationOverlapCapacity(inst),
-      doctorOverlapAllowed: dc?.allow_overlap_confirmation,
       instBlocks,
       instCitas,
       docBlocks,
@@ -757,7 +749,7 @@ exports.check = asyncHandler(async (req, res) => {
         resource_id: instalacionId,
         clinica_id: clinicaId,
         code: 'INSTALLATION_OVERLAP',
-        can_force: confirmedOverlapRows(citasInst,start,end,clinicaId,inst.allow_overlap_confirmation,installationOverlapCapacity(inst)),
+        can_force: confirmedOverlapRows(citasInst,start,end,clinicaId),
         details: { cita_ids: [...new Set(citasInst.filter(c => Number(c.clinica_id) === clinicaId).map(c => c.id_cita))], message: 'Instalación ocupada' }
       });
     }
@@ -848,7 +840,7 @@ exports.check = asyncHandler(async (req, res) => {
         clinica_id: clinicaId,
         code: 'STAFF_OVERLAP',
         // Overbooking doctor permitido -> forzable
-        can_force: confirmedOverlapRows(citasDocSameClinic,start,end,clinicaId,dc?.allow_overlap_confirmation),
+        can_force: confirmedOverlapRows(citasDocSameClinic,start,end,clinicaId),
         details: { cita_ids: citasDocSameClinic.map((c) => c.id_cita), message: 'Doctor ocupado',
           clinica_id: clinicaId, clinica_ids: [clinicaId] }
       });

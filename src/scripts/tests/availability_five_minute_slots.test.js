@@ -182,6 +182,28 @@ test('equipment rejection spells out visit duration and turnaround separately fr
   assert.match(reason.message, /Fictitious equipment.*45 min.*preparación.*10 min/);
 });
 
+test('ordinary profile grid, mini-calendar and exact check agree on overlap with no configured permissions', async () => {
+  const f=fixture({staffBusy:true}),phase=f.profile.phases[0];
+  f.profile.version=1;delete phase.equipment_requirements;
+  const busy={start:instant('12:45'),end:instant('13:30'),appointment_id:1,can_share:true};
+  for(const target of [f.context.doctors.get(5),f.context.installations.get(9)]) {
+    Object.assign(target,{allow_overlap_confirmation:false,overlap_capacity:1,busy:[busy]});
+  }
+  const exact=await f.call('check',{doctor_id:'5',instalacion_id:'9',inicio_local:day+'T12:45',fin_local:day+'T13:30'});
+  assert.equal(exact.statusCode,409);assert.equal(exact.body.can_force,true);
+  assert.equal(exact.body.available,false,'no silent overlap on the exact check');
+  const summary=await f.call('summary',{dates:[day],doctor_id:'5',instalacion_id:'9'});
+  assert.equal(summary.body.by_day[day],true);
+  for(const mode of ['doctor','installation']) {
+    const query={dates:[day],mode,column_ids:mode==='doctor'?[5]:[9],...(mode==='doctor'?{peer_instalacion_ids:[9]}:{peer_doctor_ids:[5]})};
+    const grid=await f.call('grid',query),row=grid.body.rows[0];
+    const slots=mode==='doctor'?row.slots_by_instalacion[9]:row.slots_by_doctor[5];
+    const overlap=slots.find(slot=>slot.start_local===day+'T12:45');
+    assert(overlap);assert.equal(overlap.requires_overlap_acknowledgement,true);
+    assert.doesNotMatch(JSON.stringify(grid.body),/appointment_id|patient_id|paciente_id/);
+  }
+});
+
 test('foreign reservations never disclose their catalog name or other private fields in explanations', async () => {
   const f = fixture({ staffBusy: true });
   f.context.doctors.get(5).busy[0].diagnostic = { kind: 'other_clinic', treatment_name: 'Foreign treatment', time_range: '09:30–13:30', patient_name: 'Private patient' };

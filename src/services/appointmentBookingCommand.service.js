@@ -50,13 +50,14 @@ function solveLegacy(values, context, force = false) {
   const end = new Date(values.fin);
   if (values.instalacion_id && !installationAllowsStaff(context.installations.get(Number(values.instalacion_id)),
     values.doctor_id ? [Number(values.doctor_id)] : [])) return null;
-  const checked = resource => resource && (resource.explicit_overlap_policy
-    ? resourceForConfirmedOverlap(resource, start, end, force)
-    : ({ ...resource, busy: force ? (resource.busy || []).filter(interval => interval.can_force_legacy !== true) : resource.busy }));
+  const checked = resource => resourceForConfirmedOverlap(resource, start, end, force);
   if ((context.clinicWindows && !isFree({ windows: context.clinicWindows }, start, end))
     || (values.doctor_id && !isFree(checked(context.doctors.get(Number(values.doctor_id))), start, end))
     || (values.instalacion_id && !isFree(checked(context.installations.get(Number(values.instalacion_id))), start, end))) return null;
   return { start_at: start.toISOString(), end_at: end.toISOString(), warnings: [], requires_priority_acknowledgement: false,
+    requires_overlap_acknowledgement: force && (
+      !!values.doctor_id && !isFree(context.doctors.get(Number(values.doctor_id)), start, end)
+      || !!values.instalacion_id && !isFree(context.installations.get(Number(values.instalacion_id)), start, end)),
     phases: [{ key: 'appointment', label: '', start_at: start.toISOString(), end_at: end.toISOString(),
       installation_id: values.instalacion_id ? Number(values.instalacion_id) : null,
       doctor_ids: values.doctor_id ? [Number(values.doctor_id)] : [], staff_time_scope: 'phase' }] };
@@ -394,7 +395,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       const patientConflict = (context.patientBusy || []).some(busy => new Date(busy.start) < end && new Date(busy.end) > start);
       if (!solution || patientConflict || new Date(solution.end_at).getTime() !== end.getTime()) {
         // Re-evaluated under the same resource locks. Force is only available
-        // between ordinary appointments in this clinic, never for a profile,
+        // between ordinary appointments in this clinic, never for machinery,
         // mandatory team, blocked schedule, foreign clinic or patient overlap.
         const canForce = !extraStaff.length && !patientConflict && (configuredProfile
           ? permitsProfileForce && !!solveBookingProfile({ profile, start, ...context, selections: chosen, allowOverlap: true })
