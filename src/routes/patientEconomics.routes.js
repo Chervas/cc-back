@@ -12,6 +12,7 @@ router.post('/public/budget-signatures/:token/sign', controller.signPublicBudget
 router.use(authMiddleware);
 
 router.get('/patients/:patientId/workspace', controller.getWorkspace);
+router.get('/patients/:patientId/appointment-options', controller.getAppointmentPurchaseOptions);
 router.get('/catalog', controller.listCatalog);
 router.post('/patients/:patientId/budgets', controller.createBudget);
 router.patch('/budgets/:budgetId', controller.updateBudget);

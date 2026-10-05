@@ -93,6 +93,15 @@ exports.getWorkspace = asyncHandler(async (req, res) => {
   res.json(workspace);
 });
 
+exports.getAppointmentPurchaseOptions = asyncHandler(async (req, res) => {
+  const clinicId = await requireClinicFeature(req, 'patients.view', req.query.clinic_id);
+  await requireClinicFeature(req, 'patients.sensitive.view', clinicId);
+  await requireClinicFeature(req, 'appointments.view', clinicId);
+  res.json(await require('../services/appointmentPurchaseOptions.service').read({
+    clinicId, patientIdentifier: req.params.patientId, actorId: actorId(req),
+  }));
+});
+
 async function programContext(req, write = false) {
   const clinicId = await requireVoucherFeature(req, write ? 'patients.edit' : 'patients.view');
   await requireClinicFeature(req, 'patients.sensitive.view', clinicId);
@@ -385,12 +394,23 @@ exports.previewVoucherAppointments = asyncHandler(async (req, res) => {
 });
 
 exports.createVoucherAppointments = asyncHandler(async (req, res) => {
-  await requireVoucherFeature(req, 'appointments.manage');
-  res.status(201).json(await voucherAppointments.create({
+  const clinicId = await requireVoucherFeature(req, 'appointments.manage');
+  const result = await voucherAppointments.create({
     publicId: req.params.voucherId,
     actorId: actorId(req),
     payload: req.body,
-  }));
+  });
+  const documentationPending = [];
+  try {
+    await require('../services/programBookingRealtime.service').publishProgramBookings({ db, clinicId,
+      result: { sessions: result.created.map(row => ({ appointment_id: row.id, action: 'created' })) } });
+  } catch (_) { console.warn('[voucher-booking] committed agenda invalidation pending'); }
+  for (const row of result.created) {
+    try {
+      await require('../services/consentimientos.service').ensurePackageForAppointment(row.id, { createdBy: actorId(req), triggerSource: 'voucher_booking' });
+    } catch (_) { documentationPending.push(row.id); }
+  }
+  res.status(201).json({ ...result, documentation_pending: documentationPending });
 });
 
 exports.updateFiscalDocument = asyncHandler(async (req, res) => {

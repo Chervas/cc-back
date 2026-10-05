@@ -230,7 +230,11 @@ exports.getTratamientos = asyncHandler(async (req, res) => {
         order: [['nombre', 'ASC']],
         include: [{ model: Clinica, as: 'clinica' }]
     });
-    res.json(tratamientos.map(catalogDto));
+    // Booking is an explicit projection; catalogue editors still see drafts,
+    // historical references and program-only components without activating them.
+    const booking = req.query.booking === 'true';
+    if (booking && !clinicIdNum) return res.status(400).json({ message: 'Selecciona una clínica para buscar tratamientos de cita.' });
+    res.json(tratamientos.filter(treatment => !booking || require('../lib/appointment-booking-catalog').individualBookingEligible(treatment, clinicIdNum)).map(catalogDto));
 });
 
 // Crear tratamiento

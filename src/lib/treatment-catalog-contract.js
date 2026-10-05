@@ -41,6 +41,14 @@ function mergeClinicalConfig(previous, patch) {
   else delete result.imported_price_review;
   if (previous?.historical_reference) result.historical_reference = previous.historical_reference;
   if (result.catalog_status != null && !STATUSES.has(result.catalog_status)) throw catalogError('Estado de catálogo no válido.');
+  if (result.catalog_badge != null) {
+    if (typeof result.catalog_badge !== 'string' || result.catalog_badge.trim().length > 32 || /[\u0000-\u001f\u007f]/.test(result.catalog_badge)) {
+      throw catalogError('La etiqueta debe ser un texto de hasta 32 caracteres.', 'invalid_catalog_badge');
+    }
+    const badge = result.catalog_badge.trim();
+    if (badge) result.catalog_badge = badge;
+    else delete result.catalog_badge;
+  }
   if (result.price_profile != null) result.price_profile = require('./economicPriceProfile').normalizeProfile(result.price_profile);
   if (result.booking_profile != null) {
     result.booking_profile = normalizeBookingProfile(result.booking_profile, { allowIncomplete: result.catalog_status === 'draft' });

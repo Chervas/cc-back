@@ -100,7 +100,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const mode = schedulingMode(plan.snapshot);
     const resume = mode === 'manual' ? null : resumeInfo(plan, now());
     const active = plan.voucher.status === 'active' && plan.accepted && (!plan.voucher.expires_at || new Date(plan.voucher.expires_at) > now());
-    return { voucher_id: plan.voucher.public_id, clinic_id: Number(plan.voucher.clinic_id), name: plan.snapshot.name,
+    return { voucher_id: plan.voucher.public_id, clinic_id: Number(plan.voucher.clinic_id), name: plan.snapshot.name, kind: plan.snapshot.kind,
       snapshot_sha256: plan.snapshot.sha256, timezone: plan.timeZone, cadence: plan.snapshot.cadence,
       plan_revision: planRevision(plan), scheduling_mode: mode,
       automatic_scheduling_available: mode !== 'manual' && plan.sessions.every(session => session.duration_minutes != null),
