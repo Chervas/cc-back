@@ -6,6 +6,11 @@ const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
 const { isWhatsappRoutingConfigAvailable } = require('../lib/whatsapp-channel-role');
 const patientDirectionService = require('../services/patientDirection.service');
+const {
+  isTemporaryQuickChatFocusUser,
+  temporaryQuickChatListSql,
+  attachTemporaryQuickChatEligibility,
+} = require('../lib/temporary-quickchat-focus');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 const { canUserAccessFeature } = require('../lib/access-policy');
 const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
@@ -1355,6 +1360,9 @@ exports.listConversations = async (req, res) => {
     }
     where[Op.and] = [categoryWhere];
 
+    const temporaryFocusSql = temporaryQuickChatListSql(req.userData, { patientId, leadId });
+    if (temporaryFocusSql) where[Op.and].push(db.sequelize.literal(temporaryFocusSql));
+
     let patient = null;
     let lead = null;
     let canonicalConversationId = null;
@@ -1515,7 +1523,8 @@ exports.listConversations = async (req, res) => {
     const withRestrictions = await attachContactRestrictions(rawPayload);
     const withLeadAppointments = await enrichQuickChatLeadAppointments(withRestrictions);
     const withPatientDirection = await enrichPatientDirectionAssignments(withLeadAppointments);
-    const payload = await attachRoutingReviews(await hydrateMarketingContactFallbacks(withPatientDirection, { searchQuery }), userId);
+    const withRouting = await attachRoutingReviews(await hydrateMarketingContactFallbacks(withPatientDirection, { searchQuery }), userId);
+    const payload = await attachTemporaryQuickChatEligibility(withRouting, req.userData, CitaPaciente);
     const totalUnread = payload.reduce((total, item) => {
       const unread = Number(item?.unread_count || 0);
       const automationPending = item?.pending_automation_attention
@@ -1583,6 +1592,7 @@ exports.getPermissions = async (req, res) => {
       can_use_all_clinics: !!isAggregateAllowed,
       effective_role: effectiveRole,
       is_patient_director: selectedClinicBelongsToDirector,
+      temporary_own_appointments_focus: isTemporaryQuickChatFocusUser(req.userData),
     });
   } catch (err) {
     console.error('Error getPermissions', err);
@@ -1639,7 +1649,8 @@ exports.getMessages = async (req, res) => {
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
     const [withRouting] = await attachRoutingReviews([conversationPayload], userId);
-    return res.json({ conversation: withRouting, messages, messages_page: messagesPage });
+    const [focusedPayload] = await attachTemporaryQuickChatEligibility([withRouting], req.userData, CitaPaciente);
+    return res.json({ conversation: focusedPayload, messages, messages_page: messagesPage });
   } catch (err) {
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getMessages', err);
@@ -1763,7 +1774,8 @@ exports.getConversationByPatient = async (req, res) => {
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
-    return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
+    const [focusedPayload] = await attachTemporaryQuickChatEligibility([conversationPayload], req.userData, CitaPaciente);
+    return res.json({ conversation: focusedPayload, messages, messages_page: messagesPage });
   } catch (err) {
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getConversationByPatient', err);
@@ -1824,7 +1836,8 @@ exports.getConversationByLead = async (req, res) => {
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
-    return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
+    const [focusedPayload] = await attachTemporaryQuickChatEligibility([conversationPayload], req.userData, CitaPaciente);
+    return res.json({ conversation: focusedPayload, messages, messages_page: messagesPage });
   } catch (err) {
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getConversationByLead', err);
@@ -1906,8 +1919,9 @@ exports.startPatientContact = async (req, res) => {
         error: enrichmentError?.message || enrichmentError,
       });
     }
+    const [focusedPayload] = await attachTemporaryQuickChatEligibility([payload], req.userData, CitaPaciente);
     return res.status(result.conversationCreated ? 201 : 200).json({
-      conversation: payload,
+      conversation: focusedPayload,
       messages: [],
       patient: result.patient,
       patient_created: result.patientCreated,
