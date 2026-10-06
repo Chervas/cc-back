@@ -1,6 +1,6 @@
 'use strict';
 
-const { Op } = require('sequelize');
+const { Op, literal, where: sqlWhere } = require('sequelize');
 
 function cleanString(value) {
   if (value === undefined || value === null) return null;
@@ -175,6 +175,77 @@ function formatInboundAnalysisItem(message) {
     message_id: messageId,
     content_type: 'text',
     text,
+  };
+}
+
+async function hydrateResponseReactionTargets({ Message, conversationId, responseContext }) {
+  const items = responseContext?.response_items;
+  const reactions = Array.isArray(items) ? items.filter((item) => item?.content_type === 'reaction') : [];
+  if (!reactions.length) return responseContext;
+  const id = toIntOrNull(conversationId);
+  const reactionIds = [...new Set(reactions.map((item) => toIntOrNull(item.message_id)).filter(Boolean))];
+  if (!id || reactionIds.length !== new Set(reactions.map((item) => item.message_id)).size
+    || reactionIds.length > 100) {
+    throw new Error('response_reaction_batch_scope_missing');
+  }
+  // Read the event and its exact provider target, never the latest clinic message.
+  const events = await Message.findAll({
+    where: { conversation_id: id, direction: 'inbound', message_type: 'reaction', id: { [Op.in]: reactionIds } },
+    attributes: ['id', 'conversation_id', 'direction', 'message_type', 'metadata', 'sent_at', 'createdAt'],
+    raw: true,
+  });
+  const eventById = new Map(events.filter((event) => Number(event.conversation_id) === id
+    && event.direction === 'inbound' && event.message_type === 'reaction' && !isRevokedMessage(event))
+    .map((event) => [Number(event.id), event]));
+  const targetIds = [...new Set([...eventById.values()].map((event) =>
+    cleanString(event.metadata?.reaction?.message_id || event.metadata?.reaction?.target_message_id)).filter(Boolean))];
+  const targets = targetIds.length ? await Message.findAll({
+    where: {
+      conversation_id: id,
+      direction: 'outbound',
+      [Op.and]: [sqlWhere(literal("JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.wamid'))"), { [Op.in]: targetIds })],
+    },
+    attributes: ['id', 'conversation_id', 'direction', 'content', 'message_type', 'status', 'metadata', 'sent_at', 'createdAt'],
+    limit: 201,
+    raw: true,
+  }) : [];
+  const byProviderId = new Map();
+  for (const target of targets) {
+    const providerId = cleanString(target.metadata?.wamid);
+    if (!targetIds.includes(providerId) || Number(target.conversation_id) !== id || target.direction !== 'outbound') continue;
+    const matches = byProviderId.get(providerId) || [];
+    matches.push(target);
+    byProviderId.set(providerId, matches);
+  }
+  const hydrated = items.map((item) => {
+    if (item?.content_type !== 'reaction') return item;
+    const event = eventById.get(Number(item.message_id));
+    const reaction = event?.metadata?.reaction || {};
+    // Legacy metadata also has a local target_message_id; message_id is Meta's target.
+    const providerId = cleanString(reaction.message_id || reaction.target_message_id);
+    const matches = byProviderId.get(providerId) || [];
+    const target = targets.length < 201 && matches.length === 1 ? matches[0] : null;
+    const eventAt = resolveMessageMoment(event);
+    const targetAt = resolveMessageMoment(target);
+    const usable = target && !isRevokedMessage(target) && !['event', 'reaction'].includes(target.message_type)
+      && !['failed', 'cancelled'].includes(target.status) && eventAt && targetAt && targetAt <= eventAt;
+    return {
+      ...item,
+      emoji: cleanString(reaction.emoji),
+      target_message_id: providerId,
+      target_message_preview: usable ? cleanString(target.content) : null,
+      target_message_type: usable ? cleanString(target.message_type) : null,
+    };
+  });
+  const latest = hydrated.find((item) => item.content_type === 'reaction'
+    && Number(item.message_id) === Number(responseContext.response_message_id));
+  return {
+    ...responseContext,
+    response_items: hydrated,
+    reaction_emoji: latest?.emoji || null,
+    reaction_target_message_id: latest?.target_message_id || null,
+    reaction_target_message_preview: latest?.target_message_preview || null,
+    reaction_target_message_type: latest?.target_message_type || null,
   };
 }
 
@@ -388,5 +459,6 @@ module.exports = {
   formatInboundAnalysisItem,
   formatInboundAnalysisText,
   formatInboundResponseText,
+  hydrateResponseReactionTargets,
   isRevokedMessage,
 };

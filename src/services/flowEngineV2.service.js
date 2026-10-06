@@ -80,6 +80,7 @@ const {
   precedingConversationMessages,
   formatInboundAnalysisItem,
   formatInboundResponseText,
+  hydrateResponseReactionTargets,
   isRevokedMessage,
 } = require('../lib/automation-conversation-context');
 const {
@@ -1437,14 +1438,23 @@ async function enrichConversationContext(context, targets = {}) {
     conversation_context_messages: conversationContext.conversation_context_messages || [],
   });
 
-  if (cleanString(baseContext?.trigger?.type) !== 'message_received') {
+  const hydrateReactions = async () => {
+    enriched.last_response_context = await hydrateResponseReactionTargets({
+      Message,
+      conversationId: conversationContext.conversation.id,
+      responseContext: enriched.last_response_context,
+    });
     return enriched;
+  };
+
+  if (cleanString(baseContext?.trigger?.type) !== 'message_received') {
+    return hydrateReactions();
   }
   if (
     cleanString(baseContext?.last_response_context?.wait_node_id)
     && toIntOrNull(baseContext?.last_response_context?.response_message_id)
   ) {
-    return enriched;
+    return hydrateReactions();
   }
   const conversationId = toIntOrNull(
     targets.conversation_id
@@ -1511,7 +1521,7 @@ async function enrichConversationContext(context, targets = {}) {
         .filter(Boolean),
     },
   });
-  return enriched;
+  return hydrateReactions();
 }
 
 function findFirstConversationIdInOutputs(context = {}) {
@@ -1972,7 +1982,8 @@ function deriveConfirmAppointmentOutput(signalOutput = {}, { patientText = '', r
     0,
     Math.min(1, Number(signalOutput.confianza_negacion_explicita_de_la_confirmacion) || 0),
   );
-  const confirmationConfidence = confirms
+  const invalidAffirmative = affirmative && (!certainDecision || contradiction);
+  const confirmationConfidence = invalidAffirmative ? 0 : confirms
     ? Math.min(affirmativeConfidence, contradictionConfidence,
       Number(signalOutput.confianza_confirmacion_condicionada_o_incierta),
       Number(signalOutput.confianza_lectura_confirmacion))
@@ -1983,7 +1994,9 @@ function deriveConfirmAppointmentOutput(signalOutput = {}, { patientText = '', r
   return {
     confirma_asistencia: confirms,
     requiere_respuesta: requiresReply,
-    motivo: cleanString(signalOutput.motivo),
+    motivo: invalidAffirmative
+      ? 'La interpretacion afirmativa no supera la validacion de evidencia y certeza del lote actual. Requiere revision de recepcion.'
+      : cleanString(signalOutput.motivo),
     confianza_confirma_asistencia: confirmationConfidence,
     confianza_requiere_respuesta: hasPendingEvidence
       ? Math.max(Number(signalOutput.confianza_evidencia_asunto_pendiente) || 0,

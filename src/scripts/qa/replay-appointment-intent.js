@@ -168,8 +168,12 @@ async function replay() {
   db.Conversation.findByPk = async () => activeCase.context.conversation;
   db.Conversation.findOne = async () => activeCase.context.conversation;
   db.Message.findAll = async ({ where = {} } = {}) => {
-    if (where.id) return activeCase.messages.filter((message) => activeCase.context.last_response_context.response_items.some((item) => item.message_id === message.id));
-    return activeCase.messages.filter((message) => !['event', 'reaction'].includes(message.message_type));
+    const scoped = activeCase.messages.filter((message) => (!where.conversation_id
+      || Number(message.conversation_id) === Number(where.conversation_id))
+      && (!where.direction || message.direction === where.direction));
+    if (where.id) return scoped.filter((message) => activeCase.context.last_response_context.response_items.some((item) => item.message_id === message.id));
+    if (where.direction === 'outbound') return scoped;
+    return scoped.filter((message) => !['event', 'reaction'].includes(message.message_type));
   };
   db.CitaPaciente.findByPk = async () => activeCase.context.appointment || null;
   const restoreClock = require('./historical-replay-context').installHistoricalConversationClock(
