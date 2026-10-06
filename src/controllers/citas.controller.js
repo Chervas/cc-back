@@ -2138,6 +2138,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         delete baseImportMetadata.import_resource_resolution;
         delete baseImportMetadata.clinical_component_parent;
         delete baseImportMetadata.clinical_component_children;
+        delete baseImportMetadata.patient_overlap_confirmation;
         const appointmentImportMetadata = {
             ...baseImportMetadata,
             ...(isHistoricalRegistration ? {

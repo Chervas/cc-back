@@ -12,6 +12,7 @@ test('HTTP reschedule preserves resources absent from the request', () => {
 });
 test('HTTP strips client booking snapshots even with gates off or historical registration', () => {
   assert.match(controller, /delete baseImportMetadata\.booking/);
+  assert.match(controller, /delete baseImportMetadata\.patient_overlap_confirmation/);
 });
 test('HTTP forwards force only to the authoritative transaction and uses its safe error payload', () => {
   assert.match(controller, /force: parseBool\(force\)/);
