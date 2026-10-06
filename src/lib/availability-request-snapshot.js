@@ -4,6 +4,7 @@ const { resourceAppointments, resourceInstallationBlocks } = require('../service
 const { loadBookingContext } = require('../services/appointmentBookingAvailability.service');
 const { installationAllowsStaff } = require('./installation-professionals');
 const { addDays } = require('./personal-schedule-recurring');
+const { projectPersonalBlocks } = require('./agenda-personal-blocks');
 const {
   resolveClinicTimezone, localDateTimeToUtc, formatLocal, buildWindowsFromHorarios,
   buildDoctorBloqueoRowsForDate, buildDoctorAvailabilityContext, hasActiveSchedule,
@@ -111,7 +112,7 @@ async function loadLegacyAvailabilitySnapshot({ db, clinic, dates, doctorIds = [
     validDoctors.length ? db.DoctorBloqueo.findAll({ where: { doctor_id: { [Op.in]: validDoctors }, [Op.or]: [
       { recurrente: 'none', fecha_inicio: { [Op.lt]: end }, fecha_fin: { [Op.gt]: start } },
       { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [Op.lte]: end } },
-    ] }, attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente'],
+    ] }, attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente', 'aplica_a_todas_clinicas'],
     include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }] }) : [],
     validInstallations.length ? blocksReader({ db, clinic, installationIds: validInstallations, start, end }) : [],
     validInstallations.length ? appointmentsReader({ db, clinic, installationIds: validInstallations, start, end }) : [],
@@ -123,6 +124,8 @@ async function loadLegacyAvailabilitySnapshot({ db, clinic, dates, doctorIds = [
   const doctorMap = new Map(doctorRows.map(row => [Number(row.doctor_id), row]));
   const days = new Map();
   return { clinic, timeZone, installationMap, doctorMap, additionalStaffIds, supportContext,
+    personalBlocks: projectPersonalBlocks(doctorBlockDefs.filter(row => validDoctors.includes(Number(row.doctor_id))
+      && (row.clinica_id == null || Number(row.clinica_id) === clinicId || row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1)), sortedDates, timeZone),
     day(date) {
       if (days.has(date)) return days.get(date);
       if (!sortedDates.includes(date)) throw Error('AVAILABILITY_SNAPSHOT_DATE_OUT_OF_SCOPE');

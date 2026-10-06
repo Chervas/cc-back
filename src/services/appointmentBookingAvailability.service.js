@@ -1,6 +1,7 @@
 'use strict';
 
 const { addDays } = require('../lib/personal-schedule-recurring');
+const { projectPersonalBlocks } = require('../lib/agenda-personal-blocks');
 const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
 const { resolveClinicTimezone, formatDateLocal, formatLocal, dayIndexFromLocalDate,
   buildWindowsFromHorarios, buildDoctorAvailabilityContext, buildDoctorBloqueoRowsForDate,
@@ -198,6 +199,8 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     ...ignore('id_cita'),
   }, attributes: ['inicio', 'fin'], transaction }).then(rows => rows.map(row => ({ start: row.inicio, end: row.fin }))) : [];
   return { doctors, installations: cabins, clinicWindows, installationKeys: mapping.keys, mapping, timeZone, patientBusy,
+    ...(includeDiagnosticLabels ? { personalBlocks: projectPersonalBlocks(doctorBlocks.filter(row => doctors.has(Number(row.doctor_id))
+      && (row.clinica_id == null || Number(row.clinica_id) === clinicId || row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1)), calendarDates, timeZone) } : {}),
     ...attachEquipmentContext(equipmentContext, cabins, mapping, busy) };
 }
 

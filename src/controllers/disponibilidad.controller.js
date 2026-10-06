@@ -1531,22 +1531,25 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
   const doctors = [...new Set(queries.flatMap(query => [parseIntSafe(query.doctor_id), ...parseIntArray(query.doctor_ids || query['doctor_ids[]'])]).filter(Boolean))];
   const installations = [...new Set(queries.flatMap(query => [parseIntSafe(query.instalacion_id), ...parseIntArray(query.instalacion_ids || query['instalacion_ids[]'])]).filter(Boolean))];
   const byDate = new Map();
+  const personalBlocks = [];
   for (const group of groups) {
     if (profile) {
       const context = await loadBookingContext({ db, clinic, profile, dates: group,
         start: resolveLocalInstant(group[0], '00:00:00', timeZone),
         end: resolveLocalInstant(addDays(group[group.length - 1], 1), '00:00:00', timeZone), occupancyEnabled: true, additionalStaffIds,
         includeDiagnosticLabels: grid });
+      if (grid) personalBlocks.push(...(context.personalBlocks || []));
       const getPayload = query => profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds });
       group.forEach(date => byDate.set(date, getPayload));
     } else {
       const snapshot = await loadLegacyAvailabilitySnapshot({ db, clinic, dates: group, doctorIds: doctors,
         installationIds: installations, additionalStaffIds, fetchClinicHorarios,
         readers: { resourceAppointments, resourceInstallationBlocks, loadBookingContext } });
+      if (grid) personalBlocks.push(...snapshot.personalBlocks);
       group.forEach(date => byDate.set(date, query => legacySnapshotPayload(snapshot, query)));
     }
   }
-  return query => byDate.get(query.fecha_local)(query);
+  return Object.assign(query => byDate.get(query.fecha_local)(query), { personalBlocks });
 }
 
 exports.grid = asyncHandler(async (req, res) => {
@@ -1653,6 +1656,7 @@ exports.grid = asyncHandler(async (req, res) => {
     duracion_min: durMin,
     granularity_min: stepMin,
     columns: columnIds.map((id) => String(id)),
+    personal_blocks: getPayload.personalBlocks,
     rows,
   });
 });
