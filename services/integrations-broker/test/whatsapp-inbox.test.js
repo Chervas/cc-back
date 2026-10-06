@@ -369,3 +369,47 @@ test('recent review diagnostics include late events without enlarging the origin
  assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n,0);
  assert.deepEqual(f.inbox.health(),h);f.restart();assert.deepEqual(f.inbox.health(),h);
 });
+test('older reviews from another scope cannot starve a shared active phone of contact attribution',t=>{
+ const scopeBindings=[{wabaId:'301',phoneId:'401',clinicIds:[71]},
+  {wabaId:'302',phoneId:'402',clinicIds:[72,73]}];
+ const f=fixture(t,{scopeBindings,bindings:[{wabaId:'301',phoneIds:['401']},{wabaId:'302',phoneIds:['402']}]});
+ const retain=(phoneId,wabaId,n)=>{
+  const input=body();const entry=input.entry[0],value=entry.changes[0].value;
+  entry.id=wabaId;value.metadata.phone_number_id=phoneId;value.messaging_product='whatsapp';
+  value.messages[0].id='synthetic-review-'+phoneId+'-'+n;
+  const accepted=f.inbox.accept(packet(input)),lease=f.inbox.lease(accepted.receipt);lease.raw.fill(0);
+  f.inbox.defer({receipt:accepted.receipt,lease:lease.lease,reason:'review_required'});f.advance(1);
+ };
+ for(let n=0;n<150;n++)retain('401','301',n);
+ for(let n=0;n<2;n++)retain('402','302',n);
+ const before=f.store.db.prepare('SELECT receipt,state,lease,imported_at FROM whatsapp_inbox ORDER BY receipt').all();
+ const health=f.inbox.health(),old=health.groups.find(g=>g.scopes.includes('301:401'));
+ const active=health.groups.find(g=>g.scopes.includes('302:402'));
+ assert.equal(active.blockingReview,2);assert.equal(active.reviewIsolation.scopedReviews,2);
+ assert.deepEqual(active.reviewIsolation.contacts.map(c=>c.clinicId),[72,73]);
+ assert.equal(old.reviewIsolation.scopedReviews,98);
+ assert.equal(health.groups.reduce((n,g)=>n+(g.reviewIsolation?.scopedReviews||0),0),100);
+ assert.deepEqual(f.store.db.prepare('SELECT receipt,state,lease,imported_at FROM whatsapp_inbox ORDER BY receipt').all(),before);
+ assert(!JSON.stringify(health).includes('FICTITIOUS_CANCEL_REQUEST'));
+ assert(!JSON.stringify(health).includes('34000000001'));
+ assert.deepEqual(f.inbox.health(),health);f.restart();assert.deepEqual(f.inbox.health(),health);
+});
+test('fair review selection retains an unknown active-phone barrier rather than inventing contact attribution',t=>{
+ const scopeBindings=[{wabaId:'301',phoneId:'401',clinicIds:[71]},
+  {wabaId:'302',phoneId:'402',clinicIds:[72]}];
+ const f=fixture(t,{scopeBindings,bindings:[{wabaId:'301',phoneIds:['401']},{wabaId:'302',phoneIds:['402']}]});
+ for(let n=0;n<110;n++){
+  const input=body();input.entry[0].changes[0].value.messaging_product='whatsapp';
+  input.entry[0].changes[0].value.messages[0].id='synthetic-old-'+n;
+  const accepted=f.inbox.accept(packet(input)),lease=f.inbox.lease(accepted.receipt);lease.raw.fill(0);
+  f.inbox.defer({receipt:accepted.receipt,lease:lease.lease,reason:'review_required'});f.advance(1);
+ }
+ const unknown=body({field:'smb_app_state_sync'});unknown.entry[0].id='302';
+ unknown.entry[0].changes[0].value.metadata.phone_number_id='402';
+ const accepted=f.inbox.accept(packet(unknown)),lease=f.inbox.lease(accepted.receipt);lease.raw.fill(0);
+ f.inbox.defer({receipt:accepted.receipt,lease:lease.lease,reason:'review_required'});
+ const active=f.inbox.health().groups.find(g=>g.scopes.includes('302:402'));
+ assert.equal(active.blockingReview,1);assert.equal(active.reviewIsolation,undefined);
+ assert.equal(active.reviewSummary[0].category,'app_state_changes');
+ assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n,0);
+});
