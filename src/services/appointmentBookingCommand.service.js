@@ -9,6 +9,7 @@ const { installationAllowsStaff } = require('../lib/installation-professionals')
 const { equipmentIds } = require('../lib/booking-equipment');
 const { resourceForConfirmedOverlap, validStaffIntervals, normalizeAttentionPolicy } = require('../lib/booking-attention');
 const { importTreatmentPending, importReviewVersion } = require('../lib/appointment-import-review');
+const { conflictsForPatient, patientOverlapDecision } = require('../lib/appointment-patient-overlap');
 
 function metadataObject(value) {
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = null; } }
@@ -203,7 +204,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
   priorityAcknowledged = false, selections = {}, transaction = null, capabilities = bookingCapabilities(),
   allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false,
   additionalStaffIds = undefined, supportOnly = false, expectedRange = null, importEquipmentAssignment = null,
-  trustedProgramSeries = null }) {
+  trustedProgramSeries = null, reschedulePatientOverlap = null }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
   // Internal documentary reconciliation only, never forwarded from an HTTP
   // payload. Same command/locks/occupancy as normal booking; no extra read on
@@ -321,6 +322,9 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       delete importMetadata[key];
       if (previousMetadata[key]) importMetadata[key] = previousMetadata[key];
     }
+    // The operator confirmation is server-owned provenance, not request data.
+    delete importMetadata.patient_overlap_confirmation;
+    if (previousMetadata.patient_overlap_confirmation) importMetadata.patient_overlap_confirmation = previousMetadata.patient_overlap_confirmation;
     if (values.estado === 'cancelada' && previousStaff) {
       if (requestedStaff !== undefined && JSON.stringify(requestedStaff) !== JSON.stringify(previousStaff.ids)) {
         throw bookingError('booking_additional_staff_invalid', 'Reabre la cita para cambiar su personal de apoyo.', null, 400);
@@ -395,8 +399,9 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
         : solveLegacy(values, context, !extraStaff.length && force === true)) : null;
       if (solution && extraStaff.length && solution.phases.some(phase =>
         !require('../lib/installation-professionals').installationAllowsStaff(context.installations.get(phase.installation_id),extraStaff))) solution=null;
-      const patientConflict = (context.patientBusy || []).some(busy => new Date(busy.start) < end && new Date(busy.end) > start);
-      if (!solution || patientConflict || new Date(solution.end_at).getTime() !== end.getTime()) {
+      const patientConflicts = conflictsForPatient(context.patientBusy, { start, end, appointmentId: existing?.id_cita });
+      const patientConflict = patientConflicts.length > 0;
+      if (!solution || new Date(solution.end_at).getTime() !== end.getTime()) {
         // Re-evaluated under the same resource locks. Force is only available
         // between ordinary appointments in this clinic, never for machinery,
         // mandatory team, blocked schedule, foreign clinic or patient overlap.
@@ -404,6 +409,41 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
           ? permitsProfileForce && !!solveBookingProfile({ profile, start, ...context, selections: chosen, allowOverlap: true })
           : !!solveLegacy(values, context, true));
         throw bookingError('booking_unavailable', 'El hueco ya no está disponible o no cumple el perfil del tratamiento. Actualiza las propuestas.', { can_force: canForce });
+      }
+      if (patientConflict) {
+        const ownConflicts = patientConflicts.filter(row => Number(row.clinic_id) === Number(values.clinica_id));
+        const ids = [...new Set(ownConflicts.map(row => row.doctor_id).filter(Boolean))];
+        const names = ids.length && db.Usuario ? await db.Usuario.findAll({
+          where: { id_usuario: { [db.Sequelize.Op.in]: ids } }, attributes: ['id_usuario', 'nombre', 'apellidos'], transaction: tx,
+        }) : [];
+        const decision = patientOverlapDecision({ rows: patientConflicts, previous, values, solution, timeZone: context.timeZone,
+          doctorNames: new Map(names.map(row => [Number(row.id_usuario), [row.nombre, row.apellidos].filter(Boolean).join(' ')])),
+          resourceContext: solution.phases.flatMap(phase => [
+            ...phase.doctor_ids.map(id => [`doctor:${id}`, context.doctors.get(id)]),
+            [`installation:${phase.installation_id}`, context.installations.get(phase.installation_id)],
+          ]).map(([key, resource]) => [key, (resource?.busy || []).filter(row => new Date(row.start) < end && new Date(row.end) > start)
+            .map(row => [row.appointment_id || null, new Date(row.start).toISOString(), new Date(row.end).toISOString()])
+            .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))])
+            .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+          reschedule: reschedulePatientOverlap,
+          eligible: !!existing && !session && !trustedProgramSession && !preparedSeries && !preparedContext && !supportOnly && !stateOnly
+            && !importEquipmentAssignment && !extraStaff.length && !previous.es_provisional && !values.es_provisional
+            && !previous.voucher_id && previous.source_system !== 'treatment_program'
+            && !previousMetadata.program_session && !previousMetadata.clinical_component_parent && !previousMetadata.clinical_component_children
+            && !previousMetadata.cliniccloud_source_booking?.nonshareable && !(configuredProfile?.version >= 3)
+            && !['cancelada', 'completada', 'no_asistio'].includes(previous.estado)
+            && !configuredProfile?.phases.some(phase => phase.equipment_requirements?.length || phase.professionals.mode === 'all' || phase.staff_attention?.length)
+            && !solution.phases.some(phase => phase.equipment?.length || phase.staff_intervals?.length)
+            && Object.keys(appointmentValues).every(key => ['inicio', 'fin', 'doctor_id', 'instalacion_id', 'estado', 'reschedule_reason', 'updated_by'].includes(key)),
+        });
+        if (!decision.confirmed) {
+          const { confirmed, message, ...details } = decision;
+          throw bookingError('booking_patient_overlap', message, details);
+        }
+        importMetadata.patient_overlap_confirmation = { version: 1, confirmed_by: reschedulePatientOverlap.actorId,
+          confirmed_at: new Date().toISOString(), acknowledgement: decision.patient_overlap_acknowledgement,
+          start_at: start.toISOString(), end_at: end.toISOString(), conflicts: decision.patient_conflicts };
+        values.import_metadata = importMetadata;
       }
       const acknowledged = priorityAcknowledged || (supportOnly && previousMetadata.booking?.priority_acknowledged === true);
       assertPriorityAcknowledgement(solution, acknowledged);

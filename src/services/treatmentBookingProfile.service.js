@@ -88,6 +88,11 @@ function bookingErrorMiddleware(error, req, res, next) {
 function bookingErrorPayload(error) {
   const canForce = error?.code === 'booking_unavailable' && error?.details?.can_force === true;
   return { code: error.code, message: error.message, details: error.details || null, can_force: canForce,
+    ...(error?.code === 'booking_patient_overlap' ? {
+      can_confirm_patient_overlap: error.details?.can_confirm_patient_overlap === true,
+      patient_overlap_acknowledgement: error.details?.patient_overlap_acknowledgement || null,
+      patient_conflicts: error.details?.patient_conflicts || [],
+    } : {}),
     ...(canForce ? { reason: 'overlap', conflicts: [{ type: 'overlap', message: 'Recurso ocupado por otra cita de esta clínica' }] } : {}) };
 }
 

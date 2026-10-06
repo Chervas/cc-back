@@ -3213,6 +3213,8 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             selections: req.body?.booking_selection || {}, priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
             allowObsolete: true,
             force: wantsForce,
+            reschedulePatientOverlap: { actorId: Number(req.userData?.userId),
+                acknowledgement: req.body?.patient_overlap_acknowledgement },
             persist: async ({ values, existing, transaction }) => {
                 previousStatus = existing.estado;
                 return existing.update(values, { transaction });

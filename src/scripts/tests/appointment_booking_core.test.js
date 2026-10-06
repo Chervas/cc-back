@@ -53,6 +53,7 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
     if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = { booking: true }; malformed=true; } }
     const snapshot=metadata?.booking?.profile;
     return { ...row, booking_protected: metadata && ('booking' in metadata || 'program_session' in metadata || 'additional_staff' in metadata) ? 1 : 0,
+      patient_overlap_protected: Number(malformed || !!metadata?.clinical_component_parent || !!metadata?.clinical_component_children),
       booking_nonshareable: Number(malformed || !!metadata?.program_session || !!metadata?.additional_staff
         || snapshot?.version>=3 || !!metadata?.cliniccloud_source_booking?.nonshareable
         || !!snapshot?.phases?.some(phase=>phase.equipment_requirements?.length || phase.professionals?.mode==='all')) };
@@ -84,6 +85,10 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
       finally { tx.release.forEach((release) => release()); }
     } },
     Clinica: { findByPk: async (value) => clinics.find((row) => row.id_clinica === Number(value)) },
+    Usuario: { findAll: async options => query('patient-conflict-doctors', [
+      { id_usuario: 5, nombre: 'Profesional', apellidos: 'Principal' },
+      { id_usuario: 6, nombre: 'Ainhoa', apellidos: 'Ficticia' },
+    ], options) },
     TreatmentConsentRequirement: { findAll: async () => [] },
     Tratamiento: { findByPk: async () => ({ id_tratamiento: 3, clinica_id: 72, grupo_clinica_id: 2, origen: equipmentEnabled ? 'grupo' : 'clinica', activo: true, clinical_config: { booking_profile: bookingProfile } }),
       findAll: async options => query('diagnostic-treatments', [{ id_tratamiento: 3, clinica_id: 72, nombre: 'Presoterapia ficticia' },
@@ -431,7 +436,7 @@ test('force never bypasses technical reservations, another clinic, a patient ove
   for (const change of [ { clinica_id: 73 }, { paciente_id: 1 }, { import_metadata: { booking: { profile: profile(phase('one',[9],[5],'all')) } } },
     { source_system: 'treatment_program' }, { import_metadata: '{invalid' } ]) {
     const f = fixture({ bookingProfile: null, appointments: [{ ...ordinary, ...change }] });
-    await assert.rejects(f.reserve({ force: true }), error => error.code === 'booking_unavailable' && error.details.can_force === false);
+    await assert.rejects(f.reserve({ force: true }), error => error.code === (change.paciente_id === 1 ? 'booking_patient_overlap' : 'booking_unavailable') && error.details.can_force === false);
     assert.equal(f.state.persists, 0);
   }
   const f = fixture({ bookingProfile: null });
@@ -856,7 +861,7 @@ test('an occupied unit or patient prevents reconciliation without changing the i
       start_at: start, end_at: end, phase_key: 'other', equipment_id: 1,
     }] });
     const before = structuredClone(f.row);
-    await assert.rejects(f.reconcile(), e => e.code === 'booking_unavailable' && !e.details.can_force);
+    await assert.rejects(f.reconcile(), e => e.code === (patient ? 'booking_patient_overlap' : 'booking_unavailable') && !e.details.can_force);
     assert.deepEqual(f.state.appointments.find(a => a.id_cita === 80), before);
     assert.equal(f.state.persists, 0);
   }
@@ -963,4 +968,137 @@ test('linked phase selections reject unknown, duplicate aliases and ambiguous ma
   ambiguous.import_metadata.booking.profile.phases[0].key = 't1_p2';
   assert.throws(() => programBookingSelections(f.snapshot, ambiguous, { t1_p2: { doctor_id: 6 } }), { code: 'program_selection_invalid' });
   assert.deepEqual(programBookingSelections(f.snapshot, { ...f.row, import_metadata: JSON.stringify(f.row.import_metadata) }, f.originalSelections), f.canonicalSelections);
+});
+
+function patientOverlapFixture({ otherChanges = {}, bookingProfile = profile(phase('one')), originalChanges = {} } = {}) {
+  const original = { id_cita: 80, clinica_id: 72, paciente_id: 1, doctor_id: 5, instalacion_id: 9,
+    tratamiento_id: 3, inicio: '2030-01-07T08:50:00Z', fin: '2030-01-07T09:20:00Z', estado: 'info_enviada',
+    source_system: 'cliniccloud', es_provisional: 0, import_metadata: { source_contact_id: 'synthetic',
+      booking: { version: 1, profile: bookingProfile, phases: [{ key: 'one', installation_id: 9, doctor_ids: [5],
+        start_at: '2030-01-07T08:50:00Z', end_at: '2030-01-07T09:20:00Z' }] } }, ...originalChanges };
+  const other = { id_cita: 81, clinica_id: 72, paciente_id: 1, doctor_id: 6, instalacion_id: 10,
+    inicio: '2030-01-07T09:25:00Z', fin: '2030-01-07T09:55:00Z', estado: 'info_confirmada', ...otherChanges };
+  const f = fixture({ appointments: [original, other], bookingProfile,
+    occupancies: [{ appointment_id: 80, resource_key: 'doctor:5', doctor_id: 5, start_at: original.inicio, end_at: original.fin },
+      { appointment_id: 80, resource_key: 'installation:9', installation_id: 9, start_at: original.inicio, end_at: original.fin }] });
+  const options = { existingAppointmentId: 80, force: true, appointmentValues: { inicio: start, fin: end,
+    estado: 'info_enviada', reschedule_reason: 'administrative_error', updated_by: 7 },
+    reschedulePatientOverlap: { actorId: 7 } };
+  return { ...f, original, other, options };
+}
+
+async function requiredPatientConfirmation(f, options = f.options) {
+  let conflict;
+  await assert.rejects(f.reserve(options), error => { conflict = error; return error.code === 'booking_patient_overlap'; });
+  return conflict;
+}
+
+test('patient collision requires a separate exact receipt; force alone cannot acknowledge it', async () => {
+  const f = patientOverlapFixture();
+  const error = await requiredPatientConfirmation(f);
+  assert.equal(error.details.can_force, false);
+  assert.equal(error.details.can_confirm_patient_overlap, true);
+  assert.match(error.details.patient_overlap_acknowledgement, /^[a-f0-9]{64}$/);
+  assert.match(error.message, /con Ainhoa Ficticia el 07\/01\/2030 de 10:25 a 10:55\. Se solapa 5 minutos/);
+  assert.equal(f.state.persists, 0);
+  for (const acknowledgement of [true, false, 'true', 'false', 'a'.repeat(64)]) {
+    const again = await requiredPatientConfirmation(f, { ...f.options, reschedulePatientOverlap: { actorId: 7, acknowledgement } });
+    assert.equal(again.details.patient_overlap_acknowledgement, error.details.patient_overlap_acknowledgement);
+    assert.equal(f.state.persists, 0);
+  }
+  const saved = await f.reserve({ ...f.options, reschedulePatientOverlap: { actorId: 7, acknowledgement: error.details.patient_overlap_acknowledgement } });
+  assert.equal(new Date(saved.inicio).toISOString(), start);
+  assert.equal(saved.reschedule_reason, 'administrative_error');
+  assert.equal(saved.import_metadata.source_contact_id, 'synthetic');
+  assert.equal(saved.import_metadata.booking.profile.version, 1);
+  assert.equal(saved.import_metadata.patient_overlap_confirmation.confirmed_by, 7);
+  assert.deepEqual(saved.import_metadata.patient_overlap_confirmation.conflicts.map(row => row.appointment_id), [81]);
+  assert.equal(f.state.persists, 1); assert.equal(f.state.commits, 1);
+  assert.equal(f.state.occupancies.filter(row => row.appointment_id === 80).length, 2);
+  assert(f.state.locks.some(([, key]) => key === 'patient:1'));
+});
+
+test('patient acknowledgement cannot be reused after another collision, actor, resources or proposal changes', async () => {
+  for (const change of ['conflict-time', 'new-conflict', 'actor', 'target-time', 'target-installation', 'resource-conflict']) {
+    const f = patientOverlapFixture({ bookingProfile: profile(phase('one', [9, 10])) });
+    const error = await requiredPatientConfirmation(f);
+    const options = { ...f.options, reschedulePatientOverlap: { actorId: 7, acknowledgement: error.details.patient_overlap_acknowledgement } };
+    if (change === 'conflict-time') f.state.appointments.find(row => row.id_cita === 81).fin = '2030-01-07T09:50:00Z';
+    if (change === 'new-conflict') f.state.appointments.push({ ...f.other, id_cita: 82, inicio: '2030-01-07T09:28:00Z' });
+    if (change === 'actor') { options.appointmentValues = { ...options.appointmentValues, updated_by: 8 }; options.reschedulePatientOverlap.actorId = 8; }
+    if (change === 'target-time') options.appointmentValues = { ...options.appointmentValues, inicio: '2030-01-07T09:05:00Z', fin: '2030-01-07T09:35:00Z' };
+    if (change === 'target-installation') options.appointmentValues = { ...options.appointmentValues, instalacion_id: 10 };
+    if (change === 'resource-conflict') f.state.appointments.push({ ...f.other, id_cita: 82, paciente_id: 2, doctor_id: 5, instalacion_id: 12 });
+    const again = await requiredPatientConfirmation(f, options);
+    assert.notEqual(again.details.patient_overlap_acknowledgement, error.details.patient_overlap_acknowledgement, change);
+    assert.equal(f.state.persists, 0); assert.equal(f.state.commits, 0);
+  }
+});
+
+test('patient conflict facts do not authorize creation, support edits, protected programs, attention or machine reservations', async () => {
+  for (const changes of [
+    { otherChanges: { source_system: 'treatment_program' } },
+    { otherChanges: { voucher_id: 10 } },
+    { otherChanges: { es_provisional: 1 } },
+    { otherChanges: { import_metadata: { additional_staff: { version: 1, ids: [5] } } } },
+    { otherChanges: { import_metadata: { booking: { profile: profile(phase('one', [10], [6], 'all')) } } } },
+    { otherChanges: { import_metadata: { booking: { profile: { version: 3, phases: [] } } } } },
+    { otherChanges: { import_metadata: { clinical_component_parent: { appointment_id: 92 } } } },
+    { originalChanges: { es_provisional: 1 } },
+    { originalChanges: { import_metadata: { clinical_component_children: { receipts: [] } } } },
+  ]) {
+    const f = patientOverlapFixture(changes), error = await requiredPatientConfirmation(f);
+    assert.equal(error.details.can_confirm_patient_overlap, false);
+    assert.equal(error.details.patient_overlap_acknowledgement, null);
+    assert.equal(f.state.persists, 0);
+  }
+  const creation = patientOverlapFixture();
+  const createError = await requiredPatientConfirmation(creation, { appointmentValues: { ...creation.values, updated_by: 7 }, force: true,
+    reschedulePatientOverlap: { actorId: 7 } });
+  assert.equal(createError.details.can_confirm_patient_overlap, false);
+});
+
+test('patient conflicts are clinic-scoped and names never come from a foreign appointment', async () => {
+  const f = patientOverlapFixture({ otherChanges: { clinica_id: 73, doctor_id: 999, titulo: 'Foreign patient', nota: 'Foreign note' } });
+  const error = await requiredPatientConfirmation(f);
+  const { bookingErrorPayload } = require('../../services/treatmentBookingProfile.service');
+  const body = bookingErrorPayload(error);
+  assert.equal(body.can_confirm_patient_overlap, false);
+  assert.equal(body.patient_overlap_acknowledgement, null);
+  assert.deepEqual(body.patient_conflicts, []);
+  assert.doesNotMatch(JSON.stringify(body), /999|81|Foreign|10:25|10:55/);
+  assert.equal(f.state.calls.filter(([name]) => name === 'patient-conflict-doctors').length, 0);
+});
+
+test('cancelled patient appointments, the moved appointment itself and touching intervals do not need confirmation', async () => {
+  for (const otherChanges of [{ estado: 'cancelada' }, { inicio: end, fin: '2030-01-07T10:00:00Z' },
+    { inicio: '2030-01-07T08:30:00Z', fin: start }]) {
+    const f = patientOverlapFixture({ otherChanges });
+    await f.reserve(f.options);
+    assert.equal(f.state.persists, 1);
+    assert.equal(f.state.appointments.find(row => row.id_cita === 80).import_metadata.patient_overlap_confirmation, undefined);
+  }
+});
+
+test('an acknowledged patient overlap cannot bypass a new closure or busy support', async () => {
+  for (const restriction of ['closure', 'support']) {
+    const f = patientOverlapFixture();
+    const error = await requiredPatientConfirmation(f);
+    const options = { ...f.options, reschedulePatientOverlap: { actorId: 7, acknowledgement: error.details.patient_overlap_acknowledgement } };
+    if (restriction === 'closure') f.db.ClinicaHorario.findAll = async () => hours.map(row => ({ ...row, hora_fin: '10:00' }));
+    else options.additionalStaffIds = [6];
+    await assert.rejects(f.reserve(options), error => error.code === 'booking_unavailable' && error.details.can_force === false);
+    assert.equal(f.state.persists, 0);
+  }
+});
+
+test('request metadata cannot manufacture or erase the stored patient overlap receipt', async () => {
+  const f = fixture();
+  const saved = await f.reserve({ appointmentValues: { ...f.values, import_metadata: { patient_overlap_confirmation: { confirmed_by: 999 } } } });
+  assert.equal(saved.import_metadata.patient_overlap_confirmation, undefined);
+  const prior = { version: 1, confirmed_by: 7, start_at: start, end_at: end };
+  f.state.appointments.find(row => row.id_cita === saved.id_cita).import_metadata.patient_overlap_confirmation = prior;
+  const edited = await f.reserve({ existingAppointmentId: saved.id_cita, appointmentValues: {
+    import_metadata: { patient_overlap_confirmation: { confirmed_by: 999 } } } });
+  assert.deepEqual(edited.import_metadata.patient_overlap_confirmation, prior);
 });

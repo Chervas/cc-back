@@ -22,6 +22,16 @@ test('HTTP has no adapter for operator-only documentary machinery assignment', (
   assert.doesNotMatch(controller, /importEquipmentAssignment|importedEquipmentProfile/);
 });
 
+test('HTTP only maps patient overlap confirmation in the authenticated reschedule command, not creation or legacy writes', () => {
+  const occurrences = controller.match(/reschedulePatientOverlap:/g) || [];
+  assert.equal(occurrences.length, 1);
+  const reschedule = controller.slice(controller.indexOf('exports.reagendarCita ='), controller.indexOf('exports.resolveImportedTreatment ='));
+  assert.match(reschedule, /if \(await denyAppointmentManageAccessIfNeeded\(req, res, cita.clinica_id\)\) return/);
+  assert.match(reschedule, /reschedulePatientOverlap: \{ actorId: Number\(req.userData\?\.userId\),\s*acknowledgement: req.body\?\.patient_overlap_acknowledgement \}/);
+  assert(reschedule.indexOf('reschedulePatientOverlap:') > reschedule.indexOf('if (bookingEnabled)'));
+  assert(reschedule.indexOf('reschedulePatientOverlap:') < reschedule.indexOf('} else {\n        const changes'));
+});
+
 test('linked-source state, requested-change and reschedule endpoints fail closed before legacy writes with flags off', async () => {
   const nativeRequire = createRequire(require.resolve('../../controllers/citas.controller.js'));
   const appointment = { id_cita: 5, clinica_id: 72, paciente_id: 3, voucher_id: 8, estado: 'cambio_solicitado',

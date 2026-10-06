@@ -197,7 +197,17 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
   const patientBusy = patientId ? await db.CitaPaciente.findAll({ where: {
     paciente_id: patientId, estado: { [Op.ne]: 'cancelada' }, inicio: { [Op.lt]: end }, fin: { [Op.gt]: start },
     ...ignore('id_cita'),
-  }, attributes: ['inicio', 'fin'], transaction }).then(rows => rows.map(row => ({ start: row.inicio, end: row.fin }))) : [];
+  }, attributes: ['id_cita', 'clinica_id', 'doctor_id', 'inicio', 'fin', 'estado', 'source_system', 'voucher_id', 'es_provisional',
+    nonShareableBookingAttribute(db, 'CitaPaciente'),
+    [db.Sequelize.fn('COALESCE', db.Sequelize.fn('JSON_CONTAINS_PATH', db.Sequelize.col('CitaPaciente.import_metadata'),
+      'one', db.Sequelize.literal("'$.clinical_component_parent'"), db.Sequelize.literal("'$.clinical_component_children'")), 0), 'patient_overlap_protected'],
+  ], transaction }).then(rows => rows.map(row => ({
+      start: row.inicio, end: row.fin, appointment_id: Number(row.id_cita), clinic_id: Number(row.clinica_id),
+      doctor_id: row.doctor_id == null ? null : Number(row.doctor_id), estado: row.estado,
+      source_system: row.source_system, voucher_id: row.voucher_id, es_provisional: row.es_provisional,
+      booking_nonshareable: row.get ? row.get('booking_nonshareable') : row.booking_nonshareable,
+      patient_overlap_protected: row.get ? row.get('patient_overlap_protected') : row.patient_overlap_protected,
+    }))) : [];
   return { doctors, installations: cabins, clinicWindows, installationKeys: mapping.keys, mapping, timeZone, patientBusy,
     ...(includeDiagnosticLabels ? { personalBlocks: projectPersonalBlocks(doctorBlocks.filter(row => doctors.has(Number(row.doctor_id))
       && (row.clinica_id == null || Number(row.clinica_id) === clinicId || row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1)), calendarDates, timeZone) } : {}),
