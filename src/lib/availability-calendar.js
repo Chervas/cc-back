@@ -285,6 +285,7 @@ const buildDoctorAvailabilityContext = ({
   return {
     docWins: mergeWindows(clinicWins),
     doctorId: Number(doctorId),
+    agendaFlexible: require('./flexible-agenda').isFlexibleDoctor(dc),
     dcMissing: false,
     outOfHoursMessage: message
   };

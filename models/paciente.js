@@ -47,6 +47,9 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false
     },
     dni: DataTypes.STRING,
+    numero_historia: { type: DataTypes.STRING(32), allowNull: true },
+    historia_scope: { type: DataTypes.STRING(64), allowNull: true },
+    notas_paciente: { type: DataTypes.TEXT, allowNull: true },
     telefono_movil: {
       type: DataTypes.STRING,
       allowNull: true
@@ -107,7 +110,16 @@ module.exports = (sequelize, DataTypes) => {
     sequelize,
     modelName: 'Paciente',
     tableName: 'Pacientes',
-    timestamps: true
+    timestamps: true,
+    hooks: {
+      async beforeCreate(patient, options) {
+        if (!patient.numero_historia) {
+          const fields = await require('../src/services/patientHistoryNumber.service')
+            .allocatePatientHistoryNumber(sequelize, patient.clinica_id, options.transaction);
+          patient.set(fields);
+        }
+      },
+    },
   });
   return Paciente;
 };

@@ -16,7 +16,7 @@ function isFree(resource, start, end) {
  * ALL staff are required for the entire appointment, not merely their phase.
  * Inputs contain only schedules/occupancy, never patients or clinical notes.
  */
-function solveBookingProfile({ profile: input, start, doctors, installations, equipment = null, clinicWindows = null, selections = {}, allowOverlap = false }) {
+function solveStrictBookingProfile({ profile: input, start, doctors, installations, equipment = null, clinicWindows = null, selections = {}, allowOverlap = false }) {
   const profile = normalizeBookingProfile(input);
   const appointmentStart = new Date(start);
   const appointmentEnd = new Date(appointmentStart.getTime()
@@ -118,6 +118,23 @@ function solveBookingProfile({ profile: input, start, doctors, installations, eq
     ...(allowOverlap ? { requires_overlap_acknowledgement: phases.some(phase =>
       !isFree(installations.get(phase.installation_id), new Date(phase.start_at), new Date(phase.end_at))
       || (!phase.staff_intervals && phase.doctor_ids.some(id => !isFree(doctors.get(id), new Date(phase.start_at), new Date(phase.end_at))))) } : {}) };
+}
+
+function solveBookingProfile(options) {
+  const strict = solveStrictBookingProfile(options);
+  if (strict || !options.allowOverlap) return strict;
+  const profile = normalizeBookingProfile(options.profile);
+  const relaxed = require('./flexible-agenda').flexibleProfileContext({ ...options, profile });
+  if (!relaxed) return null;
+  const solution = solveStrictBookingProfile({ ...options, ...relaxed });
+  if (!solution) return null;
+  const conflict = require('./booking-grid-diagnostics').explainUnavailableStart({
+    profile, context: options, start: new Date(options.start), selections: options.selections,
+  });
+  solution.warnings.push({ code: 'FLEXIBLE_AGENDA', message: conflict?.details?.message
+    || 'Hay un conflicto de agenda. Confirma que quieres reservar igualmente.' });
+  solution.requires_overlap_acknowledgement = true;
+  return solution;
 }
 
 function occupancyForSolution(solution, installationKeys = new Map()) {

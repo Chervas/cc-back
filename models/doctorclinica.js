@@ -16,6 +16,8 @@ module.exports = (sequelize, DataTypes) => {
     // Eje 1: si el profesional recibe citas en esta clínica (agenda).
     recibe_citas: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     allow_overlap_confirmation: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    // Server-owned, per-clinic exception. Does not grant user permissions.
+    agenda_flexible: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     activo: { type: DataTypes.BOOLEAN, defaultValue: true }
   }, {
     sequelize,

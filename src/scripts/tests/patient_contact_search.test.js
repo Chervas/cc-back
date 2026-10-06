@@ -53,3 +53,14 @@ test('el origen de auditoría falla a un valor canónico', () => {
   assert.equal(normalizeOperationalSource('QUICK CHAT'), 'quick_chat');
   assert.equal(normalizeOperationalSource('untrusted-source'), 'patient_modal');
 });
+
+test('NHC digits use exact identifiers while a full phone remains searchable', () => {
+  for (const number of ['1', '00123', '14526']) {
+    const result = buildFastPatientSearchWhere(number);
+    assert.equal(result.queryType, 'history_number');
+    assert.equal(result.where.numero_historia, number.replace(/^0+/, ''));
+  }
+  const numeric = buildFastPatientSearchWhere('654695552');
+  assert.equal(numeric.where[Op.or][0].numero_historia, '654695552');
+  assert.ok(numeric.where[Op.or][1].telefono_movil[Op.in].includes('654695552'));
+});

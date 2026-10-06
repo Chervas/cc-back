@@ -170,6 +170,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     doctorLinks.forEach((doctor) => {
       const id = Number(doctor.doctor_id);
       if (!doctors.has(id)) doctors.set(id, { name: [doctor.doctor?.nombre, doctor.doctor?.apellidos].filter(Boolean).join(' '),
+        agenda_flexible: require('../lib/flexible-agenda').isFlexibleDoctor(doctor),
         allow_overlap_confirmation: doctor.allow_overlap_confirmation === true || doctor.allow_overlap_confirmation === 1,
         explicit_overlap_policy: doctor.allow_overlap_confirmation != null,
         windows: [], busy: [...(busy.get(`doctor:${id}`) || [])] });

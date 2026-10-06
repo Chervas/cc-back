@@ -19,6 +19,7 @@ const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staf
 const { bookingCapabilities, bookingError, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
 const { resourceAppointments, resourceInstallationBlocks } = require('../services/appointmentResourceCalendar.service');
 const { buildLegacySlots, loadLegacyAvailabilitySnapshot } = require('../lib/availability-request-snapshot');
+const { allowFlexibleConflicts } = require('../lib/flexible-agenda');
 const { supportConflictsForSlot, installationStaffConflicts } = require('../lib/availability-support-conflicts');
 const {
   parseClinicConfig,
@@ -535,6 +536,11 @@ const buildUnavailableIntervals = ({
     conflicts.push(...installationStaffConflicts({ inst, doctorId, additionalStaffIds, supportContext, clinicaId }),
       ...supportConflictsForSlot({ additionalStaffIds, supportContext, start, end, clinicaId, timeZone }));
 
+    if (doctorCtx.agendaFlexible) {
+      allowFlexibleConflicts(conflicts, true);
+      for (let i = conflicts.length - 1; i >= 0; i--) if (conflicts[i].can_force) conflicts.splice(i, 1);
+    }
+
     if (!conflicts.length) {
       if (current) {
         intervals.push(current);
@@ -660,7 +666,8 @@ exports.check = asyncHandler(async (req, res) => {
       const overlapSolution = !additionalStaffIds.length ? solveBookingProfile({ profile: bookingProfile, start, ...context, selections, allowOverlap: true }) : null;
       const canForce = !!overlapSolution && new Date(overlapSolution.end_at).getTime() === end.getTime();
       if (canForce) return res.status(409).json({ available: false, reason: 'overlap', can_force: true,
-        message: 'La cita se superpone con otra reserva. Confirma la superposición antes de guardar.',
+        message: overlapSolution.warnings.find(warning => warning.code === 'FLEXIBLE_AGENDA')?.message
+          || 'La cita se superpone con otra reserva. Confirma la superposición antes de guardar.',
         conflicts: [{ type: 'overlap', message: 'Profesional o consulta compartida ocupados' }],
         resource_conflicts: [{ resource_type: 'staff_pool', code: 'STAFF_OVERLAP', can_force: true,
           details: { message: 'Superposición autorizada por la configuración del profesional y la consulta.' } }] });
@@ -757,6 +764,7 @@ exports.check = asyncHandler(async (req, res) => {
 
   // Staff (doctor) - de momento solo doctor_id (personal_ids[] vendrá en 18.12)
   const doctorId = doctor_id ? parseIntSafe(doctor_id) : null;
+  let agendaFlexible = false;
   if (doctorId) {
 
     const dc = await db.DoctorClinica.findOne({
@@ -772,6 +780,7 @@ exports.check = asyncHandler(async (req, res) => {
       fechaLocal: fechaLocalCheck,
       timeZone: clinicTimezone,
       });
+    agendaFlexible = doctorCtx.agendaFlexible === true;
 
     if (doctorCtx.dcMissing) {
       conflicts.push({
@@ -863,6 +872,7 @@ exports.check = asyncHandler(async (req, res) => {
     }
   }
 
+  allowFlexibleConflicts(conflicts, agendaFlexible);
   if (additionalStaffIds.length) conflicts.forEach(conflict => { conflict.can_force = false; });
   const canForce = conflicts.length > 0 && conflicts.every((c) => !!c.can_force);
   const wantsForce = parseBool(force);

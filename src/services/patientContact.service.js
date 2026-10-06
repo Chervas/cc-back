@@ -87,12 +87,17 @@ function buildNamePrefixWhere(query) {
 
 function buildFastPatientSearchWhere(query) {
   const normalized = normalizeContactSearchQuery(query);
+  if (/^\d{1,32}$/.test(normalized) && normalized.length < 6) {
+    return { queryType: 'history_number', where: { numero_historia: normalized.replace(/^0+/, '') }, normalizedPhone: null };
+  }
   const queryType = classifyContactSearchQuery(normalized);
   if (queryType === 'phone') {
     const candidates = getPhoneLookupCandidates(normalized);
     return {
       queryType,
-      where: candidates.length ? { telefono_movil: { [Op.in]: candidates } } : null,
+      where: candidates.length ? (/^\d{1,32}$/.test(normalized)
+        ? { [Op.or]: [{ numero_historia: normalized.replace(/^0+/, '') }, { telefono_movil: { [Op.in]: candidates } }] }
+        : { telefono_movil: { [Op.in]: candidates } }) : null,
       normalizedPhone: normalizePhoneDigits(normalized),
     };
   }
@@ -179,7 +184,7 @@ async function findPatientContactTargets({
         patientClinicScopeWhere(clinicIds),
       ],
     },
-    attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'telefono_movil', 'email', 'foto', 'clinica_id'],
+    attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'numero_historia', 'telefono_movil', 'email', 'foto', 'clinica_id'],
     include: [{
       model: PacienteClinica,
       as: 'clinicasVinculadas',

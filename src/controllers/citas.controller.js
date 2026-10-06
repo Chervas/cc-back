@@ -1200,6 +1200,7 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
             public_id: plain.paciente.public_id,
             nombre: plain.paciente.nombre,
             apellidos: plain.paciente.apellidos,
+            numero_historia: plain.paciente.numero_historia || null,
             telefono_movil: plain.paciente.telefono_movil,
             foto: plain.paciente.foto,
             ...preferredLanguagePayload(plain.paciente.idioma_preferido),
@@ -1799,6 +1800,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
 
     const resourceConflicts = [];
     const legacyConflicts = [];
+    let agendaFlexible = false;
 
     const addLegacy = (type, message) => legacyConflicts.push({ type, message });
     const addResource = (conflict) => resourceConflicts.push(conflict);
@@ -1889,6 +1891,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
             where: { doctor_id, clinica_id: clinicaId, activo: true },
             include: [{ model: DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }]
         });
+        agendaFlexible = require('../lib/flexible-agenda').isFlexibleDoctor(dc);
         const doctorCtx = buildDoctorAvailabilityContext({
             doctorId: doctor_id,
             dc: dc || null,
@@ -1983,6 +1986,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
         }
     }
 
+    require('../lib/flexible-agenda').allowFlexibleConflicts(resourceConflicts, agendaFlexible);
     const canForce = resourceConflicts.length > 0 && resourceConflicts.every((c) => !!c.can_force);
 
     return { resourceConflicts, legacyConflicts, canForce };
@@ -2372,7 +2376,7 @@ exports.getAppointmentHubList = asyncHandler(async (req, res) => {
         attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'inicio', 'fin', 'estado', 'nota', 'motivo', 'tipo_cita', 'tratamiento_id', 'doctor_id', 'instalacion_id', 'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional', 'source_system', 'source_reference', 'import_metadata', 'voucher_id', 'hold_expires_at', 'updated_at'],
         include: [
             // Only card identity; contact/clinical data still belongs to detail.
-            { model: Paciente, as: 'paciente', required: false, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos'] },
+            { model: Paciente, as: 'paciente', required: false, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'numero_historia'] },
             { model: LeadIntake, as: 'lead', required: false, attributes: ['id', 'nombre'] },
             { model: Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre', 'clinical_config'] },
             { model: Instalacion, as: 'instalacion', required: false, attributes: ['id', 'nombre'] },
@@ -2528,7 +2532,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
             {
                 model: Paciente,
                 as: 'paciente',
-                attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'telefono_movil', 'foto', 'idioma_preferido'],
+                attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'numero_historia', 'telefono_movil', 'foto', 'idioma_preferido'],
             },
             {
                 model: Instalacion,

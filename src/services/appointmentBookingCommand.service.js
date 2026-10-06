@@ -48,10 +48,12 @@ function legacyProfile(values, duration) {
 function solveLegacy(values, context, force = false) {
   const start = new Date(values.inicio);
   const end = new Date(values.fin);
-  if (values.instalacion_id && !installationAllowsStaff(context.installations.get(Number(values.instalacion_id)),
+  const flexible = force && context.doctors.get(Number(values.doctor_id))?.agenda_flexible === true;
+  if (!flexible && values.instalacion_id && !installationAllowsStaff(context.installations.get(Number(values.instalacion_id)),
     values.doctor_id ? [Number(values.doctor_id)] : [])) return null;
-  const checked = resource => resourceForConfirmedOverlap(resource, start, end, force);
-  if ((context.clinicWindows && !isFree({ windows: context.clinicWindows }, start, end))
+  const checked = resource => flexible ? require('../lib/flexible-agenda').flexibleResource(resource, start, end)
+    : resourceForConfirmedOverlap(resource, start, end, force);
+  if ((!flexible && context.clinicWindows && !isFree({ windows: context.clinicWindows }, start, end))
     || (values.doctor_id && !isFree(checked(context.doctors.get(Number(values.doctor_id))), start, end))
     || (values.instalacion_id && !isFree(checked(context.installations.get(Number(values.instalacion_id))), start, end))) return null;
   return { start_at: start.toISOString(), end_at: end.toISOString(), warnings: [], requires_priority_acknowledgement: false,
@@ -387,7 +389,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
           metadataObject((session || trustedProgramSession).snapshot), previous, chosen);
       }
       const supportFree = extraStaff.every(id => isFree(context.doctors.get(id), start, end));
-      const permitsProfileForce = !extraStaff.length && !session && !trustedProgramSession && !preparedSeries;
+      const permitsProfileForce = !extraStaff.length && ((!session && !trustedProgramSession && !preparedSeries)
+        || context.doctors.get(Number(values.doctor_id))?.agenda_flexible === true);
       solution = supportFree ? (configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen, allowOverlap: permitsProfileForce && force === true })
         : solveLegacy(values, context, !extraStaff.length && force === true)) : null;
       if (solution && extraStaff.length && solution.phases.some(phase =>

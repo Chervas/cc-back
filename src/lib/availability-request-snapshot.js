@@ -40,12 +40,14 @@ const subtractIntervals = (windows, blocks) => {
 function buildLegacySlots({ baseStart, baseEnd, clinicHasSchedule, clinicWins, inst, instWins,
   doctorCtx, additionalStaffIds = [], supportContext, timeZone, durMin, stepMin, maxSlots,
   instBlocksRows = [], instCitasRows = [], docBlocksRows = [], docCitasRows = [] }) {
-  if (inst && !installationAllowsStaff(inst, [doctorCtx?.doctorId, ...additionalStaffIds].filter(Boolean))) return [];
+  const flexible = doctorCtx?.agendaFlexible === true;
+  if (inst && !installationAllowsStaff(inst, [flexible ? null : doctorCtx?.doctorId, ...additionalStaffIds].filter(Boolean))
+    && (!flexible || additionalStaffIds.length)) return [];
   let windows = [{ start: baseStart, end: baseEnd }];
-  if (clinicHasSchedule) windows = intersectWindows(windows, clinicWins);
-  if (inst) windows = intersectWindows(windows, instWins);
+  if (clinicHasSchedule && !flexible) windows = intersectWindows(windows, clinicWins);
+  if (inst && !flexible) windows = intersectWindows(windows, instWins);
   if (doctorCtx?.dcMissing) windows = [];
-  else if (Array.isArray(doctorCtx?.docWins)) windows = intersectWindows(windows, doctorCtx.docWins);
+  else if (!flexible && Array.isArray(doctorCtx?.docWins)) windows = intersectWindows(windows, doctorCtx.docWins);
   const blocks = [];
   for (const id of additionalStaffIds) {
     const person = supportContext?.doctors.get(id);
@@ -53,7 +55,7 @@ function buildLegacySlots({ baseStart, baseEnd, clinicHasSchedule, clinicWins, i
     blocks.push(...(person?.busy || []).map(row => ({ start: new Date(row.start), end: new Date(row.end) })));
   }
   for (const row of [...instBlocksRows, ...docBlocksRows]) blocks.push({ start: new Date(row.fecha_inicio), end: new Date(row.fecha_fin) });
-  for (const row of [...instCitasRows, ...docCitasRows]) blocks.push({ start: new Date(row.inicio), end: new Date(row.fin) });
+  if (!flexible) for (const row of [...instCitasRows, ...docCitasRows]) blocks.push({ start: new Date(row.inicio), end: new Date(row.fin) });
   const slots = [];
   for (const window of subtractIntervals(windows, blocks)) {
     for (let cursor = window.start.getTime(); cursor + durMin * 60000 <= window.end.getTime(); cursor += stepMin * 60000) {

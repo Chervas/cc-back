@@ -358,7 +358,7 @@ async function loadAppointmentMaps(rows, clinicMap) {
     patientIds.length && Paciente
       ? Paciente.findAll({
           where: scopedWhere('id_paciente', patientIds),
-          attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto'],
+          attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'numero_historia', 'foto'],
           raw: true,
         })
       : [],
@@ -413,6 +413,7 @@ function mapAppointment(row, maps, now) {
     appointmentId,
     patientId: Number(row.paciente_id) || null,
     patientName: fullName(patient, `Paciente ${row.paciente_id}`),
+    patientHistoryNumber: patient?.numero_historia || null,
     patientAvatar: patient?.foto || null,
     doctorId: Number(row.doctor_id) || null,
     doctorName: fullName(doctor, 'Profesional'),

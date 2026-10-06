@@ -226,6 +226,7 @@ function redactEmbeddedPatient(paciente) {
     'dni', 'telefono_movil', 'email', 'telefono_secundario', 'foto',
     'fecha_nacimiento', 'edad', 'estatura', 'peso', 'sexo', 'profesion',
     'alergias', 'antecedentes', 'medicacion',
+    'numero_historia', 'notas_paciente', 'historia_scope',
   ];
   const redacted = {
     ...plain,
@@ -1001,6 +1002,7 @@ exports.searchPacientes = async (req, res) => {
 
     const whereOr = [];
     if (query) {
+      if (/^\d{1,32}$/.test(query)) whereOr.push({ numero_historia: query.replace(/^0+/, '') });
       whereOr.push(
         ...fieldLike('nombre', query),
         ...fieldLike('apellidos', query),
@@ -1075,7 +1077,10 @@ exports.searchPacientes = async (req, res) => {
           include: [{ model: Clinica, as: 'clinica' }]
         }
       ],
-      order: [['nombre', 'ASC']],
+      order: /^\d{1,32}$/.test(query) ? [
+        [literal(`\`Paciente\`.\`numero_historia\` = ${Paciente.sequelize.escape(query.replace(/^0+/, ''))}`), 'DESC'],
+        ['nombre', 'ASC'],
+      ] : [['nombre', 'ASC']],
       limit: 20,
       distinct: true
     });
@@ -1130,10 +1135,11 @@ exports.searchPatientContactTargets = async (req, res) => {
 
 exports.checkDuplicates = async (req, res) => {
   try {
-    const { telefono, email, clinica_id, scope = 'grupo' } = req.query;
+    const { telefono, email, nombre, apellidos, clinica_id, scope = 'grupo' } = req.query;
     const normPhone = normalizePhone(telefono);
     const normEmail = normalizeEmail(email);
-    if (!normPhone && !normEmail) {
+    const fullName = normalizeSearchTerm([nombre, apellidos].filter(Boolean).join(' '));
+    if (!normPhone && !normEmail && fullName.length < 4) {
       auditPatientResponse(req, {});
       return res.json({ exists: false });
     }
@@ -1142,30 +1148,40 @@ exports.checkDuplicates = async (req, res) => {
     }
     await assertPatientEditAccess(req, clinica_id);
 
-    const pacienteExistente = await findDuplicatePaciente({
-      telefono,
-      email,
-      clinicaId: clinica_id,
-      scope
-    });
-
-    if (!pacienteExistente) {
+    const criteria = buildDuplicateContactOrClause({ telefono, email, normPhone, normEmail });
+    if (fullName.length >= 4) criteria.push(literal(`${accentFoldSql("TRIM(CONCAT_WS(' ', `Paciente`.`nombre`, `Paciente`.`apellidos`))")} = ${Paciente.sequelize.escape(fullName)}`));
+    const groupClinics = normalizeClinicIds(await getClinicaIdsForScope(clinica_id, scope));
+    const candidates = await Paciente.findAll({ where: { [Op.and]: [{ [Op.or]: criteria }, { [Op.or]: [
+      { clinica_id: { [Op.in]: groupClinics } },
+      literal(`EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id=Paciente.id_paciente AND pc.clinica_id IN (${groupClinics.join(',') || '0'}))`),
+    ] }] }, include: [{ model: Clinica, as: 'clinica' },
+      { model: PacienteClinica, as: 'clinicasVinculadas', required: false, include: [{ model: Clinica, as: 'clinica' }] }],
+      limit: 10, order: [['id_paciente','ASC']], distinct: true });
+    if (!candidates.length) {
       auditPatientResponse(req, { clinicIds: normalizeClinicIds([clinica_id]), checks: [{ featureKey: 'patients.edit', clinicIds: normalizeClinicIds([clinica_id]) }] });
       return res.json({ exists: false });
     }
 
-    const duplicatePayload = await buildPacienteDuplicadoPayloadForRequest(req, {
-      paciente: pacienteExistente,
-      clinicaId: parseInt(clinica_id, 10),
-      normPhone,
-      normEmail,
-    });
-    const duplicateClinicIds = duplicatePayload.privacy_redacted ? normalizeClinicIds([clinica_id]) : patientClinicIds(duplicatePayload.paciente);
-    auditPatientResponse(req, { clinicIds: duplicateClinicIds, patients: duplicatePayload.paciente ? [duplicatePayload.paciente] : [], resultCount: 1,
-      includesSensitive: !duplicatePayload.privacy_redacted,
+    const matches = await Promise.all(candidates.map(async candidate => {
+      const reasons = [];
+      if (normPhone && normalizePhone(candidate.telefono_movil) === normPhone) reasons.push('Mismo teléfono');
+      if (normEmail && normalizeEmail(candidate.email) === normEmail) reasons.push('Mismo correo');
+      if (fullName && normalizeSearchTerm(`${candidate.nombre} ${candidate.apellidos}`) === fullName) reasons.push('Mismo nombre');
+      const payload = await buildPacienteDuplicadoPayloadForRequest(req, { paciente: candidate,
+        clinicaId: parseInt(clinica_id,10), normPhone, normEmail });
+      return { exists: true, ...payload, reasons, contactMatch: reasons.some(reason => reason !== 'Mismo nombre') };
+    }));
+    matches.sort((a, b) => Number(b.contactMatch) - Number(a.contactMatch));
+    const duplicatePayload = matches[0];
+    const sensitiveMatches = matches.filter(match => !match.privacy_redacted);
+    const sensitiveClinicIds = normalizeClinicIds(sensitiveMatches.flatMap(match => patientClinicIds(match.paciente)));
+    const duplicateClinicIds = sensitiveClinicIds.length ? sensitiveClinicIds : normalizeClinicIds([clinica_id]);
+    auditPatientResponse(req, { clinicIds: duplicateClinicIds, patients: matches.map(match => match.paciente).filter(Boolean), resultCount: matches.length,
+      includesSensitive: sensitiveMatches.length > 0,
       checks: [{ featureKey: 'patients.edit', clinicIds: normalizeClinicIds([clinica_id]) },
-        ...(!duplicatePayload.privacy_redacted ? [{ featureKey: 'patients.sensitive.view', clinicIds: duplicateClinicIds }] : [])] });
-    return res.json({ exists: true, ...duplicatePayload });
+        ...(sensitiveMatches.length ? [{ featureKey: 'patients.sensitive.view', clinicIds: sensitiveClinicIds }] : [])] });
+    return res.json({ exists: true, ...duplicatePayload, reasons: matches[0].reasons,
+      contactMatch: matches[0].contactMatch, matches });
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
@@ -2166,7 +2182,7 @@ exports.updatePaciente = async (req, res) => {
       }
     }
 
-    const fieldsToUpdate = ['nombre', 'apellidos', 'dni', 'telefono_movil', 'email', 'telefono_secundario', 'foto', 'fecha_nacimiento', 'edad', 'estatura', 'peso', 'sexo', 'profesion', 'fecha_alta', 'fecha_baja', 'alergias', 'antecedentes', 'medicacion', 'idioma_preferido', 'paciente_conocido', 'como_nos_conocio', 'procedencia', 'clinica_id'];
+    const fieldsToUpdate = ['nombre', 'apellidos', 'dni', 'telefono_movil', 'email', 'telefono_secundario', 'foto', 'fecha_nacimiento', 'edad', 'estatura', 'peso', 'sexo', 'profesion', 'fecha_alta', 'fecha_baja', 'alergias', 'antecedentes', 'medicacion', 'notas_paciente', 'idioma_preferido', 'paciente_conocido', 'como_nos_conocio', 'procedencia', 'clinica_id'];
     fieldsToUpdate.forEach(field => {
       if (req.body[field] !== undefined) {
         if (field === 'telefono_movil') {
