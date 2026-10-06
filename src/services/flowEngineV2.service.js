@@ -4798,6 +4798,9 @@ async function handleSendWhatsapp(node, context, runtime) {
 
       const nestedError = providerError?.error?.error || providerError?.error || {};
       const providerMessage = cleanString(nestedError?.message) || cleanString(sendErr?.message) || 'whatsapp_send_failed';
+      await require('./appointmentWhatsappDeliveryAlert.service').reconcileAppointmentWhatsappDelivery({
+        message: msg, mappedStatus: 'failed', clinicId,
+      });
       throw new Error(`whatsapp_send_failed:${providerMessage}`);
     }
   }

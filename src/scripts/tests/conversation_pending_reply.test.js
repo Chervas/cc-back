@@ -302,6 +302,17 @@ test('una respuesta manual cierra el aviso para todos los usuarios de la convers
   assert.equal(updated[0].data.manual_resolved_by_user_id, null);
 });
 
+test('abrir o responder al chat no acredita entrega ni cierra el aviso de llamar al paciente', async t => {
+  const original = db.Notification.findAll;
+  t.after(() => { db.Notification.findAll = original; });
+  db.Notification.findAll = async () => [{
+    get: () => ({ kind: 'appointment_whatsapp_delivery_failed', quickChatConversationId: 15 }),
+    update: async () => assert.fail('el aviso no debe cerrarse por enviar un mensaje manual'),
+  }];
+  const result = await resolveAutomationAttentionForConversation(15, null, { allUsers: true, reason: 'manual_reply_sent' });
+  assert.equal(result.updated, 0);
+});
+
 test('una respuesta humana completa la revisión de un flujo puramente conversacional', async (t) => {
   const originals = {
     stateFindOne: db.ConversationAutomationState.findOne,

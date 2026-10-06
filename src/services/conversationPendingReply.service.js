@@ -269,6 +269,13 @@ async function resolveAutomationAttentionForConversation(conversationId, userId,
     isRead: false,
     ...(!allUsers ? { userId: numericUserId } : {}),
     [Op.and]: [
+      // A queued/manual reply or opening the conversation is not proof that
+      // the patient received WhatsApp. Reception must explicitly acknowledge
+      // this call alert, or a later actual delivery/status transition resolves it.
+      db.sequelize.where(
+        db.sequelize.literal("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, '$.kind')), '')"),
+        { [Op.ne]: 'appointment_whatsapp_delivery_failed' }
+      ),
       db.sequelize.where(
         db.sequelize.literal("CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.quickChatConversationId')) AS UNSIGNED)"),
         numericConversationId
@@ -276,7 +283,10 @@ async function resolveAutomationAttentionForConversation(conversationId, userId,
     ],
   };
   const queryOptions = options.transaction ? { transaction: options.transaction } : {};
-  const notifications = await db.Notification.findAll({ where, ...queryOptions });
+  const notifications = (await db.Notification.findAll({ where, ...queryOptions })).filter(notification => {
+    const data = notification.get('data');
+    return data?.kind !== 'appointment_whatsapp_delivery_failed';
+  });
   if (!notifications.length) {
     return { success: true, updated: 0 };
   }

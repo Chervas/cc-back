@@ -977,6 +977,11 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
         };
         await msg.save();
         await patientDirectionService.handleHandoffMessageStatus(msg).catch(() => null);
+        if (!retryDecision.should_retry) {
+            await require('../services/appointmentWhatsappDeliveryAlert.service').reconcileAppointmentWhatsappDelivery({
+                message: msg, mappedStatus: 'failed', clinicId,
+            });
+        }
 
         if (!providerAccepted) {
             // Si Meta indica que el numero no esta registrado, marcamos el

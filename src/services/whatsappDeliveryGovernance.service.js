@@ -751,6 +751,11 @@ async function recordImmediateSendResponse({ response, clinicId = null, wabaId =
 }
 
 async function materializeFinalMessageStatus({ message, status, mappedStatus, clinicId = null } = {}) {
+  // Final delivery is persisted by the importer/worker before this call.
+  // Await the durable, scoped reception alert; a repeated status is safe.
+  await require('./appointmentWhatsappDeliveryAlert.service').reconcileAppointmentWhatsappDelivery({
+    message, status, mappedStatus, clinicId,
+  });
   const metadata = safeObject(message?.metadata);
   const template = {
     metaTemplateId: clean(metadata.meta_template_id) || null,
