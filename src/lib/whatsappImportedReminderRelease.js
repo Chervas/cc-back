@@ -67,6 +67,7 @@ async function permitsReply(conversation, message, db, transaction, { policy = r
     FROM FlowExecutionsV2 e WHERE e.clinic_id=:clinicId AND e.trigger_entity_type='appointment'
     AND e.trigger_entity_id IN (:ids) AND e.status IN ('running','waiting') AND e.created_at>=:approvedAt
     AND EXISTS (SELECT 1 FROM Messages m WHERE m.conversation_id=:conversationId AND m.direction='outbound'
+      AND m.message_type<>'event'
       AND m.status IN ('sent','delivered','read') AND m.createdAt>=:approvedAt AND m.createdAt<=:inboundAt
       AND CAST(JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.execution_id')) AS UNSIGNED)=e.id)`,
   { transaction, replacements: { clinicId: conversation.clinic_id, ids, approvedAt: new Date(policy.approvedAt),

@@ -2540,6 +2540,38 @@ async function getPackageWithDocumentsById(packageIdRaw) {
     });
 }
 
+// Read-only preparation for the real automation transport. Unlike send-mock
+// or a tablet-session action, it does not mark a document sent or enqueue it.
+async function prepareAutomationPackageContext(scope = {}) {
+    const { assertConsentAutomationScope, assertConsentAutomationConfiguration } = require('../lib/consent-automation-link');
+    const configuredSecret = toCleanString(process.env.CONSENT_PUBLIC_TOKEN_SECRET || process.env.JWT_SECRET);
+    const baseUrl = assertConsentAutomationConfiguration({
+        baseUrl: getTabletBaseUrl(),
+        secretConfigured: !!configuredSecret && configuredSecret !== 'clinicaclick-dev-consentimientos',
+        runtimeNamespace: process.env.RUNTIME_NAMESPACE,
+    });
+    const packageRow = await getPackageWithDocumentsById(scope.packageId);
+    const appointment = toIntOrNull(scope.appointmentId) ? await db.CitaPaciente.findByPk(scope.appointmentId, {
+        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'tratamiento_id', 'estado', 'inicio', 'es_provisional'],
+        raw: true,
+    }) : null;
+    const pack = getPlain(packageRow);
+    const documents = assertConsentAutomationScope({ packageRow: pack, appointment, scope });
+    const treatmentName = toCleanString(pack.tratamiento?.nombre);
+    if (!treatmentName) throw Object.assign(new Error('consent_automation_treatment_not_found'), { statusCode: 409 });
+    requireActiveConsentPackage(packageRow);
+    const token = signPackageToken(packageRow, { channel: 'whatsapp' });
+    return {
+        consentimiento: {
+            package_id: pack.id,
+            package_public_id: pack.public_id,
+            pending_count: documents.length,
+            enlace_publico: buildPublicConsentUrl(token, baseUrl),
+        },
+        tratamiento: { id: pack.tratamiento_id, nombre: treatmentName },
+    };
+}
+
 async function createTabletSession(packageIdRaw, payload = {}) {
     const packageRow = await getPackageWithDocumentsById(packageIdRaw);
     if (!packageRow) {
@@ -3449,6 +3481,7 @@ module.exports = {
     getConsentSummaryForAppointment,
     attachConsentSummaryToCitas,
     createPackageForAppointment,
+    prepareAutomationPackageContext,
     createPatientIntakePackage,
     ensurePackageForAppointment,
     sendPackageMock,

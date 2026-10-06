@@ -12,7 +12,7 @@ function importHeld(value) {
     || m.historical_registration === true || m.kind === 'lead_resolution_historical'
     || ['import', 'cliniccloud_reconciliation'].some(key => m[key] && importHeld(m[key]));
 }
-function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, patientId, templateName, confirmationTimeout = false, now = Date.now() }) {
+function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, patientId, templateName, confirmationTimeout = false, patientHoldOverride = false, now = Date.now() }) {
   if (!a || Number(a.id_cita) !== Number(e.trigger_entity_id) || Number(a.clinica_id) !== Number(clinicId)
     || patientId && Number(a.paciente_id) !== Number(patientId)) fail('whatsapp_appointment_scope_changed');
   const operations = require('./whatsappImportedAppointmentOperations');
@@ -22,7 +22,7 @@ function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, 
   const overrideDefaults = operationalReleased && operations.allowsSuppressionOverride(a, { now });
   if ((a.source_system || a.source_reference || importHeld(a.import_metadata)) && !released) fail('whatsapp_appointment_import_held');
   const reminder = /^clinicaclick_recordatorio_(dia_antes|mismo_dia)(?:_|$)/.exec(templateName || '');
-  if (released && (reminder?.[1] === 'mismo_dia'
+  if ((released || patientHoldOverride) && (reminder?.[1] === 'mismo_dia'
     || e.trigger_type === 'appointment_reminder_window' && e.context?.trigger?.schedule_moment === 'same_day')) fail('whatsapp_appointment_suppressed');
   const appointmentData = /^clinicaclick_confirmacion_datos_cita_(?:reprogramada_)?(?:hoy|24|48)(?:_|$)/.test(templateName || '');
   if (!reminder && !appointmentData && !confirmationTimeout) return true; // Cancellation acknowledgements retain their existing flow.
@@ -59,14 +59,17 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
   }
   const appointment = await loadAppointment(execution.trigger_entity_id);
   const released = require('./whatsappImportedReminderRelease').permits(appointment, { execution })
-    || require('./whatsappImportedAppointmentOperations').permits(appointment, { execution });
-  if ((held || !patientId && appointment?.paciente_id && await patientHeld(Number(appointment.paciente_id))) && !released) fail('whatsapp_patient_import_held');
+    || require('./whatsappImportedAppointmentOperations').permitsPatientHoldOverride(appointment, { execution });
+  const appointmentPatientHeld = held || !patientId && appointment?.paciente_id && await patientHeld(Number(appointment.paciente_id));
+  if (appointmentPatientHeld && String(m.communication_scope || '').trim().toLowerCase() === 'marketing') fail('whatsapp_patient_import_held');
+  if (appointmentPatientHeld && !released) fail('whatsapp_patient_import_held');
   if (m.appointment_timeout === true) {
     const health = require('./whatsappInboxHealth');
     const receptionState = getReceptionState ? await getReceptionState() : health.state(health.read(), conversation.clinic_id);
     if (!receptionState.readyForTimeout) fail('whatsapp_inbox_reception_delayed');
   }
   return assertAppointmentEligibility({ appointment, execution, clinicId: conversation.clinic_id, patientId,
+    patientHoldOverride: !!appointmentPatientHeld && released,
     confirmationTimeout: m.appointment_timeout === true,
     templateName: payload?.type === 'template' ? payload.template?.name : m.template_name || m.fallback_template_name });
 }

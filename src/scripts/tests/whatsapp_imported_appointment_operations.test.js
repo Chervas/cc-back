@@ -54,6 +54,41 @@ test('native patients, other clinics, stale visits, invalid entities and demo fi
   assert.equal(operations.allowsAppointment(f.appointment, { policy: { ...f.policy, clinicIds: [72] }, now }), false);
 });
 
+test('a current native booking overrides only the patient hold, not the imported appointment policy', () => {
+  const f = fixture(), appointment = { ...f.appointment, source_system: null, source_reference: null,
+    import_metadata: { notification_suppression: { appointment_details: false, day_before: true } } };
+  const before = JSON.stringify(appointment);
+  assert.equal(operations.allowsAppointment(appointment, { policy: f.policy, now }), false);
+  assert.equal(operations.permits(appointment, { execution: f.execution, policy: f.policy, now }), false);
+  assert.equal(operations.allowsSuppressionOverride(appointment, { policy: f.policy, now }), false);
+  assert.equal(operations.permitsPatientHoldOverride(appointment, { execution: f.execution, policy: f.policy, now }), true);
+  assert.equal(JSON.stringify(appointment), before);
+});
+
+test('native patient-hold override cannot release historical, foreign, blocked, cancelled or stale bookings', () => {
+  const f = fixture(), native = { ...f.appointment, source_system: null, source_reference: null, import_metadata: {} };
+  for (const change of [
+    { source_system: 'treatment_program' }, { source_reference: 'historic:10' }, { clinica_id: 99 },
+    { id_cita: 0 }, { paciente_id: null }, { estado: 'cancelada' }, { estado: 'completada' },
+    { estado: 'no_asistio' }, { estado: 'cambio_solicitado' }, { es_provisional: true },
+    { inicio: '2026-10-06T11:59:00.000Z' }, { inicio: '2026-10-06T12:00:00.000Z' },
+    { titulo: 'Histórico: Tratamiento' }, { import_metadata: { qa_demo: true } },
+    { import_metadata: { synthetic_data_only: true } }, { import_metadata: { historical_registration: true } },
+    { import_metadata: { messages_enabled: false } }, { import_metadata: { automation_policy: 'hold' } },
+    { import_metadata: { import: { automation_policy: 'hold' } } },
+    { import_metadata: { cliniccloud_reconciliation: { automationPolicy: 'hold' } } },
+  ]) assert.equal(operations.permitsPatientHoldOverride({ ...native, ...change },
+    { execution: f.execution, policy: f.policy, now }), false, JSON.stringify(change));
+  for (const change of [
+    { created_at: '2026-10-06T10:59:59.000Z' }, { created_at: '2026-10-06T12:01:00.000Z' },
+    { trigger_entity_type: 'patient' }, { trigger_type: 'lead_created' }, { clinic_id: 72 }, { trigger_entity_id: 11 },
+    { context: { appointment: { ...f.execution.context.appointment, paciente_id: 21 } } },
+    { context: { appointment: { ...f.execution.context.appointment, inicio: '2026-10-07T09:01:00.000Z' } } },
+  ]) assert.equal(operations.permitsPatientHoldOverride(native,
+    { execution: { ...f.execution, ...change }, policy: f.policy, now }), false, JSON.stringify(change));
+  assert.equal(operations.permitsPatientHoldOverride(native, { execution: f.execution, policy: null, now }), false);
+});
+
 test('real historical activity is excluded even if an imported appointment date is later', () => {
   const f = fixture();
   for (const change of [
@@ -129,11 +164,19 @@ test('fresh reply requires an accepted outbound in that conversation and the exa
   const f = replyFixture();
   assert.equal(await operations.permitsReply(f.conversation, f.message, f.db, null, { policy: f.policy, now }), true);
   assert.match(f.queries[0].sql, /m.status IN \('sent','delivered','read'\)/);
+  assert.match(f.queries[0].sql, /m.message_type<>'event'/);
   assert.match(f.queries[0].sql, /m.conversation_id=:conversationId/);
   assert.match(f.queries[0].sql, /m.sent_at>=:approvedAt AND m.sent_at<=:inboundAt/);
   assert.match(f.queries[0].sql, /e.status IN \('running','waiting'\)/);
   assert.equal(f.queries[0].options.replacements.conversationId, 60);
   assert.equal(f.queries[0].options.replacements.clinicId, 66);
+});
+
+test('fresh native booking reply may override its imported patient hold only after an accepted current outbound', async () => {
+  const f = replyFixture(); Object.assign(f.appointment, { source_system: null, source_reference: null, import_metadata: {} });
+  assert.equal(await operations.permitsReply(f.conversation, f.message, f.db, null, { policy: f.policy, now }), true);
+  f.appointment.import_metadata = { import: { automation_policy: 'hold' } };
+  assert.equal(await operations.permitsReply(f.conversation, f.message, f.db, null, { policy: f.policy, now }), false);
 });
 
 test('old, foreign and future inbound messages cannot open the release', async () => {

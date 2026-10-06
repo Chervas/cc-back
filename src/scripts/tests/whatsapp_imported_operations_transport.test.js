@@ -14,6 +14,7 @@ function fixture() {
       if (name === './whatsappImportedReminderRelease') return { permits: () => false };
       if (name === './whatsappImportedAppointmentOperations') return {
         permits: (a, options) => operations.permits(a, { ...options, policy, now }),
+        permitsPatientHoldOverride: (a, options) => operations.permitsPatientHoldOverride(a, { ...options, policy, now }),
         allowsSuppressionOverride: (a, options) => operations.allowsSuppressionOverride(a, { ...options, policy, now }),
       };
       if (name === './whatsappInboxHealth') return {};
@@ -39,6 +40,74 @@ test('fresh reschedule transport bypasses only the technical imported appointmen
   assert.equal(f.eligibility.assertAppointmentEligibility(f.input), true);
   assert.equal(await f.eligibility.assertAutomatedMessageEligibility(f.transport), true);
   assert.equal(JSON.stringify(f.appointment), before);
+});
+
+function nativeFixture() {
+  const f = fixture(); Object.assign(f.appointment, { source_system: null, source_reference: null,
+    import_metadata: {}, estado: 'info_enviada' });
+  f.execution.trigger_type = 'appointment_created';
+  f.input.templateName = 'clinicaclick_confirmacion_datos_cita_48_v7';
+  f.transport.payload.template.name = f.input.templateName;
+  return f;
+}
+
+test('new native booking for an imported patient can send current details without removing its patient hold', async () => {
+  const f = nativeFixture(), before = JSON.stringify(f.appointment);
+  assert.equal(await f.eligibility.assertAutomatedMessageEligibility(f.transport), true);
+  assert.equal(await f.eligibility.assertAutomatedMessageEligibility({ ...f.transport,
+    conversation: { clinic_id: 66 } }), true);
+  assert.equal(JSON.stringify(f.appointment), before);
+});
+
+test('native booking override is not global: old execution, marketing, changed date or scope stays blocked', async () => {
+  for (const change of [{ created_at: '2026-10-06T10:59:00Z' }, { clinic_id: 72 },
+    { trigger_entity_type: 'entity' }, { trigger_type: 'lead_created' }, { trigger_entity_id: 11 },
+    { context: { appointment: { ...nativeFixture().execution.context.appointment, paciente_id: 21 } } },
+    { context: { appointment: { inicio: '2026-10-08T14:00:00Z' } } }]) {
+    const f = nativeFixture(); Object.assign(f.execution, change);
+    await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport));
+  }
+  const f = nativeFixture();
+  await assert.rejects(f.eligibility.assertAutomatedMessageEligibility({ ...f.transport,
+    message: { metadata: { communication_scope: 'marketing' } } }), { code: 'whatsapp_patient_import_held' });
+});
+
+test('an appointment execution never exempts a held patient from marketing suppression', async () => {
+  for (const build of [fixture, nativeFixture]) {
+    const f = build();
+    await assert.rejects(f.eligibility.assertAutomatedMessageEligibility({ ...f.transport,
+      message: { metadata: { execution_id: 50, communication_scope: 'marketing' } } }),
+    { code: 'whatsapp_patient_import_held' });
+    await assert.rejects(f.eligibility.assertAutomatedMessageEligibility({ ...f.transport,
+      conversation: { clinic_id: 66 },
+      message: { metadata: { execution_id: 50, communication_scope: ' MARKETING ' } } }),
+    { code: 'whatsapp_patient_import_held' });
+    assert.equal(await f.eligibility.assertAutomatedMessageEligibility({ ...f.transport,
+      patientHeld: async () => false,
+      message: { metadata: { execution_id: 50, communication_scope: 'marketing' } } }), true);
+  }
+});
+
+test('native booking override preserves manual suppression and never permits same-day reminders', async () => {
+  const f = nativeFixture(); f.appointment.import_metadata.notification_suppression = { appointment_details: true };
+  assert.throws(() => f.eligibility.assertAppointmentEligibility(f.input), { code: 'whatsapp_appointment_suppressed' });
+  for (const templateName of ['clinicaclick_recordatorio_mismo_dia_v7', 'custom-reminder']) {
+    const g = nativeFixture(); g.execution.trigger_type = 'appointment_reminder_window';
+    g.execution.context.trigger = { schedule_moment: 'same_day' }; g.transport.payload.template.name = templateName;
+    await assert.rejects(g.eligibility.assertAutomatedMessageEligibility(g.transport), { code: 'whatsapp_appointment_suppressed' });
+  }
+});
+
+test('an unheld native patient retains the existing same-day reminder behavior', async () => {
+  const f = nativeFixture(); f.appointment.inicio = '2026-10-06T14:05:00.000Z';
+  f.execution.context.appointment.inicio = f.appointment.inicio;
+  f.execution.trigger_type = 'appointment_reminder_window';
+  f.execution.context.trigger = { schedule_moment: 'same_day' };
+  f.input.templateName = 'clinicaclick_recordatorio_mismo_dia_v7';
+  f.transport.payload.template.name = f.input.templateName;
+  assert.equal(f.eligibility.assertAppointmentEligibility(f.input), true);
+  assert.equal(await f.eligibility.assertAutomatedMessageEligibility({ ...f.transport, patientHeld: async () => false }), true);
+  await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: 'whatsapp_appointment_suppressed' });
 });
 test('stale executions, changed reservations and other-clinic substitutions cannot be sent', async () => {
   for (const change of [{ created_at: '2026-10-06T10:59:00Z' }, { clinic_id: 72 },

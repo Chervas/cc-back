@@ -77,7 +77,7 @@ function isHistorical(appointment) {
     || normalized(a?.titulo).startsWith('historico:');
 }
 
-function allowsAppointment(appointment, { policy = read(), now = Date.now() } = {}) {
+function allowsOperationalAppointment(appointment, { policy = read(), now = Date.now() } = {}) {
   const a = plain(appointment), m = object(a?.import_metadata);
   const approvedAt = instant(policy?.approvedAt), start = instant(a?.inicio);
   return !!policy && policy.version === 1 && policy.purpose === 'appointment_operations'
@@ -85,10 +85,31 @@ function allowsAppointment(appointment, { policy = read(), now = Date.now() } = 
     && Number.isFinite(approvedAt) && approvedAt <= now
     && Array.isArray(policy.clinicIds) && CLINICS.has(Number(a?.clinica_id))
     && policy.clinicIds.includes(Number(a.clinica_id))
-    && text(a.source_system) === 'cliniccloud' && !isHistorical(a)
+    && !isHistorical(a)
     && !m.qa_demo && !truth(m.synthetic_data_only)
     && entityId(a.id_cita) && entityId(a.paciente_id) && !truth(a.es_provisional)
     && Number.isFinite(start) && start >= approvedAt && STATUSES.has(text(a.estado));
+}
+
+function allowsAppointment(appointment, { policy = read(), now = Date.now() } = {}) {
+  return text(plain(appointment)?.source_system) === 'cliniccloud'
+    && allowsOperationalAppointment(appointment, { policy, now });
+}
+
+function appointmentHeld(value) {
+  const m = object(value);
+  return m.automation_policy === 'hold' || m.automationPolicy === 'hold' || m.messages_enabled === false
+    || ['import', 'cliniccloud_reconciliation'].some(key => m[key] && appointmentHeld(m[key]));
+}
+
+function allowsNativePatientHoldOverride(appointment, { policy = read(), now = Date.now() } = {}) {
+  const a = plain(appointment);
+  // A new operational booking for an imported patient is not historical just
+  // because the patient's old import field still carries HOLD. This never
+  // releases an appointment with its own provenance or suppression policy.
+  return allowsOperationalAppointment(a, { policy, now })
+    && !text(a.source_system) && !text(a.source_reference) && !appointmentHeld(a.import_metadata)
+    && instant(a.inicio) > now && ACTIVE_STATUSES.has(text(a.estado));
 }
 
 function allowsSuppressionOverride(appointment, { policy = read(), now = Date.now() } = {}) {
@@ -105,9 +126,9 @@ function allowsSuppressionOverride(appointment, { policy = read(), now = Date.no
     && keys.every(key => SUPPRESSION_KEYS.has(key) && typeof raw[key] === 'boolean');
 }
 
-function permits(appointment, { execution, policy = read(), now = Date.now() } = {}) {
+function matchesFreshExecution(appointment, { execution, policy, now }) {
   const a = plain(appointment), e = plain(execution);
-  if (!allowsAppointment(a, { policy, now }) || !e) return false;
+  if (!e) return false;
   const createdAt = instant(e.created_at), context = object(e.context), captured = object(context.appointment);
   if (e.trigger_entity_type !== 'appointment' || !TRIGGERS.has(e.trigger_type)
     || Number(e.trigger_entity_id) !== Number(a.id_cita) || Number(e.clinic_id) !== Number(a.clinica_id)
@@ -119,6 +140,17 @@ function permits(appointment, { execution, policy = read(), now = Date.now() } =
     if (Object.hasOwn(captured, field) && Number(captured[field]) !== Number(expected)) return false;
   }
   return true;
+}
+
+function permits(appointment, { execution, policy = read(), now = Date.now() } = {}) {
+  return allowsAppointment(appointment, { policy, now })
+    && matchesFreshExecution(appointment, { execution, policy, now });
+}
+
+function permitsPatientHoldOverride(appointment, { execution, policy = read(), now = Date.now() } = {}) {
+  return (allowsAppointment(appointment, { policy, now })
+      || allowsNativePatientHoldOverride(appointment, { policy, now }))
+    && matchesFreshExecution(appointment, { execution, policy, now });
 }
 
 async function permitsReply(conversation, message, db, transaction, { policy = read(), now = Date.now() } = {}) {
@@ -133,6 +165,7 @@ async function permitsReply(conversation, message, db, transaction, { policy = r
     FROM FlowExecutionsV2 e WHERE e.clinic_id=:clinicId AND e.trigger_entity_type='appointment'
     AND e.trigger_type IN (:triggerTypes) AND e.status IN ('running','waiting') AND e.created_at>=:approvedAt
     AND EXISTS (SELECT 1 FROM Messages m WHERE m.conversation_id=:conversationId AND m.direction='outbound'
+      AND m.message_type<>'event'
       AND m.status IN ('sent','delivered','read') AND m.createdAt>=:approvedAt
       AND m.sent_at>=:approvedAt AND m.sent_at<=:inboundAt
       AND CAST(JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.execution_id')) AS UNSIGNED)=e.id)
@@ -143,10 +176,10 @@ async function permitsReply(conversation, message, db, transaction, { policy = r
     if (!['running', 'waiting'].includes(e.status)) continue;
     const a = await db.CitaPaciente.findByPk(e.trigger_entity_id, { raw: true, transaction });
     if (Number(a?.paciente_id) === Number(c.patient_id) && instant(a?.inicio) > now
-      && ACTIVE_STATUSES.has(text(a?.estado)) && permits(a, { execution: e, policy, now })) return true;
+      && ACTIVE_STATUSES.has(text(a?.estado)) && permitsPatientHoldOverride(a, { execution: e, policy, now })) return true;
   }
   return false;
 }
 
 module.exports = { FILE, validate, read, isHistorical, allowsAppointment,
-  allowsSuppressionOverride, permits, permitsReply };
+  allowsSuppressionOverride, permits, permitsPatientHoldOverride, permitsReply };

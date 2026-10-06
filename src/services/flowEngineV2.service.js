@@ -619,7 +619,7 @@ function mergeContextObject(base, patch) {
   };
 }
 
-async function enrichContextForTemplateResolution(context, targets = {}) {
+async function enrichContextForTemplateResolution(context, targets = {}, { includeConsentLink = false } = {}) {
   const out = clone(context) || {};
   const appointmentId = toIntOrNull(targets.appointment_id);
   const patientId = toIntOrNull(targets.patient_id);
@@ -877,6 +877,20 @@ async function enrichContextForTemplateResolution(context, targets = {}) {
     lead_intake_id: toIntOrNull(out?.lead?.id) || null,
     lead_id: toIntOrNull(out?.lead?.id) || null,
   };
+
+  if (includeConsentLink && context?.trigger?.type === 'consent_required') {
+    const consentContext = await require('./consentimientos.service').prepareAutomationPackageContext({
+      packageId: toIntOrNull(context?.trigger?.data?.consent_package_id),
+      appointmentId,
+      clinicId: effectiveClinicId,
+      patientId: effectivePatientId,
+      capturedStart: context?.appointment?.inicio || context?.trigger?.data?.inicio,
+    });
+    // Do not trust prefilled public links in a persisted/user-authored context.
+    // The existing package/token service validates the current clinical scope.
+    out.consentimiento = consentContext.consentimiento;
+    out.tratamiento = consentContext.tratamiento;
+  }
 
   return out;
 }
@@ -3896,7 +3910,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     ? (quietWindow.scheduledAt || new Date(Date.now() + quietWindow.delayMs))
     : null;
   const effectiveSendAt = quietWindow.scheduledAt || new Date();
-  const templateContextBase = await enrichContextForTemplateResolution(context, targets);
+  const templateContextBase = await enrichContextForTemplateResolution(context, targets, { includeConsentLink: true });
   const templateContext = mergeContextPatch(templateContextBase, {
     runtime: {
       day_part_greeting: resolveMadridDayPartGreeting(effectiveSendAt),

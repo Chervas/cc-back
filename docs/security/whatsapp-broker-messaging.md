@@ -15,7 +15,17 @@ ClinicCloud de BS Capilar (66) y BS Medical (72). No depende de su hora antigua:
 una ejecución **nueva** debe coincidir con clínica, cita, paciente y horario actual.
 Se comprueba en encolado, programación, transporte y respuestas. Las respuestas
 requieren además un envío aceptado de esa ejecución en la misma conversación.
-No concede una excepción general al paciente ni libera marketing o citas nativas.
+No concede una excepción general al paciente ni libera marketing. Una cita nativa
+actual/futura del mismo ámbito también puede superar exclusivamente el HOLD que
+conserva la ficha importada del paciente: exige una ejecución nueva posterior al
+corte, el horario y paciente exactos, ausencia de procedencia/HOLD de la propia
+cita y estado operativo activo. No modifica ninguna nota o referencia importada.
+Sus selecciones manuales de «no enviar» siguen vigentes y no permite recordatorios
+del mismo día. Las respuestas nuevas exigen igualmente un envío aceptado en esa
+conversación y ejecución; no se liberan otras conversaciones ni colas antiguas.
+Los eventos internos de estado de cita no cuentan como envíos aceptados en esa
+comprobación. El ámbito explícito de comunicación `marketing` no puede superar
+el HOLD del paciente ni siquiera adjuntando una ejecución de cita operativa.
 
 La autorización no caduca a mitad de la migración; retirar el registro la revoca.
 DEV y gateway no pueden leerlo. No se cambian referencias, estados ni recibos
@@ -631,3 +641,26 @@ Contratos primarios Meta consultados: [texto](https://www.postman.com/meta/whats
 [plantilla textual](https://www.postman.com/meta/whatsapp-business-platform/request/o65u5m5/send-message-template-text)
 y [consulta por ID](https://www.postman.com/meta/whatsapp-business-platform/request/llkzy9g/get-template-by-id-default-fields).
 No constituyen evidencia de llamadas con credenciales reales.
+
+## Recuperación autorizada de avisos BS — 6 de octubre de 2026
+
+La recuperación solicitada por el propietario relee la cita vigente, sus avisos
+aceptados y los avisos manuales antes de crear una intención. No reproduce el
+backlog completo ni los recordatorios del mismo día. Los rechazos confirmados
+pueden usar el reenvío manual idempotente existente; un resultado desconocido,
+un aviso ya entregado/leído o una confirmación actual impiden duplicarlo. Si el
+flujo anterior quedó fallido, se crea una ejecución operativa nueva y acotada
+para que una futura respuesta tenga un flujo activo, sin revivir el antiguo.
+
+El contexto de `consent_required` ahora prepara el enlace real de firma solo en
+la acción WhatsApp: usa el contrato de token y la ruta pública existentes y
+verifica en BD paquete, paciente, clínica, cita, tratamiento y documentos
+pendientes vigentes. No amplía caducidades ni modifica firmas o documentos.
+Las versiones publicadas de BS Medical/Capilar conservan sus cuerpos aprobados;
+se corrigen únicamente sus cuatro variables de envío y sus variantes de idioma.
+Los endpoints de envío simulado no sirven como transporte ni prueba de entrega.
+
+QuickChat ya distingue «No entregado» en rojo. Los errores transitorios siguen
+su política limitada de reintentos; `131026` es un rechazo de entrega, no una
+prueba de teléfono incorrecto ni una autorización para reintentar sin límite.
+El estado de cita «recordatorio enviado» no acredita entrega o lectura.
