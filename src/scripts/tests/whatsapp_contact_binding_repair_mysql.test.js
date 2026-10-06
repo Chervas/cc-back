@@ -44,6 +44,7 @@ test('merges preserve inbox bindings atomically; explicit orphan repair preserve
     await sql.query('CREATE TABLE PatientDirectionSettings(clinic_id INT,director_phone_asset_id INT)');
     await sql.query('CREATE TABLE MetaScopeBlocks(scope_key VARCHAR(100) PRIMARY KEY)');
     for (const ddl of SCHEMA) await sql.query(ddl);
+    for (const ddl of require('../../lib/whatsappInboxRoutingReview').SCHEMA) await sql.query(ddl);
     const db = { Sequelize, sequelize: sql, Conversation, Message, ConversationRead, WhatsAppWebOrigin };
     const sandbox = { module: { exports: {} }, require: name => name === '../../models' ? db : name === './phone' ? phone : {}, process: { env: {} }, Date, Number, Map, Set };
     vm.createContext(sandbox);
@@ -51,6 +52,10 @@ test('merges preserve inbox bindings atomically; explicit orphan repair preserve
     const merge = sandbox.module.exports.mergeDuplicateConversations;
     const first = await Conversation.create({ clinic_id: 71, channel: 'whatsapp', contact_id: '+34600000001', unread_count: 1 });
     const duplicate = await Conversation.create({ clinic_id: 71, channel: 'whatsapp', contact_id: '600000001', unread_count: 1 });
+    const reviewId = randomUUID();
+    await sql.query(`INSERT INTO WhatsappInboxRoutingReviews(id,routing_key,asset_id,phone_id,waba_id,scope_clinics,candidates,
+      selected_conversation_id,status,created_at,updated_at) VALUES(?,?,81,'201','101','[71]',?,?,'resolved',NOW(3),NOW(3))`,
+    { replacements: [reviewId,hash(['201','34600000001']),JSON.stringify([{clinicId:71,conversationId:duplicate.id}]),duplicate.id] });
     const keys = [hash([71, '201', '34600000001']), hash([71, '202', '34600000001'])];
     for (const key of keys) await sql.query('INSERT INTO WhatsappInboxContactKeys VALUES(?,?,NOW(3))', { replacements: [key, duplicate.id] });
     const existing = await Message.create({ conversation_id: duplicate.id, direction: 'inbound', content: 'synthetic', metadata: {} });
@@ -64,11 +69,15 @@ test('merges preserve inbox bindings atomically; explicit orphan repair preserve
     assert.equal((await sql.query('SELECT DISTINCT conversation_id FROM WhatsappInboxContactKeys'))[0][0].conversation_id, duplicate.id);
     assert.equal((await Message.findByPk(existing.id)).conversation_id, duplicate.id);
     assert.ok(await Conversation.findByPk(duplicate.id));
+    assert.equal((await sql.query('SELECT selected_conversation_id FROM WhatsappInboxRoutingReviews'))[0][0].selected_conversation_id, duplicate.id);
     assert.equal((await Conversation.findByPk(first.id)).unread_count, 1);
     const surviving = await merge(first, [duplicate]);
     assert.equal(surviving.unread_count, 2);
     assert.equal((await Conversation.findByPk(first.id)).unread_count, 2);
     assert.equal(await Conversation.findByPk(duplicate.id), null);
+    const [[routingChoice]] = await sql.query('SELECT candidates,selected_conversation_id FROM WhatsappInboxRoutingReviews');
+    assert.equal(routingChoice.selected_conversation_id, first.id);
+    assert.equal(routingChoice.candidates[0].conversationId, first.id);
     assert.deepEqual((await sql.query('SELECT conversation_id FROM WhatsappInboxContactKeys'))[0].map(row => row.conversation_id), [first.id, first.id]);
     assert.equal((await Message.findByPk(existing.id)).conversation_id, first.id);
     assert.equal((await sql.query('SELECT message_id FROM WhatsappInboxMessageKeys'))[0][0].message_id, existing.id);

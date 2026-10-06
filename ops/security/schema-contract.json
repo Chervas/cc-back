@@ -2,6 +2,11 @@
   "version": 1,
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
   "featureGroups": {
+    "whatsapp_inbox_routing_reviews": {
+      "enabledWhenAll": {"WHATSAPP_INBOX_ROUTING_REVIEW_ENABLED": "true"},
+      "tables": ["WhatsappInboxRoutingReviews", "WhatsappInboxRoutingReviewReceipts"],
+      "migrations": ["20261006120000-whatsapp-inbox-routing-reviews.js"]
+    },
     "google_business_profile_writes": {
       "enabledWhenAll": {
         "GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED": "true",
@@ -16,6 +21,43 @@
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
+    "WhatsappInboxRoutingReviews": {
+      "ENGINE": "InnoDB", "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "id", "COLUMN_TYPE": "char(36)", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": null},
+        {"COLUMN_NAME": "routing_key", "COLUMN_TYPE": "char(64)", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "asset_id", "COLUMN_TYPE": "int", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "phone_id", "COLUMN_TYPE": "varchar(30)", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "waba_id", "COLUMN_TYPE": "varchar(30)", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "scope_clinics", "COLUMN_TYPE": "json", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "candidates", "COLUMN_TYPE": "json", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "revision", "COLUMN_TYPE": "int", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "status", "COLUMN_TYPE": "varchar(16)", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "selected_clinic_id", "COLUMN_TYPE": "int"},
+        {"COLUMN_NAME": "selected_conversation_id", "COLUMN_TYPE": "int"},
+        {"COLUMN_NAME": "resolved_by", "COLUMN_TYPE": "int"},
+        {"COLUMN_NAME": "resolved_at", "COLUMN_TYPE": "datetime(3)"},
+        {"COLUMN_NAME": "created_at", "COLUMN_TYPE": "datetime(3)", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "updated_at", "COLUMN_TYPE": "datetime(3)", "IS_NULLABLE": "NO"}
+      ], "indexes": [
+        {"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"routing_key","columns":[{"INDEX_NAME":"routing_key","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"routing_key","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}
+      ], "foreignKeys": []
+    },
+    "WhatsappInboxRoutingReviewReceipts": {
+      "ENGINE": "InnoDB", "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {"COLUMN_NAME": "receipt", "COLUMN_TYPE": "char(36)", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "part_index", "COLUMN_TYPE": "int", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "review_id", "COLUMN_TYPE": "char(36)", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "digest", "COLUMN_TYPE": "char(64)", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "received_at", "COLUMN_TYPE": "datetime(3)", "IS_NULLABLE": "NO"},
+        {"COLUMN_NAME": "imported_at", "COLUMN_TYPE": "datetime(3)"},
+        {"COLUMN_NAME": "retry_requested_at", "COLUMN_TYPE": "datetime(3)"}
+      ], "indexes": [
+        {"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"receipt","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":2,"COLUMN_NAME":"part_index","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}
+      ], "foreignKeys": []
+    },
     "WhatsappPhoneActivations": {
       "ENGINE": "InnoDB",
       "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
@@ -4296,6 +4338,7 @@
     }
   },
   "migrations": [
+    {"name":"20261006120000-whatsapp-inbox-routing-reviews.js","sha256":"c6d27ade24eb4f8f3dd076ac281893b50ee5df289ef47c3f78a553ea56c3c546"},
     {"name": "20260912230000-index-platform-audit-view.js","sha256": "dbbcad72b966056df5ca098c00cee3bf620dc46516d1bd43819b8de56ea30ae2"},
     {"name": "20260912210000-create-platform-audit-events.js", "sha256": "f70ed09874aba16b29e052e59508cd1febdf6e885d62dbf5288da08775f7b132"},
     {"name": "20260912213000-create-platform-audit-delivery-states.js", "sha256": "43a4f3cad139610dafbf36f6d9fc6ddf4595117cf1b6a8d25053031c3614b69c"},

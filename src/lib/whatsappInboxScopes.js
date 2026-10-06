@@ -157,7 +157,7 @@ function splitLease(lease, config) {
   if (!parts.length || lease.scopeBindings.some(s=>!covered.has(s.phoneId))) held();
   return parts;
 }
-async function routeClinic(connection, part) {
+async function routeClinic(connection, part, { routingReviewEnabled = false, lease, partIndex, now = Date.now() } = {}) {
   if (part.scope.clinicIds.length === 1) return part.scope.clinicIds[0];
   const ids = part.scope.clinicIds; const marks = ids.map(()=>'?').join(','); let rows;
   if (part.route.wamid) {
@@ -165,27 +165,46 @@ async function routeClinic(connection, part) {
     [rows] = await connection.execute("SELECT DISTINCT c.clinic_id FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE c.clinic_id IN ("+marks+") AND c.channel='whatsapp' AND m.direction='outbound' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wamid'))=? LIMIT 2",[...ids,part.route.wamid]);
   } else {
     if (typeof part.route.peer !== 'string' || !/^[1-9][0-9]{6,14}$/.test(part.route.peer)) held();
+    if (routingReviewEnabled) {
+      const decision = await require('./whatsappInboxRoutingReview').decision(connection, part, { receipt: lease?.receipt, partIndex });
+      if (decision) {
+        part.recoveredRoutingReview = decision.recovered;
+        return decision.clinicId;
+      }
+    }
     // A durable binding is specific to receiving phone AND contact. The same
     // person may legitimately have conversations at several member clinics.
     const keys = ids.map(clinicId=>createHash('sha256').update(JSON.stringify([clinicId,part.scope.phoneId,part.route.peer])).digest('hex'));
     const [bound] = await connection.execute("SELECT k.contact_key,c.clinic_id FROM WhatsappInboxContactKeys k JOIN Conversations c ON c.id=k.conversation_id WHERE k.contact_key IN ("+keys.map(()=>'?').join(',')+") AND c.channel='whatsapp' AND c.contact_id IN (?,?) LIMIT 2",[...keys,part.route.peer,'+'+part.route.peer]);
     if(bound.length) {
-      if(bound.length!==1 || ids[keys.indexOf(bound[0].contact_key)]!==bound[0].clinic_id)held();
+      if(bound.length!==1 || ids[keys.indexOf(bound[0].contact_key)]!==bound[0].clinic_id) {
+        if (routingReviewEnabled && bound.length > 1) await require('./whatsappInboxRoutingReview').retain(connection, part, lease, partIndex, now);
+        held();
+      }
       return bound[0].clinic_id;
     }
     // Before a binding exists, use one unambiguous prior exchange from this
     // physical sender. A conversation with another clinic phone is not evidence.
     [rows] = await connection.execute("SELECT DISTINCT c.clinic_id FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE c.clinic_id IN ("+marks+") AND c.channel='whatsapp' AND c.contact_id IN (?,?) AND m.direction='outbound' AND m.status IN ('sent','delivered','read') AND (JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.phone_number_id'))=? OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.phoneNumberId'))=? OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.whatsapp_sender_asset_id'))=? OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.sender_origin_id'))=?) LIMIT 2",[...ids,part.route.peer,'+'+part.route.peer,part.scope.phoneId,part.scope.phoneId,String(part.scope.assetId),String(part.scope.assetId)]);
     if(rows.length) {
-      if(rows.length!==1)held();
+      if(rows.length!==1) {
+        if (routingReviewEnabled) await require('./whatsappInboxRoutingReview').retain(connection, part, lease, partIndex, now);
+        held();
+      }
       return rows[0].clinic_id;
     }
     [rows] = await connection.execute("SELECT DISTINCT clinic_id FROM Conversations WHERE clinic_id IN ("+marks+") AND channel='whatsapp' AND contact_id IN (?,?) LIMIT 2",[...ids,part.route.peer,'+'+part.route.peer]);
   }
-  if (rows.length !== 1 || !ids.includes(rows[0].clinic_id)) held(); return rows[0].clinic_id;
+  if (rows.length !== 1 || !ids.includes(rows[0].clinic_id)) {
+    if (routingReviewEnabled && part.route.peer && rows.length > 1)
+      await require('./whatsappInboxRoutingReview').retain(connection, part, lease, partIndex, now);
+    held();
+  }
+  return rows[0].clinic_id;
 }
 async function importScopedLease(connection, lease, config, { importer = importLease, loadConfiguration = () => config,
   accountSyncEnabled = process.env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED === 'true',
+  routingReviewEnabled = require('./whatsappInboxRoutingReview').enabled(),
   playbackEnabled = process.env.WHATSAPP_INBOX_PLAYBACK_ENABLED === 'true', now = Date.now() } = {}) {
   config = validateConfiguration(config);
   const accountWabas = accountSyncEnabled ? accountSyncWabas(lease, config) : null;
@@ -198,7 +217,7 @@ async function importScopedLease(connection, lease, config, { importer = importL
     // Resolve and validate the ENTIRE batch before the first clinical write.
     for (const scope of [...new Map(parts.map(p=>[p.scope.phoneId,p.scope])).values()]) await assertScope(connection, scope);
     for (let i=0;i<parts.length;i++) {
-      const part = parts[i]; const clinicId = await routeClinic(connection,part); const raw = Buffer.from(JSON.stringify(part.packet));
+      const part = parts[i]; const clinicId = await routeClinic(connection,part,{ routingReviewEnabled, lease, partIndex:i, now }); const raw = Buffer.from(JSON.stringify(part.packet));
       const scope = {clinicId,wabaId:part.scope.wabaId,phoneId:part.scope.phoneId};
       try { normalize(raw,scope,now); } catch (error) {
         raw.fill(0);
@@ -208,10 +227,12 @@ async function importScopedLease(connection, lease, config, { importer = importL
           (ch.value.messages || []).some(m => !['edit','revoke'].includes(m.type)))))) error.inboxReason = 'review_required';
         throw error;
       }
-      prepared.push({scope:part.scope,importScope:scope,lease:{...lease,raw,receipt:childId(lease.receipt,i)}});
+      prepared.push({scope:part.scope,importScope:scope,index:i,lease:{...lease,raw,receipt:childId(lease.receipt,i),
+        recoveryWithoutAutomation: lease.recoveryWithoutAutomation === true || part.recoveredRoutingReview === true}});
     }
     for (const part of prepared) {
       checkConfig(); await assertScope(connection,part.scope);
+      if (routingReviewEnabled) await connection.execute('UPDATE WhatsappInboxRoutingReviewReceipts SET imported_at=COALESCE(imported_at,NOW(3)) WHERE receipt=? AND part_index=?', [lease.receipt,part.index]);
       await importer(connection,part.lease,part.importScope,now,{validateScope:async c=>{checkConfig();await assertScope(c,part.scope,{lock:true});}});
       checkConfig(); await assertScope(connection,part.scope);
     }

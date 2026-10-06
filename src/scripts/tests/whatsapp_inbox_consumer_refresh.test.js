@@ -20,6 +20,18 @@ test('new activation is visible on the next poll without restarting and stale me
  assert.equal(f.health[1].length,2);assert.equal(f.calls.filter(c=>c.path==='/confirm').length,2);
  assert(f.imports.every(i=>i.lease.recoveryWithoutAutomation));assert(f.imports.every(i=>i.lease.raw.every(b=>b===0)));
 });
+test('resolved-review maintenance runs after new imports and never delays a full fresh batch',async()=>{
+ const f=fixture();let resumed=0;
+ f.options.env.WHATSAPP_INBOX_ROUTING_REVIEW_ENABLED='true';
+ f.options.resumeReviews=async()=>{assert.equal(f.calls.at(-1).path,'/confirm');resumed++;throw Error('FICTITIOUS MAINTENANCE ERROR');};
+ assert.equal(await f.poll(),1);assert.equal(resumed,1);
+ assert.equal(f.calls.filter(c=>c.path==='/confirm').length,1);
+ const request=f.client.request;
+ f.client.request=async(method,path,body)=>path==='/pending'
+  ? {status:200,data:{automaticActionsAllowed:false,receipts:Array.from({length:20},()=>({receipt:'receipt'}))}}
+  : request(method,path,body);
+ assert.equal(await f.poll(),20);assert.equal(resumed,1);
+});
 test('a freshly restored receipt remains passive even inside the fresh-inbound window',async()=>{
  const f=fixture();f.options.recoveryNotBefore=null;
  const request=f.client.request;

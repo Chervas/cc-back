@@ -54,7 +54,7 @@ function archiveOf(health) {
 function read() {
   try {
     const stat = fs.lstatSync(FILE);
-    if (!stat.isFile() || stat.mode & 0o022 || stat.size > 131072) return null;
+    if (!stat.isFile() || stat.mode & 0o022 || stat.size > 4 * 1024 * 1024) return null;
     return JSON.parse(fs.readFileSync(FILE, 'utf8'));
   } catch { return null; }
 }
@@ -68,7 +68,7 @@ function state(snapshot, clinicId, now = Date.now(), { contactKeys = null } = {}
   if (Array.isArray(contactKeys) && contactKeys.every(contactKey)
     && Number.isSafeInteger(clinic.unscopedBlockingReview) && clinic.unscopedBlockingReview >= 0
     && clinic.unscopedBlockingReview <= clinic.blockingReview
-    && Array.isArray(clinic.blockingContactKeys) && clinic.blockingContactKeys.length <= 128
+    && Array.isArray(clinic.blockingContactKeys) && clinic.blockingContactKeys.length <= 4096
     && clinic.blockingContactKeys.every(contactKey)) {
     blockingReview = clinic.unscopedBlockingReview
       + Number(clinic.blockingContactKeys.some(key => contactKeys.includes(key)));
@@ -96,7 +96,7 @@ function publish(health, scopes, { recoveryNotBefore = null, recoveryHold = fals
       const isolation = group.reviewIsolation;
       const valid = isolation?.version === 1 && Number.isSafeInteger(isolation.scopedReviews)
         && isolation.scopedReviews > 0 && isolation.scopedReviews <= group.blockingReview
-        && Array.isArray(isolation.contacts) && isolation.contacts.length > 0 && isolation.contacts.length <= 128
+        && Array.isArray(isolation.contacts) && isolation.contacts.length > 0 && isolation.contacts.length <= 4096
         && isolation.contacts.every(c => Number.isSafeInteger(c.clinicId) && c.clinicId > 0 && contactKey(c.contactKey));
       value.unscopedBlockingReview += (Number(group.blockingReview) || 0) - (valid ? isolation.scopedReviews : 0);
       if (valid) value.blockingContactKeys = [...new Set([...value.blockingContactKeys,
@@ -134,7 +134,7 @@ async function forConversation(snapshot, conversation, bindings, query, { transa
   if (!clinic?.blockingReview) return fallback();
   if (!Number.isSafeInteger(Number(conversation?.id)) || Number(conversation.id) <= 0
     || conversation.channel !== 'whatsapp' || !Array.isArray(clinic.blockingContactKeys)
-    || clinic.blockingContactKeys.length > 128 || !clinic.blockingContactKeys.every(contactKey)) return fallback();
+    || clinic.blockingContactKeys.length > 4096 || !clinic.blockingContactKeys.every(contactKey)) return fallback();
   const peer = String(conversation.contact_id || '').replace(/^\+/, '');
   const ownBindings = bindings.filter(b => b.clinicId === clinicId);
   if (!/^[1-9][0-9]{6,14}$/.test(peer) || !ownBindings.length) return fallback();

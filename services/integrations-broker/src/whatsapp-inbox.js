@@ -1,5 +1,5 @@
 'use strict';
-const { createHmac, timingSafeEqual, randomUUID, randomBytes, hkdfSync,
+const { createHmac, createHash, timingSafeEqual, randomUUID, randomBytes, hkdfSync,
   createCipheriv, createDecipheriv } = require('node:crypto');
 const { TextDecoder } = require('node:util');
 const { BrokerError, fail } = require('./errors');
@@ -131,6 +131,9 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
       store.db.exec(`ALTER TABLE whatsapp_inbox ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
     }
   }
+  if (!store.db.prepare('PRAGMA table_info(whatsapp_inbox)').all().some(column => column.name === 'review_metadata')) {
+    store.db.exec('ALTER TABLE whatsapp_inbox ADD COLUMN review_metadata BLOB');
+  }
   store.db.exec(`CREATE INDEX IF NOT EXISTS whatsapp_inbox_archive_due
     ON whatsapp_inbox(app_id,archived_at,archive_next_attempt_at,received_at);
     CREATE INDEX IF NOT EXISTS whatsapp_inbox_tag_due
@@ -139,6 +142,18 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
   const receiptFor = row => ({ receipt: row.receipt, persisted: true, businessProcessed: row.state === 'imported', archived: !!row.archived_at });
   const clean = error => new BrokerError(error instanceof BrokerError ? error.code : 'audit_unavailable');
   const reviewCache = new Map(); // Only hashed contact references, never plaintext.
+  const reviewScopeVersion = row => createHash('sha256').update(JSON.stringify(scopesFor(JSON.parse(row.scopes)) || [])).digest('hex');
+  const reviewAad = row => aad(row) + ':review-metadata-v1:' + reviewScopeVersion(row);
+  const saveReview = (row, raw) => {
+    const diagnostics = require('./whatsapp-inbox-review');
+    const value = Buffer.from(JSON.stringify({ version: 1, contacts: diagnostics.reviewContacts(raw, scopeBindings),
+      summary: diagnostics.reviewSummary(raw) }));
+    let sealed;
+    try {
+      sealed = cipher.seal(value, reviewAad(row));
+      store.db.prepare('UPDATE whatsapp_inbox SET review_metadata=? WHERE receipt=?').run(sealed, row.receipt);
+    } finally { value.fill(0); sealed?.fill(0); }
+  };
   return {
     accept({ raw, signature, appSecret }) {
       refreshScopes();
@@ -170,6 +185,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
           try {
             store.db.prepare("INSERT INTO whatsapp_inbox(receipt,app_id,digest,key_id,body,byte_count,scopes,kinds,received_at,state) VALUES (?,?,?,?,?,?,?,?,?,'held')")
               .run(row.receipt, appId, digest, cipher.keyId, sealed, raw.length, row.scopes, row.kinds, row.received_at);
+            if (scopeBindings) saveReview(row, raw);
             for (const item of eventsFor(row.receipt, 'whatsapp_inbox_stored', row.received_at, scope.scopes)) store.appendAudit(item);
           } finally { sealed.fill(0); }
           return { ...receiptFor(row), replayed: false };
@@ -291,32 +307,50 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
       const groups = store.db.prepare("SELECT i.scopes,COUNT(*) pending,MIN(CASE WHEN r.reason IS NULL OR r.reason='import_retry' THEN i.received_at END) oldestPendingAt,SUM(CASE WHEN r.reason='review_required' THEN 1 ELSE 0 END) blockingReview,SUM(CASE WHEN r.reason IN ('unsupported_event','unmatched_status') THEN 1 ELSE 0 END) review FROM whatsapp_inbox i LEFT JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' GROUP BY i.scopes").all(appId);
       // Account-wide events cannot be attributed to a contact. Keep their
       // counters without letting them consume the bounded phone review budget.
-      // Share the same bounded budget across scopes. A retired phone's older
-      // receipts must not monopolize contact attribution for an active phone.
-      const reviews = store.db.prepare("SELECT receipt,digest,scopes,kinds,received_at,key_id,app_id,byte_count FROM (SELECT i.receipt,i.digest,i.scopes,i.kinds,i.received_at,i.key_id,i.app_id,i.byte_count,ROW_NUMBER() OVER (PARTITION BY i.scopes ORDER BY i.received_at,i.receipt) AS scope_rank FROM whatsapp_inbox i JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' AND r.reason='review_required' AND i.scopes NOT LIKE '%:account%') ORDER BY scope_rank,received_at,receipt LIMIT 100").all(appId);
-      // Recent diagnostics do not enlarge the contact-isolation budget or
-      // release any receipt. Keep the existing barrier decision unchanged.
+      // Backfill legacy receipts fairly in bounded batches. New captures persist
+      // authenticated hashed attribution atomically with their ciphertext.
+      const reviews = store.db.prepare("SELECT receipt,digest,scopes,kinds,received_at,key_id,app_id,byte_count FROM (SELECT i.receipt,i.digest,i.scopes,i.kinds,i.received_at,i.key_id,i.app_id,i.byte_count,ROW_NUMBER() OVER (PARTITION BY i.scopes ORDER BY i.received_at,i.receipt) AS scope_rank FROM whatsapp_inbox i JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' AND r.reason='review_required' AND i.scopes NOT LIKE '%:account%' AND i.review_metadata IS NULL) ORDER BY scope_rank,received_at,receipt LIMIT 100").all(appId);
+      let backfillBytes = 0;
+      for (const row of reviews) {
+        if (backfillBytes + row.byte_count > 8 * 1024 * 1024) continue;
+        backfillBytes += row.byte_count;
+        let raw;
+        try {
+          raw = cipher.open(store.db.prepare('SELECT body FROM whatsapp_inbox WHERE receipt=?').get(row.receipt).body, aad(row));
+          saveReview(row, raw);
+        } catch {} finally { raw?.fill(0); }
+      }
+      // Recent diagnostics supplement durable metadata without releasing receipts.
       const recent = store.db.prepare("SELECT i.receipt,i.digest,i.scopes,i.kinds,i.received_at,i.key_id,i.app_id,i.byte_count FROM whatsapp_inbox i JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' AND r.reason='review_required' AND i.scopes NOT LIKE '%:account%' ORDER BY i.received_at DESC LIMIT 100").all(appId);
-      const isolationReceipts = new Set(reviews.map(row => row.receipt));
-      const analysisReviews = [...new Map([...reviews, ...recent].map(row => [row.receipt, row])).values()];
+      const durable = store.db.prepare("SELECT i.receipt,i.digest,i.scopes,i.kinds,i.received_at,i.key_id,i.app_id,i.byte_count,i.review_metadata FROM whatsapp_inbox i JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.state<>'imported' AND r.reason='review_required' AND i.scopes NOT LIKE '%:account%' AND i.review_metadata IS NOT NULL").all(appId);
+      const isolationReceipts = new Set(durable.map(row => row.receipt));
+      const analysisReviews = [...new Map([...recent, ...durable].map(row => [row.receipt, row])).values()];
       const summaries = new Map();
       const present = new Set(analysisReviews.map(r => r.receipt));
       for (const receipt of reviewCache.keys()) if (!present.has(receipt)) reviewCache.delete(receipt);
-      const scopeVersion = JSON.stringify(scopeBindings);
       let bytes = 0;
       for (const row of analysisReviews) {
-        const identity = row.digest + scopeVersion;
+        const identity = row.digest + reviewScopeVersion(row)
+          + (row.review_metadata ? createHash('sha256').update(row.review_metadata).digest('hex') : '');
         let cached = reviewCache.get(row.receipt);
         if (cached?.identity !== identity) {
-          if (bytes + row.byte_count > 8 * 1024 * 1024) continue;
-          bytes += row.byte_count;
+          const size = row.review_metadata?.length || row.byte_count;
+          if (bytes + size > 8 * 1024 * 1024) continue;
+          bytes += size;
           let raw;
           try {
-            const sealed = store.db.prepare('SELECT body FROM whatsapp_inbox WHERE receipt=?').get(row.receipt);
-            raw = cipher.open(sealed.body, aad(row));
-            const diagnostics = require('./whatsapp-inbox-review');
-            cached = { identity, contacts: diagnostics.reviewContacts(raw, scopeBindings), summary: diagnostics.reviewSummary(raw) };
+            if (row.review_metadata) {
+              raw = cipher.open(row.review_metadata, reviewAad(row));
+              const value = JSON.parse(raw.toString('utf8'));
+              if (value.version !== 1) continue;
+              cached = { identity, contacts: value.contacts, summary: value.summary };
+            } else {
+              raw = cipher.open(store.db.prepare('SELECT body FROM whatsapp_inbox WHERE receipt=?').get(row.receipt).body, aad(row));
+              const diagnostics = require('./whatsapp-inbox-review');
+              cached = { identity, contacts: diagnostics.reviewContacts(raw, scopeBindings), summary: diagnostics.reviewSummary(raw) };
+            }
             reviewCache.set(row.receipt, cached);
+            if (reviewCache.size > 256) reviewCache.delete(reviewCache.keys().next().value);
           } catch { continue; } finally { raw?.fill(0); }
         }
         const group = groups.find(g => g.scopes === row.scopes);
@@ -332,7 +366,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
         if (!isolationReceipts.has(row.receipt) || !cached.contacts) continue;
         const isolation = group.reviewIsolation ||= { version: 1, scopedReviews: 0, contacts: [] };
         const contacts = new Map([...isolation.contacts, ...cached.contacts].map(c => [c.contactKey, c]));
-        if (contacts.size > 128) continue;
+        if (contacts.size > 4096) continue;
         isolation.scopedReviews++;
         isolation.contacts = [...contacts.values()];
       }
@@ -386,6 +420,17 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
           ? 24 * 3600000 : Math.min(3600000, 60000 * 2 ** Math.min(6, retry.attempts - 1));
         store.db.prepare('UPDATE whatsapp_inbox_retry SET reason=?,next_attempt_at=? WHERE receipt=?').run(reason, now() + delay, receipt);
         return { receipt, deferred: true, businessProcessed: false };
+      });
+    },
+    resumeReview({ receipt }) {
+      refreshScopes();
+      if (!uuid(receipt)) fail('invalid_request');
+      return store.transaction(() => {
+        const row = store.db.prepare("SELECT i.state,i.lease_until,i.scopes,r.reason FROM whatsapp_inbox i JOIN whatsapp_inbox_retry r ON r.receipt=i.receipt WHERE i.app_id=? AND i.receipt=?").get(appId, receipt);
+        if (!row || row.state === 'imported' || row.reason !== 'review_required' || row.lease_until > now()) fail('scope_denied');
+        contextsFor(JSON.parse(row.scopes));
+        store.db.prepare('UPDATE whatsapp_inbox_retry SET next_attempt_at=? WHERE receipt=?').run(now(), receipt);
+        return { receipt, retryScheduled: true, businessProcessed: false };
       });
     },
     confirm({ receipt, lease, importReceipt }) {

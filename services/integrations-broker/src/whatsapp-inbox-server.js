@@ -65,7 +65,7 @@ function createInboxServer({ inbox, withApplicationSecret, archive, principals, 
       // list, decrypt, lease or acknowledge the consumer's clinical payloads.
       const route = req.method + ' ' + req.url;
       const ingress = route === 'POST ' + BASE;
-      const consumer = ['GET ' + BASE + '/pending', 'POST ' + BASE + '/lease', 'POST ' + BASE + '/confirm', 'POST ' + BASE + '/defer'].includes(route);
+      const consumer = ['GET ' + BASE + '/pending', 'POST ' + BASE + '/lease', 'POST ' + BASE + '/confirm', 'POST ' + BASE + '/defer', 'POST ' + BASE + '/resume-review'].includes(route);
       if (!(ingress && principal.id === EXACT_PRINCIPALS[0] || consumer && principal.id === EXACT_PRINCIPALS[1])) fail('operation_denied');
       if (consumer && !consumerEnabled) fail('provider_disabled');
       const minute = Math.floor(now() / 60000); let window = windows.get(principal.id);
@@ -75,6 +75,7 @@ function createInboxServer({ inbox, withApplicationSecret, archive, principals, 
       if (ingress) return await receive(req, res);
       if (req.method === 'GET') return respond(res, 200, { receipts: inbox.pending(20), health: inbox.health(), automaticActionsAllowed: false });
       if (req.url === BASE + '/defer') return respond(res, 200, inbox.defer(await jsonBody(req, 'lease,reason,receipt')));
+      if (req.url === BASE + '/resume-review') return respond(res, 200, inbox.resumeReview(await jsonBody(req, 'receipt')));
       if (req.url === BASE + '/lease') {
         const body = await jsonBody(req, 'receipt'); lease = inbox.lease(body.receipt);
         const { raw, ...metadata } = lease;

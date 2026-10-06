@@ -69,7 +69,8 @@ test('gated schema requirements are omitted only while every declared gate is cl
     assert.equal(Object.hasOwn(disabled.tables, table), false);
   }
   assert.equal(disabled.migrations.some(m => m.name.startsWith('202609192')), false);
-  assert.deepEqual(disabled.disabledFeatureGroups, ['google_business_profile_writes']);
+  assert.deepEqual(disabled.disabledFeatureGroups, ['whatsapp_inbox_routing_reviews','google_business_profile_writes']);
+  assert.equal(Object.hasOwn(disabled.tables, 'WhatsappInboxRoutingReviews'), false);
 
   const partiallyEnabled = effectiveContract(schema, { GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED: 'true' });
   assert.equal(Object.hasOwn(partiallyEnabled.tables, 'BusinessProfileMutations'), false);
@@ -77,9 +78,11 @@ test('gated schema requirements are omitted only while every declared gate is cl
   const enabled = effectiveContract(schema, {
     GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED: 'true',
     GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED: 'true',
+    WHATSAPP_INBOX_ROUTING_REVIEW_ENABLED: 'true',
   });
   assert.equal(Object.hasOwn(enabled.tables, 'BusinessProfileMutations'), true);
   assert.equal(Object.hasOwn(enabled.tables, 'BusinessProfileCacheStates'), true);
   assert.equal(enabled.migrations.filter(m => m.name.startsWith('202609192')).length, 2);
   assert.deepEqual(enabled.disabledFeatureGroups || [], []);
+  assert.equal(Object.hasOwn(enabled.tables, 'WhatsappInboxRoutingReviews'), true);
 });

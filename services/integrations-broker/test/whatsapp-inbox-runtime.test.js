@@ -95,6 +95,7 @@ test('mTLS rejects absent/unlisted certificates and cross-role routes before any
   assert.equal((await f.send('unlisted', BASE, packet(f.raw))).status, 403);
   assert.equal((await f.send('gateway', BASE + '/pending', { method: 'GET' })).status, 403);
   assert.equal((await f.send('gateway', BASE + '/defer', { body: { receipt: randomUUID(), lease: randomUUID(), reason: 'unsupported_event' } })).status, 403);
+  assert.equal((await f.send('gateway', BASE + '/resume-review', { body: { receipt: randomUUID() } })).status, 403);
   assert.equal((await f.send('staging', BASE, packet(f.raw))).status, 403);
   assert.equal((await f.send('gateway', BASE + '?export=true', packet(f.raw))).status, 403);
   assert.equal(f.awsCalls.length, baseline); assert.equal(f.app.inbox.pending().length, 0);
@@ -108,6 +109,24 @@ test('consumer can defer its live lease without acknowledging clinical processin
  const deferred=await f.send('staging',BASE+'/defer',{body:{receipt,lease:leased.body.lease,reason:'unsupported_event'}});
  assert.equal(deferred.status,200);assert.equal(deferred.body.businessProcessed,false);
  const health=await f.send('staging',BASE+'/pending',{method:'GET'});assert.equal(health.body.receipts.length,0);assert.equal(health.body.health.groups[0].review,1);
+});
+test('only the consumer can schedule an expired retained review without acknowledging it', async t => {
+  const f = await fixture(t);
+  await f.send('gateway', BASE, packet(f.raw));
+  const pending = await f.send('staging', BASE + '/pending', { method: 'GET' });
+  const receipt = pending.body.receipts[0].receipt;
+  const lease = await f.send('staging', BASE + '/lease', { body: { receipt } });
+  await f.send('staging', BASE + '/defer', { body: { receipt, lease: lease.body.lease, reason: 'review_required' } });
+  assert.equal((await f.send('staging', BASE + '/resume-review', { body: { receipt } })).status, 403);
+  f.app.store.db.prepare('UPDATE whatsapp_inbox SET lease_until=? WHERE receipt=?').run(Date.now() - 1, receipt);
+  assert.equal((await f.send('staging', BASE + '/resume-review', { body: { receipt, clinicId: 71 } })).status, 400);
+  assert.equal((await f.send('staging', BASE + '/resume-review', { body: { receipt: randomUUID() } })).status, 403);
+  const resumed = await f.send('staging', BASE + '/resume-review', { body: { receipt } });
+  assert.equal(resumed.status, 200);
+  assert.deepEqual(resumed.body, { receipt, retryScheduled: true, businessProcessed: false });
+  assert.equal(f.app.store.db.prepare('SELECT reason FROM whatsapp_inbox_retry WHERE receipt=?').get(receipt).reason, 'review_required');
+  assert.notEqual(f.app.store.db.prepare('SELECT state FROM whatsapp_inbox WHERE receipt=?').get(receipt).state, 'imported');
+  assert.equal((await f.send('staging', BASE + '/pending', { method: 'GET' })).body.receipts.length, 1);
 });
 test('TLS receive, durable restart, lease/import confirmation and duplicate preserve one passive message', async t => {
   const f = await fixture(t);

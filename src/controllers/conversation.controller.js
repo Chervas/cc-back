@@ -54,6 +54,28 @@ const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .map((v) => parseInt(v.trim(), 10))
   .filter((n) => !Number.isNaN(n));
 
+const routingReview = require('../lib/whatsappInboxRoutingReview');
+async function routingAuthorizer(userId) {
+  const access = await getUserClinics(userId);
+  const cache = new Map();
+  return async conversation => {
+    if (!ensureAccess(access, conversation.clinic_id)) return false;
+    const key = `${conversation.clinic_id}:${getQuickChatConversationCategory(conversation)}`;
+    if (!cache.has(key)) cache.set(key, await canReadQuickChatConversation(userId, conversation));
+    return cache.get(key);
+  };
+}
+async function attachRoutingReviews(conversations, userId) {
+  if (!routingReview.enabled()) return conversations;
+  const ids = conversations.filter(c => c.channel === 'whatsapp').map(c => Number(c.id));
+  if (!ids.length) return conversations;
+  const authorize = await routingAuthorizer(userId);
+  const reviews = await routingReview.withConnection(db.sequelize, c => routingReview.pending(c, ids, authorize));
+  return conversations.map(conversation => ({ ...conversation, routing_reviews: reviews
+    .filter(review => review.conversationIds.includes(Number(conversation.id)))
+    .map(({ conversationIds, ...review }) => review) }));
+}
+
 const STREAMABLE_MEDIA_KINDS = new Set(['audio', 'image', 'video', 'document', 'sticker']);
 const INLINE_MEDIA_KINDS = new Set(['audio', 'image', 'video', 'sticker']);
 const LEAD_ACTIVE_APPOINTMENT_STATES = new Set([
@@ -1493,13 +1515,13 @@ exports.listConversations = async (req, res) => {
     const withRestrictions = await attachContactRestrictions(rawPayload);
     const withLeadAppointments = await enrichQuickChatLeadAppointments(withRestrictions);
     const withPatientDirection = await enrichPatientDirectionAssignments(withLeadAppointments);
-    const payload = await hydrateMarketingContactFallbacks(withPatientDirection, { searchQuery });
+    const payload = await attachRoutingReviews(await hydrateMarketingContactFallbacks(withPatientDirection, { searchQuery }), userId);
     const totalUnread = payload.reduce((total, item) => {
       const unread = Number(item?.unread_count || 0);
       const automationPending = item?.pending_automation_attention
         ? Number(item?.pending_automation_count || 0)
         : 0;
-      return total + Math.max(unread, automationPending);
+      return total + Math.max(unread, automationPending, item.routing_reviews?.length || 0);
     }, 0);
 
     res.set('X-Has-More', hasMore ? 'true' : 'false');
@@ -1616,7 +1638,8 @@ exports.getMessages = async (req, res) => {
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
-    return res.json({ conversation: conversationPayload, messages, messages_page: messagesPage });
+    const [withRouting] = await attachRoutingReviews([conversationPayload], userId);
+    return res.json({ conversation: withRouting, messages, messages_page: messagesPage });
   } catch (err) {
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getMessages', err);
@@ -1955,6 +1978,29 @@ exports.markAsRead = async (req, res) => {
   } catch (err) {
     console.error('Error markAsRead', err);
     return res.status(500).json({ error: 'Error marcando conversación como leída' });
+  }
+};
+
+exports.resolveRoutingReview = async (req, res) => {
+  if (!routingReview.enabled()) return res.status(404).json({ error: 'Funci\u00f3n no disponible' });
+  const conversationId = Number(req.params.id);
+  const clinicId = Number(req.body?.clinic_id);
+  const revision = Number(req.body?.revision);
+  const userId = Number(req.userData?.userId);
+  const reviewId = req.params.reviewId;
+  if (![conversationId, clinicId, revision, userId].every(n => Number.isSafeInteger(n) && n > 0)
+    || !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(reviewId || '')) return res.status(400).json({ error: 'Datos no v\u00e1lidos' });
+  try {
+    const authorize = await routingAuthorizer(userId);
+    const result = await routingReview.withConnection(db.sequelize, c => routingReview.resolve(c,
+      { conversationId, clinicId, revision, reviewId, userId, scopes: null, authorize }));
+    return res.json(result);
+  } catch (error) {
+    const forbidden = error.code === 'routing_review_forbidden';
+    const conflict = String(error.code || '').startsWith('routing_');
+    return res.status(forbidden ? 403 : conflict ? 409 : 503).json({
+      error: forbidden ? 'No tienes acceso a las dos conversaciones' : 'El caso ha cambiado. Actualiza la conversaci\u00f3n antes de continuar',
+    });
   }
 };
 

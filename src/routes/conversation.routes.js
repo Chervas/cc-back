@@ -18,6 +18,7 @@ router.get('/conversations/:id/messages', conversationController.getMessages);
 router.post('/conversations/:id/messages', conversationController.postMessage);
 router.patch('/conversations/:id/read', conversationController.markAsRead);
 router.patch('/conversations/:id/automation-attention/resolve', conversationController.resolveAutomationAttention);
+router.post('/conversations/:id/routing-reviews/:reviewId/resolve', conversationController.resolveRoutingReview);
 
 // Chat interno del equipo
 router.post('/chat/internal', conversationController.createInternalMessage);

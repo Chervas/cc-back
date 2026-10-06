@@ -78,6 +78,23 @@ async function mergeDuplicateConversations(canonical, duplicates, { transaction 
       'UPDATE WhatsappInboxContactKeys SET conversation_id=:canonicalId WHERE conversation_id IN (:duplicateIds)',
       { replacements: { canonicalId: Number(canonical.id), duplicateIds }, transaction });
   }
+  const [routingTables] = await db.sequelize.query(
+    "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='WhatsappInboxRoutingReviews'",
+    { transaction });
+  if (routingTables.length) {
+    const [reviews] = await db.sequelize.query('SELECT id,candidates,selected_conversation_id FROM WhatsappInboxRoutingReviews WHERE '
+      + duplicateIds.map(id => `JSON_CONTAINS(candidates,JSON_OBJECT('conversationId',${Number(id)}))`).join(' OR ') + ' FOR UPDATE', { transaction });
+    for (const review of reviews) {
+      const candidates = typeof review.candidates === 'string' ? JSON.parse(review.candidates) : review.candidates;
+      const mapped = [...new Map(candidates.map(candidate => {
+        const value = duplicateIds.includes(candidate.conversationId) ? { ...candidate, conversationId: Number(canonical.id) } : candidate;
+        return [value.conversationId, value];
+      })).values()].sort((a,b) => a.clinicId-b.clinicId || a.conversationId-b.conversationId);
+      await db.sequelize.query('UPDATE WhatsappInboxRoutingReviews SET candidates=:candidates,selected_conversation_id=:selected,revision=revision+1 WHERE id=:id',
+        { replacements: { candidates: JSON.stringify(mapped), selected: duplicateIds.includes(review.selected_conversation_id)
+          ? Number(canonical.id) : review.selected_conversation_id, id: review.id }, transaction });
+    }
+  }
 
   await Message.update(
     { conversation_id: canonical.id },

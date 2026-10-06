@@ -12,7 +12,8 @@ const pollError=(code,stage,status)=>Object.assign(Error(code),{code,pollStage:s
 // The importer still rechecks that snapshot before every clinical transaction.
 async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requiresScoped,
   isStopping=()=>false, loadConfiguration=()=>scoped.configuration(env),
-  importScoped=scoped.importScopedLease, publish=health.publish}) {
+  importScoped=scoped.importScopedLease, publish=health.publish,
+  resumeReviews=(...args)=>require('../lib/whatsappInboxRoutingReview').resumeResolved(...args)}) {
   const scopes=loadConfiguration();
   if(requiresScoped && !scopes)throw Error('inbox_consumer_configuration_invalid');
   let listed;
@@ -39,6 +40,7 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
       const imported=scopes
         ? await importScoped(connection,{...lease,raw},scopes,{loadConfiguration,
           accountSyncEnabled:env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED==='true',
+          routingReviewEnabled:env.WHATSAPP_INBOX_ROUTING_REVIEW_ENABLED==='true',
           playbackEnabled:env.WHATSAPP_INBOX_PLAYBACK_ENABLED==='true'})
         : await importLease(connection,{...lease,raw},scope);
       const ack=await client.request('POST','/confirm',{receipt:lease.receipt,lease:lease.lease,importReceipt:imported.importReceipt});
@@ -55,6 +57,11 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
         ...(error.reviewDetail==='contact_binding_mismatch'?{detail:error.reviewDetail}:{})})+'\n');
     }
     finally{raw?.fill(0);}
+  }
+  if (scopes && env.WHATSAPP_INBOX_ROUTING_REVIEW_ENABLED === 'true'
+    && listed.data.receipts.length < 20 && !isStopping()) {
+    try { await resumeReviews(connection, client, scopes.scopes); }
+    catch { process.stderr.write(JSON.stringify({event:'WHATSAPP_ROUTING_REVIEW_RESUME_UNAVAILABLE'})+'\n'); }
   }
   return settled===listed.data.receipts.length ? settled : 0;
 }
@@ -77,6 +84,7 @@ async function main(env=process.env) {
     const tables = ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys'];
     if(env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED==='true')tables.push('WhatsappInboxAdminSync');
     if(env.WHATSAPP_INBOX_PLAYBACK_ENABLED==='true')tables.push('WhatsappInboxPlaybackImports');
+    if(env.WHATSAPP_INBOX_ROUTING_REVIEW_ENABLED==='true')tables.push('WhatsappInboxRoutingReviews','WhatsappInboxRoutingReviewReceipts');
     for(const table of tables) await connection.query('SELECT 1 FROM '+table+' LIMIT 0');
     while(!stopping){
       let nextPollMs=5000;

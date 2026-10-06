@@ -26,6 +26,43 @@ function fixture(t, options = {}) {
   return { dir, filename, get store() { return store; }, get inbox() { return inbox; }, get cipher() { return cipher; }, advance(ms) { clock += ms; },
     restart() { cipher.close(); store.close(); open(); } };
 }
+test('durable authenticated isolation covers more than 100 contacts across restart without importing them', t => {
+  const f = fixture(t, { scopeBindings: [{ wabaId: '301', phoneId: '401', clinicIds: [71] }] });
+  for (let n = 0; n < 220; n++) {
+    const value = body(); value.entry[0].changes[0].value.messages[0].from = String(34000000001 + n);
+    value.entry[0].changes[0].value.messaging_product = 'whatsapp';
+    const r = f.inbox.accept(packet(value)); const lease = f.inbox.lease(r.receipt); lease.raw.fill(0);
+    f.inbox.defer({ receipt: r.receipt, lease: lease.lease, reason: 'review_required' });
+  }
+  f.restart();
+  const group = f.inbox.health().groups[0];
+  assert.equal(group.blockingReview, 220); assert.equal(group.reviewIsolation.scopedReviews, 220);
+  assert.equal(group.reviewIsolation.contacts.length, 220);
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n, 0);
+  assert(!fs.readFileSync(f.filename).includes(Buffer.from('34000000001')));
+  const receipt = f.store.db.prepare('SELECT receipt FROM whatsapp_inbox LIMIT 1').get().receipt;
+  f.store.db.prepare('UPDATE whatsapp_inbox SET review_metadata=? WHERE receipt=?').run(Buffer.alloc(40), receipt);
+  assert.equal(f.inbox.health().groups[0].reviewIsolation.scopedReviews, 219);
+});
+test('legacy isolation backfills in bounded steps and retry scheduling never acknowledges a review', t => {
+  const f = fixture(t, { scopeBindings: [{ wabaId: '301', phoneId: '401', clinicIds: [71] }] });
+  let last;
+  for (let n = 0; n < 220; n++) {
+    const value = body(); value.entry[0].changes[0].value.messages[0].from = String(34000000001 + n);
+    value.entry[0].changes[0].value.messaging_product = 'whatsapp';
+    const r = f.inbox.accept(packet(value)); const lease = f.inbox.lease(r.receipt); lease.raw.fill(0);
+    f.inbox.defer({ receipt: r.receipt, lease: lease.lease, reason: 'review_required' }); last = r.receipt;
+  }
+  f.store.db.prepare('UPDATE whatsapp_inbox SET review_metadata=NULL').run(); f.restart();
+  assert.equal(f.inbox.health().groups[0].reviewIsolation.scopedReviews, 100);
+  assert.equal(f.inbox.health().groups[0].reviewIsolation.scopedReviews, 200);
+  assert.equal(f.inbox.health().groups[0].reviewIsolation.scopedReviews, 220);
+  assert.throws(() => f.inbox.resumeReview({ receipt: last }), { code: 'scope_denied' });
+  f.advance(60001);
+  assert.equal(f.inbox.resumeReview({ receipt: last }).businessProcessed, false);
+  assert.equal(f.inbox.pending(20)[0].receipt, last);
+  assert.equal(f.inbox.health().groups[0].blockingReview, 220);
+});
 test('signed batch is encrypted and audited before ACK, survives restart and deduplicates without a business action', t => {
   const f = fixture(t); const input = packet(); const first = f.inbox.accept(input);
   assert.equal(first.persisted, true); assert.equal(first.businessProcessed, false);
@@ -352,7 +389,7 @@ test('review health attributes signed contact events without importing them and 
  assert.equal(later.blockingReview,2);assert.equal(later.reviewIsolation.scopedReviews,1);
  assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM whatsapp_inbox WHERE state='imported'").get().n,0);
 });
-test('recent review diagnostics include late events without enlarging the original clinical isolation budget',t=>{
+test('durable review diagnostics include late events without relying on a sampled isolation budget',t=>{
  const scopeBindings=[{wabaId:'301',phoneId:'401',clinicIds:[71]}];
  const f=fixture(t,{scopeBindings});
  for(let n=0;n<121;n++) {
@@ -362,7 +399,7 @@ test('recent review diagnostics include late events without enlarging the origin
   f.inbox.defer({receipt:r.receipt,lease:lease.lease,reason:'review_required'});f.advance(1);
  }
  const h=f.inbox.health(),g=h.groups.find(group=>group.scopes.includes('301:401'));
- assert.equal(g.blockingReview,121);assert.equal(g.reviewIsolation.scopedReviews,100);
+ assert.equal(g.blockingReview,121);assert.equal(g.reviewIsolation.scopedReviews,121);
  assert.equal(g.reviewSummary[0].category,'incoming_messages');assert.equal(g.reviewSummary[0].count,121);
  assert.equal(g.reviewSummary.reduce((total,item)=>total+item.count,0),g.blockingReview);
  assert(!JSON.stringify(h).includes('FICTITIOUS_CANCEL_REQUEST'));assert(!JSON.stringify(h).includes('34000000001'));
@@ -387,8 +424,8 @@ test('older reviews from another scope cannot starve a shared active phone of co
  const active=health.groups.find(g=>g.scopes.includes('302:402'));
  assert.equal(active.blockingReview,2);assert.equal(active.reviewIsolation.scopedReviews,2);
  assert.deepEqual(active.reviewIsolation.contacts.map(c=>c.clinicId),[72,73]);
- assert.equal(old.reviewIsolation.scopedReviews,98);
- assert.equal(health.groups.reduce((n,g)=>n+(g.reviewIsolation?.scopedReviews||0),0),100);
+ assert.equal(old.reviewIsolation.scopedReviews,150);
+ assert.equal(health.groups.reduce((n,g)=>n+(g.reviewIsolation?.scopedReviews||0),0),152);
  assert.deepEqual(f.store.db.prepare('SELECT receipt,state,lease,imported_at FROM whatsapp_inbox ORDER BY receipt').all(),before);
  assert(!JSON.stringify(health).includes('FICTITIOUS_CANCEL_REQUEST'));
  assert(!JSON.stringify(health).includes('34000000001'));
