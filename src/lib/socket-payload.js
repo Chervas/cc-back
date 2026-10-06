@@ -44,6 +44,21 @@ function packetFor(event, payload) {
   }
   if (family === 'notification') {
     body.data = project(payload.data, 'quickChatConversationId quickChatMessageId appointmentId leadId');
+    // Reception's recipient-undeliverable alert uses the existing persistent
+    // overlay. Only this proven, closed presentation contract crosses live
+    // sockets: never expose execution snapshots, provider errors or arbitrary
+    // notification metadata. The clinic is derived from the scoped DTO, not
+    // from caller-supplied navigation data.
+    if (body.event === 'automation.persistent_alert'
+      && payload.data?.kind === 'appointment_whatsapp_delivery_failed'
+      && payload.data?.displayMode === 'persistent_alert'
+      && payload.data?.requiresAcknowledgement === true
+      && positive(body.clinicaId)) {
+      body.data.kind = 'appointment_whatsapp_delivery_failed';
+      body.data.displayMode = 'persistent_alert';
+      body.data.requiresAcknowledgement = true;
+      body.data.clinicId = Number(body.clinicaId);
+    }
     // Navigation must remain local; arbitrary URLs can carry credentials or exfiltrate user context.
     body.link = typeof body.link === 'string' && /^\/(?!\/)[a-zA-Z0-9/_-]*$/.test(body.link) ? body.link : null;
   }

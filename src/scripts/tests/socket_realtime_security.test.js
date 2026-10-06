@@ -3,6 +3,7 @@ const test = require('node:test'); const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const { installRealtimeAccess } = require('../../lib/socket-realtime-guard');
 const { packetFor } = require('../../lib/socket-payload');
+const { mapNotificationToDto } = require('../../lib/notification-dto');
 const { createCapture } = require('../../services/platformAudit.realtime');
 const { pack, keyFor, unpack } = require('../../../services/platform-audit/src/event');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -34,6 +35,40 @@ test('closed browser projection strips provider secrets and hidden messages, pre
   assert.equal(packetFor('message:created', { id: true, conversation_id: 9 }), null);
   const flow = packetFor('flow_execution:log', { execution_id: 4, log: { id: 2, audit_snapshot: { token: 'SECRET' }, error_message: 'SECRET' }, last_error: 'SECRET' });
   assert(!JSON.stringify(flow).includes('SECRET')); assert.equal(flow.body.log.audit_snapshot, null);
+});
+test('real notification DTO preserves only the closed delivery-alert overlay flags on created and updated packets', () => {
+  const notification = { id: 96, userId: 1, event: 'automation.persistent_alert', category: 'whatsapp',
+    level: 'warning', clinicaId: 72, title: 'Paciente ficticio',
+    message: 'El paciente no está recibiendo el WhatsApp. Llámale.',
+    data: { kind: 'appointment_whatsapp_delivery_failed', displayMode: 'persistent_alert',
+      requiresAcknowledgement: true, clinicId: 999, appointmentId: 91, quickChatConversationId: 15,
+      source: 'SECRET', execution_id: 'SECRET', failedMessageId: 'SECRET',
+      deliveryFailureGroups: { consent: { providerError: 'SECRET' } }, provider_errors: ['SECRET'],
+      appointmentSlot: 'SECRET', arbitrary_flag: 'SECRET' } };
+  const dto = mapNotificationToDto({ get: () => notification });
+  const before = JSON.stringify(dto);
+  for (const event of ['notification:created', 'notification:updated']) {
+    const packet = packetFor(event, dto);
+    assert.deepEqual(packet.body.data, { quickChatConversationId: 15, appointmentId: 91,
+      kind: 'appointment_whatsapp_delivery_failed', displayMode: 'persistent_alert',
+      requiresAcknowledgement: true, clinicId: 72 });
+    assert.equal(packet.body.level, 'warning');
+    assert(!JSON.stringify(packet).includes('SECRET'));
+  }
+  assert.equal(JSON.stringify(dto), before, 'the internal producer envelope is not mutated');
+});
+test('other notification kinds, invalid scopes and non-persistent DTOs cannot widen the closed socket projection', () => {
+  const valid = { id: 96, event: 'automation.persistent_alert', clinicaId: 72,
+    data: { kind: 'appointment_whatsapp_delivery_failed', displayMode: 'persistent_alert', requiresAcknowledgement: true } };
+  for (const input of [
+    { ...valid, event: 'custom' }, { ...valid, clinicaId: 0 }, { ...valid, clinicaId: true },
+    { ...valid, data: { ...valid.data, kind: 'unknown_alert' } },
+    { ...valid, data: { ...valid.data, displayMode: 'inbox' } },
+    { ...valid, data: { ...valid.data, requiresAcknowledgement: 'true' } },
+  ]) {
+    const packet = packetFor('notification:created', input);
+    assert.deepEqual(packet.body.data, {});
+  }
 });
 test('durable v5 binds only closed actor/scope/resource fields and rejects free text or impossible success', async () => {
   const f = fixture(); f.connect(501); await f.idle();
