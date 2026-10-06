@@ -1,5 +1,36 @@
 # WhatsApp: motor de envío aislado y cliente staging
 
+## Citas operativas de BS procedentes de ClinicCloud (2026-10-06)
+
+La liberación del día 5 era exclusivamente de recordatorios del día anterior,
+con reserva y horario exactos. No cubría reprogramaciones: cambiar la hora hacía
+que el permiso dejase de coincidir y el runtime seguía clasificando todo
+`source_system=cliniccloud` como histórico. Caso verificado: cita 75839 de BS
+Capilar, reprogramada el 6 a las 13:17 por Ainhoa; no se creó su ejecución de
+reprogramación. El mensaje manual posterior está leído y no debe duplicarse.
+
+El registro privado `imported-appointment-operations.json`, en el mismo directorio
+staging protegido, autoriza desde el corte de aprobación las reservas operativas
+ClinicCloud de BS Capilar (66) y BS Medical (72). No depende de su hora antigua:
+una ejecución **nueva** debe coincidir con clínica, cita, paciente y horario actual.
+Se comprueba en encolado, programación, transporte y respuestas. Las respuestas
+requieren además un envío aceptado de esa ejecución en la misma conversación.
+No concede una excepción general al paciente ni libera marketing o citas nativas.
+
+La autorización no caduca a mitad de la migración; retirar el registro la revoca.
+DEV y gateway no pueden leerlo. No se cambian referencias, estados ni recibos
+`import_metadata`, y no se activan automatizaciones que estén pausadas. Solo se
+ignoran las supresiones booleanas técnicas del importador. Una selección manual,
+un bloqueo explícito o «error administrativo» conservan su comportamiento.
+
+Se mantiene la exclusión de recordatorios del mismo día, aunque sus flujos estén
+activos actualmente. La descripción de desactivación del apartado siguiente es
+la fotografía de la operación del día 5, no una condición vigente. No se ejecutan
+ventanas anteriores al corte, ni reprogramaciones pasadas, ni colas rechazadas.
+Los históricos reales de reactivación, las citas anteriores al corte y las
+pruebas ficticias siguen excluidos. Salud de recepción, opt-out, identidad del
+destinatario, autorización Meta e idempotencia no cambian.
+
 ## Liberación operativa de recordatorios importados (2026-10-05)
 
 La liberación autorizada de reservas existentes usa el registro privado

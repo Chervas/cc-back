@@ -38,7 +38,8 @@ async function tick() {
           || Date.parse(currentHealth?.recoveryNotBefore || '') > Date.parse(cutoff)
           || !eligible(message, conversation, b, cutoff)) { held++; return; }
         if (conversation.patient_id && await patientImportHeld(Number(conversation.patient_id), db)
-          && !await require('../lib/whatsappImportedReminderRelease').permitsReply(conversation, message, db, transaction)) { held++; return; }
+          && !await require('../lib/whatsappImportedReminderRelease').permitsReply(conversation, message, db, transaction)
+          && !await require('../lib/whatsappImportedAppointmentOperations').permitsReply(conversation, message, db, transaction)) { held++; return; }
         const current = await broker.binding(b.clinicId, b.assetId);
         if (JSON.stringify(current) !== JSON.stringify(b) || JSON.stringify(broker.configuration()) !== JSON.stringify(config)) throw Error('whatsapp_fresh_inbound_scope_changed');
         await require('./automationInboundMessage.service').enqueueInboundDispatch({ inboundMessage: message,

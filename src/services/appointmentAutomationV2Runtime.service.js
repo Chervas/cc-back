@@ -104,11 +104,13 @@ function cleanString(value) {
 }
 
 function isImportedHistoricalAppointment(cita) {
+  const operations = require('../lib/whatsappImportedAppointmentOperations');
   const sourceSystem = cleanString(cita?.source_system).toLowerCase();
   const reason = cleanString(cita?.motivo).toLowerCase();
   const title = cleanString(cita?.titulo).toLowerCase();
   const metadata = parsePlainObject(cita?.import_metadata);
-  return sourceSystem === 'cliniccloud'
+  return operations.isHistorical(cita)
+    || (sourceSystem === 'cliniccloud' && !operations.allowsAppointment(cita))
     || sourceSystem === 'lead_resolution_historical'
     || parseBool(metadata?.historical_registration, false) === true
     || cleanString(metadata?.kind).toLowerCase() === 'lead_resolution_historical'
@@ -139,6 +141,11 @@ function parsePlainObject(value) {
 function getAppointmentNotificationSuppression(cita) {
   const metadata = parsePlainObject(cita?.import_metadata);
   const raw = parsePlainObject(metadata.notification_suppression || metadata.notificationSuppression);
+  // Keep the original import receipt intact; only the reviewed operational
+  // policy can override import-time defaults, never a manual "do not send".
+  if (require('../lib/whatsappImportedAppointmentOperations').allowsSuppressionOverride(cita)) {
+    return { appointment_details: false, day_before: false, same_day: true };
+  }
   return {
     appointment_details: parseBool(raw.appointment_details ?? raw.appointmentDetails ?? raw.appointment_created, false),
     day_before: parseBool(raw.day_before ?? raw.dayBefore, false),
@@ -149,7 +156,7 @@ function getAppointmentNotificationSuppression(cita) {
 function shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig = null) {
   const normalizedTriggerType = cleanString(triggerType).toLowerCase();
   const suppression = getAppointmentNotificationSuppression(cita);
-  if (normalizedTriggerType === 'appointment_created') {
+  if (normalizedTriggerType === 'appointment_created' || normalizedTriggerType === 'appointment_rescheduled') {
     return suppression.appointment_details === true;
   }
   if (normalizedTriggerType !== 'appointment_reminder_window') {
@@ -157,6 +164,8 @@ function shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig = nul
   }
   const config = triggerConfig || {};
   const scheduleMoment = cleanString(config.schedule_moment || 'day_before').toLowerCase() || 'day_before';
+  if (scheduleMoment === 'same_day'
+    && require('../lib/whatsappImportedAppointmentOperations').allowsAppointment(cita)) return true;
   if (scheduleMoment === 'same_day') return suppression.same_day === true;
   if (scheduleMoment === 'day_before') return suppression.day_before === true;
   return false;
@@ -1054,7 +1063,7 @@ async function resolveClinicScope(cita) {
   };
 }
 
-function buildExecutionContext({ cita, eventName, userName = null, userEmail = null, triggerData = null }) {
+function buildExecutionContext({ cita, eventName, userName = null, userEmail = null, triggerData = null, triggerConfig = null }) {
   const leadIntakeId = toIntOrNull(cita?.lead_intake_id);
   const appointmentOrigin = leadIntakeId ? 'lead' : 'manual';
   const createdAt = cita?.created_at || cita?.createdAt || null;
@@ -1064,6 +1073,7 @@ function buildExecutionContext({ cita, eventName, userName = null, userEmail = n
   return {
     trigger: {
       type: eventName,
+      ...(triggerConfig?.schedule_moment ? { schedule_moment: triggerConfig.schedule_moment } : {}),
       data: {
         cita_id: toIntOrNull(cita?.id_cita),
         appointment_id: toIntOrNull(cita?.id_cita),
@@ -1206,6 +1216,7 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
     userName: options.user_name || null,
     userEmail: options.user_email || null,
     triggerData: options.trigger_data || null,
+    triggerConfig: templateConfig,
   });
   context.communication_language = await resolveAppointmentCommunicationLanguage(cita);
 
@@ -1433,6 +1444,10 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
         timeZone,
       });
       if (!scheduledFor || !Number.isFinite(scheduledFor.getTime())) return;
+      const operations = require('../lib/whatsappImportedAppointmentOperations');
+      const operationalPolicy = operations.read();
+      if (operations.allowsAppointment(cita, { policy: operationalPolicy })
+        && scheduledFor.getTime() < Date.parse(operationalPolicy.approvedAt)) return;
       const windowIdentifier = buildScheduledWindowIdentifier({
         triggerType,
         triggerConfig,
@@ -1714,6 +1729,12 @@ async function fireScheduledTrigger(payload = {}, options = {}) {
   });
   if (!scheduledFor || !Number.isFinite(scheduledFor.getTime())) {
     return { success: true, skipped: true, reason: 'invalid_schedule' };
+  }
+  const operations = require('../lib/whatsappImportedAppointmentOperations');
+  const operationalPolicy = operations.read();
+  if (operations.allowsAppointment(cita, { policy: operationalPolicy })
+    && scheduledFor.getTime() < Date.parse(operationalPolicy.approvedAt)) {
+    return { success: true, skipped: true, reason: 'imported_appointment_backlog_not_authorized' };
   }
 
   const effectiveWindowIdentifier = buildScheduledWindowIdentifier({

@@ -13,6 +13,7 @@ function fixture(){
   created_at:'2026-10-05T09:10:00.000Z',context:{appointment:{inicio:appointment.inicio}}};
  const c={module:{exports:{}},Date,Intl,require:name=>{
   if(name==='./whatsappImportedReminderRelease')return {...release,permits:(a,o)=>release.permits(a,{...o,now:o?.now??now,policy})};
+  if(name==='./whatsappImportedAppointmentOperations')return {permits:()=>false,allowsSuppressionOverride:()=>false};
   throw Error('unexpected_dependency');
  }};vm.createContext(c);vm.runInContext(fs.readFileSync(require.resolve('../../lib/whatsappAppointmentEligibility'),'utf8'),c);
  return {policy,appointment,execution,eligibility:c.module.exports};
@@ -43,7 +44,8 @@ test('patient hold is bypassed only for the exact released reminder execution, n
  const original=f.eligibility.assertAppointmentEligibility;
  const fakeDate=class extends Date {static now(){return now}};
  const c={module:{exports:{}},Date:fakeDate,Intl,require:name=>{
-  if(name==='./whatsappImportedReminderRelease')return {permits:(a,o)=>release.permits(a,{...o,policy:f.policy,now})};throw Error(name);
+  if(name==='./whatsappImportedReminderRelease')return {permits:(a,o)=>release.permits(a,{...o,policy:f.policy,now})};
+  if(name==='./whatsappImportedAppointmentOperations')return {permits:()=>false,allowsSuppressionOverride:()=>false};throw Error(name);
  }};vm.createContext(c);vm.runInContext(fs.readFileSync(require.resolve('../../lib/whatsappAppointmentEligibility'),'utf8'),c);
  assert.equal(await c.module.exports.assertAutomatedMessageEligibility(input),true);
  await assert.rejects(c.module.exports.assertAutomatedMessageEligibility({...input,loadExecution:async()=>({...f.execution,trigger_entity_type:'entity'})}),{code:'whatsapp_patient_import_held'});
