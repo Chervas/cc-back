@@ -4,6 +4,7 @@ const authMiddleware = require('./auth.middleware');
 const controller = require('../controllers/doctores.controller');
 const db = require('../../models');
 const { getAccessibleClinicIdsForFeature } = require('../lib/access-policy');
+const { agendaClinicIds } = require('../lib/agenda-read-scope');
 
 function positiveId(value) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -64,9 +65,11 @@ async function doctorClinicIds(doctorId) {
 const scopeDoctorList = asyncAccess(async (req, res, next) => {
   const clinicIdRaw = req.query?.clinica_id;
   const groupIdRaw = req.query?.group_id;
-  const clinicId = clinicIdRaw === undefined ? null : positiveId(clinicIdRaw);
+  let clinicIds;
+  try { clinicIds = agendaClinicIds(clinicIdRaw); }
+  catch { return accessError(res, 400, 'clinic_scope_invalid', 'La clínica o el grupo indicado no es válido.'); }
   const groupId = groupIdRaw === undefined ? null : positiveId(groupIdRaw);
-  if ((clinicIdRaw !== undefined && !clinicId) || (groupIdRaw !== undefined && !groupId)) {
+  if (groupIdRaw !== undefined && !groupId) {
     return accessError(res, 400, 'clinic_scope_invalid', 'La clínica o el grupo indicado no es válido.');
   }
 
@@ -78,11 +81,11 @@ const scopeDoctorList = asyncAccess(async (req, res, next) => {
       raw: true,
     });
     requestedClinicIds = clinics.map((clinic) => positiveId(clinic.id_clinica)).filter(Boolean);
-    if (clinicId && !requestedClinicIds.includes(clinicId)) {
+    if (clinicIds && clinicIds.some(id => !requestedClinicIds.includes(id))) {
       return accessError(res, 400, 'clinic_group_scope_mismatch', 'La clínica no pertenece al grupo indicado.');
     }
   }
-  if (clinicId) requestedClinicIds = [clinicId];
+  if (clinicIds) requestedClinicIds = clinicIds;
 
   const featureKey = req.query?.agenda_context === 'true' || req.query?.agenda_context === '1'
     ? 'appointments.view'

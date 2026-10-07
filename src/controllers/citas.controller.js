@@ -2544,8 +2544,14 @@ exports.getCitas = asyncHandler(async (req, res) => {
 exports.getCitasCalendar = asyncHandler(async (req, res) => {
     const { clinica_id, startDate, endDate, paciente_id, patient_id, summary } = req.query;
 
-    const readableClinicIds = await resolveAppointmentReadClinicIdsOrRespond(req, res, clinica_id);
+    const { agendaClinicIds, agendaPeerClinicIds, agendaInstallationAliases } = require('../lib/agenda-read-scope');
+    try { agendaClinicIds(clinica_id); }
+    catch { return res.status(400).json({ code: 'clinic_scope_invalid', message: 'La clínica o el grupo indicado no es válido.' }); }
+    let readableClinicIds = await resolveAppointmentReadClinicIdsOrRespond(req, res, clinica_id);
     if (!readableClinicIds) return;
+    readableClinicIds = await agendaPeerClinicIds({ db, actorId: Number(req.userData?.userId), clinicIds: readableClinicIds,
+        includePeers: ['1', 'true'].includes(String(req.query.include_group_conflicts)) && parseClinicIds(clinica_id).length === 1,
+        authorize: getAccessibleClinicIdsForFeature });
     const calendarScope = await buildClinicCalendarScope(readableClinicIds, startDate, endDate);
     const where = calendarScope.groups.length === 1
         ? { ...calendarScope.groups[0] }
@@ -2670,6 +2676,19 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
             calendarScope.timeZones.get(Number(cita.clinica_id)) || DEFAULT_TIMEZONE,
         ))
         .filter(Boolean);
+    const clinics = await Clinica.findAll({ where: { id_clinica: { [Op.in]: readableClinicIds } },
+        attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'], raw: true });
+    const rooms = await Instalacion.findAll({ where: { clinica_id: { [Op.in]: readableClinicIds }, activo: true }, attributes: ['id'], raw: true });
+    const roomIds = rooms.map(room => Number(room.id));
+    const aliasRows = db.InstallationPhysicalAlias && roomIds.length ? await db.InstallationPhysicalAlias.findAll({
+        where: { installation_id: { [Op.in]: roomIds } }, raw: true }) : [];
+    const aliases = agendaInstallationAliases(aliasRows, roomIds);
+    // Display references only. Persisted resources, bookings and mutation authorization stay unchanged.
+    for (const row of calendarRows) {
+        const clinic = clinics.find(item => Number(item.id_clinica) === Number(row.clinica_id));
+        row.agenda_clinic = clinic ? { id: clinic.id_clinica, name: clinic.nombre_clinica, avatar: clinic.url_avatar } : null;
+        row.agenda_installation_aliases = aliases;
+    }
     res.json(await protectAppointmentsForRequest(req, calendarRows));
 });
 

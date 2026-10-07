@@ -10,6 +10,7 @@ const {
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
 const { normalizeInstallationProfessionals, installationAllowsStaff } = require('../lib/installation-professionals');
 const { normalizeInstallationOverlap: overlapSettings } = require('../lib/installation-overlap');
+const { agendaClinicIds } = require('../lib/agenda-read-scope');
 
 async function validateProfessionals(value, clinicId, transaction) {
   const ids = normalizeInstallationProfessionals(value);
@@ -155,7 +156,9 @@ const buildHorarioRowsFromBody = (instalacionId, body) => {
 
 exports.list = asyncHandler(async (req, res) => {
   const { clinica_id, group_id, all, activa } = req.query;
-  let requestedClinicIds = clinica_id ? [clinica_id] : null;
+  let requestedClinicIds;
+  try { requestedClinicIds = agendaClinicIds(clinica_id); }
+  catch { return res.status(400).json({ message: 'La clínica o el grupo indicado no es válido.', code: 'clinic_scope_invalid' }); }
   if (!requestedClinicIds && group_id) {
     const groupClinics = await db.Clinica.findAll({
       where: { grupoClinicaId: group_id },
