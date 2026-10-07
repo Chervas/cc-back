@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { performance } = require('node:perf_hooks');
 const { normalizeBookingProfile } = require('../../lib/booking-profile');
-const { solutionsForCalendar } = require('../../services/appointmentBookingAvailability.service');
+const { solutionsForCalendar, startingResourceSelection } = require('../../services/appointmentBookingAvailability.service');
 const { bookingPlanHash } = require('../../lib/booking-plan-receipt');
 
 // Synthetic resource windows, actual production calendar search and solver.
@@ -47,4 +47,33 @@ test('whole-day limit includes the evening; receipt and full resources survive e
     assert.deepEqual(slot.phases[1].doctor_ids, [6, 7]);
     assert.equal((Date.parse(slot.end_at) - Date.parse(slot.start_at)) / 60000, 45);
   }
+});
+
+test('clicked starting resources constrain only the temporal first phase and retain the subsequent mandatory team', () => {
+  const p = normalizeBookingProfile({ version: 4, phases: [
+    { ...profile.phases[1] }, { ...profile.phases[0], installation_ids: [9, 11], professionals: { mode: 'any', ids: [5, 8], preferred_id: 5, fallback_when: 'unavailable' } },
+  ] });
+  const selections = startingResourceSelection(p, { startingDoctorId: '5', startingInstallationId: '9' });
+  assert.deepEqual(selections, { prepare: { doctor_id: 5, installation_id: 9 } });
+  const context = contextFor([{ start: '2030-01-07T10:05:00Z', end: '2030-01-07T10:50:00Z' }]);
+  const slots = solutionsForCalendar({ ...search(context), profile: p, selections, stepMinutes: 5, limit: 288 });
+  assert.equal(slots.length, 1); assert.deepEqual(slots[0].phases.find(phase => phase.key === 'apply').doctor_ids, [6, 7]);
+  assert.equal(slots[0].phases.find(phase => phase.key === 'prepare').installation_id, 9);
+});
+test('the displayed ALL member is an anchor, never a single-doctor override', () => {
+  const p = normalizeBookingProfile({ version: 4, phases: [{ ...profile.phases[0], professionals: { mode: 'all', ids: [5, 6], preferred_id: null } }] });
+  for (const startingDoctorId of [5, 6]) {
+    const selections = startingResourceSelection(p, { startingDoctorId, startingInstallationId: 9 });
+    assert.deepEqual(selections, { prepare: { installation_id: 9 } });
+    const context = contextFor([{ start: '2030-01-07T10:05:00Z', end: '2030-01-07T10:50:00Z' }]);
+    const slots = solutionsForCalendar({ ...search(context), profile: p, selections, stepMinutes: 5, limit: 288 });
+    assert.deepEqual(slots[0].phases[0].doctor_ids, [5, 6]);
+  }
+});
+test('starting anchors reject invalid ids, later-step resources and ambiguous legacy global overrides', () => {
+  for (const args of [{ startingDoctorId: 6 }, { startingInstallationId: 10 }, { startingDoctorId: [] },
+    { startingDoctorId: '5x' }, { startingDoctorId: 0 }, { startingInstallationId: -1 },
+    { startingDoctorId: 5, doctorId: 5 }, { startingInstallationId: 9, installationId: 9 }])
+    assert.throws(() => startingResourceSelection(profile, args), { code: 'booking_search_invalid' });
+  assert.deepEqual(startingResourceSelection(profile), {});
 });

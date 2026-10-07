@@ -200,6 +200,7 @@ exports.treatmentSlots = asyncHandler(async (req, res) => {
     date: req.query?.fecha_local, days: Number(req.query?.days || 1), stepMinutes: Number(req.query?.granularity_min || 15),
     limit: Number(req.query?.limit || 100), doctorId: req.query?.doctor_id ? Number(req.query.doctor_id) : null,
     installationId: req.query?.instalacion_id ? Number(req.query.instalacion_id) : null,
+    startingDoctorId: req.query?.starting_doctor_id ?? null, startingInstallationId: req.query?.starting_instalacion_id ?? null,
     additionalStaffIds: requestedAdditionalStaff(req), ...bookingContext,
     existingAppointmentId: bookingContext.existingAppointmentId ?? req.query?.ignore_cita_id ?? null,
     durationSelection: durationSelectionForRequest(treatment, req.query, { query: true }) }));

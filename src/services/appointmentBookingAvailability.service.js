@@ -279,7 +279,8 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
 
 async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, stepMinutes = 15, limit = 100,
   doctorId = null, installationId = null, capabilities = bookingCapabilities(), now = new Date(), additionalStaffIds = [],
-  patientId = null, existingAppointmentId = null, voucherId = null, durationSelection }) {
+  patientId = null, existingAppointmentId = null, voucherId = null, durationSelection,
+  startingDoctorId = null, startingInstallationId = null }) {
   additionalStaffIds = normalizeAdditionalStaff(additionalStaffIds);
   if (additionalStaffIds.length && !capabilities.multi) throw bookingError('booking_profile_runtime_unavailable', 'El personal de apoyo todavía no está activado.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date)) || !Number.isInteger(days) || days < 1 || days > 7
@@ -300,12 +301,33 @@ async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, s
   if (profile.phases.length > 1 && (doctorId || installationId)) {
     throw bookingError('booking_search_invalid', 'En una cita por fases elige los profesionales y cabinas por fase.', null, 400);
   }
-  const selections = profile.phases.length === 1 ? { [profile.phases[0].key]: {
+  const selections = startingResourceSelection(profile, { startingDoctorId, startingInstallationId, doctorId, installationId });
+  if (!startingDoctorId && !startingInstallationId && profile.phases.length === 1) selections[profile.phases[0].key] = {
     ...(doctorId ? { doctor_id: doctorId } : {}), ...(installationId ? { installation_id: installationId } : {}),
-  } } : {};
+  };
   const slots = solutionsForCalendar({ profile, context, date, days, stepMinutes, limit, selections, now, additionalStaffIds, allowConfirmedOverlap: true });
   return { clinic_id: Number(clinic.id_clinica), treatment_id: Number(treatmentId), timezone: timeZone,
     duration_minutes: bookingProfileDurationMinutes(profile), capabilities, slots };
+}
+
+// A clicked matrix cell binds only the starting phase. Keep subsequent phases
+// free for the canonical solver, and never reduce a mandatory ALL team to the
+// one member used to display its starting column.
+function startingResourceSelection(profile, { startingDoctorId = null, startingInstallationId = null,
+  doctorId = null, installationId = null } = {}) {
+  if (startingDoctorId == null && startingInstallationId == null) return {};
+  const invalid = () => bookingError('booking_search_invalid', 'El inicio elegido debe pertenecer al profesional y la sala del primer paso del tratamiento.', null, 400);
+  const parse = value => {
+    if (value == null) return null;
+    if (!['string', 'number'].includes(typeof value) || !/^[1-9]\d*$/.test(String(value)) || !Number.isSafeInteger(Number(value))) throw invalid();
+    return Number(value);
+  };
+  const staffId = parse(startingDoctorId), roomId = parse(startingInstallationId);
+  if (doctorId || installationId) throw invalid();
+  const first = profile.version === 4 ? profile.phases.reduce((a, b) => b.start_offset_minutes < a.start_offset_minutes ? b : a) : profile.phases[0];
+  if (staffId && !first.professionals.ids.includes(staffId) || roomId && !first.installation_ids.includes(roomId)) throw invalid();
+  return { [first.key]: { ...(staffId && first.professionals.mode !== 'all' ? { doctor_id: staffId } : {}),
+    ...(roomId ? { installation_id: roomId } : {}) } };
 }
 
 function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 15, limit = 500, selections = {}, now = new Date(), fromLocal = '00:00', toLocal = null, additionalStaffIds = [], allowConfirmedOverlap = false, onUnavailable = null }) {
@@ -350,4 +372,4 @@ function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 
 }
 
 module.exports = { resolveInstallationKeys, loadBookingContext, searchTreatmentSlots, solutionsForCalendar,
-  permitsLegacyOverlap, protectedBookingAttribute, nonShareableBookingAttribute, shareableInterval };
+  startingResourceSelection, permitsLegacyOverlap, protectedBookingAttribute, nonShareableBookingAttribute, shareableInterval };

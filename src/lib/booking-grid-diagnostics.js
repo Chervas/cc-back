@@ -233,7 +233,7 @@ function explainUnavailableVersion4Start({ profile, context, start, selections, 
           const resource = context.doctors.get(id);
           const sharingConflict = attentionVisitConflict(resource, { phase, visitStart: start, start: phaseStart, end: phaseEnd, policies });
           if (sharingConflict) return [startConflict(sharingConflict.code,
-            `${resource?.name || 'El profesional'}: ${sharingConflict.message}`, 'staff', id, phase.duration_minutes)];
+            `${resource?.name || 'El profesional'}: ${busyExplanation(resource, phaseStart, phaseEnd, 'staff')} Para esta cita necesita ${attentionExplanation(policies)}. ${sharingConflict.code === 'preparation_origin_unverified' ? 'No tiene disponibilidad verificada para encajar esta preparación.' : sharingConflict.message}`, 'staff', id, phase.duration_minutes)];
           if (policies.some(policy => !isDefaultAttention(policy))) return planStaffAttention({ resource, start: phaseStart, end: phaseEnd, policies }) ? []
             : [startConflict('staff_intervention', `${resource?.name || 'El profesional'}: no puede encajar ${attentionExplanation(policies)} en este paso sin solaparse con sus otras intervenciones o salir de su horario.`, 'staff', id, phase.duration_minutes)];
           const failure = resourceFailure(resourceForConfirmedOverlap(resource, phaseStart, phaseEnd, allowOverlap && ordinary),
