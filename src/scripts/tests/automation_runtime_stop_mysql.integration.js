@@ -152,7 +152,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const dispatchStart = waSource.indexOf('    async dispatchMessage(');
   const dispatchEnd = waSource.indexOf('\n    /**', dispatchStart);
   let fakePosts = 0;
-  const sandbox = { require: name => { assert.equal(name, '../lib/automation-runtime-stop'); return stop; },
+  const sandbox = { db: models, require: name => { assert.equal(name, '../lib/automation-runtime-stop'); return stop; },
     whatsappAuthorizedBroker: { send: async () => { fakePosts++; return { messages: [{ id: 'fictitious-wamid' }] }; } },
   };
   vm.runInNewContext('this.service = new (class {\n' + waSource.slice(dispatchStart, dispatchEnd) + '\n})()', sandbox);
@@ -230,10 +230,19 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const writerStop = toggle(false);
   await new Promise(resolve => setTimeout(resolve, 30));
   const changing = engine._handleChangeStatus(nodes[1], writer.context, { execution: writer })
-    .then(() => ({ changed: true }), error => ({ code: error.code }));
+    .then(() => ({ changed: true }), error => ({ code: error.code || error.original?.code }));
   await writerHold.commit(); await writerStop;
-  assert.equal((await changing).code, stop.STOP_REASON);
+  const writerOutcome = await changing;
+  // The canonical writer now locks its appointment before runtime authority.
+  // InnoDB may abort this intentionally inverted race as a deadlock. That must
+  // roll back the clinical write, and its fresh retry must observe the stop.
+  assert([stop.STOP_REASON, 'ER_LOCK_DEADLOCK'].includes(writerOutcome.code), JSON.stringify(writerOutcome));
   assert.equal((await models.CitaPaciente.findByPk(35)).estado, 'info_enviada');
+  if (writerOutcome.code === 'ER_LOCK_DEADLOCK') {
+    await assert.rejects(engine._handleChangeStatus(nodes[1], writer.context, { execution: writer }), { code: stop.STOP_REASON });
+    assert.equal((await models.CitaPaciente.findByPk(35)).estado, 'info_enviada');
+    report.checks.push('canonical appointment-first deadlock abort rolls back; a fresh retry observes the committed stop before clinical mutation');
+  }
   report.checks.push('actual SQL lock race: clinical writer waiting behind deactivation cannot change appointment status');
 
   const hours = { id: 'hours', type: 'action/update_google_special_hours', config: {
