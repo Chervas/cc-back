@@ -1,5 +1,24 @@
 # 13 - Backend
 
+## Colocación guiada de citas combinadas · 07/10/2026
+
+`GET /api/disponibilidad/treatment-slots` conserva su contrato normal. El modo
+guiado añade `guided_start_local` (fecha/hora local del inicio completo) y
+`guided_selection` (JSON con las elecciones por clave estable de un prefijo
+contiguo de pasos). Responde con `phase_key` del siguiente paso, o `null`
+al completar el prefijo; cada `slot` sigue siendo un plan completo con recibo
+`booking_plan_sha256`, aunque distintas opciones compartan el mismo inicio.
+
+Se usa una lectura conjunta de recursos y el solver canónico para cada
+alternativa. Los pasos anteriores permanecen fijados; horas no viables no se
+sustituyen silenciosamente. Conserva ACL de clínica/paciente, capacidad,
+prioridades, equipos ALL, maquinaria, atención, ocupación del paciente y
+personal de apoyo. No crea reservas temporales ni mensajes por paso.
+
+El cliente revalida el prefijo completo antes del único `POST /api/citas`
+con selección, recibo y clave idempotente. Ante resultado incierto no permite
+reintento ciego. Sin DDL, flags nuevos o activación de consentimientos.
+
 > **Tipo:** contrato técnico de API y arquitectura backend.
 > **Fuente de verdad:** este archivo en `cc-back`; el archivo homónimo de `cc-front` es su espejo completo.
 > **Última revisión de conciliación documental:** 2026-09-14; no certifica un nuevo despliegue.
