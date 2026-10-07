@@ -999,3 +999,66 @@ an unresolved early status as generic review with its existing 24-hour delay,
 not the single-clinic unmatched-status retry; routing/review semantics were not
 changed. Full authenticated intake, account ownership/operational deployment and
 the real purpose response/reminder/move adapters remain outside this cut.
+
+## Operational handoff — legacy confirmation incident, 2026-10-07
+
+This incident was an integration regression, not an intentional appointment
+restriction, MFA failure or Meta rejection. With the experimental visits rollout
+closed and its tables not installed, `assertMutationNode` still queried
+`AppointmentVisitMembers` for unenrolled legacy executions. The first WhatsApp
+could be accepted, then `action/change_status` failed before `wait_response`.
+Consequently a later confirmation had no live wait to resume: neither its state
+change nor its acknowledgment ran.
+
+Fix `7575e89f36b410994c612da1b91c65ffc4c8d4a4`, published to DEV and the CRM
+staging worker, limits the existing `uninstalledClosed` compatibility boundary
+to genuinely unenrolled legacy executions with the rollout closed and a missing
+table. Enrolled/lost-binding executions, an open rollout and other SQL errors
+remain fail-closed. No experimental schema, permission relaxation, authentication
+bypass or consent activation was performed. Gateway was not fully promoted.
+Regression coverage: `appointment_visit_uninstalled_mutation.test.js` and
+`appointment_visit_mutations_mysql.integration.test.js` with a fake provider.
+
+BS Medical (72), Madrid date 7 October: 44 affected executions, 40 appointments,
+35 patients. Of these, 43 first notices were accepted by the provider; one of
+those later became undeliverable (Meta 131026). One administrative-error execution
+was silent. These are not 43 confirmed patients. Five rate-limited failures and
+one phone/conversation mismatch were separate findings, not repaired by this cut.
+
+Carlos explicitly authorized reviewed recovery on 7 October. At 11:28 UTC:
+19 original executions completed through 19 native staging jobs, with 11 states
+`recordatorio_confirmado` and 8 `info_confirmada`. Nine missing acknowledgments
+were delivered; ten were omitted/suppressed because reception had already
+answered afterwards. All 19 original notices were unchanged and unique;
+appointment fields other than status and update audit were unchanged. No consent
+dispatch. No additional missing-table failures found after the published fix.
+
+Recovery did not replay entry nodes, triggers, AI, initial notices or timeout
+nudges. It pinned the original execution/template/node/delivery key, reviewed
+actual text responses and current geometry, checked patient/clinic identity,
+active jobs, linkage, revocation, already processed acknowledgment and every
+reachable repair branch, then atomically restored that execution at a terminal
+confirmation/acknowledgment path and queued its native job. The ordinary worker
+retained claims, canonical state mutation, transport idempotency, human-reply
+suppression and provider checks. A single pilot completed before the batch.
+33 operator safety assertions passed before writes. No browser tokens were used.
+
+25 executions were deliberately not reopened: nine without a response, six with
+ambiguous/other-appointment or corrected-hour evidence, three cancelled/no-show,
+four superseded time/duration snapshots, one with a later change request, one
+undeliverable and the silent administrative execution. They remain terminal;
+publication alone does not restore their waits. Any later reconciliation needs
+fresh evidence and authorization; never bulk-restart these executions at entry
+or schedule overdue nudges automatically.
+
+Private source snapshots, per-execution receipts, manifest digests, exclusion
+reasons, native job IDs and verified message/status results:
+`/home/ubuntu/qa-evidence/linked-visits-20261007-gdqsK1/recovery-final.json`,
+`recovery-results.json`, `recovery-reviewed-manifest.json`, `recovery-*.receipt.json`.
+Do not copy patient data, transport secrets or raw context into Git or prompts.
+
+Follow-up audit, not completed by this recovery: test all three real legacy
+template families with optional visits tables absent, from first-send through
+state/wait/response/acknowledgment; test each optional-feature closed boundary;
+review the six distinct provider/identity failures and whether the nine unanswered
+legacy waits need a separately scoped, no-first-send/no-overdue-nudge repair.
