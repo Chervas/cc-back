@@ -34,6 +34,10 @@ elige una clínica; una sala compartida no selecciona su primer centro por defec
   con una consulta por lote a los alias explícitos, limitada a salas activas de
   la respuesta. Permite una representación física estable incluso en días vacíos.
   No modifica IDs, bloqueos, reservas, permisos ni el modelo de datos.
+  `agenda_physical_room_key` es un ancla opaca de navegación que mantiene la
+  misma sala al cambiar entre centros, sin devolver IDs de salas ajenas en el
+  lector de una sola clínica. La misma consulta por lote cubre ambos extremos
+  del alias; no requiere otra API ni una consulta por tarjeta.
 - El selector `agenda_context` publica `agenda_flexible` desde la pertenencia
   activa que recibe citas en esa clínica. Su `agendable` considera esa excepción
   existente cuando hay apertura de clínica; no es una autorización para reservar.

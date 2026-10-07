@@ -9,6 +9,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 function controller(file, db, deps = {}) {
   const context = { exports: {}, require: name => {
     if (name === 'express-async-handler') return fn => fn;
+    if (name === 'node:crypto') return require(name);
     if (name === '../../models') return db;
     if (name === '../lib/agenda-read-scope') return scope;
     if (name === '../lib/flexible-agenda') return flexible;
@@ -53,7 +54,11 @@ test('room display metadata is one bounded batch, available on empty calendar da
   }});
   await c.list({query:{clinica_id:'66,72'},userData:{userId:1}}, {json:value=>{result=value;}});
   assert.deepEqual(plain(query.where.clinica_id[Op.in]),[66,72]);
-  assert.equal(calls,1);assert.deepEqual(plain(aliasesQuery.where.installation_id[Op.in]),[79,80]);
+  assert.equal(calls,1);assert.deepEqual(plain(aliasesQuery.where[Op.or][0].installation_id[Op.in]),[79,80]);
+  assert.deepEqual(plain(aliasesQuery.where[Op.or][1].canonical_installation_id[Op.in]),[79,80]);
   assert.deepEqual(plain(result.map(row=>row.agenda_physical_alias_ids)),[[80,79],[80,79],[81]]);
   assert.ok(result.every(row=>!row.agenda_physical_alias_ids.includes(99)));
+  assert.equal(result[0].agenda_physical_room_key,result[1].agenda_physical_room_key);
+  assert.match(result[0].agenda_physical_room_key,/^physical:[a-f0-9]{24}$/);
+  assert.equal(result[2].agenda_physical_room_key,'installation:81');
 });

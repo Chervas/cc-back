@@ -1,4 +1,5 @@
 const asyncHandler = require('express-async-handler');
+const { createHash } = require('node:crypto');
 const db = require('../../models');
 const { withCalendarMutation, sendCalendarMutationError } = require('../services/appointmentCalendarMutation.service');
 const withInstallationCalendarMutation = (installationId, mutate) => withCalendarMutation({ db, installationId, mutate });
@@ -194,10 +195,19 @@ exports.list = asyncHandler(async (req, res) => {
   // One batch; aliases cannot expose rooms outside this authorized response.
   const roomIds = items.filter(item => item.activo).map(item => Number(item.id));
   const aliasRows = db.InstallationPhysicalAlias && roomIds.length ? await db.InstallationPhysicalAlias.findAll({
-    where: { installation_id: { [Op.in]: roomIds } }, raw: true,
+    where: { [Op.or]: [{ installation_id: { [Op.in]: roomIds } }, { canonical_installation_id: { [Op.in]: roomIds } }] }, raw: true,
   }) : [];
   const aliases = agendaInstallationAliases(aliasRows, roomIds);
-  res.json(items.map(item => ({ ...item.toJSON(), agenda_physical_alias_ids: aliases[item.id] || [Number(item.id)] })));
+  const physicalKey = id => {
+    const link = aliasRows.find(row => Number(row.installation_id) === id || Number(row.canonical_installation_id) === id);
+    // Opaque navigation anchor: identifies the same room across clinic scopes
+    // without returning any foreign room/clinic IDs in a single-clinic reader.
+    return link && Number(link.group_id) > 0 && Number(link.canonical_installation_id) > 0
+      ? 'physical:' + createHash('sha256').update(`${link.group_id}:${link.canonical_installation_id}`).digest('hex').slice(0, 24)
+      : `installation:${id}`;
+  };
+  res.json(items.map(item => ({ ...item.toJSON(), agenda_physical_alias_ids: aliases[item.id] || [Number(item.id)],
+    agenda_physical_room_key: physicalKey(Number(item.id)) })));
 });
 
 exports.getById = asyncHandler(async (req, res) => {
