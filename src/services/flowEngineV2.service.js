@@ -7398,9 +7398,11 @@ async function resumeWaitingNode(execution, node, context, {
 
   if (nodeType === 'delay/wait_response') {
     const useResponse = mode === 'response';
+    const responseOnlyExpiry = !useResponse
+      && require('../lib/automation-response-only-recovery').isResponseOnlyRecoveryWait(execution, node);
     const nextNode = useResponse
       ? readOutputTarget(node, 'on_response')
-      : readOutputTarget(node, 'on_timeout');
+      : (responseOnlyExpiry ? null : readOutputTarget(node, 'on_timeout'));
 
     if (!useResponse && execution.trigger_entity_type === 'appointment'
       && whatsappAuthorizedBroker.bindingsForClinic(Number(execution.clinic_id)).some(b => b.sendEnabled)) {
@@ -7615,6 +7617,7 @@ async function resumeWaitingNode(execution, node, context, {
       nextContext = mergeNodeOutput(nextContext, node.id, {
         status: 'timed_out',
         timed_out: true,
+        ...(responseOnlyExpiry ? { recovery_response_only: true, timeout_notice_suppressed: true } : {}),
         timed_out_at: new Date().toISOString(),
         resumed_at: new Date().toISOString(),
         resume_mode: 'timeout',

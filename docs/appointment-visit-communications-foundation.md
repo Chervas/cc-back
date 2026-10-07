@@ -1062,3 +1062,42 @@ template families with optional visits tables absent, from first-send through
 state/wait/response/acknowledgment; test each optional-feature closed boundary;
 review the six distinct provider/identity failures and whether the nine unanswered
 legacy waits need a separately scoped, no-first-send/no-overdue-nudge repair.
+
+### Follow-up: both BS clinics and contextual acceptance — 7 October
+
+The first recovery was incomplete: it covered clinic 72 only, not BS Capilar
+(66). A subsequent consistent read audited both clinics and the global error
+counts. The additional batch recovered 16 original executions, with ten missing
+acknowledgments verified **delivered** and six omitted/suppressed after a human
+response. Original notices remained unique and unchanged. A later reply and a
+separate contextual acceptance of a reschedule were reviewed in a second,
+independently pinned two-case batch. Do not conflate these with first notices or
+all appointments belonging to the same patient. Historic adjacent appointment
+grouping remains deferred: a reply about a specific latest hour does not by itself
+authorize confirming every separate imported appointment.
+
+The canonical confirmation prompt now explicitly explains a direct acceptance
+such as “Ok! Gracias” after a request to confirm a specific change, and “Hola.
+De acuerdo” after an attendance question. It preserves AI evidence/confidence,
+uncertainty, revocation, pending requests and the difference between confirming
+attendance, receiving details and knowing directions. There is no keyword-based
+override or lowering of thresholds.
+
+An internal reviewed **response-only** wait can remove its timeout/nudge branch,
+never grant a send or confirmation. A native timeout still checks pending inbox
+dispatch before completing. Actual replies retain the ordinary response path,
+claim, interpretation, state writer, human takeover and idempotent transport.
+The marker binds the original execution, clinic, wait node and original outbound
+ID, and explicitly forbids first-notice replay. Restoration is an operator action
+with fresh geometry/patient/template/message checks and bounded expiry, not a
+bulk restart at entry or an unlimited retry of failed executions.
+
+Verification: 28 isolated offline assertions plus
+`legacy_confirmation_recovery_mysql.integration.test.js`: owned MySQL with the
+experimental visit tables actually absent, real status writer reaching a native
+wait, a claimed JobRequest expiry completing without its old nudge, and a reply
+reaching the real confirmed state. This fixture makes no real-AI or provider-send
+claim; those boundaries and the full three-family first-send test remain separate.
+Private follow-up evidence/receipts:
+`/home/ubuntu/qa-evidence/confirmation-followup-20261007-me1EF0/`.
+No consent activation, DDL, credential/config change or full gateway promotion.

@@ -2,12 +2,20 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
+  CONFIRM_APPOINTMENT_PRESET_CONFIG,
   CLASSIFY_INTENT_PRESET_CONFIG,
   CLASSIFY_INTENT_REFERENCE_INSTRUCTION,
   buildClassifyIntentInstruction,
   projectClassifyIntentReferenceOutput,
   cloneClassifyIntentPresetConfig,
 } = require('../../lib/automation-intent-contract');
+
+test('contextual acceptance is explicit in the canonical prompt, without overriding AI uncertainty', () => {
+  assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /Ok! Gracias/);
+  assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /Hola\. De acuerdo/);
+  assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /Gracias, lo miro y te digo/);
+  assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /Ok, pero no puedo/);
+});
 
 test('the current preset includes reference grounding without duplicating it at runtime', () => {
   const instruction = CLASSIFY_INTENT_PRESET_CONFIG.instruction;
