@@ -23,8 +23,22 @@ const Conversation = db.Conversation;
 const Message = db.Message;
 const ConversationRead = db.ConversationRead;
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
-const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile, bookingErrorPayload } = require('../services/treatmentBookingProfile.service');
+const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile, bookingErrorPayload, assertTreatmentBookingVisibility } = require('../services/treatmentBookingProfile.service');
 const { mutateAppointmentBooking } = require('../services/appointmentBookingCommand.service');
+
+// Canonical compatibility branch when the booking-profile writer is closed.
+// A visit already enrolled cannot keep obsolete dispatch rights after moving
+// or changing lifecycle. This is a server-owned, same-transaction proof; it
+// never enrolls historical rows or enables communications for a closed lane.
+async function updateLockedAppointmentWithVisit(locked, changes, transaction) {
+    const managed = db.AppointmentVisitMember && db.AppointmentVisit
+        ? require('../services/appointmentVisitManaged.service').current() : null;
+    const proof = managed ? await managed.prepareMutation({ appointmentId: Number(locked.id_cita),
+        clinicId: Number(locked.clinica_id), actorId: changes.updated_by == null ? null : Number(changes.updated_by), transaction }) : null;
+    const updated = await locked.update(changes, { transaction });
+    if (proof) await managed.persistMutation(proof, { appointment: updated, transaction });
+    return updated;
+}
 const { normalizeAdditionalStaff, additionalStaffPayload } = require('../lib/appointment-additional-staff');
 const { bookingSegments } = require('../lib/appointment-booking-segments');
 const { attachAppointmentProgramContexts } = require('../services/appointmentProgramRead.service');
@@ -2020,7 +2034,8 @@ exports.createCita = asyncHandler(async (req, res) => {
             paciente: datosPaciente
         } = req.body || {};
 
-        if (!clinica_id || !inicio || (!fin && !duracion_min) || !datosPaciente) {
+        const hasExplicitDurationChoice = Object.hasOwn(req.body || {}, 'duration_minutes') || Object.hasOwn(req.body || {}, 'phase_durations');
+        if (!clinica_id || !inicio || (!fin && !duracion_min && !(tratamiento_id && hasExplicitDurationChoice)) || !datosPaciente) {
             return res.status(400).json({ message: 'clinica_id, inicio, (fin o duracion_min) y paciente son obligatorios' });
         }
 
@@ -2042,6 +2057,7 @@ exports.createCita = asyncHandler(async (req, res) => {
             return res.status(400).json({ message: 'Clínica no encontrada' });
         }
         await assertAppointmentManageAccess(req, clinica_id);
+        require('../lib/appointment-source-provenance').assertGenericSourceIdentity(null, { source_system });
         const clinicTimezone = resolveClinicTimezone(clinica);
 
         // Resolver lead si viene
@@ -2083,8 +2099,9 @@ exports.createCita = asyncHandler(async (req, res) => {
         }
 
         const explicitPatientIdentifier = datosPaciente.id_paciente || datosPaciente.id;
+        let explicitPatient = null;
         if (explicitPatientIdentifier) {
-            const explicitPatient = await findPacienteByIdentifier(explicitPatientIdentifier);
+            explicitPatient = await findPacienteByIdentifier(explicitPatientIdentifier);
             const canReadPatient = explicitPatient
                 ? await actorCanReadPatientSensitive(req, explicitPatient)
                 : false;
@@ -2095,10 +2112,22 @@ exports.createCita = asyncHandler(async (req, res) => {
             }
         }
 
-        // Calcular fin si falta: prioridad cuerpo -> tratamiento -> instalación -> 30
+        // Explicit physical duration is resolved before any legacy defaults.
+        // The old unprofiled route keeps its existing duration behavior.
+        let durationSelection, bookingTreatment, selectedDurationProfile;
+        if (hasExplicitDurationChoice) {
+            if (!tratamiento_id) throw Object.assign(new Error('Elige un tratamiento con perfil físico antes de indicar la duración.'),
+                { code: 'booking_profile_missing', statusCode: 422 });
+            bookingTreatment = await loadScopedTreatment({ db, treatmentId: tratamiento_id, clinic: clinica });
+            durationSelection = require('../lib/booking-profile-duration').durationSelectionForRequest(bookingTreatment, req.body);
+            selectedDurationProfile = requireOperationalProfile(bookingTreatment, { durationSelection });
+        }
+
+        // Calcular fin si falta: elección física o comportamiento legacy original.
         const inicioDate = new Date(inicio);
         let finDate = fin ? new Date(fin) : null;
-        let duracionEfectiva = duracion_min ? parseInt(duracion_min, 10) : null;
+        let duracionEfectiva = selectedDurationProfile ? require('../lib/booking-profile').bookingProfileDurationMinutes(selectedDurationProfile)
+            : duracion_min ? parseInt(duracion_min, 10) : null;
 
         if (!duracionEfectiva && tratamiento_id) {
             const trat = await Tratamiento.findByPk(tratamiento_id, { attributes: ['duracion_min'] });
@@ -2116,19 +2145,33 @@ exports.createCita = asyncHandler(async (req, res) => {
         const bookingEnabled = bookingCapabilities().simple;
         // A historical label alone cannot bypass the booking gate for future work.
         const pastHistoryOnly = isHistoricalRegistration && finDate <= new Date();
+        if (hasExplicitDurationChoice && (!tratamiento_id || pastHistoryOnly)) {
+            throw Object.assign(new Error('La duración por pasos requiere un tratamiento con perfil físico y una reserva activa.'),
+                { code: 'booking_duration_unsupported', statusCode: 422 });
+        }
         const additionalStaffIds = normalizeAdditionalStaff(req.body?.additional_staff_ids);
         if (additionalStaffIds?.length && (!bookingCapabilities().multi || pastHistoryOnly)) {
             return res.status(409).json({ code: 'booking_profile_runtime_unavailable', can_force: false,
                 message: 'La reserva con personal de apoyo no está disponible en este recorrido.' });
         }
         if (!pastHistoryOnly && tratamiento_id) {
-            const bookingTreatment = await loadScopedTreatment({ db, treatmentId: tratamiento_id, clinic: clinica });
-            requireOperationalProfile(bookingTreatment);
+            bookingTreatment = bookingTreatment || await loadScopedTreatment({ db, treatmentId: tratamiento_id, clinic: clinica });
+            durationSelection = require('../lib/booking-profile-duration').durationSelectionForRequest(bookingTreatment, req.body);
+            const profile = selectedDurationProfile || requireOperationalProfile(bookingTreatment, { durationSelection });
+            if (profile && durationSelection !== undefined) {
+                const span = require('../lib/booking-profile').bookingProfileDurationMinutes(profile);
+                if (!fin) finDate = new Date(+inicioDate + span * 60000);
+                else if (+finDate - +inicioDate !== span * 60000) throw Object.assign(new Error('El final de la cita no coincide con la duración elegida para sus pasos.'),
+                    { code: 'booking_duration_locked', statusCode: 422 });
+            }
+            await assertTreatmentBookingVisibility({ db, treatment: bookingTreatment,
+                appointmentValues: { clinica_id, paciente_id: explicitPatient?.id_paciente,
+                    tratamiento_id, inicio: inicioDate, fin: finDate } });
         }
         const notificationSuppression = normalizeAppointmentNotificationSuppression(notification_suppression, {
             historicalRegistration: isHistoricalRegistration,
         });
-        const baseImportMetadata = { ...parsePlainObject(import_metadata) };
+        const baseImportMetadata = require('../lib/appointment-source-provenance').mergeAppointmentSourceMetadata(null, parsePlainObject(import_metadata));
         // HTTP callers cannot author a reservation snapshot, even while the new
         // booking runtime is disabled or when recording past clinical activity.
         delete baseImportMetadata.booking;
@@ -2208,7 +2251,17 @@ exports.createCita = asyncHandler(async (req, res) => {
         // la cita y ningún flujo puede arrancar con el idioma anterior.
         const createOptions = {
             sequelize: db.sequelize,
-            AppointmentModel: CitaPaciente,
+            AppointmentModel: { create: async (values, { transaction }) => {
+                // The legacy writer is still live while profile flags are off.
+                // Recheck within its transaction before inserting a new row;
+                // a self-authored completed appointment cannot prove its care.
+                if (!pastHistoryOnly && values.tratamiento_id) {
+                    const treatment = await loadScopedTreatment({ db, treatmentId: values.tratamiento_id, clinic: clinica, transaction });
+                    requireOperationalProfile(treatment, { durationSelection });
+                    await assertTreatmentBookingVisibility({ db, treatment, appointmentValues: values, transaction });
+                }
+                return CitaPaciente.create(values, { transaction });
+            } },
             appointmentValues: {
                 clinica_id,
                 paciente_id: paciente.id_paciente,
@@ -2245,16 +2298,25 @@ exports.createCita = asyncHandler(async (req, res) => {
                 await enqueueCreatedAppointmentCrmSignals({ lead, appointment, transaction });
             },
         };
+        const visitBirth = bookingEnabled && !pastHistoryOnly && req.body?.booking_request_key !== undefined
+            ? await require('../services/appointmentVisitManaged.service').current().prepareBirth({
+                requestKey: req.body.booking_request_key, values: createOptions.appointmentValues, clinic: clinica,
+                actorId: req.userData?.userId,
+                profile: selectedDurationProfile || (bookingTreatment ? requireOperationalProfile(bookingTreatment, { durationSelection }) : null),
+            }) : null;
         const cita = bookingEnabled && !pastHistoryOnly
             ? await mutateAppointmentBooking({
                 db,
                 appointmentValues: createOptions.appointmentValues,
+                durationSelection,
                 additionalStaffIds,
                 force: parseBool(force),
                 selections: req.body?.booking_selection || {},
                 priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
-                persist: async ({ values, transaction }) => {
-                    const created = await CitaPaciente.create(values, { transaction });
+                expectedPlanSha256: req.body?.booking_plan_sha256,
+                visitBirth,
+                persist: async ({ values, existing, transaction, sealedBirth }) => {
+                    const created = sealedBirth ? existing : await CitaPaciente.create(values, { transaction });
                     await applyExplicitPatientLanguage(paciente, datosPaciente.idioma_preferido, { transaction });
                     await createOptions.afterPersist(created, transaction);
                     return created;
@@ -2270,7 +2332,7 @@ exports.createCita = asyncHandler(async (req, res) => {
                 user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
                 user_role: req.userData?.role || req.userData?.rol || 'admin',
             });
-            await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(cita, {
+            if (!visitBirth) await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(cita, {
                 user_id: req.userData?.userId || null,
                 user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
                 user_role: req.userData?.role || req.userData?.rol || 'admin',
@@ -2279,10 +2341,14 @@ exports.createCita = asyncHandler(async (req, res) => {
             console.error('⚠️ [createCita] Error disparando automation v2:', automationErr.message);
         }
 
-        await ensureConsentPackageAndAutomation(cita, req, 'appointment_created');
+        const visitReceipt = visitBirth ? require('../services/appointmentVisitManaged.service').current().birthResult(cita) : null;
+        const birthReplay = visitReceipt?.created === false;
+        // Keep clinical package preparation. Runtime's durable enrollment branch
+        // holds unsupported consent communications instead of launching legacy.
+        if (!birthReplay) await ensureConsentPackageAndAutomation(cita, req, 'appointment_created');
 
         // La cita y el estado del lead ya están confirmados juntos; publicar sus hitos.
-        if (lead) {
+        if (lead && !birthReplay) {
             // Una cita real implica que el contacto ya era un Lead válido. Este
             // hito se envía antes de Schedule y comparte un eventId estable con
             // la cualificación manual para no duplicar conversiones.
@@ -2299,13 +2365,13 @@ exports.createCita = asyncHandler(async (req, res) => {
             });
         }
 
-        if (estadoRaw === 'completada') {
+        if (estadoRaw === 'completada' && !birthReplay) {
             await processAppointmentLeadMilestones({
                 cita,
                 previousStatus: null,
             });
         }
-        await patientDirectionService.handleAppointmentChange({
+        if (!birthReplay) await patientDirectionService.handleAppointmentChange({
             appointment: cita,
             previousStatus: null,
             actorUserId: req.userData?.userId || null,
@@ -2330,14 +2396,20 @@ exports.createCita = asyncHandler(async (req, res) => {
         await consentimientosService.attachConsentSummaryToCitas(citaCreada);
         await attachAppointmentProgramContexts(db, citaCreada);
         attachResolvedAppointmentPricesToCitas(citaCreada);
-        emitAppointmentSocketEvent('appointment:created', citaCreada?.toJSON ? citaCreada.toJSON() : citaCreada);
+        if (!birthReplay) emitAppointmentSocketEvent('appointment:created', citaCreada?.toJSON ? citaCreada.toJSON() : citaCreada);
 
-        return res.status(201).json(await protectAppointmentsForRequest(req, citaCreada));
+        const payload = await protectAppointmentsForRequest(req, citaCreada);
+        if (visitBirth) {
+            payload.booking_request_replay_supported = true;
+            payload.booking_request_key = req.body.booking_request_key;
+            payload.booking_request_replayed = birthReplay;
+        }
+        return res.status(201).json(payload);
     } catch (err) {
         if (err?.code === 'appointment_lead_link_changed') {
             return res.status(409).json({ code: err.code, message: err.message });
         }
-        if (/^(booking_|appointment_consent_|treatment_not_)/.test(String(err?.code || ''))) {
+        if (/^(booking_|appointment_visit_|appointment_consent_|treatment_not_)/.test(String(err?.code || ''))) {
             return res.status(err.statusCode || 409).json(bookingErrorPayload(err));
         }
         if (err.status === 400 && err.message === 'unsupported_patient_language') {
@@ -2813,7 +2885,8 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
                 appointment: { ...locked.toJSON(), estado: estadoRaw }, transaction });
             const correction = await require('../services/appointmentCare.service').confirmedCorrection({ cita: locked,
                 nextStatus: estadoRaw, actorId: req.userData?.userId || null, transaction });
-            return locked.update({ estado: estadoRaw, updated_by: req.userData?.userId || null, ...correction }, { transaction });
+            return updateLockedAppointmentWithVisit(locked,
+                { estado: estadoRaw, updated_by: req.userData?.userId || null, ...correction }, transaction);
         });
     }
     try {
@@ -2982,7 +3055,7 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
         } else {
             await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: locked,
                 appointment: { ...locked.toJSON(), estado: nextStatus }, transaction });
-            await locked.update({ estado: nextStatus, updated_by: actorUserId }, { transaction });
+            await updateLockedAppointmentWithVisit(locked, { estado: nextStatus, updated_by: actorUserId }, transaction);
         }
         await recordAppointmentStatusChange({
             appointment: locked,
@@ -3055,6 +3128,11 @@ exports.deleteCita = asyncHandler(async (req, res) => {
         return res.status(404).json({ message: 'Cita no encontrada' });
     }
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
+    if (db.AppointmentVisitMember && db.AppointmentVisit
+        && await require('../services/appointmentVisitManaged.service').current().managedVisit(cita)) {
+        return res.status(409).json({ code: 'appointment_visit_history_preserved',
+            message: 'Esta cita conserva el historial de una visita y sus avisos. Puedes mantenerla cancelada, pero no eliminar ese historial.' });
+    }
     if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) || cita.voucher_id && await db.PatientProgramSession.findOne({ where: { appointment_id: cita.id_cita } })) return res.status(409).json({ code: 'program_history_preserved', message: 'Las citas de un programa se cancelan; su historial no se elimina.' });
 
     if (String(cita.estado || '').trim().toLowerCase() !== 'cancelada') {
@@ -3066,6 +3144,7 @@ exports.deleteCita = asyncHandler(async (req, res) => {
     try {
         await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {
             reason: 'appointment_deleted_cancelled_active_flow',
+            preserve_current_visit_revision: false,
         });
         await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(cita.id_cita, {
             reason: 'appointment_deleted',
@@ -3213,6 +3292,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
                 estado: cita.estado, reschedule_reason: rescheduleReason, updated_by: cita.updated_by },
             selections: req.body?.booking_selection || {}, priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
             allowObsolete: true,
+            durationSelection: require('../lib/booking-profile-duration').durationSelectionForRequest(null, req.body),
             force: wantsForce,
             reschedulePatientOverlap: { actorId: Number(req.userData?.userId),
                 acknowledgement: req.body?.patient_overlap_acknowledgement },
@@ -3231,7 +3311,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             previousStatus = locked.estado;
             await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: locked,
                 appointment: { ...locked.toJSON(), ...changes }, transaction });
-            return locked.update(changes, { transaction });
+            return updateLockedAppointmentWithVisit(locked, changes, transaction);
         });
     }
     try {

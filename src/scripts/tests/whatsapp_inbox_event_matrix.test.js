@@ -29,7 +29,7 @@ test('known phone events have one scoped child and no account fallback', () => {
     ['interactive', change('messages', phoneValue({ messages: [message('interactive', { interactive: { button_reply: { title: 'Synthetic choice' } } })] }))],
     ['image', change('messages', phoneValue({ messages: [message('image', { image: { id: '301', mime_type: 'image/jpeg' } })] }))],
     ['reaction', change('messages', phoneValue({ messages: [message('reaction', { reaction: { message_id: 'wamid.synthetic_old', emoji: '1' } })] }))],
-    ['sent', change('messages', phoneValue({ statuses: [{ id: 'wamid.synthetic_outbound', status: 'sent' }] }))],
+    ['sent', change('messages', phoneValue({ statuses: [{ id: 'wamid.synthetic_outbound', status: 'sent', timestamp: at }] }))],
     ['delivered', change('messages', phoneValue({ statuses: [{ id: 'wamid.synthetic_outbound', status: 'delivered' }] }))],
     ['read', change('messages', phoneValue({ statuses: [{ id: 'wamid.synthetic_outbound', status: 'read' }] }))],
     ['failed', change('messages', phoneValue({ statuses: [{ id: 'wamid.synthetic_outbound', status: 'failed' }] }))],

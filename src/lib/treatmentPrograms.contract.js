@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { requiresMultiResourceBooking } = require('./booking-profile');
+const { requiresMultiResourceBooking, bookingProfileDurationMinutes, pendingAttentionRequirements } = require('./booking-profile');
 function domainError(statusCode, code, message, details = null) { return Object.assign(new Error(message), { statusCode, code, details }); }
 function positiveInteger(value, field = 'id') {
   const number = Number(value);
@@ -68,7 +68,13 @@ function treatmentDto(raw) {
   try { profile = require('./program-booking').normalizeProgramProfile(config.booking_profile, { allowMissingDuration: true }); } catch { issues.push({ code: 'invalid_booking_profile', message: 'Completa el perfil de agenda del tratamiento.' }); }
   if (!profile) issues.push({ code: 'missing_booking_profile', message: 'Falta configurar cabina, duración y profesionales.' });
   if (profile && requiresMultiResourceBooking(profile) && !require('../services/treatmentBookingProfile.service').bookingCapabilities().multi) issues.push({ code: 'multi_resource_writer_pending', message: 'La reserva conjunta de fases o equipos necesita activar el comando de agenda compatible en todos los entornos.' });
-  const duration = profile ? profile.phases.every(phase => phase.duration_minutes != null) ? profile.phases.reduce((sum, phase) => sum + phase.duration_minutes, 0) : null : Number(value.duracion_min) > 0 ? Number(value.duracion_min) : null;
+  if (profile?.version === 4 && require('../services/treatmentBookingProfile.service').bookingCapabilities().relativeSteps !== true) issues.push({
+    code: 'relative_steps_writer_pending', message: 'Los pasos relativos necesitan publicar y habilitar todos sus lectores y escritores antes de reservar.' });
+  if (profile?.version === 4 && pendingAttentionRequirements(profile).length) issues.push({
+    code: 'pending_attention_requirements', message: 'Hay intervenciones del profesional pendientes de definir; no se garantiza la capacidad clínica de la sesión.' });
+  if (profile?.version === 4 && profile.phases.some(phase => (phase.equipment_requirements || []).length > 1)) issues.push({
+    code: 'booking_profile_attention_ambiguous', message: 'Define un paso por técnica para conservar la atención de cada máquina antes de reservar esta composición.' });
+  const duration = profile ? bookingProfileDurationMinutes(profile) : Number(value.duracion_min) > 0 ? Number(value.duracion_min) : null;
   if (!duration) issues.push({ code: 'missing_duration', message: 'El tratamiento no tiene una duración definida.' });
   return { id: Number(value.id_tratamiento), name: value.nombre, code: value.codigo || null, clinic_id: value.clinica_id ? Number(value.clinica_id) : null,
     sale_mode: component_policy.sale_mode, standalone_sellable: component_policy.sale_mode === 'standalone', component_policy,

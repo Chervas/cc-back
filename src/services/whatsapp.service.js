@@ -473,6 +473,16 @@ class WhatsAppService {
     }
 
     async dispatchMessage(payload, clinicConfig = {}, healthContext = {}) {
+        if (healthContext.messageId) {
+            const message = await db.Message.findByPk(healthContext.messageId);
+            if (message && (whatsappAuthorizedBroker.isManagedMessage
+                ? await whatsappAuthorizedBroker.isManagedMessage(message) : message.metadata?.visit_communication_id)) {
+                await require('./appointmentVisitManaged.service').current().assertTransport(message.id, healthContext.visitDispatchAuthorization);
+                if (!clinicConfig.authorizedBroker) throw Object.assign(new Error('appointment_visit_runtime_authorized_broker_required'), {
+                    code: 'appointment_visit_runtime_authorized_broker_required', retryable: false,
+                });
+            }
+        }
         if (payload.type === 'template') {
             await require('./whatsappTemplateScope.service').assertTemplateInWaba({
                 wabaId: clinicConfig.wabaId, clinicId: clinicConfig.clinicId || clinicConfig.clinicaId,
@@ -489,7 +499,7 @@ class WhatsAppService {
                 throw Object.assign(new Error('whatsapp_authorized_binding_invalid'), { code: 'whatsapp_authorized_binding_invalid', retryable: false });
             }
             return whatsappAuthorizedBroker.send({ messageId, clinicId: Number(clinicConfig.clinicId || clinicConfig.clinicaId),
-                assetId: Number(clinicConfig.originId), expectedBinding: binding, message: payload });
+                assetId: Number(clinicConfig.originId), expectedBinding: binding, message: payload }, healthContext.visitDispatchAuthorization);
         }
         this.setClinicCredentials(clinicConfig);
         this.assertConfiguration();

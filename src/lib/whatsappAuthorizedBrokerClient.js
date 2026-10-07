@@ -122,6 +122,13 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       'whatsappAuthorizationId', [models().sequelize.literal("JSON_EXTRACT(`additionalData`, '$.whatsappManualDisconnect')"), 'manualDisconnect']], raw: true }),
   loadClinic = clinicId => models().Clinica.findByPk(clinicId, { attributes: ['id_clinica','grupoClinicaId'], raw: true }),
   loadMessage = messageId => models().Message.findByPk(messageId, { attributes: ['id','conversation_id','direction','status','createdAt','metadata'], raw: true }),
+  // Never bootstrap models merely for an injected pure client. In the actual
+  // application the model index is already loaded by the common sender. A
+  // persisted managed binding cannot be bypassed by stripping Message metadata.
+  loadVisitCommunication = messageId => {
+    const db = require.cache[require.resolve('../../models')]?.exports;
+    return db?.AppointmentVisitCommunication?.findOne({ where: { message_id: Number(messageId) }, attributes: ['id', 'runtime_stage'], raw: true }) || null;
+  },
   loadConversation = conversationId => models().Conversation.findByPk(conversationId, { attributes: ['id','clinic_id','patient_id','channel','contact_id'], raw: true }),
   loadExecution = executionId => models().FlowExecutionV2.findByPk(executionId, { attributes: ['id','clinic_id','trigger_entity_type','trigger_entity_id','trigger_type','template_version_id','created_at','context'], raw: true }),
   loadAppointment = appointmentId => models().CitaPaciente.findByPk(appointmentId, { raw: true }),
@@ -132,6 +139,19 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
   },
   isBlocked = clinicId => require('../services/metaScopeBlock.service').blocked({ assignmentScope: 'clinic', clinicId }, { purpose: 'whatsapp' }),
   createTransport = configuredTransport } = {}) {
+  async function isManagedMessage(message) {
+    if (message?.metadata?.visit_communication_id) return true;
+    const executionId = Number(message?.metadata?.execution_id);
+    if (id(executionId) && (await loadExecution(executionId))?.context?.appointment_visit) return true;
+    try { return !!(await loadVisitCommunication(message?.id))?.runtime_stage; }
+    catch (error) {
+      // Before the additive schema is installed, a CLOSED lane cannot contain
+      // a runtime-stage binding. No other SQL error means "legacy".
+      if (process.env.APPOINTMENT_VISIT_COMMUNICATIONS_V1_ENABLED !== 'true'
+        && ['ER_NO_SUCH_TABLE', 'ER_BAD_FIELD_ERROR'].includes(error.original?.code)) return false;
+      throw error;
+    }
+  }
   function read() {
     const value = loadConfiguration();
     if (value === null) return null;
@@ -171,9 +191,12 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         ? Object.freeze({ ...value, sendEnabled: false }) : value;
     } catch (error) { fail(PREFLIGHT_CODES.has(error?.code) ? error.code : 'whatsapp_authorized_binding_invalid'); }
   }
-  async function eligibleIntent(intent, config, selectedBinding) {
+  async function eligibleIntent(intent, config, selectedBinding, visitDispatchAuthorization) {
     try {
       const message = await loadMessage(intent.messageId);
+      if (await isManagedMessage(message)) {
+        await require('../services/appointmentVisitManaged.service').current().assertTransport(message.id, visitDispatchAuthorization);
+      }
       if (!message || String(message.id) !== intent.messageId || !id(Number(message.conversation_id))) fail('whatsapp_authorized_message_ineligible');
       const conversation = await loadConversation(message.conversation_id);
       if (!conversation || String(conversation.id) !== String(message.conversation_id) || Number(conversation.clinic_id) !== intent.clinicId) {
@@ -183,9 +206,11 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       await require('./whatsappAppointmentEligibility').assertAutomatedMessageEligibility({ message, conversation,
         payload: intent.message, loadExecution, loadAppointment, patientHeld,
         getReceptionState: () => loadReceptionState(conversation, config.bindings) });
+      return message;
     } catch { fail('whatsapp_authorized_message_ineligible'); }
   }
   return Object.freeze({
+    isManagedMessage,
     assertMessageEligible(message) {
       const config = read();
       if (config) assertMessageEligibility(message, config.messageNotBefore);
@@ -297,7 +322,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       if (profile.id !== captured.phoneId) fail('whatsapp_authorized_binding_changed');
       return profile;
     },
-    async send(input) {
+    async send(input, visitDispatchAuthorization) {
       runtime.namespace(environment());
       if (!exact(input, ['messageId','clinicId','assetId','expectedBinding','message']) || !id(input.clinicId) || !id(input.assetId)) fail('whatsapp_authorized_request_invalid');
       let intent;
@@ -311,17 +336,20 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       if (!captured || !sameBinding(captured, expected)) fail('whatsapp_authorized_binding_changed');
       if (!captured.sendEnabled) fail('whatsapp_authorized_send_paused');
       const config = read(); const transport = createTransport(config);
-      await eligibleIntent(intent, config, captured);
+      await eligibleIntent(intent, config, captured, visitDispatchAuthorization);
       // Recheck durable scope/asset and private revision immediately before the
       // only network dispatch. There is no credential or legacy fallback.
       const beforeSend = await binding(intent.clinicId, intent.assetId);
       if (!beforeSend || !sameBinding(captured, beforeSend) || JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
-      await eligibleIntent(intent, config, captured);
+      const dispatchMessage = await eligibleIntent(intent, config, captured, visitDispatchAuthorization);
       if (await isBlocked(intent.clinicId) !== false) fail('whatsapp_authorized_scope_blocked');
       if (JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
       runtime.namespace(environment());
       let result;
       try {
+        if (await isManagedMessage(dispatchMessage)) {
+          await require('../services/appointmentVisitManaged.service').current().beginTransport(dispatchMessage.id, visitDispatchAuthorization);
+        }
         result = await transport.execute({ requestId, tenantRef: 'clinic:' + intent.clinicId, connectionRef: captured.connectionRef,
           assetRef: 'wa-phone:' + captured.phoneId, operation: C.SEND, payload });
       } catch (error) {

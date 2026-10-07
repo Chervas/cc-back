@@ -42,7 +42,7 @@ function template(trigger_type = 'appointment_rescheduled', trigger_config = nul
     is_active: true, version: 1, published_at: new FixedDate('2026-10-05T09:00:00.000Z') };
 }
 
-function fixture(approval = policy, { cita = appointment(), templates = [] } = {}) {
+function fixture(approval = policy, { cita = appointment(), templates = [], reminderPermitted = false } = {}) {
   const creations = [], jobs = [];
   const op = Object.fromEntries(['ne', 'or', 'in', 'and'].map(key => [key, Symbol(key)]));
   const db = {
@@ -55,6 +55,7 @@ function fixture(approval = policy, { cita = appointment(), templates = [] } = {
     AutomationFlowTemplateV2: { findAll: async options => templates.filter(row => row.trigger_type === options.where.trigger_type) },
     AutomationFlowCatalog: { findAll: async () => [] },
   };
+  const managed = require('../../services/appointmentVisitManaged.service').createAppointmentVisitManagedService({ db, enabled: () => false });
   const approvedOperations = {
     ...operations,
     read: () => approval,
@@ -67,6 +68,7 @@ function fixture(approval = policy, { cita = appointment(), templates = [] } = {
     module, exports: module.exports, Date: FixedDate, Intl, process: { env: {} },
     require(name) {
       if (name === '../../models') return db;
+      if (name === './appointmentVisitManaged.service') return { current: () => managed };
       if (name === './socket.service') return { getIO: () => null };
       if (name === './jobRequests.service') return {
         enqueueUniqueJobRequest: async data => { jobs.push(data); return { job: { id: 60 } }; },
@@ -76,7 +78,8 @@ function fixture(approval = policy, { cita = appointment(), templates = [] } = {
       };
       if (name === './jobScheduler.service') return { triggerImmediate: async () => {} };
       if (name === '../lib/whatsappImportedAppointmentOperations') return approvedOperations;
-      if (name === '../lib/whatsappImportedReminderRelease') return { permits: () => false };
+      if (name === '../lib/whatsappImportedReminderRelease') return { permits: () => reminderPermitted };
+      if (name === '../lib/appointment-synthetic-guard') return require('../../lib/appointment-synthetic-guard');
       if (name === '../lib/automation-runtime-stop') return {
         createExecution: async data => { creations.push(data); return { id: 50, created_at: new FixedDate(), ...data }; },
         isStop: () => false,
@@ -111,6 +114,22 @@ for (const clinicId of [66, 72]) {
     assert.equal(JSON.stringify(a), before, 'the release must not erase import provenance or suppression receipts');
   });
 }
+
+test('native and imported QA reservations never enqueue, including an exact day-before release', async () => {
+  const markers = [{ qa_demo: { case: 'no-delivery' } }, { synthetic_data_only: true },
+    { import: { __simulation: true } }, { cliniccloud_source_booking: { is_test: true } }];
+  for (const imported of [false, true]) for (const marker of markers) {
+    const a = appointment(66, { source_system: imported ? 'cliniccloud' : null,
+      source_reference: imported ? 'synthetic-source' : null, import_metadata: marker });
+    const f = fixture(policy, { cita: a, reminderPermitted: true });
+    assert.equal(f.helpers.isImportedHistoricalAppointment(a), true);
+    assert.equal(f.helpers.importedTriggerHeld(a,
+      template('appointment_reminder_window', { schedule_moment: 'day_before' })), true);
+    assert.equal((await f.runtime.enqueueExecutionForCita(a)).skipped, true);
+    assert.equal((await f.runtime.enqueueExecutionForTemplate(a, template())).skipped, true);
+    assert.equal(f.creations.length, 0); assert.equal(f.jobs.length, 0);
+  }
+});
 
 test('the release does not depend on the old exact-time day-before reservation list', () => {
   const f = fixture(), a = appointment();

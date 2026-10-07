@@ -2,6 +2,7 @@
 const db = require('../../models');
 const { careState, assertCareAction } = require('../lib/appointment-care');
 const { assessAppointmentClinicalConsent } = require('./appointmentConsentEligibility.service');
+const { createTreatmentDocumentationService } = require('./treatmentDocumentation.service');
 
 async function record({ appointmentId, clinicId, actorId, action }) {
   return db.sequelize.transaction(async transaction => {
@@ -10,6 +11,7 @@ async function record({ appointmentId, clinicId, actorId, action }) {
     if (Number(cita.clinica_id) !== Number(clinicId)) throw Object.assign(new Error('La cita ha cambiado de clínica. Vuelve a abrirla.'), { statusCode: 409, code: 'appointment_clinic_changed' });
     const now = new Date(), state = assertCareAction(cita, action, now);
     if (action === 'arrive' && state.arrived_at || action === 'start' && state.started_at) return { appointment: cita, care: state, replayed: true };
+    let documentationSnapshot;
     if (action === 'start') {
       let consent;
       try { consent = await assessAppointmentClinicalConsent({ db, appointment: cita, transaction, now }); }
@@ -20,6 +22,10 @@ async function record({ appointmentId, clinicId, actorId, action }) {
       if (!consent.allowed) throw Object.assign(new Error('Faltan consentimientos clínicos obligatorios con firma vigente. Revisa las firmas pendientes antes de iniciar la cita.'), {
         statusCode: 409, code: 'appointment_consent_required',
       });
+      // Capture exact approved protocol references while this same transaction
+      // owns the appointment. Never use the paginated contextual list, accept
+      // client references or backfill an already-started historical visit.
+      documentationSnapshot = await createTreatmentDocumentationService(db).captureForStart({ appointment: cita, transaction, now });
     }
     const patch = action === 'arrive'
       ? { arrived_at: now, arrived_by: actorId, care_started_at: null, care_started_by: null, care_schedule_start: cita.inicio }
@@ -27,11 +33,12 @@ async function record({ appointmentId, clinicId, actorId, action }) {
     // Deliberately not the canonical estado writer: no completion, voucher use,
     // charges or automation events are caused by arrival/start.
     await cita.update({ ...patch, updated_by: actorId }, { transaction });
-    await db.AppointmentCareEvent.create({ appointment_id: cita.id_cita, clinic_id: cita.clinica_id, actor_id: actorId,
+    const careEvent = await db.AppointmentCareEvent.create({ appointment_id: cita.id_cita, clinic_id: cita.clinica_id, actor_id: actorId,
       action, schedule_start: cita.inicio, created_at: now }, { transaction });
     await db.PatientOperationalEvent.create({ patient_id: cita.paciente_id, clinic_id: cita.clinica_id, actor_user_id: actorId,
       event_type: 'appointment_care_changed', source: 'agenda', occurred_at: now,
-      metadata: { appointment_id: cita.id_cita, action, schedule_start: cita.inicio } }, { transaction });
+      metadata: { appointment_id: cita.id_cita, action, schedule_start: cita.inicio, care_event_id: careEvent.id,
+        ...(action === 'start' ? { documentation_snapshot: documentationSnapshot } : {}) } }, { transaction });
     return { appointment: cita, care: careState(cita, now), replayed: false };
   });
 }

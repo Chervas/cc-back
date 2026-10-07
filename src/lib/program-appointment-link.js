@@ -2,7 +2,8 @@
 
 const { domainError, positiveInteger } = require('./treatmentPrograms.contract');
 const { materializeSession } = require('./program-booking');
-const { normalizeBookingProfile } = require('./booking-profile');
+const { normalizeBookingProfile, bookingPhaseOffsets } = require('./booking-profile');
+const { normalizeAttentionPolicy } = require('./booking-attention');
 const { bookingSegments } = require('./appointment-booking-segments');
 const { hash } = require('./cliniccloud-import/adapter');
 const fail = (code, message, details = null) => { throw domainError(409, code, message, details); };
@@ -52,24 +53,30 @@ function compatibleLinkedAppointment(session, appointment) {
   if (!Array.isArray(actual) || actual.length !== resolved.booking_profile.phases.length
     || originalProfile && originalProfile.phases.length !== actual.length) fail('program_link_resources_mismatch', 'La cita no acredita las fases y los recursos de la sesión del programa.');
   let previousEnd = start.getTime();
+  const relative = resolved.booking_profile.version === 4, offsets = bookingPhaseOffsets(resolved.booking_profile);
   resolved.booking_profile.phases.forEach((phase, index) => {
     const existing = actual[index], existingProfile = originalProfile?.phases[index];
     const phaseStart = new Date(existing.start_at).getTime(), phaseEnd = new Date(existing.end_at).getTime();
     const doctors = existing.doctor_ids;
-    if (phaseStart !== previousEnd || phaseEnd !== phaseStart + phase.duration_minutes * 60000
+    const attention = candidate => candidate?.staff_attention || (relative && candidate?.professionals.mode === 'any'
+      && !candidate?.equipment_requirements?.length ? [normalizeAttentionPolicy(null)] : []);
+    if (phaseStart !== (relative ? start.getTime() + offsets[index] * 60000 : previousEnd) || phaseEnd !== phaseStart + phase.duration_minutes * 60000
       || !phase.installation_ids.includes(Number(existing.installation_id)) || !Array.isArray(doctors) || !doctors.length
       || doctors.some(id => !phase.professionals.ids.includes(Number(id)))
       || phase.professionals.mode === 'all' && (doctors.length !== phase.professionals.ids.length
         || phase.professionals.ids.some(id => !doctors.map(Number).includes(id)))
       || phase.professionals.mode === 'any' && doctors.length !== 1
-      || existing.staff_time_scope != null && existing.staff_time_scope !== (phase.professionals.mode === 'all' ? 'appointment' : 'phase')
+      || existing.staff_time_scope != null && existing.staff_time_scope !== (!relative && phase.professionals.mode === 'all' ? 'appointment' : 'phase')
       || hash(phase.equipment_requirements || []) !== hash(existingProfile?.equipment_requirements || [])
-      || hash(phase.staff_attention || []) !== hash(existingProfile?.staff_attention || [])) {
+      || hash(attention(phase)) !== hash(attention(existingProfile))
+      || hash(phase.attention_requirements_pending || []) !== hash(existingProfile?.attention_requirements_pending || [])
+      || hash(phase.preparation_sharing || null) !== hash(existingProfile?.preparation_sharing || null)
+      || relative && hash(phase.professionals.fallback_when || null) !== hash(existingProfile?.professionals.fallback_when || null)) {
       fail('program_link_resources_mismatch', 'La sala, el profesional, la maquinaria o las fases no corresponden a esta sesión. No se ha movido la cita.');
     }
     previousEnd = phaseEnd;
   });
-  if (previousEnd !== finish.getTime()) fail('program_link_duration_mismatch', 'Las fases no cubren el horario completo de la cita.');
+  if (!relative && previousEnd !== finish.getTime()) fail('program_link_duration_mismatch', 'Las fases no cubren el horario completo de la cita.');
   return { ...resolved, linked_resources: actual };
 }
 

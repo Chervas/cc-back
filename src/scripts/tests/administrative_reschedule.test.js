@@ -4,6 +4,9 @@ const policy=require('../../lib/appointment-reschedule-reason');
 const {buildAdministrativeRescheduleFlow,STATUS_NODE}=require('../../lib/administrative-reschedule-flow');
 const engine=fs.readFileSync(require.resolve('../../services/flowEngineV2.service'),'utf8');
 const controller=fs.readFileSync(require.resolve('../../controllers/citas.controller'),'utf8');
+const visitCompatibilityWriter=controller.slice(controller.indexOf('async function updateLockedAppointmentWithVisit('),
+ controller.indexOf('\nconst { normalizeAdditionalStaff'));
+assert(visitCompatibilityWriter.startsWith('async function updateLockedAppointmentWithVisit('));
 function extract(source,name){const start=source.search(new RegExp(`\\n(?:async )?function ${name}\\(`));assert(start>=0,name);const rest=source.slice(start+1);const end=rest.search(/\n(?:async )?function \w+/);assert(end>0,name);return rest.slice(0,end);}
 const cleanString=v=>typeof v==='string'?v.trim():null;
 function sourceGraph(){
@@ -57,13 +60,13 @@ function httpFixture({booking=true,deny=false}={}){
  const calls=[],row=()=>({...stored,toJSON(){return {...stored}},async update(values){Object.assign(stored,values);return row()}});
  const runtime=Object.fromEntries(['cancelActiveExecutionsForCita','enqueueExecutionForCita','syncScheduledTriggersForCita'].map(name=>[name,async(cita,opts)=>calls.push({name,state:cita.estado,opts})]));
  const s={exports:{},console,Date,Number,String,asyncHandler:f=>f,CitaPaciente:{findByPk:async()=>row()},denyAppointmentManageAccessIfNeeded:async(req,res)=>deny?(res.status(403).json({}),true):false,
-  require:name=>name==='../lib/appointment-reschedule-reason'?policy:name==='../lib/program-appointment-context'?{hasProgramAppointmentReference:()=>false}:{assertClinicalCompletion:async()=>{}},bookingCapabilities:()=>({simple:booking,multi:true}),normalizeAdditionalStaff:()=>null,additionalStaffPayload:()=>[],parseBool:Boolean,
+  require:name=>name==='../lib/appointment-reschedule-reason'?policy:name==='../lib/booking-profile-duration'?require('../../lib/booking-profile-duration'):name==='../lib/program-appointment-context'?{hasProgramAppointmentReference:()=>false}:{assertClinicalCompletion:async()=>{}},bookingCapabilities:()=>({simple:booking,multi:true}),normalizeAdditionalStaff:()=>null,additionalStaffPayload:()=>[],parseBool:Boolean,
   checkDisponibilidadCanonica:async()=>({resourceConflicts:[],legacyConflicts:[],canForce:false}),CITA_ESTADOS_VALIDOS:new Set(['pendiente','reprogramada','info_confirmada','recordatorio_confirmado']),
   mutateAppointmentBooking:async opts=>{calls.push({name:'booking',values:opts.appointmentValues});return opts.persist({values:opts.appointmentValues,existing:row(),transaction:{}})},
   db:{sequelize:{transaction:async(_,f)=>f({LOCK:{UPDATE:'UPDATE'}})}},recordAppointmentStatusChange:async x=>calls.push({name:'activity',value:x}),processAppointmentLeadMilestones:async()=>{},patientDirectionService:{handleAppointmentChange:async()=>{}},
   appointmentAutomationV2Runtime:runtime,appointmentNotificationCleanup:{markAutomationNotificationsReadForAppointment:async()=>{}},completeAppointmentAutomationReviews:async()=>{},ensureConsentPackageAndAutomation:async()=>calls.push({name:'consent_communication'}),
   Paciente:{},LeadIntake:{},Clinica:{},Instalacion:{},Tratamiento:{},attachFlowSummaryToCitas:async()=>{},attachUnreadCountsToCitas:async()=>{},consentimientosService:{attachConsentSummaryToCitas:async()=>{}},emitAppointmentSocketEvent:()=>{},protectAppointmentsForRequest:async(_,v)=>v};
- vm.createContext(s);vm.runInContext(controller.slice(controller.indexOf('exports.reagendarCita ='),controller.indexOf('exports.resolveImportedTreatment =')),s);
+ vm.createContext(s);vm.runInContext(visitCompatibilityWriter,s);vm.runInContext(controller.slice(controller.indexOf('exports.reagendarCita ='),controller.indexOf('exports.resolveImportedTreatment =')),s);
  return {stored,calls,async run(body){const res={code:200,status(c){this.code=c;return this},json(v){this.body=v;return this}};await s.exports.reagendarCita({params:{id:'101'},body,userData:{userId:7}},res);return res}};
 }
 for(const booking of [true,false])test(`real reschedule controller persists the confirmed state, reason and future scheduling (booking=${booking})`,async()=>{

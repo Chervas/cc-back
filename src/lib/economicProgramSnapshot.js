@@ -112,7 +112,8 @@ async function resolveLines(rawLines, { previousLines = [], resolve, integration
   return result;
 }
 
-function programPlans({ budget, lines, events = [], vouchers = [], sessions = null, appointments = [], timezone = null, now = new Date(), bookingEnabled = programBookingEnabled() }) {
+function programPlans({ budget, lines, events = [], vouchers = [], sessions = null, appointments = [], timezone = null, now = new Date(), bookingEnabled = programBookingEnabled(),
+  capabilities = require('../services/treatmentBookingProfile.service').bookingCapabilities() }) {
   const accepted = ['accepted', 'partially_accepted'].includes(budget.status);
   const acceptance = [...events].reverse().find((e) => ['accepted', 'partially_accepted'].includes(e.event_type));
   const metadata = typeof acceptance?.metadata === 'string' ? JSON.parse(acceptance.metadata) : acceptance?.metadata;
@@ -120,6 +121,18 @@ function programPlans({ budget, lines, events = [], vouchers = [], sessions = nu
   return lines.filter((l) => l.program_snapshot).map((line) => {
     const included = accepted && (budget.status === 'accepted' || acceptedKeys.has(line.key));
     const voucher = vouchers.find((v) => v.budget_line_key === line.key);
+    let relativeRestriction = null;
+    if (line.program_snapshot.appointments.some(a => a.treatments?.some(t => t.booking_profile?.version === 4))) {
+      try {
+        const operational = operationalSnapshot(line.program_snapshot);
+        for (const session of operational.appointments) if (session.booking_profile.version === 4) {
+          require('../services/treatmentBookingProfile.service').assertOperationalBookingProfile(session.booking_profile, { capabilities });
+        }
+      } catch (error) {
+        if (!['booking_profile_runtime_unavailable', 'pending_attention_requirements', 'booking_profile_attention_ambiguous', 'program_snapshot_not_operational'].includes(error.code)) throw error;
+        relativeRestriction = error.code;
+      }
+    }
     const planned = line.program_snapshot.appointments.map(a => {
       const record = sessions?.find(s => String(s.voucher_id) === String(voucher?.id) && s.session_key === a.key);
       const appointment = record?.appointment_id ? appointments.find(c => Number(c.id_cita) === Number(record.appointment_id)
@@ -143,12 +156,12 @@ function programPlans({ budget, lines, events = [], vouchers = [], sessions = nu
       name: line.program_snapshot.name, kind: line.program_snapshot.kind,
       snapshot_sha256: line.program_snapshot.sha256, appointment_count: line.program_snapshot.appointments.length,
       purchase_status: included ? 'accepted' : accepted ? 'not_accepted' : 'offered',
-      can_schedule: Boolean(included && voucher?.status === 'active' && bookingEnabled && counts?.pending > 0 && !counts.review_required
+      can_schedule: Boolean(included && voucher?.status === 'active' && bookingEnabled && !relativeRestriction && counts?.pending > 0 && !counts.review_required
         && (!voucher.expires_at || new Date(voucher.expires_at) > now)),
       can_view_schedule: Boolean(included && voucher && bookingEnabled), scheduling_counts: counts, timezone,
       scheduling_mode: schedulingMode(line.program_snapshot),
-      automatic_scheduling_available: schedulingMode(line.program_snapshot) !== 'manual' && line.program_snapshot.appointments.every(a => a.duration_minutes != null),
-      capability_reason: bookingEnabled ? null : 'program_batch_booking_pending',
+      automatic_scheduling_available: !relativeRestriction && schedulingMode(line.program_snapshot) !== 'manual' && line.program_snapshot.appointments.every(a => a.duration_minutes != null),
+      capability_reason: bookingEnabled ? relativeRestriction : 'program_batch_booking_pending',
       appointments: planned,
       voucher_id: voucher?.public_id || null };
   });
@@ -162,11 +175,16 @@ function assertFiscalReady({ lines = [], status, fiscalLines = [] }) {
     throw domainError(422, 'program_fiscal_configuration_pending', 'El precio del programa incluye impuestos. Falta confirmar su desglose fiscal: no se puede añadir IVA ni emitir este documento todavía. Puedes conservar el borrador con el precio final.');
   }
 }
-function assertOperational(lines = []) {
+function assertOperational(lines = [], { capabilities = require('../services/treatmentBookingProfile.service').bookingCapabilities() } = {}) {
   const programs = lines.filter(line => line.program_id || line.program_snapshot);
   if (!programs.length) return;
   if (!programBookingEnabled()) throw domainError(409, 'program_preparation_only', 'Este presupuesto contiene un programa en preparación. Puedes guardar el borrador, pero no presentarlo, firmarlo ni cobrarlo hasta habilitar la planificación y el consumo de sus citas.');
-  programs.forEach(line => operationalSnapshot(line.program_snapshot));
+  programs.forEach(line => {
+    const operational = operationalSnapshot(line.program_snapshot);
+    for (const session of operational.appointments) if (session.booking_profile.version === 4) {
+      require('../services/treatmentBookingProfile.service').assertOperationalBookingProfile(session.booking_profile, { capabilities });
+    }
+  });
 }
 
 module.exports = { catalogItem, snapshot, resolveLines, programPlans, requestHash, assertFiscalReady, assertOperational,

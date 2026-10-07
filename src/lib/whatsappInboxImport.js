@@ -1,15 +1,30 @@
 'use strict';
 const { createHash, randomUUID } = require('node:crypto');
 const D = require('./whatsappInboundDetails');
+const { factualSentAt, projectProviderStatus } = require('./whatsapp-provider-status');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
 function held(inboxReason = 'review_required', reviewDetail) { throw Object.assign(Error('whatsapp_inbox_review_required'), { inboxReason, reviewDetail }); }
 function contact(value) { if (typeof value !== 'string' || !/^[1-9][0-9]{6,14}$/.test(value)) held(); return value; }
-function normalize(raw, scope, now = Date.now()) {
-  if (!Buffer.isBuffer(raw) || raw.length > 3 * 1024 * 1024 || !Number.isSafeInteger(scope.clinicId)
-    || scope.clinicId < 1 || !/^[1-9][0-9]{0,29}$/.test(scope.wabaId) || !/^[1-9][0-9]{0,29}$/.test(scope.phoneId)) held();
+function validScope(scope) {
+  return Number.isSafeInteger(scope?.clinicId) && scope.clinicId > 0
+    && /^[1-9][0-9]{0,29}$/.test(scope.wabaId) && /^[1-9][0-9]{0,29}$/.test(scope.phoneId);
+}
+function ownedEnvelope(raw, scope) {
+  if (!Buffer.isBuffer(raw) || raw.length > 3 * 1024 * 1024 || !validScope(scope)) held();
   let body; try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)); } catch { held(); }
   if (body?.object !== 'whatsapp_business_account' || !Array.isArray(body.entry) || !body.entry.length || body.entry.length > 100) held();
+  for (const entry of body.entry) {
+    if (entry?.id !== scope.wabaId || !Array.isArray(entry.changes) || !entry.changes.length || entry.changes.length > 100) held();
+    for (const change of entry.changes) {
+      const value = change?.value;
+      if (value?.metadata?.phone_number_id !== scope.phoneId || value.messaging_product !== 'whatsapp') held();
+    }
+  }
+  return body;
+}
+function normalize(raw, scope, now = Date.now()) {
+  const body = ownedEnvelope(raw, scope);
   const messages = []; const statuses = [];
   const add = (m, peer, direction, historical, sourceEvent) => {
     contact(peer);
@@ -32,17 +47,22 @@ function normalize(raw, scope, now = Date.now()) {
     if (messages.length > 2000) held();
   };
   for (const entry of body.entry) {
-    if (entry?.id !== scope.wabaId || !Array.isArray(entry.changes) || !entry.changes.length || entry.changes.length > 100) held();
     for (const change of entry.changes) {
       const value = change?.value;
-      if (value?.metadata?.phone_number_id !== scope.phoneId || value.messaging_product !== 'whatsapp') held();
       if (change.field === 'messages') {
         if (!Array.isArray(value.messages) && !Array.isArray(value.statuses)) held();
         for (const m of value.messages || []) add(m,m.from,'inbound',false,'messages');
         for (const s of value.statuses || []) {
           if (typeof s?.id !== 'string' || !/^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(s.id)) held();
           if (!['sent','delivered','read','failed'].includes(s.status)) held(s.status === 'played' ? 'unsupported_event' : 'review_required');
-          statuses.push({ wamid:s.id,status:s.status,errors:D.errors(s) }); if (statuses.length > 2000) held();
+          // Retain the original provider seconds, not import time/createdAt.
+          // Missing clocks remain absent; a new sent receipt requires one below.
+          if (s.timestamp !== undefined) {
+            if (typeof s.timestamp !== 'string' || !/^[0-9]{1,12}$/.test(s.timestamp)) held('review_required', 'invalid_status_timestamp');
+            const at = Number(s.timestamp) * 1000;
+            if (!Number.isSafeInteger(at) || at < Date.UTC(2000,0,1) || at > now + 300000) held('review_required', 'invalid_status_timestamp');
+          }
+          statuses.push({ wamid:s.id,status:s.status,timestamp:s.timestamp,errors:D.errors(s) }); if (statuses.length > 2000) held();
         }
       } else if (change.field === 'smb_message_echoes') {
         if (!Array.isArray(value.message_echoes)) held();
@@ -87,8 +107,12 @@ const SCHEMA = [
  PRIMARY KEY(receipt,phone_id)) ENGINE=InnoDB`,
 ];
 async function importLease(connection, lease, scope, now = Date.now(), { validateScope } = {}) {
-  if (!uuid(lease?.receipt) || !uuid(lease?.lease) || lease.automaticActionsAllowed !== false || !Buffer.isBuffer(lease.raw)) held();
-  const batch = normalize(lease.raw,scope,now); const digest = hash(lease.raw);
+  if (!uuid(lease?.receipt) || !uuid(lease?.lease) || lease.automaticActionsAllowed !== false
+    || !Buffer.isBuffer(lease.raw) || lease.raw.length > 3 * 1024 * 1024 || !validScope(scope)) held();
+  // Replay never relaxes current envelope/account/phone ownership. Only event
+  // content/clock normalization is skipped for an exact committed receipt.
+  ownedEnvelope(lease.raw,scope);
+  const digest = hash(lease.raw);
   const lock = 'wa-inbox:' + hash(JSON.stringify([scope.clinicId,scope.phoneId])).slice(0,48);
   let locked = false; let tx = false;
   const query = async (sql, values=[]) => (await connection.execute(sql,values))[0];
@@ -117,6 +141,10 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
       await validateScope?.(connection);
       await connection.commit(); tx=false; return { importReceipt:old[0].import_receipt, replayed:true };
     }
+    // Exact receipts already committed under the old contract remain replayable;
+    // never reopen historical imports to manufacture/repair their clocks.
+    const batch = normalize(lease.raw,scope,now);
+    if (batch.statuses.some(s => s.status === 'sent' && !factualSentAt(s))) held('review_required', 'missing_sent_timestamp');
     if ((await query('SELECT id_clinica FROM Clinicas WHERE id_clinica=?',[scope.clinicId])).length !== 1) held();
     let inserted=0;
     for (const m of batch.messages) {
@@ -159,12 +187,16 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
       await query('INSERT INTO WhatsappInboxMessageKeys VALUES(?,?,?,NOW(3))',[m.key,m.digest,messageId]);
     }
     for (const s of batch.statuses) {
-      const rows=await query("SELECT m.id,m.status FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE c.clinic_id=? AND c.channel='whatsapp' AND m.direction='outbound' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wamid'))=? LIMIT 2 FOR UPDATE",[scope.clinicId,s.wamid]);
+      const rows=await query("SELECT m.id,m.status,m.metadata,m.sent_at FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE c.clinic_id=? AND c.channel='whatsapp' AND m.direction='outbound' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wamid'))=? LIMIT 2 FOR UPDATE",[scope.clinicId,s.wamid]);
       if (rows.length !== 1) held(rows.length === 0 ? 'unmatched_status' : 'review_required');
-      const rank={pending:0,sending:0,failed:0,sent:1,delivered:2,read:3}; const old=rows[0];
-      if (s.status==='failed' ? rank[old.status]<2 : rank[s.status]>rank[old.status]) {
-        const extra=s.status==='failed'?{wa_error:s.errors,wa_status:{status:s.status,errors:s.errors},error_code:s.errors[0]?.code||null,delivery_failed:true}:{};
-        await query('UPDATE Messages SET status=?,metadata=JSON_MERGE_PATCH(COALESCE(metadata,JSON_OBJECT()),CAST(? AS JSON)),updatedAt=NOW(3) WHERE id=?',[s.status,JSON.stringify(extra),old.id]);
+      const old=rows[0]; if (typeof old.metadata === 'string') old.metadata=JSON.parse(old.metadata);
+      const projected=projectProviderStatus(old,s,{recoverFailed:true});
+      if (projected) {
+        if (s.status==='failed') Object.assign(projected.metadata,{error_code:s.errors[0]?.code||null,delivery_failed:true});
+        // The existing connection owns this row lock and the receipt transaction.
+        // Status, CURRENT metadata/history and factual clock commit before ACK.
+        await query('UPDATE Messages SET status=?,metadata=CAST(? AS JSON),sent_at=COALESCE(sent_at,?),updatedAt=NOW(3) WHERE id=?',
+          [projected.status,JSON.stringify(projected.metadata),factualSentAt(s),old.id]);
       }
     }
     const importReceipt=randomUUID();

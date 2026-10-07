@@ -16,7 +16,16 @@ function confirmedOverlapRows(rows, start, end, clinicId) {
   return resourceForConfirmedOverlap(resource, start, end, true).busy.length === 0;
 }
 const { normalizeAdditionalStaff } = require('../lib/appointment-additional-staff');
-const { bookingCapabilities, bookingError, loadScopedTreatment, requireOperationalProfile } = require('../services/treatmentBookingProfile.service');
+const { bookingCapabilities, bookingError, loadScopedTreatment, requireOperationalProfile, resolveAppointmentBookingProfile, assertTreatmentBookingVisibility } = require('../services/treatmentBookingProfile.service');
+const { durationSelectionForRequest } = require('../lib/booking-profile-duration');
+const { bookingProfileDurationMinutes } = require('../lib/booking-profile');
+
+async function requestOperationalProfile(treatment, req, clinic) {
+  const durationSelection = durationSelectionForRequest(treatment, req.query, { query: true });
+  if (req.query?.ignore_cita_id != null) return resolveAppointmentBookingProfile({ db, clinic, treatment,
+    existingAppointmentId: req.query.ignore_cita_id, capabilities: bookingCapabilities(), durationSelection });
+  return requireOperationalProfile(treatment, { durationSelection });
+}
 const { resourceAppointments, resourceInstallationBlocks } = require('../services/appointmentResourceCalendar.service');
 const { buildLegacySlots, loadLegacyAvailabilitySnapshot } = require('../lib/availability-request-snapshot');
 const { allowFlexibleConflicts } = require('../lib/flexible-agenda');
@@ -122,6 +131,40 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
 
 exports.bookingCapabilities = asyncHandler(async (req, res) => res.json(bookingCapabilities()));
 
+async function requestTreatmentBookingContext(req, treatment, clinic) {
+  const continuationOnly = require('../lib/treatment-booking-visibility').bookingVisibility(treatment) === 'continuation_only';
+  // Patient occupancy applies to ordinary treatments too. Resolve the public
+  // identifier through the scoped patient service before reading their agenda;
+  // never interpret an arbitrary query ID as authority to inspect a patient.
+  const identifier = req.query?.patient_id ?? req.query?.paciente_id;
+  if (!continuationOnly && (identifier == null || identifier === '') && req.query?.ignore_cita_id == null) return {};
+  const clinicId = Number(clinic.id_clinica), actorId = Number(req.userData?.userId);
+  let patientId = null;
+  if (identifier != null && identifier !== '') {
+    await assertUserCanAccessFeature({ actorId, featureKey: 'patients.view', clinicId });
+    await assertUserCanAccessFeature({ actorId, featureKey: 'patients.sensitive.view', clinicId });
+    patientId = (await require('../services/patientEconomics.service').loadContext(identifier, clinicId)).patient.id_paciente;
+  }
+  const existingAppointmentId = Number(req.query?.ignore_cita_id);
+  let voucherId = null;
+  if (Number.isSafeInteger(existingAppointmentId) && existingAppointmentId > 0) {
+    const existing = await db.CitaPaciente.findByPk(existingAppointmentId);
+    if (!existing || Number(existing.clinica_id) !== clinicId
+      || Number(existing.tratamiento_id) !== Number(treatment.id_tratamiento)
+      || patientId != null && Number(existing.paciente_id) !== Number(patientId)) {
+      throw bookingError('appointment_not_found', 'Cita no encontrada.', null, 404);
+    }
+    patientId = existing.paciente_id;
+    voucherId = existing.voucher_id ?? null;
+  }
+  const context = { patientId, voucherId,
+    existingAppointmentId: Number.isSafeInteger(existingAppointmentId) && existingAppointmentId > 0 ? existingAppointmentId : null };
+  if (continuationOnly) await assertTreatmentBookingVisibility({ db, treatment, existingAppointmentId: context.existingAppointmentId,
+      appointmentValues: { clinica_id: clinicId, paciente_id: patientId,
+        tratamiento_id: treatment.id_tratamiento, voucher_id: voucherId } });
+  return context;
+}
+
 function requestedAdditionalStaff(req) {
   const ids = normalizeAdditionalStaff(req.query?.additional_staff_ids ?? req.query?.['additional_staff_ids[]']) || [];
   if (ids.length && !bookingCapabilities().multi) throw bookingError('booking_profile_runtime_unavailable', 'El personal de apoyo todavía no está activado.');
@@ -134,11 +177,15 @@ exports.treatmentSlots = asyncHandler(async (req, res) => {
   await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId });
   const clinic = await db.Clinica.findByPk(clinicId);
   if (!clinic) return res.status(404).json({ message: 'Clínica no encontrada' });
+  const treatment = await loadScopedTreatment({ db, treatmentId: req.query?.tratamiento_id, clinic });
+  const bookingContext = await requestTreatmentBookingContext(req, treatment, clinic);
   return res.json(await searchTreatmentSlots({ db, clinic, treatmentId: req.query?.tratamiento_id,
     date: req.query?.fecha_local, days: Number(req.query?.days || 1), stepMinutes: Number(req.query?.granularity_min || 15),
     limit: Number(req.query?.limit || 100), doctorId: req.query?.doctor_id ? Number(req.query.doctor_id) : null,
     installationId: req.query?.instalacion_id ? Number(req.query.instalacion_id) : null,
-    additionalStaffIds: requestedAdditionalStaff(req) }));
+    additionalStaffIds: requestedAdditionalStaff(req), ...bookingContext,
+    existingAppointmentId: bookingContext.existingAppointmentId ?? req.query?.ignore_cita_id ?? null,
+    durationSelection: durationSelectionForRequest(treatment, req.query, { query: true }) }));
 });
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
@@ -609,10 +656,12 @@ exports.check = asyncHandler(async (req, res) => {
   if (!clinica) return res.status(404).json({ message: 'Clínica no encontrada' });
 
   let bookingProfile = null;
+  let bookingContext = {};
   if (req.query?.tratamiento_id) {
     await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
     const treatment = await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic: clinica });
-    bookingProfile = requireOperationalProfile(treatment);
+    bookingContext = await requestTreatmentBookingContext(req, treatment, clinica);
+    bookingProfile = await requestOperationalProfile(treatment, req, clinica);
   }
 
   const clinicTimezone = resolveClinicTimezone(clinica);
@@ -627,13 +676,16 @@ exports.check = asyncHandler(async (req, res) => {
     end = parseDateTime(fin_local, clinicTimezone);
     if (!end) return res.status(400).json({ message: 'fin_local inválido' });
   } else {
-    const dur = parseIntSafe(duracion_min);
+    const dur = bookingProfile ? bookingProfileDurationMinutes(bookingProfile) : parseIntSafe(duracion_min);
     if (!dur || dur <= 0) return res.status(400).json({ message: 'fin_local o duracion_min requerido' });
     end = new Date(start.getTime() + dur * 60000);
   }
 
   if (end <= start) {
     return res.status(400).json({ message: 'rango inválido (fin <= inicio)' });
+  }
+  if (bookingProfile && +end - +start !== bookingProfileDurationMinutes(bookingProfile) * 60000) {
+    throw bookingError('booking_duration_locked', 'El intervalo no coincide con la duración de los pasos de esta cita.', { can_force: false }, 422);
   }
 
   const additionalStaffIds = requestedAdditionalStaff(req);
@@ -658,7 +710,13 @@ exports.check = asyncHandler(async (req, res) => {
       if (!ignored || Number(ignored.clinica_id) !== clinicaId) return res.status(404).json({ message: 'Cita no encontrada' });
     }
     const context = await loadBookingContext({ db, clinic: clinica, profile: bookingProfile, start, end,
-      ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, occupancyEnabled: true, additionalStaffIds });
+      ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, patientId: bookingContext.patientId,
+      occupancyEnabled: true, additionalStaffIds });
+    if ((context.patientBusy || []).some(row => new Date(row.start) < end && new Date(row.end) > start)) {
+      return res.status(409).json({ available: false, reason: 'patient_busy', can_force: false,
+        message: 'El paciente ya tiene otra cita durante este intervalo.',
+        conflicts: [{ type: 'patient_busy', message: 'El paciente ya tiene otra cita durante este intervalo.' }] });
+    }
     const selections = bookingProfile.phases.length === 1 && bookingProfile.phases[0].professionals.mode === 'any'
       ? { [bookingProfile.phases[0].key]: { doctor_id, installation_id: instalacion_id } } : {};
     const solution = solveBookingProfile({ profile: bookingProfile, start, ...context, selections });
@@ -935,7 +993,7 @@ exports.slots = asyncHandler(async (req, res) => {
   }
 
   const durMin = parseIntSafe(duracion_min);
-  if (!durMin || durMin <= 0) return res.status(400).json({ message: 'duracion_min requerido' });
+  if ((!durMin || durMin <= 0) && !req.query.tratamiento_id) return res.status(400).json({ message: 'duracion_min requerido' });
 
   const stepMin = parseIntSafe(granularity_min) || 15;
   const requestedLimit = parseIntSafe(limit);
@@ -948,7 +1006,8 @@ exports.slots = asyncHandler(async (req, res) => {
   if (req.query?.tratamiento_id) {
     await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
     const treatment = await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic: clinica });
-    const profile = requireOperationalProfile(treatment);
+    const bookingContext = await requestTreatmentBookingContext(req, treatment, clinica);
+    const profile = await requestOperationalProfile(treatment, req, clinica);
     if (profile) {
       assertGridProfile(profile);
       if (stepMin < 5 || stepMin > 120) return res.status(400).json({ message: 'granularity_min debe estar entre 5 y 120' });
@@ -962,10 +1021,13 @@ exports.slots = asyncHandler(async (req, res) => {
       const context = await loadBookingContext({ db, clinic: clinica, profile,
         start: resolveLocalInstant(fecha_local, '00:00:00', timezone),
         end: resolveLocalInstant(addDays(fecha_local, 1), '00:00:00', timezone), occupancyEnabled: true, additionalStaffIds,
+        ignoreAppointmentId: req.query.ignore_cita_id ? Number(req.query.ignore_cita_id) : null,
+        patientId: bookingContext.patientId,
         includeDiagnosticLabels: includeUnavailable });
       return res.json(profileSlotsPayload({ query: req.query, profile, context, clinic: clinica, additionalStaffIds }));
     }
   }
+  if (!durMin || durMin <= 0) return res.status(400).json({ message: 'duracion_min requerido' });
   const clinicTimezone = resolveClinicTimezone(clinica);
 
   // Base window: día local completo de clínica + recorte opcional from/to.
@@ -1497,7 +1559,7 @@ function matrixColumnQuery(baseQuery, query, columnId) {
 async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) {
   const clinicId = parseIntSafe(req.query.clinica_id);
   if (!clinicId || clinicId <= 0) throw availabilityInputError('clinica_id requerido');
-  if (!(parseIntSafe(req.query.duracion_min) > 0)) throw availabilityInputError('duracion_min requerido');
+  if (!(parseIntSafe(req.query.duracion_min) > 0) && !req.query.tratamiento_id) throw availabilityInputError('duracion_min requerido');
   const requestStep = req.query.granularity_min == null ? 15 : parseIntSafe(req.query.granularity_min);
   if (!(requestStep > 0 && requestStep <= 120)) throw availabilityInputError('granularity_min debe estar entre 1 y 120');
   await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId });
@@ -1505,8 +1567,11 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
   if (!clinic) throw availabilityInputError('Clínica no encontrada', 404);
   const additionalStaffIds = requestedAdditionalStaff(req);
   let profile = null;
+  let bookingContext = {};
   if (req.query.tratamiento_id) {
-    profile = requireOperationalProfile(await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic }));
+    const treatment = await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic });
+    bookingContext = await requestTreatmentBookingContext(req, treatment, clinic);
+    profile = await requestOperationalProfile(treatment, req, clinic);
     if (profile) {
       assertGridProfile(profile);
       const step = parseIntSafe(req.query.granularity_min) || 15;
@@ -1515,6 +1580,7 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
       }
     }
   }
+  if (!profile && !(parseIntSafe(req.query.duracion_min) > 0)) throw availabilityInputError('duracion_min requerido');
   const timeZone = resolveClinicTimezone(clinic), sortedDates = [...dates].sort();
   if (grid && profile && resolveLocalInstant(addDays(sortedDates[sortedDates.length - 1], 1), '00:00:00', timeZone)
     - resolveLocalInstant(sortedDates[0], '00:00:00', timeZone) > 32 * 86400000) throw availabilityInputError('El rango no puede superar 31 días');
@@ -1537,6 +1603,8 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
       const context = await loadBookingContext({ db, clinic, profile, dates: group,
         start: resolveLocalInstant(group[0], '00:00:00', timeZone),
         end: resolveLocalInstant(addDays(group[group.length - 1], 1), '00:00:00', timeZone), occupancyEnabled: true, additionalStaffIds,
+        ignoreAppointmentId: req.query.ignore_cita_id ? Number(req.query.ignore_cita_id) : null,
+        patientId: bookingContext.patientId,
         includeDiagnosticLabels: grid });
       if (grid) personalBlocks.push(...(context.personalBlocks || []));
       const getPayload = query => profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds });
@@ -1549,7 +1617,8 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
       group.forEach(date => byDate.set(date, query => legacySnapshotPayload(snapshot, query)));
     }
   }
-  return Object.assign(query => byDate.get(query.fecha_local)(query), { personalBlocks });
+  return Object.assign(query => byDate.get(query.fecha_local)(query), { personalBlocks,
+    durationMinutes: profile ? bookingProfileDurationMinutes(profile) : parseIntSafe(req.query.duracion_min) });
 }
 
 exports.grid = asyncHandler(async (req, res) => {
@@ -1576,7 +1645,7 @@ exports.grid = asyncHandler(async (req, res) => {
   }
 
   const durMin = parseIntSafe(duracion_min);
-  if (!durMin || durMin <= 0) return res.status(400).json({ message: 'duracion_min requerido' });
+  if ((!durMin || durMin <= 0) && !req.query.tratamiento_id) return res.status(400).json({ message: 'duracion_min requerido' });
 
   const stepMin = parseIntSafe(granularity_min) || 15;
   const columnIds = parseIntArray(req.query.column_ids || req.query['column_ids[]']);
@@ -1591,13 +1660,14 @@ exports.grid = asyncHandler(async (req, res) => {
 
   const baseQuery = {
     clinica_id: String(clinicaId),
-    duracion_min: String(durMin),
+    ...(durMin ? { duracion_min: String(durMin) } : {}),
     granularity_min: String(stepMin),
     include_unavailable: 'true',
   };
   if (from_local) baseQuery.from_local = from_local;
   if (to_local) baseQuery.to_local = to_local;
   if (tratamiento_id) baseQuery.tratamiento_id = tratamiento_id;
+  for (const key of ['duration_minutes', 'phase_durations']) if (Object.hasOwn(req.query, key)) baseQuery[key] = req.query[key];
   const additionalStaffIds = requestedAdditionalStaff(req);
   if (additionalStaffIds.length) baseQuery.additional_staff_ids = additionalStaffIds;
 
@@ -1653,7 +1723,7 @@ exports.grid = asyncHandler(async (req, res) => {
     clinica_id: clinicaId,
     dates: dateList,
     mode: normalizedMode,
-    duracion_min: durMin,
+    duracion_min: getPayload.durationMinutes,
     granularity_min: stepMin,
     columns: columnIds.map((id) => String(id)),
     personal_blocks: getPayload.personalBlocks,
@@ -1673,7 +1743,7 @@ exports.summary = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'dates[] excede el máximo (42)' });
   }
 
-  if (!(parseIntSafe(duracion_min) > 0)) {
+  if (!(parseIntSafe(duracion_min) > 0) && !req.query.tratamiento_id) {
     return res.status(400).json({ message: 'duracion_min requerido' });
   }
 

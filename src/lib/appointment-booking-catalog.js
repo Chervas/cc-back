@@ -7,10 +7,14 @@ function individualBookingEligible(treatment, clinicId, options) {
     const hidden = typeof treatment.eliminado_por_clinica === 'string' ? JSON.parse(treatment.eliminado_por_clinica) : treatment.eliminado_por_clinica;
     if (!treatment.activo || (Array.isArray(hidden) && hidden.map(Number).includes(clinicId))) return false;
     const config = typeof treatment.clinical_config === 'string' ? JSON.parse(treatment.clinical_config) : treatment.clinical_config || {};
+    if (require('./treatment-booking-visibility').bookingVisibility(treatment) === 'continuation_only'
+      && !options?.startedTreatmentIds?.has(String(treatment.id_tratamiento))) return false;
     const product = config.product_type || config.commercial?.product_type || config.budget?.product_type;
     if (['program', 'voucher', 'pack'].includes(product) || (!product && /\bbono\b|\bpack\b|\bpaquete\b/i.test(treatment.nombre || ''))) return false;
     assertStandalone(treatment);
-    requireOperationalProfile(treatment, options);
+    // Selectable is not already schedulable: reception must choose the pending
+    // minutes before querying or reserving. Physical requirements remain strict.
+    requireOperationalProfile(treatment, { ...options, allowMissingDuration: true });
     return true;
   } catch (_) { return false; }
 }

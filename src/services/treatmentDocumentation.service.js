@@ -54,9 +54,9 @@ function normalizeProtocol(payload, previous = null) {
 
 function createTreatmentDocumentationService(db = require('../../models')) {
   const { Op } = db.Sequelize;
-  async function scope(clinicId) {
+  async function scope(clinicId, transaction = null) {
     if (!positive(clinicId)) throw fail(400, 'invalid_clinic', 'Selecciona una clínica válida.');
-    const clinic = await db.Clinica.findByPk(clinicId, { attributes: ['id_clinica', 'grupoClinicaId'], raw: true });
+    const clinic = await db.Clinica.findByPk(clinicId, { attributes: ['id_clinica', 'grupoClinicaId'], raw: true, transaction });
     if (!clinic) throw fail(404, 'clinic_not_found', 'Clínica no encontrada.');
     const branches = [{ origen: 'clinica', clinica_id: clinicId }, { origen: 'sistema' }];
     if (clinic.grupoClinicaId) branches.push({ origen: 'grupo', grupo_clinica_id: clinic.grupoClinicaId });
@@ -65,8 +65,8 @@ function createTreatmentDocumentationService(db = require('../../models')) {
       db.Sequelize.where(db.Sequelize.fn('JSON_CONTAINS', db.Sequelize.fn('COALESCE', db.Sequelize.col('eliminado_por_clinica'), '[]'), JSON.stringify(String(clinicId))), 0),
     ] };
   }
-  async function requireSchema() {
-    try { await db.TreatmentProtocol.findOne({ attributes: ['id'], raw: true }); }
+  async function requireSchema(transaction = null) {
+    try { await db.TreatmentProtocol.findOne({ attributes: ['id'], raw: true, transaction }); }
     catch (error) {
       if (['ER_NO_SUCH_TABLE', '42P01'].includes(error.original?.code || error.parent?.code)) throw fail(503, 'documentation_schema_pending', 'La biblioteca está pendiente de habilitación técnica. Los consentimientos existentes siguen disponibles.');
       throw error;
@@ -85,13 +85,114 @@ function createTreatmentDocumentationService(db = require('../../models')) {
     return rows.map(row => { const item = plain(row); const treatments = array(item.treatment_ids).map(id => ({ id, name: names.get(Number(id)) || 'Tratamiento no disponible', available: names.has(Number(id)) }));
       return { ...item, treatments, treatment_count: treatments.length, treatments_preview: treatments.slice(0, 3), treatments_more_count: Math.max(0, treatments.length - 3) }; });
   }
+  async function startedSnapshot(appointment, query) {
+    if (!appointment.care_started_at) return null;
+    const event = await db.PatientOperationalEvent.findOne({ where: { patient_id: appointment.paciente_id,
+      clinic_id: appointment.clinica_id, event_type: 'appointment_care_changed', source: 'agenda',
+      metadata: { appointment_id: Number(appointment.id_cita), action: 'start' } },
+      order: [['id', 'DESC']], raw: true });
+    if (!event?.metadata?.documentation_snapshot) return null; // Never backfill historical clinical starts.
+    const care = await db.AppointmentCareEvent.findOne({ where: { id: event.metadata.care_event_id,
+      appointment_id: appointment.id_cita, clinic_id: appointment.clinica_id, action: 'start' }, raw: true });
+    const snapshots = require('../lib/appointment-documentation-snapshot');
+    const frozen = snapshots.readSnapshot(event.metadata.documentation_snapshot, { appointment, careEvent: care, operationalEvent: event });
+    const page = query.page == null ? 0 : Number(query.page), size = query.page_size == null ? 5 : Number(query.page_size);
+    if (!Number.isSafeInteger(page) || page < 0 || page > 10000 || !Number.isSafeInteger(size) || size < 1 || size > 10) {
+      throw fail(400, 'invalid_documentation_page', 'Página de documentos no válida.');
+    }
+    const refs = frozen.revisions.slice(page * size, (page + 1) * size);
+    const revisions = refs.length ? await db.TreatmentProtocolRevision.findAll({ where: {
+      [Op.or]: refs.map(ref => ({ protocol_id: ref.id, version: ref.version })) },
+      attributes: ['protocol_id', 'version', 'snapshot'], raw: true }) : [];
+    const items = refs.map(ref => snapshots.exactApprovedRevision(revisions.find(row => Number(row.protocol_id) === ref.id
+      && Number(row.version) === ref.version), ref, frozen.clinic_id, frozen.treatment_ids)).filter(Boolean);
+    return { appointment_id: frozen.appointment_id, clinic_id: frozen.clinic_id,
+      treatment_id: frozen.treatment_id || null, treatment_name: frozen.treatment_name || null,
+      context_source: 'appointment_start_snapshot', persisted_for_appointment: true,
+      captured_at: frozen.started_at, snapshot_sha256: frozen.sha256,
+      documentation_status: frozen.treatment_ids.length ? 'available' : 'no_treatment',
+      items, draft_count: frozen.draft_count, unavailable_count: refs.length - items.length,
+      total: frozen.revisions.length, page, page_size: size, has_more: (page + 1) * size < frozen.revisions.length };
+  }
   return {
+    // Internal start command only. Caller owns the appointment UPDATE lock and
+    // transaction; HTTP input cannot supply a snapshot or an approval. Unlike
+    // the contextual list, this captures ALL exact revisions, never five rows.
+    async captureForStart({ appointment, transaction, now = new Date() }) {
+      const a = plain(appointment), clinicId = positive(a?.clinica_id);
+      if (!transaction || !clinicId || !positive(a?.id_cita) || !positive(a?.paciente_id)) {
+        throw fail(409, 'appointment_documentation_start_context_required', 'Falta el contexto transaccional de inicio de la cita.');
+      }
+      const snapshots = require('../lib/appointment-documentation-snapshot');
+      let clinicalAppointment = a;
+      let clinicalReference = { clinical_context_source: 'appointment', clinical_appointment_id: Number(a.id_cita) };
+      const components = require('../lib/appointment-clinical-components');
+      if (components.metadata(a)[components.PARENT_KEY]) {
+        const linked = await require('./appointmentClinicalComponents.service').getValidatedClinicalComponentParent({
+          db, appointment: a, transaction });
+        if (!linked || components.metadata(linked.parent)[components.PARENT_KEY]) {
+          throw fail(409, 'appointment_documentation_component_unproven', 'Revisa la relación clínica entre esta reserva y su cita principal.');
+        }
+        clinicalAppointment = plain(linked.parent);
+        const receipt = components.metadata(linked.component)[components.PARENT_KEY];
+        clinicalReference = { clinical_context_source: 'validated_clinical_component_parent',
+          clinical_appointment_id: Number(clinicalAppointment.id_cita),
+          clinical_relation_audit_event_id: String(receipt.audit_event_id),
+          clinical_relation_receipt_sha256: receipt.receipt_sha256 };
+      }
+      const base = { appointment_id: Number(a.id_cita), clinic_id: clinicId, patient_id: Number(a.paciente_id),
+        schedule_start: snapshots.instant(a.inicio), started_at: snapshots.instant(now), treatment_ids: [],
+        treatment_id: positive(clinicalAppointment.tratamiento_id), treatment_name: null, revisions: [], draft_count: 0,
+        ...clinicalReference };
+      if (!clinicalAppointment.tratamiento_id) return snapshots.sealSnapshot(base);
+      let treatmentIds = [Number(clinicalAppointment.tratamiento_id)];
+      const programs = require('../lib/program-appointment-context');
+      if (programs.hasProgramAppointmentReference(clinicalAppointment)) {
+        const purchased = await programs.programAppointmentContext(db, clinicalAppointment, transaction);
+        treatmentIds = purchased.treatment_ids;
+      }
+      if (!Array.isArray(treatmentIds) || !treatmentIds.length || treatmentIds.some(id => !positive(id))
+        || new Set(treatmentIds.map(Number)).size !== treatmentIds.length) {
+        throw fail(409, 'appointment_documentation_treatments_unproven', 'No se puede verificar la composición clínica de esta cita.');
+      }
+      treatmentIds = treatmentIds.map(Number).sort((a, b) => a - b);
+      // Physical steps, machines and human-readable labels never add clinical
+      // treatments. Purchased session IDs are checked by the canonical loader.
+      const treatments = await db.Tratamiento.findAll({ where: { ...(await scope(clinicId, transaction)),
+        id_tratamiento: { [Op.in]: [...new Set([...treatmentIds, Number(clinicalAppointment.tratamiento_id)])] } },
+        attributes: ['id_tratamiento', 'nombre'], raw: true, transaction, lock: transaction.LOCK.SHARE,
+        order: [['id_tratamiento', 'ASC']] });
+      if (new Set(treatments.map(row => Number(row.id_tratamiento))).size !== new Set([...treatmentIds, Number(clinicalAppointment.tratamiento_id)]).size) {
+        throw fail(409, 'appointment_documentation_treatment_unavailable', 'No se puede verificar el tratamiento de esta cita en su clínica.');
+      }
+      await requireSchema(transaction);
+      const protocols = await db.TreatmentProtocol.findAll({ where: { clinic_id: clinicId,
+        kind: { [Op.in]: ['protocol', 'aftercare'] }, status: { [Op.in]: ['approved', 'draft'] },
+        [Op.or]: treatmentIds.map(id => db.Sequelize.where(db.Sequelize.fn('JSON_CONTAINS', db.Sequelize.col('treatment_ids'), JSON.stringify(id)), 1)) },
+        attributes: ['id', 'version', 'status'], order: [['id', 'ASC']], raw: true, transaction, lock: transaction.LOCK.SHARE });
+      const approved = protocols.filter(row => row.status === 'approved');
+      const revisions = approved.length ? await db.TreatmentProtocolRevision.findAll({ where: {
+        [Op.or]: approved.map(row => ({ protocol_id: row.id, version: row.version })) },
+        attributes: ['protocol_id', 'version', 'snapshot'], order: [['protocol_id', 'ASC'], ['version', 'ASC']],
+        raw: true, transaction, lock: transaction.LOCK.SHARE }) : [];
+      const refs = approved.map(ref => {
+        const revision = revisions.find(row => Number(row.protocol_id) === Number(ref.id) && Number(row.version) === Number(ref.version));
+        if (!snapshots.exactApprovedRevision(revision, ref, clinicId, treatmentIds)) {
+          throw fail(409, 'appointment_documentation_revision_unavailable', 'No se puede verificar una versión aprobada del protocolo. Revísala antes de iniciar la cita.');
+        }
+        return { id: Number(ref.id), version: Number(ref.version), snapshot_sha256: snapshots.digest(revision.snapshot) };
+      });
+      return snapshots.sealSnapshot({ ...base, treatment_ids: treatmentIds,
+        treatment_name: treatments.find(row => Number(row.id_tratamiento) === Number(clinicalAppointment.tratamiento_id)).nombre,
+        revisions: refs, draft_count: protocols.filter(row => row.status === 'draft').length });
+    },
     async forAppointment({ clinicId, appointmentId, query = {} }) {
       if (!/^[1-9]\d*$/.test(String(appointmentId)) || !positive(appointmentId) || !positive(clinicId)) throw fail(400, 'invalid_appointment_context', 'Selecciona una cita y clínica válidas.');
       clinicId = Number(clinicId);
       const appointment = await db.CitaPaciente.findOne({
         where: { id_cita: Number(appointmentId), clinica_id: clinicId },
-        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'tratamiento_id', 'voucher_id', 'source_system', 'import_metadata'], raw: true,
+        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'tratamiento_id', 'voucher_id', 'source_system', 'import_metadata',
+          'care_started_at', 'care_schedule_start', 'care_started_by'], raw: true,
       });
       if (!appointment) throw fail(404, 'appointment_not_found', 'Cita no encontrada en esta clínica.');
       const patient = await db.Paciente.findByPk(appointment.paciente_id, { attributes: ['id_paciente', 'clinica_id'], raw: true });
@@ -99,6 +200,8 @@ function createTreatmentDocumentationService(db = require('../../models')) {
         where: { paciente_id: appointment.paciente_id, clinica_id: clinicId }, attributes: ['id'], raw: true,
       }));
       if (!patientLinked) throw fail(404, 'appointment_not_found', 'Cita no encontrada en esta clínica.');
+      const frozen = await startedSnapshot(appointment, query);
+      if (frozen) return frozen;
       const base = {
         appointment_id: Number(appointment.id_cita), clinic_id: clinicId,
         treatment_id: appointment.tratamiento_id ? Number(appointment.tratamiento_id) : null,

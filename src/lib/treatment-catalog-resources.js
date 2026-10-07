@@ -1,6 +1,6 @@
 'use strict';
 const { catalogError } = require('./treatment-catalog-contract');
-const { requiresMultiResourceBooking } = require('./booking-profile');
+const { requiresMultiResourceBooking, pendingAttentionRequirements } = require('./booking-profile');
 
 async function validateCatalogResources(treatment, db, { transaction, environment = process.env } = {}) {
   const historical = require('./historical-treatment-reference');
@@ -15,14 +15,29 @@ async function validateCatalogResources(treatment, db, { transaction, environmen
       && !(included && commercial.componentApproved(treatment))) {
     throw catalogError('El precio del archivo incluye impuestos. Completa su revisión fiscal antes de ofrecer el tratamiento; puedes conservarlo como Borrador.', 'imported_treatment_fiscal_review_pending', 422);
   }
-  const profile = treatment.clinical_config?.booking_profile;
-  if (!profile) return;
+  const suppliedProfile = treatment.clinical_config?.booking_profile;
+  if (!suppliedProfile) return;
   const draft = treatment.clinical_config.catalog_status === 'draft';
   const dormant = draft || treatment.clinical_config.catalog_status === 'obsolete';
+  let profile = suppliedProfile;
   const compatible = environment.BOOKING_PROFILES_ENABLED === 'true'
-    && (!requiresMultiResourceBooking(profile) || environment.BOOKING_MULTI_RESOURCE_ENABLED === 'true');
+    && (!requiresMultiResourceBooking(profile) || environment.BOOKING_MULTI_RESOURCE_ENABLED === 'true')
+    && (profile.version !== 4 || (environment.BOOKING_MULTI_RESOURCE_ENABLED === 'true' && environment.BOOKING_PHASE_OFFSETS_ENABLED === 'true'));
   if (!compatible && (!dormant || treatment.activo === true)) {
     throw catalogError('Este perfil de cabinas y profesionales todavía no puede estar operativo. Selecciona Borrador para prepararlo; su activación requiere una agenda compatible en todos los entornos.', 'booking_profile_preparation_only', 409);
+  }
+  // Direct service callers must meet the same authoring contract as merge,
+  // after the existing rollout gate. No interval or occupancy is manufactured
+  // while minutes remain pending; the booking command checks the chosen time.
+  if (!dormant || treatment.activo === true) {
+    profile = require('./program-booking').normalizeProgramProfile(profile, { allowMissingDuration: true });
+  }
+  if ((!dormant || treatment.activo === true) && pendingAttentionRequirements(profile).length) {
+    throw catalogError('Completa el tiempo de las intervenciones pendientes antes de ofrecer este tratamiento. Se puede conservar su configuración como Borrador.', 'pending_attention_requirements', 409);
+  }
+  if ((!dormant || treatment.activo === true) && profile.version === 4
+    && profile.phases.some(phase => (phase.equipment_requirements || []).length > 1)) {
+    throw catalogError('Define un paso por técnica para conservar la atención de cada máquina antes de ofrecer este tratamiento.', 'booking_profile_attention_ambiguous', 409);
   }
   const { Op } = db.Sequelize;
   if (treatment.origen === 'sistema') throw catalogError('Personaliza el tratamiento para una clínica antes de asignar cabinas o profesionales concretos.');

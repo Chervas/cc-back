@@ -104,6 +104,7 @@ function cleanString(value) {
 }
 
 function isImportedHistoricalAppointment(cita) {
+  if (require('../lib/appointment-synthetic-guard').isSyntheticData(cita)) return true;
   const operations = require('../lib/whatsappImportedAppointmentOperations');
   const sourceSystem = cleanString(cita?.source_system).toLowerCase();
   const reason = cleanString(cita?.motivo).toLowerCase();
@@ -120,6 +121,7 @@ function isImportedHistoricalAppointment(cita) {
 }
 
 function importedTriggerHeld(cita, template) {
+  if (require('../lib/appointment-synthetic-guard').isSyntheticData(cita)) return true;
   if (!isImportedHistoricalAppointment(cita)) return false;
   const config = template && getTemplateTriggerConfig(template);
   return !template || template.trigger_type !== 'appointment_reminder_window' || config?.schedule_moment !== 'day_before'
@@ -177,7 +179,7 @@ function stripCatalogClinicScopeSuffixes(rawTemplateKey) {
   return normalized.replace(/(?:__?clinic_\d+)+$/gi, '') || normalized;
 }
 
-async function loadCatalogBindingMapForTemplates(templates) {
+async function loadCatalogBindingMapForTemplates(templates, options = {}) {
   const candidateKeys = Array.from(
     new Set(
       (Array.isArray(templates) ? templates : [])
@@ -191,6 +193,7 @@ async function loadCatalogBindingMapForTemplates(templates) {
   if (!candidateKeys.length) return new Map();
 
   const catalogRows = await AutomationFlowCatalog.findAll({
+    transaction: options.transaction,
     attributes: ['id', 'template_key', 'trigger_type', 'is_active', 'is_default_for_trigger'],
     where: { template_key: { [Op.ne]: null } },
     raw: true,
@@ -200,6 +203,7 @@ async function loadCatalogBindingMapForTemplates(templates) {
   const catalogRefs = Array.from(new Set(catalogRows.map((row) => cleanString(row.template_key)).filter(Boolean)));
   const sourceRows = catalogRefs.length
     ? await AutomationFlowTemplateV2.findAll({
+        transaction: options.transaction,
         attributes: ['public_id', 'template_key'],
         where: {
           [Op.or]: [
@@ -528,7 +532,7 @@ function treatmentAutomationSlotKeyForEvent(eventName) {
   return treatmentBindingKeyForAppointmentEvent(normalized);
 }
 
-async function isTreatmentAutomationDisabledForEvent(cita, eventName) {
+async function isTreatmentAutomationDisabledForEvent(cita, eventName, options = {}) {
   const bindingKey = treatmentAutomationSlotKeyForEvent(eventName);
   if (!bindingKey) return false;
 
@@ -536,6 +540,7 @@ async function isTreatmentAutomationDisabledForEvent(cita, eventName) {
   if (!tratamientoId) return false;
 
   const tratamiento = await Tratamiento.findByPk(tratamientoId, {
+    transaction: options.transaction,
     attributes: ['id_tratamiento', 'automation_template_bindings'],
     raw: true,
   });
@@ -545,12 +550,13 @@ async function isTreatmentAutomationDisabledForEvent(cita, eventName) {
   return bindings?.[bindingKey]?.disabled === true;
 }
 
-async function resolveTemplateBoundToTratamiento(cita, eventName) {
+async function resolveTemplateBoundToTratamiento(cita, eventName, options = {}) {
   const tratamientoId = toIntOrNull(cita?.tratamiento_id);
   if (!tratamientoId) return null;
   const normalizedEventName = cleanString(eventName).toLowerCase();
 
   const tratamiento = await Tratamiento.findByPk(tratamientoId, {
+    transaction: options.transaction,
     attributes: [
       'id_tratamiento',
       'appointment_automation_template_key',
@@ -571,7 +577,7 @@ async function resolveTemplateBoundToTratamiento(cita, eventName) {
 
   if (!templateKey) return null;
 
-  const { candidates } = await fetchClinicScopedTemplates(cita, normalizedEventName);
+  const { candidates } = await fetchClinicScopedTemplates(cita, normalizedEventName, options);
   const template = candidates.find(row => cleanString(row.template_key) === templateKey)
     || candidates.find(row => stripCatalogClinicScopeSuffixes(row.template_key) === templateKey);
   if (!template) return null;
@@ -856,18 +862,20 @@ async function resolveClinicFallbackTemplate(cita, eventName) {
   return scored[0]?.template || null;
 }
 
-async function fetchClinicScopedTemplates(cita, eventName) {
+async function fetchClinicScopedTemplates(cita, eventName, options = {}) {
   const clinicId = toIntOrNull(cita?.clinica_id);
   if (!clinicId) {
     return { clinicId: null, groupId: null, candidates: [] };
   }
 
   const clinic = await Clinica.findByPk(clinicId, {
+    transaction: options.transaction,
     attributes: ['id_clinica', 'grupoClinicaId', 'configuracion'],
     raw: true,
   });
   const groupId = toIntOrNull(clinic?.grupoClinicaId);
   const candidates = await AutomationFlowTemplateV2.findAll({
+    transaction: options.transaction,
     where: {
       trigger_type: eventName,
       published_at: { [Op.ne]: null },
@@ -985,17 +993,17 @@ function buildScheduledWindowIdentifier({ triggerType, triggerConfig, scheduledF
   ].join(':');
 }
 
-async function resolveScheduledTemplatesForCita(cita, eventName) {
+async function resolveScheduledTemplatesForCita(cita, eventName, options = {}) {
   if (!SCHEDULED_APPOINTMENT_TRIGGER_TYPES.has(cleanString(eventName))) {
     return [];
   }
-  if (await isTreatmentAutomationDisabledForEvent(cita, eventName)) {
+  if (await isTreatmentAutomationDisabledForEvent(cita, eventName, options)) {
     return [];
   }
 
-  const { clinicId, groupId, candidates } = await fetchClinicScopedTemplates(cita, eventName);
+  const { clinicId, groupId, candidates } = await fetchClinicScopedTemplates(cita, eventName, options);
   const catalogBindingMap = Array.isArray(candidates) && candidates.length > 1
-    ? await loadCatalogBindingMapForTemplates(candidates)
+    ? await loadCatalogBindingMapForTemplates(candidates, options)
     : new Map();
   const byTemplateKey = new Map();
   for (const row of candidates || []) {
@@ -1004,7 +1012,7 @@ async function resolveScheduledTemplatesForCita(cita, eventName) {
     byTemplateKey.set(key, row);
   }
 
-  const boundTemplate = await resolveTemplateBoundToTratamiento(cita, eventName);
+  const boundTemplate = await resolveTemplateBoundToTratamiento(cita, eventName, options);
   if (boundTemplate) {
     byTemplateKey.set(cleanString(boundTemplate.template_key), boundTemplate);
   }
@@ -1136,6 +1144,9 @@ async function resolveAppointmentCommunicationLanguage(cita) {
 }
 
 async function enqueueExecutionForTemplate(cita, template, options = {}) {
+  if (await require('./appointmentVisitManaged.service').current().managedVisit(cita)) {
+    return enqueueExecutionForCita(cita, options);
+  }
   const citaId = toIntOrNull(cita?.id_cita);
   if (!citaId || !template) {
     return { success: false, skipped: true, reason: 'invalid_cita' };
@@ -1283,6 +1294,13 @@ async function enqueueExecutionForCita(cita, options = {}) {
   if (!citaId) {
     return { success: false, skipped: true, reason: 'invalid_cita' };
   }
+  const managed = await require('./appointmentVisitManaged.service').current().publishCita(cita, options, async (row, template, supplied) => {
+    const context = buildExecutionContext({ cita: row, eventName: template.trigger_type, userName: supplied.user_name || null,
+      userEmail: supplied.user_email || null, triggerData: supplied.trigger_data || null, triggerConfig: getTemplateTriggerConfig(template) });
+    context.communication_language = await resolveAppointmentCommunicationLanguage(row);
+    return context;
+  });
+  if (managed) return managed;
   if (isImportedHistoricalAppointment(cita)) {
     return { success: true, skipped: true, reason: 'imported_historical_appointment' };
   }
@@ -1306,7 +1324,7 @@ async function enqueueExecutionForCita(cita, options = {}) {
 
 async function cancelActiveExecutionsForCita(cita, options = {}) {
   const citaId = toIntOrNull(cita?.id_cita || cita);
-  if (!citaId) {
+  if (!Number.isSafeInteger(citaId) || citaId <= 0) {
     return { success: false, skipped: true, reason: 'invalid_cita' };
   }
 
@@ -1326,12 +1344,32 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
     where.id = { [Op.notIn]: excludeExecutionIds };
   }
 
+  // A movement retry may arrive after the new purpose execution was already
+  // published. Legacy cleanup must cancel obsolete revisions, not that current
+  // execution. Repeat the native revision predicate in the UPDATE as well as
+  // the discovery SELECT, so a concurrent canonical movement cannot turn a
+  // stale JS projection into permission to cancel the new purpose. This guard
+  // deliberately adds no family/execution -> appointment lock inversion.
+  const managedVisit = options.preserve_current_visit_revision !== false
+    && db.AppointmentVisitMember && db.AppointmentVisit
+    ? await require('./appointmentVisitManaged.service').current().managedVisit(cita) : null;
+  const currentRevisionGuard = managedVisit ? db.sequelize.literal(`NOT EXISTS (
+    SELECT 1 FROM AppointmentVisitMembers AS avm
+    INNER JOIN AppointmentVisits AS av ON av.id = avm.visit_id
+    WHERE avm.appointment_id = ${citaId} AND av.owner_appointment_id = ${citaId}
+      AND av.runtime_enrollment IS NOT NULL
+      AND av.id = JSON_UNQUOTE(JSON_EXTRACT(context, '$.appointment_visit.visit_id'))
+      AND av.communication_revision = CAST(JSON_UNQUOTE(JSON_EXTRACT(context, '$.appointment_visit.communication_revision')) AS UNSIGNED)
+      AND av.runtime_enrollment_sha256 = JSON_UNQUOTE(JSON_EXTRACT(context, '$.appointment_visit.enrollment_sha256'))
+  )`) : null;
+  if (currentRevisionGuard) where[Op.and] = currentRevisionGuard;
+
   const executions = await FlowExecutionV2.findAll({
     where,
     attributes: ['id'],
     raw: true,
   });
-  const executionIds = executions.map((row) => toIntOrNull(row.id)).filter(Boolean);
+  let executionIds = executions.map((row) => toIntOrNull(row.id)).filter(Boolean);
   if (!executionIds.length) {
     return {
       success: true,
@@ -1354,9 +1392,18 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
       where: {
         id: { [Op.in]: executionIds },
         status: { [Op.in]: ['running', 'waiting'] },
+        ...(currentRevisionGuard ? { [Op.and]: currentRevisionGuard } : {}),
       },
     }
   );
+
+  if (currentRevisionGuard) {
+    // Only cancel jobs of rows the guarded UPDATE actually left cancelled.
+    // An execution protected between SELECT and UPDATE keeps its queued work.
+    executionIds = (await FlowExecutionV2.findAll({ where: {
+      id: { [Op.in]: executionIds }, status: 'cancelled', last_error: reason,
+    }, attributes: ['id'], raw: true })).map(row => toIntOrNull(row.id)).filter(Boolean);
+  }
 
   const jobsToCancel = [];
   for (const executionId of executionIds) {
@@ -1390,6 +1437,8 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
 async function syncScheduledTriggersForCita(cita, options = {}) {
   const citaId = toIntOrNull(cita?.id_cita);
   if (!citaId) return { success: false, skipped: true, reason: 'invalid_cita' };
+  const managedSchedule = await require('./appointmentVisitManaged.service').current().syncReminderIntents(cita);
+  if (managedSchedule) return managedSchedule;
   if (isImportedHistoricalAppointment(cita) && !require('../lib/whatsappImportedReminderRelease').permits(cita)) {
     const existingJobs = await listExistingScheduledJobs(citaId);
     await Promise.all(existingJobs.map((job) => jobRequestsService.markCancelled(job.id, {
@@ -1775,6 +1824,8 @@ module.exports = {
   buildIdempotencyKey,
   buildScheduledWindowIdentifier,
   computeScheduledRunAt,
+  resolveScheduledTemplatesForCita,
+  scheduledTriggerFireGraceMs: () => SCHEDULED_TRIGGER_FIRE_GRACE_MS,
   enqueueExecutionForCita,
   enqueueExecutionForTemplate,
   cancelActiveExecutionsForCita,
@@ -1787,4 +1838,5 @@ module.exports = {
   getExecutionLogs,
   isAppointmentConfirmedForReminder,
   isRescheduleTemplateEligible,
+  resolveTemplateForCitaEvent,
 };

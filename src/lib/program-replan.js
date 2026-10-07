@@ -16,32 +16,56 @@ function planRevision(plan) {
   return hash(JSON.parse(JSON.stringify({ snapshot:plan.snapshot.sha256, voucher:plain(plan.voucher), budget:plain(plan.budget),
     sessions:plan.sessions.map(row=>({key:row.key,record:plain(row.record)||null,appointment:plain(row.appointment)||null})) })));
 }
-function resumeInfo(plan, now = new Date()) {
-  const interrupted = plan.sessions.some(row => row.scheduling_status === 'missed'
-    || row.scheduling_status === 'pending' && row.appointment?.estado === 'cancelada');
-  if (!interrupted) return null;
-  const selected = plan.sessions.filter(row => row.scheduling_status !== 'completed');
-  if (!selected.length) return null;
-  const needsAttendance = selected.some(row => row.scheduling_status === 'reserved' && new Date(row.start_at) <= now);
-  const outOfOrder = plan.sessions.some(row => row.scheduling_status === 'completed' && row.position > selected[0].position);
+const completed = row => row.scheduling_status === 'completed' || !!row.record?.consumption_movement_id;
+function resumeSelectionInfo(plan, fromKey, now = new Date()) {
+  const origin = plan.sessions.find(row => row.key === fromKey);
+  if (!origin || completed(origin) || !['pending', 'missed', 'reserved'].includes(origin.scheduling_status)) return null;
+  // Positions come from the verified purchased snapshot, never a request or a
+  // label. Earlier pending units remain pending: this is calendar replanning,
+  // not an assertion that the patient has completed or skipped their care.
+  const selected = plan.sessions.filter(row => row.position >= origin.position && !completed(row))
+    .sort((a, b) => a.position - b.position);
+  const needsAttendance = selected.some(row => row.scheduling_status === 'reserved'
+    && (!Number.isFinite(new Date(row.start_at).getTime()) || new Date(row.start_at) <= now));
+  const outOfOrder = plan.sessions.some(row => completed(row) && row.position > origin.position);
   const activeNotifications = selected.some(row => {
     if (row.scheduling_status !== 'reserved') return false;
-    const metadata = typeof row.appointment.import_metadata === 'string' ? JSON.parse(row.appointment.import_metadata) : row.appointment.import_metadata;
+    let metadata = row.appointment?.import_metadata;
+    if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { return true; } }
     return metadata?.automation_policy !== 'hold';
   });
   const blocked = outOfOrder ? 'Hay sesiones realizadas después de una pendiente. Revisa el orden clínico antes de retomar el programa.'
     : needsAttendance ? 'Indica primero si el paciente asistió a las citas anteriores que siguen abiertas.'
     : activeNotifications ? 'Hay citas con comunicaciones activadas. Revisa su reprogramación desde la agenda.'
     : selected.length > 30 ? 'Este programa tiene más de treinta sesiones pendientes; revisa su planificación desde la agenda.' : null;
-  return { from_key:selected[0].key, from_label:selected[0].label, affected_count:selected.length,
+  return { from_key:origin.key, from_label:origin.label, position:origin.position, affected_count:selected.length,
+    affected_keys:selected.map(row=>row.key),
+    earlier_pending_count:plan.sessions.filter(row=>row.position<origin.position && !completed(row)
+      && ['pending','missed'].includes(row.scheduling_status)).length,
     existing_reservations_count:selected.filter(row=>row.scheduling_status==='reserved').length,
     missed_count:selected.filter(row=>row.scheduling_status==='missed').length, blocked_reason:blocked };
 }
+function resumeOptions(plan, now = new Date()) {
+  return plan.sessions.filter(row=>!completed(row) && ['pending','missed','reserved'].includes(row.scheduling_status))
+    .sort((a,b)=>a.position-b.position).map(row=> {
+      const { affected_keys, ...option }=resumeSelectionInfo(plan,row.key,now);
+      return option;
+    });
+}
+function resumeInfo(plan, now = new Date()) {
+  // Keep the original interruption signal. New selectable origins must not
+  // turn ordinary pending purchases into mandatory all-sessions replanning.
+  const interrupted = plan.sessions.some(row => row.scheduling_status === 'missed'
+    || row.scheduling_status === 'pending' && row.appointment?.estado === 'cancelada');
+  if (!interrupted) return null;
+  const origin=plan.sessions.filter(row=>!completed(row)).sort((a,b)=>a.position-b.position)[0];
+  return origin ? resumeSelectionInfo(plan,origin.key,now) : null;
+}
 function resumeSessions(plan, fromKey, now) {
-  const info = resumeInfo(plan, now);
-  if (!info || info.from_key !== fromKey) fail('program_resume_changed','Actualiza el programa: ha cambiado la sesión desde la que se debe continuar.');
+  const info = resumeSelectionInfo(plan, fromKey, now);
+  if (!info) fail('program_resume_changed','Actualiza el programa: ha cambiado la sesión desde la que se debe continuar.');
   if (info.blocked_reason) fail('program_resume_review_required',info.blocked_reason);
-  return plan.sessions.filter(row=>row.scheduling_status!=='completed');
+  return plan.sessions.filter(row=>info.affected_keys.includes(row.key)).sort((a,b)=>a.position-b.position);
 }
 function resumeInput(payload) {
   if (payload.mode == null && payload.replan_from_key == null && payload.expected_plan_revision == null) return null;
@@ -81,4 +105,4 @@ function assertSeriesContext(token, { transaction, session, existing, values }) 
   }
   return {series:structuredClone(context.series),timeZone:context.timeZone};
 }
-module.exports={schedulingState,planRevision,resumeInfo,resumeSessions,resumeInput,assertRevision,createSeriesContext,assertSeriesContext};
+module.exports={schedulingState,planRevision,resumeInfo,resumeSelectionInfo,resumeOptions,resumeSessions,resumeInput,assertRevision,createSeriesContext,assertSeriesContext};

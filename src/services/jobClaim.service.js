@@ -1,5 +1,6 @@
 'use strict';
 const fail = () => { throw Object.assign(Error('job_claim_lost'), { code: 'job_claim_lost' }); };
+const claims = new WeakSet();
 // The monotonically increasing attempt is persisted by claimNextJob/claimJobById.
 // This object is passed internally, never read from the job payload or HTTP input.
 function createJobClaim(job, { isActive, models = () => require('../../models'),
@@ -7,7 +8,7 @@ function createJobClaim(job, { isActive, models = () => require('../../models'),
   const id = Number(job?.id), attempt = Number(job?.attempts);
   const capturedNamespace = job?.payload?.__runtime_namespace;
   const claimedAt = Math.floor(new Date(job?.last_attempt_at).getTime() / 1000);
-  return Object.freeze({ id, attempt, namespace: capturedNamespace,
+  const claim = Object.freeze({ id, attempt, namespace: capturedNamespace,
     async assert({ transaction, executionId } = {}) {
       if (!Number.isSafeInteger(id) || id < 1 || !Number.isSafeInteger(attempt) || attempt < 1
         || !Number.isFinite(claimedAt) || claimedAt <= 0 || typeof isActive !== 'function' || !isActive()
@@ -24,5 +25,6 @@ function createJobClaim(job, { isActive, models = () => require('../../models'),
       return true;
     },
   });
+  claims.add(claim); return claim;
 }
-module.exports = { createJobClaim };
+module.exports = { createJobClaim, isJobClaim: value => claims.has(value) };

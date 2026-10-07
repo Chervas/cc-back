@@ -1919,30 +1919,11 @@ createWorker('webhook_whatsapp', async (job) => {
             continue;
         }
 
-        const message = await Message.findByPk(messageRef.id);
+        const message = await require('../lib/whatsapp-provider-status').persistProviderStatus({ db, messageId: messageRef.id, status });
         if (!message) {
             continue;
         }
-
-        // No degradar estados: solo avanzamos
-        const currentStatus = (message.status || '').toLowerCase();
         const nextStatus = mappedStatus;
-        const order = ['pending', 'sending', 'sent', 'delivered', 'read', 'failed'];
-        const currentIdx = order.indexOf(currentStatus);
-        const nextIdx = order.indexOf(nextStatus);
-        if (currentIdx !== -1 && nextIdx !== -1 && nextIdx < currentIdx) {
-            continue;
-        }
-
-        message.status = nextStatus;
-        if (nextStatus === 'sent' && status?.timestamp && !message.sent_at) {
-            const tsMs = Number(status.timestamp) * 1000;
-            if (!Number.isNaN(tsMs)) {
-                message.sent_at = new Date(tsMs);
-            }
-        }
-        message.metadata = mergeStatusMetadata(message.metadata, status);
-        await message.save();
         try {
             await leadAutoReplyContactStatusService.materializeLeadAutoReplyProviderStatus({
                 message,

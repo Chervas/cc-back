@@ -12,7 +12,8 @@ function fixture() {
   vm.runInNewContext(fs.readFileSync(require.resolve('../../services/appointmentPurchaseOptions.service'), 'utf8'), { module, Date, Number, String, Math,
     require: path => path === './voucherScheduleAvailability.service' ? { activeAppointmentWhere: () => ({ estado: { [Op.ne]: 'cancelada' } }) }
       : path === './treatmentBookingProfile.service' ? { loadScopedTreatment: async ({ treatmentId, clinic }) => { assert.equal(treatmentId, 4); assert.equal(clinic.id_clinica, 72); return { nombre: 'Nombre sin cambiar', clinical_config: { catalog_badge: 'Antiguo' } }; }, requireOperationalProfile: () => null }
-        : path === '../lib/treatment-commercial-policy' ? { assertStandalone: () => {} } : (() => { throw Error(path); })(),
+        : path === '../lib/treatment-commercial-policy' ? { assertStandalone: () => {} }
+          : path === '../lib/treatment-booking-visibility' ? require('../../lib/treatment-booking-visibility') : (() => { throw Error(path); })(),
   });
   const service = module.exports.createAppointmentPurchaseOptions({ db,
     economics: { loadContext: async (patient, clinic) => { assert.equal(patient, 'pac-test'); assert.equal(clinic, 72); return { patient: { id_paciente: 8 }, clinic: { id_clinica: 72 } }; } },

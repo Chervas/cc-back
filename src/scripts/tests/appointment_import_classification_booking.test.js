@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const { resolveImportedTreatment } = require('../../services/appointmentImportResolution.service');
 const { classifyImportedAppointment } = require('../../services/appointmentBookingCommand.service');
 const { importReviewVersion } = require('../../lib/appointment-import-review');
-const { occupancyForSolution } = require('../../lib/booking-profile-solver');
+const { occupancyForSolution, solveBookingProfile } = require('../../lib/booking-profile-solver');
 const { normalizeBookingProfile } = require('../../lib/booking-profile');
 
 const start = '2030-01-07T09:00:00.000Z', middle = '2030-01-07T09:15:00.000Z', end = '2030-01-07T09:30:00.000Z';
@@ -87,6 +87,63 @@ function fixture({ treatmentProfile = null, treatmentPatch = {}, failEvent = fal
     clinicId: 72, actorId: 7, input, capabilities, ...overrides });
   return { db, state, request, run, treatment };
 }
+
+function relativeFixture() {
+  const f = fixture();
+  const profile = normalizeBookingProfile({ version: 4, phases: [
+    { key: 'draw', duration_minutes: 30, start_offset_minutes: 0, installation_ids: [9], professionals: { mode: 'any', ids: [5] } },
+    { key: 'apply', duration_minutes: 30, start_offset_minutes: 15, installation_ids: [10], professionals: { mode: 'any', ids: [6] } },
+  ] });
+  const free = () => ({ windows: [{ start, end: '2030-01-07T20:00:00Z' }], busy: [] });
+  const solution = solveBookingProfile({ profile, start, doctors: new Map([[5, free()], [6, free()]]),
+    installations: new Map([[9, free()], [10, free()]]), installationKeys: new Map([[9, 'installation:9'], [10, 'installation:10']]) });
+  f.state.row.fin = solution.end_at;
+  f.state.row.import_metadata.booking = { version: 1, profile, phases: solution.phases,
+    capacity_fully_verified: solution.capacity_fully_verified, attention_requirements_pending: [] };
+  f.state.occupancy = occupancyForSolution(solution).map((row, index) => ({ ...row, id: 700 + index, appointment_id: 51 }));
+  f.relativeCapabilities = { ...capabilities, relativeSteps: true };
+  return f;
+}
+test('v4 imported classification preserves relative clocks, verified attention, span and canonical occupancy IDs', async () => {
+  const f = relativeFixture(), before = structuredClone(f.state);
+  await f.run(undefined, { capabilities: f.relativeCapabilities });
+  assert.equal(f.state.row.tratamiento_id, 3); assert.equal(f.state.row.fin, '2030-01-07T09:45:00.000Z');
+  assert.deepEqual(f.state.row.import_metadata.booking, before.row.import_metadata.booking);
+  assert.deepEqual(f.state.occupancy, before.occupancy); assert.equal(f.state.occupancyWrites, 0);
+});
+test('v4 classification rejects incompatible catalog offsets without rewriting the source reservation', async () => {
+  const f = relativeFixture(), before = structuredClone(f.state);
+  const wanted = structuredClone(f.state.row.import_metadata.booking.profile); wanted.phases[1].start_offset_minutes = 20;
+  f.treatment.clinical_config = { booking_profile: wanted };
+  await assert.rejects(f.run(undefined, { capabilities: f.relativeCapabilities }), { code: 'booking_import_profile_mismatch' });
+  assert.deepEqual(f.state.row, before.row); assert.deepEqual(f.state.occupancy, before.occupancy);
+  assert.equal(f.state.persisted, 0);
+});
+test('v4 import classification preserves the frozen substitute rule and rejects a different catalog permission', async () => {
+  const f = relativeFixture();
+  f.state.row.import_metadata.booking.profile.phases[0].professionals = {
+    mode: 'any', ids: [5, 6], preferred_id: 5, fallback_when: 'absence_only',
+  };
+  const wanted = structuredClone(f.state.row.import_metadata.booking.profile);
+  f.treatment.clinical_config = { booking_profile: wanted };
+  const before = structuredClone(f.state);
+  wanted.phases[0].professionals.fallback_when = 'unavailable';
+  await assert.rejects(f.run(undefined, { capabilities: f.relativeCapabilities }), { code: 'booking_import_profile_mismatch' });
+  assert.deepEqual(f.state.row, before.row); assert.deepEqual(f.state.occupancy, before.occupancy);
+  wanted.phases[0].professionals.fallback_when = 'absence_only';
+  await f.run(undefined, { capabilities: f.relativeCapabilities });
+  assert.equal(f.state.row.import_metadata.booking.profile.phases[0].professionals.fallback_when, 'absence_only');
+  assert.deepEqual(f.state.occupancy, before.occupancy); assert.equal(f.state.occupancyWrites, 0);
+});
+test('v4 classification never blesses an unverified or forged original snapshot', async () => {
+  for (const tamper of [row => { delete row.import_metadata.booking.capacity_fully_verified; },
+    row => { row.import_metadata.booking.phases[1].start_offset_minutes = 20; },
+    row => { row.fin = end; }]) {
+    const f = relativeFixture(); tamper(f.state.row);
+    await assert.rejects(f.run(undefined, { capabilities: f.relativeCapabilities }), { code: 'booking_import_reservation_invalid' });
+    assert.equal(f.state.occupancyWrites, 0); assert.equal(f.state.persisted, 0); assert.equal(f.state.events.length, 0);
+  }
+});
 
 test('classification keeps original multi-room, machine, partial attention, team and canonical occupancy IDs', async () => {
   for (const extraSupport of [false, true]) {

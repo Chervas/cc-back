@@ -11,7 +11,8 @@ function harness({ document = {}, packageRow = {} } = {}) {
     const updates = [];
     const doc = { id: 1, public_id: 'qa_document', status: 'pending', ...document, update: async patch => { writes++; updates.push(patch); } };
     const pack = { id: 1, public_id: 'qa_package', status: 'pending', documents: [doc], ...packageRow };
-    const db = { Sequelize: { Op: {} }, PatientConsentDocument: { findByPk: async () => doc }, PatientIntakeRequest: { findOne: async () => null },
+    const db = { Sequelize: { Op: {} }, sequelize: { transaction: async (options, work) => work({}) },
+        PatientConsentDocument: { findByPk: async () => doc, update: async patch => { await doc.update(patch); return [1]; } }, PatientIntakeRequest: { findOne: async () => null },
         ConsentSignaturePackage: { findOne: async () => pack, findByPk: async () => pack },
         ConsentDeliveryEvent: { create: async () => { writes++; } } };
     const nativeRequire = createRequire(servicePath), module = { exports: {} };

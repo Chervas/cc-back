@@ -1,6 +1,6 @@
 'use strict';
 
-const { normalizeBookingProfile } = require('./booking-profile');
+const { normalizeBookingProfile, bookingPhaseOffsets, bookingProfileDurationMinutes } = require('./booking-profile');
 const { domainError } = require('./treatmentPrograms.contract');
 const { addDays } = require('./personal-schedule-recurring');
 const { formatDateLocal } = require('./availability-calendar');
@@ -40,23 +40,33 @@ function schedulingMode(value) {
 }
 function composeAppointmentProfile(appointment, { allowMissingDuration = false } = {}) {
   if (!appointment?.treatments?.length || appointment.treatments.length > 8) error('program_composition_invalid', 'Faltan los tratamientos de esta cita.');
+  const profiles = appointment.treatments.map(treatment => normalizeProgramProfile(treatment.booking_profile, { allowMissingDuration }));
+  const relative = profiles.some(profile => profile?.version === 4);
+  if (relative && profiles.some(profile => profile && profile.version < 4 && profile.phases.some(phase => phase.professionals.mode === 'all'))) {
+    error('program_profile_v4_legacy_team_unsupported', 'La composición mezcla pasos relativos y un equipo antiguo reservado durante toda la visita. Revisa sus tiempos explícitamente antes de combinarla.');
+  }
   const phases = [], treatmentIds = [];
+  let componentOffset = 0;
   appointment.treatments.forEach((treatment, treatmentIndex) => {
-    const profile = normalizeProgramProfile(treatment.booking_profile, { allowMissingDuration });
+    const profile = profiles[treatmentIndex];
     if (!profile) error('program_profile_missing', 'Completa las cabinas y profesionales de cada tratamiento.');
     if (!Number.isSafeInteger(treatment.id) || treatmentIds.includes(treatment.id)) error('program_composition_invalid', 'Tratamientos no válidos o repetidos en la misma cita.');
     treatmentIds.push(treatment.id);
+    const offsets = bookingPhaseOffsets(profile), span = bookingProfileDurationMinutes(profile);
+    if (relative && span == null && treatmentIndex < appointment.treatments.length - 1) error('program_profile_v4_duration_required',
+      'Elige primero la duración de los pasos anteriores: no se puede deducir cuándo empieza la técnica siguiente.');
     profile.phases.forEach((phase, phaseIndex) => phases.push({ ...phase,
       key: `t${treatmentIndex + 1}_p${phaseIndex + 1}`,
       label: [treatment.name, phase.label].filter(Boolean).join(' · ').slice(0, 120),
       treatment_id: treatment.id, treatment_name: treatment.name,
+      ...(relative ? { start_offset_minutes: componentOffset + offsets[phaseIndex] } : {}),
     }));
+    if (relative) componentOffset += span || 0;
   });
-  const profile = normalizeProgramProfile({ version: phases.some(p => p.staff_attention) ? 3 : phases.some(p => p.equipment_requirements?.length) ? 2 : 1, phases }, { allowMissingDuration });
+  const profile = normalizeProgramProfile({ version: relative ? 4 : phases.some(p => p.staff_attention) ? 3 : phases.some(p => p.equipment_requirements?.length) ? 2 : 1, phases }, { allowMissingDuration });
   return { profile, treatment_ids: treatmentIds,
     phase_treatments: phases.map(({ key, treatment_id, treatment_name }) => ({ key, treatment_id, treatment_name })),
-    duration_minutes: profile.phases.some(phase => phase.duration_minutes == null) ? null
-      : profile.phases.reduce((total, phase) => total + phase.duration_minutes, 0) };
+    duration_minutes: bookingProfileDurationMinutes(profile) };
 }
 
 function durationChoice(row) {
@@ -81,16 +91,26 @@ function materializeSession(session, choice = {}) {
   if (!template) error('program_profile_missing', 'Falta configurar la sala y el profesional de esta sesión.');
   const missing = template.phases.filter(phase => phase.duration_minutes == null);
   const knownMinutes = template.phases.reduce((total, phase) => total + (phase.duration_minutes || 0), 0);
+  const knownSpan = template.version === 4 ? Math.max(...template.phases.filter(phase => phase.duration_minutes != null)
+    .map(phase => phase.start_offset_minutes + phase.duration_minutes), 0) : null;
   const durations = supplied.phase_durations || {};
   if (Object.keys(durations).some(key => !missing.some(phase => phase.key === key))) error('program_duration_locked', 'Solo puedes elegir la duración de las fases que no la tienen definida.');
   const phases = template.phases.map(phase => {
     if (phase.duration_minutes != null) return phase;
-    const duration = durations[phase.key] ?? (missing.length === 1 && supplied.duration_minutes != null ? supplied.duration_minutes - knownMinutes : null);
+    // For overlapping steps, total span does not identify a shorter interior
+    // act. Only a unique final endpoint may be derived from a chosen total;
+    // otherwise require an explicit duration for the missing step itself.
+    const totalChoice = missing.length === 1 && supplied.duration_minutes != null
+      ? template.version === 4
+        ? (supplied.duration_minutes > knownSpan ? supplied.duration_minutes - phase.start_offset_minutes : null)
+        : supplied.duration_minutes - knownMinutes
+      : null;
+    const duration = durations[phase.key] ?? totalChoice;
     if (!Number.isInteger(duration) || duration < 1) error('program_duration_required', 'Elige la duración de esta sesión antes de buscar o reservar su cita.', { key: session.key, phase_key: phase.key });
     return { ...phase, duration_minutes: duration };
   });
   const profile = normalizeBookingProfile({ ...template, phases });
-  const total = profile.phases.reduce((minutes, phase) => minutes + phase.duration_minutes, 0);
+  const total = bookingProfileDurationMinutes(profile);
   if (supplied.duration_minutes != null && supplied.duration_minutes !== total) error('program_duration_locked', 'La duración debe respetar las fases ya definidas del tratamiento.');
   return { ...session, booking_profile: profile, duration_minutes: total,
     ...(missing.length ? { duration_selection: { ...supplied, duration_minutes: total } } : {}) };

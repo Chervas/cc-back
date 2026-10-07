@@ -234,7 +234,25 @@ exports.getTratamientos = asyncHandler(async (req, res) => {
     // historical references and program-only components without activating them.
     const booking = req.query.booking === 'true';
     if (booking && !clinicIdNum) return res.status(400).json({ message: 'Selecciona una clínica para buscar tratamientos de cita.' });
-    res.json(tratamientos.filter(treatment => !booking || require('../lib/appointment-booking-catalog').individualBookingEligible(treatment, clinicIdNum)).map(catalogDto));
+    const bookingOptions = {};
+    const patientIdentifier = req.query.patient_id ?? req.query.paciente_id;
+    if (booking && patientIdentifier != null && patientIdentifier !== '') {
+        const { assertUserCanAccessFeature } = require('../lib/access-policy');
+        for (const featureKey of ['appointments.view', 'patients.view', 'patients.sensitive.view']) {
+            await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey, clinicId: clinicIdNum });
+        }
+        const { patient } = await require('../services/patientEconomics.service').loadContext(patientIdentifier, clinicIdNum);
+        const started = await db.CitaPaciente.findAll({ where: require('../lib/treatment-booking-visibility').initiatedTreatmentWhere(Op, {
+            clinicId: clinicIdNum, patientId: patient.id_paciente }), attributes: ['tratamiento_id'], group: ['tratamiento_id'], raw: true });
+        bookingOptions.startedTreatmentIds = new Set(started.map(row => String(row.tratamiento_id)));
+    }
+    res.json(tratamientos.filter(treatment => !booking || require('../lib/appointment-booking-catalog').individualBookingEligible(treatment, clinicIdNum, bookingOptions)).map(treatment => {
+        const dto = catalogDto(treatment);
+        return booking ? { ...dto, duration_requirements: require('../lib/booking-profile-duration').durationRequirements(
+            require('../lib/program-booking').normalizeProgramProfile(
+                require('../services/treatmentBookingProfile.service').parseClinicalConfig(treatment).booking_profile,
+                { allowMissingDuration: true })) } : dto;
+    }));
 });
 
 // Crear tratamiento

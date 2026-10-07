@@ -12,6 +12,7 @@ function fixture(){
  const execution={id:50,clinic_id:72,template_version_id:1552,trigger_type:'appointment_reminder_window',trigger_entity_type:'appointment',trigger_entity_id:10,
   created_at:'2026-10-05T09:10:00.000Z',context:{appointment:{inicio:appointment.inicio}}};
  const c={module:{exports:{}},Date,Intl,require:name=>{
+  if(name==='./appointment-synthetic-guard')return require('../../lib/appointment-synthetic-guard');
   if(name==='./whatsappImportedReminderRelease')return {...release,permits:(a,o)=>release.permits(a,{...o,now:o?.now??now,policy})};
   if(name==='./whatsappImportedAppointmentOperations')return {permits:()=>false,permitsPatientHoldOverride:()=>false,allowsSuppressionOverride:()=>false};
   throw Error('unexpected_dependency');
@@ -44,6 +45,7 @@ test('patient hold is bypassed only for the exact released reminder execution, n
  const original=f.eligibility.assertAppointmentEligibility;
  const fakeDate=class extends Date {static now(){return now}};
  const c={module:{exports:{}},Date:fakeDate,Intl,require:name=>{
+  if(name==='./appointment-synthetic-guard')return require('../../lib/appointment-synthetic-guard');
   if(name==='./whatsappImportedReminderRelease')return {permits:(a,o)=>release.permits(a,{...o,policy:f.policy,now})};
   if(name==='./whatsappImportedAppointmentOperations')return {permits:()=>false,permitsPatientHoldOverride:()=>false,allowsSuppressionOverride:()=>false};throw Error(name);
  }};vm.createContext(c);vm.runInContext(fs.readFileSync(require.resolve('../../lib/whatsappAppointmentEligibility'),'utf8'),c);

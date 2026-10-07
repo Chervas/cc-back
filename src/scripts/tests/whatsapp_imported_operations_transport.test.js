@@ -11,6 +11,7 @@ function fixture() {
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(require.resolve('../../lib/whatsappAppointmentEligibility'), 'utf8'), {
     module, Date: FixedDate, Intl, require(name) {
+      if (name === './appointment-synthetic-guard') return require('../../lib/appointment-synthetic-guard');
       if (name === './whatsappImportedReminderRelease') return { permits: () => false };
       if (name === './whatsappImportedAppointmentOperations') return {
         permits: (a, options) => operations.permits(a, { ...options, policy, now }),

@@ -10,9 +10,14 @@ const servicePath = path.resolve(__dirname, '../../services/consentimientos.serv
 function harness() {
     const calls = [], Op = { or: Symbol('or'), in: Symbol('in') };
     const stored = [{ id: 8, tratamiento_id: 4, clinica_id: 3 }];
-    const db = { Sequelize: { Op }, TreatmentConsentRequirement: {
+    const transaction = { LOCK: { UPDATE: 'UPDATE' } };
+    const db = { Sequelize: { Op }, sequelize: { transaction: async (options, work) => {
+        assert.equal(options.isolationLevel, 'READ COMMITTED'); return work(transaction);
+    } }, Tratamiento: { findByPk: async (id, options) => {
+        calls.push(['anchor', options]); assert.equal(id, 4); return { id_tratamiento: id };
+    } }, TreatmentConsentRequirement: {
         destroy: async options => { calls.push(['destroy', options]); },
-        bulkCreate: async rows => { calls.push(['create', rows]); },
+        bulkCreate: async (rows, options) => { calls.push(['create', rows, options]); },
         findAll: async options => { calls.push(['read', options]); return stored; },
     } };
     const nativeRequire = createRequire(servicePath), module = { exports: {} };
@@ -21,7 +26,7 @@ function harness() {
         module, exports: module.exports, __dirname: path.dirname(servicePath),
         process: { env: {} }, Buffer, console,
     });
-    return { service: module.exports, calls, stored, Op };
+    return { service: module.exports, calls, stored, Op, transaction };
 }
 
 test('saving a treatment requirement returns its clinic-scoped persisted list', async () => {
@@ -29,21 +34,30 @@ test('saving a treatment requirement returns its clinic-scoped persisted list', 
     const result = await h.service.saveTreatmentRequirements('4', { clinic_id: 3,
         requirements: [{ clinic_template_id: 5, required: true, blocking_policy: 'hard' }] });
     assert.equal(result, h.stored);
-    assert.equal(h.calls[0][1].where.tratamiento_id, 4);
-    assert.equal(h.calls[0][1].where.clinica_id, 3);
-    assert.equal(h.calls[1][1][0].clinica_id, 3);
-    assert.equal(h.calls[1][1][0].clinic_template_id, 5);
-    const query = h.calls[2][1];
+    assert.equal(h.calls[0][1].lock, 'UPDATE');
+    assert.equal(h.calls[1][1].where.tratamiento_id, 4);
+    assert.equal(h.calls[1][1].where.clinica_id, 3);
+    assert.equal(h.calls[2][1][0].clinica_id, 3);
+    assert.equal(h.calls[2][1][0].clinic_template_id, 5);
+    const query = h.calls[3][1];
     assert.equal(query.where.tratamiento_id, 4);
     assert.equal(query.where[h.Op.or][0].clinica_id, 3);
     assert.equal(query.where[h.Op.or][1].clinica_id, null);
+    assert(h.calls.every(([name, options, createOptions]) => (name === 'create' ? createOptions : options).transaction === h.transaction));
 });
 
 test('clearing clinic requirements also returns successfully, without a create', async () => {
     const h = harness();
     assert.equal(await h.service.saveTreatmentRequirements(4, { clinica_id: 3, requirements: [] }), h.stored);
-    assert.deepEqual(h.calls.map(([name]) => name), ['destroy', 'read']);
-    assert.equal(h.calls[1][1].where[h.Op.or][0].clinica_id, 3);
+    assert.deepEqual(h.calls.map(([name]) => name), ['anchor', 'destroy', 'read']);
+    assert.equal(h.calls[2][1].where[h.Op.or][0].clinica_id, 3);
+});
+
+test('an internal caller may keep its existing transaction and requirement read inside it', async () => {
+    const h = harness(), transaction = { LOCK: { UPDATE: 'CALLER_UPDATE' } };
+    await h.service.saveTreatmentRequirements(4, { clinic_id: 3, requirements: [] }, transaction);
+    assert.equal(h.calls[0][1].lock, 'CALLER_UPDATE');
+    assert(h.calls.every(([, options]) => options.transaction === transaction));
 });
 
 test('invalid treatment IDs fail before any writes', async () => {

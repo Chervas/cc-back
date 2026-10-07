@@ -267,6 +267,40 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     await e.reload(); assert.equal(e.status, 'cancelled'); runs++;
   }
   report.checks.push('100 repeated off/on interleavings retain terminal cancellation across historical/current versions and running/waiting states');
+
+  // Persisted fixtures exercise the real final gates, not an extracted helper.
+  // Adding a QA marker after enqueue must still stop WhatsApp and email, while
+  // accepted/unknown delivery evidence and unrelated clinical rows stay intact.
+  const qaExecution = await create(local, { status: 'running' });
+  const qaMessage = await makeMessage(qaExecution);
+  const qaEmail = { related_type: 'flow_execution_v2', related_id: qaExecution.id };
+  await stop.assertMessageCanDispatch(qaMessage.id);
+  const qaAppointmentBefore = (await models.CitaPaciente.findByPk(35)).toJSON();
+  await models.CitaPaciente.update({ import_metadata: { qa_demo: { fixture: 'isolated-visit' } } }, { where: { id_cita: 35 } });
+  await assert.rejects(stop.assertMessageCanDispatch(qaMessage.id), { code: 'synthetic_communication_forbidden' });
+  await assert.rejects(stop.assertEmailCanDispatch(qaEmail), { code: 'synthetic_communication_forbidden' });
+  await assert.rejects(stop.prepareMessageForDispatch(qaMessage, { status: 'sending' }), { code: 'synthetic_communication_forbidden' });
+  await qaMessage.reload(); assert.equal(qaMessage.status, 'failed');
+  const qaAccepted = await makeMessage(qaExecution, { metadata: { source: 'automations_v2', execution_id: qaExecution.id, wamid: 'synthetic-accepted' } });
+  const qaUnknown = await makeMessage(qaExecution, { metadata: { source: 'automations_v2', execution_id: qaExecution.id, outcome_unknown: true } });
+  await qaAccepted.reload(); await qaUnknown.reload();
+  const acceptedBefore = qaAccepted.toJSON(), unknownBefore = qaUnknown.toJSON();
+  await stop.cancelMessage(qaAccepted.id); await stop.cancelMessage(qaUnknown.id);
+  await qaAccepted.reload(); await qaUnknown.reload();
+  assert.deepEqual(qaAccepted.toJSON(), acceptedBefore); assert.deepEqual(qaUnknown.toJSON(), unknownBefore);
+  await models.CitaPaciente.update({ import_metadata: qaAppointmentBefore.import_metadata }, { where: { id_cita: 35 } });
+  const restoredAppointment = (await models.CitaPaciente.findByPk(35)).toJSON();
+  for (const field of ['paciente_id', 'clinica_id', 'doctor_id', 'instalacion_id', 'tratamiento_id', 'estado', 'inicio', 'fin', 'nota']) {
+    assert.deepEqual(restoredAppointment[field], qaAppointmentBefore[field]);
+  }
+  const simulationOnly = await create(local, { context: { __simulation: true }, status: 'running' });
+  assert.equal((await stop.assertExecutionActive(simulationOnly)).id, simulationOnly.id, 'isolated execution itself remains possible');
+  const simulatedMessage = await makeMessage(simulationOnly);
+  await assert.rejects(stop.assertMessageCanDispatch(simulatedMessage.id), { code: 'synthetic_communication_forbidden' });
+  const unmarkedExecution = await create(local, { status: 'running' });
+  const unmarkedMessage = await makeMessage(unmarkedExecution);
+  await stop.assertMessageCanDispatch(unmarkedMessage.id);
+  report.checks.push('actual MySQL QA marker added after enqueue rejects WhatsApp/email preparation; accepted/unknown evidence and clinical fields survive, simulation cannot dispatch, normal traffic stays eligible');
   report.coverage = { repeatedInterleavings: runs, networkProviderCalls: 0, realPatientsTouched: 0,
-    actualMysql: true, actualToggleController: true, actualEngine: true, graphOrPromptEdits: false };
+    actualMysql: true, actualToggleController: true, actualEngine: true, syntheticFinalDispatchGuards: true, graphOrPromptEdits: false };
 }).catch(error => { console.error(error.stack); process.exitCode = 1; });

@@ -1,6 +1,6 @@
 'use strict';
 
-const { normalizeBookingProfile, requiresMultiResourceBooking } = require('../lib/booking-profile');
+const { normalizeBookingProfile, requiresMultiResourceBooking, pendingAttentionRequirements } = require('../lib/booking-profile');
 
 function bookingError(code, message, details = null, statusCode = 409) {
   const error = new Error(message);
@@ -13,7 +13,37 @@ function bookingError(code, message, details = null, statusCode = 409) {
 
 function bookingCapabilities(environment = process.env) {
   const simple = environment.BOOKING_PROFILES_ENABLED === 'true';
-  return { simple, multi: simple && environment.BOOKING_MULTI_RESOURCE_ENABLED === 'true' };
+  const multi = simple && environment.BOOKING_MULTI_RESOURCE_ENABLED === 'true';
+  return { simple, multi, relativeSteps: multi && environment.BOOKING_PHASE_OFFSETS_ENABLED === 'true' };
+}
+
+// A v4 profile is not a v3 itinerary: offsets, partial staff attention and the
+// visit span must be understood by every read/write consumer before activation.
+// Also used for contracted/snapshot profiles, without applying catalog lifecycle
+// restrictions to an existing purchase. Cancellation does not need this gate.
+function assertOperationalBookingProfile(profile, { capabilities = bookingCapabilities() } = {}) {
+  if (!profile) return null;
+  const advanced = requiresMultiResourceBooking(profile);
+  if (!capabilities.simple || (advanced && !capabilities.multi) || (profile.version === 4 && capabilities.relativeSteps !== true)) {
+    throw bookingError('booking_profile_runtime_unavailable',
+      profile.version === 4
+        ? 'La reserva por pasos y tiempos de atención todavía no está habilitada. Se conserva la configuración; no puede reservarse hasta completar su publicación.'
+        : advanced
+          ? 'El tratamiento requiere fases o un equipo simultáneo. La reserva multicabina/equipo todavía no está activada.'
+          : 'El perfil de agenda está configurado, pero su reserva todavía no está activada.',
+      { configured: true, simple_enabled: capabilities.simple === true, multi_enabled: capabilities.multi === true,
+        relative_steps_enabled: capabilities.relativeSteps === true, can_force: false });
+  }
+  const pending = pendingAttentionRequirements(profile);
+  if (pending.length) throw bookingError('pending_attention_requirements',
+    'Falta definir el tiempo de algunas intervenciones del profesional. No se puede confirmar disponibilidad completa para esta visita.',
+    { requirements: pending, can_force: false });
+  if (profile.version === 4 && profile.phases.some(phase => (phase.equipment_requirements || []).length > 1)) {
+    throw bookingError('booking_profile_attention_ambiguous',
+      'Define un paso por técnica para conservar la atención de cada máquina. Esta configuración todavía no puede reservarse.',
+      { can_force: false });
+  }
+  return profile;
 }
 
 function parseClinicalConfig(treatment) {
@@ -24,7 +54,8 @@ function parseClinicalConfig(treatment) {
   return config && typeof config === 'object' && !Array.isArray(config) ? config : {};
 }
 
-function requireOperationalProfile(treatment, { capabilities = bookingCapabilities(), allowObsolete = false } = {}) {
+function requireOperationalProfile(treatment, { capabilities = bookingCapabilities(), allowObsolete = false,
+  durationSelection, allowMissingDuration = false } = {}) {
   const config = parseClinicalConfig(treatment);
   if (require('../lib/historical-treatment-reference').isHistoricalTreatment(treatment)) {
     throw bookingError('treatment_not_bookable', 'Esta referencia conserva una reserva importada; no puede utilizarse para dar nuevas citas.');
@@ -32,16 +63,34 @@ function requireOperationalProfile(treatment, { capabilities = bookingCapabiliti
   if (!allowObsolete && (config.catalog_status === 'obsolete' || config.catalog_status === 'draft' || treatment?.activo === false)) {
     throw bookingError('treatment_not_bookable', 'Este tratamiento está obsoleto o en borrador. Selecciona un tratamiento vigente.');
   }
-  const profile = normalizeBookingProfile(config.booking_profile);
-  if (!profile) return null;
-  if (!capabilities.simple || (requiresMultiResourceBooking(profile) && !capabilities.multi)) {
-    throw bookingError('booking_profile_runtime_unavailable',
-      requiresMultiResourceBooking(profile)
-        ? 'El tratamiento requiere fases o un equipo simultáneo. La reserva multicabina/equipo todavía no está activada.'
-        : 'El perfil de agenda está configurado, pero su reserva todavía no está activada.',
-      { configured: true, simple_enabled: capabilities.simple, multi_enabled: capabilities.multi, can_force: false });
+  const { profile } = require('../lib/booking-profile-duration').resolveBookingProfileDuration(config.booking_profile,
+    { durationSelection, allowMissingDuration });
+  return assertOperationalBookingProfile(profile, { capabilities });
+}
+
+// Editing previews resolve only a server-owned appointment snapshot. A changed
+// catalog template must not resize its old reservation or choose new minutes.
+async function resolveAppointmentBookingProfile({ db, treatment, clinic, existingAppointmentId = null,
+  capabilities = bookingCapabilities(), durationSelection, transaction = null, allowObsolete = false }) {
+  if (existingAppointmentId == null) return requireOperationalProfile(treatment, { capabilities, durationSelection, allowObsolete });
+  const id = Number(existingAppointmentId);
+  if (!Number.isSafeInteger(id) || id < 1) throw bookingError('booking_ignore_invalid', 'Revisa la cita que quieres modificar.', null, 400);
+  const stored = await db.CitaPaciente.findByPk(id, { transaction });
+  const appointment = stored?.toJSON ? stored.toJSON() : stored;
+  if (!appointment || Number(appointment.clinica_id) !== Number(clinic.id_clinica)
+    || Number(appointment.tratamiento_id) !== Number(treatment?.id_tratamiento)) {
+    throw bookingError('appointment_not_found', 'Cita no encontrada.', null, 404);
   }
-  return profile;
+  let metadata = appointment.import_metadata;
+  if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch {
+    throw bookingError('booking_profile_invalid', 'La configuración guardada de la cita no es válida.');
+  } }
+  if (metadata?.booking != null) {
+    const profile = normalizeBookingProfile(metadata.booking.profile);
+    if (!profile) throw bookingError('booking_profile_invalid', 'Falta el perfil guardado de la cita.');
+    return requireOperationalProfile({ activo: true, clinical_config: { booking_profile: profile } }, { capabilities, durationSelection });
+  }
+  return requireOperationalProfile(treatment, { capabilities, durationSelection, allowObsolete });
 }
 
 async function loadScopedTreatment({ db, treatmentId, clinic, transaction = null }) {
@@ -81,7 +130,7 @@ function assertPriorityAcknowledgement(solution, acknowledged) {
 }
 
 function bookingErrorMiddleware(error, req, res, next) {
-  if (!/^(booking_|program_|appointment_consent_|appointment_clinical_component_|historical_reference_|treatment_not_|treatment_not_found)/.test(String(error?.code || ''))) return next(error);
+  if (!/^(booking_|program_|pending_attention_requirements$|appointment_consent_|appointment_clinical_component_|historical_reference_|treatment_not_|treatment_not_found)/.test(String(error?.code || ''))) return next(error);
   return res.status(error.statusCode || 409).json(bookingErrorPayload(error));
 }
 
@@ -96,5 +145,6 @@ function bookingErrorPayload(error) {
     ...(canForce ? { reason: 'overlap', conflicts: [{ type: 'overlap', message: 'Recurso ocupado por otra cita de esta clínica' }] } : {}) };
 }
 
-module.exports = { bookingError, bookingCapabilities, parseClinicalConfig, requireOperationalProfile,
-  loadScopedTreatment, assertPriorityAcknowledgement, bookingErrorMiddleware, bookingErrorPayload };
+module.exports = { bookingError, bookingCapabilities, parseClinicalConfig, requireOperationalProfile, resolveAppointmentBookingProfile, assertOperationalBookingProfile,
+  loadScopedTreatment, assertPriorityAcknowledgement, bookingErrorMiddleware, bookingErrorPayload,
+  assertTreatmentBookingVisibility: (...args) => require('./treatmentBookingEligibility.service').assertTreatmentBookingVisibility(...args) };

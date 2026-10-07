@@ -25,7 +25,7 @@ test('passive importer commits complete batches once, preserves contacts, rolls 
    const history=[{field:'history',value:{messaging_product:'whatsapp',metadata:{phone_number_id:'201'},history:[{threads:[{id:'19995550101',messages:[m('one','19995550101'),{...m('out','19995559999','synthetic clinic reply'),to:'19995550101'}]}]}]}}];
    await importLease(c,lease(null,history),scope);
    await importLease(c,lease(null,[{field:'messages',value:{messaging_product:'whatsapp',metadata:{phone_number_id:'201'},statuses:[{id:'wamid.out',status:'read'}]}}]),scope);
-   await importLease(c,lease(null,[{field:'messages',value:{messaging_product:'whatsapp',metadata:{phone_number_id:'201'},statuses:[{id:'wamid.out',status:'sent'}]}}]),scope);
+   await importLease(c,lease(null,[{field:'messages',value:{messaging_product:'whatsapp',metadata:{phone_number_id:'201'},statuses:[{id:'wamid.out',status:'sent',timestamp:'1789430400'}]}}]),scope);
    assert.equal((await sql.query("SELECT status FROM Messages WHERE direction='outbound'"))[0][0].status,'read');
    await assert.rejects(importLease(c,lease([m('new','19995550109')],[{field:'messages',value:{messaging_product:'whatsapp',metadata:{phone_number_id:'999'},messages:[m('new','19995550109')]}}]),scope),/review_required/);
    await sql.query('DELETE FROM Messages WHERE id=1'); await importLease(c,lease([m('one','19995550101')]),scope);

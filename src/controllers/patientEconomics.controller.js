@@ -411,6 +411,7 @@ exports.previewVoucherAppointments = asyncHandler(async (req, res) => {
   await requireVoucherFeature(req, 'appointments.manage');
   res.json(await voucherAppointments.preview({
     publicId: req.params.voucherId,
+    actorId: actorId(req),
     payload: req.body,
   }));
 });
@@ -422,6 +423,12 @@ exports.createVoucherAppointments = asyncHandler(async (req, res) => {
     actorId: actorId(req),
     payload: req.body,
   });
+  // A lost HTTP response is not a new booking or a request to regenerate its
+  // documents from today's catalogue. The durable receipt supplies identity;
+  // the appointment screen remains the authority for current documentation.
+  if (result.replayed === true) {
+    return res.status(200).json({ ...result, documentation_review_required: true });
+  }
   const documentationPending = [];
   try {
     await require('../services/programBookingRealtime.service').publishProgramBookings({ db, clinicId,

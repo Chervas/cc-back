@@ -22,6 +22,7 @@ function fixture() {
   });
   const clinic = { id_clinica: 123, grupoClinicaId: 42 };
   const db = { Clinica: { findByPk: async id => Number(id) === 123 ? { ...clinic } : null },
+    Message: { findByPk: async id => ({ id, metadata: {} }) },
     ClinicMetaAsset: { findAll: async query => { calls.queries.push(query); return clone(state.assets.filter(a => match(a, query.where))); },
       findOne: async query => { calls.queries.push(query); const value = state.assets.find(a => match(a, query.where)); return value ? clone(value) : null; } },
     MarketingContactOptOut: { findOne: async query => { calls.optOut.push(query); return state.optOut ? { id: 99, reason_text: 'Synthetic restriction' } : null; } },

@@ -1003,7 +1003,9 @@ async function withExecutionJobClaim(execution, work) {
   return db.sequelize.transaction(async transaction => {
     // Match GBP acceptance's execution -> job lock order. Never wrap node or
     // provider execution in this transaction: only persist engine state here.
-    const current = await FlowExecutionV2.findByPk(execution.id, { transaction, lock: transaction.LOCK.UPDATE });
+    const current = execution.context?.appointment_visit
+      ? await require('../lib/automation-runtime-stop').assertExecutionActive(execution, transaction, { allowCompleted: true })
+      : await FlowExecutionV2.findByPk(execution.id, { transaction, lock: transaction.LOCK.UPDATE });
     await assertExecutionJobClaim(execution, transaction);
     if (current?.status === 'cancelled') throw require('../lib/automation-runtime-stop').stopped('automation_execution_stopped');
     if (!current || current.status !== execution.status || current.current_node_id !== execution.current_node_id) {
@@ -2541,16 +2543,41 @@ async function handleChangeStatus(node, context, runtime) {
     let previousStatus = null;
     let skippedReason = null;
     await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
-      if (runtime?.execution?.id) {
-        await require('../lib/automation-runtime-stop').assertExecutionActive(runtime.execution, transaction);
-        await assertExecutionJobClaim(runtime.execution, transaction);
-      }
+      // Match the canonical reservation writer: appointment -> membership /
+      // visit -> runtime authority. An enrolled mutation must not acquire its
+      // job first and then wait for the appointment held by a reprogramming.
       appointment = await CitaPaciente.findByPk(targets.appointment_id, {
         transaction,
         lock: transaction.LOCK.UPDATE,
       });
       if (!appointment) {
         throw new Error(`appointment_not_found:${targets.appointment_id}`);
+      }
+      const managed = db.AppointmentVisitMember && db.AppointmentVisit
+        ? require('./appointmentVisitManaged.service').current() : null;
+      let actorUserId = toIntOrNull(runtime?.execution?.created_by);
+      const mutation = managed ? await managed.prepareMutation({
+        appointmentId: Number(appointment.id_cita), clinicId: Number(appointment.clinica_id),
+        actorId: actorUserId, transaction,
+      }) : null;
+      if (runtime?.execution?.id) {
+        const active = await require('../lib/automation-runtime-stop').assertExecutionActive(runtime.execution, transaction);
+        await assertExecutionJobClaim(runtime.execution, transaction);
+        if (mutation && (actorUserId !== toIntOrNull(active.created_by)
+          || Number(active.trigger_entity_id) !== Number(appointment.id_cita)
+          || Number(active.clinic_id) !== Number(appointment.clinica_id))) {
+          throw Object.assign(Error('appointment_visit_runtime_execution_scope_changed'), {
+            code: 'appointment_visit_runtime_execution_scope_changed', preserveFlowState: true, retryable: false,
+          });
+        }
+        actorUserId = toIntOrNull(active.created_by);
+        if (managed) await managed.assertMutationNode(active, node, {
+          transaction, appointmentId: Number(appointment.id_cita), clinicId: Number(appointment.clinica_id),
+        });
+      } else if (mutation) {
+        throw Object.assign(Error('appointment_visit_runtime_execution_required'), {
+          code: 'appointment_visit_runtime_execution_required', preserveFlowState: true, retryable: false,
+        });
       }
       previousStatus = cleanString(appointment.estado);
       if (
@@ -2568,22 +2595,25 @@ async function handleChangeStatus(node, context, runtime) {
       }
 
       if (previousStatus !== appointmentStatus) {
+        const changes = { estado: appointmentStatus, ...(actorUserId ? { updated_by: actorUserId } : {}) };
         if (require('./treatmentBookingProfile.service').bookingCapabilities().simple) {
           appointment = await require('./appointmentBookingCommand.service').mutateAppointmentBooking({
-            db, existingAppointmentId: appointment.id_cita, appointmentValues: { estado: appointmentStatus },
+            db, existingAppointmentId: appointment.id_cita, appointmentValues: changes,
             stateOnly: true, transaction,
-            persist: ({ existing, transaction: tx }) => existing.update({ estado: appointmentStatus }, { transaction: tx }),
+            persist: ({ existing, transaction: tx }) => existing.update(changes, { transaction: tx }),
           });
         } else {
           await require('./appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: appointment,
             appointment: { ...appointment.toJSON(), estado: appointmentStatus }, transaction });
-          await appointment.update({ estado: appointmentStatus }, { transaction });
+          await appointment.update(changes, { transaction });
+          if (mutation) await managed.persistMutation(mutation, { appointment, transaction });
         }
         const templateVersion = runtime?.execution?.templateVersion || null;
         await recordAppointmentStatusChange({
           appointment,
           previousStatus,
           newStatus: appointmentStatus,
+          actorUserId,
           source: 'automation_v2',
           metadata: {
             flow_execution_id: toIntOrNull(runtime?.execution?.id),
@@ -3261,6 +3291,12 @@ async function enqueueAutomationWhatsappTransport({
   dispatchKind,
   retryOnFailure = true,
 }) {
+  if (whatsappAuthorizedBroker.isManagedMessage
+      ? await whatsappAuthorizedBroker.isManagedMessage(msg) : msg?.metadata?.visit_communication_id) {
+    throw Object.assign(new Error('appointment_visit_runtime_legacy_transport_forbidden'), {
+      code: 'appointment_visit_runtime_legacy_transport_forbidden', retryable: false, preserveFlowState: true,
+    });
+  }
   const messageId = toIntOrNull(msg?.id);
   const conversationId = toIntOrNull(conversation?.id || msg?.conversation_id);
   const normalizedRecipient = whatsappService.normalizePhoneNumber(recipient);
@@ -3332,6 +3368,11 @@ async function runScheduledWhatsappSendJob(payload = {}) {
       status: 'completed',
       result: { skipped: true, reason: 'message_not_found', message_id: messageId },
     };
+  }
+
+  if (whatsappAuthorizedBroker.isManagedMessage
+      ? await whatsappAuthorizedBroker.isManagedMessage(msg) : msg.metadata?.visit_communication_id) {
+    return { status: 'completed', result: { skipped: true, reason: 'appointment_visit_runtime_legacy_transport_forbidden', message_id: messageId } };
   }
 
   const currentStatus = toLowerSafe(msg.status);
@@ -3621,6 +3662,7 @@ function buildAutomationWhatsappDeliveryKey(execution, node) {
 function buildAutomationWhatsappRowDeliveryKey(deliveryKey, messageType) {
   const normalizedDeliveryKey = cleanString(deliveryKey);
   if (!normalizedDeliveryKey) return null;
+  if (messageType !== 'event' && /^visit-communication:[a-f0-9-]{36}$/.test(normalizedDeliveryKey)) return normalizedDeliveryKey;
   return `${normalizedDeliveryKey}:${messageType === 'event' ? 'event' : 'outbound'}`;
 }
 
@@ -3842,13 +3884,17 @@ async function handleSendWhatsapp(node, context, runtime) {
   }
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   const execution = runtime?.execution || null;
-  const automationDeliveryKey = buildAutomationWhatsappDeliveryKey(execution, node);
+  const managedService = require('./appointmentVisitManaged.service').current();
+  const managedContext = execution?.context?.appointment_visit
+    ? await managedService.sendContext(execution, node, runtime?.jobClaim) : null;
+  const automationDeliveryKey = managedContext?.delivery_key || buildAutomationWhatsappDeliveryKey(execution, node);
   if (automationDeliveryKey) {
     const existingMessage = await findAutomationWhatsappMessageByDeliveryKey({
       deliveryKey: automationDeliveryKey,
       messageType: ['template', 'text'],
     });
     if (existingMessage) {
+      if (managedContext) return managedService.reuseMessage(existingMessage, execution, node, runtime?.jobClaim);
       return reuseExistingAutomationWhatsappMessage({ existingMessage, node });
     }
   }
@@ -4516,6 +4562,7 @@ async function handleSendWhatsapp(node, context, runtime) {
       ? accessGuidanceDecision.access_guidance?.image_url || null
       : null,
     automation_delivery_key: automationDeliveryKey,
+    ...(managedContext ? { visit_communication_id: managedContext.communication.id } : {}),
     preview_text: previewText,
     recipient_mode: recipientData.recipient_mode,
     recipient: recipientData.recipient,
@@ -4551,11 +4598,21 @@ async function handleSendWhatsapp(node, context, runtime) {
       content: messageContent,
       message_type: messageType,
       status: 'pending',
-      sent_at: new Date(),
+      sent_at: managedContext ? null : new Date(),
       metadata,
     },
   });
   const msg = messageMaterialization.message;
+  if (managedContext) {
+    // Commit/bind durable managed work before publication. No legacy immediate
+    // send, Bull queue or quiet-hours producer may also dispatch this Message.
+    if (!messageMaterialization.created) return managedService.reuseMessage(msg, execution, node, runtime?.jobClaim);
+    await managedService.enqueueMessage(msg, execution, node, quietScheduledFor, runtime?.jobClaim);
+    await conversation.update({ last_message_at: new Date() });
+    if (eventMsg) emitMessageCreatedToConversationRooms(conversation, eventMsg);
+    emitMessageCreatedToConversationRooms(conversation, msg);
+    return managedService.deliveryWaiting(msg, managedContext.communication);
+  }
   if (!messageMaterialization.created) {
     return reuseExistingAutomationWhatsappMessage({ existingMessage: msg, node });
   }

@@ -16,7 +16,7 @@ function harness() {
     import_metadata: { notification_suppression: { day_before: true }, cliniccloud_reconciliation: { automation_policy: 'hold' } } };
   const requirements = [5, 6].map(id => ({ id, tratamiento_id: 4, clinic_template_id: id, required: true,
     blocking_policy: 'hard', clinicTemplate: { id, name: `Ficticio ${id}`, purpose: 'clinical', status: 'active',
-      validity_mode: 'single_act', versions: [{ id: id + 10, version: 1, locale: 'es', title: 'Ficticio', body_html: '<p>Solo QA</p>' }] } }));
+      validity_mode: 'single_act', versions: [{ id: id + 10, version: 1, locale: 'es', status: 'published', title: 'Ficticio', body_html: '<p>Solo QA</p>' }] } }));
   const matches = (row, where = {}) => Reflect.ownKeys(where).every(key => {
     const value = where[key];
     if (value && typeof value === 'object') {
@@ -32,7 +32,7 @@ function harness() {
     const previous = queue; queue = new Promise(resolve => { release = resolve; });
     await previous;
     const before = JSON.stringify({ packages: state.packages, documents: state.documents });
-    const transaction = { LOCK: { UPDATE: 'UPDATE' } };
+    const transaction = { LOCK: { UPDATE: 'UPDATE', SHARE: 'SHARE' } };
     try { return await callback(transaction); }
     catch (error) { Object.assign(state, JSON.parse(before)); throw error; }
     finally { release(); }
@@ -40,7 +40,12 @@ function harness() {
     state.calls.push(['appointment', options]);
     return Number(id) === 1 ? appointment : null;
   } }, Paciente: {}, Clinica: {}, Tratamiento: {}, Usuario: {}, PatientIntakeRequest: { findOne: async () => null },
-  ClinicConsentTemplate: {}, ClinicConsentTemplateVersion: { findOne: async () => null }, ConsentTemplateCatalog: {}, ConsentTemplateCatalogVersion: {},
+  ClinicConsentTemplate: {}, ClinicConsentTemplateVersion: { findOne: async options => {
+    state.calls.push(['operational_version', options]);
+    return requirements.find(row => row.clinic_template_id === options.where.clinic_template_id)?.clinicTemplate.versions
+      .filter(row => row.status === options.where.status && row.locale === options.where.locale)
+      .sort((a, b) => b.version - a.version || b.id - a.id)[0] || null;
+  } }, ConsentTemplateCatalog: {}, ConsentTemplateCatalogVersion: {},
   TreatmentConsentRequirement: { findAll: async options => { state.calls.push(['requirements', options]); return requirements; } },
   ConsentSignaturePackage: {
     findOne: async options => state.packages.find(row => matches(row, options.where)) || null,
@@ -109,6 +114,45 @@ test('an unavailable requirement version rolls back the entire package', async (
   const h = harness(); h.requirements[1].clinicTemplate.versions = [];
   await assert.rejects(h.prepare(), error => error.message === 'consent_template_version_unavailable' && error.statusCode === 409);
   assert.equal(h.state.packages.length, 0); assert.equal(h.state.documents.length, 0);
+});
+
+test('new documents select only the highest published Spanish version in the write transaction', async () => {
+  const h = harness();
+  h.requirements.forEach(row => row.clinicTemplate.versions.push(
+    { id: 100 + row.id, version: 2, status: 'draft', locale: 'es', title: 'Borrador', body_html: '<p>Borrador</p>' },
+    { id: 200 + row.id, version: 3, status: 'archived', locale: 'es', title: 'Archivado', body_html: '<p>Archivado</p>' },
+    { id: 300 + row.id, version: 4, status: 'published', locale: 'en', title: 'Otro idioma', body_html: '<p>Other</p>' },
+    { id: 400 + row.id, version: 5, status: 'published', locale: 'es', title: 'Publicado español', body_html: '<p>Publicado</p>' },
+  ));
+  await h.prepare();
+  assert.deepEqual(h.state.documents.map(row => row.clinic_template_version_id), [405, 406]);
+  const calls = h.state.calls.filter(([name]) => name === 'operational_version');
+  assert.equal(calls.length, 2);
+  calls.forEach(([, options]) => {
+    assert(options.transaction); assert.equal(options.where.status, 'published'); assert.equal(options.where.locale, 'es');
+    assert.equal(options.lock, options.transaction.LOCK.SHARE);
+    assert.deepEqual(Array.from(options.order, item => Array.from(item)), [['version', 'DESC'], ['id', 'DESC']]);
+  });
+});
+
+test('only a draft or a foreign published version cannot issue a new Spanish document', async () => {
+  for (const version of [
+    { status: 'draft', locale: 'es' }, { status: 'published', locale: 'en' }, { status: 'archived', locale: 'es' },
+  ]) {
+    const h = harness(); Object.assign(h.requirements[1].clinicTemplate.versions[0], version);
+    await assert.rejects(h.prepare(), error => error.message === 'consent_template_version_unavailable' && error.statusCode === 409);
+    assert.equal(h.state.packages.length, 0); assert.equal(h.state.documents.length, 0);
+  }
+});
+
+test('same-act frozen documents do not require a current published version or perform another issuance query', async () => {
+  const h = harness(); await h.prepare();
+  const frozen = JSON.stringify(h.state.documents);
+  const queried = h.state.calls.filter(([name]) => name === 'operational_version').length;
+  h.requirements.forEach(row => row.clinicTemplate.versions = []);
+  await h.prepare();
+  assert.equal(JSON.stringify(h.state.documents), frozen);
+  assert.equal(h.state.calls.filter(([name]) => name === 'operational_version').length, queried);
 });
 
 test('patient signature pending professional signature is retained, not replaced by a blank document', async () => {

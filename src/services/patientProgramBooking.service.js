@@ -9,22 +9,39 @@ const { addDays } = require('../lib/personal-schedule-recurring');
 const { loadBookingContext, resolveInstallationKeys, solutionsForCalendar } = require('./appointmentBookingAvailability.service');
 const { lockBookingResources, mutateAppointmentBooking } = require('./appointmentBookingCommand.service');
 const { solveBookingProfile, occupancyForSolution } = require('../lib/booking-profile-solver');
-const { assertPriorityAcknowledgement, loadScopedTreatment } = require('./treatmentBookingProfile.service');
+const { assertPriorityAcknowledgement, loadScopedTreatment, bookingCapabilities, assertOperationalBookingProfile } = require('./treatmentBookingProfile.service');
 const { equipmentIds } = require('../lib/booking-equipment');
-const { schedulingState, planRevision, resumeInfo, resumeSessions, resumeInput, assertRevision, createSeriesContext } = require('../lib/program-replan');
+const { schedulingState, planRevision, resumeInfo, resumeSelectionInfo, resumeOptions, resumeSessions, resumeInput, assertRevision, createSeriesContext } = require('../lib/program-replan');
 const { additionalStaffSnapshot } = require('../lib/appointment-additional-staff');
 const { installationAllowsStaff } = require('../lib/installation-professionals');
 const { isFree } = require('../lib/booking-profile-solver');
+const { attentionVisitOrigin } = require('../lib/booking-attention-origin');
 const json = value => typeof value === 'string' ? JSON.parse(value) : value;
 const fail = (code, message, details, status = 409) => { throw domainError(status, code, message, details); };
 
-function addVirtualBusy(context, solution, staff = []) {
-  const occupancy = occupancyForSolution(solution, context.installationKeys);
+function addVirtualBusy(context, solution, staff = [], profile = null) {
+  const virtualId = profile?.version === 4 ? (context.attention_virtual_id || 0) - 1 : null;
+  if (virtualId != null) context.attention_virtual_id = virtualId;
+  const occupancy = occupancyForSolution(solution, context.installationKeys).map(row => ({ ...row,
+    ...(virtualId != null ? { appointment_id: virtualId } : {}) }));
   for (const row of occupancy) {
     const targets = row.resource_kind === 'equipment' ? [context.equipment?.get(Number(row.resource_key.split(':')[1]))]
       : row.doctor_id ? [context.doctors.get(row.doctor_id)]
       : [...context.installations].filter(([id]) => context.installationKeys.get(id) === row.resource_key).map(([, target]) => target);
-    for (const target of new Set(targets)) if (target) target.busy.push({ start: row.start_at, end: row.end_at });
+    for (const target of new Set(targets)) if (target) target.busy.push({ start: row.start_at, end: row.end_at,
+      ...(virtualId != null ? { appointment_id: virtualId, protected_attention_origin: true } : {}) });
+  }
+  if (virtualId != null) {
+    const frozen = { ...profile, phases: profile.phases.map((phase, index) => ({ ...phase,
+      ...(solution.phases[index].staff_attention ? { staff_attention: solution.phases[index].staff_attention } : {}) })) };
+    for (const doctorId of new Set(occupancy.map(row => row.doctor_id).filter(Boolean))) {
+      const target = context.doctors.get(doctorId);
+      const appointment = { id_cita: virtualId, clinica_id: target?.clinic_id, inicio: solution.start_at, fin: solution.end_at,
+        booking_attention_snapshot: { version: 1, profile: frozen, phases: solution.phases,
+          capacity_fully_verified: solution.capacity_fully_verified, attention_requirements_pending: solution.attention_requirements_pending } };
+      if (target) (target.attention_visits ||= []).push({ ...attentionVisitOrigin({ appointment, doctorId, occupancies: occupancy }),
+        protected_attention_origin: true });
+    }
   }
   for (const id of staff) context.doctors.get(id)?.busy.push({ start: solution.start_at, end: solution.end_at });
   context.patientBusy.push({ start: solution.start_at, end: solution.end_at });
@@ -44,8 +61,13 @@ function previousAppointment(session) {
   return row ? { id: Number(row.id_cita), status: row.estado, start_at: new Date(row.inicio).toISOString(), end_at: new Date(row.fin).toISOString() } : null;
 }
 
-function createPatientProgramBookingService({ db, enabled = programBookingEnabled, now = () => new Date() }) {
+function createPatientProgramBookingService({ db, enabled = programBookingEnabled, capabilities = bookingCapabilities, now = () => new Date() }) {
   function assertEnabled() { if (!enabled()) fail('program_booking_disabled', 'La reserva de programas aún no está habilitada en este entorno.', null, 503); }
+  function assertRelativeSessions(sessions) {
+    for (const session of sessions) if (session.booking_profile.version === 4) {
+      assertOperationalBookingProfile(session.booking_profile, { capabilities: capabilities() });
+    }
+  }
   async function load({ publicId, clinicId, transaction = null, lock = false }) {
     assertEnabled();
     if (!Number.isSafeInteger(clinicId) || clinicId < 1) fail('program_clinic_required', 'Clínica no válida.', null, 400);
@@ -95,17 +117,27 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const reserved = plan.sessions.filter(row => row.scheduling_status === 'reserved').length;
     if (Number(plan.voucher.available_units) < reserved) fail('program_units_inconsistent', 'Revisa las sesiones disponibles de este programa.');
   }
-  function dto(plan) {
+  function dto(plan, { resumeFromKey = null } = {}) {
     const pending = plan.sessions.filter(row => ['pending', 'missed'].includes(row.scheduling_status)).length;
     const mode = schedulingMode(plan.snapshot);
-    const resume = mode === 'manual' ? null : resumeInfo(plan, now());
+    const legacyResume = mode === 'manual' ? null : resumeInfo(plan, now());
+    const resume = resumeFromKey == null ? legacyResume : resumeSelectionInfo(plan, resumeFromKey, now());
+    const resumeChoices = resumeOptions(plan, now());
     const active = plan.voucher.status === 'active' && plan.accepted && (!plan.voucher.expires_at || new Date(plan.voucher.expires_at) > now());
+    // Purchased history stays readable while the relative-step writer is off.
+    // This marker cannot turn an incomplete attention plan into a bookable one.
+    let bookingRestriction = null;
+    try { assertRelativeSessions(plan.sessions); } catch (error) {
+      if (!['booking_profile_runtime_unavailable', 'pending_attention_requirements', 'booking_profile_attention_ambiguous'].includes(error.code)) throw error;
+      bookingRestriction = { code: error.code, message: error.message };
+    }
     return { voucher_id: plan.voucher.public_id, clinic_id: Number(plan.voucher.clinic_id), name: plan.snapshot.name, kind: plan.snapshot.kind,
       snapshot_sha256: plan.snapshot.sha256, timezone: plan.timeZone, cadence: plan.snapshot.cadence,
       plan_revision: planRevision(plan), scheduling_mode: mode,
-      automatic_scheduling_available: mode !== 'manual' && plan.sessions.every(session => session.duration_minutes != null),
-      resume, can_resume: !!resume && !resume.blocked_reason && active,
-      pending_count: pending, can_schedule: pending > 0 && active && !resume,
+      automatic_scheduling_available: !bookingRestriction && mode !== 'manual' && plan.sessions.every(session => session.duration_minutes != null),
+      resume, resume_options: resumeChoices, can_resume: !bookingRestriction && resumeChoices.some(option => !option.blocked_reason) && active,
+      pending_count: pending, can_schedule: !bookingRestriction && pending > 0 && active && !legacyResume,
+      ...(bookingRestriction ? { booking_restriction: bookingRestriction } : {}),
       sessions: plan.sessions.map(({ record, appointment, ...row }) => ({ ...row,
         requires_manual_date: mode === 'manual', duration_required: row.duration_minutes == null,
         appointment_id: appointment?.id_cita || null,
@@ -113,6 +145,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
         phases: json(appointment?.import_metadata || {})?.booking?.phases || [] })) };
   }
   async function contextFor(plan, sessions, start, end, transaction = null, lock = false, ignoreAppointmentIds = []) {
+    assertRelativeSessions(sessions);
     // Include support calendars in the single bulk read without making a person
     // assisting one session a mandatory participant of every other session.
     const profile = { version: 1, phases: sessions.flatMap(row => row.booking_profile.phases.map(phase => ({ ...phase,
@@ -120,7 +153,8 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const installationIds = [...new Set(profile.phases.flatMap(row => row.installation_ids))];
     const doctorIds = [...new Set(profile.phases.flatMap(row => row.professionals.ids))];
     const machineIds = equipmentIds(profile);
-    profile.version = profile.phases.some(phase => phase.staff_attention) ? 3 : machineIds.length ? 2 : 1;
+    profile.version = sessions.some(session => session.booking_profile.version === 4) ? 4
+      : profile.phases.some(phase => phase.staff_attention) ? 3 : machineIds.length ? 2 : 1;
     if (installationIds.length + doctorIds.length + machineIds.length > 100) fail('program_search_resources_too_many', 'Este conjunto utiliza demasiados recursos. Planifica menos sesiones a la vez.', null, 400);
     const mapping = await resolveInstallationKeys({ db, clinic: plan.clinic, installationIds, transaction, enabled: true });
     if (lock) {
@@ -137,6 +171,47 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
   }
   async function read(options) { return dto(await load(options)); }
 
+  function fixedSessions(plan, pending, selectedKeys, payload) {
+    const fixed = payload.fixed_sessions || [];
+    if (!Array.isArray(fixed) || fixed.length > 30 || new Set(fixed.map(row => row?.key)).size !== fixed.length) fail('program_search_invalid', 'Revisa las fechas conservadas.', null, 400);
+    if (!fixed.length) return [];
+    const choices = fixed.map(row => {
+      if (!row || !pending.some(item => item.key === row.key) || selectedKeys.includes(row.key)) {
+        fail('program_search_invalid', 'No se puede conservar y cambiar la misma sesión, ni cambiar una sesión ajena al tramo elegido.', null, 400);
+      }
+      const instant = new Date(row.start_at);
+      if (!Number.isFinite(instant.getTime()) || instant <= now() || instant - now() > 366 * 86400000) fail('program_search_invalid', 'Fecha conservada no válida.', null, 400);
+      return { ...row, start_at: instant.toISOString() };
+    });
+    // Same selection/duration parser as confirmation; resource/phase identity
+    // is still checked against the server-owned purchased session below.
+    const normalized = bookingRequest({ request_key: 'program-fixed-preview', snapshot_sha256: plan.snapshot.sha256, sessions: choices }).sessions;
+    return normalized.map(choice => {
+      const session = materializeSession(pending.find(row => row.key === choice.key), choice);
+      if (Object.keys(choice.selections).some(key => !session.booking_profile.phases.some(phase => phase.key === key))) fail('program_selection_invalid', 'La fase elegida no pertenece a esta cita.');
+      return { ...session, choice, start_at: choice.start_at,
+        end_at: new Date(new Date(choice.start_at).getTime() + session.duration_minutes * 60000).toISOString() };
+    }).sort((a, b) => a.position - b.position);
+  }
+  function proposalSeries(plan, pending, resume, replacements) {
+    // A date belonging to an old affected reservation is history, not a new
+    // manual choice. Unaffected prefix/completed rows stay fixed constraints.
+    return plan.sessions.map(row => replacements.find(item => item.key === row.key)
+      || (resume && pending.some(item => item.key === row.key) ? { ...row, start_at: null, end_at: null } : row));
+  }
+  function checkFixedSessions(context, sessions) {
+    for (const session of sessions) {
+      const staff = supportIds(session);
+      const solution = solveBookingProfile({ profile: session.booking_profile, ...context,
+        start: new Date(session.start_at), selections: session.choice.selections });
+      if (!solution || new Date(solution.end_at).getTime() !== new Date(session.end_at).getTime() || !supportAvailable(context, solution, staff)
+        || context.patientBusy.some(busy => new Date(busy.start) < new Date(session.end_at) && new Date(busy.end) > new Date(session.start_at))) {
+        fail('program_fixed_session_unavailable', 'Una fecha conservada ya no está disponible. Revisa esa sesión antes de continuar.', { key: session.key });
+      }
+      addVirtualBusy(context, solution, staff, session.booking_profile);
+    }
+  }
+
   async function propose(options) {
     const plan = await load(options); assertSchedulable(plan);
     const payload = options.payload || {};
@@ -151,29 +226,23 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const end = resolveLocalInstant(endDate, '00:00:00', plan.timeZone);
     const manual = schedulingMode(plan.snapshot) === 'manual';
     const pending = resume ? resumeSessions(plan, resume.replan_from_key, now()) : plan.sessions.filter(row => row.scheduling_status === 'pending' || manual && row.scheduling_status === 'missed');
-    if (!pending.length) return { ...dto(plan), proposals: [], unproposed_count: 0 };
+    const projectionOptions = { resumeFromKey: resume?.replan_from_key || null };
+    if (!pending.length) return { ...dto(plan, projectionOptions), proposals: [], unproposed_count: 0 };
     const selectedKeys = payload.session_keys == null ? pending.slice(0, 30).map(row => row.key) : payload.session_keys;
     if (!Array.isArray(selectedKeys) || !selectedKeys.length || selectedKeys.length > 30 || new Set(selectedKeys).size !== selectedKeys.length
       || selectedKeys.some(key => !pending.some(row => row.key === key))) fail('program_search_invalid', 'Selecciona hasta treinta sesiones pendientes.', null, 400);
     let selected = pending.filter(row => selectedKeys.includes(row.key));
+    // Even a date-less preview must not advertise an unavailable v4 writer or
+    // a clinically incomplete attention plan as ready for scheduling.
+    assertRelativeSessions(selected);
     const ignored = resume ? pending.filter(row => row.scheduling_status === 'reserved').map(row => Number(row.appointment.id_cita)) : [];
+    const fixedRows = fixedSessions(plan, pending, selectedKeys, payload);
     if (payload.manual_sessions != null || manual || selected.some(session => session.duration_minutes == null)) {
       const choices = payload.manual_sessions || [];
       if (!Array.isArray(choices) || choices.length > 30 || new Set(choices.map(row => row?.key)).size !== choices.length
         || choices.some(row => !row || !selectedKeys.includes(row.key))) fail('program_search_invalid', 'Revisa las sesiones con fecha manual.', null, 400);
       const proposals = [];
       const explicit = [];
-      const fixed = payload.fixed_sessions || [];
-      if (!Array.isArray(fixed) || fixed.length > 30 || new Set(fixed.map(row => row?.key)).size !== fixed.length) fail('program_search_invalid', 'Revisa las fechas conservadas.', null, 400);
-      const fixedRows = fixed.map(row => {
-        const session = row && pending.find(item => item.key === row.key);
-        if (!session || selectedKeys.includes(row.key)) fail('program_search_invalid', 'No se puede conservar y cambiar la misma sesión.', null, 400);
-        const instant = new Date(row.start_at);
-        if (!Number.isFinite(instant.getTime()) || instant <= now() || instant - now() > 366 * 86400000) fail('program_search_invalid', 'Fecha conservada no válida.', null, 400);
-        const resolved = materializeSession(session, row);
-        return { ...resolved, choice: row, start_at: instant.toISOString(),
-          end_at: new Date(instant.getTime() + resolved.duration_minutes * 60000).toISOString() };
-      });
       for (const session of selected) {
         const choice = choices.find(row => row.key === session.key);
         if (!choice) {
@@ -189,55 +258,37 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
         const finish = new Date(instant.getTime() + resolved.duration_minutes * 60000);
         explicit.push({ ...resolved, choice, start_at: instant.toISOString(), end_at: finish.toISOString() });
       }
-      if (explicit.length) {
+      if (explicit.length || fixedRows.length) {
         const searchStart = new Date(Math.min(start.getTime(), ...fixedRows.map(row => new Date(row.start_at).getTime())));
         const searchEnd = new Date(Math.max(end.getTime(), ...fixedRows.map(row => new Date(row.end_at).getTime())));
         const context = await contextFor(plan, [...fixedRows, ...explicit], searchStart, searchEnd, null, false, ignored);
-        const series = plan.sessions.map(row => explicit.find(item => item.key === row.key) || fixedRows.find(item => item.key === row.key) || row);
+        const series = proposalSeries(plan, pending, resume, [...explicit, ...fixedRows]);
         const orderIssues = seriesIssues(series, plan.snapshot.cadence, plan.timeZone);
-        for (const session of fixedRows) {
-          const staff = supportIds(session);
-          const solution = solveBookingProfile({ profile: session.booking_profile, ...context,
-            start: new Date(session.start_at), selections: session.choice.selections || {} });
-          if (!solution || !supportAvailable(context, solution, staff)
-            || context.patientBusy.some(busy => new Date(busy.start) < new Date(session.end_at) && new Date(busy.end) > new Date(session.start_at))) {
-            fail('program_fixed_session_unavailable', 'Una fecha conservada ya no está disponible. Revisa esa sesión antes de continuar.', { key: session.key });
-          }
-          addVirtualBusy(context, solution, staff);
-        }
+        checkFixedSessions(context, fixedRows);
         for (const session of explicit) {
           const staff = supportIds(session);
           const solution = orderIssues.length ? null : solveBookingProfile({ profile: session.booking_profile, ...context,
             start: new Date(session.start_at), selections: session.choice.selections || {} });
           const available = solution && supportAvailable(context, solution, staff)
             && !context.patientBusy.some(busy => new Date(busy.start) < new Date(session.end_at) && new Date(busy.end) > new Date(session.start_at));
-          if (available) addVirtualBusy(context, solution, staff);
+          if (available) addVirtualBusy(context, solution, staff, session.booking_profile);
           proposals.push({ key: session.key, label: session.label, solution: available ? solution : null,
             ...(session.duration_selection || {}), previous_appointment: previousAppointment(session),
             reason_code: available ? null : orderIssues.length ? 'program_cadence_conflict' : 'program_booking_unavailable',
             reason: available ? null : orderIssues.length ? 'La fecha elegida no respeta el orden o la pauta del programa.' : 'No hay disponibilidad en la fecha y hora elegidas.' });
         }
       }
-      return { ...dto(plan), proposals: selected.map(session => proposals.find(row => row.key === session.key)),
+      return { ...dto(plan, projectionOptions), proposals: selected.map(session => proposals.find(row => row.key === session.key)),
         unproposed_count: pending.length - selected.length };
     }
-    const context = await contextFor(plan, resume ? pending : selected, start, end, null, false, ignored);
-    const series = plan.sessions.map(row => ({ key: row.key, offset_days: row.offset_days,
-      start_at: resume && pending.includes(row) ? null : row.start_at, end_at: resume && pending.includes(row) ? null : row.end_at }));
+    const searchStart = new Date(Math.min(start.getTime(), ...fixedRows.map(row => new Date(row.start_at).getTime())));
+    const searchEnd = new Date(Math.max(end.getTime(), ...fixedRows.map(row => new Date(row.end_at).getTime())));
+    const context = await contextFor(plan, [...(resume ? pending : selected), ...fixedRows], searchStart, searchEnd, null, false, ignored);
+    const series = proposalSeries(plan, pending, resume, fixedRows).map(row => ({ key: row.key, offset_days: row.offset_days, start_at: row.start_at, end_at: row.end_at }));
     const proposals = [];
     // Optional fixed proposals are rechecked, never trusted as reservations. This
     // lets the dialog ask for another day for one unit while retaining the rest.
-    const fixed = payload.fixed_sessions || [];
-    if (!Array.isArray(fixed) || fixed.length > 30 || new Set(fixed.map(row => row.key)).size !== fixed.length) fail('program_search_invalid', 'Revisa las fechas conservadas.', null, 400);
-    for (const row of fixed) {
-      const session = pending.find(item => item.key === row.key);
-      if (!session || selectedKeys.includes(row.key)) fail('program_search_invalid', 'No se puede conservar y cambiar la misma sesión.', null, 400);
-      const instant = new Date(row.start_at);
-      if (!Number.isFinite(instant.getTime())) fail('program_search_invalid', 'Fecha conservada no válida.', null, 400);
-      const finish = new Date(instant.getTime() + session.duration_minutes * 60000);
-      Object.assign(series[session.position], { start_at: instant.toISOString(), end_at: finish.toISOString() });
-      context.patientBusy.push({ start: instant, end: finish });
-    }
+    checkFixedSessions(context, fixedRows);
     const first = series.find(row => row.start_at);
     const anchor = first ? formatDateLocal(new Date(first.start_at), plan.timeZone) : date;
     const anchorOffset = first?.offset_days ?? 0;
@@ -262,14 +313,14 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
         }
       }
       if (chosen) {
-        addVirtualBusy(context, chosen, staff);
+        addVirtualBusy(context, chosen, staff, session.booking_profile);
         Object.assign(series[session.position], { start_at: chosen.start_at, end_at: chosen.end_at });
       }
       proposals.push({ key: session.key, label: session.label, solution: chosen,
         previous_appointment: previousAppointment(session),
         reason: chosen ? null : 'No hay un hueco que respete la pauta en los días consultados.' });
     }
-    return { ...dto(plan), proposals, unproposed_count: pending.length - selected.length };
+    return { ...dto(plan, projectionOptions), proposals, unproposed_count: pending.length - selected.length };
   }
 
   async function book(options) {
@@ -331,7 +382,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
         const appointment = await mutateAppointmentBooking({ db, transaction, trustedProgramSeries, preparedContext: context,
           ...(moving ? { existingAppointmentId: session.appointment.id_cita } : { trustedProgramSession: record }),
           additionalStaffIds: staff,
-          capabilities: { simple: true, multi: true }, selections: session.choice.selections,
+          capabilities: capabilities(), selections: session.choice.selections,
           priorityAcknowledged: session.choice.priority_acknowledged,
           appointmentValues: moving ? { inicio: session.start_at, fin: session.end_at, estado: 'reprogramada', reschedule_reason: 'clinic_schedule', updated_by: options.actorId }
             : { clinica_id: plan.voucher.clinic_id, paciente_id: plan.voucher.patient_id, voucher_id: plan.voucher.id,
@@ -347,7 +398,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
             ...(previous ? { previous_appointment_id: previous.id, previous_start_at: previous.start_at, previous_end_at: previous.end_at } : {}),
             start_at: solution.start_at, end_at: solution.end_at }, transaction, eventModel: db.PatientOperationalEvent || null,
           recordUnchanged: moving && previous.start_at !== solution.start_at });
-        addVirtualBusy(context, solution, staff);
+        addVirtualBusy(context, solution, staff, session.booking_profile);
         created.push({ key: session.key, appointment_id: appointment.id_cita, action: moving ? 'rescheduled' : 'created', previous_appointment: previous,
           start_at: solution.start_at, end_at: solution.end_at, phases: solution.phases });
       }
@@ -387,6 +438,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
       const review = require('../lib/appointment-import-review').appointmentImportReview(values);
       if (review?.pending_assignment?.length || review?.resources_need_review) fail('program_link_import_review_required', 'Completa primero la revisión del tratamiento, la cabina y el profesional importados.');
       const resolved = compatibleLinkedAppointment(session, values);
+      assertRelativeSessions([resolved]);
       const treatment = await loadScopedTreatment({ db, treatmentId: session.treatment_ids[0], clinic: plan.clinic, transaction });
       const config = json(treatment?.clinical_config || {});
       if (!treatment?.activo || ['draft', 'obsolete'].includes(config.catalog_status)) fail('program_link_treatment_inactive', 'El tratamiento debe estar activo antes de vincular esta cita.');

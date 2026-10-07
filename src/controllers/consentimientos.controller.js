@@ -29,7 +29,13 @@ function getRequestBaseUrl(req) {
 function sendError(res, error) {
     const status = error?.statusCode || error?.status || 500;
     const message = error?.message || 'consentimientos_error';
-    const payload = { message };
+    // Presentation only: keep the issuance service's stable error key and
+    // HTTP status. Publication is its existing operational state, not an
+    // inferred clinical approval; other error contracts remain unchanged.
+    const payload = message === 'consent_template_version_unavailable'
+        ? { code: message, key: message, message: 'No se pueden preparar las firmas: uno de los consentimientos de esta cita no tiene una versión publicada en español. '
+            + 'Pide al responsable de consentimientos que revise la plantilla y publique la versión correspondiente; después vuelve a intentarlo.' }
+        : { message };
     if (error?.details) payload.details = error.details;
     return res.status(status).json(payload);
 }

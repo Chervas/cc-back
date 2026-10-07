@@ -146,6 +146,19 @@ function getSigningPolicyFromVersion(version = {}, template = {}) {
     };
 }
 
+function getSigningPolicyFromDocument(documentLike) {
+    const document = getPlain(documentLike);
+    const snapshot = parseJsonObject(document.snapshot_json);
+    const version = parseJsonObject(snapshot.version);
+    const schema = parseJsonObject(version.variable_schema);
+    const frozenPolicy = parseJsonObject(snapshot.clinical_policy);
+    return getSigningPolicyFromVersion({ ...version, variable_schema: {
+        ...schema,
+        clinical_policy: { ...parseJsonObject(schema.clinical_policy), ...frozenPolicy },
+        signing_timing: frozenPolicy.signing_timing || frozenPolicy.due_policy || schema.signing_timing,
+    } }, parseJsonObject(snapshot.template));
+}
+
 function pickSigningPolicy(policies = []) {
     const validPolicies = policies.filter(Boolean);
     if (!validPolicies.length) {
@@ -224,6 +237,12 @@ function normalizeTemplatePayload(payload = {}, fallback = {}) {
 }
 
 function normalizeVersionPayload(payload = {}, fallback = {}) {
+    const status = normalizeEnum(payload.version_status ?? payload.status_version ?? payload.estado_version,
+        VERSION_STATUS_VALUES, fallback.status || 'published');
+    const publishedAt = status === 'draft' ? null
+        : Object.prototype.hasOwnProperty.call(payload, 'published_at') ? payload.published_at
+        : fallback.published_at !== undefined ? fallback.published_at
+        : status === 'published' ? new Date() : null;
     return {
         version: toIntOrNull(payload.version) || fallback.version || 1,
         locale: toCleanString(payload.locale ?? payload.idioma) || fallback.locale || 'es',
@@ -231,8 +250,8 @@ function normalizeVersionPayload(payload = {}, fallback = {}) {
         body_json: payload.body_json ?? payload.contenido_json ?? fallback.body_json ?? null,
         body_html: toCleanString(payload.body_html ?? payload.contenido_html) ?? fallback.body_html ?? null,
         variable_schema: payload.variable_schema ?? payload.variables ?? fallback.variable_schema ?? null,
-        status: normalizeEnum(payload.version_status ?? payload.status_version ?? payload.estado_version, VERSION_STATUS_VALUES, fallback.status || 'published'),
-        published_at: payload.published_at ?? fallback.published_at ?? new Date(),
+        status,
+        published_at: publishedAt,
     };
 }
 
@@ -1386,6 +1405,10 @@ async function syncClinicTemplatesFromCatalog(clinicIdRaw, userId = null) {
             requires_representative_when_minor: plain.requires_representative_when_minor,
             requires_professional_signature: plain.requires_professional_signature,
             locale: sourceVersion?.locale || 'es',
+            // Copying editable catalog text is not publication. Keep the
+            // source version state/date; an absent source stays unpublished.
+            version_status: sourceVersion?.status || 'draft',
+            published_at: sourceVersion?.published_at ?? null,
             title: sourceVersion?.title || plain.name,
             body_json: sourceVersion?.body_json || null,
             body_html: sourceVersion?.body_html || buildDefaultBodyHtml(plain.name),
@@ -1545,6 +1568,8 @@ async function propagateAdminTemplateToClinics(catalogIdRaw, options = {}) {
             requires_representative_when_minor: catalogPlain.requires_representative_when_minor,
             requires_professional_signature: catalogPlain.requires_professional_signature,
             locale: sourceVersion?.locale || 'es',
+            version_status: sourceVersion?.status || 'draft',
+            published_at: sourceVersion?.published_at ?? null,
             title: sourceVersion?.title || catalogPlain.name,
             body_json: sourceVersion?.body_json || null,
             body_html: sourceVersion?.body_html || buildDefaultBodyHtml(catalogPlain.name),
@@ -1586,7 +1611,7 @@ async function getTreatmentRequirements({ tratamientoId, tratamientoIds = null, 
     });
 }
 
-async function saveTreatmentRequirements(tratamientoIdRaw, payload = {}) {
+async function saveTreatmentRequirements(tratamientoIdRaw, payload = {}, transaction = null) {
     const tratamientoId = toIntOrNull(tratamientoIdRaw);
     if (!tratamientoId) {
         const err = new Error('tratamiento_id_required');
@@ -1609,16 +1634,23 @@ async function saveTreatmentRequirements(tratamientoIdRaw, payload = {}) {
         }))
         .filter((item) => item.clinic_template_id || item.catalog_template_id);
 
-    await db.TreatmentConsentRequirement.destroy({
-        where: {
-            tratamiento_id: tratamientoId,
-            clinica_id: clinicId || null,
-        },
-    });
-    if (normalized.length) {
-        await db.TreatmentConsentRequirement.bulkCreate(normalized);
-    }
-    return getTreatmentRequirements({ tratamientoId, clinicaId: clinicId });
+    const execute = async tx => {
+        // The clinical start/completion reader takes a SHARE lock on this same
+        // anchor before reading requirements. It must never observe the gap
+        // between replacement's DELETE and INSERT, including the empty set.
+        const treatment = await db.Tratamiento.findByPk(tratamientoId, {
+            attributes: ['id_tratamiento'], transaction: tx, lock: tx.LOCK.UPDATE,
+        });
+        if (!treatment) throw Object.assign(new Error('treatment_not_found'), { statusCode: 404 });
+        await db.TreatmentConsentRequirement.destroy({
+            where: { tratamiento_id: tratamientoId, clinica_id: clinicId || null },
+            transaction: tx,
+        });
+        if (normalized.length) await db.TreatmentConsentRequirement.bulkCreate(normalized, { transaction: tx });
+        return getTreatmentRequirements({ tratamientoId, clinicaId: clinicId, transaction: tx });
+    };
+    return transaction ? execute(transaction)
+        : db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, execute);
 }
 
 async function findAppointment(citaIdRaw, transaction = null) {
@@ -1652,25 +1684,41 @@ function pickLatestVersion(versions = []) {
     })[0];
 }
 
-async function resolveRequirementTemplate(requirement, transaction = null) {
+function requirementTemplateIdentity(requirement) {
     const plain = getPlain(requirement);
-    if (plain.clinicTemplate) {
-        const version = pickLatestVersion(plain.clinicTemplate.versions) || await getLatestClinicVersion(plain.clinicTemplate.id, 'es', transaction);
-        return {
-            source: 'clinic',
-            template: plain.clinicTemplate,
-            version: getPlain(version),
-        };
-    }
-    if (plain.catalogTemplate) {
-        const version = pickLatestVersion(plain.catalogTemplate.versions) || await getLatestCatalogVersion(plain.catalogTemplate.id, 'es', transaction);
-        return {
-            source: 'catalog',
-            template: plain.catalogTemplate,
-            version: getPlain(version),
-        };
-    }
+    if (plain.clinicTemplate) return { source: 'clinic', template: plain.clinicTemplate };
+    if (plain.catalogTemplate) return { source: 'catalog', template: plain.catalogTemplate };
     return null;
+}
+
+async function getOperationalConsentVersion(resolved, transaction) {
+    // Publication/locale selection belongs to NEW patient-document issuance,
+    // not to editing, numbering, previewing or historically frozen evidence.
+    // "published" is the existing operational state; this does not infer a
+    // separate medical approval workflow or change an already-issued snapshot.
+    const clinicSource = resolved.source === 'clinic';
+    const model = clinicSource ? db.ClinicConsentTemplateVersion : db.ConsentTemplateCatalogVersion;
+    // Hold the selected revision until this issuance commits/rolls back. This
+    // protects its row from concurrent mutation/deletion, not the template or
+    // the publication of a different revision (no new approval workflow).
+    return model.findOne({ transaction,
+        ...(transaction ? { lock: transaction.LOCK.SHARE } : {}),
+        where: { [clinicSource ? 'clinic_template_id' : 'catalog_id']: resolved.template.id,
+            status: 'published', locale: 'es' },
+        order: [['version', 'DESC'], ['id', 'DESC']],
+    });
+}
+
+async function resolveRequirementTemplate(requirement, transaction = null) {
+    const resolved = requirementTemplateIdentity(requirement);
+    if (!resolved) return null;
+    // A summary may propose a version not yet emitted, but must not present
+    // editable draft/archived/foreign text as the document awaiting signature.
+    const versions = Array.isArray(resolved.template.versions) ? resolved.template.versions : [];
+    const version = pickLatestVersion(versions.filter(row => {
+        const value = getPlain(row); return value.status === 'published' && value.locale === 'es';
+    })) || await getOperationalConsentVersion(resolved, transaction);
+    return { ...resolved, version: getPlain(version) };
 }
 
 function isReusableSignedConsentTemplate(template = {}) {
@@ -1703,9 +1751,9 @@ async function findSignedReusableConsent({ pacienteId, clinicaId, resolved, tran
     });
 }
 
-async function supersedePendingReusableConsents({ pacienteId, clinicaId, resolved, exceptId = null, transaction = null }) {
+function pendingReusableConsentWhere({ pacienteId, clinicaId, resolved, exceptId = null }) {
     if (!pacienteId || !clinicaId || !resolved?.template || !isReusableSignedConsentTemplate(resolved.template)) {
-        return;
+        return null;
     }
     const where = {
         paciente_id: pacienteId,
@@ -1717,10 +1765,36 @@ async function supersedePendingReusableConsents({ pacienteId, clinicaId, resolve
     if (exceptId) {
         where.id = { [Op.ne]: exceptId };
     }
+    return where;
+}
+
+async function pendingReusableConsentCandidates(options, transaction) {
+    const where = pendingReusableConsentWhere(options);
+    return where ? db.PatientConsentDocument.findAll({ where, attributes: ['id', 'package_id'], raw: true, transaction }) : [];
+}
+
+async function lockConsentPackages(packageIds, transaction) {
+    const ids = [...new Set(packageIds.map(toIntOrNull).filter(Boolean))].sort((a, b) => a - b);
+    // Child UPDATE/INSERT takes FK locks on its parent. Lock every known parent
+    // in one stable order BEFORE writing any child, not while refreshing counts.
+    for (const id of ids) await db.ConsentSignaturePackage.findByPk(id, {
+        attributes: ['id'], transaction, lock: transaction.LOCK.UPDATE,
+    });
+}
+
+async function supersedePendingReusableConsents({ pacienteId, clinicaId, resolved, exceptId = null, candidates = [], transaction }) {
+    const where = pendingReusableConsentWhere({ pacienteId, clinicaId, resolved, exceptId });
+    if (!where || !candidates.length) return;
+    // Never widen to documents born in a new, unlocked package; never overwrite
+    // a candidate that signed/revoked while we were acquiring its package lock.
+    where.id = { [Op.in]: candidates.map(row => row.id) };
     await db.PatientConsentDocument.update(
         { status: 'superseded', delivery_status: 'superseded' },
         { where, transaction }
     );
+    for (const packageId of [...new Set(candidates.map(row => toIntOrNull(row.package_id)).filter(Boolean))].sort((a, b) => a - b)) {
+        await refreshPackageCounts(packageId, transaction);
+    }
 }
 
 function isReusableSignedConsentDocument(documentLike) {
@@ -1732,40 +1806,18 @@ function isReusableSignedConsentDocument(documentLike) {
     });
 }
 
-async function supersedePendingReusableConsentDocuments(documentLike) {
+function reusableDocumentOptions(documentLike) {
     const doc = getPlain(documentLike);
     if (!doc?.id || !doc?.paciente_id || !doc?.clinica_id || !isReusableSignedConsentDocument(doc)) {
-        return;
+        return null;
     }
-    const where = {
-        paciente_id: doc.paciente_id,
-        clinica_id: doc.clinica_id,
-        status: { [Op.in]: Array.from(DOCUMENT_PENDING_STATUSES) },
-        purpose: doc.purpose || 'data_protection',
-        id: { [Op.ne]: doc.id },
-    };
-    if (doc.clinic_template_id) {
-        where.clinic_template_id = doc.clinic_template_id;
-    } else if (doc.catalog_template_id) {
-        where.catalog_template_id = doc.catalog_template_id;
-    } else {
-        return;
-    }
-
-    const affected = await db.PatientConsentDocument.findAll({
-        where,
-        attributes: ['id', 'package_id'],
-        raw: true,
-    });
-    if (!affected.length) return;
-
-    await db.PatientConsentDocument.update(
-        { status: 'superseded', delivery_status: 'superseded' },
-        { where: { id: affected.map((item) => item.id) } }
-    );
-
-    const packageIds = Array.from(new Set(affected.map((item) => toIntOrNull(item.package_id)).filter(Boolean)));
-    await Promise.all(packageIds.map((packageId) => refreshPackageCounts(packageId)));
+    const templateId = doc.clinic_template_id || doc.catalog_template_id;
+    if (!templateId) return null;
+    return { pacienteId: doc.paciente_id, clinicaId: doc.clinica_id, exceptId: doc.id,
+        resolved: { source: doc.clinic_template_id ? 'clinic' : 'catalog', template: {
+            id: templateId, purpose: doc.purpose || 'data_protection',
+            validity_mode: doc.snapshot_json?.template?.validity_mode,
+        } } };
 }
 
 async function resolveRequirementsForAppointment(citaLike, transaction = null) {
@@ -2104,6 +2156,19 @@ async function getConsentSummaryForAppointment(citaLike) {
         include: [{ model: db.ConsentSignaturePackage, as: 'package', required: false }],
     });
 
+    // Choose the same effective attempt used by the counts before deriving
+    // display metadata. A newer catalog version must not rename/re-time the
+    // frozen document the patient or professional is actually being shown.
+    const latest = new Map();
+    const now = new Date();
+    const signed = item => require('./appointmentConsentEligibility.service').isCurrentSignedDocument(item, {}, now);
+    for (const row of documents) {
+        const item = getPlain(row);
+        const key = `${item.tratamiento_id}:` + (item.clinic_template_id ? `clinic:${item.clinic_template_id}` : `catalog:${item.catalog_template_id}`);
+        const previous = latest.get(key);
+        if (!previous || (signed(item) && !signed(previous)) || (signed(item) === signed(previous) && item.id > previous.id)) latest.set(key, item);
+    }
+
     const existingKeys = new Set(documents.map((doc) => {
         const plain = getPlain(doc);
         return `${plain.tratamiento_id}:` + (plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`);
@@ -2116,10 +2181,15 @@ async function getConsentSummaryForAppointment(citaLike) {
     for (const requirement of requirements) {
         const plain = getPlain(requirement);
         const key = `${plain.tratamiento_id}:` + (plain.clinic_template_id ? `clinic:${plain.clinic_template_id}` : `catalog:${plain.catalog_template_id}`);
-        const resolved = await resolveRequirementTemplate(requirement);
-        if (resolved?.template) requirementTitles.set(key, { title: resolved.version?.title || resolved.template.name, required: !!plain.required });
-        if (resolved?.template && resolved?.version) {
-            signingPolicies.push(getSigningPolicyFromVersion(resolved.version, resolved.template));
+        const emitted = latest.get(key);
+        const resolved = emitted ? requirementTemplateIdentity(requirement) : await resolveRequirementTemplate(requirement);
+        if (emitted) {
+            const frozen = parseJsonObject(emitted.snapshot_json);
+            requirementTitles.set(key, { title: frozen.version?.title || emitted.title || frozen.template?.name || 'Consentimiento', required: !!plain.required });
+            signingPolicies.push(getSigningPolicyFromDocument(emitted));
+        } else {
+            if (resolved?.template) requirementTitles.set(key, { title: resolved.version?.title || resolved.template.name, required: !!plain.required });
+            if (resolved?.template && resolved?.version) signingPolicies.push(getSigningPolicyFromVersion(resolved.version, resolved.template));
         }
         if (existingKeys.has(key)) continue;
         if (plain.required) {
@@ -2127,18 +2197,6 @@ async function getConsentSummaryForAppointment(citaLike) {
             if (plain.blocking_policy === 'hard' && resolved?.template?.purpose === 'clinical') missingBlocking += 1;
         }
         else missingOptional += 1;
-    }
-    // A rejected/revoked earlier attempt must not hide a later valid signature,
-    // nor make it count twice. This grouping is for the appointment summary;
-    // individual packages retain every document and their own history.
-    const latest = new Map();
-    const now = new Date();
-    const signed = item => require('./appointmentConsentEligibility.service').isCurrentSignedDocument(item, {}, now);
-    for (const row of documents) {
-        const item = getPlain(row);
-        const key = `${item.tratamiento_id}:` + (item.clinic_template_id ? `clinic:${item.clinic_template_id}` : `catalog:${item.catalog_template_id}`);
-        const previous = latest.get(key);
-        if (!previous || (signed(item) && !signed(previous)) || (signed(item) === signed(previous) && item.id > previous.id)) latest.set(key, item);
     }
     const summary = summarizeDocuments([...latest.values()], missingRequired, missingOptional, missingBlocking);
     const packageRow = documents.map((doc) => getPlain(doc).package).find(Boolean) || null;
@@ -2231,6 +2289,7 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
         err.statusCode = 404;
         throw err;
     }
+
     const plainCita = getPlain(cita);
     if (!plainCita.paciente_id || !plainCita.clinica_id || !plainCita.tratamiento_id) {
         const err = new Error('appointment_missing_patient_clinic_or_treatment');
@@ -2245,6 +2304,19 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
         throw err;
     }
 
+    const preparedRequirements = [];
+    for (const requirement of requirements) {
+        // The template identity is sufficient to locate existing/reusable
+        // evidence. A newer draft, archive or removed published version must
+        // not force regeneration of the document already frozen for this act.
+        const resolved = requirementTemplateIdentity(requirement);
+        if (!resolved?.template) throw Object.assign(new Error('consent_template_version_unavailable'), { statusCode: 409 });
+        const reusableOptions = { pacienteId: plainCita.paciente_id, clinicaId: plainCita.clinica_id, resolved };
+        preparedRequirements.push({ requirement, resolved,
+            candidates: await pendingReusableConsentCandidates(reusableOptions, transaction),
+            signedReusable: await findSignedReusableConsent({ ...reusableOptions, transaction }) });
+    }
+
     let packageRow = await db.ConsentSignaturePackage.findOne({
         transaction,
         where: {
@@ -2255,6 +2327,11 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
             status: { [Op.notIn]: ['cancelled', 'expired'] },
         },
     });
+    await lockConsentPackages([packageRow?.id, ...preparedRequirements.flatMap(row => [row.signedReusable?.package_id,
+        ...row.candidates.map(candidate => candidate.package_id)])], transaction);
+    // A known package may have been cancelled while this preparation waited.
+    if (packageRow) packageRow = await db.ConsentSignaturePackage.findOne({ transaction,
+        where: { id: packageRow.id, status: { [Op.notIn]: ['cancelled', 'expired'] } } });
     if (!packageRow) {
         const appointmentStart = plainCita.inicio ? new Date(plainCita.inicio) : null;
         const dueAt = appointmentStart && Number.isFinite(appointmentStart.getTime()) ? appointmentStart : null;
@@ -2290,7 +2367,7 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
     const programDoctorIds = [...new Set([...doctorsByTreatment.values()].flat())];
     const programDoctors = programDoctorIds.length ? await db.Usuario.findAll({ where: { id_usuario: { [Op.in]: programDoctorIds } }, attributes: ['id_usuario', 'nombre', 'apellidos'], transaction }) : [];
 
-    for (const requirement of requirements) {
+    for (const { requirement, resolved, candidates } of preparedRequirements) {
         const plainRequirement = getPlain(requirement);
         const requirementTreatmentId = toIntOrNull(plainRequirement.tratamiento_id) || plainCita.tratamiento_id;
         const requirementTreatment = requirementTreatments.find(row => Number(row.id_tratamiento) === Number(requirementTreatmentId));
@@ -2300,11 +2377,6 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
         const professional = programContext ? (assignedDoctors.length === 1 ? getPlain(programDoctors.find(row => row.id_usuario === assignedDoctors[0])) : null) : plainCita.doctor;
         const documentContext = requirementTreatment || programContext ? buildTemplateContext({ paciente: plainCita.paciente, clinica: plainCita.clinica,
             tratamiento: getPlain(requirementTreatment) || plainCita.tratamiento, cita: { ...plainCita, tratamiento_id: requirementTreatmentId }, profesional: professional }) : context;
-        const resolved = await resolveRequirementTemplate(requirement, transaction);
-        if (!resolved?.template || !resolved?.version) {
-            throw Object.assign(new Error('consent_template_version_unavailable'), { statusCode: 409 });
-        }
-
         const signedReusable = await findSignedReusableConsent({
             pacienteId: plainCita.paciente_id,
             clinicaId: plainCita.clinica_id,
@@ -2317,6 +2389,7 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
                 clinicaId: plainCita.clinica_id,
                 resolved,
                 exceptId: signedReusable.id,
+                candidates,
                 transaction,
             });
             continue;
@@ -2340,6 +2413,8 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
         // replace them with another pending signature (including dual signing).
         if (existing) continue;
 
+        resolved.version = getPlain(await getOperationalConsentVersion(resolved, transaction));
+        if (!resolved.version) throw Object.assign(new Error('consent_template_version_unavailable'), { statusCode: 409 });
         const title = resolved.version.title || resolved.template.name;
         const renderedHtml = renderTemplateHtml(resolved.version.body_html || buildDefaultBodyHtml(title), documentContext);
         const signingPolicy = getSigningPolicyFromVersion(resolved.version, resolved.template);
@@ -2417,6 +2492,11 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
 async function refreshPackageCounts(packageIdRaw, transaction = null) {
     const packageId = toIntOrNull(packageIdRaw);
     if (!packageId) return null;
+    if (!transaction) return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' },
+        tx => refreshPackageCounts(packageId, tx));
+    await lockConsentPackages([packageId], transaction);
+    const packageRow = await db.ConsentSignaturePackage.findByPk(packageId, { attributes: ['id', 'status'], transaction });
+    if (!packageRow) return null;
     const documents = await db.PatientConsentDocument.findAll({
         transaction,
         where: { package_id: packageId, status: { [Op.notIn]: ['cancelled', 'voided', 'superseded'] } },
@@ -2436,7 +2516,8 @@ async function refreshPackageCounts(packageIdRaw, transaction = null) {
     const signedCount = currentDocuments.filter((doc) => !!doc.required && doc.status === 'signed' && !doc.revoked_at).length;
     const pending = currentDocuments.some((doc) => DOCUMENT_PENDING_STATUSES.has(doc.status));
     const intake = await db.PatientIntakeRequest.findOne({ where: { package_id: packageId }, transaction });
-    const status = intake?.status === 'pending' ? 'pending'
+    const status = ['cancelled', 'expired'].includes(packageRow.status) ? packageRow.status
+        : intake?.status === 'pending' ? 'pending'
         : !currentDocuments.length && intake ? 'signed'
         : requiredCount > 0 && signedCount >= requiredCount ? 'signed' : (pending ? 'pending' : 'draft');
     await db.ConsentSignaturePackage.update(
@@ -2444,6 +2525,24 @@ async function refreshPackageCounts(packageIdRaw, transaction = null) {
         { where: { id: packageId }, transaction }
     );
     return { required_count: requiredCount, signed_count: signedCount, status };
+}
+
+async function markPendingConsentDocument(docLike, values, transaction) {
+    const doc = getPlain(docLike);
+    if (!DOCUMENT_PENDING_STATUSES.has(doc.status)) return false;
+    const [changed] = await db.PatientConsentDocument.update(values, { transaction,
+        where: { id: doc.id, package_id: doc.package_id, paciente_id: doc.paciente_id, clinica_id: doc.clinica_id,
+            status: { [Op.in]: Array.from(DOCUMENT_PENDING_STATUSES) }, signed_at: null, revoked_at: null } });
+    return changed === 1;
+}
+
+async function requireCurrentActiveConsentPackage(packageId, transaction) {
+    const current = await db.ConsentSignaturePackage.findByPk(packageId, {
+        attributes: ['id', 'status', 'expires_at'], transaction,
+    });
+    if (!current) throw Object.assign(new Error('consent_package_not_found'), { statusCode: 404 });
+    requireActiveConsentPackage(current);
+    return current;
 }
 
 async function sendPackageMock(packageIdRaw, payload = {}) {
@@ -2474,32 +2573,36 @@ async function sendPackageMock(packageIdRaw, payload = {}) {
 
     const documents = Array.isArray(packageRow.documents) ? packageRow.documents : [];
     const pendingDocuments = documents.filter((doc) => DOCUMENT_PENDING_STATUSES.has(getPlain(doc).status));
-    const intake = await db.PatientIntakeRequest.findOne({ where: { package_id: packageRow.id, status: 'pending' } });
-    if (!pendingDocuments.length && !intake) {
-        const err = new Error('consent_package_has_no_pending_documents');
-        err.statusCode = 409;
-        throw err;
-    }
-    for (const doc of pendingDocuments) {
-        const plainDoc = getPlain(doc);
-        await db.ConsentDeliveryEvent.create({
-            package_id: packageRow.id,
-            patient_consent_document_id: plainDoc.id,
-            channel,
-            status: eventStatus,
-            recipient,
-            event_payload: {
-                mocked: true,
-                reason: 'Email/WhatsApp provider pendiente de conectar al motor de automatizaciones',
-                public_url: publicUrl,
-                token_expires_in_hours: getLinkTtlHours(payload.ttl_hours ?? payload.validez_horas),
-                created_at: new Date().toISOString(),
-            },
+    await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+        await lockConsentPackages([packageRow.id], transaction);
+        await requireCurrentActiveConsentPackage(packageRow.id, transaction);
+        const intake = await db.PatientIntakeRequest.findOne({ where: { package_id: packageRow.id, status: 'pending' }, transaction });
+        let changed = 0;
+        for (const doc of pendingDocuments) {
+            const plainDoc = getPlain(doc);
+            if (!await markPendingConsentDocument(doc, { status: documentStatus, channel, delivery_status: eventStatus }, transaction)) continue;
+            changed++;
+            await db.ConsentDeliveryEvent.create({
+                package_id: packageRow.id,
+                patient_consent_document_id: plainDoc.id,
+                channel,
+                status: eventStatus,
+                recipient,
+                event_payload: {
+                    mocked: true,
+                    reason: 'Email/WhatsApp provider pendiente de conectar al motor de automatizaciones',
+                    public_url: publicUrl,
+                    token_expires_in_hours: getLinkTtlHours(payload.ttl_hours ?? payload.validez_horas),
+                    created_at: new Date().toISOString(),
+                },
+            }, { transaction });
+        }
+        if (!changed && !intake) throw Object.assign(new Error('consent_package_has_no_pending_documents'), { statusCode: 409 });
+        await db.ConsentSignaturePackage.update({ status: channel === 'tablet' ? 'viewed' : 'sent' }, {
+            where: { id: packageRow.id, status: { [Op.in]: ['draft', 'pending', 'sent', 'viewed'] } }, transaction,
         });
-        await doc.update({ status: documentStatus, channel, delivery_status: eventStatus });
-    }
-    await packageRow.update({ status: channel === 'tablet' ? 'viewed' : 'sent' });
-    await refreshPackageCounts(packageRow.id);
+        await refreshPackageCounts(packageRow.id, transaction);
+    });
     return db.ConsentSignaturePackage.findByPk(packageRow.id, {
         include: [
             { model: db.PatientConsentDocument, as: 'documents', required: false },
@@ -3060,26 +3163,31 @@ async function getPublicPackage(tokenRaw, requestMeta = {}) {
     }
     requireActiveConsentPackage(packageRow);
     const documents = Array.isArray(packageRow.documents) ? packageRow.documents : [];
-    await Promise.all(documents.map(async (doc) => {
-        const plainDoc = getPlain(doc);
-        if (!DOCUMENT_PENDING_STATUSES.has(plainDoc.status)) return;
-        await db.ConsentDeliveryEvent.create({
-            package_id: packageRow.id,
-            patient_consent_document_id: plainDoc.id,
-            channel: token.channel || 'tablet',
-            status: 'viewed',
-            recipient: token.channel === 'email' ? packageRow.paciente?.email : packageRow.paciente?.telefono_movil,
-            event_payload: {
-                event: 'public_package_viewed',
-                viewed_at: new Date().toISOString(),
-                ip: toCleanString(requestMeta.ip),
-                user_agent: toCleanString(requestMeta.userAgent),
-            },
+    await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+        await lockConsentPackages([packageRow.id], transaction);
+        await requireCurrentActiveConsentPackage(packageRow.id, transaction);
+        for (const doc of documents) {
+            const plainDoc = getPlain(doc);
+            if (!await markPendingConsentDocument(doc, { status: 'viewed', channel: token.channel || 'tablet', delivery_status: 'viewed' }, transaction)) continue;
+            await db.ConsentDeliveryEvent.create({
+                package_id: packageRow.id,
+                patient_consent_document_id: plainDoc.id,
+                channel: token.channel || 'tablet',
+                status: 'viewed',
+                recipient: token.channel === 'email' ? packageRow.paciente?.email : packageRow.paciente?.telefono_movil,
+                event_payload: {
+                    event: 'public_package_viewed',
+                    viewed_at: new Date().toISOString(),
+                    ip: toCleanString(requestMeta.ip),
+                    user_agent: toCleanString(requestMeta.userAgent),
+                },
+            }, { transaction });
+        }
+        await db.ConsentSignaturePackage.update({ status: 'viewed' }, {
+            where: { id: packageRow.id, status: { [Op.in]: ['draft', 'pending', 'sent', 'viewed'] } }, transaction,
         });
-        await doc.update({ status: 'viewed', channel: token.channel || 'tablet', delivery_status: 'viewed' });
-    }));
-    await packageRow.update({ status: 'viewed' });
-    await refreshPackageCounts(packageRow.id);
+        await refreshPackageCounts(packageRow.id, transaction);
+    });
     const refreshed = await getPackageWithDocumentsById(packageRow.id);
     return { ...serializePublicPackage(refreshed), intake: await require('./patientIntake.service').publicView(refreshed) };
 }
@@ -3137,7 +3245,7 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
         },
     };
     const nextHash = hashSnapshot({ ...nextSnapshot, rendered_html: plainDoc.snapshot_html || '' });
-    await doc.update({
+    const signedValues = {
         status: 'signed',
         signed_at: new Date(evidence.signed_at),
         signed_by_patient_id: evidence.signer_role === 'patient' ? plainDoc.paciente_id : null,
@@ -3146,24 +3254,42 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
         delivery_status: 'signed',
         snapshot_json: nextSnapshot,
         snapshot_hash: nextHash,
-    });
-    await db.ConsentDeliveryEvent.create({
-        package_id: plainDoc.package_id || null,
-        patient_consent_document_id: plainDoc.id,
-        channel: evidence.method === 'tablet_signature' ? 'tablet' : (plainDoc.channel || 'internal'),
-        status: 'viewed',
-        recipient: evidence.signer_name || null,
-        event_payload: {
-            event: 'document_signed',
-            evidence: {
-                ...evidence,
-                signature_data_url: evidence.signature_data_url ? '[captured]' : null,
+    };
+    await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+        const reusableOptions = reusableDocumentOptions(plainDoc);
+        const candidates = reusableOptions ? await pendingReusableConsentCandidates(reusableOptions, transaction) : [];
+        await lockConsentPackages([plainDoc.package_id, ...candidates.map(row => row.package_id)], transaction);
+        // The package displayed by the tablet may have been cancelled or
+        // expired while evidence was captured. Recheck its current lifecycle
+        // under the package anchor before any document, event or count write.
+        if (plainDoc.package_id) await requireCurrentActiveConsentPackage(plainDoc.package_id, transaction);
+        // A second device, revocation or countersignature may have changed the
+        // document since it was displayed. The captured snapshot hash is the
+        // compare-and-swap receipt; never replace a committed signature.
+        const [changed] = await db.PatientConsentDocument.update(signedValues, {
+            where: { id: plainDoc.id, status: plainDoc.status, signed_at: null,
+                revoked_at: plainDoc.revoked_at || null, snapshot_hash: plainDoc.snapshot_hash || null },
+            transaction,
+        });
+        if (changed !== 1) throw Object.assign(new Error('consent_document_signature_conflict'), { statusCode: 409 });
+        await db.ConsentDeliveryEvent.create({
+            package_id: plainDoc.package_id || null,
+            patient_consent_document_id: plainDoc.id,
+            channel: evidence.method === 'tablet_signature' ? 'tablet' : (plainDoc.channel || 'internal'),
+            status: 'viewed',
+            recipient: evidence.signer_name || null,
+            event_payload: {
+                event: 'document_signed',
+                evidence: {
+                    ...evidence,
+                    signature_data_url: evidence.signature_data_url ? '[captured]' : null,
+                },
+                snapshot_hash: nextHash,
             },
-            snapshot_hash: nextHash,
-        },
+        }, { transaction });
+        if (reusableOptions) await supersedePendingReusableConsents({ ...reusableOptions, candidates, transaction });
+        if (plainDoc.package_id) await refreshPackageCounts(plainDoc.package_id, transaction);
     });
-    await supersedePendingReusableConsentDocuments({ ...plainDoc, status: 'signed' });
-    if (plainDoc.package_id) await refreshPackageCounts(plainDoc.package_id);
     return findDocumentByIdentifier(plainDoc.id);
 }
 
@@ -3203,23 +3329,29 @@ async function signProfessionalConsentDocument(identifier, payload = {}, userId 
         professional_signature_evidence: evidence,
     };
     const nextHash = hashSnapshot({ ...nextSnapshot, rendered_html: plainDoc.snapshot_html || '' });
-    await doc.update({
-        professional_signed_by: evidence.professional_id || null,
-        professional_signed_at: new Date(evidence.signed_at),
-        snapshot_json: nextSnapshot,
-        snapshot_hash: nextHash,
-    });
-    await db.ConsentDeliveryEvent.create({
-        package_id: plainDoc.package_id || null,
-        patient_consent_document_id: plainDoc.id,
-        channel: 'internal',
-        status: 'viewed',
-        recipient: evidence.professional_name || (evidence.professional_id ? `usuario:${evidence.professional_id}` : 'professional'),
-        event_payload: {
-            event: 'professional_signed_document',
-            evidence,
+    await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+        await lockConsentPackages([plainDoc.package_id], transaction);
+        // A patient-signed package is still active for its professional
+        // countersignature; cancelled and expired packages are not.
+        if (plainDoc.package_id) await requireCurrentActiveConsentPackage(plainDoc.package_id, transaction);
+        const [changed] = await db.PatientConsentDocument.update({
+            professional_signed_by: evidence.professional_id || null,
+            professional_signed_at: new Date(evidence.signed_at),
+            snapshot_json: nextSnapshot,
             snapshot_hash: nextHash,
-        },
+        }, { where: { id: plainDoc.id, status: plainDoc.status,
+            professional_signed_at: null, revoked_at: plainDoc.revoked_at || null,
+            snapshot_hash: plainDoc.snapshot_hash || null }, transaction });
+        if (changed !== 1) throw Object.assign(new Error('consent_document_signature_conflict'), { statusCode: 409 });
+        await db.ConsentDeliveryEvent.create({
+            package_id: plainDoc.package_id || null,
+            patient_consent_document_id: plainDoc.id,
+            channel: 'internal',
+            status: 'viewed',
+            recipient: evidence.professional_name || (evidence.professional_id ? `usuario:${evidence.professional_id}` : 'professional'),
+            event_payload: { event: 'professional_signed_document', evidence, snapshot_hash: nextHash },
+        }, { transaction });
+        if (plainDoc.package_id) await refreshPackageCounts(plainDoc.package_id, transaction);
     });
     return findDocumentByIdentifier(plainDoc.id);
 }
@@ -3343,40 +3475,37 @@ async function revokeConsentDocument(identifier, payload = {}, requestMeta = {})
         err.statusCode = 404;
         throw err;
     }
-    const plainDoc = getPlain(doc);
-    if (!['signed', 'sent', 'viewed', 'pending'].includes(plainDoc.status)) {
-        const err = new Error('consent_document_cannot_be_revoked');
-        err.statusCode = 409;
-        throw err;
-    }
-    const evidence = normalizeRevocationEvidence(payload, requestMeta);
-    const snapshot = plainDoc.snapshot_json && typeof plainDoc.snapshot_json === 'object' ? plainDoc.snapshot_json : {};
-    const nextSnapshot = {
-        ...snapshot,
-        revocation_evidence: evidence,
-    };
-    const nextHash = hashSnapshot({ ...nextSnapshot, rendered_html: plainDoc.snapshot_html || '' });
-    await doc.update({
-        status: 'revoked',
-        revoked_at: new Date(evidence.revoked_at),
-        snapshot_json: nextSnapshot,
-        snapshot_hash: nextHash,
-        delivery_status: 'revoked',
+    const displayed = getPlain(doc);
+    await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+        await lockConsentPackages([displayed.package_id], transaction);
+        const current = await db.PatientConsentDocument.findByPk(displayed.id, { transaction, lock: transaction.LOCK.UPDATE });
+        if (!current) throw Object.assign(new Error('consent_document_not_found'), { statusCode: 404 });
+        const plainDoc = getPlain(current);
+        if (plainDoc.package_id !== displayed.package_id || plainDoc.paciente_id !== displayed.paciente_id || plainDoc.clinica_id !== displayed.clinica_id) {
+            throw Object.assign(new Error('consent_document_changed'), { statusCode: 409 });
+        }
+        if (!['signed', 'sent', 'viewed', 'pending'].includes(plainDoc.status) || plainDoc.revoked_at) {
+            throw Object.assign(new Error('consent_document_cannot_be_revoked'), { statusCode: 409 });
+        }
+        // Revocation appends to CURRENT evidence under the document lock. The
+        // snapshot first displayed may predate either actual signature.
+        const evidence = normalizeRevocationEvidence(payload, requestMeta);
+        const snapshot = plainDoc.snapshot_json && typeof plainDoc.snapshot_json === 'object' ? plainDoc.snapshot_json : {};
+        const nextSnapshot = { ...snapshot, revocation_evidence: evidence };
+        const nextHash = hashSnapshot({ ...nextSnapshot, rendered_html: plainDoc.snapshot_html || '' });
+        await current.update({ status: 'revoked', revoked_at: new Date(evidence.revoked_at), snapshot_json: nextSnapshot,
+            snapshot_hash: nextHash, delivery_status: 'revoked' }, { transaction });
+        await db.ConsentDeliveryEvent.create({
+            package_id: plainDoc.package_id || null,
+            patient_consent_document_id: plainDoc.id,
+            channel: plainDoc.channel || 'internal',
+            status: 'viewed',
+            recipient: evidence.revoked_by,
+            event_payload: { event: 'document_revoked', evidence, snapshot_hash: nextHash },
+        }, { transaction });
+        if (plainDoc.package_id) await refreshPackageCounts(plainDoc.package_id, transaction);
     });
-    await db.ConsentDeliveryEvent.create({
-        package_id: plainDoc.package_id || null,
-        patient_consent_document_id: plainDoc.id,
-        channel: plainDoc.channel || 'internal',
-        status: 'viewed',
-        recipient: evidence.revoked_by,
-        event_payload: {
-            event: 'document_revoked',
-            evidence,
-            snapshot_hash: nextHash,
-        },
-    });
-    if (plainDoc.package_id) await refreshPackageCounts(plainDoc.package_id);
-    return findDocumentByIdentifier(plainDoc.id);
+    return findDocumentByIdentifier(displayed.id);
 }
 
 async function renderConsentDocument(identifier) {

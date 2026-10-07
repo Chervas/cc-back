@@ -418,6 +418,15 @@ async function drainQueue(priorityList, marker, allowedTypes = SCHEDULER_ALLOWED
 }
 
 async function handleCriticalTick() {
+  // Discover only narrowly enrolled native birth intents on the existing tick.
+  // The managed service returns before SQL while rollout/manifest is CLOSED.
+  // Failure of discovery must not stop ordinary JobRequest draining.
+  try {
+    await require('./appointmentVisitManaged.service').current().reconcilePendingBirthIntents({ runtimeNamespace: CURRENT_RUNTIME_NAMESPACE });
+  } catch (error) {
+    workerState.lastError = 'Visit intent discovery failed: ' + (error.code || error.name || 'unknown');
+    console.warn('[appointment visit] Pending intent discovery held', { code: error.code || error.name || 'unknown' });
+  }
   if (externalDispatcher) {
     return externalDispatcher('critical');
   }

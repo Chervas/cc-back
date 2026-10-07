@@ -13,6 +13,7 @@ function importHeld(value) {
     || ['import', 'cliniccloud_reconciliation'].some(key => m[key] && importHeld(m[key]));
 }
 function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, patientId, templateName, confirmationTimeout = false, patientHoldOverride = false, now = Date.now() }) {
+  require('./appointment-synthetic-guard').assertNoSyntheticDispatch(a, e);
   if (!a || Number(a.id_cita) !== Number(e.trigger_entity_id) || Number(a.clinica_id) !== Number(clinicId)
     || patientId && Number(a.paciente_id) !== Number(patientId)) fail('whatsapp_appointment_scope_changed');
   const operations = require('./whatsappImportedAppointmentOperations');
@@ -42,6 +43,8 @@ function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, 
   return true;
 }
 async function assertAutomatedMessageEligibility({ message, conversation, payload, loadExecution, loadAppointment, patientHeld, getReceptionState }) {
+  const { assertNoSyntheticDispatch } = require('./appointment-synthetic-guard');
+  assertNoSyntheticDispatch(message, conversation);
   const m = object(message.metadata), executionId = Number(m.execution_id);
   const automated = Number.isSafeInteger(executionId) && executionId > 0 || !!m.communication_scope;
   if (!automated) return true;
@@ -52,12 +55,14 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
     return true;
   }
   const execution = await loadExecution(executionId);
+  assertNoSyntheticDispatch(execution);
   if (!execution || Number(execution.clinic_id) !== Number(conversation.clinic_id)) fail('whatsapp_automation_scope_changed');
   if (execution.trigger_entity_type !== 'appointment') {
     if (held) fail('whatsapp_patient_import_held');
     return true;
   }
   const appointment = await loadAppointment(execution.trigger_entity_id);
+  assertNoSyntheticDispatch(appointment);
   const released = require('./whatsappImportedReminderRelease').permits(appointment, { execution })
     || require('./whatsappImportedAppointmentOperations').permitsPatientHoldOverride(appointment, { execution });
   const appointmentPatientHeld = held || !patientId && appointment?.paciente_id && await patientHeld(Number(appointment.paciente_id));

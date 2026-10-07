@@ -26,8 +26,10 @@ function model(data) {
 function matches(row, where) {
   return Reflect.ownKeys(where).every(key => where[key]?.[Op.in] ? where[key][Op.in].includes(row[key]) : row[key] === where[key]);
 }
-function fixture({ duration = 30, offsets, appointment = null, automaticProposals = false } = {}) {
-  const frozen = snapshot(definition(duration, offsets));
+function fixture({ duration = 30, offsets, appointment = null, automaticProposals = false, profile = null, relativeSteps = false } = {}) {
+  const purchase = definition(duration, offsets);
+  if (profile) for (const session of purchase.appointments) session.treatments[0].booking_profile = clone(profile);
+  const frozen = snapshot(purchase);
   const state = { records: [], appointments: appointment ? [model(appointment)] : [], requests: [], events: [], commands: [], contextReads: 0,
     voucher: model({ id: 1, public_id: 'purchase', clinic_id: 72, patient_id: 3, budget_id: 4, budget_line_key: 'line',
       source_system: 'treatment_program', status: 'active', total_units: 3, available_units: 3, sold_amount: 120 }),
@@ -52,7 +54,7 @@ function fixture({ duration = 30, offsets, appointment = null, automaticProposal
     EconomicBudgetVersion: { findOne: async () => ({ lines: [{ key: 'line', program_snapshot: frozen }] }) },
     Clinica: { findByPk: async id => id === 72 ? clinic : null },
     Tratamiento: { findByPk: async id => id === 10 ? { id_tratamiento: 10, clinica_id: 72, origen: 'clinica', activo: true,
-      clinical_config: { catalog_status: 'active', booking_profile: baseProfile(duration) } } : null },
+      clinical_config: { catalog_status: 'active', booking_profile: profile || baseProfile(duration) } } : null },
     Instalacion: { findAll: async () => [{ id: 8 }] }, DoctorClinica: { findAll: async () => [{ doctor_id: 7 }] },
     PatientProgramSession: { findAll: async ({ where }) => state.records.filter(row => matches(row, where)),
       findOne: async ({ where }) => state.records.find(row => matches(row, where)) || null,
@@ -70,7 +72,7 @@ function fixture({ duration = 30, offsets, appointment = null, automaticProposal
   const free = () => ({ windows: [{ start: '2030-01-01T00:00:00Z', end: '2031-01-01T00:00:00Z' }], busy: [], resource_key: 'installation:8' });
   const injected = { './appointmentBookingAvailability.service': {
     resolveInstallationKeys: async () => ({ keys: new Map([[8, 'installation:8']]) }),
-    loadBookingContext: async () => { state.contextReads++; return { doctors: new Map([[7, free()]]), installations: new Map([[8, free()]]),
+    loadBookingContext: async options => { state.contextReads++; state.contextVersion = options.profile.version; return { doctors: new Map([[7, free()]]), installations: new Map([[8, free()]]),
       installationKeys: new Map([[8, 'installation:8']]), patientBusy: [], equipment: new Map() }; },
     solutionsForCalendar: options => {
       if (!automaticProposals) throw Error('Automatic date suggestions forbidden for this manual fixture');
@@ -79,13 +81,14 @@ function fixture({ duration = 30, offsets, appointment = null, automaticProposal
     },
   }, './appointmentBookingCommand.service': { lockBookingResources: async () => {},
     mutateAppointmentBooking: async options => {
-      state.commands.push({ values: clone(options.appointmentValues), snapshot: clone(options.trustedProgramSession.snapshot) });
+      state.commands.push({ values: clone(options.appointmentValues), snapshot: clone(options.trustedProgramSession.snapshot), capabilities: clone(options.capabilities) });
       assert(options.trustedProgramSession.snapshot.booking_profile.phases.every(phase => phase.duration_minutes > 0));
       return options.persist({ values: options.appointmentValues, existing: null });
     } } };
   const module = { exports: {} };
   vm.runInNewContext(source, { module, exports: module.exports, require: name => injected[name] || actualRequire(name), Date, Map, Set, structuredClone });
   return { state, frozen, db: fakeDb, service: module.exports.createPatientProgramBookingService({ db: fakeDb, enabled: () => true,
+    capabilities: () => ({ simple: true, multi: true, relativeSteps }),
     now: () => new Date('2030-01-01T00:00:00Z') }), options: { publicId: 'purchase', clinicId: 72, actorId: 9 } };
 }
 function individual(extra = {}) {
@@ -109,6 +112,58 @@ test('manual purchase exposes every unbooked unit as pending without fictional d
   const preview = await f.service.propose({ ...f.options, payload: { from_date: '2030-01-07', days: 10 } });
   assert(preview.proposals.every(row => row.solution === null && row.reason_code === 'program_manual_date_required'));
   assert.equal(f.state.contextReads, 0); assert.equal(f.state.commands.length, 0);
+});
+const relativeProfile = pending => ({ version: 4, phases: [{ ...baseProfile(30).phases[0], start_offset_minutes: 0,
+  staff_attention: [{ mode: 'start_only', start_minutes: 5, start_window_minutes: 15 }],
+  ...(pending ? { attention_requirements_pending: [{ key: 'check', label: 'Comprobación intermedia: tiempo pendiente de confirmar' }] } : {}) }] });
+test('v4 purchase stays readable but preview and reservation fail closed with the relative writer off', async () => {
+  const f = fixture({ profile: relativeProfile() });
+  const plan = await f.service.read(f.options);
+  assert.equal(plan.sessions[0].booking_profile.version, 4); assert.equal(plan.pending_count, 3);
+  assert.equal(plan.can_schedule, false); assert.equal(plan.booking_restriction.code, 'booking_profile_runtime_unavailable');
+  await assert.rejects(f.service.propose({ ...f.options, payload: { from_date: '2030-01-07', days: 1 } }), { code: 'booking_profile_runtime_unavailable' });
+  await assert.rejects(f.service.book({ ...f.options, payload: { request_key: 'relative-gate-request', snapshot_sha256: f.frozen.sha256,
+    sessions: [{ key: 's0', start_at: '2030-01-07T09:00:00Z' }] } }), { code: 'booking_profile_runtime_unavailable' });
+  assert.equal(f.state.contextReads, 0); assert.equal(f.state.records.length, 0); assert.equal(f.state.commands.length, 0);
+  assert.equal(f.state.voucher.available_units, 3); assert.equal(f.state.voucher.sold_amount, 120);
+});
+test('v4 strict program preview preserves offsets and attention while reserve passes real capabilities without changing economics', async () => {
+  const f = fixture({ profile: relativeProfile(), relativeSteps: true });
+  const preview = await f.service.propose({ ...f.options, payload: { from_date: '2030-01-07', days: 1, session_keys: ['s0'],
+    manual_sessions: [{ key: 's0', start_local: '2030-01-07T10:15' }] } });
+  assert.equal(f.state.contextVersion, 4); assert.equal(preview.proposals[0].solution.capacity_fully_verified, true);
+  assert.equal(preview.proposals[0].solution.phases[0].start_offset_minutes, 0);
+  assert.equal(preview.proposals[0].solution.phases[0].staff_intervals[0].kind, 'start');
+  const payload = { request_key: 'relative-book-request', snapshot_sha256: f.frozen.sha256,
+    sessions: [{ key: 's0', start_at: preview.proposals[0].solution.start_at }] };
+  await f.service.book({ ...f.options, payload });
+  assert.equal(f.state.commands[0].snapshot.booking_profile.version, 4);
+  assert.equal(f.state.commands[0].snapshot.booking_profile.phases[0].start_offset_minutes, 0);
+  assert.equal(f.state.commands[0].capabilities.relativeSteps, true);
+  assert.equal(f.state.voucher.available_units, 3); assert.equal(f.state.voucher.sold_amount, 120);
+  assert.equal((await f.service.read(f.options)).pending_count, 2);
+  assert.equal((await f.service.book({ ...f.options, payload })).replayed, true);
+  assert.equal(f.state.commands.length, 1);
+});
+test('unknown v4 attention remains a clinical blocker even with all writer capabilities enabled', async () => {
+  const f = fixture({ profile: relativeProfile(true), relativeSteps: true });
+  const plan = await f.service.read(f.options);
+  assert.equal(plan.can_schedule, false); assert.equal(plan.booking_restriction.code, 'pending_attention_requirements');
+  await assert.rejects(f.service.propose({ ...f.options, payload: { from_date: '2030-01-07', days: 1, session_keys: ['s0'],
+    manual_sessions: [{ key: 's0', start_local: '2030-01-07T10:15' }] } }), { code: 'pending_attention_requirements' });
+  await assert.rejects(f.service.book({ ...f.options, payload: { request_key: 'relative-pending-request', snapshot_sha256: f.frozen.sha256,
+    sessions: [{ key: 's0', start_at: '2030-01-07T09:00:00Z' }] } }), { code: 'pending_attention_requirements' });
+  assert.equal(f.state.contextReads, 0); assert.equal(f.state.commands.length, 0); assert.equal(f.state.records.length, 0);
+});
+test('linking an equivalent existing v4 appointment cannot bypass the relative writer gate', async () => {
+  const profile = relativeProfile();
+  const free = { windows: [{ start: '2030-01-01T00:00:00Z', end: '2031-01-01T00:00:00Z' }], busy: [] };
+  const solution = solveBookingProfile({ profile, start: '2030-01-07T09:00:00Z', doctors: new Map([[7, free]]), installations: new Map([[8, free]]) });
+  const appointment = individual({ import_metadata: { booking: { version: 1, profile, phases: solution.phases,
+    capacity_fully_verified: true, attention_requirements_pending: [] } } });
+  const f = fixture({ profile, appointment }), before = f.state.appointments[0].toJSON();
+  await assert.rejects(f.service.linkAppointment({ ...f.options, payload: await linkPayload(f) }), { code: 'booking_profile_runtime_unavailable' });
+  assert.deepEqual(f.state.appointments[0].toJSON(), before); assert.equal(f.state.records.length, 0); assert.equal(f.state.events.length, 0);
 });
 test('manual preview is the exact chosen local instant and booking leaves remaining units pending and economics untouched', async () => {
   const f = fixture({ duration: null });

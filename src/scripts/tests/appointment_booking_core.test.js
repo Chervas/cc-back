@@ -26,7 +26,8 @@ function matches(row, where = {}) {
   return Reflect.ownKeys(where).every((key) => {
     if (key === Op.or) return where[key].some((condition) => matches(row, condition));
     const condition = where[key];
-    const value = row[key];
+    const value = typeof key === 'string' && key.startsWith('$') && key.endsWith('$')
+      ? key.slice(1, -1).split('.').reduce((target, field) => target?.[field], row) : row[key];
     if (condition && typeof condition === 'object' && !(condition instanceof Date)) {
       return Reflect.ownKeys(condition).every((operator) => {
         const expected = condition[operator];
@@ -46,13 +47,14 @@ function matches(row, where = {}) {
 }
 
 function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false, appointments = [], occupancies = [], aliases = [],
-  equipment = [], equipmentClinics = [], roomPolicies = [], equipmentEnabled = false } = {}) {
+  equipment = [], equipmentClinics = [], roomPolicies = [], equipmentEnabled = false, doctorHours = {}, doctorBlocks = [] } = {}) {
   const withBookingMarker = row => {
     let metadata = row.import_metadata;
     let malformed=false;
     if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = { booking: true }; malformed=true; } }
     const snapshot=metadata?.booking?.profile;
-    return { ...row, booking_protected: metadata && ('booking' in metadata || 'program_session' in metadata || 'additional_staff' in metadata) ? 1 : 0,
+    return { ...row, booking_attention_snapshot: snapshot?.version === 4 ? metadata.booking : null,
+      booking_protected: metadata && ('booking' in metadata || 'program_session' in metadata || 'additional_staff' in metadata) ? 1 : 0,
       patient_overlap_protected: Number(malformed || !!metadata?.clinical_component_parent || !!metadata?.clinical_component_children),
       booking_nonshareable: Number(malformed || !!metadata?.program_session || !!metadata?.additional_staff
         || snapshot?.version>=3 || !!metadata?.cliniccloud_source_booking?.nonshareable
@@ -64,7 +66,7 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
   const mutexes = new Map();
   const clinic = { id_clinica: 72, grupoClinicaId: 2, configuracion: { timezone: 'Europe/Madrid' }, equipment_booking_enabled: equipmentEnabled };
   const clinics = [clinic, { id_clinica: 73, grupoClinicaId: 2, equipment_booking_enabled: equipmentEnabled }];
-  const installations = [9, 10, 12].map((installationId) => ({ id: installationId, clinica_id: 72, activo: true, horarios: hours, clinica: clinic }));
+  const installations = [9, 10, 12, 13].map((installationId) => ({ id: installationId, clinica_id: 72, activo: true, horarios: hours, clinica: clinic }));
   installations.push({ id: 19, clinica_id: 73, activo: true, horarios: hours, clinica: clinics[1] });
   const query = (name, rows, options) => { state.calls.push([name, options]); return rows.filter((row) => matches(row, options.where)); };
   const allAppointments = (tx) => [...state.appointments.filter((row) => !tx?.replacements.has(row.id_cita)), ...(tx?.pending || [])];
@@ -93,11 +95,11 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
     Tratamiento: { findByPk: async () => ({ id_tratamiento: 3, clinica_id: 72, grupo_clinica_id: 2, origen: equipmentEnabled ? 'grupo' : 'clinica', activo: true, clinical_config: { booking_profile: bookingProfile } }),
       findAll: async options => query('diagnostic-treatments', [{ id_tratamiento: 3, clinica_id: 72, nombre: 'Presoterapia ficticia' },
         { id_tratamiento: 999, clinica_id: 73, nombre: 'Foreign private treatment' }], options) },
-    DoctorClinica: { findAll: async (options) => query('doctors', (equipmentEnabled ? [72, 73] : [72]).flatMap(clinicId => [5, 6].map((doctorId) => ({ doctor_id: doctorId, clinica_id: clinicId, activo: true, recibe_citas: true, horarios: hours }))), options) },
+    DoctorClinica: { findAll: async (options) => query('doctors', (equipmentEnabled ? [72, 73] : [72]).flatMap(clinicId => [5, 6].map((doctorId) => ({ doctor_id: doctorId, clinica_id: clinicId, activo: true, recibe_citas: true, horarios: doctorHours[doctorId] || hours }))), options) },
     DoctorHorario: {}, DoctorHorarioExcepcion: {}, InstalacionHorario: {}, DoctorBloqueoExcepcion: {},
     Instalacion: { findAll: async (options) => query('installations', installations, options) },
     ClinicaHorario: { findAll: async (options) => { state.calls.push(['hours', options]); return hours; } },
-    DoctorBloqueo: { findAll: async (options) => { state.calls.push(['blocks', options]); return []; } },
+    DoctorBloqueo: { findAll: async (options) => query('blocks', doctorBlocks, options) },
     InstalacionBloqueo: { findAll: async (options) => { state.calls.push(['cab-blocks', options]); return []; } },
     InstallationPhysicalAlias: { findAll: async (options) => query('aliases', aliases, options) },
     BookingEquipment: { findAll: async options => query('equipment', equipment.map(unit => ({ ...unit, owner_clinic: clinics.find(c => c.id_clinica === unit.owner_clinic_id) })), options) },
@@ -139,8 +141,333 @@ function fixture({ bookingProfile = profile(phase('one')), failOccupancy = false
   return { db, state, clinic, values, persist, reserve: (overrides = {}) => mutateAppointmentBooking({ db, appointmentValues: values, persist, capabilities, ...overrides }) };
 }
 
+const relativeCapabilities = { simple: true, multi: true, relativeSteps: true };
+const relativeProfile = () => normalizeBookingProfile({ version: 4, phases: [
+  { ...phase('first', [9], [5]), start_offset_minutes: 0 },
+  { ...phase('second', [10], [6]), start_offset_minutes: 15 },
+] });
+const relativeEnd = '2030-01-07T09:45:00.000Z';
+const sharedPreparationProfile = () => normalizeBookingProfile({ version: 4, phases: [{ ...phase('prepare', [9, 10, 12, 13]),
+  start_offset_minutes: 0, staff_attention: [{ mode: 'start_only', start_minutes: 5, start_window_minutes: 15 }],
+  preparation_sharing: { mode: 'same_start' } }] });
+const fallbackProfile = (when = 'absence_only') => normalizeBookingProfile({ version: 4, phases: [{
+  ...phase('care', [9, 10], [5, 6]), start_offset_minutes: 0,
+  professionals: { mode: 'any', ids: [5, 6], preferred_id: 5, fallback_when: when },
+}] });
+const doctorBlock = (patch = {}) => ({ id: 7, doctor_id: 5, clinica_id: 72, tipo: 'vacaciones', recurrente: 'none',
+  fecha_inicio: new Date(start), fecha_fin: new Date(end), excepciones: [], ...patch });
+
+test('v4 context derives absences only from scoped typed blocks with recurrence exceptions', async () => {
+  for (const [block, expected] of [[doctorBlock(), 1], [doctorBlock({ tipo: 'ausencia' }), 1],
+    [doctorBlock({ tipo: 'otro', motivo: 'Vacaciones' }), 0], [doctorBlock({ tipo: 'formacion' }), 0],
+    [doctorBlock({ clinica_id: 73 }), 0], [doctorBlock({ clinica_id: null }), 1],
+    [doctorBlock({ clinica_id: 73, aplica_a_todas_clinicas: true }), 1],
+    [doctorBlock({ recurrente: 'weekly', fecha_inicio: new Date('2029-12-31T09:00:00Z'), fecha_fin: new Date('2029-12-31T09:30:00Z') }), 1],
+    [doctorBlock({ excepciones: [{ fecha: '2030-01-07', cancelado: true }] }), 0]]) {
+    const f = fixture({ bookingProfile: fallbackProfile(), doctorBlocks: [block] });
+    const c = await loadBookingContext({ db: f.db, clinic: f.clinic, profile: fallbackProfile(), start: new Date(start), end: new Date(end), occupancyEnabled: true });
+    assert.equal(c.doctors.get(5).absence_windows.length, expected, JSON.stringify(block));
+    assert.equal(c.doctors.get(5).schedule_verified, true);
+    assert.equal(f.state.calls.filter(([name]) => name === 'blocks').length, 1);
+    assert.equal(f.state.calls.filter(([name]) => name === 'doctors').length, 1);
+  }
+});
+
+test('v4 context does not infer clinical absence from missing or malformed schedule data', async () => {
+  for (const doctorHours of [[], [{ ...hours[1], hora_inicio: '99:00' }], [{ ...hours[1], hora_fin: null }],
+    [{ ...hours[1], dia_semana: null }], [{ ...hours[1], hora_inicio: '20:00', hora_fin: '08:00' }]]) {
+    const f = fixture({ bookingProfile: fallbackProfile(), doctorHours: { 5: doctorHours } });
+    const c = await loadBookingContext({ db: f.db, clinic: f.clinic, profile: fallbackProfile(), start: new Date(start), end: new Date(end), occupancyEnabled: true });
+    assert.equal(c.doctors.get(5).schedule_verified, false);
+  }
+  const onlyAfternoon = [{ ...hours[1], hora_inicio: '16:00' }];
+  const f = fixture({ bookingProfile: fallbackProfile(), doctorHours: { 5: onlyAfternoon } });
+  const saved = await f.reserve({ capabilities: relativeCapabilities, priorityAcknowledged: true, selections: { care: { doctor_id: 6 } } });
+  assert.equal(saved.doctor_id, 6); assert.equal(saved.import_metadata.booking.warnings[0].fallback_reason, 'absence');
+});
+
+test('canonical v4 booking enforces substitution policy and preserves it during reprogramming', async () => {
+  const appointments = [{ id_cita: 44, clinica_id: 72, paciente_id: 2, doctor_id: 5, instalacion_id: 10,
+    inicio: start, fin: end, estado: 'pendiente' }];
+  const denied = fixture({ bookingProfile: fallbackProfile(), appointments });
+  await assert.rejects(denied.reserve({ capabilities: relativeCapabilities, priorityAcknowledged: true,
+    selections: { care: { doctor_id: 6 } }, force: true }), { code: 'booking_unavailable' });
+  assert.equal(denied.state.persists, 0);
+  const p = fallbackProfile('unavailable'), allowed = fixture({ bookingProfile: p, appointments });
+  const saved = await allowed.reserve({ capabilities: relativeCapabilities, priorityAcknowledged: true, selections: { care: { doctor_id: 6 } } });
+  assert.equal(saved.doctor_id, 6);
+  assert.equal(saved.import_metadata.booking.profile.phases[0].professionals.fallback_when, 'unavailable');
+  assert.equal(bookingSegments(saved).length, 1);
+  p.phases[0].professionals.fallback_when = 'absence_only';
+  const moved = await allowed.reserve({ capabilities: relativeCapabilities, existingAppointmentId: saved.id_cita, priorityAcknowledged: true,
+    appointmentValues: { inicio: '2030-01-07T11:00:00Z', fin: '2030-01-07T11:30:00Z' } });
+  assert.equal(moved.import_metadata.booking.profile.phases[0].professionals.fallback_when, 'unavailable', 'Rebooking uses the frozen decision, not a changed catalogue');
+  assert.equal(bookingSegments(moved).length, 1);
+});
+
+test('canonical v4 typed vacation authorizes its configured substitute but ordinary blocks do not', async () => {
+  const f = fixture({ bookingProfile: fallbackProfile(), doctorBlocks: [doctorBlock()] });
+  const saved = await f.reserve({ capabilities: relativeCapabilities, priorityAcknowledged: true, selections: { care: { doctor_id: 6 } } });
+  assert.equal(saved.doctor_id, 6); assert.equal(saved.import_metadata.booking.warnings[0].fallback_reason, 'absence');
+  const other = fixture({ bookingProfile: fallbackProfile(), doctorBlocks: [doctorBlock({ tipo: 'otro', motivo: 'Vacaciones' })] });
+  await assert.rejects(other.reserve({ capabilities: relativeCapabilities, priorityAcknowledged: true }), { code: 'booking_unavailable' });
+  assert.equal(other.state.persists, 0);
+});
+
+test('canonical mixed v4 flexible booking persists complete phases and acknowledgement, while support and closed gates remain protected', async () => {
+  const p = relativeProfile(); p.phases[0].duration_minutes = 15;
+  const make = () => {
+    const f = fixture({ bookingProfile: p, doctorHours: { 5: [{ ...hours[1], hora_inicio: '10:30' }] } });
+    const readDoctors = f.db.DoctorClinica.findAll;
+    f.db.DoctorClinica.findAll = async options => (await readDoctors(options)).map(row => ({ ...row, agenda_flexible: row.doctor_id === 5 }));
+    return f;
+  };
+  const selections = { first: { doctor_id: 5, installation_id: 9 }, second: { doctor_id: 6, installation_id: 10 } };
+  const f = make(), options = { capabilities: relativeCapabilities, selections,
+    appointmentValues: { ...f.values, fin: relativeEnd, updated_by: 7 } };
+  await assert.rejects(f.reserve(options), error => error.code === 'booking_unavailable' && error.details.can_force === true);
+  assert.equal(f.state.persists, 0);
+  const saved = await f.reserve({ ...options, force: true });
+  assert.equal(saved.import_metadata.booking.capacity_fully_verified, true);
+  assert.equal(saved.import_metadata.booking.overlap_confirmed, true);
+  assert.equal(saved.import_metadata.booking.overlap_confirmed_by, 7);
+  assert.deepEqual(saved.import_metadata.booking.warnings.find(row => row.code === 'FLEXIBLE_AGENDA').reasons, ['staff_schedule']);
+  assert.equal(bookingSegments(saved).length, 2);
+  assert.deepEqual(f.state.occupancies.filter(row => row.resource_kind === 'doctor').map(row => [row.doctor_id, row.start_at, row.end_at]),
+    [[5, start, '2030-01-07T09:15:00.000Z'], [6, '2030-01-07T09:15:00.000Z', relativeEnd]]);
+  const support = make();
+  await assert.rejects(support.reserve({ ...options, appointmentValues: { ...support.values, fin: relativeEnd }, force: true, additionalStaffIds: [6] }),
+    error => error.code === 'booking_unavailable' && error.details.can_force === false);
+  assert.equal(support.state.persists, 0);
+  const off = make();
+  await assert.rejects(off.reserve({ ...options, capabilities: { ...relativeCapabilities, relativeSteps: false }, force: true }),
+    { code: 'booking_profile_runtime_unavailable' });
+  assert.equal(off.state.persists, 0);
+});
+
+test('canonical v4 sharing fits three patients with the same initial 15-minute window and protects the fourth', async () => {
+  const f = fixture({ bookingProfile: sharedPreparationProfile() });
+  for (const [index, room] of [9, 10, 12].entries()) await f.reserve({ capabilities: relativeCapabilities,
+    appointmentValues: { ...f.values, paciente_id: index + 1 }, selections: { prepare: { installation_id: room } } });
+  const intervals = f.state.occupancies.filter(row => row.resource_kind === 'doctor');
+  assert.deepEqual(intervals.map(row => [row.start_at, row.end_at]), [[start, '2030-01-07T09:05:00.000Z'],
+    ['2030-01-07T09:05:00.000Z', '2030-01-07T09:10:00.000Z'], ['2030-01-07T09:10:00.000Z', '2030-01-07T09:15:00.000Z']]);
+  assert(f.state.appointments.every(row => bookingSegments(row)[0].preparation_sharing.mode === 'same_start'));
+  await assert.rejects(f.reserve({ capabilities: relativeCapabilities, appointmentValues: { ...f.values, paciente_id: 4 },
+    selections: { prepare: { installation_id: 13 } }, force: true }), { code: 'booking_unavailable' });
+  assert.equal(f.state.appointments.length, 3);
+  assert(f.state.occupancies.filter(row => row.resource_kind === 'installation').every(row => row.start_at === start && row.end_at === end));
+});
+
+test('v4 origin verification fails closed on unknown, forged or incomplete staff snapshots', async () => {
+  for (const corrupt of [row => { delete row.import_metadata.booking; },
+    row => { delete row.import_metadata.booking.capacity_fully_verified; },
+    row => { delete row.import_metadata.booking.phases[0].preparation_sharing; },
+    row => { row.import_metadata.booking.phases[0].staff_intervals[0].end_at = end; }]) {
+    const f = fixture({ bookingProfile: sharedPreparationProfile() });
+    const first = await f.reserve({ capabilities: relativeCapabilities }); corrupt(first);
+    await assert.rejects(f.reserve({ capabilities: relativeCapabilities, appointmentValues: { ...f.values, paciente_id: 2 },
+      selections: { prepare: { installation_id: 10 } }, force: true }), { code: 'booking_unavailable' });
+    assert.equal(f.state.appointments.length, 1);
+  }
+});
+
+test('bulk reads source visit overlap even when a secondary clinician preparation finished before the query', async () => {
+  const sourceProfile = normalizeBookingProfile({ version: 4, phases: [
+    { ...phase('other_clinician', [10], [6]), duration_minutes: 15, start_offset_minutes: 15 },
+    { ...phase('initial', [9], [5]), start_offset_minutes: 0,
+      staff_attention: [{ mode: 'start_only', start_minutes: 5, start_window_minutes: 15 }], preparation_sharing: { mode: 'same_start' } },
+  ] });
+  const sourceSolution = solveBookingProfile({ profile: sourceProfile, start, doctors: new Map([[5, free()], [6, free()]]),
+    installations: new Map([[9, free()], [10, free()]]) });
+  const source = { id_cita: 44, clinica_id: 72, paciente_id: 10, doctor_id: 6, instalacion_id: 10, estado: 'pendiente', inicio: start, fin: end,
+    import_metadata: { booking: { version: 1, profile: sourceProfile, phases: sourceSolution.phases,
+      capacity_fully_verified: true, attention_requirements_pending: [] } } };
+  const targetProfile = sharedPreparationProfile(); targetProfile.phases[0].installation_ids = [12];
+  const rows = occupancyForSolution(sourceSolution).map(row => ({ ...row, appointment_id: 44 }));
+  const f = fixture({ bookingProfile: targetProfile, appointments: [source], occupancies: rows });
+  const later = new Date('2030-01-07T09:10:00Z'), finish = new Date('2030-01-07T09:40:00Z');
+  const context = await loadBookingContext({ db: f.db, clinic: f.clinic, profile: targetProfile, start: later, end: finish, occupancyEnabled: true });
+  assert.equal(context.doctors.get(5).attention_visits.length, 1);
+  assert.equal(context.doctors.get(5).attention_visits[0].verified, true);
+  assert(context.doctors.get(5).busy.every(row => new Date(row.end) <= later));
+  assert.equal(solveBookingProfile({ profile: targetProfile, start: later, ...context }), null);
+  assert.equal(f.state.calls.filter(([name]) => name === 'occupancies').length, 1);
+  const include = f.state.calls.find(([name]) => name === 'occupancies')[1].include[0];
+  assert(include.attributes.some(attribute => Array.isArray(attribute) && attribute[1] === 'booking_attention_snapshot'));
+  assert(!include.attributes.includes('import_metadata')); assert(!include.attributes.includes('nota')); assert(!include.attributes.includes('paciente_id'));
+  // An old writer cannot use this v4 source's preparation-only occupancy as
+  // permission. Existing v1–3-to-v1–3 behaviour remains covered separately.
+  const old = profile(phase('old', [12], [5]));
+  const oldContext = await loadBookingContext({ db: f.db, clinic: f.clinic, profile: old, start: later, end: finish, occupancyEnabled: true });
+  assert.equal(solveBookingProfile({ profile: old, start: later, ...oldContext, allowOverlap: true }), null);
+});
+
+test('legacy destinations cannot force or fall through verified, pending or malformed v4 source visits', async () => {
+  const base = fixture({ bookingProfile: sharedPreparationProfile() });
+  const saved = await base.reserve({ capabilities: relativeCapabilities });
+  const later = '2030-01-07T09:10:00.000Z', finish = '2030-01-07T09:40:00.000Z';
+  const changes = [() => {}, row => { row.import_metadata.booking.capacity_fully_verified = false; },
+    row => { delete row.import_metadata.booking.capacity_fully_verified; },
+    row => { row.import_metadata.booking.attention_requirements_pending = [{ key: 'check', label: 'Pendiente' }]; },
+    row => { row.import_metadata.booking.profile.phases[0].start_offset_minutes = 7; },
+    row => { row.import_metadata.booking.phases[0].staff_intervals[0].end_at = end; }];
+  for (const version of [null, 1, 3]) for (const segmented of [true, false]) for (const change of changes) {
+    const source = structuredClone(saved); source.paciente_id = 88; change(source);
+    // Neither a free-form key nor stale client flags can cancel server evidence.
+    source.import_metadata.protected_attention_origin = false;
+    const p = version == null ? null : { ...profile(phase('legacy', [10], [5])), version };
+    const f = fixture({ bookingProfile: p, appointments: [source], occupancies: segmented ? base.state.occupancies : [] });
+    const read = f.db.DoctorClinica.findAll;
+    f.db.DoctorClinica.findAll = async args => (await read(args)).map(row => ({ ...row, agenda_flexible: true }));
+    const options = { appointmentValues: { ...f.values, instalacion_id: 10, inicio: later, fin: finish },
+      selections: { legacy: { doctor_id: 5, installation_id: 10 } }, force: true };
+    await assert.rejects(f.reserve(options), error => error.code === 'booking_unavailable' && error.details.can_force === false);
+    assert.equal(f.state.persists, 0); assert.equal(f.state.appointments.length, 1);
+    const pForContext = p || profile(phase('legacy', [10], [5]));
+    const context = await loadBookingContext({ db: f.db, clinic: f.clinic, profile: pForContext,
+      start: new Date(later), end: new Date(finish), occupancyEnabled: true });
+    assert(context.doctors.get(5).busy.some(row => row.protected_attention_origin === true
+      && +new Date(row.start) === +new Date(start) && +new Date(row.end) === +new Date(end)));
+    const query = f.state.calls.find(([name, args]) => name === 'appointments' && args.attributes?.includes('source_system'))[1];
+    assert(query.attributes.some(attribute => Array.isArray(attribute) && attribute[1] === 'booking_attention_snapshot'));
+    assert(!query.attributes.includes('import_metadata'));
+  }
+});
+
+test('a protected v4 source does not disable normal cancellation exclusion or legacy-to-legacy flexibility', async () => {
+  const base = fixture({ bookingProfile: sharedPreparationProfile() });
+  const saved = await base.reserve({ capabilities: relativeCapabilities });
+  for (const source of [{ ...saved, estado: 'cancelada' }, { ...saved, import_metadata: { protected_attention_origin: true,
+    booking: { profile: profile(phase('legacy_source')) } } }]) {
+    const p = profile(phase('legacy', [10], [5]));
+    const f = fixture({ bookingProfile: p, appointments: [source], occupancies: base.state.occupancies });
+    const read = f.db.DoctorClinica.findAll;
+    f.db.DoctorClinica.findAll = async args => (await read(args)).map(row => ({ ...row, agenda_flexible: true }));
+    const later = '2030-01-07T09:01:00.000Z', finish = '2030-01-07T09:31:00.000Z';
+    const result = await f.reserve({ appointmentValues: { ...f.values, paciente_id: 2, instalacion_id: 10, inicio: later, fin: finish },
+      selections: { legacy: { doctor_id: 5, installation_id: 10 } }, force: true });
+    assert(result); assert.equal(f.state.persists, 1);
+  }
+});
+
+test('source v4 protection survives legacy fallback and never turns an occupied primary into an absence', async () => {
+  const base = fixture({ bookingProfile: sharedPreparationProfile() });
+  const saved = await base.reserve({ capabilities: relativeCapabilities });
+  const later = new Date('2030-01-07T09:10:00.000Z'), finish = new Date('2030-01-07T09:40:00.000Z');
+  for (const verified of [true, false]) for (const rule of ['legacy', 'absence_only', 'unavailable']) {
+    const source = structuredClone(saved); source.import_metadata.booking.capacity_fully_verified = verified;
+    const p = rule === 'legacy' ? profile(phase('target', [10], [5, 6])) : fallbackProfile(rule);
+    p.phases[0].installation_ids = [10];
+    const f = fixture({ bookingProfile: p, appointments: [source], occupancies: base.state.occupancies });
+    const context = await loadBookingContext({ db: f.db, clinic: f.clinic, profile: p, start: later, end: finish, occupancyEnabled: true });
+    const options = { profile: p, start: later, ...context };
+    const result = solveBookingProfile(options);
+    if (rule === 'absence_only') assert.equal(result, null);
+    else {
+      assert.deepEqual(result.phases[0].doctor_ids, [6]);
+      assert.equal(result.warnings.find(row => row.code === 'NON_PREFERRED_PROFESSIONAL').preferred_available, false);
+    }
+    context.doctors.get(5).agenda_flexible = true;
+    assert.equal(solveBookingProfile({ ...options, selections: { [p.phases[0].key]: { doctor_id: 5, installation_id: 10 } }, allowOverlap: true }), null);
+  }
+});
+
+test('v4 canonical transaction freezes relative steps without degrading to v3 or summing overlapping durations', async () => {
+  const p = relativeProfile(), f = fixture({ bookingProfile: p });
+  const saved = await f.reserve({ capabilities: relativeCapabilities, appointmentValues: { ...f.values, fin: relativeEnd } });
+  assert.equal(saved.import_metadata.booking.profile.version, 4);
+  assert.equal(saved.import_metadata.booking.capacity_fully_verified, true);
+  assert.equal(saved.fin, relativeEnd);
+  assert.equal(f.state.appointments.length, 1);
+  assert.equal(f.state.occupancies.length, 4);
+  assert.deepEqual(f.state.occupancies.filter(row => row.resource_kind === 'doctor').map(row => [row.doctor_id, row.start_at, row.end_at]),
+    [[5, start, end], [6, '2030-01-07T09:15:00.000Z', relativeEnd]]);
+  const segments = bookingSegments(saved);
+  assert.equal(segments.length, 2);
+  assert.deepEqual(segments.map(row => row.start_offset_minutes), [0, 15]);
+  assert(segments.every(row => row.booking_profile_version === 4 && row.capacity_fully_verified));
+  assert.deepEqual(f.state.locks.map(([, key]) => key), ['doctor:5', 'doctor:6', 'installation:10', 'installation:9', 'patient:1']);
+});
+
+test('v4 snapshot survives reprogramming, cancellation and reactivation without adopting a changed catalogue', async () => {
+  const p = relativeProfile(), f = fixture({ bookingProfile: p });
+  const saved = await f.reserve({ capabilities: relativeCapabilities, appointmentValues: { ...f.values, fin: relativeEnd } });
+  const frozen = structuredClone(saved.import_metadata.booking.profile);
+  p.phases[0].duration_minutes = 90; // Changes the catalogue mock, not the saved contract.
+  const moved = await f.reserve({ capabilities: relativeCapabilities, existingAppointmentId: saved.id_cita,
+    appointmentValues: { inicio: '2030-01-07T11:00:00.000Z', fin: '2030-01-07T11:45:00.000Z' } });
+  assert.deepEqual(moved.import_metadata.booking.profile, frozen);
+  assert.equal(bookingSegments(moved)[1].start_at, '2030-01-07T11:15:00.000Z');
+  const beforeRows = structuredClone(f.state.occupancies);
+  const canceled = await f.reserve({ existingAppointmentId: saved.id_cita, appointmentValues: { estado: 'cancelada' } });
+  assert.deepEqual(canceled.import_metadata.booking.profile, frozen);
+  assert.deepEqual(f.state.occupancies, beforeRows, 'Cancellation retains provenance and releases by canonical status');
+  await assert.rejects(f.reserve({ existingAppointmentId: saved.id_cita, appointmentValues: { estado: 'pendiente' } }),
+    { code: 'booking_profile_runtime_unavailable' });
+  assert.equal(f.state.appointments[0].estado, 'cancelada');
+  const reopened = await f.reserve({ capabilities: relativeCapabilities, existingAppointmentId: saved.id_cita, appointmentValues: { estado: 'pendiente' } });
+  assert.deepEqual(reopened.import_metadata.booking.profile, frozen);
+  assert.equal(bookingSegments(reopened).length, 2);
+  assert.equal(f.state.occupancies.length, 4);
+});
+
+test('v4 projection fails closed on forged offsets, span, scope, attention and partial validation', async () => {
+  const f = fixture({ bookingProfile: relativeProfile() });
+  const saved = await f.reserve({ capabilities: relativeCapabilities, appointmentValues: { ...f.values, fin: relativeEnd } });
+  for (const mutation of [
+    row => row.import_metadata.booking.phases[1].start_offset_minutes = 10,
+    row => row.import_metadata.booking.profile.phases[1].start_offset_minutes = 20,
+    row => row.import_metadata.booking.phases[1].start_at = end,
+    row => row.fin = '2030-01-07T10:00:00.000Z',
+    row => row.import_metadata.booking.phases[0].staff_time_scope = 'appointment',
+    row => delete row.import_metadata.booking.phases[0].staff_intervals,
+    row => row.import_metadata.booking.capacity_fully_verified = false,
+    row => delete row.import_metadata.booking.capacity_fully_verified,
+    row => row.import_metadata.booking.capacity_fully_verified = 'true',
+  ]) {
+    const altered = structuredClone(saved); mutation(altered);
+    assert.deepEqual(bookingSegments(altered), []);
+  }
+});
+
+test('v4 writes remain gated and clinically pending requirements cannot be forged or forced', async () => {
+  const f = fixture({ bookingProfile: relativeProfile() });
+  await assert.rejects(f.reserve({ appointmentValues: { ...f.values, fin: relativeEnd } }), { code: 'booking_profile_runtime_unavailable' });
+  assert.equal(f.state.persists, 0);
+  const p = relativeProfile(); p.phases[0].attention_requirements_pending = [{ key: 'mid_check', label: 'Duración y ventana pendientes.' }];
+  const pending = fixture({ bookingProfile: p });
+  await assert.rejects(pending.reserve({ capabilities: relativeCapabilities, force: true,
+    appointmentValues: { ...pending.values, fin: relativeEnd, import_metadata: { booking: { capacity_fully_verified: true } } } }),
+  { code: 'pending_attention_requirements' });
+  assert.equal(pending.state.persists, 0); assert.equal(pending.state.appointments.length, 0); assert.equal(pending.state.occupancies.length, 0);
+});
+
+test('v4 transaction rollback and concurrent writers protect the complete visit', async () => {
+  const failed = fixture({ bookingProfile: relativeProfile(), failOccupancy: true });
+  await assert.rejects(failed.reserve({ capabilities: relativeCapabilities, appointmentValues: { ...failed.values, fin: relativeEnd } }),
+    /offline simulated occupancy failure/);
+  assert.equal(failed.state.appointments.length, 0); assert.equal(failed.state.occupancies.length, 0); assert.equal(failed.state.commits, 0);
+  const f = fixture({ bookingProfile: relativeProfile() });
+  const options = { capabilities: relativeCapabilities, appointmentValues: { ...f.values, fin: relativeEnd } };
+  const results = await Promise.allSettled([f.reserve(options), f.reserve(options)]);
+  assert.equal(results.filter(row => row.status === 'fulfilled').length, 1);
+  assert.equal(results.find(row => row.status === 'rejected').reason.code, 'booking_unavailable');
+  assert.equal(f.state.appointments.length, 1); assert.equal(f.state.occupancies.length, 4);
+});
+
+test('v4 treatment slot search returns the same span and phases as canonical booking', async () => {
+  const f = fixture({ bookingProfile: relativeProfile() });
+  const result = await searchTreatmentSlots({ db: f.db, clinic: f.clinic, treatmentId: 3, date: '2030-01-07', days: 1,
+    stepMinutes: 15, limit: 5, now: new Date('2030-01-06T00:00:00Z'), capabilities: relativeCapabilities });
+  assert.equal(result.duration_minutes, 45);
+  assert.equal(result.slots.length, 5);
+  assert(result.slots.every(slot => +new Date(slot.end_at) - +new Date(slot.start_at) === 45 * 60000 && slot.phases.length === 2));
+  assert.equal(f.state.appointments.length, 0); assert.equal(f.state.persists, 0);
+});
+
 test('flags are closed by default; incomplete rollout cannot create advanced bookings', () => {
-  assert.deepEqual(bookingCapabilities({}), { simple: false, multi: false });
+  assert.deepEqual(bookingCapabilities({}), { simple: false, multi: false, relativeSteps: false });
   const treatment = { clinical_config: { booking_profile: profile(phase('one'), phase('two')) } };
   assert.throws(() => requireOperationalProfile(treatment, { capabilities: { simple: true, multi: false } }), { code: 'booking_profile_runtime_unavailable' });
 });
@@ -517,7 +844,7 @@ test('cancellation retains the trusted profile but releases capacity; reactivati
 test('legacy creation strips forged booking snapshots while preserving unrelated provenance', async () => {
   const f = fixture({ bookingProfile: null });
   const created = await f.reserve({ appointmentValues: { ...f.values, import_metadata: { source_batch: 'synthetic', booking: { version: 1, forged: true } } } });
-  assert.deepEqual(created.import_metadata, { source_batch: 'synthetic' });
+  assert.equal(created.import_metadata, null, 'HTTP/generic creation cannot claim import provenance');
   assert.deepEqual(bookingSegments({ id_cita: 1, import_metadata: { booking: { version: 1, phases: [phase('fake')] } } }), []);
 });
 
@@ -602,6 +929,27 @@ function equipmentFixture(overrides = {}) {
     equipment: [machine()], equipmentClinics: [{ equipment_id: 1, clinic_id: 72 }],
     roomPolicies: [{ installation_id: 9, mode: 'all' }], ...overrides });
 }
+
+test('legacy flexible machinery bookings preserve v4 unit occupancy independently of doctor and room', async () => {
+  const p = { version: 4, phases: [{ ...machinePhase(), start_offset_minutes: 0 }] };
+  const original = equipmentFixture({ bookingProfile: p });
+  const saved = await original.reserve({ capabilities: { ...eqCaps, relativeSteps: true } });
+  for (const change of [() => {}, row => { row.import_metadata.booking.capacity_fully_verified = false; },
+    row => { row.import_metadata.booking.phases = []; }]) {
+    const source = structuredClone(saved); source.paciente_id = 88; change(source);
+    const f = equipmentFixture({ bookingProfile: { version: 2, phases: [machinePhase(10, 6)] },
+      appointments: [source], occupancies: original.state.occupancies, roomPolicies: [{ installation_id: 10, mode: 'all' }] });
+    const read = f.db.DoctorClinica.findAll;
+    f.db.DoctorClinica.findAll = async args => (await read(args)).map(row => ({ ...row, agenda_flexible: true }));
+    const context = await loadBookingContext({ db: f.db, clinic: f.clinic, profile: { version: 2, phases: [machinePhase(10, 6)] },
+      start: new Date(start), end: new Date(end), occupancyEnabled: true, equipmentEnabled: true });
+    assert(context.equipment.get(1).busy.every(row => row.protected_attention_origin === true));
+    await assert.rejects(f.reserve({ capabilities: eqCaps, appointmentValues: { ...f.values, doctor_id: 6, instalacion_id: 10 },
+      selections: { machine: { doctor_id: 6, installation_id: 10 } }, force: true }),
+    error => error.code === 'booking_unavailable' && error.details.can_force === false);
+    assert.equal(f.state.persists, 0);
+  }
+});
 
 test('equipment is opt-in: no machine SQL for psychology, even in an equipped clinic', async () => {
   for (const enabled of [false, true]) {

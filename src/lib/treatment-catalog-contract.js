@@ -41,6 +41,7 @@ function mergeClinicalConfig(previous, patch) {
   else delete result.imported_price_review;
   if (previous?.historical_reference) result.historical_reference = previous.historical_reference;
   if (result.catalog_status != null && !STATUSES.has(result.catalog_status)) throw catalogError('Estado de catálogo no válido.');
+  if (Object.hasOwn(result, 'booking_visibility')) result.booking_visibility = require('./treatment-booking-visibility').normalizeBookingVisibility(result.booking_visibility);
   if (result.catalog_badge != null) {
     if (typeof result.catalog_badge !== 'string' || result.catalog_badge.trim().length > 32 || /[\u0000-\u001f\u007f]/.test(result.catalog_badge)) {
       throw catalogError('La etiqueta debe ser un texto de hasta 32 caracteres.', 'invalid_catalog_badge');
@@ -51,7 +52,11 @@ function mergeClinicalConfig(previous, patch) {
   }
   if (result.price_profile != null) result.price_profile = require('./economicPriceProfile').normalizeProfile(result.price_profile);
   if (result.booking_profile != null) {
-    result.booking_profile = normalizeBookingProfile(result.booking_profile, { allowIncomplete: result.catalog_status === 'draft' });
+    // A draft may defer resources. An operative template may defer only its
+    // duration, using the same strict physical contract as the booking writer.
+    result.booking_profile = result.catalog_status === 'draft'
+      ? normalizeBookingProfile(result.booking_profile, { allowIncomplete: true })
+      : require('./program-booking').normalizeProgramProfile(result.booking_profile, { allowMissingDuration: true });
   }
   const commercial = require('./treatment-commercial-policy').mergeCommercialConfig(previous, result);
   return Object.keys(commercial).length ? commercial : null;
@@ -94,8 +99,9 @@ function catalogState(treatment) {
   if (status !== 'active' || treatment?.activo === false) reasons.push(status);
   if (config.booking_profile) {
     try {
-      const profile = normalizeBookingProfile(config.booking_profile);
+      const profile = require('./program-booking').normalizeProgramProfile(config.booking_profile, { allowMissingDuration: true });
       if (requiresMultiResourceBooking(profile)) reasons.push('advanced_booking_required');
+      if (require('./booking-profile-duration').durationRequirements(profile).required) reasons.push('booking_duration_required');
     } catch (_) { reasons.push('incomplete_booking_profile'); }
   }
   return { status, editable: status !== 'obsolete', booking_ready: reasons.length === 0, booking_issues: reasons };
@@ -127,7 +133,14 @@ function catalogDto(treatment) { const value = treatment?.toJSON ? treatment.toJ
     ? { ...cfg, historical_reference: { version: cfg?.historical_reference?.version, nonbillable: true,
       required_clinical_document_review: cfg?.historical_reference?.required_clinical_document_review !== false,
       clinical_approval_inferred: false } } : cfg;
-  return { ...value, clinical_config, catalog_price: component_policy.sale_mode === 'program_component_only'
+  let duration_requirements;
+  if (component_policy.sale_mode !== 'historical_reference' && cfg?.booking_profile) {
+    try {
+      const template = require('./program-booking').normalizeProgramProfile(cfg.booking_profile, { allowMissingDuration: true });
+      duration_requirements = require('./booking-profile-duration').durationRequirements(template);
+    } catch { /* An incomplete draft is not a validated physical template. */ }
+  }
+  return { ...value, clinical_config, ...(duration_requirements ? { duration_requirements } : {}), catalog_price: component_policy.sale_mode === 'program_component_only'
     ? { amount: null, label: 'Incluido en programas · no se vende por separado', semantics: 'included_in_program', review_required: component_policy.requires_component_approval }
     : catalogPrice(value), standalone_sellable: component_policy.sale_mode === 'standalone', component_policy };
 }

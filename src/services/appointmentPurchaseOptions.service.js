@@ -13,7 +13,8 @@ function createAppointmentPurchaseOptions({ db = require('../../models'), econom
     const [appointments, consumptions, started] = await Promise.all([
       ids.length ? db.CitaPaciente.findAll({ where: { voucher_id: { [Op.in]: ids }, clinica_id: clinicId, paciente_id: patient.id_paciente, ...activeAppointmentWhere(Op) }, attributes: ['id_cita', 'voucher_id'] }) : [],
       ids.length ? db.PatientVoucherMovement.findAll({ where: { voucher_id: { [Op.in]: ids }, movement_type: 'consumption' }, attributes: ['voucher_id', 'appointment_id'] }) : [],
-      db.CitaPaciente.findAll({ where: { clinica_id: clinicId, paciente_id: patient.id_paciente, tratamiento_id: { [Op.ne]: null }, [Op.or]: [{ estado: 'completada' }, { care_started_at: { [Op.ne]: null } }] }, attributes: ['tratamiento_id'], group: ['tratamiento_id'], raw: true }),
+      db.CitaPaciente.findAll({ where: require('../lib/treatment-booking-visibility').initiatedTreatmentWhere(Op, {
+        clinicId, patientId: patient.id_paciente, now: now() }), attributes: ['tratamiento_id'], group: ['tratamiento_id'], raw: true }),
     ]);
     const items = [];
     for (const voucher of vouchers) {

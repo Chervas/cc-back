@@ -8,8 +8,21 @@ const models = () => require('../../models');
 const stopped = code => Object.assign(Error(code || STOP_REASON), {
   code: code || STOP_REASON, retryable: false, preserveFlowState: true,
 });
-const isStop = error => [STOP_REASON, 'automation_execution_stopped'].includes(error?.code);
+const isStop = error => [STOP_REASON, 'automation_execution_stopped', 'synthetic_communication_forbidden'].includes(error?.code);
 const simulation = execution => execution?.context?.__simulation === true;
+
+async function assertExecutionNotSynthetic(execution, transaction) {
+  const { assertNoSyntheticDispatch } = require('./appointment-synthetic-guard');
+  assertNoSyntheticDispatch(execution);
+  if (execution?.trigger_entity_type === 'appointment') {
+    const appointment = await models().CitaPaciente.findByPk(execution.trigger_entity_id, {
+      attributes: ['id_cita', 'import_metadata'], raw: true, transaction,
+    });
+    // Existing execution/scope gates remain authoritative for missing rows.
+    // A freshly marked QA appointment must also stop an already queued message.
+    assertNoSyntheticDispatch(appointment);
+  }
+}
 
 function familyWhere(template) {
   return {
@@ -119,12 +132,15 @@ async function assertMessageCanDispatch(messageId) {
   if (!messageId) return;
   const db = models();
   const message = await db.Message.findByPk(messageId);
+  require('./appointment-synthetic-guard').assertNoSyntheticDispatch(message);
   const metadata = message?.metadata || {};
   if (!['automations_v2', 'automation_v2'].includes(metadata.source) || !metadata.execution_id) return;
   if (metadata.cancelled || metadata.cancellation_reason === STOP_REASON) throw stopped();
   const execution = await db.FlowExecutionV2.findByPk(metadata.execution_id);
   if (!execution) throw stopped('automation_execution_stopped');
-  await assertExecutionActive(execution, undefined, { allowCompleted: true });
+  require('./appointment-synthetic-guard').assertNoSyntheticDispatch(execution);
+  const current = await assertExecutionActive(execution, undefined, { allowCompleted: true });
+  await assertExecutionNotSynthetic(current);
 }
 
 async function cancelMessage(messageId) {
@@ -139,14 +155,18 @@ async function cancelMessage(messageId) {
 }
 
 async function prepareMessageForDispatch(message, patch) {
+  require('./appointment-synthetic-guard').assertNoSyntheticDispatch(message, patch);
   const db = models(), metadata = message.metadata || {};
   return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
     if (['automations_v2', 'automation_v2'].includes(metadata.source) && metadata.execution_id) {
       const execution = await db.FlowExecutionV2.findByPk(metadata.execution_id, { transaction });
       if (!execution) throw stopped('automation_execution_stopped');
-      await assertExecutionActive(execution, transaction, { allowCompleted: true });
+      require('./appointment-synthetic-guard').assertNoSyntheticDispatch(execution);
+      const currentExecution = await assertExecutionActive(execution, transaction, { allowCompleted: true });
+      await assertExecutionNotSynthetic(currentExecution, transaction);
     }
     const current = await db.Message.findByPk(message.id, { transaction, lock: transaction.LOCK.UPDATE });
+    require('./appointment-synthetic-guard').assertNoSyntheticDispatch(current);
     if (!current || current.metadata?.cancelled || current.metadata?.cancellation_reason === STOP_REASON) throw stopped();
     await current.update({ ...patch, metadata: { ...(current.metadata || {}), ...(patch.metadata || {}) } }, { transaction });
     await message.reload({ transaction });
@@ -157,11 +177,14 @@ async function prepareMessageForDispatch(message, patch) {
 }
 
 async function assertEmailCanDispatch(message) {
+  require('./appointment-synthetic-guard').assertNoSyntheticDispatch(message);
   if (message?.related_type !== 'flow_execution_v2') return;
   if (message.status === 'cancelled' || message.last_error_code === STOP_REASON) throw stopped();
   const execution = await models().FlowExecutionV2.findByPk(Number(message.related_id));
   if (!execution) throw stopped('automation_execution_stopped');
-  await assertExecutionActive(execution, undefined, { allowCompleted: true });
+  require('./appointment-synthetic-guard').assertNoSyntheticDispatch(execution);
+  const current = await assertExecutionActive(execution, undefined, { allowCompleted: true });
+  await assertExecutionNotSynthetic(current);
 }
 
 async function stopExecution(execution) {

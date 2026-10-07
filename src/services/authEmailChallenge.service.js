@@ -1,6 +1,6 @@
 'use strict';
 const { randomUUID, randomBytes, randomInt } = require('node:crypto');
-const { Op } = require('sequelize');
+const { Op, Transaction } = require('sequelize');
 const C = require('./authEmailChallenge.contract');
 const sessionsApi = require('./accessSession.service');
 const FIELDS = ['id_usuario', 'email_usuario', 'password_usuario', 'estado_cuenta', 'es_provisional',
@@ -67,7 +67,8 @@ function createService({ models, sessions, trustedDevices, audit, queueEmail, co
   }
   const begin = user => finish(async () => {
     const cfg = enabled();
-    return db().sequelize.transaction(async transaction => {
+    // The user row serializes this account without locking unrelated users' challenge-index gaps.
+    return db().sequelize.transaction({ isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED }, async transaction => {
       const fresh = await db().Usuario.findByPk(user.id_usuario, { attributes: FIELDS, transaction, lock: transaction.LOCK.UPDATE });
       if (!sessionsApi.activeUser(fresh) || credentialBinding(fresh) !== credentialBinding(user)) C.fail();
       await capacity(transaction);
@@ -97,7 +98,7 @@ function createService({ models, sessions, trustedDevices, audit, queueEmail, co
     await capacity();
     const hint = await db().AuthEmailChallenge.findOne({ attributes: ['challenge_id', 'user_id'], where: { challenge_hash: hash }, raw: true, logging: false });
     if (!hint) { await record({ outcome: 'denied', reason: 'challenge_rejected' }); return resultError('auth_email_invalid'); }
-    return db().sequelize.transaction(async transaction => {
+    return db().sequelize.transaction({ isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED }, async transaction => {
       // Same order as every session issuer/revoker: user, then proof/session.
       const user = await db().Usuario.findByPk(hint.user_id, { attributes: FIELDS, transaction, lock: transaction.LOCK.UPDATE });
       const row = await db().AuthEmailChallenge.findByPk(hint.challenge_id, { transaction, lock: transaction.LOCK.UPDATE });
