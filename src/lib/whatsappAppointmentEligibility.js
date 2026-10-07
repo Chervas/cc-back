@@ -19,11 +19,12 @@ function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, 
   const operations = require('./whatsappImportedAppointmentOperations');
   const legacyReleased = require('./whatsappImportedReminderRelease').permits(a, { execution: e, now });
   const operationalReleased = operations.permits(a, { execution: e, now });
-  const released = legacyReleased || operationalReleased;
+  const sameDayRecovered = require('./whatsappSameDayRecovery').permits(a, { execution: e, templateName, now });
+  const released = legacyReleased || operationalReleased || sameDayRecovered;
   const overrideDefaults = operationalReleased && operations.allowsSuppressionOverride(a, { now });
   if ((a.source_system || a.source_reference || importHeld(a.import_metadata)) && !released) fail('whatsapp_appointment_import_held');
   const reminder = /^clinicaclick_recordatorio_(dia_antes|mismo_dia)(?:_|$)/.exec(templateName || '');
-  if ((released || patientHoldOverride) && (reminder?.[1] === 'mismo_dia'
+  if (!sameDayRecovered && (released || patientHoldOverride) && (reminder?.[1] === 'mismo_dia'
     || e.trigger_type === 'appointment_reminder_window' && e.context?.trigger?.schedule_moment === 'same_day')) fail('whatsapp_appointment_suppressed');
   const appointmentData = /^clinicaclick_confirmacion_datos_cita_(?:reprogramada_)?(?:hoy|24|48)(?:_|$)/.test(templateName || '');
   if (!reminder && !appointmentData && !confirmationTimeout) return true; // Cancellation acknowledgements retain their existing flow.
@@ -39,7 +40,7 @@ function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, 
   // info_confirmada only confirms appointment details. Attendance is a separate state.
   if (before && a.estado === 'recordatorio_confirmado') fail('whatsapp_appointment_already_confirmed');
   if (day(start) !== day(now + (before ? 86400000 : 0))) fail('whatsapp_appointment_wrong_day');
-  if (before ? !legacyReleased && !overrideDefaults && (suppression.day_before || suppression.dayBefore) : suppression.same_day || suppression.sameDay) fail('whatsapp_appointment_suppressed');
+  if (before ? !legacyReleased && !overrideDefaults && (suppression.day_before || suppression.dayBefore) : !sameDayRecovered && (suppression.same_day || suppression.sameDay)) fail('whatsapp_appointment_suppressed');
   return true;
 }
 async function assertAutomatedMessageEligibility({ message, conversation, payload, loadExecution, loadAppointment, patientHeld, getReceptionState }) {
@@ -64,7 +65,9 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
   const appointment = await loadAppointment(execution.trigger_entity_id);
   assertNoSyntheticDispatch(appointment);
   const released = require('./whatsappImportedReminderRelease').permits(appointment, { execution })
-    || require('./whatsappImportedAppointmentOperations').permitsPatientHoldOverride(appointment, { execution });
+    || require('./whatsappImportedAppointmentOperations').permitsPatientHoldOverride(appointment, { execution })
+    || require('./whatsappSameDayRecovery').permits(appointment, { execution,
+      templateName: payload?.type === 'template' ? payload.template?.name : m.template_name || m.fallback_template_name });
   const appointmentPatientHeld = held || !patientId && appointment?.paciente_id && await patientHeld(Number(appointment.paciente_id));
   if (appointmentPatientHeld && String(m.communication_scope || '').trim().toLowerCase() === 'marketing') fail('whatsapp_patient_import_held');
   if (appointmentPatientHeld && !released) fail('whatsapp_patient_import_held');

@@ -167,6 +167,8 @@ function shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig = nul
   const config = triggerConfig || {};
   const scheduleMoment = cleanString(config.schedule_moment || 'day_before').toLowerCase() || 'day_before';
   if (scheduleMoment === 'same_day'
+    && require('../lib/whatsappSameDayRecovery').allowsAppointment(cita)) return false;
+  if (scheduleMoment === 'same_day'
     && require('../lib/whatsappImportedAppointmentOperations').allowsAppointment(cita)) return true;
   if (scheduleMoment === 'same_day') return suppression.same_day === true;
   if (scheduleMoment === 'day_before') return suppression.day_before === true;

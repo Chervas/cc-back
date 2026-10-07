@@ -14,6 +14,7 @@ function fixture(){
  const c={module:{exports:{}},Date,Intl,require:name=>{
   if(name==='./appointment-synthetic-guard')return require('../../lib/appointment-synthetic-guard');
   if(name==='./whatsappImportedReminderRelease')return {...release,permits:(a,o)=>release.permits(a,{...o,now:o?.now??now,policy})};
+  if(name==='./whatsappSameDayRecovery')return {permits:()=>false};
   if(name==='./whatsappImportedAppointmentOperations')return {permits:()=>false,permitsPatientHoldOverride:()=>false,allowsSuppressionOverride:()=>false};
   throw Error('unexpected_dependency');
  }};vm.createContext(c);vm.runInContext(fs.readFileSync(require.resolve('../../lib/whatsappAppointmentEligibility'),'utf8'),c);
@@ -47,6 +48,7 @@ test('patient hold is bypassed only for the exact released reminder execution, n
  const c={module:{exports:{}},Date:fakeDate,Intl,require:name=>{
   if(name==='./appointment-synthetic-guard')return require('../../lib/appointment-synthetic-guard');
   if(name==='./whatsappImportedReminderRelease')return {permits:(a,o)=>release.permits(a,{...o,policy:f.policy,now})};
+  if(name==='./whatsappSameDayRecovery')return {permits:()=>false};
   if(name==='./whatsappImportedAppointmentOperations')return {permits:()=>false,permitsPatientHoldOverride:()=>false,allowsSuppressionOverride:()=>false};throw Error(name);
  }};vm.createContext(c);vm.runInContext(fs.readFileSync(require.resolve('../../lib/whatsappAppointmentEligibility'),'utf8'),c);
  assert.equal(await c.module.exports.assertAutomatedMessageEligibility(input),true);
