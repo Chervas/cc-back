@@ -1,7 +1,7 @@
 'use strict';
 
 // Shared calendar semantics used by the public availability API and voucher series.
-const { buildHorarioExceptionMap, expandHorariosForDate } = require('./personal-schedule-recurring');
+const { buildHorarioExceptionMap, expandHorariosForDate, addDays } = require('./personal-schedule-recurring');
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const timeZoneFormatters = new Map();
 const dayIndexFromLocalDate = (value) => new Date(`${value}T12:00:00Z`).getUTCDay();
@@ -166,48 +166,62 @@ const buildWindowsFromHorarios = (horarios, dow, fechaLocal, timeZone) => {
   return base;
 };
 
+// The nearest two anchors are enough: earlier occurrences end earlier and
+// cannot extend the union on this date. This also handles long overlapping
+// daily/monthly spans without iterating every day since the original block.
+const bloqueoAnchorsForDate = (startDay, fechaLocal, recurrence) => {
+  if (fechaLocal < startDay) return [];
+  if (recurrence === 'daily') return [addDays(fechaLocal, -1), fechaLocal].filter(d => d >= startDay);
+  if (recurrence === 'weekly') {
+    const delta = (dayIndexFromLocalDate(fechaLocal) - dayIndexFromLocalDate(startDay) + 7) % 7;
+    const latest = addDays(fechaLocal, -delta);
+    return [addDays(latest, -7), latest].filter(d => d >= startDay);
+  }
+  if (recurrence !== 'monthly') return [];
+  const day = Number(startDay.slice(8, 10)), anchors = [];
+  const year = Number(fechaLocal.slice(0, 4)), month = Number(fechaLocal.slice(5, 7));
+  for (let offset = 0; anchors.length < 2 && offset < 15; offset++) {
+    const candidate = new Date(Date.UTC(year, month - 1 - offset, day));
+    const monthStart = new Date(Date.UTC(year, month - 1 - offset, 1));
+    if (candidate.getUTCMonth() !== monthStart.getUTCMonth()) continue;
+    const date = candidate.toISOString().slice(0, 10);
+    if (date > fechaLocal) continue;
+    if (date < startDay) break;
+    anchors.unshift(date);
+  }
+  return anchors;
+};
+
 const buildDoctorBloqueoRowsForDate = (bloqueos, fechaLocal, timeZone) => {
-  const targetDow = dayIndexFromLocalDate(fechaLocal);
+  const dayStart = localDateTimeToUtc(fechaLocal, '00:00', timeZone);
+  const dayEnd = localDateTimeToUtc(addDays(fechaLocal, 1), '00:00', timeZone);
+  if (!dayStart || !dayEnd) return [];
   return (bloqueos || []).flatMap((bloqueo) => {
     const exceptions = Array.isArray(bloqueo?.excepciones) ? bloqueo.excepciones : [];
-    const canceled = exceptions.some((row) => String(row?.fecha || '') === fechaLocal && row?.cancelado !== false);
-    if (canceled) return [];
-
-    const startDay = formatDateLocal(bloqueo.fecha_inicio, timeZone);
-    const endDay = formatDateLocal(bloqueo.fecha_fin, timeZone);
-    const startParts = formatPartsInTimeZone(bloqueo.fecha_inicio, timeZone);
-    const endParts = formatPartsInTimeZone(bloqueo.fecha_fin, timeZone);
-    const startHm = `${String(startParts.hour).padStart(2, '0')}:${String(startParts.minute).padStart(2, '0')}`;
-    const endHm = `${String(endParts.hour).padStart(2, '0')}:${String(endParts.minute).padStart(2, '0')}`;
+    const exception = exceptions.filter(row => String(row?.fecha || '') === fechaLocal)
+      .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0];
+    // Block exceptions cancel the selected calendar date, including interior
+    // dates of a recurring multi-day block.
+    if (exception && exception.cancelado !== false) return [];
+    const originalStart = new Date(bloqueo.fecha_inicio), originalEnd = new Date(bloqueo.fecha_fin);
+    if (!Number.isFinite(originalStart.getTime()) || !Number.isFinite(originalEnd.getTime()) || originalStart >= originalEnd) return [];
+    const startDay = formatDateLocal(originalStart, timeZone), endDay = formatDateLocal(originalEnd, timeZone);
+    const startParts = formatPartsInTimeZone(originalStart, timeZone), endParts = formatPartsInTimeZone(originalEnd, timeZone);
+    const hm = parts => `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
     const recurrente = String(bloqueo.recurrente || 'none');
-
-    let applies = false;
-    if (recurrente === 'none') {
-      applies = fechaLocal >= startDay && fechaLocal <= endDay;
-    } else if (recurrente === 'daily') {
-      applies = fechaLocal >= startDay;
-    } else if (recurrente === 'weekly') {
-      applies = fechaLocal >= startDay && targetDow === dayIndexFromLocalDate(startDay);
-    } else if (recurrente === 'monthly') {
-      applies = fechaLocal >= startDay && Number(fechaLocal.slice(8, 10)) === Number(startDay.slice(8, 10));
-    }
-    if (!applies) return [];
-
-    const occStartHm = recurrente === 'none'
-      ? (fechaLocal === startDay ? startHm : '00:00')
-      : startHm;
-    const occEndHm = recurrente === 'none'
-      ? (fechaLocal === endDay ? endHm : '23:59')
-      : endHm;
-    const start = localDateTimeToUtc(fechaLocal, occStartHm, timeZone);
-    const end = localDateTimeToUtc(fechaLocal, occEndHm, timeZone);
-    if (!start || !end || start >= end) return [];
-
-    return [{
-      ...bloqueo.toJSON?.() || bloqueo,
-      fecha_inicio: start,
-      fecha_fin: end,
-    }];
+    const spanDays = Math.max(0, Math.round((new Date(`${endDay}T12:00:00Z`) - new Date(`${startDay}T12:00:00Z`)) / 86400000));
+    const occurrences = recurrente === 'none' ? [{ start: originalStart, end: originalEnd }]
+      : bloqueoAnchorsForDate(startDay, fechaLocal, recurrente).map(anchor => ({
+        start: localDateTimeToUtc(anchor, hm(startParts), timeZone),
+        end: localDateTimeToUtc(addDays(anchor, spanDays), hm(endParts), timeZone),
+      }));
+    const clipped = occurrences.map(({ start, end }) => ({
+      start: new Date(Math.max(start?.getTime(), dayStart.getTime())),
+      end: new Date(Math.min(end?.getTime(), dayEnd.getTime())),
+    })).filter(({ start, end }) => Number.isFinite(start.getTime()) && Number.isFinite(end.getTime()) && start < end);
+    return mergeWindows(clipped).map(({ start, end }) => ({
+      ...bloqueo.toJSON?.() || bloqueo, fecha_inicio: start, fecha_fin: end,
+    }));
   });
 };
 

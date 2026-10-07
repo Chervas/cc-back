@@ -36,7 +36,7 @@ const {
 } = require('../lib/access-policy');
 const personalPresenceService = require('../services/personalPresence.service');
 const { withCalendarMutation, sendCalendarMutationError, assertDoctorIdentityMutable } = require('../services/appointmentCalendarMutation.service');
-const withDoctorCalendarMutation = (doctorId, mutate) => withCalendarMutation({ db: require('../../models'), doctorId, mutate });
+const withDoctorCalendarMutation = (doctorId, mutate) => withCalendarMutation({ protectLegacyAppointments: true, db: require('../../models'), doctorId, mutate });
 const {
     normalizeDateOnly,
     addDays,
@@ -46,7 +46,12 @@ const {
     expandHorariosForDate,
     expandHorariosForRange,
     matchesHorarioOnDate,
+    dayIndexFromDate,
+    removedHorarioIntervals,
+    horarioTransferFields,
 } = require('../lib/personal-schedule-recurring');
+
+const { buildDoctorBloqueoRowsForDate } = require('../lib/availability-calendar');
 
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 // Nota: columna DoctorBloqueos.tipo es STRING(32) (sin ENUM). Mantener lista alineada con el front.
@@ -387,14 +392,15 @@ function buildDateTime(dateOrIso, hm, fallbackHm, timeZone = DEFAULT_TIMEZONE) {
     const raw = String(dateOrIso).trim();
     const hasExplicitTz = /[Zz]$|[+-]\d{2}:\d{2}$/.test(raw);
     const localMatch = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2})?))?$/);
+    if (localMatch && !normalizeDateOnly(localMatch[1])) return null;
 
     if (hm) {
-        const day = localMatch ? localMatch[1] : raw.slice(0, 10);
+        const day = localMatch ? localMatch[1] : (hasExplicitTz ? toDay(raw, timeZone) : raw.slice(0, 10));
         return localDateTimeToUtc(day, `${hm}:00`, timeZone);
     }
 
-    if (localMatch && !hasExplicitTz && localMatch[2]) {
-        return localDateTimeToUtc(localMatch[1], localMatch[2], timeZone);
+    if (localMatch && !hasExplicitTz) {
+        return localDateTimeToUtc(localMatch[1], localMatch[2] || `${fallbackHm || '00:00'}:00`, timeZone);
     }
 
     const parsed = parseDateOrNull(raw);
@@ -409,6 +415,33 @@ function buildDateTime(dateOrIso, hm, fallbackHm, timeZone = DEFAULT_TIMEZONE) {
     }
 
     return null;
+}
+
+function buildPersonalBlockRange(body, timeZone, existing = null) {
+    const startInput = body.fecha_inicio || body.fecha || (existing && toDay(existing.fecha_inicio, timeZone));
+    let endInput = body.fecha_fin || body.fecha || (existing && toDay(existing.fecha_fin, timeZone));
+    const noHours = [body.hora_inicio, body.hora_fin].every(value => value == null || value === '');
+    const allDay = body.all_day === true || (!existing && body.all_day !== false && noHours
+        && normalizeDateOnly(startInput) && normalizeDateOnly(endInput));
+    if (allDay) {
+        // Date-only end dates are inclusive in the form. Persist the next
+        // local midnight, so a DST day and its final minute are fully covered.
+        if (existing && !body.fecha_fin && !body.fecha && toHm(existing.fecha_fin, timeZone) === '00:00') {
+            endInput = addDays(endInput, -1);
+        }
+        const first = normalizeDateOnly(startInput), last = normalizeDateOnly(endInput);
+        if (!first || !last || last < first) return null;
+        return { start: localDateTimeToUtc(first, '00:00:00', timeZone),
+            end: localDateTimeToUtc(addDays(last, 1), '00:00:00', timeZone) };
+    }
+    const startHm = Object.prototype.hasOwnProperty.call(body, 'hora_inicio')
+        ? normalizeHm(body.hora_inicio) : (existing ? toHm(existing.fecha_inicio, timeZone) : null);
+    const endHm = Object.prototype.hasOwnProperty.call(body, 'hora_fin')
+        ? normalizeHm(body.hora_fin) : (existing ? toHm(existing.fecha_fin, timeZone) : null);
+    if ((Object.prototype.hasOwnProperty.call(body, 'hora_inicio') && !startHm)
+        || (Object.prototype.hasOwnProperty.call(body, 'hora_fin') && !endHm)) return null;
+    return { start: buildDateTime(startInput, startHm, '00:00', timeZone),
+        end: buildDateTime(endInput, endHm, '23:59', timeZone) };
 }
 
 function toHm(dateValue, timeZone = DEFAULT_TIMEZONE) {
@@ -649,6 +682,9 @@ async function canAccessTargetPersonal(actorId, targetUserId, clinicId) {
 }
 
 function serializeBloqueo(bloqueo, timeZone = DEFAULT_TIMEZONE) {
+    const startDay = toDay(bloqueo.fecha_inicio, timeZone), endDay = toDay(bloqueo.fecha_fin, timeZone);
+    const allDay = toHm(bloqueo.fecha_inicio, timeZone) === '00:00'
+        && toHm(bloqueo.fecha_fin, timeZone) === '00:00' && endDay > startDay;
     return {
         id: bloqueo.id,
         id_usuario: bloqueo.doctor_id,
@@ -658,6 +694,9 @@ function serializeBloqueo(bloqueo, timeZone = DEFAULT_TIMEZONE) {
         fecha_inicio: bloqueo.fecha_inicio,
         fecha_fin: bloqueo.fecha_fin,
         fecha: toDay(bloqueo.fecha_inicio, timeZone),
+        timezone: timeZone,
+        all_day: allDay,
+        fecha_fin_dia: allDay ? addDays(endDay, -1) : endDay,
         hora_inicio: toHm(bloqueo.fecha_inicio, timeZone),
         hora_fin: toHm(bloqueo.fecha_fin, timeZone),
         motivo: bloqueo.motivo || '',
@@ -1415,7 +1454,7 @@ async function removeClinicCollaborationInternal({ actorId, targetUserId, clinic
             };
         }
 
-        await withCalendarMutation({ db: require('../../models'), doctorId: targetUserId, transaction, mutate: async () => {
+        await withCalendarMutation({ protectLegacyAppointments: true, db: require('../../models'), doctorId: targetUserId, transaction, mutate: async () => {
         const doctorClinicaRows = await DoctorClinica.findAll({
             where: { doctor_id: targetUserId, clinica_id: clinicaId },
             attributes: ['id'],
@@ -1786,16 +1825,13 @@ exports.createPersonalBloqueo = async (req, res) => {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
-        const horaInicio = normalizeHm(req.body?.hora_inicio);
-        const horaFin = normalizeHm(req.body?.hora_fin);
-        const fechaInicioInput = req.body?.fecha_inicio || req.body?.fecha;
-        const fechaFinInput = req.body?.fecha_fin || req.body?.fecha;
         const clinicTimezone = clinicaId == null
             ? DEFAULT_TIMEZONE
             : await getClinicTimezoneById(clinicaId);
 
-        const fechaInicio = buildDateTime(fechaInicioInput, horaInicio, '00:00', clinicTimezone);
-        const fechaFin = buildDateTime(fechaFinInput, horaFin, '23:59', clinicTimezone);
+        const range = buildPersonalBlockRange(req.body || {}, clinicTimezone);
+        const fechaInicio = range?.start;
+        const fechaFin = range?.end;
         const tipo = normalizeBloqueoTipo(req.body?.tipo);
 
         if (!fechaInicio || !fechaFin) {
@@ -1813,14 +1849,8 @@ exports.createPersonalBloqueo = async (req, res) => {
             return res.status(400).json({ message: 'Rango inválido: fecha_fin debe ser mayor que fecha_inicio' });
         }
 
-        const overlapCita = await CitaPaciente.findOne({
-            where: {
-                doctor_id: targetUserId,
-                inicio: { [Op.lt]: fechaFin },
-                fin: { [Op.gt]: fechaInicio },
-            },
-            attributes: ['id_cita', 'inicio', 'fin'],
-            raw: true,
+        const overlapCita = await findPersonalBlockAppointmentConflict({
+            doctorId: targetUserId, clinicaId, start: fechaInicio, end: fechaFin,
         });
 
         if (overlapCita) {
@@ -1909,26 +1939,9 @@ exports.updatePersonalBloqueo = async (req, res) => {
             ? DEFAULT_TIMEZONE
             : await getClinicTimezoneById(clinicaId);
 
-        // Preservar horas actuales si no se envían.
-        const horaInicio = req.body?.hora_inicio !== undefined
-            ? normalizeHm(req.body?.hora_inicio)
-            : toHm(bloqueo.fecha_inicio, clinicTimezone);
-        const horaFin = req.body?.hora_fin !== undefined
-            ? normalizeHm(req.body?.hora_fin)
-            : toHm(bloqueo.fecha_fin, clinicTimezone);
-
-        if (req.body?.hora_inicio !== undefined && !horaInicio) {
-            return res.status(400).json({ message: 'hora_inicio inválida' });
-        }
-        if (req.body?.hora_fin !== undefined && !horaFin) {
-            return res.status(400).json({ message: 'hora_fin inválida' });
-        }
-
-        const fechaInicioInput = req.body?.fecha_inicio || req.body?.fecha || toDay(bloqueo.fecha_inicio, clinicTimezone);
-        const fechaFinInput = req.body?.fecha_fin || req.body?.fecha || toDay(bloqueo.fecha_fin, clinicTimezone);
-
-        const fechaInicio = buildDateTime(fechaInicioInput, horaInicio, '00:00', clinicTimezone);
-        const fechaFin = buildDateTime(fechaFinInput, horaFin, '23:59', clinicTimezone);
+        const range = buildPersonalBlockRange(req.body || {}, clinicTimezone, bloqueo);
+        const fechaInicio = range?.start;
+        const fechaFin = range?.end;
 
         if (!fechaInicio || !fechaFin) {
             return res.status(400).json({ message: 'fecha_inicio/fecha_fin inválidas' });
@@ -1949,14 +1962,8 @@ exports.updatePersonalBloqueo = async (req, res) => {
         }
 
         // Evitar crear/editar bloqueos que oculten citas existentes.
-        const overlapCita = await CitaPaciente.findOne({
-            where: {
-                doctor_id: targetUserId,
-                inicio: { [Op.lt]: fechaFin },
-                fin: { [Op.gt]: fechaInicio },
-            },
-            attributes: ['id_cita', 'inicio', 'fin'],
-            raw: true,
+        const overlapCita = await findPersonalBlockAppointmentConflict({
+            doctorId: targetUserId, clinicaId, start: fechaInicio, end: fechaFin,
         });
 
         if (overlapCita) {
@@ -2526,7 +2533,7 @@ function findOverlappingRows(rows = []) {
 }
 
 
-async function getClinicaHorariosMap(clinicIds = []) {
+async function getClinicaHorariosMap(clinicIds = [], transaction = null) {
     const ids = Array.from(new Set(
         (clinicIds || [])
             .map((id) => Number(id))
@@ -2545,6 +2552,7 @@ async function getClinicaHorariosMap(clinicIds = []) {
             attributes: ['clinica_id', 'dia_semana', 'activo', 'hora_inicio', 'hora_fin'],
             order: [['clinica_id', 'ASC'], ['dia_semana', 'ASC'], ['hora_inicio', 'ASC']],
             raw: true,
+            transaction,
         });
     } catch (error) {
         if (isMissingClinicaHorarioTableError(error)) {
@@ -2579,7 +2587,7 @@ async function getClinicaHorariosMap(clinicIds = []) {
     return map;
 }
 
-async function findCrossClinicScheduleConflicts({ targetUserId, clinicaId, candidateHorarios, excludeHorarioIds = [] }) {
+async function findCrossClinicScheduleConflicts({ targetUserId, clinicaId, candidateHorarios, excludeHorarioIds = [], transaction = null }) {
     const activeCandidate = (candidateHorarios || []).filter((h) => h && h.activo !== false);
     if (!activeCandidate.length) return [];
     const excludedHorarioIdSet = new Set(
@@ -2607,12 +2615,14 @@ async function findCrossClinicScheduleConflicts({ targetUserId, clinicaId, candi
                 include: [{ model: DoctorHorarioExcepcion, as: 'excepciones' }],
             },
         ],
+        transaction,
     });
 
     const horizon = resolveScheduleRange({});
     const conflicts = [];
     for (const candidate of activeCandidate) {
-        const candidateExceptionMap = new Map();
+        const candidateExceptionMap = buildHorarioExceptionMap((candidate.excepciones || [])
+            .map(exception => ({ ...exception, doctor_horario_id: -1 })));
         const candidateOccurrences = expandHorariosForRange(
             [{ id: -1, doctor_clinica_id: null, ...candidate, created_at: new Date() }],
             candidate.fecha_inicio_vigencia || horizon.from,
@@ -2955,6 +2965,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
         ));
         return {
             ...c,
+            timezone: clinicTimeZone,
             horarios: (c.horarios || []).map((h) => serializeHorarioRow(h)),
             horarios_expandidos: horariosExpandidos,
             permissions: {
@@ -3083,6 +3094,14 @@ exports.previewHorarioImpact = async (req, res) => {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
+        if (['delete_row', 'delete-row'].includes(req.body?.action)) {
+            const clinicTimezone = await getClinicTimezoneById(clinicaId);
+            const appointments = await findFutureAppointmentsForRowImpact({ doctorId: targetUserId, clinicaId,
+                timeZone: clinicTimezone });
+            return res.json({ scope: 'row', clinic_timezone: clinicTimezone, intervals: [],
+                has_affected_appointments: appointments.length > 0, affected_count: appointments.length, appointments });
+        }
+
         const horarioId = Number(req.body?.horario_id || req.body?.horarioId || req.params.horarioId);
         let fallback = {};
         if (Number.isFinite(horarioId)) {
@@ -3108,15 +3127,24 @@ exports.previewHorarioImpact = async (req, res) => {
         }
 
         const clinicTimezone = await getClinicTimezoneById(clinicaId);
-        const intervals = buildImpactIntervalsFromBody(req.body || {}, fallback);
-        if (!intervals.length) {
+        const intervals = buildImpactIntervalsFromBody(req.body || {}, fallback, clinicTimezone);
+        const validNoRemoval = ['update_shift', 'resize_shift', 'move_shift'].includes(req.body?.action)
+            && normalizeDateOnly(req.body?.fecha || req.body?.date || req.body?.source_fecha)
+            && normalizeHm(req.body?.next_start || req.body?.hora_inicio)
+            && normalizeHm(req.body?.next_end || req.body?.hora_fin)
+            && normalizeHm(fallback.original_start || req.body?.original_start || req.body?.hora_inicio_original)
+            && normalizeHm(fallback.original_end || req.body?.original_end || req.body?.hora_fin_original);
+        if (!intervals.length && !validNoRemoval) {
             return res.status(400).json({
                 message: 'No se pudo calcular el impacto del cambio de horario',
                 reason: 'INVALID_IMPACT_PAYLOAD',
             });
         }
 
-        const appointments = await findAppointmentsForImpact({
+        const appointments = ['block', 'create_block', 'update_block'].includes(req.body?.action)
+            && ['daily', 'weekly', 'monthly'].includes(req.body?.recurrente)
+            ? await findAppointmentsForRecurringBlockImpact({ doctorId: targetUserId, clinicaId, body: req.body, timeZone: clinicTimezone })
+            : await findAppointmentsForImpact({
             doctorId: targetUserId,
             clinicaId,
             intervals,
@@ -3128,8 +3156,10 @@ exports.previewHorarioImpact = async (req, res) => {
             affected_count: appointments.length,
             intervals,
             appointments,
+            clinic_timezone: clinicTimezone,
         });
     } catch (error) {
+        if (sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.previewHorarioImpact] Error:', error);
         return res.status(500).json({ message: 'Error calculating horario impact', error: error.message });
     }
@@ -3235,9 +3265,12 @@ function serializeScheduleAppointment(row, timeZone = DEFAULT_TIMEZONE) {
         paciente_telefono: patient?.telefono_movil || patient?.telefono_secundario || null,
         inicio: plain.inicio,
         fin: plain.fin,
+        duration_minutes: (new Date(plain.fin) - new Date(plain.inicio)) / 60000,
         fecha: startDay,
+        fecha_fin: toDay(plain.fin, timeZone),
         hora_inicio: startHm,
         hora_fin: endHm,
+        ...(Array.isArray(plain.affected_phases) ? { affected_phases: plain.affected_phases } : {}),
         estado: plain.estado || null,
         titulo: plain.titulo || null,
         motivo: plain.motivo || null,
@@ -3280,9 +3313,88 @@ async function loadAppointmentsForScheduleRange({ doctorId, clinicIds, from, to 
         include: appointmentInclude(),
         order: [['inicio', 'ASC']],
     });
-    return visible.map(segment => {
-        const appointment = appointments.find(row => Number(row.id_cita) === Number(segment.id_cita));
-        return appointment ? { ...(appointment.toJSON ? appointment.toJSON() : appointment), inicio: segment.inicio, fin: segment.fin } : null;
+    // Preserve the whole clinical appointment for rescheduling. Its resource
+    // phases determine impact, but must never shorten a 60-minute appointment
+    // into the 20-minute phase occupied by this professional.
+    return appointments.map(appointment => {
+        const plain = appointment.toJSON ? appointment.toJSON() : appointment;
+        return { ...plain, schedule_phases: visible
+            .filter(segment => Number(segment.id_cita) === Number(plain.id_cita))
+            .map(segment => ({ doctor_id: segment.doctor_id, instalacion_id: segment.instalacion_id,
+                inicio: segment.inicio, fin: segment.fin, segmented: segment.segmented === true })) };
+    });
+}
+
+async function findPersonalBlockAppointmentConflict({ doctorId, clinicaId, start, end }) {
+    // Keep resource-calendar reads within its bounded contract for long leave.
+    // The future reservation guard still validates the mutation atomically.
+    for (let from = new Date(start); from < end;) {
+        const to = new Date(Math.min(new Date(end).getTime(), from.getTime() + 366 * 86400000));
+        const rows = await require('../services/appointmentResourceCalendar.service').resourceAppointments({
+            db: require('../../models'), doctorId, start: from, end: to,
+        });
+        const conflict = rows.find(row => clinicaId == null || Number(row.clinica_id) === Number(clinicaId));
+        if (conflict) return { id_cita: Number(conflict.id_cita), inicio: conflict.inicio, fin: conflict.fin,
+            clinica_id: Number(conflict.clinica_id) };
+        from = to;
+    }
+    return null;
+}
+
+async function findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZone = DEFAULT_TIMEZONE, now = new Date() }) {
+    const db = require('../../models');
+    const enabled = require('../services/treatmentBookingProfile.service').bookingCapabilities().simple;
+    const primary = await CitaPaciente.findAll({ where: { doctor_id: Number(doctorId), clinica_id: Number(clinicaId),
+        fin: { [Op.gt]: now }, ...ACTIVE_APPOINTMENT_WHERE },
+        attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin'],
+        order: [['inicio', 'ASC']], limit: 2001, raw: true });
+    const review = () => rejectPersonalScheduleTransfer(409, { code: 'booking_calendar_review_required', review_required: true,
+        message: 'Hay muchas reservas afectadas. Revisa el horario por partes antes de vaciar la fila.' });
+    if (primary.length > 2000) review();
+    let phases = primary;
+    if (enabled) {
+        const ledger = await db.AppointmentBookingOccupancy.findAll({ where: {
+            [Op.or]: [{ resource_key: `doctor:${Number(doctorId)}`, end_at: { [Op.gt]: now } },
+                ...(primary.length ? [{ appointment_id: { [Op.in]: primary.map(row => row.id_cita) } }] : [])],
+        }, include: [{ model: CitaPaciente, as: 'appointment', required: true, attributes: ['id_cita', 'clinica_id'],
+            where: { clinica_id: Number(clinicaId), ...ACTIVE_APPOINTMENT_WHERE } }],
+        order: [['start_at', 'ASC']], limit: 2001 });
+        if (ledger.length > 2000) review();
+        const segmentedIds = new Set(ledger.map(row => Number(row.appointment_id)));
+        phases = [...primary.filter(row => !segmentedIds.has(Number(row.id_cita))), ...ledger
+            .filter(row => row.resource_key === `doctor:${Number(doctorId)}` && new Date(row.end_at) > now)
+            .map(row => ({ id_cita: Number(row.appointment_id), clinica_id: Number(clinicaId), doctor_id: row.doctor_id,
+                instalacion_id: row.installation_id, inicio: row.start_at, fin: row.end_at, segmented: true }))];
+    }
+    const ids = [...new Set(phases.map(row => Number(row.id_cita)))];
+    if (ids.length > 2000) review();
+    if (!ids.length) return [];
+    const appointments = await CitaPaciente.findAll({ where: { id_cita: { [Op.in]: ids }, clinica_id: Number(clinicaId),
+        ...ACTIVE_APPOINTMENT_WHERE }, include: appointmentInclude(), order: [['inicio', 'ASC']], limit: 2001 });
+    return appointments.map(appointment => {
+        const plain = appointment.toJSON ? appointment.toJSON() : appointment;
+        const affected = phases.filter(phase => Number(phase.id_cita) === Number(plain.id_cita))
+            .map(({ id_cita, clinica_id, ...phase }) => phase);
+        return serializeScheduleAppointment({ ...plain, affected_phases: affected }, timeZone);
+    });
+}
+
+async function findAppointmentsForRecurringBlockImpact({ doctorId, clinicaId, body, timeZone }) {
+    const range = buildPersonalBlockRange(body, timeZone);
+    if (!range?.start || !range?.end || range.start >= range.end) return [];
+    const block = { id: -1, doctor_id: doctorId, clinica_id: clinicaId, fecha_inicio: range.start,
+        fecha_fin: range.end, recurrente: body.recurrente, excepciones: [] };
+    const appointments = await findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZone });
+    return appointments.map(appointment => {
+        const phases = (appointment.affected_phases || []).filter(phase => {
+            const last = toDay(phase.fin, timeZone);
+            for (let day = toDay(phase.inicio, timeZone); day && day <= last; day = addDays(day, 1)) {
+                if (buildDoctorBloqueoRowsForDate([block], day, timeZone).some(projected =>
+                    overlapsDateRange(phase.inicio, phase.fin, projected.fecha_inicio, projected.fecha_fin))) return true;
+            }
+            return false;
+        });
+        return phases.length ? { ...appointment, affected_phases: phases } : null;
     }).filter(Boolean);
 }
 
@@ -3297,7 +3409,8 @@ function enrichExpandedShiftWithAppointments(shift, appointmentRows, timeZone = 
     const matches = (appointmentRows || []).filter((row) => {
         const plain = row.toJSON ? row.toJSON() : row;
         if (clinicId && Number(plain.clinica_id) !== clinicId) return false;
-        return overlapsDateRange(plain.inicio, plain.fin, shiftStart, shiftEnd);
+        return (plain.schedule_phases || [plain]).some(phase =>
+            overlapsDateRange(phase.inicio, phase.fin, shiftStart, shiftEnd));
     }).filter(row => {
         if (seen.has(Number(row.id_cita))) return false;
         seen.add(Number(row.id_cita)); return true;
@@ -3310,23 +3423,29 @@ function enrichExpandedShiftWithAppointments(shift, appointmentRows, timeZone = 
     };
 }
 
-function buildImpactIntervalsFromBody(body = {}, fallback = {}) {
+function buildImpactIntervalsFromBody(body = {}, fallback = {}, timeZone = DEFAULT_TIMEZONE) {
     const action = String(body.action || fallback.action || '').trim();
-    const date = normalizeDateOnly(body.fecha || body.date || fallback.fecha);
+    const date = normalizeDateOnly(body.source_fecha || body.fecha || body.date || fallback.fecha);
     const originalStart = normalizeHm(body.original_start || body.hora_inicio_original || fallback.original_start);
     const originalEnd = normalizeHm(body.original_end || body.hora_fin_original || fallback.original_end);
     const nextStart = normalizeHm(body.next_start || body.hora_inicio || fallback.next_start);
     const nextEnd = normalizeHm(body.next_end || body.hora_fin || fallback.next_end);
     const intervals = [];
 
-    if (!date || !originalStart || !originalEnd) return intervals;
-
-    if (action === 'delete_shift' || action === 'delete-row' || action === 'delete_row') {
-        intervals.push({ fecha: date, start: originalStart, end: originalEnd, reason: 'delete_shift' });
-        return intervals;
-    }
-
     if (action === 'create_block' || action === 'update_block' || action === 'block') {
+        if (body.all_day === true || body.fecha_inicio || body.fecha_fin) {
+            const range = buildPersonalBlockRange({ ...body, fecha: body.fecha || body.date }, timeZone);
+            if (!range?.start || !range?.end || range.start >= range.end) return intervals;
+            let day = toDay(range.start, timeZone);
+            const lastDay = toDay(range.end, timeZone);
+            while (day && day <= lastDay) {
+                const start = day === toDay(range.start, timeZone) ? toHm(range.start, timeZone) : '00:00';
+                const end = day === lastDay ? toHm(range.end, timeZone) : '24:00';
+                if (start < end) intervals.push({ fecha: day, start, end, reason: 'block' });
+                day = addDays(day, 1);
+            }
+            return intervals;
+        }
         const blockStart = normalizeHm(body.block_start || body.hora_inicio || nextStart || originalStart);
         const blockEnd = normalizeHm(body.block_end || body.hora_fin || nextEnd || originalEnd);
         if (blockStart && blockEnd && blockStart < blockEnd) {
@@ -3335,21 +3454,22 @@ function buildImpactIntervalsFromBody(body = {}, fallback = {}) {
         return intervals;
     }
 
+    if (!date || !originalStart || !originalEnd || originalStart >= originalEnd) return intervals;
+    if (action === 'delete_shift' || action === 'delete-row' || action === 'delete_row') {
+        return [{ fecha: date, start: originalStart, end: originalEnd, reason: 'delete_shift' }];
+    }
+
     if (action === 'update_shift' || action === 'resize_shift' || action === 'move_shift') {
         if (!nextStart || !nextEnd || nextStart >= nextEnd) {
             intervals.push({ fecha: date, start: originalStart, end: originalEnd, reason: 'invalid_next_range' });
             return intervals;
         }
 
-        if (nextStart > originalStart) {
-            intervals.push({ fecha: date, start: originalStart, end: nextStart, reason: 'shorten_start' });
-        }
-        if (nextEnd < originalEnd) {
-            intervals.push({ fecha: date, start: nextEnd, end: originalEnd, reason: 'shorten_end' });
-        }
-        if (nextStart > originalEnd || nextEnd < originalStart) {
-            intervals.push({ fecha: date, start: originalStart, end: originalEnd, reason: 'move_outside_original' });
-        }
+        const targetDate = normalizeDateOnly(body.target_fecha);
+        const removed = action === 'move_shift' && targetDate && targetDate !== date
+            ? [{ start: originalStart, end: originalEnd }]
+            : removedHorarioIntervals(originalStart, originalEnd, nextStart, nextEnd);
+        intervals.push(...removed.map(interval => ({ fecha: date, ...interval, reason: 'removed_shift_time' })));
     }
 
     return intervals.filter((it) => it.start && it.end && it.start < it.end);
@@ -3370,14 +3490,17 @@ async function findAppointmentsForImpact({ doctorId, clinicaId, intervals, timeZ
         to: maxDay,
     });
 
-    const affected = rows.filter((row) => {
+    const affected = rows.map((row) => {
         const plain = row.toJSON ? row.toJSON() : row;
-        return validIntervals.some((interval) => {
+        const phases = (plain.schedule_phases || [plain]).filter(phase => validIntervals.some(interval => {
             const start = buildDateTime(interval.fecha, interval.start, '00:00', timeZone);
-            const end = buildDateTime(interval.fecha, interval.end, '23:59', timeZone);
-            return start && end && overlapsDateRange(plain.inicio, plain.fin, start, end);
-        });
-    });
+            const end = interval.end === '24:00'
+                ? localDateTimeToUtc(addDays(interval.fecha, 1), '00:00:00', timeZone)
+                : buildDateTime(interval.fecha, interval.end, '23:59', timeZone);
+            return start && end && overlapsDateRange(phase.inicio, phase.fin, start, end);
+        }));
+        return phases.length ? { ...plain, affected_phases: phases } : null;
+    }).filter(Boolean);
 
     const seen = new Set();
     return affected
@@ -3422,71 +3545,22 @@ function normalizeBloqueoExceptionInput(body = {}) {
 }
 
 function expandBloqueoForRange(bloqueo, fromDate, toDate, timeZone = DEFAULT_TIMEZONE, exceptionMap = new Map()) {
-    if (!bloqueo) return [];
-    const rangeDates = [];
-    const startDay = normalizeDateOnly(toDay(bloqueo.fecha_inicio, timeZone));
-    const endDay = normalizeDateOnly(toDay(bloqueo.fecha_fin, timeZone));
-    const startHm = normalizeHm(toHm(bloqueo.fecha_inicio, timeZone));
-    const endHm = normalizeHm(toHm(bloqueo.fecha_fin, timeZone));
-    if (!startDay || !startHm || !endHm) return [];
-
-    const recurrente = String(bloqueo.recurrente || 'none');
-    const from = normalizeDateOnly(fromDate);
-    const to = normalizeDateOnly(toDate);
-    if (!from || !to || from > to) return [];
-
-    if (recurrente === 'none') {
-        const dates = [];
-        let date = startDay < from ? from : startDay;
-        const last = endDay && endDay > startDay ? endDay : startDay;
-        while (date && date <= to && date <= last) {
-            dates.push(date);
-            date = addDays(date, 1);
-        }
-        rangeDates.push(...dates);
-    } else {
-        let date = from > startDay ? from : startDay;
-        while (date && date <= to) {
-            const dowMatches = new Date(`${date}T12:00:00Z`).getUTCDay() === new Date(`${startDay}T12:00:00Z`).getUTCDay();
-            const weeksSinceStart = Math.floor((new Date(`${date}T00:00:00Z`) - new Date(`${startDay}T00:00:00Z`)) / (7 * 86400000));
-            const dayOfMonthMatches = Number(date.slice(8, 10)) === Number(startDay.slice(8, 10));
-            const include =
-                recurrente === 'daily'
-                    ? true
-                    : recurrente === 'weekly'
-                        ? dowMatches && weeksSinceStart >= 0
-                        : recurrente === 'monthly'
-                            ? dayOfMonthMatches && date >= startDay
-                            : false;
-            if (include) {
-                rangeDates.push(date);
-            }
-            date = addDays(date, 1);
+    const from = normalizeDateOnly(fromDate), to = normalizeDateOnly(toDate);
+    if (!bloqueo || !from || !to || from > to) return [];
+    const rows = [];
+    const source = { ...(bloqueo.toJSON ? bloqueo.toJSON() : bloqueo),
+        excepciones: exceptionMap.get(Number(bloqueo.id)) || bloqueo.excepciones || [] };
+    for (let date = from; date && date <= to; date = addDays(date, 1)) {
+        const nextDay = addDays(date, 1);
+        for (const projected of buildDoctorBloqueoRowsForDate([source], date, timeZone)) {
+            rows.push({ bloqueo_id: Number(bloqueo.id), doctor_id: Number(bloqueo.doctor_id),
+                clinica_id: bloqueo.clinica_id ?? null, fecha: date,
+                hora_inicio: toHm(projected.fecha_inicio, timeZone),
+                hora_fin: toDay(projected.fecha_fin, timeZone) === nextDay ? '24:00' : toHm(projected.fecha_fin, timeZone),
+                motivo: bloqueo.motivo || '', tipo: bloqueo.tipo || 'ausencia', recurrente: bloqueo.recurrente || 'none' });
         }
     }
-
-    const exceptions = exceptionMap.get(Number(bloqueo.id)) || [];
-    return rangeDates
-        .filter((date) => {
-            const exception = exceptions
-                .filter((row) => normalizeDateOnly(row.fecha) === date)
-                .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0];
-            return !(exception && exception.cancelado !== false);
-        })
-        .map((date) => ({
-            bloqueo_id: Number(bloqueo.id),
-            doctor_id: Number(bloqueo.doctor_id),
-            clinica_id: bloqueo.clinica_id ?? null,
-            fecha: date,
-            hora_inicio: date === startDay && recurrente === 'none' ? startHm : (recurrente === 'none' && date !== startDay ? '00:00' : startHm),
-            hora_fin: recurrente === 'none'
-                ? (date === (endDay || startDay) ? endHm : '23:59')
-                : endHm,
-            motivo: bloqueo.motivo || '',
-            tipo: bloqueo.tipo || 'ausencia',
-            recurrente,
-        }))
-        .filter((row) => row.hora_inicio < row.hora_fin);
+    return rows;
 }
 
 async function getOrCreateDoctorClinica(targetUserId, clinicaId, options = {}) {
@@ -3524,7 +3598,7 @@ async function getOrCreateDoctorClinica(targetUserId, clinicaId, options = {}) {
     return dc;
 }
 
-async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candidateHorario, excludeHorarioIds = [] }) {
+async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candidateHorario, excludeHorarioIds = [], transaction = null }) {
     if (!candidateHorario || candidateHorario.activo === false) {
         return null;
     }
@@ -3536,6 +3610,7 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
         },
         attributes: ['id'],
         raw: true,
+        transaction,
     });
 
     if (sameClinicDoctorPivot) {
@@ -3559,6 +3634,7 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
             where: whereExisting,
             attributes: ['id', 'doctor_clinica_id', 'dia_semana', 'hora_inicio', 'hora_fin', 'activo', 'rrule', 'fecha_inicio_vigencia', 'fecha_fin_vigencia', 'created_at'],
             include: [{ model: DoctorHorarioExcepcion, as: 'excepciones' }],
+            transaction,
         });
 
         const horizon = resolveScheduleRange({});
@@ -3566,7 +3642,8 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
             [{ id: -1, doctor_clinica_id: sameClinicDoctorPivot.id, ...candidateHorario, created_at: new Date() }],
             candidateHorario.fecha_inicio_vigencia || horizon.from,
             candidateHorario.fecha_fin_vigencia || horizon.to,
-            new Map(),
+            buildHorarioExceptionMap((candidateHorario.excepciones || [])
+                .map(exception => ({ ...exception, doctor_horario_id: -1 }))),
         );
         const existingExceptionMap = buildHorarioExceptionMap(
             sameClinicRows.flatMap((row) => Array.isArray(row.excepciones) ? row.excepciones : []),
@@ -3635,6 +3712,7 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
         clinicaId: Number(clinicaId),
         candidateHorarios: [candidateHorario],
         excludeHorarioIds,
+        transaction,
     });
     if (crossClinicConflicts.length) {
         return {
@@ -3648,10 +3726,15 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
         };
     }
 
+    const openingCandidates = [candidateHorario, ...(candidateHorario.excepciones || [])
+        .filter(exception => !exception.cancelado && matchesHorarioOnDate(candidateHorario, exception.fecha))
+        .map(exception => ({ ...candidateHorario, hora_inicio: exception.hora_inicio_override || candidateHorario.hora_inicio,
+            hora_fin: exception.hora_fin_override || candidateHorario.hora_fin }))];
     const effectiveErrors = await validateHorariosAgainstEffectiveAvailability(
         Number(targetUserId),
         Number(clinicaId),
-        [candidateHorario],
+        openingCandidates,
+        transaction,
     );
     if (effectiveErrors.length) {
         return {
@@ -4118,97 +4201,84 @@ exports.copyHorarioClinicaForCurrent = async (req, res) => {
     return exports.copyHorarioClinica(req, res);
 };
 
+function rejectPersonalScheduleTransfer(status, body) {
+    throw Object.assign(new Error(body.message), { personalScheduleStatus: status, personalScheduleBody: body });
+}
+
+function sendPersonalScheduleTransferError(error, res) {
+    if (!error?.personalScheduleStatus) return false;
+    res.status(error.personalScheduleStatus).json(error.personalScheduleBody);
+    return true;
+}
+
+function ownedHorarioInclude(doctorId, clinicaId) {
+    return [{ model: DoctorClinica, as: 'doctorClinica',
+        where: { doctor_id: doctorId, clinica_id: clinicaId }, attributes: ['id', 'clinica_id'], required: true },
+        { model: DoctorHorarioExcepcion, as: 'excepciones' }];
+}
+
+function scheduleExceptionFields(exception) {
+    const plain = exception.toJSON ? exception.toJSON() : exception;
+    return { fecha: plain.fecha, cancelado: plain.cancelado, hora_inicio_override: plain.hora_inicio_override,
+        hora_fin_override: plain.hora_fin_override };
+}
+
 exports.copyHorarioClinica = async (req, res) => {
     try {
         const actorId = Number(req.userData?.userId);
-        if (!Number.isFinite(actorId)) {
-            return res.status(401).json({ message: 'Auth failed!' });
-        }
-
+        if (!Number.isSafeInteger(actorId) || actorId <= 0) return res.status(401).json({ message: 'Auth failed!' });
         const targetUserId = Number(req.params.id);
         const sourceDoctorId = Number(req.body?.source_doctor_id);
-        const sourceHorarioId = Number(req.body?.source_horario_id);
         const sourceClinicaId = Number(req.body?.source_clinica_id);
         const toClinicaId = Number(req.body?.to_clinica_id);
-        if (
-            !Number.isFinite(targetUserId) ||
-            !Number.isFinite(sourceDoctorId) ||
-            !Number.isFinite(sourceHorarioId) ||
-            !Number.isFinite(sourceClinicaId) ||
-            !Number.isFinite(toClinicaId)
-        ) {
+        const bulk = Object.prototype.hasOwnProperty.call(req.body || {}, 'source_horario_ids');
+        const rawIds = bulk ? req.body.source_horario_ids : [req.body?.source_horario_id];
+        if (![targetUserId, sourceDoctorId, sourceClinicaId, toClinicaId].every(id => Number.isSafeInteger(id) && id > 0)
+            || !Array.isArray(rawIds) || !rawIds.length || rawIds.length > 31
+            || rawIds.some(id => !Number.isSafeInteger(Number(id)) || Number(id) <= 0)
+            || new Set(rawIds.map(Number)).size !== rawIds.length
+            || (bulk && ['dia_semana', 'hora_inicio', 'hora_fin', 'activo', 'rrule', 'fecha_inicio_vigencia', 'fecha_fin_vigencia']
+                .some(key => Object.prototype.hasOwnProperty.call(req.body, key)))) {
             return res.status(400).json({ message: 'Invalid copy payload' });
         }
+        const sourceIds = rawIds.map(Number);
+        const [canReadSource, canEditTarget] = await Promise.all([
+            canEditHorarios(actorId, sourceDoctorId, sourceClinicaId), canEditHorarios(actorId, targetUserId, toClinicaId),
+        ]);
+        if (!canReadSource || !canEditTarget) return res.status(403).json({ message: 'Forbidden' });
 
-        const canReadSource = await canEditHorarios(actorId, sourceDoctorId, sourceClinicaId);
-        const canEditTarget = await canEditHorarios(actorId, targetUserId, toClinicaId);
-        if (!canReadSource || !canEditTarget) {
-            return res.status(403).json({ message: 'Forbidden' });
-        }
-
-        const source = await DoctorHorario.findOne({
-            where: { id: sourceHorarioId },
-            include: [
-                {
-                    model: DoctorClinica,
-                    as: 'doctorClinica',
-                    where: { doctor_id: sourceDoctorId, clinica_id: sourceClinicaId },
-                    attributes: ['id', 'clinica_id'],
-                    required: true,
-                },
-            ],
-        });
-        if (!source) {
-            return res.status(404).json({ message: 'Horario not found' });
-        }
-
-        const normalizedRows = normalizeHorarioRows([{
-            dia_semana: req.body?.dia_semana ?? source.dia_semana,
-            hora_inicio: req.body?.hora_inicio ?? source.hora_inicio,
-            hora_fin: req.body?.hora_fin ?? source.hora_fin,
-            activo: req.body?.activo ?? source.activo,
-        }]);
-        if (normalizedRows.length !== 1) {
-            return res.status(400).json({ message: 'horario inválido' });
-        }
-        const candidate = normalizedRows[0];
-
-        const validationError = await validateSingleHorarioCandidate({
-            targetUserId,
-            clinicaId: toClinicaId,
-            candidateHorario: candidate,
-        });
-        if (validationError) {
-            return res.status(validationError.status).json(validationError.body);
-        }
-
-        const created = await withDoctorCalendarMutation(targetUserId, async transaction => {
-          const targetDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId, { transaction });
-          return DoctorHorario.create({
-            doctor_clinica_id: targetDc.id,
-            dia_semana: candidate.dia_semana,
-            hora_inicio: candidate.hora_inicio,
-            hora_fin: candidate.hora_fin,
-            activo: candidate.activo !== false,
-            rrule: candidate.rrule,
-            fecha_inicio_vigencia: candidate.fecha_inicio_vigencia,
-            fecha_fin_vigencia: candidate.fecha_fin_vigencia,
-          }, { transaction });
-        });
-
-        return res.status(201).json({
-            message: 'Horario copiado correctamente.',
-            copied: {
-                source_doctor_id: sourceDoctorId,
-                source_horario_id: sourceHorarioId,
-                source_clinica_id: sourceClinicaId,
-                target_doctor_id: targetUserId,
-                target_clinica_id: toClinicaId,
-                horario: serializeHorarioRow(created),
-            },
-        });
+        const created = await withCalendarMutation({ protectLegacyAppointments: true, db: require('../../models'), doctorIds: [sourceDoctorId, targetUserId],
+            mutate: async transaction => {
+                const sources = await DoctorHorario.findAll({ where: { id: { [Op.in]: sourceIds } },
+                    include: ownedHorarioInclude(sourceDoctorId, sourceClinicaId), order: [['id', 'ASC']],
+                    transaction, lock: transaction.LOCK.UPDATE });
+                if (sources.length !== sourceIds.length) rejectPersonalScheduleTransfer(404, { message: 'Horario not found' });
+                const targetDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId, { transaction });
+                const copies = [];
+                for (const id of sourceIds) {
+                    const source = sources.find(row => Number(row.id) === id);
+                    if (!source) rejectPersonalScheduleTransfer(404, { message: 'Horario not found' });
+                    const [candidate] = normalizeHorarioRows([horarioTransferFields(source, bulk ? {} : req.body)]);
+                    if (!candidate) rejectPersonalScheduleTransfer(400, { message: 'horario inválido' });
+                    const exceptions = (source.excepciones || []).map(scheduleExceptionFields);
+                    const validationError = await validateSingleHorarioCandidate({ targetUserId, clinicaId: toClinicaId,
+                        candidateHorario: { ...candidate, excepciones: exceptions }, transaction });
+                    if (validationError) rejectPersonalScheduleTransfer(validationError.status, validationError.body);
+                    const copy = await DoctorHorario.create({ ...candidate, doctor_clinica_id: targetDc.id }, { transaction });
+                    copy.excepciones = exceptions.length ? await DoctorHorarioExcepcion.bulkCreate(exceptions.map(exception => ({
+                        ...exception, doctor_horario_id: copy.id, creado_por: actorId,
+                    })), { transaction }) : [];
+                    copies.push(copy);
+                }
+                return copies;
+            } });
+        return res.status(201).json({ message: bulk ? 'Fila copiada correctamente.' : 'Horario copiado correctamente.',
+            copied: { source_doctor_id: sourceDoctorId, source_clinica_id: sourceClinicaId,
+                target_doctor_id: targetUserId, target_clinica_id: toClinicaId,
+                ...(bulk ? { source_horario_ids: sourceIds, horarios: created.map(serializeHorarioRow) }
+                    : { source_horario_id: sourceIds[0], horario: serializeHorarioRow(created[0]) }) } });
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.copyHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error copying horario', error: error.message });
     }
@@ -4217,95 +4287,81 @@ exports.copyHorarioClinica = async (req, res) => {
 exports.moveHorarioClinica = async (req, res) => {
     try {
         const actorId = Number(req.userData?.userId);
-        if (!Number.isFinite(actorId)) {
-            return res.status(401).json({ message: 'Auth failed!' });
-        }
-
-        const targetUserId = Number(req.params.id);
+        if (!Number.isSafeInteger(actorId) || actorId <= 0) return res.status(401).json({ message: 'Auth failed!' });
+        const sourceDoctorId = Number(req.params.id);
+        const targetUserId = Number(req.body?.to_doctor_id ?? sourceDoctorId);
         const horarioId = Number(req.body?.horario_id);
         const fromClinicaId = Number(req.body?.from_clinica_id);
         const toClinicaId = Number(req.body?.to_clinica_id);
-        if (!Number.isFinite(targetUserId) || !Number.isFinite(horarioId) || !Number.isFinite(fromClinicaId) || !Number.isFinite(toClinicaId)) {
+        const hasSourceDate = Object.prototype.hasOwnProperty.call(req.body || {}, 'source_fecha');
+        const hasTargetDate = Object.prototype.hasOwnProperty.call(req.body || {}, 'target_fecha');
+        const sourceDate = normalizeDateOnly(req.body?.source_fecha);
+        const targetDate = normalizeDateOnly(req.body?.target_fecha);
+        const occurrence = hasSourceDate || hasTargetDate;
+        if (![sourceDoctorId, targetUserId, horarioId, fromClinicaId, toClinicaId]
+            .every(id => Number.isSafeInteger(id) && id > 0)
+            || (occurrence && (!sourceDate || !targetDate || !hasSourceDate || !hasTargetDate))) {
             return res.status(400).json({ message: 'Invalid move payload' });
         }
-        if (fromClinicaId === toClinicaId) {
-            return res.status(400).json({
-                message: 'La clínica origen y destino no pueden ser la misma.',
-                code: 'SAME_SOURCE_AND_TARGET_CLINIC',
-            });
+        if (sourceDoctorId === targetUserId && fromClinicaId === toClinicaId && (!occurrence || sourceDate === targetDate)) {
+            return res.status(400).json({ message: occurrence ? 'El origen y destino no pueden ser la misma ocurrencia.'
+                : 'La clínica origen y destino no pueden ser la misma.',
+            code: occurrence ? 'SAME_SOURCE_AND_TARGET_OCCURRENCE' : 'SAME_SOURCE_AND_TARGET_CLINIC' });
         }
+        const [canEditSource, canEditTarget] = await Promise.all([
+            canEditHorarios(actorId, sourceDoctorId, fromClinicaId), canEditHorarios(actorId, targetUserId, toClinicaId),
+        ]);
+        if (!canEditSource || !canEditTarget) return res.status(403).json({ message: 'Forbidden' });
 
-        const canEditSource = await canEditHorarios(actorId, targetUserId, fromClinicaId);
-        const canEditTarget = await canEditHorarios(actorId, targetUserId, toClinicaId);
-        if (!canEditSource || !canEditTarget) {
-            return res.status(403).json({ message: 'Forbidden' });
-        }
-
-        const existing = await DoctorHorario.findOne({
-            where: { id: horarioId },
-            include: [
-                {
-                    model: DoctorClinica,
-                    as: 'doctorClinica',
-                    where: { doctor_id: targetUserId, clinica_id: fromClinicaId },
-                    attributes: ['id', 'clinica_id'],
-                    required: true,
-                },
-            ],
-        });
-        if (!existing) {
-            return res.status(404).json({ message: 'Horario not found' });
-        }
-
-        const normalizedRows = normalizeHorarioRows([{
-            dia_semana: req.body?.dia_semana ?? existing.dia_semana,
-            hora_inicio: req.body?.hora_inicio ?? existing.hora_inicio,
-            hora_fin: req.body?.hora_fin ?? existing.hora_fin,
-            activo: req.body?.activo ?? existing.activo,
-        }]);
-        if (normalizedRows.length !== 1) {
-            return res.status(400).json({ message: 'horario inválido' });
-        }
-        const candidate = normalizedRows[0];
-
-        const validationError = await validateSingleHorarioCandidate({
-            targetUserId,
-            clinicaId: toClinicaId,
-            candidateHorario: candidate,
-            excludeHorarioIds: [horarioId],
-        });
-        if (validationError) {
-            return res.status(validationError.status).json(validationError.body);
-        }
-
-        const created = await withDoctorCalendarMutation(targetUserId, async tx => {
-          const destinationDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId, { transaction: tx });
-          const moved = await DoctorHorario.create({
-            doctor_clinica_id: destinationDc.id,
-            dia_semana: candidate.dia_semana,
-            hora_inicio: candidate.hora_inicio,
-            hora_fin: candidate.hora_fin,
-            activo: candidate.activo !== false,
-            rrule: candidate.rrule,
-            fecha_inicio_vigencia: candidate.fecha_inicio_vigencia,
-            fecha_fin_vigencia: candidate.fecha_fin_vigencia,
-        }, { transaction: tx });
-
-          await existing.destroy({ transaction: tx });
-          return moved;
-        });
-
-        return res.json({
-            message: 'Horario movido correctamente.',
-            moved: {
-                horario_id_origen: horarioId,
-                clinica_id_origen: fromClinicaId,
-                clinica_id_destino: toClinicaId,
-                horario: serializeHorarioRow(created),
-            },
-        });
+        const moved = await withCalendarMutation({ protectLegacyAppointments: true, db: require('../../models'), doctorIds: [sourceDoctorId, targetUserId],
+            mutate: async transaction => {
+                const existing = await DoctorHorario.findOne({ where: { id: horarioId },
+                    include: ownedHorarioInclude(sourceDoctorId, fromClinicaId), transaction, lock: transaction.LOCK.UPDATE });
+                if (!existing) rejectPersonalScheduleTransfer(404, { message: 'Horario not found' });
+                let rawCandidate = horarioTransferFields(existing, req.body);
+                if (occurrence) {
+                    const [sourceOccurrence] = expandHorariosForDate([existing], sourceDate,
+                        buildHorarioExceptionMap(existing.excepciones || []));
+                    if (!sourceOccurrence) rejectPersonalScheduleTransfer(422, {
+                        message: 'La fecha origen debe corresponder a una ocurrencia vigente del horario.',
+                        code: 'INVALID_SOURCE_SCHEDULE_OCCURRENCE',
+                    });
+                    rawCandidate = { dia_semana: dayIndexFromDate(targetDate),
+                        hora_inicio: req.body?.hora_inicio ?? sourceOccurrence.hora_inicio,
+                        hora_fin: req.body?.hora_fin ?? sourceOccurrence.hora_fin,
+                        activo: req.body?.activo ?? true, rrule: null,
+                        fecha_inicio_vigencia: targetDate, fecha_fin_vigencia: targetDate };
+                }
+                const [candidate] = normalizeHorarioRows([rawCandidate]);
+                if (!candidate) rejectPersonalScheduleTransfer(400, { message: 'horario inválido' });
+                const targetDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId, { transaction });
+                if (occurrence) {
+                    // Target validation reads this cancellation in the same
+                    // transaction. A failed target write rolls it back as well.
+                    await DoctorHorarioExcepcion.upsert({ doctor_horario_id: horarioId, fecha: sourceDate,
+                        cancelado: true, hora_inicio_override: null, hora_fin_override: null, creado_por: actorId }, { transaction });
+                }
+                const validationError = await validateSingleHorarioCandidate({ targetUserId, clinicaId: toClinicaId,
+                    candidateHorario: { ...candidate, excepciones: occurrence ? [] : (existing.excepciones || []).map(scheduleExceptionFields) },
+                    excludeHorarioIds: occurrence ? [] : [horarioId], transaction });
+                if (validationError) rejectPersonalScheduleTransfer(validationError.status, validationError.body);
+                if (occurrence) {
+                    const created = await DoctorHorario.create({ ...candidate, doctor_clinica_id: targetDc.id }, { transaction });
+                    created.excepciones = [];
+                    return created;
+                }
+                // Updating the same row preserves its ID, every exception and
+                // any reference to that pattern. No copy-then-delete window.
+                await existing.update({ ...candidate, doctor_clinica_id: targetDc.id }, { transaction });
+                return existing;
+            } });
+        return res.json({ message: 'Horario movido correctamente.', moved: {
+            horario_id_origen: horarioId, clinica_id_origen: fromClinicaId, clinica_id_destino: toClinicaId,
+            doctor_id_origen: sourceDoctorId, doctor_id_destino: targetUserId, scope: occurrence ? 'occurrence' : 'pattern',
+            ...(occurrence ? { source_fecha: sourceDate, target_fecha: targetDate } : {}), horario: serializeHorarioRow(moved),
+        } });
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.moveHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error moving horario', error: error.message });
     }
@@ -4321,7 +4377,7 @@ exports.moveHorarioClinica = async (req, res) => {
  * @param {Array<{dia_semana:number, hora_inicio:string, hora_fin:string, activo:boolean}>} horarios
  * @returns {Promise<Array<{dia_semana:number, hora_inicio:string, hora_fin:string, reason:string}>>} errors (empty = valid)
  */
-async function validateHorariosAgainstEffectiveAvailability(_targetUserId, clinicaId, horarios) {
+async function validateHorariosAgainstEffectiveAvailability(_targetUserId, clinicaId, horarios, transaction = null) {
     const errors = [];
     const activeHorarios = (horarios || []).filter((h) => h && h.activo !== false);
     if (!activeHorarios.length) return errors;
@@ -4341,7 +4397,7 @@ async function validateHorariosAgainstEffectiveAvailability(_targetUserId, clini
         return merged;
     }
 
-    const clinicaHorariosMap = await getClinicaHorariosMap([clinicaId]);
+    const clinicaHorariosMap = await getClinicaHorariosMap([clinicaId], transaction);
     const clinicaHorarios = clinicaHorariosMap.get(Number(clinicaId)) || [];
 
     const openingRawByDay = new Map();
@@ -4409,82 +4465,61 @@ exports.updateHorariosClinicaForCurrent = async (req, res) => {
 exports.updateHorariosClinica = async (req, res) => {
     try {
         const actorId = Number(req.userData?.userId);
-        if (!Number.isFinite(actorId)) {
-            return res.status(401).json({ message: 'Auth failed!' });
-        }
-
+        if (!Number.isFinite(actorId)) return res.status(401).json({ message: 'Auth failed!' });
         const targetUserId = Number(req.params.id);
         const clinicaId = Number(req.params.clinicaId);
-        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) {
-            return res.status(400).json({ message: 'Invalid id' });
-        }
-
-        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
-        if (!canEdit) {
-            return res.status(403).json({ message: 'Forbidden' });
-        }
-
-        const horarios = normalizeHorarioRows(req.body);
-        if (!horarios.length && Array.isArray(req.body?.horarios) && req.body.horarios.length) {
+        if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) return res.status(400).json({ message: 'Invalid id' });
+        if (!await canEditHorarios(actorId, targetUserId, clinicaId)) return res.status(403).json({ message: 'Forbidden' });
+        const rawRows = Array.isArray(req.body) ? req.body : req.body?.horarios;
+        if (!Array.isArray(rawRows) || rawRows.some(row => !row || typeof row !== 'object')) {
             return res.status(400).json({ message: 'horarios inválidos' });
         }
-
-        const sameClinicOverlap = findOverlappingRows(horarios);
-        if (sameClinicOverlap) {
-            return res.status(409).json({
-                message: 'El horario se solapa con otro tramo en esta clínica.',
-                code: 'STAFF_SCHEDULE_OVERLAP_SAME_CLINIC',
-                can_force: false,
-                conflicts: [{
-                    clinica_id: clinicaId,
-                    dia_semana: sameClinicOverlap.dia_semana,
-                    nuevo_hora_inicio: sameClinicOverlap.right.hora_inicio,
-                    nuevo_hora_fin: sameClinicOverlap.right.hora_fin,
-                    conflicto_hora_inicio: sameClinicOverlap.left.hora_inicio,
-                    conflicto_hora_fin: sameClinicOverlap.left.hora_fin,
-                }],
-            });
+        const suppliedIds = rawRows.filter(row => Object.prototype.hasOwnProperty.call(row, 'id')).map(row => Number(row.id));
+        if (suppliedIds.some(id => !Number.isSafeInteger(id) || id <= 0) || new Set(suppliedIds).size !== suppliedIds.length) {
+            return res.status(400).json({ message: 'Invalid horario ids' });
         }
-
-        const crossClinicConflicts = await findCrossClinicScheduleConflicts({
-            targetUserId,
-            clinicaId,
-            candidateHorarios: horarios,
-        });
-        if (crossClinicConflicts.length) {
-            return res.status(409).json({
-                message: 'El horario se solapa con la disponibilidad del profesional en otra clínica.',
-                code: 'STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC',
-                can_force: false,
-                conflicts: crossClinicConflicts,
-            });
-        }
-
-        // Validar siempre contra apertura clínica.
-        if (horarios.length > 0) {
-            const effectiveErrors = await validateHorariosAgainstEffectiveAvailability(
-                targetUserId, clinicaId, horarios,
-            );
-            if (effectiveErrors.length) {
-                return res.status(422).json({
-                    message: 'Algunos tramos del horario están fuera del horario permitido en la clínica.',
-                    code: 'SCHEDULE_OUT_OF_EFFECTIVE_AVAILABILITY',
-                    errors: effectiveErrors,
-                });
-            }
-        }
-
-        const created = await withDoctorCalendarMutation(targetUserId, async transaction => {
+        const rows = await withDoctorCalendarMutation(targetUserId, async transaction => {
             const dc = await getOrCreateDoctorClinica(targetUserId, clinicaId, { transaction });
-            await DoctorHorario.destroy({ where: { doctor_clinica_id: dc.id }, transaction });
-            return DoctorHorario.bulkCreate(
-                horarios.map((h) => ({ ...h, doctor_clinica_id: dc.id })), { transaction },
-            );
+            const existing = await DoctorHorario.findAll({ where: { doctor_clinica_id: dc.id },
+                include: [{ model: DoctorHorarioExcepcion, as: 'excepciones' }], order: [['id', 'ASC']],
+                transaction, lock: transaction.LOCK.UPDATE });
+            if (suppliedIds.some(id => !existing.some(row => Number(row.id) === id))) {
+                rejectPersonalScheduleTransfer(404, { message: 'Horario not found' });
+            }
+            const candidates = rawRows.map(raw => {
+                const original = Object.prototype.hasOwnProperty.call(raw, 'id')
+                    ? existing.find(row => Number(row.id) === Number(raw.id)) : null;
+                const [candidate] = normalizeHorarioRows([original ? horarioTransferFields(original, raw) : raw]);
+                if (!candidate) rejectPersonalScheduleTransfer(400, { message: 'horarios inválidos' });
+                return { original, candidate };
+            });
+            const removedIds = existing.filter(row => !suppliedIds.includes(Number(row.id))).map(row => Number(row.id));
+            if (removedIds.length) await DoctorHorario.destroy({ where: { doctor_clinica_id: dc.id,
+                id: { [Op.in]: removedIds } }, transaction });
+            const persisted = [];
+            for (const { original, candidate } of candidates) {
+                if (original) {
+                    await original.update(candidate, { transaction });
+                    persisted.push(original);
+                } else {
+                    const created = await DoctorHorario.create({ ...candidate, doctor_clinica_id: dc.id }, { transaction });
+                    created.excepciones = [];
+                    persisted.push(created);
+                }
+            }
+            // Validate the final set inside the transaction. Existing IDs and
+            // exception rows survive, and a conflict rolls back every change.
+            for (const row of persisted) {
+                const validationError = await validateSingleHorarioCandidate({ targetUserId, clinicaId,
+                    candidateHorario: { ...horarioTransferFields(row), excepciones: (row.excepciones || []).map(scheduleExceptionFields) },
+                    excludeHorarioIds: [Number(row.id)], transaction });
+                if (validationError) rejectPersonalScheduleTransfer(validationError.status, validationError.body);
+            }
+            return persisted;
         });
-
-        return res.json(created.map((row) => serializeHorarioRow(row)));
+        return res.json(rows.map(serializeHorarioRow));
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.updateHorariosClinica] Error:', error);
         return res.status(500).json({ message: 'Error updating horarios', error: error.message });
     }

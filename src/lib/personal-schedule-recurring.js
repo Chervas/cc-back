@@ -16,6 +16,8 @@ function normalizeDateOnly(value) {
   const raw = String(value).trim();
   const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) return null;
+  const parsed = new Date(`${raw}T12:00:00Z`);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== raw) return null;
   return `${match[1]}-${match[2]}-${match[3]}`;
 }
 
@@ -290,6 +292,28 @@ function expandHorariosForRange(horarios = [], fromIso, toIso, exceptionMap = ne
   return out;
 }
 
+// Only the part removed from the original interval can affect its bookings.
+// A completely disjoint move removes the original once, never the gap or
+// time outside it. Endpoints are half-open, like the reservation ledger.
+function removedHorarioIntervals(originalStart, originalEnd, nextStart, nextEnd) {
+  if (!normalizeHm(originalStart) || !normalizeHm(originalEnd) || originalStart >= originalEnd) return [];
+  if (!normalizeHm(nextStart) || !normalizeHm(nextEnd) || nextStart >= nextEnd
+    || nextEnd <= originalStart || nextStart >= originalEnd) {
+    return [{ start: originalStart, end: originalEnd }];
+  }
+  const removed = [];
+  if (nextStart > originalStart) removed.push({ start: originalStart, end: nextStart });
+  if (nextEnd < originalEnd) removed.push({ start: nextEnd, end: originalEnd });
+  return removed;
+}
+
+function horarioTransferFields(source, overrides = {}) {
+  const fields = ['dia_semana', 'hora_inicio', 'hora_fin', 'activo', 'rrule', 'fecha_inicio_vigencia', 'fecha_fin_vigencia'];
+  return Object.fromEntries(fields.map(key => [key,
+    Object.prototype.hasOwnProperty.call(overrides, key) ? overrides[key] : (source[key] ?? null),
+  ]));
+}
+
 module.exports = {
   normalizeHm,
   normalizeDateOnly,
@@ -303,4 +327,6 @@ module.exports = {
   expandHorariosForRange,
   matchesHorarioOnDate,
   dayIndexFromDate,
+  removedHorarioIntervals,
+  horarioTransferFields,
 };

@@ -57,7 +57,8 @@ async function uncoveredPhases({ db, rows, transaction, installationMapping = nu
         const doctorId = Number(row.doctor_id), dc = links.find(l => Number(l.doctor_id) === doctorId && Number(l.clinica_id) === clinicId);
         const context = buildDoctorAvailabilityContext({ doctorId, clinicaId: clinicId, dc, dow, fechaLocal: date, timeZone });
         cache.set(key, { windows: dc?.activo && dc?.recibe_citas ? context.docWins : [],
-          blocks: buildDoctorBloqueoRowsForDate(doctorBlocks.filter(b => Number(b.doctor_id) === doctorId), date, timeZone) });
+          blocks: buildDoctorBloqueoRowsForDate(doctorBlocks.filter(b => Number(b.doctor_id) === doctorId
+            && (b.clinica_id == null || b.aplica_a_todas_clinicas === true || Number(b.clinica_id) === clinicId)), date, timeZone) });
       } else {
         const room = rooms.find(r => Number(r.id) === Number(row.installation_id));
         cache.set(key, { windows: room?.activo ? buildWindowsFromHorarios(room.horarios || [], dow, date, timeZone) : [],
@@ -73,15 +74,44 @@ async function uncoveredPhases({ db, rows, transaction, installationMapping = nu
   return result;
 }
 
-async function withCalendarMutation({ db, doctorId = null, installationId = null, clinicId = null, clinic = null, mutate,
-  enabled = bookingCapabilities().simple, now = new Date(), transaction: suppliedTransaction = null,
+// Personal keeps guarding legacy appointments when the new ledger gate is
+// closed. When open, a frozen ledger appointment replaces its legacy primary
+// doctor interval, even if that doctor's ID is absent from its real phases.
+async function legacyDoctorReservations({ db, doctors, enabled, now, transaction }) {
+  if (!doctors.length) return [];
+  const { Op } = db.Sequelize;
+  const appointments = await db.CitaPaciente.findAll({
+    where: { doctor_id: { [Op.in]: doctors }, estado: { [Op.ne]: 'cancelada' }, fin: { [Op.gt]: now } },
+    attributes: ['id_cita', 'doctor_id', 'clinica_id', 'inicio', 'fin'],
+    order: [['id_cita', 'ASC']], limit: 2001, transaction, lock: transaction.LOCK.UPDATE,
+  });
+  if (appointments.length > 2000) throw bookingError('booking_calendar_review_required',
+    'Hay muchas reservas afectadas. Revisa el cambio de horario por partes.');
+  const ids = appointments.map(row => Number(row.id_cita));
+  const frozen = enabled && ids.length ? await db.AppointmentBookingOccupancy.findAll({
+    where: { appointment_id: { [Op.in]: ids } }, attributes: ['appointment_id'], group: ['appointment_id'], transaction,
+  }) : [];
+  const frozenIds = new Set(frozen.map(row => Number(row.appointment_id)));
+  return appointments.filter(row => !frozenIds.has(Number(row.id_cita))).map(row => ({
+    appointment_id: Number(row.id_cita), resource_key: `doctor:${Number(row.doctor_id)}`,
+    doctor_id: Number(row.doctor_id), installation_id: null, start_at: row.inicio, end_at: row.fin,
+    appointment: { clinica_id: row.clinica_id },
+  }));
+}
+
+async function withCalendarMutation({ db, doctorId = null, doctorIds = [], installationId = null, clinicId = null, clinic = null, mutate,
+  enabled = bookingCapabilities().simple, protectLegacyAppointments = false, now = new Date(), transaction: suppliedTransaction = null,
   realtimeEnabled = process.env.AVAILABILITY_REALTIME_ENABLED === 'true',
   notify = require('../lib/calendar-availability-invalidation').notifyCalendarAvailability }) {
-  if ((!doctorId && !installationId && !clinicId) || [doctorId, installationId, clinicId].filter(v => v !== null)
+  if (!Array.isArray(doctorIds)) throw Error('CALENDAR_MUTATION_SCOPE_INVALID');
+  const doctors = [...new Set([...doctorIds, ...(doctorId !== null ? [doctorId] : [])].map(Number))];
+  if ((!doctors.length && !installationId && !clinicId) || doctors.length > 31
+    || [...doctors, installationId, clinicId].filter(v => v !== null)
     .some(v => !Number.isSafeInteger(Number(v)) || Number(v) <= 0)) throw Error('CALENDAR_MUTATION_SCOPE_INVALID');
   const execute = async transaction => {
     if (transaction.options?.isolationLevel !== 'READ COMMITTED') throw Error('booking_requires_read_committed');
-    if (!enabled) return mutate(transaction);
+    if (!enabled && !protectLegacyAppointments) return mutate(transaction);
+    if (!enabled && (!doctors.length || installationId || clinicId)) throw Error('CALENDAR_LEGACY_SCOPE_INVALID');
     // Shared by bookings, exclusive only when editing the clinic's opening
     // hours. Unrelated bookings remain parallel; there is no global clinic mutex.
     if (clinicId) {
@@ -94,12 +124,15 @@ async function withCalendarMutation({ db, doctorId = null, installationId = null
       clinic = await db.Clinica.findByPk(room.clinica_id, { transaction });
     }
     const mapping = installationId ? await resolveInstallationKeys({ db, clinic, installationIds: [Number(installationId)], transaction, enabled: true }) : null;
-    const keys = [...(doctorId ? [`doctor:${Number(doctorId)}`] : []), ...(mapping ? [mapping.keys.get(Number(installationId))] : [])];
-    await lockBookingResources({ db, resourceKeys: keys, transaction });
+    const keys = [...doctors.map(id => `doctor:${id}`), ...(mapping ? [mapping.keys.get(Number(installationId))] : [])];
+    if (enabled) await lockBookingResources({ db, resourceKeys: keys, transaction });
+    else await db.DoctorClinica.findAll({ where: { doctor_id: { [db.Sequelize.Op.in]: [...doctors].sort((a, b) => a - b) } },
+      attributes: ['id'], order: [['doctor_id', 'ASC'], ['id', 'ASC']], transaction, lock: transaction.LOCK.UPDATE });
     const { Op } = db.Sequelize;
-    const rows = await db.AppointmentBookingOccupancy.findAll({ where: { ...(clinicId ? {} : { resource_key: { [Op.in]: keys } }), end_at: { [Op.gt]: now } },
+    const rows = enabled ? await db.AppointmentBookingOccupancy.findAll({ where: { ...(clinicId ? {} : { resource_key: { [Op.in]: keys } }), end_at: { [Op.gt]: now } },
       include: [{ model: db.CitaPaciente, as: 'appointment', required: true, attributes: ['clinica_id'], where: { estado: { [Op.ne]: 'cancelada' }, ...(clinicId ? { clinica_id: Number(clinicId) } : {}) } }],
-      order: [['start_at', 'ASC']], limit: 2001, transaction });
+      order: [['start_at', 'ASC']], limit: 2001, transaction }) : [];
+    if (protectLegacyAppointments) rows.push(...await legacyDoctorReservations({ db, doctors, enabled, now, transaction }));
     if (rows.length > 2000) throw bookingError('booking_calendar_review_required', 'Hay muchas reservas afectadas. Revisa el cambio de horario por partes.');
     if (clinicId) await lockBookingResources({ db, resourceKeys: rows.map(r => r.resource_key), transaction });
     // Each equivalent room must observe a block entered under any of its aliases.
@@ -117,7 +150,11 @@ async function withCalendarMutation({ db, doctorId = null, installationId = null
   const executeAndNotify = async transaction => {
     const result = await execute(transaction);
     if (realtimeEnabled) transaction.afterCommit(async () => {
-      try { await notify({ db, doctorId, installationId, clinicId }); }
+      try {
+        if (doctors.length) {
+          for (const id of doctors) await notify({ db, doctorId: id, installationId, clinicId });
+        } else await notify({ db, doctorId, installationId, clinicId });
+      }
       catch (_) { console.warn('[availability-realtime] calendar_refresh_failed'); }
     });
     return result;

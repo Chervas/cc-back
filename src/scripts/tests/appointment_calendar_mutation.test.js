@@ -72,3 +72,73 @@ test('a supplied transaction must use the same READ COMMITTED contract', async (
   const f = fixture();
   await assert.rejects(withCalendarMutation({ ...f.options, transaction: { options: {} }, mutate: () => {} }), /booking_requires_read_committed/);
 });
+
+test('a transfer locks both doctors in canonical order and protects the source reservation in the same transaction', async () => {
+  const f = fixture();
+  f.db.AppointmentBookingOccupancy.findAll = async query => {
+    assert.deepEqual(query.where.resource_key[f.db.Sequelize.Op.in], ['doctor:6', 'doctor:5']);
+    return f.rows;
+  };
+  await assert.rejects(withCalendarMutation({ ...f.options, doctorId: null, doctorIds: [6, 5, 6],
+    mutate: async tx => { assert.equal(tx.options.isolationLevel, 'READ COMMITTED'); f.setEnd('11:00'); } }), { code: 'booking_calendar_conflict' });
+  assert.deepEqual(f.state().calls, ['doctor:5', 'doctor:6']);
+  assert.equal(f.state().rolledBack, true); assert.equal(f.state().end, '20:00');
+});
+test('a clinic-specific absence does not invalidate the same professional in another clinic', async () => {
+  const f = fixture();
+  await withCalendarMutation({ ...f.options, mutate: async () => f.blocks.push({ doctor_id: 5, clinica_id: 99,
+    recurrente: 'none', fecha_inicio: f.rows[0].start_at, fecha_fin: f.rows[0].end_at }) });
+  assert.equal(f.state().committed, true);
+});
+test('a global absence still protects reservations in every clinic', async () => {
+  const f = fixture();
+  await assert.rejects(withCalendarMutation({ ...f.options, mutate: async () => f.blocks.push({ doctor_id: 5, clinica_id: null,
+    recurrente: 'none', fecha_inicio: f.rows[0].start_at, fecha_fin: f.rows[0].end_at }) }), { code: 'booking_calendar_conflict' });
+});
+test('a multi-doctor mutation invalidates the calendars of both doctors only after commit', async () => {
+  const f = fixture(); const hooks = [], notified = [];
+  const run = f.db.sequelize.transaction;
+  f.db.sequelize.transaction = (options, callback) => run(options, async tx => {
+    tx.afterCommit = hook => hooks.push(hook); return callback(tx);
+  });
+  await withCalendarMutation({ ...f.options, doctorId: null, doctorIds: [6, 5], realtimeEnabled: true,
+    notify: async message => notified.push(message.doctorId), mutate: async () => 42 });
+  assert.deepEqual(notified, []); assert.equal(hooks.length, 1);
+  await hooks[0](); assert.deepEqual(notified, [6, 5]);
+});
+
+test('Personal protects future legacy appointments with the ledger gate closed', async () => {
+  const f = fixture(); let ledgerReads = 0;
+  f.db.CitaPaciente = { findAll: async query => {
+    assert.equal(query.limit, 2001); assert.equal(query.lock, 'UPDATE');
+    assert.deepEqual(query.attributes, ['id_cita', 'doctor_id', 'clinica_id', 'inicio', 'fin']);
+    return [{ id_cita: 4, doctor_id: 5, clinica_id: 72, inicio: f.rows[0].start_at, fin: f.rows[0].end_at }];
+  } };
+  f.db.AppointmentBookingOccupancy.findAll = async () => { ledgerReads++; throw Error('closed gate must not read ledger'); };
+  await assert.rejects(withCalendarMutation({ ...f.options, enabled: false, protectLegacyAppointments: true,
+    mutate: async () => f.setEnd('11:00') }), { code: 'booking_calendar_conflict' });
+  assert.equal(ledgerReads, 0); assert.equal(f.state().rolledBack, true); assert.equal(f.state().end, '20:00');
+});
+test('Personal protects legacy fallback appointments while the ledger gate is open', async () => {
+  const f = fixture(); f.db.AppointmentBookingOccupancy.findAll = async () => [];
+  f.db.CitaPaciente = { findAll: async () => [{ id_cita: 4, doctor_id: 5, clinica_id: 72,
+    inicio: f.rows[0].start_at, fin: f.rows[0].end_at }] };
+  await assert.rejects(withCalendarMutation({ ...f.options, protectLegacyAppointments: true,
+    mutate: async () => f.setEnd('11:00') }), { code: 'booking_calendar_conflict' });
+});
+test('canonical phases suppress an unused legacy primary doctor instead of inventing occupancy', async () => {
+  const f = fixture(); f.db.CitaPaciente = { findAll: async () => [{ id_cita: 4, doctor_id: 5, clinica_id: 72,
+    inicio: f.rows[0].start_at, fin: f.rows[0].end_at }] };
+  f.db.AppointmentBookingOccupancy.findAll = async query => query.group ? [{ appointment_id: 4 }] : [];
+  await withCalendarMutation({ ...f.options, protectLegacyAppointments: true, mutate: async () => f.setEnd('11:00') });
+  assert.equal(f.state().committed, true);
+});
+test('legacy review is bounded before mutation, including when the gate is closed', async () => {
+  const f = fixture(); f.db.CitaPaciente = { findAll: async query => {
+    assert.equal(query.limit, 2001); return Array(2001).fill({ id_cita: 4, doctor_id: 5, clinica_id: 72 });
+  } };
+  let mutated = false;
+  await assert.rejects(withCalendarMutation({ ...f.options, enabled: false, protectLegacyAppointments: true,
+    mutate: async () => { mutated = true; } }), { code: 'booking_calendar_review_required' });
+  assert.equal(mutated, false);
+});
