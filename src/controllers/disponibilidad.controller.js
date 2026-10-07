@@ -196,11 +196,19 @@ exports.treatmentSlots = asyncHandler(async (req, res) => {
   if (!clinic) return res.status(404).json({ message: 'Clínica no encontrada' });
   const treatment = await loadScopedTreatment({ db, treatmentId: req.query?.tratamiento_id, clinic });
   const bookingContext = await requestTreatmentBookingContext(req, treatment, clinic);
+  let guidedSelection = null;
+  if (req.query?.guided_selection != null) {
+    if (typeof req.query.guided_selection !== 'string' || req.query.guided_selection.length > 8000)
+      throw bookingError('booking_search_invalid', 'Revisa los pasos colocados.', null, 400);
+    try { guidedSelection = JSON.parse(req.query.guided_selection); }
+    catch { throw bookingError('booking_search_invalid', 'Revisa los pasos colocados.', null, 400); }
+  }
   return res.json(await searchTreatmentSlots({ db, clinic, treatmentId: req.query?.tratamiento_id,
     date: req.query?.fecha_local, days: Number(req.query?.days || 1), stepMinutes: Number(req.query?.granularity_min || 15),
     limit: Number(req.query?.limit || 100), doctorId: req.query?.doctor_id ? Number(req.query.doctor_id) : null,
     installationId: req.query?.instalacion_id ? Number(req.query.instalacion_id) : null,
     startingDoctorId: req.query?.starting_doctor_id ?? null, startingInstallationId: req.query?.starting_instalacion_id ?? null,
+    guidedStartLocal: req.query?.guided_start_local ?? null, guidedSelection,
     additionalStaffIds: requestedAdditionalStaff(req), ...bookingContext,
     existingAppointmentId: bookingContext.existingAppointmentId ?? req.query?.ignore_cita_id ?? null,
     durationSelection: durationSelectionForRequest(treatment, req.query, { query: true }) }));

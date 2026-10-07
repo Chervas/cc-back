@@ -1,5 +1,27 @@
 # Motivos de disponibilidad de inicio · 2026-10-05
 
+## Colocación guiada de una visita combinada · 07/10/2026
+
+`GET /disponibilidad/treatment-slots` admite `guided_start_local` (inicio
+local de la visita, en la cuadrícula de cinco minutos) y `guided_selection`
+(JSON por clave de fase con un prefijo temporal contiguo). Se mantienen los
+permisos de clínica, paciente sensible, visibilidad de catálogo, capacidades,
+duraciones, ocupación, maquinaria y personal de apoyo del endpoint normal.
+
+La respuesta añade `phase_key`: siguiente fase por colocar, o `null` si el
+prefijo está completo. Cada elemento de `slots` es un plan **completo** viable
+con su recibo SHA, no una reserva de esa fase. Pueden compartir inicio y
+representar salas/profesionales distintos del siguiente paso. Cada elección
+fija los pasos anteriores y vuelve a resolver los restantes desde un único
+snapshot de recursos. No hay consultas por movimiento del cursor ni escrituras.
+
+Se rechazan claves desconocidas, pasos omitidos, recursos incompatibles,
+subequipos ALL, selecciones ambiguas y más de 500 alternativas. Una hora no
+viable no se sustituye por otra. El prefijo completo se revalida antes de enviar
+un único `createCita`, con el recibo y la misma clave idempotente. No introduce
+mensajes por fase ni activa consentimientos. No requiere migración SQL ni flags
+nuevos.
+
 La matriz de tratamiento de una sola fase mantiene los mismos huecos del solver
 canónico. Añade `unavailable_intervals` / `unavailable_by_doctor` /
 `unavailable_by_instalacion` cuando el cliente pide motivos. Estos intervalos

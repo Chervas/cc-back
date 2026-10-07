@@ -280,7 +280,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
 async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, stepMinutes = 15, limit = 100,
   doctorId = null, installationId = null, capabilities = bookingCapabilities(), now = new Date(), additionalStaffIds = [],
   patientId = null, existingAppointmentId = null, voucherId = null, durationSelection,
-  startingDoctorId = null, startingInstallationId = null }) {
+  startingDoctorId = null, startingInstallationId = null, guidedStartLocal = null, guidedSelection = null }) {
   additionalStaffIds = normalizeAdditionalStaff(additionalStaffIds);
   if (additionalStaffIds.length && !capabilities.multi) throw bookingError('booking_profile_runtime_unavailable', 'El personal de apoyo todavía no está activado.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date)) || !Number.isInteger(days) || days < 1 || days > 7
@@ -298,6 +298,14 @@ async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, s
   const end = resolveLocalInstant(addDays(date, days), '00:00:00', timeZone);
   const context = await loadBookingContext({ db, clinic, profile, start, end, occupancyEnabled: capabilities.simple,
     ignoreAppointmentId: existingAppointmentId, patientId, additionalStaffIds, equipmentEnabled: capabilities.equipment });
+  if (guidedStartLocal != null || guidedSelection != null) {
+    if (days !== 1 || doctorId || installationId || startingDoctorId || startingInstallationId)
+      throw bookingError('booking_search_invalid', 'La colocación guiada elige los recursos por paso.', null, 400);
+    const result = guidedTreatmentOptions({ profile, context, date, startLocal: guidedStartLocal,
+      selections: guidedSelection, now, additionalStaffIds });
+    return { clinic_id: Number(clinic.id_clinica), treatment_id: Number(treatmentId), timezone: timeZone,
+      duration_minutes: bookingProfileDurationMinutes(profile), capabilities, ...result };
+  }
   if (profile.phases.length > 1 && (doctorId || installationId)) {
     throw bookingError('booking_search_invalid', 'En una cita por fases elige los profesionales y cabinas por fase.', null, 400);
   }
@@ -308,6 +316,44 @@ async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, s
   const slots = solutionsForCalendar({ profile, context, date, days, stepMinutes, limit, selections, now, additionalStaffIds, allowConfirmedOverlap: true });
   return { clinic_id: Number(clinic.id_clinica), treatment_id: Number(treatmentId), timezone: timeZone,
     duration_minutes: bookingProfileDurationMinutes(profile), capabilities, slots };
+}
+
+// A prefix is only an intention. Every option solves the WHOLE visit with the
+// previous choices fixed; no per-pointer SQL, holds or independent bookings.
+function guidedTreatmentOptions({ profile, context, date, startLocal, selections, now = new Date(), additionalStaffIds = [] }) {
+  const invalid = () => bookingError('booking_search_invalid', 'Revisa el orden, la hora y los recursos de los pasos colocados.', null, 400);
+  if (typeof startLocal !== 'string' || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d$/.test(startLocal)
+    || startLocal.slice(0, 10) !== date || Number(startLocal.slice(-2)) % 5 !== 0) throw invalid();
+  if (!selections || typeof selections !== 'object' || Array.isArray(selections)) throw invalid();
+  let offset = 0;
+  const phases = profile.phases.map((phase, index) => {
+    const item = { phase, index, offset: profile.version === 4 ? phase.start_offset_minutes : offset };
+    offset += phase.duration_minutes; return item;
+  }).sort((a, b) => a.offset - b.offset || a.index - b.index).map(item => item.phase);
+  const keys = Object.keys(selections);
+  if (!keys.length || keys.length > phases.length || keys.some(key => !phases.slice(0, keys.length).some(phase => phase.key === key))) throw invalid();
+  const prefix = Object.create(null);
+  for (const phase of phases.slice(0, keys.length)) {
+    const choice = selections[phase.key];
+    if (!choice || typeof choice !== 'object' || Array.isArray(choice)
+      || Object.keys(choice).some(key => !['doctor_id', 'installation_id'].includes(key))
+      || !Number.isSafeInteger(choice.installation_id) || !phase.installation_ids.includes(choice.installation_id)
+      || phase.professionals.mode === 'any' && (!Number.isSafeInteger(choice.doctor_id) || !phase.professionals.ids.includes(choice.doctor_id))
+      || phase.professionals.mode === 'all' && choice.doctor_id != null) throw invalid();
+    prefix[phase.key] = { ...choice };
+  }
+  const next = phases[keys.length] || null;
+  const candidates = next ? next.installation_ids.flatMap(installation_id =>
+    (next.professionals.mode === 'all' ? [null] : next.professionals.ids).map(doctor_id => ({ installation_id,
+      ...(doctor_id != null ? { doctor_id } : {}) }))) : [null];
+  // Bound resource combinations independently of the day grid; never silently
+  // truncate feasible alternatives or relax constraints on a large template.
+  if (candidates.length > 500) throw bookingError('booking_search_invalid', 'Este paso tiene demasiadas alternativas. Acota sus recursos en el catálogo.', null, 400);
+  const fromLocal = startLocal.slice(11);
+  const slots = candidates.flatMap(choice => solutionsForCalendar({ profile, context, date, days: 1,
+    stepMinutes: 5, limit: 1, fromLocal, exactStartLocal: startLocal, selections: next ? { ...prefix, [next.key]: choice } : prefix,
+    now, additionalStaffIds, allowConfirmedOverlap: true }));
+  return { phase_key: next?.key || null, slots };
 }
 
 // A clicked matrix cell binds only the starting phase. Keep subsequent phases
@@ -330,13 +376,14 @@ function startingResourceSelection(profile, { startingDoctorId = null, startingI
     ...(roomId ? { installation_id: roomId } : {}) } };
 }
 
-function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 15, limit = 500, selections = {}, now = new Date(), fromLocal = '00:00', toLocal = null, additionalStaffIds = [], allowConfirmedOverlap = false, onUnavailable = null }) {
+function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 15, limit = 500, selections = {}, now = new Date(), fromLocal = '00:00', toLocal = null, exactStartLocal = null, additionalStaffIds = [], allowConfirmedOverlap = false, onUnavailable = null }) {
   additionalStaffIds = normalizeAdditionalStaff(additionalStaffIds);
   const timeZone = context.timeZone;
   const end = resolveLocalInstant(addDays(date, days), '00:00:00', timeZone);
   const slots = [];
   for (let localDate = date; localDate < addDays(date, days) && slots.length < limit; localDate = addDays(localDate, 1)) {
     for (let minute = 0; minute < 1440 && slots.length < limit; minute += stepMinutes) {
+      if (exactStartLocal && `${localDate}T${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}` !== exactStartLocal) continue;
       let candidate;
       try { candidate = resolveLocalInstant(localDate, `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}:00`, timeZone); }
       catch (error) { if (error.code === 'voucher_schedule_dst_conflict') continue; throw error; }
@@ -372,4 +419,4 @@ function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 
 }
 
 module.exports = { resolveInstallationKeys, loadBookingContext, searchTreatmentSlots, solutionsForCalendar,
-  startingResourceSelection, permitsLegacyOverlap, protectedBookingAttribute, nonShareableBookingAttribute, shareableInterval };
+  guidedTreatmentOptions, startingResourceSelection, permitsLegacyOverlap, protectedBookingAttribute, nonShareableBookingAttribute, shareableInterval };
