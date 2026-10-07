@@ -40,6 +40,16 @@ function attentionExplanation(policies) {
     .filter((value, index, values) => values.indexOf(value) === index).join('; ');
 }
 
+function attentionBusyExplanation(resource, start, end, policies) {
+  // Explain the occupation that actually intersects the requested preparation
+  // window first. An unrelated appointment later in the visit must not mask a
+  // continuous reservation that prevents its initial five minutes.
+  const windows = policies.map(policy => policy.start_window_minutes).filter(value => value > 0);
+  const preparationEnd = windows.length ? new Date(Math.min(+end, +start + Math.max(...windows) * 60000)) : end;
+  const initialConflict = (resource?.busy || []).some(interval => +new Date(interval.start) < +preparationEnd && +new Date(interval.end) > +start);
+  return busyExplanation(resource, start, initialConflict ? preparationEnd : end, 'staff');
+}
+
 function resourceFailure(resource, start, end, type, id, duration) {
   const label = resource?.name || (type === 'staff' ? 'El profesional' : 'La sala');
   if (!resource) return startConflict('resource_not_enabled', `${label}: recurso no habilitado para este tratamiento.`, type, id, duration);
@@ -233,7 +243,7 @@ function explainUnavailableVersion4Start({ profile, context, start, selections, 
           const resource = context.doctors.get(id);
           const sharingConflict = attentionVisitConflict(resource, { phase, visitStart: start, start: phaseStart, end: phaseEnd, policies });
           if (sharingConflict) return [startConflict(sharingConflict.code,
-            `${resource?.name || 'El profesional'}: ${busyExplanation(resource, phaseStart, phaseEnd, 'staff')} Para esta cita necesita ${attentionExplanation(policies)}. ${sharingConflict.code === 'preparation_origin_unverified' ? 'No tiene disponibilidad verificada para encajar esta preparación.' : sharingConflict.message}`, 'staff', id, phase.duration_minutes)];
+            `${resource?.name || 'El profesional'}: ${attentionBusyExplanation(resource, phaseStart, phaseEnd, policies)} Para esta cita necesita ${attentionExplanation(policies)}. ${sharingConflict.code === 'preparation_origin_unverified' ? 'No tiene disponibilidad verificada para encajar esta preparación.' : sharingConflict.message}`, 'staff', id, phase.duration_minutes)];
           if (policies.some(policy => !isDefaultAttention(policy))) return planStaffAttention({ resource, start: phaseStart, end: phaseEnd, policies }) ? []
             : [startConflict('staff_intervention', `${resource?.name || 'El profesional'}: no puede encajar ${attentionExplanation(policies)} en este paso sin solaparse con sus otras intervenciones o salir de su horario.`, 'staff', id, phase.duration_minutes)];
           const failure = resourceFailure(resourceForConfirmedOverlap(resource, phaseStart, phaseEnd, allowOverlap && ordinary),

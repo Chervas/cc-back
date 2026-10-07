@@ -125,6 +125,7 @@ test('different starts of verified visits yield the exact same-start rule rather
 test('unverified full reservation names its own treatment and time, explains preparation, and does not grant capacity', () => {
     const f = fixture([phase('ems', 0, 5, 10, { staff_attention: [setup], preparation_sharing: { mode: 'same_start' } })]);
     const doctor = f.context.doctors.get(5);
+    doctor.busy.push({ start: time(15), end: time(25), diagnostic: { kind: 'own_clinic', treatment_name: 'OTHER_LATER_APPOINTMENT', time_range: '17:30–17:40', full_interval: true } });
     doctor.busy.push({ start: time(-45), end: time(30), diagnostic: { kind: 'own_clinic', treatment_name: 'INDIBA ONA ficticio', time_range: '16:30–17:45', full_interval: true,
         patient_name: 'PRIVATE_PATIENT', notes: 'PRIVATE_NOTES' } });
     doctor.attention_visits.push({ appointment_id: 9001, clinic_id: 72, start: time(-45), end: time(30), version: 2, verified: false, partial: false });
@@ -132,8 +133,8 @@ test('unverified full reservation names its own treatment and time, explains pre
     assert.equal(conflict.details.reason_key, 'preparation_origin_unverified');
     assert.match(conflict.details.message, /INDIBA ONA ficticio.*16:30–17:45/);
     assert.match(conflict.details.message, /reserva al profesional durante todo.*5 min.*primeros 15 min/);
-    assert.doesNotMatch(JSON.stringify(conflict), /PRIVATE|9001|patient_name|notes/);
-    doctor.busy[0].diagnostic.kind = 'other_clinic';
+    assert.doesNotMatch(JSON.stringify(conflict), /PRIVATE|9001|patient_name|notes|OTHER_LATER_APPOINTMENT/);
+    doctor.busy[1].diagnostic.kind = 'other_clinic';
     const foreign = rejected(f); assert.match(foreign.details.message, /otra clínica/);
     assert.doesNotMatch(JSON.stringify(foreign), /INDIBA ONA|PRIVATE|9001/);
 });
