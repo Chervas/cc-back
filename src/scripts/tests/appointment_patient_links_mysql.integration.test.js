@@ -76,6 +76,14 @@ test('patient links: real SQL birth, scope, confirmed owner, atomic movement, ro
     }), error => error.code === 'appointment_link_care_started');
     assert.equal((await f.read(follower.id_cita)).estado, 'cambio_solicitado');
     await owner.update({ care_started_at: null });
+    await sql.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+      const current = await command.mutateAppointmentBooking({ db, transaction, capabilities: f.capabilities,
+        existingAppointmentId: follower.id_cita, stateOnly: true, appointmentValues: { estado: 'recordatorio_confirmado' },
+        persist: ({ values, existing }) => existing.update(values, { transaction }) });
+      const restored = await links.resolveRequestTogether(db, current, 'keep', 'recordatorio_confirmado', transaction, 1);
+      assert.equal(restored.length, 1);
+    });
+    assert.equal((await f.read(owner.id_cita)).estado, 'recordatorio_confirmado');
     const moved = await links.moveTogether(db, follower.id_cita, { inicio: '2030-01-07T13:30:00Z', fin: '2030-01-07T14:00:00Z',
       estado: 'reprogramada', reschedule_reason: 'administrative_error', updated_by: 1 }, {});
     assert.equal(moved.rows.length, 2); assert.equal(+new Date((await f.read(owner.id_cita)).inicio), +new Date('2030-01-07T13:00:00Z'));

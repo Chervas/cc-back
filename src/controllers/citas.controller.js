@@ -3070,8 +3070,10 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
     }
     const nextStatus = action === 'cancel' ? 'cancelada' : previousStatus;
     const actorUserId = req.userData?.userId || null;
+    let resolvedLinkRows = [];
 
     const cita = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
+        await require('../services/appointmentPatientLinks.service').load(db, citaId, transaction, true);
         const locked = await CitaPaciente.findByPk(citaId, {
             transaction,
             lock: transaction.LOCK.UPDATE,
@@ -3093,6 +3095,8 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
                 appointment: { ...locked.toJSON(), estado: nextStatus }, transaction });
             await updateLockedAppointmentWithVisit(locked, { estado: nextStatus, updated_by: actorUserId }, transaction);
         }
+        resolvedLinkRows = await require('../services/appointmentPatientLinks.service').resolveRequestTogether(db,
+            locked, action, nextStatus, transaction, actorUserId);
         await recordAppointmentStatusChange({
             appointment: locked,
             previousStatus: oldStatus,
@@ -3107,7 +3111,7 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
         });
         return locked;
     }).catch((error) => {
-        if (error?.statusCode === 409 && !String(error.code || '').startsWith('appointment_consent_')) return null;
+        if (error?.message === 'appointment_change_already_resolved') return null;
         throw error;
     });
     if (!cita) {
@@ -3121,15 +3125,16 @@ exports.resolveRequestedAppointmentChange = asyncHandler(async (req, res) => {
         actorUserId,
     }).catch(() => null);
     if (nextStatus === 'cancelada') {
-        await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {
+        for (const member of [cita, ...resolvedLinkRows]) await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(member, {
             reason: 'appointment_change_request_cancelled',
         });
     }
-    await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(cita, {
+    for (const member of [cita, ...resolvedLinkRows]) await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(member, {
         user_id: actorUserId,
         user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
         user_role: req.userData?.role || req.userData?.rol || 'admin',
     });
+    for (const member of resolvedLinkRows) emitAppointmentSocketEvent('appointment:updated', member.toJSON());
     await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(cita.id_cita, {
         reason: `appointment_change_request_${action}`,
     });

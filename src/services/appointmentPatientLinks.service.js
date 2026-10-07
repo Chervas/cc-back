@@ -145,6 +145,29 @@ async function unlink(db, id, actorId) {
     return group.rows;
   });
 }
+async function resolveRequestTogether(db, appointment, action, nextStatus, transaction, actorId) {
+  if (action === 'cancel') return confirmTogether(db, appointment, 'cancelada', transaction, actorId);
+  const group = await load(db, appointment.id_cita, transaction, true);
+  if (!group) return [];
+  const events = db.PatientOperationalEvent ? await db.PatientOperationalEvent.findAll({ where: {
+    clinic_id: group.link.clinic_id, patient_id: group.link.patient_id, event_type: 'appointment.status_changed' },
+    order: [['occurred_at', 'DESC'], ['id', 'DESC']], limit: 100, transaction, raw: true }) : [];
+  const changed = [];
+  for (const row of group.rows) {
+    if (row.id_cita === appointment.id_cita || row.estado !== 'cambio_solicitado') continue;
+    const prior = events.find(event => Number(json(event.metadata).appointment_id) === Number(row.id_cita)
+      && json(event.metadata).new_status === 'cambio_solicitado');
+    const status = json(prior?.metadata).previous_status || nextStatus;
+    const saved = await require('./appointmentBookingCommand.service').mutateAppointmentBooking({ db, transaction,
+      existingAppointmentId: row.id_cita, appointmentValues: { estado: status, updated_by: actorId }, stateOnly: true, allowObsolete: true,
+      persist: ({ values, existing }) => existing.update(values, { transaction }) });
+    await require('./appointmentActivity.service').recordAppointmentStatusChange({ appointment: saved,
+      previousStatus: 'cambio_solicitado', newStatus: status, actorUserId: actorId, source: 'agenda',
+      metadata: { appointment_link_id: group.link.id, resolution: action }, transaction });
+    changed.push(saved);
+  }
+  return changed;
+}
 async function moveTogether(db, selectedId, changes, options) {
   if (!await membership(db, selectedId)) return null;
   return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
@@ -214,4 +237,4 @@ async function ignoreLinkedIds(db, id, clinicId) {
   if (!group || Number(group.link.clinic_id) !== Number(clinicId)) return [];
   return group.rows.map(row => Number(row.id_cita));
 }
-module.exports = { membership, load, follower, eligible, combinada, choiceRequired, linkAtBirth, decorate, confirmTogether, unlink, moveTogether, ignoreLinkedIds };
+module.exports = { membership, load, follower, eligible, combinada, choiceRequired, linkAtBirth, decorate, confirmTogether, resolveRequestTogether, unlink, moveTogether, ignoreLinkedIds };
