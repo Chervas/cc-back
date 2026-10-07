@@ -261,7 +261,7 @@ async function findCanonicalWhatsappConversation({
     if (!createIfMissing || !contactCandidates.length) {
       return null;
     }
-    return Conversation.create({
+    const created = await Conversation.create({
       clinic_id: normalizedClinicId,
       channel: 'whatsapp',
       contact_id: contactCandidates[0],
@@ -270,6 +270,7 @@ async function findCanonicalWhatsappConversation({
       unread_count: 0,
       last_message_at: lastMessageAt || new Date(),
     }, { transaction });
+    return require('../services/temporaryPatientDirection.service').observeConversation(created, { transaction });
   }
 
   const requestedPhone = normalizePhoneE164(contactId);
@@ -320,7 +321,7 @@ async function findCanonicalWhatsappConversation({
     canonical = await mergeDuplicateConversations(canonical, duplicates, { transaction });
   }
 
-  return canonical;
+  return require('../services/temporaryPatientDirection.service').observeConversation(canonical, { transaction });
 }
 
 module.exports = {

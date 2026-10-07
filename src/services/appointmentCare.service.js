@@ -39,6 +39,7 @@ async function record({ appointmentId, clinicId, actorId, action }) {
       event_type: 'appointment_care_changed', source: 'agenda', occurred_at: now,
       metadata: { appointment_id: cita.id_cita, action, schedule_start: cita.inicio, care_event_id: careEvent.id,
         ...(action === 'start' ? { documentation_snapshot: documentationSnapshot } : {}) } }, { transaction });
+    await require('./temporaryPatientDirection.service').observeAppointment(cita, { transaction });
     return { appointment: cita, care: careState(cita, now), replayed: false };
   });
 }

@@ -2068,6 +2068,8 @@ exports.createPaciente = async (req, res) => {
     await transaction.commit();
     transaction = null;
 
+    await require('../services/temporaryPatientDirection.service').observePatient(newPaciente, req.userData?.userId);
+
     res.status(201).json({
       message: 'Paciente creado exitosamente',
       paciente: newPaciente,

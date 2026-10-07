@@ -1209,6 +1209,7 @@ async function registerTake({ assignmentId, actorUserId }) {
 async function handleAppointmentChange({ appointment, previousStatus = null, actorUserId = null }) {
   const cita = appointment?.get ? appointment.get({ plain: true }) : appointment;
   if (!cita) return null;
+  await require('./temporaryPatientDirection.service').observeAppointment(cita);
   const assignment = await findAssignment({
     clinicId: cita.clinica_id,
     leadId: cita.lead_intake_id,

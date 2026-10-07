@@ -18,7 +18,8 @@ for (const enabled of [true, false]) test(`automation status writer uses canonic
     normalizeStatusTarget: value => value, toIntOrNull: value => Number(value) || null, PROTECTED_APPOINTMENT_STATUSES: new Set(),
     CitaPaciente: { findByPk: async () => appointment }, recordAppointmentStatusChange: async () => { events++; },
     db: { sequelize: { transaction: async (options, callback) => { assert.equal(options.isolationLevel, 'READ COMMITTED'); await callback(tx); throw completed; } } },
-    require: name => name.endsWith('treatmentBookingProfile.service') ? { bookingCapabilities: () => ({ simple: enabled }) }
+    require: name => name.endsWith('appointmentPatientLinks.service') ? { load: async () => [], confirmTogether: async () => [] }
+      : name.endsWith('treatmentBookingProfile.service') ? { bookingCapabilities: () => ({ simple: enabled }) }
       : name.endsWith('appointmentConsentEligibility.service') ? { assertClinicalCompletion: async options => {
         assert.equal(options.previous.estado, 'pendiente'); assert.equal(options.appointment.estado, 'completada'); assert.equal(options.transaction, tx);
       } }

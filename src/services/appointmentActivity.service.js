@@ -200,6 +200,10 @@ async function recordAppointmentStatusChange({
   const next = cleanString(newStatus)?.toLowerCase() || null;
   if (!appointmentId || !clinicId || !next || previous === next && !recordUnchanged) return null;
 
+  if (next === 'completada' && [66, 72, 77].includes(clinicId)) {
+    await require('./temporaryPatientDirection.service').observeAppointment(appointment, { transaction });
+  }
+
   return eventModel.create({
     patient_id: patientId,
     clinic_id: clinicId,

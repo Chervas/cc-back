@@ -8,6 +8,7 @@ const { isWhatsappRoutingConfigAvailable } = require('../lib/whatsapp-channel-ro
 const patientDirectionService = require('../services/patientDirection.service');
 const {
   isTemporaryQuickChatFocusUser,
+  TEMPORARY_DIRECTOR_CLINICS,
   temporaryQuickChatListSql,
   attachTemporaryQuickChatEligibility,
 } = require('../lib/temporary-quickchat-focus');
@@ -1291,7 +1292,8 @@ async function enrichQuickChatLeadAppointments(conversations = []) {
 async function enrichPatientDirectionAssignments(conversations = []) {
   const rows = Array.isArray(conversations) ? conversations.map((row) => toPlain(row)) : [];
   const conversationIds = rows.map((row) => parsePositiveInt(row?.id)).filter(Boolean);
-  if (!conversationIds.length || !db.PatientDirectionAssignment) return rows;
+  if (!conversationIds.length) return rows;
+  if (!db.PatientDirectionAssignment) return require('../services/temporaryPatientDirection.service').enrich(rows);
   const assignments = await db.PatientDirectionAssignment.findAll({
     where: {
       conversation_id: { [Op.in]: conversationIds },
@@ -1322,10 +1324,10 @@ async function enrichPatientDirectionAssignments(conversations = []) {
       });
     }
   }
-  return rows.map((row) => ({
+  return require('../services/temporaryPatientDirection.service').enrich(rows.map((row) => ({
     ...row,
     patient_direction: byConversation.get(Number(row.id)) || null,
-  }));
+  })));
 }
 
 exports.listConversations = async (req, res) => {
@@ -1526,6 +1528,7 @@ exports.listConversations = async (req, res) => {
     const withRouting = await attachRoutingReviews(await hydrateMarketingContactFallbacks(withPatientDirection, { searchQuery }), userId);
     const payload = await attachTemporaryQuickChatEligibility(withRouting, req.userData, CitaPaciente);
     const totalUnread = payload.reduce((total, item) => {
+      if (item.quickchat_list_eligible === false) return total;
       const unread = Number(item?.unread_count || 0);
       const automationPending = item?.pending_automation_attention
         ? Number(item?.pending_automation_count || 0)
@@ -1592,7 +1595,9 @@ exports.getPermissions = async (req, res) => {
       can_use_all_clinics: !!isAggregateAllowed,
       effective_role: effectiveRole,
       is_patient_director: selectedClinicBelongsToDirector,
-      temporary_own_appointments_focus: isTemporaryQuickChatFocusUser(req.userData),
+      temporary_own_appointments_focus: isTemporaryQuickChatFocusUser(req.userData)
+        && (selectedClinicId ? TEMPORARY_DIRECTOR_CLINICS.includes(selectedClinicId)
+          : clinicIds.some(id => TEMPORARY_DIRECTOR_CLINICS.includes(Number(id)))),
     });
   } catch (err) {
     console.error('Error getPermissions', err);
@@ -2468,6 +2473,7 @@ exports.postMessage = async (req, res) => {
 
     const manualReplyAccepted = conversation.channel !== 'whatsapp' || outboundWhatsappQueued;
     if (manualReplyAccepted && msg.message_type !== 'event' && msg.status !== 'failed') {
+      await require('../services/temporaryPatientDirection.service').observeConversation(conversation, { actorUserId: userId });
       try {
         await markBufferedResponseExecutionsForHumanReply({
           clinicId: conversation.clinic_id,
