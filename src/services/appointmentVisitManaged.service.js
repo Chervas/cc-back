@@ -234,10 +234,16 @@ function createAppointmentVisitManagedService({ db, now = () => new Date(),
     const active = await db.FlowExecutionV2.findByPk(execution.id, { transaction, lock: transaction.LOCK.UPDATE });
     const binding = v.object(active?.context?.appointment_visit);
     if (!binding.visit_id) {
-      const member = v.positiveId(Number(appointmentId)) && db.AppointmentVisitMember
-        && await db.AppointmentVisitMember.findByPk(Number(appointmentId), { transaction });
-      const visit = member && await db.AppointmentVisit.findByPk(member.visit_id, { transaction });
-      if (visit?.runtime_enrollment || v.object(execution?.context?.appointment_visit).visit_id) held('appointment_visit_runtime_mutation_binding_required');
+      // The execution must not lose an existing managed binding. Only a
+      // genuinely unenrolled legacy appointment may retain the legacy lane
+      // when the additive managed schema has never been installed.
+      if (v.object(execution?.context?.appointment_visit).visit_id) held('appointment_visit_runtime_mutation_binding_required');
+      const visit = await uninstalledClosed(async () => {
+        const member = v.positiveId(Number(appointmentId)) && db.AppointmentVisitMember
+          && await db.AppointmentVisitMember.findByPk(Number(appointmentId), { transaction });
+        return member && await db.AppointmentVisit.findByPk(member.visit_id, { transaction });
+      });
+      if (visit?.runtime_enrollment) held('appointment_visit_runtime_mutation_binding_required');
       return null; // A genuinely unenrolled legacy appointment retains its lane.
     }
     if (enabled() !== true) held('appointment_visit_runtime_rollout_closed');
