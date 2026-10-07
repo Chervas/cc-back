@@ -2421,7 +2421,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         if (err?.code === 'appointment_lead_link_changed') {
             return res.status(409).json({ code: err.code, message: err.message });
         }
-        if (/^(booking_|appointment_visit_|appointment_consent_|treatment_not_)/.test(String(err?.code || ''))) {
+        if (/^(booking_|appointment_visit_|appointment_consent_|appointment_link_|appointment_same_day_|treatment_not_)/.test(String(err?.code || ''))) {
             return res.status(err.statusCode || 409).json(bookingErrorPayload(err));
         }
         if (err.status === 400 && err.message === 'unsupported_patient_language') {
