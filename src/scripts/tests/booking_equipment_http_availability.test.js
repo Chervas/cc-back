@@ -114,9 +114,11 @@ test('treatment weekly grid loads one context and skips incompatible columns bef
   await f.grid(); assert.equal(f.calls.context, 2, 'a new request must reload occupancy');
 });
 test('grid respects ACL and clinic equipment opt-in before computing any slots', async () => {
-  const f = fixture({ denied: true }); await assert.rejects(f.grid(), { statusCode: 403 });
-  assert.equal(f.calls.context, 0);
-  await assert.rejects(fixture({ enabled: false }).grid(), { code: 'booking_equipment_disabled' });
+  for (const complete_plan of [undefined, 'true']) {
+    const f = fixture({ denied: true }); await assert.rejects(f.grid({ complete_plan }), { statusCode: 403 });
+    assert.equal(f.calls.context, 0);
+    await assert.rejects(fixture({ enabled: false }).grid({ complete_plan }), { code: 'booking_equipment_disabled' });
+  }
 });
 test('ordinary profile grid does not query equipment and oversized ranges fail early', async () => {
   const f = fixture({ equipment: false, enabled: false }); await f.grid({ mode: 'installation', column_ids: [9, 10], peer_doctor_ids: [5, 6] });

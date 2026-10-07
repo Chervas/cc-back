@@ -64,8 +64,10 @@ function assertGridProfile(profile) {
   }
 }
 
-function profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds }) {
-  assertGridProfile(profile);
+function profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds, completePlan = false }) {
+  // Only the explicit matrix contract may constrain the STARTING phase while
+  // solving the complete visit. Flat /slots and /check remain mono-phase.
+  if (!completePlan) assertGridProfile(profile);
   const stepMin = parseIntSafe(query.granularity_min) || 15;
   if (stepMin < 5 || stepMin > 120) throw Object.assign(Error('granularity_min debe estar entre 5 y 120'), { statusCode: 400 });
   const installationIds = parseIntArray(query.instalacion_ids || query['instalacion_ids[]']);
@@ -75,7 +77,9 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
     || (professionalIds.length && (!query.instalacion_id || query.doctor_id))) {
     throw Object.assign(Error('Batch de cabinas/profesionales inválido'), { statusCode: 400 });
   }
-  const phase = profile.phases[0];
+  const phase = profile.version === 4
+    ? profile.phases.reduce((first, candidate) => candidate.start_offset_minutes < first.start_offset_minutes ? candidate : first)
+    : profile.phases[0];
   const timeZone = resolveClinicTimezone(clinic);
   const rangeEnd = query.to_local ? resolveLocalInstant(query.fecha_local, `${query.to_local}:00`, timeZone)
     : resolveLocalInstant(addDays(query.fecha_local, 1), '00:00:00', timeZone);
@@ -88,13 +92,15 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
       if (includeUnavailable) appendStartInterval(unavailable,
         resolveLocalInstant(query.fecha_local, `${query.from_local || '00:00'}:00`, response.timezone),
         rangeEnd,
-        incompatibleStart(profile, doctor, installation), response.timezone, formatLocal);
+        incompatibleStart({ ...profile, phases: [phase] }, doctor, installation), response.timezone, formatLocal);
       return { slots: [], unavailable };
     }
     const slots = solutionsForCalendar({ profile, context, date: query.fecha_local, stepMinutes: stepMin,
       limit: Math.min(parseIntSafe(query.limit) > 0 ? parseIntSafe(query.limit) : 500, 500), additionalStaffIds,
       allowConfirmedOverlap: true,
-      selections: { [phase.key]: { doctor_id: doctor, installation_id: installation } },
+      // A column identifying a member of an ALL team must retain the whole
+      // team, never turn it into one chosen professional.
+      selections: { [phase.key]: { doctor_id: phase.professionals.mode === 'all' ? null : doctor, installation_id: installation } },
       fromLocal: typeof query.from_local === 'string' ? query.from_local : '00:00',
       toLocal: typeof query.to_local === 'string' ? query.to_local : null,
       onUnavailable: includeUnavailable ? (start, conflict) => appendStartInterval(unavailable, start,
@@ -102,7 +108,7 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
     return { slots, unavailable };
   };
   const response = { timezone: resolveClinicTimezone(clinic), clinica_id: Number(clinic.id_clinica),
-    fecha_local: query.fecha_local, duracion_min: phase.duration_minutes, granularity_min: stepMin };
+    fecha_local: query.fecha_local, duracion_min: bookingProfileDurationMinutes(profile), granularity_min: stepMin };
   if (query.summary_only === true) {
     const pairs = installationIds.length ? installationIds.map(id => [Number(query.doctor_id), id])
       : professionalIds.length ? professionalIds.map(id => [id, Number(query.instalacion_id)])
@@ -1557,6 +1563,7 @@ function matrixColumnQuery(baseQuery, query, columnId) {
 }
 
 async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) {
+  const completePlan = grid && parseBool(req.query.complete_plan);
   const clinicId = parseIntSafe(req.query.clinica_id);
   if (!clinicId || clinicId <= 0) throw availabilityInputError('clinica_id requerido');
   if (!(parseIntSafe(req.query.duracion_min) > 0) && !req.query.tratamiento_id) throw availabilityInputError('duracion_min requerido');
@@ -1573,7 +1580,7 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
     bookingContext = await requestTreatmentBookingContext(req, treatment, clinic);
     profile = await requestOperationalProfile(treatment, req, clinic);
     if (profile) {
-      assertGridProfile(profile);
+      if (!completePlan) assertGridProfile(profile);
       const step = parseIntSafe(req.query.granularity_min) || 15;
       if (step < 5 || step > 120 || queries.some(query => parseIntArray(query.instalacion_ids).length > 50 || parseIntArray(query.doctor_ids).length > 50)) {
         throw availabilityInputError('Rango o recursos de disponibilidad inválidos');
@@ -1607,7 +1614,7 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
         patientId: bookingContext.patientId,
         includeDiagnosticLabels: grid });
       if (grid) personalBlocks.push(...(context.personalBlocks || []));
-      const getPayload = query => profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds });
+      const getPayload = query => profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds, completePlan });
       group.forEach(date => byDate.set(date, getPayload));
     } else {
       const snapshot = await loadLegacyAvailabilitySnapshot({ db, clinic, dates: group, doctorIds: doctors,

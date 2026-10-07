@@ -66,6 +66,14 @@ function incompatibleStart(profile, doctor, installation) {
 
 function explainUnavailableStart({ profile, context, start, selections = {}, additionalStaffIds = [], allowOverlap = false }) {
   if (profile.version === 4) return explainUnavailableVersion4Start({ profile, context, start: new Date(start), selections, additionalStaffIds, allowOverlap });
+  if (profile.phases.length > 1) {
+    const duration = bookingProfileDurationMinutes(profile), end = new Date(+new Date(start) + duration * 60000);
+    if (context.clinicWindows && !isFree({ windows: context.clinicWindows }, new Date(start), end)) return startConflict('clinic_schedule',
+      `La clínica no permite completar los ${duration} min de esta visita desde esta hora, incluidos todos sus pasos.`, 'clinic', null, duration);
+    // Legacy sequential ALL staff occupy the entire visit. Do not invent a
+    // first-step explanation for a rejection of the complete canonical plan.
+    return startConflict('joint_resources', 'No hay una combinación de salas, profesionales y maquinaria que permita completar todos los pasos desde esta hora.', 'installation', null, duration);
+  }
   const phase = profile.phases[0], duration = phase.duration_minutes;
   allowOverlap = allowOverlap && ordinaryPhaseCanOverlap(phase);
   const end = new Date(+start + duration * 60000), selection = selections[phase.key] || {};
