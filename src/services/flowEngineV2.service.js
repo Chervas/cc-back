@@ -2542,10 +2542,12 @@ async function handleChangeStatus(node, context, runtime) {
     let appointment = null;
     let previousStatus = null;
     let skippedReason = null;
+    let linkedConfirmations = [];
     await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
       // Match the canonical reservation writer: appointment -> membership /
       // visit -> runtime authority. An enrolled mutation must not acquire its
       // job first and then wait for the appointment held by a reprogramming.
+      await require('./appointmentPatientLinks.service').load(db, targets.appointment_id, transaction, true);
       appointment = await CitaPaciente.findByPk(targets.appointment_id, {
         transaction,
         lock: transaction.LOCK.UPDATE,
@@ -2608,6 +2610,8 @@ async function handleChangeStatus(node, context, runtime) {
           await appointment.update(changes, { transaction });
           if (mutation) await managed.persistMutation(mutation, { appointment, transaction });
         }
+        linkedConfirmations = await require('./appointmentPatientLinks.service').confirmTogether(db, appointment,
+          appointmentStatus, transaction, actorUserId);
         const templateVersion = runtime?.execution?.templateVersion || null;
         await recordAppointmentStatusChange({
           appointment,
@@ -2717,6 +2721,7 @@ async function handleChangeStatus(node, context, runtime) {
         },
       );
     }
+    for (const member of linkedConfirmations) emitAppointmentSocketEvent(member, 'appointment:updated');
     emitAppointmentSocketEvent(appointment, 'appointment:updated');
 
     return {
@@ -3936,6 +3941,9 @@ async function handleSendWhatsapp(node, context, runtime) {
   }
   let targets = resolveRuntimeTargets(execution, context);
   targets = await backfillRuntimeTargets(execution, targets);
+  if (targets.appointment_id && await require('./appointmentPatientLinks.service').follower(db, targets.appointment_id)) {
+    return { kind: 'success', output: { status: 'suppressed_linked_appointment_uses_first_notice' }, next_node_id: readOutputTarget(node, 'on_success') };
+  }
   const clinicId = toIntOrNull(targets.clinic_id);
   if (!clinicId) {
     throw new Error('whatsapp_clinic_not_found');

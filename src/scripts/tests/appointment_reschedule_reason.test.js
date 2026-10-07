@@ -29,7 +29,7 @@ const controllerSource = fs.readFileSync(
   'utf8'
 );
 const rescheduleCancellation = controllerSource.match(
-  /cancelActiveExecutionsForCita\(cita, \{\s*reason: 'appointment_rescheduled_cancelled_previous_active_flow',[\s\S]*?\}\);/
+  /cancelActiveExecutionsForCita\(member, \{\s*reason: 'appointment_rescheduled_cancelled_previous_active_flow',[\s\S]*?\}\);/
 );
 assert.ok(rescheduleCancellation, 'la reprogramación debe cancelar los flujos anteriores de la cita');
 assert.doesNotMatch(

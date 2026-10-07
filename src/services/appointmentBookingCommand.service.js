@@ -215,6 +215,8 @@ async function classifyImportedAppointment({ db, existingAppointmentId, appointm
  * run existing consent/automation/socket hooks ONCE after this function commits.
  * This command is dormant until the entire shared-DB writer/read path is promoted.
  */
+const patientLinkContexts = new WeakSet();
+function registerPatientLinkContext(context) { patientLinkContexts.add(context); }
 async function mutateAppointmentBooking({ db, appointmentValues, existingAppointmentId = null, persist,
   priorityAcknowledged = false, selections = {}, transaction = null, capabilities = bookingCapabilities(),
   allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false,
@@ -432,7 +434,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const lockedReplay = await replay(); if (lockedReplay) return lockedReplay;
     let solution = null;
     if (values.estado !== 'cancelada') {
-      const context = ((!extraStaff.length || preparedSeries) && preparedContext) || await loadBookingContext({ db, clinic, profile, start, end, transaction: tx,
+      const context = ((!extraStaff.length || preparedSeries || patientLinkContexts.has(preparedContext)) && preparedContext) || await loadBookingContext({ db, clinic, profile, start, end, transaction: tx,
         ignoreAppointmentId: existing?.id_cita, occupancyEnabled: true, installationMapping: mapping, patientId: values.paciente_id,
         additionalStaffIds: extraStaff, equipmentEnabled: capabilities.equipment,
         inheritEquipmentAttention: !snapshot || Number(previous.tratamiento_id) !== Number(values.tratamiento_id) || configuredProfile?.version >= 3 });
@@ -562,4 +564,4 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
   return transaction ? execute(transaction) : db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, execute);
 }
 
-module.exports = { lockBookingResources, lockExistingBookingResources, mutateAppointmentBooking, classifyImportedAppointment };
+module.exports = { lockBookingResources, lockExistingBookingResources, mutateAppointmentBooking, classifyImportedAppointment, registerPatientLinkContext };

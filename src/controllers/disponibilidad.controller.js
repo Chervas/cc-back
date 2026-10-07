@@ -724,6 +724,7 @@ exports.check = asyncHandler(async (req, res) => {
       if (!ignored || Number(ignored.clinica_id) !== clinicaId) return res.status(404).json({ message: 'Cita no encontrada' });
     }
     supportContext = await loadBookingContext({ db, clinic: clinica, profile: { phases: [] }, start, end,
+      ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, ignore_cita_id, clinicaId),
       additionalStaffIds, ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, occupancyEnabled: true,
       includeDiagnosticLabels: true });
     supportConflicts = supportConflictsForSlot({ additionalStaffIds, supportContext, start, end, clinicaId, timeZone: clinicTimezone });
@@ -736,6 +737,7 @@ exports.check = asyncHandler(async (req, res) => {
       if (!ignored || Number(ignored.clinica_id) !== clinicaId) return res.status(404).json({ message: 'Cita no encontrada' });
     }
     const context = await loadBookingContext({ db, clinic: clinica, profile: bookingProfile, start, end,
+      ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, ignore_cita_id, clinicaId),
       ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, patientId: bookingContext.patientId,
       occupancyEnabled: true, additionalStaffIds });
     if ((context.patientBusy || []).some(row => new Date(row.start) < end && new Date(row.end) > start)) {
@@ -1048,6 +1050,7 @@ exports.slots = asyncHandler(async (req, res) => {
         start: resolveLocalInstant(fecha_local, '00:00:00', timezone),
         end: resolveLocalInstant(addDays(fecha_local, 1), '00:00:00', timezone), occupancyEnabled: true, additionalStaffIds,
         ignoreAppointmentId: req.query.ignore_cita_id ? Number(req.query.ignore_cita_id) : null,
+        ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, req.query.ignore_cita_id, clinicaId),
         patientId: bookingContext.patientId,
         includeDiagnosticLabels: includeUnavailable });
       return res.json(profileSlotsPayload({ query: req.query, profile, context, clinic: clinica, additionalStaffIds }));
@@ -1631,6 +1634,7 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
         start: resolveLocalInstant(group[0], '00:00:00', timeZone),
         end: resolveLocalInstant(addDays(group[group.length - 1], 1), '00:00:00', timeZone), occupancyEnabled: true, additionalStaffIds,
         ignoreAppointmentId: req.query.ignore_cita_id ? Number(req.query.ignore_cita_id) : null,
+        ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, req.query.ignore_cita_id, clinic.id_clinica),
         patientId: bookingContext.patientId,
         includeDiagnosticLabels: grid });
       if (grid) personalBlocks.push(...(context.personalBlocks || []));

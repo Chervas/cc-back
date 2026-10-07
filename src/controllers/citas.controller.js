@@ -221,6 +221,7 @@ function protectAppointmentPayload(citaLike, capabilities = {}) {
 
 async function protectAppointmentsForRequest(req, citas) {
     const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
+    await require('../services/appointmentPatientLinks.service').decorate(db, list);
     // Precomputed calendar summaries are already server-owned. Full records
     // validate reciprocal clinical-component relations with bounded bulk reads.
     const full = list.filter(row => row?.import_metadata);
@@ -2304,6 +2305,9 @@ exports.createCita = asyncHandler(async (req, res) => {
                 actorId: req.userData?.userId,
                 profile: selectedDurationProfile || (bookingTreatment ? requireOperationalProfile(bookingTreatment, { durationSelection }) : null),
             }) : null;
+        if (bookingEnabled && !pastHistoryOnly) await require('../services/appointmentPatientLinks.service').choiceRequired(
+            db, { ...createOptions.appointmentValues, patient_link_combined: (selectedDurationProfile?.phases?.length
+                || bookingTreatment?.clinical_config?.booking_profile?.phases?.length || 0) > 1 }, clinica, req.body?.same_day_choice);
         const cita = bookingEnabled && !pastHistoryOnly
             ? await mutateAppointmentBooking({
                 db,
@@ -2316,9 +2320,17 @@ exports.createCita = asyncHandler(async (req, res) => {
                 expectedPlanSha256: req.body?.booking_plan_sha256,
                 visitBirth,
                 persist: async ({ values, existing, transaction, sealedBirth }) => {
+                    // Recheck while holding the canonical patient/resource locks:
+                    // two concurrent bookings must not bypass the same-day choice.
+                    if (!sealedBirth) await require('../services/appointmentPatientLinks.service').choiceRequired(db,
+                        { ...values, patient_link_combined: (selectedDurationProfile?.phases?.length
+                            || bookingTreatment?.clinical_config?.booking_profile?.phases?.length || 0) > 1 },
+                        clinica, req.body?.same_day_choice, transaction);
                     const created = sealedBirth ? existing : await CitaPaciente.create(values, { transaction });
                     await applyExplicitPatientLanguage(paciente, datosPaciente.idioma_preferido, { transaction });
                     await createOptions.afterPersist(created, transaction);
+                    await require('../services/appointmentPatientLinks.service').linkAtBirth(db, created,
+                        req.body?.same_day_choice, Number(req.userData?.userId), transaction);
                     return created;
                 },
             })
@@ -2463,6 +2475,18 @@ exports.getAppointmentHubList = asyncHandler(async (req, res) => {
     const items = rows.slice(0, q.limit).map(row => ({ ...plainCita(row), inicio_local: formatDateTimeLocal(row.inicio, timeZone), time_zone: timeZone }));
     const canManage = await canUserAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.manage', clinicId: q.clinicId });
     res.json({ items: await protectAppointmentsForRequest(req, items), can_manage: canManage, page: q.page, has_more: rows.length > q.limit });
+});
+
+exports.unlinkPatientAppointments = asyncHandler(async (req, res) => {
+    const row = await CitaPaciente.findByPk(Number(req.params.id));
+    if (!row) return res.status(404).json({ message: 'Cita no encontrada.' });
+    if (await denyAppointmentManageAccessIfNeeded(req, res, row.clinica_id)) return;
+    const rows = await require('../services/appointmentPatientLinks.service').unlink(db, row.id_cita, Number(req.userData?.userId));
+    for (const member of rows) {
+        await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(member, { future_only: true });
+        emitAppointmentSocketEvent('appointment:updated', member.toJSON());
+    }
+    return res.json({ unlinked: true, appointment_ids: rows.map(member => member.id_cita) });
 });
 
 exports.getCitas = asyncHandler(async (req, res) => {
@@ -2856,12 +2880,15 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     let previousStatus = cita.estado;
+    let linkedStateRows = [];
     if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
     }
     cita.updated_by = req.userData?.userId || null;
     if (bookingCapabilities().simple) {
-        cita = await mutateAppointmentBooking({ db, existingAppointmentId: citaId,
+        cita = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+          await require('../services/appointmentPatientLinks.service').load(db, citaId, transaction, true);
+          const saved = await mutateAppointmentBooking({ db, transaction, existingAppointmentId: citaId,
             appointmentValues: { estado: estadoRaw, updated_by: cita.updated_by }, allowObsolete: true, stateOnly: true,
             priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
             persist: async ({ values, existing, transaction }) => {
@@ -2870,6 +2897,10 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
                     nextStatus: estadoRaw, actorId: cita.updated_by, transaction });
                 return existing.update({ ...values, ...correction }, { transaction });
             },
+          });
+          linkedStateRows = await require('../services/appointmentPatientLinks.service').confirmTogether(db, saved,
+            estadoRaw, transaction, req.userData?.userId);
+          return saved;
         });
     } else {
         cita = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
@@ -2902,6 +2933,7 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
         console.warn('⚠️ [updateCitaEstado] No se pudo registrar la transición:', activityError.message || activityError);
     }
 
+    for (const row of linkedStateRows) emitAppointmentSocketEvent('appointment:updated', row.toJSON());
     await processAppointmentLeadMilestones({ cita, previousStatus });
     await patientDirectionService.handleAppointmentChange({
         appointment: cita,
@@ -2929,26 +2961,30 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
 
     try {
         const automationEvent = mapEstadoToAutomationV2Event(estadoRaw);
+        const stateRows = [cita, ...linkedStateRows];
+        const noticeGroup = ['cancelada', 'cambio_solicitado'].includes(estadoRaw)
+            ? await require('../services/appointmentPatientLinks.service').load(db, cita.id_cita) : null;
+        const noticeAppointment = noticeGroup?.rows.find(row => Number(row.id_cita) === Number(noticeGroup.link.owner_appointment_id)) || cita;
         if (CITA_ESTADOS_TERMINALES_AUTOMATION.has(estadoRaw)) {
-            await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {
+            for (const member of stateRows) await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(member, {
                 reason: `appointment_status_${estadoRaw}_cancelled_active_flow`,
                 exclude_trigger_types: automationEvent ? [automationEvent] : [],
             });
         }
         if (CITA_ESTADOS_RESUELVEN_NOTIFICACIONES.has(estadoRaw)) {
-            await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(cita.id_cita, {
+            for (const member of stateRows) await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(member.id_cita, {
                 reason: `appointment_status_${estadoRaw}`,
             });
         }
         if (automationEvent) {
-            await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
+            await appointmentAutomationV2Runtime.enqueueExecutionForCita(noticeAppointment, {
                 event_name: automationEvent,
                 user_id: req.userData?.userId || null,
                 user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
                 user_role: req.userData?.role || req.userData?.rol || 'admin',
             });
         }
-        await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(cita, {
+        for (const member of stateRows) await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(member, {
             user_id: req.userData?.userId || null,
             user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
             user_role: req.userData?.role || req.userData?.rol || 'admin',
@@ -3133,6 +3169,8 @@ exports.deleteCita = asyncHandler(async (req, res) => {
         return res.status(409).json({ code: 'appointment_visit_history_preserved',
             message: 'Esta cita conserva el historial de una visita y sus avisos. Puedes mantenerla cancelada, pero no eliminar ese historial.' });
     }
+    if (await require('../services/appointmentPatientLinks.service').membership(db, citaId)) return res.status(409).json({
+        code: 'appointment_link_history_preserved', message: 'Las citas vinculadas se cancelan juntas; no se elimina una reserva del grupo.' });
     if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) || cita.voucher_id && await db.PatientProgramSession.findOne({ where: { appointment_id: cita.id_cita } })) return res.status(409).json({ code: 'program_history_preserved', message: 'Las citas de un programa se cancelan; su historial no se elimina.' });
 
     if (String(cita.estado || '').trim().toLowerCase() !== 'cancelada') {
@@ -3282,8 +3320,16 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     }
     cita.estado = statusForReschedule(rescheduleReason, estadoRaw);
     cita.updated_by = req.userData?.userId || null;
+    let linkedMove = null;
     if (bookingEnabled) {
-        cita = await mutateAppointmentBooking({
+        linkedMove = await require('../services/appointmentPatientLinks.service').moveTogether(db, cita.id_cita, {
+            inicio, fin, estado: cita.estado, reschedule_reason: rescheduleReason, updated_by: cita.updated_by,
+            ...(nextDoctorIdRaw !== undefined ? { doctor_id: nextDoctorId } : {}),
+            ...(nextInstalacionIdRaw !== undefined ? { instalacion_id: nextInstalacionId } : {}),
+        }, { additionalStaffIds, selections: req.body?.booking_selection || {},
+            priorityAcknowledged: req.body?.booking_priority_acknowledged === true, force: wantsForce,
+            reschedulePatientOverlap: { actorId: Number(req.userData?.userId), acknowledgement: req.body?.patient_overlap_acknowledgement } });
+        cita = linkedMove?.selected || await mutateAppointmentBooking({
             db, existingAppointmentId: cita.id_cita,
             additionalStaffIds,
             appointmentValues: { inicio, fin,
@@ -3340,20 +3386,21 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     });
 
     try {
-        await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {
+        for (const member of linkedMove?.rows || [cita]) await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(member, {
             reason: 'appointment_rescheduled_cancelled_previous_active_flow',
         });
         await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(cita.id_cita, {
             reason: 'appointment_rescheduled',
         });
-        await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
+        const noticeOwner = linkedMove ? linkedMove.rows.find(row => Number(row.id_cita) === linkedMove.ownerId) : cita;
+        await appointmentAutomationV2Runtime.enqueueExecutionForCita(noticeOwner, {
             event_name: 'appointment_rescheduled',
             trigger_data: { reschedule_reason: rescheduleReason },
             user_id: req.userData?.userId || null,
             user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
             user_role: req.userData?.role || req.userData?.rol || 'admin',
         });
-        await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(cita, {
+        for (const member of linkedMove?.rows || [cita]) await appointmentAutomationV2Runtime.syncScheduledTriggersForCita(member, {
             user_id: req.userData?.userId || null,
             user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
             user_role: req.userData?.role || req.userData?.rol || 'admin',
@@ -3385,6 +3432,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     await attachFlowSummaryToCitas(citaActualizada);
     await attachUnreadCountsToCitas(citaActualizada, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citaActualizada);
+    for (const row of linkedMove?.rows || []) emitAppointmentSocketEvent('appointment:updated', row.toJSON());
     emitAppointmentSocketEvent('appointment:updated', citaActualizada?.toJSON ? citaActualizada.toJSON() : citaActualizada);
     return res.json(await protectAppointmentsForRequest(req, citaActualizada));
 });

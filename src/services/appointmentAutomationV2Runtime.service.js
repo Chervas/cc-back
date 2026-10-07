@@ -1146,6 +1146,9 @@ async function resolveAppointmentCommunicationLanguage(cita) {
 }
 
 async function enqueueExecutionForTemplate(cita, template, options = {}) {
+  if (await require('./appointmentPatientLinks.service').follower(db, cita?.id_cita)) {
+    return { success: true, skipped: true, reason: 'linked_appointment_uses_first_notice' };
+  }
   if (await require('./appointmentVisitManaged.service').current().managedVisit(cita)) {
     return enqueueExecutionForCita(cita, options);
   }
@@ -1292,6 +1295,9 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
 }
 
 async function enqueueExecutionForCita(cita, options = {}) {
+  if (await require('./appointmentPatientLinks.service').follower(db, cita?.id_cita)) {
+    return { success: true, skipped: true, reason: 'linked_appointment_uses_first_notice' };
+  }
   const citaId = toIntOrNull(cita?.id_cita);
   if (!citaId) {
     return { success: false, skipped: true, reason: 'invalid_cita' };
@@ -1439,6 +1445,11 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
 async function syncScheduledTriggersForCita(cita, options = {}) {
   const citaId = toIntOrNull(cita?.id_cita);
   if (!citaId) return { success: false, skipped: true, reason: 'invalid_cita' };
+  if (await require('./appointmentPatientLinks.service').follower(db, citaId)) {
+    const jobs = await listExistingScheduledJobs(citaId);
+    for (const job of jobs) await jobRequestsService.markCancelled(job.id, { errorMessage: 'linked_appointment_uses_first_notice' });
+    return { success: true, skipped: true, scheduled_jobs: [], reason: 'linked_appointment_uses_first_notice' };
+  }
   const managedSchedule = await require('./appointmentVisitManaged.service').current().syncReminderIntents(cita);
   if (managedSchedule) return managedSchedule;
   if (isImportedHistoricalAppointment(cita) && !require('../lib/whatsappImportedReminderRelease').permits(cita)) {
@@ -1495,6 +1506,7 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
         timeZone,
       });
       if (!scheduledFor || !Number.isFinite(scheduledFor.getTime())) return;
+      if (options.future_only === true && scheduledFor.getTime() <= Date.now()) return;
       const operations = require('../lib/whatsappImportedAppointmentOperations');
       const operationalPolicy = operations.read();
       if (operations.allowsAppointment(cita, { policy: operationalPolicy })
@@ -1753,6 +1765,9 @@ async function fireScheduledTrigger(payload = {}, options = {}) {
   const triggerConfig = getTemplateTriggerConfig(template);
   const released = triggerType === 'appointment_reminder_window' && triggerConfig.schedule_moment === 'day_before'
     && require('../lib/whatsappImportedReminderRelease').permits(cita, { templateVersionId: Number(template.id) });
+  if (await require('./appointmentPatientLinks.service').follower(db, citaId)) {
+    return { success: true, skipped: true, reason: 'linked_appointment_uses_first_notice' };
+  }
   if (shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig) && !released) {
     return { success: true, skipped: true, reason: 'appointment_notification_suppressed' };
   }
