@@ -1101,3 +1101,32 @@ claim; those boundaries and the full three-family first-send test remain separat
 Private follow-up evidence/receipts:
 `/home/ubuntu/qa-evidence/confirmation-followup-20261007-me1EF0/`.
 No consent activation, DDL, credential/config change or full gateway promotion.
+
+Follow-up closure at 14:36 UTC: **18** additional original executions completed;
+12 missing acknowledgments delivered/read and six omitted after human replies;
+all first notices unchanged and unique, appointment geometry/provenance preserved
+and native update audit records the recovery actor. **12** unanswered latest,
+unchanged, accepted notices restored at their original response wait, without
+changing appointment status or sending anything at restoration. Expiry is the
+earlier of the appointment start and the original notice +24h. They remain able
+to receive replies; expiry runs no reminder nudge. Any downgrade to code before
+this guard requires stopping these specifically reviewed waits/jobs first, or
+old code could follow their original timeout branch. Preserve receipts and do
+not re-run spent manifests.
+
+Real configured signed Bedrock broker smoke, with only synthetic text and normal
+AI usage accounting, tested six contextual acceptance/refusal/directions cases.
+It exposed a tool enum formatted as `&quot;asistencia&quot;`. Representation-only
+normalization now removes at most one matching literal/HTML double-quote pair
+and accepts an exact allowlisted enum; no clinical synonyms, inferred patient
+meaning, weaker evidence or confidence thresholds. Isolated regression tests
+retain rejection of unknown choices, directions-only replies, weak confidence,
+missing evidence, uncertainty and revocation. This is not a full real-provider
+first-send/worker test and makes no future perfect-classification guarantee.
+
+No new missing-table failures after the earlier fix. Terminal historical errors
+deliberately retained: 12 in clinic 66 and 15 in clinic 72 are superseded,
+protected/cancelled, different-hour/paired or otherwise not safely reopenable;
+nine rate-limited executions and one phone/conversation mismatch are separate
+findings. Seven pre-fix executions of another clinic (35) were discovered in the
+global read-only audit; this BS recovery did not contact its patients.

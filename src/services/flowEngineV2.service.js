@@ -1961,11 +1961,16 @@ function buildScopedClassifyIntentBatch(context = {}) {
 }
 
 function deriveConfirmAppointmentOutput(signalOutput = {}, { patientText = '', responseItems = [] } = {}) {
+  const { canonicalAiChoice } = require('../lib/automation-ai-choice');
+  const subject = canonicalAiChoice(signalOutput.asunto_confirmacion,
+    ['asistencia', 'recepcion_datos', 'datos_contacto', 'indicaciones', 'otro']);
+  const reading = canonicalAiChoice(signalOutput.lectura_confirmacion,
+    ['compromiso_asistencia', 'afirmacion_incondicional', 'acuse_recepcion']);
   const affirmative = signalOutput.respuesta_afirmativa_a_la_clinica === true;
   const contradiction = signalOutput.negacion_explicita_de_la_confirmacion === true;
   const confirmationSubjectSupported = Number(signalOutput.confianza_asunto_confirmacion) >= AUTO_APPLY_CONFIDENCE_THRESHOLD
-    && (['asistencia', 'recepcion_datos', 'datos_contacto'].includes(signalOutput.asunto_confirmacion)
-      || signalOutput.lectura_confirmacion === 'compromiso_asistencia');
+    && (['asistencia', 'recepcion_datos', 'datos_contacto'].includes(subject)
+      || reading === 'compromiso_asistencia');
   const normalizeEvidence = (text) => String(text || '').normalize('NFC')
     .replace(/\s+/g, ' ').replace(/\s+([.,!?;:])/g, '$1').trim();
   const text = normalizeEvidence(patientText);
@@ -1983,7 +1988,7 @@ function deriveConfirmAppointmentOutput(signalOutput = {}, { patientText = '', r
   const certainDecision = evidenceVerified && signalOutput.confirmacion_condicionada_o_incierta === false
     && confirmationSubjectSupported
     && Number(signalOutput.confianza_confirmacion_condicionada_o_incierta) >= AUTO_APPLY_CONFIDENCE_THRESHOLD
-    && ['compromiso_asistencia', 'afirmacion_incondicional', 'acuse_recepcion'].includes(signalOutput.lectura_confirmacion)
+    && reading !== null
     && Number(signalOutput.confianza_lectura_confirmacion) >= AUTO_APPLY_CONFIDENCE_THRESHOLD;
   const certainReplyAssessment = typeof signalOutput.requiere_respuesta === 'boolean'
     && Number(signalOutput.confianza_requiere_respuesta) >= AUTO_APPLY_CONFIDENCE_THRESHOLD;

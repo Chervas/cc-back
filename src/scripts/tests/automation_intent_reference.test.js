@@ -17,6 +17,29 @@ test('contextual acceptance is explicit in the canonical prompt, without overrid
   assert.match(CONFIRM_APPOINTMENT_PRESET_CONFIG.instruction, /Ok, pero no puedo/);
 });
 
+test('tool enum quoting is representation only; unknown decisions and weak evidence remain held', () => {
+  const { canonicalAiChoice } = require('../../lib/automation-ai-choice');
+  for (const value of ['asistencia', '"asistencia"', '&quot;asistencia&quot;']) {
+    assert.equal(canonicalAiChoice(value, ['asistencia']), 'asistencia');
+  }
+  for (const value of ['attendance', '<b>asistencia</b>', '&quot;asistencia', '"incierta"', true, null]) {
+    assert.equal(canonicalAiChoice(value, ['asistencia']), null);
+  }
+  const { deriveConfirmAppointmentOutput } = require('../../services/flowEngineV2.service');
+  const signal = { evidencia_confirmacion:'Ok!', asunto_confirmacion:'&quot;asistencia&quot;', confianza_asunto_confirmacion:.95,
+    lectura_confirmacion:'"afirmacion_incondicional"', confianza_lectura_confirmacion:.95,
+    confirmacion_condicionada_o_incierta:false, confianza_confirmacion_condicionada_o_incierta:.95,
+    respuesta_afirmativa_a_la_clinica:true, confianza_respuesta_afirmativa_a_la_clinica:.95,
+    negacion_explicita_de_la_confirmacion:false, confianza_negacion_explicita_de_la_confirmacion:.95,
+    requiere_respuesta:false, confianza_requiere_respuesta:.95 };
+  assert.equal(deriveConfirmAppointmentOutput(signal,{patientText:'Ok! Gracias'}).confirma_asistencia,true);
+  for (const change of [{lectura_confirmacion:'"incierta"'}, {confianza_lectura_confirmacion:.4},
+    {asunto_confirmacion:'"indicaciones"'}, {evidencia_confirmacion:'text not present'},
+    {confirmacion_condicionada_o_incierta:true}, {negacion_explicita_de_la_confirmacion:true}]) {
+    assert.equal(deriveConfirmAppointmentOutput({...signal,...change},{patientText:'Ok! Gracias'}).confirma_asistencia,false);
+  }
+});
+
 test('the current preset includes reference grounding without duplicating it at runtime', () => {
   const instruction = CLASSIFY_INTENT_PRESET_CONFIG.instruction;
   assert(instruction.includes(CLASSIFY_INTENT_REFERENCE_INSTRUCTION));
