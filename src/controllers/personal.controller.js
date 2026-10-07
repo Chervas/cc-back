@@ -4367,6 +4367,86 @@ exports.moveHorarioClinica = async (req, res) => {
     }
 };
 
+exports.mergeHorariosClinicaForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.mergeHorariosClinica(req, res);
+};
+
+exports.mergeHorariosClinica = async (req, res) => {
+    try {
+        const actorId = Number(req.userData?.userId);
+        if (!Number.isSafeInteger(actorId) || actorId <= 0) return res.status(401).json({ message: 'Auth failed!' });
+        const doctorId = Number(req.params.id), clinicaId = Number(req.body?.clinica_id);
+        const keepId = Number(req.body?.keep_horario_id), deleteId = Number(req.body?.delete_horario_id);
+        const hasDate = Object.prototype.hasOwnProperty.call(req.body || {}, 'fecha');
+        const date = normalizeDateOnly(req.body?.fecha);
+        const start = normalizeHm(req.body?.hora_inicio), end = normalizeHm(req.body?.hora_fin);
+        if (![doctorId, clinicaId, keepId, deleteId].every(id => Number.isSafeInteger(id) && id > 0)
+            || keepId === deleteId || (hasDate && !date) || !start || !end || start >= end) {
+            return res.status(400).json({ message: 'Invalid merge payload' });
+        }
+        if (!await canEditHorarios(actorId, doctorId, clinicaId)) return res.status(403).json({ message: 'Forbidden' });
+        const merged = await withDoctorCalendarMutation(doctorId, async transaction => {
+            const rows = await DoctorHorario.findAll({ where: { id: { [Op.in]: [keepId, deleteId] } },
+                include: ownedHorarioInclude(doctorId, clinicaId), order: [['id', 'ASC']],
+                transaction, lock: transaction.LOCK.UPDATE });
+            if (rows.length !== 2) rejectPersonalScheduleTransfer(404, { message: 'Horario not found' });
+            const keep = rows.find(row => Number(row.id) === keepId), removed = rows.find(row => Number(row.id) === deleteId);
+            const exceptions = row => (row.excepciones || []).map(scheduleExceptionFields)
+                .sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)) || JSON.stringify(a).localeCompare(JSON.stringify(b)));
+            let effective = rows;
+            if (hasDate) {
+                effective = expandHorariosForDate(rows, date,
+                    buildHorarioExceptionMap(rows.flatMap(row => row.excepciones || [])));
+                if (effective.length !== 2) rejectPersonalScheduleTransfer(422, {
+                    code: 'INVALID_SOURCE_SCHEDULE_OCCURRENCE', message: 'Ambos tramos deben tener una ocurrencia vigente en la fecha elegida.' });
+            } else {
+                const metadata = row => JSON.stringify([Number(row.dia_semana), row.activo !== false,
+                    row.rrule || null, normalizeDateOnly(row.fecha_inicio_vigencia), normalizeDateOnly(row.fecha_fin_vigencia), exceptions(row)]);
+                if (keep.activo === false || removed.activo === false || metadata(keep) !== metadata(removed)) {
+                    rejectPersonalScheduleTransfer(422, { code: 'INCOMPATIBLE_SCHEDULE_MERGE_PATTERNS',
+                        message: 'Para fusionar patrones deben coincidir el día, la recurrencia, la vigencia y las excepciones. Elige una fecha concreta.' });
+                }
+            }
+            const ranges = effective.map(row => ({ start: normalizeHm(row.hora_inicio), end: normalizeHm(row.hora_fin) }))
+                .sort((a, b) => String(a.start).localeCompare(String(b.start)));
+            const unionEnd = ranges[0].end > ranges[1].end ? ranges[0].end : ranges[1].end;
+            if (ranges.some(range => !range.start || !range.end || range.start >= range.end)
+                || ranges[0].end < ranges[1].start || start !== ranges[0].start || end !== unionEnd) {
+                rejectPersonalScheduleTransfer(422, { code: 'INVALID_SCHEDULE_MERGE_RANGE',
+                    message: 'La fusión debe conservar la unión exacta de dos tramos contiguos, sin huecos ni recortes.' });
+            }
+            const rawCandidate = hasDate ? { dia_semana: dayIndexFromDate(date), hora_inicio: start, hora_fin: end,
+                activo: true, rrule: null, fecha_inicio_vigencia: date, fecha_fin_vigencia: date, excepciones: [] }
+                : { ...horarioTransferFields(keep), hora_inicio: start, hora_fin: end, excepciones: exceptions(keep) };
+            const [normalized] = normalizeHorarioRows([rawCandidate]);
+            if (!normalized) rejectPersonalScheduleTransfer(400, { message: 'horario inválido' });
+            const candidate = { ...normalized, excepciones: rawCandidate.excepciones };
+            const validationError = await validateSingleHorarioCandidate({ targetUserId: doctorId, clinicaId,
+                candidateHorario: candidate, excludeHorarioIds: [keepId, deleteId], transaction });
+            if (validationError) rejectPersonalScheduleTransfer(validationError.status, validationError.body);
+            if (hasDate) {
+                await DoctorHorarioExcepcion.upsert({ doctor_horario_id: keepId, fecha: date, cancelado: false,
+                    hora_inicio_override: start, hora_fin_override: end, creado_por: actorId }, { transaction });
+                await DoctorHorarioExcepcion.upsert({ doctor_horario_id: deleteId, fecha: date, cancelado: true,
+                    hora_inicio_override: null, hora_fin_override: null, creado_por: actorId }, { transaction });
+            } else {
+                await keep.update({ hora_inicio: start, hora_fin: end }, { transaction });
+                await DoctorHorario.destroy({ where: { id: deleteId, doctor_clinica_id: keep.doctor_clinica_id }, transaction });
+            }
+            return keep;
+        });
+        return res.json({ message: 'Horarios fusionados correctamente.', merged: {
+            scope: hasDate ? 'occurrence' : 'pattern', ...(hasDate ? { fecha: date } : {}),
+            horario_id_conservado: keepId, horario_id_eliminado: deleteId, horario: serializeHorarioRow(merged),
+        } });
+    } catch (error) {
+        if (sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
+        console.error('[personal.mergeHorariosClinica] Error:', error);
+        return res.status(500).json({ message: 'Error merging horarios', error: error.message });
+    }
+};
+
 /**
  * Valida que los horarios candidatos estén contenidos dentro del horario permitido
  * por la clínica (apertura del centro).

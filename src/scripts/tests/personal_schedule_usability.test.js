@@ -29,7 +29,7 @@ function matches(value, where = {}) {
     return actual === wanted || String(actual) === String(wanted);
   });
 }
-function fixture({ bookingEnabled = true, deniedClinic = null } = {}) {
+function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard = false } = {}) {
   let state = {
     links: [{ id: 201, doctor_id: 2, clinica_id: 10, activo: true, recibe_citas: true },
       { id: 202, doctor_id: 2, clinica_id: 20, activo: true, recibe_citas: true },
@@ -101,7 +101,16 @@ function fixture({ bookingEnabled = true, deniedClinic = null } = {}) {
   const withCalendarMutation = async options => {
     calls.transactions++; assert.equal(options.protectLegacyAppointments, true); calls.scopes.push(options.doctorIds || [options.doctorId]);
     const before = structuredClone(state);
-    try { return await options.mutate(tx); }
+    try {
+      if (realCoverageGuard) {
+        const actual = require('../../services/appointmentCalendarMutation.service');
+        models.Sequelize = { Op };
+        models.AppointmentBookingResource = { upsert: async () => {}, findByPk: async () => ({}) };
+        return await actual.withCalendarMutation({ ...options, enabled: bookingEnabled, transaction: tx,
+          now: new Date('2027-01-01T00:00:00Z'), realtimeEnabled: false, notify: async () => {} });
+      }
+      return await options.mutate(tx);
+    }
     catch (error) { state = before; calls.rollback++; throw error; }
   };
   const imports = {
@@ -112,7 +121,9 @@ function fixture({ bookingEnabled = true, deniedClinic = null } = {}) {
     '../lib/access-policy': { canUserAccessFeature: async ({ clinicId }) => Number(clinicId) !== deniedClinic,
       getAccessibleClinicIdsForFeature: async () => [10, 20] },
     '../services/personalPresence.service': {},
-    '../services/appointmentCalendarMutation.service': { withCalendarMutation, sendCalendarMutationError: () => false },
+    '../services/appointmentCalendarMutation.service': { withCalendarMutation,
+      sendCalendarMutationError: (error, res) => { if (!/^booking_calendar_/.test(error?.code || '')) return false;
+        res.status(error.status || 409).json({ code: error.code, message: error.message }); return true; } },
     '../lib/personal-schedule-recurring': recurring, '../lib/availability-calendar': calendar,
     '../services/treatmentBookingProfile.service': { bookingCapabilities: () => ({ simple: bookingEnabled }) },
     '../services/appointmentResourceCalendar.service': { resourceAppointments: async ({ doctorId, start, end }) => bookingEnabled
@@ -337,4 +348,78 @@ test('recurring multiday block preview reviews future interior-day phases beyond
   assert.equal(result.statusCode, 200, JSON.stringify(result)); assert.equal(result.body.affected_count, 1);
   assert.equal(new Date(result.body.appointments[0].inicio).toISOString(), '2027-02-09T09:00:00.000Z');
   assert.equal(new Date(result.body.appointments[0].affected_phases[0].inicio).toISOString(), '2027-02-09T09:20:00.000Z');
+});
+
+const mergeBody = { keep_horario_id: 100, delete_horario_id: 102, clinica_id: 10, hora_inicio: '09:00', hora_fin: '15:00' };
+function addMergePartner(f, { differentRecurrence = false } = {}) {
+  f.state().schedules.push({ ...f.state().schedules[0], id: 102, hora_inicio: '13:00', hora_fin: '15:00',
+    ...(differentRecurrence ? { rrule: null } : {}) });
+}
+function addMergeBooking(f, { date = '2027-01-04', ledger = true } = {}) {
+  f.state().appointments.push({ id_cita: 88, doctor_id: 2, clinica_id: 10, estado: 'confirmada',
+    inicio: `${date}T11:30:00Z`, fin: `${date}T13:30:00Z` });
+  if (ledger) f.state().phases.push({ appointment_id: 88, resource_key: 'doctor:2', doctor_id: 2,
+    start_at: `${date}T12:30:00Z`, end_at: `${date}T13:00:00Z` });
+}
+test('atomic pattern merge preserves ledger and legacy appointment coverage without an intermediate deletion', async () => {
+  for (const bookingEnabled of [true, false]) {
+    const f = fixture({ realCoverageGuard: true, bookingEnabled }); addMergePartner(f); addMergeBooking(f, { ledger: bookingEnabled });
+    f.state().exceptions.push(...f.state().exceptions.map(row => ({ ...row, id: row.id + 10, doctor_horario_id: 102 })));
+    const result = await f.call('mergeHorariosClinica', mergeBody, { id: '2' });
+    assert.equal(result.statusCode, 200, JSON.stringify(result)); assert.equal(result.body.merged.scope, 'pattern');
+    assert.equal(f.state().schedules.find(row => row.id === 100).hora_fin, '15:00');
+    assert.equal(f.state().schedules.some(row => row.id === 102), false);
+    assert.equal(f.state().appointments[0].inicio, '2027-01-04T11:30:00Z');
+    assert.equal(f.state().appointments[0].fin, '2027-01-04T13:30:00Z'); assert.equal(f.calls.transactions, 1);
+  }
+});
+test('dated merge uses effective exception ranges and preserves RRULE, every other date and booked visits', async () => {
+  const f = fixture({ realCoverageGuard: true }); addMergePartner(f, { differentRecurrence: true });
+  f.state().exceptions.push({ id: 902, doctor_horario_id: 102, fecha: '2027-02-01', cancelado: false,
+    hora_inicio_override: '12:00', hora_fin_override: '15:00' });
+  addMergeBooking(f, { date: '2027-02-01' }); const before = plain(f.state().schedules);
+  const result = await f.call('mergeHorariosClinica', { ...mergeBody, fecha: '2027-02-01', hora_inicio: '10:00' }, { id: '2' });
+  assert.equal(result.statusCode, 200, JSON.stringify(result)); assert.equal(result.body.merged.scope, 'occurrence');
+  assert.deepEqual(plain(f.state().schedules), before);
+  const map = recurring.buildHorarioExceptionMap(f.state().exceptions);
+  const merged = recurring.expandHorariosForDate(f.state().schedules, '2027-02-01', map);
+  assert.deepEqual(merged.filter(row => row.horario_id === 100 || row.horario_id === 102).map(row =>
+    [row.horario_id, row.hora_inicio, row.hora_fin]), [[100, '10:00', '15:00']]);
+  assert.equal(recurring.expandHorariosForDate(f.state().schedules, '2027-01-04', map).filter(row => row.horario_id === 100 || row.horario_id === 102).length, 2);
+  assert.equal(f.state().appointments[0].fin, '2027-02-01T13:30:00Z'); assert.equal(f.calls.transactions, 1);
+});
+test('a failed second merge write rolls back the kept override and every source exception', async () => {
+  const f = fixture({ realCoverageGuard: true }); addMergePartner(f); const before = plain(f.state());
+  const upsert = f.models.DoctorHorarioExcepcion.upsert;
+  f.models.DoctorHorarioExcepcion.upsert = async (fields, options) => {
+    if (fields.doctor_horario_id === 102) throw Error('synthetic second write failed');
+    return upsert(fields, options);
+  };
+  const result = await f.call('mergeHorariosClinica', { ...mergeBody, fecha: '2027-01-04' }, { id: '2' });
+  assert.equal(result.statusCode, 500); assert.deepEqual(plain(f.state()), before); assert.equal(f.calls.rollback, 1);
+});
+test('merge rejects gaps, recuts, incompatible patterns, canceled dates, foreign scope and permissions without a write', async () => {
+  const cases = [
+    { change: f => { addMergePartner(f); f.state().schedules.find(row => row.id === 102).hora_inicio = '14:00'; }, body: { ...mergeBody, fecha: '2027-01-04' }, code: 'INVALID_SCHEDULE_MERGE_RANGE', status: 422 },
+    { change: f => addMergePartner(f), body: { ...mergeBody, fecha: '2027-01-04', hora_fin: '14:00' }, code: 'INVALID_SCHEDULE_MERGE_RANGE', status: 422 },
+    { change: f => addMergePartner(f, { differentRecurrence: true }), body: mergeBody, code: 'INCOMPATIBLE_SCHEDULE_MERGE_PATTERNS', status: 422 },
+    { change: f => addMergePartner(f), body: { ...mergeBody, fecha: '2027-01-18' }, code: 'INVALID_SOURCE_SCHEDULE_OCCURRENCE', status: 422 },
+    { change: f => { addMergePartner(f); f.state().schedules.find(row => row.id === 102).doctor_clinica_id = 202; }, body: mergeBody, status: 404 },
+  ];
+  for (const item of cases) {
+    const f = fixture(); item.change(f); const before = plain(f.state());
+    const result = await f.call('mergeHorariosClinica', item.body, { id: '2' });
+    assert.equal(result.statusCode, item.status, JSON.stringify(result)); if (item.code) assert.equal(result.body.code, item.code);
+    assert.deepEqual(plain(f.state()), before); assert.equal(f.calls.writes, 0);
+  }
+  const denied = fixture({ deniedClinic: 10 }); addMergePartner(denied);
+  const result = await denied.call('mergeHorariosClinica', { ...mergeBody, fecha: '2027-01-04' }, { id: '2' }, 2);
+  assert.equal(result.statusCode, 403); assert.equal(denied.calls.transactions, 0);
+});
+test('final candidate overlap rejects an atomic merge while preserving both source schedules', async () => {
+  const f = fixture({ realCoverageGuard: true }); addMergePartner(f);
+  f.state().schedules.push({ ...f.state().schedules[0], id: 103, doctor_clinica_id: 202, hora_inicio: '14:00', hora_fin: '16:00' });
+  const before = plain(f.state()); const result = await f.call('mergeHorariosClinica', { ...mergeBody, fecha: '2027-01-04' }, { id: '2' });
+  assert.equal(result.statusCode, 409, JSON.stringify(result)); assert.equal(result.body.code, 'STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC');
+  assert.deepEqual(plain(f.state()), before); assert.equal(f.calls.writes, 0);
 });

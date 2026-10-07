@@ -53,6 +53,7 @@ router.post('/me/clinicas/:clinicaId/horarios/:horarioId/excepciones', personalC
 router.patch('/me/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId', personalController.patchHorarioExcepcionForCurrent);
 router.delete('/me/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId', personalController.deleteHorarioExcepcionForCurrent);
 router.post('/me/horarios/move', personalController.moveHorarioClinicaForCurrent);
+router.post('/me/horarios/merge', personalController.mergeHorariosClinicaForCurrent);
 router.post('/me/horarios/copy', personalController.copyHorarioClinicaForCurrent);
 router.patch('/me/clinicas/:clinicaId/disponibilidad-config', personalController.updateDisponibilidadConfigClinicaForCurrent);
 router.get('/:id/clinicas/:clinicaId/horarios', personalController.getHorariosClinica);
@@ -66,6 +67,7 @@ router.post('/:id/clinicas/:clinicaId/horarios/:horarioId/excepciones', personal
 router.patch('/:id/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId', personalController.patchHorarioExcepcion);
 router.delete('/:id/clinicas/:clinicaId/horarios/:horarioId/excepciones/:exceptionId', personalController.deleteHorarioExcepcion);
 router.post('/:id/horarios/move', personalController.moveHorarioClinica);
+router.post('/:id/horarios/merge', personalController.mergeHorariosClinica);
 router.post('/:id/horarios/copy', personalController.copyHorarioClinica);
 router.patch('/:id/clinicas/:clinicaId/disponibilidad-config', personalController.updateDisponibilidadConfigClinica);
 
