@@ -89,10 +89,21 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
     // Skip incompatible columns before iterating times; no SQL per column/slot.
     if ((doctor && !phase.professionals.ids.includes(doctor))
       || (installation && !phase.installation_ids.includes(installation))) {
+      const conflict = incompatibleStart({ ...profile, phases: [phase] }, doctor, installation);
+      if (completePlan && profile.phases.length > 1) {
+        const roomMismatch = installation && !phase.installation_ids.includes(installation);
+        const resources = roomMismatch ? phase.installation_ids.map(id => context.installations.get(id)?.name)
+          : phase.professionals.ids.map(id => context.doctors.get(id)?.name);
+        const names = resources.filter(Boolean).join(' / ');
+        conflict.details = { ...conflict.details, phase_key: phase.key, phase_label: phase.label || '',
+          message: roomMismatch
+            ? `Esta sala no corresponde al primer paso de la cita${phase.label ? ` («${phase.label}»)` : ''}.${names ? ` La cita debe empezar en ${names}.` : ''}`
+            : `Este profesional no realiza el primer paso de la cita${phase.label ? ` («${phase.label}»)` : ''}.${names ? ` Ese paso corresponde a ${names}.` : ''}` };
+      }
       if (includeUnavailable) appendStartInterval(unavailable,
         resolveLocalInstant(query.fecha_local, `${query.from_local || '00:00'}:00`, response.timezone),
         rangeEnd,
-        incompatibleStart({ ...profile, phases: [phase] }, doctor, installation), response.timezone, formatLocal);
+        conflict, response.timezone, formatLocal);
       return { slots: [], unavailable };
     }
     const slots = solutionsForCalendar({ profile, context, date: query.fecha_local, stepMinutes: stepMin,
