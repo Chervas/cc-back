@@ -24,3 +24,25 @@ grupo, permisos parciales y alias) y `installation_access_scope_contract.test.js
 No DDL, activaciones de catálogo, envíos ni cambios en gateway. Rollback: revertir
 este corte de lectura junto al frontend correspondiente, sin revertir los fixes
 de WhatsApp ni sus esperas recuperadas.
+
+## Vista conjunta de sólo lectura y selectores estables — 07/10/2026
+
+El grupo sigue siendo exclusivamente lectura. Para crear, bloquear o editar se
+elige una clínica; una sala compartida no selecciona su primer centro por defecto.
+
+- El lector autorizado de instalaciones añade `agenda_physical_alias_ids`,
+  con una consulta por lote a los alias explícitos, limitada a salas activas de
+  la respuesta. Permite una representación física estable incluso en días vacíos.
+  No modifica IDs, bloqueos, reservas, permisos ni el modelo de datos.
+- El selector `agenda_context` publica `agenda_flexible` desde la pertenencia
+  activa que recibe citas en esa clínica. Su `agendable` considera esa excepción
+  existente cuando hay apertura de clínica; no es una autorización para reservar.
+  La matriz y la validación canónica conservan bloqueos, atención, máquinas,
+  conflictos y confirmación. El agregado de varias clínicas es sólo presentación.
+- Frontend solicita la lista explícita de clínicas al lector de instalaciones,
+  en vez de consultar todos los centros autorizados y filtrar localmente.
+
+Regresión adicional: `agenda_selector_readiness.test.js` ejecuta ambos
+controladores con dependencias simuladas, sin DB ni proveedores, comprobando
+ámbito, excepción por pertenencia y una sola consulta de alias sin recursos ajenos.
+No alterar las recuperaciones de WhatsApp ni reactivar consentimientos.

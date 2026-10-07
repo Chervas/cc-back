@@ -5,6 +5,7 @@ const { resourceAppointments, resourceInstallationBlocks } = require('../service
 const withDoctorCalendarMutation = (doctorId, mutate) => withCalendarMutation({ db, doctorId, mutate });
 const { Op } = db.Sequelize;
 const { STAFF_ROLES } = require('../lib/role-helpers');
+const { isFlexibleDoctor } = require('../lib/flexible-agenda');
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
 const dayIndex = (date) => new Date(date).getDay();
@@ -129,6 +130,7 @@ exports.list = asyncHandler(async (req, res) => {
     const hasSchedule = Array.isArray(dc.horarios) && dc.horarios.some((horario) => horario?.id != null);
     const clinicHasOpening = Array.isArray(dc.clinica?.horarios) && dc.clinica.horarios.length > 0;
     const receivesAppointments = !!dc.recibe_citas;
+    const flexibleAgenda = agendaContext && isFlexibleDoctor(dc);
     uniqueByPivot.set(key, {
       id: String(dc.doctor?.id_usuario ?? dc.doctor_id),
       nombre: dc.doctor?.nombre || '',
@@ -144,7 +146,10 @@ exports.list = asyncHandler(async (req, res) => {
       recibe_citas: receivesAppointments,
       has_schedule: hasSchedule,
       clinic_has_opening: clinicHasOpening,
-      agendable: receivesAppointments && hasSchedule && clinicHasOpening,
+      agenda_flexible: flexibleAgenda,
+      // Selector readiness is not availability/permission. The canonical
+      // matrix still enforces real blocks, resources and confirmation.
+      agendable: receivesAppointments && (hasSchedule || flexibleAgenda) && clinicHasOpening,
     });
   });
 

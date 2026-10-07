@@ -10,7 +10,7 @@ const {
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
 const { normalizeInstallationProfessionals, installationAllowsStaff } = require('../lib/installation-professionals');
 const { normalizeInstallationOverlap: overlapSettings } = require('../lib/installation-overlap');
-const { agendaClinicIds } = require('../lib/agenda-read-scope');
+const { agendaClinicIds, agendaInstallationAliases } = require('../lib/agenda-read-scope');
 
 async function validateProfessionals(value, clinicId, transaction) {
   const ids = normalizeInstallationProfessionals(value);
@@ -190,7 +190,14 @@ exports.list = asyncHandler(async (req, res) => {
   include.push({ model: db.InstalacionBloqueo, as: 'bloqueos' });
 
   const items = await db.Instalacion.findAll({ where, include, order: [['orden_visualizacion','ASC'], ['id','ASC']] });
-  res.json(items);
+  // Stable display evidence, even when a calendar day has no appointments.
+  // One batch; aliases cannot expose rooms outside this authorized response.
+  const roomIds = items.filter(item => item.activo).map(item => Number(item.id));
+  const aliasRows = db.InstallationPhysicalAlias && roomIds.length ? await db.InstallationPhysicalAlias.findAll({
+    where: { installation_id: { [Op.in]: roomIds } }, raw: true,
+  }) : [];
+  const aliases = agendaInstallationAliases(aliasRows, roomIds);
+  res.json(items.map(item => ({ ...item.toJSON(), agenda_physical_alias_ids: aliases[item.id] || [Number(item.id)] })));
 });
 
 exports.getById = asyncHandler(async (req, res) => {
