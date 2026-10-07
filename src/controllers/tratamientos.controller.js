@@ -201,7 +201,15 @@ exports.getTratamientos = asyncHandler(async (req, res) => {
     if (disciplina) {
         where.disciplina = { [Op.in]: expandTreatmentDisciplineCodes(disciplina) };
     } else if (clinicIdNum) {
-        where.disciplina = { [Op.in]: expandTreatmentDisciplineCodes(await resolveClinicDisciplines(clinicIdNum)) };
+        // The clinic's own configured catalogue is authoritative. Its broad
+        // specialty list must not silently hide an active local consultation
+        // stored as "general". Keep automatic specialty filtering for shared
+        // group/system suggestions, and retain the tenant scope above.
+        where[Op.and] = where[Op.and] || [];
+        where[Op.and].push({ [Op.or]: [
+            { origen: 'clinica', clinica_id: clinicIdNum },
+            { disciplina: { [Op.in]: expandTreatmentDisciplineCodes(await resolveClinicDisciplines(clinicIdNum)) } },
+        ] });
     }
     if (categoria) where.categoria = categoria;
     if (especialidad) where.especialidad = especialidad;
