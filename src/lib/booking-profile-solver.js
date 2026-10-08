@@ -2,7 +2,7 @@
 
 const { normalizeBookingProfile, bookingPhaseOffsets, bookingProfileDurationMinutes, pendingAttentionRequirements } = require('./booking-profile');
 const { installationAllowsStaff } = require('./installation-professionals');
-const { attentionVisitsAllowStep } = require('./booking-attention-origin');
+const { attentionVisitsAllowStep, legacyAttentionConfirmationIds } = require('./booking-attention-origin');
 const { professionalFallbackAllowed } = require('./booking-professional-fallback');
 const { legacyProtectedAttentionResource, flexibleVersion4PhaseDoctor, flexibleVersion4StaffResource, flexibleVersion4RoomResource } = require('./flexible-agenda');
 const { normalizeAttentionPolicy, isDefaultAttention, requiresVersion4Attention, planStaffAttention, assessStaffAttentionSteps, resourceForConfirmedOverlap, ordinaryPhaseCanOverlap } = require('./booking-attention');
@@ -223,7 +223,8 @@ function solveVersion4BookingProfile({ profile, start, doctors, installations, e
           && !professionalFallbackAllowed({ profileVersion: 4, professionals: phase.professionals,
             primary: doctors.get(phase.professionals.preferred_id), start: timing.start, end: timing.end, policies }))
           && doctorIds.every(id => attentionVisitsAllowStep(doctors.get(id), { phase, visitStart: appointmentStart,
-            start: timing.start, end: timing.end, policies: phase.professionals.mode === 'all' ? [normalizeAttentionPolicy(null)] : policies }));
+            start: timing.start, end: timing.end, policies: phase.professionals.mode === 'all' ? [normalizeAttentionPolicy(null)] : policies,
+            allowLegacyAttentionConfirmation: flexibleDoctor(phase, doctorIds) === id }));
         staffEligibility.set(signature, eligible);
       }
       if (!staffEligibility.get(signature)) return null;
@@ -308,6 +309,11 @@ function solveVersion4BookingProfile({ profile, start, doctors, installations, e
         new Date(interval.start_at), new Date(interval.end_at)))) reasons.push('staff_schedule');
       if (reasons.length) warnings.push({ code: 'FLEXIBLE_AGENDA', phase_key: phase.key, doctor_id: id, reasons,
         message: 'Esta fase requiere confirmar una excepción de horario o de profesional permitido en la sala. Las reservas, ausencias, intervenciones y máquinas siguen protegidas.' });
+      const appointmentIds = legacyAttentionConfirmationIds(original, { start: timing.start, end: timing.end,
+        allowLegacyAttentionConfirmation: true });
+      if (appointmentIds.length) warnings.push({ code: 'FLEXIBLE_AGENDA', phase_key: phase.key, doctor_id: id,
+        reasons: ['legacy_attention_origin'], appointment_ids: [...new Set(appointmentIds)].sort((a, b) => a - b),
+        message: 'Esta cita coincide con una reserva importada que conserva la configuración anterior. Los minutos de atención necesarios sí caben sin solaparse. Confirma la excepción para reservar; no se mueve ninguna cita ni se libera tiempo ya ocupado.' });
     }
     const phases = selected.map(({ phase, timing, installationId, doctorIds, units, policies }) => ({
       key: phase.key, label: phase.label, start_at: timing.start.toISOString(), end_at: timing.end.toISOString(),

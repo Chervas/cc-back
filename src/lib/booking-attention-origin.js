@@ -11,6 +11,36 @@ function parse(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+// Operator confirmation can acknowledge compatibility with a frozen v3
+// import; it cannot manufacture available clinician time. Keep this proof
+// separate from the v4 same-start contract and verify every persisted staff
+// interval, including multiplicity. No request flag or current catalog policy
+// can substitute for this stored, single-clinician source evidence.
+function legacyPartialAttentionVerified({ appointment, doctorId, occupancies }) {
+  const booking = parse(get(appointment, 'booking_legacy_attention_snapshot'));
+  const id = Number(get(appointment, 'id_cita'));
+  const clinicId = Number(get(appointment, 'clinica_id'));
+  if (get(appointment, 'source_system') !== 'cliniccloud' || !Number.isSafeInteger(id) || id < 1
+    || !Number.isSafeInteger(clinicId) || clinicId < 1 || booking?.profile?.version !== 3
+    || (booking.attention_requirements_pending != null && (!Array.isArray(booking.attention_requirements_pending)
+      || booking.attention_requirements_pending.length)) || booking.profile.phases?.length !== 1) return false;
+  let profile;
+  try { profile = normalizeBookingProfile(booking.profile); } catch { return false; }
+  const required = profile.phases[0];
+  if (required.professionals.mode !== 'any' || !required.staff_attention?.some(policy => !isDefaultAttention(policy))) return false;
+  if (bookingSegments({ id_cita: id, inicio: get(appointment, 'inicio'), fin: get(appointment, 'fin'),
+    import_metadata: { booking } }, { includeClinicalLabels: false }).length !== 1) return false;
+  const phase = booking.phases[0];
+  if (phase.doctor_ids.length !== 1 || phase.doctor_ids[0] !== Number(doctorId) || !phase.staff_intervals?.length) return false;
+  const rows = occupancies.filter(row => Number(row.appointment_id) === id && Number(row.doctor_id) === Number(doctorId));
+  if (rows.some(row => row.resource_kind !== 'doctor' || row.resource_key !== `doctor:${Number(doctorId)}`
+    || row.installation_id != null)) return false;
+  const signature = (key, start, end) => JSON.stringify([key, ms(start), ms(end)]);
+  const expected = phase.staff_intervals.map(interval => signature(phase.key, interval.start_at, interval.end_at)).sort();
+  const actual = rows.map(row => signature(row.phase_key, row.start_at, row.end_at)).sort();
+  return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+}
+
 /** Internal calendar evidence only. Never patient identity, names or notes.
  * A boolean supplied by the caller is not evidence: validate the frozen
  * snapshot, geometry and ALL persisted staff intervals for this clinician. */
@@ -24,7 +54,8 @@ function attentionVisitOrigin({ appointment, doctorId, occupancies = [] }) {
   let covered = ms(start);
   for (const interval of intervals) if (ms(interval.start) <= covered) covered = Math.max(covered, ms(interval.end));
   const unknown = { appointment_id: id, clinic_id: clinicId, start, end, verified: false, version: booking?.profile?.version === 4 ? 4 : null,
-    partial: !Number.isFinite(covered) || covered < ms(end), phases: [] };
+    partial: !Number.isFinite(covered) || covered < ms(end), phases: [],
+    ...(legacyPartialAttentionVerified({ appointment, doctorId, occupancies }) ? { legacy_partial_verified: true } : {}) };
   if (!Number.isSafeInteger(clinicId) || clinicId < 1 || !Number.isFinite(ms(start)) || !Number.isFinite(ms(end)) || ms(start) >= ms(end) || !rows.length
     || booking?.profile?.version !== 4 || !Array.isArray(booking.attention_requirements_pending) || booking.attention_requirements_pending.length) return unknown;
   let profile;
@@ -47,12 +78,25 @@ function attentionVisitOrigin({ appointment, doctorId, occupancies = [] }) {
 
 /** Sharing concerns different visits, not the simultaneous steps within ONE
  * visit. Saved intervals remain fixed; matching origins never releases them. */
-function attentionVisitConflict(resource, { phase, visitStart, start, end, policies }) {
+function canConfirmLegacyAttention(resource, visit, { allowLegacyAttentionConfirmation = false }) {
+  return allowLegacyAttentionConfirmation === true && resource?.agenda_flexible === true
+    && resource.allow_legacy_attention_confirmation === true && visit.verified === false
+    && visit.legacy_partial_verified === true && visit.version !== 4
+    && Number.isSafeInteger(resource.clinic_id) && resource.clinic_id === visit.clinic_id;
+}
+
+function legacyAttentionConfirmationIds(resource, options) {
+  return (resource?.attention_visits || []).filter(visit => intersects(visit, options)
+    && canConfirmLegacyAttention(resource, visit, options)).map(visit => visit.appointment_id);
+}
+
+function attentionVisitConflict(resource, { phase, visitStart, start, end, policies, allowLegacyAttentionConfirmation = false }) {
   const partial = policies.some(policy => !isDefaultAttention(policy));
   const visits = resource?.attention_visits || [];
   for (const visit of visits) {
     if (!intersects(visit, { start, end })) continue;
     if (!visit.verified) {
+      if (canConfirmLegacyAttention(resource, visit, { allowLegacyAttentionConfirmation })) continue;
       if (partial || visit.partial || visit.version === 4) return { code: 'preparation_origin_unverified',
         message: 'Hay otra visita cuyo tiempo de atención no está acreditado. Se conserva su reserva completa; no puede compartirse la preparación.' };
       continue;
@@ -79,4 +123,4 @@ function attentionVisitConflict(resource, { phase, visitStart, start, end, polic
 
 const attentionVisitsAllowStep = (resource, options) => attentionVisitConflict(resource, options) === null;
 
-module.exports = { attentionVisitOrigin, attentionVisitsAllowStep, attentionVisitConflict };
+module.exports = { attentionVisitOrigin, attentionVisitsAllowStep, attentionVisitConflict, legacyAttentionConfirmationIds };

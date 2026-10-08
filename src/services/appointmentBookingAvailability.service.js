@@ -49,6 +49,13 @@ const nonShareableBookingAttribute = (db, alias) => [db.Sequelize.literal(`(
 const attentionSnapshotAttribute = (db, alias) => [db.Sequelize.literal(`CASE
   WHEN COALESCE(JSON_EXTRACT(${alias}.import_metadata, '$.booking.profile.version'), 0) = 4
   THEN JSON_EXTRACT(${alias}.import_metadata, '$.booking') ELSE NULL END`), 'booking_attention_snapshot'];
+// Bounded calendar evidence for the separate, default-off operator permission.
+// It is never a v4 sharing authorization or a request-authored permission.
+const legacyAttentionSnapshotAttribute = (db, alias) => [db.Sequelize.literal(`CASE
+  WHEN ${alias}.source_system = 'cliniccloud'
+    AND COALESCE(JSON_EXTRACT(${alias}.import_metadata, '$.booking.profile.version'), 0) = 3
+    AND COALESCE(JSON_CONTAINS_PATH(${alias}.import_metadata, 'one', '$.program_session', '$.additional_staff'), 0) = 0
+  THEN JSON_EXTRACT(${alias}.import_metadata, '$.booking') ELSE NULL END`), 'booking_legacy_attention_snapshot'];
 // This alias is selected by the server only when the stored profile is v4.
 // Invalid or incomplete clinical evidence is still protective, never permission
 // to release time. Do not read an identically named key from request metadata.
@@ -131,6 +138,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
       [Op.or]: [{ doctor_id: { [Op.in]: doctorIds } }, { instalacion_id: { [Op.in]: mapping.physicalInstallationIds } }],
     }, attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin', 'source_system',
       ...(includeDiagnosticLabels ? ['tratamiento_id'] : []), attentionSnapshotAttribute(db, 'CitaPaciente'),
+      ...(profile.version === 4 ? [legacyAttentionSnapshotAttribute(db, 'CitaPaciente')] : []),
       protectedBookingAttribute(db, 'CitaPaciente'), nonShareableBookingAttribute(db, 'CitaPaciente')], transaction }),
   ]);
   // One physical room has one simultaneous-occupancy policy across aliases.
@@ -154,6 +162,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
     ],
   }, include: [{ model: db.CitaPaciente, as: 'appointment', attributes: ['id_cita', 'clinica_id', 'source_system', 'inicio', 'fin',
     ...(includeDiagnosticLabels ? ['tratamiento_id'] : []), attentionSnapshotAttribute(db, 'appointment'),
+    ...(profile.version === 4 ? [legacyAttentionSnapshotAttribute(db, 'appointment')] : []),
     protectedBookingAttribute(db, 'appointment'), nonShareableBookingAttribute(db, 'appointment')], required: true, where: { estado: { [Op.ne]: 'cancelada' } } }], transaction }) : [];
   // Optional catalog labels for a read-only grid: one scoped bulk query, never
   // patient/title/note data or labels belonging to a foreign appointment.
@@ -231,6 +240,8 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
         clinic_id: clinicId,
         ...(profile.version === 4 ? { schedule_verified: verifiedDoctorSchedule(doctor.horarios), absence_windows: [] } : {}),
         agenda_flexible: require('../lib/flexible-agenda').isFlexibleDoctor(doctor),
+        allow_legacy_attention_confirmation: require('../lib/flexible-agenda').isFlexibleDoctor(doctor)
+          && (doctor.allow_legacy_attention_confirmation === true || doctor.allow_legacy_attention_confirmation === 1),
         allow_overlap_confirmation: doctor.allow_overlap_confirmation === true || doctor.allow_overlap_confirmation === 1,
         explicit_overlap_policy: doctor.allow_overlap_confirmation != null,
         windows: [], busy: [...(busy.get(`doctor:${id}`) || [])],

@@ -18,6 +18,8 @@ module.exports = (sequelize, DataTypes) => {
     allow_overlap_confirmation: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     // Server-owned, per-clinic exception. Does not grant user permissions.
     agenda_flexible: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    // Operator-owned compatibility confirmation; never releases occupied time.
+    allow_legacy_attention_confirmation: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     activo: { type: DataTypes.BOOLEAN, defaultValue: true }
   }, {
     sequelize,

@@ -2,7 +2,7 @@
 const crypto = require('node:crypto');
 const TTL_MS = 20000;
 const TABLES = {
-  DoctorClinica: ['id', 'doctor_id', 'clinica_id', 'activo', 'recibe_citas', 'allow_overlap_confirmation', 'agenda_flexible', 'rol_en_clinica', 'created_at', 'updated_at'],
+  DoctorClinica: ['id', 'doctor_id', 'clinica_id', 'activo', 'recibe_citas', 'allow_overlap_confirmation', 'agenda_flexible', 'allow_legacy_attention_confirmation', 'rol_en_clinica', 'created_at', 'updated_at'],
   DoctorHorario: ['id', 'doctor_clinica_id', 'dia_semana', 'activo', 'hora_inicio', 'hora_fin', 'rrule', 'fecha_inicio_vigencia', 'fecha_fin_vigencia', 'created_at', 'updated_at'],
   DoctorHorarioExcepcion: ['id', 'doctor_horario_id', 'fecha', 'cancelado', 'hora_inicio_override', 'hora_fin_override', 'creado_por', 'created_at', 'updated_at'],
   DoctorBloqueo: ['id', 'doctor_id', 'clinica_id', 'fecha_inicio', 'fecha_fin', 'tipo', 'motivo', 'recurrente', 'recurrente_hasta', 'aplica_a_todas_clinicas', 'creado_por', 'created_at', 'updated_at'],
