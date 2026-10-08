@@ -17,6 +17,27 @@ withIsolatedCampaignMysql(async owned => {
   };
   try {
     const reception = await login(ids.reception), clinical = await login(ids.assistant), outsider = await login(ids.outsider);
+    // Both reservation paths must reject clinical states supplied by a generic
+    // creation payload. No API client can manufacture the native care evidence.
+    for (const enabled of ['true', 'false']) {
+      const oldGate = process.env.BOOKING_PROFILES_ENABLED;
+      process.env.BOOKING_PROFILES_ENABLED = enabled;
+      try {
+        for (const estado of ['ha_acudido', 'en_atencion', 'completada']) {
+          const before = await fingerprint();
+          const body = f.body({ estado });
+          if (enabled === 'false') {
+            Object.assign(body, { tratamiento_id: null, tipo_cita: 'primera_sin_trat',
+              fin: new Date(Date.parse(body.inicio) + 40 * 60000).toISOString() });
+            delete body.phase_durations; delete body.booking_request_key; delete body.booking_selection;
+          }
+          const result = await request('POST', '/api/citas', body, clinical);
+          assert.equal(result.status, 409, JSON.stringify(result.body));
+          assert.match(result.body.code, /^care_/);
+          assert.deepEqual(await fingerprint(), before, 'Forged clinical creation has no domain mutation');
+        }
+      } finally { process.env.BOOKING_PROFILES_ENABLED = oldGate; }
+    }
     const created = await request('POST', '/api/citas', f.body(), clinical);
     assert.equal(created.status, 201, JSON.stringify(created.body));
     const id = created.body.id_cita, care = action => `/api/citas/${id}/care/${action}`;
@@ -61,6 +82,6 @@ withIsolatedCampaignMysql(async owned => {
     assert.equal(await db.JobRequest.count(), 0);
     assert.equal(await db.FlowExecutionV2.count(), 0);
     assert.equal(f.externalFetchAttempts, 0);
-    owned.report.checks.push('Actual authenticated HTTP/SQL: ACL cross-clinic/clinical rights; no finish before start; arrival/replay; actor spoof rejected by authenticated attribution; care start; no confirmation rewind; two concurrent finishes produce one evidence event and one replay; completion replay has no mutation; no cancellation rewind; zero consents/messages/jobs/executions/provider calls');
+    owned.report.checks.push('Actual authenticated HTTP/SQL: generic creation cannot forge arrival/start/finish with booking gate on or off; ACL cross-clinic/clinical rights; no finish before start; arrival/replay; actor spoof rejected by authenticated attribution; care start; no confirmation rewind; two concurrent finishes produce one evidence event and one replay; completion replay has no mutation; no cancellation rewind; zero consents/messages/jobs/executions/provider calls');
   } finally { await f.close(); }
 }).then(() => {}, error => { console.error(error.code || error.message); process.exitCode = 1; });
