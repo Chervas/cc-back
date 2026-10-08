@@ -10249,7 +10249,7 @@ la elegibilidad para Agenda y no crea ni elimina turnos. La interfaz puede
 consultar resumenes desde Personal, pero el Gantt es el unico editor de turnos
 y bloqueos.
 
-Disponibilidad Personal (candidato local 2026-10-08): las 16 mutaciones canónicas
+Disponibilidad Personal (contrato 2026-10-08): las 16 mutaciones canónicas
 de horarios, movimientos, copias, fusiones, bloques y sus excepciones
 pueden emitir `undo: { token, expires_at, label }`. El token es opaco y el servidor
 conserva solo su SHA-256, ligado al actor, durante 20 segundos. PUT de horarios
@@ -10270,7 +10270,8 @@ las revisiones se conservan. El recibo y la mutación comparten commit/rollback.
 El mutex duradero por profesional se toma antes del snapshot incluso sin
 vínculos previos y con el ledger apagado. Cambiar configuración de Agenda
 invalida recibos anteriores, pero no emite Undo: no restaura `recibe_citas`,
-`allow_overlap_confirmation`, `agenda_flexible` ni roles. Si crear disponibilidad
+`allow_overlap_confirmation`, `agenda_flexible`,
+`allow_legacy_attention_confirmation` ni roles. Si crear disponibilidad
 reactiva un vínculo previo, Undo restaura su `activo`; si la acción creó el
 vínculo, lo retira después de restaurar las filas. Borrar el último horario y
 deshacerlo conserva el vínculo original y recupera IDs y excepciones.
@@ -10306,7 +10307,37 @@ su duración completa. POST/PATCH/preview aceptan `recurrente_hasta`; PATCH
 omitido conserva y null elimina el límite. Fechas inexistentes o anteriores al
 inicio se rechazan. GET/serializer devuelve el mismo campo y la proyección
 compartida de Agenda, Personal y disponibilidad respeta el límite. Requiere su
-migración aditiva preparada; null conserva las series existentes sin límite.
+migración aditiva; null conserva las series existentes sin límite.
+
+### Confirmación acotada de atención importada
+
+`DoctorClinicas.allow_legacy_attention_confirmation` es un permiso de operador
+por vínculo profesional-clínica, falso por defecto. Solo permite confirmar
+explícitamente una compatibilidad de atención parcial importada cuando el
+snapshot v3 conserva un perfil válido y unos intervalos efectivos comprobados.
+La reserva anterior, sus intervalos y sus ocupaciones permanecen intactos.
+Requiere profesional flexible seleccionado, la misma clínica y `force=true`;
+sin confirmación se devuelve el aviso existente. Una estructura malformada se
+rechaza sin causar un error de disponibilidad ni reducir ocupación.
+
+El permiso no elimina bloqueos, ausencias, restricciones de horarios, solapes
+del paciente ni ocupaciones de salas o máquinas. No concede permisos de usuario,
+no reescribe citas antiguas y no envía mensajes o consentimientos. La concesión
+o retirada invalida el snapshot de Undo; deshacer disponibilidad nunca restaura
+un permiso cambiado en un vínculo existente. No sustituye la conciliación de
+recursos históricos.
+
+Las tres migraciones `20261008123000`, `20261008123100` y `20261008133000`
+deben aplicarse antes de servir los modelos nuevos: crean dos tablas de recibos
+y revisiones, un límite de recurrencia nullable y el permiso desactivado.
+El operador [personal-calendar-schema-release](../../docs/personal-calendar-schema-release.md)
+fija los archivos revisados, exige plan, respaldo y diario privados, comprueba
+que las filas anteriores no cambien y registra únicamente esas tres migraciones.
+Las dos ampliaciones de columna exigen `ALGORITHM=INSTANT`, sin copia alternativa.
+Un fallo parcial requiere revisión; no se repite ni se revierte automáticamente.
+Activar la excepción requiere verificar identidad y vínculo activo, recepción
+de citas y agenda flexible. La autorización de CRM de este corte se limita a
+Piedad en BS Medical (`doctor_id=221`, `clinica_id=72`); DEV utiliza datos ficticios.
 
 ## Runtime de `field_check` por columnas (2026-09-03)
 

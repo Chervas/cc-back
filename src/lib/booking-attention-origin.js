@@ -24,12 +24,16 @@ function legacyPartialAttentionVerified({ appointment, doctorId, occupancies }) 
     || !Number.isSafeInteger(clinicId) || clinicId < 1 || booking?.profile?.version !== 3
     || (booking.attention_requirements_pending != null && (!Array.isArray(booking.attention_requirements_pending)
       || booking.attention_requirements_pending.length)) || booking.profile.phases?.length !== 1) return false;
+  if (!Array.isArray(booking.phases) || booking.phases.length !== 1
+    || !booking.phases[0] || typeof booking.phases[0] !== 'object' || Array.isArray(booking.phases[0])) return false;
   let profile;
   try { profile = normalizeBookingProfile(booking.profile); } catch { return false; }
   const required = profile.phases[0];
   if (required.professionals.mode !== 'any' || !required.staff_attention?.some(policy => !isDefaultAttention(policy))) return false;
-  if (bookingSegments({ id_cita: id, inicio: get(appointment, 'inicio'), fin: get(appointment, 'fin'),
-    import_metadata: { booking } }, { includeClinicalLabels: false }).length !== 1) return false;
+  try {
+    if (bookingSegments({ id_cita: id, inicio: get(appointment, 'inicio'), fin: get(appointment, 'fin'),
+      import_metadata: { booking } }, { includeClinicalLabels: false }).length !== 1) return false;
+  } catch { return false; } // Malformed stored geometry cannot grant an exception.
   const phase = booking.phases[0];
   if (phase.doctor_ids.length !== 1 || phase.doctor_ids[0] !== Number(doctorId) || !phase.staff_intervals?.length) return false;
   const rows = occupancies.filter(row => Number(row.appointment_id) === id && Number(row.doctor_id) === Number(doctorId));

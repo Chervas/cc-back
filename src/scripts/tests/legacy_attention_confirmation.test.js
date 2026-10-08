@@ -117,6 +117,24 @@ test('continuous or multiphase historical snapshots are not narrow partial-sourc
   assert.notEqual(origin(multi).legacy_partial_verified, true);
 });
 
+test('malformed legacy phase shapes and nested geometry fail closed without crashing or releasing reservations', () => {
+  for (const mutate of [
+    booking => { booking.phases = [null]; },
+    booking => { booking.phases = [undefined]; },
+    booking => { booking.phases = [[]]; },
+    booking => { booking.phases = ['invalid']; },
+    booking => { booking.phases = []; },
+    booking => { booking.phases[0].staff_intervals = [null]; },
+  ]) {
+    const f = sourceEvidence(); mutate(f.appointment.booking_legacy_attention_snapshot);
+    const before = structuredClone(f);
+    assert.doesNotThrow(() => origin(f), mutate.toString());
+    assert.notEqual(origin(f).legacy_partial_verified, true, mutate.toString());
+    assert.equal(confirmed(fixture(f)), null, mutate.toString());
+    assert.deepEqual(f, before, 'Malformed snapshots keep every persisted occupancy unchanged');
+  }
+});
+
 test('confirmed scoped exception fits free actual attention and records an explicit pinned warning', () => {
   const f = fixture(), before = structuredClone(f);
   assert.equal(solveBookingProfile(f), null);
