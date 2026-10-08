@@ -89,8 +89,10 @@ function assertStopped(target) {
     if (!['inactive', 'failed'].includes(execFileSync('systemctl', ['show', '--property=ActiveState', '--value',
       'clinicaclick-whatsapp-fresh-inbound.service'], { encoding: 'utf8' }).trim())) fail('CARE_SCHEMA_STOP_CRM_DISPATCHER_FIRST');
     const processes = JSON.parse(execFileSync('pm2', ['jlist'], { encoding: 'utf8' }));
-    const process = processes.find(p => p.name === 'pm2-back-staging');
-    if (!process || !['stopped', 'errored'].includes(process.pm2_env.status)) fail('CARE_SCHEMA_STOP_CRM_WRITERS_FIRST');
+    for (const name of ['pm2-back-staging', 'pm2-gateway']) {
+      const process = processes.find(p => p.name === name);
+      if (!process || !['stopped', 'errored'].includes(process.pm2_env.status)) fail('CARE_SCHEMA_STOP_CRM_WRITERS_FIRST');
+    }
   }
 }
 async function applyMigration(connection) {

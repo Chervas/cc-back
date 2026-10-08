@@ -47,3 +47,23 @@ for (const change of ['lost-row','ordinary-data','piedad-grant','ordinal','fake-
 test('operator refuses public, relative or traversal evidence paths', () => {
   for (const filename of ['/tmp/plan.json','plan.json','/home/ubuntu/secure-imports/../plan.json']) assert.throws(() => privatePath(filename), /PRIVATE_PATH/);
 });
+
+test('CRM migration requires API, legacy gateway and fresh-inbound writers stopped', () => {
+  const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
+  const filename = require.resolve('../appointment-care-schema-release');
+  let fresh = 'inactive', api = 'stopped', gateway = 'stopped';
+  const context = { module: { exports: {} }, exports: {}, __dirname: path.dirname(filename),
+    process, Buffer, console, require: name => name === 'node:child_process' ? {
+      execFileSync: cmd => cmd === 'systemctl' ? fresh : JSON.stringify([
+        { name: 'pm2-back-staging', pm2_env: { status: api } },
+        { name: 'pm2-gateway', pm2_env: { status: gateway } },
+      ]),
+    } : require(name === '../lib/cliniccloud-import/operator-database'
+      ? '../../lib/cliniccloud-import/operator-database' : name) };
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8'), context, { filename });
+  const stopped = () => context.module.exports.assertStopped('crm');
+  assert.doesNotThrow(stopped);
+  fresh = 'active'; assert.throws(stopped, /STOP_CRM_DISPATCHER/); fresh = 'inactive';
+  api = 'online'; assert.throws(stopped, /STOP_CRM_WRITERS/); api = 'stopped';
+  gateway = 'online'; assert.throws(stopped, /STOP_CRM_WRITERS/);
+});
