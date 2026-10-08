@@ -53,7 +53,8 @@ test('classification uses BLOQUEO, not TIPO=CITA; payment state does not create 
   const block = sourceAppointment({ TIPO: 'CITA', 'TIPO SERVICIO': 'BLOQUEO', ESTADO: 'Anulada (Clínica)' });
   assert.equal(block.kind, 'block'); assert.equal(block.status, 'cancelada');
   const paid = sourceAppointment({ ESTADO: 'Pagada' });
-  assert.equal(paid.status, 'completada'); assert.equal(paid.source_paid_state, true);
+  assert.equal(paid.status, 'ha_acudido'); assert.equal(paid.care_legacy_attendance, true);
+  assert.equal(paid.source_paid_state, true);
   assert.equal(paid.amount_paid, undefined);
   const unknown = sourceAppointment({ ESTADO: '' });
   assert.equal(unknown.status, null); assert.ok(unknown.validation_errors.includes('UNKNOWN_SOURCE_STATE'));

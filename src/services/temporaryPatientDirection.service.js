@@ -116,7 +116,7 @@ function createTemporaryPatientDirectionService(db, { notify = () => {}, warn = 
         changed.push(start);
       }
       const appointment = await firstAppointment(conversation, start.metadata.started_at, transaction);
-      if (appointment && (appointment.estado === 'completada' || careState(appointment).arrived_at)) {
+      if (appointment && (require('../lib/status-catalog').hasAttendedAppointment(appointment) || careState(appointment).arrived_at)) {
         const event = await db.Message.create({ conversation_id: conversation.id, sender_id: null,
           direction: 'outbound', message_type: 'event', status: 'sent', sent_at: now(),
           automation_delivery_key: `${KEY_PREFIX}handoff:${conversation.id}`,

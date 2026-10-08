@@ -4,10 +4,10 @@
 // availability calls. An eventual connector must authorize every input first.
 // Contract: front/src/Documentacion/41-comunicaciones-e-interoperabilidad.md.
 const FHIR_VERSION = '4.0.1';
-const MAPPING_VERSION = 'clinicaclick-appointment-r4-draft-1';
+const MAPPING_VERSION = 'clinicaclick-appointment-r4-draft-2';
 const STATES = Object.freeze(['pendiente', 'info_enviada', 'info_confirmada',
   'recordatorio_enviado', 'recordatorio_confirmado', 'cambio_solicitado',
-  'completada', 'no_asistio', 'cancelada', 'reprogramada']);
+  'ha_acudido', 'en_atencion', 'completada', 'no_asistio', 'cancelada', 'reprogramada']);
 const ACTORS = Object.freeze({ doctor: 'Practitioner', installation: 'Location', equipment: 'Device' });
 
 function fail(code) { throw Object.assign(new Error(code), { code }); }
@@ -70,7 +70,7 @@ function projectAppointment(appointment, options = {}) {
   const c = context(appointment, options);
   const occupancy = options.occupancies || [];
   if (!Array.isArray(occupancy) || occupancy.length > 500) fail('invalid_occupancies');
-  const patientStatus = ['recordatorio_confirmado', 'completada'].includes(appointment.estado) ? 'accepted' : 'needs-action';
+  const patientStatus = ['recordatorio_confirmado', 'ha_acudido', 'en_atencion', 'completada'].includes(appointment.estado) ? 'accepted' : 'needs-action';
   const participants = [{ actor: actor(c.base, 'Patient', 'patient:' + c.patient), status: patientStatus }];
   const seen = new Set();
   const warnings = new Set();
@@ -106,7 +106,7 @@ function projectAppointment(appointment, options = {}) {
       warnings.add('legacy_resource_allocation_unverified');
     }
   }
-  const terminal = { completada: 'fulfilled', cancelada: 'cancelled', no_asistio: 'noshow' };
+  const terminal = { ha_acudido: 'arrived', en_atencion: 'checked-in', completada: 'fulfilled', cancelada: 'cancelled', no_asistio: 'noshow' };
   const status = terminal[appointment.estado] || (participants.every(p => p.status === 'accepted') ? 'booked' : 'pending');
   const resource = { resourceType: 'Appointment', identifier: [c.identifier], status,
     start: c.period.start, end: c.period.end, participant: participants };
@@ -136,7 +136,7 @@ function reviewPatientResponse(response, appointment, options = {}) {
   const expectedActor = actor(c.base, 'Patient', 'patient:' + c.patient);
   if (response.actor?.type !== 'Patient' || !sameIdentifier(response.actor?.identifier, expectedActor.identifier)) fail('response_patient_mismatch');
   if (!['accepted', 'declined', 'tentative', 'needs-action'].includes(response.participantStatus)) fail('unmapped_participation_status');
-  if (['completada', 'no_asistio', 'cancelada'].includes(appointment.estado)) fail('terminal_appointment_response');
+  if (['ha_acudido', 'en_atencion', 'completada', 'no_asistio', 'cancelada'].includes(appointment.estado)) fail('terminal_appointment_response');
   // Require the schedule the participant actually saw: a bare accepted status
   // cannot confirm a new date after a reschedule, even with a fresh local read.
   const proposed = period(response.start, response.end);

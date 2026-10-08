@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 
-const ADAPTER_VERSION = 'cliniccloud-offline/1.1.0';
+const ADAPTER_VERSION = 'cliniccloud-offline/1.2.0';
 const TIMEZONE = 'Europe/Madrid';
 const norm = (v) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\s+/g, ' ').toUpperCase();
 const clean = (v) => String(v ?? '').trim();
@@ -53,8 +53,8 @@ function provenance(record, fileHash, entity) {
   const rowHash = hash(record.values);
   return { file_sha256: fileHash, source_row: record.source_row, row_sha256: rowHash, row_key: `${entity}:${fileHash}:${record.source_row}:${rowHash}` };
 }
-const NEW_STATUSES = { PENDIENTE: 'pendiente', REALIZADA: 'completada', PAGADA: 'completada', 'ANULADA (CLINICA)': 'cancelada', 'ANULADA (CONTACTO)': 'cancelada' };
-const OLD_STATUSES = { '0': 'pendiente', '1': 'completada', '3': 'completada', '-1': 'cancelada', '-2': 'cancelada' };
+const NEW_STATUSES = { PENDIENTE: 'pendiente', REALIZADA: 'ha_acudido', PAGADA: 'ha_acudido', 'ANULADA (CLINICA)': 'cancelada', 'ANULADA (CONTACTO)': 'cancelada' };
+const OLD_STATUSES = { '0': 'pendiente', '1': 'ha_acudido', '3': 'ha_acudido', '-1': 'cancelada', '-2': 'cancelada' };
 function normalizeContacts(records, fileHash, historical = false) {
   return records.map((record) => {
     const r = record.values;
@@ -119,6 +119,8 @@ function normalizeAppointments(records, fileHash, { historical = false, agendas 
       status: (historical ? OLD_STATUSES[sourceState] : NEW_STATUSES[norm(sourceState)]) || null,
       source_state: sourceState,
       source_paid_state: !historical && norm(sourceState) === 'PAGADA',
+      ...((historical ? OLD_STATUSES[sourceState] : NEW_STATUSES[norm(sourceState)]) === 'ha_acudido'
+        ? { care_legacy_attendance: true } : {}),
       installation_label: historical ? null : clean(r['SALA/BOX']) || null,
       subject: clean(r[historical ? 'asunto' : 'ASUNTO']),
       details: clean(r[historical ? 'detalles' : 'DETALLES']),

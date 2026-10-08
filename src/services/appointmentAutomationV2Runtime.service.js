@@ -1146,6 +1146,10 @@ async function resolveAppointmentCommunicationLanguage(cita) {
 }
 
 async function enqueueExecutionForTemplate(cita, template, options = {}) {
+  const eventName = normalizeEventName(options.event_name) || cleanString(template?.trigger_type) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
+  if (!require('../lib/appointment-care').allowsAppointmentAutomation(cita, eventName)) {
+    return { success: true, skipped: true, reason: 'appointment_care_stage_ineligible' };
+  }
   if (await require('./appointmentPatientLinks.service').follower(db, cita?.id_cita)) {
     return { success: true, skipped: true, reason: 'linked_appointment_uses_first_notice' };
   }
@@ -1175,7 +1179,6 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
     }
   }
 
-  const eventName = normalizeEventName(options.event_name) || cleanString(template?.trigger_type) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
   if (!APPOINTMENT_TRIGGER_TYPES.has(cleanString(template.trigger_type))) {
     return { success: false, skipped: true, reason: 'no_template_for_event' };
   }
@@ -1295,6 +1298,10 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
 }
 
 async function enqueueExecutionForCita(cita, options = {}) {
+  const eventName = normalizeEventName(options.event_name) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
+  if (!require('../lib/appointment-care').allowsAppointmentAutomation(cita, eventName)) {
+    return { success: true, skipped: true, reason: 'appointment_care_stage_ineligible' };
+  }
   if (await require('./appointmentPatientLinks.service').follower(db, cita?.id_cita)) {
     return { success: true, skipped: true, reason: 'linked_appointment_uses_first_notice' };
   }
@@ -1313,7 +1320,6 @@ async function enqueueExecutionForCita(cita, options = {}) {
     return { success: true, skipped: true, reason: 'imported_historical_appointment' };
   }
 
-  const eventName = normalizeEventName(options.event_name) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
   if (shouldSuppressAppointmentTrigger(cita, eventName)) {
     return { success: true, skipped: true, reason: 'appointment_notification_suppressed' };
   }
@@ -1469,7 +1475,8 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
   const normalizedStatus = cleanString(cita?.estado).toLowerCase();
   const existingJobs = await listExistingScheduledJobs(citaId);
 
-  if (normalizedStatus && !ACTIVE_APPOINTMENT_STATUSES.has(normalizedStatus)) {
+  if (normalizedStatus && !ACTIVE_APPOINTMENT_STATUSES.has(normalizedStatus)
+    && !require('../lib/appointment-care').allowsAppointmentAutomation(cita, 'appointment_after')) {
     await Promise.all(existingJobs.map((job) => jobRequestsService.markCancelled(job.id, {
       errorMessage: `appointment_status_${normalizedStatus}_cancelled_schedule`,
     })));
@@ -1492,6 +1499,7 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
 
   const desiredJobs = [];
   for (const triggerType of Array.from(SCHEDULED_APPOINTMENT_TRIGGER_TYPES)) {
+    if (!require('../lib/appointment-care').allowsAppointmentAutomation(cita, triggerType)) continue;
     const templates = await resolveScheduledTemplatesForCita(cita, triggerType);
     templates.forEach((template) => {
       if (importedTriggerHeld(cita, template)) return;
@@ -1741,6 +1749,9 @@ async function fireScheduledTrigger(payload = {}, options = {}) {
   }
   const cita = citaModel.toJSON ? citaModel.toJSON() : citaModel;
   const normalizedStatus = cleanString(cita?.estado).toLowerCase();
+  if (!require('../lib/appointment-care').allowsAppointmentAutomation(cita, triggerType)) {
+    return { success: true, skipped: true, reason: 'appointment_care_stage_ineligible' };
+  }
   if (['cambio_solicitado', 'cancelada', 'no_asistio'].includes(normalizedStatus)) {
     return { success: true, skipped: true, reason: `appointment_${normalizedStatus}` };
   }

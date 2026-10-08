@@ -1,10 +1,13 @@
 'use strict';
 const db = require('../../models');
-const { careState, assertCareAction } = require('../lib/appointment-care');
+const { careState, assertCareAction, careActionPatch } = require('../lib/appointment-care');
 const { assessAppointmentClinicalConsent } = require('./appointmentConsentEligibility.service');
 const { createTreatmentDocumentationService } = require('./treatmentDocumentation.service');
 
 async function record({ appointmentId, clinicId, actorId, action }) {
+  if (!['arrive', 'start'].includes(action)) throw Object.assign(new Error('Finaliza la atención mediante el cambio de estado canónico.'), {
+    statusCode: 400, code: 'care_action_invalid',
+  });
   return db.sequelize.transaction(async transaction => {
     const cita = await db.CitaPaciente.findByPk(appointmentId, { transaction, lock: transaction.LOCK.UPDATE });
     if (!cita) throw Object.assign(new Error('Cita no encontrada.'), { statusCode: 404, code: 'appointment_not_found' });
@@ -27,20 +30,20 @@ async function record({ appointmentId, clinicId, actorId, action }) {
       // client references or backfill an already-started historical visit.
       documentationSnapshot = await createTreatmentDocumentationService(db).captureForStart({ appointment: cita, transaction, now });
     }
-    const patch = action === 'arrive'
-      ? { arrived_at: now, arrived_by: actorId, care_started_at: null, care_started_by: null, care_schedule_start: cita.inicio }
-      : { care_started_at: now, care_started_by: actorId };
-    // Deliberately not the canonical estado writer: no completion, voucher use,
-    // charges or automation events are caused by arrival/start.
+    const previousStatus = cita.estado;
+    const patch = careActionPatch(cita, action, { now, actorId });
+    // Arrival/start never claim completion, consume vouchers or dispatch messages.
     await cita.update({ ...patch, updated_by: actorId }, { transaction });
+    await require('./appointmentActivity.service').recordAppointmentStatusChange({ appointment: cita,
+      previousStatus, newStatus: patch.estado, actorUserId: actorId, source: 'agenda',
+      metadata: { care_action: action }, occurredAt: now, transaction });
     const careEvent = await db.AppointmentCareEvent.create({ appointment_id: cita.id_cita, clinic_id: cita.clinica_id, actor_id: actorId,
       action, schedule_start: cita.inicio, created_at: now }, { transaction });
     await db.PatientOperationalEvent.create({ patient_id: cita.paciente_id, clinic_id: cita.clinica_id, actor_user_id: actorId,
       event_type: 'appointment_care_changed', source: 'agenda', occurred_at: now,
       metadata: { appointment_id: cita.id_cita, action, schedule_start: cita.inicio, care_event_id: careEvent.id,
         ...(action === 'start' ? { documentation_snapshot: documentationSnapshot } : {}) } }, { transaction });
-    await require('./temporaryPatientDirection.service').observeAppointment(cita, { transaction });
-    return { appointment: cita, care: careState(cita, now), replayed: false };
+    return { appointment: cita, care: careState(cita, now), previousStatus, replayed: false };
   });
 }
 // A reception correction is audited separately from the canonical status
@@ -61,4 +64,15 @@ async function confirmedCorrection({ cita, nextStatus, actorId, transaction, mod
       next_status: nextStatus, schedule_start: cita.inicio } }, { transaction });
   return { arrived_at: null, arrived_by: null, care_started_at: null, care_started_by: null, care_schedule_start: null };
 }
-module.exports = { record, confirmedCorrection };
+async function recordCompletion({ models = db, appointment, transaction, actorId }) {
+  const care = careState(appointment);
+  if (!require('../lib/appointment-care').hasCompletedAppointmentCare(appointment)) throw Error('care_completion_evidence_required');
+  const event = await models.AppointmentCareEvent.create({ appointment_id: appointment.id_cita,
+    clinic_id: appointment.clinica_id, actor_id: actorId, action: 'finish', schedule_start: appointment.inicio,
+    created_at: care.completed_at }, { transaction });
+  await models.PatientOperationalEvent.create({ patient_id: appointment.paciente_id, clinic_id: appointment.clinica_id,
+    actor_user_id: actorId, event_type: 'appointment_care_changed', source: 'agenda', occurred_at: care.completed_at,
+    metadata: { appointment_id: appointment.id_cita, action: 'finish', schedule_start: appointment.inicio,
+      care_event_id: event.id, care_lifecycle_version: 2 } }, { transaction });
+}
+module.exports = { record, confirmedCorrection, recordCompletion };

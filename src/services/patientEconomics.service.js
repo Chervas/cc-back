@@ -2676,7 +2676,7 @@ async function consumeVoucherForCompletedAppointment({ appointmentId, actorId })
       lock: transaction.LOCK.UPDATE,
     });
     if (!appointment) return { consumed: false, reason: 'appointment_not_found' };
-    if (String(appointment.estado || '') !== 'completada') {
+    if (!require('../lib/appointment-care').hasCompletedAppointmentCare(appointment)) {
       return { consumed: false, reason: 'appointment_not_completed' };
     }
 

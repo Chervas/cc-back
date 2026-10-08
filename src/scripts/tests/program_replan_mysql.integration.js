@@ -15,9 +15,8 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   define('Clinica', { id_clinica:{type:D.INTEGER,primaryKey:true}, grupoClinicaId:D.INTEGER, configuracion:D.JSON, equipment_booking_enabled:D.BOOLEAN });
   define('Usuario', { id_usuario:{type:D.INTEGER,primaryKey:true}, nombre:D.STRING, apellidos:D.STRING });
   define('Paciente', { id_paciente:{type:D.INTEGER,primaryKey:true} });
-  define('Tratamiento', { id_tratamiento:{type:D.INTEGER,primaryKey:true}, clinica_id:D.INTEGER, origen:D.STRING, activo:D.BOOLEAN, clinical_config:D.JSON });
   for (const file of ['doctorclinica','doctorhorario','doctorhorarioexcepcion','doctorbloqueo','doctorbloqueoexcepcion','instalacion','instalacionhorario','instalacionbloqueo','clinicahorario',
-    'citapaciente','appointmentbookingoccupancy','appointmentbookingresource','installationphysicalalias','bookingequipment','bookingequipmentclinic','bookingequipmentroompolicy',
+    'tratamiento','citapaciente','appointmentcareevent','appointmentbookingoccupancy','appointmentbookingresource','installationphysicalalias','bookingequipment','bookingequipmentclinic','bookingequipmentroompolicy',
     'economicbudget','economicbudgetversion','economicbudgetevent','patientvoucher','patientvouchermovement','patientprogramsession','patientprogrambookingrequest','patientoperationalevent']) {
     const m = require('../../../models/' + file)(sql,D); db[m.name]=m;
   }
@@ -45,7 +44,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const treatments=[];
   for (const id of [1,2]) {
     const profile={version:2,phases:[{key:'care',duration_minutes:30,installation_ids:[id],professionals:{mode:'any',ids:[1],preferred_id:1},equipment_requirements:[{equipment_ids:[machine.id]}]}]};
-    await db.Tratamiento.create({id_tratamiento:id,clinica_id:1,origen:'clinica',activo:true,clinical_config:{catalog_status:'active',booking_profile:profile}});
+    await db.Tratamiento.create({id_tratamiento:id,clinica_id:1,nombre:'Tratamiento ficticio '+id,disciplina:'fixture',origen:'clinica',activo:true,clinical_config:{catalog_status:'active',booking_profile:profile}});
     treatments.push({id,name:'Tratamiento ficticio '+id,booking_profile:profile});
   }
   const frozen=snapshot({id:'qa-program',version:1,status:'active',name:'Programa ficticio',kind:'program',total_price:100,summary:{issues:[]},cadence:{mode:'weekly',sessions_per_week:2,min_days_between:2},
@@ -62,7 +61,18 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const initial=await service.book({...options,payload:{request_key:'qa-initial-booking',snapshot_sha256:frozen.sha256,sessions:choices(proposed)}});
   assert.equal(initial.sessions.length,4);
   const change=async(id,values,other={})=>mutateAppointmentBooking({db,existingAppointmentId:id,appointmentValues:values,...other,persist:({existing,values,transaction})=>existing.update(values,{transaction})});
-  await change(initial.sessions[0].appointment_id,{estado:'completada',updated_by:1},{stateOnly:true});
+  const firstId = initial.sessions[0].appointment_id;
+  await assert.rejects(change(firstId, { estado: 'completada', updated_by: 1 }, { stateOnly: true }), { code: 'care_start_required' });
+  assert.equal(Number((await voucher.reload()).available_units), 4);
+  const first = await db.CitaPaciente.findByPk(firstId);
+  // Private test setup supplies the evidence exercised natively by the HTTP
+  // lifecycle test; this suite focuses on the program ledger transaction.
+  await first.update({ estado: 'en_atencion', care_schedule_start: first.inicio,
+    arrived_at: new Date(Date.now() - 120000), arrived_by: 1, care_started_at: new Date(Date.now() - 60000), care_started_by: 1 });
+  await change(firstId, { estado: 'completada', updated_by: 1 }, { stateOnly: true });
+  assert.equal(await db.AppointmentCareEvent.count({ where: { appointment_id: firstId, action: 'finish' } }), 1);
+  await change(firstId, { estado: 'completada', updated_by: 1 }, { stateOnly: true });
+  assert.equal(await db.AppointmentCareEvent.count({ where: { appointment_id: firstId, action: 'finish' } }), 1);
   await change(initial.sessions[1].appointment_id,{estado:'no_asistio',updated_by:1},{stateOnly:true});
   await change(initial.sessions[2].appointment_id,{updated_by:1},{additionalStaffIds:[2]});
   const completed=(await db.CitaPaciente.findByPk(initial.sessions[0].appointment_id)).toJSON();

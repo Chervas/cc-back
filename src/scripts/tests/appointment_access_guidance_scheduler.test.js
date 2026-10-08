@@ -9,10 +9,18 @@ const appointmentRuntime = require('../../services/appointmentAutomationV2Runtim
 const jobRequestsService = require('../../services/jobRequests.service');
 const jobScheduler = require('../../services/jobScheduler.service');
 const { queues } = require('../../services/queue.service');
+const runtimeStop = require('../../lib/automation-runtime-stop');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// These scheduler cases have no linked bookings; never query the live registry.
+const originalLinkRead = db.AppointmentPatientLinkMember.findByPk;
+const originalVisitRead = db.AppointmentVisitMember.findByPk;
+db.AppointmentPatientLinkMember.findByPk = async () => null;
+db.AppointmentVisitMember.findByPk = async () => null;
 
 test.after(async () => {
+  db.AppointmentPatientLinkMember.findByPk = originalLinkRead;
+  db.AppointmentVisitMember.findByPk = originalVisitRead;
   jobScheduler.stop();
   const queueList = Object.values(queues || {});
   await Promise.all(queueList.map((queue) => queue.waitUntilReady()));
@@ -123,6 +131,7 @@ test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async
     patientFind: db.Paciente.findByPk,
     enqueueUnique: jobRequestsService.enqueueUniqueJobRequest,
     triggerImmediate: jobScheduler.triggerImmediate,
+    createExecution: runtimeStop.createExecution,
   };
   const cita = futureAppointment();
   const template = reminderTemplate({ exclude_if_booked_same_day: false });
@@ -150,6 +159,9 @@ test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async
       return { job: { id: 13001 }, created: true };
     };
     jobScheduler.triggerImmediate = async () => true;
+    // Switch concurrency is covered by automation-runtime-stop tests; this
+    // case isolates deduplication and recovery after a failed job handoff.
+    runtimeStop.createExecution = async values => db.FlowExecutionV2.create(values);
 
     const options = {
       event_name: 'appointment_reminder_window',
@@ -175,6 +187,7 @@ test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async
     db.Paciente.findByPk = originals.patientFind;
     jobRequestsService.enqueueUniqueJobRequest = originals.enqueueUnique;
     jobScheduler.triggerImmediate = originals.triggerImmediate;
+    runtimeStop.createExecution = originals.createExecution;
   }
 });
 
@@ -221,6 +234,10 @@ test('disabled=true en bindings de tratamiento corta automatizaciones inmediatas
       tratamiento_id: 44101,
       estado: 'completada',
     };
+    cita.care_schedule_start = cita.inicio;
+    cita.arrived_at = cita.inicio;
+    cita.care_started_at = cita.inicio;
+    cita.care_completed_at = cita.fin;
     const immediate = await appointmentRuntime.enqueueExecutionForCita(cita, {
       event_name: 'appointment_completed',
     });
@@ -374,4 +391,22 @@ test('el disparo omite citas canceladas y recordatorios que siguen sin confirmar
     db.AutomationFlowTemplateV2.findAll = originals.templateFindAll;
     db.FlowExecutionV2.create = originals.executionCreate;
   }
+});
+
+test('already queued reminders and aftercare recheck native phase before any template or registry read', async () => {
+  const original = db.CitaPaciente.findByPk;
+  try {
+    for (const estado of ['ha_acudido', 'en_atencion', 'completada']) {
+      db.CitaPaciente.findByPk = async () => ({ ...futureAppointment(), estado });
+      const reminder = await appointmentRuntime.fireScheduledTrigger({ appointment_id: 8801,
+        trigger_type: 'appointment_reminder_window', template_key: 'obsolete-reminder' });
+      assert.equal(reminder.reason, 'appointment_care_stage_ineligible');
+    }
+    for (const row of [{ estado: 'ha_acudido', care_legacy_attendance: true }, { estado: 'en_atencion' }, { estado: 'completada' }]) {
+      db.CitaPaciente.findByPk = async () => ({ ...futureAppointment(), ...row });
+      const after = await appointmentRuntime.fireScheduledTrigger({ appointment_id: 8801,
+        trigger_type: 'appointment_after', template_key: 'old-aftercare' });
+      assert.equal(after.reason, 'appointment_care_stage_ineligible');
+    }
+  } finally { db.CitaPaciente.findByPk = original; }
 });

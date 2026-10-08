@@ -9,7 +9,7 @@ const {
   madridToday, addDays,
 } = contract;
 
-const INACTIVE_APPOINTMENT_STATUSES = ['cancelada', 'no_asistio', 'completada'];
+const INACTIVE_APPOINTMENT_STATUSES = ['cancelada', 'no_asistio', 'ha_acudido', 'en_atencion', 'completada'];
 const plain = (row) => row?.toJSON ? row.toJSON() : row;
 
 // Dependency injection keeps focal tests entirely offline. Default DB is loaded lazily.
@@ -83,7 +83,7 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
       linked_appointment_start: appointment?.inicio || null,
       linked_appointment_status: appointment?.estado || null,
       linked_appointment_needs_review: data.status === 'scheduled' && (!appointment || ['cancelada', 'no_asistio'].includes(appointment.estado)),
-      linked_appointment_completed: data.status === 'scheduled' && appointment?.estado === 'completada',
+      linked_appointment_completed: data.status === 'scheduled' && require('../lib/status-catalog').hasAttendedAppointment(appointment),
       source_kind: data.source_kind,
       source_appointment_id: data.source_appointment_id ? Number(data.source_appointment_id) : null,
       source_date: data.source_date || null,

@@ -102,7 +102,7 @@ function nativeAppointmentCandidate(source, patientId, live, evidence) {
     ||Number(appointment.clinica_id)!==evidence.clinic_id||Number(appointment.created_by)!==evidence.native_created_by
     ||appointment.source_system!=null||appointment.source_reference!=null||appointment.tipo_cita!=='primera_sin_trat'
     ||!(nativeActiveStates.has(appointment.estado)
-      ||(history&&['completada','cancelada','no_asistio'].includes(appointment.estado)))) throw Error('CONTACT_ALIAS_NATIVE_FIRST_VISIT_NOT_CORROBORATED');
+      ||(history&&['ha_acudido','en_atencion','completada','cancelada','no_asistio'].includes(appointment.estado)))) throw Error('CONTACT_ALIAS_NATIVE_FIRST_VISIT_NOT_CORROBORATED');
   return {patient:candidates[0],appointment_sha256:hash(appointment)};
 }
 function anchoredIntakeCandidate(source,patientId,live,evidence) {

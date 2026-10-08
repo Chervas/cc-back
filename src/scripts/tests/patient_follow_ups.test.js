@@ -258,6 +258,12 @@ test('report context reopens same source and changed linked appointment is a liv
   assert.equal(moved.item.linked_appointment_start.toISOString(), '2026-12-15T10:00:00.000Z');
   linked.estado = 'completada';
   assert.equal((await service.get({ clinicId: 10, id: item.id })).item.linked_appointment_completed, true);
+  for (const estado of ['ha_acudido', 'en_atencion']) {
+    linked.estado = estado;
+    assert.equal((await service.get({ clinicId: 10, id: item.id })).item.linked_appointment_completed, true);
+    await assert.rejects(service.update({ clinicId: 10, id: item.id, actorId: 3,
+      payload: { expected_version: item.version, status: 'scheduled', linked_appointment_id: 105 } }), { code: 'follow_up_appointment_inactive' });
+  }
 });
 
 async function call(handler, req) {

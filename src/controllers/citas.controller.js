@@ -31,6 +31,7 @@ const { mutateAppointmentBooking } = require('../services/appointmentBookingComm
 // or changing lifecycle. This is a server-owned, same-transaction proof; it
 // never enrolls historical rows or enables communications for a closed lane.
 async function updateLockedAppointmentWithVisit(locked, changes, transaction) {
+    require('../lib/appointment-care').assertCareStatusChange(locked, { ...locked.toJSON(), ...changes });
     const managed = db.AppointmentVisitMember && db.AppointmentVisit
         ? require('../services/appointmentVisitManaged.service').current() : null;
     const proof = managed ? await managed.prepareMutation({ appointmentId: Number(locked.id_cita),
@@ -81,6 +82,8 @@ const CITA_ESTADOS_TERMINALES_AUTOMATION = new Set([
     'cambio_solicitado',
     'cancelada',
     'reprogramada',
+    'ha_acudido',
+    'en_atencion',
     'completada',
     'no_asistio',
 ]);
@@ -89,6 +92,8 @@ const CITA_ESTADOS_RESUELVEN_NOTIFICACIONES = new Set([
     'recordatorio_confirmado',
     'cancelada',
     'reprogramada',
+    'ha_acudido',
+    'en_atencion',
     'completada',
     'no_asistio'
 ]);
@@ -2458,7 +2463,7 @@ exports.getAppointmentHubList = asyncHandler(async (req, res) => {
         inicio: { [q.past ? Op.lt : Op.gte]: new Date() },
     };
     const rows = await CitaPaciente.findAll({ where,
-        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'inicio', 'fin', 'estado', 'nota', 'motivo', 'tipo_cita', 'tratamiento_id', 'doctor_id', 'instalacion_id', 'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional', 'source_system', 'source_reference', 'import_metadata', 'voucher_id', 'hold_expires_at', 'updated_at'],
+        attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'inicio', 'fin', 'estado', 'nota', 'motivo', 'tipo_cita', 'tratamiento_id', 'doctor_id', 'instalacion_id', 'arrived_at', 'care_started_at', 'care_completed_at', 'care_legacy_attendance', 'care_schedule_start', 'es_provisional', 'source_system', 'source_reference', 'import_metadata', 'voucher_id', 'hold_expires_at', 'updated_at'],
         include: [
             // Only card identity; contact/clinical data still belongs to detail.
             { model: Paciente, as: 'paciente', required: false, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'numero_historia'] },
@@ -2608,7 +2613,7 @@ exports.getCitasCalendar = asyncHandler(async (req, res) => {
         attributes: [
             'id_cita',
             'created_by',
-            'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional',
+            'arrived_at', 'care_started_at', 'care_completed_at', 'care_legacy_attendance', 'care_schedule_start', 'es_provisional',
             'clinica_id',
             'paciente_id',
             'lead_intake_id',
@@ -2784,17 +2789,41 @@ exports.getCitaById = asyncHandler(async (req, res) => {
 
 exports.recordAppointmentCare = asyncHandler(async (req, res) => {
     const id = Number(req.params.id), action = req.params.action;
-    if (!Number.isSafeInteger(id) || id <= 0 || !['arrive', 'start'].includes(action)) return res.status(400).json({ message: 'Acción de cita no válida.' });
+    if (!Number.isSafeInteger(id) || id <= 0 || !['arrive', 'start', 'finish'].includes(action)) return res.status(400).json({ message: 'Acción de cita no válida.' });
     const cita = await CitaPaciente.findByPk(id, { attributes: ['id_cita', 'clinica_id'] });
     if (!cita) return res.status(404).json({ message: 'Cita no encontrada.' });
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
-    if (action === 'start' && !await canUserAccessFeature({ actorId: Number(req.userData.userId), featureKey: 'clinical.reports.manage', clinicId: cita.clinica_id })) {
-        return res.status(403).json({ message: 'No tienes permiso para iniciar la atención clínica.' });
+    if (['start', 'finish'].includes(action) && !await canUserAccessFeature({ actorId: Number(req.userData.userId), featureKey: 'clinical.reports.manage', clinicId: cita.clinica_id })) {
+        return res.status(403).json({ message: 'No tienes permiso para iniciar o finalizar la atención clínica.' });
+    }
+    if (action === 'finish') {
+        req.body = { estado: 'completada' };
+        return exports.updateCitaEstado(req, res);
     }
     try {
         const result = await require('../services/appointmentCare.service').record({ appointmentId: id, clinicId: cita.clinica_id, actorId: Number(req.userData.userId), action });
-        if (!result.replayed) emitAppointmentSocketEvent('appointment:updated', result.appointment);
-        return res.json({ care: result.care, replayed: result.replayed });
+        if (!result.replayed) {
+            emitAppointmentSocketEvent('appointment:updated', result.appointment);
+            const effects = [
+                ['cancel_flows', () => appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(result.appointment, {
+                    reason: `appointment_status_${result.appointment.estado}`,
+                })],
+                ['sync_timers', () => appointmentAutomationV2Runtime.syncScheduledTriggersForCita(result.appointment)],
+                ['lead_milestones', () => processAppointmentLeadMilestones({ cita: result.appointment, previousStatus: result.previousStatus })],
+                ['patient_direction', () => patientDirectionService.handleAppointmentChange({ appointment: result.appointment,
+                    previousStatus: result.previousStatus, actorUserId: req.userData.userId })],
+                ['close_notifications', () => appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(id, {
+                    reason: `appointment_status_${result.appointment.estado}`,
+                })],
+            ];
+            // The care transaction committed. Isolate optional consumers so one
+            // failure does not report an unsaved action or skip every other effect.
+            for (const [name, run] of effects) {
+                try { await run(); }
+                catch (error) { console.warn(`[appointment-care] ${name} pendiente para cita ${id}:`, error.code || error.name); }
+            }
+        }
+        return res.json({ ...await protectAppointmentsForRequest(req, result.appointment), care: result.care, replayed: result.replayed });
     } catch (error) {
         if ([400, 404, 409].includes(error.statusCode)) return res.status(error.statusCode).json({ code: error.code, message: error.message });
         throw error;
@@ -2899,6 +2928,14 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     let previousStatus = cita.estado;
+    if (['ha_acudido', 'en_atencion'].includes(estadoRaw)) {
+        req.params.action = estadoRaw === 'ha_acudido' ? 'arrive' : 'start';
+        return exports.recordAppointmentCare(req, res);
+    }
+    if (estadoRaw === 'completada' && !await canUserAccessFeature({ actorId: Number(req.userData.userId),
+        featureKey: 'clinical.reports.manage', clinicId: cita.clinica_id })) {
+        return res.status(403).json({ message: 'No tienes permiso para finalizar la atención clínica.' });
+    }
     let linkedStateRows = [];
     if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
@@ -2907,6 +2944,10 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
     if (bookingCapabilities().simple) {
         cita = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
           await require('../services/appointmentPatientLinks.service').load(db, citaId, transaction, true);
+          const current = await CitaPaciente.findByPk(citaId, { transaction, lock: transaction.LOCK.UPDATE });
+          if (!current) throw Object.assign(new Error('Cita no encontrada.'), { statusCode: 404 });
+          previousStatus = current.estado;
+          if (previousStatus === 'completada' && estadoRaw === 'completada') return current;
           const saved = await mutateAppointmentBooking({ db, transaction, existingAppointmentId: citaId,
             appointmentValues: { estado: estadoRaw, updated_by: cita.updated_by }, allowObsolete: true, stateOnly: true,
             priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
@@ -2926,6 +2967,7 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
             const locked = await CitaPaciente.findByPk(citaId, { transaction, lock: transaction.LOCK.UPDATE });
             if (!locked) throw Object.assign(new Error('Cita no encontrada.'), { statusCode: 404 });
             previousStatus = locked.estado;
+            if (previousStatus === 'completada' && estadoRaw === 'completada') return locked;
             if (previousStatus === 'cancelada' && estadoRaw !== 'cancelada' && locked.tratamiento_id) {
                 const clinic = await Clinica.findByPk(locked.clinica_id, { transaction });
                 const treatment = await loadScopedTreatment({ db, treatmentId: locked.tratamiento_id, clinic, transaction });
@@ -2933,11 +2975,19 @@ exports.updateCitaEstado = asyncHandler(async (req, res) => {
             }
             await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: locked,
                 appointment: { ...locked.toJSON(), estado: estadoRaw }, transaction });
+            const completionPatch = estadoRaw === 'completada' && previousStatus !== 'completada'
+                ? require('../lib/appointment-care').careActionPatch(locked, 'finish', { actorId: req.userData.userId }) : {};
             const correction = await require('../services/appointmentCare.service').confirmedCorrection({ cita: locked,
                 nextStatus: estadoRaw, actorId: req.userData?.userId || null, transaction });
-            return updateLockedAppointmentWithVisit(locked,
-                { estado: estadoRaw, updated_by: req.userData?.userId || null, ...correction }, transaction);
+            const saved = await updateLockedAppointmentWithVisit(locked,
+                { estado: estadoRaw, updated_by: req.userData?.userId || null, ...correction, ...completionPatch }, transaction);
+            if (completionPatch.care_completed_at) await require('../services/appointmentCare.service').recordCompletion({ models: db,
+                appointment: saved, actorId: req.userData.userId, transaction });
+            return saved;
         });
+    }
+    if (estadoRaw === 'completada' && previousStatus === 'completada') {
+        return res.json({ ...await protectAppointmentsForRequest(req, cita), care: require('../lib/appointment-care').careState(cita), replayed: true });
     }
     try {
         await recordAppointmentStatusChange({

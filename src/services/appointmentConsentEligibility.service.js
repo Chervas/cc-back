@@ -153,7 +153,9 @@ async function assertAppointmentClinicalConsent(options) {
 }
 
 async function assertClinicalCompletion({ previous = null, appointment, ...options }) {
+  require('../lib/appointment-care').assertCareStatusChange(plain(previous), plain(appointment));
   if (plain(appointment)?.estado !== 'completada' || plain(previous)?.estado === 'completada') return;
+  require('../lib/appointment-care').assertCareAction(plain(previous) || plain(appointment), 'finish', options.now || new Date());
   return assertAppointmentClinicalConsent({ ...options, appointment });
 }
 

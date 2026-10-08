@@ -29,7 +29,7 @@ function validateDistinctVisit(review, action) {
     || Number(native.paciente_id) !== review.patient_id || ![66, 72].includes(Number(native.clinica_id))
     || native.source_system || native.source_reference
     || !['primera_sin_trat', 'primera_con_trat'].includes(native.tipo_cita)
-    || !['completada', 'info_enviada', 'pendiente', 'confirmada'].includes(native.estado)
+    || !['ha_acudido', 'en_atencion', 'completada', 'info_enviada', 'pendiente', 'confirmada'].includes(native.estado)
     || normalizedRow(native).fin >= localToUtc(source.start_local)
     || !current || !positive(current.appointment_id) || current.contact_id !== source.source_contact_id
     || current.state !== 0 || hash(current.source) !== hash(source)

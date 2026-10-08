@@ -925,7 +925,7 @@ const TRIGGER_TYPES_V2 = [
   { value: 'appointment_no_show', label: 'Cita no show' },
   { value: 'appointment_rescheduled', label: 'Cita reagendada' },
   { value: 'appointment_cancelled', label: 'Cita cancelada' },
-  { value: 'appointment_completed', label: 'Cita completada' },
+  { value: 'appointment_completed', label: 'Atención finalizada' },
   { value: 'consent_required', label: 'Consentimiento necesario' },
   { value: 'lead_nuevo', label: 'Lead nuevo' },
   { value: 'patient_reactivation', label: 'Reactivación de pacientes' },

@@ -505,7 +505,7 @@ async function consumeProgramSession({ db, appointment, voucher, transaction, ac
   const session = await db.PatientProgramSession.findOne({ where: { voucher_id: voucher.id, appointment_id: appointment.id_cita }, transaction, lock: transaction.LOCK.UPDATE });
   if (!session || Number(appointment.clinica_id) !== Number(voucher.clinic_id) || Number(appointment.paciente_id) !== Number(voucher.patient_id)) fail('program_session_not_found', 'La cita no corresponde a una sesión de este programa.');
   if (session.consumption_movement_id) return { consumed: false, already_consumed: true, movement_id: String(session.consumption_movement_id) };
-  if (appointment.estado !== 'completada' || voucher.status !== 'active' || Number(voucher.available_units) < 1) return { consumed: false, reason: 'program_session_not_consumable' };
+  if (!require('../lib/appointment-care').hasCompletedAppointmentCare(appointment) || voucher.status !== 'active' || Number(voucher.available_units) < 1) return { consumed: false, reason: 'program_session_not_consumable' };
   const movement = await db.PatientVoucherMovement.create({ voucher_id: voucher.id, movement_type: 'consumption', units: -1,
     appointment_id: appointment.id_cita, notes: `Sesión ${session.position + 1} del programa.`, occurred_at: new Date(), created_by: actorId }, { transaction });
   const remaining = Number(voucher.available_units) - 1;

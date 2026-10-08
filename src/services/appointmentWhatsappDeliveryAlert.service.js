@@ -8,7 +8,7 @@ const { isTemporaryQuickChatFocusUser } = require('../lib/temporary-quickchat-fo
 const realtime = require('./notificationsRealtime.service');
 
 const KIND = 'appointment_whatsapp_delivery_failed';
-const RESOLVED_STATES = new Set(['completada', 'no_asistio', 'cancelada']);
+const RESOLVED_STATES = new Set(['ha_acudido', 'en_atencion', 'completada', 'no_asistio', 'cancelada']);
 const RECEPTION_SUBROLES = new Set(['Administrativos', 'Recepción / Comercial ventas']);
 // Only an explicit recipient-undeliverable answer is a reason to ask reception
 // to call. A timeout, pacing/quality hold, or configuration error is NOT proof

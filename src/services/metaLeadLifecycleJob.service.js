@@ -57,7 +57,7 @@ async function resolveLifecycleSignal(input, dependencies = {}) {
     ...(input.appointment_id ? { id_cita: input.appointment_id } : {}),
     [Op.or]: [{ es_provisional: false }, { es_provisional: null }],
     estado: { [Op.in]: ['pendiente', 'info_enviada', 'info_confirmada', 'recordatorio_enviado',
-      'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'completada'] } },
+      'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'ha_acudido', 'en_atencion', 'completada'] } },
     attributes: ['id_cita'], limit: 1, raw: true, ...query });
   if (input.appointment_id ? !appointments.length : lead.status_lead !== 'cualificado' && !appointments.length) fail('meta_crm_milestone_not_current');
   const clinic = await models.Clinica.findByPk(input.clinic_id, { raw: true, ...query });

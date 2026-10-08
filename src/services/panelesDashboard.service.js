@@ -191,8 +191,12 @@ function statusUi(rawStatus) {
       return { status: 'reminder-confirmed', label: 'Confirmada' };
     case 'cambio_solicitado':
       return { status: 'change-requested', label: 'Cambio solicitado' };
+    case 'ha_acudido':
+      return { status: 'attended', label: 'Ha acudido' };
+    case 'en_atencion':
+      return { status: 'care-started', label: 'Atención iniciada' };
     case 'completada':
-      return { status: 'attended', label: 'Acudió' };
+      return { status: 'care-completed', label: 'Atención finalizada' };
     case 'no_asistio':
       return { status: 'no-show', label: 'No asistió' };
     case 'cancelada':
@@ -493,7 +497,7 @@ async function loadAppointments({
   const appointmentAttributes = [
     'id_cita', 'clinica_id', 'paciente_id', 'doctor_id', 'instalacion_id',
     'tratamiento_id', 'titulo', 'motivo', 'nota', 'tipo_cita', 'estado', 'inicio', 'fin',
-    'arrived_at', 'care_started_at', 'care_schedule_start', 'es_provisional', 'source_system', 'voucher_id', 'import_metadata',
+    'arrived_at', 'care_started_at', 'care_completed_at', 'care_legacy_attendance', 'care_schedule_start', 'es_provisional', 'source_system', 'voucher_id', 'import_metadata',
   ];
   const doctorScope = doctorId ? { doctor_id: doctorId } : {};
 

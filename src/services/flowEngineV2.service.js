@@ -116,12 +116,14 @@ const FIELD_CHECK_LOGIC_CONNECTORS = new Set(['and', 'or']);
 const RETIRED_APPOINTMENT_INTENT_PRESETS = new Set([
   'appointment_unconfirmed_reply',
 ]);
-const PROTECTED_APPOINTMENT_STATUSES = new Set(['cancelada', 'completada', 'no_asistio']);
+const PROTECTED_APPOINTMENT_STATUSES = new Set(['cancelada', 'ha_acudido', 'en_atencion', 'completada', 'no_asistio']);
 const APPOINTMENT_NOTIFICATION_RESOLVED_STATUSES = new Set([
   'info_confirmada',
   'recordatorio_confirmado',
   'cancelada',
   'reprogramada',
+  'ha_acudido',
+  'en_atencion',
   'completada',
   'no_asistio',
 ]);

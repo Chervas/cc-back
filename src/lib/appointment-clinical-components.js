@@ -124,7 +124,7 @@ function assertPairRoles(component, parent, treatment, { forLink = true } = {}) 
     || cm.import_treatment_resolution || pm[PARENT_KEY]
     || [component, parent].some(row => row.voucher_id || row.lead_intake_id || row.es_provisional || row.hold_expires_at
       || ['cancelada', 'no_asistio', 'reprogramada'].includes(row.estado)
-      || forLink && (row.arrived_at || row.care_started_at || row.care_schedule_start || row.estado === 'completada'))
+      || forLink && (row.arrived_at || row.care_started_at || row.care_schedule_start || require('./status-catalog').hasAttendedAppointment(row)))
     || cm.program_session || pm.program_session || cm.additional_staff || pm.additional_staff
     || !simpleReservedRole(component, 53, 79) || !simpleReservedRole(parent, 50, 75)) {
     fail('roles_unproven', 'Esta relación solo identifica una extracción y una infiltración PRP simples, abiertas y ya reservadas. No crea ni corrige sus fases.');

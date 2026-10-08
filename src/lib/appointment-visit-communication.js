@@ -41,7 +41,7 @@ function held(value, depth = 0) {
 const qa = value => isSyntheticData(value);
 function lifecycle(appointment) {
   const state = String(appointment.estado || '');
-  if (['cancelada', 'no_asistio', 'completada'].includes(state)) return state;
+  if (['cancelada', 'no_asistio', 'ha_acudido', 'en_atencion', 'completada'].includes(state)) return state;
   if (['pendiente', 'info_enviada', 'info_confirmada', 'recordatorio_enviado', 'recordatorio_confirmado', 'reprogramada'].includes(state)) return 'active';
   if (state === 'cambio_solicitado') return 'change_requested';
   fail('unsupported_appointment_state');

@@ -11,9 +11,11 @@ const APPOINTMENT_STATUS_LABELS = Object.freeze({
   info_enviada: 'Datos de la cita enviados',
   info_confirmada: 'Datos de la cita confirmados',
   recordatorio_enviado: 'Recordatorio enviado',
-  recordatorio_confirmado: 'Asistencia confirmada',
+  recordatorio_confirmado: 'Cita confirmada',
   cambio_solicitado: 'Cambio solicitado',
-  completada: 'Cita completada',
+  ha_acudido: 'Ha acudido',
+  en_atencion: 'Atención iniciada',
+  completada: 'Atención finalizada',
   cancelada: 'Cita cancelada',
   no_asistio: 'Paciente no acude',
   reprogramada: 'Cita reprogramada',
@@ -23,9 +25,11 @@ const APPOINTMENT_STATUS_TITLES = Object.freeze({
   info_enviada: 'Datos de la cita enviados',
   info_confirmada: 'Datos de la cita confirmados',
   recordatorio_enviado: 'Recordatorio enviado',
-  recordatorio_confirmado: 'Asistencia confirmada por el paciente',
+  recordatorio_confirmado: 'Cita confirmada por el paciente',
   cambio_solicitado: 'Cambio de cita solicitado',
-  completada: 'Cita completada',
+  ha_acudido: 'Ha acudido',
+  en_atencion: 'Atención iniciada',
+  completada: 'Atención finalizada',
   cancelada: 'Cita cancelada',
   no_asistio: 'Paciente no acude',
   reprogramada: 'Cita reprogramada',
@@ -37,6 +41,8 @@ const APPOINTMENT_STATUS_ICONS = Object.freeze({
   recordatorio_enviado: 'heroicons_outline:bell-alert',
   recordatorio_confirmado: 'heroicons_outline:hand-thumb-up',
   cambio_solicitado: 'heroicons_outline:arrow-path-rounded-square',
+  ha_acudido: 'heroicons_outline:user',
+  en_atencion: 'heroicons_outline:clipboard-document-list',
   completada: 'heroicons_outline:check',
   cancelada: 'heroicons_outline:x-circle',
   no_asistio: 'heroicons_outline:hand-thumb-down',
@@ -90,12 +96,17 @@ function appointmentStatusSourceLabel(event) {
 
 function buildAppointmentStatusDescription(event) {
   const metadata = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
-  const previousLabel = appointmentStatusLabel(metadata.previous_status);
-  const nextLabel = appointmentStatusLabel(metadata.new_status);
+  const previousLabel = appointmentStatusLabel(historicalStatus(metadata.previous_status, metadata));
+  const nextLabel = appointmentStatusLabel(historicalStatus(metadata.new_status, metadata));
   const transition = previousLabel && nextLabel
     ? `${previousLabel} → ${nextLabel}`
     : (nextLabel || 'Estado actualizado');
   return `${appointmentStatusSourceLabel(event)} · ${transition}.`;
+}
+
+function historicalStatus(status, metadata) {
+  const normalized = cleanString(status)?.toLowerCase() || null;
+  return normalized === 'completada' && Number(metadata.care_lifecycle_version) !== 2 ? 'ha_acudido' : normalized;
 }
 
 function serializeAppointmentStatusActivity(event, { patientId = null, leadId = null, actorName = 'Sistema' } = {}) {
@@ -145,7 +156,7 @@ function serializeAppointmentStatusActivity(event, { patientId = null, leadId = 
       usuarioId: event.actor_user_id ? String(event.actor_user_id) : 'system', usuarioNombre: actorName || 'Sistema',
       detalles: { ...metadata, source: event.source || null } };
   }
-  const newStatus = cleanString(metadata.new_status)?.toLowerCase() || null;
+  const newStatus = historicalStatus(metadata.new_status, metadata);
   const appointmentId = toPositiveInt(metadata.appointment_id);
   const typeByStatus = {
     info_enviada: 'appointment_info_sent',
@@ -153,6 +164,8 @@ function serializeAppointmentStatusActivity(event, { patientId = null, leadId = 
     recordatorio_enviado: 'appointment_reminder_sent',
     recordatorio_confirmado: 'appointment_confirmed',
     cambio_solicitado: 'appointment_change_requested',
+    ha_acudido: 'appointment_arrived',
+    en_atencion: 'appointment_care_started',
     completada: 'appointment_completed',
     cancelada: 'appointment_cancelled',
     no_asistio: 'appointment_no_show',
@@ -200,7 +213,7 @@ async function recordAppointmentStatusChange({
   const next = cleanString(newStatus)?.toLowerCase() || null;
   if (!appointmentId || !clinicId || !next || previous === next && !recordUnchanged) return null;
 
-  if (next === 'completada' && [66, 72, 77].includes(clinicId)) {
+  if (require('../lib/status-catalog').hasAttendedAppointment({ estado: next }) && [66, 72, 77].includes(clinicId)) {
     await require('./temporaryPatientDirection.service').observeAppointment(appointment, { transaction });
   }
 
@@ -213,6 +226,7 @@ async function recordAppointmentStatusChange({
     channel: null,
     metadata: {
       ...metadata,
+      care_lifecycle_version: 2,
       appointment_id: appointmentId,
       previous_status: previous,
       new_status: next,

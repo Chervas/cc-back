@@ -62,7 +62,7 @@ async function resolveImportedTreatment({ db, appointmentId, clinicId, actorId, 
     if ((resourcesOnly ? !importResourcesInScope(before) || !before.doctor_id || !before.instalacion_id
       : !importTreatmentPending(before) || original.import_treatment_resolution) || before.voucher_id
       || original.program_session || before.es_provisional || before.hold_expires_at
-      || ['cancelada', 'completada', 'no_asistio'].includes(before.estado)) {
+      || ['cancelada', 'ha_acudido', 'en_atencion', 'completada', 'no_asistio'].includes(before.estado)) {
       fail('not_resolvable', resourcesOnly
         ? 'Primero asigna una cabina y un profesional a esta cita importada abierta. Las sesiones de programas se revisan desde su plan.'
         : 'Esta acción solo completa citas importadas abiertas, sin tratamiento ni programa ya vinculado.');

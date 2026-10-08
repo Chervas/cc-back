@@ -1,6 +1,8 @@
 'use strict';
 
 const db = require('../../models');
+const { hasAttendedAppointment } = require('../lib/status-catalog');
+const { hasCompletedAppointmentCare } = require('../lib/appointment-care');
 
 const PROPDENTAL_GROUP_ID = 5;
 const TERMINAL_LEAD_STATUSES = new Set(['convertido', 'descartado']);
@@ -87,15 +89,16 @@ async function syncLeadStatusFromAppointments(leadId, dependencies = {}) {
 
   const citas = await CitaPaciente.findAll({
     where: { lead_intake_id: normalizedLeadId },
-    attributes: ['id_cita', 'estado', 'inicio', 'tratamiento_id', 'tipo_cita'],
+    attributes: ['id_cita', 'estado', 'inicio', 'tratamiento_id', 'tipo_cita', 'arrived_at',
+      'care_started_at', 'care_completed_at', 'care_schedule_start', 'care_legacy_attendance'],
     order: [['inicio', 'DESC'], ['id_cita', 'DESC']],
     raw: true,
   });
 
   const completedTreatment = citas.find((row) => (
-    normalizedStatus(row?.estado) === 'completada' && isTreatmentAppointment(row)
+    hasCompletedAppointmentCare(row) && isTreatmentAppointment(row)
   )) || null;
-  const completedAppointment = citas.find((row) => normalizedStatus(row?.estado) === 'completada') || null;
+  const completedAppointment = citas.find(hasAttendedAppointment) || null;
   const activeAppointment = citas.find((row) => (
     LEAD_ACTIVE_APPOINTMENT_STATES.has(normalizedStatus(row?.estado))
   )) || null;
@@ -139,7 +142,7 @@ async function maybeUploadCompletedTreatmentConversion({
   const nextStatus = normalizedStatus(plain.estado);
 
   if (!appointmentId || !leadId) return { sent: false, reason: 'linked_appointment_required' };
-  if (nextStatus !== 'completada' || normalizedStatus(previousStatus) === 'completada') {
+  if (nextStatus !== 'completada' || normalizedStatus(previousStatus) === 'completada' || !hasCompletedAppointmentCare(plain)) {
     return { sent: false, reason: 'first_completed_transition_required' };
   }
   if (!isTreatmentAppointment(plain)) {

@@ -31,7 +31,7 @@ function compatibleLinkedAppointment(session, appointment) {
   if (session.treatment_ids.length !== 1 || Number(appointment.tratamiento_id) !== session.treatment_ids[0]) {
     fail('program_link_treatment_mismatch', 'El tratamiento individual debe coincidir exactamente con la sesión elegida. Revisa primero el tratamiento de la cita.');
   }
-  if (['cancelada', 'completada', 'no_asistio'].includes(appointment.estado) || appointment.care_started_at) {
+  if (['cancelada', 'ha_acudido', 'en_atencion', 'completada', 'no_asistio'].includes(appointment.estado) || appointment.care_started_at) {
     fail('program_link_appointment_closed', 'Vincula una cita abierta y sin atención iniciada; no se modifica el historial ni se descuentan sesiones realizadas.');
   }
   const metadata = object(appointment.import_metadata);

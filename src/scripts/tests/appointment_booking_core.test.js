@@ -735,6 +735,8 @@ test('unsigned clinical completion fails before appointment persistence or occup
   const f = fixture();
   f.db.Tratamiento.findAll = async () => [];
   const original = await f.reserve();
+  Object.assign(original, { estado: 'en_atencion', care_schedule_start: original.inicio,
+    arrived_at: original.inicio, care_started_at: original.inicio });
   f.db.TreatmentConsentRequirement.findAll = async () => [{ tratamiento_id: 3, clinic_template_id: 7,
     required: true, blocking_policy: 'hard', clinicTemplate: { purpose: 'clinical', status: 'active', validity_mode: 'single_act' } }];
   f.db.PatientConsentDocument = { findAll: async () => [] };
@@ -742,7 +744,7 @@ test('unsigned clinical completion fails before appointment persistence or occup
   await assert.rejects(f.reserve({ existingAppointmentId: original.id_cita, stateOnly: true,
     appointmentValues: { estado: 'completada' }, force: true }), { code: 'appointment_consent_required' });
   assert.equal(f.state.persists, persists);
-  assert.equal(f.state.appointments[0].estado, 'pendiente');
+  assert.equal(f.state.appointments[0].estado, 'en_atencion');
   assert.equal(f.state.occupancies.length, 2);
 });
 

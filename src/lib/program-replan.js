@@ -6,7 +6,10 @@ const fail = (code, message) => { throw domainError(409, code, message); };
 const plain = value => value?.toJSON ? value.toJSON() : value;
 
 function schedulingState(record, appointment) {
-  if (record?.consumption_movement_id || appointment?.estado === 'completada') return 'completed';
+  // Preserve the purchased program's historical performed position. This is
+  // planning evidence, not a new care completion or consumption movement.
+  if (record?.consumption_movement_id || appointment?.estado === 'completada'
+    || appointment?.estado === 'ha_acudido' && !!appointment.care_legacy_attendance) return 'completed';
   if (appointment?.estado === 'no_asistio') return 'missed';
   return appointment && appointment.estado !== 'cancelada' ? 'reserved' : 'pending';
 }

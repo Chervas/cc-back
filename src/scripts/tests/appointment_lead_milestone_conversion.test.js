@@ -31,6 +31,12 @@ function leadFixture(overrides = {}) {
   return lead;
 }
 
+function completedCare() {
+  return { inicio: new Date('2026-07-12T10:00:00Z'), care_schedule_start: new Date('2026-07-12T10:00:00Z'),
+    arrived_at: new Date('2026-07-12T10:00:00Z'), care_started_at: new Date('2026-07-12T10:05:00Z'),
+    care_completed_at: new Date('2026-07-12T12:00:00Z'), care_legacy_attendance: false };
+}
+
 function statusDependencies(lead, citas, counters = {}) {
   return {
     LeadIntake: {
@@ -42,7 +48,7 @@ function statusDependencies(lead, citas, counters = {}) {
     CitaPaciente: {
       async findAll(query) {
         counters.appointmentReads = (counters.appointmentReads || 0) + 1;
-        assert.deepEqual(query.attributes, ['id_cita', 'estado', 'inicio', 'tratamiento_id', 'tipo_cita']);
+        assert.deepEqual(query.attributes, ['id_cita', 'estado', 'inicio', 'tratamiento_id', 'tipo_cita', 'arrived_at', 'care_started_at', 'care_completed_at', 'care_schedule_start', 'care_legacy_attendance']);
         return citas;
       },
     },
@@ -62,6 +68,7 @@ async function testLeadStatusMilestones() {
 
   const convertedByTreatmentId = leadFixture();
   await syncLeadStatusFromAppointments(convertedByTreatmentId.id, statusDependencies(convertedByTreatmentId, [{
+    ...completedCare(),
     id_cita: 102,
     estado: 'completada',
     tratamiento_id: 7,
@@ -72,12 +79,21 @@ async function testLeadStatusMilestones() {
 
   const convertedByType = leadFixture({ status_lead: 'acudio_cita' });
   await syncLeadStatusFromAppointments(convertedByType.id, statusDependencies(convertedByType, [{
+    ...completedCare(),
     id_cita: 103,
     estado: 'completada',
     tratamiento_id: null,
     tipo_cita: 'primera_con_trat',
   }]));
   assert.equal(convertedByType.status_lead, 'convertido');
+
+  for (const estado of ['ha_acudido', 'en_atencion']) {
+    const attended = leadFixture();
+    await syncLeadStatusFromAppointments(attended.id, statusDependencies(attended, [{
+      id_cita: 107, estado, tratamiento_id: 7, tipo_cita: 'continuacion', care_legacy_attendance: estado === 'ha_acudido',
+    }]));
+    assert.equal(attended.status_lead, 'acudio_cita', 'Attendance/start must not claim completed treatment');
+  }
 
   const attendedIsNotDegraded = leadFixture({ status_lead: 'acudio_cita', call_outcome_appointment_id: 104 });
   await syncLeadStatusFromAppointments(attendedIsNotDegraded.id, statusDependencies(attendedIsNotDegraded, [{
@@ -124,6 +140,7 @@ async function testPurchasePayloadAndValue() {
   let uploadInput = null;
   const result = await maybeUploadCompletedTreatmentConversion({
     cita: {
+      ...completedCare(),
       id_cita: 301,
       clinica_id: 56,
       lead_intake_id: lead.id,
@@ -176,6 +193,7 @@ async function testPurchaseGuardsAndZeroFallback() {
 
   const repeated = await maybeUploadCompletedTreatmentConversion({
     cita: {
+      ...completedCare(),
       id_cita: 302,
       clinica_id: 56,
       lead_intake_id: lead.id,
@@ -189,6 +207,7 @@ async function testPurchaseGuardsAndZeroFallback() {
 
   const noTreatment = await maybeUploadCompletedTreatmentConversion({
     cita: {
+      ...completedCare(),
       id_cita: 303,
       clinica_id: 56,
       lead_intake_id: lead.id,
@@ -204,6 +223,7 @@ async function testPurchaseGuardsAndZeroFallback() {
   const outsideLead = leadFixture({ grupo_clinica_id: 9 });
   const outside = await maybeUploadCompletedTreatmentConversion({
     cita: {
+      ...completedCare(),
       id_cita: 304,
       clinica_id: 999,
       lead_intake_id: outsideLead.id,
@@ -222,6 +242,7 @@ async function testPurchaseGuardsAndZeroFallback() {
   let zeroValueInput = null;
   await maybeUploadCompletedTreatmentConversion({
     cita: {
+      ...completedCare(),
       id_cita: 305,
       clinica_id: 56,
       lead_intake_id: lead.id,
@@ -251,6 +272,7 @@ async function testProcessIsNonBlockingForProviderFailures() {
   const warnings = [];
   const result = await processAppointmentLeadMilestones({
     cita: {
+      ...completedCare(),
       id_cita: 401,
       clinica_id: 56,
       lead_intake_id: lead.id,
@@ -261,6 +283,7 @@ async function testProcessIsNonBlockingForProviderFailures() {
     previousStatus: 'pendiente',
     dependencies: {
       ...statusDependencies(lead, [{
+        ...completedCare(),
         id_cita: 401,
         estado: 'completada',
         tratamiento_id: 77,
@@ -290,7 +313,7 @@ function testControllerUsesCommonHelperForEveryCompletionWritePath() {
     controller,
     /const\s*\{[^}]*processAppointmentLeadMilestones[^}]*\}\s*=\s*require\('\.\.\/services\/appointmentLeadMilestone\.service'\);/
   );
-  assert.match(controller, /if \(estadoRaw === 'completada'\) \{\s*await processAppointmentLeadMilestones\(\{\s*cita,\s*previousStatus: null,/s);
+  assert.match(controller, /if \(estadoRaw === 'completada' && !birthReplay\) \{\s*await processAppointmentLeadMilestones\(\{\s*cita,\s*previousStatus: null,/s);
   // Status protection is now exercised against MySQL in appointment_lead_link_mysql.
   assert.match(controller, /lead = await recordCreatedAppointmentLead\(\{ models: db, lead, appointment, transaction,/);
 
@@ -298,10 +321,10 @@ function testControllerUsesCommonHelperForEveryCompletionWritePath() {
     controller.indexOf('exports.updateCitaEstado ='),
     controller.indexOf('exports.reagendarCita =')
   );
-  assert.match(updateSection, /(?:const|let) previousStatus = cita\.estado;[\s\S]*(?:await cita\.save\(\);|return locked\.update\([^;]+;)[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
+  assert.match(updateSection, /(?:const|let) previousStatus = cita\.estado;[\s\S]*updateLockedAppointmentWithVisit\(locked,[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
 
   const rescheduleSection = controller.slice(controller.indexOf('exports.reagendarCita ='));
-  assert.match(rescheduleSection, /(?:const|let) previousStatus = cita\.estado;[\s\S]*(?:await cita\.save\(\);|return locked\.update\([^;]+;)[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
+  assert.match(rescheduleSection, /(?:const|let) previousStatus = cita\.estado;[\s\S]*updateLockedAppointmentWithVisit\(locked,[\s\S]*processAppointmentLeadMilestones\(\{ cita, previousStatus \}\)/);
 }
 
 async function run() {

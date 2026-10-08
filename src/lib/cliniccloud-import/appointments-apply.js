@@ -52,7 +52,7 @@ function validateCandidate(action, local, row, context, manifest) {
     || instant(source.start_utc) !== row.inicio || instant(source.end_utc) !== row.fin, 'SCHEDULE_CHANGE_NOT_SUPPORTED');
   const day = source.start_local?.slice(0, 10);
   reject(!day || day < manifest.coverage.start || day > manifest.coverage.end, 'OUTSIDE_AUTHORITATIVE_INTERVAL');
-  reject(!['pendiente', 'cancelada', 'completada', 'no_asistio'].includes(source.status), 'UNSUPPORTED_SOURCE_STATUS');
+  reject(!['pendiente', 'cancelada', 'ha_acudido', 'completada', 'no_asistio'].includes(source.status), 'UNSUPPORTED_SOURCE_STATUS');
   // Shared old writers do not all lock/index appointment dependencies. This
   // release does not accept an operator assertion as a substitute for safety.
   reject(row.estado !== source.status, 'STATE_CHANGE_EXECUTOR_DISABLED');
@@ -112,7 +112,7 @@ function verifyPackage(pkg) {
     if (hash(value) !== operation_sha256 || hash(operation.before) !== operation.expected_row_sha256 || hash(operation.context) !== operation.expected_context_sha256) fail('OPERATION_INTEGRITY_MISMATCH');
     if (ids.has(operation.local_id) || keys.has(operation.action_key)) fail('DUPLICATE_PACKAGE_TARGET');
     ids.add(operation.local_id); keys.add(operation.action_key);
-    if (!positive(operation.local_id) || !['pendiente', 'cancelada', 'completada', 'no_asistio'].includes(operation.desired_status)
+    if (!positive(operation.local_id) || !['pendiente', 'cancelada', 'ha_acudido', 'completada', 'no_asistio'].includes(operation.desired_status)
       || operation.before.source_system !== 'cliniccloud' || operation.state_change !== false || operation.before.estado !== operation.desired_status) fail('INVALID_OPERATION');
   }
 }

@@ -67,7 +67,7 @@ async function nativeLifecycleContext(input, dependencies = {}) {
     ...(appointmentId ? { id_cita: Number(appointmentId) } : {}),
     [Op.or]: [{ es_provisional: false }, { es_provisional: null }],
     estado: { [Op.in]: ['pendiente', 'info_enviada', 'info_confirmada', 'recordatorio_enviado',
-      'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'completada'] } }, attributes: ['id_cita'], limit: 1, raw: true, transaction });
+      'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'ha_acudido', 'en_atencion', 'completada'] } }, attributes: ['id_cita'], limit: 1, raw: true, transaction });
   if (appointmentId ? !appointments.length : lead.status_lead !== 'cualificado' && !appointments.length) fail('workspace_google_native_milestone_not_current');
   const context = await resolveWorkspaceGoogleNativeRoute({ models, clinicId: Number(input.clinicId), identity, eventName: input.eventName, now, transaction });
   const consent = lead.consentimiento_canal && typeof lead.consentimiento_canal === 'object' && !Array.isArray(lead.consentimiento_canal)

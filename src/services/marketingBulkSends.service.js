@@ -3331,7 +3331,7 @@ function mapReviewPatientItem({ patient, appointment = null, source = 'manual_se
   const name = buildPatientDisplayName(patient);
   const appointmentDate = appointment?.inicio || appointment?.appointment_at || null;
   const formattedAppointmentDate = formatReviewDate(appointmentDate);
-  const attendedAppointmentDate = normalizeText(appointment?.estado).toLowerCase() === 'completada'
+  const attendedAppointmentDate = require('../lib/status-catalog').hasAttendedAppointment(appointment)
     ? formattedAppointmentDate
     : '';
   const visitReference = formattedAppointmentDate
@@ -3459,7 +3459,7 @@ async function buildReviewRequestCandidateForAppointment(scope, body = {}) {
   if (!appointment) return { item: null, reason: 'appointment_not_found' };
 
   const plain = appointment.get ? appointment.get({ plain: true }) : appointment;
-  if (plain.estado !== 'completada') {
+  if (!require('../lib/appointment-care').hasCompletedAppointmentCare(plain)) {
     return { item: null, reason: 'appointment_not_completed' };
   }
   if (isImportedHistoricalAppointment(plain)) {
@@ -3568,7 +3568,7 @@ async function attachLatestAttendedAppointmentDate(items = [], scope = {}) {
     where: {
       paciente_id: { [Op.in]: patientIds },
       clinica_id: { [Op.in]: clinicIds },
-      estado: 'completada',
+      estado: { [Op.in]: require('../lib/status-catalog').CITA_ATTENDED_STATUSES },
     },
     attributes: [
       'paciente_id',
@@ -3730,7 +3730,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
         LEFT JOIN Tratamientos t ON t.id_tratamiento = c.tratamiento_id
         WHERE c.paciente_id IN (:patientIds)
           AND c.clinica_id IN (:clinicIds)
-          AND c.estado = 'completada'
+          AND c.estado IN ('ha_acudido', 'en_atencion', 'completada')
         ORDER BY c.paciente_id ASC, c.inicio DESC, c.id_cita DESC
         `,
         {
@@ -3794,7 +3794,11 @@ async function buildItemsForReviewRequest(scope, body = {}) {
   if (treatmentMoment === 'started_or_completed' || treatmentMoment === 'started') {
     appointmentWhere.estado = { [Op.ne]: 'cancelada' };
   } else {
-    appointmentWhere.estado = 'completada';
+    // Manual selection keeps previously performed history. It never emits an
+    // appointment_completed event or authorizes an automatic review request.
+    appointmentWhere[Op.and] = [{ [Op.or]: [
+      { estado: 'completada' }, { estado: 'ha_acudido', care_legacy_attendance: true },
+    ] }];
   }
   if (source === 'completed_treatment') {
     appointmentWhere[Op.or] = [
@@ -3854,7 +3858,7 @@ async function buildReviewTreatmentOptions(scope) {
     INNER JOIN Pacientes p ON p.id_paciente = c.paciente_id
     LEFT JOIN Tratamientos t ON t.id_tratamiento = c.tratamiento_id
     WHERE c.clinica_id IN (:clinicIds)
-      AND c.estado = 'completada'
+      AND (c.estado = 'completada' OR (c.estado = 'ha_acudido' AND c.care_legacy_attendance = 1))
       AND c.tratamiento_id IS NOT NULL
       AND p.fecha_baja IS NULL
       ${requestedClause}

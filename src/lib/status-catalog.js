@@ -56,12 +56,30 @@ const CITA_STATUSES = Object.freeze([
     is_terminal: false,
   },
   {
-    value: 'completada',
+    value: 'ha_acudido',
     label: 'Ha acudido',
-    description: 'Paciente acudió a la cita',
+    description: 'Paciente presente en la clínica; atención todavía no finalizada',
+    color: 'emerald',
+    icon: 'heroicons_outline:user',
+    order: 7,
+    is_terminal: false,
+  },
+  {
+    value: 'en_atencion',
+    label: 'Atención iniciada',
+    description: 'Se ha iniciado la atención clínica de esta cita',
+    color: 'emerald',
+    icon: 'heroicons_outline:clipboard-document-list',
+    order: 8,
+    is_terminal: false,
+  },
+  {
+    value: 'completada',
+    label: 'Atención finalizada',
+    description: 'La atención de esta cita ha finalizado explícitamente',
     color: 'emerald',
     icon: 'heroicons_outline:check',
-    order: 7,
+    order: 9,
     is_terminal: true,
   },
   {
@@ -70,7 +88,7 @@ const CITA_STATUSES = Object.freeze([
     description: 'Paciente no se presento',
     color: 'amber',
     icon: 'heroicons_outline:exclamation-triangle',
-    order: 8,
+    order: 10,
     is_terminal: true,
   },
   {
@@ -79,7 +97,7 @@ const CITA_STATUSES = Object.freeze([
     description: 'Cita anulada',
     color: 'rose',
     icon: 'heroicons_outline:x-circle',
-    order: 9,
+    order: 11,
     is_terminal: true,
   },
   {
@@ -88,23 +106,31 @@ const CITA_STATUSES = Object.freeze([
     description: 'La cita cambió de fecha u hora y sigue pendiente de atención',
     color: 'slate',
     icon: 'heroicons_outline:arrow-path',
-    order: 10,
+    order: 12,
     is_terminal: false,
   },
 ]);
 
 const CITA_ALLOWED_TRANSITIONS = Object.freeze({
-  pendiente: ['info_enviada', 'recordatorio_enviado', 'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'cancelada', 'completada', 'no_asistio'],
-  info_enviada: ['info_confirmada', 'recordatorio_enviado', 'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'cancelada', 'completada', 'no_asistio'],
-  info_confirmada: ['recordatorio_enviado', 'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'cancelada', 'completada', 'no_asistio'],
-  recordatorio_enviado: ['recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'cancelada', 'completada', 'no_asistio'],
-  recordatorio_confirmado: ['cambio_solicitado', 'reprogramada', 'cancelada', 'completada', 'no_asistio'],
+  pendiente: ['info_enviada', 'recordatorio_enviado', 'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'cancelada', 'ha_acudido', 'no_asistio'],
+  info_enviada: ['info_confirmada', 'recordatorio_enviado', 'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'cancelada', 'ha_acudido', 'no_asistio'],
+  info_confirmada: ['recordatorio_enviado', 'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'cancelada', 'ha_acudido', 'no_asistio'],
+  recordatorio_enviado: ['recordatorio_confirmado', 'cambio_solicitado', 'reprogramada', 'cancelada', 'ha_acudido', 'no_asistio'],
+  recordatorio_confirmado: ['cambio_solicitado', 'reprogramada', 'cancelada', 'ha_acudido', 'no_asistio'],
   cambio_solicitado: ['pendiente', 'info_enviada', 'info_confirmada', 'recordatorio_enviado', 'recordatorio_confirmado', 'reprogramada', 'cancelada'],
-  reprogramada: ['recordatorio_confirmado', 'info_confirmada', 'cambio_solicitado', 'cancelada', 'completada', 'no_asistio'],
+  reprogramada: ['recordatorio_confirmado', 'info_confirmada', 'cambio_solicitado', 'cancelada', 'ha_acudido', 'no_asistio'],
+  ha_acudido: ['en_atencion', 'recordatorio_confirmado', 'info_confirmada'],
+  en_atencion: ['completada'],
   cancelada: [],
   completada: [],
   no_asistio: [],
 });
+
+const CITA_ATTENDED_STATUSES = Object.freeze(['ha_acudido', 'en_atencion', 'completada']);
+
+function hasAttendedAppointment(appointment) {
+  return CITA_ATTENDED_STATUSES.includes(normalizeValue(appointment?.estado));
+}
 
 const LEAD_STATUSES = Object.freeze([
   {
@@ -249,6 +275,8 @@ module.exports = {
   CITA_STATUSES,
   CITA_ALLOWED_TRANSITIONS,
   CITA_STATUS_VALUES,
+  CITA_ATTENDED_STATUSES,
+  hasAttendedAppointment,
   LEAD_STATUSES,
   LEAD_ALLOWED_TRANSITIONS,
   LEAD_STATUS_VALUES,

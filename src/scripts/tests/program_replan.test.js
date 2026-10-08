@@ -15,6 +15,8 @@ test('attendance states distinguish missed, completed and cancelled without inve
   assert.equal(schedulingState(null, { estado:'completada' }), 'completed');
   assert.equal(schedulingState({consumption_movement_id:1},{estado:'no_asistio'}), 'completed');
   assert.equal(schedulingState(null,{estado:'cancelada'}),'pending');
+  assert.equal(schedulingState(null, { estado: 'ha_acudido', care_legacy_attendance: true }), 'completed');
+  for (const estado of ['ha_acudido', 'en_atencion']) assert.equal(schedulingState(null, { estado }), 'reserved');
 });
 test('resume keeps completed sessions fixed and blocks ambiguous past attendance, order and live notifications', () => {
   const p=plan(); assert.equal(resumeInfo(p,now).existing_reservations_count,1);

@@ -101,12 +101,13 @@ async function assertTreatmentBookingVisibility({ db, treatment, appointmentValu
   const started = await db.CitaPaciente.findAll({ where: initiatedTreatmentWhere(db.Sequelize.Op, {
     clinicId: values.clinica_id, patientId: values.paciente_id, treatmentId,
     ignoreAppointmentId: ignoreAppointmentId || existingAppointmentId, now,
-  }), attributes: ['id_cita', 'clinica_id', 'paciente_id', 'tratamiento_id', 'estado', 'care_started_at', 'fin'], transaction });
+  }), attributes: ['id_cita', 'clinica_id', 'paciente_id', 'tratamiento_id', 'estado', 'care_started_at', 'care_legacy_attendance', 'fin'], transaction });
   if (started.some(row => same(row.clinica_id, values.clinica_id) && same(row.paciente_id, values.paciente_id)
     && same(row.tratamiento_id, treatmentId) && !['cancelada', 'no_asistio'].includes(row.estado)
     && (!ignoreAppointmentId || !same(row.id_cita, ignoreAppointmentId))
     && (!existingAppointmentId || !same(row.id_cita, existingAppointmentId))
-    && (row.estado === 'completada' && Number.isFinite(new Date(row.fin).getTime()) && new Date(row.fin) <= now
+    && ((row.estado === 'completada' || row.estado === 'ha_acudido' && !!row.care_legacy_attendance)
+      && Number.isFinite(new Date(row.fin).getTime()) && new Date(row.fin) <= now
       || row.care_started_at && Number.isFinite(new Date(row.care_started_at).getTime())
       && new Date(row.care_started_at) <= now))) return;
   denied();

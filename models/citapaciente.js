@@ -62,7 +62,9 @@ module.exports = (sequelize, DataTypes) => {
         'completada',
         'no_asistio',
         'cancelada',
-        'reprogramada'
+        'reprogramada',
+        'ha_acudido',
+        'en_atencion'
       ),
       allowNull: false,
       defaultValue: 'pendiente'
@@ -75,6 +77,9 @@ module.exports = (sequelize, DataTypes) => {
     arrived_by: { type: DataTypes.INTEGER, allowNull: true },
     care_started_at: { type: DataTypes.DATE, allowNull: true },
     care_started_by: { type: DataTypes.INTEGER, allowNull: true },
+    care_completed_at: { type: DataTypes.DATE, allowNull: true },
+    care_completed_by: { type: DataTypes.INTEGER, allowNull: true },
+    care_legacy_attendance: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     care_schedule_start: { type: DataTypes.DATE, allowNull: true },
   }, {
     sequelize,

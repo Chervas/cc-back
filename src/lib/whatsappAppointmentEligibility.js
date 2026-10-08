@@ -16,6 +16,7 @@ function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, 
   require('./appointment-synthetic-guard').assertNoSyntheticDispatch(a, e);
   if (!a || Number(a.id_cita) !== Number(e.trigger_entity_id) || Number(a.clinica_id) !== Number(clinicId)
     || patientId && Number(a.paciente_id) !== Number(patientId)) fail('whatsapp_appointment_scope_changed');
+  if (!require('./appointment-care').allowsAppointmentAutomation(a, e.trigger_type)) fail('whatsapp_appointment_care_stage_ineligible');
   const operations = require('./whatsappImportedAppointmentOperations');
   const legacyReleased = require('./whatsappImportedReminderRelease').permits(a, { execution: e, now });
   const operationalReleased = operations.permits(a, { execution: e, now });

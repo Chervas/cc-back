@@ -22,7 +22,9 @@ function bookingVisibility(treatment) {
 function initiatedTreatmentWhere(Op, { clinicId, patientId, treatmentId, ignoreAppointmentId, now = new Date() } = {}) {
   return { clinica_id: clinicId, paciente_id: patientId,
     tratamiento_id: treatmentId ?? { [Op.ne]: null }, estado: { [Op.notIn]: ['cancelada', 'no_asistio'] },
-    [Op.or]: [{ estado: 'completada', fin: { [Op.lte]: now } }, { care_started_at: { [Op.ne]: null, [Op.lte]: now } }],
+    [Op.or]: [{ estado: 'completada', fin: { [Op.lte]: now } },
+      { estado: 'ha_acudido', care_legacy_attendance: true, fin: { [Op.lte]: now } },
+      { care_started_at: { [Op.ne]: null, [Op.lte]: now } }],
     ...(ignoreAppointmentId ? { id_cita: { [Op.ne]: ignoreAppointmentId } } : {}),
   };
 }

@@ -3,10 +3,11 @@ const { randomUUID } = require('node:crypto');
 const { resolveClinicTimezone, formatDateLocal } = require('../lib/availability-calendar');
 const { bookingError, requireOperationalProfile, loadScopedTreatment } = require('./treatmentBookingProfile.service');
 const json = value => typeof value === 'string' ? JSON.parse(value) : value || {};
+const { hasAttendedAppointment } = require('../lib/status-catalog');
 const closed = row => ['cancelada', 'no_asistio', 'completada'].includes(row.estado);
 const fail = (code, message, details) => { throw bookingError(code, message, details, 409); };
 function combinada(row) { return (json(row.import_metadata).booking?.profile?.phases?.length || 0) > 1; }
-function eligible(row) { return !!row.paciente_id && !closed(row) && !combinada(row)
+function eligible(row) { return !!row.paciente_id && !closed(row) && !hasAttendedAppointment(row) && !combinada(row)
   && !row.voucher_id && !json(row.import_metadata).program_session && !row.care_started_at
   && !json(row.import_metadata).clinical_component_parent && !json(row.import_metadata).clinical_component_children; }
 async function optional(read) {
@@ -48,12 +49,12 @@ async function follower(db, id, transaction) {
   return Number(link.owner_appointment_id) !== Number(id);
 }
 async function choiceRequired(db, values, clinic, choice, transaction) {
-  if (!values.paciente_id || values.estado === 'completada') return;
+  if (!values.paciente_id || hasAttendedAppointment(values)) return;
   const zone = resolveClinicTimezone(clinic), day = formatDateLocal(new Date(values.inicio), zone);
   const rows = await db.CitaPaciente.findAll({ where: { clinica_id: values.clinica_id, paciente_id: values.paciente_id,
     inicio: { [db.Sequelize.Op.between]: [new Date(+new Date(values.inicio) - 86400000), new Date(+new Date(values.inicio) + 86400000)] } },
     transaction, include: [{ model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['nombre'] }] });
-  const matches = rows.filter(row => !closed(row) && formatDateLocal(new Date(row.inicio), zone) === day);
+  const matches = rows.filter(row => !closed(row) && !hasAttendedAppointment(row) && formatDateLocal(new Date(row.inicio), zone) === day);
   if (!matches.length || choice?.mode === 'separate' || choice?.mode === 'link') return;
   const canLinkNew = !combinada(values) && !values.voucher_id && !values.patient_link_combined;
   fail('appointment_same_day_choice_required', 'Este paciente ya tiene una cita hoy. ¿Quieres enviarle también aviso de esta cita o vincularla a la primera?', {
@@ -113,12 +114,12 @@ async function confirmTogether(db, appointment, status, transaction, actorId) {
   const group = await load(db, appointment.id_cita, transaction, true);
   if (!group || (!['cancelada', 'cambio_solicitado'].includes(status)
     && Number(group.link.owner_appointment_id) !== Number(appointment.id_cita))) return [];
-  if (['cancelada', 'cambio_solicitado'].includes(status) && group.rows.some(row => row.care_started_at || row.estado === 'completada')) {
+  if (['cancelada', 'cambio_solicitado'].includes(status) && group.rows.some(row => row.care_started_at || hasAttendedAppointment(row))) {
     fail('appointment_link_care_started', 'No se ha cambiado ninguna cita: una cita de esta unión ya se ha iniciado o realizado. Revisa la unión antes de cancelarla.');
   }
   const changed = [];
   for (const row of group.rows) {
-    if (Number(row.id_cita) === Number(appointment.id_cita) || closed(row) || row.care_started_at || row.estado === status) continue;
+    if (Number(row.id_cita) === Number(appointment.id_cita) || closed(row) || hasAttendedAppointment(row) || row.care_started_at || row.estado === status) continue;
     const previous = row.estado;
     const updated = await require('./appointmentBookingCommand.service').mutateAppointmentBooking({ db, transaction,
       existingAppointmentId: row.id_cita, appointmentValues: { estado: status, updated_by: actorId || null }, stateOnly: true, allowObsolete: true,
@@ -134,7 +135,7 @@ async function unlink(db, id, actorId) {
   return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
     const group = await load(db, id, transaction, true);
     if (!group) fail('appointment_link_missing', 'Esta cita no está vinculada a otra cita individual.');
-    if (group.rows.some(row => combinada(row) || row.care_started_at || closed(row))) fail('appointment_link_closed', 'No se pueden separar citas iniciadas, cerradas ni pasos de un tratamiento combinado.');
+    if (group.rows.some(row => combinada(row) || row.care_started_at || hasAttendedAppointment(row) || closed(row))) fail('appointment_link_closed', 'No se pueden separar citas iniciadas, cerradas ni pasos de un tratamiento combinado.');
     // The whole union is dissolved explicitly. No historical message is changed
     // or replayed; future scheduling is re-evaluated after commit by the caller.
     await db.AppointmentPatientLinkMember.destroy({ where: { link_id: group.link.id }, transaction });

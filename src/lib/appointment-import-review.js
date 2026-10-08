@@ -119,7 +119,7 @@ function appointmentImportReview(appointment, { clinicalComponentContext = null 
   if (importTreatmentPending(appointment, { clinicalComponentContext }) && !pendingAssignment.includes('treatment')) pendingAssignment.push('treatment');
   if (installationInactive && !pendingAssignment.includes('installation')) pendingAssignment.push('installation');
   const resourcesNeedReview = importResourcesInScope(appointment)
-    && !['cancelada', 'completada', 'no_asistio'].includes(appointment.estado) && !hasReviewedImportResources(appointment);
+    && !['cancelada', 'ha_acudido', 'en_atencion', 'completada', 'no_asistio'].includes(appointment.estado) && !hasReviewedImportResources(appointment);
   if (resourcesNeedReview) {
     for (const field of ['professional', 'installation']) if (!pendingAssignment.includes(field)) pendingAssignment.push(field);
   }
@@ -140,7 +140,7 @@ function appointmentImportReview(appointment, { clinicalComponentContext = null 
         commercial_use_allowed: false, clinical_approval_inferred: false } : {}),
     ...(resourcesNeedReview ? { resources_need_review: true } : {}),
     ...(resourcesNeedReview && appointment.doctor_id && appointment.instalacion_id && !installationInactive
-      && !['cancelada', 'completada', 'no_asistio'].includes(appointment.estado) && importReviewVersion(appointment)
+      && !['cancelada', 'ha_acudido', 'en_atencion', 'completada', 'no_asistio'].includes(appointment.estado) && importReviewVersion(appointment)
       ? { resource_review_version: importReviewVersion(appointment) } : {}),
     ...(sourceService ? { source_service: sourceService } : {}),
     ...(installationInactive ? { installation_inactive: true } : {}) };

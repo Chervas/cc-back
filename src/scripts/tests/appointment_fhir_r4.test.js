@@ -23,8 +23,8 @@ const throws = (fn, code) => assert.throws(fn, { code });
 test('canonical model states are all covered; unknown aliases fail closed', () => {
   const model = fs.readFileSync(path.join(__dirname, '../../../models/citapaciente.js'), 'utf8');
   const enumBlock = model.match(/estado:\s*\{[\s\S]*?DataTypes.ENUM\(([\s\S]*?)\)/)[1];
-  assert.deepEqual([...enumBlock.matchAll(/'([^']+)'/g)].map(m => m[1]), STATES);
-  const expected = { recordatorio_confirmado: 'booked', completada: 'fulfilled', no_asistio: 'noshow', cancelada: 'cancelled' };
+  assert.deepEqual([...enumBlock.matchAll(/'([^']+)'/g)].map(m => m[1]).sort(), [...STATES].sort());
+  const expected = { recordatorio_confirmado: 'booked', ha_acudido: 'arrived', en_atencion: 'checked-in', completada: 'fulfilled', no_asistio: 'noshow', cancelada: 'cancelled' };
   for (const state of STATES) assert.equal(projection(state).resource.status, expected[state] || 'pending');
   throws(() => projection('confirmada'), 'unmapped_appointment_state');
 });

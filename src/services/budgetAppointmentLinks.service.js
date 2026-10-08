@@ -42,7 +42,7 @@ function createService({ db = require('../../models') } = {}) {
   async function plan(publicId) {
     const ctx = await context(publicId);
     const appointments = await db.CitaPaciente.findAll({ where: { paciente_id: ctx.budget.patient_id, clinica_id: ctx.budget.clinic_id },
-      attributes: ['id_cita', 'inicio', 'fin', 'estado', 'tratamiento_id', 'es_provisional', 'voucher_id', 'care_started_at', 'updated_at'],
+      attributes: ['id_cita', 'inicio', 'fin', 'estado', 'tratamiento_id', 'es_provisional', 'voucher_id', 'arrived_at', 'care_started_at', 'care_completed_at', 'care_schedule_start', 'care_legacy_attendance', 'updated_at'],
       order: [['inicio', 'DESC'], ['id_cita', 'DESC']], limit: 150 });
     const reports = appointments.length && db.AppointmentClinicalReport ? await db.AppointmentClinicalReport.findAll({ where: {
       appointment_id: { [Op.in]:appointments.map(row => row.id_cita) }, clinic_id:ctx.budget.clinic_id, patient_id:ctx.budget.patient_id, status:'final' }, attributes:['appointment_id'], raw:true }) : [];
@@ -55,7 +55,7 @@ function createService({ db = require('../../models') } = {}) {
         && link.version === Number(ctx.budget.current_version) && linkedRows.some(row => Number(row.id_cita) === link.appointment_id && usable(row))).length),
     })), links: ctx.links, appointments: appointments.filter(usable).map(row => ({
       id: Number(row.id_cita), start: row.inicio, end: row.fin, status: row.estado,
-      performed: reports.some(report => Number(report.appointment_id) === Number(row.id_cita)) || (row.estado === 'completada' && !row.care_started_at),
+      performed: reports.some(report => Number(report.appointment_id) === Number(row.id_cita)) || require('../lib/appointment-care').hasCompletedAppointmentCare(row),
       treatment_id: Number(row.tratamiento_id), already_linked: ctx.links.some(link => link.appointment_id === Number(row.id_cita)),
     })) };
   }
@@ -71,7 +71,7 @@ function createService({ db = require('../../models') } = {}) {
       if (association === 'performed') {
         const finalReport = db.AppointmentClinicalReport && await db.AppointmentClinicalReport.findOne({ where:{ appointment_id:appointment.id_cita,
           clinic_id:ctx.budget.clinic_id, patient_id:ctx.budget.patient_id, status:'final' }, attributes:['id'], transaction });
-        if (!finalReport && !(appointment.estado === 'completada' && !appointment.care_started_at)) fail('budget_appointment_not_completed', 'No hay una atención finalizada para esta cita. Vincúlala como cita existente; no se dará por realizada desde el presupuesto.');
+        if (!finalReport && !require('../lib/appointment-care').hasCompletedAppointmentCare(appointment)) fail('budget_appointment_not_completed', 'No hay una atención finalizada para esta cita. Vincúlala como cita existente; no se dará por realizada desde el presupuesto.');
       }
       const existing = ctx.links.find(item => item.appointment_id === Number(appointmentId));
       if (existing) {

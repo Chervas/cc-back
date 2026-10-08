@@ -884,7 +884,7 @@ async function countAppointments(scope, range) {
   };
   const [creadas, completadas, noAsistio] = await Promise.all([
     CitaPaciente.count({ where: baseWhere }),
-    CitaPaciente.count({ where: { ...baseWhere, estado: 'completada' } }),
+    CitaPaciente.count({ where: { ...baseWhere, estado: { [Op.in]: require('../lib/status-catalog').CITA_ATTENDED_STATUSES } } }),
     CitaPaciente.count({ where: { ...baseWhere, estado: 'no_asistio' } }),
   ]);
   return { creadas, completadas, noAsistio };
@@ -916,7 +916,7 @@ async function aggregateAppointmentSeries(scope, range) {
     if (!bucket) continue;
     const count = toNumber(row.count);
     bucket.citas += count;
-    if (String(row.estado || '').toLowerCase() === 'completada') bucket.acudieron += count;
+    if (require('../lib/status-catalog').hasAttendedAppointment(row)) bucket.acudieron += count;
   }
 
   return {

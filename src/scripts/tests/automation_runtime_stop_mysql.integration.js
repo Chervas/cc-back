@@ -173,6 +173,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     './appointmentActivity.service': { recordAppointmentStatusChange: async () => { activityWrites++; } },
     './appointmentNotificationCleanup.service': { markAutomationNotificationsReadForAppointment: async () => {} },
     './appointmentAutomationV2Runtime.service': { cancelActiveExecutionsForCita: async () => {}, syncScheduledTriggersForCita: async () => {} },
+    './appointmentPatientLinks.service': require('../../services/appointmentPatientLinks.service'),
     './treatmentBookingProfile.service': { bookingCapabilities: () => ({ simple: false }) },
     './appointmentConsentEligibility.service': { assertClinicalCompletion: async () => {} },
     './aiOrchestrator.service': { analyzeStructured: async () => { aiStarted.release(); await aiRelease.promise; return { ready: true }; } },

@@ -1233,8 +1233,8 @@ async function handleAppointmentChange({ appointment, previousStatus = null, act
     });
   }
   if (Number(assignment.first_appointment_id) === Number(cita.id_cita)
-      && cleanText(cita.estado).toLowerCase() === 'completada'
-      && cleanText(previousStatus).toLowerCase() !== 'completada') {
+      && require('../lib/status-catalog').hasAttendedAppointment(cita)
+      && !require('../lib/status-catalog').hasAttendedAppointment({ estado: previousStatus })) {
     const ended = await endAssignment(assignment, {
       reason: 'first_appointment_attended',
       actorUserId,

@@ -132,7 +132,7 @@ async function classifyImportedAppointment({ db, existingAppointmentId, appointm
   const metadata = metadataObject(previous.import_metadata);
   if (!importTreatmentPending(previous) || metadata.import_treatment_resolution || previous.voucher_id
     || metadata.program_session || previous.es_provisional || previous.hold_expires_at
-    || ['cancelada', 'completada', 'no_asistio'].includes(previous.estado)) {
+    || ['cancelada', 'ha_acudido', 'en_atencion', 'completada', 'no_asistio'].includes(previous.estado)) {
     throw bookingError('booking_import_not_resolvable', 'Esta acción solo clasifica citas importadas abiertas sin tratamiento ni programa.');
   }
   if (importReviewVersion(previous) !== expectedVersion) {
@@ -323,10 +323,16 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     }
     await require('./appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous,
       appointment: values, transaction: tx });
+    if (stateOnly && existing && values.estado === 'completada' && previous.estado === 'completada') return existing;
+    const completionPatch = values.estado === 'completada' && previous.estado !== 'completada'
+      ? require('../lib/appointment-care').careActionPatch(previous, 'finish', { actorId: values.updated_by }) : {};
+    Object.assign(values, completionPatch);
     // Decide under the appointment row lock, not a stale controller read. An
     // active-to-active status update does not rebook or change its professionals.
     if (stateOnly && existing && previous.estado !== 'cancelada' && values.estado !== 'cancelada') {
-      const saved = await persist({ values: { ...previous, estado: values.estado, updated_by: values.updated_by }, existing, transaction: tx, solution: null });
+      const saved = await persist({ values: { ...previous, estado: values.estado, updated_by: values.updated_by, ...completionPatch }, existing, transaction: tx, solution: null });
+      if (completionPatch.care_completed_at) await require('./appointmentCare.service').recordCompletion({ models: db,
+        appointment: saved, actorId: values.updated_by, transaction: tx });
       if (session && values.estado === 'completada') {
         const voucher = await db.PatientVoucher.findByPk(session.voucher_id, { transaction: tx, lock: tx.LOCK.UPDATE });
         const result = await require('./patientProgramBooking.service').consumeProgramSession({ db, appointment: saved, voucher, transaction: tx, actorId: values.updated_by });
@@ -542,6 +548,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
         afterPersist: async row => persist({ values, existing: row, transaction: tx, solution, sealedBirth: true }),
       }) : await persist({ values, existing, transaction: tx, solution });
     if (!appointment?.id_cita) throw new Error('booking_appointment_persistence_failed');
+    if (completionPatch.care_completed_at) await require('./appointmentCare.service').recordCompletion({ models: db,
+      appointment, actorId: values.updated_by, transaction: tx });
     // Cancellation releases capacity via the canonical appointment state. Keep
     // its old rows as the provenance for restoring the same booking snapshot.
     if (values.estado !== 'cancelada') {

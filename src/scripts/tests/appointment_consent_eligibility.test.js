@@ -89,7 +89,9 @@ test('book, cancel, replay and history drafts do not invoke the clinical complet
 });
 test('unsigned completion fails with an actionable, non-forceable 409 without clinical identifiers', async () => {
   const f = databaseFixture();
-  await assert.rejects(assertClinicalCompletion({ ...f, appointment, now }), error => {
+  const previous = { ...appointment, estado: 'en_atencion', inicio: '2026-09-21T07:00:00Z',
+    care_schedule_start: '2026-09-21T07:00:00Z', arrived_at: '2026-09-21T07:00:00Z', care_started_at: '2026-09-21T07:01:00Z' };
+  await assert.rejects(assertClinicalCompletion({ ...f, previous, appointment: { ...previous, estado: 'completada' }, now }), error => {
     assert.equal(error.statusCode, 409); assert.equal(error.code, 'appointment_consent_required');
     assert.deepEqual(error.details, { action: 'review_consents', blocking_count: 1 }); return true;
   });
