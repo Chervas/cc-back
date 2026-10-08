@@ -14,7 +14,10 @@ const DEFAULT_BACKUP_DIR = '/home/ubuntu/secure-imports/clinicaclick-cleanups';
 function strictWhereSql(allImportedHistory = false) {
   return `
   ${allImportedHistory ? '' : 'c.inicio > NOW() AND'}
-  c.estado = 'completada'
+  c.estado = 'ha_acudido'
+  AND c.care_legacy_attendance = 1
+  AND c.care_completed_at IS NULL
+  AND c.care_completed_by IS NULL
   AND c.titulo LIKE 'Histórico:%'
   AND c.motivo = :importReason
   AND cl.grupoClinicaId = :groupId
@@ -94,7 +97,7 @@ function writeBackup(rows, allImportedHistory = false) {
   const scope = allImportedHistory ? 'all-imported-history' : 'future-historical-appointments';
   const filePath = path.join(directory, `propdental-${scope}-${stamp}.json`);
   const payload = {
-    schema_version: 1,
+    schema_version: 2,
     generated_at: new Date().toISOString(),
     group_id: GROUP_ID,
     import_reason: IMPORT_REASON,
@@ -108,11 +111,21 @@ function writeBackup(rows, allImportedHistory = false) {
 }
 
 function validateBackupRow(row) {
-  return Number.isInteger(Number(row?.id_cita))
-    && Number.isInteger(Number(row?.clinica_id))
-    && String(row?.estado || '') === 'completada'
+  const historicalState = row?.estado === 'completada'
+    || (row?.estado === 'ha_acudido' && [true, 1].includes(row.care_legacy_attendance));
+  return Number.isInteger(Number(row?.id_cita)) && Number(row.id_cita) > 0
+    && Number.isInteger(Number(row?.clinica_id)) && Number(row.clinica_id) > 0
+    && historicalState
+    && row.care_completed_at == null && row.care_completed_by == null
     && String(row?.titulo || '').startsWith('Histórico:')
     && String(row?.motivo || '') === IMPORT_REASON;
+}
+
+function normalizeBackupRow(row) {
+  if (!validateBackupRow(row)) throw new Error('invalid_cleanup_backup');
+  // Old backups used completion to mean attendance. Restore that evidence,
+  // never fabricate a native clinical finish or schedule retrospective sends.
+  return { ...row, estado: 'ha_acudido', care_legacy_attendance: true };
 }
 
 async function restoreBackup(filePath) {
@@ -128,7 +141,7 @@ async function restoreBackup(filePath) {
     if (existing > 0) {
       throw new Error(`restore_conflict:${existing}`);
     }
-    await db.CitaPaciente.bulkCreate(rows, { transaction, validate: true });
+    await db.CitaPaciente.bulkCreate(rows.map(normalizeBackupRow), { transaction, validate: true, hooks: false });
   });
   console.log(JSON.stringify({ restored: rows.length, backup: filePath }, null, 2));
 }
@@ -197,14 +210,18 @@ async function main() {
   await dryRun(allImportedHistory);
 }
 
-main()
-  .catch((error) => {
-    console.error(JSON.stringify({
-      error: error.message,
-      dependencies: error.dependencies || undefined,
-    }, null, 2));
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await db.sequelize.close();
-  });
+module.exports = { strictWhereSql, validateBackupRow, normalizeBackupRow, findTargets, applyCleanup, restoreBackup };
+
+if (require.main === module) {
+  main()
+    .catch((error) => {
+      console.error(JSON.stringify({
+        error: error.message,
+        dependencies: error.dependencies || undefined,
+      }, null, 2));
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await db.sequelize.close();
+    });
+}
