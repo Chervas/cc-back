@@ -10264,7 +10264,8 @@ restaura ni reprograma citas. Nueva reserva incompatible: 409
 `booking_calendar_conflict`; cambio posterior: 409 `availability_undo_conflict`;
 caducidad o uso previo: 410; otro actor no obtiene el recibo (404).
 Las tablas `PersonalCalendarUndoReceipts` y `PersonalCalendarRevisions` requieren
-la migración aditiva preparada; no existe almacenamiento temporal en memoria.
+la migración `20261008123000` antes de servir el código; no existe
+almacenamiento temporal en memoria.
 Los recibos de más de un día se purgan por lotes de 200 al emitir otro recibo;
 las revisiones se conservan. El recibo y la mutación comparten commit/rollback.
 El mutex duradero por profesional se toma antes del snapshot incluso sin
@@ -10330,7 +10331,7 @@ recursos históricos.
 Las tres migraciones `20261008123000`, `20261008123100` y `20261008133000`
 deben aplicarse antes de servir los modelos nuevos: crean dos tablas de recibos
 y revisiones, un límite de recurrencia nullable y el permiso desactivado.
-El operador [personal-calendar-schema-release](../../docs/personal-calendar-schema-release.md)
+El operador [personal-calendar-schema-release](https://github.com/Chervas/cc-back/blob/dev/docs/personal-calendar-schema-release.md)
 fija los archivos revisados, exige plan, respaldo y diario privados, comprueba
 que las filas anteriores no cambien y registra únicamente esas tres migraciones.
 Las dos ampliaciones de columna exigen `ALGORITHM=INSTANT`, sin copia alternativa.

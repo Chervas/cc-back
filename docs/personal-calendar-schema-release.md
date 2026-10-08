@@ -1,7 +1,7 @@
 # Publicación del esquema de Personal y confirmación de atención heredada
 
 > **Tipo:** runbook.
-> **Fuente de verdad:** operación acotada de las tres DDL de Personal y Piedad; no concede permisos ni publica código.
+> **Fuente de verdad:** operación acotada de las tres migraciones de Personal y Piedad; no concede permisos ni publica código.
 > **Última revisión:** 2026-10-08.
 > **Relacionado con:** [despliegues](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/30-despliegues-y-entornos.md), [seguridad y migraciones](security-integrations-audit-migration.md#esquema-de-seguridad-y-publicación-entre-entornos).
 
