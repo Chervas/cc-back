@@ -29,7 +29,7 @@ function matches(value, where = {}) {
     return actual === wanted || String(actual) === String(wanted);
   });
 }
-function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard = false } = {}) {
+function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard = false, emitUndoReceipt = false } = {}) {
   let state = {
     links: [{ id: 201, doctor_id: 2, clinica_id: 10, activo: true, recibe_citas: true },
       { id: 202, doctor_id: 2, clinica_id: 20, activo: true, recibe_citas: true },
@@ -50,6 +50,7 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
   const wrapSchedule = data => Object.assign(Object.create(null), data, {
     get excepciones() { return state.exceptions.filter(row => row.doctor_horario_id === data.id); },
     async update(fields, options) { assert.equal(options.transaction, tx); calls.writes++; Object.assign(data, fields); Object.assign(this, fields); return this; },
+    async destroy(options) { return models.DoctorHorario.destroy({ where: { id: data.id }, ...options }); },
   });
   // Object.assign evaluates getters. Define this accessor after wrapping.
   const schedule = data => {
@@ -109,7 +110,8 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
         return await actual.withCalendarMutation({ ...options, enabled: bookingEnabled, transaction: tx,
           now: new Date('2027-01-01T00:00:00Z'), realtimeEnabled: false, notify: async () => {} });
       }
-      return await options.mutate(tx);
+      const value = await options.mutate(tx);
+      return emitUndoReceipt ? { value, undo: { token: 'A'.repeat(43), expires_at: '2027-01-01T00:00:20.000Z', label: 'Cambio de disponibilidad' } } : value;
     }
     catch (error) { state = before; calls.rollback++; throw error; }
   };
@@ -125,6 +127,7 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
       sendCalendarMutationError: (error, res) => { if (!/^booking_calendar_/.test(error?.code || '')) return false;
         res.status(error.status || 409).json({ code: error.code, message: error.message }); return true; } },
     '../lib/personal-schedule-recurring': recurring, '../lib/availability-calendar': calendar,
+    '../services/personalCalendarUndo.service': require('../../services/personalCalendarUndo.service'),
     '../services/treatmentBookingProfile.service': { bookingCapabilities: () => ({ simple: bookingEnabled }) },
     '../services/appointmentResourceCalendar.service': { resourceAppointments: async ({ doctorId, start, end }) => bookingEnabled
       ? state.phases.filter(row => row.doctor_id === doctorId && new Date(row.start_at) < end && new Date(row.end_at) > start)
@@ -422,4 +425,108 @@ test('final candidate overlap rejects an atomic merge while preserving both sour
   const before = plain(f.state()); const result = await f.call('mergeHorariosClinica', { ...mergeBody, fecha: '2027-01-04' }, { id: '2' });
   assert.equal(result.statusCode, 409, JSON.stringify(result)); assert.equal(result.body.code, 'STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC');
   assert.deepEqual(plain(f.state()), before); assert.equal(f.calls.writes, 0);
+});
+
+test('block recurrence until is validated, serialized, preserved by PATCH and explicit null clears it', async () => {
+  const f = fixture();
+  const body = { clinica_id: 10, fecha_inicio: '2027-01-04', fecha_fin: '2027-01-04', all_day: true,
+    tipo: 'ausencia', recurrente: 'weekly', recurrente_hasta: '2027-01-18' };
+  let result = await f.call('createPersonalBloqueo', body, { id: '2' });
+  assert.equal(result.statusCode, 201, JSON.stringify(result)); assert.equal(result.body.recurrente_hasta, '2027-01-18');
+  const id = result.body.id;
+  result = await f.call('updatePersonalBloqueo', { motivo: 'Ficticio' }, { id: '2', bloqueoId: String(id) });
+  assert.equal(result.statusCode, 200); assert.equal(result.body.recurrente_hasta, '2027-01-18');
+  result = await f.call('updatePersonalBloqueo', { recurrente_hasta: null }, { id: '2', bloqueoId: String(id) });
+  assert.equal(result.statusCode, 200); assert.equal(result.body.recurrente_hasta, null);
+  for (const until of ['2027-01-03', '2027-02-30']) {
+    const before = plain(f.state()); result = await f.call('createPersonalBloqueo', { ...body, recurrente_hasta: until }, { id: '2' });
+    assert.equal(result.statusCode, 400); assert.deepEqual(plain(f.state()), before);
+  }
+});
+test('inclusive recurrence anchor limits apply to daily, weekly, monthly and full duration of the final multi-day block', () => {
+  const f = fixture();
+  for (const recurrente of ['daily', 'weekly', 'monthly']) {
+    const last = recurrente === 'monthly' ? '2027-02-04' : '2027-01-11';
+    const block = { id: 40, doctor_id: 2, clinica_id: 10, recurrente, recurrente_hasta: last,
+      fecha_inicio: calendar.localDateTimeToUtc('2027-01-04', '00:00', 'Europe/Madrid'),
+      fecha_fin: calendar.localDateTimeToUtc('2027-01-06', '00:00', 'Europe/Madrid') };
+    assert.equal(calendar.buildDoctorBloqueoRowsForDate([block], last, 'Europe/Madrid').length, 1);
+    assert.equal(calendar.buildDoctorBloqueoRowsForDate([block], recurring.addDays(last, 1), 'Europe/Madrid').length, 1);
+    assert.equal(calendar.buildDoctorBloqueoRowsForDate([block], recurring.addDays(last, 2), 'Europe/Madrid').length, 0);
+    assert.equal(f.helpers.expandBloqueoForRange(block, recurring.addDays(last, 2), recurring.addDays(last, 9), 'Europe/Madrid').length, 0);
+  }
+});
+test('bounded recurring preview ignores appointments after until and still sees the inclusive last occurrence', async () => {
+  const f = fixture();
+  for (const [id, date] of [[70, '2027-01-11'], [71, '2027-01-18']]) {
+    f.state().appointments.push({ id_cita: id, doctor_id: 2, clinica_id: 10, estado: 'confirmada', inicio: `${date}T09:00:00Z`, fin: `${date}T10:00:00Z` });
+    f.state().phases.push({ appointment_id: id, doctor_id: 2, resource_key: 'doctor:2', start_at: `${date}T09:00:00Z`, end_at: `${date}T10:00:00Z` });
+  }
+  const body = { action: 'block', fecha_inicio: '2027-01-04', fecha_fin: '2027-01-04', all_day: true,
+    recurrente: 'weekly', recurrente_hasta: '2027-01-11' };
+  let result = await f.call('previewHorarioImpact', body, { id: '2', clinicaId: '10' });
+  assert.equal(result.statusCode, 200, JSON.stringify(result)); assert.deepEqual(result.body.appointments.map(row => row.id_cita), [70]);
+  result = await f.call('previewHorarioImpact', { ...body, recurrente_hasta: '2027-01-01' }, { id: '2', clinicaId: '10' });
+  assert.equal(result.statusCode, 400);
+});
+test('canonical PUT returns its undo envelope and DELETE returns receipt instead of 204', async () => {
+  const f = fixture({ emitUndoReceipt: true });
+  let result = await f.call('updateHorariosClinica', { horarios: f.state().schedules.filter(row => row.doctor_clinica_id === 201) }, { id: '2', clinicaId: '10' });
+  assert.equal(result.statusCode, 200, JSON.stringify(result)); assert.equal(result.body.horarios.length, 2); assert.equal(result.body.undo.token.length, 43);
+  result = await f.call('deleteHorarioClinica', {}, { id: '2', clinicaId: '10', horarioId: '100' });
+  assert.equal(result.statusCode, 200, JSON.stringify(result)); assert.equal(result.body.undo.token.length, 43);
+});
+test('one append-only PUT accepts 366 dated additions and retains existing IDs and their exceptions', async () => {
+  const f = fixture();
+  const additions = Array.from({ length: 366 }, (_, offset) => {
+    const date = recurring.addDays('2028-01-01', offset);
+    return { dia_semana: recurring.dayIndexFromDate(date), hora_inicio: '16:00', hora_fin: '17:00', activo: true,
+      rrule: null, fecha_inicio_vigencia: date, fecha_fin_vigencia: date };
+  });
+  const result = await f.call('updateHorariosClinica', { horarios: additions, append_only: true }, { id: '2', clinicaId: '10' });
+  assert.equal(result.statusCode, 200, JSON.stringify(result)); assert.equal(result.body.length, 368);
+  assert.equal(result.body.find(row => row.id === 100).excepciones.length, 2); assert.equal(f.calls.transactions, 1);
+});
+
+test('append-only reads the current locked row and preserves a previously committed concurrent addition', async () => {
+  const f = fixture({ emitUndoReceipt: true });
+  const original = plain(f.state().schedules), exceptions = plain(f.state().exceptions);
+  // This row was absent when the client copied its source; it exists by PUT time.
+  const concurrent = { id: 999, doctor_clinica_id: 201, dia_semana: 5, activo: true, hora_inicio: '16:00', hora_fin: '17:00', rrule: null };
+  f.state().schedules.push(concurrent);
+  const result = await f.call('updateHorariosClinica', { append_only: true, horarios: [{ dia_semana: 1, activo: true,
+    hora_inicio: '13:00', hora_fin: '14:00', fecha_inicio_vigencia: '2027-01-04', fecha_fin_vigencia: '2027-01-04' }] }, { id: '2', clinicaId: '10' });
+  assert.equal(result.statusCode, 200, JSON.stringify(result)); assert.equal(result.body.horarios.length, 4);
+  assert.ok(result.body.undo?.token); assert.equal(f.calls.transactions, 1);
+  assert.deepEqual(plain(f.state().schedules.slice(0, 2)), original);
+  assert.deepEqual(plain(f.state().schedules.find(row => row.id === 999)), concurrent);
+  assert.deepEqual(plain(f.state().exceptions), exceptions);
+});
+
+test('append-only rejects conflicts with the current row and between additions without a partial write', async () => {
+  for (const betweenIncoming of [false, true]) {
+    const f = fixture(); const before = plain(f.state());
+    const first = { dia_semana: 1, activo: true, hora_inicio: '13:00', hora_fin: '14:00', fecha_inicio_vigencia: '2027-01-04', fecha_fin_vigencia: '2027-01-04' };
+    const second = betweenIncoming ? { ...first } : { ...first, hora_inicio: '09:00', hora_fin: '10:00' };
+    const result = await f.call('updateHorariosClinica', { append_only: true, horarios: [first, second] }, { id: '2', clinicaId: '10' });
+    assert.equal(result.statusCode, 409, JSON.stringify(result)); assert.equal(f.calls.rollback, 1);
+    assert.deepEqual(plain(f.state()), before);
+  }
+});
+
+test('append-only rejects supplied IDs, empty additions and non-boolean mode before a transaction', async () => {
+  for (const body of [{ append_only: true, horarios: [{ id: 100, dia_semana: 1, hora_inicio: '09:00', hora_fin: '10:00' }] },
+    { append_only: true, horarios: [] }, { append_only: 'true', horarios: [] }]) {
+    const f = fixture(); const result = await f.call('updateHorariosClinica', body, { id: '2', clinicaId: '10' });
+    assert.equal(result.statusCode, 400, JSON.stringify(result)); assert.equal(f.calls.transactions, 0);
+  }
+});
+
+test('the dedicated append endpoint always appends even when the caller requests replacement', async () => {
+  const f = fixture({ emitUndoReceipt: true });
+  const result = await f.call('appendHorariosClinica', { append_only: false, horarios: [{ dia_semana: 1, activo: true,
+    hora_inicio: '13:00', hora_fin: '14:00', fecha_inicio_vigencia: '2027-01-04', fecha_fin_vigencia: '2027-01-04' }] }, { id: '2', clinicaId: '10' });
+  assert.equal(result.statusCode, 200, JSON.stringify(result)); assert.equal(result.body.horarios.length, 3);
+  assert.ok(result.body.horarios.find(row => row.id === 100)); assert.equal(result.body.horarios.find(row => row.id === 100).excepciones.length, 2);
+  assert.equal(f.calls.transactions, 1);
 });

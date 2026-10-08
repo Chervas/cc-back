@@ -16,6 +16,7 @@ module.exports = (sequelize, DataTypes) => {
     tipo: { type: DataTypes.STRING(32), allowNull: false, defaultValue: 'ausencia' },
     motivo: DataTypes.STRING(255),
     recurrente: { type: DataTypes.ENUM('none','daily','weekly','monthly'), defaultValue: 'none' },
+    recurrente_hasta: { type: DataTypes.DATEONLY, allowNull: true },
     aplica_a_todas_clinicas: { type: DataTypes.BOOLEAN, defaultValue: false },
     creado_por: DataTypes.INTEGER
   }, {

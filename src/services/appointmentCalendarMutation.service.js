@@ -101,6 +101,7 @@ async function legacyDoctorReservations({ db, doctors, enabled, now, transaction
 
 async function withCalendarMutation({ db, doctorId = null, doctorIds = [], installationId = null, clinicId = null, clinic = null, mutate,
   enabled = bookingCapabilities().simple, protectLegacyAppointments = false, now = new Date(), transaction: suppliedTransaction = null,
+  undoContext = null, onValidated = null,
   realtimeEnabled = process.env.AVAILABILITY_REALTIME_ENABLED === 'true',
   notify = require('../lib/calendar-availability-invalidation').notifyCalendarAvailability }) {
   if (!Array.isArray(doctorIds)) throw Error('CALENDAR_MUTATION_SCOPE_INVALID');
@@ -110,7 +111,12 @@ async function withCalendarMutation({ db, doctorId = null, doctorIds = [], insta
     .some(v => !Number.isSafeInteger(Number(v)) || Number(v) <= 0)) throw Error('CALENDAR_MUTATION_SCOPE_INVALID');
   const execute = async transaction => {
     if (transaction.options?.isolationLevel !== 'READ COMMITTED') throw Error('booking_requires_read_committed');
-    if (!enabled && !protectLegacyAppointments) return mutate(transaction);
+    if (!enabled && !protectLegacyAppointments) {
+      if (doctors.length) await require('./personalCalendarUndo.service').lockRevisions({ db, doctorIds: doctors, transaction });
+      const value = await mutate(transaction);
+      if (doctors.length) await require('./personalCalendarUndo.service').bumpRevisions({ db, doctorIds: doctors, transaction });
+      return value;
+    }
     if (!enabled && (!doctors.length || installationId || clinicId)) throw Error('CALENDAR_LEGACY_SCOPE_INVALID');
     // Shared by bookings, exclusive only when editing the clinic's opening
     // hours. Unrelated bookings remain parallel; there is no global clinic mutex.
@@ -126,7 +132,10 @@ async function withCalendarMutation({ db, doctorId = null, doctorIds = [], insta
     const mapping = installationId ? await resolveInstallationKeys({ db, clinic, installationIds: [Number(installationId)], transaction, enabled: true }) : null;
     const keys = [...doctors.map(id => `doctor:${id}`), ...(mapping ? [mapping.keys.get(Number(installationId))] : [])];
     if (enabled) await lockBookingResources({ db, resourceKeys: keys, transaction });
-    else await db.DoctorClinica.findAll({ where: { doctor_id: { [db.Sequelize.Op.in]: [...doctors].sort((a, b) => a - b) } },
+    // A doctor may have no pivot row yet. The durable revision is its shared
+    // mutex even with the ledger gate closed; lock before reading any snapshot.
+    await require('./personalCalendarUndo.service').lockRevisions({ db, doctorIds: doctors, transaction });
+    if (!enabled) await db.DoctorClinica.findAll({ where: { doctor_id: { [db.Sequelize.Op.in]: [...doctors].sort((a, b) => a - b) } },
       attributes: ['id'], order: [['doctor_id', 'ASC'], ['id', 'ASC']], transaction, lock: transaction.LOCK.UPDATE });
     const { Op } = db.Sequelize;
     const rows = enabled ? await db.AppointmentBookingOccupancy.findAll({ where: { ...(clinicId ? {} : { resource_key: { [Op.in]: keys } }), end_at: { [Op.gt]: now } },
@@ -138,6 +147,9 @@ async function withCalendarMutation({ db, doctorId = null, doctorIds = [], insta
     // Each equivalent room must observe a block entered under any of its aliases.
     // Preserve the actual booked room for its own opening hours; alias block
     // projection is supplied to the validator below.
+    const undoService = require('./personalCalendarUndo.service');
+    const canCaptureUndo = undoContext && db.PersonalCalendarUndoReceipt && db.PersonalCalendarRevision;
+    const undoBefore = canCaptureUndo ? await undoService.loadSnapshot({ db, doctorIds: doctors, transaction }) : null;
     const before = await uncoveredPhases({ db, rows, transaction, installationMapping: mapping });
     const value = await mutate(transaction);
     const after = await uncoveredPhases({ db, rows, transaction, installationMapping: mapping });
@@ -145,6 +157,14 @@ async function withCalendarMutation({ db, doctorId = null, doctorIds = [], insta
     if (introduced.length) throw bookingError('booking_calendar_conflict',
       'El cambio dejaría citas reservadas fuera de horario o dentro de un bloqueo. Reprograma esas citas antes de guardar el cambio.',
       { affected_appointments: new Set(introduced.map(key => key.split(':')[0])).size });
+    if (onValidated) await onValidated(transaction, value);
+    const revisions = await undoService.bumpRevisions({ db, doctorIds: doctors, transaction });
+    if (canCaptureUndo) {
+      const undoAfter = await undoService.loadSnapshot({ db, doctorIds: doctors, transaction });
+      const undo = await undoService.createReceipt({ db, doctorIds: doctors, actorId: undoContext.actorId,
+        before: undoBefore, after: undoAfter, revisions, transaction, enabled, now: undoContext.now ? undoContext.now() : new Date() });
+      return { value, undo };
+    }
     return value;
   };
   const executeAndNotify = async transaction => {

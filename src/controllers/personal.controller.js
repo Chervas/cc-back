@@ -37,6 +37,22 @@ const {
 const personalPresenceService = require('../services/personalPresence.service');
 const { withCalendarMutation, sendCalendarMutationError, assertDoctorIdentityMutable } = require('../services/appointmentCalendarMutation.service');
 const withDoctorCalendarMutation = (doctorId, mutate) => withCalendarMutation({ protectLegacyAppointments: true, db: require('../../models'), doctorId, mutate });
+const personalCalendarUndo = require('../services/personalCalendarUndo.service');
+async function withPersonalAvailabilityMutation(req, doctorIds, mutate) {
+    const result = await withCalendarMutation({ protectLegacyAppointments: true, db: require('../../models'),
+        doctorIds: Array.isArray(doctorIds) ? doctorIds.map(Number) : [Number(doctorIds)],
+        undoContext: { actorId: Number(req.userData?.userId) }, mutate });
+    if (result && Object.prototype.hasOwnProperty.call(result, 'value') && Object.prototype.hasOwnProperty.call(result, 'undo')) {
+        req.personalAvailabilityUndo = result.undo; return result.value;
+    }
+    return result;
+}
+function availabilityResponse(req, payload = {}) {
+    if (!req.personalAvailabilityUndo) return payload;
+    return Array.isArray(payload) ? { horarios: payload, undo: req.personalAvailabilityUndo }
+        : { ...payload, undo: req.personalAvailabilityUndo };
+}
+
 const {
     normalizeDateOnly,
     addDays,
@@ -444,6 +460,21 @@ function buildPersonalBlockRange(body, timeZone, existing = null) {
         end: buildDateTime(endInput, endHm, '23:59', timeZone) };
 }
 
+function normalizePersonalBlockRecurrence(body, existing, start, timeZone) {
+    const recurrence = body.recurrente ?? existing?.recurrente ?? 'none';
+    if (!['none', 'daily', 'weekly', 'monthly'].includes(recurrence)) return { error: 'recurrente inválido' };
+    const rawUntil = Object.prototype.hasOwnProperty.call(body, 'recurrente_hasta')
+        ? body.recurrente_hasta : existing?.recurrente_hasta;
+    const until = rawUntil == null || rawUntil === '' ? null : normalizeDateOnly(rawUntil);
+    if (rawUntil != null && rawUntil !== '' && !until) return { error: 'recurrente_hasta inválida' };
+    if (recurrence === 'none') {
+        if (Object.prototype.hasOwnProperty.call(body, 'recurrente_hasta') && until) return { error: 'recurrente_hasta requiere un bloqueo recurrente' };
+        return { recurrente: recurrence, recurrente_hasta: null };
+    }
+    if (until && until < toDay(start, timeZone)) return { error: 'recurrente_hasta debe ser igual o posterior al inicio' };
+    return { recurrente: recurrence, recurrente_hasta: until };
+}
+
 function toHm(dateValue, timeZone = DEFAULT_TIMEZONE) {
     const date = parseDateOrNull(dateValue);
     if (!date) return null;
@@ -702,6 +733,7 @@ function serializeBloqueo(bloqueo, timeZone = DEFAULT_TIMEZONE) {
         motivo: bloqueo.motivo || '',
         tipo: bloqueo.tipo || 'ausencia',
         recurrente: bloqueo.recurrente || 'none',
+        recurrente_hasta: normalizeDateOnly(bloqueo.recurrente_hasta),
         aplica_a_todas_clinicas: !!bloqueo.aplica_a_todas_clinicas,
         excepciones: Array.isArray(bloqueo.excepciones)
             ? bloqueo.excepciones.map((row) => serializeBloqueoExceptionRow(row))
@@ -1778,10 +1810,10 @@ exports.getPersonalBloqueos = async (req, res) => {
         if (fromDate && toDate) {
             where[Op.and] = [
                 { fecha_inicio: { [Op.lte]: toDate } },
-                { fecha_fin: { [Op.gte]: fromDate } },
+                { [Op.or]: [{ fecha_fin: { [Op.gte]: fromDate } }, { recurrente: { [Op.ne]: 'none' } }] },
             ];
         } else if (fromDate) {
-            where.fecha_fin = { [Op.gte]: fromDate };
+            where[Op.and] = [{ [Op.or]: [{ fecha_fin: { [Op.gte]: fromDate } }, { recurrente: { [Op.ne]: 'none' } }] }];
         } else if (toDate) {
             where.fecha_inicio = { [Op.lte]: toDate };
         }
@@ -1849,6 +1881,9 @@ exports.createPersonalBloqueo = async (req, res) => {
             return res.status(400).json({ message: 'Rango inválido: fecha_fin debe ser mayor que fecha_inicio' });
         }
 
+        const recurrenceFields = normalizePersonalBlockRecurrence(req.body || {}, null, fechaInicio, clinicTimezone);
+        if (recurrenceFields.error) return res.status(400).json({ message: recurrenceFields.error });
+
         const overlapCita = await findPersonalBlockAppointmentConflict({
             doctorId: targetUserId, clinicaId, start: fechaInicio, end: fechaFin,
         });
@@ -1861,23 +1896,23 @@ exports.createPersonalBloqueo = async (req, res) => {
             });
         }
 
-        const bloqueo = await withDoctorCalendarMutation(targetUserId, transaction => DoctorBloqueo.create({
+        const bloqueo = await withPersonalAvailabilityMutation(req, targetUserId, transaction => DoctorBloqueo.create({
             doctor_id: targetUserId,
             clinica_id: clinicaId,
             fecha_inicio: fechaInicio,
             fecha_fin: fechaFin,
             tipo,
             motivo: (req.body?.motivo || '').toString().slice(0, 255),
-            recurrente: req.body?.recurrente || 'none',
+            ...recurrenceFields,
             aplica_a_todas_clinicas: clinicaId == null ? true : false,
             creado_por: actorId,
         }, { transaction }));
 
         const serialized = serializeBloqueo(bloqueo, clinicTimezone);
 
-        return res.status(201).json(serialized);
+        return res.status(201).json(availabilityResponse(req, serialized));
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.createPersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error creating personal bloqueo', error: error.message });
     }
@@ -1962,6 +1997,9 @@ exports.updatePersonalBloqueo = async (req, res) => {
         }
 
         // Evitar crear/editar bloqueos que oculten citas existentes.
+        const recurrenceFields = normalizePersonalBlockRecurrence(req.body || {}, bloqueo, fechaInicio, clinicTimezone);
+        if (recurrenceFields.error) return res.status(400).json({ message: recurrenceFields.error });
+
         const overlapCita = await findPersonalBlockAppointmentConflict({
             doctorId: targetUserId, clinicaId, start: fechaInicio, end: fechaFin,
         });
@@ -1974,19 +2012,19 @@ exports.updatePersonalBloqueo = async (req, res) => {
             });
         }
 
-        await withDoctorCalendarMutation(targetUserId, transaction => bloqueo.update({
+        await withPersonalAvailabilityMutation(req, targetUserId, transaction => bloqueo.update({
             clinica_id: clinicaId,
             fecha_inicio: fechaInicio,
             fecha_fin: fechaFin,
             tipo: tipo || 'ausencia',
             motivo: (req.body?.motivo ?? bloqueo.motivo ?? '').toString().slice(0, 255),
-            recurrente: req.body?.recurrente ?? bloqueo.recurrente ?? 'none',
+            ...recurrenceFields,
             aplica_a_todas_clinicas: clinicaId == null ? true : false,
         }, { transaction }));
 
-        return res.json(serializeBloqueo(bloqueo, clinicTimezone));
+        return res.json(availabilityResponse(req, serializeBloqueo(bloqueo, clinicTimezone)));
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.updatePersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error updating personal bloqueo', error: error.message });
     }
@@ -2022,10 +2060,10 @@ exports.deletePersonalBloqueo = async (req, res) => {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
-        await withDoctorCalendarMutation(targetUserId, transaction => bloqueo.destroy({ transaction }));
-        return res.status(204).end();
+        await withPersonalAvailabilityMutation(req, targetUserId, transaction => bloqueo.destroy({ transaction }));
+        return req.personalAvailabilityUndo ? res.json(availabilityResponse(req)) : res.status(204).end();
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.deletePersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error deleting personal bloqueo', error: error.message });
     }
@@ -2094,7 +2132,7 @@ exports.createPersonalBloqueoExcepcion = async (req, res) => {
         const payload = normalizeBloqueoExceptionInput(req.body || {});
         if (payload.error) return res.status(400).json({ message: payload.error });
 
-        const [row] = await withDoctorCalendarMutation(targetUserId, transaction => DoctorBloqueoExcepcion.upsert({
+        const [row] = await withPersonalAvailabilityMutation(req, targetUserId, transaction => DoctorBloqueoExcepcion.upsert({
             doctor_bloqueo_id: bloqueoId,
             fecha: payload.fecha,
             cancelado: payload.cancelado,
@@ -2104,9 +2142,9 @@ exports.createPersonalBloqueoExcepcion = async (req, res) => {
         const persisted = row || await DoctorBloqueoExcepcion.findOne({
             where: { doctor_bloqueo_id: bloqueoId, fecha: payload.fecha },
         });
-        return res.status(201).json(serializeBloqueoExceptionRow(persisted));
+        return res.status(201).json(availabilityResponse(req, serializeBloqueoExceptionRow(persisted)));
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.createPersonalBloqueoExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error creating bloqueo exception', error: error.message });
     }
@@ -2146,13 +2184,13 @@ exports.patchPersonalBloqueoExcepcion = async (req, res) => {
         });
         if (payload.error) return res.status(400).json({ message: payload.error });
 
-        await withDoctorCalendarMutation(targetUserId, transaction => exception.update({
+        await withPersonalAvailabilityMutation(req, targetUserId, transaction => exception.update({
             fecha: payload.fecha,
             cancelado: payload.cancelado,
         }, { transaction }));
-        return res.json(serializeBloqueoExceptionRow(exception));
+        return res.json(availabilityResponse(req, serializeBloqueoExceptionRow(exception)));
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.patchPersonalBloqueoExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error updating bloqueo exception', error: error.message });
     }
@@ -2181,14 +2219,14 @@ exports.deletePersonalBloqueoExcepcion = async (req, res) => {
         const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
         if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
 
-        const deleted = await withDoctorCalendarMutation(targetUserId, transaction => DoctorBloqueoExcepcion.destroy({
+        const deleted = await withPersonalAvailabilityMutation(req, targetUserId, transaction => DoctorBloqueoExcepcion.destroy({
             where: { id: exceptionId, doctor_bloqueo_id: bloqueoId },
             transaction,
         }));
         if (!deleted) return res.status(404).json({ message: 'Bloqueo exception not found' });
-        return res.status(204).end();
+        return req.personalAvailabilityUndo ? res.json(availabilityResponse(req)) : res.status(204).end();
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.deletePersonalBloqueoExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error deleting bloqueo exception', error: error.message });
     }
@@ -3127,6 +3165,11 @@ exports.previewHorarioImpact = async (req, res) => {
         }
 
         const clinicTimezone = await getClinicTimezoneById(clinicaId);
+        if (['block', 'create_block', 'update_block'].includes(req.body?.action)) {
+            const blockRange = buildPersonalBlockRange(req.body || {}, clinicTimezone);
+            const recurrenceFields = normalizePersonalBlockRecurrence(req.body || {}, null, blockRange?.start, clinicTimezone);
+            if (recurrenceFields.error) return res.status(400).json({ message: recurrenceFields.error });
+        }
         const intervals = buildImpactIntervalsFromBody(req.body || {}, fallback, clinicTimezone);
         const validNoRemoval = ['update_shift', 'resize_shift', 'move_shift'].includes(req.body?.action)
             && normalizeDateOnly(req.body?.fecha || req.body?.date || req.body?.source_fecha)
@@ -3341,11 +3384,12 @@ async function findPersonalBlockAppointmentConflict({ doctorId, clinicaId, start
     return null;
 }
 
-async function findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZone = DEFAULT_TIMEZONE, now = new Date() }) {
+async function findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZone = DEFAULT_TIMEZONE, now = new Date(), earliestStart = null, latestEnd = null }) {
+    const lowerBound = new Date(Math.max(new Date(now).getTime(), earliestStart ? new Date(earliestStart).getTime() : 0));
     const db = require('../../models');
     const enabled = require('../services/treatmentBookingProfile.service').bookingCapabilities().simple;
     const primary = await CitaPaciente.findAll({ where: { doctor_id: Number(doctorId), clinica_id: Number(clinicaId),
-        fin: { [Op.gt]: now }, ...ACTIVE_APPOINTMENT_WHERE },
+        fin: { [Op.gt]: lowerBound }, ...(latestEnd ? { inicio: { [Op.lt]: latestEnd } } : {}), ...ACTIVE_APPOINTMENT_WHERE },
         attributes: ['id_cita', 'clinica_id', 'doctor_id', 'instalacion_id', 'inicio', 'fin'],
         order: [['inicio', 'ASC']], limit: 2001, raw: true });
     const review = () => rejectPersonalScheduleTransfer(409, { code: 'booking_calendar_review_required', review_required: true,
@@ -3354,7 +3398,7 @@ async function findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZon
     let phases = primary;
     if (enabled) {
         const ledger = await db.AppointmentBookingOccupancy.findAll({ where: {
-            [Op.or]: [{ resource_key: `doctor:${Number(doctorId)}`, end_at: { [Op.gt]: now } },
+            [Op.or]: [{ resource_key: `doctor:${Number(doctorId)}`, end_at: { [Op.gt]: lowerBound }, ...(latestEnd ? { start_at: { [Op.lt]: latestEnd } } : {}) },
                 ...(primary.length ? [{ appointment_id: { [Op.in]: primary.map(row => row.id_cita) } }] : [])],
         }, include: [{ model: CitaPaciente, as: 'appointment', required: true, attributes: ['id_cita', 'clinica_id'],
             where: { clinica_id: Number(clinicaId), ...ACTIVE_APPOINTMENT_WHERE } }],
@@ -3362,7 +3406,7 @@ async function findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZon
         if (ledger.length > 2000) review();
         const segmentedIds = new Set(ledger.map(row => Number(row.appointment_id)));
         phases = [...primary.filter(row => !segmentedIds.has(Number(row.id_cita))), ...ledger
-            .filter(row => row.resource_key === `doctor:${Number(doctorId)}` && new Date(row.end_at) > now)
+            .filter(row => row.resource_key === `doctor:${Number(doctorId)}` && new Date(row.end_at) > lowerBound && (!latestEnd || new Date(row.start_at) < latestEnd))
             .map(row => ({ id_cita: Number(row.appointment_id), clinica_id: Number(clinicaId), doctor_id: row.doctor_id,
                 instalacion_id: row.installation_id, inicio: row.start_at, fin: row.end_at, segmented: true }))];
     }
@@ -3383,8 +3427,10 @@ async function findAppointmentsForRecurringBlockImpact({ doctorId, clinicaId, bo
     const range = buildPersonalBlockRange(body, timeZone);
     if (!range?.start || !range?.end || range.start >= range.end) return [];
     const block = { id: -1, doctor_id: doctorId, clinica_id: clinicaId, fecha_inicio: range.start,
-        fecha_fin: range.end, recurrente: body.recurrente, excepciones: [] };
-    const appointments = await findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZone });
+        fecha_fin: range.end, recurrente: body.recurrente, recurrente_hasta: normalizeDateOnly(body.recurrente_hasta), excepciones: [] };
+    const spanDays = Math.round((new Date(`${toDay(range.end, timeZone)}T12:00:00Z`) - new Date(`${toDay(range.start, timeZone)}T12:00:00Z`)) / 86400000);
+    const latestEnd = block.recurrente_hasta ? localDateTimeToUtc(addDays(block.recurrente_hasta, spanDays), toHm(range.end, timeZone), timeZone) : null;
+    const appointments = await findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZone, earliestStart: range.start, latestEnd });
     return appointments.map(appointment => {
         const phases = (appointment.affected_phases || []).filter(phase => {
             const last = toDay(phase.fin, timeZone);
@@ -3819,7 +3865,7 @@ exports.createHorarioClinica = async (req, res) => {
             return res.status(validationError.status).json(validationError.body);
         }
 
-        const created = await withDoctorCalendarMutation(targetUserId, async transaction => {
+        const created = await withPersonalAvailabilityMutation(req, targetUserId, async transaction => {
           const dc = await getOrCreateDoctorClinica(targetUserId, clinicaId, { transaction });
           return DoctorHorario.create({
             doctor_clinica_id: dc.id,
@@ -3833,9 +3879,9 @@ exports.createHorarioClinica = async (req, res) => {
           }, { transaction });
         });
 
-        return res.status(201).json(serializeHorarioRow(created));
+        return res.status(201).json(availabilityResponse(req, serializeHorarioRow(created)));
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.createHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error creating horario', error: error.message });
     }
@@ -3913,11 +3959,11 @@ exports.patchHorarioClinica = async (req, res) => {
         existing.rrule = candidate.rrule;
         existing.fecha_inicio_vigencia = candidate.fecha_inicio_vigencia;
         existing.fecha_fin_vigencia = candidate.fecha_fin_vigencia;
-        await withDoctorCalendarMutation(targetUserId, transaction => existing.save({ transaction }));
+        await withPersonalAvailabilityMutation(req, targetUserId, transaction => existing.save({ transaction }));
 
-        return res.json(serializeHorarioRow(existing));
+        return res.json(availabilityResponse(req, serializeHorarioRow(existing)));
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.patchHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error patching horario', error: error.message });
     }
@@ -3962,11 +4008,11 @@ exports.deleteHorarioClinica = async (req, res) => {
             return res.status(404).json({ message: 'Horario not found' });
         }
 
-        await withDoctorCalendarMutation(targetUserId, transaction => existing.destroy({ transaction }));
+        await withPersonalAvailabilityMutation(req, targetUserId, transaction => existing.destroy({ transaction }));
 
-        return res.status(204).end();
+        return req.personalAvailabilityUndo ? res.json(availabilityResponse(req)) : res.status(204).end();
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.deleteHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error deleting horario', error: error.message });
     }
@@ -4061,7 +4107,7 @@ exports.createHorarioExcepcion = async (req, res) => {
             return res.status(validationError.status).json(validationError.body);
         }
 
-        const [row] = await withDoctorCalendarMutation(targetUserId, transaction => DoctorHorarioExcepcion.upsert({
+        const [row] = await withPersonalAvailabilityMutation(req, targetUserId, transaction => DoctorHorarioExcepcion.upsert({
             doctor_horario_id: horarioId,
             fecha: payload.fecha,
             cancelado: payload.cancelado,
@@ -4073,9 +4119,9 @@ exports.createHorarioExcepcion = async (req, res) => {
         const persisted = row || await DoctorHorarioExcepcion.findOne({
             where: { doctor_horario_id: horarioId, fecha: payload.fecha },
         });
-        return res.status(201).json(serializeHorarioExceptionRow(persisted));
+        return res.status(201).json(availabilityResponse(req, serializeHorarioExceptionRow(persisted)));
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.createHorarioExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error creating horario exception', error: error.message });
     }
@@ -4142,15 +4188,15 @@ exports.patchHorarioExcepcion = async (req, res) => {
             return res.status(validationError.status).json(validationError.body);
         }
 
-        await withDoctorCalendarMutation(targetUserId, transaction => exception.update({
+        await withPersonalAvailabilityMutation(req, targetUserId, transaction => exception.update({
             fecha: payload.fecha,
             cancelado: payload.cancelado,
             hora_inicio_override: payload.hora_inicio_override,
             hora_fin_override: payload.hora_fin_override,
         }, { transaction }));
-        return res.json(serializeHorarioExceptionRow(exception));
+        return res.json(availabilityResponse(req, serializeHorarioExceptionRow(exception)));
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.patchHorarioExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error updating horario exception', error: error.message });
     }
@@ -4178,14 +4224,14 @@ exports.deleteHorarioExcepcion = async (req, res) => {
             include: [{ model: DoctorClinica, as: 'doctorClinica', required: true,
                 where: { doctor_id: targetUserId, clinica_id: clinicaId } }] });
         if (!ownedHorario) return res.status(404).json({ message: 'Horario not found' });
-        const deleted = await withDoctorCalendarMutation(targetUserId, transaction => DoctorHorarioExcepcion.destroy({
+        const deleted = await withPersonalAvailabilityMutation(req, targetUserId, transaction => DoctorHorarioExcepcion.destroy({
             where: { id: exceptionId, doctor_horario_id: horarioId },
             transaction,
         }));
         if (!deleted) return res.status(404).json({ message: 'Horario exception not found' });
-        return res.status(204).end();
+        return req.personalAvailabilityUndo ? res.json(availabilityResponse(req)) : res.status(204).end();
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.deleteHorarioExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error deleting horario exception', error: error.message });
     }
@@ -4247,8 +4293,7 @@ exports.copyHorarioClinica = async (req, res) => {
         ]);
         if (!canReadSource || !canEditTarget) return res.status(403).json({ message: 'Forbidden' });
 
-        const created = await withCalendarMutation({ protectLegacyAppointments: true, db: require('../../models'), doctorIds: [sourceDoctorId, targetUserId],
-            mutate: async transaction => {
+        const created = await withPersonalAvailabilityMutation(req, [sourceDoctorId, targetUserId], async transaction => {
                 const sources = await DoctorHorario.findAll({ where: { id: { [Op.in]: sourceIds } },
                     include: ownedHorarioInclude(sourceDoctorId, sourceClinicaId), order: [['id', 'ASC']],
                     transaction, lock: transaction.LOCK.UPDATE });
@@ -4271,14 +4316,14 @@ exports.copyHorarioClinica = async (req, res) => {
                     copies.push(copy);
                 }
                 return copies;
-            } });
-        return res.status(201).json({ message: bulk ? 'Fila copiada correctamente.' : 'Horario copiado correctamente.',
+            });
+        return res.status(201).json(availabilityResponse(req, { message: bulk ? 'Fila copiada correctamente.' : 'Horario copiado correctamente.',
             copied: { source_doctor_id: sourceDoctorId, source_clinica_id: sourceClinicaId,
                 target_doctor_id: targetUserId, target_clinica_id: toClinicaId,
                 ...(bulk ? { source_horario_ids: sourceIds, horarios: created.map(serializeHorarioRow) }
-                    : { source_horario_id: sourceIds[0], horario: serializeHorarioRow(created[0]) }) } });
+                    : { source_horario_id: sourceIds[0], horario: serializeHorarioRow(created[0]) }) } }));
     } catch (error) {
-        if (sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.copyHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error copying horario', error: error.message });
     }
@@ -4313,8 +4358,7 @@ exports.moveHorarioClinica = async (req, res) => {
         ]);
         if (!canEditSource || !canEditTarget) return res.status(403).json({ message: 'Forbidden' });
 
-        const moved = await withCalendarMutation({ protectLegacyAppointments: true, db: require('../../models'), doctorIds: [sourceDoctorId, targetUserId],
-            mutate: async transaction => {
+        const moved = await withPersonalAvailabilityMutation(req, [sourceDoctorId, targetUserId], async transaction => {
                 const existing = await DoctorHorario.findOne({ where: { id: horarioId },
                     include: ownedHorarioInclude(sourceDoctorId, fromClinicaId), transaction, lock: transaction.LOCK.UPDATE });
                 if (!existing) rejectPersonalScheduleTransfer(404, { message: 'Horario not found' });
@@ -4354,14 +4398,14 @@ exports.moveHorarioClinica = async (req, res) => {
                 // any reference to that pattern. No copy-then-delete window.
                 await existing.update({ ...candidate, doctor_clinica_id: targetDc.id }, { transaction });
                 return existing;
-            } });
-        return res.json({ message: 'Horario movido correctamente.', moved: {
+            });
+        return res.json(availabilityResponse(req, { message: 'Horario movido correctamente.', moved: {
             horario_id_origen: horarioId, clinica_id_origen: fromClinicaId, clinica_id_destino: toClinicaId,
             doctor_id_origen: sourceDoctorId, doctor_id_destino: targetUserId, scope: occurrence ? 'occurrence' : 'pattern',
             ...(occurrence ? { source_fecha: sourceDate, target_fecha: targetDate } : {}), horario: serializeHorarioRow(moved),
-        } });
+        } }));
     } catch (error) {
-        if (sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.moveHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error moving horario', error: error.message });
     }
@@ -4386,7 +4430,7 @@ exports.mergeHorariosClinica = async (req, res) => {
             return res.status(400).json({ message: 'Invalid merge payload' });
         }
         if (!await canEditHorarios(actorId, doctorId, clinicaId)) return res.status(403).json({ message: 'Forbidden' });
-        const merged = await withDoctorCalendarMutation(doctorId, async transaction => {
+        const merged = await withPersonalAvailabilityMutation(req, doctorId, async transaction => {
             const rows = await DoctorHorario.findAll({ where: { id: { [Op.in]: [keepId, deleteId] } },
                 include: ownedHorarioInclude(doctorId, clinicaId), order: [['id', 'ASC']],
                 transaction, lock: transaction.LOCK.UPDATE });
@@ -4436,12 +4480,12 @@ exports.mergeHorariosClinica = async (req, res) => {
             }
             return keep;
         });
-        return res.json({ message: 'Horarios fusionados correctamente.', merged: {
+        return res.json(availabilityResponse(req, { message: 'Horarios fusionados correctamente.', merged: {
             scope: hasDate ? 'occurrence' : 'pattern', ...(hasDate ? { fecha: date } : {}),
             horario_id_conservado: keepId, horario_id_eliminado: deleteId, horario: serializeHorarioRow(merged),
-        } });
+        } }));
     } catch (error) {
-        if (sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.mergeHorariosClinica] Error:', error);
         return res.status(500).json({ message: 'Error merging horarios', error: error.message });
     }
@@ -4542,6 +4586,17 @@ exports.updateHorariosClinicaForCurrent = async (req, res) => {
     return exports.updateHorariosClinica(req, res);
 };
 
+exports.appendHorariosClinicaForCurrent = async (req, res) => {
+    req.params.id = String(req.userData?.userId || '');
+    return exports.appendHorariosClinica(req, res);
+};
+
+exports.appendHorariosClinica = async (req, res) => {
+    // A dedicated endpoint fails closed on older servers that cannot append.
+    req.body = { ...(Array.isArray(req.body) ? { horarios: req.body } : req.body || {}), append_only: true };
+    return exports.updateHorariosClinica(req, res);
+};
+
 exports.updateHorariosClinica = async (req, res) => {
     try {
         const actorId = Number(req.userData?.userId);
@@ -4550,15 +4605,21 @@ exports.updateHorariosClinica = async (req, res) => {
         const clinicaId = Number(req.params.clinicaId);
         if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) return res.status(400).json({ message: 'Invalid id' });
         if (!await canEditHorarios(actorId, targetUserId, clinicaId)) return res.status(403).json({ message: 'Forbidden' });
+        const hasAppendOnly = !Array.isArray(req.body) && Object.prototype.hasOwnProperty.call(req.body || {}, 'append_only');
+        if (hasAppendOnly && typeof req.body.append_only !== 'boolean') return res.status(400).json({ message: 'append_only debe ser verdadero o falso.' });
+        const appendOnly = hasAppendOnly && req.body.append_only;
         const rawRows = Array.isArray(req.body) ? req.body : req.body?.horarios;
         if (!Array.isArray(rawRows) || rawRows.some(row => !row || typeof row !== 'object')) {
             return res.status(400).json({ message: 'horarios inválidos' });
+        }
+        if (appendOnly && (!rawRows.length || rawRows.some(row => Object.prototype.hasOwnProperty.call(row, 'id')))) {
+            return res.status(400).json({ message: 'append_only requiere horarios nuevos sin id.' });
         }
         const suppliedIds = rawRows.filter(row => Object.prototype.hasOwnProperty.call(row, 'id')).map(row => Number(row.id));
         if (suppliedIds.some(id => !Number.isSafeInteger(id) || id <= 0) || new Set(suppliedIds).size !== suppliedIds.length) {
             return res.status(400).json({ message: 'Invalid horario ids' });
         }
-        const rows = await withDoctorCalendarMutation(targetUserId, async transaction => {
+        const rows = await withPersonalAvailabilityMutation(req, targetUserId, async transaction => {
             const dc = await getOrCreateDoctorClinica(targetUserId, clinicaId, { transaction });
             const existing = await DoctorHorario.findAll({ where: { doctor_clinica_id: dc.id },
                 include: [{ model: DoctorHorarioExcepcion, as: 'excepciones' }], order: [['id', 'ASC']],
@@ -4573,10 +4634,11 @@ exports.updateHorariosClinica = async (req, res) => {
                 if (!candidate) rejectPersonalScheduleTransfer(400, { message: 'horarios inválidos' });
                 return { original, candidate };
             });
-            const removedIds = existing.filter(row => !suppliedIds.includes(Number(row.id))).map(row => Number(row.id));
+            const removedIds = appendOnly ? [] : existing.filter(row => !suppliedIds.includes(Number(row.id))).map(row => Number(row.id));
             if (removedIds.length) await DoctorHorario.destroy({ where: { doctor_clinica_id: dc.id,
                 id: { [Op.in]: removedIds } }, transaction });
-            const persisted = [];
+            const persisted = appendOnly ? [...existing] : [];
+            const added = [];
             for (const { original, candidate } of candidates) {
                 if (original) {
                     await original.update(candidate, { transaction });
@@ -4585,11 +4647,12 @@ exports.updateHorariosClinica = async (req, res) => {
                     const created = await DoctorHorario.create({ ...candidate, doctor_clinica_id: dc.id }, { transaction });
                     created.excepciones = [];
                     persisted.push(created);
+                    added.push(created);
                 }
             }
             // Validate the final set inside the transaction. Existing IDs and
             // exception rows survive, and a conflict rolls back every change.
-            for (const row of persisted) {
+            for (const row of appendOnly ? added : persisted) {
                 const validationError = await validateSingleHorarioCandidate({ targetUserId, clinicaId,
                     candidateHorario: { ...horarioTransferFields(row), excepciones: (row.excepciones || []).map(scheduleExceptionFields) },
                     excludeHorarioIds: [Number(row.id)], transaction });
@@ -4597,9 +4660,9 @@ exports.updateHorariosClinica = async (req, res) => {
             }
             return persisted;
         });
-        return res.json(rows.map(serializeHorarioRow));
+        return res.json(availabilityResponse(req, rows.map(serializeHorarioRow)));
     } catch (error) {
-        if (sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.updateHorariosClinica] Error:', error);
         return res.status(500).json({ message: 'Error updating horarios', error: error.message });
     }
@@ -4648,6 +4711,8 @@ exports.updateDisponibilidadConfigClinica = async (req, res) => {
 
         if (hasOverlapInput && typeof req.body.allow_overlap_confirmation !== 'boolean') return res.status(400).json({ message: 'allow_overlap_confirmation debe ser verdadero o falso.' });
 
+        // Configuration changes invalidate older availability receipts, but do
+        // not offer Undo of receives-appointments or overlap settings themselves.
         const dc = await withDoctorCalendarMutation(targetUserId, async transaction => {
             const link = await getOrCreateDoctorClinica(targetUserId, clinicaId, { transaction });
             await link.update({ ...(hasRecibeCitasInput ? { recibe_citas: recibeCitas } : {}),
@@ -4664,7 +4729,7 @@ exports.updateDisponibilidadConfigClinica = async (req, res) => {
             allow_overlap_confirmation: !!dc.allow_overlap_confirmation,
         });
     } catch (error) {
-        if (sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.updateDisponibilidadConfigClinica] Error:', error);
         return res.status(500).json({ message: 'Error updating disponibilidad config', error: error.message });
     }
@@ -5231,4 +5296,45 @@ exports.__personalSecurityContract = {
     canManageOwnScheduleInClinic,
     getAllowedClinicIdsForActorTarget,
     getOperationalStaffClinicIdsForUser,
+};
+
+exports.undoPersonalAvailability = async (req, res) => {
+    try {
+        const result = await personalCalendarUndo.undoAvailability({ db: require('../../models'),
+            actorId: Number(req.userData?.userId), token: req.body?.token,
+            assertPermissions: async scopes => {
+                for (const scope of scopes) {
+                    const canEdit = scope.kind === 'bloqueo'
+                        ? await canEditBloqueos(Number(req.userData?.userId), scope.doctorId, scope.clinicId)
+                        : await canEditHorarios(Number(req.userData?.userId), scope.doctorId, scope.clinicId);
+                    if (!canEdit) return false;
+                }
+                return true;
+            },
+            validateRestored: async ({ before, changes, transaction }) => {
+                const restoredIds = new Set(changes.DoctorHorario.filter(change => change.before).map(change => change.id));
+                for (const change of changes.DoctorHorarioExcepcion) {
+                    const exception = change.before || change.after;
+                    if (exception) restoredIds.add(Number(exception.doctor_horario_id));
+                }
+                for (const id of restoredIds) {
+                    const original = before.DoctorHorario.find(row => Number(row.id) === id);
+                    const link = original && before.DoctorClinica.find(row => Number(row.id) === Number(original.doctor_clinica_id));
+                    if (!link) continue;
+                    const row = await DoctorHorario.findOne({ where: { id },
+                        include: ownedHorarioInclude(link.doctor_id, link.clinica_id), transaction });
+                    if (!row) rejectPersonalScheduleTransfer(409, { code: 'availability_undo_conflict', message: 'El horario original ya no se puede restaurar.' });
+                    const validationError = await validateSingleHorarioCandidate({ targetUserId: link.doctor_id, clinicaId: link.clinica_id,
+                        candidateHorario: { ...horarioTransferFields(row), excepciones: (row.excepciones || []).map(scheduleExceptionFields) },
+                        excludeHorarioIds: [id], transaction });
+                    if (validationError) rejectPersonalScheduleTransfer(validationError.status, validationError.body);
+                }
+            },
+        });
+        return res.json(result);
+    } catch (error) {
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
+        console.error('[personal.undoPersonalAvailability] failed');
+        return res.status(500).json({ message: 'No se pudo deshacer el cambio. La disponibilidad se conserva.' });
+    }
 };

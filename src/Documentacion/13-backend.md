@@ -10249,6 +10249,65 @@ la elegibilidad para Agenda y no crea ni elimina turnos. La interfaz puede
 consultar resumenes desde Personal, pero el Gantt es el unico editor de turnos
 y bloqueos.
 
+Disponibilidad Personal (candidato local 2026-10-08): las 16 mutaciones canónicas
+de horarios, movimientos, copias, fusiones, bloques y sus excepciones
+pueden emitir `undo: { token, expires_at, label }`. El token es opaco y el servidor
+conserva solo su SHA-256, ligado al actor, durante 20 segundos. PUT de horarios
+responde `{ horarios, undo }`; los DELETE con recibo responden 200 `{ undo }`.
+`POST /api/personal/availability/undo` recibe `{ token }` y devuelve
+`{ undone: true, doctor_ids, clinica_ids }`. No recibe snapshots ni IDs del actor
+desde el cliente. Revalida los permisos actuales y el estado posterior exacto;
+una revisión monótona por profesional impide el caso cambiar-y-volver-al-mismo
+estado. Conserva IDs, excepciones y ámbitos y restaura solo las filas cambiadas
+bajo los mismos locks y guard transaccional de citas legacy/ledger. Nunca
+restaura ni reprograma citas. Nueva reserva incompatible: 409
+`booking_calendar_conflict`; cambio posterior: 409 `availability_undo_conflict`;
+caducidad o uso previo: 410; otro actor no obtiene el recibo (404).
+Las tablas `PersonalCalendarUndoReceipts` y `PersonalCalendarRevisions` requieren
+la migración aditiva preparada; no existe almacenamiento temporal en memoria.
+Los recibos de más de un día se purgan por lotes de 200 al emitir otro recibo;
+las revisiones se conservan. El recibo y la mutación comparten commit/rollback.
+El mutex duradero por profesional se toma antes del snapshot incluso sin
+vínculos previos y con el ledger apagado. Cambiar configuración de Agenda
+invalida recibos anteriores, pero no emite Undo: no restaura `recibe_citas`,
+`allow_overlap_confirmation`, `agenda_flexible` ni roles. Si crear disponibilidad
+reactiva un vínculo previo, Undo restaura su `activo`; si la acción creó el
+vínculo, lo retira después de restaurar las filas. Borrar el último horario y
+deshacerlo conserva el vínculo original y recupera IDs y excepciones.
+Cuando `bookingCapabilities().simple` está apagado, los escritores de citas
+legacy no comparten el mutex de recursos: solo se ofrecen inversas probadas
+sin reducción de disponibilidad, como restaurar un horario eliminado o retirar
+un bloqueo recién creado. Cambios de patrón/overrides dudosos, quitar horarios
+activos, restaurar bloqueos o desactivar vínculos no reciben Undo en ese modo.
+El RPC comprueba de nuevo el modo: 409 `availability_undo_legacy_unsafe` si una
+inversa que reduciría cobertura dejó de poder serializarse. No restaura filas
+ni consume el recibo ante ese rechazo. La clasificación es conservadora y
+no altera citas ni habilita gates. Los perfiles multicabina/por pasos desactivados
+fallan cerrados; no pasan al escritor legacy cuando `simple` sigue activo.
+
+POST `/api/personal/:id/clinicas/:clinicaId/horarios/append` (y alias `me`)
+recibe `{ horarios: [nuevos tramos sin id] }` para copiar días, replicar fechas
+o añadir en lote. Es la ruta del frontend: un servidor anterior devuelve 404
+y no interpreta el lote como reemplazo. Sin fallback al PUT de reemplazo.
+El wrapper fuerza `append_only: true`; el PUT existente también admite ese
+booleano de forma explícita. Bajo el mutex y una sola transacción obtiene
+la fila actual, conserva todos sus IDs/excepciones y valida las nuevas filas
+contra las actuales y entre sí; un conflicto revierte todo el lote. Devuelve
+todos los horarios y un único recibo Undo cuando procede. No depende de un GET
+previo ni borra altas concurrentes ya confirmadas. IDs en el lote, lote vacío
+o `append_only` no booleano devuelven 400 antes de escribir. Sin ese modo el PUT
+mantiene la semántica de reemplazo/reconciliación de la fila.
+
+`DoctorBloqueos.recurrente_hasta` es DATEONLY nullable y limita, de forma
+inclusiva en la zona clínica, la última fecha de inicio de una repetición.
+`fecha_fin` sigue indicando la duración de la primera ocurrencia: nunca se usa
+como fecha final de la serie. Una última ocurrencia de varios días conserva
+su duración completa. POST/PATCH/preview aceptan `recurrente_hasta`; PATCH
+omitido conserva y null elimina el límite. Fechas inexistentes o anteriores al
+inicio se rechazan. GET/serializer devuelve el mismo campo y la proyección
+compartida de Agenda, Personal y disponibilidad respeta el límite. Requiere su
+migración aditiva preparada; null conserva las series existentes sin límite.
+
 ## Runtime de `field_check` por columnas (2026-09-03)
 
 El modo `multi_branch` de `condition/field_check` recibe `branch_rules` con un

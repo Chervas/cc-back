@@ -10,6 +10,7 @@ router.post('/reclamar', personalController.claimProvisionalAccount);
 
 // El resto de rutas requieren JWT
 router.use(authMiddleware);
+router.post('/availability/undo', personalController.undoPersonalAvailability);
 
 // Listado filtrable por clinica/grupo (no hace dump global salvo admin/all)
 router.get('/', personalController.getPersonal);
@@ -45,6 +46,7 @@ router.get('/:id/schedule', personalController.getScheduleForPersonal);
 router.get('/me/clinicas/:clinicaId/horarios', personalController.getHorariosClinicaForCurrent);
 router.post('/me/clinicas/:clinicaId/horarios/impact-preview', personalController.previewHorarioImpactForCurrent);
 router.put('/me/clinicas/:clinicaId/horarios', personalController.updateHorariosClinicaForCurrent);
+router.post('/me/clinicas/:clinicaId/horarios/append', personalController.appendHorariosClinicaForCurrent);
 router.post('/me/clinicas/:clinicaId/horarios', personalController.createHorarioClinicaForCurrent);
 router.patch('/me/clinicas/:clinicaId/horarios/:horarioId', personalController.patchHorarioClinicaForCurrent);
 router.delete('/me/clinicas/:clinicaId/horarios/:horarioId', personalController.deleteHorarioClinicaForCurrent);
@@ -59,6 +61,7 @@ router.patch('/me/clinicas/:clinicaId/disponibilidad-config', personalController
 router.get('/:id/clinicas/:clinicaId/horarios', personalController.getHorariosClinica);
 router.post('/:id/clinicas/:clinicaId/horarios/impact-preview', personalController.previewHorarioImpact);
 router.put('/:id/clinicas/:clinicaId/horarios', personalController.updateHorariosClinica);
+router.post('/:id/clinicas/:clinicaId/horarios/append', personalController.appendHorariosClinica);
 router.post('/:id/clinicas/:clinicaId/horarios', personalController.createHorarioClinica);
 router.patch('/:id/clinicas/:clinicaId/horarios/:horarioId', personalController.patchHorarioClinica);
 router.delete('/:id/clinicas/:clinicaId/horarios/:horarioId', personalController.deleteHorarioClinica);

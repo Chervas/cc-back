@@ -1,7 +1,7 @@
 'use strict';
 
 // Shared calendar semantics used by the public availability API and voucher series.
-const { buildHorarioExceptionMap, expandHorariosForDate, addDays } = require('./personal-schedule-recurring');
+const { buildHorarioExceptionMap, expandHorariosForDate, addDays, normalizeDateOnly } = require('./personal-schedule-recurring');
 const DEFAULT_TIMEZONE = 'Europe/Madrid';
 const timeZoneFormatters = new Map();
 const dayIndexFromLocalDate = (value) => new Date(`${value}T12:00:00Z`).getUTCDay();
@@ -210,8 +210,12 @@ const buildDoctorBloqueoRowsForDate = (bloqueos, fechaLocal, timeZone) => {
     const hm = parts => `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
     const recurrente = String(bloqueo.recurrente || 'none');
     const spanDays = Math.max(0, Math.round((new Date(`${endDay}T12:00:00Z`) - new Date(`${startDay}T12:00:00Z`)) / 86400000));
+    const until = normalizeDateOnly(bloqueo.recurrente_hasta);
+    // UNTIL limits occurrence anchors inclusively; a final multi-day occurrence
+    // keeps its full duration, even when its interior falls after the anchor limit.
+    const anchorDate = until && until < fechaLocal ? until : fechaLocal;
     const occurrences = recurrente === 'none' ? [{ start: originalStart, end: originalEnd }]
-      : bloqueoAnchorsForDate(startDay, fechaLocal, recurrente).map(anchor => ({
+      : bloqueoAnchorsForDate(startDay, anchorDate, recurrente).filter(anchor => !until || anchor <= until).map(anchor => ({
         start: localDateTimeToUtc(anchor, hm(startParts), timeZone),
         end: localDateTimeToUtc(addDays(anchor, spanDays), hm(endParts), timeZone),
       }));
