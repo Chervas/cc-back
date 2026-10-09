@@ -50,7 +50,8 @@ const DOMAIN_TABLES = [
   'AppointmentVisitCommunication', 'AppointmentVisitBirthRequest', 'AppointmentVisitDispatch', 'Notification',
 ];
 
-async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registerOwnedLoopbackServer, includeConsentRoutes = false }) {
+async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registerOwnedLoopbackServer,
+  includeConsentRoutes = false, includeProgramLedger = false }) {
   assert(sql.options.dialectOptions?.socketPath?.startsWith('/tmp/cc-campaign-opt-mysql-'));
   const [[owned]] = await sql.query('SELECT @@skip_networking AS isolated, DATABASE() AS name');
   assert.equal(Number(owned.isolated), 1); assert.equal(owned.name, 'campaign_optimization_qa');
@@ -70,6 +71,9 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
     CONSENT_PUBLIC_TOKEN_SECRET: crypto.randomBytes(32).toString('hex'),
     CONSENT_KIOSK_TOKEN_SECRET: crypto.randomBytes(32).toString('hex'),
   });
+  if (includeProgramLedger) Object.assign(process.env, {
+    TREATMENT_PROGRAM_BOOKING_ENABLED: 'true', TREATMENT_PROGRAM_ECONOMICS_ENABLED: 'true',
+  });
   const keyFile = path.join(report.root, 'owned-auth-email-key');
   fs.writeFileSync(keyFile, crypto.randomBytes(32), { mode: 0o600 });
   process.env.AUTH_EMAIL_MFA_KEY_FILE = keyFile;
@@ -78,7 +82,9 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
   // are needed to exercise the actual native group/clinic ACL precedence.
   db.GrupoClinica = sql.define('GrupoClinica', { id_grupo: { type: S.DataTypes.INTEGER, primaryKey: true },
     nombre: S.DataTypes.STRING }, { tableName: 'GruposClinicas', timestamps: false });
-  for (const file of CORE_MODELS) {
+  const modelFiles = includeProgramLedger
+    ? [...CORE_MODELS, 'patientvoucher', 'patientvouchermovement', 'patientprogramsession'] : CORE_MODELS;
+  for (const file of modelFiles) {
     const model = require('../../../../models/' + file)(sql, S.DataTypes); db[model.name] = model;
   }
   if (includeConsentRoutes) {
@@ -205,7 +211,9 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
   });
   const fingerprint = async () => {
     const snapshots = {};
-    for (const name of DOMAIN_TABLES) snapshots[name] = await db[name].findAll({ order: db[name].primaryKeyAttributes.map(key => [key, 'ASC']), raw: true });
+    const tables = includeProgramLedger
+      ? [...DOMAIN_TABLES, 'PatientVoucher', 'PatientVoucherMovement', 'PatientProgramSession'] : DOMAIN_TABLES;
+    for (const name of tables) snapshots[name] = await db[name].findAll({ order: db[name].primaryKeyAttributes.map(key => [key, 'ASC']), raw: true });
     return { sha256: crypto.createHash('sha256').update(JSON.stringify(snapshots)).digest('hex'),
       counts: Object.fromEntries(Object.entries(snapshots).map(([name, rows]) => [name, rows.length])) };
   };

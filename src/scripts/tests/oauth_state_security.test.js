@@ -222,7 +222,7 @@ function testScopeInventoryAclAndMultiConnectionCutoverGuards() {
   ]) {
     assert.ok(routeSource.includes(`'${requiredPath}'`), requiredPath);
   }
-  assert.match(routeSource, /providerInventory\s*\|\|\s*req\.method !== 'GET'/,
+  assert.match(routeSource, /providerInventory\s*\|\|\s*normalizedPath === '\/google\/disconnection-status'\s*\|\|\s*req\.method !== 'GET'/,
     'provider inventories require the same write permission as connection mutations');
 
   const adsStatus = routeSource.slice(

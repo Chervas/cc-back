@@ -175,7 +175,7 @@ withIsolatedCampaignMysql(async owned => {
     assert.equal(started.status, 200, JSON.stringify(started.body));
     const startRow = await db.CitaPaciente.findByPk(appointmentId);
     assert.equal(startRow.care_started_by, ids.assistant); assert.equal(startRow.updated_by, ids.assistant);
-    assert.equal(startRow.estado, 'pendiente'); assert(startRow.care_started_at);
+    assert.equal(startRow.estado, 'en_atencion'); assert(startRow.care_started_at);
     assert.equal(await db.AppointmentCareEvent.count({ where: { appointment_id: appointmentId, action: 'start', actor_id: ids.assistant } }), 1);
     const startEvent = await db.PatientOperationalEvent.findOne({ where: { actor_user_id: ids.assistant, event_type: 'appointment_care_changed',
       metadata: { appointment_id: appointmentId, action: 'start' } }, raw: true });
@@ -203,28 +203,43 @@ withIsolatedCampaignMysql(async owned => {
     await denied('PATCH', '/api/citas/' + appointmentId + '/estado', { estado: 'cancelada' }, employeeToken, 403,
       'Withdrawing membership revokes booking mutation authority before session expiry');
     await membership.update({ estado_invitacion: 'aceptada' });
-    const cancelled = await request('PATCH', '/api/citas/' + appointmentId + '/estado', { estado: 'cancelada' }, employeeToken);
+    const deniedCancel = await denied('PATCH', '/api/citas/' + appointmentId + '/estado', { estado: 'cancelada' }, employeeToken, 409,
+      'Started clinical care cannot be cancelled or lose its evidence');
+    assert.equal(deniedCancel.body.code, 'care_already_started');
+    assert.equal((await db.CitaPaciente.findByPk(appointmentId)).estado, 'en_atencion');
+    await denied('POST', '/api/citas', body(), employeeToken, 409,
+      'Rejecting a cancellation does not release started clinical capacity');
+    assert.equal((await request('GET', docPath, undefined, employeeToken)).body.context_source, 'appointment_start_snapshot');
+
+    // Cancellation remains valid for another reservation that has not started.
+    // Never rewind the already-started appointment just to test old semantics.
+    const otherBody = body({ inicio: new Date(+native.inicio + 2 * 3600000).toISOString() });
+    const other = await request('POST', '/api/citas', otherBody, employeeToken);
+    assert.equal(other.status, 201, JSON.stringify(other.body));
+    const cancelledId = other.body.id_cita;
+    const otherOccupancy = await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: cancelledId }, raw: true });
+    const cancelled = await request('PATCH', '/api/citas/' + cancelledId + '/estado', { estado: 'cancelada' }, employeeToken);
     assert.equal(cancelled.status, 200, JSON.stringify(cancelled.body));
-    const cancelledRow = await db.CitaPaciente.findByPk(appointmentId);
+    const cancelledRow = await db.CitaPaciente.findByPk(cancelledId);
     assert.equal(cancelledRow.estado, 'cancelada'); assert.equal(cancelledRow.updated_by, ids.assistant);
-    assert.equal(cancelledRow.care_started_at.toISOString(), startRow.care_started_at.toISOString());
+    assert.equal(cancelledRow.care_started_at, null);
+    assert.equal((await db.CitaPaciente.findByPk(appointmentId)).care_started_at.toISOString(), startRow.care_started_at.toISOString());
     // Canonical cancellation deliberately retains old occupancy as restore
     // provenance. Real availability JOINs exclude its cancelled appointment.
-    assert.deepEqual(await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: appointmentId }, raw: true }), occupancy);
-    assert.equal(await db.AppointmentBookingOccupancy.count({ include: [{ model: db.CitaPaciente, as: 'appointment',
+    assert.deepEqual(await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: cancelledId }, raw: true }), otherOccupancy);
+    assert.equal(await db.AppointmentBookingOccupancy.count({ where: { appointment_id: cancelledId }, include: [{ model: db.CitaPaciente, as: 'appointment',
       required: true, where: { estado: { [db.Sequelize.Op.ne]: 'cancelada' } } }] }), 0);
     assert.equal(await db.PatientOperationalEvent.count({ where: { actor_user_id: ids.assistant, event_type: 'appointment.status_changed',
-      metadata: { appointment_id: appointmentId, new_status: 'cancelada' } } }), 1);
-    assert.equal((await request('GET', docPath, undefined, employeeToken)).body.context_source, 'appointment_start_snapshot');
-    await denied('POST', '/api/citas/' + appointmentId + '/care/start', { clinic_id: ids.clinic }, employeeToken, 409,
+      metadata: { appointment_id: cancelledId, new_status: 'cancelada' } } }), 1);
+    await denied('POST', '/api/citas/' + cancelledId + '/care/start', { clinic_id: ids.clinic }, employeeToken, 409,
       'Cancelled clinical appointment cannot be restarted');
-    const capacityProof = await request('POST', '/api/citas', body(), employeeToken);
+    const capacityProof = await request('POST', '/api/citas', body({ inicio: otherBody.inicio }), employeeToken);
     assert.equal(capacityProof.status, 201, JSON.stringify(capacityProof.body));
-    assert.notEqual(capacityProof.body.id_cita, appointmentId);
+    assert.notEqual(capacityProof.body.id_cita, cancelledId);
     assert.equal((await request('PATCH', '/api/citas/' + capacityProof.body.id_cita + '/estado', { estado: 'cancelada' }, employeeToken)).status, 200);
-    report.proof.cancelledCapacity = { oldOccupancyRowsPreserved: occupancy.length,
+    report.proof.cancelledCapacity = { startedAppointmentPreserved: appointmentId, oldOccupancyRowsPreserved: otherOccupancy.length,
       newAppointmentAtSameResourcesAndTime: capacityProof.body.id_cita };
-    report.checks.push('Actual employee cancellation checks current membership, releases capacity via canonical state while retaining occupancy provenance and started documents; identical native HTTP booking succeeds only after cancellation');
+    report.checks.push('Started care rejects cancellation without releasing capacity or frozen documentation; a separate unstarted reservation can be cancelled, keeps occupancy provenance and permits a new native HTTP booking at its former slot');
 
     const loggedOut = await request('POST', '/api/auth/sign-out', {}, employeeToken);
     assert.equal(loggedOut.status, 200, JSON.stringify(loggedOut.body));
