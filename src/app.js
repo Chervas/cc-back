@@ -154,6 +154,7 @@ const corsOptionsDelegate = (req, callback) => {
     return callback(null, { origin: false });
 };
 
+app.use(require('./lib/gatewayHttpBoundary').gatewayHttpBoundary());
 app.use(cors(corsOptionsDelegate));
 // Signed bytes reach the durable inbox before a parser can modify them.
 app.use(require('./lib/whatsappInboxGateway').gatewayMiddleware());
@@ -384,6 +385,7 @@ const io = new Server(server, {
     }
 });
 setIO(io);
+io.use(require('./lib/gatewayHttpBoundary').gatewaySocketBoundary());
 const automationsV2ResumeService = require('./services/automationsV2Resume.service');
 
 // Con gateway vivo, el webhook inbound coordina una sola reanudacion y encola

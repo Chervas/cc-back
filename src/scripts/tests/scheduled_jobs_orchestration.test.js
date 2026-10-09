@@ -6,7 +6,9 @@ const path = require('path');
 const { Op } = require('sequelize');
 require('./fixtures/scheduled_jobs.fixture.cjs');
 process.env.JOBS_AUTO_START = 'false';
-process.env.RUNTIME_ROLE = 'gateway';
+// This suite exercises the business worker, not the external-entry runtime.
+// The offline fixture already prevents SQL, providers and queue connections.
+process.env.RUNTIME_ROLE = 'api';
 const db = require('../../../models');
 const {
   SCHEDULED_JOB_DEFINITIONS,
