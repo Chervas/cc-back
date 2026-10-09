@@ -56,10 +56,17 @@ El router de citas serializa los errores de dominio `care_*` como JSON con
 su `code`, mensaje legible, `details` y `can_force=false`, también cuando salen
 de las escrituras genéricas de estado/reprogramación/apoyo. No modifica la
 regla de no asistencia ni convierte fallos desconocidos en conflictos clínicos.
-**Ajuste de transporte preparado, pendiente de publicación:** la aceptación
-SQL/HTTP aislada utiliza el router real sin fallback JSON del fixture, comprueba
-`application/json`, código y ausencia de mutaciones; no acredita el runtime
-publicado por sí sola. Evidencia y publicación efectiva corresponden a 19/99.
+**Ajuste de transporte publicado en DEV y CRM el 09/10/2026**, backend
+`1c30663324c81ef3d60520352cc742f6785cd900`. La aceptación SQL/HTTP aislada
+utiliza el router real sin fallback JSON del fixture y comprueba JSON, código y
+ausencia de mutaciones. Después de publicar, el PATCH nativo autenticado en DEV
+de una reserva ficticia futura respondió `409`, `application/json` y
+`care_no_show_too_early`, sin modificar estado, `updated_at` ni metadata.
+La lectura autenticada de CRM comprueba las cinco pertenencias activas, recepción
+de citas y excepciones desactivadas; la interfaz abre el borrador vacío en ambas
+orientaciones de agenda. No se escribe una reserva real para validar este corte
+ni se atribuye a esa lectura la prueba SQL de no asistencia futura. Evidencia
+detallada y madurez efectiva corresponden a 19/99.
 
 ### Retirada preparada de las excepciones por profesional · 09/10/2026
 
@@ -69,13 +76,18 @@ Ainhoa, Lidia o Piedad. `DoctorClinicas.agenda_flexible` y la concesión acotada
 `allow_legacy_attention_confirmation` pertenecen a la compatibilidad anterior;
 el nuevo `409` con recibo no necesita que esos campos estén habilitados.
 
-**La retirada de datos está pendiente de aplicación y verificación.** El alcance
-preparado son cinco vínculos de BS Capilar/BS Medical y el permiso adicional de
-Piedad en Medical; identidades y valores exactos en el
+**La retirada de datos fue aplicada y verificada el 09/10/2026, a las 18:39 UTC.**
+Los cinco vínculos de BS Capilar/BS Medical tienen `agenda_flexible=false` y
+`allow_legacy_attention_confirmation=false`; este último ya era falso salvo en
+Piedad en Medical. Identidades y valores exactos en el
 [runbook de Personal](https://github.com/Chervas/cc-back/blob/dev/docs/personal-calendar-schema-release.md#retirada-preparada-de-las-excepciones-por-profesional--09102026).
 No requiere DDL ni cambia accesos clínicos, roles, adscripción, `activo`,
 `recibe_citas`, horarios o reservas. Tampoco se retiran por esta operación las
 políticas físicas de sala ni los campos históricos de confirmación de solapes.
+La imagen de filas bajo transacción y la lectura posterior acreditan cinco
+vínculos y la conservación de los demás campos. Las revisiones de Personal se
+incrementaron normalmente para invalidar Undo; no deben restaurarse hacia atrás.
+Un rollback de código no reactiva automáticamente estas excepciones.
 
 Con recursos explícitos activos de la clínica, una falta de horario o un solape
 ordinario debe llegar a los motivos del servidor y a la confirmación manual;
@@ -84,8 +96,9 @@ clínica única no debe cerrarse únicamente por el indicador legacy `agendable`
 si el actor tiene acceso, el núcleo de reservas está disponible y el vínculo
 activo recibe citas. La API sigue validando el ámbito y la disponibilidad real.
 Programas/bonos adquiridos, atención registrada y los demás límites clínicos y
-de integridad descritos arriba continúan protegidos. Esta preparación documental
-no certifica una nueva publicación ni una prueba visual autenticada.
+de integridad descritos arriba continúan protegidos. La revisión autenticada de
+CRM es de lectura y navegación, sin alterar pacientes, reservas o comunicaciones;
+la aceptación con escritura se realiza en DEV ficticio y MySQL aislado.
 
 
 ## Colocación guiada de citas combinadas · 07/10/2026
@@ -10408,7 +10421,8 @@ migración aditiva; null conserva las series existentes sin límite.
 
 **Compatibilidad histórica:** conserva el contrato del corte anterior. La
 decisión del 09/10/2026 es retirar las concesiones identificadas y utilizar la
-confirmación manual por reserva; la aplicación de datos sigue pendiente.
+confirmación manual por reserva; la retirada de datos fue aplicada y verificada
+en los cinco vínculos identificados.
 
 `DoctorClinicas.allow_legacy_attention_confirmation` es un permiso de operador
 por vínculo profesional-clínica, falso por defecto. Solo permite confirmar
@@ -10437,10 +10451,11 @@ Un fallo parcial requiere revisión; no se repite ni se revierte automáticament
 La habilitación inicial del corte anterior se limitó a Piedad en BS Medical
 (`doctor_id=221`, `clinica_id=72`, vínculo `119`); DEV utiliza datos ficticios.
 No es una autorización general para habilitarla de nuevo. La decisión del
-09/10/2026 prepara su retirada y la de la agenda flexible en los cinco vínculos
+09/10/2026 retiró esa concesión y la agenda flexible en los cinco vínculos
 identificados: la confirmación manual vigente no depende de estos campos.
-La preparación no afirma que los valores de CRM ya estén retirados; su aplicación
-y comprobación corresponden al operador y se registran en 19/99.
+Los valores finales de CRM están verificados; el resultado y las evidencias se
+registran en el runbook de Personal y en 19/99. La recuperación de código no
+autoriza reactivarlos ni restaurar revisiones antiguas de Personal.
 
 ## Runtime de `field_check` por columnas (2026-09-03)
 

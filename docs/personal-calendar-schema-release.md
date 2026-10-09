@@ -114,8 +114,9 @@ y diario privado e inspeccionar el último paso antes de decidir una reparación
 explícita. El operador rechaza el reintento sobre DDL parcial. No ejecutar `down`,
 repetir a ciegas ni restaurar globalmente una BD sobre escrituras nuevas. El
 rollback de código conserva el esquema aditivo y restaura una versión compatible.
-Guardar la evidencia del corte y su estado en los documentos canónicos; este
-runbook no declara ninguna publicación o migración ejecutada.
+Guardar la evidencia del corte y su estado en los documentos canónicos. Este
+procedimiento de esquema no acredita por sí solo una publicación o migración;
+los resultados reales de otros cortes se identifican explícitamente más abajo.
 
 Pruebas focales sin IPC del runner:
 
@@ -129,34 +130,43 @@ MySQL efímeras del adaptador y las DDL reales.
 
 ### Retirada preparada de las excepciones por profesional · 09/10/2026
 
-**Pendiente de aplicar, verificar y registrar.** La decisión del titular es
-retirar las excepciones de agenda anteriores en los vínculos siguientes y usar
-la confirmación explícita de cada reserva (`409` y recibo revalidado). Este
-runbook prepara el alcance; no acredita cambios de datos o publicación.
+**Aplicada y verificada en CRM el 09/10/2026, a las 18:39 UTC, sin DDL.** La
+decisión del titular retira las excepciones de agenda anteriores en los vínculos
+siguientes y utiliza la confirmación explícita de cada reserva (`409` y recibo
+revalidado). El instrumento acotado confirmó la transacción y la lectura final
+de las cinco identidades; no se cambió ninguna reserva ni su horario.
 
-| Vínculo `DoctorClinicas.id` | Profesional | `doctor_id` | Clínica | `clinica_id` | Cambio preparado |
+| Vínculo `DoctorClinicas.id` | Profesional | `doctor_id` | Clínica | `clinica_id` | Valores finales verificados |
 | --- | --- | --- | --- | --- | --- |
-| 20 | Ainhoa | 50 | BS Capilar | 66 | `agenda_flexible=false` |
-| 122 | Ainhoa | 50 | BS Medical | 72 | `agenda_flexible=false` |
-| 113 | Lidia | 142 | BS Medical | 72 | `agenda_flexible=false` |
-| 115 | Lidia | 142 | BS Capilar | 66 | `agenda_flexible=false` |
+| 20 | Ainhoa | 50 | BS Capilar | 66 | `agenda_flexible=false`, `allow_legacy_attention_confirmation=false` |
+| 122 | Ainhoa | 50 | BS Medical | 72 | `agenda_flexible=false`, `allow_legacy_attention_confirmation=false` |
+| 113 | Lidia | 142 | BS Medical | 72 | `agenda_flexible=false`, `allow_legacy_attention_confirmation=false` |
+| 115 | Lidia | 142 | BS Capilar | 66 | `agenda_flexible=false`, `allow_legacy_attention_confirmation=false` |
 | 119 | Piedad | 221 | BS Medical | 72 | `agenda_flexible=false`, `allow_legacy_attention_confirmation=false` |
 
-Antes de escribir, resolver y comprobar las cinco identidades, parejas exactas
-profesional/clínica y valores actuales. Conservar una evidencia privada del
-estado anterior y aplicar únicamente los campos indicados mediante el instrumento
-acotado del operador, con transacción y compare-and-swap. Una identidad, valor o
-fila inesperados exige parar y revisar; no sustituir el alcance por un UPDATE
-global de la tabla. Comprobar después todos los valores y la conservación de
-los demás campos y permisos. No ejecutar DDL, `down` ni el publicador de esquema
-para esta retirada.
+La operación resolvió las cinco parejas exactas, conservó la imagen privada de
+las filas antes del commit y aplicó compare-and-swap bajo transacción. Se
+verificaron los valores finales y todos los demás campos sin cambios.
+`allow_legacy_attention_confirmation` sólo pasó de verdadero a falso en Piedad;
+en los otros cuatro vínculos ya era falso. La invalidación normal de Undo
+incrementó `PersonalCalendarRevisions` para los profesionales 50 (`0→1`),
+142 (`0→1`) y 221 (`1→2`). No se ejecutó DDL, `down`, actualización global ni el
+publicador de esquema para retirar estos campos.
+
+La evidencia privada de operación es
+`/home/ubuntu/secure-imports/booking-native-20261009-W7mUcV/apply-verified.json`
+(`committed=true`, `verified=true`, cinco vínculos). La imagen anterior permanece
+privada; no copiarla a la documentación ni restaurarla globalmente.
 
 No modificar roles o permisos clínicos, `activo`, `recibe_citas`, adscripción,
 horarios, ausencias, bloqueos ni citas. `allow_overlap_confirmation`, capacidad
 y políticas físicas de sala quedan fuera de este corte. No activar mensajes,
-consentimientos, programas, jobs ni flags del runtime. Mantener una reversión
-acotada con el estado anterior y CAS, nunca una restauración global sobre
-escrituras nuevas. Cerrar el resultado real y las evidencias en 19/99.
+consentimientos, programas, jobs ni flags del runtime. Un rollback de código no
+debe reactivar automáticamente los permisos retirados. Una eventual reversión de
+datos requiere una nueva autorización, alcance exacto y CAS sobre el estado
+vigente, sin sobrescribir escrituras posteriores ni reducir las revisiones de
+Personal. Nunca restaurar globalmente la BD. Cerrar el resultado y las evidencias
+en 19/99.
 
 Validar la preparación y reserva ordinaria con los campos retirados: falta de
 horario, solape, personal de apoyo y grupo vinculado deben seguir mostrando los
@@ -168,12 +178,30 @@ mantenimiento, recursos ajenos, equipos ALL y contrato adquirido de programa/bon
 
 La comprobación del transporte de errores usa el router real de citas con
 `nativeFinalHandler=true` en el fixture HTTP/SQL aislado, sin su fallback JSON.
-La validación preparada pasa 34 solicitudes autenticadas en MySQL efímero:
+La validación aislada pasa 34 solicitudes autenticadas en MySQL efímero:
 rechazos de `no_asistio` futuro con el núcleo de perfiles activado/desactivado,
 protección de atención/recursos, cancelación histórica y replay. Se comprueba
 `Content-Type: application/json`, código de dominio y estado/ocupación intactos
 en los rechazos; cuatro pruebas directas verifican que errores desconocidos
 siguen delegándose. Cero mensajes, consentimientos, jobs o conexiones externas.
-El ajuste `care_*` está **pendiente de publicación y aceptación del runtime**;
-la prueba aislada no afirma que la retirada de permisos se haya aplicado.
 Evidencia privada: `/tmp/cc-campaign-opt-mysql-oHO47n/result.json`.
+
+El ajuste `care_*` está **publicado en DEV y CRM** con backend
+`1c30663324c81ef3d60520352cc742f6785cd900`. La promoción staging fue fast-forward;
+el preflight acreditó 56 tablas, cero problemas y cero migraciones pendientes
+necesarias para esta release, conservando el entorno del servicio. Se reinició
+la API, no el gateway.
+
+Después de publicar se probó el PATCH nativo autenticado en DEV sobre una
+reserva ficticia futura ya cancelada: `409`,
+`Content-Type: application/json; charset=utf-8` y
+`care_no_show_too_early`, conservando estado, `updated_at` y metadata. Evidencia
+privada: `dev-future-json-after-publish.json` en el directorio de operación anterior.
+La limpieza visual autenticada canceló las pruebas con comunicaciones suprimidas;
+se verificó ausencia de mensajes, jobs, paquetes y documentos de consentimiento
+generados por esas pruebas (`dev-cleanup.json`). CRM comprueba con sesión real
+las cinco pertenencias sin agenda flexible, activas y recibiendo citas, ambas
+orientaciones de agenda y la apertura/cierre de un borrador vacío. Cero
+escrituras clínicas o comunicaciones durante esa navegación. Evidencia
+`crm-native-readonly-after-retirement.json` en la misma carpeta; no se confunde
+esa revisión con las escrituras ficticias DEV o SQL aisladas.
