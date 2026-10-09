@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const crypto = require('crypto');
 const db = require('../../models');
+const { resolveEnqueueRuntimeNamespace } = require('../lib/gatewayJobOwnership');
 
 const { JobRequest, sequelize, Sequelize } = db;
 
@@ -153,9 +154,9 @@ const buildScopedPayload = (payload = {}, { dedupeScope = null } = {}) => {
     ? { ...payload }
     : {};
 
-  if (!base[RUNTIME_NAMESPACE_PAYLOAD_KEY]) {
-    base[RUNTIME_NAMESPACE_PAYLOAD_KEY] = CURRENT_RUNTIME_NAMESPACE;
-  }
+  base[RUNTIME_NAMESPACE_PAYLOAD_KEY] = resolveEnqueueRuntimeNamespace(
+    CURRENT_RUNTIME_NAMESPACE, base[RUNTIME_NAMESPACE_PAYLOAD_KEY], process.env
+  );
   if (dedupeScope && !base[DEDUPE_SCOPE_PAYLOAD_KEY]) {
     base[DEDUPE_SCOPE_PAYLOAD_KEY] = dedupeScope;
   }

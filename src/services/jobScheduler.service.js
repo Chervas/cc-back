@@ -3,6 +3,8 @@ const jobRequestsService = require('./jobRequests.service');
 const jobExecutor = require('./jobExecutor.service');
 const aiRuntimeMonitoring = require('./aiRuntimeMonitoring.service');
 const { BACKGROUND_INTEGRATION_JOB_TYPES } = require('../config/scheduledJobCatalog');
+const { isGatewayRuntime } = require('../lib/gatewayJobOwnership');
+const IS_GATEWAY_RUNTIME = isGatewayRuntime(process.env);
 
 const CRITICAL_INTERVAL_MS = Number(process.env.JOB_SCHEDULER_CRITICAL_INTERVAL_MS || 5000);
 const STANDARD_INTERVAL_MS = Number(process.env.JOB_SCHEDULER_INTERVAL_MS || 30000);
@@ -306,6 +308,7 @@ function buildSettlementRecovery(job, result, now = new Date()) {
 }
 
 async function processJob(job) {
+  if (IS_GATEWAY_RUNTIME) return false;
   workerState.activeJobs += 1;
   try {
     let result;
@@ -369,6 +372,7 @@ async function processJob(job) {
 }
 
 async function drainQueue(priorityList, marker, allowedTypes = SCHEDULER_ALLOWED_TYPES) {
+  if (IS_GATEWAY_RUNTIME) return 0;
   if (marker === 'critical') {
     if (drainingCritical) {
       return 0;
@@ -412,6 +416,7 @@ async function drainQueue(priorityList, marker, allowedTypes = SCHEDULER_ALLOWED
 }
 
 async function handleCriticalTick() {
+  if (IS_GATEWAY_RUNTIME) return 0;
   if (externalDispatcher) {
     return externalDispatcher('critical');
   }
@@ -419,6 +424,7 @@ async function handleCriticalTick() {
 }
 
 async function handleStandardTick() {
+  if (IS_GATEWAY_RUNTIME) return 0;
   if (externalDispatcher) {
     return externalDispatcher('standard');
   }
@@ -426,6 +432,7 @@ async function handleStandardTick() {
 }
 
 async function handleBackgroundTick() {
+  if (IS_GATEWAY_RUNTIME) return 0;
   if (externalDispatcher) {
     return externalDispatcher('background');
   }
@@ -462,6 +469,7 @@ async function handleBackgroundTick() {
 }
 
 function start(options = {}) {
+  if (IS_GATEWAY_RUNTIME) return Promise.resolve({ status: 'disabled', reason: 'gateway_runtime' });
   if (workerState.running) {
     return startupPromise || Promise.resolve({ status: 'already_running' });
   }
@@ -575,6 +583,7 @@ function stop() {
 }
 
 async function triggerImmediate(jobId) {
+  if (IS_GATEWAY_RUNTIME) return false;
   if (workerState.running && startupPromise) {
     await startupPromise;
   }
