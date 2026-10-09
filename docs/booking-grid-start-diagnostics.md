@@ -68,3 +68,44 @@ Pruebas: `availability_five_minute_slots`, `availability_request_snapshot`,
 `booking_equipment_http_availability`, `booking_attention` y
 `appointment_additional_staff_availability`. También QA de agenda día/semana,
 ambas orientaciones, todos los filtros y zoom, sin crear citas reales.
+
+## Excepciones manuales explicadas · 09/10/2026
+
+La selección explícita de un profesional o sala existentes y activos de la
+clínica puede advertir restricciones de asignación, horarios, ausencias,
+bloqueos y ocupación (profesional, sala, máquina y propio paciente). El catálogo
+no se modifica. La interfaz reúne **todos** los motivos del mismo snapshot,
+incluyendo profesional/sala asignados, tratamiento ocupado, horario real y
+minutos que excede la cita. No se atribuye atención continua a una reserva
+histórica salvo que su snapshot de intervención lo acredite.
+
+`/check` y los motivos JSON de matriz exponen `booking_restrictions` y
+`can_confirm_restrictions`. En una combinada aún incompleta,
+`can_place_with_restrictions` permite continuar colocando sus pasos; no
+autoriza guardar ni elegir por el usuario. Las propuestas completas de
+`treatment-slots` añaden `requires_restriction_acknowledgement` cuando procede,
+conservando offsets, duración, equipo ALL completo y maquinaria requerida.
+El hover no consulta SQL ni HTTP: reutiliza el mismo JSON de disponibilidad.
+
+POST de cita, reagendado y PATCH de apoyo usan un contrato distinto de `force`:
+un 409 `booking_restriction_confirmation_required` devuelve la explicación,
+`booking_restriction_acknowledgement` y el `booking_plan_sha256` efectivo.
+Sólo tras confirmar se repite el mismo payload con ambos recibos. Se recalcula
+bajo locks de recursos y paciente: si cambian reserva, profesional, sala,
+horarios, estado, actor o evidencias, exige otra confirmación. Las citas
+independientes vinculadas se mueven con un recibo del conjunto (incluye también
+miembros sin advertencias); si falla una, ninguna se guarda.
+
+El recibo y el perfil original se conservan en `import_metadata`, junto al
+snapshot efectivo que proyecta las tarjetas. No hay migración SQL, permiso
+nuevo, envíos extra, cambio de estados comunicacionales ni activación de
+consentimientos. `force: true` por sí solo no acepta esta excepción.
+
+No admite recursos ajenos/inactivos, acceso sin permiso, maquinaria inexistente
+o en mantenimiento, cambios de firmas/consumo, duración u obligaciones ALL, ni
+una combinación internamente imposible. Sesiones de programas comprados siguen
+su contrato protegido; esta entrega no modifica su contabilidad o selección.
+
+Pruebas offline: `booking_restriction_confirmation`, `booking_guided_placement`,
+`appointment_booking_core` (alta, stale receipt, apoyo y fases),
+`appointment_booking_http_contract` y suites existentes de disponibilidad.

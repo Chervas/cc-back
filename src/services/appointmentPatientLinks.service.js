@@ -1,5 +1,5 @@
 'use strict';
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash, timingSafeEqual } = require('node:crypto');
 const { resolveClinicTimezone, formatDateLocal } = require('../lib/availability-calendar');
 const { bookingError, requireOperationalProfile, loadScopedTreatment } = require('./treatmentBookingProfile.service');
 const json = value => typeof value === 'string' ? JSON.parse(value) : value || {};
@@ -178,11 +178,12 @@ async function moveTogether(db, selectedId, changes, options) {
     const delta = +new Date(changes.inicio) - +new Date(selected.inicio);
     if (!Number.isFinite(delta) || +new Date(changes.fin) - +new Date(changes.inicio) !== +new Date(selected.fin) - +new Date(selected.inicio)) fail('appointment_link_duration_locked', 'Mueve la unión conservando la duración de sus citas. Para cambiarla, desvincula primero.');
     const clinic = await db.Clinica.findByPk(group.link.clinic_id, { transaction });
-    const profiles = [];
+    const profiles = [], treatments = [];
     for (const row of group.rows) {
-      let profile = json(row.import_metadata).booking?.profile;
+      const treatment = await loadScopedTreatment({ db, treatmentId: row.tratamiento_id, clinic, transaction });
+      treatments.push(treatment);
+      let profile = json(row.import_metadata).booking_restriction_confirmation?.original_profile || json(row.import_metadata).booking?.profile;
       if (!profile) {
-        const treatment = await loadScopedTreatment({ db, treatmentId: row.tratamiento_id, clinic, transaction });
         profile = requireOperationalProfile(treatment, { allowObsolete: true });
       }
       profile ||= { version: 1, phases: [{ key: 'appointment', duration_minutes: (+new Date(row.fin) - +new Date(row.inicio)) / 60000,
@@ -195,24 +196,97 @@ async function moveTogether(db, selectedId, changes, options) {
       if (changes.doctor_id != null) profiles[selectedIndex].phases[0].professionals.ids = [Number(changes.doctor_id)];
       if (changes.instalacion_id != null) profiles[selectedIndex].phases[0].installation_ids = [Number(changes.instalacion_id)];
     }
-    const union = { version: Math.max(...profiles.map(profile => profile.version || 1)), phases: profiles.flatMap(profile => profile.phases) };
+    const manual = options.restrictionConfirmation?.actorId === Number(changes.updated_by)
+      && Number.isSafeInteger(options.restrictionConfirmation?.actorId) && options.restrictionConfirmation.actorId > 0;
+    const { restrictionReadProfile, assessment, restrictionErrorDetails } = require('../lib/booking-restriction-confirmation');
+    const choices = profiles.map((profile, index) => {
+      const row = group.rows[index], selectedRow = Number(row.id_cita) === Number(selectedId), snapshot = json(row.import_metadata).booking;
+      let selections = snapshot?.phases ? Object.fromEntries(snapshot.phases.map(step => [step.key, {
+        installation_id: step.installation_id, ...(profile.phases.find(phase => phase.key === step.key)?.professionals.mode === 'any'
+          ? { doctor_id: step.doctor_ids[0] } : {}),
+      }])) : { [profile.phases[0].key]: { doctor_id: row.doctor_id, installation_id: row.instalacion_id } };
+      if (selectedRow && Object.keys(options.selections || {}).length) selections = options.selections;
+      else if (selectedRow && profile.phases.length === 1) selections = { [profile.phases[0].key]: {
+        ...selections[profile.phases[0].key], ...(changes.doctor_id != null ? { doctor_id: changes.doctor_id } : {}),
+        ...(changes.instalacion_id != null ? { installation_id: changes.instalacion_id } : {}),
+      } };
+      return selections;
+    });
+    const readProfiles = manual ? profiles.map((profile, index) => restrictionReadProfile(profile, { selections: choices[index] })) : profiles;
+    const union = { version: Math.max(...readProfiles.map(profile => profile.version || 1)), phases: readProfiles.flatMap(profile => profile.phases) };
     // Lock all resources before any update; failures roll the entire move back.
     const { lockBookingResources, mutateAppointmentBooking } = require('./appointmentBookingCommand.service');
     const { resolveInstallationKeys, loadBookingContext } = require('./appointmentBookingAvailability.service');
-    const ids = [...new Set(union.phases.flatMap(phase => phase.installation_ids))];
+    const ids = [...new Set([...union.phases.flatMap(phase => phase.installation_ids),
+      ...group.rows.flatMap(row => [Number(row.instalacion_id), ...((json(row.import_metadata).booking?.phases || []).map(phase => Number(phase.installation_id)))]).filter(id => id > 0)])];
     const mapping = await resolveInstallationKeys({ db, clinic, installationIds: ids, transaction, enabled: true });
-    const support = [...new Set(group.rows.flatMap(row => json(row.import_metadata).additional_staff?.ids || []))];
-    const keys = [`patient:${group.link.patient_id}`, ...union.phases.flatMap(phase => phase.professionals.ids.map(id => `doctor:${id}`)),
+    const previousOccupancies = await db.AppointmentBookingOccupancy.findAll({ where: {
+      appointment_id: { [db.Sequelize.Op.in]: group.rows.map(row => Number(row.id_cita)) } }, transaction });
+    const rowSupports = group.rows.map(row => Number(row.id_cita) === Number(selectedId) && options.additionalStaffIds !== undefined
+      ? require('../lib/appointment-additional-staff').normalizeAdditionalStaff(options.additionalStaffIds)
+      : json(row.import_metadata).additional_staff?.ids || []);
+    const support = [...new Set(rowSupports.flat())];
+    const keys = [`patient:${group.link.patient_id}`, ...previousOccupancies.map(row => row.resource_key),
+      ...group.rows.flatMap(row => [Number(row.doctor_id), ...(json(row.import_metadata).additional_staff?.ids || [])]).filter(id => id > 0).map(id => `doctor:${id}`),
+      ...union.phases.flatMap(phase => phase.professionals.ids.map(id => `doctor:${id}`)),
       ...support.map(id => `doctor:${id}`), ...ids.map(id => mapping.keys.get(Number(id))),
       ...require('../lib/booking-equipment').equipmentIds(union).map(id => `equipment:${id}`)];
     if (new Set(keys).size > 100) fail('appointment_link_resource_limit', 'Esta unión utiliza demasiados recursos. Desvincula algunas citas antes de moverla.');
     await lockBookingResources({ db, resourceKeys: keys, transaction });
+    // A single receipt covers ALL independently linked reservations. Rolling
+    // back after the first warning must not trap the UI in a per-member loop.
+    // Read once per member, under the group's lexical resource locks, and pin
+    // both external evidence and the proposed earlier members of this move.
+    const prepared = [], virtual = [];
+    if (manual) {
+      const { occupancyForSolution, solveBookingProfile } = require('../lib/booking-profile-solver');
+      for (let index = 0; index < group.rows.length; index++) {
+        const row = group.rows[index], start = new Date(+new Date(row.inicio) + delta), end = new Date(+new Date(row.fin) + delta);
+        const context = await loadBookingContext({ db, clinic, profile: readProfiles[index], start, end, transaction,
+          occupancyEnabled: true, patientId: group.link.patient_id, additionalStaffIds: rowSupports[index],
+          ignoreAppointmentIds: group.rows.map(item => Number(item.id_cita)), inheritEquipmentAttention: false, includeDiagnosticLabels: true });
+        for (const prior of virtual) {
+          for (const occupancy of prior.occupancies) {
+            const resource = occupancy.resource_kind === 'doctor' ? context.doctors.get(occupancy.doctor_id)
+              : occupancy.resource_kind === 'installation' ? [...context.installations.entries()]
+                .find(([id, room]) => (room.resource_key || mapping.keys.get(Number(id))) === occupancy.resource_key)?.[1]
+                : context.equipment?.get(Number(occupancy.resource_key.split(':')[1]));
+            if (resource) resource.busy.push({ start: occupancy.start_at, end: occupancy.end_at, appointment_id: prior.id,
+              diagnostic: { kind: 'appointment', treatment_name: prior.treatmentName } });
+          }
+          context.patientBusy.push({ start: prior.solution.start_at, end: prior.solution.end_at, appointment_id: prior.id, clinic_id: Number(group.link.clinic_id) });
+        }
+        const decision = assessment({ profile: profiles[index], context, start, selections: choices[index], additionalStaffIds: rowSupports[index],
+          canonicalSolution: solveBookingProfile({ profile: profiles[index], ...context, start, selections: choices[index] }),
+          clinicId: Number(group.link.clinic_id), clinicName: clinic.nombre_clinica, treatmentId: row.tratamiento_id,
+          treatmentName: treatments[index]?.nombre || '', patientId: group.link.patient_id, appointmentId: row.id_cita,
+          actorId: options.restrictionConfirmation.actorId, previous: row.toJSON ? row.toJSON() : row });
+        prepared.push({ context, decision });
+        if (decision.solution) virtual.push({ id: Number(row.id_cita), solution: decision.solution, treatmentName: treatments[index]?.nombre || '',
+          occupancies: occupancyForSolution(decision.solution, mapping.keys) });
+      }
+      const warnings = prepared.filter(item => item.decision.restrictions.length);
+      if (warnings.length && prepared.every(item => item.decision.solution && (!item.decision.restrictions.length || item.decision.canConfirm))) {
+        const receipt = createHash('sha256').update(JSON.stringify({ schema: 'linked-booking-restrictions/1',
+          actor: options.restrictionConfirmation.actorId, group: String(group.link.id), revision: group.link.revision,
+          selected: Number(selectedId), delta, members: group.rows.map((row, index) => [Number(row.id_cita), prepared[index].decision.acknowledgement]) })).digest('hex');
+        const supplied = options.restrictionConfirmation.acknowledgement;
+        if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied)
+          || !timingSafeEqual(Buffer.from(supplied, 'hex'), Buffer.from(receipt, 'hex'))) {
+          const selectedDecision = prepared[selectedIndex].decision;
+          fail('booking_restriction_confirmation_required', 'Las citas vinculadas se moverán juntas. Revisa todas las restricciones y confirma el movimiento completo.', {
+            ...restrictionErrorDetails(selectedDecision), can_confirm_restrictions: true, booking_restriction_acknowledgement: receipt,
+            booking_restrictions: warnings.flatMap(item => item.decision.restrictions), linked_appointments: group.rows.length,
+          });
+        }
+      }
+    }
     const result = [], moved = new Set();
     for (let index = 0; index < group.rows.length; index++) {
       const row = group.rows[index], start = new Date(+new Date(row.inicio) + delta), end = new Date(+new Date(row.fin) + delta);
       const currentChanges = { inicio: start, fin: end, estado: changes.estado, reschedule_reason: changes.reschedule_reason,
         updated_by: changes.updated_by, ...(Number(row.id_cita) === Number(selectedId) ? changes : {}) };
-      const context = await loadBookingContext({ db, clinic, profile: profiles[index], start, end, transaction,
+      const context = prepared[index]?.context || await loadBookingContext({ db, clinic, profile: profiles[index], start, end, transaction,
         occupancyEnabled: true, patientId: group.link.patient_id, additionalStaffIds: support,
         ignoreAppointmentIds: group.rows.filter(item => !moved.has(Number(item.id_cita))).map(item => Number(item.id_cita)),
         inheritEquipmentAttention: false });
@@ -220,7 +294,10 @@ async function moveTogether(db, selectedId, changes, options) {
       const updated = await mutateAppointmentBooking({ db, transaction, existingAppointmentId: row.id_cita,
         appointmentValues: currentChanges, preparedContext: context, allowObsolete: true,
         priorityAcknowledged: options.priorityAcknowledged, force: options.force,
-        ...(Number(row.id_cita) === Number(selectedId) ? { selections: options.selections || {}, additionalStaffIds: options.additionalStaffIds } : {}),
+        ...(manual ? { selections: choices[index], restrictionConfirmation: { actorId: options.restrictionConfirmation.actorId,
+          acknowledgement: prepared[index].decision.acknowledgement } } : {}),
+        ...(Number(row.id_cita) === Number(selectedId) ? { ...(!manual ? { selections: options.selections || {} } : {}),
+          expectedPlanSha256: options.expectedPlanSha256, additionalStaffIds: options.additionalStaffIds } : {}),
         reschedulePatientOverlap: options.reschedulePatientOverlap,
         persist: ({ values, existing }) => existing.update(values, { transaction }) });
       result.push(updated); moved.add(Number(row.id_cita));

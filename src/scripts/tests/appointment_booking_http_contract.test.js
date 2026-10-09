@@ -25,7 +25,7 @@ test('HTTP has no adapter for operator-only documentary machinery assignment', (
 
 test('HTTP only maps patient overlap confirmation in the authenticated reschedule command, not creation or legacy writes', () => {
   const occurrences = controller.match(/reschedulePatientOverlap:/g) || [];
-  assert.equal(occurrences.length, 1);
+  assert.equal(occurrences.length, 2); // Single and atomically linked rescheduling.
   const reschedule = controller.slice(controller.indexOf('exports.reagendarCita ='), controller.indexOf('exports.resolveImportedTreatment ='));
   assert.match(reschedule, /if \(await denyAppointmentManageAccessIfNeeded\(req, res, cita.clinica_id\)\) return/);
   assert.match(reschedule, /reschedulePatientOverlap: \{ actorId: Number\(req.userData\?\.userId\),\s*acknowledgement: req.body\?\.patient_overlap_acknowledgement \}/);
@@ -40,6 +40,7 @@ test('linked-source state, requested-change and reschedule endpoints fail closed
   const exports = {}, context = { exports, CITA_ESTADOS_VALIDOS: new Set(['completada']),
     asyncHandler: fn => fn, CitaPaciente: { findByPk: async () => appointment },
     denyAppointmentManageAccessIfNeeded: async () => false,
+    canUserAccessFeature: async () => true,
     require: name => name === '../lib/program-booking' ? { programBookingEnabled: () => false } : nativeRequire(name) };
   for (const [start, finish] of [
     ['exports.updateCitaEstado =', 'exports.resolveRequestedAppointmentChange ='],

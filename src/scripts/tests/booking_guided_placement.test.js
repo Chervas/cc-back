@@ -53,3 +53,22 @@ test('invalid prefix, unknown resources, ALL reduction, malformed times and non-
 test('past starts have no options even if resources are free', () => {
   const f = fixture(); f.now = new Date('2030-01-07T15:01:00Z'); assert.deepEqual(guidedTreatmentOptions(f).slots, []);
 });
+test('explicit manual guided placement offers occupied and outside-profile scoped resources without reducing an ALL team', () => {
+  const f = fixture(); f.selections.indiba.installation_id = 11;
+  f.context.doctors.get(7).busy.push({ start: '2030-01-07T15:33:00Z', end: '2030-01-07T15:50:00Z', appointment_id: 99 });
+  const result = guidedTreatmentOptions({ ...f, allowRestrictedPlacement: true });
+  assert(result.slots.length > 0);
+  const outside = result.slots.find(slot => slot.phases[1].doctor_ids[0] === 7 && slot.phases[1].installation_id === 9);
+  assert(outside); assert.equal(outside.requires_restriction_acknowledgement, true);
+  assert(outside.booking_restrictions.some(row => row.code === 'TREATMENT_INSTALLATION_NOT_ALLOWED'));
+  assert(outside.booking_restrictions.some(row => row.code === 'STAFF_OVERLAP'));
+  assert.deepEqual(outside.phases[2].doctor_ids, [5, 7]);
+});
+test('manual guided proposals include busy supporting staff but never absent resources', () => {
+  const f = fixture(); f.additionalStaffIds = [8];
+  f.context.doctors.get(8).busy.push({ start: '2030-01-07T15:35:00Z', end: '2030-01-07T15:40:00Z', appointment_id: 98 });
+  const result = guidedTreatmentOptions({ ...f, allowRestrictedPlacement: true });
+  assert(result.slots.length > 0); assert(result.slots.every(slot => slot.requires_restriction_acknowledgement));
+  f.selections.indiba.doctor_id = 99;
+  assert.throws(() => guidedTreatmentOptions({ ...f, allowRestrictedPlacement: true }), { code: 'booking_search_invalid' });
+});

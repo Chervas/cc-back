@@ -39,11 +39,18 @@ function fixture({ enabled = true, equipment = true, denied = false, busy = fals
         loadBookingContext: async args => {
           calls.context++;
           if (equipment) { calls.equipment++; assertEquipmentEnabled(args.clinic, true); }
-          return {};
+          const windows = [{ start: '2030-01-07T00:00:00Z', end: '2030-01-09T00:00:00Z' }];
+          return { timeZone: 'Europe/Madrid', clinicWindows: null, patientBusy: [],
+            doctors: new Map([[5, { name: 'Fictitious clinician', windows, busy: [] }]]),
+            installations: new Map([[9, { name: 'Fictitious room', windows, busy: [] }]]),
+            ...(equipment ? { equipment: new Map([[6, { id: 6, name: 'Fictitious machine', status: 'available',
+              installation_ids: new Set([9]), turnaround_minutes: 0, attention_policy: { mode: 'continuous', patient_preparation_minutes: 0 },
+              busy: busy ? [{ start: '2030-01-07T09:00:00Z', end: '2030-01-07T09:30:00Z', appointment_id: 200 }] : [] }]]) } : {}) };
         }, solutionsForCalendar: args => {
           calls.solve++;
           assert.equal(args.profile, profile);
-          return busy ? [] : [{ start_local: args.date + 'T10:00:00', end_local: args.date + 'T10:30:00' }];
+          return busy || Object.entries(args.selections || {}).some(([, choice]) => choice.doctor_id && choice.doctor_id !== 5
+            || choice.installation_id && choice.installation_id !== 9) ? [] : [{ start_local: args.date + 'T10:00:00', end_local: args.date + 'T10:30:00' }];
         },
       };
       if (name === '../lib/booking-profile-solver') return {
@@ -70,9 +77,10 @@ test('exact-slot HTTP check retains clinic equipment opt-in in its SQL projectio
 test('exact-slot HTTP check still rejects a clinic without equipment opt-in', async () => {
   const f = fixture({ enabled: false }); await assert.rejects(f.check(), { code: 'booking_equipment_disabled' });
 });
-test('equipment collision cannot be forced and does not disclose another appointment', async () => {
+test('equipment collision requires explicit acknowledgement rather than old force and does not disclose another appointment', async () => {
   const f = fixture({ busy: true }); await f.check();
   assert.equal(f.response.statusCode, 409); assert.equal(f.response.body.can_force, false);
+  assert.equal(f.response.body.can_confirm_restrictions, true);
   assert.doesNotMatch(JSON.stringify(f.response.body), /patient_id|paciente_id|cita_ids|source_reference/);
 });
 test('equipment check requires clinic permission before consulting availability', async () => {
@@ -101,10 +109,10 @@ test('multi-phase grid is explicit rather than painting only the first phase', a
   await assert.rejects(f.grid(), { code: 'booking_profile_use_treatment_slots' });
   assert.equal(f.calls.context, 0);
 });
-test('treatment weekly grid loads one context and skips incompatible columns before solving', async () => {
+test('treatment weekly grid loads one context and evaluates explanations for every visible column', async () => {
   const f = fixture(); await f.grid();
   assert.equal(f.calls.acl, 1); assert.equal(f.calls.clinic, 1); assert.equal(f.calls.context, 1);
-  assert.equal(f.calls.equipment, 1); assert.equal(f.calls.solve, 2);
+  assert.equal(f.calls.equipment, 1); assert.equal(f.calls.solve, 8);
   assert.equal(f.response.body.rows.length, 4);
   for (const row of f.response.body.rows) {
     assert.equal(row.ok, true);

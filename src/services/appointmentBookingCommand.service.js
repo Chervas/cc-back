@@ -222,7 +222,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
   allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false,
   additionalStaffIds = undefined, supportOnly = false, expectedRange = null, importEquipmentAssignment = null,
   trustedProgramSeries = null, reschedulePatientOverlap = null, durationSelection, expectedPlanSha256,
-  visitBirth = null }) {
+  visitBirth = null, restrictionConfirmation = null }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
   durationSelection = normalizeDurationSelection(durationSelection);
   // Internal documentary reconciliation only, never forwarded from an HTTP
@@ -247,6 +247,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const previous = existing?.toJSON ? existing.toJSON() : (existing || {});
     assertGenericSourceIdentity(previous, appointmentValues);
     const values = { ...previous, ...appointmentValues };
+    const stateOnlyCancellation = stateOnly && existing && values.estado === 'cancelada';
     // Existing enrolled visits must follow the canonical writer even with the
     // communication rollout closed. The proof is captured under the same Cita
     // lock and finalized only after persistence/occupancy, never from a PATCH
@@ -275,11 +276,11 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       }
     }
     const previousStaff = additionalStaffSnapshot(previous);
-    if (metadataObject(previous.import_metadata).additional_staff && !previousStaff) {
+    if (!stateOnlyCancellation && metadataObject(previous.import_metadata).additional_staff && !previousStaff) {
       throw bookingError('booking_additional_staff_invalid', 'Revisa el personal de apoyo de esta cita antes de modificarla.');
     }
     const extraStaff = requestedStaff ?? previousStaff?.ids ?? [];
-    if (extraStaff.length && !capabilities.multi) throw bookingError('booking_profile_runtime_unavailable',
+    if (!stateOnlyCancellation && extraStaff.length && !capabilities.multi) throw bookingError('booking_profile_runtime_unavailable',
       'La reserva con personal de apoyo todavía no está activada.');
     if (stateOnly && requestedStaff !== undefined) throw bookingError('booking_additional_staff_invalid',
       'Cambia el personal desde la edición de la cita, no desde su estado.', null, 400);
@@ -322,7 +323,18 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       throw bookingError('program_session_replaced', 'Esta cita pertenece al historial de una sesión que ya tiene otra reserva.');
     }
     await require('./appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous,
-      appointment: values, transaction: tx });
+      appointment: values, transaction: tx, additionalStaffIds: requestedStaff });
+    if (stateOnlyCancellation) {
+      // Cancelling an existing reservation releases capacity by canonical state;
+      // it is not a new booking. A hidden treatment, an old/incomplete profile or
+      // a closed multi-resource rollout must not prevent this action. Preserve
+      // every original snapshot/occupancy row and the same transaction/visit
+      // proof; reopening will still recheck the complete booking requirements.
+      const saved = await persist({ values: { ...previous, estado: 'cancelada', updated_by: values.updated_by },
+        existing, transaction: tx, solution: null });
+      if (visitMutation) await managedVisitWriter.persistMutation(visitMutation, { appointment: saved, transaction: tx });
+      return saved;
+    }
     if (stateOnly && existing && values.estado === 'completada' && previous.estado === 'completada') return existing;
     const completionPatch = values.estado === 'completada' && previous.estado !== 'completada'
       ? require('../lib/appointment-care').careActionPatch(previous, 'finish', { actorId: values.updated_by }) : {};
@@ -373,6 +385,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     // The operator confirmation is server-owned provenance, not request data.
     delete importMetadata.patient_overlap_confirmation;
     if (previousMetadata.patient_overlap_confirmation) importMetadata.patient_overlap_confirmation = previousMetadata.patient_overlap_confirmation;
+    delete importMetadata.booking_restriction_confirmation;
+    if (previousMetadata.booking_restriction_confirmation) importMetadata.booking_restriction_confirmation = previousMetadata.booking_restriction_confirmation;
     if (values.estado === 'cancelada' && previousStaff) {
       if (requestedStaff !== undefined && JSON.stringify(requestedStaff) !== JSON.stringify(previousStaff.ids)) {
         throw bookingError('booking_additional_staff_invalid', 'Reabre la cita para cambiar su personal de apoyo.', null, 400);
@@ -424,11 +438,34 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     if (configuredProfile && values.estado !== 'cancelada' && +end - +start !== bookingProfileDurationMinutes(configuredProfile) * 60000) {
       throw bookingError('booking_duration_locked', 'La duración de la cita debe respetar los pasos del tratamiento.', { can_force: false }, 422);
     }
-    const profile = configuredProfile || legacyProfile(values, (end - start) / 60000);
-    const installationIds = [...new Set(profile.phases.flatMap((phase) => phase.installation_ids))];
+    let profile = configuredProfile || legacyProfile(values, (end - start) / 60000);
+    const manualRestrictions = restrictionConfirmation && !stateOnly && !importEquipmentAssignment
+      && !session && !trustedProgramSession && !preparedSeries
+      && Number.isSafeInteger(restrictionConfirmation.actorId) && restrictionConfirmation.actorId > 0
+      && restrictionConfirmation.actorId === Number(values.updated_by || values.created_by);
+    // A previously accepted exception does not rewrite the catalog. Retain the
+    // original requirements for a fresh, exact confirmation when it is moved.
+    if (manualRestrictions && snapshot && Number(previous.tratamiento_id) === Number(values.tratamiento_id)
+      && previousMetadata.booking_restriction_confirmation?.original_profile) {
+      profile = normalizeBookingProfile(previousMetadata.booking_restriction_confirmation.original_profile);
+    }
+    const existingSelections = previousMetadata.booking?.phases && configuredProfile
+      ? Object.fromEntries(previousMetadata.booking.phases.map((phase) => [phase.key, {
+        installation_id: phase.installation_id,
+        ...((session ? normalizeBookingProfile(previousMetadata.booking.profile) : profile)?.phases.find((candidate) => candidate.key === phase.key)?.professionals.mode === 'any'
+          ? { doctor_id: phase.doctor_ids?.[0] } : {}),
+      }])) : null;
+    let chosen = Object.keys(selections || {}).length ? selections
+      : (profile.phases.length === 1 && profile.phases[0].professionals.mode === 'any'
+        ? { [profile.phases[0].key]: { doctor_id: values.doctor_id, installation_id: values.instalacion_id } }
+        : existingSelections || {});
+    if (session || trustedProgramSession) chosen = require('../lib/program-appointment-link').programBookingSelections(
+      metadataObject((session || trustedProgramSession).snapshot), previous, chosen);
+    const readProfile = manualRestrictions ? require('../lib/booking-restriction-confirmation').restrictionReadProfile(profile, { selections: chosen }) : profile;
+    const installationIds = [...new Set(readProfile.phases.flatMap((phase) => phase.installation_ids))];
     const mapping = await resolveInstallationKeys({ db, clinic, installationIds, transaction: tx, enabled: true });
     const keys = [
-      ...profile.phases.flatMap((phase) => phase.professionals.ids.map((id) => `doctor:${id}`)),
+      ...readProfile.phases.flatMap((phase) => phase.professionals.ids.map((id) => `doctor:${id}`)),
       ...extraStaff.map((id) => `doctor:${id}`),
       ...installationIds.map((id) => mapping.keys.get(id)), ...previousRows.map((row) => row.resource_key),
       ...equipmentIds(profile).map(id => `equipment:${id}`),
@@ -440,33 +477,49 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const lockedReplay = await replay(); if (lockedReplay) return lockedReplay;
     let solution = null;
     if (values.estado !== 'cancelada') {
-      const context = ((!extraStaff.length || preparedSeries || patientLinkContexts.has(preparedContext)) && preparedContext) || await loadBookingContext({ db, clinic, profile, start, end, transaction: tx,
+      const context = ((!extraStaff.length || preparedSeries || patientLinkContexts.has(preparedContext)) && preparedContext) || await loadBookingContext({ db, clinic, profile: readProfile, start, end, transaction: tx,
         ignoreAppointmentId: existing?.id_cita, occupancyEnabled: true, installationMapping: mapping, patientId: values.paciente_id,
         additionalStaffIds: extraStaff, equipmentEnabled: capabilities.equipment,
-        inheritEquipmentAttention: !snapshot || Number(previous.tratamiento_id) !== Number(values.tratamiento_id) || configuredProfile?.version >= 3 });
-      const existingSelections = previousMetadata.booking?.phases && configuredProfile
-        ? Object.fromEntries(previousMetadata.booking.phases.map((phase) => [phase.key, {
-          installation_id: phase.installation_id,
-          ...((session ? normalizeBookingProfile(previousMetadata.booking.profile) : configuredProfile)?.phases.find((candidate) => candidate.key === phase.key)?.professionals.mode === 'any'
-            ? { doctor_id: phase.doctor_ids?.[0] } : {}),
-        }])) : null;
-      let chosen = Object.keys(selections || {}).length ? selections
-        : (configuredProfile?.phases.length === 1 && configuredProfile.phases[0].professionals.mode === 'any'
-          ? { [configuredProfile.phases[0].key]: { doctor_id: values.doctor_id, installation_id: values.instalacion_id } }
-          : existingSelections || {});
-      if (session || trustedProgramSession) {
-        chosen = require('../lib/program-appointment-link').programBookingSelections(
-          metadataObject((session || trustedProgramSession).snapshot), previous, chosen);
-      }
+        inheritEquipmentAttention: !snapshot || Number(previous.tratamiento_id) !== Number(values.tratamiento_id) || configuredProfile?.version >= 3,
+        includeDiagnosticLabels: !!manualRestrictions });
       const supportFree = extraStaff.every(id => isFree(context.doctors.get(id), start, end));
       const permitsProfileForce = !extraStaff.length && ((!session && !trustedProgramSession && !preparedSeries)
         || context.doctors.get(Number(values.doctor_id))?.agenda_flexible === true);
-      solution = supportFree ? (configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen, allowOverlap: permitsProfileForce && force === true })
-        : solveLegacy(values, context, !extraStaff.length && force === true)) : null;
+      solution = supportFree ? (configuredProfile ? solveBookingProfile({ profile, start, ...context, selections: chosen, allowOverlap: !manualRestrictions && permitsProfileForce && force === true })
+        : solveLegacy(values, context, !manualRestrictions && !extraStaff.length && force === true)) : null;
       if (solution && extraStaff.length && solution.phases.some(phase =>
         !require('../lib/installation-professionals').installationAllowsStaff(context.installations.get(phase.installation_id),extraStaff))) solution=null;
       const patientConflicts = conflictsForPatient(context.patientBusy, { start, end, appointmentId: existing?.id_cita });
-      const patientConflict = patientConflicts.length > 0;
+      let patientConflict = patientConflicts.length > 0;
+      if (manualRestrictions && (!solution || patientConflict)) {
+        const { assessment, restrictionErrorDetails } = require('../lib/booking-restriction-confirmation');
+        const result = assessment({ profile, context, start, selections: chosen, additionalStaffIds: extraStaff,
+          canonicalSolution: solution,
+          clinicId: Number(values.clinica_id), clinicName: clinic.nombre_clinica, treatmentId: values.tratamiento_id,
+          treatmentName: treatment?.nombre || '', patientId: values.paciente_id, appointmentId: existing?.id_cita || null,
+          actorId: restrictionConfirmation.actorId, previous: existing ? previous : null,
+          acknowledgement: restrictionConfirmation.acknowledgement,
+          eligible: !['ha_acudido', 'en_atencion', 'completada', 'no_asistio'].includes(previous.estado)
+            && !previous.care_started_at && !previous.care_completed_at
+            && previous.care_legacy_attendance !== true && previous.care_legacy_attendance !== 1 && !values.es_provisional });
+        if (result.canConfirm && !result.confirmed) throw bookingError('booking_restriction_confirmation_required',
+          'Este horario tiene restricciones. Revisa todos los motivos y confirma si quieres reservar igualmente.', restrictionErrorDetails(result));
+        if (result.confirmed) {
+          const originalProfile = profile;
+          solution = result.solution;
+          profile = result.effectiveProfile;
+          if (configuredProfile) configuredProfile = profile;
+          patientConflict = false;
+          importMetadata.booking_restriction_confirmation = { version: 1, confirmed_by: restrictionConfirmation.actorId,
+            confirmed_at: new Date().toISOString(), acknowledgement: result.acknowledgement,
+            start_at: start.toISOString(), end_at: end.toISOString(), restrictions: result.restrictions,
+            original_profile: normalizeBookingProfile({ ...originalProfile,
+              version: solution.phases.some(phase => phase.staff_attention) && originalProfile.version < 3 ? 3 : originalProfile.version,
+              phases: originalProfile.phases.map((phase, index) => ({ ...phase,
+                ...(solution.phases[index].staff_attention ? { staff_attention: solution.phases[index].staff_attention } : {}) })) }) };
+          values.import_metadata = importMetadata;
+        }
+      }
       if (!solution || new Date(solution.end_at).getTime() !== end.getTime()) {
         // Re-evaluated under the same resource locks. Force is only available
         // between ordinary appointments in this clinic, never for machinery,
@@ -539,6 +592,10 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
         values.import_metadata = importMetadata;
       }
     }
+    // Choices resolve real phase resources after the early care check. Protect
+    // their final identity as well, including secondary phases whose primary
+    // doctor/room fields do not change. This pure guard performs no extra read.
+    require('../lib/appointment-care').assertCareStatusChange(previous, values, new Date(), { additionalStaffIds: requestedStaff });
     if (solution) require('../lib/booking-plan-receipt').assertBookingPlanReceipt(expectedPlanSha256, profile, solution);
     const appointment = visitBirth
       ? await require('./appointmentVisitManaged.service').current().persistBirth(visitBirth, {

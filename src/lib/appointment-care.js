@@ -1,4 +1,5 @@
 'use strict';
+const { CITA_ALLOWED_TRANSITIONS } = require('./status-catalog');
 const terminal = new Set(['cancelada', 'completada', 'no_asistio']);
 const fail = (code, message) => { throw Object.assign(new Error(message), { statusCode: 409, code }); };
 function careState(cita, now = new Date()) {
@@ -7,12 +8,15 @@ function careState(cita, now = new Date()) {
   const legacy = cita.care_legacy_attendance === true || cita.care_legacy_attendance === 1;
   const arrived = sameSchedule ? cita.arrived_at || null : null;
   const started = sameSchedule ? cita.care_started_at || null : null;
+  const scheduleStarted = !!cita.inicio && Number.isFinite(new Date(cita.inicio).getTime()) && new Date(cita.inicio) <= now;
   return {
     arrived_at: arrived,
     started_at: started,
     completed_at: sameSchedule ? cita.care_completed_at || null : null,
     legacy_attendance: legacy,
-    can_arrive: active && !legacy && !cita.es_provisional && !!cita.paciente_id && new Date(cita.inicio) <= now && !arrived,
+    can_arrive: active && !legacy && !cita.es_provisional && !!cita.paciente_id && scheduleStarted && !arrived,
+    can_no_show: (CITA_ALLOWED_TRANSITIONS[cita.estado] || []).includes('no_asistio')
+      && active && !legacy && !cita.es_provisional && !!cita.paciente_id && scheduleStarted && !arrived && !started,
     can_start: active && !legacy && !cita.es_provisional && !!cita.paciente_id && !!arrived && ['ha_acudido', 'en_atencion'].includes(cita.estado),
     can_complete: active && !legacy && !cita.es_provisional && !!cita.paciente_id && !!arrived && !!started && cita.estado === 'en_atencion',
   };
@@ -55,22 +59,51 @@ function allowsAppointmentAutomation(cita, triggerType) {
   return true;
 }
 
-function assertCareStatusChange(previous, next) {
+function assertCareStatusChange(previous, next, now = new Date(), { additionalStaffIds } = {}) {
   if (!next) return;
   previous = previous || {};
-  const care = careState(previous);
+  const care = careState(previous, now);
   // Clinical evidence belongs to this exact reservation, not a moved or relabelled appointment.
   if (care.started_at || previous.estado === 'en_atencion' || previous.estado === 'completada' || care.legacy_attendance) {
     const timeChanged = ['inicio', 'fin'].some(key => Object.hasOwn(next, key)
       && new Date(next[key]).getTime() !== new Date(previous[key]).getTime());
-    const identityChanged = ['paciente_id', 'clinica_id', 'tratamiento_id'].some(key => Object.hasOwn(next, key)
+    const identityChanged = ['paciente_id', 'clinica_id', 'tratamiento_id', 'doctor_id', 'instalacion_id'].some(key => Object.hasOwn(next, key)
       && Number(next[key] || 0) !== Number(previous[key] || 0));
-    if (timeChanged || identityChanged) fail('care_reservation_locked', 'La cita conserva evidencia de atención o asistencia histórica. No cambies su paciente, tratamiento ni horario.');
+    const phaseResources = row => {
+      let metadata = row.import_metadata;
+      if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { return null; } }
+      const phases = metadata?.booking?.phases;
+      return Array.isArray(phases) ? JSON.stringify(phases.map(phase => [phase?.key,
+        Number(phase?.installation_id || 0), (Array.isArray(phase?.doctor_ids) ? phase.doctor_ids : []).map(Number).sort((a, b) => a - b)])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])))) : null;
+    };
+    const previousPhases = phaseResources(previous), nextPhases = phaseResources(next);
+    const phaseResourcesChanged = previousPhases !== null && nextPhases !== null && previousPhases !== nextPhases;
+    const supportChanged = additionalStaffIds !== undefined && JSON.stringify(additionalStaffIds)
+      !== JSON.stringify(require('./appointment-additional-staff').additionalStaffSnapshot(previous)?.ids || []);
+    if (timeChanged || identityChanged || phaseResourcesChanged || supportChanged) fail('care_reservation_locked', 'La cita conserva evidencia de atención o asistencia histórica. No cambies su paciente, tratamiento, horario, profesional, sala ni personal de apoyo.');
   }
   if (!next.estado || previous.estado === next.estado) return;
   if (care.legacy_attendance) fail('care_legacy_attendance', 'Conserva la asistencia histórica; su corrección requiere revisar el historial.');
   if (previous.estado === 'completada') fail('care_already_completed', 'La atención ya está finalizada. Conserva su historial clínico.');
   if (previous.estado === 'en_atencion' && next.estado !== 'completada') fail('care_already_started', 'La atención ya está iniciada. No se puede sustituir por una confirmación o cancelación.');
+  if (next.estado === 'no_asistio') {
+    // Compare actual instants, not server-local hours: stored appointments are
+    // UTC dates and an offset-bearing request represents the same clinic time.
+    const startValue = Object.hasOwn(next, 'inicio') ? next.inicio : previous.inicio;
+    const startsAt = new Date(startValue).getTime();
+    if (!startValue || !Number.isFinite(startsAt) || !Number.isFinite(new Date(now).getTime())) {
+      fail('care_no_show_start_required', 'Revisa la fecha y la hora de la cita antes de marcar «No acude».');
+    }
+    if (startsAt > new Date(now).getTime()) fail('care_no_show_too_early', 'Todavía no ha llegado la hora de esta cita. Puedes marcar «No acude» a partir de su hora de inicio.');
+    if (previous.estado === 'cancelada') fail('care_appointment_inactive', 'Esta cita está cancelada. No se puede marcar «No acude».');
+    if (care.arrived_at || care.started_at || previous.estado === 'ha_acudido') {
+      fail('care_already_arrived', 'Ya se ha registrado la llegada del paciente. No se puede marcar «No acude».');
+    }
+    if (previous.estado && !(CITA_ALLOWED_TRANSITIONS[previous.estado] || []).includes('no_asistio')) {
+      fail('care_no_show_state_invalid', 'El estado actual de esta cita no permite marcar «No acude». Revisa primero su cambio pendiente.');
+    }
+  }
   if (['ha_acudido', 'en_atencion'].includes(next.estado)) fail('care_action_required', 'Registra la llegada o el inicio mediante la acción correspondiente de esta cita.');
 }
 

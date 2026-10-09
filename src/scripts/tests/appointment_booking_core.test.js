@@ -498,7 +498,8 @@ test('grid labels use one scoped catalog read; normal search/mutations load no d
   assert.deepEqual(calls[0][1].where.id_tratamiento[Op.in], [3], 'foreign treatment IDs are not queried');
   assert.deepEqual(calls[0][1].attributes, ['id_tratamiento', 'nombre']);
   const own = labeled.doctors.get(5).busy.find(row => row.appointment_id === 101).diagnostic;
-  assert.deepEqual(own, { kind: 'appointment', treatment_name: 'Presoterapia ficticia', full_interval: true, time_range: '10:00–10:30' });
+  assert.deepEqual(own, { kind: 'appointment', treatment_name: 'Presoterapia ficticia', full_interval: true,
+    time_range: '10:00–10:30', installation_name: null, clinic_name: null });
   const foreign = labeled.doctors.get(5).busy.find(row => row.appointment_id === 102).diagnostic;
   assert.deepEqual(foreign, { kind: 'other_clinic', time_range: '10:00–10:30' });
   assert.doesNotMatch(JSON.stringify(labeled.doctors.get(5).busy), /Private note|Private patient|Foreign private treatment/);
@@ -843,11 +844,85 @@ test('cancellation retains the trusted profile but releases capacity; reactivati
   assert.equal(f.state.appointments.find((row) => row.id_cita === original.id_cita).estado, 'cancelada');
 });
 
+test('state-only cancellation never revalidates a hidden catalogue or incomplete legacy snapshot', async () => {
+  for (const import_metadata of [null, { booking: { version: 1 } }, { additional_staff: { version: 1, ids: ['invalid'] } }]) {
+    const old = { id_cita: 44, clinica_id: 72, paciente_id: 1, tratamiento_id: 3, doctor_id: 5, instalacion_id: 9,
+      inicio: start, fin: end, estado: 'recordatorio_confirmado', source_system: 'cliniccloud', source_reference: 'test-source', import_metadata };
+    const originalRows = [{ appointment_id: 44, phase_key: 'legacy', resource_kind: 'doctor', resource_key: 'doctor:5',
+      doctor_id: 5, installation_id: null, start_at: start, end_at: end }];
+    const f = fixture({ appointments: [old], occupancies: originalRows });
+    f.db.Tratamiento.findByPk = async () => { throw Error('Cancellation must not load a hidden treatment'); };
+    f.db.InstallationPhysicalAlias.findAll = async () => { throw Error('Cancellation must not re-resolve a historic installation'); };
+    const saved = await f.reserve({ capabilities: { simple: true, multi: false }, existingAppointmentId: 44,
+      stateOnly: true, appointmentValues: { estado: 'cancelada', updated_by: 7, import_metadata: { booking: { forged: true } } } });
+    assert.equal(saved.estado, 'cancelada');
+    assert.equal(saved.updated_by, 7);
+    assert.deepEqual(saved.import_metadata, import_metadata, 'No snapshot or imported provenance is rewritten');
+    assert.deepEqual(f.state.occupancies, originalRows);
+    assert.equal(f.state.commits, 1);
+    assert.equal(f.state.persists, 1);
+    assert.equal(f.state.calls.length, 0, 'No calendar/capacity/availability queries are necessary to release capacity');
+  }
+});
+
+test('state-only cancellation permits closed resource rollout but preserves medical evidence and transactional rollback', async () => {
+  const f = fixture(), original = await f.reserve({ additionalStaffIds: [6] });
+  const oldSnapshot = structuredClone(original.import_metadata), oldOccupancy = structuredClone(f.state.occupancies);
+  await assert.rejects(f.reserve({ existingAppointmentId: original.id_cita, stateOnly: true,
+    appointmentValues: { estado: 'cancelada' }, persist: async () => { throw Error('simulated cancellation persistence failure'); } }), /simulated cancellation/);
+  assert.equal(f.state.appointments[0].estado, 'pendiente');
+  assert.deepEqual(f.state.appointments[0].import_metadata, oldSnapshot);
+  assert.deepEqual(f.state.occupancies, oldOccupancy);
+  const canceled = await f.reserve({ capabilities: { simple: true, multi: false }, existingAppointmentId: original.id_cita,
+    stateOnly: true, appointmentValues: { estado: 'cancelada' } });
+  assert.deepEqual(canceled.import_metadata, oldSnapshot);
+  assert.deepEqual(f.state.occupancies, oldOccupancy);
+  for (const evidence of [{ estado: 'en_atencion', care_started_at: start, care_schedule_start: start },
+    { estado: 'completada' }, { estado: 'ha_acudido', care_legacy_attendance: true }]) {
+    const protectedRow = { ...f.values, ...evidence, id_cita: 45 };
+    const clinical = fixture({ appointments: [protectedRow] });
+    await assert.rejects(clinical.reserve({ existingAppointmentId: 45, stateOnly: true,
+      appointmentValues: { estado: 'cancelada' } }), error => /^care_/.test(error.code));
+    assert.equal(clinical.state.persists, 0);
+    assert.equal(clinical.state.commits, 0);
+    assert.equal(clinical.state.rollbacks, 1);
+  }
+});
+
 test('legacy creation strips forged booking snapshots while preserving unrelated provenance', async () => {
   const f = fixture({ bookingProfile: null });
   const created = await f.reserve({ appointmentValues: { ...f.values, import_metadata: { source_batch: 'synthetic', booking: { version: 1, forged: true } } } });
   assert.equal(created.import_metadata, null, 'HTTP/generic creation cannot claim import provenance');
   assert.deepEqual(bookingSegments({ id_cita: 1, import_metadata: { booking: { version: 1, phases: [phase('fake')] } } }), []);
+});
+
+test('clinical resource ownership cannot change after care started/completed or historical attendance, even without conflicts', async () => {
+  for (const evidence of [{ estado: 'en_atencion', care_started_at: start, care_schedule_start: start },
+    { estado: 'completada' }, { estado: 'ha_acudido', care_legacy_attendance: true }]) {
+    const savedRow = { ...fixture().values, ...evidence, id_cita: 45 };
+    const f = fixture({ bookingProfile: null, appointments: [savedRow] });
+    for (const appointmentValues of [{ doctor_id: 6 }, { instalacion_id: 12 }]) {
+      await assert.rejects(f.reserve({ existingAppointmentId: 45, appointmentValues }), { code: 'care_reservation_locked' });
+    }
+    await assert.rejects(f.reserve({ existingAppointmentId: 45, additionalStaffIds: [6], supportOnly: true,
+      expectedRange: { start, end }, appointmentValues: { updated_by: 42 } }), error =>
+      ['care_reservation_locked', 'booking_additional_staff_closed'].includes(error.code));
+    assert.equal(f.state.persists, 0);
+    assert.equal(f.state.commits, 0);
+  }
+});
+
+test('booking selections cannot change clinically protected secondary resources after the early care guard', async () => {
+  const f = fixture({ bookingProfile: profile(phase('one'), phase('two', [12, 13], [5, 6])) });
+  const saved = await f.reserve({ appointmentValues: { ...f.values, fin: '2030-01-07T10:00:00Z' } });
+  Object.assign(saved, { estado: 'en_atencion', care_schedule_start: start, care_started_at: start });
+  const before = structuredClone(f.state.occupancies), persists = f.state.persists;
+  for (const second of [{ doctor_id: 6, installation_id: 12 }, { doctor_id: 5, installation_id: 13 }]) {
+    await assert.rejects(f.reserve({ existingAppointmentId: saved.id_cita, appointmentValues: {}, priorityAcknowledged: true,
+      selections: { one: { doctor_id: 5, installation_id: 9 }, two: second } }), { code: 'care_reservation_locked' });
+  }
+  assert.equal(f.state.persists, persists);
+  assert.deepEqual(f.state.occupancies, before);
 });
 
 test('mandatory team persists one appointment and every physical phase under one transaction', async () => {
@@ -1451,4 +1526,86 @@ test('request metadata cannot manufacture or erase the stored patient overlap re
   const edited = await f.reserve({ existingAppointmentId: saved.id_cita, appointmentValues: {
     import_metadata: { patient_overlap_confirmation: { confirmed_by: 999 } } } });
   assert.deepEqual(edited.import_metadata.patient_overlap_confirmation, prior);
+});
+
+async function restrictionRequired(f, options) {
+  let received;
+  await assert.rejects(f.reserve(options), error => {
+    received = error;
+    return error.code === 'booking_restriction_confirmation_required' && error.details.can_confirm_restrictions === true;
+  });
+  return received;
+}
+test('manual assignment/closure exceptions require the exact server receipt even when old force is true', async () => {
+  const f = fixture({ doctorBlocks: [doctorBlock({ doctor_id: 6 })] });
+  const options = { appointmentValues: { ...f.values, doctor_id: 6, instalacion_id: 10, created_by: 7,
+    import_metadata: { source_contact_id: 'synthetic', booking_restriction_confirmation: { confirmed_by: 999 } } },
+    force: true, restrictionConfirmation: { actorId: 7 } };
+  const first = await restrictionRequired(f, options);
+  assert(first.details.booking_restrictions.some(row => row.code === 'TREATMENT_PROFESSIONAL_NOT_ALLOWED'));
+  assert(first.details.booking_restrictions.some(row => row.code === 'TREATMENT_INSTALLATION_NOT_ALLOWED'));
+  assert(first.details.booking_restrictions.some(row => row.code === 'STAFF_BLOCKED'));
+  assert.equal(f.state.persists, 0);
+  const saved = await f.reserve({ ...options, expectedPlanSha256: first.details.booking_plan_sha256,
+    restrictionConfirmation: { actorId: 7, acknowledgement: first.details.booking_restriction_acknowledgement } });
+  assert.equal(saved.doctor_id, 6); assert.equal(saved.instalacion_id, 10);
+  assert.equal(saved.import_metadata.booking_restriction_confirmation.confirmed_by, 7);
+  assert.deepEqual(saved.import_metadata.booking_restriction_confirmation.original_profile.phases[0].professionals.ids, [5]);
+  assert.deepEqual(saved.import_metadata.booking.profile.phases[0].professionals.ids, [6]);
+  assert.equal(saved.import_metadata.source_contact_id, undefined, 'request cannot forge source provenance');
+  assert.equal(bookingSegments(saved).length, 1);
+  assert.equal(f.state.occupancies.length, 2); assert.equal(f.state.commits, 1);
+  assert(f.state.locks.some(([, key]) => key === 'doctor:6'));
+  assert(f.state.locks.some(([, key]) => key === 'installation:10'));
+});
+test('stale manual exception evidence or actor never persists any appointment or occupancy', async () => {
+  for (const kind of ['busy', 'actor', 'selection', 'plan']) {
+    const f = fixture(), options = { appointmentValues: { ...f.values, doctor_id: 6, instalacion_id: 10, created_by: 7 },
+      force: true, restrictionConfirmation: { actorId: 7 } };
+    const error = await restrictionRequired(f, options);
+    const confirmed = { ...options, expectedPlanSha256: error.details.booking_plan_sha256,
+      restrictionConfirmation: { actorId: 7, acknowledgement: error.details.booking_restriction_acknowledgement } };
+    if (kind === 'busy') f.state.appointments.push({ ...f.values, paciente_id: 2, doctor_id: 6, id_cita: 80 });
+    if (kind === 'actor') { confirmed.appointmentValues = { ...confirmed.appointmentValues, created_by: 8 }; confirmed.restrictionConfirmation.actorId = 8; }
+    if (kind === 'selection') confirmed.appointmentValues = { ...confirmed.appointmentValues, instalacion_id: 12 };
+    if (kind === 'plan') confirmed.expectedPlanSha256 = 'a'.repeat(64);
+    await assert.rejects(f.reserve(confirmed), error => ['booking_restriction_confirmation_required', 'booking_plan_changed'].includes(error.code));
+    assert.equal(f.state.persists, 0); assert.equal(f.state.commits, 0); assert.equal(f.state.occupancies.length, 0);
+  }
+});
+test('support-only exception retains range/status/primary resources and requires one exact confirmation', async () => {
+  const { changeAppointmentSupport } = require('../../services/appointmentSupport.service');
+  const f = fixture({ bookingProfile: null }), saved = await f.reserve({ appointmentValues: { ...f.values, tratamiento_id: null,
+    estado: 'recordatorio_confirmado', import_metadata: { notification_suppression: { same_day: true } } } });
+  f.state.appointments.push({ ...f.values, id_cita: 80, paciente_id: 2, doctor_id: 6, instalacion_id: 12 });
+  const find = f.db.CitaPaciente.findByPk;
+  f.db.CitaPaciente.findByPk = async (...args) => {
+    const row = await find(...args);
+    return row && { ...row, toJSON: () => row, update: (values, { transaction }) => f.persist({ values, existing: row, transaction }) };
+  };
+  const options = { db: f.db, appointmentId: saved.id_cita, actorId: 7, ids: [6], expectedRange: { start, end }, capabilities,
+    restrictionConfirmation: { actorId: 7 } };
+  let error;
+  await assert.rejects(changeAppointmentSupport(options), item => { error = item; return item.code === 'booking_restriction_confirmation_required'; });
+  assert.equal(f.state.events.length, 0);
+  const changed = await changeAppointmentSupport({ ...options, expectedPlanSha256: error.details.booking_plan_sha256,
+    restrictionConfirmation: { actorId: 7, acknowledgement: error.details.booking_restriction_acknowledgement } });
+  for (const key of ['estado', 'inicio', 'fin', 'doctor_id', 'instalacion_id', 'paciente_id']) assert.equal(changed[key], saved[key]);
+  assert.deepEqual(changed.import_metadata.notification_suppression, saved.import_metadata.notification_suppression);
+  assert.equal(f.state.events.length, 1); assert.equal(f.state.events[0].event_type, 'appointment.staff_changed');
+  assert.equal(changed.import_metadata.booking_restriction_confirmation.confirmed_by, 7);
+});
+test('combined manual exceptions preserve offsets, durations, segment indices and shared end under one atomic receipt', async () => {
+  const f = fixture({ bookingProfile: relativeProfile() });
+  const options = { appointmentValues: { ...f.values, fin: relativeEnd, created_by: 7 }, capabilities: relativeCapabilities,
+    selections: { first: { doctor_id: 6, installation_id: 9 }, second: { doctor_id: 5, installation_id: 10 } },
+    restrictionConfirmation: { actorId: 7 } };
+  const error = await restrictionRequired(f, options);
+  const saved = await f.reserve({ ...options, expectedPlanSha256: error.details.booking_plan_sha256,
+    restrictionConfirmation: { actorId: 7, acknowledgement: error.details.booking_restriction_acknowledgement } });
+  const segments = bookingSegments(saved);
+  assert.equal(segments.length, 2); assert.deepEqual(segments.map(item => item.phase_index), [1, 2]);
+  assert.deepEqual(saved.import_metadata.booking.profile.phases.map(item => item.start_offset_minutes), [0, 15]);
+  assert.deepEqual(saved.import_metadata.booking.profile.phases.map(item => item.duration_minutes), [30, 30]);
+  assert.equal(new Date(saved.fin).toISOString(), relativeEnd); assert.equal(f.state.occupancies.length, 4);
 });

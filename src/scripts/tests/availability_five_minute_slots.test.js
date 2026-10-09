@@ -114,12 +114,21 @@ for (const mode of ['doctor', 'installation']) test(`${mode}: rejected starts ha
     ...(mode === 'doctor' ? { peer_instalacion_ids: [9,10] } : { peer_doctor_ids: [5,7] }) };
   const grid = await f.call('grid', query), allowed = grid.body.rows[0], excluded = grid.body.rows[1];
   const intervals = mode === 'doctor' ? allowed.unavailable_by_instalacion[9] : allowed.unavailable_by_doctor[5];
+  assert(intervals.length <= 288, 'one five-minute day has at most 288 distinct start explanations');
   assert.equal(reasonAt(intervals, '09:00').reason_key, 'clinic_schedule');
   assert.equal(reasonAt(intervals, '12:40').reason_key, 'resource_busy');
   assert.match(reasonAt(intervals, '12:40').message, /Fictitious clinician.*45 min/);
   assert.equal(reasonAt(intervals, '12:45'), undefined, 'a valid starting position is not painted unavailable');
   assert.equal(reasonAt(intervals, '12:50').reason_key, 'clinic_schedule', 'the duration crosses closing, not an invented machine collision');
-  assert(intervals.length < 10, 'adjacent equal reasons are compressed, not one node per grid cell');
+  // Exact end-of-shift overruns and phase envelopes can legitimately differ
+  // at each five-minute start. Compress equal evidence, never merge different
+  // explanations just to meet the former primary-reason-only size ceiling.
+  for (let index = 1; index < intervals.length; index++) {
+    const previous = intervals[index - 1], current = intervals[index];
+    if (previous.end_utc === current.start_utc) assert.notEqual(
+      JSON.stringify(previous.resource_conflicts), JSON.stringify(current.resource_conflicts),
+      'adjacent equal complete reasons are compressed');
+  }
   const excludedIntervals = mode === 'doctor' ? excluded.unavailable_by_instalacion[9] : excluded.unavailable_by_doctor[5];
   assert.equal(reasonAt(excludedIntervals, '12:45').reason_key, mode === 'doctor' ? 'incompatible_staff' : 'incompatible_installation');
   assert.equal(f.calls.context, 1);
@@ -190,7 +199,9 @@ test('ordinary profile grid, mini-calendar and exact check agree on overlap with
     Object.assign(target,{allow_overlap_confirmation:false,overlap_capacity:1,busy:[busy]});
   }
   const exact=await f.call('check',{doctor_id:'5',instalacion_id:'9',inicio_local:day+'T12:45',fin_local:day+'T13:30'});
-  assert.equal(exact.statusCode,409);assert.equal(exact.body.can_force,true);
+  assert.equal(exact.statusCode,409);assert.equal(exact.body.can_force,false);
+  assert.equal(exact.body.can_confirm_restrictions,true);
+  assert.match(exact.body.booking_restriction_acknowledgement,/^[a-f0-9]{64}$/);
   assert.equal(exact.body.available,false,'no silent overlap on the exact check');
   const summary=await f.call('summary',{dates:[day],doctor_id:'5',instalacion_id:'9'});
   assert.equal(summary.body.by_day[day],true);
@@ -210,4 +221,34 @@ test('foreign reservations never disclose their catalog name or other private fi
   const grid = await f.call('grid', { dates: [day], mode: 'installation', column_ids: [9], context_doctor_id: '5' });
   assert.match(reasonAt(grid.body.rows[0].unavailable_intervals, '12:45').message, /ocupado en otra clínica/);
   assert.doesNotMatch(JSON.stringify(grid.body), /Foreign treatment|Private patient|diagnostic|appointment_id/);
+});
+
+test('sixteen-column HTTP controller matrix remains bounded and reads its synthetic resource snapshot only once', async (t) => {
+  const f = fixture({ staffBusy: true });
+  const rooms = Array.from({ length: 16 }, (_, index) => index + 9);
+  const doctors = [5, 8, 11, 12];
+  f.profile.phases[0].installation_ids = rooms;
+  f.profile.phases[0].professionals.ids = doctors;
+  for (const key of doctors) f.context.doctors.set(key, { ...f.context.doctors.get(5), name: `Profesional ficticio ${key}` });
+  for (const key of rooms) f.context.installations.set(key, { ...f.context.installations.get(9),
+    name: `Sala ficticia ${key}`, resource_key: `installation:${key}`, profesionales_permitidos: doctors });
+  f.context.equipment.get(6).installation_ids = new Set(rooms);
+  const before = performance.now();
+  const grid = await f.call('grid', { dates: [day], mode: 'installation', column_ids: rooms,
+    peer_doctor_ids: doctors });
+  const elapsedMs = Math.round(performance.now() - before);
+  assert.equal(grid.statusCode, 200); assert.equal(grid.body.rows.length, 16);
+  assert.equal(f.calls.context, 1, 'one bulk snapshot read for all columns, not one per cursor or cell');
+  let intervals = 0;
+  for (const row of grid.body.rows) for (const key of doctors) {
+    const values = row.unavailable_by_doctor[key];
+    assert(values.length <= 288, 'at most one explanation per five-minute start in a day');
+    intervals += values.length;
+    for (let index = 1; index < values.length; index++) if (values[index - 1].end_utc === values[index].start_utc)
+      assert.notEqual(JSON.stringify(values[index - 1].resource_conflicts), JSON.stringify(values[index].resource_conflicts));
+  }
+  const jsonBytes = Buffer.byteLength(JSON.stringify(grid.body));
+  t.diagnostic(JSON.stringify({ syntheticHttpController: true, liveSql: false, columns: 16,
+    peers: doctors.length, contextReads: f.calls.context, intervals, jsonBytes, elapsedMs }));
+  assert(jsonBytes < 32 * 1024 * 1024, 'bounded matrix serialization avoids unbounded repeated evidence');
 });

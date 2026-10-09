@@ -106,7 +106,43 @@ test('patient links: real SQL birth, scope, confirmed owner, atomic movement, ro
     assert.equal(await links.follower(db, follower.id_cita), false);
     assert.equal(await links.membership(db, owner.id_cita), null);
     assert.equal(await db.CitaPaciente.count(), 3);
-    report.checks.push('Actual canonical reservations linked transactionally: owner confirmation inherited and propagated, DTO1/2,2/2, group move from follower preserves offsets, failed move rolls back, compound cannot link/unlink, dissolving group preserves reservations');
+    const cancelOwner = await f.reserve({ appointmentValues: f.values({ tratamiento_id: 4,
+      inicio: '2030-01-08T10:00:00Z', fin: '2030-01-08T10:30:00Z' }) });
+    await cancelOwner.reload();
+    const cancelChoice = { mode: 'link', appointment_id: cancelOwner.id_cita, updated_at: cancelOwner.updated_at };
+    const cancelFollower = await f.reserve({ appointmentValues: f.values({ tratamiento_id: 4,
+      inicio: '2030-01-08T10:30:00Z', fin: '2030-01-08T11:00:00Z' }),
+      persist: async ({ values, transaction }) => {
+        const row = await db.CitaPaciente.create(values, { transaction });
+        await links.linkAtBirth(db, row, cancelChoice, 1, transaction); return row;
+      } });
+    await db.Tratamiento.update({ eliminado_por_clinica: [100] }, { where: { id_tratamiento: 4 } });
+    await cancelFollower.update({ import_metadata: { booking: { version: 1, historic_profile_missing: true } } });
+    const pairIds = [cancelOwner.id_cita, cancelFollower.id_cita];
+    const beforeCancel = await Promise.all(pairIds.map(id => f.read(id)));
+    const beforeCancelOccupancy = await Promise.all(pairIds.map(id => f.occupancy(id)));
+    const cancelPair = () => sql.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+      await links.load(db, cancelFollower.id_cita, transaction, true);
+      const current = await command.mutateAppointmentBooking({ db, transaction, capabilities: { simple: true, multi: false },
+        existingAppointmentId: cancelFollower.id_cita, stateOnly: true, appointmentValues: { estado: 'cancelada', updated_by: 1 },
+        persist: ({ values, existing }) => existing.update(values, { transaction }) });
+      return links.confirmTogether(db, current, 'cancelada', transaction, 1);
+    });
+    db.CitaPaciente.addHook('beforeUpdate', 'owned-cancel-rollback', row => {
+      if (row.id_cita === cancelOwner.id_cita && row.estado === 'cancelada') throw Error('owned cancellation rollback');
+    });
+    try { await assert.rejects(cancelPair(), /owned cancellation rollback/); }
+    finally { db.CitaPaciente.removeHook('beforeUpdate', 'owned-cancel-rollback'); }
+    assert.deepEqual(await Promise.all(pairIds.map(id => f.read(id))), beforeCancel, 'Cancelling linked appointments is all-or-nothing');
+    assert.deepEqual(await Promise.all(pairIds.map(id => f.occupancy(id))), beforeCancelOccupancy);
+    const propagatedCancel = await cancelPair();
+    assert.equal(propagatedCancel.length, 1);
+    const afterCancel = await Promise.all(pairIds.map(id => f.read(id)));
+    assert(afterCancel.every(row => row.estado === 'cancelada'));
+    assert.deepEqual(afterCancel.map(row => row.import_metadata), beforeCancel.map(row => row.import_metadata));
+    assert.deepEqual(await Promise.all(pairIds.map(id => f.occupancy(id))), beforeCancelOccupancy);
+    assert.equal(queued.length, 0);
+    report.checks.push('Actual canonical reservations linked transactionally: owner confirmation inherited and propagated, DTO1/2,2/2, group move from follower preserves offsets, failed move rolls back, compound cannot link/unlink, dissolving group preserves reservations; linked cancellation succeeds with hidden catalogue/incomplete historic snapshot, persists original occupancies and rolls back every member on failure, no queue/provider calls');
    } finally { await f.close(); }
   });
  });

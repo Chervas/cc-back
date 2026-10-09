@@ -2188,6 +2188,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         delete baseImportMetadata.clinical_component_parent;
         delete baseImportMetadata.clinical_component_children;
         delete baseImportMetadata.patient_overlap_confirmation;
+        delete baseImportMetadata.booking_restriction_confirmation;
         const appointmentImportMetadata = {
             ...baseImportMetadata,
             ...(isHistoricalRegistration ? {
@@ -2320,6 +2321,7 @@ exports.createCita = asyncHandler(async (req, res) => {
                 durationSelection,
                 additionalStaffIds,
                 force: parseBool(force),
+                restrictionConfirmation: { actorId: Number(req.userData?.userId), acknowledgement: req.body?.booking_restriction_acknowledgement },
                 selections: req.body?.booking_selection || {},
                 priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
                 expectedPlanSha256: req.body?.booking_plan_sha256,
@@ -3401,7 +3403,9 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             ...(nextDoctorIdRaw !== undefined ? { doctor_id: nextDoctorId } : {}),
             ...(nextInstalacionIdRaw !== undefined ? { instalacion_id: nextInstalacionId } : {}),
         }, { additionalStaffIds, selections: req.body?.booking_selection || {},
+            expectedPlanSha256: req.body?.booking_plan_sha256,
             priorityAcknowledged: req.body?.booking_priority_acknowledged === true, force: wantsForce,
+            restrictionConfirmation: { actorId: Number(req.userData?.userId), acknowledgement: req.body?.booking_restriction_acknowledgement },
             reschedulePatientOverlap: { actorId: Number(req.userData?.userId), acknowledgement: req.body?.patient_overlap_acknowledgement } });
         cita = linkedMove?.selected || await mutateAppointmentBooking({
             db, existingAppointmentId: cita.id_cita,
@@ -3413,7 +3417,9 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             selections: req.body?.booking_selection || {}, priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
             allowObsolete: true,
             durationSelection: require('../lib/booking-profile-duration').durationSelectionForRequest(null, req.body),
+            expectedPlanSha256: req.body?.booking_plan_sha256,
             force: wantsForce,
+            restrictionConfirmation: { actorId: Number(req.userData?.userId), acknowledgement: req.body?.booking_restriction_acknowledgement },
             reschedulePatientOverlap: { actorId: Number(req.userData?.userId),
                 acknowledgement: req.body?.patient_overlap_acknowledgement },
             persist: async ({ values, existing, transaction }) => {
@@ -3541,6 +3547,8 @@ exports.updateCitaSupport = asyncHandler(async (req, res) => {
     if (await denyAppointmentManageAccessIfNeeded(req, res, existing.clinica_id)) return;
     await require('../services/appointmentSupport.service').changeAppointmentSupport({ db, appointmentId: citaId,
         actorId: req.userData?.userId || null, ids: req.body?.additional_staff_ids,
+        restrictionConfirmation: { actorId: Number(req.userData?.userId), acknowledgement: req.body?.booking_restriction_acknowledgement },
+        expectedPlanSha256: req.body?.booking_plan_sha256,
         expectedRange: { start: req.body?.expected_start, end: req.body?.expected_end } });
     const updated = await CitaPaciente.findByPk(citaId, { include: [
         { model: Paciente, as: 'paciente' }, { model: Clinica, as: 'clinica' },

@@ -87,8 +87,8 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
     const unavailable = [];
     const includeUnavailable = parseBool(query.include_unavailable) && query.summary_only !== true;
     // Skip incompatible columns before iterating times; no SQL per column/slot.
-    if ((doctor && !phase.professionals.ids.includes(doctor))
-      || (installation && !phase.installation_ids.includes(installation))) {
+    if (query.summary_only === true && ((doctor && !phase.professionals.ids.includes(doctor))
+      || (installation && !phase.installation_ids.includes(installation)))) {
       const conflict = incompatibleStart({ ...profile, phases: [phase] }, doctor, installation);
       if (completePlan && profile.phases.length > 1) {
         const roomMismatch = installation && !phase.installation_ids.includes(installation);
@@ -163,18 +163,19 @@ async function requestTreatmentBookingContext(req, treatment, clinic) {
     patientId = (await require('../services/patientEconomics.service').loadContext(identifier, clinicId)).patient.id_paciente;
   }
   const existingAppointmentId = Number(req.query?.ignore_cita_id);
-  let voucherId = null;
+  let voucherId = null, existingAppointment = null;
   if (Number.isSafeInteger(existingAppointmentId) && existingAppointmentId > 0) {
     const existing = await db.CitaPaciente.findByPk(existingAppointmentId);
     if (!existing || Number(existing.clinica_id) !== clinicId
-      || Number(existing.tratamiento_id) !== Number(treatment.id_tratamiento)
+      || treatment && Number(existing.tratamiento_id) !== Number(treatment.id_tratamiento)
       || patientId != null && Number(existing.paciente_id) !== Number(patientId)) {
       throw bookingError('appointment_not_found', 'Cita no encontrada.', null, 404);
     }
     patientId = existing.paciente_id;
     voucherId = existing.voucher_id ?? null;
+    existingAppointment = existing.toJSON ? existing.toJSON() : existing;
   }
-  const context = { patientId, voucherId,
+  const context = { patientId, voucherId, existingAppointment,
     existingAppointmentId: Number.isSafeInteger(existingAppointmentId) && existingAppointmentId > 0 ? existingAppointmentId : null };
   if (continuationOnly) await assertTreatmentBookingVisibility({ db, treatment, existingAppointmentId: context.existingAppointmentId,
       appointmentValues: { clinica_id: clinicId, paciente_id: patientId,
@@ -683,9 +684,11 @@ exports.check = asyncHandler(async (req, res) => {
 
   let bookingProfile = null;
   let bookingContext = {};
+  let bookingTreatment = null;
   if (req.query?.tratamiento_id) {
     await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
     const treatment = await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic: clinica });
+    bookingTreatment = treatment;
     bookingContext = await requestTreatmentBookingContext(req, treatment, clinica);
     bookingProfile = await requestOperationalProfile(treatment, req, clinica);
   }
@@ -710,6 +713,36 @@ exports.check = asyncHandler(async (req, res) => {
   if (end <= start) {
     return res.status(400).json({ message: 'rango inválido (fin <= inicio)' });
   }
+  // Manual appointments without a treatment use the SAME explanation and
+  // explicit-confirmation contract. There is no second permissive writer.
+  if (!bookingProfile && bookingCapabilities().simple && parseIntSafe(doctor_id) && parseIntSafe(instalacion_id)) {
+    await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
+    const patientContext = await requestTreatmentBookingContext(req, null, clinica);
+    const profile = { version: 1, phases: [{ key: 'appointment', duration_minutes: (+end - +start) / 60000,
+      installation_ids: [Number(instalacion_id)], professionals: { mode: 'any', ids: [Number(doctor_id)], preferred_id: Number(doctor_id) } }] };
+    const selections = { appointment: { doctor_id: Number(doctor_id), installation_id: Number(instalacion_id) } };
+    const additionalStaffIds = requestedAdditionalStaff(req);
+    const context = await loadBookingContext({ db, clinic: clinica, profile, start, end, occupancyEnabled: true,
+      patientId: patientContext.patientId, additionalStaffIds, includeDiagnosticLabels: true,
+      ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null,
+      ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, ignore_cita_id, clinicaId) });
+    const { assessment, restrictionErrorDetails, restrictionResourceConflicts } = require('../lib/booking-restriction-confirmation');
+    const result = assessment({ profile, context, start, selections, additionalStaffIds,
+      clinicId: clinicaId, clinicName: clinica.nombre_clinica, patientId: patientContext.patientId || null,
+      appointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, actorId: Number(req.userData?.userId),
+      previous: patientContext.existingAppointment,
+      eligible: !patientContext.existingAppointment || !['ha_acudido', 'en_atencion', 'completada', 'no_asistio'].includes(patientContext.existingAppointment.estado)
+        && !patientContext.existingAppointment.care_started_at && !patientContext.existingAppointment.care_completed_at
+        && patientContext.existingAppointment.care_legacy_attendance !== true && patientContext.existingAppointment.care_legacy_attendance !== 1 });
+    if (result.canConfirm) return res.status(409).json({ available: false, reason: 'restriction',
+      code: 'booking_restriction_confirmation_required', message: result.restrictions.map(row => row.message).join('\n'),
+      ...restrictionErrorDetails(result), resource_conflicts: restrictionResourceConflicts(result) });
+    if (!result.solution) return res.status(409).json({ available: false, can_force: false, can_confirm_restrictions: false,
+      message: 'Revisa la sala y el profesional: deben estar activos y pertenecer a esta clínica.' });
+    return res.json({ available: true, clinica: { clinica_id: clinicaId, timezone: clinicTimezone },
+      resources: { doctor_id: Number(doctor_id), instalacion_id: Number(instalacion_id) }, booking: result.solution,
+      range: { inicio_local: formatLocal(start, clinicTimezone), fin_local: formatLocal(end, clinicTimezone), inicio_utc: start.toISOString(), fin_utc: end.toISOString() } });
+  }
   if (bookingProfile && +end - +start !== bookingProfileDurationMinutes(bookingProfile) * 60000) {
     throw bookingError('booking_duration_locked', 'El intervalo no coincide con la duración de los pasos de esta cita.', { can_force: false }, 422);
   }
@@ -731,24 +764,38 @@ exports.check = asyncHandler(async (req, res) => {
   }
 
   if (bookingProfile) {
-    if (supportConflicts.length) return res.status(409).json(build409({ conflicts: supportConflicts }));
+    let existingBooking = bookingContext.existingAppointment || null;
     if (ignore_cita_id) {
-      const ignored = await db.CitaPaciente.findByPk(Number(ignore_cita_id), { attributes: ['id_cita', 'clinica_id'] });
+      const ignored = await db.CitaPaciente.findByPk(Number(ignore_cita_id));
       if (!ignored || Number(ignored.clinica_id) !== clinicaId) return res.status(404).json({ message: 'Cita no encontrada' });
+      existingBooking = ignored.toJSON ? ignored.toJSON() : ignored;
     }
-    const context = await loadBookingContext({ db, clinic: clinica, profile: bookingProfile, start, end,
+    const { restrictionReadProfile, assessment, restrictionErrorDetails, restrictionResourceConflicts } = require('../lib/booking-restriction-confirmation');
+    let selections = bookingProfile.phases.length === 1 && bookingProfile.phases[0].professionals.mode === 'any'
+      ? { [bookingProfile.phases[0].key]: { doctor_id, installation_id: instalacion_id } } : {};
+    if (req.query.booking_selection != null) {
+      try { selections = typeof req.query.booking_selection === 'string' ? JSON.parse(req.query.booking_selection) : req.query.booking_selection; }
+      catch { throw bookingError('booking_restriction_selection_invalid', 'Revisa los recursos elegidos para cada paso.', null, 400); }
+    }
+    const readProfile = restrictionReadProfile(bookingProfile, { selections });
+    const context = await loadBookingContext({ db, clinic: clinica, profile: readProfile, start, end,
       ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, ignore_cita_id, clinicaId),
       ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, patientId: bookingContext.patientId,
-      occupancyEnabled: true, additionalStaffIds });
-    if ((context.patientBusy || []).some(row => new Date(row.start) < end && new Date(row.end) > start)) {
-      return res.status(409).json({ available: false, reason: 'patient_busy', can_force: false,
-        message: 'El paciente ya tiene otra cita durante este intervalo.',
-        conflicts: [{ type: 'patient_busy', message: 'El paciente ya tiene otra cita durante este intervalo.' }] });
-    }
-    const selections = bookingProfile.phases.length === 1 && bookingProfile.phases[0].professionals.mode === 'any'
-      ? { [bookingProfile.phases[0].key]: { doctor_id, installation_id: instalacion_id } } : {};
+      occupancyEnabled: true, additionalStaffIds, includeDiagnosticLabels: true });
     const solution = solveBookingProfile({ profile: bookingProfile, start, ...context, selections });
-    if (!solution || new Date(solution.end_at).getTime() !== end.getTime()) {
+    const patientBusy = (context.patientBusy || []).some(row => new Date(row.start) < end && new Date(row.end) > start);
+    if (!solution || patientBusy || supportConflicts.length || new Date(solution.end_at).getTime() !== end.getTime()) {
+      const result = assessment({ profile: bookingProfile, context, start, selections, additionalStaffIds,
+        canonicalSolution: supportConflicts.length ? null : solution,
+        clinicId: clinicaId, clinicName: clinica.nombre_clinica, treatmentId: Number(req.query.tratamiento_id), treatmentName: bookingTreatment?.nombre || '',
+        patientId: bookingContext.patientId || null, appointmentId: ignore_cita_id ? Number(ignore_cita_id) : null,
+        actorId: Number(req.userData?.userId), previous: existingBooking,
+        eligible: !existingBooking || !['ha_acudido', 'en_atencion', 'completada', 'no_asistio'].includes(existingBooking.estado)
+          && !existingBooking.care_started_at && !existingBooking.care_completed_at
+          && existingBooking.care_legacy_attendance !== true && existingBooking.care_legacy_attendance !== 1 });
+      if (result.canConfirm) return res.status(409).json({ available: false, reason: 'restriction',
+        code: 'booking_restriction_confirmation_required', message: result.restrictions.map(row => row.message).join('\n'),
+        ...restrictionErrorDetails(result), resource_conflicts: restrictionResourceConflicts(result), booking: result.solution });
       const overlapSolution = !additionalStaffIds.length ? solveBookingProfile({ profile: bookingProfile, start, ...context, selections, allowOverlap: true }) : null;
       const canForce = !!overlapSolution && new Date(overlapSolution.end_at).getTime() === end.getTime();
       if (canForce) return res.status(409).json({ available: false, reason: 'overlap', can_force: true,
@@ -1630,7 +1677,9 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
   const personalBlocks = [];
   for (const group of groups) {
     if (profile) {
-      const context = await loadBookingContext({ db, clinic, profile, dates: group,
+      const readProfile = require('../lib/booking-restriction-confirmation').restrictionReadProfile(profile,
+        { doctorIds: doctors, installationIds: installations });
+      const context = await loadBookingContext({ db, clinic, profile: readProfile, dates: group,
         start: resolveLocalInstant(group[0], '00:00:00', timeZone),
         end: resolveLocalInstant(addDays(group[group.length - 1], 1), '00:00:00', timeZone), occupancyEnabled: true, additionalStaffIds,
         ignoreAppointmentId: req.query.ignore_cita_id ? Number(req.query.ignore_cita_id) : null,

@@ -78,10 +78,12 @@ test('foreign clinic, different treatment, unknown appointment and explicit pati
     assert.equal(f.calendars.length, 0);
   }
 });
-test('patient conflict is generic 409 without PII, source appointment IDs, foreign staff or times and cannot be forced', async () => {
+test('patient collision explains its time with a separate acknowledgement, without identity or source appointment IDs', async () => {
   const f = fixture(); const response = await f.invoke('check', { patient_id: 'synthetic-public-patient', force: true });
-  assert.equal(response.statusCode, 409); assert.equal(response.body.reason, 'patient_busy'); assert.equal(response.body.can_force, false);
-  assert.doesNotMatch(JSON.stringify(response.body), /200|appointment_id|doctor_id|clinic_id|09:00|09:30|Synthetic target|patient_id|paciente_id/);
+  assert.equal(response.statusCode, 409); assert.equal(response.body.reason, 'restriction'); assert.equal(response.body.can_force, false);
+  assert.equal(response.body.can_confirm_restrictions, true); assert.match(response.body.booking_restriction_acknowledgement, /^[a-f0-9]{64}$/);
+  assert.match(response.body.booking_restrictions[0].message, /10:00.*10:30/);
+  assert.doesNotMatch(JSON.stringify(response.body.booking_restrictions), /appointment_id|doctor_id|clinic_id|patient_id|paciente_id/);
 });
 test('ordinary slots/grid/summary use patient calendars but preserve available alternatives outside the busy interval', async () => {
   const f = fixture(); const response = await f.invoke('slots', { patient_id: 'synthetic-public-patient', from_local: '10:00', to_local: '11:00', granularity_min: '15' });

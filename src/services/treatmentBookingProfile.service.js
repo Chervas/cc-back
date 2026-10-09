@@ -137,6 +137,15 @@ function bookingErrorMiddleware(error, req, res, next) {
 function bookingErrorPayload(error) {
   const canForce = error?.code === 'booking_unavailable' && error?.details?.can_force === true;
   return { code: error.code, message: error.message, details: error.details || null, can_force: canForce,
+    ...(error?.code === 'booking_restriction_confirmation_required' ? {
+      can_confirm_restrictions: error.details?.can_confirm_restrictions === true,
+      booking_restriction_acknowledgement: error.details?.booking_restriction_acknowledgement || null,
+      booking_restrictions: error.details?.booking_restrictions || [],
+      booking: error.details?.booking || null,
+      booking_plan_sha256: error.details?.booking_plan_sha256 || null,
+      ...(Number.isInteger(error.details?.linked_appointments) && error.details.linked_appointments > 1
+        ? { linked_appointments: error.details.linked_appointments } : {}),
+    } : {}),
     ...(error?.code === 'booking_patient_overlap' ? {
       can_confirm_patient_overlap: error.details?.can_confirm_patient_overlap === true,
       patient_overlap_acknowledgement: error.details?.patient_overlap_acknowledgement || null,

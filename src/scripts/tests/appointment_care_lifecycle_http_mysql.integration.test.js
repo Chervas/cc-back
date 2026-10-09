@@ -63,6 +63,12 @@ withIsolatedCampaignMysql(async owned => {
     assert.equal(start.status, 200, JSON.stringify(start.body));
     assert.equal(start.body.estado, 'en_atencion');
     assert.equal(start.body.care.can_complete, true);
+    for (const resource of [{ doctor_id: ids.doctorTwo }, { instalacion_id: ids.roomTwo }]) {
+      await denied('PATCH', `/api/citas/${id}/reagendar`, { inicio: start.body.inicio, fin: start.body.fin,
+        reschedule_reason: 'administrative_error', ...resource }, reception, 409, 'care_reservation_locked');
+    }
+    await denied('PATCH', `/api/citas/${id}/personal-apoyo`, { additional_staff_ids: [ids.doctorTwo],
+      expected_start: start.body.inicio, expected_end: start.body.fin }, reception, 409, 'care_reservation_locked');
     await denied('PATCH', `/api/citas/${id}/estado`, { estado: 'recordatorio_confirmado' }, reception, 409, 'care_already_started');
     const finishes = await Promise.all([request('POST', care('finish'), {}, clinical), request('POST', care('finish'), {}, clinical)]);
     for (const finish of finishes) assert.equal(finish.status, 200, JSON.stringify(finish.body));
@@ -77,11 +83,47 @@ withIsolatedCampaignMysql(async owned => {
     assert.equal((await request('PATCH', `/api/citas/${id}/estado`, { estado: 'completada' }, clinical)).body.replayed, true);
     assert.deepEqual(await fingerprint(), afterFinish);
     await denied('PATCH', `/api/citas/${id}/estado`, { estado: 'cancelada' }, reception, 409, 'care_already_completed');
+
+    // Reservation actions remain independent from treatment catalogue edits.
+    // This is a real authenticated HTTP request over the owned SQL fixture,
+    // with every delivery/provider socket still denied by the fixture.
+    const futureStart = new Date(Date.now() + 86400000).toISOString();
+    const future = await request('POST', '/api/citas', f.body({ inicio: futureStart, same_day_choice: { mode: 'separate' } }), reception);
+    assert.equal(future.status, 201, JSON.stringify(future.body));
+    const futureId = future.body.id_cita;
+    assert.equal(future.body.care.can_no_show, false);
+    await denied('PATCH', `/api/citas/${futureId}/estado`, { estado: 'no_asistio' }, reception, 409, 'care_no_show_too_early');
+    for (const enabled of ['true', 'false']) {
+      const oldGate = process.env.BOOKING_PROFILES_ENABLED;
+      process.env.BOOKING_PROFILES_ENABLED = enabled;
+      try {
+        await denied('PATCH', `/api/citas/${futureId}/estado`, { estado: 'no_asistio' }, reception, 409, 'care_no_show_too_early');
+      } finally { process.env.BOOKING_PROFILES_ENABLED = oldGate; }
+    }
+    const futureRow = await db.CitaPaciente.findByPk(futureId);
+    const originalOccupancy = await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: futureId },
+      order: [['id', 'ASC']], raw: true });
+    const incompleteSnapshot = { ...futureRow.import_metadata, booking: { version: 1, old_profile_missing: true } };
+    await futureRow.update({ import_metadata: incompleteSnapshot });
+    await db.Tratamiento.update({ activo: false, eliminado_por_clinica: [ids.clinic] }, { where: { id_tratamiento: ids.treatment } });
+    const oldMultiGate = process.env.BOOKING_MULTI_RESOURCE_ENABLED;
+    process.env.BOOKING_MULTI_RESOURCE_ENABLED = 'false';
+    try {
+      const cancel = await request('PATCH', `/api/citas/${futureId}/estado`, { estado: 'cancelada' }, reception);
+      assert.equal(cancel.status, 200, JSON.stringify(cancel.body));
+      assert.equal(cancel.body.estado, 'cancelada');
+      assert.equal(cancel.body.care.can_no_show, false);
+      const canceled = await db.CitaPaciente.findByPk(futureId);
+      assert.deepEqual(canceled.import_metadata, incompleteSnapshot);
+      assert.deepEqual(await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: futureId },
+        order: [['id', 'ASC']], raw: true }), originalOccupancy, 'Cancelled capacity is released by canonical status; original occupancy remains historical evidence');
+      await denied('PATCH', `/api/citas/${futureId}/estado`, { estado: 'pendiente' }, reception, 404, 'treatment_not_found');
+    } finally { process.env.BOOKING_MULTI_RESOURCE_ENABLED = oldMultiGate; }
     assert.equal(await db.PatientConsentDocument.count(), 0);
     assert.equal(await db.Message.count(), 0);
     assert.equal(await db.JobRequest.count(), 0);
     assert.equal(await db.FlowExecutionV2.count(), 0);
     assert.equal(f.externalFetchAttempts, 0);
-    owned.report.checks.push('Actual authenticated HTTP/SQL: generic creation cannot forge arrival/start/finish with booking gate on or off; ACL cross-clinic/clinical rights; no finish before start; arrival/replay; actor spoof rejected by authenticated attribution; care start; no confirmation rewind; two concurrent finishes produce one evidence event and one replay; completion replay has no mutation; no cancellation rewind; zero consents/messages/jobs/executions/provider calls');
+    owned.report.checks.push('Actual authenticated HTTP/SQL: generic creation cannot forge arrival/start/finish with booking gate on or off; ACL cross-clinic/clinical rights; no finish before start; arrival/replay; actor spoof rejected by authenticated attribution; care start; no changing doctor/room/support after care started even at unchanged times; no confirmation rewind; two concurrent finishes produce one evidence event and one replay; completion replay has no mutation; no cancellation rewind; future no-show denied transactionally with booking gate on/off; existing open reservation cancelled despite hidden treatment, incomplete historic profile and closed multi-resource gate, original snapshots/occupancy preserved, reopening still validates; zero consents/messages/jobs/executions/provider calls');
   } finally { await f.close(); }
 }).then(() => {}, error => { console.error(error.code || error.message); process.exitCode = 1; });

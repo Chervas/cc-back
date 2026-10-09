@@ -1,5 +1,58 @@
 # 13 - Backend
 
+## Reserva con restricciones, cancelación y no asistencia · 09/10/2026
+
+La reserva manual mantiene permisos, entidades activas y adscripción a la clínica.
+Para una cita ordinaria con recursos explícitos, las asignaciones de tratamiento,
+horarios/cierres, bloqueos/ausencias y solapes de profesional, sala, maquinaria o
+paciente pueden confirmarse como excepción administrativa. No es un nuevo permiso
+automático ni se activa con `force=true`: siempre requiere revisar los motivos.
+
+El comando nativo de creación, reprogramación o cambio de personal de apoyo
+responde `409 booking_restriction_confirmation_required` con
+`can_confirm_restrictions=true`, `booking_restrictions[]`,
+`booking_restriction_acknowledgement` y el `booking_plan_sha256` actualizado.
+Cada motivo identifica los recursos y explica asignaciones, reserva concurrente
+y hora real de fin de turno/exceso. El cliente repite el mismo cuerpo con ambos
+recibos del **último 409 de escritura**, no con los recibos informativos de GET.
+Cambiar la evidencia obliga a revisar y confirmar otra vez; no sirve un recibo
+emitido para otro actor, paciente, clínica, horario o plan.
+
+La comprobación y escritura se realizan bajo los anclajes de recursos existentes.
+Mover varias citas vinculadas valida todo el conjunto en una transacción y exige
+un recibo de conjunto; no reutiliza el de una cita para las demás. Se conserva
+el perfil original y la decisión administrativa en metadata de servidor, junto
+al snapshot efectivo de lo reservado. No se cambian el catálogo ni otras citas.
+
+No se pueden confirmar entidades inexistentes/inactivas, una máquina en
+mantenimiento o sin ubicación válida, reducción de equipos obligatorios ALL,
+trabajo simultáneo internamente imposible ni atención clínica ya registrada.
+La atención iniciada/finalizada y la asistencia histórica protegen también
+profesional, sala, personal de apoyo y recursos de cada fase; elegir otro
+recurso en `booking_selection` no elude esta protección.
+Las sesiones de programas/bonos comprados conservan su contrato y consumo; este
+corte no permite reasignarlas fuera de su perfil adquirido. No requiere DDL,
+flags nuevos ni activación de comunicaciones o consentimientos.
+
+Las propuestas guiadas con restricciones incluyen
+`requires_restriction_acknowledgement=true` y `booking_restrictions[]`, conservando
+todas las fases, duraciones, offsets, intervenciones y maquinaria. Son sólo una
+vista previa: el POST final vuelve a exigir la confirmación transaccional.
+La matriz aporta los mismos motivos al ojo y al hover, sin lecturas por cursor.
+
+Cancelar una cita abierta libera su ocupación sin volver a exigir que un
+tratamiento histórico siga publicado ni reconstruirlo desde el catálogo actual.
+Se mantienen snapshot, trazabilidad y cancelación atómica del conjunto vinculado.
+Llegada, atención iniciada/finalizada, asistencia histórica y consumo clínico
+no pueden borrarse mediante una cancelación genérica.
+
+`no_asistio` sólo se acepta desde el instante real de inicio de la reserva y
+si todavía no se ha registrado llegada/atención. Se publica `care.can_no_show`;
+el servidor lo revalida también en las escrituras genéricas y no confía en un
+menú antiguo del navegador. Antes de la hora responde
+`care_no_show_too_early`; no cambia las cinco confirmaciones anteriores.
+
+
 ## Colocación guiada de citas combinadas · 07/10/2026
 
 `GET /api/disponibilidad/treatment-slots` conserva su contrato normal. El modo
@@ -153,8 +206,9 @@ Contrato: `back-dev/docs/security/whatsapp-onboarding-ui.md`.
 
 ## 13/09/2026 — API gateway del alta WhatsApp con MFA
 
-Base `/api/whatsapp/onboarding`: POST `/begin` (`requestId,scope` y
-`channelRole:primary|secondary` opcional, principal por defecto),
+Base `/api/whatsapp/onboarding`: POST `/begin` (`requestId,scope`,
+`channelRole:primary|secondary` opcional, principal por defecto, y
+`replacementAssetId` solo al reconectar),
 `/finish` (`requestId,state,code,wabaId,phoneId`), `/status` y `/cancel`
 (`requestId`). JSON exacto de hasta 8 KiB, sin compresión/query/rawBody.
 Bearer de sesión gestionada, Origin HTTPS app/crm/autenticacion de ClinicaClick
@@ -171,6 +225,11 @@ DTO: requestId, authorizationStatus, connected false, pending, expiresAt, scope,
 clinicCount, selected y cancellationConfirmed; `channelRole` conserva la intención
 firmada del intento. Filas anteriores sin rol mantienen su contexto/MAC v1. `phoneId` admite `null` para
 resolver un WABA con un único número en el broker; cero o varios se rechazan.
+La reconexión firma activo y autorización anteriores en contexto v3. Una rotación
+de IDs solo sustituye ese activo cuando los perfiles autenticados conservan el
+mismo teléfono y la coexistencia; el navegador no decide esa equivalencia.
+Un activo legacy sin autorización nativa solo puede adoptarse si sigue activo,
+en coexistencia, sin activación previa y con la misma huella de teléfono.
 El DTO puede añadir `phoneState` nullable con `phoneId,isOnBizApp,platformType,
 coexistenceAvailable,registrationAttempted:false,observedAt`. La observación
 debe concordar con el número candidato; no acredita conexión ni envío.
@@ -3005,7 +3064,7 @@ Reglas:
 - El panel se sirve desde backend; el frontend no debe recomponerlo con llamadas paralelas a agenda, leads, consentimientos o reseñas.
 - El servicio `panelesDashboard.service.js` evita `include`/left joins para el contrato del panel: consulta tablas base y enriquece en memoria por mapas de IDs.
 - `todayAppointments` usa rango de día completo y excluye citas canceladas/reprogramadas, citas ya cerradas como `completada`/`no_asistio` y citas abiertas cuyo `fin` ya pasó, porque el bloque operativo representa "citas que esperamos hoy". `doctorAppointmentsToday` conserva la agenda del doctor con el estado de cada cita del día. `pastAttendancePending` devuelve citas ya finalizadas sin asistencia cerrada para que la UI pregunte si acudió.
-- Las acciones de asistencia siguen usando el endpoint canónico `PATCH /api/citas/:id/estado`.
+- El ciclo nativo usa `POST /api/citas/:id/care/arrive`, `/start` y `/finish`. El endpoint genérico de estado conserva los cambios previos permitidos y redirige las fases clínicas a sus validaciones nativas. [Contrato y publicación](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/17.1-ciclo-atencion-validacion-20261008.md).
 - Desde 2026-07-04 la respuesta incluye `setup` para primeros pasos generales, `criticalAlerts` para bloqueos técnicos, `growthOpportunities` para crecimiento y `meta.generatedAt` para mostrar la última actualización.
 - Desde 2026-07-04 la respuesta incluye `nextAppointments` para que el frontend explique estados vacíos de "citas de hoy" sin recomponer agenda en Angular. Se calcula en backend con la misma tabla base `CitasPacientes` y excluye canceladas/reprogramadas.
 - Desde 2026-07-06 `tasks.items` incluye `pending_attendance` cuando hay citas pasadas pendientes de cerrar asistencia, y `tasks.total` se calcula en backend sobre todos los items devueltos.
@@ -6091,8 +6150,8 @@ Consecuencias:
   Este JSON permite que la UI seleccione automatizaciones complementarias sin alterar el contrato principal `appointment_automation_template_key/version`.
 - El runtime evalúa primero `disabled=true`; si no está bloqueado, resuelve el binding del tratamiento y después el fallback clinic/group/system. Los slots solo son compatibles con su `trigger_type`: `appointment_completed`, `appointment_no_show`, `appointment_after`, `appointment_rescheduled` o `appointment_cancelled`.
 - Para `appointment_created` con `with_treatment + treatment_filter=specific`, `publish` bloquea otra automatización activa del mismo scope si ya cubre alguno de esos tratamientos.
-- Si una cita pasa a `cancelada`, `reprogramada`, `completada` o `no_asistio`, las ejecuciones V2 activas/pendientes de esa cita se cancelan antes de lanzar el evento correspondiente. `reprogramada` cancela automatizaciones de la hora anterior, pero la cita sigue siendo accionable manualmente desde UI. Un nodo `action/change_status` no puede resucitar citas realmente cerradas (`cancelada`, `completada`, `no_asistio`); el nodo se marca como `skipped` y el flujo termina.
-- Las notificaciones operativas creadas por `action/send_system_notification` para una cita se marcan automáticamente como leídas cuando esa cita queda resuelta (`info_confirmada`, `recordatorio_confirmado`, `cancelada`, `reprogramada`, `completada`, `no_asistio`). El backend emite `notification:updated` para que la campana no mantenga avisos obsoletos si la resolución ocurre en tiempo real.
+- Si una cita pasa a `cancelada`, `reprogramada`, `ha_acudido`, `en_atencion`, `completada` o `no_asistio`, las ejecuciones V2 previas se cancelan. `reprogramada` cancela automatizaciones de la hora anterior, pero sigue siendo accionable manualmente. Un nodo `action/change_status` no puede devolver una cita atendida a confirmación ni resucitar una cita cerrada; se marca como `skipped` y el flujo termina. Las comunicaciones posteriores requieren finalización nativa y configuración activa.
+- Las notificaciones operativas de `action/send_system_notification` se marcan leídas al resolverse la cita (`info_confirmada`, `recordatorio_confirmado`, `cancelada`, `reprogramada`, `ha_acudido`, `en_atencion`, `completada`, `no_asistio`). Se emite `notification:updated` para retirar avisos obsoletos en tiempo real.
 
 ### `condition/field_check` temporal
 
@@ -6921,7 +6980,7 @@ Reglas:
 - `cancelada` no mantiene al lead como `citado`.
 - `enrichLeadsWithLinkedAppointments()` ignora citas no activas para `linked_appointment`.
 - El resumen de paciente (`GET /api/pacientes/:id`) usa el mismo criterio operativo para `proxima_cita`/`ultima_cita`: una cita en estado `reprogramada` debe seguir mostrándose en ficha/QuickChat si conserva fecha futura o si está en curso (`fin >= now`). Solo `cancelada` se excluye de estos bounds.
-- `reprogramada` no es terminal para acciones manuales de UI: se puede pasar a `info_confirmada`, `recordatorio_confirmado`, `completada`, `no_asistio` o `cancelada`. Sí sigue cancelando ejecuciones de automatización previas cuando se dispara el evento de reagendado, para no enviar mensajes de la hora antigua.
+- `reprogramada` no es terminal para acciones manuales de UI: permite confirmar datos/intención de acudir, registrar llegada, no asistencia o cancelación. Iniciar y finalizar atención exigen las acciones nativas y su evidencia de llegada/inicio, no un salto genérico a `completada`. Sí sigue cancelando ejecuciones de automatización previas al reagendar, para no enviar mensajes de la hora antigua.
 
 ### Intake web: precedencia de scope
 
@@ -7885,7 +7944,7 @@ Actualización 2026-05-06:
 - La importación histórica para reseñas/reactivación acepta aliases de fecha tipo `fecha_tratamiento`, `fecha_de_tratamiento`, `fecha_realizacion`, `fecha_ultima_cita` y `fecha_ultimo_tratamiento`. Si el CSV trae nombres como `Apellidos Apellidos Nombre`, el frontend debe inferir `name_format=last_last_first` y el backend mantiene la misma lógica automática como red de seguridad; así se separan nombre/apellidos para evitar que el WhatsApp salude por el apellido. Estas citas importadas son datos de contexto: nunca deben lanzar `appointment_created` ni recordatorios de cita; si aparecen en actividad de paciente deben mostrarse como tratamiento histórico importado.
 - En candidatos de reseñas, `tratamiento` no debe rellenarse con valores técnicos genéricos (`visita`, `cita`, `Importación de pacientes...`). Si la cita histórica tiene `titulo = "Histórico: ..."` se limpia el prefijo y solo se usa cuando queda un tratamiento real. Si no existe tratamiento identificable, el front debe mostrarlo como no asignado.
 - Fuentes soportadas para reseñas: `first_completed_or_completed_treatment`, `first_completed_appointment`, `completed_treatment`, `manual_selection`. `manual_selection` pertenece a envíos puntuales. En automatización, la clínica debe elegir explícitamente una de las tres fuentes clínicas y la espera inicial; `completed_treatment` exige tratamiento asociado, `first_completed_appointment` usa la primera cita atendida y la opción combinada actúa en el primer hito válido. En todos los casos se excluye cualquier paciente que ya tenga una solicitud previa enviada o en cola para evitar duplicados.
-- En reseñas, `appointment_completed` significa que la cita se ha marcado con `estado = completada`, es decir, el paciente ha acudido o la clínica la da por realizada. No equivale a `info_confirmada` ni a `recordatorio_confirmado`, que solo indican confirmación previa del paciente. La automatización no envía en ese instante salvo que la clínica haya elegido expresamente `same_day`: entra en el `delay/fixed` coherente con `review_delay` (`same_day`, `24h`, `48h` o `7d`) y después vuelve a validar que la copia clínica sigue activa y configurada.
+- En reseñas, `appointment_completed` exige finalización nativa de esta cita (`completada` con llegada, inicio, finalización y ancla de reserva vigente), no mera asistencia ni el histórico migrado. No equivale a `info_confirmada` ni a `recordatorio_confirmado`, que solo indican confirmación previa. La automatización conserva el `delay/fixed` configurado (`same_day`, `24h`, `48h` o `7d`) y vuelve a validar su copia clínica activa y configurada. Este corte no activa ninguna copia desactivada. [Contrato y estado de publicación](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/17.1-ciclo-atencion-validacion-20261008.md).
 - La escala de reseña es `1-5`; el filtro público queda fijado en `5/5`. Las plantillas WABA `solicitud_resena` y `recordatorio_resena_sin_respuesta` ya no usan botones rápidos: WhatsApp colapsa 5 opciones bajo "ver todas las opciones" y Meta rechaza emojis/formato en botones. Ambas muestran la escala con estrellas en el cuerpo en orden descendente (`5 ⭐⭐⭐⭐⭐` ... `1 ⭐`) y el paciente responde escribiendo `1`, `2`, `3`, `4` o `5`. El copy base actual incluye `firma_resenas`/`review_sender_name` para firmar el mensaje inicial y abre con: `Soy {{firma_resenas}} de {{nombre_clinica}}. ¿Te puedo hacer una pregunta? Como viste, en la clínica somos una pequeña familia...`; muestra directamente las cinco opciones. En reseñas, las variables `{{nombre}}`, `{{nombre_paciente}}` y equivalentes deben resolverse solo con nombre de pila para que el saludo sea natural; `{{nombre_completo}}` queda reservado para usos explícitos. Al recibir la respuesta, `materializeInboundReply` crea `review_rating_received`; si la valoración es `5/5` envía follow-up con `{{clinica.url_dejar_resena}}` como URL visible en texto, y si es `1-4` pide motivo como opinión privada. Si el paciente responde con valoración y motivo en el mismo mensaje (`4 estrellas. El doctor...`), el backend separa la nota del comentario, guarda ese comentario como `review_private_feedback_received` y no envía otra pregunta pidiendo el motivo. Si responde `1-4` y después `5`, se ignora el cambio para no llevarlo a Google; si responde `5` y después baja a `1-4`, se pide motivo privado una sola vez. El texto que llega después de un `review_private_feedback_request` se trata siempre como motivo privado y no se vuelve a parsear como valoración, aunque contenga números como tiempos de espera o fechas; la valoración mostrada se conserva desde el mensaje que originó la petición de motivo. Si por reintento/webhook tardío el mismo inbound ya quedó registrado como `review_rating_received`, no se guarda de nuevo como `review_private_feedback_received` ni se pinta en actividad/resumen como motivo. Se evita `interactive cta_url` para reseñas porque puede abrir Google en un contexto que obliga a iniciar sesión, mientras el enlace directo conserva mejor el flujo de escritura de reseña. Los follow-ups tras respuesta usan texto libre porque el inbound del paciente abre ventana de 24h; si en el futuro se diferencian o retrasan fuera de esa ventana deberán tener fallback por plantilla aprobada. Si el paciente deja motivo, se guarda como `review_private_feedback_received` y se envía acuse `review_private_feedback_ack` para cerrar la conversación. Si el paciente no contesta a la primera solicitud, el backend intenta enviar recordatorio 24h después solo si existe plantilla activa; si no existe, cierra el flujo como sin respuesta sin bloquear el primer envío. Las solicitudes manuales en cola (`mass_sends`) usan la misma política opcional de recordatorio/no-respuesta por item para no comportarse distinto a la automatización futura. En envíos de prueba (`mass_campaign_test`), el follow-up debe enviarse al número de prueba guardado en `metadata.recipient`, no al teléfono del contacto usado para renderizar variables; además, cada prueba se evalúa por `trigger_message_id` para poder repetir tests sobre el mismo contacto/lista sin bloquear el nuevo follow-up.
 - Si una campaña/lista de reseñas se prepara con premio, `criteria.review_gift_enabled` y `criteria.review_gift_description` gobiernan el follow-up de `5/5`. Sin premio: mensaje corto con URL visible para publicar en Google. Con premio: texto corto con la descripción del regalo, URL visible y la instrucción de escribir al WhatsApp para tramitarlo. Este follow-up no es plantilla WABA: se envía como mensaje de sesión justo después de recibir la valoración del paciente, aprovechando la ventana de 24h abierta por ese inbound. El backend usa un margen operativo de 23h50; si el webhook/materialización llega fuera de ventana, no intenta enviar texto libre y registra `review_rating_followup_skipped` con `reason=whatsapp_session_window_expired`.
 - Desde 2026-07-14 el follow-up positivo acepta `criteria.review_team_members_text` tanto sin premio como con premio para humanizar el cierre: si existe, añade `Si mencionas a alguien del equipo en la reseña, como a Dario el dentista o Vero en recepción, les haremos llegar el detalle...`; si no existe, mantiene el fallback genérico `Si mencionas a alguien del equipo en la reseña...`. Este texto se guarda en criterios de la lista y en la configuración del nodo `action/request_review`, se usa también en campañas automáticas futuras y no requiere aprobación de Meta porque se envía como mensaje de sesión tras la respuesta `5/5`, no como plantilla WABA.

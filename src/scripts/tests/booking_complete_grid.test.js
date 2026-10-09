@@ -60,7 +60,7 @@ test('preview without patient returns full plans in both column orders, with one
     assert.equal(+new Date(slot.phases[1].start_at) - +new Date(slot.start_at), 13 * 60000); assert(slot.booking_plan_sha256); }
   assert.equal(installations.duracion_min, 30); assert.equal(f.counts.context, 2); assert.equal(f.counts.acl, 2);
   assert.equal(pair(installations, 'installation', 6, 10).slots.length, 0, 'the later phase is not a visit start');
-  assert.match(pair(installations, 'installation', 6, 10).reasons[0].resource_conflicts[0].details.message, /primer paso.*Sala ficticia 9/);
+  assert.match(pair(installations, 'installation', 6, 10).reasons[0].resource_conflicts[0].details.message, /no está asignado.*Profesional ficticio 5[\s\S]*Sala ficticia 9/);
 });
 test('second-phase professional, room and machine conflicts reject starts in BOTH orientations at their real offset', async () => {
   for (const resource of ['professional', 'room', 'machine']) {
