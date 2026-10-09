@@ -9,7 +9,7 @@ function requiresReview(item) {
     || (item.planned || []).some((action) => action.type==='action/send_system_notification');
 }
 
-function check({report,expectations,cases,previous,casesBytes,previousCases,expectedCandidate,minimumRealInferences=200,regression=false}) {
+function check({report,expectations,cases,previous,casesBytes,previousCases,expectedCandidate,minimumRealInferences=200,regression=false,requireProviderTrace=false}) {
   assert.equal(report.complete,true,'partial replay is not a completed validation');
   assert.equal(report.clinicalWrites,false);
   assert.equal(report.sends,false);
@@ -50,7 +50,8 @@ function check({report,expectations,cases,previous,casesBytes,previousCases,expe
     if (!expected) {failures.push({id:item.id,reason:'human_expectation_missing'});continue;}
     groups[expected.kind]=(groups[expected.kind]||0)+1;
     if (item.error) {
-      if (expected.expectedError===item.error && item.inferenceCalls===0) expectedSafetyHolds.push(item.id);
+      if (expected.expectedError===item.error && item.inferenceCalls===0
+        && (!requireProviderTrace || Array.isArray(item.providerTrace) && item.providerTrace.length===0)) expectedSafetyHolds.push(item.id);
       else failures.push({id:item.id,reason:'analysis_failed',error:item.error});
       continue;
     }
@@ -61,6 +62,20 @@ function check({report,expectations,cases,previous,casesBytes,previousCases,expe
     providers[provider]=(providers[provider]||0)+1;
     const model=item.output?._ai_model;
     models[model]=(models[model]||0)+1;
+    if (item.output?._ai_fallback_used === true || item.output?._ai_simulated === true) {
+      failures.push({id:item.id,reason:'fallback_or_simulated_inference'});
+    }
+    if (requireProviderTrace || item.providerTrace) {
+      const trace = item.providerTrace;
+      if (!Array.isArray(trace) || trace.length !== 1) {
+        failures.push({id:item.id,reason:'one_provider_call_not_verified'});
+      } else if (trace[0].errorCode || trace[0].stopReason !== 'tool_use'
+        || trace[0].model !== model || !(trace[0].usage?.input_tokens > 0)
+        || !(trace[0].usage?.output_tokens > 0)
+        || trace[0].usage.output_tokens >= trace[0].maxTokens) {
+        failures.push({id:item.id,reason:'provider_completion_not_verified'});
+      }
+    }
     if (item.inferenceCalls===1 && provider==='bedrock') {
       realCalls++;
       if (String(model).includes('amazon.nova-lite-')) realLiteCalls++;
@@ -86,6 +101,7 @@ function check({report,expectations,cases,previous,casesBytes,previousCases,expe
   if (realCalls<minimumRealInferences) failures.push({reason:'fewer_than_200_additional_real_inferences',realCalls,minimumRealInferences});
   if (realLiteCalls<minimumRealInferences) failures.push({reason:'fewer_than_200_additional_nova_lite_inferences',realLiteCalls,minimumRealInferences});
   return {validationKind:regression?'current_native_path_regression':'additional_distinct_conversations',
+    casesSha256:expectations.casesSha256,
     cases:report.results.length,distinctConversations:conversations.size,realCalls,realLiteCalls,providers,models,groups,
     projectedStates:states,reviews,conservative,legacyNonInference,expectedSafetyHolds,failures,
     cutoff:report.cutoff,clinicalWrites:false,sends:false,
@@ -107,7 +123,8 @@ if (require.main===module) {
     previous:read(previousFile),casesBytes:fs.readFileSync(casesFile),
     previousCases:priorCasesIndex>=0 ? read(process.argv[priorCasesIndex+1]) : null,expectedCandidate,
     minimumRealInferences:minimumIndex>=0 ? Number(process.argv[minimumIndex+1]) : 200,
-    regression:process.argv.includes('--regression')});
+    regression:process.argv.includes('--regression'),
+    requireProviderTrace:process.argv.includes('--require-provider-trace')});
   const out = process.argv.indexOf('--report');
   if (out>=0) fs.writeFileSync(process.argv[out+1],JSON.stringify(result,null,2),{mode:0o600,flag:'wx'});
   console.log(JSON.stringify(result));

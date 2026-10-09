@@ -1,17 +1,62 @@
 'use strict';
 
-// Reuse historical analysis outputs, not a new inference. Current field-check
-// nodes and the actual final state writer run with in-memory appointment rows;
-// provider, SQL and queue sockets are forbidden by the offline fixture.
+// Traverse supplied analysis outputs with in-memory appointment rows. Provider,
+// SQL and queue sockets are forbidden; fresh outputs need a validated replay.
 const fs = require('node:fs'), assert = require('node:assert/strict'), crypto = require('node:crypto');
 require('../tests/fixtures/campaign_offline_runtime.cjs');
 const { loadSource } = require('../tests/fixtures/business_profile_flow_runtime.fixture');
-const args = process.argv.slice(2), arg = name => args[args.indexOf(name) + 1];
+const args = process.argv.slice(2), arg = name => args.includes(name) ? args[args.indexOf(name) + 1] : null;
 const input = arg('--cases'), output = arg('--report');
 if (!input?.startsWith('/home/ubuntu/secure-imports/') || !output?.startsWith('/home/ubuntu/secure-imports/')
   || fs.existsSync(output)) throw Error('NEW_PRIVATE_CARE_QA_REPORT_REQUIRED');
-const cases = JSON.parse(fs.readFileSync(input)).cases;
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const sourceCases = JSON.parse(fs.readFileSync(input)).cases;
+const inferenceReport = arg('--inference-report');
+const inferenceValidation = arg('--inference-validation');
+let cases = sourceCases, freshEvidence = null;
+if (inferenceReport || inferenceValidation) {
+  assert(inferenceReport && inferenceValidation, 'FRESH_REPLAY_AND_VALIDATION_REQUIRED');
+  const replay = JSON.parse(fs.readFileSync(inferenceReport));
+  const validation = JSON.parse(fs.readFileSync(inferenceValidation));
+  assert.equal(replay.complete, true);
+  assert.equal(replay.clinicalWrites, false); assert.equal(replay.sends, false);
+  assert.equal(validation.failures.length, 0, 'FRESH_REPLAY_NOT_VALIDATED');
+  assert.equal(validation.cases, sourceCases.length);
+  assert.equal(validation.casesSha256, crypto.createHash('sha256').update(fs.readFileSync(input)).digest('hex'));
+  assert.equal(validation.cutoff, replay.cutoff);
+  assert.equal(replay.sourceLogs, sourceCases.length);
+  assert.equal(replay.results.length, sourceCases.length);
+  const byId = new Map(replay.results.map(item => [item.id, item]));
+  assert.equal(byId.size, sourceCases.length);
+  const holds = new Set(validation.expectedSafetyHolds);
+  cases = sourceCases.flatMap(item => {
+    const result = byId.get(item.id); assert(result, 'FRESH_REPLAY_CASE_MISSING');
+    if (result.error) {
+      assert(holds.has(item.id) && result.inferenceCalls === 0, 'UNEXPECTED_FRESH_REPLAY_ERROR');
+      return [];
+    }
+    assert.equal(result.inferenceCalls, 1);
+    assert.equal(result.output?._ai_provider, 'bedrock');
+    assert.equal(result.output?._ai_simulated, undefined);
+    assert.equal(result.output?._ai_fallback_used, false);
+    assert.equal(result.currentPathEvidence?.graphHash, hash(item.nodes));
+    assert.equal(result.currentPathEvidence?.nodeId, item.node.id);
+    assert.equal(result.response, item.context.last_response_context?.response_text);
+    assert.equal(result.reference, item.context.last_prompt);
+    return [{ ...item, original_output: result.output }];
+  });
+  assert.equal(holds.size, sourceCases.length - cases.length);
+  assert.equal(validation.realCalls, cases.length);
+  const candidatePaths = ['src/services/flowEngineV2.service.js', 'src/lib/automation-intent-contract.js',
+    'src/lib/automation-conversation-context.js', 'src/lib/same-day-canonical-flow.js'];
+  assert.deepEqual(Object.keys(replay.candidate).sort(), candidatePaths.sort());
+  for (const [name, expected] of Object.entries(replay.candidate)) {
+    assert.equal(crypto.createHash('sha256').update(fs.readFileSync(require('node:path').resolve(__dirname, '../../..', name))).digest('hex'), expected);
+  }
+  freshEvidence = { sourceCases: sourceCases.length, expectedSafetyHolds: holds.size,
+    sourceRealCalls: validation.realCalls, inferenceReport,
+    reportSha256: crypto.createHash('sha256').update(fs.readFileSync(inferenceReport)).digest('hex') };
+}
 let appointment, clinicalWrites = 0, providerCalls = 0;
 const db = { CitaPaciente: { findByPk: async () => appointment }, Sequelize: require('sequelize'),
   sequelize: { transaction: async (_, work) => work({ LOCK: { UPDATE: 'UPDATE' } }) } };
@@ -29,8 +74,11 @@ const engine = loadSource('flowEngineV2.service', { '../../models': db,
 }, { JOB_RUNTIME_NAMESPACE: 'qa', RUNTIME_ROLE: 'gateway', JOBS_AUTO_START: 'false' });
 
 (async () => {
-  const result = { mode: 'local_historical_outputs_current_graphs', newInference: false,
-    limitations: 'Does not measure new model decisions. Uses stored historical output only to traverse current field checks and test care-state protection.',
+  const result = { mode: freshEvidence ? 'local_fresh_outputs_current_graphs' : 'local_historical_outputs_current_graphs',
+    newInference: false, freshEvidence,
+    limitations: freshEvidence
+      ? 'Reuses newly inferred and validated outputs to test care guards offline. This stage makes no additional inference or delivery.'
+      : 'Does not measure new model decisions. Uses stored historical output only to traverse current field checks and test care-state protection.',
     cases: cases.length, conversations: new Set(cases.map(c => c.context.conversation.id)).size,
     graphs: new Set(cases.map(c => c.currentPathEvidence.graphHash)).size,
     routedCases: 0, stateActions: 0, protectedTransitions: 0, phaseSendGuards: 0,

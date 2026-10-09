@@ -40,6 +40,29 @@ test('rejects more than one inference and insufficient real coverage',()=>{
   const input=fixture();input.report.results[0].inferenceCalls=2;
   assert.deepEqual(check(input).failures.map(f=>f.reason),['one_real_inference_not_verified','fewer_than_200_additional_real_inferences','fewer_than_200_additional_nova_lite_inferences']);
 });
+test('does not accept simulated inference or a provider fallback as the selected model proof',()=>{
+  for (const key of ['_ai_fallback_used','_ai_simulated']) {
+    const input=fixture();input.report.results[0].output[key]=true;
+    assert.ok(check(input).failures.some(f=>f.reason==='fallback_or_simulated_inference'));
+  }
+});
+test('provider trace verifies a single completed, non-truncated tool call',()=>{
+  const input=fixture();input.requireProviderTrace=true;
+  for (const item of input.report.results) item.providerTrace=[{
+    model:item.output._ai_model,maxTokens:700,stopReason:'tool_use',
+    usage:{input_tokens:100,output_tokens:80},
+  }];
+  assert.equal(check(input).failures.length,0);
+  for (const stopReason of ['max_tokens',null]) {
+    input.report.results[0].providerTrace[0].stopReason=stopReason;
+    assert.ok(check(input).failures.some(f=>f.reason==='provider_completion_not_verified'));
+  }
+  input.report.results[0].providerTrace[0].stopReason='tool_use';
+  input.report.results[0].providerTrace[0].usage.output_tokens=700;
+  assert.ok(check(input).failures.some(f=>f.reason==='provider_completion_not_verified'));
+  input.report.results[0].providerTrace=[];
+  assert.ok(check(input).failures.some(f=>f.reason==='one_provider_call_not_verified'));
+});
 test('rejects partial results, changed runtime and tampered expectations',()=>{
   const input=fixture();input.report.complete=false;assert.throws(()=>check(input));
   input.report.complete=true;input.report.candidate={runtime:'modified'};assert.throws(()=>check(input));

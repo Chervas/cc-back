@@ -150,6 +150,9 @@ async function reconstructClinicalContext() {
 
 async function replay() {
   if (!args.includes('--real-ai')) throw new Error('replay_requires_explicit_real_ai_flag');
+  if (!require(backend + '/src/services/bedrockBroker.service').enabled()) {
+    throw new Error('replay_requires_authorized_bedrock_broker');
+  }
   const data = JSON.parse(fs.readFileSync(file));
   const output = argument('--report', file.replace('.cases.json', '.replay.json'));
   if (fs.existsSync(output)) throw Error('replay_report_already_exists');
@@ -180,6 +183,22 @@ async function replay() {
     require(backend + '/src/lib/automation-conversation-context'), () => activeCase);
   const engine = require(backend + '/src/services/flowEngineV2.service');
   const ai = require(backend + '/src/services/aiOrchestrator.service');
+  const provider = require(backend + '/src/services/bedrockAiProvider.service');
+  const providerAnalyze = provider.analyzeStructured;
+  let providerTrace;
+  provider.analyzeStructured = async (request) => {
+    const trace = { model: request.model,
+      maxTokens: Math.max(32, Math.min(4096, Number(request.maxTokens) || 700)) };
+    providerTrace.push(trace);
+    try {
+      const result = await providerAnalyze(request);
+      Object.assign(trace, { stopReason: result.stop_reason, usage: result.usage });
+      return result;
+    } catch (error) {
+      trace.errorCode = provider.providerErrorCode(error);
+      throw error;
+    }
+  };
   const analyze = ai.analyzeStructured;
   let inference, inferenceCalls;
   ai.analyzeStructured = async (request) => {
@@ -198,6 +217,7 @@ async function replay() {
       activeCase = item;
       inference = null;
       inferenceCalls = 0;
+      providerTrace = [];
       const startedAt = Date.now();
       const context = structuredClone(item.context);
       const before = JSON.stringify(context.appointment);
@@ -229,11 +249,11 @@ async function replay() {
           currentPathEvidence:item.currentPathEvidence || null,
           response: item.context.last_response_context.response_text, reference: item.context.last_prompt,
           previous: item.original_output, output: result.output, route, planned, inference,
-          inferenceCalls, elapsedMs:Date.now()-startedAt,
+          inferenceCalls, providerTrace, elapsedMs:Date.now()-startedAt,
           clinicalWrites: false, sends: false });
       } catch (error) {
         results.push({ id: item.id, preset: item.preset, error: error.message,
-          inferenceCalls, elapsedMs:Date.now()-startedAt });
+          inferenceCalls, providerTrace, elapsedMs:Date.now()-startedAt });
       }
       const last = results.at(-1);
       console.log(JSON.stringify({ id: last.id, preset: item.preset, intent: last.output?.intencion_principal,
