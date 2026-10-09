@@ -189,3 +189,56 @@ test('legacy diagnostics without an appointment ID still identify appointments a
   assert.match(reason.message, /5 min de puesta en marcha.*primeros 10 min.*5 min de retirada.*últimos 10 min/);
   assert.doesNotMatch(reason.message, /un bloqueo de agenda|requiere toda su atención/);
 });
+
+test('doctor-only manual receipts explain real staff/clinic/patient restrictions without inventing a room', () => {
+  const f = fixture(); f.start = '2030-01-07T10:00:00Z'; f.treatmentId = null; f.treatmentName = '';
+  f.profile.phases[0].installation_ids = []; f.selections = { valuation: { doctor_id: 5 } }; f.doctorOnly = true;
+  const free = assessment(f);
+  assert.equal(free.restrictions.length, 0); assert.equal(free.canConfirm, false);
+  assert.equal(free.solution.phases[0].installation_id, null);
+  f.context.doctors.get(5).windows = [];
+  f.context.doctors.get(5).busy.push({ start: f.start, end: '2030-01-07T10:45:00Z', diagnostic: { kind: 'block' } });
+  f.context.clinicWindows = [];
+  f.context.patientBusy.push({ start: f.start, end: '2030-01-07T10:45:00Z', clinic_id: 72 });
+  const warning = assessment(f);
+  assert.equal(warning.canConfirm, true);
+  assert.deepEqual(warning.restrictions.map(r => r.code).sort(), ['CLINIC_OUT_OF_HOURS', 'PATIENT_OVERLAP', 'STAFF_BLOCKED', 'STAFF_OUT_OF_HOURS']);
+  assert(warning.restrictions.every(row => !row.installation));
+  assert.equal(assessment({ ...f, acknowledgement: warning.acknowledgement }).confirmed, true);
+  assert.equal(assessment({ ...f, actorId: 9, acknowledgement: warning.acknowledgement }).confirmed, false);
+  for (const patch of [{ patientId: 999 }, { appointmentId: 888 }, { clinicId: 66 },
+    { previous: { inicio: f.start, fin: end, estado: 'pendiente', updated_at: f.start } },
+    { profile: { ...f.profile, phases: [{ ...f.profile.phases[0], duration_minutes: 40 }] } },
+    { selections: { valuation: { doctor_id: 6 } } }]) {
+    assert.equal(assessment({ ...f, ...patch, acknowledgement: warning.acknowledgement }).confirmed, false);
+  }
+  f.context.doctors.get(5).busy.push({ start: f.start, end: '2030-01-07T10:05:00Z', appointment_id: 99 });
+  assert.equal(assessment({ ...f, acknowledgement: warning.acknowledgement }).confirmed, false);
+  f.context.doctors.delete(5); assert.equal(assessment(f).canConfirm, false);
+});
+
+test('doctor-only receipt mode never relaxes ordinary, ALL, machine or relative treatment profiles', () => {
+  const { normalizeBookingProfile, normalizeDoctorOnlyBookingProfile } = require('../../lib/booking-profile');
+  const { bookingPlanHash, assertBookingPlanReceipt } = require('../../lib/booking-plan-receipt');
+  const f = fixture(); f.profile.phases[0].installation_ids = []; f.selections = { valuation: { doctor_id: 5 } }; f.doctorOnly = true;
+  const result = assessment(f), sha = bookingPlanHash(result.effectiveProfile, result.solution, { doctorOnly: true });
+  assert.throws(() => normalizeBookingProfile(result.effectiveProfile), { code: 'booking_profile_invalid' });
+  assert.throws(() => bookingPlanHash(result.effectiveProfile, result.solution), { code: 'booking_profile_invalid' });
+  assertBookingPlanReceipt(sha, result.effectiveProfile, result.solution, { doctorOnly: true });
+  assert.throws(() => assertBookingPlanReceipt('0'.repeat(64), result.effectiveProfile, result.solution, { doctorOnly: true }), { code: 'booking_plan_changed' });
+  for (const mutate of [p => { p.phases[0].professionals.ids = [6]; p.phases[0].professionals.preferred_id = 6; },
+    p => { p.phases[0].duration_minutes = 40; }]) {
+    const changedProfile = structuredClone(result.effectiveProfile); mutate(changedProfile);
+    const changedSolution = structuredClone(result.solution);
+    if (changedProfile.phases[0].professionals.ids[0] === 6) changedSolution.phases[0].doctor_ids = [6];
+    else changedSolution.phases[0].end_at = changedSolution.end_at = new Date(+new Date(changedSolution.start_at) + 40 * 60000).toISOString();
+    assert.notEqual(bookingPlanHash(changedProfile, changedSolution, { doctorOnly: true }), sha);
+  }
+  for (const mutate of [p => { p.version = 4; p.phases[0].start_offset_minutes = 0; },
+    p => { p.phases[0].professionals.mode = 'all'; p.phases[0].professionals.preferred_id = null; },
+    p => { p.phases[0].installation_ids = [3]; }, p => { p.phases[0].duration_minutes = null; },
+    p => { p.phases.push({ ...p.phases[0], key: 'second' }); }]) {
+    const raw = structuredClone(f.profile); mutate(raw);
+    assert.throws(() => normalizeDoctorOnlyBookingProfile(raw), { code: 'booking_profile_invalid' });
+  }
+});

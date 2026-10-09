@@ -1,7 +1,7 @@
 'use strict';
 
 const { solveBookingProfile, occupancyForSolution, isFree } = require('../lib/booking-profile-solver');
-const { normalizeBookingProfile, bookingProfileDurationMinutes } = require('../lib/booking-profile');
+const { normalizeBookingProfile, normalizeDoctorOnlyBookingProfile, bookingProfileDurationMinutes } = require('../lib/booking-profile');
 const { resolveBookingProfileDuration, normalizeDurationSelection } = require('../lib/booking-profile-duration');
 const { resolveInstallationKeys, loadBookingContext } = require('./appointmentBookingAvailability.service');
 const { bookingError, bookingCapabilities, requireOperationalProfile, assertOperationalBookingProfile, loadScopedTreatment, assertPriorityAcknowledgement, assertTreatmentBookingVisibility } = require('./treatmentBookingProfile.service');
@@ -439,6 +439,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       throw bookingError('booking_duration_locked', 'La duración de la cita debe respetar los pasos del tratamiento.', { can_force: false }, 422);
     }
     let profile = configuredProfile || legacyProfile(values, (end - start) / 60000);
+    const doctorOnly = !configuredProfile && !values.instalacion_id && !!values.doctor_id;
     const manualRestrictions = restrictionConfirmation && !stateOnly && !importEquipmentAssignment
       && !session && !trustedProgramSession && !preparedSeries
       && Number.isSafeInteger(restrictionConfirmation.actorId) && restrictionConfirmation.actorId > 0
@@ -459,6 +460,20 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       : (profile.phases.length === 1 && profile.phases[0].professionals.mode === 'any'
         ? { [profile.phases[0].key]: { doctor_id: values.doctor_id, installation_id: values.instalacion_id } }
         : existingSelections || {});
+    if (!configuredProfile && Object.keys(selections || {}).length) {
+      // A legacy single appointment has one explicit primary assignment. Its
+      // optional selection cannot reserve different resources behind that row.
+      // Catalog phase choices remain independent and use the strict solver.
+      const key = profile.phases[0].key, choice = selections?.[key];
+      const sameId = (a, b) => Number(a || 0) === Number(b || 0);
+      if (!selections || typeof selections !== 'object' || Array.isArray(selections)
+        || Object.keys(selections).length !== 1 || !choice || typeof choice !== 'object' || Array.isArray(choice)
+        || Object.keys(choice).some(field => !['doctor_id', 'installation_id'].includes(field))
+        || (choice.doctor_id != null && !sameId(choice.doctor_id, values.doctor_id))
+        || (choice.installation_id != null && !sameId(choice.installation_id, values.instalacion_id))) {
+        throw bookingError('booking_restriction_selection_invalid', 'El profesional y la sala deben coincidir con los de esta cita.', null, 400);
+      }
+    }
     if (session || trustedProgramSession) chosen = require('../lib/program-appointment-link').programBookingSelections(
       metadataObject((session || trustedProgramSession).snapshot), previous, chosen);
     const readProfile = manualRestrictions ? require('../lib/booking-restriction-confirmation').restrictionReadProfile(profile, { selections: chosen }) : profile;
@@ -493,7 +508,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       let patientConflict = patientConflicts.length > 0;
       if (manualRestrictions && (!solution || patientConflict)) {
         const { assessment, restrictionErrorDetails } = require('../lib/booking-restriction-confirmation');
-        const result = assessment({ profile, context, start, selections: chosen, additionalStaffIds: extraStaff,
+        const result = assessment({ profile, context, start, selections: chosen, additionalStaffIds: extraStaff, doctorOnly,
           canonicalSolution: solution,
           clinicId: Number(values.clinica_id), clinicName: clinic.nombre_clinica, treatmentId: values.tratamiento_id,
           treatmentName: treatment?.nombre || '', patientId: values.paciente_id, appointmentId: existing?.id_cita || null,
@@ -513,7 +528,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
           importMetadata.booking_restriction_confirmation = { version: 1, confirmed_by: restrictionConfirmation.actorId,
             confirmed_at: new Date().toISOString(), acknowledgement: result.acknowledgement,
             start_at: start.toISOString(), end_at: end.toISOString(), restrictions: result.restrictions,
-            original_profile: normalizeBookingProfile({ ...originalProfile,
+            original_profile: (doctorOnly ? normalizeDoctorOnlyBookingProfile : normalizeBookingProfile)({ ...originalProfile,
               version: solution.phases.some(phase => phase.staff_attention) && originalProfile.version < 3 ? 3 : originalProfile.version,
               phases: originalProfile.phases.map((phase, index) => ({ ...phase,
                 ...(solution.phases[index].staff_attention ? { staff_attention: solution.phases[index].staff_attention } : {}) })) }) };
@@ -596,7 +611,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     // their final identity as well, including secondary phases whose primary
     // doctor/room fields do not change. This pure guard performs no extra read.
     require('../lib/appointment-care').assertCareStatusChange(previous, values, new Date(), { additionalStaffIds: requestedStaff });
-    if (solution) require('../lib/booking-plan-receipt').assertBookingPlanReceipt(expectedPlanSha256, profile, solution);
+    if (solution) require('../lib/booking-plan-receipt').assertBookingPlanReceipt(expectedPlanSha256, profile, solution, { doctorOnly });
     const appointment = visitBirth
       ? await require('./appointmentVisitManaged.service').current().persistBirth(visitBirth, {
         values, transaction: tx,

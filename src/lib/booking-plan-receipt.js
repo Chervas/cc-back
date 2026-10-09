@@ -1,7 +1,7 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
-const { normalizeBookingProfile } = require('./booking-profile');
+const { normalizeBookingProfile, normalizeDoctorOnlyBookingProfile } = require('./booking-profile');
 const { normalizeAttentionPolicy } = require('./booking-attention');
 
 // An optimistic comparison of the complete plan the user saw. This grants no
@@ -29,8 +29,8 @@ function planChanged() {
 // The writer freezes effective (including inherited machine/default) attention
 // into the profile. Hash that same semantic representation on BOTH sides;
 // otherwise a valid SQL snapshot cannot reproduce its own preview receipt.
-function effectiveProfile(profile, solution) {
-  const normalized = normalizeBookingProfile(profile);
+function effectiveProfile(profile, solution, { doctorOnly = false } = {}) {
+  const normalized = doctorOnly ? normalizeDoctorOnlyBookingProfile(profile) : normalizeBookingProfile(profile);
   if (!solution.phases.some(phase => phase.staff_attention != null)) return normalized;
   return normalizeBookingProfile({ ...normalized, version: normalized.version === 4 ? 4 : 3,
     phases: normalized.phases.map((phase, index) => {
@@ -47,8 +47,8 @@ function effectiveProfile(profile, solution) {
     }),
   });
 }
-function bookingPlanHash(profile, solution) {
-  const normalized = effectiveProfile(profile, solution);
+function bookingPlanHash(profile, solution, options) {
+  const normalized = effectiveProfile(profile, solution, options);
   const instant = value => new Date(value).toISOString();
   const policies = normalized.phases.map(({ label: _label, ...phase }) => phase);
   const phases = solution.phases.map(phase => ({ key: phase.key,
@@ -70,9 +70,9 @@ function bookingPlanHash(profile, solution) {
     warnings: semanticWarnings(solution.warnings),
   })).digest('hex');
 }
-function assertBookingPlanReceipt(expected, profile, solution) {
+function assertBookingPlanReceipt(expected, profile, solution, options) {
   if (expected === undefined) return;
-  if (typeof expected !== 'string' || !/^[a-f0-9]{64}$/.test(expected) || expected !== bookingPlanHash(profile, solution)) {
+  if (typeof expected !== 'string' || !/^[a-f0-9]{64}$/.test(expected) || expected !== bookingPlanHash(profile, solution, options)) {
     throw planChanged();
   }
 }

@@ -715,19 +715,22 @@ exports.check = asyncHandler(async (req, res) => {
   }
   // Manual appointments without a treatment use the SAME explanation and
   // explicit-confirmation contract. There is no second permissive writer.
-  if (!bookingProfile && bookingCapabilities().simple && parseIntSafe(doctor_id) && parseIntSafe(instalacion_id)) {
+  if (!bookingProfile && bookingCapabilities().simple && parseIntSafe(doctor_id)) {
     await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId: clinicaId });
     const patientContext = await requestTreatmentBookingContext(req, null, clinica);
+    const installationId = parseIntSafe(instalacion_id) || null;
+    if (instalacion_id != null && instalacion_id !== '' && !installationId) return res.status(400).json({ message: 'instalacion_id inválido' });
+    const doctorOnly = installationId === null;
     const profile = { version: 1, phases: [{ key: 'appointment', duration_minutes: (+end - +start) / 60000,
-      installation_ids: [Number(instalacion_id)], professionals: { mode: 'any', ids: [Number(doctor_id)], preferred_id: Number(doctor_id) } }] };
-    const selections = { appointment: { doctor_id: Number(doctor_id), installation_id: Number(instalacion_id) } };
+      installation_ids: installationId ? [installationId] : [], professionals: { mode: 'any', ids: [Number(doctor_id)], preferred_id: Number(doctor_id) } }] };
+    const selections = { appointment: { doctor_id: Number(doctor_id), ...(installationId ? { installation_id: installationId } : {}) } };
     const additionalStaffIds = requestedAdditionalStaff(req);
     const context = await loadBookingContext({ db, clinic: clinica, profile, start, end, occupancyEnabled: true,
       patientId: patientContext.patientId, additionalStaffIds, includeDiagnosticLabels: true,
       ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null,
       ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, ignore_cita_id, clinicaId) });
     const { assessment, restrictionErrorDetails, restrictionResourceConflicts } = require('../lib/booking-restriction-confirmation');
-    const result = assessment({ profile, context, start, selections, additionalStaffIds,
+    const result = assessment({ profile, context, start, selections, additionalStaffIds, doctorOnly,
       clinicId: clinicaId, clinicName: clinica.nombre_clinica, patientId: patientContext.patientId || null,
       appointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, actorId: Number(req.userData?.userId),
       previous: patientContext.existingAppointment,
@@ -740,7 +743,7 @@ exports.check = asyncHandler(async (req, res) => {
     if (!result.solution) return res.status(409).json({ available: false, can_force: false, can_confirm_restrictions: false,
       message: 'Revisa la sala y el profesional: deben estar activos y pertenecer a esta clínica.' });
     return res.json({ available: true, clinica: { clinica_id: clinicaId, timezone: clinicTimezone },
-      resources: { doctor_id: Number(doctor_id), instalacion_id: Number(instalacion_id) }, booking: result.solution,
+      resources: { doctor_id: Number(doctor_id), instalacion_id: installationId }, booking: result.solution,
       range: { inicio_local: formatLocal(start, clinicTimezone), fin_local: formatLocal(end, clinicTimezone), inicio_utc: start.toISOString(), fin_utc: end.toISOString() } });
   }
   if (bookingProfile && +end - +start !== bookingProfileDurationMinutes(bookingProfile) * 60000) {
@@ -1617,11 +1620,43 @@ function legacySnapshotPayload(snapshot, query) {
   return { ...response, slots: result.slots, ...(includeUnavailable ? { unavailable_intervals: result.unavailable } : {}) };
 }
 
+function doctorOnlyColumnIds(query) {
+  const raw = query.doctor_only_column_ids ?? query['doctor_only_column_ids[]'];
+  if (raw == null) return [];
+  const values = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : [raw];
+  if (!values.length || values.length > 80 || values.some(value =>
+    !(['number', 'string'].includes(typeof value)) || !/^[1-9]\d*$/.test(String(value).trim())
+    || !Number.isSafeInteger(Number(value)))) {
+    throw availabilityInputError('doctor_only_column_ids debe contener identificadores enteros positivos (máximo 80).');
+  }
+  return [...new Set(values.map(value => Number(value)))];
+}
+
+function validateDoctorOnlyColumns(query, columnIds) {
+  const raw = query.doctor_only_column_ids ?? query['doctor_only_column_ids[]'];
+  if (raw == null) return;
+  const ids = doctorOnlyColumnIds(query);
+  const explicitRoom = value => value != null && value !== '' && value !== 'todos';
+  if (!ids.length || ids.length > 80 || ids.some(id => !columnIds.includes(id))
+    || query.mode !== 'doctor' || query.tratamiento_id
+    || explicitRoom(query.context_instalacion_id) || explicitRoom(query.preferred_instalacion_id)
+    || explicitRoom(query.instalacion_id)
+    || ['instalacion_ids', 'instalacion_ids[]', 'doctor_ids', 'doctor_ids[]'].some(key => query[key] != null)) {
+    throw availabilityInputError('Las columnas sin sala sólo se permiten para profesionales visibles, sin tratamiento ni sala elegida.');
+  }
+}
+
 function matrixColumnQuery(baseQuery, query, columnId) {
   const normalizedMode = query.mode === 'doctor' ? 'doctor' : 'installation';
   const contextDoctorId = query.context_doctor_id !== 'todos' ? parseIntSafe(query.context_doctor_id) : null;
   const contextInstallationId = query.context_instalacion_id !== 'todos' ? parseIntSafe(query.context_instalacion_id) : null;
   if (normalizedMode === 'doctor') {
+    // An explicitly roomless primary column is not the OR of every peer room.
+    // Reuse the same bulk staff/clinic snapshot; real room subcolumns retain
+    // their own pairwise constraints and the existing response shape.
+    if (doctorOnlyColumnIds(query).includes(Number(columnId))) {
+      return { ...baseQuery, doctor_id: String(columnId) };
+    }
     const installation = contextInstallationId || parseIntSafe(query.preferred_instalacion_id);
     const peers = parseIntArray(query.peer_instalacion_ids || query['peer_instalacion_ids[]']);
     return { ...baseQuery, doctor_id: String(columnId), ...(installation ? { instalacion_id: String(installation) }
@@ -1737,6 +1772,8 @@ exports.grid = asyncHandler(async (req, res) => {
   }
 
   const normalizedMode = mode === 'doctor' ? 'doctor' : 'installation';
+  try { validateDoctorOnlyColumns(req.query, columnIds); }
+  catch (error) { return res.status(error.statusCode || 400).json({ message: error.message }); }
 
   const baseQuery = {
     clinica_id: String(clinicaId),
@@ -1836,6 +1873,8 @@ exports.summary = asyncHandler(async (req, res) => {
   baseQuery.summary_only = true;
   const columnIds = parseIntArray(req.query.column_ids || req.query['column_ids[]']);
   if (columnIds.length > 80) return res.status(400).json({ message: 'column_ids[] excede el máximo (80)' });
+  try { validateDoctorOnlyColumns(req.query, columnIds); }
+  catch (error) { return res.status(error.statusCode || 400).json({ message: error.message }); }
   const queries = columnIds.length ? columnIds.map(id => matrixColumnQuery(baseQuery, req.query, id)) : [baseQuery];
   let getPayload;
   try {

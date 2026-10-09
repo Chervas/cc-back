@@ -3,7 +3,7 @@
 // A manual exception is a receipt for one exact, server-read reservation. It
 // never grants access, activates resources, changes a catalog or calls a sender.
 const { createHash, timingSafeEqual } = require('node:crypto');
-const { normalizeBookingProfile, bookingProfileDurationMinutes } = require('./booking-profile');
+const { normalizeBookingProfile, normalizeDoctorOnlyBookingProfile, bookingProfileDurationMinutes } = require('./booking-profile');
 const { solveBookingProfile, isFree } = require('./booking-profile-solver');
 const { installationAllowsStaff, normalizeInstallationProfessionals } = require('./installation-professionals');
 const { formatLocal } = require('./availability-calendar');
@@ -53,8 +53,9 @@ function restrictionReadProfile(profile, { selections = {}, doctorIds = [], inst
   })) };
 }
 
-function effectiveSelectedProfile(profile, selections) {
-  return normalizeBookingProfile({ ...profile, phases: profile.phases.map(phase => {
+function effectiveSelectedProfile(profile, selections, doctorOnly = false) {
+  const normalize = doctorOnly ? normalizeDoctorOnlyBookingProfile : normalizeBookingProfile;
+  return normalize({ ...profile, phases: profile.phases.map(phase => {
     const choice = selections[phase.key] || {};
     return { ...phase, ...(choice.installation_id ? { installation_ids: [choice.installation_id] } : {}),
       ...(phase.professionals.mode === 'any' && choice.doctor_id ? { professionals: {
@@ -66,8 +67,8 @@ function effectiveSelectedProfile(profile, selections) {
 
 function assessment({ profile: raw, context, start: rawStart, selections = {}, additionalStaffIds = [],
   clinicId = null, clinicName = '', treatmentId = null, treatmentName = '', patientId = null, appointmentId = null,
-  actorId = null, previous = null, acknowledgement = null, eligible = true, canonicalSolution = null }) {
-  const profile = normalizeBookingProfile(raw), chosen = normalizedSelections(profile, selections);
+  actorId = null, previous = null, acknowledgement = null, eligible = true, canonicalSolution = null, doctorOnly = false }) {
+  const profile = doctorOnly ? normalizeDoctorOnlyBookingProfile(raw) : normalizeBookingProfile(raw), chosen = normalizedSelections(profile, selections);
   const start = new Date(rawStart), end = new Date(+start + bookingProfileDurationMinutes(profile) * 60000);
   if (!Number.isFinite(+start)) throw selectionError();
   // The strict solver does not reserve optional full-visit support itself.
@@ -75,9 +76,9 @@ function assessment({ profile: raw, context, start: rawStart, selections = {}, a
   // because its extra staff is unavailable or incompatible with that room.
   if (canonicalSolution && additionalStaffIds.length && (!additionalStaffIds.every(key => isFree(context.doctors.get(key), start, end))
     || canonicalSolution.phases.some(step => !installationAllowsStaff(context.installations.get(step.installation_id), additionalStaffIds)))) canonicalSolution = null;
-  const selectedProfile = effectiveSelectedProfile(profile, chosen);
+  const selectedProfile = effectiveSelectedProfile(profile, chosen, doctorOnly);
   const effectiveProfile = canonicalSolution ? profile : selectedProfile;
-  const explicit = profile.phases.every(phase => chosen[phase.key]?.installation_id
+  const explicit = profile.phases.every(phase => (doctorOnly || chosen[phase.key]?.installation_id)
     && (phase.professionals.mode === 'all' || chosen[phase.key]?.doctor_id));
   const scopeValid = selectedProfile.phases.every(phase => phase.installation_ids.every(value => context.installations.has(value))
     && phase.professionals.ids.every(value => context.doctors.has(value)))
@@ -97,7 +98,12 @@ function assessment({ profile: raw, context, start: rawStart, selections = {}, a
   // Keeps machine status/location/turnaround, ALL teams, offsets, durations and
   // one clinician's joint internal timeline. Only EXTERNAL availability moves
   // from a prohibition to an explicitly acknowledged warning.
-  const solution = scopeValid ? canonicalSolution || solveBookingProfile({ profile: selectedProfile, start, ...relaxed, selections: chosen }) : null;
+  const solution = scopeValid ? canonicalSolution || (doctorOnly ? {
+    start_at: start.toISOString(), end_at: end.toISOString(), warnings: [], requires_priority_acknowledgement: false,
+    phases: [{ key: selectedProfile.phases[0].key, label: selectedProfile.phases[0].label,
+      start_at: start.toISOString(), end_at: end.toISOString(), installation_id: null,
+      doctor_ids: selectedProfile.phases[0].professionals.ids, staff_time_scope: 'phase' }],
+  } : solveBookingProfile({ profile: selectedProfile, start, ...relaxed, selections: chosen })) : null;
   const restrictions = [];
   const timeZone = context.timeZone || 'Europe/Madrid';
   const clock = date => formatLocal(new Date(date), timeZone).slice(11, 16);
@@ -152,15 +158,16 @@ function assessment({ profile: raw, context, start: rawStart, selections = {}, a
     { clinic: { id: clinicId, name: clean(clinicName) }, start_at: start.toISOString(), end_at: end.toISOString() });
   if (solution) for (const step of solution.phases) {
     const phase = profile.phases.find(row => row.key === step.key), first = new Date(step.start_at), last = new Date(step.end_at);
-    const room = context.installations.get(step.installation_id), installation = descriptor('installation', step.installation_id, room);
+    const hasRoom = step.installation_id != null;
+    const room = hasRoom ? context.installations.get(step.installation_id) : null, installation = hasRoom ? descriptor('installation', step.installation_id, room) : null;
     const details = { phase_key: step.key, phase_label: clean(phase.label),
       start_offset_minutes: (+first - +start) / 60000, duration_minutes: bookingProfileDurationMinutes(profile),
-      start_at: step.start_at, end_at: step.end_at, installation,
+      start_at: step.start_at, end_at: step.end_at, ...(installation ? { installation } : {}),
       treatment: { id: id(treatmentId), name: clean(treatmentName) } };
-    if (!phase.installation_ids.includes(step.installation_id)) add('TREATMENT_INSTALLATION_NOT_ALLOWED',
+    if (hasRoom && !phase.installation_ids.includes(step.installation_id)) add('TREATMENT_INSTALLATION_NOT_ALLOWED',
       `${installation.name} no está asignada a este tratamiento.${phase.installation_ids.length ? ` Las salas asignadas son ${phase.installation_ids.map(value => context.installations.get(value)?.name || 'una sala no disponible').join(', ')}.` : ''}`,
       { ...details, assigned_installations: phase.installation_ids.map(value => descriptor('installation', value, context.installations.get(value))) });
-    schedule(room, first, last, 'INSTALLATION', installation, details); busy(room, first, last, 'INSTALLATION', installation, details);
+    if (hasRoom) { schedule(room, first, last, 'INSTALLATION', installation, details); busy(room, first, last, 'INSTALLATION', installation, details); }
     for (const doctorId of step.doctor_ids) {
       const resource = context.doctors.get(doctorId), doctor = descriptor('doctor', doctorId, resource), staffDetails = { ...details, doctor };
       if (!phase.professionals.ids.includes(doctorId)) add('TREATMENT_PROFESSIONAL_NOT_ALLOWED',
@@ -172,7 +179,7 @@ function assessment({ profile: raw, context, start: rawStart, selections = {}, a
           policies: step.staff_attention || [normalizeAttentionPolicy(null)] })) add('PROFESSIONAL_SUBSTITUTION_NOT_ALLOWED',
         `${doctor.name} es el profesional alternativo. Este tratamiento sólo prevé la sustitución en una ausencia del profesional prioritario; esa condición no se cumple aquí.`,
         { ...staffDetails, assigned_doctors: [descriptor('doctor', phase.professionals.preferred_id, context.doctors.get(phase.professionals.preferred_id))] });
-      if (!installationAllowsStaff(room, [doctorId])) add('INSTALLATION_PROFESSIONAL_NOT_ALLOWED',
+      if (hasRoom && !installationAllowsStaff(room, [doctorId])) add('INSTALLATION_PROFESSIONAL_NOT_ALLOWED',
         `${doctor.name} no figura entre los profesionales asignados a ${installation.name}.`, staffDetails);
       const ranges = step.staff_intervals || [{ start_at: step.staff_time_scope === 'appointment' ? solution.start_at : step.start_at,
         end_at: step.staff_time_scope === 'appointment' ? solution.end_at : step.end_at }];
@@ -197,7 +204,7 @@ function assessment({ profile: raw, context, start: rawStart, selections = {}, a
       const resource = context.equipment?.get(machine.id), descriptorValue = descriptor('equipment', machine.id, resource);
       busy(resource, first, new Date(+last + machine.turnaround_minutes * 60000), 'EQUIPMENT', descriptorValue, details);
     }
-    for (const staffId of additionalStaffIds) if (!installationAllowsStaff(room, [staffId])) add('INSTALLATION_PROFESSIONAL_NOT_ALLOWED',
+    for (const staffId of additionalStaffIds) if (hasRoom && !installationAllowsStaff(room, [staffId])) add('INSTALLATION_PROFESSIONAL_NOT_ALLOWED',
       `${context.doctors.get(staffId)?.name || 'El personal de apoyo'} no figura entre los profesionales asignados a ${installation.name}.`,
       { ...details, doctor: descriptor('doctor', staffId, context.doctors.get(staffId)), resource_role: 'additional_staff' });
   }
@@ -217,7 +224,7 @@ function assessment({ profile: raw, context, start: rawStart, selections = {}, a
   // used for hover and confirmation. This is pure snapshot work: no extra
   // query, and no inference that a historical whole-visit hold means the
   // current protocol requires continuous care.
-  if (solution && profile.phases.length === 1 && restrictions.some(row => /^(STAFF|EQUIPMENT)_(OVERLAP|BLOCKED)$/.test(row.code))) {
+  if (solution && !doctorOnly && profile.phases.length === 1 && restrictions.some(row => /^(STAFF|EQUIPMENT)_(OVERLAP|BLOCKED)$/.test(row.code))) {
     const diagnostic = explainUnavailableStart({ profile: selectedProfile, context, start,
       selections: chosen, additionalStaffIds });
     if (['staff_intervention', 'equipment_busy'].includes(diagnostic.details.reason_key)) {
@@ -255,14 +262,14 @@ function assessment({ profile: raw, context, start: rawStart, selections = {}, a
   })).digest('hex') : null;
   const confirmed = canConfirm && !!expected && typeof acknowledgement === 'string' && /^[a-f0-9]{64}$/.test(acknowledgement)
     && timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(acknowledgement, 'hex'));
-  return { solution, effectiveProfile, restrictions: unique, canConfirm, acknowledgement: expected, confirmed };
+  return { solution, effectiveProfile, restrictions: unique, canConfirm, acknowledgement: expected, confirmed, ...(doctorOnly ? { doctorOnly: true } : {}) };
 }
 
 function restrictionErrorDetails(result) {
   return { can_force: false, can_confirm_restrictions: result.canConfirm,
     booking_restriction_acknowledgement: result.acknowledgement, booking_restrictions: result.restrictions,
     ...(result.solution ? { booking: result.solution,
-      booking_plan_sha256: require('./booking-plan-receipt').bookingPlanHash(result.effectiveProfile, result.solution) } : {}) };
+      booking_plan_sha256: require('./booking-plan-receipt').bookingPlanHash(result.effectiveProfile, result.solution, { doctorOnly: result.doctorOnly === true }) } : {}) };
 }
 function restrictionResourceConflicts(result) {
   return result.restrictions.map(row => ({ resource_type: row.doctor ? 'staff' : row.equipment ? 'equipment' : row.installation ? 'installation' : 'clinic',

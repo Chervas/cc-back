@@ -321,7 +321,7 @@ test('legacy destinations cannot force or fall through verified, pending or malf
     const read = f.db.DoctorClinica.findAll;
     f.db.DoctorClinica.findAll = async args => (await read(args)).map(row => ({ ...row, agenda_flexible: true }));
     const options = { appointmentValues: { ...f.values, instalacion_id: 10, inicio: later, fin: finish },
-      selections: { legacy: { doctor_id: 5, installation_id: 10 } }, force: true };
+      selections: { [version == null ? 'appointment' : 'legacy']: { doctor_id: 5, installation_id: 10 } }, force: true };
     await assert.rejects(f.reserve(options), error => error.code === 'booking_unavailable' && error.details.can_force === false);
     assert.equal(f.state.persists, 0); assert.equal(f.state.appointments.length, 1);
     const pForContext = p || profile(phase('legacy', [10], [5]));
@@ -1608,4 +1608,62 @@ test('combined manual exceptions preserve offsets, durations, segment indices an
   assert.deepEqual(saved.import_metadata.booking.profile.phases.map(item => item.start_offset_minutes), [0, 15]);
   assert.deepEqual(saved.import_metadata.booking.profile.phases.map(item => item.duration_minutes), [30, 30]);
   assert.equal(new Date(saved.fin).toISOString(), relativeEnd); assert.equal(f.state.occupancies.length, 4);
+});
+
+test('roomless first visits stay free when eligible and confirm real restrictions with actor/evidence/plan receipts', async () => {
+  const roomlessValues = f => ({ ...f.values, tratamiento_id: null, instalacion_id: null, tipo_cita: 'primera_sin_trat', created_by: 7 });
+  const free = fixture({ bookingProfile: null });
+  const savedFree = await free.reserve({ appointmentValues: roomlessValues(free), restrictionConfirmation: { actorId: 7 } });
+  assert.equal(savedFree.instalacion_id, null); assert.equal(savedFree.import_metadata, null);
+  assert.equal(free.state.occupancies.length, 1); assert.equal(free.state.occupancies[0].resource_kind, 'doctor');
+  for (const kind of ['staff_hours', 'clinic_hours', 'staff_block', 'staff_overlap']) {
+    const f = fixture({ bookingProfile: null,
+      ...(kind === 'staff_hours' ? { doctorHours: { 5: [{ ...hours[1], hora_inicio: '15:00' }] } } : {}),
+      ...(kind === 'staff_block' ? { doctorBlocks: [doctorBlock({ tipo: 'otro' })] } : {}),
+      ...(kind === 'staff_overlap' ? { appointments: [{ id_cita: 44, paciente_id: 2, clinica_id: 72, doctor_id: 5,
+        instalacion_id: 10, inicio: start, fin: end, estado: 'pendiente' }] } : {}) });
+    if (kind === 'clinic_hours') f.db.ClinicaHorario.findAll = async () => [{ ...hours[1], hora_inicio: '15:00' }];
+    const options = { appointmentValues: roomlessValues(f), restrictionConfirmation: { actorId: 7 }, force: true };
+    const warning = await restrictionRequired(f, options);
+    assert(warning.details.booking_restrictions.length);
+    assert(warning.details.booking_restrictions.every(row => !row.installation));
+    await assert.rejects(f.reserve({ ...options, expectedPlanSha256: '0'.repeat(64),
+      restrictionConfirmation: { actorId: 7, acknowledgement: warning.details.booking_restriction_acknowledgement } }), { code: 'booking_plan_changed' });
+    assert.equal(f.state.persists, 0);
+    const saved = await f.reserve({ ...options, expectedPlanSha256: warning.details.booking_plan_sha256,
+      restrictionConfirmation: { actorId: 7, acknowledgement: warning.details.booking_restriction_acknowledgement } });
+    assert.equal(saved.instalacion_id, null); assert.equal(saved.tratamiento_id, null);
+    assert.deepEqual(saved.import_metadata.booking_restriction_confirmation.original_profile.phases[0].installation_ids, []);
+    assert.equal(saved.import_metadata.booking_restriction_confirmation.confirmed_by, 7);
+    assert.equal(f.state.occupancies.length, 1); assert.equal(f.state.occupancies[0].resource_kind, 'doctor');
+    const before = f.state.persists;
+    const moved = await f.reserve({ existingAppointmentId: saved.id_cita, appointmentValues: {
+      inicio: '2030-01-07T06:00:00Z', fin: '2030-01-07T06:30:00Z', updated_by: 7 }, restrictionConfirmation: { actorId: 7 } }).catch(e => e);
+    assert.equal(moved.code, 'booking_restriction_confirmation_required'); assert.equal(f.state.persists, before);
+  }
+});
+
+test('roomless manual exceptions reject stale evidence, changed actor and inactive/foreign membership before persistence', async () => {
+  const f = fixture({ bookingProfile: null, doctorHours: { 5: [] } });
+  const options = { appointmentValues: { ...f.values, tratamiento_id: null, instalacion_id: null, created_by: 7 }, restrictionConfirmation: { actorId: 7 } };
+  const warning = await restrictionRequired(f, options);
+  await assert.rejects(f.reserve({ ...options, appointmentValues: { ...options.appointmentValues, created_by: 8 },
+    restrictionConfirmation: { actorId: 8, acknowledgement: warning.details.booking_restriction_acknowledgement } }), { code: 'booking_restriction_confirmation_required' });
+  await assert.rejects(f.reserve({ ...options, restrictionConfirmation: { actorId: 8, acknowledgement: warning.details.booking_restriction_acknowledgement } }), { code: 'booking_unavailable' });
+  const read = f.db.DoctorBloqueo.findAll;
+  f.db.DoctorBloqueo.findAll = async q => [...await read(q), doctorBlock({ tipo: 'otro' })];
+  await assert.rejects(f.reserve({ ...options, restrictionConfirmation: { actorId: 7, acknowledgement: warning.details.booking_restriction_acknowledgement } }), { code: 'booking_restriction_confirmation_required' });
+  f.db.DoctorClinica.findAll = async () => [];
+  await assert.rejects(f.reserve(options), { code: 'booking_unavailable' });
+  assert.equal(f.state.persists, 0); assert.equal(f.state.occupancies.length, 0);
+});
+
+test('legacy selections cannot seal a different doctor/room from the persisted primary assignment', async () => {
+  for (const roomless of [true, false]) for (const choice of [{ doctor_id: 6 }, { installation_id: 11 }]) {
+    const f = fixture({ bookingProfile: null, doctorHours: { 5: [], 6: [] } });
+    const values = { ...f.values, tratamiento_id: null, ...(roomless ? { instalacion_id: null } : {}), created_by: 7 };
+    await assert.rejects(f.reserve({ appointmentValues: values, selections: { appointment: choice },
+      restrictionConfirmation: { actorId: 7 } }), { code: 'booking_restriction_selection_invalid', statusCode: 400 });
+    assert.equal(f.state.persists, 0); assert.equal(f.state.occupancies.length, 0);
+  }
 });

@@ -170,5 +170,20 @@ function requiresMultiResourceBooking(profile) {
     || profile.phases.some((phase) => phase.professionals.mode === 'all' && phase.professionals.ids.length > 1));
 }
 
+// A manual appointment may legitimately reserve only one clinician, without a
+// treatment or a room. This is NOT a relaxed catalogue profile: keep the normal
+// normalizer strict and require this exact, server-derived legacy shape.
+function normalizeDoctorOnlyBookingProfile(value) {
+  const profile = normalizeBookingProfile(value, { allowIncomplete: true });
+  const phase = profile?.phases?.[0];
+  if (!profile || profile.version !== 1 || profile.phases.length !== 1
+    || !phase.duration_minutes || phase.installation_ids.length
+    || phase.professionals.mode !== 'any' || phase.professionals.ids.length !== 1
+    || phase.equipment_requirements?.length || phase.staff_attention?.length) {
+    invalid('phases', 'La reserva sin sala debe tener un único profesional y una duración, sin fases ni equipos de tratamiento.');
+  }
+  return profile;
+}
+
 module.exports = { normalizeBookingProfile, requiresMultiResourceBooking, bookingPhaseOffsets, bookingProfileDurationMinutes,
-  pendingAttentionRequirements };
+  pendingAttentionRequirements, normalizeDoctorOnlyBookingProfile };

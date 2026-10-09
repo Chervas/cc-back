@@ -1,5 +1,36 @@
 # 13 - Backend
 
+## Reserva manual sin sala y matriz mixta · 09/10/2026
+
+Una primera cita manual puede reservar sólo al profesional, sin tratamiento ni
+sala. Esa asignación no representa una reserva en todas las salas visibles:
+se comprueban apertura de clínica, horario/ausencias/ocupación del profesional,
+personal de apoyo y otras citas del paciente. Una restricción real utiliza el
+mismo `409` y los dos recibos de escritura descritos debajo. No se inventa una
+cabina para poder confirmar el aviso. ACL, pertenencia activa y recepción de
+citas siguen siendo obligatorias.
+
+El normalizador separado `normalizeDoctorOnlyBookingProfile` acepta únicamente
+el perfil manual generado por servidor: versión 1, un paso, duración positiva,
+un profesional ANY y ninguna sala, máquina o intervención de tratamiento.
+El normalizador de catálogo continúa siendo estricto. Selecciones de recursos
+discordantes con la asignación principal de una cita manual se rechazan antes
+de persistir: fila, ocupación y recibo deben describir la misma reserva.
+
+`grid` y `summary` admiten `doctor_only_column_ids` como subconjunto validado de
+las columnas visibles, sólo en orientación de profesionales y sin tratamiento
+ni sala explícita. Reutilizan el snapshot conjunto existente. Esas columnas
+devuelven `slots`/`unavailable_intervals` del profesional; las demás conservan
+sus mapas por sala. No añade consultas por hover ni modifica horarios o flags.
+Los arrays de recursos incompatibles con este modo se rechazan para evitar
+diferencias entre matriz y resumen. La carga densa real sigue pendiente de medir.
+
+Diagnóstico de la incidencia: una reserva manual sin sala dentro del horario
+tenía un amarillo falso por la unión de restricciones de salas ajenas. No tenía
+un motivo real que exigiese confirmar. El WhatsApp asociado quedó fallido porque
+se creó después de su hora de inicio; la guarda de elegibilidad lo impidió antes
+de invocar al proveedor. No se reenvía ni se cambia esa política de comunicación.
+
 ## Reserva con restricciones, cancelación y no asistencia · 09/10/2026
 
 La reserva manual mantiene permisos, entidades activas y adscripción a la clínica.

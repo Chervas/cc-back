@@ -106,6 +106,58 @@ test('a legacy treatment without a booking profile (623) uses one grid snapshot/
   assert.equal(f.counts.doctorAppointments, 1); assert.equal(f.counts.roomAppointments, 1); assert.equal(f.counts.profileContext, 0);
 });
 
+test('mixed doctor-only columns use the same bulk snapshot without pretending every peer room belongs to them', async () => {
+  const f = fixture();
+  f.rooms.forEach(room => { room.profesionales_permitidos = [6]; });
+  const query = { dates: ['2030-01-07'], mode: 'doctor', column_ids: [5, 6],
+    peer_instalacion_ids: [9, 10, 11], doctor_only_column_ids: [5] };
+  const result = await f.call('grid', query);
+  assert.equal(result.statusCode, 200);
+  const roomless = result.body.rows.find(row => row.column_id === '5');
+  const paired = result.body.rows.find(row => row.column_id === '6');
+  assert(roomless.slots.length > 0); assert.equal(roomless.slots_by_instalacion, undefined);
+  assert.equal(roomless.unavailable_by_instalacion, undefined);
+  assert.deepEqual(Object.keys(paired.slots_by_instalacion).sort(), ['10', '11', '9']);
+  assert(Object.values(paired.slots_by_instalacion).every(slots => slots.length > 0));
+  assert.deepEqual(f.counts, { acl: 1, clinic: 1, clinicHours: 1, rooms: 1, doctorLinks: 1, doctorBlocks: 1,
+    roomBlocks: 1, roomAppointments: 1, doctorAppointments: 1, profileContext: 0, catalog: 0, solve: 0 });
+  const legacy = await f.call('slots', { fecha_local: '2030-01-07', doctor_id: '5', include_unavailable: 'true' });
+  assert.deepEqual(roomless.slots, legacy.body.slots);
+  assert.deepEqual(roomless.unavailable_intervals, legacy.body.unavailable_intervals);
+  assert.equal((await f.call('summary', query)).body.by_day['2030-01-07'], true);
+});
+
+test('doctor-only projection retains true clinic closure and staff occupancy diagnostics', async () => {
+  const f = fixture({ clinicHours: [{ dia_semana: 1, activo: true, hora_inicio: '09:30', hora_fin: '11:00' }] });
+  f.rooms.forEach(room => { room.profesionales_permitidos = [6]; });
+  f.state.doctorAppointments.push({ id_cita: 1, clinica_id: 66, doctor_id: 5,
+    inicio: '2030-01-07T09:00:00Z', fin: '2030-01-07T09:30:00Z' });
+  const result = await f.call('grid', { dates: ['2030-01-07'], mode: 'doctor', column_ids: [5, 6],
+    peer_instalacion_ids: [9, 10, 11], 'doctor_only_column_ids[]': ['5'] });
+  const row = result.body.rows.find(item => item.column_id === '5');
+  const codes = row.unavailable_intervals.flatMap(span => span.resource_conflicts.map(item => item.code));
+  assert(codes.includes('CLINIC_OUT_OF_HOURS'));
+  assert(codes.includes('STAFF_OVERLAP'));
+  assert(!codes.includes('INSTALLATION_PROFESSIONAL_NOT_ALLOWED'));
+  assert(row.slots.some(slot => slot.start_local === '2030-01-07T09:30'));
+});
+
+test('doctor-only field rejects partial IDs, float/nested/object inputs, invalid scope, treatment and room contexts before reading SQL', async () => {
+  const base = { dates: ['2030-01-07'], mode: 'doctor', column_ids: [5, 6], doctor_only_column_ids: [5] };
+  const patches = [
+    ...['5oops', '5.1', '0', '-5', '9007199254740992', '5,', {}, [[5]], [], [5, {}], Array(81).fill(5)]
+      .map(value => ({ doctor_only_column_ids: value })),
+    { doctor_only_column_ids: [7] }, { mode: 'installation' }, { mode: 'doctors' },
+    { tratamiento_id: '623' }, { context_instalacion_id: '9' }, { preferred_instalacion_id: '9' }, { instalacion_id: '9' },
+    { instalacion_ids: [9, 10, 11] }, { 'instalacion_ids[]': [9] }, { doctor_ids: [6] }, { 'doctor_ids[]': [6] },
+  ];
+  for (const route of ['grid', 'summary']) for (const patch of patches) {
+    const f = fixture(), result = await f.call(route, { ...base, ...patch });
+    assert.equal(result.statusCode, 400, JSON.stringify({ route, patch, result }));
+    assert(Object.values(f.counts).every(count => count === 0), 'Rejected request cannot load tenant data');
+  }
+});
+
 test('42-day matrix summary ORs the same slots as legacy, without 42×columns reads or diagnostics', async () => {
   const f = fixture(), dates = Array.from({ length: 42 }, (_, index) => addDays('2030-01-07', index));
   const result = await f.call('summary', { dates, mode: 'installation', column_ids: [9, 10, 11], peer_doctor_ids: [5, 6, 7], include_unavailable: 'true' });

@@ -187,7 +187,7 @@ async function moveTogether(db, selectedId, changes, options) {
         profile = requireOperationalProfile(treatment, { allowObsolete: true });
       }
       profile ||= { version: 1, phases: [{ key: 'appointment', duration_minutes: (+new Date(row.fin) - +new Date(row.inicio)) / 60000,
-        installation_ids: [Number(row.instalacion_id)], professionals: { mode: 'any', ids: [Number(row.doctor_id)] } }] };
+        installation_ids: row.instalacion_id ? [Number(row.instalacion_id)] : [], professionals: { mode: 'any', ids: [Number(row.doctor_id)] } }] };
       profiles.push(profile);
     }
     // Manual legacy reservations can change their primary room/professional.
@@ -213,6 +213,9 @@ async function moveTogether(db, selectedId, changes, options) {
       return selections;
     });
     const readProfiles = manual ? profiles.map((profile, index) => restrictionReadProfile(profile, { selections: choices[index] })) : profiles;
+    const doctorOnlyProfiles = profiles.map(profile => profile.version === 1 && profile.phases.length === 1
+      && profile.phases[0].installation_ids.length === 0 && profile.phases[0].professionals.mode === 'any'
+      && profile.phases[0].professionals.ids.length === 1);
     const union = { version: Math.max(...readProfiles.map(profile => profile.version || 1)), phases: readProfiles.flatMap(profile => profile.phases) };
     // Lock all resources before any update; failures roll the entire move back.
     const { lockBookingResources, mutateAppointmentBooking } = require('./appointmentBookingCommand.service');
@@ -257,7 +260,8 @@ async function moveTogether(db, selectedId, changes, options) {
           context.patientBusy.push({ start: prior.solution.start_at, end: prior.solution.end_at, appointment_id: prior.id, clinic_id: Number(group.link.clinic_id) });
         }
         const decision = assessment({ profile: profiles[index], context, start, selections: choices[index], additionalStaffIds: rowSupports[index],
-          canonicalSolution: solveBookingProfile({ profile: profiles[index], ...context, start, selections: choices[index] }),
+          doctorOnly: doctorOnlyProfiles[index],
+          canonicalSolution: doctorOnlyProfiles[index] ? null : solveBookingProfile({ profile: profiles[index], ...context, start, selections: choices[index] }),
           clinicId: Number(group.link.clinic_id), clinicName: clinic.nombre_clinica, treatmentId: row.tratamiento_id,
           treatmentName: treatments[index]?.nombre || '', patientId: group.link.patient_id, appointmentId: row.id_cita,
           actorId: options.restrictionConfirmation.actorId, previous: row.toJSON ? row.toJSON() : row });
