@@ -204,6 +204,7 @@ async function recordAppointmentStatusChange({
   transaction = null,
   eventModel = require('../../models').PatientOperationalEvent,
   recordUnchanged = false,
+  administrativeRestore = false,
 }) {
   if (!eventModel || !appointment) return null;
   const appointmentId = toPositiveInt(appointment.id_cita || appointment.id);
@@ -213,7 +214,7 @@ async function recordAppointmentStatusChange({
   const next = cleanString(newStatus)?.toLowerCase() || null;
   if (!appointmentId || !clinicId || !next || previous === next && !recordUnchanged) return null;
 
-  if (require('../lib/status-catalog').hasAttendedAppointment({ estado: next }) && [66, 72, 77].includes(clinicId)) {
+  if (administrativeRestore !== true && require('../lib/status-catalog').hasAttendedAppointment({ estado: next }) && [66, 72, 77].includes(clinicId)) {
     await require('./temporaryPatientDirection.service').observeAppointment(appointment, { transaction });
   }
 

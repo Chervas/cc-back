@@ -4643,7 +4643,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     // La intencion de espera se confirma antes de publicar el JobRequest. Un
     // crash o fallo del enqueue puede reconstruir el mismo job sin adelantar
     // el mensaje ni convertirlo en un envio inmediato.
-    await msg.update({
+        await msg.update({
       status: 'pending',
       metadata: {
         ...(msg.metadata || {}),
@@ -4812,6 +4812,7 @@ async function handleSendWhatsapp(node, context, runtime) {
       metadata: {
         ...(msg.metadata || {}),
         error: providerError,
+        ...require('../lib/whatsapp-failure-diagnostic').diagnosticMetadata(sendErr),
       },
     });
 
@@ -4873,7 +4874,10 @@ async function handleSendWhatsapp(node, context, runtime) {
       await require('./appointmentWhatsappDeliveryAlert.service').reconcileAppointmentWhatsappDelivery({
         message: msg, mappedStatus: 'failed', clinicId,
       });
-      throw new Error(`whatsapp_send_failed:${providerMessage}`);
+      throw Object.assign(new Error(`whatsapp_send_failed:${providerMessage}`), {
+        ...(require('../lib/whatsapp-failure-diagnostic').reasonCode(sendErr)
+          ? { details: { reason_code: require('../lib/whatsapp-failure-diagnostic').reasonCode(sendErr) } } : {}),
+      });
     }
   }
 
@@ -5005,7 +5009,7 @@ async function handleReplyMessage(node, context, runtime) {
   };
 }
 
-async function materializeFailedAutomationWhatsappMessage({ node, context, execution, errorMessage }) {
+async function materializeFailedAutomationWhatsappMessage({ node, context, execution, errorMessage, error }) {
   try {
     const automationDeliveryKey = buildAutomationWhatsappDeliveryKey(execution, node);
     if (automationDeliveryKey) {
@@ -5021,6 +5025,7 @@ async function materializeFailedAutomationWhatsappMessage({ node, context, execu
           metadata: {
             ...(existingMessage.metadata || {}),
             flow_error: errorMessage,
+            ...require('../lib/whatsapp-failure-diagnostic').diagnosticMetadata(error),
           },
         });
         return existingMessage;
@@ -5121,6 +5126,7 @@ async function materializeFailedAutomationWhatsappMessage({ node, context, execu
         recipient: recipientData.recipient,
         error: errorMessage,
         error_message: errorMessage,
+        ...require('../lib/whatsapp-failure-diagnostic').diagnosticMetadata(error),
           automation_delivery_key: automationDeliveryKey,
           generated_at: new Date().toISOString(),
         },
@@ -5135,6 +5141,7 @@ async function materializeFailedAutomationWhatsappMessage({ node, context, execu
         metadata: {
           ...(failedMessage.metadata || {}),
           flow_error: errorMessage,
+          ...require('../lib/whatsapp-failure-diagnostic').diagnosticMetadata(error),
         },
       });
       return failedMessage;
@@ -8392,6 +8399,7 @@ async function runExecution(executionId, options = {}) {
           context,
           execution,
           errorMessage,
+          error,
         });
       }
 

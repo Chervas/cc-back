@@ -222,7 +222,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
   allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false,
   additionalStaffIds = undefined, supportOnly = false, expectedRange = null, importEquipmentAssignment = null,
   trustedProgramSeries = null, reschedulePatientOverlap = null, durationSelection, expectedPlanSha256,
-  visitBirth = null, restrictionConfirmation = null }) {
+  visitBirth = null, restrictionConfirmation = null, administrativeRestore = false }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
   durationSelection = normalizeDurationSelection(durationSelection);
   // Internal documentary reconciliation only, never forwarded from an HTTP
@@ -247,6 +247,12 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const previous = existing?.toJSON ? existing.toJSON() : (existing || {});
     assertGenericSourceIdentity(previous, appointmentValues);
     const values = { ...previous, ...appointmentValues };
+    if (administrativeRestore && (!existing || previous.estado !== 'cancelada' || stateOnly || supportOnly || force
+      || trustedProgramSession || trustedProgramSeries || durationSelection !== undefined || additionalStaffIds !== undefined
+      || Object.keys(appointmentValues).some(key => !['estado', 'updated_by'].includes(key))
+      || !require('../lib/appointment-restoration').ACTIVE.has(values.estado))) {
+      throw bookingError('booking_restore_invalid', 'La recuperación sólo puede conservar la reserva y su estado anterior.', null, 400);
+    }
     const stateOnlyCancellation = stateOnly && existing && values.estado === 'cancelada';
     // Existing enrolled visits must follow the canonical writer even with the
     // communication rollout closed. The proof is captured under the same Cita
@@ -323,7 +329,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       throw bookingError('program_session_replaced', 'Esta cita pertenece al historial de una sesión que ya tiene otra reserva.');
     }
     await require('./appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous,
-      appointment: values, transaction: tx, additionalStaffIds: requestedStaff });
+      appointment: values, transaction: tx, additionalStaffIds: requestedStaff, restoreExistingArrival: administrativeRestore });
     if (stateOnlyCancellation) {
       // Cancelling an existing reservation releases capacity by canonical state;
       // it is not a new booking. A hidden treatment, an old/incomplete profile or
@@ -610,7 +616,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     // Choices resolve real phase resources after the early care check. Protect
     // their final identity as well, including secondary phases whose primary
     // doctor/room fields do not change. This pure guard performs no extra read.
-    require('../lib/appointment-care').assertCareStatusChange(previous, values, new Date(), { additionalStaffIds: requestedStaff });
+    require('../lib/appointment-care').assertCareStatusChange(previous, values, new Date(), {
+      additionalStaffIds: requestedStaff, restoreExistingArrival: administrativeRestore });
     if (solution) require('../lib/booking-plan-receipt').assertBookingPlanReceipt(expectedPlanSha256, profile, solution, { doctorOnly });
     const appointment = visitBirth
       ? await require('./appointmentVisitManaged.service').current().persistBirth(visitBirth, {
@@ -638,7 +645,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       }
       if (rows.length) await db.AppointmentBookingOccupancy.bulkCreate(rows.map((row) => ({ ...row, appointment_id: appointment.id_cita })), { transaction: tx });
     }
-    if (visitMutation) await managedVisitWriter.persistMutation(visitMutation, { appointment, transaction: tx });
+    if (visitMutation) await managedVisitWriter.persistMutation(visitMutation, { appointment, transaction: tx,
+      ...(administrativeRestore ? { suppressCommunications: true } : {}) });
     return appointment;
   };
   return transaction ? execute(transaction) : db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, execute);

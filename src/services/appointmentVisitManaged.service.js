@@ -214,7 +214,8 @@ function createAppointmentVisitManagedService({ db, now = () => new Date(),
   async function persistMutation(token, args) {
     const proof = mutationTokens.get(token);
     if (!proof || proof.owner !== api) held('appointment_visit_runtime_server_mutation_proof_required');
-    const result = await proof.runtime.persistCanonicalMutation(proof.proof, { ...args, communicationEnabled: enabled() === true,
+    const result = await proof.runtime.persistCanonicalMutation(proof.proof, { ...args,
+      communicationEnabled: enabled() === true && args.suppressCommunications !== true,
       registeredManifests: manifests() });
     mutationResults.set(args.appointment, result); return result;
   }

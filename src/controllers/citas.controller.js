@@ -2789,6 +2789,45 @@ exports.getCitaById = asyncHandler(async (req, res) => {
     }));
 });
 
+// Administrative recovery is deliberately separate from status/reschedule
+// handlers: those handlers dispatch automations and must not run on undo.
+exports.getAppointmentRestoration = asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ code: 'booking_restore_invalid', message: 'Cita no válida.' });
+    const appointment = await CitaPaciente.findByPk(id, { attributes: ['id_cita', 'clinica_id'] });
+    if (!appointment) return res.status(404).json({ message: 'cita_not_found' });
+    if (await denyAppointmentManageAccessIfNeeded(req, res, appointment.clinica_id)) return;
+    return res.json(await require('../services/appointmentRestoration.service').previewRestoration({ db,
+        appointmentId: id, actorId: Number(req.userData.userId) }));
+});
+exports.restoreAppointment = asyncHandler(async (req, res) => {
+    const id = Number(req.params.id), body = req.body;
+    const allowed = ['restoration_acknowledgement', 'booking_restriction_acknowledgement', 'booking_plan_sha256'];
+    if (!Number.isSafeInteger(id) || id <= 0 || !body || typeof body !== 'object' || Array.isArray(body)
+        || Object.keys(body).some(key => !allowed.includes(key))
+        || !/^[a-f0-9]{64}$/.test(body.restoration_acknowledgement || '')
+        || allowed.slice(1).some(key => body[key] !== undefined && (typeof body[key] !== 'string' || !/^[a-f0-9]{64}$/.test(body[key]))))
+        return res.status(400).json({ code: 'booking_restore_invalid', message: 'Vuelve a abrir «Recuperar cita» y confirma la recuperación.' });
+    const appointment = await CitaPaciente.findByPk(id, { attributes: ['id_cita', 'clinica_id'] });
+    if (!appointment) return res.status(404).json({ message: 'cita_not_found' });
+    if (await denyAppointmentManageAccessIfNeeded(req, res, appointment.clinica_id)) return;
+    const result = await require('../services/appointmentRestoration.service').restoreAppointment({ db,
+        appointmentId: id, actorId: Number(req.userData.userId), acknowledgement: body.restoration_acknowledgement,
+        restrictionAcknowledgement: body.booking_restriction_acknowledgement, expectedPlanSha256: body.booking_plan_sha256 });
+    const restored = await CitaPaciente.findByPk(id, { include: [
+        { model: Paciente, as: 'paciente' }, { model: LeadIntake, as: 'lead' },
+        { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
+        { model: Instalacion, as: 'instalacion', required: false }, { model: Tratamiento, as: 'tratamiento', required: false },
+        db.Usuario ? { model: db.Usuario, as: 'doctor', required: false } : null,
+    ].filter(Boolean) });
+    await attachFlowSummaryToCitas(restored);
+    await attachUnreadCountsToCitas(restored, req.userData.userId);
+    await attachAppointmentProgramContexts(db, restored);
+    attachResolvedAppointmentPricesToCitas(restored);
+    for (const row of result.rows) emitAppointmentSocketEvent('appointment:updated', row.toJSON ? row.toJSON() : row);
+    return res.json({ ...await protectAppointmentsForRequest(req, restored), restoration: result.restoration });
+});
+
 exports.recordAppointmentCare = asyncHandler(async (req, res) => {
     const id = Number(req.params.id), action = req.params.action;
     if (!Number.isSafeInteger(id) || id <= 0 || !['arrive', 'start', 'finish'].includes(action)) return res.status(400).json({ message: 'Acción de cita no válida.' });

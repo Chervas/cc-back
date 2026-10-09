@@ -48,6 +48,10 @@ const {
   getActiveContactRestrictionsForPatient,
   resolveWhatsappNumberRestrictionAfterChange,
 } = require('../services/marketingOptOut.service');
+const {
+  scopePatientCustomFields,
+  buildClinicCloudPatientHistory,
+} = require('../lib/cliniccloud-patient-history');
 
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
@@ -237,6 +241,8 @@ function redactEmbeddedPatient(paciente) {
   sensitiveFields.forEach((field) => { redacted[field] = null; });
   delete redacted.proxima_cita;
   delete redacted.ultima_cita;
+  delete redacted.camposPersonalizados;
+  delete redacted.historialClinicCloud;
   if (Array.isArray(redacted.relaciones)) {
     redacted.relaciones = redacted.relaciones.map((relation) => ({
       ...relation,
@@ -638,7 +644,7 @@ const restrictEmbeddedPatientClinicScope = (patientLike, readableClinicIds) => {
   return scoped;
 };
 
-const restrictPacientePayloadToClinics = (paciente, readableClinicIds) => {
+const restrictPacientePayloadToClinics = (paciente, readableClinicIds, { sensitiveClinicIds = [] } = {}) => {
   const plain = typeof paciente?.toJSON === 'function' ? paciente.toJSON() : { ...(paciente || {}) };
   const allowed = new Set(normalizeClinicIds(readableClinicIds));
   const originalClinicIds = patientClinicIds(plain);
@@ -659,6 +665,16 @@ const restrictPacientePayloadToClinics = (paciente, readableClinicIds) => {
     clinicasVinculadas: scopedLinks,
     scope_limited: originalClinicIds.some((clinicId) => !allowed.has(clinicId)),
   };
+
+  if (Array.isArray(plain.camposPersonalizados)) {
+    scoped.camposPersonalizados = scopePatientCustomFields(plain.camposPersonalizados, {
+      readableClinicIds,
+      sensitiveClinicIds,
+      linkedClinicIds: originalClinicIds,
+    });
+  }
+  // A precomputed historical projection must not survive a narrower scope.
+  delete scoped.historialClinicCloud;
 
   if (Array.isArray(plain.relaciones)) {
     scoped.relaciones = plain.relaciones.map((relation) => ({
@@ -1229,7 +1245,7 @@ exports.getPacienteById = async (req, res) => {
           model: PatientCustomField,
           as: 'camposPersonalizados',
           required: false,
-          attributes: ['field_key', 'label', 'value', 'value_type', 'source']
+          attributes: ['field_key', 'label', 'value', 'value_type', 'source', 'clinica_id', 'source_column', 'last_imported_at']
         },
         {
           model: PacienteRelacion,
@@ -1255,8 +1271,17 @@ exports.getPacienteById = async (req, res) => {
       });
     }
     await ensurePacientePublicId(paciente);
+    // The `every` sensitive permission check above covers every readable
+    // patient membership. A row from another (or unknown) clinic is still
+    // excluded before either the raw value or its read-only view is returned.
+    const scopedPatient = restrictPacientePayloadToClinics(paciente, readableClinicIds, { sensitiveClinicIds: readableClinicIds });
+    const historyClinics = [
+      { clinica_id: scopedPatient.clinica_id, nombre_clinica: scopedPatient.clinica?.nombre_clinica },
+      ...(scopedPatient.clinicasVinculadas || []).map(link => ({ clinica_id: link.clinica_id, nombre_clinica: link.clinica?.nombre_clinica })),
+    ];
     const payload = {
-      ...restrictPacientePayloadToClinics(paciente, readableClinicIds),
+      ...scopedPatient,
+      historialClinicCloud: buildClinicCloudPatientHistory(scopedPatient.camposPersonalizados, { clinics: historyClinics }),
       ...await getPacienteAppointmentBounds(paciente.id_paciente, readableClinicIds),
       contact_restrictions: await getActiveContactRestrictionsForPatient({
         clinicIds: readableClinicIds,

@@ -7,6 +7,21 @@ test('details confirmed still receives day-before; attendance confirmed does not
   assert.equal(check(base()), true);
   const v=base();v.appointment.estado='recordatorio_confirmado';assert.throws(()=>check(v),{code:'whatsapp_appointment_already_confirmed'});
 });
+test('safe blocked-send diagnostic distinguishes past, provisional, status and changed schedule without changing eligibility', () => {
+  for (const [changes, reason] of [[{ now: Date.parse('2026-09-16T10:00Z') }, 'whatsapp_appointment_past'],
+    [{ appointment: { es_provisional: true } }, 'whatsapp_appointment_provisional'],
+    [{ appointment: { estado: 'cambio_solicitado' } }, 'whatsapp_appointment_status_ineligible'],
+    [{ appointment: { inicio: 'invalid' } }, 'whatsapp_appointment_start_invalid'],
+    [{ appointment: { inicio: '2026-09-17T09:00Z' } }, 'whatsapp_appointment_rescheduled']]) {
+    const value = base(); Object.assign(value.appointment, changes.appointment); if (changes.now) value.now = changes.now;
+    assert.throws(() => check(value), error => error.retryable === false && error.details?.reason_code === reason);
+  }
+  const D = require('../../lib/whatsapp-failure-diagnostic');
+  assert.equal(D.reasonCode({ code: 'whatsapp_authorized_message_ineligible' }), null);
+  assert.deepEqual(D.diagnosticMetadata({ details: { reason_code: 'SQL_SECRET_INVALID' } }), {});
+  assert.deepEqual(D.diagnosticMetadata({ details: { reason_code: 'whatsapp_appointment_past' } }),
+    { technical_failure_reason_code: 'whatsapp_appointment_past' });
+});
 test('same-day reminder includes confirmed and unconfirmed appointments', () => {
   for(const estado of ['info_confirmada','recordatorio_confirmado','pendiente','recordatorio_enviado']) {
     const v=base();v.appointment.estado=estado;v.templateName='clinicaclick_recordatorio_mismo_dia_primera_visita_v9';v.now=Date.parse('2026-09-16T06:00Z');assert.equal(check(v),true);

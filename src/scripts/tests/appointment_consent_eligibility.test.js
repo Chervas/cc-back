@@ -82,7 +82,7 @@ test('completion evidence reads are bounded, tenant scoped and locked in the wri
 test('book, cancel, replay and history drafts do not invoke the clinical completion check', async () => {
   const f = databaseFixture();
   for (const estado of ['pendiente', 'confirmada', 'cancelada', 'no_asistio', 'reprogramada']) {
-    await assertClinicalCompletion({ ...f, appointment: { ...appointment, estado } });
+    await assertClinicalCompletion({ ...f, appointment: { ...appointment, estado, inicio: '2026-09-21T07:00:00Z' }, now });
   }
   await assertClinicalCompletion({ ...f, appointment, previous: appointment });
   assert.equal(f.calls.length, 0);

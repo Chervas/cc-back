@@ -169,14 +169,17 @@ async function resolveRequestTogether(db, appointment, action, nextStatus, trans
   }
   return changed;
 }
-async function moveTogether(db, selectedId, changes, options) {
+async function mutateTogether(db, selectedId, changes, options, restoring = false) {
   if (!await membership(db, selectedId)) return null;
-  return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+  const execute = async transaction => {
     const group = await load(db, selectedId, transaction, true);
-    if (!group || group.rows.some(row => !eligible(row))) fail('appointment_link_closed', 'No se ha movido ninguna cita: revisa las citas iniciadas o cerradas de la unión.');
+    if (!group || group.rows.some(row => restoring ? row.estado !== 'cancelada'
+      || !require('../lib/appointment-restoration').ACTIVE.has(options.states?.get(Number(row.id_cita)))
+      || row.care_started_at || row.care_completed_at || hasAttendedAppointment(row)
+      : !eligible(row))) fail('appointment_link_closed', 'No se ha cambiado ninguna cita: revisa las citas iniciadas o cerradas de la unión.');
     const selected = group.rows.find(row => Number(row.id_cita) === Number(selectedId));
-    const delta = +new Date(changes.inicio) - +new Date(selected.inicio);
-    if (!Number.isFinite(delta) || +new Date(changes.fin) - +new Date(changes.inicio) !== +new Date(selected.fin) - +new Date(selected.inicio)) fail('appointment_link_duration_locked', 'Mueve la unión conservando la duración de sus citas. Para cambiarla, desvincula primero.');
+    const delta = restoring ? 0 : +new Date(changes.inicio) - +new Date(selected.inicio);
+    if (!Number.isFinite(delta) || !restoring && +new Date(changes.fin) - +new Date(changes.inicio) !== +new Date(selected.fin) - +new Date(selected.inicio)) fail('appointment_link_duration_locked', 'Mueve la unión conservando la duración de sus citas. Para cambiarla, desvincula primero.');
     const clinic = await db.Clinica.findByPk(group.link.clinic_id, { transaction });
     const profiles = [], treatments = [];
     for (const row of group.rows) {
@@ -273,12 +276,17 @@ async function moveTogether(db, selectedId, changes, options) {
       if (warnings.length && prepared.every(item => item.decision.solution && (!item.decision.restrictions.length || item.decision.canConfirm))) {
         const receipt = createHash('sha256').update(JSON.stringify({ schema: 'linked-booking-restrictions/1',
           actor: options.restrictionConfirmation.actorId, group: String(group.link.id), revision: group.link.revision,
-          selected: Number(selectedId), delta, members: group.rows.map((row, index) => [Number(row.id_cita), prepared[index].decision.acknowledgement]) })).digest('hex');
+          selected: Number(selectedId), delta,
+          ...(restoring ? { restoration: options.restorationAcknowledgement,
+            states: group.rows.map(row => [Number(row.id_cita), options.states.get(Number(row.id_cita))]) } : {}),
+          members: group.rows.map((row, index) => [Number(row.id_cita), prepared[index].decision.acknowledgement]) })).digest('hex');
         const supplied = options.restrictionConfirmation.acknowledgement;
         if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied)
           || !timingSafeEqual(Buffer.from(supplied, 'hex'), Buffer.from(receipt, 'hex'))) {
           const selectedDecision = prepared[selectedIndex].decision;
-          fail('booking_restriction_confirmation_required', 'Las citas vinculadas se moverán juntas. Revisa todas las restricciones y confirma el movimiento completo.', {
+          fail('booking_restriction_confirmation_required', restoring
+            ? 'Las citas vinculadas se recuperarán juntas. Revisa todas las restricciones antes de confirmar.'
+            : 'Las citas vinculadas se moverán juntas. Revisa todas las restricciones y confirma el movimiento completo.', {
             ...restrictionErrorDetails(selectedDecision), can_confirm_restrictions: true, booking_restriction_acknowledgement: receipt,
             booking_restrictions: warnings.flatMap(item => item.decision.restrictions), linked_appointments: group.rows.length,
           });
@@ -288,8 +296,9 @@ async function moveTogether(db, selectedId, changes, options) {
     const result = [], moved = new Set();
     for (let index = 0; index < group.rows.length; index++) {
       const row = group.rows[index], start = new Date(+new Date(row.inicio) + delta), end = new Date(+new Date(row.fin) + delta);
-      const currentChanges = { inicio: start, fin: end, estado: changes.estado, reschedule_reason: changes.reschedule_reason,
-        updated_by: changes.updated_by, ...(Number(row.id_cita) === Number(selectedId) ? changes : {}) };
+      const currentChanges = restoring ? { estado: options.states.get(Number(row.id_cita)), updated_by: changes.updated_by }
+        : { inicio: start, fin: end, estado: changes.estado, reschedule_reason: changes.reschedule_reason,
+          updated_by: changes.updated_by, ...(Number(row.id_cita) === Number(selectedId) ? changes : {}) };
       const context = prepared[index]?.context || await loadBookingContext({ db, clinic, profile: profiles[index], start, end, transaction,
         occupancyEnabled: true, patientId: group.link.patient_id, additionalStaffIds: support,
         ignoreAppointmentIds: group.rows.filter(item => !moved.has(Number(item.id_cita))).map(item => Number(item.id_cita)),
@@ -297,6 +306,7 @@ async function moveTogether(db, selectedId, changes, options) {
       require('./appointmentBookingCommand.service').registerPatientLinkContext(context);
       const updated = await mutateAppointmentBooking({ db, transaction, existingAppointmentId: row.id_cita,
         appointmentValues: currentChanges, preparedContext: context, allowObsolete: true,
+        administrativeRestore: restoring,
         priorityAcknowledged: options.priorityAcknowledged, force: options.force,
         ...(manual ? { selections: choices[index], restrictionConfirmation: { actorId: options.restrictionConfirmation.actorId,
           acknowledgement: prepared[index].decision.acknowledgement } } : {}),
@@ -305,13 +315,20 @@ async function moveTogether(db, selectedId, changes, options) {
         reschedulePatientOverlap: options.reschedulePatientOverlap,
         persist: ({ values, existing }) => existing.update(values, { transaction }) });
       result.push(updated); moved.add(Number(row.id_cita));
-      await require('./appointmentActivity.service').recordAppointmentStatusChange({ appointment: updated, previousStatus: row.estado,
+      if (!restoring) await require('./appointmentActivity.service').recordAppointmentStatusChange({ appointment: updated, previousStatus: row.estado,
         newStatus: updated.estado, actorUserId: changes.updated_by, source: 'agenda', recordUnchanged: true,
         metadata: { action: 'linked_appointments_rescheduled', appointment_link_id: group.link.id }, transaction });
     }
     await group.link.update({ revision: group.link.revision + 1 }, { transaction });
     return { ownerId: Number(group.link.owner_appointment_id), selected: result.find(row => Number(row.id_cita) === Number(selectedId)), rows: result };
-  });
+  };
+  return options.transaction ? execute(options.transaction) : db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, execute);
+}
+async function moveTogether(db, selectedId, changes, options) { return mutateTogether(db, selectedId, changes, options); }
+async function restoreTogether(db, selectedId, options) {
+  if (!options.transaction || !(options.states instanceof Map) || !options.restorationAcknowledgement)
+    fail('booking_restore_invalid', 'La recuperación conjunta necesita una revisión administrativa vigente.');
+  return mutateTogether(db, selectedId, { updated_by: options.actorId }, options, true);
 }
 async function ignoreLinkedIds(db, id, clinicId) {
   if (!id) return [];
@@ -319,4 +336,4 @@ async function ignoreLinkedIds(db, id, clinicId) {
   if (!group || Number(group.link.clinic_id) !== Number(clinicId)) return [];
   return group.rows.map(row => Number(row.id_cita));
 }
-module.exports = { membership, load, follower, eligible, combinada, choiceRequired, linkAtBirth, decorate, confirmTogether, resolveRequestTogether, unlink, moveTogether, ignoreLinkedIds };
+module.exports = { membership, load, follower, eligible, combinada, choiceRequired, linkAtBirth, decorate, confirmTogether, resolveRequestTogether, unlink, moveTogether, restoreTogether, ignoreLinkedIds };

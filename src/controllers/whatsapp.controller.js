@@ -1498,14 +1498,16 @@ exports.sendMessage = async (req, res) => {
       },
     });
   } catch (error) {
+    const reasonCode = require('../lib/whatsapp-failure-diagnostic').reasonCode(error);
+    const diagnostic = reasonCode ? { details: { reason_code: reasonCode } } : {};
     if (error?.code && error?.statusCode) {
-      return res.status(error.statusCode).json({ success: false, error: error.code });
+      return res.status(error.statusCode).json({ success: false, error: error.code, ...diagnostic });
     }
     const statusCode = error.response?.status || 500;
     const errorBody = error.response?.data || {
       message: error.message || 'Error desconocido enviando WhatsApp',
     };
-    return res.status(statusCode).json({ success: false, error: errorBody });
+    return res.status(statusCode).json({ success: false, error: errorBody, ...diagnostic });
   }
 };
 

@@ -59,7 +59,7 @@ function allowsAppointmentAutomation(cita, triggerType) {
   return true;
 }
 
-function assertCareStatusChange(previous, next, now = new Date(), { additionalStaffIds } = {}) {
+function assertCareStatusChange(previous, next, now = new Date(), { additionalStaffIds, restoreExistingArrival = false } = {}) {
   if (!next) return;
   previous = previous || {};
   const care = careState(previous, now);
@@ -104,7 +104,13 @@ function assertCareStatusChange(previous, next, now = new Date(), { additionalSt
       fail('care_no_show_state_invalid', 'El estado actual de esta cita no permite marcar «No acude». Revisa primero su cambio pendiente.');
     }
   }
-  if (['ha_acudido', 'en_atencion'].includes(next.estado)) fail('care_action_required', 'Registra la llegada o el inicio mediante la acción correspondiente de esta cita.');
+  // Dedicated audited recovery may preserve an arrival already recorded for
+  // this exact appointment; it never creates arrival/start/completion evidence.
+  const preservingArrival = restoreExistingArrival === true && previous.estado === 'cancelada'
+    && next.estado === 'ha_acudido' && !!care.arrived_at && !care.started_at && !care.completed_at
+    && !care.legacy_attendance && new Date(care.arrived_at) <= now && new Date(previous.inicio) <= now;
+  if (['ha_acudido', 'en_atencion'].includes(next.estado) && !preservingArrival)
+    fail('care_action_required', 'Registra la llegada o el inicio mediante la acción correspondiente de esta cita.');
 }
 
 module.exports = { careState, assertCareAction, careActionPatch, hasCompletedAppointmentCare, allowsAppointmentAutomation, assertCareStatusChange };

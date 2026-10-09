@@ -23,8 +23,9 @@ const providerId = v => typeof v === 'string' && /^[1-9][0-9]{0,29}$/.test(v);
 const uuid = v => typeof v === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v);
 const exact = (v, keys) => v && typeof v === 'object' && !Array.isArray(v)
   && Object.keys(v).sort().join(',') === [...keys].sort().join(',');
-function fail(code, unknown = false) {
-  throw Object.assign(Error(code), { code, retryable: false, ...(unknown ? { delivery_unknown: true } : {}) });
+function fail(code, unknown = false, reasonCode = null) {
+  throw Object.assign(Error(code), { code, retryable: false, ...(unknown ? { delivery_unknown: true } : {}),
+    ...(reasonCode ? { details: { reason_code: reasonCode } } : {}) });
 }
 function checkedBinding(value) {
   const keys = [...BINDING_KEYS, ...(Object.hasOwn(value || {}, 'messageNotBefore') ? ['messageNotBefore'] : [])];
@@ -207,7 +208,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         payload: intent.message, loadExecution, loadAppointment, patientHeld,
         getReceptionState: () => loadReceptionState(conversation, config.bindings) });
       return message;
-    } catch { fail('whatsapp_authorized_message_ineligible'); }
+    } catch (error) { fail('whatsapp_authorized_message_ineligible', false, require('./whatsapp-failure-diagnostic').reasonCode(error)); }
   }
   return Object.freeze({
     isManagedMessage,

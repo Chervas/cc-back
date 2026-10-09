@@ -955,6 +955,7 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
         msg.metadata = {
             ...(msg.metadata || {}),
             error: err?.response?.data || err.message,
+            ...require('../lib/whatsapp-failure-diagnostic').diagnosticMetadata(err),
             ...(err?.code === 'WHATSAPP_SENDER_HEALTH_BLOCKED'
                 ? {
                     sender_health_blocked: true,

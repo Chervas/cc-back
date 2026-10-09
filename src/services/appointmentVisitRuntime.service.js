@@ -84,7 +84,7 @@ function createAppointmentVisitRuntimeService({ db, now = () => new Date(), newI
     });
   }
   async function persistCanonicalMutation(token, { appointment, transaction, communicationEnabled = rolloutEnabled() === true,
-    registeredManifests = null }) {
+    registeredManifests = null, suppressCommunications = false }) {
     const proof = mutations.get(token);
     if (!proof || proof.tx !== transaction || transaction?.finished || Number(appointment?.id_cita) !== proof.appointmentId) r.fail('server_mutation_proof_required');
     return transact(transaction, async tx => {
@@ -102,7 +102,7 @@ function createAppointmentVisitRuntimeService({ db, now = () => new Date(), newI
       const kind = after.lifecycle === 'cancelada' ? 'cancelled'
         : after.lifecycle === 'active' && (changedReservation || before.lifecycle === 'cancelada') ? 'rescheduled' : 'lifecycle_changed';
       const reason = require('../lib/appointment-reschedule-reason').RESCHEDULE_REASONS.includes(row.reschedule_reason) ? row.reschedule_reason : null;
-      const suppressed = kind === 'rescheduled' && reason === 'administrative_error';
+      const suppressed = suppressCommunications === true || kind === 'rescheduled' && reason === 'administrative_error';
       const event = { schema: 'appointment-visit-mutation/1', visit_id: visit.id, owner_appointment_id: proof.appointmentId,
         actor_id: proof.actorId, before_revision: proof.revision, communication_revision: proof.revision + 1, kind,
         before_snapshot_sha256: proof.projection.snapshot_sha256, before_snapshot: proof.projection.snapshot,
@@ -128,6 +128,7 @@ function createAppointmentVisitRuntimeService({ db, now = () => new Date(), newI
         event_type: r.MUTATION_EVENT, source: 'appointment_visit_runtime', occurred_at: new Date(event.recorded_at),
         metadata: { mutation: event, mutation_sha256: v.hash(event) } }, { transaction: tx });
       const result = { changed: true, visit: refreshed.visit, event: recorded, communication: null };
+      if (suppressCommunications === true) return { ...result, communication_held: 'appointment_restoration_silent' };
       if (!communicationEnabled) return { ...result, communication_held: 'visit_rollout_closed' };
       // Reminder ownership is independent of a suppressed immediate movement
       // notice. Old revisions were retired above; a future reminder for this

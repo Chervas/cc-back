@@ -50,3 +50,31 @@ Regresión adicional: `agenda_selector_readiness.test.js` ejecuta ambos
 controladores con dependencias simuladas, sin DB ni proveedores, comprobando
 ámbito, excepción por pertenencia y una sola consulta de alias sin recursos ajenos.
 No alterar las recuperaciones de WhatsApp ni reactivar consentimientos.
+
+## Recuperación administrativa y archivo histórico — 10/10/2026
+
+`GET /citas/:id/recuperacion` prepara la recuperación de una cancelación y
+`POST /citas/:id/recuperar` exige su reconocimiento vigente. Recupera el estado
+anterior acreditado por el último evento real, no una confirmación inventada.
+Revalida recursos, fases y citas vinculadas de forma atómica; una restricción
+de disponibilidad pide la confirmación estándar y vuelve a validar el conjunto.
+No acepta horarios/estados arbitrarios ni reutiliza recibos de otra cita o actor.
+
+La recuperación es silenciosa con rollout de visitas encendido o apagado:
+auditoría conservada, cero replanificación/discovery/dispatch de comunicaciones,
+consentimientos o formularios. La restauración de una llegada anterior tampoco
+repite el observador operativo de dirección de pacientes BS. Un estado sin
+historial suficiente no se reconstruye por suposición.
+
+El detalle de paciente incorpora el original de ClinicCloud con sus permisos
+sensibles y adscripción real por clínica. La descarga de cada adjunto verifica
+la clínica y finalidad de ese archivo, sin heredar permisos del centro primario.
+El operador de primera pasada `src/scripts/cliniccloud-patient-history-archive.js`
+no carga modelos ni workers: exige respaldo íntegro, plan/fuente fijados, ensayo
+rollback y diarios privados exclusivos, y sólo completa campos nativos vacíos.
+No modifica citas, economía, consentimientos ni preferencias de comunicación.
+
+No cambia el contrato externo del broker ni requiere publicar gateway. La
+diagnosis de WhatsApp conserva el `reason_code` aprobado del rechazo local para
+mostrar un motivo comprensible; no reintenta mensajes históricos ni cambia
+elegibilidad. Las pruebas HTTP de escritura usan MySQL aislado, no CRM.

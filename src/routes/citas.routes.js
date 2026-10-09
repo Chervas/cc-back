@@ -12,6 +12,8 @@ router.get('/clinical-reports/patient/:patientId', authMiddleware, clinicalRepor
 router.get('/calendar', authMiddleware, citasController.getCitasCalendar);
 router.get('/hub', authMiddleware, citasController.getAppointmentHubList);
 router.post('/:id/desvincular', authMiddleware, citasController.unlinkPatientAppointments);
+router.get('/:id/recuperacion', authMiddleware, citasController.getAppointmentRestoration);
+router.post('/:id/recuperar', authMiddleware, citasController.restoreAppointment);
 router.get('/:id/activity', authMiddleware, citasController.getAppointmentHubActivity);
 router.post('/:id/care/:action', authMiddleware, citasController.recordAppointmentCare);
 router.get('/:id/clinical-report', authMiddleware, clinicalReportsController.getByAppointment);

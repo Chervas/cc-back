@@ -177,6 +177,38 @@ async function allowedPurposesForActor({ actorId, clinicId }) {
   return entries.filter(Boolean);
 }
 
+// Sharing a patient does not share every clinic's clinical documents. Derive
+// scope from real patient-clinic memberships (plus the legacy primary clinic),
+// never from a common group, an asset's metadata or the caller's clinic hint.
+async function patientClinicIds(patient) {
+  const id = Number(patient.id_paciente);
+  const primary = Number(patient.clinica_id);
+  const memberships = db.PacienteClinica ? await db.PacienteClinica.findAll({
+    where: { paciente_id: id }, attributes: ['paciente_id', 'clinica_id'], raw: true,
+  }) : [];
+  return [...new Set([primary, ...memberships.map(toPlain)
+    .filter(row => Number(row.paciente_id) === id).map(row => Number(row.clinica_id))])]
+    .filter(clinicId => Number.isSafeInteger(clinicId) && clinicId > 0);
+}
+
+async function allowedClinicPurposes(patient, actorId) {
+  const entries = await Promise.all((await patientClinicIds(patient)).map(async clinicId =>
+    [clinicId, await allowedPurposesForActor({ actorId, clinicId })]));
+  return new Map(entries.filter(([, purposes]) => purposes.length));
+}
+
+function assetHasAllowedClinicPurpose(asset, allowed) {
+  return asset.scope_type === 'clinic' && Number.isSafeInteger(Number(asset.clinic_id))
+    && Number(asset.clinic_id) > 0 && allowed.get(Number(asset.clinic_id))?.includes(asset.purpose) === true;
+}
+
+function forbiddenAttachment(featureKey, clinicId) {
+  const error = new Error('access_policy_forbidden');
+  error.status = 403;
+  if (featureKey && clinicId) error.details = { feature_key: featureKey, clinic_id: clinicId };
+  throw error;
+}
+
 async function listPatientClinicalAttachments(patientIdentifier, actorId) {
   const patient = await findPatient(patientIdentifier);
   if (!patient) {
@@ -193,9 +225,8 @@ async function listPatientClinicalAttachments(patientIdentifier, actorId) {
     };
   }
 
-  const clinicId = Number(patient.clinica_id);
-  const allowedPurposes = await allowedPurposesForActor({ actorId, clinicId });
-  if (!allowedPurposes.length) {
+  const allowed = await allowedClinicPurposes(patient, actorId);
+  if (!allowed.size) {
     return {
       patient_id: patient.id_paciente,
       items: [],
@@ -207,13 +238,18 @@ async function listPatientClinicalAttachments(patientIdentifier, actorId) {
     where: {
       patient_id: Number(patient.id_paciente),
       status: 'active',
-      purpose: { [Op.in]: allowedPurposes },
+      // This endpoint has clinic ACL, not an explicit group/system asset grant.
+      // Group-scoped readers elsewhere retain their own policy; no fallback to
+      // the patient's primary clinic may authorize such an asset here.
+      scope_type: 'clinic',
+      [Op.or]: [...allowed].map(([clinicId, purposes]) => ({ clinic_id: clinicId,
+        purpose: { [Op.in]: purposes } })),
     },
     order: [['created_at', 'DESC'], ['id', 'DESC']],
     limit: 200,
   });
 
-  const items = rows.map(clinicalAttachmentToJson);
+  const items = rows.filter(row => assetHasAllowedClinicPurpose(toPlain(row), allowed)).map(clinicalAttachmentToJson);
   const byCategory = items.reduce((acc, item) => {
     acc[item.category] = (acc[item.category] || 0) + 1;
     return acc;
@@ -259,18 +295,16 @@ async function readPatientClinicalAttachment(patientIdentifier, attachmentIdenti
   }
 
   const plain = toPlain(asset);
-  const config = PURPOSE_CONFIG[plain.purpose] || PURPOSE_CONFIG.clinical_attachment;
+  const config = PURPOSE_CONFIG[plain.purpose];
+  const clinicId = Number(plain.clinic_id);
+  if (plain.scope_type !== 'clinic' || !config || !Number.isSafeInteger(clinicId) || clinicId <= 0
+    || !(await patientClinicIds(patient)).includes(clinicId)) forbiddenAttachment();
   const allowed = await canUserAccessFeature({
     actorId,
     featureKey: config.featureKey,
-    clinicId: Number(patient.clinica_id),
+    clinicId,
   });
-  if (!allowed) {
-    const error = new Error('access_policy_forbidden');
-    error.status = 403;
-    error.details = { feature_key: config.featureKey, clinic_id: Number(patient.clinica_id) };
-    throw error;
-  }
+  if (!allowed) forbiddenAttachment(config.featureKey, clinicId);
 
   return clinicalPrivateStorage.readClinicalPrivateAsset(asset);
 }

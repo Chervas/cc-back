@@ -3,7 +3,8 @@ const object = v => {
   if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return {}; } }
   return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
 };
-const fail = code => { throw Object.assign(Error(code), { code, retryable: false }); };
+const fail = (code, reasonCode = code) => { throw Object.assign(Error(code), { code, retryable: false,
+  ...(require('./whatsapp-failure-diagnostic').reasonCode({ code: reasonCode }) ? { details: { reason_code: reasonCode } } : {}) }); };
 const date = value => value == null ? NaN : new Date(value).getTime();
 const day = value => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' }).format(value);
 function importHeld(value) {
@@ -30,8 +31,12 @@ function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, 
   const appointmentData = /^clinicaclick_confirmacion_datos_cita_(?:reprogramada_)?(?:hoy|24|48)(?:_|$)/.test(templateName || '');
   if (!reminder && !appointmentData && !confirmationTimeout) return true; // Cancellation acknowledgements retain their existing flow.
   const start = date(a.inicio), previous = date(e.context?.appointment?.inicio);
-  if (!Number.isFinite(start) || !Number.isFinite(previous) || start !== previous) fail('whatsapp_appointment_rescheduled');
-  if (start <= now || a.es_provisional || !['pendiente','info_enviada','info_confirmada','recordatorio_enviado','recordatorio_confirmado','reprogramada'].includes(a.estado)) fail('whatsapp_appointment_ineligible');
+  if (!Number.isFinite(start)) fail('whatsapp_appointment_rescheduled', 'whatsapp_appointment_start_invalid');
+  if (!Number.isFinite(previous) || start !== previous) fail('whatsapp_appointment_rescheduled');
+  if (start <= now) fail('whatsapp_appointment_ineligible', 'whatsapp_appointment_past');
+  if (a.es_provisional) fail('whatsapp_appointment_ineligible', 'whatsapp_appointment_provisional');
+  if (!['pendiente','info_enviada','info_confirmada','recordatorio_enviado','recordatorio_confirmado','reprogramada'].includes(a.estado))
+    fail('whatsapp_appointment_ineligible', 'whatsapp_appointment_status_ineligible');
   if (confirmationTimeout && a.estado === 'recordatorio_confirmado') fail('whatsapp_appointment_already_confirmed');
   if (confirmationTimeout && e.context?.whatsapp_timeout_recovery && day(start) !== day(now)) fail('whatsapp_appointment_wrong_day');
   const m = object(a.import_metadata), suppression = object(m.notification_suppression || m.notificationSuppression);

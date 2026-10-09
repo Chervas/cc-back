@@ -40,6 +40,28 @@ test('current appointment and patient import holds are checked before every prov
   await assert.rejects(f.client.send(input()), { code: 'whatsapp_authorized_message_ineligible' });
   assert.equal(reads, 2); assert.equal(f.calls.length, 0);
 });
+test('blocked automated appointment keeps a bounded reason through authorization and never attempts transport or retry', async () => {
+  const start = new Date(Date.now() - 3600000).toISOString();
+  const f = fixture({
+    loadMessage: async id => ({ id, conversation_id: 71, direction: 'outbound', status: 'pending', createdAt: new Date(),
+      metadata: { execution_id: 19, template_name: 'clinicaclick_confirmacion_datos_cita_hoy_v55' } }),
+    loadConversation: async id => ({ id, clinic_id: 123, patient_id: 7 }), patientHeld: async () => false,
+    loadExecution: async () => ({ id: 19, clinic_id: 123, trigger_entity_type: 'appointment', trigger_entity_id: 9,
+      context: { appointment: { inicio: start } } }),
+    loadAppointment: async () => ({ id_cita: 9, clinica_id: 123, paciente_id: 7, estado: 'pendiente', inicio: start }),
+  });
+  await assert.rejects(f.client.send(input()), error => {
+    assert.equal(error.code, 'whatsapp_authorized_message_ineligible');
+    assert.equal(error.details.reason_code, 'whatsapp_appointment_past');
+    assert.equal(error.retryable, false);
+    assert.equal(buildWhatsappOutboundRetryDecision({ error, retryOnFailure: true, maxAttempts: 5 }).should_retry, false); return true;
+  });
+  assert.equal(f.calls.length, 0);
+  const unknown = fixture({ loadMessage: async () => { throw Error('PRIVATE_UNEXPECTED_ERROR'); } });
+  await assert.rejects(unknown.client.send(input()), error => error.code === 'whatsapp_authorized_message_ineligible'
+    && error.details === undefined && !error.message.includes('PRIVATE'));
+  assert.equal(unknown.calls.length, 0);
+});
 test('DEV, gateway, disabled workers and mismatched queues cannot reach binding or transport', async () => {
   for (const change of [{ RUNTIME_ROLE: 'gateway' }, { JOB_RUNTIME_NAMESPACE: 'dev' }, { QUEUE_PREFIX: 'dev' }, { JOBS_WORKER_ENABLED: 'false' }]) {
     const f = fixture(); Object.assign(f.state.env, change);
