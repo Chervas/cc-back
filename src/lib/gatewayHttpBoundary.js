@@ -7,7 +7,7 @@ const EXTERNAL_ROUTES = [
   ['POST', /^\/api\/whatsapp\/webhook\/?$/],
   ['GET', /^\/api\/whatsapp\/onboarding\/window$/],
   ['POST', /^\/api\/whatsapp\/onboarding\/(?:begin|finish|status|cancel|authorizations|complete)$/],
-  ['GET', /^\/(?:api\/)?oauth\/(?:meta|google)\/callback\/?$/],
+  ['GET', /^\/(?:api\/)?oauth\/(?:meta(?:\/marketing)?|google)\/callback\/?$/],
   ['GET', /^\/api\/(?:intake\/leads|leads)\/webhook\/?$/],
   ['POST', /^\/api\/(?:intake\/leads|leads)\/webhook\/?$/],
   ['GET', /^\/api\/intake\/config\/?$/],

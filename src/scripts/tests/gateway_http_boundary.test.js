@@ -17,7 +17,7 @@ const external = [
   ['GET', '/api/whatsapp/onboarding/window'],
   ...['begin', 'finish', 'status', 'cancel', 'authorizations', 'complete']
     .map(operation => ['POST', '/api/whatsapp/onboarding/' + operation]),
-  ...['/oauth', '/api/oauth'].flatMap(prefix => ['meta', 'google'].map(provider => ['GET', `${prefix}/${provider}/callback`])),
+  ...['/oauth', '/api/oauth'].flatMap(prefix => ['meta', 'meta/marketing', 'google'].map(provider => ['GET', `${prefix}/${provider}/callback`])),
   ...['/api/leads/webhook', '/api/intake/leads/webhook'].flatMap(route => ['GET', 'POST'].map(method => [method, route])),
   ['GET', '/api/intake/config'],
   ...['leads', 'landing-leads', 'events', 'whatsapp-origin'].map(operation => ['POST', '/api/intake/' + operation]),
@@ -99,6 +99,19 @@ test('External contract inventory keeps methods, aliases and automatic HEAD only
   }
   assert.equal(externalRouteAllowed('GET', '/api/intake/leads'), false);
   assert.equal(externalRouteAllowed('POST', '/api/whatsapp/onboarding/window'), false);
+});
+
+test('Every public provider callback declared in the current OAuth router is preserved, without opening its diagnostic route', () => {
+  const source = fs.readFileSync(path.join(sourceRoot, 'src/routes/oauth.routes.js'), 'utf8');
+  const declaration = source.match(/const PUBLIC_OAUTH_PATHS = new Set\(\[([\s\S]*?)\]\)/);
+  assert(declaration, 'OAuth public path inventory must remain explicit');
+  const callbacks = [...declaration[1].matchAll(/'([^']+\/callback)'/g)].map(match => match[1]);
+  assert(callbacks.length >= 3);
+  for (const callback of callbacks) for (const prefix of ['/oauth', '/api/oauth']) {
+    assert.equal(externalRouteAllowed('GET', prefix + callback), true, prefix + callback);
+    assert.equal(externalRouteAllowed('POST', prefix + callback), false);
+  }
+  assert.equal(externalRouteAllowed('GET', '/oauth/test'), false);
 });
 
 test('All management methods are closed before CORS, parser or handlers, including authenticated callers', async t => {
