@@ -130,7 +130,7 @@ function assertPriorityAcknowledgement(solution, acknowledged) {
 }
 
 function bookingErrorMiddleware(error, req, res, next) {
-  if (!/^(booking_|program_|pending_attention_requirements$|appointment_consent_|appointment_clinical_component_|appointment_link_|appointment_same_day_|historical_reference_|treatment_not_|treatment_not_found)/.test(String(error?.code || ''))) return next(error);
+  if (!/^(care_|booking_|program_|pending_attention_requirements$|appointment_consent_|appointment_clinical_component_|appointment_link_|appointment_same_day_|historical_reference_|treatment_not_|treatment_not_found)/.test(String(error?.code || ''))) return next(error);
   return res.status(error.statusCode || 409).json(bookingErrorPayload(error));
 }
 

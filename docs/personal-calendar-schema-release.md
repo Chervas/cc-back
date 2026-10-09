@@ -102,20 +102,20 @@ o permisos falsos. No presentar `check` como prueba de conservación de datos.
 
 ## Permiso acotado y recuperación
 
-La DDL no concede permiso a Piedad. Cualquier habilitación posterior requiere
+La DDL no concede permiso a Piedad. La habilitación del corte anterior utilizó
 otro instrumento de operación, identidad revisada y compare-and-swap del enlace
-exacto. El destino CRM autorizado es profesional 221, clínica 72, después de
-verificar identidad, enlace activo, `recibe_citas` y `agenda_flexible`. No aplicar
-ese número a fixtures DEV por semejanza ni concederlo por lotes. La publicación
-de este operador no autoriza ampliar la excepción a otros profesionales.
+exacto: profesional 221, clínica 72, vínculo 119, con enlace activo,
+`recibe_citas` y `agenda_flexible` verificados. Ese alcance es histórico, no
+autoriza reactivar o ampliar la excepción. No aplicar esos números a fixtures
+DEV por semejanza. La publicación de este operador no concede permisos.
 
-Ante error de DDL o verificación, conservar plan, respaldo y diario privado e
-inspeccionar el último paso antes de decidir una reparación explícita. El
-operador rechaza el reintento sobre DDL parcial. No ejecutar `down`, repetir a
-ciegas ni restaurar globalmente una BD sobre escrituras nuevas. El rollback de
-código conserva el esquema aditivo y restaura una versión compatible. Guardar
-la evidencia del corte y su estado en los documentos canónicos; este runbook no
-declara ninguna publicación o migración ejecutada.
+Ante error de DDL o verificación del corte de esquema, conservar plan, respaldo
+y diario privado e inspeccionar el último paso antes de decidir una reparación
+explícita. El operador rechaza el reintento sobre DDL parcial. No ejecutar `down`,
+repetir a ciegas ni restaurar globalmente una BD sobre escrituras nuevas. El
+rollback de código conserva el esquema aditivo y restaura una versión compatible.
+Guardar la evidencia del corte y su estado en los documentos canónicos; este
+runbook no declara ninguna publicación o migración ejecutada.
 
 Pruebas focales sin IPC del runner:
 
@@ -126,3 +126,54 @@ node src/scripts/tests/personal_calendar_schema_release.test.js
 Ese comando ejecuta los casos `node:test` individuales. Un resultado de un
 único archivo del runner `--test` no sustituye el recuento de casos ni las pruebas
 MySQL efímeras del adaptador y las DDL reales.
+
+### Retirada preparada de las excepciones por profesional · 09/10/2026
+
+**Pendiente de aplicar, verificar y registrar.** La decisión del titular es
+retirar las excepciones de agenda anteriores en los vínculos siguientes y usar
+la confirmación explícita de cada reserva (`409` y recibo revalidado). Este
+runbook prepara el alcance; no acredita cambios de datos o publicación.
+
+| Vínculo `DoctorClinicas.id` | Profesional | `doctor_id` | Clínica | `clinica_id` | Cambio preparado |
+| --- | --- | --- | --- | --- | --- |
+| 20 | Ainhoa | 50 | BS Capilar | 66 | `agenda_flexible=false` |
+| 122 | Ainhoa | 50 | BS Medical | 72 | `agenda_flexible=false` |
+| 113 | Lidia | 142 | BS Medical | 72 | `agenda_flexible=false` |
+| 115 | Lidia | 142 | BS Capilar | 66 | `agenda_flexible=false` |
+| 119 | Piedad | 221 | BS Medical | 72 | `agenda_flexible=false`, `allow_legacy_attention_confirmation=false` |
+
+Antes de escribir, resolver y comprobar las cinco identidades, parejas exactas
+profesional/clínica y valores actuales. Conservar una evidencia privada del
+estado anterior y aplicar únicamente los campos indicados mediante el instrumento
+acotado del operador, con transacción y compare-and-swap. Una identidad, valor o
+fila inesperados exige parar y revisar; no sustituir el alcance por un UPDATE
+global de la tabla. Comprobar después todos los valores y la conservación de
+los demás campos y permisos. No ejecutar DDL, `down` ni el publicador de esquema
+para esta retirada.
+
+No modificar roles o permisos clínicos, `activo`, `recibe_citas`, adscripción,
+horarios, ausencias, bloqueos ni citas. `allow_overlap_confirmation`, capacidad
+y políticas físicas de sala quedan fuera de este corte. No activar mensajes,
+consentimientos, programas, jobs ni flags del runtime. Mantener una reversión
+acotada con el estado anterior y CAS, nunca una restauración global sobre
+escrituras nuevas. Cerrar el resultado real y las evidencias en 19/99.
+
+Validar la preparación y reserva ordinaria con los campos retirados: falta de
+horario, solape, personal de apoyo y grupo vinculado deben seguir mostrando los
+motivos y requerir el nuevo recibo, sin una excepción silenciosa. No usar el
+`agendable` legacy como veto local cuando una clínica única autorizada permite
+preparar el borrador con núcleo de reservas activo y pertenencia activa que
+recibe citas. Mantener los límites de atención registrada, máquinas inactivas/en
+mantenimiento, recursos ajenos, equipos ALL y contrato adquirido de programa/bono.
+
+La comprobación del transporte de errores usa el router real de citas con
+`nativeFinalHandler=true` en el fixture HTTP/SQL aislado, sin su fallback JSON.
+La validación preparada pasa 34 solicitudes autenticadas en MySQL efímero:
+rechazos de `no_asistio` futuro con el núcleo de perfiles activado/desactivado,
+protección de atención/recursos, cancelación histórica y replay. Se comprueba
+`Content-Type: application/json`, código de dominio y estado/ocupación intactos
+en los rechazos; cuatro pruebas directas verifican que errores desconocidos
+siguen delegándose. Cero mensajes, consentimientos, jobs o conexiones externas.
+El ajuste `care_*` está **pendiente de publicación y aceptación del runtime**;
+la prueba aislada no afirma que la retirada de permisos se haya aplicado.
+Evidencia privada: `/tmp/cc-campaign-opt-mysql-oHO47n/result.json`.

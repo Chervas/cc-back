@@ -4,7 +4,7 @@ const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysq
 const { createOwnedVisitAuthAclFixture } = require('./helpers/owned-visit-auth-acl-fixture');
 
 withIsolatedCampaignMysql(async owned => {
-  const f = await createOwnedVisitAuthAclFixture(owned);
+  const f = await createOwnedVisitAuthAclFixture({ ...owned, nativeFinalHandler: true });
   const { db, ids, request, fingerprint } = f;
   const C = require('../../services/authEmailChallenge.contract');
   const login = async id => {
@@ -33,6 +33,7 @@ withIsolatedCampaignMysql(async owned => {
           }
           const result = await request('POST', '/api/citas', body, clinical);
           assert.equal(result.status, 409, JSON.stringify(result.body));
+          assert.match(result.headers['content-type'], /^application\/json\b/);
           assert.match(result.body.code, /^care_/);
           assert.deepEqual(await fingerprint(), before, 'Forged clinical creation has no domain mutation');
         }
@@ -42,8 +43,11 @@ withIsolatedCampaignMysql(async owned => {
     assert.equal(created.status, 201, JSON.stringify(created.body));
     const id = created.body.id_cita, care = action => `/api/citas/${id}/care/${action}`;
     const denied = async (method, route, body, token, status, code) => {
-      const before = await fingerprint(), result = await request(method, route, body, token);
+      const before = await fingerprint(), result = await request(method, route, body, token,
+        { accept: 'application/json' });
       assert.equal(result.status, status, JSON.stringify(result.body));
+      assert.match(result.headers['content-type'], /^application\/json\b/,
+        'Native router supplies JSON: no fixture error fallback is installed');
       if (code) assert.equal(result.body.code, code);
       assert.deepEqual(await fingerprint(), before, 'Denied action has no domain mutation');
     };
@@ -124,6 +128,7 @@ withIsolatedCampaignMysql(async owned => {
     assert.equal(await db.JobRequest.count(), 0);
     assert.equal(await db.FlowExecutionV2.count(), 0);
     assert.equal(f.externalFetchAttempts, 0);
+    owned.report.checks.push('Native router JSON contract, without the fixture error fallback: every rejected lifecycle action returns application/json with its domain code; future no-show with profile gate on/off and care/resource/state rewinds preserve all domain rows. Accept:application/json does not manufacture this contract. Unknown errors remain delegated to Express final handling.');
     owned.report.checks.push('Actual authenticated HTTP/SQL: generic creation cannot forge arrival/start/finish with booking gate on or off; ACL cross-clinic/clinical rights; no finish before start; arrival/replay; actor spoof rejected by authenticated attribution; care start; no changing doctor/room/support after care started even at unchanged times; no confirmation rewind; two concurrent finishes produce one evidence event and one replay; completion replay has no mutation; no cancellation rewind; future no-show denied transactionally with booking gate on/off; existing open reservation cancelled despite hidden treatment, incomplete historic profile and closed multi-resource gate, original snapshots/occupancy preserved, reopening still validates; zero consents/messages/jobs/executions/provider calls');
   } finally { await f.close(); }
 }).then(() => {}, error => { console.error(error.code || error.message); process.exitCode = 1; });

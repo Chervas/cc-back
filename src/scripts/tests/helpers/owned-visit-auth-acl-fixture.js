@@ -51,7 +51,7 @@ const DOMAIN_TABLES = [
 ];
 
 async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registerOwnedLoopbackServer,
-  includeConsentRoutes = false, includeProgramLedger = false }) {
+  includeConsentRoutes = false, includeProgramLedger = false, nativeFinalHandler = false }) {
   assert(sql.options.dialectOptions?.socketPath?.startsWith('/tmp/cc-campaign-opt-mysql-'));
   const [[owned]] = await sql.query('SELECT @@skip_networking AS isolated, DATABASE() AS name');
   assert.equal(Number(owned.isolated), 1); assert.equal(owned.name, 'campaign_optimization_qa');
@@ -192,7 +192,10 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
   app.use('/api/citas', require('../../../routes/citas.routes'));
   app.use('/api/treatment-documentation', require('../../../routes/treatmentDocumentation.routes'));
   if (includeConsentRoutes) app.use('/api/consentimientos', require('../../../routes/consentimientos.routes'));
-  app.use((error, req, res, next) => {
+  // Native error-contract acceptance must reach each real router's own
+  // middleware. The legacy fixture fallback could otherwise hide a missing
+  // domain handler by manufacturing JSON that production does not return.
+  if (!nativeFinalHandler) app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
     res.status(error.statusCode || error.status || 500).json({ code: error.code || 'owned_unhandled_error', message: error.message });
   });
