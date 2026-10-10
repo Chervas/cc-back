@@ -17,7 +17,8 @@ test('one explicit clinic, civil periods and at most five cards; no patient-sele
     assert.deepEqual(query(), { clinicId: 72, query: '', period: 'today', limit: 5, cursor: null });
     assert.equal(query({ query: '  Ana   Pérez ', limit: 999 }).query, 'Ana Pérez');
     assert.equal(query({ query: '7' }).query, '7');
-    for (const invalid of [{ clinica_id: '72,66' }, { clinica_id: '72bad' }, { clinica_id: -1 },
+    for (const invalid of [{ clinica_id: '72,,66' }, { clinica_id: '72bad' }, { clinica_id: -1 },
+        { clinica_id: 'all' }, { clinica_id: ['72','66'] }, { clinica_id: Array.from({ length: 21 }, (_, i) => i + 1).join(',') },
         { query: ['Ana'] }, { query: 'a' }, { query: 'a'.repeat(101) }, { period: 'later' },
         { limit: '0' }, { limit: '2x' }, { cursor: {} }, { cursor: '' }]) {
         assert.throws(() => query(invalid), error => error.status === 400);
@@ -81,11 +82,15 @@ test('name tokens span nombre/apellidos and HC; percent/underscore input is lite
 
 const source = fs.readFileSync(require.resolve('../../controllers/citas.controller'), 'utf8');
 function handler(overrides = {}) {
-    const calls = { reads: 0, bulk: 0, protections: 0 };
+    const calls = { reads: 0, bulk: 0, protections: 0, scopeReads: 0, agendaAcl: 0, sensitiveAcl: 0 };
     const rows = Array.from({ length: 6 }, (_, i) => ({ id_cita: i + 1, clinica_id: 72,
         paciente_id: 7, inicio: new Date('2026-10-10T10:00:00Z'), paciente: { nombre: 'QA' } }));
     const globals = { exports: {}, asyncHandler: fn => fn, Op, process: { env: { JWT_SECRET: key } },
         denyAppointmentViewAccessIfNeeded: async () => false, canUserAccessFeature: async () => true,
+        resolveAppointmentReadClinicIdsOrRespond: async () => { calls.agendaAcl++; return [66,72]; },
+        getAccessibleClinicIdsForFeature: async ({ clinicIds }) => { calls.sensitiveAcl++; return clinicIds; },
+        Clinica: { findAll: async () => { calls.scopeReads++; return [{ id_clinica: 66, grupoClinicaId: 4 }, { id_clinica: 72, grupoClinicaId: 4 }]; } },
+        resolveClinicTimezone: () => 'UTC',
         buildClinicCalendarScope: async () => ({ timeZones: new Map([[72, 'UTC']]) }), DEFAULT_TIMEZONE: 'Europe/Madrid',
         formatDateLocal: () => '2026-10-10', buildCalendarRangeForTimeZone: boundsForDay,
         Paciente: {}, Instalacion: {}, Tratamiento: {}, db: { Usuario: {} }, plainCita: row => row,
@@ -140,4 +145,91 @@ test('registered GET-only before dynamic id; never mutates lifecycle, notificati
     const start = source.indexOf('exports.searchCalendarAppointments =');
     const code = source.slice(start, source.indexOf('\nexports.unlinkPatientAppointments =', start));
     assert.doesNotMatch(code, /\.update\(|\.create\(|\.destroy\(|\.save\(|syncScheduled|enqueue|emitAppointment|mutateAppointmentBooking/);
+});
+
+test('group cursor pins exact authorized IDs, each civil day/timezone and global keyset across midnight', () => {
+    const q = query({ clinica_id: '72,66,72' });
+    assert.deepEqual(q.clinicIds, [66,72]);
+    const clinics = [{ clinic_id: 66, clinic_day: '2026-10-10', time_zone: 'Europe/Madrid' },
+        { clinic_id: 72, clinic_day: '2026-10-09', time_zone: 'America/New_York' }];
+    const first = search.appointmentSearchPlan(q, context({ clinics }));
+    const cursor = search.appointmentSearchCursor(first, { id_cita: 17, inicio: '2026-10-10T18:00:00Z' }, key);
+    const next = search.appointmentSearchPlan({ ...q, cursor }, context({ now: now + 1000,
+        clinics: clinics.map(c => ({ ...c, clinic_day: '2026-10-11' })) }));
+    assert.deepEqual(next.clinics.map(c => c.clinic_day), ['2026-10-10','2026-10-09']);
+    const where = search.appointmentSearchWhere(next, Op)[Op.and];
+    assert.deepEqual(where[0][Op.or].map(branch => branch[Op.and][0].clinica_id), [66,72]);
+    assert.equal(where[0][Op.or][1][Op.and][1].inicio[Op.gte].toISOString(), '2026-10-09T00:00:00.000Z');
+    assert.equal(where[1][Op.or][1].id_cita[Op.gt], 17);
+    for (const [change, ctx] of [[{ clinicIds: [66,73] }, { clinics: [clinics[0], { ...clinics[1], clinic_id: 73 }] }],
+        [{}, { clinics: [clinics[0], { ...clinics[1], time_zone: 'UTC' }] }], [{}, { actorId: 9 }],
+        [{ query: 'Other' }, {}], [{ period: 'past' }, {}], [{}, { now: now + 3600000 }]]) {
+        assert.throws(() => search.appointmentSearchPlan({ ...q, cursor, ...change }, context({ clinics, ...ctx })));
+    }
+    assert.throws(() => plan({ cursor }), 'group cursor cannot become a single-clinic cursor');
+});
+
+test('group route is one bounded joined read, with complete ACL rechecks on every cursor page', async () => {
+    const h = handler(); await h.run({ clinica_id: '72,66' });
+    assert.equal(h.calls.reads, 1); assert.equal(h.calls.scopeReads, 1);
+    assert.equal(h.calls.agendaAcl, 1); assert.equal(h.calls.sensitiveAcl, 1);
+    assert.equal(h.calls.options.limit, 6); assert.equal(h.calls.options.offset, undefined);
+    assert.deepEqual(Array.from(h.response.body.clinics, c => c.clinic_id), [66,72]);
+    const cursor = h.response.body.next_cursor;
+    await h.run({ clinica_id: '66,72', cursor });
+    assert.equal(h.calls.reads, 2); assert.equal(h.calls.agendaAcl, 2); assert.equal(h.calls.sensitiveAcl, 2);
+    assert.equal(h.calls.bulk, 4); assert.equal(h.calls.protections, 2);
+});
+
+test('group denies a missing permission or mixed/nonexistent group before any patient/appointment read', async () => {
+    for (const overrides of [
+        { resolveAppointmentReadClinicIdsOrRespond: async () => null },
+        { getAccessibleClinicIdsForFeature: async () => [66] },
+        { Clinica: { findAll: async () => [{ id_clinica: 66, grupoClinicaId: 4 }, { id_clinica: 72, grupoClinicaId: 5 }] } },
+        { Clinica: { findAll: async () => [{ id_clinica: 66, grupoClinicaId: null }, { id_clinica: 72, grupoClinicaId: null }] } },
+        { Clinica: { findAll: async () => [{ id_clinica: 66, grupoClinicaId: 4 }] } },
+    ]) {
+        const h = handler(overrides); await h.run({ clinica_id: '66,72' });
+        assert.equal(h.calls.reads, 0); assert.equal(h.calls.bulk, 0); assert.equal(h.calls.protections, 0);
+        if (!overrides.resolveAppointmentReadClinicIdsOrRespond) assert.equal(h.response.code, 403);
+    }
+    let allowed = [66,72];
+    const h = handler({ getAccessibleClinicIdsForFeature: async () => allowed });
+    await h.run({ clinica_id: '66,72' }); const cursor = h.response.body.next_cursor;
+    allowed = [66]; await h.run({ clinica_id: '66,72', cursor });
+    assert.equal(h.response.code, 403); assert.equal(h.calls.reads, 1, 'signed cursor is never an ACL grant');
+});
+
+test('revoking agenda read between group pages stops the next appointment SQL', async () => {
+    let allowed = true;
+    const h = handler({ resolveAppointmentReadClinicIdsOrRespond: async (_, response) => {
+        if (allowed) return [66,72];
+        response.status(403).json({ message: 'No tienes permiso para ver esta agenda' });
+        return null;
+    } });
+    await h.run({ clinica_id: '66,72' });
+    const cursor = h.response.body.next_cursor;
+    allowed = false;
+    await h.run({ clinica_id: '66,72', cursor });
+    assert.equal(h.response.code, 403);
+    assert.equal(h.calls.reads, 1);
+    assert.equal(h.calls.bulk, 2);
+});
+
+test('group mapping and day-boundary adapter receive each owner clinic timezone', async () => {
+    const zones = { 66: 'America/New_York', 72: 'Europe/Madrid' };
+    const mapped = [], bounded = [];
+    const rows = Array.from({ length: 6 }, (_, i) => ({ id_cita: i + 1, clinica_id: i % 2 ? 72 : 66,
+        paciente_id: 7, inicio: new Date('2026-10-10T10:00:00Z'), paciente: { nombre: 'QA' } }));
+    const h = handler({
+        resolveClinicTimezone: row => zones[row.id_clinica],
+        buildCalendarRangeForTimeZone: (day, endDay, zone) => { assert.equal(day, endDay); bounded.push(zone); return boundsForDay(day); },
+        CitaPaciente: { findAll: async () => rows },
+        mapCalendarCitaRow: (row, zone) => { mapped.push([row.clinica_id, zone]); return row; },
+    });
+    await h.run({ clinica_id: '72,66' });
+    assert.deepEqual(bounded, [zones[66], zones[72]]);
+    assert.deepEqual(mapped, rows.slice(0, 5).map(row => [row.clinica_id, zones[row.clinica_id]]));
+    assert.deepEqual(Array.from(h.response.body.clinics, row => [row.clinic_id, row.time_zone]),
+        [[66, zones[66]], [72, zones[72]]]);
 });

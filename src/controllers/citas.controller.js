@@ -2484,21 +2484,46 @@ exports.getAppointmentHubList = asyncHandler(async (req, res) => {
     res.json({ items: await protectAppointmentsForRequest(req, items), can_manage: canManage, page: q.page, has_more: rows.length > q.limit });
 });
 
-// Direct appointment cards, bounded to five rows and ONE authorized clinic.
+// Direct appointment cards: five rows, explicit authorized clinic/group scope.
 // No patient selection, N+1 history lookup, calendar mutation or messaging.
 exports.searchCalendarAppointments = asyncHandler(async (req, res) => {
     const search = require('../lib/appointment-calendar-search');
     const q = search.parseAppointmentCalendarSearch(req.query);
-    if (await denyAppointmentViewAccessIfNeeded(req, res, q.clinicId)) return;
+    const clinicIds = q.clinicIds || [q.clinicId];
+    if (q.clinicIds) {
+        if (!await resolveAppointmentReadClinicIdsOrRespond(req, res, clinicIds.join(','))) return;
+    } else if (await denyAppointmentViewAccessIfNeeded(req, res, q.clinicId)) return;
     const actorId = Number(req.userData?.userId);
     // Searching a name must not become an oracle for redacted patient records.
-    if (!await canUserAccessFeature({ actorId, featureKey: 'patients.sensitive.view', clinicId: q.clinicId })) {
+    const sensitiveAllowed = q.clinicIds
+        ? await getAccessibleClinicIdsForFeature({ actorId, featureKey: 'patients.sensitive.view', clinicIds })
+        : await canUserAccessFeature({ actorId, featureKey: 'patients.sensitive.view', clinicId: q.clinicId }) ? clinicIds : [];
+    if (clinicIds.some(id => !sensitiveAllowed.map(Number).includes(id))) {
         return res.status(403).json({ message: 'No tienes permiso para buscar citas por paciente.' });
     }
-    const scope = await buildClinicCalendarScope([q.clinicId]);
-    const timeZone = scope.timeZones.get(q.clinicId) || DEFAULT_TIMEZONE;
+    let clinics;
+    let timeZone;
+    if (q.clinicIds) {
+        const rows = await Clinica.findAll({ where: { id_clinica: { [Op.in]: clinicIds } },
+            attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId', 'configuracion'] });
+        const groupId = Number(rows[0]?.grupoClinicaId);
+        if (!Number.isSafeInteger(groupId) || groupId <= 0 || rows.length !== clinicIds.length
+            || rows.some(row => Number(row.grupoClinicaId) !== groupId)) {
+            return res.status(403).json({ message: 'La búsqueda debe pertenecer a un único grupo de clínicas.' });
+        }
+        const now = new Date();
+        clinics = clinicIds.map(id => {
+            const row = rows.find(clinic => Number(clinic.id_clinica) === id);
+            const zone = resolveClinicTimezone(row);
+            return { clinic_id: id, clinic_day: formatDateLocal(now, zone), time_zone: zone };
+        });
+        timeZone = clinics[0].time_zone;
+    } else {
+        const scope = await buildClinicCalendarScope(clinicIds);
+        timeZone = scope.timeZones.get(q.clinicId) || DEFAULT_TIMEZONE;
+    }
     const key = process.env.JWT_SECRET;
-    const plan = search.appointmentSearchPlan(q, { actorId, timeZone, key,
+    const plan = search.appointmentSearchPlan(q, { actorId, timeZone, clinics, key,
         currentDay: formatDateLocal(new Date(), timeZone),
         boundsForDay: (day, zone) => buildCalendarRangeForTimeZone(day, day, zone) });
     const rows = await CitaPaciente.findAll({
@@ -2509,6 +2534,7 @@ exports.searchCalendarAppointments = asyncHandler(async (req, res) => {
             'es_provisional', 'source_system', 'source_reference', 'hold_expires_at', 'voucher_id', 'import_metadata',
             'created_at', 'updated_at'],
         include: [
+            { model: Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
             { model: Paciente, as: 'paciente', required: true,
                 attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'numero_historia'],
                 where: search.patientSearchWhere(q.query, require('sequelize')) },
@@ -2524,13 +2550,17 @@ exports.searchCalendarAppointments = asyncHandler(async (req, res) => {
     // All enrichments are bounded bulk reads over this page, never its history.
     await attachAppointmentProgramContexts(db, page);
     await require('../services/appointmentCardIndicators.service').attach(db, page);
-    const items = await protectAppointmentsForRequest(req, page.map(row => mapCalendarCitaRow(row, timeZone)));
+    const items = await protectAppointmentsForRequest(req, page.map(row => ({
+        ...mapCalendarCitaRow(row, clinics?.find(clinic => clinic.clinic_id === Number(row.clinica_id))?.time_zone || timeZone),
+        clinica_nombre: plainCita(row).clinica?.nombre_clinica || null,
+    })));
     const hasMore = rows.length > q.limit;
     res.set('Cache-Control', 'private, no-store');
     res.set('X-Agenda-Endpoint', 'calendar-search');
     res.json({ items, has_more: hasMore, next_cursor: hasMore
         ? search.appointmentSearchCursor(plan, plainCita(page[page.length - 1]), key) : null,
-        clinic_day: plan.day, time_zone: timeZone });
+        clinic_day: plan.day, time_zone: timeZone,
+        ...(plan.clinics ? { clinics: plan.clinics.map(({ clinic_id, clinic_day, time_zone }) => ({ clinic_id, clinic_day, time_zone })) } : {}) });
 });
 
 exports.unlinkPatientAppointments = asyncHandler(async (req, res) => {
