@@ -18,7 +18,10 @@ function readPlanInputs(options) {
     const snapshot = jsonFile(options['--snapshot']), calendar = jsonFile(options['--source-calendar']), history = jsonFile(options['--source-history']);
     const sourceFileHashes = { calendar: calendar.sha256, history: history.sha256 };
     if (hash(sourceFileHashes) !== hash(contract.SOURCE_FILES)) fail('BS_APPOINTMENT_PINNED_ORIGINAL_FILES_CHANGED');
-    return { snapshot: snapshot.value, calendarSource: calendar.value, historySource: history.value, sourceFileHashes };
+    const jointCsv = options['--approved-joint-pair'];
+    if (jointCsv != null && !/^[1-9]\d*,[1-9]\d*$/.test(jointCsv)) fail('BS_APPOINTMENT_ONLY_EXACT_APPROVED_JOINT_PAIR_ALLOWED');
+    return { snapshot: snapshot.value, calendarSource: calendar.value, historySource: history.value, sourceFileHashes,
+        ...(jointCsv != null ? { approvedJointPair: contract.normalizeApprovedJointPair(jointCsv.split(',').map(Number)) } : {}) };
 }
 function createBackup(plan, snapshot, now = new Date()) {
     const assessment = executor.assessBatch({ plan, snapshot, direction: 'forward', last: null, now });
@@ -29,7 +32,7 @@ function createBackup(plan, snapshot, now = new Date()) {
 }
 async function run(args) {
     const options = parseArgs(args, ['--mode', '--target', '--snapshot', '--source-calendar', '--source-history', '--plan', '--approval', '--backup',
-        '--journal', '--private-output', '--confirm-plan-sha256', '--max-operations', '--direction']);
+        '--journal', '--private-output', '--confirm-plan-sha256', '--max-operations', '--direction', '--approved-joint-pair']);
     const mode = options['--mode'] || 'dry-run';
     if (!['capture', 'plan', 'dry-run', 'backup', 'apply', 'rollback', 'recover'].includes(mode) || !options['--private-output']) fail('BS_APPOINTMENT_CLI_MODE_AND_PRIVATE_OUTPUT_REQUIRED');
     const writable = ['apply', 'rollback', 'recover'].includes(mode);

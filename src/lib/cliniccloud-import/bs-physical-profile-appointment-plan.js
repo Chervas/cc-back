@@ -24,6 +24,8 @@ const SOURCE_FILES = Object.freeze({
 const FIELD_WHITELIST = Object.freeze(['CitasPacientes.import_metadata.booking', 'CitasPacientes.import_metadata.piedad_preparation_migration',
     'AppointmentBookingOccupancies.doctor_intervals', 'AppointmentBookingOccupancies.authorized_ems_equipment_correction']);
 const RECIPES = Object.freeze({ 5: [1948, 1949], 11: [1957], 14: [1964, 1965] });
+// Separately approved, source-accredited reconciliation. No arbitrary groups.
+const APPROVED_JOINT_PAIR_SHA256 = 'bf3cf5a4aef787cd744ec561f879295f591debafbae2b6320c446c417e5f8480';
 const object = value => typeof value === 'string' ? JSON.parse(value) : value;
 const clone = value => JSON.parse(JSON.stringify(value));
 const same = (a, b) => hash(a) === hash(b);
@@ -182,7 +184,7 @@ function sourceEvidence(row, index, unitId, notePriority = null) {
             policy_recipe_id: 1957, room_id: 82, equipment_id: 11, commercial_or_clinical_reclassification: false } : null,
         reviewed_component_resolution_sha256: reviewedTreatment(row, Number(row.tratamiento_id)) ? hash(m.import_treatment_resolution) : null };
 }
-function resourceContext(snapshot, row) {
+function resourceContext(snapshot, row, { excludedDoctorAppointmentIds = [] } = {}) {
     const date = calendar.formatDateLocal(new Date(ms(row.inicio)), 'Europe/Madrid'), dow = calendar.dayIndexFromLocalDate(date);
     const r = snapshot.resources;
     const link = r.professionals.find(item => Number(item.doctor_id) === 221 && Number(item.clinica_id) === 72);
@@ -197,15 +199,18 @@ function resourceContext(snapshot, row) {
     const activeAppointments = snapshot.appointments.filter(item => Number(item.id_cita) !== Number(row.id_cita) && item.estado !== 'cancelada');
     const ids = new Set(activeAppointments.map(item => Number(item.id_cita)));
     const occupancies = snapshot.occupancies.filter(item => ids.has(Number(item.appointment_id)));
-    const busy = occupancies.filter(item => item.resource_key === 'doctor:221').map(item => ({ start: timestamp(item.start_at), end: timestamp(item.end_at), appointment_id: Number(item.appointment_id) }));
-    const attentionVisits = activeAppointments.filter(item => Number(item.doctor_id) === 221
+    const excludedDoctorIds = new Set(excludedDoctorAppointmentIds.map(Number));
+    const doctorAppointments = activeAppointments.filter(item => !excludedDoctorIds.has(Number(item.id_cita)));
+    const busy = occupancies.filter(item => item.resource_key === 'doctor:221' && !excludedDoctorIds.has(Number(item.appointment_id)))
+        .map(item => ({ start: timestamp(item.start_at), end: timestamp(item.end_at), appointment_id: Number(item.appointment_id) }));
+    const attentionVisits = doctorAppointments.filter(item => Number(item.doctor_id) === 221
         || occupancies.some(o => Number(o.appointment_id) === Number(item.id_cita) && o.doctor_id === 221)).map(item => attentionVisitOrigin({
             appointment: { ...item, inicio: timestamp(item.inicio), fin: timestamp(item.fin),
                 booking_attention_snapshot: object(item.import_metadata)?.booking, booking_legacy_attention_snapshot: object(item.import_metadata)?.booking }, doctorId: 221, occupancies: occupancies.map(o => ({ ...o, start_at: timestamp(o.start_at), end_at: timestamp(o.end_at) })) }));
     // Appointments with no occupancy remain full legacy reservations, as in the
     // operational availability loader. Partial legacy source evidence remains
     // unverified and never licenses sharing through an old permission flag.
-    for (const item of activeAppointments.filter(item => Number(item.doctor_id) === 221
+    for (const item of doctorAppointments.filter(item => Number(item.doctor_id) === 221
         && !occupancies.some(o => Number(o.appointment_id) === Number(item.id_cita)))) busy.push({ start: timestamp(item.inicio), end: timestamp(item.fin), appointment_id: Number(item.id_cita) });
     const blocks = r.doctor_blocks.map(item => ({ ...item, fecha_inicio: timestamp(item.fecha_inicio), fecha_fin: timestamp(item.fecha_fin),
         excepciones: r.doctor_block_exceptions.filter(e => Number(e.doctor_bloqueo_id) === Number(item.id)) }));
@@ -229,7 +234,7 @@ function eligibility(row, snapshot) {
     if (!manual && (![2, 3].includes(m.booking?.profile?.version) || m.booking?.phases?.length !== 1)) return 'legacy_single_phase_snapshot_required';
     return null;
 }
-function propose(row, snapshot, index) {
+function propose(row, snapshot, index, { validateOnly = false, attentionSnapshot = null, excludedDoctorAppointmentIds = [] } = {}) {
     let reason = eligibility(row, snapshot); if (reason) return { reason };
     const notePriority = notePriorityEvidence(row, snapshot, index); if (notePriority?.reason) return notePriority;
     const duration = (ms(row.fin) - ms(row.inicio)) / 60000;
@@ -287,10 +292,17 @@ function propose(row, snapshot, index) {
     if (roomBlocks.some(item => overlaps(span, { start: timestamp(item.fecha_inicio), end: timestamp(item.fecha_fin) }))) return { reason: 'existing_room_block' };
     if (context.activeAppointments.some(item => Number(item.paciente_id) === Number(row.paciente_id)
         && overlaps(span, { start: timestamp(item.inicio), end: timestamp(item.fin) }))) return { reason: 'existing_patient_overlap' };
-    const conflict = attentionVisitConflict(context.doctor, { phase: profile.phases[0], visitStart: timestamp(row.inicio),
+    // ALL non-attention checks above always use the ORIGINAL snapshot. Only an
+    // explicitly accredited pair may stage clinician attention below; rooms,
+    // equipment, patients, original source and before-state are never masked.
+    if (validateOnly) return { validated: true, equipment_id: unitId, policy_recipe_id: evidence.recipe_id,
+        before_row_sha256: currentRowHash(row), source_evidence_sha256: hash(evidence), before_occupancy_sha256: hash(oldOccupancies) };
+    const attentionContext = attentionSnapshot || excludedDoctorAppointmentIds.length
+        ? resourceContext(attentionSnapshot || snapshot, row, { excludedDoctorAppointmentIds }) : context;
+    const conflict = attentionVisitConflict(attentionContext.doctor, { phase: profile.phases[0], visitStart: timestamp(row.inicio),
         ...span, policies: [policy] });
     if (conflict) return { reason: conflict.code };
-    const decision = assessStaffAttentionSteps({ resource: context.doctor, steps: [{ key: actual.key, ...span, policies: [policy] }] });
+    const decision = assessStaffAttentionSteps({ resource: attentionContext.doctor, steps: [{ key: actual.key, ...span, policies: [policy] }] });
     if (decision.status !== 'planned') return { reason: `staff_preparation_${decision.status}` };
     const phase = { ...clone(actual), equipment: [{ id: unitId, name: unit.name, turnaround_minutes: Number(unit.turnaround_minutes) }],
         start_offset_minutes: 0, staff_attention: [policy], preparation_sharing: { mode: 'same_start' },
@@ -324,9 +336,48 @@ function propose(row, snapshot, index) {
             - newOccupancies.filter(item => item.resource_kind === 'doctor').reduce((n, item) => n + (ms(item.end_at) - ms(item.start_at)) / 60000, 0) };
     return { operation: { ...body, operation_sha256: hash(body) } };
 }
-function buildPiedadAppointmentPlan({ snapshot, calendarSource, historySource, sourceFileHashes }) {
+function normalizeApprovedJointPair(value) {
+    if (value == null) return null;
+    if (!Array.isArray(value) || value.length !== 2 || value.some(id => !Number.isSafeInteger(id) || id < 1)
+        || value[0] >= value[1] || hash(value) !== APPROVED_JOINT_PAIR_SHA256) fail('BS_APPOINTMENT_ONLY_EXACT_APPROVED_JOINT_PAIR_ALLOWED');
+    return [...value];
+}
+function jointlyProposeApprovedPair(snapshot, index, records, approvedIds) {
+    const rows = approvedIds.map(id => snapshot.targets.find(row => Number(row.id_cita) === id)).map(row => row && materializeAppointment(row));
+    if (rows.some(row => !row) || approvedIds.some(id => records.find(row => row.appointment_id === id)?.reason !== 'preparation_origin_unverified'))
+        return { operations: [], reason: 'joint_pair_not_both_individually_origin_blocked' };
+    if (rows.some(row => row.source_system !== 'cliniccloud' || Number(row.clinica_id) !== 72 || Number(row.doctor_id) !== 221)
+        || ms(rows[0].inicio) !== ms(rows[1].inicio) || Number(rows[0].paciente_id) === Number(rows[1].paciente_id)
+        || Number(rows[0].instalacion_id) === Number(rows[1].instalacion_id)) return { operations: [], reason: 'joint_pair_scope_geometry_or_patient_changed' };
+    const checks = rows.map(row => propose(row, snapshot, index, { validateOnly: true }));
+    if (!checks.every(row => row.validated) || checks[0].policy_recipe_id !== 1957 || checks[0].equipment_id !== 11
+        || checks[1].policy_recipe_id !== 1948 || checks[1].equipment_id !== 5)
+        return { operations: [], reason: 'joint_pair_original_source_physical_or_recipe_not_accredited' };
+    const first = propose(rows[0], snapshot, index, { excludedDoctorAppointmentIds: [approvedIds[1]] });
+    if (!first.operation) return { operations: [], reason: `joint_pair_first_${first.reason}` };
+    const staging = { ...snapshot, appointments: snapshot.appointments.map(row => Number(row.id_cita) === approvedIds[0] ? first.operation.after : row),
+        occupancies: [...snapshot.occupancies.filter(row => Number(row.appointment_id) !== approvedIds[0] || row.resource_kind !== 'doctor'),
+            ...first.operation.after_occupancies.filter(row => row.resource_kind === 'doctor').map(row => ({ ...row, appointment_id: approvedIds[0] }))] };
+    const second = propose(rows[1], snapshot, index, { attentionSnapshot: staging });
+    if (!second.operation) return { operations: [], reason: `joint_pair_second_${second.reason}` };
+    const operations = [first.operation, second.operation];
+    if (operations.some(op => op.equipment_correction || !same(op.physical_occupancy_signature, op.after_physical_occupancy_signature)))
+        fail('BS_APPOINTMENT_JOINT_PAIR_PHYSICAL_RESERVATION_CHANGED');
+    assertFinalCapacity(snapshot, operations);
+    const proof = { version: 1, appointment_ids: [...approvedIds], ordered_preparation_ids: [...approvedIds],
+        original_snapshot_sha256: snapshot.snapshot_sha256, original_nonattention_checks: checks,
+        both_sources_verified_before_staging: true, other_doctor_intervals_reallocated: false, full_physical_reservations_preserved: true,
+        same_visit_start: true, five_minutes_each_within_first_fifteen: true };
+    for (const op of operations) {
+        op.after.import_metadata.piedad_preparation_migration.joint_preparation_proof = clone(proof);
+        op.target_data_sha256 = appointmentDataHash(op.after);
+    }
+    return { operations, reason: null, proof_sha256: hash(proof) };
+}
+function buildPiedadAppointmentPlan({ snapshot, calendarSource, historySource, sourceFileHashes, approvedJointPair = null }) {
     scopeCheck(snapshot);
     if (!same(sourceFileHashes, SOURCE_FILES)) fail('BS_APPOINTMENT_PINNED_ORIGINAL_FILES_CHANGED');
+    approvedJointPair = normalizeApprovedJointPair(approvedJointPair);
     const index = sourceIndex(calendarSource, historySource), operations = [], records = [];
     for (const input of snapshot.targets) {
         const row = materializeAppointment(input), decision = propose(row, snapshot, index);
@@ -334,6 +385,14 @@ function buildPiedadAppointmentPlan({ snapshot, calendarSource, historySource, s
         records.push({ appointment_id: Number(row.id_cita), clinic_id: Number(row.clinica_id),
             status: decision.operation ? 'ready' : 'blocked', reason: decision.reason || null,
             policy_recipe_id: decision.operation?.policy_recipe_id || null, existing_profile_version: row.import_metadata?.booking?.profile?.version || null });
+    }
+    let jointAssessment;
+    if (approvedJointPair) {
+        const joint = jointlyProposeApprovedPair(snapshot, index, records, approvedJointPair);
+        operations.push(...joint.operations);
+        for (const op of joint.operations) Object.assign(records.find(row => row.appointment_id === op.appointment_id),
+            { status: 'ready', reason: null, policy_recipe_id: op.policy_recipe_id });
+        jointAssessment = { appointment_ids: approvedJointPair, ready: joint.operations.length, reason: joint.reason, proof_sha256: joint.proof_sha256 || null };
     }
     const plannedIds = operations.map(op => op.appointment_id);
     for (const op of operations) {
@@ -346,7 +405,8 @@ function buildPiedadAppointmentPlan({ snapshot, calendarSource, historySource, s
     const body = { version: VERSION, target: 'crm', database: snapshot.database, snapshot_sha256: snapshot.snapshot_sha256,
         captured_at: snapshot.captured_at, scope: snapshot.scope, source_file_hashes: sourceFileHashes, field_whitelist: FIELD_WHITELIST,
         resource_snapshot_sha256: hash({ clinics: snapshot.clinics, resources: snapshot.resources, treatments: snapshot.treatments }),
-        operations, records, summary: { future_imported_candidates: snapshot.targets.length, ready: operations.length,
+        operations, records, ...(approvedJointPair ? { approved_joint_preparation_pair: approvedJointPair, joint_preparation_pair_assessment: jointAssessment } : {}),
+        summary: { future_imported_candidates: snapshot.targets.length, ready: operations.length,
             blocked: records.length - operations.length, blocked_by_reason: byReason, historical_appointments_excluded: snapshot.historical_counts.reduce((n, row) => n + Number(row.total), 0),
             capilar_future_candidates: snapshot.targets.filter(row => Number(row.clinica_id) === 66).length,
             released_doctor_minutes: operations.reduce((n, op) => n + op.released_doctor_minutes, 0),
@@ -385,4 +445,4 @@ function verifyPiedadAppointmentPlan(plan, inputs) {
 }
 module.exports = { VERSION, SOURCE_FILES, FIELD_WHITELIST, RECIPES, buildPiedadAppointmentPlan, verifyPiedadAppointmentPlan,
     materializeAppointment, currentRowHash, appointmentDataHash, occupancySignature, timestamp, eligibility, sourceEvidence, resourceContext,
-    competingReservationEvidence, assertFinalCapacity, noteTechnique };
+    competingReservationEvidence, assertFinalCapacity, noteTechnique, APPROVED_JOINT_PAIR_SHA256, normalizeApprovedJointPair };

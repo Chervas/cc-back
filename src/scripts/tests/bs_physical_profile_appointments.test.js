@@ -3,12 +3,31 @@
 // Synthetic fixtures only. No DB/network/env/application bootstrap or PHI.
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const Module = require('node:module');
 const { hash, norm } = require('../../lib/cliniccloud-import/adapter');
 const contract = require('../../lib/cliniccloud-import/bs-physical-profile-appointment-plan');
 const executor = require('../../lib/cliniccloud-import/bs-physical-profile-appointment-apply');
 const { occupancyForSolution } = require('../../lib/booking-profile-solver');
 const { sharedPreparationRecipe } = require('../../lib/bs-operational-recipes');
 const { createBackup } = require('../bs-physical-profile-appointments');
+// Test-only isolated modules: synthetic IDs use a synthetic digest. Production
+// has no injection parameter, environment override, or alternative approval pin.
+function isolatedTestModule(filename, rewrite = source => source, dependencies = {}) {
+    const instance = new Module(filename, module); instance.filename = filename;
+    instance.paths = Module._nodeModulePaths(path.dirname(filename));
+    const originalRequire = instance.require.bind(instance);
+    instance.require = name => Object.hasOwn(dependencies, name) ? dependencies[name] : originalRequire(name);
+    instance._compile(rewrite(fs.readFileSync(filename, 'utf8')), filename); return instance.exports;
+}
+const jointContract = isolatedTestModule(require.resolve('../../lib/cliniccloud-import/bs-physical-profile-appointment-plan'), source => {
+    const matches = source.match(/^const APPROVED_JOINT_PAIR_SHA256 = '[a-f0-9]{64}';$/gm);
+    assert.equal(matches?.length, 1);
+    return source.replace(matches[0], `const APPROVED_JOINT_PAIR_SHA256 = '${hash([1001, 1002])}';`);
+});
+const jointExecutor = isolatedTestModule(require.resolve('../../lib/cliniccloud-import/bs-physical-profile-appointment-apply'), source => source,
+    { './bs-physical-profile-appointment-plan': jointContract });
 const copy = value => JSON.parse(JSON.stringify(value));
 const NOW = new Date('2026-10-10T12:00:00Z'), START = '2026-10-13T07:30:00.000Z', END = '2026-10-13T08:00:00.000Z';
 const policy3 = { mode: 'start_end', start_minutes: 5, start_window_minutes: 10, end_minutes: 5, end_window_minutes: 10 };
@@ -94,6 +113,23 @@ function authorization(plan, snapshot, direction = 'forward') {
         backup_file_sha256: backupFileSha256, field_whitelist: contract.FIELD_WHITELIST, preserve_all_appointment_fields_and_updated_at: true,
         preserve_room_and_unchanged_equipment_occupancies: true, allow_exact_listed_ems_machine_corrections: true, no_messages_jobs_events_or_financial_writes: true } };
 }
+function pairFixture() {
+    const first = fixture(), second = fixture({ oldUnit: 5, roomId: 85, note: 'EMS', concept: 'EMSHAPE CORPORAL' });
+    for (const [inputs, id, patient, contact, sourceId, occupancyOffset] of [[first, 1001, 2001, 999, 12345, 0], [second, 1002, 2002, 998, 12346, 100]]) {
+        for (const row of [...inputs.snapshot.targets, ...inputs.snapshot.appointments]) {
+            row.id_cita = id; row.paciente_id = patient; row.import_metadata.source_contact_id = String(contact);
+            row.import_metadata.source_appointment_id = String(sourceId); row.import_metadata.cliniccloud_delta.source.source_contact_id = String(contact);
+        }
+        for (const row of inputs.snapshot.occupancies) { row.appointment_id = id; row.id += occupancyOffset; }
+        const raw = inputs.calendarSource.data.captures[0].response[0]; raw.id = sourceId; raw.extendedProps.idContacto = contact;
+        const history = inputs.historySource.data.results[0]; history.id = contact; history.data[0].idCita = sourceId; history.data[0].idContacto = contact;
+    }
+    first.snapshot.targets.push(...second.snapshot.targets); first.snapshot.appointments.push(...second.snapshot.appointments);
+    first.snapshot.occupancies.push(...second.snapshot.occupancies); first.snapshot = seal(first.snapshot);
+    first.calendarSource.data.captures[0].response.push(...second.calendarSource.data.captures[0].response);
+    first.historySource.data.results.push(...second.historySource.data.results);
+    return first;
+}
 test('PRESO uses approved1957 policy, never rewrites623/history/time/state or input', () => {
     const inputs = fixture(), original = hash(inputs), plan = contract.buildPiedadAppointmentPlan(inputs), op = plan.operations[0];
     assert.equal(hash(inputs), original); assert.equal(plan.summary.ready, 1); assert.equal(op.policy_recipe_id, 1957);
@@ -174,4 +210,70 @@ test('raw writer updates metadata only with explicit timestamp preservation and 
     assert.ok(queries.some(sql => /SET import_metadata=\?,updated_at=updated_at/.test(sql)));
     assert.ok(queries.filter(sql => /^DELETE/.test(sql)).every(sql => /resource_kind='doctor'|resource_kind='equipment'/.test(sql)));
     assert.ok(queries.every(sql => !/Notifications|FlowExecutions|JobRequests|AppointmentVisitCommunications/.test(sql)));
+});
+test('approved joint pair stages two distinct five-minute preparations, preserving original source/before/snapshot', () => {
+    const inputs = pairFixture(), original = hash(inputs), oldPlan = contract.buildPiedadAppointmentPlan(inputs);
+    assert.equal(oldPlan.operations.length, 0); assert.ok(oldPlan.records.every(row => row.reason === 'preparation_origin_unverified'));
+    assert.equal(Object.hasOwn(oldPlan, 'approved_joint_preparation_pair'), false);
+    const plan = jointContract.buildPiedadAppointmentPlan({ ...inputs, approvedJointPair: [1001, 1002] });
+    assert.equal(hash(inputs), original); assert.equal(plan.operations.length, 2);
+    assert.deepEqual(plan.operations.map(op => op.appointment_id), [1001, 1002]);
+    const [first, second] = plan.operations;
+    assert.equal(first.after.import_metadata.booking.phases[0].staff_intervals[0].start_at, START);
+    assert.equal(second.after.import_metadata.booking.phases[0].staff_intervals[0].start_at, '2026-10-13T07:35:00.000Z');
+    for (const op of plan.operations) {
+        assert.deepEqual(op.before, inputs.snapshot.appointments.find(row => row.id_cita === op.appointment_id));
+        assert.equal(op.after.import_metadata.piedad_preparation_migration.snapshot_sha256, inputs.snapshot.snapshot_sha256);
+        assert.equal(op.after.import_metadata.piedad_preparation_migration.joint_preparation_proof.original_snapshot_sha256, inputs.snapshot.snapshot_sha256);
+        assert.deepEqual(op.after_physical_occupancy_signature, op.physical_occupancy_signature); assert.equal(op.equipment_correction, null);
+    }
+    contract.assertFinalCapacity(inputs.snapshot, plan.operations);
+    assert.deepEqual(contract.buildPiedadAppointmentPlan(inputs), oldPlan);
+    for (const value of [[1001, 99999], [1002, 1001], [1001, 1001], ['1001', 1002], [1001, 1002, 1003], [0, 1002], [Number.MAX_SAFE_INTEGER + 1, 1002]])
+        assert.throws(() => jointContract.buildPiedadAppointmentPlan({ ...inputs, approvedJointPair: value }), /ONLY_EXACT_APPROVED_JOINT_PAIR/);
+    assert.throws(() => contract.normalizeApprovedJointPair([1001, 1002]), /ONLY_EXACT_APPROVED_JOINT_PAIR/);
+});
+test('joint pair source/identity and patient checks run against original rows before any doctor context is masked', () => {
+    const sourceDrift = pairFixture(); sourceDrift.calendarSource.data.captures[0].response[1].start = '2026-10-13T09:35:00';
+    const changed = jointContract.buildPiedadAppointmentPlan({ ...sourceDrift, approvedJointPair: [1001, 1002] });
+    assert.equal(changed.operations.length, 0); assert.equal(changed.records[1].reason, 'original_visit_geometry_or_identity_changed');
+    const samePatient = pairFixture(); samePatient.snapshot.targets[1].paciente_id = 2001; samePatient.snapshot.appointments[1].paciente_id = 2001;
+    samePatient.snapshot = seal(samePatient.snapshot);
+    assert.equal(jointContract.buildPiedadAppointmentPlan({ ...samePatient, approvedJointPair: [1001, 1002] }).operations.length, 0);
+    const third = pairFixture(), row = { ...copy(third.snapshot.appointments[0]), id_cita: 9001, paciente_id: 9001, instalacion_id: 81 };
+    third.snapshot.appointments.push(row); third.snapshot.occupancies.push({ id: 9001, appointment_id: 9001, doctor_id: 221,
+        resource_kind: 'doctor', resource_key: 'doctor:221', start_at: START, end_at: END }); third.snapshot = seal(third.snapshot);
+    assert.equal(jointContract.buildPiedadAppointmentPlan({ ...third, approvedJointPair: [1001, 1002] }).operations.length, 0);
+    const physical = pairFixture(); physical.snapshot.appointments.push({ ...copy(physical.snapshot.appointments[0]), id_cita: 9002, doctor_id: 999, paciente_id: 9002 });
+    physical.snapshot.occupancies.push({ id: 9002, appointment_id: 9002, resource_kind: 'equipment', resource_key: 'equipment:11', start_at: START, end_at: END });
+    physical.snapshot = seal(physical.snapshot);
+    const physicalPlan = jointContract.buildPiedadAppointmentPlan({ ...physical, approvedJointPair: [1001, 1002] });
+    assert.equal(physicalPlan.operations.length, 0); assert.equal(physicalPlan.records[0].reason, 'existing_physical_room_or_machine_collision');
+});
+test('joint pair forward, exact rollback and reapply exclude only their own planned competition changes', async () => {
+    const inputs = { ...pairFixture(), approvedJointPair: [1001, 1002] }, plan = jointContract.buildPiedadAppointmentPlan(inputs);
+    const store = fakeStore(inputs), log = journal(), auth = authorization(plan, inputs.snapshot);
+    const first = await jointExecutor.executePiedadAppointmentMigration({ plan, inputs, store, journal: log, ...auth, dryRun: false, now: NOW });
+    assert.equal(first.written, 2);
+    const rollback = await jointExecutor.executePiedadAppointmentMigration({ plan, inputs, store, journal: log, ...auth,
+        approval: { ...auth.approval, direction: 'rollback' }, direction: 'rollback', dryRun: false, now: NOW });
+    assert.equal(rollback.written, 2); assert.deepEqual(store.snapshot.appointments, inputs.snapshot.appointments);
+    assert.deepEqual(store.snapshot.occupancies, inputs.snapshot.occupancies);
+    const reapplied = await jointExecutor.executePiedadAppointmentMigration({ plan, inputs, store, journal: log, ...auth, dryRun: false, now: NOW });
+    assert.equal(reapplied.written, 2); assert.equal(reapplied.messages_dispatched, 0);
+});
+test('indeterminate commit is recovered from exact stored after-state without repeating clinical writes or old journal hash fields', async () => {
+    const inputs = fixture(), plan = contract.buildPiedadAppointmentPlan(inputs), store = fakeStore(inputs), log = journal(), auth = authorization(plan, inputs.snapshot);
+    const commit = store.commit, rollback = store.rollback; let committed = false;
+    store.commit = async () => { await commit(); committed = true; throw Error('Synthetic disconnected commit response'); };
+    store.rollback = async () => { if (!committed) await rollback(); };
+    await assert.rejects(executor.executePiedadAppointmentMigration({ plan, inputs, store, journal: log, ...auth, dryRun: false, now: NOW }), /INDETERMINATE_COMMIT_REQUIRES_RECOVERY/);
+    const unfinished = log.entries.at(-1); unfinished.entry_sha256 = 'previous-entry'; unfinished.sequence = 2;
+    unfinished.previous_entry_sha256 = 'previous-link'; unfinished.journal_at = NOW.toISOString();
+    const writes = store.calls.filter(call => call === 'write').length;
+    const recovered = await executor.recoverPiedadAppointmentMigration({ plan, inputs, store, journal: log, ...auth,
+        approval: { ...auth.approval, recover_indeterminate_commit: true }, now: NOW });
+    assert.equal(recovered.clinical_writes, 0); assert.equal(recovered.outcomes[0].stage, 'committed');
+    assert.equal(store.calls.filter(call => call === 'write').length, writes);
+    for (const key of ['entry_sha256', 'sequence', 'previous_entry_sha256', 'journal_at']) assert.equal(Object.hasOwn(log.entries.at(-1), key), false);
 });
