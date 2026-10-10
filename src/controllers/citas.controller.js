@@ -2484,6 +2484,55 @@ exports.getAppointmentHubList = asyncHandler(async (req, res) => {
     res.json({ items: await protectAppointmentsForRequest(req, items), can_manage: canManage, page: q.page, has_more: rows.length > q.limit });
 });
 
+// Direct appointment cards, bounded to five rows and ONE authorized clinic.
+// No patient selection, N+1 history lookup, calendar mutation or messaging.
+exports.searchCalendarAppointments = asyncHandler(async (req, res) => {
+    const search = require('../lib/appointment-calendar-search');
+    const q = search.parseAppointmentCalendarSearch(req.query);
+    if (await denyAppointmentViewAccessIfNeeded(req, res, q.clinicId)) return;
+    const actorId = Number(req.userData?.userId);
+    // Searching a name must not become an oracle for redacted patient records.
+    if (!await canUserAccessFeature({ actorId, featureKey: 'patients.sensitive.view', clinicId: q.clinicId })) {
+        return res.status(403).json({ message: 'No tienes permiso para buscar citas por paciente.' });
+    }
+    const scope = await buildClinicCalendarScope([q.clinicId]);
+    const timeZone = scope.timeZones.get(q.clinicId) || DEFAULT_TIMEZONE;
+    const key = process.env.JWT_SECRET;
+    const plan = search.appointmentSearchPlan(q, { actorId, timeZone, key,
+        currentDay: formatDateLocal(new Date(), timeZone),
+        boundsForDay: (day, zone) => buildCalendarRangeForTimeZone(day, day, zone) });
+    const rows = await CitaPaciente.findAll({
+        where: search.appointmentSearchWhere(plan, Op),
+        attributes: ['id_cita', 'created_by', 'clinica_id', 'paciente_id', 'lead_intake_id', 'doctor_id',
+            'instalacion_id', 'tratamiento_id', 'titulo', 'nota', 'motivo', 'tipo_cita', 'estado', 'inicio', 'fin',
+            'arrived_at', 'care_started_at', 'care_completed_at', 'care_legacy_attendance', 'care_schedule_start',
+            'es_provisional', 'source_system', 'source_reference', 'hold_expires_at', 'voucher_id', 'import_metadata',
+            'created_at', 'updated_at'],
+        include: [
+            { model: Paciente, as: 'paciente', required: true,
+                attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'numero_historia'],
+                where: search.patientSearchWhere(q.query, require('sequelize')) },
+            { model: Instalacion, as: 'instalacion', required: false, attributes: ['id', 'nombre', 'color'] },
+            { model: Tratamiento, as: 'tratamiento', required: false,
+                attributes: ['id_tratamiento', 'nombre', 'disciplina', 'categoria', 'duracion_min', 'precio_base', 'color', 'clinical_config'] },
+            ...(db.Usuario ? [{ model: db.Usuario, as: 'doctor', required: false,
+                attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'] }] : []),
+        ],
+        order: [['inicio', plan.direction], ['id_cita', plan.direction]], limit: q.limit + 1,
+    });
+    const page = rows.slice(0, q.limit);
+    // All enrichments are bounded bulk reads over this page, never its history.
+    await attachAppointmentProgramContexts(db, page);
+    await require('../services/appointmentCardIndicators.service').attach(db, page);
+    const items = await protectAppointmentsForRequest(req, page.map(row => mapCalendarCitaRow(row, timeZone)));
+    const hasMore = rows.length > q.limit;
+    res.set('Cache-Control', 'private, no-store');
+    res.set('X-Agenda-Endpoint', 'calendar-search');
+    res.json({ items, has_more: hasMore, next_cursor: hasMore
+        ? search.appointmentSearchCursor(plan, plainCita(page[page.length - 1]), key) : null,
+        clinic_day: plan.day, time_zone: timeZone });
+});
+
 exports.unlinkPatientAppointments = asyncHandler(async (req, res) => {
     const row = await CitaPaciente.findByPk(Number(req.params.id));
     if (!row) return res.status(404).json({ message: 'Cita no encontrada.' });

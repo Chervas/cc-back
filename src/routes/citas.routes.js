@@ -10,6 +10,7 @@ router.get('/next', authMiddleware, citasController.getNextCita);
 router.get('/manual-attribution-preview', authMiddleware, citasController.getManualAttributionPreview);
 router.get('/clinical-reports/patient/:patientId', authMiddleware, clinicalReportsController.listForPatient);
 router.get('/calendar', authMiddleware, citasController.getCitasCalendar);
+router.get('/calendar-search', authMiddleware, citasController.searchCalendarAppointments);
 router.get('/hub', authMiddleware, citasController.getAppointmentHubList);
 router.post('/:id/desvincular', authMiddleware, citasController.unlinkPatientAppointments);
 router.get('/:id/recuperacion', authMiddleware, citasController.getAppointmentRestoration);
