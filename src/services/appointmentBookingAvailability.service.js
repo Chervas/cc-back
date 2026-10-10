@@ -418,19 +418,21 @@ function startingResourceSelection(profile, { startingDoctorId = null, startingI
     ...(roomId ? { installation_id: roomId } : {}) } };
 }
 
-function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 15, limit = 500, selections = {}, now = new Date(), fromLocal = '00:00', toLocal = null, exactStartLocal = null, additionalStaffIds = [], allowConfirmedOverlap = false, allowRestrictionProposals = false, onUnavailable = null }) {
+function solutionsForCalendar({ profile, context, date, days = 1, stepMinutes = 15, limit = 500, selections = {}, now = new Date(), fromLocal = '00:00', toLocal = null, exactStartLocal = null, additionalStaffIds = [], allowConfirmedOverlap = false, allowRestrictionProposals = false, onUnavailable = null, resolveInstant = resolveLocalInstant }) {
   additionalStaffIds = normalizeAdditionalStaff(additionalStaffIds);
   const timeZone = context.timeZone;
-  const end = resolveLocalInstant(addDays(date, days), '00:00:00', timeZone);
+  const end = resolveInstant(addDays(date, days), '00:00:00', timeZone);
   const slots = [];
   for (let localDate = date; localDate < addDays(date, days) && slots.length < limit; localDate = addDays(localDate, 1)) {
     for (let minute = 0; minute < 1440 && slots.length < limit; minute += stepMinutes) {
       if (exactStartLocal && `${localDate}T${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}` !== exactStartLocal) continue;
-      let candidate;
-      try { candidate = resolveLocalInstant(localDate, `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}:00`, timeZone); }
-      catch (error) { if (error.code === 'voucher_schedule_dst_conflict') continue; throw error; }
       const localTime = `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
       if (localTime < fromLocal || (toLocal && localTime >= toLocal)) continue;
+      // A bound excludes a start before any resource/solver work. Do not pay
+      // the DST conversion cost for hours outside the requested visible range.
+      let candidate;
+      try { candidate = resolveInstant(localDate, `${localTime}:00`, timeZone); }
+      catch (error) { if (error.code === 'voucher_schedule_dst_conflict') continue; throw error; }
       if (candidate < now) {
         onUnavailable?.(candidate, startConflict('past_start', 'Esta hora de inicio ya ha pasado.', 'clinic'));
         continue;

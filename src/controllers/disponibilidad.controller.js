@@ -5,6 +5,7 @@ const { assertUserCanAccessFeature } = require('../lib/access-policy');
 const { searchTreatmentSlots, loadBookingContext, solutionsForCalendar } = require('../services/appointmentBookingAvailability.service');
 const { addDays } = require('../lib/personal-schedule-recurring');
 const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
+const { createAvailabilityLocalInstantResolver } = require('../lib/availability-local-instants');
 const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
 const { resourceForConfirmedOverlap } = require('../lib/booking-attention');
 const { incompatibleStart, appendStartInterval } = require('../lib/booking-grid-diagnostics');
@@ -64,7 +65,8 @@ function assertGridProfile(profile) {
   }
 }
 
-function profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds, completePlan = false }) {
+function profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds, completePlan = false,
+  resolveInstant = createAvailabilityLocalInstantResolver() }) {
   // Only the explicit matrix contract may constrain the STARTING phase while
   // solving the complete visit. Flat /slots and /check remain mono-phase.
   if (!completePlan) assertGridProfile(profile);
@@ -81,8 +83,8 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
     ? profile.phases.reduce((first, candidate) => candidate.start_offset_minutes < first.start_offset_minutes ? candidate : first)
     : profile.phases[0];
   const timeZone = resolveClinicTimezone(clinic);
-  const rangeEnd = query.to_local ? resolveLocalInstant(query.fecha_local, `${query.to_local}:00`, timeZone)
-    : resolveLocalInstant(addDays(query.fecha_local, 1), '00:00:00', timeZone);
+  const rangeEnd = query.to_local ? resolveInstant(query.fecha_local, `${query.to_local}:00`, timeZone)
+    : resolveInstant(addDays(query.fecha_local, 1), '00:00:00', timeZone);
   const getResult = (doctor, installation) => {
     const unavailable = [];
     const includeUnavailable = parseBool(query.include_unavailable) && query.summary_only !== true;
@@ -113,7 +115,7 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
       // team, never turn it into one chosen professional.
       selections: { [phase.key]: { doctor_id: phase.professionals.mode === 'all' ? null : doctor, installation_id: installation } },
       fromLocal: typeof query.from_local === 'string' ? query.from_local : '00:00',
-      toLocal: typeof query.to_local === 'string' ? query.to_local : null,
+      toLocal: typeof query.to_local === 'string' ? query.to_local : null, resolveInstant,
       onUnavailable: includeUnavailable ? (start, conflict) => appendStartInterval(unavailable, start,
         new Date(Math.min(+start + stepMin * 60000, +rangeEnd)), conflict, response.timezone, formatLocal) : null });
     return { slots, unavailable };
@@ -1694,6 +1696,9 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
   }
   if (!profile && !(parseIntSafe(req.query.duracion_min) > 0)) throw availabilityInputError('duracion_min requerido');
   const timeZone = resolveClinicTimezone(clinic), sortedDates = [...dates].sort();
+  // Shared only by this authenticated request's columns/dates, never between
+  // requests or across availability snapshots. It stores pure clock instants.
+  const resolveInstant = createAvailabilityLocalInstantResolver();
   if (grid && profile && resolveLocalInstant(addDays(sortedDates[sortedDates.length - 1], 1), '00:00:00', timeZone)
     - resolveLocalInstant(sortedDates[0], '00:00:00', timeZone) > 32 * 86400000) throw availabilityInputError('El rango no puede superar 31 días');
   // Normal 42-day calendar needs one range. Disjoint legacy requests spanning
@@ -1722,7 +1727,7 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
         patientId: bookingContext.patientId,
         includeDiagnosticLabels: grid });
       if (grid) personalBlocks.push(...(context.personalBlocks || []));
-      const getPayload = query => profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds, completePlan });
+      const getPayload = query => profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds, completePlan, resolveInstant });
       group.forEach(date => byDate.set(date, getPayload));
     } else {
       const snapshot = await loadLegacyAvailabilitySnapshot({ db, clinic, dates: group, doctorIds: doctors,
