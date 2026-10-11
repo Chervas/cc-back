@@ -21,7 +21,7 @@ const FlowExecutionV2 = db.FlowExecutionV2;
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const Conversation = db.Conversation;
 const Message = db.Message;
-const ConversationRead = db.ConversationRead;
+const { appointmentConversationUnreadCounts } = require('../lib/appointment-conversation-unread');
 const appointmentAutomationV2Runtime = require('../services/appointmentAutomationV2Runtime.service');
 const { bookingCapabilities, loadScopedTreatment, requireOperationalProfile, bookingErrorPayload, assertTreatmentBookingVisibility } = require('../services/treatmentBookingProfile.service');
 const { mutateAppointmentBooking } = require('../services/appointmentBookingCommand.service');
@@ -861,64 +861,11 @@ async function attachFlowSummaryToCitas(citas) {
     return citas;
 }
 
-async function getUnreadCountForConversation(conversationId, userId) {
-    if (!Message || !conversationId) return 0;
-
-    const lastOutbound = await Message.findOne({
-        where: {
-            conversation_id: conversationId,
-            direction: 'outbound',
-            message_type: { [Op.ne]: 'event' },
-        },
-        attributes: ['createdAt'],
-        order: [['createdAt', 'DESC']],
-        raw: true,
-    });
-
-    const where = { conversation_id: conversationId, direction: 'inbound' };
-    if (lastOutbound?.createdAt) {
-        where.createdAt = { [Op.gt]: lastOutbound.createdAt };
-    }
-    return Message.count({ where });
-}
-
 async function attachUnreadCountsToCitas(citas, userId) {
-    const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
-    if (!list.length || !Conversation || !Message) return citas;
-
-    await Promise.all(list.map(async (cita) => {
-        try {
-            const plain = typeof cita?.toJSON === 'function' ? cita.toJSON() : cita;
-            if (!plain?.clinica_id || !plain?.paciente_id) {
-                return;
-            }
-
-            const conv = await findCanonicalWhatsappConversation({
-                clinicId: plain.clinica_id,
-                contactId: plain?.paciente?.telefono_movil || null,
-                patientId: plain.paciente_id,
-                leadId: plain.lead_intake_id || null,
-                createIfMissing: false,
-            });
-
-            const unreadCount = conv ? await getUnreadCountForConversation(conv.id, userId) : 0;
-            if (typeof cita?.setDataValue === 'function') {
-                cita.setDataValue('conversation_id', conv?.id || null);
-                cita.setDataValue('unread_count', unreadCount);
-            } else {
-                cita.conversation_id = conv?.id || null;
-                cita.unread_count = unreadCount;
-            }
-        } catch (err) {
-            if (typeof cita?.setDataValue === 'function') {
-                cita.setDataValue('unread_count', 0);
-            } else if (cita) {
-                cita.unread_count = 0;
-            }
-        }
-    }));
-
-    return citas;
+    // The canonical resolver also repairs/merges existing contacts. A GET card
+    // projection must never mutate those identities or personal read receipts.
+    // Use the same scoped, read-only mapping and personal counts as the agenda.
+    return attachCalendarUnreadCountsToCitas(citas, userId);
 }
 
 function setCitaDataValue(cita, key, value) {
@@ -936,11 +883,18 @@ function plainCita(cita) {
 }
 
 function scoreCalendarConversation(conversation, citaLike, phoneCandidatesByPatient) {
+    // Phone aliases must not attach a chat already owned by another patient.
+    // This is the same identity boundary enforced by the canonical resolver.
+    if (Number(conversation.patient_id) > 0 && Number(citaLike.paciente_id) > 0
+        && Number(conversation.patient_id) !== Number(citaLike.paciente_id)) return 0;
     let score = 0;
     if (Number(conversation.patient_id) === Number(citaLike.paciente_id)) score += 100;
     if (citaLike.lead_intake_id && Number(conversation.lead_id) === Number(citaLike.lead_intake_id)) score += 50;
     const phoneCandidates = phoneCandidatesByPatient.get(Number(citaLike.paciente_id)) || new Set();
     if (conversation.contact_id && phoneCandidates.has(String(conversation.contact_id))) score += 30;
+    // Recency is only a tie-breaker for an actual identity match. Otherwise a
+    // recent conversation of another patient in this batch becomes their chat.
+    if (!score) return 0;
     if (conversation.last_inbound_at) score += 8;
     if (conversation.last_message_at) score += 4;
     return score;
@@ -951,12 +905,41 @@ async function attachCalendarUnreadCountsToCitas(citas, userId) {
     if (!list.length || !Conversation || !Message) return citas;
 
     const plainList = list.map(plainCita).filter(Boolean);
+    const actorId = Number(userId);
     const patientIds = Array.from(new Set(
         plainList
             .map((cita) => Number(cita?.paciente_id))
             .filter((id) => Number.isInteger(id) && id > 0)
     ));
-    if (!patientIds.length) return citas;
+    if (!patientIds.length || !Number.isSafeInteger(actorId) || actorId <= 0) {
+        list.forEach(cita => {
+            setCitaDataValue(cita, 'conversation_id', null);
+            setCitaDataValue(cita, 'unread_count', 0);
+        });
+        return citas;
+    }
+
+    const clinicIds = Array.from(new Set(plainList.map(cita => Number(cita?.clinica_id))
+        .filter(id => Number.isSafeInteger(id) && id > 0)));
+    const readAccess = await Promise.all(clinicIds.map(async clinicId => {
+        const [patients, leads] = await Promise.all([
+            canUserAccessFeature({ actorId, featureKey: 'quickchat.read_patients', clinicId }).catch(() => false),
+            canUserAccessFeature({ actorId, featureKey: 'quickchat.read_leads', clinicId }).catch(() => false),
+        ]);
+        return { clinicId, patients, leads };
+    }));
+    const readCategoryConditions = [];
+    const patientClinics = readAccess.filter(access => access.patients).map(access => access.clinicId);
+    const leadClinics = readAccess.filter(access => access.leads).map(access => access.clinicId);
+    if (patientClinics.length) readCategoryConditions.push({ clinic_id: { [Op.in]: patientClinics }, patient_id: { [Op.ne]: null } });
+    if (leadClinics.length) readCategoryConditions.push({ clinic_id: { [Op.in]: leadClinics }, patient_id: null });
+    if (!readCategoryConditions.length) {
+        list.forEach(cita => {
+            setCitaDataValue(cita, 'conversation_id', null);
+            setCitaDataValue(cita, 'unread_count', 0);
+        });
+        return citas;
+    }
 
     const leadIds = Array.from(new Set(
         plainList
@@ -992,11 +975,11 @@ async function attachCalendarUnreadCountsToCitas(citas, userId) {
 
     const conversations = await Conversation.findAll({
         where: {
-            clinic_id: { [Op.in]: Array.from(new Set(plainList.map((cita) => Number(cita?.clinica_id)).filter((id) => Number.isInteger(id) && id > 0))) },
+            clinic_id: { [Op.in]: clinicIds },
             channel: 'whatsapp',
-            [Op.or]: orConditions,
+            [Op.and]: [{ [Op.or]: orConditions }, { [Op.or]: readCategoryConditions }],
         },
-        attributes: ['id', 'clinic_id', 'contact_id', 'patient_id', 'lead_id', 'last_message_at', 'last_inbound_at', 'unread_count', 'updatedAt'],
+        attributes: ['id', 'clinic_id', 'contact_id', 'patient_id', 'lead_id', 'last_message_at', 'last_inbound_at', 'updatedAt'],
         raw: true,
     });
 
@@ -1012,49 +995,16 @@ async function attachCalendarUnreadCountsToCitas(citas, userId) {
         .map((conversation) => Number(conversation.id))
         .filter((id) => Number.isInteger(id) && id > 0);
 
-    const pendingReplyByConversation = new Map();
-    if (conversationIds.length) {
-        const rows = await db.sequelize.query(`
-            SELECT
-                base.conversation_id AS conversation_id,
-                COUNT(m.id) AS unread_count
-            FROM (
-                SELECT id AS conversation_id
-                FROM Conversations
-                WHERE id IN (:conversationIds)
-            ) base
-            LEFT JOIN (
-                SELECT conversation_id, MAX(createdAt) AS last_outbound_at
-                FROM Messages
-                WHERE conversation_id IN (:conversationIds)
-                  AND direction = 'outbound'
-                  AND message_type <> 'event'
-                GROUP BY conversation_id
-            ) last_outbound
-              ON last_outbound.conversation_id = base.conversation_id
-            LEFT JOIN Messages m
-              ON m.conversation_id = base.conversation_id
-             AND m.direction = 'inbound'
-             AND (
-                last_outbound.last_outbound_at IS NULL
-                OR m.createdAt > last_outbound.last_outbound_at
-             )
-            GROUP BY base.conversation_id
-        `, {
-            replacements: { conversationIds },
-            type: db.Sequelize.QueryTypes.SELECT,
-        });
-        rows.forEach((row) => {
-            pendingReplyByConversation.set(Number(row.conversation_id), Number(row.unread_count || 0));
-        });
-    } else {
-        conversations.forEach((conversation) => {
-            pendingReplyByConversation.set(Number(conversation.id), Number(conversation.unread_count || 0));
-        });
-    }
+    const unreadByConversation = await appointmentConversationUnreadCounts({ db, conversationIds, userId,
+        clinicIds: plainList.map(cita => cita?.clinica_id) });
 
     list.forEach((cita) => {
         const plain = plainCita(cita);
+        if (!Number.isSafeInteger(Number(plain?.paciente_id)) || Number(plain.paciente_id) <= 0) {
+            setCitaDataValue(cita, 'conversation_id', null);
+            setCitaDataValue(cita, 'unread_count', 0);
+            return;
+        }
         let best = null;
         let bestScore = Number.NEGATIVE_INFINITY;
         conversations.forEach((conversation) => {
@@ -1071,7 +1021,7 @@ async function attachCalendarUnreadCountsToCitas(citas, userId) {
             return;
         }
         setCitaDataValue(cita, 'conversation_id', best.id);
-        setCitaDataValue(cita, 'unread_count', pendingReplyByConversation.get(Number(best.id)) || 0);
+        setCitaDataValue(cita, 'unread_count', unreadByConversation.get(Number(best.id)) || 0);
     });
 
     return citas;
