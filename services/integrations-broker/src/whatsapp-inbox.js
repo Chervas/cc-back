@@ -146,13 +146,15 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
   const reviewAad = row => aad(row) + ':review-metadata-v1:' + reviewScopeVersion(row);
   const saveReview = (row, raw) => {
     const diagnostics = require('./whatsapp-inbox-review');
-    const value = Buffer.from(JSON.stringify({ version: 1, contacts: diagnostics.reviewContacts(raw, scopeBindings),
-      summary: diagnostics.reviewSummary(raw) }));
+    const projection = { version: 2, contacts: diagnostics.reviewContacts(raw, scopeBindings),
+      summary: diagnostics.reviewSummary(raw) };
+    const value = Buffer.from(JSON.stringify(projection));
     let sealed;
     try {
       sealed = cipher.seal(value, reviewAad(row));
       store.db.prepare('UPDATE whatsapp_inbox SET review_metadata=? WHERE receipt=?').run(sealed, row.receipt);
     } finally { value.fill(0); sealed?.fill(0); }
+    return projection;
   };
   return {
     accept({ raw, signature, appSecret }) {
@@ -341,8 +343,17 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
           try {
             if (row.review_metadata) {
               raw = cipher.open(row.review_metadata, reviewAad(row));
-              const value = JSON.parse(raw.toString('utf8'));
-              if (value.version !== 1) continue;
+              let value = JSON.parse(raw.toString('utf8'));
+              if (![1, 2].includes(value.version)) continue;
+              if (value.version === 1) {
+                // Upgrade only redacted diagnostics; preserve payload, lease,
+                // import state and every review/ownership barrier.
+                let payload;
+                try {
+                  payload = cipher.open(store.db.prepare('SELECT body FROM whatsapp_inbox WHERE receipt=?').get(row.receipt).body, aad(row));
+                  value = saveReview(row, payload);
+                } finally { payload?.fill(0); }
+              }
               cached = { identity, contacts: value.contacts, summary: value.summary };
             } else {
               raw = cipher.open(store.db.prepare('SELECT body FROM whatsapp_inbox WHERE receipt=?').get(row.receipt).body, aad(row));

@@ -2,7 +2,7 @@
 const test = require('node:test'); const assert = require('node:assert/strict');
 const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os');
 const http = require('node:http');
-const { randomBytes, randomUUID, createHmac } = require('node:crypto');
+const { randomBytes, randomUUID, createHmac, createHash } = require('node:crypto');
 const { BrokerStore } = require('../src/store');
 const { createInboxCipher, createWhatsappInbox, MAX_BYTES } = require('../src/whatsapp-inbox');
 const { createWhatsappInboxHandler } = require('../src/whatsapp-inbox-http');
@@ -26,6 +26,27 @@ function fixture(t, options = {}) {
   return { dir, filename, get store() { return store; }, get inbox() { return inbox; }, get cipher() { return cipher; }, advance(ms) { clock += ms; },
     restart() { cipher.close(); store.close(); open(); } };
 }
+test('BSUID diagnostics upgrade preserves ciphertext, lease and unresolved import across restart', t => {
+  const scopes=[{wabaId:'301',phoneId:'401',clinicIds:[71]}];
+  const f=fixture(t,{scopeBindings:scopes});
+  const event=body();const value=event.entry[0].changes[0].value;
+  value.messaging_product='whatsapp';value.contacts=[{user_id:'ES.SyntheticUser'}];
+  value.messages=[{from_user_id:'ES.SyntheticUser',id:'wamid.synthetic',timestamp:String(Math.floor(Date.now()/1000)),type:'text',text:{body:'PRIVATE_SYNTHETIC'}}];
+  const receipt=f.inbox.accept(packet(event)).receipt,lease=f.inbox.lease(receipt);lease.raw.fill(0);
+  f.inbox.defer({receipt,lease:lease.lease,reason:'review_required'});
+  const before=f.store.db.prepare('SELECT * FROM whatsapp_inbox WHERE receipt=?').get(receipt);
+  const aad=JSON.stringify(['cc-wa-inbox-v1',before.app_id,before.receipt,before.key_id,before.digest,before.scopes,before.kinds,before.received_at]);
+  const legacy=f.cipher.seal(Buffer.from(JSON.stringify({version:1,contacts:null,summary:{category:'incoming_messages',errorCodes:[]}})),
+    aad+':review-metadata-v1:'+createHash('sha256').update(JSON.stringify(scopes)).digest('hex'));
+  f.store.db.prepare('UPDATE whatsapp_inbox SET review_metadata=? WHERE receipt=?').run(legacy,receipt);legacy.fill(0);
+  f.restart();const group=f.inbox.health().groups[0];
+  assert.equal(group.blockingReview,1);assert.equal(group.reviewSummary[0].category,'user_identity_unresolved');
+  assert.equal(group.reviewIsolation,undefined);
+  const after=f.store.db.prepare('SELECT * FROM whatsapp_inbox WHERE receipt=?').get(receipt);
+  assert.deepEqual(Buffer.from(after.body),Buffer.from(before.body));
+  for(const key of ['state','lease','lease_until','imported_at','import_receipt','digest'])assert.equal(after[key],before[key],key);
+  f.restart();assert.equal(f.inbox.health().groups[0].reviewSummary[0].category,'user_identity_unresolved');
+});
 test('durable authenticated isolation covers more than 100 contacts across restart without importing them', t => {
   const f = fixture(t, { scopeBindings: [{ wabaId: '301', phoneId: '401', clinicIds: [71] }] });
   for (let n = 0; n < 220; n++) {

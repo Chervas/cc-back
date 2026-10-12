@@ -49,7 +49,8 @@ function reviewBrief(clinic) {
   if (!count) return '';
   const items = health.summaryOf({ blockingReview: count, reviewSummary: clinic?.reviewSummary });
   if (!items) return `${count} eventos retenidos cuyo tipo aún no está clasificado.`;
-  const names = { incoming_messages: ['mensaje entrante', 'mensajes entrantes'], delivery_updates: ['actualización de entrega', 'actualizaciones de entrega'],
+  const names = { user_identity_unresolved: ['mensaje de usuario sin teléfono pendiente de identificar', 'mensajes de usuarios sin teléfono pendientes de identificar'],
+    incoming_messages: ['mensaje entrante', 'mensajes entrantes'], delivery_updates: ['actualización de entrega', 'actualizaciones de entrega'],
     provider_errors: ['error técnico de Meta', 'errores técnicos de Meta'], mobile_echoes: ['eco de un mensaje enviado desde el móvil', 'ecos de mensajes enviados desde el móvil'],
     app_state_changes: ['cambio de estado de la app', 'cambios de estado de la app'], history: ['evento de historial', 'eventos de historial'],
     mixed: ['lote mixto', 'lotes mixtos'], unknown: ['evento sin clasificar', 'eventos sin clasificar'] };

@@ -64,3 +64,24 @@ test('no-response decisions keep outage, unknown-review, expired-appointment and
  assert.equal((await decide({...recovered,hasAskedToday:async()=>true})).action,'stop');
  assert.equal((await decide({...recovered,loadAppointment:async()=>({...appointment,inicio:'2026-09-28T15:00:00Z'})})).action,'stop');
 });
+test('BSUID review permits only verified-phone replies and never silence actions',async()=>{
+ const s=snapshot();s.clinics[0].blockingReview=2;s.clinics[0].unscopedBlockingReview=2;s.clinics[0].blockingContactKeys=[];
+ s.clinics[0].reviewSummary=[{category:'user_identity_unresolved',count:2,oldestAt:now,newestAt:now,errorCodes:[]}];
+ const c={id:7,clinic_id:72,channel:'whatsapp',contact_id:'19995550202'},b=[{clinicId:72,phoneId:'201'}];
+ const scoped=await health.forConversation(s,c,b,async()=>[[]],{now});
+ assert.equal(scoped.readyForReplies,true);assert.equal(scoped.healthy,false);assert.equal(scoped.readyForTimeout,false);
+ assert.equal(health.state(s,72,now).readyForReplies,false);
+ for(const alter of [x=>x.recoveryHold=true,x=>x.observedAt=now-90001,
+  x=>x.clinics[0].reviewSummary[0].category='incoming_messages',x=>x.clinics[0].reviewSummary[0].count=1,
+  x=>x.clinics[0].reviewSummary[0].count=3]) {
+  const bad=structuredClone(s);alter(bad);
+  assert.notEqual((await health.forConversation(bad,c,b,async()=>[[]],{now})).readyForReplies,true);
+ }
+ for(const [conversation,bindings] of [[{...c,contact_id:'ES.SyntheticUser'},b],[c,[]],
+  [{...c,channel:'instagram'},b],[{...c,clinic_id:35},b]]) {
+  assert.notEqual((await health.forConversation(s,conversation,bindings,async()=>[[]],{now})).readyForReplies,true);
+ }
+ const blocked=structuredClone(s);blocked.clinics[0].blockingReview=3;blocked.clinics[0].blockingContactKeys=[hash(c.contact_id)];
+ blocked.clinics[0].reviewSummary.push({category:'incoming_messages',count:1,oldestAt:now,newestAt:now,errorCodes:[]});
+ assert.equal((await health.forConversation(blocked,c,b,async()=>[[]],{now})).readyForReplies,false);
+});

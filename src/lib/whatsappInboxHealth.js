@@ -4,10 +4,10 @@ const { createHash } = require('node:crypto');
 const contactKey = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const FILE = '/run/clinicaclick-whatsapp-inbox-health/health.json';
 const REVIEW_CATEGORIES = new Set(['incoming_messages', 'delivery_updates', 'provider_errors',
-  'mobile_echoes', 'app_state_changes', 'history', 'mixed', 'unknown']);
+  'mobile_echoes', 'app_state_changes', 'history', 'mixed', 'unknown', 'user_identity_unresolved']);
 function summaryOf(group) {
   const items = group.reviewSummary;
-  if (!Array.isArray(items) || items.length > 9 || items.some(item => !REVIEW_CATEGORIES.has(item.category)
+  if (!Array.isArray(items) || items.length > 10 || items.some(item => !REVIEW_CATEGORIES.has(item.category)
     || !Number.isSafeInteger(item.count) || item.count < 1
     || ['oldestAt', 'newestAt'].some(key => item[key] !== null && !Number.isSafeInteger(item[key]))
     || !Array.isArray(item.errorCodes) || item.errorCodes.length > 10
@@ -58,13 +58,14 @@ function read() {
     return JSON.parse(fs.readFileSync(FILE, 'utf8'));
   } catch { return null; }
 }
-function state(snapshot, clinicId, now = Date.now(), { contactKeys = null } = {}) {
+function state(snapshot, clinicId, now = Date.now(), { contactKeys = null, verifiedPhoneContact = false } = {}) {
   if (!snapshot || snapshot.version !== 1 || !Number.isFinite(snapshot.observedAt)
     || now - snapshot.observedAt > 90000 || snapshot.observedAt > now + 5000
     || !Array.isArray(snapshot.clinics)) return { healthy: false, reason: 'inbox_health_unavailable' };
   const clinic = snapshot.clinics.find(c => c.clinicId === Number(clinicId));
   if (!clinic) return { healthy: false, reason: 'inbox_health_scope_missing' };
   let blockingReview = clinic.blockingReview;
+  let identityReview = 0;
   if (Array.isArray(contactKeys) && contactKeys.every(contactKey)
     && Number.isSafeInteger(clinic.unscopedBlockingReview) && clinic.unscopedBlockingReview >= 0
     && clinic.unscopedBlockingReview <= clinic.blockingReview
@@ -72,12 +73,19 @@ function state(snapshot, clinicId, now = Date.now(), { contactKeys = null } = {}
     && clinic.blockingContactKeys.every(contactKey)) {
     blockingReview = clinic.unscopedBlockingReview
       + Number(clinic.blockingContactKeys.some(key => contactKeys.includes(key)));
+    if (verifiedPhoneContact === true) {
+      const summary = summaryOf(clinic);
+      const count = summary?.filter(item => item.category === 'user_identity_unresolved')
+        .reduce((total, item) => total + item.count, 0) || 0;
+      if (count <= clinic.unscopedBlockingReview) identityReview = count;
+    }
   }
-  const readyForReplies = !snapshot.recoveryHold && blockingReview === 0;
-  const healthy = readyForReplies
+  const readyForReplies = !snapshot.recoveryHold && blockingReview - identityReview === 0;
+  const healthy = readyForReplies && identityReview === 0
     && (clinic.oldestPendingAt === null || now - clinic.oldestPendingAt <= 120000);
   return { healthy, readyForReplies, readyForTimeout: healthy && clinic.oldestPendingAt === null,
-    reason: healthy ? null : 'inbox_reception_delayed', recoveryNotBefore: snapshot.recoveryNotBefore || null };
+    reason: healthy ? null : identityReview ? 'inbox_user_identity_pending' : 'inbox_reception_delayed',
+    recoveryNotBefore: snapshot.recoveryNotBefore || null };
 }
 function publish(health, scopes, { recoveryNotBefore = null, recoveryHold = false } = {}) {
   if (!health || !Number.isFinite(health.observedAt) || !Array.isArray(health.groups)) throw Error('inbox_health_invalid');
@@ -148,6 +156,6 @@ async function forConversation(snapshot, conversation, bindings, query, { transa
       keys.push(...bound.map(row => row.contact_key));
     } catch { return fallback(); }
   }
-  return state(snapshot, clinicId, now, { contactKeys: keys });
+  return state(snapshot, clinicId, now, { contactKeys: keys, verifiedPhoneContact: true });
 }
 module.exports = { FILE, read, state, publish, issues, forConversation, summaryOf };

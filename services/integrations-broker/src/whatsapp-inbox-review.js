@@ -1,6 +1,18 @@
 'use strict';
 const { createHash } = require('node:crypto');
 const phone = value => typeof value === 'string' && /^[1-9][0-9]{6,14}$/.test(value);
+const bsuid = value => typeof value === 'string' && /^[A-Z]{2}\.[A-Za-z0-9]{1,128}$/.test(value);
+function unresolvedUserIdentity(value) {
+  return value.messaging_product === 'whatsapp' && /^[1-9][0-9]{0,29}$/.test(value.metadata?.phone_number_id || '')
+    && Array.isArray(value.messages) && value.messages.length > 0 && value.messages.length <= 2000
+    && !value.statuses?.length && !value.errors?.length
+    && value.messages.every(m => m && m.from == null && bsuid(m.from_user_id)
+      && /^[0-9]{1,12}$/.test(m.timestamp || '')
+      && /^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(m.id || '')
+      && Array.isArray(value.contacts) && value.contacts.length <= 2000
+      && value.contacts.filter(c => c?.user_id === m.from_user_id).length === 1
+      && value.contacts.find(c => c?.user_id === m.from_user_id).wa_id == null);
+}
 
 // Attribution only: this never imports, acknowledges or relaxes an ownership
 // check. Unknown/mixed account events retain the clinic-wide barrier.
@@ -41,7 +53,8 @@ function reviewSummary(raw) {
     for (const entry of body.entry) for (const change of entry.changes || []) {
       const value = change.value || {};
       if (change.field === 'messages') {
-        if (value.messages?.length) categories.add('incoming_messages');
+        if (value.messages?.length) categories.add(unresolvedUserIdentity(value)
+          ? 'user_identity_unresolved' : 'incoming_messages');
         if (value.statuses?.length) categories.add('delivery_updates');
         if (value.errors?.length && !value.messages?.length && !value.statuses?.length) categories.add('provider_errors');
         if (!value.messages?.length && !value.statuses?.length && !value.errors?.length) categories.add('unknown');
