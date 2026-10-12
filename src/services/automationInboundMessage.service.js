@@ -642,6 +642,25 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
       });
       return { status: 'completed', result: { claim_id: claim.id, owner: 'marketing_opt_out' } };
     }
+    const transportTransition = await require('./whatsappDispatchWait.service').inboundTransition(message, conversation);
+    if (transportTransition) {
+      if (transportTransition.review) {
+        await conversationAutomationState.setState({ clinicId, conversationId: conversation.id,
+          stage: 'review', status: 'review', sourceMessageId: message.id, executionId: transportTransition.executionId,
+          needsResponse: true, manualActionRequired: true, failureCode: transportTransition.reason });
+        await markClaimCompleted(claim, 'transport_review', transportTransition.executionId, { reason: transportTransition.reason });
+        return { status: 'completed', result: { claim_id: claim.id, owner: 'transport_review' } };
+      }
+      await db.sequelize.transaction(async transaction => {
+        const locked = await db.AutomationInboundMessageClaim.findByPk(claim.id, { transaction, lock: transaction.LOCK.UPDATE });
+        if (claimMetadata(locked).processing_attempt !== attempt.attemptKey) throw Error('inbound_transition_claim_lost');
+        await updateClaim(locked, { status: 'queued', processed_at: null }, {
+          processing_lease_until: null, transport_execution_id: transportTransition.executionId }, { transaction });
+        await db.JobRequest.update({ max_attempts: 4096 }, { where: { id: jobRequest.id, status: 'running', attempts: jobRequest.attempts }, transaction });
+      });
+      return { status: 'waiting', nextAllowedAt: transportTransition.nextAllowedAt,
+        result: { claim_id: claim.id, deferred: true, reason: transportTransition.reason } };
+    }
     const bulkResult = await marketingBulkSendsService.materializeInboundReply({
       conversation,
       inboundMessage: message,

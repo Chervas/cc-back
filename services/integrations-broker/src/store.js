@@ -125,14 +125,14 @@ class BrokerStore {
       this.appendAudit(event);
     });
   }
-  acceptNonce(principal, nonce, now, maxPerMinute) {
+  acceptNonce(principal, nonce, now, maxPerMinute, rateKey = principal) {
     this.transaction(() => {
       this.db.prepare('DELETE FROM nonces WHERE expires_at < ?').run(now);
       if (this.db.prepare('SELECT 1 FROM nonces WHERE principal=? AND nonce=?').get(principal, nonce)) fail('request_replayed');
       const window = Math.floor(now / 60000);
       this.db.prepare('DELETE FROM rate_windows WHERE window < ?').run(window - 1);
-      this.db.prepare('INSERT INTO rate_windows VALUES (?,?,1) ON CONFLICT(principal,window) DO UPDATE SET count=count+1').run(principal, window);
-      if (this.db.prepare('SELECT count FROM rate_windows WHERE principal=? AND window=?').get(principal, window).count > maxPerMinute) fail('rate_limited');
+      this.db.prepare('INSERT INTO rate_windows VALUES (?,?,1) ON CONFLICT(principal,window) DO UPDATE SET count=count+1').run(rateKey, window);
+      if (this.db.prepare('SELECT count FROM rate_windows WHERE principal=? AND window=?').get(rateKey, window).count > maxPerMinute) fail('rate_limited');
       this.db.prepare('INSERT INTO nonces VALUES (?,?,?)').run(principal, nonce, now + 120000);
     });
   }

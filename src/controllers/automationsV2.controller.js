@@ -6060,6 +6060,15 @@ exports.updateTemplateDraft = async (req, res) => {
     const bodyKeys = Object.keys(body || {});
 
     if (row.published_at) {
+      if (Object.hasOwn(body, 'catch_up_today')) {
+        if (bodyKeys.length !== 1 || !['preview', 'enqueue'].includes(body.catch_up_today)
+          || !row.is_active || row.is_system && !row.clinic_id) {
+          return res.status(409).json({ success: false, error: 'same_day_catchup_not_available' });
+        }
+        const catchUpToday = await require('../services/appointmentSameDayCatchup.service').prepare(row, {
+          enqueue: body.catch_up_today === 'enqueue', userId: access.user_id });
+        return res.json({ success: true, catch_up_today: catchUpToday });
+      }
       const allowsOnlyActiveToggle =
         bodyKeys.length > 0 &&
         bodyKeys.every((key) => key === 'is_active');

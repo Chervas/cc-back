@@ -237,6 +237,10 @@ async function runAutomationFlowV2Job(payload = {}, _job, jobClaim) {
   const updated = await flowEngineV2Service.runExecution(execution.id, options);
 
   if (updated.status === 'waiting') {
+    if (updated.waiting_meta?.kind === 'whatsapp_dispatch' && _job?.id) {
+      await jobClaim?.assert({});
+      await _job.update({ max_attempts: Math.max(Number(_job.max_attempts || 0), 4096), priority: 'low' });
+    }
     const receiptWait = require('../lib/businessProfileReceiptWait');
     if (receiptWait.needsReview(updated)) {
       return { status: 'failed', retryable: false, nextRunAt: null,
@@ -587,6 +591,8 @@ const JOB_HANDLERS = {
   automations_v2_execute: async (payload = {}, job, claim) => runAutomationFlowV2Job(payload, job, claim),
   appointment_visit_dispatch: async (payload = {}, job, claim) => require('./appointmentVisitManaged.service').current().runDispatch(payload, job, claim),
   automation_whatsapp_quiet_send: async (payload = {}) => flowEngineV2Service.runScheduledWhatsappSendJob(payload),
+  whatsapp_authorized_dispatch_retry: async (payload, job, claim) => require('./whatsappDispatchWait.service').run(payload, job, claim),
+  appointment_same_day_catchup: async payload => require('./appointmentSameDayCatchup.service').run(payload),
   whatsapp_manual_template_resend: async (payload = {}) => require('./whatsappTemplateResend.service').dispatch(payload),
   appointment_automation_schedule_fire: async (payload = {}, _job, claim) => runAppointmentAutomationScheduleJob(payload, claim),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),

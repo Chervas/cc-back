@@ -69,6 +69,9 @@ function fixture(approval = policy, { cita = appointment(), templates = [], remi
     require(name) {
       if (name === '../../models') return db;
       if (name === './appointmentVisitManaged.service') return { current: () => managed };
+      if (name === '../lib/appointment-care') return require('../../lib/appointment-care');
+      if (name === './appointmentPatientLinks.service') return { follower: async () => false };
+      if (name === '../lib/whatsappSameDayRecovery') return { allowsAppointment: () => false };
       if (name === './socket.service') return { getIO: () => null };
       if (name === './jobRequests.service') return {
         enqueueUniqueJobRequest: async data => { jobs.push(data); return { job: { id: 60 } }; },
@@ -114,6 +117,26 @@ for (const clinicId of [66, 72]) {
     assert.equal(JSON.stringify(a), before, 'the release must not erase import provenance or suppression receipts');
   });
 }
+
+test('explicit late same-day catchup keeps the native booking, state, import and time exclusions', () => {
+  const t = template('appointment_reminder_window', { schedule_moment: 'same_day', schedule_time_mode: 'custom', custom_time: '08:00',
+    exclude_if_not_confirmed: true, exclude_if_booked_same_day: true });
+  const a = appointment(66, { source_system: null, source_reference: null, import_metadata: {}, estado: 'recordatorio_confirmado',
+    inicio: '2026-10-06T15:00:00Z', fin: '2026-10-06T15:30:00Z', created_at: '2026-10-01T09:00:00Z' });
+  const f = fixture();
+  assert(f.runtime.catchUpEligible(a, t));
+  for (const changes of [{ estado: 'pendiente' }, { estado: 'ha_acudido' }, { estado: 'en_atencion' }, { estado: 'completada' },
+    { estado: 'cancelada' }, { estado: 'cambio_solicitado' }, { inicio: '2026-10-06T11:00:00Z' },
+    { inicio: '2026-10-07T15:00:00Z' }, { created_at: '2026-10-06T09:00:00Z' },
+    { source_system: 'cliniccloud', import_metadata: { historical_registration: true } },
+    { import_metadata: { notification_suppression: { same_day: true } } }]) {
+    assert.equal(!!f.runtime.catchUpEligible({ ...a, ...changes }, t), false, JSON.stringify(changes));
+  }
+  for (const changes of [{ is_active: false }, { clinic_id: null }, { trigger_type: 'appointment_after' },
+    { trigger_config: { ...t.trigger_config, schedule_moment: 'day_before' } }]) {
+    assert.equal(!!f.runtime.catchUpEligible(a, { ...t, ...changes }), false);
+  }
+});
 
 test('native and imported QA reservations never enqueue, including an exact day-before release', async () => {
   const markers = [{ qa_demo: { case: 'no-delivery' } }, { synthetic_data_only: true },

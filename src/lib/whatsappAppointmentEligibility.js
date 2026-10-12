@@ -91,4 +91,4 @@ async function patientImportHeld(patientId, db = require('../../models')) {
   const [rows] = await db.sequelize.query("SELECT 1 AS held FROM PatientCustomFields WHERE paciente_id=:patientId AND source='cliniccloud' AND JSON_VALID(value) AND (JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(value),value,'{}'),'$.import.automation_policy'))='hold' OR JSON_EXTRACT(IF(JSON_VALID(value),value,'{}'),'$.import.messages_enabled')=CAST('false' AS JSON)) LIMIT 1", { replacements: { patientId } });
   return rows.length > 0;
 }
-module.exports = { object, importHeld, assertAppointmentEligibility, assertAutomatedMessageEligibility, patientImportHeld };
+module.exports = { object, day, importHeld, assertAppointmentEligibility, assertAutomatedMessageEligibility, patientImportHeld };

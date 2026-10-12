@@ -1866,5 +1866,21 @@ module.exports = {
   getExecutionLogs,
   isAppointmentConfirmedForReminder,
   isRescheduleTemplateEligible,
+  catchUpEligible(cita, template) {
+    const config = getTemplateTriggerConfig(template);
+    if (!template?.clinic_id || template.trigger_type !== 'appointment_reminder_window' || config.schedule_moment !== 'same_day'
+      || config.custom_time !== '08:00' || config.schedule_time_mode !== 'custom'
+      || !template.published_at || !template.is_active || importedTriggerHeld(cita, template)
+      || shouldSuppressAppointmentTrigger(cita, template.trigger_type, config)
+      || !require('../lib/appointment-care').allowsAppointmentAutomation(cita, template.trigger_type)
+      || ['cambio_solicitado', 'cancelada', 'no_asistio'].includes(cita.estado)
+      || config.exclude_if_not_confirmed && !isAppointmentConfirmedForReminder(cita)
+      || config.only_if_not_confirmed && isAppointmentConfirmedForReminder(cita)) return false;
+    const start = new Date(cita.inicio);
+    if (!Number.isFinite(start.getTime()) || formatDateLocal(start, 'Europe/Madrid') !== formatDateLocal(new Date(), 'Europe/Madrid')) return false;
+    const due = computeScheduledRunAt({ cita, triggerType: template.trigger_type, triggerConfig: config,
+      timeZone: 'Europe/Madrid', pastWindowGraceMs: 86400000 });
+    return due && due.getTime() < Date.now() ? due : false;
+  },
   resolveTemplateForCitaEvent,
 };

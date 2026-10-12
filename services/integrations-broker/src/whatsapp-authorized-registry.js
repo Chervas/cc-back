@@ -82,10 +82,10 @@ function createWhatsappAuthorizedRegistry({ filename, authorizations, loadEnroll
     authorize({ request, binding, principal }) {
       const value = this.assert(binding); const b = E.bindingFor(value.enrollmentBinding);
       if (request.assetRef !== 'wa-phone:' + value.definition.phoneId || !b.clinicIds.some(id => request.tenantRef === 'clinic:' + id)
-        || (request.operation === C.SEND || request.operation === R.READ || request.operation === P.READ || request.operation === S.READ || M.OPERATIONS.includes(request.operation)) && (!['staging:whatsapp','dev:whatsapp'].includes(principal.id) || request.payload.authorizationId !== value.definition.authorizationId
+        || (request.operation === C.SEND || request.operation === require('./whatsapp-send-receipt').READ || request.operation === R.READ || request.operation === P.READ || request.operation === S.READ || M.OPERATIONS.includes(request.operation)) && (!['staging:whatsapp','dev:whatsapp'].includes(principal.id) || request.payload.authorizationId !== value.definition.authorizationId
           || request.payload.phoneId !== value.definition.phoneId)
         || request.operation === C.REVOKE && principal.id !== 'control:whatsapp') fail('scope_denied');
-      if (![C.SEND,C.REVOKE,R.READ,P.READ,S.READ,...M.OPERATIONS].includes(request.operation)) fail('operation_denied'); return value;
+      if (![C.SEND,C.REVOKE,R.READ,P.READ,S.READ,require('./whatsapp-send-receipt').READ,...M.OPERATIONS].includes(request.operation)) fail('operation_denied'); return value;
     },
     close() { if (!closed) { closed = true; db.close(); } },
   });

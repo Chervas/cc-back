@@ -3756,6 +3756,11 @@ async function reuseExistingAutomationWhatsappMessage({ existingMessage, node })
     ? existingMessage.metadata
     : {};
   const storedSelection = readStoredWhatsappReplaySelection(existingMetadata);
+  const dispatchWait = require('../lib/whatsapp-dispatch-wait');
+  if (!dispatchWait.accepted(existingMessage)) {
+    const waiting = dispatchWait.flowWait(existingMessage);
+    if (waiting) return waiting;
+  }
   const existingStatus = toLowerSafe(existingMessage?.status) || 'pending';
   const conversation = await Conversation.findByPk(existingMessage?.conversation_id);
   if (!conversation) {
@@ -3766,6 +3771,7 @@ async function reuseExistingAutomationWhatsappMessage({ existingMessage, node })
   let quietHoursJobRequestId = toIntOrNull(existingMetadata.quiet_hours_job_request_id);
   let outputStatus = existingStatus;
   const finalStatuses = new Set(['sent', 'delivered', 'read']);
+  if (dispatchWait.accepted(existingMessage)) finalStatuses.add(existingStatus);
   const queuedByQuietHours = existingMetadata.queued_by_quiet_hours === true;
   const scheduledFor = new Date(existingMetadata.scheduled_for || '');
   const hasValidSchedule = Number.isFinite(scheduledFor.getTime());
@@ -4802,6 +4808,13 @@ async function handleSendWhatsapp(node, context, runtime) {
       else io.emit('message:updated', payload);
     }
     } catch (sendErr) {
+      if (require('../lib/whatsapp-dispatch-wait').deferred(sendErr)) {
+        await msg.reload();
+        if (require('../lib/whatsapp-dispatch-wait').accepted(msg)) return reuseExistingAutomationWhatsappMessage({ existingMessage: msg, node });
+        const waiting = require('../lib/whatsapp-dispatch-wait').flowWait(msg);
+        if (waiting) return waiting;
+        throw sendErr;
+      }
       if (require('../lib/automation-runtime-stop').isStop(sendErr)) {
         await require('../lib/automation-runtime-stop').cancelMessage(msg.id);
         throw sendErr;
@@ -7418,6 +7431,25 @@ async function resumeWaitingNode(execution, node, context, {
       ? readOutputTarget(node, 'on_response')
       : (responseOnlyExpiry ? null : readOutputTarget(node, 'on_timeout'));
 
+    if (!useResponse && nextNode && execution.trigger_entity_type === 'appointment') {
+      const anchor = resolveWaitResponseAnchor(context, {
+        ...node.config, listens_to_node_id: execution.waiting_meta?.listens_to_node_id || node.config?.listens_to_node_id,
+      });
+      const messageId = toIntOrNull(anchor.listened_output?.message_id);
+      const message = messageId ? await Message.findByPk(messageId) : null;
+      if (Number(message?.metadata?.execution_id) === Number(execution.id)
+        && require('../lib/whatsapp-undeliverable').definitiveRecipientFailure(message)) {
+        const conversation = await Conversation.findByPk(message.conversation_id);
+        if (Number(conversation?.clinic_id) === Number(execution.clinic_id)) {
+          await require('./appointmentWhatsappDeliveryAlert.service').reconcileAppointmentWhatsappDelivery({
+            message, mappedStatus: 'failed', clinicId: execution.clinic_id });
+          await updateExecutionAndEmit(execution, { status: 'cancelled', current_node_id: null, wait_until: null,
+            waiting_meta: null, last_error: 'recipient_undeliverable_no_silence_followup' }, 'flow_execution:cancelled');
+          return { resumed: false, context };
+        }
+      }
+    }
+
     if (!useResponse && execution.trigger_entity_type === 'appointment'
       && whatsappAuthorizedBroker.bindingsForClinic(Number(execution.clinic_id)).some(b => b.sendEnabled)) {
       const anchor = resolveWaitResponseAnchor(context, {
@@ -8145,6 +8177,9 @@ async function runExecution(executionId, options = {}) {
       (resumeMode === 'timeout' || resumeMode === 'retry_current_node')
       && execution.wait_until
       && new Date(execution.wait_until).getTime() > Date.now()
+      && !(execution.waiting_meta?.kind === 'whatsapp_dispatch'
+        && require('../lib/whatsapp-dispatch-wait').acceptedTransport(execution,
+          await Message.findByPk(Number(execution.waiting_meta.message_id))))
     ) {
       return execution;
     }

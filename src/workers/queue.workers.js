@@ -918,6 +918,11 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             }
         }
     } catch (err) {
+        if (require('../lib/whatsapp-dispatch-wait').deferred(err) && err.dispatchIntent) {
+            // The committed native JobRequest now owns this same Message ID.
+            // Bull completion here is a handoff, not proof of delivery.
+            return { deferred: true, message_id: msg.id };
+        }
         if (require('../lib/automation-runtime-stop').isStop(err)) {
             await require('../lib/automation-runtime-stop').cancelMessage(msg.id);
             return;

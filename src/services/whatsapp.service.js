@@ -498,8 +498,15 @@ class WhatsAppService {
             if (Object.hasOwn(clinicConfig, 'accessToken') || clinicConfig.phoneNumberId !== binding.phoneId || clinicConfig.wabaId !== binding.wabaId) {
                 throw Object.assign(new Error('whatsapp_authorized_binding_invalid'), { code: 'whatsapp_authorized_binding_invalid', retryable: false });
             }
-            return whatsappAuthorizedBroker.send({ messageId, clinicId: Number(clinicConfig.clinicId || clinicConfig.clinicaId),
-                assetId: Number(clinicConfig.originId), expectedBinding: binding, message: payload }, healthContext.visitDispatchAuthorization);
+            try {
+                return await whatsappAuthorizedBroker.send({ messageId, clinicId: Number(clinicConfig.clinicId || clinicConfig.clinicaId),
+                    assetId: Number(clinicConfig.originId), expectedBinding: binding, message: payload }, healthContext.visitDispatchAuthorization);
+            } catch (error) {
+                if (require('../lib/whatsapp-dispatch-wait').deferred(error) && !healthContext.visitDispatchAuthorization) {
+                    await require('./whatsappDispatchWait.service').defer(error);
+                }
+                throw error;
+            }
         }
         this.setClinicCredentials(clinicConfig);
         this.assertConfiguration();

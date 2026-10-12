@@ -637,6 +637,51 @@ async function resolveScopedClinics({ userId, scopeRaw }) {
   return clinics.filter((clinic) => requestedIds.has(Number(clinic.id_clinica)));
 }
 
+async function whatsappTransportQueues({ clinicIds, clinicNameById }) {
+  if (!clinicIds.length) return [];
+  const [rows] = await db.sequelize.query(`SELECT c.clinic_id,
+    JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.dispatch_wait.lane')) lane,
+    JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.dispatch_wait.state')) dispatch_state,
+    JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.dispatch_wait.reason')) reason,
+    COUNT(*) total, SUM(m.status IN ('sent','delivered','read')) sent,
+    SUM(m.status IN ('delivered','read')) delivered, SUM(m.status='failed') failed,
+    MIN(j.next_run_at) next_at, MIN(j.created_at) created_at, MAX(j.updated_at) updated_at
+    FROM JobRequests j JOIN (SELECT MAX(id) latest_id FROM JobRequests
+      WHERE type='whatsapp_authorized_dispatch_retry' AND created_at>=:since
+        AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.__runtime_namespace'))=:namespace
+      GROUP BY JSON_UNQUOTE(JSON_EXTRACT(payload,'$.message_id'))) latest ON latest.latest_id=j.id
+    JOIN Messages m ON m.id=CAST(JSON_UNQUOTE(JSON_EXTRACT(j.payload,'$.message_id')) AS UNSIGNED)
+    JOIN Conversations c ON c.id=m.conversation_id
+    WHERE j.type='whatsapp_authorized_dispatch_retry' AND c.clinic_id IN (:clinicIds)
+      AND j.created_at>=:since AND JSON_UNQUOTE(JSON_EXTRACT(j.payload,'$.__runtime_namespace'))=:namespace
+    GROUP BY c.clinic_id,lane,dispatch_state,reason`, { replacements: { clinicIds,
+    since: new Date(Date.now() - 7 * 86400000), namespace: require('./jobRequests.service').getCurrentRuntimeNamespace() } });
+  const reasons = { whatsapp_capacity_minute: 'Presupuesto tecnico por minuto ocupado', rate_limited: 'Capacidad del broker ocupada',
+    whatsapp_capacity_fairness: 'Turno reservado a otra clinica que ya estaba esperando',
+    whatsapp_capacity_concurrency: 'Operaciones simultaneas ocupadas', whatsapp_broker_draining: 'Broker reiniciandose',
+    broker_unavailable: 'Broker temporalmente no disponible', audit_unavailable: 'Esperando la entrega de la auditoria protegida',
+    whatsapp_delivery_unknown: 'Conciliando una respuesta de transporte perdida' };
+  return rows.map((row, index) => {
+    const state = row.dispatch_state, review = ['review', 'expired'].includes(state) || Number(row.failed) > 0;
+    const done = Number(row.delivered) === Number(row.total);
+    return { id: `whatsapp-transport:${row.clinic_id}:${index}`, source_type: 'whatsapp_transport', type: 'whatsapp_dispatch',
+      type_label: row.lane === 'commercial' ? 'Envios comerciales' : 'Citas y respuestas',
+      title: row.lane === 'commercial' ? 'Transporte WhatsApp comercial' : 'Transporte WhatsApp asistencial', channel: 'whatsapp',
+      status: review ? 'failed' : done ? 'delivered' : state === 'accepted' ? 'awaiting_delivery' : 'waiting',
+      status_group: review ? 'error' : done ? 'history' : 'active',
+      status_label: review ? 'Requiere revision' : done ? 'Entregados' : state === 'accepted' ? 'Aceptados; esperando entrega' : state === 'reconciling' ? 'Conciliando resultado' : 'Esperando capacidad',
+      status_explanation: review ? 'No se reenviaran automaticamente. Revisa el motivo antes de actuar.'
+        : state === 'accepted' ? 'Meta ha aceptado el envio; el trabajo terminado no acredita entrega al paciente.'
+          : `${reasons[row.reason] || 'Transporte pendiente'}. Reanudacion automatica con el mismo mensaje; sin repetir la IA.`,
+      clinic_ids: [Number(row.clinic_id)], clinic_name: clinicNameById.get(Number(row.clinic_id)),
+      total: Number(row.total), sent: Number(row.sent), processed: Number(row.delivered), failed: Number(row.failed),
+      pending: Math.max(0, Number(row.total) - Number(row.delivered) - Number(row.failed)), next_at: row.next_at,
+      cadence: row.lane === 'commercial' ? 'Prioridad comercial; capacidad limitada por clinica' : 'Prioridad asistencial',
+      configuration_url: '/ajustes?panel=jobs-monitoring&tab=whatsapp', configuration_label: 'Abrir monitorizacion WhatsApp',
+      can_pause: false, can_resume: false, created_at: row.created_at, updated_at: row.updated_at };
+  });
+}
+
 async function listSendQueues({ userId, scopeRaw }) {
   const clinics = await resolveScopedClinics({ userId, scopeRaw });
   const clinicIds = clinics.map((clinic) => Number(clinic.id_clinica));
@@ -650,12 +695,13 @@ async function listSendQueues({ userId, scopeRaw }) {
       Number(clinic.id_clinica),
     ]);
   }
-  const [marketing, leads, email] = await Promise.all([
+  const [marketing, leads, email, whatsappTransport] = await Promise.all([
     marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }),
     leadBackfillQueues({ clinicIds, clinicNameById }),
     emailQueues({ clinicIds, clinicNameById }),
+    whatsappTransportQueues({ clinicIds, clinicNameById }),
   ]);
-  const items = [...leads, ...marketing, ...email]
+  const items = [...leads, ...marketing, ...email, ...whatsappTransport]
     .sort((left, right) => new Date(right.updated_at || 0).getTime() - new Date(left.updated_at || 0).getTime());
   return {
     items,
@@ -673,7 +719,8 @@ async function listSendQueues({ userId, scopeRaw }) {
       paused: items.filter((item) => item.status_group === 'paused').length,
       error: items.filter((item) => item.status_group === 'error').length,
       history: items.filter((item) => item.status_group === 'history').length,
-      pending_messages: items.reduce((sum, item) => sum + numberValue(item.pending), 0),
+      pending_messages: items.filter(item => item.source_type !== 'whatsapp_transport').reduce((sum, item) => sum + numberValue(item.pending), 0),
+      transport_pending_messages: whatsappTransport.reduce((sum, item) => sum + numberValue(item.pending), 0),
     },
   };
 }

@@ -5,7 +5,7 @@ const policy=require('../../lib/whatsappAppointmentTimeout');
 const text=fs.readFileSync(require.resolve('../../services/flowEngineV2.service'),'utf8');
 const source=text.slice(text.indexOf('async function resumeWaitingNode('),text.indexOf('\nfunction findClassifyIntentOutput('));
 const notifySource=text.slice(text.indexOf('async function notifyRecoveredReply('),text.indexOf('\nasync function resumeWaitingNode('));
-function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,affected=false,pending=false,recovered=false,alertFails=false,next=true}={}) {
+function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,affected=false,pending=false,recovered=false,alertFails=false,next=true,undeliverable=false,unknown=false}={}) {
  const now=Date.now(),start=new Date(now+3600000).toISOString();
  const context={appointment:{id_cita:1,clinica_id:2,inicio:start,estado:'info_enviada'}};
  const execution={id:4,clinic_id:2,trigger_entity_type:'appointment',trigger_entity_id:1,status:'running',current_node_id:'wait',
@@ -18,11 +18,14 @@ function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,
    if(name==='../lib/whatsappAppointmentTimeout')return policy;
    if(name==='../lib/whatsappPendingReply')return {pendingReply:async()=>recovered?{kind:'recovered',messageId:8}:pending?8:null};
    if(name==='../lib/whatsappInboxHealth')return {...require('../../lib/whatsappInboxHealth'),read:()=>healthy?snapshot:null};
-   throw Error('unexpected dependency');
+   if(name==='../lib/whatsapp-undeliverable')return require('../../lib/whatsapp-undeliverable');
+   if(name==='../lib/automation-response-only-recovery')return require('../../lib/automation-response-only-recovery');
+   if(name==='./appointmentWhatsappDeliveryAlert.service')return {reconcileAppointmentWhatsappDelivery:async()=>{alerts.push('undeliverable');}};
+   throw Error('unexpected dependency: '+name);
  },cleanString:v=>v||null,readOutputTarget:(n,k)=>n.outputs[k],whatsappAuthorizedBroker:{bindingsForClinic:()=>[{sendEnabled:true,clinicId:2,phoneId:'123'}]},
- resolveWaitResponseAnchor:()=>({listened_output:{conversation_id:3}}),toIntOrNull:Number,parseDateValueOrNull:v=>new Date(v),
+ resolveWaitResponseAnchor:()=>({listened_output:{conversation_id:3,...(undeliverable?{message_id:7}:{})}}),toIntOrNull:Number,parseDateValueOrNull:v=>new Date(v),
  CitaPaciente:{findByPk:async()=>context.appointment},Conversation:{findByPk:async()=>({id:3,clinic_id:2,channel:'whatsapp',contact_id:'19995550101'})},
- Message:{findOne:async()=>reply?{id:8}:null},Op:{gte:Symbol('gte')},
+ Message:{findOne:async()=>reply?{id:8}:null,findByPk:async()=>({id:7,conversation_id:3,status:'failed',metadata:{execution_id:4,wa_error:[{code:131026}],delivery_unknown:unknown}})},Op:{gte:Symbol('gte')},
  notifyRecoveredReply:async(...args)=>{alerts.push(args);if(alertFails)throw Error('synthetic_alert_failure');},
  conversationAutomationState:{setState:async patch=>reviews.push(patch)},
  db:{sequelize:{query:async sql=>sql.includes('k.contact_key')?[affected?[{contact_key:'a'.repeat(64)}]:[]]:[asked?[{sent_at:new Date(),appointment_start:start}]:[]]}},
@@ -36,6 +39,13 @@ test('real engine timeout branch returns to a durable wait when reception health
  const f=fixture({healthy:false});const due=f.execution.wait_until;await f.run();
  assert.equal(f.execution.status,'waiting');assert.equal(f.execution.current_node_id,'wait');
  assert.equal(f.execution.waiting_meta.inbox_original_due_at,due);assert.ok(f.execution.wait_until>Date.now());
+});
+test('explicit undeliverable first message stops only its silence followup and alerts reception',async()=>{
+ const f=fixture({undeliverable:true});await f.run();
+ assert.equal(f.execution.status,'cancelled');assert.equal(f.execution.last_error,'recipient_undeliverable_no_silence_followup');
+ assert.equal(f.alerts[0],'undeliverable');
+ const other=fixture();await other.run();assert.equal(other.execution.current_node_id,'send');
+ const unknown=fixture({undeliverable:true,unknown:true});await unknown.run();assert.equal(unknown.execution.current_node_id,'send');
 });
 test('real engine no longer cancels a waiting flow just because an inbound row exists',async()=>{
  const f=fixture({reply:true});await f.run();

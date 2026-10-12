@@ -19,13 +19,14 @@ function validateConfig(config) {
   if (config?.tlsRenewal) tlsReload.validateSettings(config.tlsRenewal);
   const configKeys = [...CONFIG_KEYS, ...(Object.hasOwn(config || {}, 'tlsRenewal') ? ['tlsRenewal'] : [])];
   if(Object.hasOwn(config||{},'activationEnabled')) {configKeys.push('activationEnabled');if(typeof config.activationEnabled!=='boolean')fail('invalid_request');}
+  if (Object.hasOwn(config || {}, 'dispatchCapacity')) { configKeys.push('dispatchCapacity'); require('./whatsapp-dispatch-capacity').validate(config.dispatchCapacity); }
   if (!C.keys(config, configKeys) || config.enabled !== true || config.cohort !== C.COHORT || !net.isIP(config.listenAddress)
     || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535
     || !['stateFile','tlsCertFile','tlsKeyFile','enrollmentConfigFile','enrollmentStateFile'].every(k => absolute(config[k]))
     || new Set([config.stateFile,config.enrollmentStateFile,config.enrollmentConfigFile,config.tlsKeyFile,config.tlsCertFile]).size !== 5
     || !Array.isArray(config.authorizations) || !config.authorizations.length || config.authorizations.length > 64) fail('invalid_request');
   const policy = validatePolicy(config.policy);
-  if (![2,3].includes(policy.principals.length) || policy.principals.some(p => p.maxPerMinute > 60
+  if (![2,3].includes(policy.principals.length) || policy.principals.some(p => p.maxPerMinute > (p.id === 'staging:whatsapp' ? 600 : 60)
       || !['staging:whatsapp','control:whatsapp','dev:whatsapp'].includes(p.id))
     || !['staging:whatsapp','control:whatsapp'].every(id => policy.principals.some(p => p.id === id))
     || policy.connections.length !== config.authorizations.length) fail('invalid_request');
@@ -69,7 +70,7 @@ function validateConfig(config) {
       if (!b.clinicIds.some(id => grant.tenantRef === 'clinic:' + id) || grant.assetRef !== 'wa-phone:' + a.phoneId
         || grant.principalId !== 'dev:whatsapp' && !grant.operations.includes(expected)
         || grant.operations.some(op => ![expected,...(expected === C.SEND ? [...M.OPERATIONS,require('./whatsapp-inbound-media').READ,
-          require('./whatsapp-authorized-profile').READ,require('./whatsapp-authorized-status').READ] : [])].includes(op)) || new Set(grant.operations).size !== grant.operations.length || seen.has(key)) fail('invalid_request');
+          require('./whatsapp-authorized-profile').READ,require('./whatsapp-authorized-status').READ,require('./whatsapp-send-receipt').READ] : [])].includes(op)) || new Set(grant.operations).size !== grant.operations.length || seen.has(key)) fail('invalid_request');
       seen.add(key);
     }
   }
@@ -118,9 +119,10 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappAu
     aws = await awsFactory();
     secrets = createWhatsappAuthorizedSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY, registry, http });
     broker = new Broker({ store, policy: config.policy, secrets, operations: createWhatsappAuthorizedOperations({ http, secrets, registry, store }), timeoutMs: 25000,
+      admission: require('./whatsapp-dispatch-capacity').createCapacity({ store, settings: config.dispatchCapacity }),
       policyResolver:activations?{resolve:(request,principal,policy)=>activations.resolve(request,principal,policy,store)}:undefined });
     server = createServer({ execute(...args) {
-      if (!accepting || pending.size >= 8) fail('rate_limited');
+      if (!accepting) fail('whatsapp_broker_draining');
       const work = broker.execute(...args); pending.add(work);
       void work.then(() => pending.delete(work), () => pending.delete(work)); return work;
     } }, { cert, key });

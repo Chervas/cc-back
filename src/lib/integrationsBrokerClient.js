@@ -9,6 +9,7 @@ const publicMediaLimits = require('../../services/integrations-broker/src/public
 const activationLimits = require('../../services/integrations-broker/src/whatsapp-activation-limits');
 const SAFE_CODES = new Set(['invalid_request', 'invalid_signature', 'scope_denied', 'operation_denied', 'whatsapp_template_not_authorized', 'whatsapp_authorized_phone_unavailable', 'connection_blocked', 'asset_revoked',
   'request_replayed', 'idempotency_conflict', 'outcome_unknown', 'rate_limited', 'provider_disabled', 'provider_failed',
+  'whatsapp_capacity_concurrency', 'whatsapp_capacity_minute', 'whatsapp_capacity_fairness', 'whatsapp_broker_draining',
   'provider_timeout', 'provider_unauthorized', 'credential_revoked', 'secret_unavailable', 'audit_unavailable', 'internal_error',
   'secret_version_changed', 'oauth_state_invalid', 'oauth_identity_mismatch', 'oauth_credentials_incomplete',
   'oauth_flow_busy', 'oauth_flow_interrupted',
@@ -48,7 +49,7 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
         : publicMedia ? publicMediaLimits.MAX_REQUEST_BYTES : 32768)) return Promise.reject(error('invalid_request'));
       const message = Buffer.from(`clinicaclick-broker-v1\nPOST\n/v1/execute\n${createHash('sha256').update(body).digest('hex')}`);
       return new Promise((resolve, reject) => {
-        let settled = false; let timer;
+        let settled = false; let timer; let connected = false;
         const finish = (err, value) => { if (settled) return; settled = true; clearTimeout(timer); err ? reject(err) : resolve(value); };
         const req = https.request(new URL('/v1/execute', base), { method: 'POST', ca, rejectUnauthorized: true,
           minVersion: 'TLSv1.2', agent: false, headers: { 'content-type': 'application/json', 'content-length': body.length,
@@ -68,7 +69,10 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
           });
         });
         timer = setTimeout(() => { finish(error('broker_timeout')); req.destroy(); }, Math.min(timeoutMs, budget));
-        req.on('error', () => finish(error('broker_unavailable')));
+        req.on('socket', socket => socket.once('secureConnect', () => { connected = true; }));
+        req.on('error', cause => finish(Object.assign(error('broker_unavailable'), {
+          beforeDispatch: !connected && ['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN'].includes(cause?.code),
+        })));
         req.end(body);
       });
     },

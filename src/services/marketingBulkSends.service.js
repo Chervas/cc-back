@@ -2807,7 +2807,7 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
     where: {
       list_id: list.id,
       item_id: item.id,
-      event_type: ackEventType,
+      event_type: { [Op.in]: [ackEventType, ackEventType.replace(/_sent$/, '_pending')] },
     },
     order: [['occurred_at', 'DESC']],
     limit: 25,
@@ -2903,6 +2903,14 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
       source: 'review_private_feedback_ack',
     }).catch(() => null);
   } catch (error) {
+    if (require('../lib/whatsapp-dispatch-wait').deferred(error) && appMessage) {
+      await MarketingPatientContactEvent.create({ list_id: list.id, item_id: item.id,
+        paciente_id: isTestSend ? null : item.paciente_id || null,
+        event_type: ackEventType.replace(/_sent$/, '_pending'), channel: 'whatsapp',
+        payload: { status: 'waiting_transport', inbound_message_id: inboundMessage.id,
+          app_message_id: appMessage.id, test_send: isTestSend }, occurred_at: new Date() });
+      return { sent: false, deferred: true, status: 'waiting_transport', app_message_id: appMessage.id };
+    }
     status = 'failed';
     errorPayload = extractProviderError(error);
     if (appMessage) {
@@ -3159,6 +3167,9 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
     });
     emitQuickChatMessageUpdated(conversation, appMessage);
   } catch (error) {
+    if (require('../lib/whatsapp-dispatch-wait').deferred(error) && appMessage) {
+      return { sent: false, deferred: true, status: 'waiting_transport', app_message_id: appMessage.id };
+    }
     status = 'failed';
     errorPayload = extractProviderError(error);
     if (appMessage) {
@@ -7526,6 +7537,12 @@ async function resolveDispatchBusinessHoursForList(list, scope = {}, dispatch = 
   return hydrateDispatchBusinessHoursForList(list, scope, normalized);
 }
 
+async function deferredDispatchAllowedAt(list) {
+  const dispatch = getDispatchConfig(list);
+  const businessHours = await resolveDispatchBusinessHoursForList(list, {}, dispatch);
+  return isWithinBusinessHours(new Date(), businessHours) ? null : getNextBusinessAllowedAt(new Date(), businessHours);
+}
+
 async function loadClinicForTemplateVariables(clinicId) {
   const safeClinicId = Number(clinicId || 0);
   if (!safeClinicId || !Clinica) return null;
@@ -8577,6 +8594,10 @@ async function sendTest(scope, campaignId, body = {}) {
       },
     });
   } catch (sendErr) {
+    if (require('../lib/whatsapp-dispatch-wait').deferred(sendErr)) {
+      return { sent: false, deferred: true, message_id: appMessage.id, app_message_id: appMessage.id,
+        status: 'waiting_transport', provider_message_id: null };
+    }
     const providerError = sendErr?.response?.data || sendErr?.message || 'whatsapp_send_failed';
     await appMessage.update({
       status: 'failed',
@@ -9758,6 +9779,14 @@ async function sendDispatchItem({
     };
   } catch (error) {
     const providerError = extractProviderError(error);
+    if (require('../lib/whatsapp-dispatch-wait').deferred(error)) {
+      await item.update({ dispatch_status: 'queued', app_message_id: appMessage.id, conversation_id: conversation.id,
+        send_batch_index: batchIndex, failed_at: null, last_error_code: 'dispatch_wait',
+        last_error_message: 'En espera de transporte; no aceptado por Meta todavia.' });
+      // Existing batches already wait for their in-flight items; the native
+      // message job owns retry/reconciliation, never a new campaign Message.
+      return { sent: false, deferred: true, app_message_id: appMessage.id, error: null };
+    }
     await appMessage.update({
       status: 'failed',
       metadata: {
@@ -10036,6 +10065,9 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     : [];
 
   if (!batch.length) {
+    const transportPending = await MarketingPatientListItem.count({ where: { list_id: list.id, dispatch_status: 'queued' } });
+    if (transportPending) return { status: 'waiting', nextAllowedAt: new Date(Date.now() + 60000),
+      result: { list_id: list.id, waiting_transport: transportPending, provider_accepted: false } };
     await refreshListCounters(list.id);
     const finalCounters = await getDispatchScopedCounters(list, filter);
     const completedAt = new Date();
@@ -10175,7 +10207,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
       batchIndex,
     });
     if (result.sent) sent += 1;
-    else failed += 1;
+    else if (!result.deferred) failed += 1;
     if (result.held) {
       heldByMeta = true;
       break;
@@ -10240,6 +10272,9 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
 
   const remaining = await countDispatchRemainingItems(list.id, filter);
   if (remaining <= 0) {
+    const transportPending = await MarketingPatientListItem.count({ where: { list_id: list.id, dispatch_status: 'queued' } });
+    if (transportPending) return { status: 'waiting', nextAllowedAt: new Date(Date.now() + 60000),
+      result: { list_id: list.id, waiting_transport: transportPending, provider_accepted: false } };
     const completedAt = new Date();
     const awaitingDelivery = await MarketingPatientListItem.count({
       where: {
@@ -10899,6 +10934,7 @@ async function removeCampaign(scope, campaignId, userId = null) {
 }
 
 module.exports = {
+  deferredDispatchAllowedAt,
   listCampaigns,
   createCampaign,
   getCampaign,

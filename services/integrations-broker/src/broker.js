@@ -14,7 +14,7 @@ const publicMediaLimits = require('./public-media-limits');
 const { canonical } = require('./canonical');
 const { canonicalDigest } = require('./canonical-digest');
 class Broker {
-  constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, policyResolver, now = () => Date.now(), timeoutMs = 10000, transportProfile = 'default' }) {
+  constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, policyResolver, admission, now = () => Date.now(), timeoutMs = 10000, transportProfile = 'default' }) {
     if (!['default', 'ai', 'email', 'public-media'].includes(transportProfile)
       || transportProfile === 'ai' && Object.keys(operations).some(op => !aiLimits.isAiOperation(op))
       || transportProfile === 'email' && Object.keys(operations).some(op => !emailLimits.isEmailOperation(op))
@@ -24,7 +24,7 @@ class Broker {
     this.maxRequestBytes = transportProfile === 'ai' ? aiLimits.MAX_REQUEST_BYTES
       : transportProfile === 'email' ? emailLimits.MAX_REQUEST_BYTES
         : transportProfile === 'public-media' ? publicMediaLimits.MAX_REQUEST_BYTES : 32768;
-    this.operations = operations; this.adsEnrollment = adsEnrollment; this.policyResolver = policyResolver; this.now = now;
+    this.operations = operations; this.adsEnrollment = adsEnrollment; this.policyResolver = policyResolver; this.admission = admission; this.now = now;
     this.timeoutMs = Math.min(transportProfile === 'ai' ? aiLimits.MAX_TIMEOUT_MS : 30000, Math.max(1, timeoutMs));
     this.active = new Map(); this.activeAssets = new Map();
     for (const item of policy.connections) {
@@ -39,7 +39,24 @@ class Broker {
     catch { fail('invalid_request'); }
     const now = this.now();
     const principal = authenticate(raw, headers, request, this.policy, now);
-    this.store.acceptNonce(principal.id, request.nonce, now, Math.min(600, Math.max(1, principal.maxPerMinute || 60)));
+    const admissionLane = this.admission?.lane?.(request.operation) || 'send';
+    const sendLane = request.payload.dispatchLane === 'commercial' ? 'commercial' : 'clinical';
+    const admissionBudget = this.admission && admissionLane === 'send'
+      ? this.admission.limits?.[sendLane === 'commercial' ? 'commercialClinicPerMinute' : 'clinicPerMinute'] || 120
+      : admissionLane !== 'send' ? 100 : 600;
+    try { this.store.acceptNonce(principal.id, request.nonce, now,
+      Math.min(admissionBudget, Math.max(1, principal.maxPerMinute || 60)),
+      this.admission ? principal.id + ':' + admissionLane
+        + (admissionLane === 'send' ? ':' + sendLane + ':' + request.tenantRef : '') : principal.id); }
+    catch (error) {
+      if (this.admission && this.store.backlog().pending < this.policy.maxBacklog) {
+        const granted = this.policy.grants.some(g => g.principalId === principal.id && g.tenantRef === request.tenantRef
+          && g.connectionRef === request.connectionRef && g.assetRef === request.assetRef);
+        this.store.appendAudit(eventFor(granted ? request : { ...request, tenantRef: 'unassigned', assetRef: 'unassigned' },
+          principal, this.policy, 'integration.denied', 'denied', error.code || 'invalid_request', now));
+      }
+      throw error;
+    }
     let operation; let binding; let resolved = this.policy;
     try {
       resolved = this.policyResolver?.resolve(request, principal, this.policy) || this.adsEnrollment?.resolve(request, principal, this.policy) || this.policy;
@@ -64,6 +81,14 @@ class Broker {
         'integration.denied', 'denied', error instanceof BrokerError ? error.code : 'invalid_request', now));
       throw error;
     }
+    let release;
+    try { release = this.admission?.acquire({ request, principal, operation }); }
+    catch (error) {
+      if (this.store.backlog().pending < this.policy.maxBacklog) this.store.appendAudit(eventFor(request, principal, resolved,
+        'integration.denied', 'denied', error.code || 'invalid_request', now));
+      throw error;
+    }
+    try {
     const identity = { operation: request.operation, tenantRef: request.tenantRef,
       connectionRef: request.connectionRef, assetRef: request.assetRef, payload: request.payload };
     const digest = ['ai', 'public-media'].includes(this.transportProfile) ? canonicalDigest(identity)
@@ -166,6 +191,7 @@ class Broker {
       clearTimeout(timer); active.delete(controller); if (!active.size) this.active.delete(request.connectionRef);
       activeAsset.delete(controller); if (!activeAsset.size) this.activeAssets.delete(assetKey);
     }
+    } finally { release?.(); }
   }
   block(ref, event, state = 'blocked') {
     this.store.block(ref, event, state);

@@ -70,7 +70,8 @@ function validateMessage(message) {
   requireValue(Buffer.byteLength(JSON.stringify(message)) <= 24576); return message;
 }
 function validateSend(payload) {
-  requireValue(keys(payload, ['authorizationId','phoneId','message']) && E.uuid(payload.authorizationId) && E.id(payload.phoneId));
+  requireValue(keys(payload, ['authorizationId','phoneId','message'], ['dispatchLane']) && E.uuid(payload.authorizationId) && E.id(payload.phoneId)
+    && (!Object.hasOwn(payload, 'dispatchLane') || ['clinical', 'commercial'].includes(payload.dispatchLane)));
   validateMessage(payload.message); return payload;
 }
 function parameterCount(value) {

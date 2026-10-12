@@ -347,6 +347,10 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       if (JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
       runtime.namespace(environment());
       let result;
+      // Preserve historical clinical intent digests. Only commercial sends
+      // add the optional, signed scheduling lane; Meta never receives it.
+      if (require('./whatsapp-dispatch-wait').lane(dispatchMessage) === 'commercial') payload.dispatchLane = 'commercial';
+      const dispatchAttemptAt = new Date().toISOString();
       try {
         if (await isManagedMessage(dispatchMessage)) {
           await require('../services/appointmentVisitManaged.service').current().beginTransport(dispatchMessage.id, visitDispatchAuthorization);
@@ -354,6 +358,10 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         result = await transport.execute({ requestId, tenantRef: 'clinic:' + intent.clinicId, connectionRef: captured.connectionRef,
           assetRef: 'wa-phone:' + captured.phoneId, operation: C.SEND, payload });
       } catch (error) {
+        if (require('./whatsapp-dispatch-wait').decision(error) === 'waiting') {
+          throw Object.assign(Error(error.code), { code: error.code, retryable: false, dispatchDeferred: true,
+            dispatchIntent: intent, dispatchPayload: payload });
+        }
         if (PREFLIGHT_CODES.has(error?.code) || error?.code === 'broker_configuration_invalid') fail(error.code);
         if (NO_SEND_CODES.has(error?.code)) fail(error.code);
         const provider = providerErrors.diagnostic(error?.code);
@@ -361,7 +369,8 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
           throw Object.assign(Error(error.code), { code: error.code, retryable: false,
             response: { data: { error: provider } } });
         }
-        fail('whatsapp_delivery_unknown', true);
+        throw Object.assign(Error('whatsapp_delivery_unknown'), { code: 'whatsapp_delivery_unknown', retryable: false,
+          delivery_unknown: true, dispatchDeferred: true, dispatchIntent: intent, dispatchPayload: payload, dispatchAttemptAt });
       }
       try {
         runtime.namespace(environment());
@@ -373,6 +382,20 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         }
         return C.projectResult(result.data);
       } catch { fail('whatsapp_delivery_unknown', true); }
+    },
+    async sendReceipt(intent, send) {
+      runtime.namespace(environment());
+      const captured = await binding(intent.clinicId, intent.assetId);
+      if (!captured || !sameBinding(captured, checkedBinding(intent.expectedBinding))) fail('whatsapp_authorized_binding_changed');
+      const config = read(); const requestId = randomUUID();
+      const R = require('../../services/integrations-broker/src/whatsapp-send-receipt');
+      const result = await createTransport(config).execute({ requestId, tenantRef: 'clinic:' + captured.clinicId,
+        connectionRef: captured.connectionRef, assetRef: 'wa-phone:' + captured.phoneId, operation: R.READ,
+        payload: { authorizationId: captured.authorizationId, phoneId: captured.phoneId, intentId: runtime.requestId(intent.messageId, environment()), send } });
+      const latest = await binding(intent.clinicId, intent.assetId);
+      if (!latest || !sameBinding(captured, latest) || JSON.stringify(read()) !== JSON.stringify(config)
+        || result?.requestId !== requestId) fail('whatsapp_authorized_binding_changed');
+      return R.project(result.data);
     },
   });
 }

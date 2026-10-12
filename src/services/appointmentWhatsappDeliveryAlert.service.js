@@ -24,19 +24,7 @@ const millis = value => value ? new Date(value).getTime() : NaN;
 const same = (a, b) => a !== null && a !== undefined && b !== null && b !== undefined && String(a) === String(b);
 const hash = value => createHash('sha256').update(value).digest('hex').slice(0, 24);
 
-function definitiveRecipientFailure(message, status = {}) {
-  const metadata = object(message?.metadata);
-  const retry = object(metadata.outbound_retry);
-  if (message?.status !== 'failed' || retry.retrying === true || retry.reason === 'delivery_unknown'
-    || metadata.delivery_unknown === true || metadata.post_acceptance_error) return false;
-  const errors = [...(Array.isArray(status.errors) ? status.errors : []),
-    ...(Array.isArray(metadata.wa_error) ? metadata.wa_error : []),
-    ...(Array.isArray(metadata.wa_status?.errors) ? metadata.wa_status.errors : [])];
-  const sendError = object(metadata.error);
-  const nested = object(sendError.error?.error || sendError.error);
-  if (nested.code) errors.push(nested);
-  return errors.some(error => RECIPIENT_UNDELIVERABLE_CODES.has(String(error?.code || '')));
-}
+const { definitiveRecipientFailure } = require('../lib/whatsapp-undeliverable');
 
 function scopeFromExecution(execution, appointment) {
   if (!execution || !appointment || !same(execution.clinic_id, appointment.clinica_id)) return null;

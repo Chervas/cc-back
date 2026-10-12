@@ -41,7 +41,7 @@ test('Authorized runtime rejects mixed identities, grants, enrollment slots and 
     c => { c.authorizations[0].enabled = 'false'; }, c => { delete c.authorizations[0].enabled; },
     c => { c.policy.principals[0].id = 'dev:whatsapp'; c.policy.grants.filter(g => g.principalId === 'staging:whatsapp').forEach(g => { g.principalId = 'dev:whatsapp'; }); },
     c => { c.policy.principals[1].publicKey = c.policy.principals[0].publicKey; },
-    c => { c.policy.principals[0].maxPerMinute = 61; },
+    c => { c.policy.principals[0].maxPerMinute = 601; },
     c => { c.policy.grants.pop(); }, c => { c.policy.grants[0].operations = [C.REVOKE]; },
     c => { c.policy.grants[1].operations.push(C.SEND); }, c => { c.policy.grants[0].tenantRef = 'clinic:999'; },
     c => { c.policy.grants[0].assetRef = 'wa-phone:402'; }, c => { c.policy.grants[2] = structuredClone(c.policy.grants[0]); },
