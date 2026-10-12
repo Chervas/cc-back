@@ -1412,6 +1412,47 @@ function patientOverlapFixture({ otherChanges = {}, bookingProfile = profile(pha
   return { ...f, original, other, options };
 }
 
+test('canonical administrative edit preserves locked attendance confirmation without trusting a stale status proposal', async () => {
+  const original = { id_cita: 80, clinica_id: 72, paciente_id: 1, doctor_id: 5, instalacion_id: 9,
+    tratamiento_id: 3, inicio: '2030-01-07T08:00:00Z', fin: '2030-01-07T08:30:00Z', estado: 'recordatorio_confirmado' };
+  for (const proposedStatus of ['info_confirmada', 'reprogramada', 'recordatorio_enviado']) {
+    const f = fixture({ appointments: [original] });
+    const saved = await f.reserve({ existingAppointmentId: 80, appointmentValues: {
+      inicio: start, fin: end, estado: proposedStatus, reschedule_reason: 'administrative_error', updated_by: 7 } });
+    assert.equal(saved.estado, 'recordatorio_confirmado');
+    assert.equal(new Date(saved.inicio).toISOString(), start);
+    assert.equal(saved.reschedule_reason, 'administrative_error');
+    assert.equal(f.state.persists, 1); assert.equal(f.state.commits, 1);
+    assert(f.state.occupancies.some(row => row.appointment_id === 80));
+  }
+});
+
+test('old administrative reason does not intercept later state actions or ordinary rescheduling', async () => {
+  const original = { id_cita: 80, clinica_id: 72, paciente_id: 1, doctor_id: 5, instalacion_id: 9,
+    tratamiento_id: 3, inicio: start, fin: end, estado: 'recordatorio_confirmado', reschedule_reason: 'administrative_error' };
+  const cancelled = await fixture({ appointments: [original] }).reserve({ existingAppointmentId: 80, stateOnly: true,
+    appointmentValues: { estado: 'cancelada', updated_by: 7 } });
+  assert.equal(cancelled.estado, 'cancelada');
+  for (const reason of ['patient_request', 'clinic_schedule']) {
+    const f = fixture({ appointments: [original] });
+    const moved = await f.reserve({ existingAppointmentId: 80, appointmentValues: {
+      inicio: '2030-01-07T10:00:00Z', fin: '2030-01-07T10:30:00Z', estado: 'reprogramada', reschedule_reason: reason, updated_by: 7 } });
+    assert.equal(moved.estado, 'reprogramada');
+  }
+});
+
+test('canonical administrative edit cannot manufacture attendance confirmation from a stale requested state', async () => {
+  for (const currentStatus of ['pendiente', 'info_enviada', 'info_confirmada', 'recordatorio_enviado']) {
+    const original = { id_cita: 80, clinica_id: 72, paciente_id: 1, doctor_id: 5, instalacion_id: 9,
+      tratamiento_id: 3, inicio: '2030-01-07T08:00:00Z', fin: '2030-01-07T08:30:00Z', estado: currentStatus };
+    const f = fixture({ appointments: [original] });
+    const saved = await f.reserve({ existingAppointmentId: 80, appointmentValues: {
+      inicio: start, fin: end, estado: 'recordatorio_confirmado', reschedule_reason: 'administrative_error', updated_by: 7 } });
+    assert.equal(saved.estado, 'info_confirmada');
+    assert.equal(f.state.persists, 1); assert.equal(f.state.commits, 1);
+  }
+});
+
 async function requiredPatientConfirmation(f, options = f.options) {
   let conflict;
   await assert.rejects(f.reserve(options), error => { conflict = error; return error.code === 'booking_patient_overlap'; });

@@ -247,6 +247,16 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const previous = existing?.toJSON ? existing.toJSON() : (existing || {});
     assertGenericSourceIdentity(previous, appointmentValues);
     const values = { ...previous, ...appointmentValues };
+    // Re-evaluate the administrative correction under the row lock. The
+    // controller and linked-group proposal may predate a patient confirmation.
+    // This guard is only for an explicit reservation edit, never a later
+    // independent state action on a row carrying an old reschedule reason.
+    if (existing && !stateOnly && !supportOnly
+      && appointmentValues.reschedule_reason === 'administrative_error'
+      && (Object.hasOwn(appointmentValues, 'inicio') || Object.hasOwn(appointmentValues, 'fin'))) {
+      values.estado = require('../lib/appointment-reschedule-reason').statusForReschedule(
+        appointmentValues.reschedule_reason, appointmentValues.estado, previous.estado);
+    }
     if (administrativeRestore && (!existing || previous.estado !== 'cancelada' || stateOnly || supportOnly || force
       || trustedProgramSession || trustedProgramSeries || durationSelection !== undefined || additionalStaffIds !== undefined
       || Object.keys(appointmentValues).some(key => !['estado', 'updated_by'].includes(key))

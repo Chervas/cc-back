@@ -85,8 +85,9 @@ test('patient links: real SQL birth, scope, confirmed owner, atomic movement, ro
     });
     assert.equal((await f.read(owner.id_cita)).estado, 'recordatorio_confirmado');
     const moved = await links.moveTogether(db, follower.id_cita, { inicio: '2030-01-07T13:30:00Z', fin: '2030-01-07T14:00:00Z',
-      estado: 'reprogramada', reschedule_reason: 'administrative_error', updated_by: 1 }, {});
+      estado: 'info_confirmada', reschedule_reason: 'administrative_error', updated_by: 1 }, {});
     assert.equal(moved.rows.length, 2); assert.equal(+new Date((await f.read(owner.id_cita)).inicio), +new Date('2030-01-07T13:00:00Z'));
+    assert(moved.rows.every(row => row.estado === 'recordatorio_confirmado'), 'An administrative linked move preserves each persisted attendance confirmation');
     const occupancy = await f.occupancy(owner.id_cita); assert(occupancy.every(row => +new Date(row.start_at) >= +new Date('2030-01-07T13:00:00Z')));
     const before = JSON.stringify(await f.read(owner.id_cita));
     await assert.rejects(links.moveTogether(db, owner.id_cita, { inicio: '2030-01-07T23:00:00Z', fin: '2030-01-07T23:30:00Z',

@@ -9,8 +9,13 @@ function isSilentReschedule(context, execution = null) {
   return trigger === 'appointment_rescheduled' && reason === ADMINISTRATIVE_ERROR;
 }
 
-function statusForReschedule(reason, requestedStatus) {
-  return reason === ADMINISTRATIVE_ERROR ? 'info_confirmada' : requestedStatus || 'reprogramada';
+function statusForReschedule(reason, requestedStatus, currentStatus) {
+  // Correcting the reservation does not revoke the patient's attendance
+  // confirmation. Only the persisted current state is evidence of that
+  // confirmation: a requested status alone must not manufacture one.
+  return reason === ADMINISTRATIVE_ERROR
+    ? currentStatus === 'recordatorio_confirmado' ? currentStatus : 'info_confirmada'
+    : requestedStatus || 'reprogramada';
 }
 
 module.exports = { ADMINISTRATIVE_ERROR, RESCHEDULE_REASONS, isSilentReschedule, statusForReschedule };

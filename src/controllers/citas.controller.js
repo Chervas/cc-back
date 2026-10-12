@@ -3462,7 +3462,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             });
         }
     }
-    cita.estado = statusForReschedule(rescheduleReason, estadoRaw);
+    cita.estado = statusForReschedule(rescheduleReason, estadoRaw, previousStatus);
     cita.updated_by = req.userData?.userId || null;
     let linkedMove = null;
     if (bookingEnabled) {
@@ -3503,6 +3503,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             const locked = await CitaPaciente.findByPk(citaId, { transaction, lock: transaction.LOCK.UPDATE });
             if (!locked) throw Object.assign(new Error('Cita no encontrada.'), { statusCode: 404 });
             previousStatus = locked.estado;
+            changes.estado = statusForReschedule(rescheduleReason, estadoRaw, previousStatus);
             await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: locked,
                 appointment: { ...locked.toJSON(), ...changes }, transaction });
             return updateLockedAppointmentWithVisit(locked, changes, transaction);

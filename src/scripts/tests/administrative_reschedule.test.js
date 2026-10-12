@@ -46,6 +46,7 @@ test('silent correction cannot call WhatsApp or email even if a customized graph
 });
 test('later reminders, patient requests and ordinary clinic reschedules are not muted',()=>{
  assert.equal(policy.statusForReschedule('administrative_error','recordatorio_confirmado'),'info_confirmada');
+ assert.equal(policy.statusForReschedule('administrative_error','info_confirmada','recordatorio_confirmado'),'recordatorio_confirmado');
  for(const reason of ['patient_request','clinic_schedule']){assert.equal(policy.statusForReschedule(reason,''),'reprogramada');assert.equal(policy.isSilentReschedule({trigger:{type:'appointment_rescheduled',data:{reschedule_reason:reason}}}),false);}
  assert.equal(policy.isSilentReschedule({trigger:{type:'appointment_reminder_window'},appointment:{reschedule_reason:'administrative_error'}}),false);
 });
@@ -55,12 +56,20 @@ test('older templates do not treat administrative corrections as ordinary clinic
  assert.equal(s.isRescheduleTemplateEligible({trigger_config:null},{reschedule_reason:'clinic_schedule'}),true);
  assert.equal(s.isRescheduleTemplateEligible(buildAdministrativeRescheduleFlow(sourceGraph()),{reschedule_reason:'administrative_error'}),true);
 });
-function httpFixture({booking=true,deny=false}={}){
- const stored={id_cita:101,clinica_id:10,paciente_id:20,estado:'info_enviada',inicio:new Date('2026-10-13T09:00Z'),fin:new Date('2026-10-13T09:30Z'),doctor_id:30,instalacion_id:40,import_metadata:{notification_suppression:{day_before:true}}};
+function httpFixture({booking=true,deny=false,currentStatus='info_enviada',confirmBeforeLock=false}={}){
+ const stored={id_cita:101,clinica_id:10,paciente_id:20,estado:currentStatus,inicio:new Date('2026-10-13T09:00Z'),fin:new Date('2026-10-13T09:30Z'),doctor_id:30,instalacion_id:40,import_metadata:{notification_suppression:{day_before:true}}};
  const calls=[],row=()=>({...stored,toJSON(){return {...stored}},async update(values){Object.assign(stored,values);return row()}});
  const runtime=Object.fromEntries(['cancelActiveExecutionsForCita','enqueueExecutionForCita','syncScheduledTriggersForCita'].map(name=>[name,async(cita,opts)=>calls.push({name,state:cita.estado,opts})]));
- const s={exports:{},console,Date,Number,String,asyncHandler:f=>f,CitaPaciente:{findByPk:async()=>row()},denyAppointmentManageAccessIfNeeded:async(req,res)=>deny?(res.status(403).json({}),true):false,
-  require:name=>name==='../lib/appointment-reschedule-reason'?policy:name==='../lib/booking-profile-duration'?require('../../lib/booking-profile-duration'):name==='../lib/program-appointment-context'?{hasProgramAppointmentReference:()=>false}:{assertClinicalCompletion:async()=>{}},bookingCapabilities:()=>({simple:booking,multi:true}),normalizeAdditionalStaff:()=>null,additionalStaffPayload:()=>[],parseBool:Boolean,
+ const s={exports:{},console,Date,Number,String,asyncHandler:f=>f,CitaPaciente:{findByPk:async(_,opts)=>{if(confirmBeforeLock&&opts?.lock)stored.estado='recordatorio_confirmado';return row()}},denyAppointmentManageAccessIfNeeded:async(req,res)=>deny?(res.status(403).json({}),true):false,
+  require:name=>{
+   if(name==='../lib/appointment-reschedule-reason')return policy;
+   if(name==='../lib/booking-profile-duration')return require('../../lib/booking-profile-duration');
+   if(name==='../lib/appointment-care')return require('../../lib/appointment-care');
+   if(name==='../lib/program-appointment-context')return {hasProgramAppointmentReference:()=>false};
+   if(name==='../services/appointmentPatientLinks.service')return {moveTogether:async()=>null};
+   if(name==='../services/appointmentConsentEligibility.service')return {assertClinicalCompletion:async()=>{}};
+   throw Error('Unexpected offline controller dependency '+name);
+  },bookingCapabilities:()=>({simple:booking,multi:true}),normalizeAdditionalStaff:()=>null,additionalStaffPayload:()=>[],parseBool:Boolean,
   checkDisponibilidadCanonica:async()=>({resourceConflicts:[],legacyConflicts:[],canForce:false}),CITA_ESTADOS_VALIDOS:new Set(['pendiente','reprogramada','info_confirmada','recordatorio_confirmado']),
   mutateAppointmentBooking:async opts=>{calls.push({name:'booking',values:opts.appointmentValues});return opts.persist({values:opts.appointmentValues,existing:row(),transaction:{}})},
   db:{sequelize:{transaction:async(_,f)=>f({LOCK:{UPDATE:'UPDATE'}})}},recordAppointmentStatusChange:async x=>calls.push({name:'activity',value:x}),processAppointmentLeadMilestones:async()=>{},patientDirectionService:{handleAppointmentChange:async()=>{}},
@@ -75,6 +84,20 @@ for(const booking of [true,false])test(`real reschedule controller persists the 
  assert.equal(f.stored.doctor_id,30);assert.equal(f.stored.instalacion_id,40);assert.deepEqual(f.stored.import_metadata,{notification_suppression:{day_before:true}});
  assert(f.calls.some(c=>c.name==='syncScheduledTriggersForCita'));assert(f.calls.some(c=>c.name==='cancelActiveExecutionsForCita'));assert(!f.calls.some(c=>c.name==='consent_communication'));
  assert.equal(f.calls.find(c=>c.name==='activity').value.metadata.reschedule_reason,'administrative_error');
+});
+for(const booking of [true,false])test(`administrative edit preserves an existing attendance confirmation, even with stale requested status (booking=${booking})`,async()=>{
+ const f=httpFixture({booking,currentStatus:'recordatorio_confirmado'});
+ const result=await f.run({inicio:'2026-10-14T10:00Z',fin:'2026-10-14T10:30Z',reschedule_reason:'administrative_error',estado:'info_confirmada'});
+ assert.equal(result.code,200);assert.equal(f.stored.estado,'recordatorio_confirmado');
+ assert.equal(f.stored.reschedule_reason,'administrative_error');
+ assert(f.calls.some(c=>c.name==='syncScheduledTriggersForCita'));assert(!f.calls.some(c=>c.name==='consent_communication'));
+ assert.equal(f.calls.find(c=>c.name==='activity').value.newStatus,'recordatorio_confirmado');
+});
+test('legacy writer uses locked confirmation rather than the earlier controller read',async()=>{
+ const f=httpFixture({booking:false,confirmBeforeLock:true});
+ await f.run({inicio:'2026-10-14T10:00Z',fin:'2026-10-14T10:30Z',reschedule_reason:'administrative_error',estado:'info_confirmada'});
+ assert.equal(f.stored.estado,'recordatorio_confirmado');
+ assert.equal(f.calls.find(c=>c.name==='activity').value.previousStatus,'recordatorio_confirmado');
 });
 test('unauthorized and invalid reasons cannot mutate an appointment',async()=>{
  const f=httpFixture({deny:true});assert.equal((await f.run({reschedule_reason:'administrative_error'})).code,403);assert.equal(f.stored.estado,'info_enviada');

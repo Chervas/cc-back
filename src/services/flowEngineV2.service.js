@@ -2546,7 +2546,7 @@ async function handleChangeStatus(node, context, runtime) {
     throw new Error('change_status_missing_new_status');
   }
 
-  const appointmentStatus = normalizeCitaStatus(rawStatus);
+  let appointmentStatus = normalizeCitaStatus(rawStatus);
   const leadStatus = normalizeLeadStatus(rawStatus);
   const requestedTarget = normalizeStatusTarget(resolveTemplateValue(config?.target_entity, context));
 
@@ -2608,6 +2608,14 @@ async function handleChangeStatus(node, context, runtime) {
         });
       }
       previousStatus = cleanString(appointment.estado);
+      // Published/custom administrative branches may still request the older
+      // "details confirmed" status. Retain a real attendance confirmation,
+      // without changing those graphs or muting subsequent reminder windows.
+      if (appointmentStatus === 'info_confirmada'
+        && require('../lib/appointment-reschedule-reason').isSilentReschedule(context, runtime?.execution)) {
+        appointmentStatus = require('../lib/appointment-reschedule-reason').statusForReschedule(
+          'administrative_error', appointmentStatus, previousStatus);
+      }
       if (
         responseDriven
         && contextAppointmentStatus
