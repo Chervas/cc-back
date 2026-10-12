@@ -2,7 +2,7 @@
 
 > **Tipo:** contrato y runbook de esquema aditivo.
 > **Última revisión:** 12/10/2026.
-> **Estado de este corte:** implementación y pruebas preparadas; el usuario ha autorizado explícitamente la migración y publicación en DEV y CRM el 12/10/2026. Todavía no se ha aplicado SQL ni publicado este cambio. La aprobación no sustituye la verificación del plan, respaldo y esquema de cada destino.
+> **Estado de este corte:** migración aditiva autorizada, aplicada y verificada en DEV y CRM el 12/10/2026; backend publicado en ambos destinos. Respaldo privado por destino, sin backfill ni DML clínico. Las pruebas de guardado usan datos ficticios y no se atribuyen a ellas ediciones de pacientes reales.
 
 ## Contrato canónico
 
@@ -163,7 +163,7 @@ Ante error, conservar plan, respaldo y diario; detener la continuación del
 corte y revisar su último paso. No ejecutar `down`, reintentar automáticamente,
 alterar permisos o restaurar globalmente el respaldo sobre cambios posteriores.
 
-## Validación realizada, todavía sin SQL ni publicación
+## Validación de código y contratos
 
 Los casos directos pasan 23/23 pruebas del contrato de campos y 13/13 del
 operador. Las pruebas HTTP utilizan un servidor ficticio propio en
@@ -194,5 +194,36 @@ la frontera de dependencias permanece estricta. Un test antiguo de idioma
 tiene además una aserción estática previa incompatible con el wrapper actual
 de reservas; no se modificó ni se incluyó como prueba pasada de este corte.
 
-Hasta registrar resultados reales de una operación autorizada, este documento
-describe implementación preparada, no una migración aplicada o publicación.
+## Corte operativo aplicado · 12/10/2026
+
+Fuente funcional `4292e403c92da2e44a2a17263f738738a17558f0`, difundida a
+DEV/staging por fast-forward. El usuario aprobó expresamente migración y
+publicación de ambos destinos. Los planes privados vinculan ese commit y los
+hashes anteriores; no se ejecutaron otras migraciones pendientes.
+
+- DEV: plan canónico `4d4a21c7edecccb97a4405cb2a66340f0a3ff5f27a259b3d95c28083aac36946`,
+  directorio privado `patient-profile-dev-ks5mgt`. Respaldo303 tablas,
+  4.640.872 bytes gzip SHA `e696764486fa2eb25bae4a16a9305de8485567a42f6e9d2eb2bb598847b97d05`.
+- CRM: plan `9f79f7086fdb35d74da4e1837d2d02a6d9cc51868544290147b3ec6126048734`,
+  directorio `patient-profile-crm-gwKMDj`. Respaldo304 tablas,
+  1.094.726.337 bytes gzip SHA `4f57bda3aed9a178272493d7ba1beffb291b3133e8bc6f50e6a873cc41e5529f`.
+
+Ambos dumps tienen integridad gzip y finalización verificadas; no se ha probado
+una restauración real. Ambos operadores terminaron `applied_verified`; sus
+verificaciones posteriores conservan metadata previa y confirman los nueve
+tipos/NULL/default/charset y registro único. La primera lectura DEV se hizo
+antes de terminar el apply y no cuenta: la aceptada es
+`verified-after-completion.json`. No se le atribuye éxito al intento temprano.
+
+DEV ejecuta el release aislado4292 y sus dos servicios volvieron activos. CRM
+recargó únicamente `pm2-back-staging`, sin `--update-env`. Hashes de modelo,
+controlador y contrato coinciden en ambos; readiness `/api/auth/me` sin
+credenciales401 en3004 y3001. MFA, namespaces, colas y proveedores conservados.
+Frontend publicado aparte tras validar su candidato y los recursos HTTP.
+El guardado UI se comprobó con cuatro PATCH ficticios en memoria, no SQL.
+
+Evidencia y recuperación completas en el recibo privado
+`secure-imports/patient-profile-agenda-release-Nzsbng/verification.json` y en
+frontend `src/Documentacion/99-bitacora-operativa.md`. El release anterior56b
+permite rollback de código conservando las columnas aditivas; no se eliminan
+ni se restaura globalmente un dump sobre cambios posteriores del usuario.
