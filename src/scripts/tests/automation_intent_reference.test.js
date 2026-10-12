@@ -403,8 +403,8 @@ test('the real classification node adds grounding once and preserves legacy outp
       assert.equal(request.inputText.split('patient_message_batch:').length - 1, 1);
       assert.deepEqual(Object.keys(request.outputFormat).slice(0, 5), ['decision_pospuesta', 'evidencia_asunto_pendiente', 'asunto_preguntado', 'significado_de_respuesta', 'lectura_respuesta']);
     }
-    assert.equal(calls[0].outputFormat.accion_inequivoca, 'boolean');
-    assert.equal(calls[0].outputFormat.confianza, 'number');
+    assert.equal(calls[0].outputFormat.accion_inequivoca.type, 'boolean');
+    assert.equal(calls[0].outputFormat.confianza.type, 'number');
     assert.doesNotMatch(calls[0].inputText, /APPOINTMENT_CONTEXT_MUST_NOT_ENTER_THE_MODEL/);
     assert.match(calls[1].inputText, /APPOINTMENT_CONTEXT_MUST_NOT_ENTER_THE_MODEL|TRIGGER_CONTEXT_MUST_NOT_ENTER_THE_MODEL/);
   } finally { ai.analyzeStructured = original; }

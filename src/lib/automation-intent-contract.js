@@ -22,6 +22,7 @@ const CLASSIFY_INTENT_REFERENCE_SYSTEM_INSTRUCTION = [
   'Para classify_intent, analiza primero el significado actual del lote nuevo. No atribuyas al paciente palabras de la clinica, ejemplos, decisiones historicas ni el estado almacenado de la cita.',
   'No toda respuesta al recordatorio confirma asistencia. Solo conocer la ubicacion es solo_indicaciones. Un compromiso espontaneo escrito de acudir es compromiso_asistencia, aunque tambien comente indicaciones. Un si/acuse solo es acuse_confirmacion_solicitada cuando responde a una pregunta de asistencia, recepcion de datos o telefono.',
   'Informar que antes hablo con recepcion, o preguntar por una fecha antes acordada, es consulta_gestion_previa sin decision nueva. Una solicitud nueva de cambiar fecha/hora es solicitud_nueva_cambio; explicar que no puede llegar no la convierte en cancelar. Una preferencia condicional que mantiene la cita original es ambigua y se revisa.',
+  'Si el lote solo relata una gestion administrativa o una visita pasadas, no confirma una cita futura: consulta_gestion_previa y revision; una confirmacion actual independiente sigue siendo valida aunque haya otros asuntos pendientes.',
   'Aceptar programar una primera visita no confirma una cita existente: otra y necesita_respuesta=true. Ante una interpretacion dudosa, ambigua y revision sin accion. No diagnostiques.',
   'Una reserva cuestionada requiere verificar lo ocurrido, no cancelar. Una disculpa por no contestar y una afirmacion condicionada no prueban asistencia. Una correccion de identidad, solicitud de aviso o queja que pide revision son asuntos pendientes aunque el paciente tambien confirme o agradezca.',
   'La confirmacion aplazada sigue pendiente: no conviertas en asistencia un aviso de que respondera despues, ni sus saludos o agradecimientos. Antes de decidir, conserva toda incidencia sobre avisos repetidos, contestador o puntualidad que requiera actuacion. Estas salvaguardas prevalecen sobre ejemplos de acuses breves: esos ejemplos solo valen si el resto del lote no aplaza ni contradice la decision.',
@@ -154,13 +155,20 @@ function projectClassifyIntentReferenceOutput(value = {}, { patientText = '', re
   const independentConfirmationWithReply = output.intencion_principal === 'confirmar_cita'
     && ((output.hay_asunto_por_resolver === true && replyConfidence >= AUTO_APPLY_CONFIDENCE_THRESHOLD)
       || (hasPendingEvidence && Number(output.confianza_evidencia_asunto_pendiente) >= AUTO_APPLY_CONFIDENCE_THRESHOLD));
-  if (readings && (!decisionNotPostponed || !(hasWrittenEvidence || hasReactionEvidence) || !matches || incompatibleSecondary || unrelatedAcknowledgement
-    || !['asistencia', 'datos_contacto'].includes(output.asunto_preguntado)
-    || unsupportedCancellation || output.requiere_verificar_gestion_o_condicion !== false
-    || !(Number(output.confianza_requiere_verificar_gestion_o_condicion) >= AUTO_APPLY_CONFIDENCE_THRESHOLD)
-    || !(Number(output.confianza_lectura_respuesta) >= AUTO_APPLY_CONFIDENCE_THRESHOLD)
-    || (output.necesita_respuesta === true && !independentConfirmationWithReply)
-    || output.posible_urgencia === true)) {
+  const failureReasons = readings ? [
+    [!decisionNotPostponed, 'decision_not_independently_established'],
+    [!(hasWrittenEvidence || hasReactionEvidence), 'current_evidence_missing'],
+    [!matches, 'incompatible_response_reading'],
+    [incompatibleSecondary, 'incompatible_secondary_intent'],
+    [unrelatedAcknowledgement || !['asistencia', 'datos_contacto'].includes(output.asunto_preguntado), 'question_not_about_confirmation'],
+    [unsupportedCancellation, 'explicit_cancellation_not_established'],
+    [output.requiere_verificar_gestion_o_condicion !== false
+      || !(Number(output.confianza_requiere_verificar_gestion_o_condicion) >= AUTO_APPLY_CONFIDENCE_THRESHOLD), 'independent_decision_not_established'],
+    [!(Number(output.confianza_lectura_respuesta) >= AUTO_APPLY_CONFIDENCE_THRESHOLD), 'response_reading_uncertain'],
+    [output.necesita_respuesta === true && !independentConfirmationWithReply, 'unresolved_or_uncertain_reply'],
+    [output.posible_urgencia === true, 'possible_urgency'],
+  ].filter(([failed]) => failed).map(([, reason]) => reason) : [];
+  if (failureReasons.length) {
     output.intencion_principal = 'otra';
     output.intencion_secundaria = '';
     output.confianza = 0;
@@ -169,6 +177,7 @@ function projectClassifyIntentReferenceOutput(value = {}, { patientText = '', re
     output.necesita_respuesta = true;
     if (Object.hasOwn(output, 'confianza_necesita_respuesta')) output.confianza_necesita_respuesta = 0;
     output._ai_reference_inconsistent = true;
+    output._ai_reference_failure_reasons = failureReasons;
     output.motivo = `${String(output.motivo || '').trim()} La accion propuesta no concuerda con la evidencia sobre la cita; requiere revision.`.trim();
   }
   return output;

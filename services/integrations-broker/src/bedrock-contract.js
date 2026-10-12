@@ -6,9 +6,16 @@ const object = (properties, required = Object.keys(properties)) => ({ type:'obje
 const one = items => ({ type:'array', minItems:1, maxItems:1, items });
 const text = { type:'string', maxLength:1048576 };
 const field = { type:'string', minLength:1, maxLength:1024, not:{enum:['__proto__','prototype','constructor']} };
+const description = { type:'string', maxLength:4096 };
+const outputField = { anyOf: [
+  object({type:{const:'string'},description,enum:{type:'array',minItems:1,maxItems:50,uniqueItems:true,
+    items:{type:'string',minLength:1,maxLength:1024}}}, ['type']),
+  object({type:{const:'boolean'},description}, ['type']),
+  object({type:{const:'number'},description,minimum:{const:0},maximum:{const:1}}, ['type']),
+] };
 const outputSchema = object({ type:{const:'object'},
   properties:{type:'object',minProperties:1,maxProperties:256,propertyNames:field,
-    additionalProperties:object({type:{enum:['string','number','boolean']}})},
+    additionalProperties:outputField},
   required:{type:'array',minItems:1,maxItems:256,uniqueItems:true,items:field}, additionalProperties:{const:false} });
 const bodySchema = object({ modelId:{enum:MODELS}, system:one(object({text})),
   messages:one(object({role:{const:'user'},content:one(object({text}))})),

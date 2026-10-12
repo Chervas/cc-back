@@ -77,9 +77,18 @@ function getClient() {
 function outputSchema(outputFormat = {}) {
   const properties = {};
   const required = [];
-  for (const [name, rawType] of Object.entries(outputFormat || {})) {
+  for (const [name, definition] of Object.entries(outputFormat || {})) {
+    const rawType = typeof definition === 'string' ? definition : definition?.type;
     const type = ['string', 'number', 'boolean'].includes(rawType) ? rawType : 'string';
     properties[name] = { type };
+    if (definition && typeof definition === 'object') {
+      if (typeof definition.description === 'string') properties[name].description = definition.description.slice(0, 4096);
+      if (type === 'string' && Array.isArray(definition.enum)) properties[name].enum = [...definition.enum];
+      if (type === 'number' && definition.minimum === 0 && definition.maximum === 1) {
+        properties[name].minimum = 0;
+        properties[name].maximum = 1;
+      }
+    }
     required.push(name);
   }
   return {

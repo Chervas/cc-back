@@ -1116,16 +1116,23 @@ function normalizeOutputFieldEntries(rawFields) {
     .filter(Boolean);
 }
 
-function normalizeOutputFieldsToFormat(rawFields) {
+function normalizeOutputFieldsToFormat(rawFields, { structured = false } = {}) {
   const out = {};
   const fields = normalizeOutputFieldEntries(rawFields);
   for (const field of fields) {
     out[field.name] = { type: field.type };
+    if (structured) {
+      if (field.description) out[field.name].description = field.description.slice(0, 4096);
+      if (field.allowed_values.length) out[field.name].enum = field.allowed_values;
+    }
   }
   for (const field of fields) {
     if (!field.include_confidence) continue;
     const confidenceField = `confianza_${field.name}`;
-    if (!out[confidenceField]) out[confidenceField] = { type: 'number' };
+    if (!out[confidenceField]) out[confidenceField] = structured ? {
+      type: 'number', minimum: 0, maximum: 1,
+      description: `Certeza de que el valor devuelto en ${field.name} es correcto. Si el valor es false y estas seguro de false, devuelve confianza alta. No es la probabilidad de que ${field.name} sea true.`,
+    } : { type: 'number' };
   }
   return out;
 }
@@ -1875,9 +1882,21 @@ function latestClinicPromptFromConversation(context = {}) {
 
 function resolveClassifyIntentPrompt(context = {}) {
   const responseContext = isObject(context?.last_response_context) ? context.last_response_context : {};
+  const listenedOutput = context.outputs?.[responseContext.listens_to_node_id];
+  const listenedMessageId = toIntOrNull(listenedOutput?.message_id);
+  const responseItems = Array.isArray(responseContext.response_items) ? responseContext.response_items : [];
+  const batchIds = [responseContext.response_message_id, ...responseItems.map(item => item?.message_id)]
+    .map(toIntOrNull).filter(Boolean);
+  const firstBatchId = batchIds.length ? Math.min(...batchIds) : null;
+  // Recover the exact scoped message, not whichever clinic message is latest.
+  const messages = Array.isArray(context.conversation_context_messages) ? context.conversation_context_messages : [];
+  const listenedMessage = messages.find(message =>
+    listenedMessageId && Number(message.id) === listenedMessageId && message.direction === 'outbound'
+    && firstBatchId && Number(message.id) < firstBatchId);
   return cleanString(
     responseContext.reaction_target_message_preview
     || responseContext.listened_message_preview
+    || listenedMessage?.text
     || context?.last_prompt
     || latestClinicPromptFromConversation(context)
   );
@@ -3831,6 +3850,7 @@ async function reuseExistingAutomationWhatsappMessage({ existingMessage, node })
     kind: 'success',
     output: {
       message_id: existingMessage.id,
+      message_preview: cleanString(existingMessage.content || existingMetadata.preview_text),
       status: outputStatus,
       replay_reused: true,
       transport_job_id: transportJobId || null,
@@ -7266,7 +7286,9 @@ async function processNode(node, context, runtime = {}) {
               ? buildClassifyIntentInstruction(resolvedInstruction)
               : resolvedInstruction,
           inputText,
-          outputFormat: analysisOutputFormatSimple,
+          outputFormat: presetKey === 'classify_intent' || usesConfirmSignalContract
+            ? normalizeOutputFieldsToFormat(analysisOutputFields, { structured: true })
+            : analysisOutputFormatSimple,
           analysisMode,
           maxTokens: resolveTemplateValue(config?.max_tokens, context),
           clinicId: runtimeTargets.clinic_id,

@@ -69,6 +69,31 @@ test('Bedrock schema forbids tools, files, URLs as resources, model endpoints an
   assert.equal(contract.validate(p), p);
 });
 
+test('bounded output annotations remain compatible with legacy tools and reject arbitrary schemas', () => {
+  assert.equal(contract.validate(payload()).useCase,'confirm_appointment');
+  const schema = p => p.body.toolConfig.tools[0].toolSpec.inputSchema.json;
+  const p=payload();
+  schema(p).properties.motivo={type:'string',description:'Solo un resultado permitido.',enum:['confirmacion','revision']};
+  schema(p).properties.confirmado={type:'boolean',description:'Decision actual.'};
+  schema(p).properties.confianza={type:'number',description:'Certeza del valor.',minimum:0,maximum:1};
+  schema(p).required.push('confianza');
+  assert.equal(contract.validate(p),p);
+  for(const mutate of [
+    s=>{s.properties.motivo.$ref='https://foreign.invalid/schema';},
+    s=>{s.properties.motivo.enum=['duplicated','duplicated'];},
+    s=>{s.properties.motivo.enum=Array.from({length:51},(_,i)=>String(i));},
+    s=>{s.properties.motivo.description='x'.repeat(4097);},
+    s=>{s.properties.motivo.properties={nested:{type:'string'}};},
+    s=>{s.properties.confirmado.enum=['true'];},
+    s=>{s.properties.confianza.minimum=-1;},
+    s=>{s.properties.confianza.maximum=2;},
+    s=>{s.properties.motivo.type='object';},
+  ]) {
+    const bad=structuredClone(p);mutate(schema(bad));
+    assert.throws(()=>contract.validate(bad),{code:'invalid_request'});
+  }
+});
+
 test('no ambient AWS credentials, and provider reflection of each credential is suppressed', async () => {
   for (const value of [{}, { ...credentials, extra: 'bad' }, { ...credentials, sessionToken: '' }]) {
     await assert.rejects(createBedrockHttp()({ payload: payload(), token: Buffer.from(JSON.stringify(value)) }), { code: 'secret_unavailable' });

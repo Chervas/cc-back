@@ -81,6 +81,31 @@ test('orchestrator retains provider fallback, usage and purpose, but never retri
   }
 });
 
+test('structured appointment fields retain enums, certainty descriptions and numeric types through the signed broker', async () => {
+  const f = setup(async () => {
+    const result = response();
+    result.output.message.content[0].toolUse.input = { lectura_respuesta:'acuse_confirmacion_solicitada',
+      decision_pospuesta:false, confianza_decision_pospuesta:0.99 };
+    return result;
+  });
+  const outputFormat = {
+    lectura_respuesta:{type:'string',enum:['acuse_confirmacion_solicitada','ambigua'],description:'Lectura de la respuesta.'},
+    decision_pospuesta:{type:'boolean',description:'Si el paciente pospone su decision.'},
+    confianza_decision_pospuesta:{type:'number',minimum:0,maximum:1,
+      description:'Certeza del valor devuelto, tambien cuando es false; no probabilidad de true.'},
+  };
+  const result = await f.orchestrator.analyzeStructured({...input,outputFormat,analysisMode:'complex_reasoning'});
+  const schema = f.calls[0].payload.body.toolConfig.tools[0].toolSpec.inputSchema.json;
+  assert.deepEqual(schema.properties,outputFormat);
+  assert.equal(result.decision_pospuesta,false);
+  assert.equal(result.confianza_decision_pospuesta,0.99);
+  assert.equal(typeof result.confianza_decision_pospuesta,'number');
+  assert.equal(result.lectura_respuesta,'acuse_confirmacion_solicitada');
+  assert.equal(f.calls.length,1);
+  assert.equal(f.calls[0].payload.useCase,'confirm_appointment');
+  assert.equal(f.calls[0].payload.body.modelId,'eu.amazon.nova-lite-v1:0');
+});
+
 test('queued conversations recheck the pause and provider switch immediately before dispatch', async () => {
   for (const scenario of ['pause','disabled']) {
     let release;

@@ -53,7 +53,8 @@ function routeFor({ useCase, analysisMode, prompt, inputText, outputFormat } = {
 
 function coerceByFormat(value, outputFormat = {}) {
   const output = {};
-  for (const [key, type] of Object.entries(outputFormat || {})) {
+  for (const [key, definition] of Object.entries(outputFormat || {})) {
+    const type = typeof definition === 'string' ? definition : definition?.type;
     const raw = value?.[key];
     if (type === 'number') {
       const parsed = Number(raw);
