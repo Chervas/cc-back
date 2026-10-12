@@ -63,6 +63,8 @@ function patientFixture(options = {}) {
   };
   const controller = source('controllers/paciente.controller.js', { '../../models': models, sequelize, crypto,
     '../services/platformAudit.patientReads': audit, '../lib/phone': require('../../../lib/phone'), '../lib/access-policy': permissions,
+    '../lib/patient-profile-fields': require('../../../lib/patient-profile-fields'),
+    '../lib/cliniccloud-patient-history': require('../../../lib/cliniccloud-patient-history'),
     '../services/patientContact.service': { PATIENT_EVENT_TYPES: { created: 'created' }, findPatientContactTargets: async () => {
       if (state.readFailure) throw Error('FICTITIOUS_SQL_SECRET');
       return { query: 'FICTITIOUS_SEARCH', query_type: 'name', normalized_phone: null, items: [{ patient: patient().toJSON(), conversation_id: 81 }] };

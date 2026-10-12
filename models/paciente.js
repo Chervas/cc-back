@@ -1,5 +1,6 @@
 'use strict';
 const { Model } = require('sequelize');
+const { patientProfileAttributes } = require('../src/lib/patient-profile-fields');
 module.exports = (sequelize, DataTypes) => {
   class Paciente extends Model {
     static associate(models) {
@@ -50,6 +51,7 @@ module.exports = (sequelize, DataTypes) => {
     numero_historia: { type: DataTypes.STRING(32), allowNull: true },
     historia_scope: { type: DataTypes.STRING(64), allowNull: true },
     notas_paciente: { type: DataTypes.TEXT, allowNull: true },
+    ...patientProfileAttributes(DataTypes),
     telefono_movil: {
       type: DataTypes.STRING,
       allowNull: true

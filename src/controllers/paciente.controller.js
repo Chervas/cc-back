@@ -27,6 +27,10 @@ const {
   languageForNewPatient,
 } = require('../lib/patient-language');
 const {
+  PATIENT_PROFILE_FIELD_NAMES,
+  validatePatientProfileFields,
+} = require('../lib/patient-profile-fields');
+const {
   assertUserCanAccessFeature,
   canUserAccessFeature,
   getAccessibleClinicIdsForFeature,
@@ -231,6 +235,7 @@ function redactEmbeddedPatient(paciente) {
     'fecha_nacimiento', 'edad', 'estatura', 'peso', 'sexo', 'profesion',
     'alergias', 'antecedentes', 'medicacion',
     'numero_historia', 'notas_paciente', 'historia_scope',
+    ...PATIENT_PROFILE_FIELD_NAMES,
   ];
   const redacted = {
     ...plain,
@@ -2002,6 +2007,8 @@ exports.createPaciente = async (req, res) => {
     }
     await assertPatientEditAccess(req, clinica_id);
 
+    const patientProfileFields = validatePatientProfileFields(req.body);
+
     let tutorPaciente = null;
     if (tutor?.id_paciente_relacionado) {
       tutorPaciente = await findPacienteByIdentifier(tutor.id_paciente_relacionado, {
@@ -2065,7 +2072,8 @@ exports.createPaciente = async (req, res) => {
       paciente_conocido,
       como_nos_conocio,
       procedencia,
-      clinica_id
+      clinica_id,
+      ...patientProfileFields,
     }, { transaction });
 
     // Crear relación con tutor si aplica
@@ -2113,6 +2121,9 @@ exports.createPaciente = async (req, res) => {
   } catch (error) {
     if (transaction && !transaction.finished) {
       await transaction.rollback();
+    }
+    if (error.status === 400 && error.message === 'invalid_patient_profile_field') {
+      return res.status(400).json({ message: 'Datos de la ficha del paciente inválidos', error: error.message, details: error.details });
     }
     if (error.status === 400 && error.message === 'unsupported_patient_language') {
       return res.status(400).json({
@@ -2192,6 +2203,9 @@ exports.updatePaciente = async (req, res) => {
     if (Number(nextClinicaId) !== Number(paciente.clinica_id)) {
       await assertPatientEditAccess(req, nextClinicaId);
     }
+    // Validate every new field before mutating the in-memory patient or saving
+    // any part of a mixed PATCH. Invalid clinical/profile input is atomic.
+    const patientProfileFields = validatePatientProfileFields(req.body);
     const nextTelefono = req.body.telefono_movil !== undefined ? req.body.telefono_movil : paciente.telefono_movil;
     const nextEmail = req.body.email !== undefined ? req.body.email : paciente.email;
     const normPhone = normalizePhone(nextTelefono);
@@ -2218,7 +2232,7 @@ exports.updatePaciente = async (req, res) => {
       }
     }
 
-    const fieldsToUpdate = ['nombre', 'apellidos', 'dni', 'telefono_movil', 'email', 'telefono_secundario', 'foto', 'fecha_nacimiento', 'edad', 'estatura', 'peso', 'sexo', 'profesion', 'fecha_alta', 'fecha_baja', 'alergias', 'antecedentes', 'medicacion', 'notas_paciente', 'idioma_preferido', 'paciente_conocido', 'como_nos_conocio', 'procedencia', 'clinica_id'];
+    const fieldsToUpdate = ['nombre', 'apellidos', 'dni', 'telefono_movil', 'email', 'telefono_secundario', 'foto', 'fecha_nacimiento', 'edad', 'estatura', 'peso', 'sexo', 'profesion', 'fecha_alta', 'fecha_baja', 'alergias', 'antecedentes', 'medicacion', 'notas_paciente', 'idioma_preferido', 'paciente_conocido', 'como_nos_conocio', 'procedencia', 'clinica_id', ...Object.keys(patientProfileFields)];
     fieldsToUpdate.forEach(field => {
       if (req.body[field] !== undefined) {
         if (field === 'telefono_movil') {
@@ -2254,6 +2268,9 @@ exports.updatePaciente = async (req, res) => {
       paciente
     });
   } catch (error) {
+    if (error.status === 400 && error.message === 'invalid_patient_profile_field') {
+      return res.status(400).json({ message: 'Datos de la ficha del paciente inválidos', error: error.message, details: error.details });
+    }
     if (error.status === 400 && error.message === 'unsupported_patient_language') {
       return res.status(400).json({
         message: 'idioma_preferido inválido',
