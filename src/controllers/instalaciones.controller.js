@@ -12,6 +12,35 @@ const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
 const { normalizeInstallationProfessionals, installationAllowsStaff } = require('../lib/installation-professionals');
 const { normalizeInstallationOverlap: overlapSettings } = require('../lib/installation-overlap');
 const { agendaClinicIds, agendaInstallationAliases } = require('../lib/agenda-read-scope');
+const { normalizeSharingRequest, createInstallationPhysicalSharingService, installationSharingListMetadata } = require('../services/installationPhysicalSharing.service');
+
+const physicalSharing = req => createInstallationPhysicalSharingService({ db,
+  authorize: (feature, clinicId) => assertClinicFeature(req, feature, clinicId) });
+
+function sendSharingError(error, res) {
+  if (!/^installation_sharing_/.test(error?.code || '')) return false;
+  res.status(error.statusCode || error.status || 409).json({ message: error.message, code: error.code,
+    details: error.details || null, can_force: false });
+  return true;
+}
+
+function validateSharingMainFields(body, clinicId) {
+  if (!body.physical_sharing) return;
+  const sharing = normalizeSharingRequest(body.physical_sharing);
+  const member = sharing.memberships.find(row => row.clinic_id === Number(clinicId));
+  if (body.activo === false || body.activo === 0) {
+    const error = new Error('Para desactivar esta ficha usa su configuración individual; conserva la clínica principal al compartir.');
+    error.status = 400; error.code = 'installation_sharing_invalid'; throw error;
+  }
+  if (body.profesionales_permitidos !== undefined && member) {
+    const ids = normalizeInstallationProfessionals(body.profesionales_permitidos);
+    const sharingIds = normalizeInstallationProfessionals(member.professional_ids);
+    if (JSON.stringify(ids) !== JSON.stringify(member.professional_mode === 'all' ? [] : sharingIds)) {
+      const error = new Error('La selección de profesionales de esta clínica debe coincidir con su configuración compartida.');
+      error.status = 400; error.code = 'installation_sharing_invalid'; throw error;
+    }
+  }
+}
 
 async function validateProfessionals(value, clinicId, transaction) {
   const ids = normalizeInstallationProfessionals(value);
@@ -193,11 +222,18 @@ exports.list = asyncHandler(async (req, res) => {
   const items = await db.Instalacion.findAll({ where, include, order: [['orden_visualizacion','ASC'], ['id','ASC']] });
   // Stable display evidence, even when a calendar day has no appointments.
   // One batch; aliases cannot expose rooms outside this authorized response.
-  const roomIds = items.filter(item => item.activo).map(item => Number(item.id));
+  const roomIds = items.map(item => Number(item.id));
   const aliasRows = db.InstallationPhysicalAlias && roomIds.length ? await db.InstallationPhysicalAlias.findAll({
     where: { [Op.or]: [{ installation_id: { [Op.in]: roomIds } }, { canonical_installation_id: { [Op.in]: roomIds } }] }, raw: true,
   }) : [];
+  // Configuration lists include disabled members as part of the same physical
+  // row. Calendar readers already request activa=true in the SQL scope.
   const aliases = agendaInstallationAliases(aliasRows, roomIds);
+  // The configuration column can name peer clinics only after a separate
+  // settings.view grant. Selecting one clinic does not grant group visibility.
+  const sharingVisibleClinicIds = await accessibleClinicScope(req, 'clinic.settings.view');
+  const sharingClinics = await installationSharingListMetadata({ db, items, aliases: aliasRows,
+    accessibleClinicIds: sharingVisibleClinicIds });
   const physicalKey = id => {
     const link = aliasRows.find(row => Number(row.installation_id) === id || Number(row.canonical_installation_id) === id);
     // Opaque navigation anchor: identifies the same room across clinic scopes
@@ -207,7 +243,24 @@ exports.list = asyncHandler(async (req, res) => {
       : `installation:${id}`;
   };
   res.json(items.map(item => ({ ...item.toJSON(), agenda_physical_alias_ids: aliases[item.id] || [Number(item.id)],
-    agenda_physical_room_key: physicalKey(Number(item.id)) })));
+    agenda_physical_room_key: physicalKey(Number(item.id)), physical_sharing_clinics: sharingClinics[item.id] || [] })));
+});
+
+exports.getSharingContext = asyncHandler(async (req, res) => {
+  try {
+    const rawId = req.params.id || req.query.clinica_id;
+    if (typeof rawId !== 'string' || !/^[1-9]\d*$/.test(rawId) || !Number.isSafeInteger(Number(rawId))) {
+      return res.status(400).json({ message: 'La clínica o la instalación indicada no es válida.', code: 'installation_sharing_invalid' });
+    }
+    const installationId = req.params.id ? Number(req.params.id) : null;
+    const clinicId = req.params.id ? null : Number(req.query.clinica_id);
+    const result = await physicalSharing(req).context({ installationId, clinicId });
+    return res.json(result);
+  } catch (error) {
+    if (sendSharingError(error, res) || sendProfessionalError(error, res)) return;
+    if (sendInstallationAccessError(error, res)) return;
+    throw error;
+  }
 });
 
 exports.getById = asyncHandler(async (req, res) => {
@@ -240,9 +293,10 @@ exports.create = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  const t = await db.sequelize.transaction();
   try {
-    const created = await db.Instalacion.create({
+    validateSharingMainFields(body, clinicaId);
+    const createInTransaction = async t => {
+      const created = await db.Instalacion.create({
       clinica_id: clinicaId,
       nombre: body.nombre,
       tipo,
@@ -263,12 +317,13 @@ exports.create = asyncHandler(async (req, res) => {
       orden_visualizacion: body.orden_visualizacion != null ? Number(body.orden_visualizacion) : null,
     }, { transaction: t });
 
-    const rows = buildHorarioRowsFromBody(created.id, body);
-    if (rows.length) {
-      await db.InstalacionHorario.bulkCreate(rows, { transaction: t });
-    }
-
-    await t.commit();
+      const rows = buildHorarioRowsFromBody(created.id, body);
+      if (rows.length) await db.InstalacionHorario.bulkCreate(rows, { transaction: t });
+      return created;
+    };
+    const created = body.physical_sharing
+      ? await physicalSharing(req).save({ clinicId: clinicaId, sharing: body.physical_sharing, mutate: createInTransaction })
+      : await db.sequelize.transaction(createInTransaction);
 
     const item = await db.Instalacion.findByPk(created.id, {
       include: [
@@ -279,7 +334,7 @@ exports.create = asyncHandler(async (req, res) => {
     });
     return res.status(201).json(item);
   } catch (e) {
-    await t.rollback();
+    if (sendSharingError(e, res) || sendInstallationAccessError(e, res)) return;
     if (sendProfessionalError(e, res)) return;
     console.error('Error create instalacion', e);
     return res.status(500).json({ message: 'Error creando instalación' });
@@ -297,17 +352,28 @@ exports.update = asyncHandler(async (req, res) => {
   if (!tipo) return res.status(400).json({ message: 'tipo de instalación inválido' });
 
   try {
-    await withInstallationCalendarMutation(id, async t => {
+    validateSharingMainFields(body, item.clinica_id);
+    const mutate = async t => {
       await item.reload({ transaction: t, lock: t.LOCK.UPDATE });
+      // Compare normalized stored values without validating the old tuple: an
+      // explicitly valid replacement must still be able to repair legacy data.
+      const currentOccupancyPolicy = { capacidad: Number(item.capacidad || 1),
+        allow_overlap_confirmation: !!item.allow_overlap_confirmation,
+        overlap_capacity_unlimited: !!item.overlap_capacity_unlimited };
+      const nextOccupancyPolicy = overlapSettings(body, currentOccupancyPolicy);
+      const sharedOccupancyChanged = Object.keys(currentOccupancyPolicy)
+        .some(key => nextOccupancyPolicy[key] !== currentOccupancyPolicy[key]);
       // Update only the shared-occupancy fields on aliases, never their names,
-      // clinical scopes, schedules or permitted professionals.
-      if (body.allow_overlap_confirmation !== undefined || body.overlap_capacity_unlimited !== undefined || body.capacidad !== undefined) {
+      // clinical scopes, schedules or permitted professionals. Older/full-form
+      // clients echo unchanged capacity: that is not a cross-clinic edit and
+      // must not require foreign authority or touch the other clinical member.
+      if (sharedOccupancyChanged) {
         const clinic = await db.Clinica.findByPk(item.clinica_id, { transaction: t });
         const mapping = await require('../services/appointmentBookingAvailability.service').resolveInstallationKeys({ db, clinic, installationIds: [id], transaction: t, enabled: true });
         const aliases = await db.Instalacion.findAll({ where: { id: { [Op.in]: mapping.physicalInstallationIds } }, transaction: t });
         for (const alias of aliases) {
           await assertClinicFeature(req, 'clinic.settings.edit', Number(alias.clinica_id));
-          if (Number(alias.id) !== id) await alias.update(overlapSettings(body, { capacidad: item.capacidad, allow_overlap_confirmation: !!item.allow_overlap_confirmation, overlap_capacity_unlimited: !!item.overlap_capacity_unlimited }), { transaction: t });
+          if (Number(alias.id) !== id) await alias.update(nextOccupancyPolicy, { transaction: t });
         }
       }
       await item.update({
@@ -317,8 +383,7 @@ exports.update = asyncHandler(async (req, res) => {
       descripcion: body.descripcion ?? item.descripcion,
       piso: body.piso ?? item.piso,
       color: body.color ?? item.color,
-      capacidad: body.capacidad != null ? Number(body.capacidad) : item.capacidad,
-      ...overlapSettings(body, { capacidad: item.capacidad, allow_overlap_confirmation: !!item.allow_overlap_confirmation, overlap_capacity_unlimited: !!item.overlap_capacity_unlimited }),
+      ...nextOccupancyPolicy,
       activo: body.activo !== undefined ? Boolean(body.activo) : item.activo,
       requiere_preparacion: body.requiere_preparacion !== undefined ? Boolean(body.requiere_preparacion) : item.requiere_preparacion,
       tiempo_preparacion_minutos: body.tiempo_preparacion_minutos != null ? Number(body.tiempo_preparacion_minutos) : item.tiempo_preparacion_minutos,
@@ -341,7 +406,10 @@ exports.update = asyncHandler(async (req, res) => {
       }
     }
 
-    });
+    };
+    if (body.physical_sharing) {
+      await physicalSharing(req).save({ installationId: id, sharing: body.physical_sharing, mutate });
+    } else await withInstallationCalendarMutation(id, mutate);
 
     const full = await db.Instalacion.findByPk(id, {
       include: [
@@ -352,6 +420,7 @@ exports.update = asyncHandler(async (req, res) => {
     });
     return res.json(full);
   } catch (e) {
+    if (sendSharingError(e, res) || sendInstallationAccessError(e, res)) return;
     if (sendCalendarMutationError(e, res)) return;
     if (sendProfessionalError(e, res)) return;
     console.error('Error update instalacion', e);

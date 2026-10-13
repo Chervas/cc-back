@@ -51,7 +51,8 @@ const DOMAIN_TABLES = [
 ];
 
 async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registerOwnedLoopbackServer,
-  includeConsentRoutes = false, includeProgramLedger = false, includeAvailabilityRoutes = false, nativeFinalHandler = false }) {
+  includeConsentRoutes = false, includeProgramLedger = false, includeAvailabilityRoutes = false,
+  includeInstallationRoutes = false, nativeFinalHandler = false }) {
   assert(sql.options.dialectOptions?.socketPath?.startsWith('/tmp/cc-campaign-opt-mysql-'));
   const [[owned]] = await sql.query('SELECT @@skip_networking AS isolated, DATABASE() AS name');
   assert.equal(Number(owned.isolated), 1); assert.equal(owned.name, 'campaign_optimization_qa');
@@ -191,6 +192,7 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
   app.use('/api/auth', require('../../../routes/auth.routes'));
   app.use('/api/citas', require('../../../routes/citas.routes'));
   if (includeAvailabilityRoutes) app.use('/api/disponibilidad', require('../../../routes/disponibilidad.routes'));
+  if (includeInstallationRoutes) app.use('/api/instalaciones', require('../../../routes/instalaciones.routes'));
   app.use('/api/treatment-documentation', require('../../../routes/treatmentDocumentation.routes'));
   if (includeConsentRoutes) app.use('/api/consentimientos', require('../../../routes/consentimientos.routes'));
   // Native error-contract acceptance must reach each real router's own

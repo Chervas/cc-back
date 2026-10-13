@@ -5,6 +5,7 @@ const fs = require('node:fs'), path = require('node:path'), vm = require('node:v
 const Op = require('sequelize').Op;
 const scope = require('../../lib/agenda-read-scope');
 const flexible = require('../../lib/flexible-agenda');
+const installationSharing = require('../../services/installationPhysicalSharing.service');
 const plain = value => JSON.parse(JSON.stringify(value));
 function controller(file, db, deps = {}) {
   const context = { exports: {}, require: name => {
@@ -13,6 +14,7 @@ function controller(file, db, deps = {}) {
     if (name === '../../models') return db;
     if (name === '../lib/agenda-read-scope') return scope;
     if (name === '../lib/flexible-agenda') return flexible;
+    if (name === '../services/installationPhysicalSharing.service') return installationSharing;
     if (name === '../lib/role-helpers') return { STAFF_ROLES: ['Personal de clínica'] };
     return deps[name] || {};
   }};
@@ -43,22 +45,28 @@ test('agenda selector uses only an active, receiving flexible membership in the 
 });
 test('room display metadata is one bounded batch, available on empty calendar days and restricted to authorized resources', async () => {
   let calls=0, aliasesQuery, query, result;
-  const rooms=[{id:79,activo:true,clinica_id:66},{id:80,activo:true,clinica_id:72},{id:81,activo:false,clinica_id:72}];
-  const db={Sequelize:{Op},Instalacion:{findAll:async options=>{query=options;return rooms.map(row=>({...row,toJSON:()=>row}));}},
-    InstallationPhysicalAlias:{findAll:async options=>{calls++;aliasesQuery=options;return [
+  const rooms=[{id:79,activo:true,clinica_id:66,clinica:{nombre_clinica:'Capilar'}},
+    {id:80,activo:true,clinica_id:72,clinica:{nombre_clinica:'Medical'}},{id:81,activo:false,clinica_id:72,clinica:{nombre_clinica:'Medical'}}];
+  const db={Sequelize:{Op},Instalacion:{findAll:async options=>{
+    if (!options.where.id) query=options;
+    return rooms.filter(row=>!options.where.id || options.where.id[Op.in].includes(row.id))
+      .map(row=>({...row,toJSON:()=>row}));
+  }},
+    InstallationPhysicalAlias:{findAll:async options=>{calls++;if(options.where[Op.or])aliasesQuery=options;return [
       {installation_id:79,canonical_installation_id:80,group_id:29},
       {installation_id:99,canonical_installation_id:80,group_id:29},
     ];}}};
   const c=controller('instalaciones.controller.js',db,{'../lib/access-policy':{
-    getAccessibleClinicIdsForFeature:async args=>{assert.deepEqual(plain(args.clinicIds),[66,72]);return [66,72];}
+    getAccessibleClinicIdsForFeature:async args=>{if (args.clinicIds !== null) assert.deepEqual(plain(args.clinicIds),[66,72]);return [66,72];}
   }});
   await c.list({query:{clinica_id:'66,72'},userData:{userId:1}}, {json:value=>{result=value;}});
   assert.deepEqual(plain(query.where.clinica_id[Op.in]),[66,72]);
-  assert.equal(calls,1);assert.deepEqual(plain(aliasesQuery.where[Op.or][0].installation_id[Op.in]),[79,80]);
-  assert.deepEqual(plain(aliasesQuery.where[Op.or][1].canonical_installation_id[Op.in]),[79,80]);
+  assert.equal(calls,2);assert.deepEqual(plain(aliasesQuery.where[Op.or][0].installation_id[Op.in]),[79,80,81]);
+  assert.deepEqual(plain(aliasesQuery.where[Op.or][1].canonical_installation_id[Op.in]),[79,80,81]);
   assert.deepEqual(plain(result.map(row=>row.agenda_physical_alias_ids)),[[80,79],[80,79],[81]]);
   assert.ok(result.every(row=>!row.agenda_physical_alias_ids.includes(99)));
   assert.equal(result[0].agenda_physical_room_key,result[1].agenda_physical_room_key);
   assert.match(result[0].agenda_physical_room_key,/^physical:[a-f0-9]{24}$/);
   assert.equal(result[2].agenda_physical_room_key,'installation:81');
+  assert.deepEqual(plain(result[0].physical_sharing_clinics),[{clinic_id:66,name:'Capilar',enabled:true},{clinic_id:72,name:'Medical',enabled:true}]);
 });

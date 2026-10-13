@@ -19,8 +19,11 @@ test('peer references stay inside the same group and the actor appointment view 
   assert.equal(calls.length, 1, 'explicit groups are never expanded');
   assert.deepEqual(await agendaPeerClinicIds({ db, actorId:10, clinicIds:[66], includePeers:true, authorize: async () => [66,72] }), [66,72]);
 });
-test('physical room aliases require explicit evidence and visible canonical resources', () => {
+test('physical room aliases require explicit evidence and never expose hidden resources', () => {
   const rows = [{ installation_id:79, canonical_installation_id:80, group_id:29 }, { installation_id:90, canonical_installation_id:80, group_id:29 }];
   assert.deepEqual(agendaInstallationAliases(rows, [79,80]), { 79:[80,79], 80:[80,79] });
   assert.deepEqual(agendaInstallationAliases(rows, [79]), {});
+  assert.deepEqual(agendaInstallationAliases(rows, [79,90]), { 79:[79,90], 90:[79,90] },
+    'disabling the canonical clinic use must not split the two remaining physical aliases');
+  assert.deepEqual(agendaInstallationAliases([{ installation_id:79, canonical_installation_id:79, group_id:29 }], [79]), {});
 });

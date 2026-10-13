@@ -14,7 +14,8 @@ const phase = (key = 'care', patch = {}) => ({ key, label: 'Paso sintético', du
 const profile = (version = 1, phases = [phase()]) => ({ version, phases: phases.map(row => ({ ...row,
   ...(version === 4 ? { start_offset_minutes: row.start_offset_minutes ?? 0 } : {}) })) });
 
-async function createOwnedBookingDurationFixture({ sql, models: db, registerOwnedLoopbackServer, nativeCatalogModel = false }) {
+async function createOwnedBookingDurationFixture({ sql, models: db, registerOwnedLoopbackServer,
+  nativeCatalogModel = false, includePatientScope = false }) {
   if (!sql.options.dialectOptions?.socketPath?.startsWith('/tmp/cc-campaign-opt-mysql-')) throw Error('OWNED_BOOKING_SOCKET_REQUIRED');
   const [[storage]] = await sql.query('SELECT @@skip_networking AS isolated, DATABASE() AS name');
   if (Number(storage.isolated) !== 1 || storage.name !== 'campaign_optimization_qa') throw Error('OWNED_BOOKING_DATABASE_REQUIRED');
@@ -24,7 +25,9 @@ async function createOwnedBookingDurationFixture({ sql, models: db, registerOwne
   define('Clinica', 'Clinicas', { id_clinica: { type: D.INTEGER, primaryKey: true }, grupoClinicaId: D.INTEGER,
     nombre_clinica: D.STRING, configuracion: D.JSON, equipment_booking_enabled: D.BOOLEAN });
   define('Usuario', 'Usuarios', { id_usuario: { type: D.INTEGER, primaryKey: true }, nombre: D.STRING, apellidos: D.STRING });
-  define('Paciente', 'Pacientes', { id_paciente: { type: D.INTEGER, primaryKey: true } });
+  define('Paciente', 'Pacientes', { id_paciente: { type: D.INTEGER, primaryKey: true },
+    ...(includePatientScope ? { clinica_id: D.INTEGER } : {}) });
+  if (includePatientScope) db.PacienteClinica = require('../../../../models/pacienteclinica')(sql, D);
   if (nativeCatalogModel) db.Tratamiento = require('../../../../models/tratamiento')(sql, D);
   else define('Tratamiento', 'Tratamientos', { id_tratamiento: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER,
     grupo_clinica_id: D.INTEGER, nombre: D.STRING, origen: D.STRING, activo: D.BOOLEAN, clinical_config: D.JSON });
@@ -45,7 +48,9 @@ async function createOwnedBookingDurationFixture({ sql, models: db, registerOwne
   await db.Clinica.bulkCreate([100, 200].map(id => ({ id_clinica: id, grupoClinicaId: 50,
     nombre_clinica: `Clínica ficticia ${id}`, configuracion: { timezone: 'Europe/Madrid' }, equipment_booking_enabled: true })));
   await db.Usuario.bulkCreate([1, 2].map(id => ({ id_usuario: id, nombre: `Profesional ficticio ${id}`, apellidos: 'Sólo prueba' })));
-  await db.Paciente.bulkCreate([1, 2, 3, 4].map(id_paciente => ({ id_paciente })));
+  await db.Paciente.bulkCreate([1, 2, 3, 4].map(id_paciente => ({ id_paciente,
+    ...(includePatientScope ? { clinica_id: 100 } : {}) })));
+  if (includePatientScope) await db.PacienteClinica.create({ paciente_id: 4, clinica_id: 200, es_principal: false });
   for (const clinica_id of [100, 200]) for (let day = 1; day <= 5; day++) {
     await db.ClinicaHorario.create({ clinica_id, dia_semana: day, activo: true, hora_inicio: '09:00', hora_fin: '20:00' });
   }

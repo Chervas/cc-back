@@ -12,8 +12,9 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // This fixture owns its mysqld and Unix socket. TCP is denied unless a test
 // explicitly registers its own live loopback server; host DB/provider sockets remain denied.
-async function withIsolatedCampaignMysql(work) {
+async function withIsolatedCampaignMysql(work, { performanceSchema = false } = {}) {
   if (process.env.CAMPAIGN_OPTIMIZATION_MYSQL_TEST !== '1') throw Error('Explicit CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 is required');
+  assert.equal(typeof performanceSchema, 'boolean', 'TESTONLY performance-schema option must be a boolean');
   const root = fs.mkdtempSync('/tmp/cc-campaign-opt-mysql-');
   fs.chmodSync(root, 0o700);
   const data = path.join(root, 'data'); fs.mkdirSync(data, { mode: 0o700 });
@@ -59,7 +60,7 @@ async function withIsolatedCampaignMysql(work) {
       `--log-error=${log}`, '--innodb-buffer-pool-size=64M'], { timeout: 90000, env: { PATH: '/usr/sbin:/usr/bin:/bin', HOME: root } });
     child = spawn('/usr/sbin/mysqld', ['--no-defaults', `--datadir=${data}`, `--socket=${socketPath}`,
       `--pid-file=${path.join(root, 'mysql.pid')}`, `--log-error=${log}`, '--skip-networking', '--mysqlx=0', '--skip-log-bin',
-      '--innodb-buffer-pool-size=64M', '--performance-schema=OFF', '--max-connections=32', '--skip-name-resolve'],
+      '--innodb-buffer-pool-size=64M', `--performance-schema=${performanceSchema ? 'ON' : 'OFF'}`, '--max-connections=32', '--skip-name-resolve'],
     { stdio: 'ignore', env: { PATH: '/usr/sbin:/usr/bin:/bin', HOME: root } });
     exited = new Promise(resolve => { child.once('exit', (code, signal) => resolve({ code, signal })); child.once('error', error => resolve({ error: error.message })); });
     const config = { username: 'root', password: '', host: 'localhost', dialect: 'mysql', dialectOptions: { socketPath }, logging: false,
@@ -71,8 +72,10 @@ async function withIsolatedCampaignMysql(work) {
       try { await admin.authenticate(); break; }
       catch (error) { if (Date.now() >= deadline || rejected.length) throw error; await delay(100); }
     }
-    const [rows] = await admin.query('SELECT @@datadir AS datadir, @@skip_networking AS isolated, VERSION() AS version');
+    const [rows] = await admin.query('SELECT @@datadir AS datadir, @@skip_networking AS isolated, @@performance_schema AS performance_schema, VERSION() AS version');
     assert.equal(fs.realpathSync(rows[0].datadir), fs.realpathSync(data)); assert.equal(Number(rows[0].isolated), 1);
+    assert.equal(Number(rows[0].performance_schema), Number(performanceSchema));
+    if (performanceSchema) report.performanceSchema = true;
     report.mysql = rows[0].version; report.pid = child.pid;
     await admin.query('CREATE DATABASE campaign_optimization_qa');
     sql = new Sequelize({ ...config, database: report.database, timezone: '+00:00' });

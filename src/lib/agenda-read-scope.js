@@ -27,12 +27,18 @@ function agendaInstallationAliases(rows, visibleInstallationIds) {
   const groups = new Map();
   for (const row of rows) {
     const id = Number(row.installation_id), canonical = Number(row.canonical_installation_id);
-    if (!visible.has(id) || !visible.has(canonical) || !row.group_id) continue;
+    if (!Number.isSafeInteger(id) || id < 1 || !Number.isSafeInteger(canonical) || canonical < 1
+      || id === canonical || !row.group_id || (!visible.has(id) && !visible.has(canonical))) continue;
     const key = `${row.group_id}:${canonical}`;
-    const members = groups.get(key) || new Set([canonical]); members.add(id); groups.set(key, members);
+    const members = groups.get(key) || new Set();
+    if (visible.has(canonical)) members.add(canonical);
+    if (visible.has(id)) members.add(id);
+    groups.set(key, members);
   }
   const result = {};
-  for (const members of groups.values()) for (const id of members) result[id] = [...members];
+  // The physical reference may belong to a disabled or unauthorized clinical
+  // member. Visible aliases still share a room; never expose that hidden ID.
+  for (const members of groups.values()) if (members.size > 1) for (const id of members) result[id] = [...members];
   return result;
 }
 
