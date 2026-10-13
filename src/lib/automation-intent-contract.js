@@ -99,7 +99,9 @@ function buildClassifyIntentInstruction(instruction) {
     : [configured, CLASSIFY_INTENT_REFERENCE_INSTRUCTION].filter(Boolean).join(' ');
 }
 
-function projectClassifyIntentReferenceOutput(value = {}, { patientText = '', responseItems = [] } = {}) {
+function projectClassifyIntentReferenceOutput(value = {}, {
+  patientText = '', responseItems = [], allowIndependentWrittenAction = false,
+} = {}) {
   const output = { ...value };
   const normalizeEvidence = (text) => String(text || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const text = normalizeEvidence(patientText);
@@ -149,6 +151,11 @@ function projectClassifyIntentReferenceOutput(value = {}, { patientText = '', re
     && output.intencion_secundaria !== output.intencion_principal;
   const unrelatedAcknowledgement = output.lectura_respuesta === 'acuse_confirmacion_solicitada'
     && !['asistencia', 'datos_contacto'].includes(output.asunto_preguntado);
+  // Only the same-day directions flow opts in; acknowledgements and reactions still need the requested subject.
+  const independentWrittenAction = allowIndependentWrittenAction === true && hasWrittenEvidence
+    && ['indicaciones', 'otro'].includes(output.asunto_preguntado)
+    && ((output.intencion_principal === 'confirmar_cita' && output.lectura_respuesta === 'compromiso_asistencia')
+      || (output.intencion_principal === 'cancelar_cita' && output.lectura_respuesta === 'rechazo_asistencia'));
   const unsupportedCancellation = output.intencion_principal === 'cancelar_cita'
     && (output.rechazo_asistencia_explicito !== true
       || !(Number(output.confianza_rechazo_asistencia_explicito) >= AUTO_APPLY_CONFIDENCE_THRESHOLD));
@@ -160,7 +167,8 @@ function projectClassifyIntentReferenceOutput(value = {}, { patientText = '', re
     [!(hasWrittenEvidence || hasReactionEvidence), 'current_evidence_missing'],
     [!matches, 'incompatible_response_reading'],
     [incompatibleSecondary, 'incompatible_secondary_intent'],
-    [unrelatedAcknowledgement || !['asistencia', 'datos_contacto'].includes(output.asunto_preguntado), 'question_not_about_confirmation'],
+    [unrelatedAcknowledgement || (!['asistencia', 'datos_contacto'].includes(output.asunto_preguntado)
+      && !independentWrittenAction), 'question_not_about_confirmation'],
     [unsupportedCancellation, 'explicit_cancellation_not_established'],
     [output.requiere_verificar_gestion_o_condicion !== false
       || !(Number(output.confianza_requiere_verificar_gestion_o_condicion) >= AUTO_APPLY_CONFIDENCE_THRESHOLD), 'independent_decision_not_established'],

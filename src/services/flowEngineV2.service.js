@@ -96,6 +96,8 @@ const {
   emitAutomationResponseProcessing,
   findHumanReplyAfterMessage,
 } = require('./conversationPendingReply.service');
+const { EXIT_KEY: SAME_DAY_NO_ACTION_EXIT_KEY, isExplicitSameDayNoActionExit,
+  isSameDayDirectionsTemplate } = require('../lib/same-day-no-action-branch');
 const UPDATE_LEAD_INFO_MODES = new Set([
   'set_required',
   'set_received',
@@ -6969,6 +6971,8 @@ async function processNode(node, context, runtime = {}) {
         kind: 'success',
         output: {
           status: 'flow_ended',
+          ...(config?.migration_key === SAME_DAY_NO_ACTION_EXIT_KEY
+            ? { resolution_key: SAME_DAY_NO_ACTION_EXIT_KEY } : {}),
         },
         next_node_id: null,
       };
@@ -7314,6 +7318,7 @@ async function processNode(node, context, runtime = {}) {
         aiOutput = normalizeClassifyIntentOutput(projectClassifyIntentReferenceOutput(normalizeClassifyIntentOutput(aiOutput, aiContext), {
           patientText: cleanString(buildScopedClassifyIntentBatch(aiContext).response_text),
           responseItems: buildScopedClassifyIntentBatch(aiContext).response_items,
+          allowIndependentWrittenAction: isSameDayDirectionsTemplate(runtime?.execution?.templateVersion),
         }), aiContext);
         for (const field of CLASSIFY_INTENT_REFERENCE_FIELDS) {
           if (!normalizedOutputFields.some((configured) => configured.name === field.name)) {
@@ -8051,8 +8056,10 @@ async function syncConversationAutomationStateAfterExecution(execution) {
   const pendingResponse = expectsResponse
     && !humanReply
     && !appointmentIntentResolvedExternally;
+  const explicitNoActionExit = isExplicitSameDayNoActionExit(execution, normalized, state);
   const persistedManualReason = state.manual_action_required === true
     && state.needs_response !== true
+    && !explicitNoActionExit
     && !appointmentIntentApplied
     && !appointmentIntentResolvedExternally
     && !appointmentIntentAlreadyResolved;
@@ -8062,7 +8069,7 @@ async function syncConversationAutomationStateAfterExecution(execution) {
     || (confirmationOutcome?.manualActionRequired === true && !humanReply)
     || normalized?.posible_urgencia === true
     || pendingResponse
-    || normalized?.intencion_principal === 'otra'
+    || (normalized?.intencion_principal === 'otra' && !explicitNoActionExit)
     || rebookingOutcome?.wantsNewAppointment === true
     || (
       context?.human_takeover?.active === true
