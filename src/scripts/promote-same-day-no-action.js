@@ -10,6 +10,18 @@ const hash = value => createHash('sha256').update(JSON.stringify(value, (_key, i
     ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)).digest('hex');
 const parse = value => typeof value === 'string' ? JSON.parse(value) : value;
 
+function assertPreservedVersion(old, current, familyPublicIds) {
+  assert(current, 'same_day_existing_version_deleted');
+  const managed = familyPublicIds.has(old.public_id) && !!old.published_at;
+  for (const key of Object.keys(old)) {
+    if (hash(current[key]) === hash(old[key])) continue;
+    // Native publication deactivates every published historical sibling and touches updated_at.
+    if (managed && key === 'updated_at') continue;
+    if (managed && key === 'is_active' && old.is_active === 1 && current.is_active === 0) continue;
+    assert.fail('same_day_existing_version_changed:' + old.id + ':' + key);
+  }
+}
+
 async function inspect(db) {
   const { Op } = db.Sequelize;
   const catalog = await db.AutomationFlowCatalog.findOne({ where: { name: CATALOG_NAME }, raw: true });
@@ -40,7 +52,7 @@ async function promote(db, expected, { apply = false, actorUserId = 1 } = {}) {
   if (!apply) return before;
   assert.equal(hash(before), hash(expected), 'same_day_preflight_changed');
   const oldVersions = await db.AutomationFlowTemplateV2.findAll({ raw: true, order: [['id', 'ASC']] });
-  const familyIds = new Set([before.source.id, ...before.copies.map(c => c.id)]);
+  const familyPublicIds = new Set([before.source.public_id, ...before.copies.map(c => c.public_id)]);
   let promoted = before.source;
   if (hash(before.source.nodes) !== hash(before.nodes)) {
     await db.sequelize.transaction(async transaction => {
@@ -76,11 +88,7 @@ async function promote(db, expected, { apply = false, actorUserId = 1 } = {}) {
   }
   for (const old of oldVersions) {
     const current = await db.AutomationFlowTemplateV2.findByPk(old.id, { raw: true });
-    assert(current, 'same_day_existing_version_deleted');
-    for (const key of Object.keys(old)) {
-      if (familyIds.has(old.id) && ['is_active', 'updated_at'].includes(key)) continue;
-      assert.equal(hash(current[key]), hash(old[key]), 'same_day_existing_version_changed:' + key);
-    }
+    assertPreservedVersion(old, current, familyPublicIds);
   }
   await db.AutomationFlowCatalog.update({ last_propagated_at: new Date(),
     last_propagated_template_key: after.source.public_id, last_propagated_template_version: after.source.version },
@@ -119,5 +127,5 @@ async function main() {
   } finally { await db.sequelize.close(); }
 }
 
-module.exports = { inspect, promote };
+module.exports = { inspect, promote, assertPreservedVersion };
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
