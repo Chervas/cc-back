@@ -73,7 +73,7 @@ function httpFixture({booking=true,deny=false,currentStatus='info_enviada',confi
   checkDisponibilidadCanonica:async()=>({resourceConflicts:[],legacyConflicts:[],canForce:false}),CITA_ESTADOS_VALIDOS:new Set(['pendiente','reprogramada','info_confirmada','recordatorio_confirmado']),
   mutateAppointmentBooking:async opts=>{calls.push({name:'booking',values:opts.appointmentValues});return opts.persist({values:opts.appointmentValues,existing:row(),transaction:{}})},
   db:{sequelize:{transaction:async(_,f)=>f({LOCK:{UPDATE:'UPDATE'}})}},recordAppointmentStatusChange:async x=>calls.push({name:'activity',value:x}),processAppointmentLeadMilestones:async()=>{},patientDirectionService:{handleAppointmentChange:async()=>{}},
-  appointmentAutomationV2Runtime:runtime,appointmentNotificationCleanup:{markAutomationNotificationsReadForAppointment:async()=>{}},completeAppointmentAutomationReviews:async()=>{},ensureConsentPackageAndAutomation:async()=>calls.push({name:'consent_communication'}),
+  appointmentAutomationV2Runtime:runtime,appointmentNotificationCleanup:{markAutomationNotificationsReadForAppointment:async()=>calls.push({name:'notification_cleanup'})},completeAppointmentAutomationReviews:async()=>calls.push({name:'review_closed'}),ensureConsentPackageAndAutomation:async()=>calls.push({name:'consent_communication'}),
   Paciente:{},LeadIntake:{},Clinica:{},Instalacion:{},Tratamiento:{},attachFlowSummaryToCitas:async()=>{},attachUnreadCountsToCitas:async()=>{},consentimientosService:{attachConsentSummaryToCitas:async()=>{}},emitAppointmentSocketEvent:()=>{},protectAppointmentsForRequest:async(_,v)=>v};
  vm.createContext(s);vm.runInContext(visitCompatibilityWriter,s);vm.runInContext(controller.slice(controller.indexOf('exports.reagendarCita ='),controller.indexOf('exports.resolveImportedTreatment =')),s);
  return {stored,calls,async run(body){const res={code:200,status(c){this.code=c;return this},json(v){this.body=v;return this}};await s.exports.reagendarCita({params:{id:'101'},body,userData:{userId:7}},res);return res}};
@@ -102,6 +102,22 @@ test('legacy writer uses locked confirmation rather than the earlier controller 
 test('unauthorized and invalid reasons cannot mutate an appointment',async()=>{
  const f=httpFixture({deny:true});assert.equal((await f.run({reschedule_reason:'administrative_error'})).code,403);assert.equal(f.stored.estado,'info_enviada');
  const g=httpFixture();assert.equal((await g.run({reschedule_reason:'unknown'})).code,400);assert.equal(g.calls.length,0);
+});
+for(const booking of [true,false])for(const currentStatus of ['info_enviada','info_confirmada','recordatorio_enviado','recordatorio_confirmado'])
+ test(`same-time column move preserves state, waits, reviews and notification suppression (booking=${booking}, ${currentStatus})`,async()=>{
+  const f=httpFixture({booking,currentStatus});
+  const result=await f.run({inicio:'2026-10-13T11:00:00+02:00',fin:'2026-10-13T11:30:00+02:00',doctor_id:31,instalacion_id:41,reschedule_reason:'clinic_schedule'});
+  assert.equal(result.code,200);assert.equal(f.stored.estado,currentStatus);assert.equal(f.stored.reschedule_reason,null);
+  assert.equal(f.stored.doctor_id,31);assert.equal(f.stored.instalacion_id,41);
+  assert.deepEqual(f.stored.import_metadata,{notification_suppression:{day_before:true}});
+  assert(!f.calls.some(c=>['cancelActiveExecutionsForCita','enqueueExecutionForCita','syncScheduledTriggersForCita','notification_cleanup','review_closed','consent_communication'].includes(c.name)),JSON.stringify(f.calls));
+ });
+test('same-time legacy column move preserves a confirmation received after the first read',async()=>{
+ const f=httpFixture({booking:false,confirmBeforeLock:true});
+ await f.run({inicio:'2026-10-13T09:00Z',fin:'2026-10-13T09:30Z',doctor_id:31,reschedule_reason:'clinic_schedule'});
+ assert.equal(f.stored.estado,'recordatorio_confirmado');assert.equal(f.stored.doctor_id,31);
+ assert.equal(f.calls.find(c=>c.name==='activity').value.previousStatus,'recordatorio_confirmado');
+ assert(!f.calls.some(c=>c.name==='enqueueExecutionForCita'));
 });
 for(const reason of ['patient_request','clinic_schedule',undefined])test(`ordinary reschedule keeps its notification and consent path (${reason || 'legacy default'})`,async()=>{
  const f=httpFixture(),result=await f.run({inicio:'2026-10-14T10:00Z',fin:'2026-10-14T10:30Z',...(reason?{reschedule_reason:reason}:{})});

@@ -1427,6 +1427,22 @@ test('canonical administrative edit preserves locked attendance confirmation wit
   }
 });
 
+test('canonical same-time resource change preserves every locked state while updating occupancies', async () => {
+  for (const estado of ['pendiente', 'info_enviada', 'info_confirmada', 'recordatorio_enviado', 'recordatorio_confirmado']) {
+    const original = { id_cita: 80, clinica_id: 72, paciente_id: 1, doctor_id: 5, instalacion_id: 9,
+      tratamiento_id: 3, inicio: start, fin: end, estado, reschedule_reason: 'patient_request' };
+    const f = fixture({ appointments: [original], bookingProfile: profile(phase('one', [9, 10], [6, 5])) });
+    const saved = await f.reserve({ existingAppointmentId: 80, selections: { one: { doctor_id: 6, installation_id: 10 } },
+      appointmentValues: { inicio: start, fin: end, doctor_id: 6, instalacion_id: 10,
+        estado: 'reprogramada', reschedule_reason: 'clinic_schedule', updated_by: 7 } });
+    assert.equal(saved.estado, estado); assert.equal(saved.reschedule_reason, 'patient_request');
+    assert.equal(saved.doctor_id, 6); assert.equal(saved.instalacion_id, 10);
+    assert(f.state.occupancies.some(row => row.appointment_id === 80 && row.doctor_id === 6));
+    assert(f.state.occupancies.some(row => row.appointment_id === 80 && row.installation_id === 10));
+    assert.equal(f.state.commits, 1);
+  }
+});
+
 test('old administrative reason does not intercept later state actions or ordinary rescheduling', async () => {
   const original = { id_cita: 80, clinica_id: 72, paciente_id: 1, doctor_id: 5, instalacion_id: 9,
     tratamiento_id: 3, inicio: start, fin: end, estado: 'recordatorio_confirmado', reschedule_reason: 'administrative_error' };

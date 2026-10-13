@@ -18,4 +18,17 @@ function statusForReschedule(reason, requestedStatus, currentStatus) {
     : requestedStatus || 'reprogramada';
 }
 
-module.exports = { ADMINISTRATIVE_ERROR, RESCHEDULE_REASONS, isSilentReschedule, statusForReschedule };
+function sameAppointmentTime(previous, next) {
+  const range = value => [value?.inicio, value?.fin].map(item => item == null ? NaN : new Date(item).getTime());
+  const a = range(previous), b = range(next);
+  return [...a, ...b].every(Number.isFinite) && a[1] > a[0] && b[1] > b[0]
+    && a[0] === b[0] && a[1] === b[1];
+}
+
+function preserveUnchangedReservation(previous, values) {
+  if (!RESCHEDULE_REASONS.includes(values.reschedule_reason) || !sameAppointmentTime(previous, values)) return values;
+  return { ...values, estado: previous.estado, reschedule_reason: previous.reschedule_reason ?? null };
+}
+
+module.exports = { ADMINISTRATIVE_ERROR, RESCHEDULE_REASONS, isSilentReschedule, statusForReschedule,
+  sameAppointmentTime, preserveUnchangedReservation };

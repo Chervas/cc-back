@@ -17,6 +17,9 @@ test('patient links: real SQL birth, scope, confirmed owner, atomic movement, ro
     await require('../../../migrations/20261007170000-create-appointment-patient-links').up(sql.getQueryInterface(), S);
     db.AppointmentPatientLink = require('../../../models/appointmentpatientlink')(sql, S.DataTypes);
     db.AppointmentPatientLinkMember = require('../../../models/appointmentpatientlinkmember')(sql, S.DataTypes);
+    const treatment = await db.Tratamiento.findByPk(4), config = structuredClone(treatment.clinical_config);
+    config.booking_profile.phases[0].installation_ids = [101, 102];
+    await treatment.update({ clinical_config: config });
     const values = f.values({ tratamiento_id: 4, inicio: '2030-01-07T10:00:00Z', fin: '2030-01-07T10:30:00Z' });
     const owner = await f.reserve({ appointmentValues: { ...values, estado: 'info_confirmada' } });
     const next = { ...values, inicio: '2030-01-07T10:30:00Z', fin: '2030-01-07T11:00:00Z' };
@@ -59,6 +62,18 @@ test('patient links: real SQL birth, scope, confirmed owner, atomic movement, ro
       assert.equal(confirmed.length, 1);
     });
     assert.equal((await f.read(follower.id_cita)).estado, 'recordatorio_confirmado');
+    const ownerBeforeColumn = await f.read(owner.id_cita), followerBeforeColumn = await f.read(follower.id_cita);
+    const column = await links.moveTogether(db, owner.id_cita, { inicio: ownerBeforeColumn.inicio, fin: ownerBeforeColumn.fin,
+      instalacion_id: 102, estado: 'reprogramada', reschedule_reason: 'clinic_schedule', updated_by: 1 },
+      { selections: { fixed: { installation_id: 102 } } });
+    assert.equal(column.previousSchedule.estado, 'recordatorio_confirmado');
+    assert(column.rows.every(row => row.estado === 'recordatorio_confirmado'));
+    assert.equal(column.selected.instalacion_id, 102);
+    assert.equal(+new Date((await f.read(owner.id_cita)).inicio), +new Date(ownerBeforeColumn.inicio));
+    assert.equal(+new Date((await f.read(follower.id_cita)).inicio), +new Date(followerBeforeColumn.inicio));
+    assert((await f.occupancy(owner.id_cita)).some(row => row.installation_id === 102));
+    assert.equal(queued.length, 0);
+    report.checks.push('Same-time linked column move preserves both confirmations and intervals, updates real occupancies, returns locked previous range and queues no communication');
     await sql.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
       const current = await command.mutateAppointmentBooking({ db, transaction, capabilities: f.capabilities,
         existingAppointmentId: follower.id_cita, stateOnly: true, appointmentValues: { estado: 'cambio_solicitado' },

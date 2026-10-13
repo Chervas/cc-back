@@ -102,7 +102,12 @@ function createAppointmentVisitRuntimeService({ db, now = () => new Date(), newI
       const kind = after.lifecycle === 'cancelada' ? 'cancelled'
         : after.lifecycle === 'active' && (changedReservation || before.lifecycle === 'cancelada') ? 'rescheduled' : 'lifecycle_changed';
       const reason = require('../lib/appointment-reschedule-reason').RESCHEDULE_REASONS.includes(row.reschedule_reason) ? row.reschedule_reason : null;
-      const suppressed = suppressCommunications === true || kind === 'rescheduled' && reason === 'administrative_error';
+      const sameTimeResourceChange = before.lifecycle === 'active' && after.lifecycle === 'active'
+        && before.treatment_id === after.treatment_id
+        && require('../lib/appointment-reschedule-reason').sameAppointmentTime(
+          { inicio: before.start_at, fin: before.end_at }, { inicio: after.start_at, fin: after.end_at });
+      const suppressed = suppressCommunications === true || kind === 'rescheduled'
+        && (reason === 'administrative_error' || sameTimeResourceChange);
       const event = { schema: 'appointment-visit-mutation/1', visit_id: visit.id, owner_appointment_id: proof.appointmentId,
         actor_id: proof.actorId, before_revision: proof.revision, communication_revision: proof.revision + 1, kind,
         before_snapshot_sha256: proof.projection.snapshot_sha256, before_snapshot: proof.projection.snapshot,

@@ -3373,11 +3373,12 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
 
     let previousStatus = cita.estado;
+    let previousSchedule = { inicio: cita.inicio, fin: cita.fin, estado: cita.estado, reschedule_reason: cita.reschedule_reason };
     const rescheduleReason = String(req.body?.reschedule_reason || 'clinic_schedule').trim().toLowerCase();
     if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
     }
-    const { RESCHEDULE_REASONS, statusForReschedule } = require('../lib/appointment-reschedule-reason');
+    const { RESCHEDULE_REASONS, statusForReschedule, sameAppointmentTime, preserveUnchangedReservation } = require('../lib/appointment-reschedule-reason');
     if (!RESCHEDULE_REASONS.includes(rescheduleReason)) {
         return res.status(400).json({
             message: 'reschedule_reason inválido',
@@ -3462,7 +3463,10 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             });
         }
     }
-    cita.estado = statusForReschedule(rescheduleReason, estadoRaw, previousStatus);
+    const proposed = preserveUnchangedReservation(previousSchedule, { inicio, fin, estado: statusForReschedule(rescheduleReason, estadoRaw, previousStatus),
+        reschedule_reason: rescheduleReason });
+    cita.estado = proposed.estado;
+    cita.reschedule_reason = proposed.reschedule_reason;
     cita.updated_by = req.userData?.userId || null;
     let linkedMove = null;
     if (bookingEnabled) {
@@ -3492,9 +3496,15 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
                 acknowledgement: req.body?.patient_overlap_acknowledgement },
             persist: async ({ values, existing, transaction }) => {
                 previousStatus = existing.estado;
+                previousSchedule = { inicio: existing.inicio, fin: existing.fin };
+                Object.assign(values, preserveUnchangedReservation(existing, { ...values, reschedule_reason: rescheduleReason }));
                 return existing.update(values, { transaction });
             },
         });
+        if (linkedMove?.previousSchedule) {
+            previousSchedule = linkedMove.previousSchedule;
+            previousStatus = previousSchedule.estado;
+        }
     } else {
         const changes = { inicio, fin, estado: cita.estado, reschedule_reason: rescheduleReason, updated_by: cita.updated_by,
             ...(nextDoctorIdRaw !== undefined ? { doctor_id: nextDoctorId } : {}),
@@ -3503,7 +3513,9 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             const locked = await CitaPaciente.findByPk(citaId, { transaction, lock: transaction.LOCK.UPDATE });
             if (!locked) throw Object.assign(new Error('Cita no encontrada.'), { statusCode: 404 });
             previousStatus = locked.estado;
+            previousSchedule = { inicio: locked.inicio, fin: locked.fin };
             changes.estado = statusForReschedule(rescheduleReason, estadoRaw, previousStatus);
+            Object.assign(changes, preserveUnchangedReservation(locked, changes));
             await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: locked,
                 appointment: { ...locked.toJSON(), ...changes }, transaction });
             return updateLockedAppointmentWithVisit(locked, changes, transaction);
@@ -3534,7 +3546,8 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         console.warn('[patient-direction] No se pudo aplicar la reprogramación:', error.message || error);
     });
 
-    try {
+    const scheduleChanged = !sameAppointmentTime(previousSchedule, cita);
+    if (scheduleChanged) try {
         for (const member of linkedMove?.rows || [cita]) await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(member, {
             reason: 'appointment_rescheduled_cancelled_previous_active_flow',
         });
@@ -3558,11 +3571,11 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
         console.error('⚠️ [reagendarCita] Error disparando automation v2:', automationErr.message);
     }
 
-    await completeAppointmentAutomationReviews(citaId, cita.estado).catch((error) => {
+    if (scheduleChanged) await completeAppointmentAutomationReviews(citaId, cita.estado).catch((error) => {
         console.warn('[reagendarCita] No se pudo cerrar la revisión de automatización:', error.message || error);
     });
 
-    if (rescheduleReason !== 'administrative_error') {
+    if (scheduleChanged && rescheduleReason !== 'administrative_error') {
         await ensureConsentPackageAndAutomation(cita, req, 'appointment_rescheduled');
     }
 

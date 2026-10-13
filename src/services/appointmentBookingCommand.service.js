@@ -257,6 +257,9 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       values.estado = require('../lib/appointment-reschedule-reason').statusForReschedule(
         appointmentValues.reschedule_reason, appointmentValues.estado, previous.estado);
     }
+    if (existing && !stateOnly && !supportOnly && Object.hasOwn(appointmentValues, 'inicio') && Object.hasOwn(appointmentValues, 'fin')) {
+      Object.assign(values, require('../lib/appointment-reschedule-reason').preserveUnchangedReservation(previous, values));
+    }
     if (administrativeRestore && (!existing || previous.estado !== 'cancelada' || stateOnly || supportOnly || force
       || trustedProgramSession || trustedProgramSeries || durationSelection !== undefined || additionalStaffIds !== undefined
       || Object.keys(appointmentValues).some(key => !['estado', 'updated_by'].includes(key))

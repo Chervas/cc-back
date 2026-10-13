@@ -178,6 +178,7 @@ async function mutateTogether(db, selectedId, changes, options, restoring = fals
       || row.care_started_at || row.care_completed_at || hasAttendedAppointment(row)
       : !eligible(row))) fail('appointment_link_closed', 'No se ha cambiado ninguna cita: revisa las citas iniciadas o cerradas de la unión.');
     const selected = group.rows.find(row => Number(row.id_cita) === Number(selectedId));
+    const previousSchedule = { inicio: selected.inicio, fin: selected.fin, estado: selected.estado };
     const delta = restoring ? 0 : +new Date(changes.inicio) - +new Date(selected.inicio);
     if (!Number.isFinite(delta) || !restoring && +new Date(changes.fin) - +new Date(changes.inicio) !== +new Date(selected.fin) - +new Date(selected.inicio)) fail('appointment_link_duration_locked', 'Mueve la unión conservando la duración de sus citas. Para cambiarla, desvincula primero.');
     const clinic = await db.Clinica.findByPk(group.link.clinic_id, { transaction });
@@ -317,10 +318,12 @@ async function mutateTogether(db, selectedId, changes, options, restoring = fals
       result.push(updated); moved.add(Number(row.id_cita));
       if (!restoring) await require('./appointmentActivity.service').recordAppointmentStatusChange({ appointment: updated, previousStatus: row.estado,
         newStatus: updated.estado, actorUserId: changes.updated_by, source: 'agenda', recordUnchanged: true,
-        metadata: { action: 'linked_appointments_rescheduled', appointment_link_id: group.link.id }, transaction });
+        metadata: { action: delta === 0 ? 'linked_appointment_resources_updated' : 'linked_appointments_rescheduled',
+          appointment_link_id: group.link.id }, transaction });
     }
     await group.link.update({ revision: group.link.revision + 1 }, { transaction });
-    return { ownerId: Number(group.link.owner_appointment_id), selected: result.find(row => Number(row.id_cita) === Number(selectedId)), rows: result };
+    return { ownerId: Number(group.link.owner_appointment_id), selected: result.find(row => Number(row.id_cita) === Number(selectedId)),
+      rows: result, previousSchedule };
   };
   return options.transaction ? execute(options.transaction) : db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, execute);
 }
