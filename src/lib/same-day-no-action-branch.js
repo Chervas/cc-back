@@ -1,5 +1,6 @@
 'use strict';
 
+const { isDeepStrictEqual } = require('node:util');
 const { AUTO_APPLY_CONFIDENCE_THRESHOLD } = require('./automation-intent-contract');
 const FAMILY_KEY = 'recordatorio_mismo_d_a_sabes_llegar';
 const BRANCH_ID = 'branch_no_action';
@@ -40,7 +41,7 @@ function addSameDayNoActionBranch(source) {
     position: { x: 1700, y: 1440 } };
   const existing = comparator.config.branch_rules.find(n => n.id === BRANCH_ID);
   if (existing) {
-    if (JSON.stringify(existing) !== JSON.stringify(branch)
+    if (!isDeepStrictEqual(existing, branch)
       || comparator.outputs?.[BRANCH_ID] !== END_ID
       || nodes.find(n => n.id === END_ID)?.config?.migration_key !== EXIT_KEY) {
       throw Error('same_day_no_action_existing_branch_changed');

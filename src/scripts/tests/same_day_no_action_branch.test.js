@@ -26,6 +26,9 @@ test('adds only one comparator branch and a silent end, without altering input, 
   assert.equal(nodes[1].outputs[BRANCH_ID], 'N75');
   assert.equal(nodes[3].type, 'control/end');
   assert.deepEqual(addSameDayNoActionBranch({ ...original, nodes }), nodes);
+  const reordered = value => Array.isArray(value) ? value.map(reordered)
+    : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, reordered(item)])) : value;
+  assert.deepEqual(addSameDayNoActionBranch({ ...original, nodes: reordered(nodes) }), nodes);
 });
 
 test('cannot alter another family or a damaged/conflicting graph', () => {

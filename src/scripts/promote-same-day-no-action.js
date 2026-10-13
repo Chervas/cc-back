@@ -5,7 +5,9 @@ const { createHash } = require('node:crypto');
 const assert = require('node:assert/strict');
 const { FAMILY_KEY, addSameDayNoActionBranch, isSameDayDirectionsTemplate } = require('../lib/same-day-no-action-branch');
 const CATALOG_NAME = 'recordatorio_mismo_dia_a_las_8_sabes_llegar';
-const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const hash = value => createHash('sha256').update(JSON.stringify(value, (_key, item) =>
+  item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)).digest('hex');
 const parse = value => typeof value === 'string' ? JSON.parse(value) : value;
 
 async function inspect(db) {
@@ -43,11 +45,11 @@ async function promote(db, expected, { apply = false, actorUserId = 1 } = {}) {
   if (hash(before.source.nodes) !== hash(before.nodes)) {
     await db.sequelize.transaction(async transaction => {
       const currentCatalog = await db.AutomationFlowCatalog.findByPk(before.catalog.id,
-        { transaction, lock: transaction.LOCK.UPDATE });
+        { transaction, lock: transaction.LOCK.UPDATE, raw: true });
       const current = await db.AutomationFlowTemplateV2.findByPk(before.source.id,
-        { transaction, lock: transaction.LOCK.UPDATE });
-      assert.equal(hash(current.toJSON()), hash(before.source), 'same_day_source_changed');
-      assert.equal(hash(currentCatalog.toJSON()), hash(before.catalog), 'same_day_catalog_changed');
+        { transaction, lock: transaction.LOCK.UPDATE, raw: true });
+      assert.equal(hash(current), hash(before.source), 'same_day_source_changed');
+      assert.equal(hash(currentCatalog), hash(before.catalog), 'same_day_catalog_changed');
       const { id, ...payload } = before.source;
       const version = await db.AutomationFlowTemplateV2.max('version',
         { where: { public_id: before.source.public_id }, transaction });
@@ -55,8 +57,8 @@ async function promote(db, expected, { apply = false, actorUserId = 1 } = {}) {
       promoted = (await db.AutomationFlowTemplateV2.create({ ...payload, nodes: before.nodes,
         version: Number(version) + 1, published_at: now, published_by: actorUserId,
         created_by: actorUserId, created_at: now, updated_at: now }, { transaction })).toJSON();
-      await current.update({ is_active: false }, { transaction });
-      await currentCatalog.update({ template_version: promoted.version }, { transaction });
+      await db.AutomationFlowTemplateV2.update({ is_active: false }, { where: { id: current.id }, transaction });
+      await db.AutomationFlowCatalog.update({ template_version: promoted.version }, { where: { id: currentCatalog.id }, transaction });
     });
   }
   const defaults = require('../services/automationDefaults.service');
