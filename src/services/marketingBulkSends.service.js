@@ -2406,8 +2406,62 @@ function buildGoogleRatingTargets(totalReviews, ratingSum, averageRating) {
 }
 
 function isReviewRequestList(list) {
-  const criteria = list?.criteria || {};
-  return criteria.review_request === true || isReviewTemplateUsage(criteria.template_usage);
+  const criteria = asPlainObject(list?.criteria);
+  const flag = criteria.review_request;
+  return flag === true || flag === 1 || ['true', '1'].includes(String(flag || '').toLowerCase())
+    || isReviewTemplateUsage(criteria.template_usage)
+    || [criteria.dispatch, criteria.dispatch_config].some(value => {
+      const dispatch = asPlainObject(value);
+      return ['review_request', 'reviews', 'solicitud_resena', 'resenas'].includes(normalizeKey(dispatch.context || dispatch.dispatch_context));
+    });
+}
+
+/** Reseñas are a non-operational clinic purpose, regardless of channel or patient origin.
+ * Re-read persisted recipient/list scope: a group sender or caller clinic is not
+ * authority to release another clinic's recipient. No patient or clinical DML. */
+async function assertReviewRequestCommunicationAllowed({ list, item = null, conversation = null,
+  forceReview = false, templateName = null, channel = null, deliveryClinicId = null } = {}) {
+  const eligibility = require('../lib/whatsappAppointmentEligibility');
+  const storedList = list?.id ? await MarketingPatientList.findByPk(list.id, {
+    attributes: ['id', 'criteria', 'scope_type', 'clinica_id', 'clinic_ids', 'grupo_clinica_id'],
+  }) : null;
+  const review = forceReview || isReviewRequestList(storedList) || isReviewRequestList(list)
+    || eligibility.nonOperationalClinicCommunication({ templateName }) === true;
+  if (!review) return { review: false, clinicId: null };
+  const deniedScope = () => { throw Object.assign(new Error('review_communication_scope_unverified'), {
+    code: 'review_communication_scope_unverified', reason: 'review_communication_scope_unverified',
+    retryable: false, statusCode: 403, status: 403,
+  }); };
+  if (!storedList) deniedScope();
+  const bound = item?.id ? await MarketingPatientListItem.findOne({
+    where: { id: item.id, list_id: storedList.id }, attributes: ['id', 'list_id', 'clinica_id'],
+  }) : null;
+  if (item?.id && !bound) deniedScope();
+  const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
+  const listIds = [...new Set([storedList.clinica_id, ...(Array.isArray(storedList.clinic_ids) ? storedList.clinic_ids : [])]
+    .map(positive).filter(Boolean))];
+  const multi = ['group', 'multi'].includes(String(storedList.scope_type || '').toLowerCase()) || listIds.length > 1;
+  const clinicId = positive(bound?.clinica_id) || (!multi && listIds.length === 1 ? listIds[0] : null);
+  const assertClinic = id => eligibility.assertClinicNonOperationalAllowed(id, {
+    metadata: { communication_purpose: 'review_request', channel },
+  });
+  // Check all certain actual bindings before rejecting an ambiguous scope.
+  // Never choose the group's first clinic when the recipient has none.
+  if (clinicId) assertClinic(clinicId);
+  if (!multi && positive(storedList.clinica_id)) assertClinic(Number(storedList.clinica_id));
+  if (!clinicId || multi && !positive(bound?.clinica_id)
+    || listIds.length && !listIds.includes(clinicId)) deniedScope();
+  if (deliveryClinicId != null) {
+    assertClinic(Number(deliveryClinicId));
+    if (positive(deliveryClinicId) !== clinicId) deniedScope();
+  }
+  if (conversation?.id) {
+    const current = await Conversation.findByPk(conversation.id, { attributes: ['id', 'clinic_id'] });
+    if (!current) deniedScope();
+    assertClinic(Number(current.clinic_id));
+    if (Number(current.clinic_id) !== clinicId) deniedScope();
+  }
+  return { review: true, clinicId };
 }
 
 function getWhatsappRoutingPurposeForList(list) {
@@ -2800,6 +2854,7 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
   if (!isReviewRequestList(list) || triggerMetadata.kind !== 'review_private_feedback_request') {
     return { sent: false, reason: 'not_private_feedback_reply' };
   }
+  const allowedScope = await assertReviewRequestCommunicationAllowed({ list, item, conversation, forceReview: true, channel: 'whatsapp' });
 
   const isTestSend = isBulkSendTestMessage(triggerMessage);
   const ackEventType = isTestSend ? 'review_test_private_feedback_ack_sent' : 'review_private_feedback_ack_sent';
@@ -2818,7 +2873,7 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
   const recipient = whatsappService.normalizePhoneNumber(triggerMetadata.recipient || item.phone || '');
   if (!recipient) return { sent: false, reason: 'missing_recipient' };
 
-  const clinicId = Number(item.clinica_id || list.clinica_id || conversation?.clinic_id || 0) || null;
+  const clinicId = allowedScope.clinicId;
   const body = buildReviewPrivateFeedbackAckText(item);
   if (!isWithinWhatsappSessionWindow(occurredAt)) {
     await MarketingPatientContactEvent.create({
@@ -2846,6 +2901,7 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
   let clinicConfig = null;
 
   try {
+    await assertReviewRequestCommunicationAllowed({ list, item, conversation, forceReview: true, channel: 'whatsapp' });
     clinicConfig = await whatsappService.getClinicConfig(clinicId, {
       purpose: getWhatsappRoutingPurposeForList(list),
     });
@@ -3018,6 +3074,8 @@ async function sendReviewRatingFollowUpOrStoreInlineFeedback({ list, item, conve
 
 async function sendReviewRatingFollowUp({ list, item, conversation, rating, clinicId, triggerMessage, occurredAt }) {
   if (!isReviewRequestList(list) || !rating) return { sent: false, reason: 'not_review_rating' };
+  const allowedScope = await assertReviewRequestCommunicationAllowed({ list, item, conversation, forceReview: true, channel: 'whatsapp' });
+  clinicId = allowedScope.clinicId;
 
   const triggerMetadata = asPlainObject(triggerMessage?.metadata);
   const isTestSend = isBulkSendTestMessage(triggerMessage);
@@ -3112,6 +3170,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   let errorPayload = null;
 
   try {
+    await assertReviewRequestCommunicationAllowed({ list, item, conversation, forceReview: true, channel: 'whatsapp' });
     const clinicConfig = await whatsappService.getClinicConfig(clinicId, {
       purpose: getWhatsappRoutingPurposeForList(list),
     });
@@ -5741,6 +5800,14 @@ async function createAndStartReviewRequestForAppointment(options = {}) {
   if (!appointmentId || !clinicId) {
     return { success: true, sent: false, skipped: true, reason: 'appointment_or_clinic_missing' };
   }
+  const actualAppointment = await CitaPaciente.findByPk(appointmentId, { attributes: ['id_cita', 'clinica_id'] });
+  if (!actualAppointment) return { success: true, sent: false, skipped: true, reason: 'appointment_not_found' };
+  require('../lib/whatsappAppointmentEligibility').assertClinicNonOperationalAllowed(Number(actualAppointment.clinica_id), {
+    metadata: { communication_purpose: 'review_request' },
+  });
+  if (Number(actualAppointment.clinica_id) !== clinicId) {
+    return { success: true, sent: false, skipped: true, reason: 'appointment_clinic_mismatch' };
+  }
 
   const scope = {
     scope: 'clinic',
@@ -5897,6 +5964,7 @@ async function sendReviewRequestReminder(options = {}) {
   if (!list || !item) {
     return { success: true, sent: false, skipped: true, reason: 'review_request_not_found' };
   }
+  await assertReviewRequestCommunicationAllowed({ list, item, forceReview: true, channel: 'whatsapp' });
   if (item.replied_at || String(item.dispatch_status || '').toLowerCase() === 'replied') {
     return { success: true, sent: false, skipped: true, reason: 'already_replied', list_id: listId, item_id: itemId };
   }
@@ -8462,11 +8530,20 @@ async function sendTest(scope, campaignId, body = {}) {
     throw err;
   }
   const initialPlainItem = item?.get ? item.get({ plain: true }) : item;
+  const allowedReviewScope = await assertReviewRequestCommunicationAllowed({ list, item, templateName: template.name, channel: 'whatsapp' });
   const clinicId = Number(body.clinic_id || body.clinica_id || initialPlainItem?.clinica_id || getClinicIdForList(list, scope) || 0);
   if (!clinicId) {
     const err = new Error('La campaña necesita una clínica concreta para enviar WhatsApp.');
     err.status = 400;
     throw err;
+  }
+  if (allowedReviewScope.review) {
+    require('../lib/whatsappAppointmentEligibility').assertClinicNonOperationalAllowed(clinicId, {
+      metadata: { communication_purpose: 'review_request' },
+    });
+    if (clinicId !== allowedReviewScope.clinicId) {
+      throw Object.assign(new Error('review_communication_scope_unverified'), { code: 'review_communication_scope_unverified', retryable: false, status: 403 });
+    }
   }
   if (isReviewTemplateUsage(templateUsage)) {
     item = await getOrCreateReviewTestSampleItem(list, clinicId, listCriteria);
@@ -9629,6 +9706,8 @@ async function sendDispatchItem({
   eventType = 'mass_campaign_message_sent',
   connectionSource = 'mass_campaign_dispatch',
 }) {
+  await assertReviewRequestCommunicationAllowed({ list, item, templateName: template?.name, channel: 'whatsapp',
+    deliveryClinicId: clinicConfig?.clinicId || getClinicIdForList(list) });
   const plainItem = item.get ? item.get({ plain: true }) : item;
   const dispatch = getDispatchConfig(list);
   const dispatchContext = normalizeDispatchContext(dispatchContextOverride || dispatch.context);
@@ -9691,6 +9770,7 @@ async function sendDispatchItem({
   emitQuickChatMessageCreated(conversation, appMessage);
 
   try {
+    await assertReviewRequestCommunicationAllowed({ list, item, conversation, templateName: template?.name, channel: 'whatsapp' });
     const response = await whatsappService.sendMessage({
       to: item.phone,
       useTemplate: true,
@@ -10934,6 +11014,7 @@ async function removeCampaign(scope, campaignId, userId = null) {
 }
 
 module.exports = {
+  assertReviewRequestCommunicationAllowed,
   deferredDispatchAllowedAt,
   listCampaigns,
   createCampaign,
@@ -10965,6 +11046,10 @@ module.exports = {
   removeCampaign,
   reconcileDispatchJobState,
   __testing: {
+    isReviewRequestList,
+    sendDispatchItem,
+    sendReviewPrivateFeedbackAcknowledgement,
+    sendReviewRatingFollowUp,
     buildWhatsappSenderSnapshot,
     getRequestedWhatsappSenderOriginId,
     resolveWhatsappTemplateForClinic,

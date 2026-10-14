@@ -30,11 +30,68 @@ function protectedCommunication({ templateName, metadata, payload } = {}) {
     m.communication_scope, m.communicationScope, m.communication_purpose, m.template_usage,
     payload?.communication_scope, payload?.template?.category, m.template_category].some(protectedPurpose);
 }
+function nonOperationalClinicCommunication({ templateName, metadata, payload } = {}) {
+  const m = object(metadata);
+  const purpose = value => typeof value === 'string'
+    && /consent|resena|(?:^|[^a-z])review[a-z]*(?:$|[^a-z])/.test(value.replace(/([a-z])([A-Z])/g, '$1_$2')
+      .toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
+  // These two clinics have not enabled consent/review communication yet.
+  // Inspect both the actual outbound payload and the stored purpose, including
+  // text follow-ups from the review workflow; a care label cannot erase either.
+  if ([templateName, payload?.template?.name, m.template_name, m.fallback_template_name,
+    m.communication_scope, m.communicationScope, m.communication_purpose, m.communicationPurpose,
+    m.template_usage, m.kind, m.source, m.dispatch_context, m.purpose,
+    payload?.communication_scope, payload?.communicationScope, payload?.communication_purpose,
+    payload?.communicationPurpose, payload?.purpose, payload?.template_usage].some(purpose)) return true;
+  // Actual rendered outbound links remain protected even when a custom email
+  // template or a manual message has a generic name and no purpose metadata.
+  const content = [];
+  const collect = (value, depth = 0) => {
+    if (depth > 12 || content.length > 10000) return;
+    if (typeof value === 'string') content.push(value);
+    else if (Array.isArray(value)) value.forEach(item => collect(item, depth + 1));
+    else if (value && typeof value === 'object') Object.values(value).forEach(item => collect(item, depth + 1));
+  };
+  for (const value of [payload?.text, payload?.html, payload?.document, payload?.interactive, payload?.template?.components]) collect(value);
+  if (content.some(value => (value.match(/https?:\/\/[^\s<>"']+/gi) || []).some(link => {
+    try {
+      const url = new URL(link.replace(/[),.;]+$/, '')), path = decodeURIComponent(url.pathname);
+      return /^\/tablet\/consentimientos\/[^/]+\/?$/.test(path)
+        || /^\/(?:api\/)?consentimientos\/documents\/[1-9]\d*\/pdf\/?$/.test(path)
+        || url.hostname === 'g.page' && /^\/r\/[^/]+\/review\/?$/.test(path)
+        || /^(?:search\.)?google\.[a-z.]+$/.test(url.hostname) && path === '/local/writereview';
+    } catch (_) { return false; }
+  }))) return true;
+  // Generic package_id/document_id can represent other clinical documents.
+  // Only consent/review-specific identifiers establish this protected purpose.
+  const identifiers = ['consent_request_id', 'consent_package_id', 'consent_document_id',
+    'patient_consent_document_id', 'consent_package_public_id', 'review_request_id', 'review_list_id'];
+  return [m, object(payload?.metadata)].some(fields => identifiers.some(key => {
+    const value = fields[key];
+    return typeof value === 'number' ? Number.isSafeInteger(value) && value > 0
+      : typeof value === 'string' && !!value.trim() && value.trim() !== '0';
+  })) || m.review_request === true || payload?.review_request === true;
+}
+function assertClinicCommunicationAllowed(clinicId, communication, execution = null) {
+  // Never use a message-provided clinic_id: the caller supplies the actual
+  // conversation's clinic (or the independently checked appointment scope).
+  if ([66, 72].includes(Number(clinicId)) && (execution?.trigger_type === 'consent_required'
+    || nonOperationalClinicCommunication(communication))) fail('whatsapp_appointment_nonoperational_clinic_held');
+}
+function assertClinicNonOperationalAllowed(clinicId, { execution = null, ...communication } = {}) {
+  try { assertClinicCommunicationAllowed(clinicId, communication, execution); }
+  catch (error) {
+    if (error.code === 'whatsapp_appointment_nonoperational_clinic_held') error.statusCode = 403;
+    throw error;
+  }
+  return true;
+}
 function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, patientId, templateName,
   messageMetadata = null, payload = null, confirmationTimeout = false, patientHoldOverride = false, now = Date.now() }) {
   require('./appointment-synthetic-guard').assertNoSyntheticDispatch(a, e);
   if (!a || Number(a.id_cita) !== Number(e.trigger_entity_id) || Number(a.clinica_id) !== Number(clinicId)
     || patientId && Number(a.paciente_id) !== Number(patientId)) fail('whatsapp_appointment_scope_changed');
+  assertClinicCommunicationAllowed(clinicId, { templateName, metadata: messageMetadata, payload }, e);
   if (!require('./appointment-care').allowsAppointmentAutomation(a, e.trigger_type)) fail('whatsapp_appointment_care_stage_ineligible');
   const appointmentProtected = !!(a.source_system || a.source_reference || importHeld(a.import_metadata));
   if ((appointmentProtected || patientHoldOverride) && (e.trigger_type === 'consent_required'
@@ -92,6 +149,10 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
   const { assertNoSyntheticDispatch } = require('./appointment-synthetic-guard');
   assertNoSyntheticDispatch(message, conversation);
   const m = object(message.metadata), executionId = Number(m.execution_id);
+  // This applies to native/new patients, manual sends and already queued jobs,
+  // not only automation or importer HOLD exceptions. Keep it before the manual
+  // fast path. Marketing retains its existing independent policy.
+  assertClinicCommunicationAllowed(conversation?.clinic_id, { metadata: m, payload });
   const automated = Number.isSafeInteger(executionId) && executionId > 0 || !!m.communication_scope;
   if (!automated) return true;
   const patientId = Number(m.recipient_patient_id || conversation.patient_id) || null;
@@ -103,6 +164,7 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
   const execution = await loadExecution(executionId);
   assertNoSyntheticDispatch(execution);
   if (!execution || Number(execution.clinic_id) !== Number(conversation.clinic_id)) fail('whatsapp_automation_scope_changed');
+  assertClinicCommunicationAllowed(conversation.clinic_id, { metadata: m, payload }, execution);
   if (execution.trigger_entity_type !== 'appointment') {
     if (held) fail('whatsapp_patient_import_held');
     return true;
@@ -147,4 +209,5 @@ async function patientImportHeld(patientId, db = require('../../models')) {
   const [rows] = await db.sequelize.query("SELECT 1 AS held FROM PatientCustomFields WHERE paciente_id=:patientId AND source='cliniccloud' AND JSON_VALID(value) AND (JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(value),value,'{}'),'$.import.automation_policy'))='hold' OR JSON_EXTRACT(IF(JSON_VALID(value),value,'{}'),'$.import.messages_enabled')=CAST('false' AS JSON)) LIMIT 1", { replacements: { patientId } });
   return rows.length > 0;
 }
-module.exports = { object, day, importHeld, protectedCommunication, assertAppointmentEligibility, assertAutomatedMessageEligibility, patientImportHeld };
+module.exports = { object, day, importHeld, protectedCommunication, nonOperationalClinicCommunication,
+  assertClinicNonOperationalAllowed, assertAppointmentEligibility, assertAutomatedMessageEligibility, patientImportHeld };

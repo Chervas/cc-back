@@ -22,6 +22,63 @@ function fail(code, status, message) {
   throw error;
 }
 
+// Shared purpose gate derives the recipient's clinic from persisted campaign
+// records, not the caller's group sender. Lazy require avoids the existing
+// bulk-sends/email service dependency cycle.
+async function assertReviewAllowed(list, item, forceReview = false) {
+  return require('./marketingBulkSends.service').assertReviewRequestCommunicationAllowed({
+    list, item, forceReview, channel: 'email',
+  });
+}
+function denyUnverifiedReviewScope(message) {
+  throw Object.assign(new Error(message || 'review_communication_scope_unverified'), {
+    code: 'review_communication_scope_unverified', reason: 'review_communication_scope_unverified',
+    status: 403, statusCode: 403, retryable: false,
+  });
+}
+
+/** Called again at the actual email transport boundary, including old queued
+ * messages which predate explicit purpose metadata. This is read-only. */
+async function assertEmailReviewCanDispatch(message) {
+  const current = message?.id ? await db.EmailMessage.findByPk(message.id, {
+    attributes: ['id', 'clinica_id', 'stream', 'template_key', 'related_type', 'related_id', 'metadata'],
+  }) : null;
+  if (!current) fail('email_outbox_no_longer_available', 409, 'El mensaje de email ya no está disponible.');
+  const metadata = current.metadata && typeof current.metadata === 'object' ? current.metadata : {};
+  const eligibility = require('../lib/whatsappAppointmentEligibility');
+  const communication = { metadata, templateName: current.template_key };
+  const explicitReview = eligibility.nonOperationalClinicCommunication(communication);
+  if (explicitReview) eligibility.assertClinicNonOperationalAllowed(Number(current.clinica_id), communication);
+  const relatedCampaign = ['marketing_bulk_send', 'marketing_bulk_send_test'].includes(current.related_type);
+  // Other domains may legitimately use a list_id; it is not campaign authority
+  // without the actual marketing stream/relation. Purpose-only review emails
+  // have already passed the clinic-wide gate above.
+  if (!relatedCampaign && current.stream !== 'marketing') return true;
+  const relatedIds = relatedCampaign ? /^(\d+):(\d+)$/.exec(String(current.related_id || '')) : null;
+  const listId = Number(relatedIds?.[1] || metadata.list_id || 0);
+  if (!listId) {
+    if (relatedCampaign) denyUnverifiedReviewScope('El email de campaña no conserva su lista de destinatarios.');
+    return true;
+  }
+  const itemId = Number((current.related_type === 'marketing_bulk_send' ? relatedIds?.[2] : 0) || metadata.item_id || 0);
+  const list = await db.MarketingPatientList.findByPk(listId);
+  const item = itemId ? await db.MarketingPatientListItem.findOne({ where: { id: itemId, list_id: listId } }) : null;
+  // A deleted campaign/recipient cannot turn an unclassifiable old outbox into
+  // ordinary marketing permission, including old campaign test messages.
+  if (!list || itemId && !item) denyUnverifiedReviewScope('El email de campaña no conserva su lista o destinatario verificados.');
+  const decision = await assertReviewAllowed(list, item, explicitReview);
+  if (decision.review) {
+    eligibility.assertClinicNonOperationalAllowed(Number(current.clinica_id), {
+      metadata: { communication_purpose: 'review_request' },
+    });
+    if (Number(current.clinica_id) !== decision.clinicId || metadata.list_id && Number(metadata.list_id) !== listId
+      || current.related_type === 'marketing_bulk_send' && metadata.item_id && Number(metadata.item_id) !== itemId) {
+      denyUnverifiedReviewScope('La clínica de la solicitud de reseña no coincide con su destinatario.');
+    }
+  }
+  return true;
+}
+
 function plain(value) {
   return value?.get ? value.get({ plain: true }) : value;
 }
@@ -267,6 +324,7 @@ function assertTemplateVariables(template, variables, list) {
 }
 
 async function queueItem({ list, item, sender, template, scopeKey }) {
+  const reviewScope = await assertReviewAllowed(list, item);
   if (list.scope_type === 'group' && !item.clinica_id) {
     fail('marketing_email_recipient_clinic_missing', 409, 'El contacto no está asignado a una clínica del grupo.');
   }
@@ -312,6 +370,7 @@ async function queueItem({ list, item, sender, template, scopeKey }) {
       show_clinicaclick_branding: template.design?.show_clinicaclick_branding !== false,
     },
     metadata: {
+      ...(reviewScope.review ? { communication_purpose: 'review_request' } : {}),
       list_id: list.id,
       item_id: item.id,
       grupo_clinica_id: list.grupo_clinica_id || null,
@@ -416,6 +475,7 @@ async function sendTest(list, body = {}) {
     ? await db.MarketingPatientListItem.findOne({ where: { id: body.item_id, list_id: list.id } })
     : await db.MarketingPatientListItem.findOne({ where: { list_id: list.id, status: 'ready', selected: true }, order: [['id', 'ASC']] });
   if (!item) fail('marketing_email_test_item_missing', 409, 'La campaña necesita un contacto de ejemplo para completar variables.');
+  const reviewScope = await assertReviewAllowed(list, item);
   const clinic = item.clinica_id ? await db.Clinica.findByPk(item.clinica_id) : (list.clinica_id ? await db.Clinica.findByPk(list.clinica_id) : null);
   const variables = templateContext({ list, item, clinic });
   assertTemplateVariables(template, variables, list);
@@ -438,6 +498,7 @@ async function sendTest(list, body = {}) {
       show_clinicaclick_branding: template.design?.show_clinicaclick_branding !== false,
     },
     metadata: {
+      ...(reviewScope.review ? { communication_purpose: 'review_request' } : {}),
       list_id: list.id,
       item_id: item.id,
       grupo_clinica_id: list.grupo_clinica_id || null,
@@ -516,6 +577,7 @@ async function reconcileEmailDispatchCompletion(listId, { transaction = null } =
 }
 
 module.exports = {
+  assertEmailReviewCanDispatch,
   JOB_TYPE,
   assertReady,
   enqueueDispatch,

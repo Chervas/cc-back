@@ -39,7 +39,10 @@ function source() {
   const files = ['migrations/' + NAME, 'models/appointmentremindersequence.js',
     'src/lib/appointment-reminder-sequence.js', 'src/services/appointmentReminderSequence.service.js',
     'src/services/appointmentAutomationV2Runtime.service.js', 'src/lib/whatsappImportedAppointmentOperations.js',
-    'src/lib/whatsappAppointmentEligibility.js', 'src/scripts/appointment-reminder-sequence-release.js'];
+    'src/lib/whatsappAppointmentEligibility.js', 'src/services/whatsapp.service.js',
+    'src/services/consentimientos.service.js', 'src/services/marketingBulkSends.service.js',
+    'src/services/marketingEmailDispatch.service.js', 'src/services/emailDelivery.service.js',
+    'src/services/emailProvider.service.js', 'src/scripts/appointment-reminder-sequence-release.js'];
   const pins = Object.fromEntries(files.map(file => [file, hash(readBytes(path.join(ROOT, file)))]));
   if (pins['migrations/' + NAME] !== MIGRATION_SHA256) fail('REVIEWED_MIGRATION_CHANGED');
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();

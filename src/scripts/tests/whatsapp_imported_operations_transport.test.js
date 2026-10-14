@@ -235,7 +235,8 @@ test('native patient-HOLD cancellation acknowledgement needs its narrowly verifi
     { type: 'template', template: { name: 'clinicaclick_consent_required' } },
     { type: 'template', template: { name: 'clinicaclick_review' } }]) {
     await assert.rejects(f.eligibility.assertAutomatedMessageEligibility({ ...f.transport, payload,
-      loadNativeReplyAcknowledgement: callback }), { code: 'whatsapp_patient_import_held' });
+      loadNativeReplyAcknowledgement: callback }), { code: payload.template.name.includes('recordatorio')
+        ? 'whatsapp_patient_import_held' : 'whatsapp_appointment_nonoperational_clinic_held' });
   }
   assert.equal(calls, 1);
 });
@@ -289,12 +290,14 @@ test('operational reminder authorization never releases consent/review/marketing
       const f = sameDayFixture({ native, sameDayAllowed });
       f.transport.message.metadata.communication_scope = 'care';
       f.transport.payload.template.name = name;
-      await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: 'whatsapp_patient_import_held' });
+      const reason = name.includes('marketing') ? 'whatsapp_patient_import_held' : 'whatsapp_appointment_nonoperational_clinic_held';
+      await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: reason });
       f.input.templateName = name;
       assert.throws(() => f.eligibility.assertAppointmentEligibility({ ...f.input, patientHoldOverride: true }),
-        { code: 'whatsapp_patient_import_held' });
+        { code: reason });
       if (!native) await assert.rejects(f.eligibility.assertAutomatedMessageEligibility({ ...f.transport,
-        patientHeld: async () => false }), { code: 'whatsapp_appointment_import_held' });
+        patientHeld: async () => false }), { code: name.includes('marketing')
+          ? 'whatsapp_appointment_import_held' : 'whatsapp_appointment_nonoperational_clinic_held' });
     }
   }
 });
@@ -308,21 +311,27 @@ test('protected purpose denials inspect both actual payload and persisted metada
       const f = sameDayFixture({ native });
       Object.assign(f.transport.message.metadata, metadata);
       f.transport.payload = { type: 'text', text: { body: 'ACK de prueba' } };
-      await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: 'whatsapp_patient_import_held' });
+      await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: metadata.template_category
+        ? 'whatsapp_patient_import_held' : 'whatsapp_appointment_nonoperational_clinic_held' });
     }
     const f = sameDayFixture({ native }); f.transport.message.metadata.template_name = 'clinicaclick_confirmacion_cita';
     f.transport.payload = { type: 'template', template: { name: 'clinicaclick_consentimiento_estetica_v1' } };
-    await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: 'whatsapp_patient_import_held' });
+    await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: 'whatsapp_appointment_nonoperational_clinic_held' });
     f.transport.payload = { type: 'text', text: { body: 'Respuesta operativa' } };
     f.execution.trigger_type = 'consent_required';
-    await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: 'whatsapp_patient_import_held' });
+    await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: 'whatsapp_appointment_nonoperational_clinic_held' });
   }
 });
 
-test('the operational hold hotfix leaves independent unheld-native consent workflow eligibility unchanged', async () => {
+test('BS consent/review prohibition also covers independent unheld-native consent workflows', async () => {
   const f = sameDayFixture({ native: true }); f.execution.trigger_type = 'consent_required';
   f.transport.payload = { type: 'template', template: { name: 'clinicaclick_consentimiento_estetica_v1' } };
-  assert.equal(await f.eligibility.assertAutomatedMessageEligibility({ ...f.transport, patientHeld: async () => false }), true);
+  await assert.rejects(f.eligibility.assertAutomatedMessageEligibility({ ...f.transport, patientHeld: async () => false }),
+    { code: 'whatsapp_appointment_nonoperational_clinic_held' });
+  f.appointment.clinica_id = 99; f.execution.clinic_id = 99; f.execution.context.appointment.clinica_id = 99;
+  f.transport.conversation.clinic_id = 99;
+  assert.equal(await f.eligibility.assertAutomatedMessageEligibility({ ...f.transport, patientHeld: async () => false }), true,
+    'the new global veto does not release or block another clinic independently');
 });
 test('the appointment exception does not release marketing, unknown entities or a patient globally', async () => {
   const f = fixture(); f.execution.trigger_entity_type = 'entity';

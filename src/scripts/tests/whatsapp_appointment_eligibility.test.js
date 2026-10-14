@@ -100,3 +100,68 @@ test('final timeout transport uses scoped reception readiness and still blocks p
  assert.equal(await dispatch({...input,getReceptionState:async()=>({healthy:true,readyForTimeout:true})}),true);
  await assert.rejects(dispatch({...input,getReceptionState:async()=>({healthy:true,readyForTimeout:false})}),{code:'whatsapp_inbox_reception_delayed'});
 });
+
+test('BS Medical and Capilar block manual and existing queued consent/review sends before any automation fast path', async () => {
+  for (const clinic_id of [66, 72]) for (const name of ['clinicaclick_consentimiento_estetica_v1',
+    'clinicaclick_solicitud_resena_v1', 'clinicaclick_solicitud_reseña_v1', 'clinicaclick_review_request_v1']) {
+    for (const status of ['pending', 'failed']) {
+      await assert.rejects(dispatch({ message: { id: 100, direction: 'outbound', status, metadata: {} },
+        conversation: { clinic_id, patient_id: null }, payload: { type: 'template', template: { name } },
+        patientHeld: async () => { throw Error('patient_hold_should_not_be_needed'); } }), error =>
+        error.code === 'whatsapp_appointment_nonoperational_clinic_held' && error.retryable === false
+          && error.details.reason_code === 'whatsapp_appointment_nonoperational_clinic_held');
+    }
+  }
+  assert.deepEqual(require('../../lib/whatsapp-failure-diagnostic').diagnosticMetadata({
+    code: 'whatsapp_appointment_nonoperational_clinic_held' }),
+  { technical_failure_reason_code: 'whatsapp_appointment_nonoperational_clinic_held' });
+});
+
+test('the clinic veto recognizes actual/persisted purposes, review text followups and specific consent/document IDs', async () => {
+  const purposes = [{ template_name: 'custom_consent_link' }, { fallback_template_name: 'custom_review_request' },
+    { communication_scope: 'clinical_consent' }, { communicationScope: 'customer-review_requests' },
+    { communication_purpose: 'CUSTOM_CONSENT_scope' }, { communicationPurpose: 'reviewRequest' },
+    { template_usage: 'solicitud_resena' }, { kind: 'review_private_feedback_ack' },
+    { dispatch_context: 'review_request' }, { consent_request_id: 4 }, { consent_package_id: '5' },
+    { consent_document_id: 6 }, { patient_consent_document_id: 'document-uuid' },
+    { consent_package_public_id: 'package-uuid' }, { review_request_id: 8 }, { review_list_id: 9 },
+    { review_request: true }];
+  for (const clinic_id of [66, 72]) for (const metadata of purposes) {
+    await assert.rejects(dispatch({ message: { metadata: JSON.stringify({ communication_scope: 'care', ...metadata }) },
+      conversation: { clinic_id, patient_id: 3 }, payload: { type: 'text', text: { body: 'Workflow text' } },
+      patientHeld: async () => false }), { code: 'whatsapp_appointment_nonoperational_clinic_held' });
+  }
+  await assert.rejects(dispatch({ message: { metadata: { template_name: 'ordinary_confirmation' } },
+    conversation: { clinic_id: 66 }, payload: { type: 'template', template: { name: 'actual_review_request' } } }),
+  { code: 'whatsapp_appointment_nonoperational_clinic_held' });
+  await assert.rejects(dispatch({ message: { metadata: {} }, conversation: { clinic_id: 72 },
+    payload: { type: 'text', metadata: { consent_request_id: 20 }, text: { body: 'Consent link' } } }),
+  { code: 'whatsapp_appointment_nonoperational_clinic_held' });
+});
+
+test('conversation scope is authoritative and ordinary marketing/clinical messages retain their independent eligibility', async () => {
+  const blocked = { message: { metadata: { clinic_id: 2, recipient_clinic_id: 2 } }, conversation: { clinic_id: 66 },
+    payload: { type: 'template', template: { name: 'custom_consent_link' } } };
+  await assert.rejects(dispatch(blocked), { code: 'whatsapp_appointment_nonoperational_clinic_held' });
+  assert.equal(await dispatch({ ...blocked, message: { metadata: { clinic_id: 66 } }, conversation: { clinic_id: 2 } }), true);
+  for (const clinic_id of [66, 72]) for (const metadata of [{}, { template_category: 'MARKETING', template_usage: 'promocion' },
+    { communication_scope: 'marketing', template_name: 'clinicaclick_promocion_v1' },
+    { package_id: 8, document_id: 9, consent_package_id: null, consent_document_id: 0, purpose: 'preview' }]) {
+    assert.equal(await dispatch({ message: { metadata }, conversation: { clinic_id, patient_id: 3 },
+      payload: { type: 'text', text: { body: 'Ordinary clinical response', preview_url: false } },
+      patientHeld: async () => false }), true);
+  }
+});
+
+test('a loaded consent_required execution cannot evade the BS clinic veto by using an ordinary text payload', async () => {
+  for (const clinic_id of [66, 72]) for (const entity of ['appointment', 'patient']) {
+    await assert.rejects(dispatch({ message: { metadata: { execution_id: 10 } }, conversation: { clinic_id, patient_id: 3 },
+      payload: { type: 'text', text: { body: 'Signature link' } }, patientHeld: async () => false,
+      loadExecution: async () => ({ id: 10, clinic_id, trigger_type: 'consent_required', trigger_entity_type: entity }),
+      loadAppointment: async () => { throw Error('appointment_load_not_needed'); } }),
+    { code: 'whatsapp_appointment_nonoperational_clinic_held' });
+  }
+  assert.equal(await dispatch({ message: { metadata: { execution_id: 10 } }, conversation: { clinic_id: 2, patient_id: 3 },
+    payload: { type: 'text', text: { body: 'Signature link' } }, patientHeld: async () => false,
+    loadExecution: async () => ({ id: 10, clinic_id: 2, trigger_type: 'consent_required', trigger_entity_type: 'patient' }) }), true);
+});

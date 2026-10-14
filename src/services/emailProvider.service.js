@@ -135,6 +135,7 @@ async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
     throw Object.assign(new Error('email_broker_configuration_invalid'), { code: 'email_broker_configuration_invalid', retryable: false });
   }
   if (provider === 'mock') {
+    if (beforeDispatch) await beforeDispatch();
     return {
       provider: 'mock',
       providerMessageId: `mock_${crypto.randomUUID()}`,
@@ -192,6 +193,10 @@ async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
       if (beforeDispatch) {
         try { await beforeDispatch(); }
         catch (error) {
+          if (['whatsapp_appointment_nonoperational_clinic_held', 'review_communication_scope_unverified'].includes(error.code)) {
+            error.retryable = false;
+            throw error;
+          }
           if (['email_outbox_no_longer_sending', 'email_recipient_suppressed', 'email_verification_no_longer_valid'].includes(error.code)) throw error;
           throw Object.assign(Error('email_delivery_guard_unavailable'), { code: 'email_delivery_guard_unavailable', retryable: true });
         }
@@ -240,6 +245,7 @@ async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
   const timeout = setTimeout(() => abortController.abort(), config.timeoutMs);
   try {
     const command = new SendEmailCommand(commandInput);
+    if (beforeDispatch) await beforeDispatch();
     const response = await client.send(command, { abortSignal: abortController.signal });
     if (!cleanString(response.MessageId)) {
       const error = new Error('email_provider_response_missing_message_id');

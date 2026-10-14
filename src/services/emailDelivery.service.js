@@ -439,6 +439,11 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
         throw Object.assign(Error('email_outbox_no_longer_sending'), { code: 'email_outbox_no_longer_sending', retryable: false });
       }
       await require('../lib/automation-runtime-stop').assertEmailCanDispatch(current);
+      require('../lib/whatsappAppointmentEligibility').assertClinicNonOperationalAllowed(current.clinica_id, {
+        templateName: current.template_key, metadata: current.metadata,
+        payload: { text: rendered.text, html: rendered.html },
+      });
+      await require('./marketingEmailDispatch.service').assertEmailReviewCanDispatch(current);
       const dispatchState = await marketingDispatchDeliveryState(current);
       if (dispatchState === 'paused') {
         await settleMessageIfActive(message, { status: 'queued', completed_at: null });
@@ -513,6 +518,12 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       },
     };
   } catch (error) {
+    if (error?.code === 'whatsapp_appointment_nonoperational_clinic_held' && !providerResult?.providerMessageId) {
+      await settleMessageIfActive(message, { status: 'suppressed', completed_at: new Date(),
+        last_error_code: error.code,
+        last_error_message: 'Consent and review communication has not been enabled for this clinic.' });
+      return { status: 'completed', result: { email_message_id: message.id, skipped: true, reason: error.code } };
+    }
     if (require('../lib/automation-runtime-stop').isStop(error)) {
       await settleMessageIfActive(message, { status: 'cancelled', completed_at: new Date(),
         last_error_code: 'automation_deactivated', last_error_message: 'La automatización se desactivó antes del envío.' });

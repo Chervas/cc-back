@@ -472,9 +472,127 @@ class WhatsAppService {
         return this.dispatchMessage(payload, clinicConfig, healthContext);
     }
 
+    async assertClinicNonOperationalAllowed(payload, clinicConfig, message = null) {
+        const configuredClinicId = Number(clinicConfig.clinicId || clinicConfig.clinicaId);
+        const heldClinic = value => [66, 72].includes(value);
+        let clinicId = configuredClinicId;
+        if (!message?.conversation_id && !heldClinic(clinicId)) return;
+        const eligibility = require('../lib/whatsappAppointmentEligibility');
+        const deny = () => eligibility.assertClinicNonOperationalAllowed(heldClinic(clinicId) ? clinicId : configuredClinicId, {
+            metadata: { communication_purpose: 'consent' },
+        });
+        try {
+            // The message's caller-controlled metadata never supplies clinic scope.
+            // A queued message must still belong to the selected conversation.
+            if (message?.conversation_id) {
+                const conversation = await db.Conversation.findByPk(message.conversation_id, {
+                    attributes: ['id', 'clinic_id'], raw: true,
+                });
+                if (!conversation || !Number.isSafeInteger(Number(conversation.clinic_id)) || Number(conversation.clinic_id) < 1) {
+                    throw new Error('whatsapp_automation_scope_changed');
+                }
+                clinicId = Number(conversation.clinic_id);
+                if (clinicId !== configuredClinicId) {
+                    if (heldClinic(clinicId) || heldClinic(configuredClinicId)) return deny();
+                    return;
+                }
+            }
+            if (!heldClinic(clinicId)) return;
+            const metadata = eligibility.object(message?.metadata);
+            eligibility.assertClinicNonOperationalAllowed(clinicId, { payload, metadata });
+            eligibility.assertClinicNonOperationalAllowed(clinicId, {
+                metadata: { communication_purpose: metadata.flow_domain },
+            });
+            const strings = [];
+            const collect = (value, depth = 0) => {
+                if (depth > 12 || strings.length > 10000) return deny();
+                if (typeof value === 'string') strings.push(value);
+                else if (Array.isArray(value)) value.forEach(item => collect(item, depth + 1));
+                else if (value && typeof value === 'object') Object.entries(value).forEach(([key, item]) => {
+                    strings.push(key); collect(item, depth + 1);
+                });
+            };
+            // Only outbound content, never the patient's clinical history or notes.
+            collect(payload?.text);
+            collect(payload?.interactive);
+            collect(payload?.document);
+            collect(payload?.template?.components);
+            if (payload?.type === 'template') {
+                const template = await db.WhatsappTemplate.findOne({
+                    where: { waba_id: String(clinicConfig.wabaId || ''), name: payload.template?.name,
+                        language: payload.template?.language?.code },
+                    attributes: ['id', 'name', 'catalog_template_id', 'variables', 'components'], raw: true,
+                });
+                if (template) {
+                    const catalog = Number(template.catalog_template_id) > 0
+                        ? await db.WhatsappTemplateCatalog.findByPk(template.catalog_template_id, {
+                            attributes: ['id', 'name', 'family_key', 'body_text', 'variables', 'components'], raw: true,
+                        }) : null;
+                    if (require('../lib/whatsapp-template-workflow').isReviewWorkflowWhatsappTemplate({ ...template, catalog })) {
+                        eligibility.assertClinicNonOperationalAllowed(clinicId, { metadata: { communication_purpose: 'review_request' } });
+                    }
+                    eligibility.assertClinicNonOperationalAllowed(clinicId, {
+                        templateName: catalog?.name, metadata: { communication_purpose: catalog?.family_key },
+                    });
+                    const staticContent = [];
+                    const before = strings.length;
+                    collect(template.variables); collect(template.components);
+                    collect(catalog?.family_key); collect(catalog?.variables);
+                    collect(catalog?.components); collect(catalog?.body_text);
+                    staticContent.push(...strings.slice(before));
+                    const normalized = staticContent.join(' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+                    if (/\bconsent(?:imiento(?:s)?|_signature|_package|_document|_required)?\b/.test(normalized)
+                        || /(?:url_dejar_resena|url_resena_google|google_review_url|review_request|solicitud_resena|firma_resenas|enlace_resena)/.test(normalized)
+                        || /\b(?:resena|reviews)\b/.test(normalized)
+                        || /\b(?:deja(?:r)?|solicita(?:r)?|escrib(?:e|ir))\b.{0,50}\bresena\b/.test(normalized)) return deny();
+                }
+            }
+            const urls = strings.flatMap(value => value.match(/https?:\/\/[^\s<>"']+/gi) || []);
+            // Consent PDFs and signing links are recognizable independently of the
+            // filename, template name and caller's generic document/package IDs.
+            for (const value of urls) {
+                let url, path;
+                try { url = new URL(value.replace(/[),.;]+$/, '')); path = decodeURIComponent(url.pathname); }
+                catch (_invalidUrl) { continue; }
+                if (/^\/tablet\/consentimientos\/[^/]+\/?$/.test(path)
+                    || /^\/(?:api\/)?consentimientos\/documents\/[1-9]\d*\/pdf\/?$/.test(path)
+                    || url.hostname === 'g.page' && /^\/r\/[^/]+\/review\/?$/.test(path)
+                    || /^(?:search\.)?google\.[a-z.]+$/.test(url.hostname) && path === '/local/writereview') return deny();
+            }
+            if (urls.length) {
+                // url_dejar_resena is derived, not a Clinicas SQL column. The
+                // existing resolver reads locally synchronized business-profile
+                // links and configured aliases; it never calls Google's API.
+                const clinic = await Clinica.findByPk(clinicId, { attributes: ['id_clinica', 'configuracion'], raw: true });
+                const links = await require('./googleLocalLinks.service').resolveClinicGoogleReviewLinks(clinic || { id_clinica: clinicId });
+                const configuredReviewUrl = String(links?.url_dejar_resena || '').trim();
+                if (configuredReviewUrl && urls.some(value => {
+                    try {
+                        const expected = new URL(configuredReviewUrl), actual = new URL(value.replace(/[),.;]+$/, ''));
+                        return expected.host === actual.host && expected.pathname.replace(/\/$/, '') === actual.pathname.replace(/\/$/, '')
+                            && [...expected.searchParams].every(([key, item]) => actual.searchParams.get(key) === item);
+                    } catch (_invalidUrl) { return false; }
+                })) return deny();
+            }
+        } catch (_error) {
+            // Unknown DB/classification failures must not leak SQL, signed links or
+            // tokens, nor turn into a fallback send through the legacy Graph route.
+            if (heldClinic(clinicId) || heldClinic(configuredClinicId)) return deny();
+            // A failed lookup cannot prove that a persisted conversation is
+            // outside BS. This is a scope failure, not a new consent/review ban
+            // for other clinics, and must not fall back to a direct send.
+            throw Object.assign(new Error('whatsapp_automation_scope_changed'), {
+                code: 'whatsapp_automation_scope_changed', retryable: false, statusCode: 409,
+                details: { reason_code: 'whatsapp_automation_scope_changed' },
+            });
+        }
+    }
+
     async dispatchMessage(payload, clinicConfig = {}, healthContext = {}) {
+        let storedMessage = null;
         if (healthContext.messageId) {
             const message = await db.Message.findByPk(healthContext.messageId);
+            storedMessage = message;
             if (message && (whatsappAuthorizedBroker.isManagedMessage
                 ? await whatsappAuthorizedBroker.isManagedMessage(message) : message.metadata?.visit_communication_id)) {
                 await require('./appointmentVisitManaged.service').current().assertTransport(message.id, healthContext.visitDispatchAuthorization);
@@ -483,6 +601,7 @@ class WhatsAppService {
                 });
             }
         }
+        await this.assertClinicNonOperationalAllowed(payload, clinicConfig, storedMessage);
         if (payload.type === 'template') {
             await require('./whatsappTemplateScope.service').assertTemplateInWaba({
                 wabaId: clinicConfig.wabaId, clinicId: clinicConfig.clinicId || clinicConfig.clinicaId,

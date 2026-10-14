@@ -2560,6 +2560,14 @@ async function sendPackageMock(packageIdRaw, payload = {}) {
         throw err;
     }
     const plain = getPlain(packageRow);
+    if (['email', 'whatsapp'].includes(channel)) {
+        // Sending is not enabled for these clinics yet. The stored package
+        // owns the clinic scope; a caller cannot move it with payload metadata.
+        // Stop before minting a public token or recording a simulated delivery.
+        require('../lib/whatsappAppointmentEligibility').assertClinicNonOperationalAllowed(plain.clinica_id, {
+            metadata: { communication_purpose: 'consent', consent_package_id: plain.id },
+        });
+    }
     const recipient = toCleanString(payload.recipient)
         || (channel === 'email' ? plain.paciente?.email : plain.paciente?.telefono_movil)
         || null;
@@ -2660,6 +2668,11 @@ async function prepareAutomationPackageContext(scope = {}) {
     }) : null;
     const pack = getPlain(packageRow);
     const documents = assertConsentAutomationScope({ packageRow: pack, appointment, scope });
+    // This method creates a WhatsApp automation link, not an in-clinic tablet
+    // session. Keep on-site preparation/signing APIs separate and unchanged.
+    require('../lib/whatsappAppointmentEligibility').assertClinicNonOperationalAllowed(pack.clinica_id, {
+        metadata: { communication_purpose: 'consent', consent_package_id: pack.id },
+    });
     const treatmentName = toCleanString(pack.tratamiento?.nombre);
     if (!treatmentName) throw Object.assign(new Error('consent_automation_treatment_not_found'), { statusCode: 409 });
     requireActiveConsentPackage(packageRow);
