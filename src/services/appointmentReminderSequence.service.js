@@ -134,8 +134,11 @@ function createAppointmentReminderSequenceService({ db, now = () => new Date(), 
       if (historyDay !== context.scope.local_date) continue;
       history.push({ execution_id: c.id(row.execution_id), appointment_id: c.id(row.appointment_id), stage,
         message_id: c.id(row.message_id), status: row.status, sent_at: row.sent_at,
-        metadata: Object.fromEntries(['wamid', 'wa_response', 'provider_acceptance_at', 'delivery_unknown',
-          'outcome_unknown', 'network_started_at'].map(key => [key, json(row[key])])) });
+        metadata: { ...Object.fromEntries(['wamid', 'provider_acceptance_at', 'delivery_unknown',
+          'outcome_unknown', 'network_started_at'].map(key => [key, json(row[key])])),
+        // This column is a SQL existence predicate, not the provider response
+        // itself. MySQL returns 0/1; numeric zero is not an attempted delivery.
+        wa_response: Number(row.wa_response) === 1 } });
     }
     return history;
   }
