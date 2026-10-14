@@ -20,11 +20,27 @@ function importHeld(value) {
     || m.historical_registration === true || m.kind === 'lead_resolution_historical'
     || ['import', 'cliniccloud_reconciliation'].some(key => m[key] && importHeld(m[key]));
 }
-function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, patientId, templateName, confirmationTimeout = false, patientHoldOverride = false, now = Date.now() }) {
+function protectedCommunication({ templateName, metadata, payload } = {}) {
+  const m = object(metadata);
+  const protectedPurpose = value => typeof value === 'string'
+    && /consent|review|resena|marketing|survey|encuesta/.test(value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
+  // Actual transport and persisted selection are both authoritative denials.
+  // A care label or a different payload name cannot erase a protected family.
+  return [templateName, payload?.template?.name, m.template_name, m.fallback_template_name,
+    m.communication_scope, m.communicationScope, m.communication_purpose, m.template_usage,
+    payload?.communication_scope, payload?.template?.category, m.template_category].some(protectedPurpose);
+}
+function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, patientId, templateName,
+  messageMetadata = null, payload = null, confirmationTimeout = false, patientHoldOverride = false, now = Date.now() }) {
   require('./appointment-synthetic-guard').assertNoSyntheticDispatch(a, e);
   if (!a || Number(a.id_cita) !== Number(e.trigger_entity_id) || Number(a.clinica_id) !== Number(clinicId)
     || patientId && Number(a.paciente_id) !== Number(patientId)) fail('whatsapp_appointment_scope_changed');
   if (!require('./appointment-care').allowsAppointmentAutomation(a, e.trigger_type)) fail('whatsapp_appointment_care_stage_ineligible');
+  const appointmentProtected = !!(a.source_system || a.source_reference || importHeld(a.import_metadata));
+  if ((appointmentProtected || patientHoldOverride) && (e.trigger_type === 'consent_required'
+    || protectedCommunication({ templateName, metadata: messageMetadata, payload }))) {
+    fail(patientHoldOverride ? 'whatsapp_patient_import_held' : 'whatsapp_appointment_import_held');
+  }
   const operations = require('./whatsappImportedAppointmentOperations');
   const legacyReleased = require('./whatsappImportedReminderRelease').permits(a, { execution: e, now });
   const operationalReleased = operations.permits(a, { execution: e, now });
@@ -93,11 +109,16 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
   }
   const appointment = await loadAppointment(execution.trigger_entity_id);
   assertNoSyntheticDispatch(appointment);
+  const appointmentPatientHeld = held || !patientId && appointment?.paciente_id && await patientHeld(Number(appointment.paciente_id));
+  const appointmentProtected = !!(appointment?.source_system || appointment?.source_reference || importHeld(appointment?.import_metadata));
+  if ((appointmentPatientHeld || appointmentProtected) && (execution.trigger_type === 'consent_required'
+    || protectedCommunication({ metadata: m, payload }))) {
+    fail(appointmentPatientHeld ? 'whatsapp_patient_import_held' : 'whatsapp_appointment_import_held');
+  }
   let released = require('./whatsappImportedReminderRelease').permits(appointment, { execution })
     || require('./whatsappImportedAppointmentOperations').permitsPatientHoldOverride(appointment, { execution })
     || require('./whatsappSameDayRecovery').permits(appointment, { execution,
       templateName: payload?.type === 'template' ? payload.template?.name : m.template_name || m.fallback_template_name });
-  const appointmentPatientHeld = held || !patientId && appointment?.paciente_id && await patientHeld(Number(appointment.paciente_id));
   if (appointmentPatientHeld && String(m.communication_scope || '').trim().toLowerCase() === 'marketing') fail('whatsapp_patient_import_held');
   const actualTemplate = payload?.type === 'template' ? payload.template?.name : m.template_name || m.fallback_template_name;
   const confirmationTimeout = m.appointment_timeout === true
@@ -117,6 +138,7 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
     if (!receptionState.readyForTimeout) fail('whatsapp_inbox_reception_delayed');
   }
   return assertAppointmentEligibility({ appointment, execution, clinicId: conversation.clinic_id, patientId,
+    messageMetadata: m, payload,
     patientHoldOverride: !!appointmentPatientHeld && released,
     confirmationTimeout,
     templateName: payload?.type === 'template' ? payload.template?.name : m.template_name || m.fallback_template_name });
@@ -125,4 +147,4 @@ async function patientImportHeld(patientId, db = require('../../models')) {
   const [rows] = await db.sequelize.query("SELECT 1 AS held FROM PatientCustomFields WHERE paciente_id=:patientId AND source='cliniccloud' AND JSON_VALID(value) AND (JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(value),value,'{}'),'$.import.automation_policy'))='hold' OR JSON_EXTRACT(IF(JSON_VALID(value),value,'{}'),'$.import.messages_enabled')=CAST('false' AS JSON)) LIMIT 1", { replacements: { patientId } });
   return rows.length > 0;
 }
-module.exports = { object, day, importHeld, assertAppointmentEligibility, assertAutomatedMessageEligibility, patientImportHeld };
+module.exports = { object, day, importHeld, protectedCommunication, assertAppointmentEligibility, assertAutomatedMessageEligibility, patientImportHeld };

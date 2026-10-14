@@ -88,9 +88,10 @@ test('an appointment execution never exempts a held patient from marketing suppr
       conversation: { clinic_id: 66 },
       message: { metadata: { execution_id: 50, communication_scope: ' MARKETING ' } } }),
     { code: 'whatsapp_patient_import_held' });
-    assert.equal(await f.eligibility.assertAutomatedMessageEligibility({ ...f.transport,
-      patientHeld: async () => false,
-      message: { metadata: { execution_id: 50, communication_scope: 'marketing' } } }), true);
+    const unheld = { ...f.transport, patientHeld: async () => false,
+      message: { metadata: { execution_id: 50, communication_scope: 'marketing' } } };
+    if (build === fixture) await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(unheld), { code: 'whatsapp_appointment_import_held' });
+    else assert.equal(await f.eligibility.assertAutomatedMessageEligibility(unheld), true);
   }
 });
 
@@ -279,6 +280,49 @@ test('weekly manual suppression is never promoted to an importer technical defau
     assert.throws(() => f.eligibility.assertAppointmentEligibility(f.input), { code: 'whatsapp_appointment_suppressed' });
     assert.equal(operations.allowsSuppressionOverride(f.appointment, { policy: { ...policy, sameDayAllowed: true }, now }), false);
   }
+});
+
+test('operational reminder authorization never releases consent/review/marketing families mislabeled as care', async () => {
+  for (const sameDayAllowed of [false, true]) for (const native of [false, true]) {
+    for (const name of ['clinicaclick_consentimiento_estetica_v1', 'clinicaclick_solicitud_resena_v1',
+      'clinicaclick_solicitud_reseña_v1', 'clinicaclick_review_request_v1', 'clinicaclick_marketing_v1']) {
+      const f = sameDayFixture({ native, sameDayAllowed });
+      f.transport.message.metadata.communication_scope = 'care';
+      f.transport.payload.template.name = name;
+      await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: 'whatsapp_patient_import_held' });
+      f.input.templateName = name;
+      assert.throws(() => f.eligibility.assertAppointmentEligibility({ ...f.input, patientHoldOverride: true }),
+        { code: 'whatsapp_patient_import_held' });
+      if (!native) await assert.rejects(f.eligibility.assertAutomatedMessageEligibility({ ...f.transport,
+        patientHeld: async () => false }), { code: 'whatsapp_appointment_import_held' });
+    }
+  }
+});
+
+test('protected purpose denials inspect both actual payload and persisted metadata rather than trusting either care/ACK relabel', async () => {
+  for (const native of [false, true]) {
+    for (const metadata of [{ communication_scope: 'clinical_consent' }, { communicationScope: 'customer-review_requests' },
+      { communication_purpose: 'unknown_CUSTOM_CONSENT_scope' }, { template_usage: 'solicitud_resena' },
+      { template_name: 'clinicaclick_consentimiento_estetica_v1' }, { fallback_template_name: 'clinicaclick_review_v1' },
+      { template_category: 'MARKETING' }]) {
+      const f = sameDayFixture({ native });
+      Object.assign(f.transport.message.metadata, metadata);
+      f.transport.payload = { type: 'text', text: { body: 'ACK de prueba' } };
+      await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: 'whatsapp_patient_import_held' });
+    }
+    const f = sameDayFixture({ native }); f.transport.message.metadata.template_name = 'clinicaclick_confirmacion_cita';
+    f.transport.payload = { type: 'template', template: { name: 'clinicaclick_consentimiento_estetica_v1' } };
+    await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: 'whatsapp_patient_import_held' });
+    f.transport.payload = { type: 'text', text: { body: 'Respuesta operativa' } };
+    f.execution.trigger_type = 'consent_required';
+    await assert.rejects(f.eligibility.assertAutomatedMessageEligibility(f.transport), { code: 'whatsapp_patient_import_held' });
+  }
+});
+
+test('the operational hold hotfix leaves independent unheld-native consent workflow eligibility unchanged', async () => {
+  const f = sameDayFixture({ native: true }); f.execution.trigger_type = 'consent_required';
+  f.transport.payload = { type: 'template', template: { name: 'clinicaclick_consentimiento_estetica_v1' } };
+  assert.equal(await f.eligibility.assertAutomatedMessageEligibility({ ...f.transport, patientHeld: async () => false }), true);
 });
 test('the appointment exception does not release marketing, unknown entities or a patient globally', async () => {
   const f = fixture(); f.execution.trigger_entity_type = 'entity';
