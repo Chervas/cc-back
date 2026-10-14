@@ -37,6 +37,8 @@ async function assertReady({ message, conversation, transaction }) {
   const loadExecution = id => db.FlowExecutionV2.findByPk(id, { transaction, raw: true });
   const loadAppointment = id => db.CitaPaciente.findByPk(id, { transaction, raw: true });
   await eligibility.assertAutomatedMessageEligibility({ message, conversation, loadExecution, loadAppointment,
+    loadNativeReplyAcknowledgement: args => require('../lib/whatsappImportedAppointmentOperations')
+      .permitsNativeReplyAcknowledgement(args.appointment, { ...args, db, transaction }),
     patientHeld: eligibility.patientImportHeld, payload: { type: 'template', template: { name: template.name } } });
   if (Number(m.execution_id) > 0) {
     const e = await loadExecution(Number(m.execution_id));

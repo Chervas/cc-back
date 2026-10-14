@@ -21,16 +21,60 @@ function fixture() {
   return { rawPolicy, policy, appointment, execution };
 }
 
-test('approval is immutable, tenant scoped and never enables a backlog or same-day reminder', () => {
+test('approval is immutable, tenant scoped, explicit about same-day and never enables backlog replay', () => {
   const f = fixture();
   assert(Object.isFrozen(f.policy)); assert(Object.isFrozen(f.policy.clinicIds));
   for (const change of [
     { version: 2 }, { purpose: 'marketing' }, { approvedBy: 0 }, { approvalRef: 'invalid ref' },
     { approvedAt: '2026-10-06T13:00:00.000Z' }, { approvedAt: '2026-10-06' },
-    { automaticBacklogReplay: true }, { sameDayAllowed: true }, { clinicIds: [] },
+    { automaticBacklogReplay: true }, { sameDayAllowed: 'true' }, { sameDayAllowed: 1 }, { sameDayAllowed: null }, { clinicIds: [] },
     { clinicIds: [66, 99] }, { clinicIds: [66, 66] }, { clinicIds: ['66'] },
   ]) assert.throws(() => operations.validate({ ...f.rawPolicy, ...change }, { now }), /invalid_imported_appointment_operations/);
   assert.equal(operations.allowsAppointment(f.appointment, { policy: f.policy, now: Date.parse('2026-10-06T10:00Z') }), false);
+  assert.equal(f.policy.sameDayAllowed, false);
+  const permitted = operations.validate({ ...f.rawPolicy, sameDayAllowed: true }, { now });
+  assert.equal(permitted.sameDayAllowed, true);
+  assert(Object.isFrozen(permitted)); assert(Object.isFrozen(permitted.clinicIds));
+});
+
+test('same-day permission is explicit and scoped to future active verified imported or native bookings', () => {
+  const f = fixture(), policy = operations.validate({ ...f.rawPolicy, sameDayAllowed: true }, { now });
+  const before = JSON.stringify(f.appointment);
+  f.execution.trigger_type = 'appointment_reminder_window';
+  assert.equal(operations.allowsSameDayAppointment(f.appointment, { policy: f.policy, now }), false);
+  assert.equal(operations.permitsSameDay(f.appointment, { execution: f.execution, policy: f.policy, now }), false);
+  assert.equal(operations.allowsSameDayAppointment(f.appointment, { policy, now }), true);
+  assert.equal(operations.permitsSameDay(f.appointment, { execution: f.execution, policy, now }), true);
+  const native = { ...f.appointment, source_system: null, source_reference: null, import_metadata: {} };
+  assert.equal(operations.allowsSameDayAppointment(native, { policy, now }), true);
+  assert.equal(operations.permitsSameDay(native, { execution: f.execution, policy, now }), true);
+  assert.equal(JSON.stringify(f.appointment), before);
+  assert.equal(operations.permitsSameDay(native,
+    { execution: { ...f.execution, trigger_type: 'consent_required' }, policy, now }), false);
+  assert.equal(operations.permitsSameDay(native,
+    { execution: { ...f.execution, trigger_type: 'appointment_after' }, policy, now }), false);
+});
+
+test('same-day permission cannot replay past activity or relax current reservation/execution verification', () => {
+  const f = fixture(), policy = operations.validate({ ...f.rawPolicy, sameDayAllowed: true }, { now });
+  f.execution.trigger_type = 'appointment_reminder_window';
+  for (const change of [
+    { clinica_id: 99 }, { paciente_id: 21 }, { es_provisional: true }, { estado: 'cancelada' },
+    { estado: 'completada' }, { estado: 'no_asistio' }, { estado: 'ha_acudido' }, { estado: 'en_atencion' },
+    { inicio: '2026-10-06T11:59:00.000Z' }, { inicio: '2026-10-06T12:00:00.000Z' },
+    { import_metadata: { historical_registration: true } }, { import_metadata: { synthetic_data_only: true } },
+  ]) assert.equal(operations.permitsSameDay({ ...f.appointment, ...change },
+    { execution: f.execution, policy, now }), false, JSON.stringify(change));
+  for (const change of [
+    { clinic_id: 72 }, { trigger_entity_id: 11 }, { trigger_type: 'lead_created' }, { trigger_entity_type: 'patient' },
+    { created_at: '2026-10-06T10:59:59.000Z' }, { created_at: '2026-10-06T12:00:01.000Z' },
+    { context: {} }, { context: { appointment: { ...f.execution.context.appointment, inicio: '2026-10-07T09:01:00.000Z' } } },
+  ]) assert.equal(operations.permitsSameDay(f.appointment,
+    { execution: { ...f.execution, ...change }, policy, now }), false, JSON.stringify(change));
+  for (const change of [{ approvedAt: '2026-10-06T13:00:00.000Z' }, { sameDayAllowed: 'true' },
+    { approvedBy: 0 }, { automaticBacklogReplay: true }, { clinicIds: [66, 99] }]) {
+    assert.equal(operations.allowsSameDayAppointment(f.appointment, { policy: { ...policy, ...change }, now }), false);
+  }
 });
 
 test('operational ClinicCloud reservations retain every source receipt unchanged', () => {
@@ -155,9 +199,13 @@ function replyFixture() {
   const f = fixture(), queries = [];
   const conversation = { id: 60, clinic_id: 66, patient_id: 20 };
   const message = { direction: 'inbound', conversation_id: 60, sent_at: '2026-10-06T11:55:00.000Z' };
-  const db = { sequelize: { query: async (sql, options) => { queries.push({ sql, options }); return [[f.execution]]; } },
+  const outbound = { outbound_id: 100, outbound_conversation_id: 60, outbound_direction: 'outbound',
+    outbound_message_type: 'template', outbound_status: 'delivered',
+    outbound_created_at: '2026-10-06T11:35:00.000Z', outbound_sent_at: '2026-10-06T11:40:00.000Z',
+    outbound_receipt: {} };
+  const db = { sequelize: { query: async (sql, options) => { queries.push({ sql, options }); return [[{ ...f.execution, ...outbound }]]; } },
     CitaPaciente: { findByPk: async () => f.appointment } };
-  return { ...f, queries, conversation, message, db };
+  return { ...f, queries, conversation, message, outbound, db };
 }
 
 test('fresh reply requires an accepted outbound in that conversation and the exact current live execution', async () => {
@@ -177,6 +225,132 @@ test('fresh native booking reply may override its imported patient hold only aft
   assert.equal(await operations.permitsReply(f.conversation, f.message, f.db, null, { policy: f.policy, now }), true);
   f.appointment.import_metadata = { import: { automation_policy: 'hold' } };
   assert.equal(await operations.permitsReply(f.conversation, f.message, f.db, null, { policy: f.policy, now }), false);
+});
+
+test('accepted same-day reminder replies continue only their current imported or native booking execution', async () => {
+  for (const native of [false, true]) {
+    const f = replyFixture();
+    f.policy = operations.validate({ ...f.rawPolicy, sameDayAllowed: true }, { now });
+    f.appointment.inicio = '2026-10-06T14:00:00.000Z';
+    f.execution.trigger_type = 'appointment_reminder_window';
+    f.execution.context.appointment.inicio = f.appointment.inicio;
+    f.execution.context.trigger = { schedule_moment: 'same_day' };
+    if (native) Object.assign(f.appointment, { source_system: null, source_reference: null, import_metadata: {} });
+    const before = JSON.stringify(f.appointment);
+    assert.equal(await operations.permitsReply(f.conversation, f.message, f.db, null, { policy: f.policy, now }), true);
+    assert.equal(JSON.stringify(f.appointment), before);
+    f.db.sequelize.query = async () => [[]];
+    assert.equal(await operations.permitsReply(f.conversation, f.message, f.db, null, { policy: f.policy, now }), false);
+  }
+});
+
+test('delivered/read replies with NULL sent_at require a real provider ID and bounded API or provider receipt timestamp', async () => {
+  const epoch = value => String(Date.parse(value) / 1000);
+  for (const outbound_status of ['sent', 'delivered', 'read']) for (const receipt of [
+    { wamid: 'wamid.FixtureAccepted==', provider_acceptance_at: '2026-10-06T11:40:00.000Z' },
+    { response_id: 'wamid.FixtureAccepted==', provider_acceptance_at: '2026-10-06T11:40:00.000Z' },
+    { wamid: 'wamid.FixtureAccepted==', wa_status_timestamps: { sent: epoch('2026-10-06T11:40:00.000Z') } },
+    { wamid: 'wamid.FixtureAccepted==', wa_status_timestamps: { delivered: epoch('2026-10-06T11:40:00.000Z') } },
+    { wamid: 'wamid.FixtureAccepted==', wa_status: { status: 'read', timestamp: epoch('2026-10-06T11:40:00.000Z') } },
+  ]) {
+    const f = replyFixture(); Object.assign(f.outbound, { outbound_sent_at: null, outbound_status, outbound_receipt: receipt });
+    assert.equal(await operations.permitsReply(f.conversation, f.message, f.db, null, { policy: f.policy, now }), true);
+  }
+});
+
+test('NULL sent_at never trusts creation/state alone, malformed receipts, historical acceptance or acceptance after the inbound', async () => {
+  for (const receipt of [
+    {}, { provider_acceptance_at: '2026-10-06T11:40:00.000Z' }, { wamid: 'wamid.FixtureAccepted==' },
+    { wamid: 'not-a-provider-id', provider_acceptance_at: '2026-10-06T11:40:00.000Z' },
+    { wamid: 'wamid.One', response_id: 'wamid.Other', provider_acceptance_at: '2026-10-06T11:40:00.000Z' },
+    { wamid: 'wamid.FixtureAccepted==', provider_acceptance_at: 'invalid' },
+    { wamid: 'wamid.FixtureAccepted==', provider_acceptance_at: '2026-10-06T10:59:59.000Z' },
+    { wamid: 'wamid.FixtureAccepted==', provider_acceptance_at: '2026-10-06T11:55:01.000Z' },
+    { wamid: 'wamid.FixtureAccepted==', wa_status_timestamps: { read: true } },
+    { wamid: 'wamid.FixtureAccepted==', wa_status_timestamps: { delivered: 'invalid' } },
+    { wamid: 'wamid.FixtureAccepted==', wa_status: { status: 'failed', timestamp: '1791286800' } },
+    { wamid: 'wamid.FixtureAccepted==', provider_acceptance_at: '2026-10-06T11:40:00.000Z', historical: true },
+    { wamid: 'wamid.FixtureAccepted==', provider_acceptance_at: '2026-10-06T11:40:00.000Z', synthetic_data_only: true },
+    { wamid: 'wamid.FixtureAccepted==', provider_acceptance_at: '2026-10-06T11:40:00.000Z',
+      wa_status_timestamps: { sent: String(Date.parse('2026-10-06T10:59:59.000Z') / 1000) } },
+  ]) {
+    const f = replyFixture(); Object.assign(f.outbound, { outbound_sent_at: null, outbound_receipt: receipt });
+    assert.equal(await operations.permitsReply(f.conversation, f.message, f.db, null, { policy: f.policy, now }), false, JSON.stringify(receipt));
+  }
+  for (const patch of [{ outbound_created_at: '2026-10-06T10:59:59.000Z' }, { outbound_created_at: '2026-10-06T11:55:01.000Z' },
+    { outbound_status: 'pending' }, { outbound_status: 'sending' }, { outbound_status: 'failed' },
+    { outbound_direction: 'inbound' }, { outbound_conversation_id: 61 }, { outbound_message_type: 'event' }]) {
+    const f = replyFixture(); Object.assign(f.outbound, { outbound_sent_at: null,
+      outbound_receipt: { wamid: 'wamid.FixtureAccepted==', provider_acceptance_at: '2026-10-06T11:40:00.000Z' }, ...patch });
+    assert.equal(await operations.permitsReply(f.conversation, f.message, f.db, null, { policy: f.policy, now }), false, JSON.stringify(patch));
+  }
+});
+
+function nativeCancellationAckFixture() {
+  const f = replyFixture(); Object.assign(f.appointment, { source_system: null, source_reference: null, import_metadata: {}, estado: 'cancelada' });
+  f.execution.trigger_type = 'appointment_reminder_window'; f.execution.status = 'running';
+  f.execution.context.last_response_context = { response_message_id: 200, responded_at: f.message.sent_at };
+  f.execution.context.whatsapp_no_response_timeout = false;
+  const inbound = { id: 200, conversation_id: 60, direction: 'inbound', sent_at: f.message.sent_at, receipt: {} };
+  const ack = { id: 300, conversation_id: 60, direction: 'outbound', message_type: 'text',
+    metadata: { execution_id: 50, communication_scope: 'care' } };
+  const originalQuery = f.db.sequelize.query;
+  f.db.sequelize.query = async (sql, options) => /FROM Messages WHERE id=/.test(sql) ? [[inbound]] : originalQuery(sql, options);
+  return { ...f, inbound, ack, input: { execution: f.execution, conversation: f.conversation, message: ack,
+    payload: { type: 'text', text: { body: 'Fixture acknowledgement' } }, db: f.db, policy: f.policy, now } };
+}
+
+test('native cancelled-patient-HOLD acknowledgement requires an actual accepted reminder, actual inbound and exact current flow', async () => {
+  for (const sameDayAllowed of [false, true]) {
+    const f = nativeCancellationAckFixture(), before = JSON.stringify(f.appointment);
+    f.input.policy = operations.validate({ ...f.rawPolicy, sameDayAllowed }, { now });
+    assert.equal(await operations.permitsNativeReplyAcknowledgement(f.appointment, f.input), true);
+    assert.equal(JSON.stringify(f.appointment), before);
+    assert.equal(f.queries.at(-1).options.replacements.executionId, 50);
+    f.outbound.outbound_sent_at = null; f.outbound.outbound_receipt = {};
+    assert.equal(await operations.permitsNativeReplyAcknowledgement(f.appointment, f.input), false);
+    f.outbound.outbound_receipt = { wamid: 'wamid.FixtureAccepted==', provider_acceptance_at: '2026-10-06T11:40:00.000Z' };
+    assert.equal(await operations.permitsNativeReplyAcknowledgement(f.appointment, f.input), true);
+  }
+});
+
+test('reply acknowledgement cannot release marketing/consents/reviews, historical/native appointment HOLDs or changed/past scope', async () => {
+  for (const patch of [{ source_system: 'cliniccloud' }, { source_reference: 'old:10' },
+    { import_metadata: { automation_policy: 'hold' } }, { import_metadata: { historical_registration: true } },
+    { es_provisional: true }, { estado: 'completada' }, { estado: 'no_asistio' },
+    { inicio: '2026-10-06T11:59:00.000Z' }, { paciente_id: 21 }, { clinica_id: 72 }]) {
+    const f = nativeCancellationAckFixture(); Object.assign(f.appointment, patch);
+    assert.equal(await operations.permitsNativeReplyAcknowledgement(f.appointment, f.input), false, JSON.stringify(patch));
+  }
+  for (const patch of [{ status: 'completed' }, { status: 'cancelled' }, { trigger_type: 'consent_required' },
+    { created_at: '2026-10-06T10:59:59.000Z' }, { context: { appointment: { inicio: '2026-10-07T09:00:00.000Z' }, last_response_context: { response_message_id: 200 } } }]) {
+    const f = nativeCancellationAckFixture(); Object.assign(f.execution, patch);
+    assert.equal(await operations.permitsNativeReplyAcknowledgement(f.appointment, f.input), false, JSON.stringify(patch));
+  }
+  for (const receipt of [{ historical: true }, { qa_demo: true }, { synthetic_data_only: true },
+    { revoked_at: '2026-10-06T11:58:00.000Z' }, { coexistence_last_event: 'revoke' }]) {
+    const f = nativeCancellationAckFixture(); f.inbound.receipt = receipt;
+    assert.equal(await operations.permitsNativeReplyAcknowledgement(f.appointment, f.input), false);
+  }
+  for (const patch of [{ id: 201 }, { conversation_id: 61 }, { direction: 'outbound' },
+    { sent_at: '2026-10-06T10:59:59.000Z' }, { sent_at: '2026-10-06T12:01:00.000Z' }, { sent_at: null }]) {
+    const f = nativeCancellationAckFixture(); Object.assign(f.inbound, patch);
+    assert.equal(await operations.permitsNativeReplyAcknowledgement(f.appointment, f.input), false);
+  }
+  for (const scope of ['marketing', 'review', 'consent']) {
+    const f = nativeCancellationAckFixture(); f.ack.metadata.communication_scope = scope;
+    assert.equal(await operations.permitsNativeReplyAcknowledgement(f.appointment, f.input), false);
+  }
+  for (const name of ['clinicaclick_recordatorio_mismo_dia_v7', 'clinicaclick_confirmacion_datos_cita_hoy_v7',
+    'clinicaclick_consent_required', 'clinicaclick_review']) {
+    const f = nativeCancellationAckFixture(); f.input.payload = { type: 'template', template: { name } };
+    assert.equal(await operations.permitsNativeReplyAcknowledgement(f.appointment, f.input), false);
+  }
+  const f = nativeCancellationAckFixture(); f.execution.context.whatsapp_no_response_timeout = true;
+  assert.equal(await operations.permitsNativeReplyAcknowledgement(f.appointment, f.input), false);
+  f.ack.metadata.appointment_timeout = false;
+  assert.equal(await operations.permitsNativeReplyAcknowledgement(f.appointment, f.input), true,
+    'the ACK message snapshot is authoritative even if its execution later progressed to timeout');
 });
 
 test('old, foreign and future inbound messages cannot open the release', async () => {

@@ -131,9 +131,21 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
     return db?.AppointmentVisitCommunication?.findOne({ where: { message_id: Number(messageId) }, attributes: ['id', 'runtime_stage'], raw: true }) || null;
   },
   loadConversation = conversationId => models().Conversation.findByPk(conversationId, { attributes: ['id','clinic_id','patient_id','channel','contact_id'], raw: true }),
-  loadExecution = executionId => models().FlowExecutionV2.findByPk(executionId, { attributes: ['id','clinic_id','trigger_entity_type','trigger_entity_id','trigger_type','template_version_id','created_at','context'], raw: true }),
+  loadExecution = executionId => models().FlowExecutionV2.findByPk(executionId, { attributes: ['id','clinic_id','trigger_entity_type','trigger_entity_id','trigger_type','template_version_id','created_at','context','status'], raw: true }),
   loadAppointment = appointmentId => models().CitaPaciente.findByPk(appointmentId, { raw: true }),
   patientHeld = patientId => require('./whatsappAppointmentEligibility').patientImportHeld(patientId),
+  authorizeReminderMessage = input => {
+    // An injected pure client must never bootstrap the application's workers or
+    // DB merely to test a send. Real automated dispatch already has models.
+    if (!require.cache[require.resolve('../../models')]?.exports) fail('whatsapp_appointment_daily_sequence_unavailable');
+    return require('../services/appointmentReminderSequence.service').current().authorizeMessage(input);
+  },
+  loadNativeReplyAcknowledgement = input => {
+    const db = require.cache[require.resolve('../../models')]?.exports;
+    if (!db) return false;
+    return require('./whatsappImportedAppointmentOperations').permitsNativeReplyAcknowledgement(input.appointment,
+      { ...input, db });
+  },
   loadReceptionState = (conversation, bindings) => {
     const health = require('./whatsappInboxHealth');
     return health.forConversation(health.read(), conversation, bindings, (...args) => models().sequelize.query(...args));
@@ -192,7 +204,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         ? Object.freeze({ ...value, sendEnabled: false }) : value;
     } catch (error) { fail(PREFLIGHT_CODES.has(error?.code) ? error.code : 'whatsapp_authorized_binding_invalid'); }
   }
-  async function eligibleIntent(intent, config, selectedBinding, visitDispatchAuthorization) {
+  async function eligibleIntent(intent, config, selectedBinding, visitDispatchAuthorization, { authorizeDaily = false } = {}) {
     try {
       const message = await loadMessage(intent.messageId);
       if (await isManagedMessage(message)) {
@@ -206,7 +218,24 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       assertMessageEligibility(message, bindingCutoff(config, selectedBinding));
       await require('./whatsappAppointmentEligibility').assertAutomatedMessageEligibility({ message, conversation,
         payload: intent.message, loadExecution, loadAppointment, patientHeld,
+        loadNativeReplyAcknowledgement,
         getReceptionState: () => loadReceptionState(conversation, config.bindings) });
+      const metadata = message.metadata || {};
+      if (Number.isSafeInteger(Number(metadata.execution_id)) && Number(metadata.execution_id) > 0) {
+        const execution = await loadExecution(Number(metadata.execution_id));
+        const classifier = require('./appointment-reminder-sequence');
+        const persistedStage = classifier.messageStage({ execution, message });
+        const actualStage = classifier.messageStage({ execution, message: { ...message, metadata: { ...metadata,
+          ...(intent.message.type === 'template' ? { template_name: intent.message.template?.name } : {}) } } });
+        if (persistedStage && actualStage && persistedStage !== actualStage) fail('whatsapp_appointment_daily_sequence_owned');
+        const stage = actualStage || persistedStage;
+        if (stage && authorizeDaily) {
+          if (execution?.trigger_entity_type !== 'appointment') fail('whatsapp_automation_scope_changed');
+          const appointment = await loadAppointment(execution.trigger_entity_id);
+          const ownership = await authorizeReminderMessage({ appointment, execution, messageId: Number(message.id), stageKey: stage });
+          if (!ownership?.allowed) fail('whatsapp_appointment_daily_sequence_owned');
+        }
+      }
       return message;
     } catch (error) { fail('whatsapp_authorized_message_ineligible', false, require('./whatsapp-failure-diagnostic').reasonCode(error)); }
   }
@@ -342,10 +371,12 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       // only network dispatch. There is no credential or legacy fallback.
       const beforeSend = await binding(intent.clinicId, intent.assetId);
       if (!beforeSend || !sameBinding(captured, beforeSend) || JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
-      const dispatchMessage = await eligibleIntent(intent, config, captured, visitDispatchAuthorization);
       if (await isBlocked(intent.clinicId) !== false) fail('whatsapp_authorized_scope_blocked');
       if (JSON.stringify(read()) !== JSON.stringify(config)) fail('whatsapp_authorized_binding_changed');
       runtime.namespace(environment());
+      // Seal the durable message slot only at this final pre-send check. A
+      // definite earlier binding/scope denial must not spend a delivery right.
+      const dispatchMessage = await eligibleIntent(intent, config, captured, visitDispatchAuthorization, { authorizeDaily: true });
       let result;
       // Preserve historical clinical intent digests. Only commercial sends
       // add the optional, signed scheduling lane; Meta never receives it.

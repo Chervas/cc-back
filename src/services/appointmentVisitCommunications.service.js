@@ -136,7 +136,9 @@ function createAppointmentVisitCommunicationService({ db, now = () => new Date()
       const operational = !!operationalOwner && operations.allowsAppointment(appointment, { policy, now: time });
       const exactLegacy = !!legacyOwner && legacyRelease.permits(appointment,
         { templateVersionId: execution?.template_version_id || templateVersionId, policy: legacy, now: time });
-      decisions.set(appointment, { allowed: operational || exactLegacy, sameDayOff: importedOwner && (operational || exactLegacy),
+      decisions.set(appointment, { allowed: operational || exactLegacy,
+        sameDayOff: importedOwner && (operational || exactLegacy)
+          && !(operational && operations.allowsSameDayAppointment(appointment, { policy, now: time })),
         suppressionOverride: operational && operations.allowsSuppressionOverride(appointment, { policy, now: time })
           || exactLegacy && purpose === 'reminder_day_before' });
       if (operations.isHistorical(appointment)) fail('held');

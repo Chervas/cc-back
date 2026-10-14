@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const operations = require('../../lib/whatsappImportedAppointmentOperations');
+const daily = require('../../lib/appointment-reminder-sequence');
 const source = fs.readFileSync(require.resolve('../../services/appointmentAutomationV2Runtime.service'), 'utf8');
 const now = Date.parse('2026-10-06T12:00:00.000Z');
 const policy = operations.validate({
@@ -44,6 +45,7 @@ function template(trigger_type = 'appointment_rescheduled', trigger_config = nul
 
 function fixture(approval = policy, { cita = appointment(), templates = [], reminderPermitted = false } = {}) {
   const creations = [], jobs = [];
+  const claims = new Map();
   const op = Object.fromEntries(['ne', 'or', 'in', 'and'].map(key => [key, Symbol(key)]));
   const db = {
     Sequelize: { Op: op, literal: value => value },
@@ -56,10 +58,27 @@ function fixture(approval = policy, { cita = appointment(), templates = [], remi
     AutomationFlowCatalog: { findAll: async () => [] },
   };
   const managed = require('../../services/appointmentVisitManaged.service').createAppointmentVisitManagedService({ db, enabled: () => false });
+  const inspectAppointment = async ({ appointment: row }) => {
+    const scope = daily.dayScope(row, 'Europe/Madrid'), anchor = daily.selectAnchor([row], scope);
+    return { appointment: row, appointments: [row], scope, key: daily.sequenceKey(scope), anchor,
+      anchor_appointment_id: anchor?.id_cita || null, arrival_at: anchor ? daily.instant(anchor.inicio) : null,
+      follower: !anchor, confirmedForReminder: !!anchor && ['info_confirmada', 'recordatorio_confirmado', 'completada'].includes(row.estado),
+      attendanceConfirmed: !!anchor && ['recordatorio_confirmado', 'ha_acudido', 'en_atencion', 'completada'].includes(row.estado),
+      reason: anchor ? null : 'appointment_day_no_arrival' };
+  };
+  const sequence = { inspectAppointment, claimExecution: async input => {
+    const current = await inspectAppointment(input);
+    const stage = daily.stageKey(input.scheduleMoment), key = current.key + ':' + stage;
+    const executionId = daily.id(input.executionId), prior = claims.get(key);
+    const allowed = !!executionId && !current.follower && (prior == null || prior === executionId);
+    if (allowed) claims.set(key, executionId);
+    return { allowed, reason: allowed ? null : 'appointment_day_stage_already_owned' };
+  } };
   const approvedOperations = {
     ...operations,
     read: () => approval,
     allowsAppointment: (a, options) => operations.allowsAppointment(a, { ...options, policy: approval, now }),
+    allowsSameDayAppointment: (a, options) => operations.allowsSameDayAppointment(a, { ...options, policy: approval, now }),
     allowsSuppressionOverride: (a, options) => operations.allowsSuppressionOverride(a, { ...options, policy: approval, now }),
     permits: (a, options) => operations.permits(a, { ...options, policy: approval, now }),
   };
@@ -68,6 +87,7 @@ function fixture(approval = policy, { cita = appointment(), templates = [], remi
     module, exports: module.exports, Date: FixedDate, Intl, process: { env: {} },
     require(name) {
       if (name === '../../models') return db;
+      if (name === './appointmentReminderSequence.service') return { current: () => sequence };
       if (name === './appointmentVisitManaged.service') return { current: () => managed };
       if (name === '../lib/appointment-care') return require('../../lib/appointment-care');
       if (name === './appointmentPatientLinks.service') return { follower: async () => false };
@@ -95,7 +115,7 @@ function fixture(approval = policy, { cita = appointment(), templates = [], remi
   };
   vm.runInNewContext(source + '\nmodule.exports.__helpers = { isImportedHistoricalAppointment, importedTriggerHeld, getAppointmentNotificationSuppression, shouldSuppressAppointmentTrigger };',
     context, { filename: 'appointmentAutomationV2Runtime.service.js' });
-  return { runtime: module.exports, helpers: module.exports.__helpers, creations, jobs };
+  return { runtime: module.exports, helpers: module.exports.__helpers, creations, jobs, claims };
 }
 
 for (const clinicId of [66, 72]) {

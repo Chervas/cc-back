@@ -456,6 +456,8 @@ function createAppointmentVisitManagedService({ db, now = () => new Date(),
         await require('../lib/automation-runtime-stop').assertMessageCanDispatch(context.message.id);
         await require('../lib/whatsappAppointmentEligibility').assertAutomatedMessageEligibility({ message: context.message, conversation: context.conversation,
           loadExecution: id => db.FlowExecutionV2.findByPk(id), loadAppointment: id => db.CitaPaciente.findByPk(id),
+          loadNativeReplyAcknowledgement: args => require('../lib/whatsappImportedAppointmentOperations')
+            .permitsNativeReplyAcknowledgement(args.appointment, { ...args, db, transaction }),
           patientHeld: id => require('../lib/whatsappAppointmentEligibility').patientImportHeld(id, db) });
         require('../lib/whatsappAuthorizedBrokerClient').assertMessageEligible(context.message);
         const scheduled = context.message.metadata?.scheduled_for;

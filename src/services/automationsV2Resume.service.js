@@ -870,6 +870,58 @@ async function scheduleBufferedInboundResponse({
   return outcome;
 }
 
+async function selectPatientDayResponseOwner(sorted, { clinicId, patientId, conversationId, leadId }) {
+  const newest = sorted[0];
+  if (!newest || newest.status !== 'waiting' || newest.trigger_type !== 'appointment_reminder_window'
+    || newest.trigger_entity_type !== 'appointment' || !db.CitaPaciente) return newest;
+  try {
+    const daily = require('../lib/appointment-reminder-sequence');
+    const snapshot = daily.object(newest.context).appointment;
+    const capturedPatientId = daily.id(snapshot?.paciente_id), capturedClinicId = daily.id(snapshot?.clinica_id);
+    const targetPatientId = daily.id(patientId) || capturedPatientId;
+    const stage = daily.executionStage(newest), namespace = getExecutionRuntimeNamespace(newest);
+    // Unknown old runtime/identity receipts retain the previously verified reply
+    // choice. This preference never expands access across queue namespaces.
+    if (!stage || !namespace || !capturedPatientId || capturedPatientId !== targetPatientId
+      || capturedClinicId !== Number(clinicId) || daily.id(snapshot.id_cita) !== daily.id(newest.trigger_entity_id)
+      || !IS_GATEWAY_RUNTIME && namespace !== CURRENT_RUNTIME_NAMESPACE) return newest;
+    const appointment = await db.CitaPaciente.findByPk(newest.trigger_entity_id, { raw: true,
+      attributes: ['id_cita', 'clinica_id', 'paciente_id', 'inicio', 'estado', 'es_provisional'] });
+    if (!appointment || daily.id(appointment.clinica_id) !== capturedClinicId
+      || daily.id(appointment.paciente_id) !== capturedPatientId
+      || daily.instant(appointment.inicio) !== daily.instant(snapshot.inicio)) return newest;
+    const inspected = await require('./appointmentReminderSequence.service').current().inspectAppointment({ appointment });
+    const rows = new Map((inspected.appointments || []).map(row => [daily.id(row.id_cita), row]));
+    const eligible = sorted.filter(execution => {
+      if (execution.status !== 'waiting' || execution.trigger_type !== newest.trigger_type
+        || execution.trigger_entity_type !== 'appointment' || Number(execution.clinic_id) !== capturedClinicId
+        || daily.executionStage(execution) !== stage || getExecutionRuntimeNamespace(execution) !== namespace
+        || !getWaitResponseNode(execution) || !matchesExecutionTarget(execution, { conversationId, patientId, leadId })) return false;
+      const captured = daily.object(execution.context).appointment, current = rows.get(daily.id(execution.trigger_entity_id));
+      return !!current && !daily.placeholder(current)
+        && !['cancelada', 'cambio_solicitado', 'no_asistio', 'completada', 'ha_acudido', 'en_atencion'].includes(current.estado)
+        && daily.id(captured?.id_cita) === daily.id(current.id_cita)
+        && daily.id(captured?.clinica_id) === capturedClinicId && daily.id(current.clinica_id) === capturedClinicId
+        && daily.id(captured?.paciente_id) === capturedPatientId && daily.id(current.paciente_id) === capturedPatientId
+        && daily.instant(captured.inicio) === daily.instant(current.inicio)
+        && daily.dayScope(current, inspected.scope.time_zone).local_date === inspected.scope.local_date;
+    });
+    // These are already matched WAITING instances: no execution is created or
+    // recovered, no receipt/HOLD exception is granted, and no clinical owner is
+    // changed. Extraction can be the communication arrival before its PRP act.
+    const owner = inspected.sequence && daily.claims(inspected.sequence.claims)[stage];
+    const durable = owner && eligible.find(row => Number(row.id) === owner.execution_id
+      && Number(row.trigger_entity_id) === owner.appointment_id);
+    const isArrival = row => Number(row.trigger_entity_id) === Number(inspected.anchor_appointment_id);
+    return durable && isArrival(durable) ? durable : eligible.find(isArrival) || durable || newest;
+  } catch {
+    // A stale slot, missing additive ledger or unavailable diagnostic read must
+    // not manufacture permission. Keep the existing fresh reply behavior; the
+    // final delivery guards remain authoritative for any subsequent message.
+    return newest;
+  }
+}
+
 async function enqueueInboundResponseResume({
   clinicId,
   conversationId,
@@ -945,8 +997,13 @@ async function enqueueInboundResponseResume({
       return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
     });
 
-    const newest = sorted[0];
-    const staleExecutions = sorted.slice(1);
+    const newest = await selectPatientDayResponseOwner(sorted, {
+      clinicId: normalizedClinicId, patientId: normalizedPatientId,
+      conversationId: normalizedConversationId, leadId: normalizedLeadId,
+    });
+    const changedOwner = Number(newest?.id) !== Number(sorted[0]?.id);
+    const supersededReason = changedOwner ? 'superseded_by_patient_day_response_owner' : 'superseded_by_newer_waiting_execution';
+    const staleExecutions = sorted.filter(row => Number(row.id) !== Number(newest.id));
 
     for (const staleExecution of staleExecutions) {
       supersededExecutionIds.push(staleExecution.id);
@@ -960,13 +1017,13 @@ async function enqueueInboundResponseResume({
         wait_until: null,
         waiting_meta: {
           ...existingWaitingMeta,
-          cancelled_reason: 'superseded_by_newer_waiting_execution',
+          cancelled_reason: supersededReason,
           superseded_by_execution_id: newest.id,
           cancelled_at: new Date().toISOString(),
         },
       });
 
-      await cancelQueuedExecutionJob(staleExecution.id, 'superseded_by_newer_waiting_execution');
+      await cancelQueuedExecutionJob(staleExecution.id, supersededReason);
     }
 
     effectiveMatches = newest ? [newest] : [];

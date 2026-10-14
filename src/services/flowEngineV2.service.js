@@ -3984,7 +3984,9 @@ async function handleSendWhatsapp(node, context, runtime) {
   }
   let targets = resolveRuntimeTargets(execution, context);
   targets = await backfillRuntimeTargets(execution, targets);
-  if (targets.appointment_id && await require('./appointmentPatientLinks.service').follower(db, targets.appointment_id)) {
+  if (targets.appointment_id && execution?.trigger_type !== 'appointment_reminder_window'
+    && context.whatsapp_no_response_timeout !== true
+    && await require('./appointmentPatientLinks.service').follower(db, targets.appointment_id)) {
     return { kind: 'success', output: { status: 'suppressed_linked_appointment_uses_first_notice' }, next_node_id: readOutputTarget(node, 'on_success') };
   }
   const clinicId = toIntOrNull(targets.clinic_id);
@@ -4462,6 +4464,27 @@ async function handleSendWhatsapp(node, context, runtime) {
   }
 
   senderData = await getSenderData();
+
+  const dailyStage = require('../lib/appointment-reminder-sequence').messageStage({
+    message: { metadata: { template_name: template?.name || null,
+      fallback_template_name: fallbackTriggeredReason ? template?.name || null : null,
+      appointment_timeout: context.whatsapp_no_response_timeout === true } } });
+  if (dailyStage && execution?.trigger_entity_type === 'appointment') {
+    const appointment = await CitaPaciente.findByPk(execution.trigger_entity_id);
+    const sequence = require('./appointmentReminderSequence.service').current();
+    const arrival = await sequence.inspectAppointment({ appointment });
+    if (arrival.follower || dailyStage === 'no_response' && arrival.attendanceConfirmed) {
+      // A suppressed follower must not advance into "sent" state mutations or
+      // start its own wait/timeout chain. Its clinical reservation is untouched.
+      return { kind: 'success', output: { status: 'suppressed_patient_day_reminder',
+        reason: arrival.reason || 'appointment_day_attendance_confirmed' }, next_node_id: null };
+    }
+    if (dailyStage !== 'no_response') {
+      const ownership = await sequence.claimExecution({ appointment, executionId: Number(execution.id), scheduleMoment: dailyStage });
+      if (!ownership.allowed) return { kind: 'success', output: {
+        status: 'suppressed_patient_day_reminder', reason: ownership.reason }, next_node_id: null };
+    }
+  }
 
   const senderClinic = await Clinica.findByPk(clinicId, {
     attributes: ['id_clinica', 'nombre_clinica'],

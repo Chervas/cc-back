@@ -27,6 +27,37 @@ test('same-day reminder includes confirmed and unconfirmed appointments', () => 
     const v=base();v.appointment.estado=estado;v.templateName='clinicaclick_recordatorio_mismo_dia_primera_visita_v9';v.now=Date.parse('2026-09-16T06:00Z');assert.equal(check(v),true);
   }
 });
+test('weekly reminders use seven Madrid calendar days, including spring/autumn DST boundaries', () => {
+  for (const [clock, start] of [
+    ['2026-09-15T17:00:00Z', '2026-09-22T09:00:00Z'],
+    ['2026-10-24T22:30:00Z', '2026-11-01T09:00:00Z'],
+    ['2026-03-22T22:30:00Z', '2026-03-29T09:00:00Z'],
+  ]) {
+    const v = base(); v.now = Date.parse(clock); v.templateName = 'clinicaclick_recordatorio_semana_antes_v1';
+    v.appointment.inicio = start; v.execution.context.appointment.inicio = start;
+    assert.equal(check(v), true);
+    const wrong = structuredClone(v); wrong.now += 2 * 86400000;
+    assert.throws(() => check(wrong), { code: 'whatsapp_appointment_wrong_day' });
+  }
+});
+test('weekly reminders preserve current scope/start/future/lifecycle and both manual suppression aliases', () => {
+  const weekly = () => {
+    const v = base(); v.templateName = 'clinicaclick_recordatorio_semana_antes_v1';
+    v.appointment.inicio = '2026-09-22T09:00:00Z'; v.execution.context.appointment.inicio = v.appointment.inicio;
+    return v;
+  };
+  for (const patch of [{ estado: 'cancelada' }, { estado: 'completada' }, { estado: 'recordatorio_confirmado' },
+    { es_provisional: true }, { clinica_id: 4 }, { paciente_id: 5 },
+    { inicio: '2026-09-22T09:01:00Z' }, { import_metadata: { historical_registration: true } },
+    { import_metadata: { notification_suppression: { week_before: true } } },
+    { import_metadata: { notification_suppression: { weekBefore: true } } }]) {
+    const v = weekly(); Object.assign(v.appointment, patch); assert.throws(() => check(v));
+  }
+  const past = weekly(); past.now = Date.parse('2026-09-22T10:00:00Z');
+  assert.throws(() => check(past), { code: 'whatsapp_appointment_ineligible' });
+  const ack = weekly(); ack.templateName = null; ack.execution.context.trigger = { schedule_moment: 'week_before' };
+  ack.appointment.estado = 'cancelada'; assert.equal(check(ack), true, 'the parent weekly flow cannot turn an ACK into a new reminder');
+});
 test('imports, nested holds, cancellations, past appointments and scope changes fail', () => {
   for(const change of [{source_system:'cliniccloud'},{source_reference:'import:1'},{import_metadata:{cliniccloud_reconciliation:{automation_policy:'hold'}}},{estado:'cancelada'},{estado:'cambio_solicitado'},{estado:'completada'},{clinica_id:4},{paciente_id:5},{inicio:'2026-09-17T09:00Z'},{es_provisional:true},{import_metadata:{notification_suppression:{day_before:true}}}]) {
     const v=base();Object.assign(v.appointment,change);assert.throws(()=>check(v));

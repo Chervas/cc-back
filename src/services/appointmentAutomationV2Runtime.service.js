@@ -146,7 +146,8 @@ function getAppointmentNotificationSuppression(cita) {
   // Keep the original import receipt intact; only the reviewed operational
   // policy can override import-time defaults, never a manual "do not send".
   if (require('../lib/whatsappImportedAppointmentOperations').allowsSuppressionOverride(cita)) {
-    return { appointment_details: false, day_before: false, same_day: true };
+    return { appointment_details: false, day_before: false,
+      same_day: !require('../lib/whatsappImportedAppointmentOperations').allowsSameDayAppointment(cita) };
   }
   return {
     appointment_details: parseBool(raw.appointment_details ?? raw.appointmentDetails ?? raw.appointment_created, false),
@@ -169,7 +170,8 @@ function shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig = nul
   if (scheduleMoment === 'same_day'
     && require('../lib/whatsappSameDayRecovery').allowsAppointment(cita)) return false;
   if (scheduleMoment === 'same_day'
-    && require('../lib/whatsappImportedAppointmentOperations').allowsAppointment(cita)) return true;
+    && require('../lib/whatsappImportedAppointmentOperations').allowsAppointment(cita)
+    && !require('../lib/whatsappImportedAppointmentOperations').allowsSameDayAppointment(cita)) return true;
   if (scheduleMoment === 'same_day') return suppression.same_day === true;
   if (scheduleMoment === 'day_before') return suppression.day_before === true;
   return false;
@@ -1145,14 +1147,26 @@ async function resolveAppointmentCommunicationLanguage(cita) {
   return normalizeWhatsappLocale(patient?.idioma_preferido, { fallback: 'es' }) || 'es';
 }
 
+async function inspectReminderArrival(cita) {
+  return require('./appointmentReminderSequence.service').current().inspectAppointment({ appointment: cita });
+}
+
+async function reminderOrLinkedFollower(cita, eventName) {
+  if (eventName === 'appointment_reminder_window') {
+    const daily = await inspectReminderArrival(cita);
+    return daily.follower ? { skipped: true, reason: daily.reason || 'patient_day_uses_first_arrival' } : null;
+  }
+  return await require('./appointmentPatientLinks.service').follower(db, cita?.id_cita)
+    ? { skipped: true, reason: 'linked_appointment_uses_first_notice' } : null;
+}
+
 async function enqueueExecutionForTemplate(cita, template, options = {}) {
   const eventName = normalizeEventName(options.event_name) || cleanString(template?.trigger_type) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
   if (!require('../lib/appointment-care').allowsAppointmentAutomation(cita, eventName)) {
     return { success: true, skipped: true, reason: 'appointment_care_stage_ineligible' };
   }
-  if (await require('./appointmentPatientLinks.service').follower(db, cita?.id_cita)) {
-    return { success: true, skipped: true, reason: 'linked_appointment_uses_first_notice' };
-  }
+  const follower = await reminderOrLinkedFollower(cita, eventName);
+  if (follower) return { success: true, ...follower };
   if (await require('./appointmentVisitManaged.service').current().managedVisit(cita)) {
     return enqueueExecutionForCita(cita, options);
   }
@@ -1196,9 +1210,21 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
     windowIdentifier: options.window_identifier,
   });
 
+  let reminderSkipReason = null;
   const ensureExecutionDispatch = async (execution, requestedBy) => {
     if (!['running', 'waiting'].includes(cleanString(execution?.status).toLowerCase())) {
       return null;
+    }
+    if (eventName === 'appointment_reminder_window') {
+      const claim = await require('./appointmentReminderSequence.service').current().claimExecution({
+        appointment: cita, executionId: Number(execution.id), scheduleMoment: templateConfig.schedule_moment });
+      if (!claim.allowed) {
+        reminderSkipReason = claim.reason || 'patient_day_reminder_already_owned';
+        await FlowExecutionV2.update({ status: 'cancelled', current_node_id: null, wait_until: null,
+          waiting_meta: null, last_error: reminderSkipReason }, { where: { id: execution.id,
+          status: { [Op.in]: ['running','waiting'] } } });
+        return null;
+      }
     }
     const { job } = await jobRequestsService.enqueueUniqueJobRequest({
       type: 'automations_v2_execute',
@@ -1224,6 +1250,7 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
       execution: existing,
       template,
       queue_job_id: queueJob?.id || null,
+      ...(reminderSkipReason ? { skipped: true, reason: reminderSkipReason } : {}),
     };
   }
 
@@ -1294,6 +1321,7 @@ async function enqueueExecutionForTemplate(cita, template, options = {}) {
     execution: createdExecution,
     template,
     queue_job_id: queueJob?.id || null,
+    ...(reminderSkipReason ? { skipped: true, reason: reminderSkipReason } : {}),
   };
 }
 
@@ -1302,9 +1330,8 @@ async function enqueueExecutionForCita(cita, options = {}) {
   if (!require('../lib/appointment-care').allowsAppointmentAutomation(cita, eventName)) {
     return { success: true, skipped: true, reason: 'appointment_care_stage_ineligible' };
   }
-  if (await require('./appointmentPatientLinks.service').follower(db, cita?.id_cita)) {
-    return { success: true, skipped: true, reason: 'linked_appointment_uses_first_notice' };
-  }
+  const follower = await reminderOrLinkedFollower(cita, eventName);
+  if (follower) return { success: true, ...follower };
   const citaId = toIntOrNull(cita?.id_cita);
   if (!citaId) {
     return { success: false, skipped: true, reason: 'invalid_cita' };
@@ -1451,12 +1478,10 @@ async function cancelActiveExecutionsForCita(cita, options = {}) {
 async function syncScheduledTriggersForCita(cita, options = {}) {
   const citaId = toIntOrNull(cita?.id_cita);
   if (!citaId) return { success: false, skipped: true, reason: 'invalid_cita' };
-  if (await require('./appointmentPatientLinks.service').follower(db, citaId)) {
-    const jobs = await listExistingScheduledJobs(citaId);
-    for (const job of jobs) await jobRequestsService.markCancelled(job.id, { errorMessage: 'linked_appointment_uses_first_notice' });
-    return { success: true, skipped: true, scheduled_jobs: [], reason: 'linked_appointment_uses_first_notice' };
-  }
-  const managedSchedule = await require('./appointmentVisitManaged.service').current().syncReminderIntents(cita);
+  const daily = await inspectReminderArrival(cita);
+  const linkedFollower = await require('./appointmentPatientLinks.service').follower(db, citaId);
+  const managedSchedule = !daily.follower && !linkedFollower
+    ? await require('./appointmentVisitManaged.service').current().syncReminderIntents(cita) : null;
   if (managedSchedule) return managedSchedule;
   if (isImportedHistoricalAppointment(cita) && !require('../lib/whatsappImportedReminderRelease').permits(cita)) {
     const existingJobs = await listExistingScheduledJobs(citaId);
@@ -1499,6 +1524,7 @@ async function syncScheduledTriggersForCita(cita, options = {}) {
 
   const desiredJobs = [];
   for (const triggerType of Array.from(SCHEDULED_APPOINTMENT_TRIGGER_TYPES)) {
+    if (triggerType === 'appointment_reminder_window' ? daily.follower : linkedFollower) continue;
     if (!require('../lib/appointment-care').allowsAppointmentAutomation(cita, triggerType)) continue;
     const templates = await resolveScheduledTemplatesForCita(cita, triggerType);
     templates.forEach((template) => {
@@ -1776,23 +1802,24 @@ async function fireScheduledTrigger(payload = {}, options = {}) {
   const triggerConfig = getTemplateTriggerConfig(template);
   const released = triggerType === 'appointment_reminder_window' && triggerConfig.schedule_moment === 'day_before'
     && require('../lib/whatsappImportedReminderRelease').permits(cita, { templateVersionId: Number(template.id) });
-  if (await require('./appointmentPatientLinks.service').follower(db, citaId)) {
-    return { success: true, skipped: true, reason: 'linked_appointment_uses_first_notice' };
-  }
+  const follower = await reminderOrLinkedFollower(cita, triggerType);
+  if (follower) return { success: true, ...follower };
+  const daily = triggerType === 'appointment_reminder_window' ? await inspectReminderArrival(cita) : null;
+  const reminderConfirmed = daily ? daily.confirmedForReminder : isAppointmentConfirmedForReminder(cita);
   if (shouldSuppressAppointmentTrigger(cita, triggerType, triggerConfig) && !released) {
     return { success: true, skipped: true, reason: 'appointment_notification_suppressed' };
   }
   if (
     triggerType === 'appointment_reminder_window' &&
     triggerConfig?.exclude_if_not_confirmed === true &&
-    !isAppointmentConfirmedForReminder(cita)
+    !reminderConfirmed
   ) {
     return { success: true, skipped: true, reason: 'appointment_not_confirmed' };
   }
   if (
     triggerType === 'appointment_reminder_window' &&
     triggerConfig?.only_if_not_confirmed === true &&
-    isAppointmentConfirmedForReminder(cita)
+    reminderConfirmed
   ) {
     return { success: true, skipped: true, reason: 'appointment_already_confirmed' };
   }

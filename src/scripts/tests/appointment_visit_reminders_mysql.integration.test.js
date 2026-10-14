@@ -61,7 +61,8 @@ test('new visits and voucher bookings freeze native reminder stages and recover 
         assert.equal((await f.claimAndHandle(sameItem.job.id)).result.outcome, 'unknown');
         const unknownAttempts = f.attempts.length; await f.jobs.setPending(sameItem.job.id);
         assert.equal((await f.claimAndHandle(sameItem.job.id)).result.reason, 'unknown'); assert.equal(f.attempts.length, unknownAttempts); f.provider('accept');
-        assert.equal((await f.patch(first, 'state', { estado: 'cancelada' })).statusCode, 200);
+        const cancellation = await f.patch(first, 'state', { estado: 'cancelada' });
+        assert.equal(cancellation.statusCode, 200, JSON.stringify(cancellation));
         assert.equal((await day.reload()).status, 'accepted'); assert.equal((await same.reload()).status, 'unknown');
         context.report.checks.push('Details acceptance and one day-before acceptance do not suppress the independent same-day purpose; fake network uncertainty reserves that same right permanently and retry does not transport again');
 

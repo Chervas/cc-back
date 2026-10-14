@@ -159,6 +159,38 @@ test('current protected operations policy releases future imported PRP per membe
     const identity = await h.singleton(); await assert.rejects(claim(h, identity.visit));
   }
 });
+test('explicit same-day operations authorization reaches visit claims and current dispatch without releasing legacy defaults', async () => {
+  const row = appointment(101, { source_system: 'cliniccloud', source_reference: 'fixture:101',
+    inicio: '2030-01-01T14:00:00.000Z', fin: '2030-01-01T14:30:00.000Z',
+    import_metadata: { cliniccloud_reconciliation: { automation_policy: 'hold' },
+      notification_suppression: { appointment_details: true, day_before: true, same_day: true } } });
+  const f = fixture({ rows: [row], policy: { ...policy(), sameDayAllowed: true } });
+  const before = structuredClone(f.state.CitaPaciente), { visit } = await f.singleton();
+  const intent = await claim(f, visit, { purpose: 'reminder_same_day' });
+  const bind = prepareBinding(f, intent.communication, { execution: { trigger_type: 'appointment_reminder_window' } });
+  await bind();
+  assert.equal((await f.service.assertCommunicationCurrent({ communicationId: intent.communication.id, clinicId: 66 })).owner_appointment_id, 101);
+  assert.deepEqual(f.state.CitaPaciente, before);
+  f.policy(policy());
+  await assert.rejects(f.service.assertCommunicationCurrent({ communicationId: intent.communication.id, clinicId: 66 }),
+    { code: 'appointment_visit_notification_suppressed' });
+  assert(!f.writes.some(write => ['CitaPaciente', 'Message', 'FlowExecutionV2'].includes(write.model)));
+});
+test('same-day visit authorization retains manual suppressions and never adopts pre-approval communication windows', async () => {
+  for (const raw of [{ same_day: true, locked: true }, { same_day: true, reason: 'manual_selection' },
+    { same_day: true, manual_confirmation_required: true }, { sameDay: true }]) {
+    const f = fixture({ rows: [appointment(101, { source_system: 'cliniccloud',
+      import_metadata: { cliniccloud_reconciliation: { automation_policy: 'hold' }, notification_suppression: raw } })],
+    policy: { ...policy(), sameDayAllowed: true } }), { visit } = await f.singleton();
+    await assert.rejects(claim(f, visit, { purpose: 'reminder_same_day' }), { code: 'appointment_visit_notification_suppressed' });
+    assert.equal(f.state.AppointmentVisitCommunication.size, 0);
+  }
+  const f = fixture({ rows: [appointment(101, { source_system: 'cliniccloud',
+    import_metadata: { cliniccloud_reconciliation: { automation_policy: 'hold' } } })], policy: { ...policy(), sameDayAllowed: true } });
+  const { visit } = await f.singleton();
+  await assert.rejects(claim(f, visit, { purpose: 'reminder_same_day',
+    window: { ...window(), starts_at: '2029-12-30T12:00:00.000Z' } }), { code: 'appointment_visit_held' });
+});
 test('imported bind needs real fresh owner execution, current snapshot and purpose; old waits cannot be adopted', async () => {
   for (const execution of [{ created_at: '2029-12-30T12:00:00.000Z' }, { trigger_entity_id: 101 },
     { context: { appointment: { inicio: '2030-01-07T10:00:00.000Z' } } }, { trigger_type: 'appointment_cancelled' },

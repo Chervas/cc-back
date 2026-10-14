@@ -24,7 +24,7 @@ const CORE_MODELS = [
   'instalacion', 'instalacionhorario', 'instalacionbloqueo', 'clinicahorario', 'citapaciente',
   'appointmentbookingoccupancy', 'appointmentbookingresource', 'installationphysicalalias',
   'bookingequipment', 'bookingequipmentclinic', 'bookingequipmentroompolicy',
-  'conversation', 'message', 'automationflowcatalog', 'automationflowtemplatev2', 'flowexecutionv2', 'flowexecutionlogv2', 'jobrequest',
+  'conversation', 'message', 'conversationread', 'automationflowcatalog', 'automationflowtemplatev2', 'flowexecutionv2', 'flowexecutionlogv2', 'jobrequest',
   'marketingcompetitionheatmapcache', 'marketingreportoverviewcache',
   'consenttemplatecatalog', 'consenttemplatecatalogversion', 'consenttemplatecatalogdiscipline',
   'consenttemplatecatalogtreatment', 'clinicconsenttemplate', 'clinicconsenttemplateversion',
@@ -35,7 +35,7 @@ const ASSOCIATED = [
   'Clinica', 'Usuario', 'UsuarioClinica', 'Paciente', 'PacienteClinica', 'Tratamiento', 'LeadIntake',
   'DoctorClinica', 'DoctorHorario', 'DoctorHorarioExcepcion', 'DoctorBloqueo', 'DoctorBloqueoExcepcion',
   'Instalacion', 'InstalacionHorario', 'InstalacionBloqueo', 'ClinicaHorario', 'CitaPaciente',
-  'AppointmentBookingOccupancy', 'BookingEquipment', 'Conversation', 'FlowExecutionV2', 'AutomationFlowTemplateV2',
+  'AppointmentBookingOccupancy', 'BookingEquipment', 'Conversation', 'ConversationRead', 'FlowExecutionV2', 'AutomationFlowTemplateV2',
   'ConsentTemplateCatalog', 'ConsentTemplateCatalogVersion', 'ConsentTemplateCatalogDiscipline',
   'ConsentTemplateCatalogTreatment', 'ClinicConsentTemplate', 'ClinicConsentTemplateVersion',
   'TreatmentConsentRequirement', 'ConsentSignaturePackage', 'PatientConsentDocument', 'ConsentDeliveryEvent',
@@ -48,6 +48,7 @@ const DOMAIN_TABLES = [
   'PatientIntakeRequest', 'Conversation', 'Message', 'AutomationFlowTemplateV2', 'FlowExecutionV2',
   'FlowExecutionLogV2', 'JobRequest', 'AppointmentVisit', 'AppointmentVisitMember',
   'AppointmentVisitCommunication', 'AppointmentVisitBirthRequest', 'AppointmentVisitDispatch', 'Notification',
+  'AppointmentReminderSequence',
 ];
 
 async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registerOwnedLoopbackServer,
@@ -116,12 +117,14 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
   }
   await require('../../../../migrations/20261006130000-create-appointment-visit-communications').up(qi, S);
   await require('../../../../migrations/20261007130000-add-appointment-visit-runtime-contracts').up(qi, S);
+  await require('../../../../migrations/20261014120000-create-appointment-reminder-sequences').up(qi, S);
   for (const file of ['appointmentvisit', 'appointmentvisitmember', 'appointmentvisitcommunication',
     'appointmentvisitbirthrequest', 'appointmentvisitdispatch']) {
     const model = require('../../../../models/' + file)(sql, S.DataTypes); db[model.name] = model;
   }
   for (const name of ['AppointmentVisit', 'AppointmentVisitMember', 'AppointmentVisitCommunication',
     'AppointmentVisitBirthRequest', 'AppointmentVisitDispatch']) db[name].associate?.(db);
+  db.AppointmentReminderSequence = require('../../../../models/appointmentremindersequence')(sql, S.DataTypes);
 
   db.OwnedAuthOutbox = sql.define('OwnedAuthOutbox', {
     id: { type: S.DataTypes.INTEGER, primaryKey: true, autoIncrement: true },

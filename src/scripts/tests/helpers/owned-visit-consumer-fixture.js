@@ -20,7 +20,9 @@ async function createOwnedVisitConsumerFixture({ sql, models: db, registerOwnedL
   require('../fixtures/security_offline_runtime.cjs');
   const physical = await createOwnedBookingDurationFixture({ sql, models: db });
   const D = S.DataTypes, qi = sql.getQueryInterface(), publication = [], attempts = [];
-  const fixtureProcess = Object.create(process); fixtureProcess.env = { ...process.env, JOB_RUNTIME_NAMESPACE: 'visit_fixture' };
+  const fixtureProcess = Object.create(process); fixtureProcess.env = { ...process.env,
+    RUNTIME_ROLE: 'api', JOB_RUNTIME_NAMESPACE: 'visit_fixture', JOBS_WORKER_ENABLED: 'false',
+    JOBS_CRON_LEADER: 'false', JOBS_AUTO_START: 'false' };
   const schedulerFile = require.resolve('../../../services/jobScheduler.service');
   require.cache[schedulerFile] = { id: schedulerFile, filename: schedulerFile, loaded: true, exports: { triggerImmediate: async id => publication.push(id) } };
   const jobsFile = require.resolve('../../../services/jobRequests.service');
@@ -38,23 +40,28 @@ async function createOwnedVisitConsumerFixture({ sql, models: db, registerOwnedL
     for (const [key, type] of Object.entries(attrs)) { await qi.addColumn(model.tableName, key, { type, allowNull: true }); model.rawAttributes[key] = { type, allowNull: true }; }
     model.refreshAttributes();
   }
-  for (const file of ['conversation', 'message', 'automationflowtemplatev2', 'flowexecutionv2', 'flowexecutionlogv2', 'jobrequest',
+  for (const file of ['conversation', 'message', 'conversationread', 'automationflowtemplatev2', 'flowexecutionv2', 'flowexecutionlogv2', 'jobrequest',
     'ClinicMetaAsset', 'whatsapptemplatecatalog', 'whatsapptemplate', 'patientcustomfield', 'marketingcontactoptout', 'securitymonitoringmeasure']) {
     const model = require('../../../../models/' + file)(sql, D); db[model.name] = model;
   }
-  for (const name of ['Conversation', 'FlowExecutionV2', 'AutomationFlowTemplateV2', 'WhatsappTemplate', 'PatientCustomField', 'MarketingContactOptOut']) db[name].associate?.(db);
+  for (const name of ['Conversation', 'ConversationRead', 'FlowExecutionV2', 'AutomationFlowTemplateV2', 'WhatsappTemplate', 'PatientCustomField', 'MarketingContactOptOut']) db[name].associate?.(db);
   await sql.sync();
-  const jobs = scopedModule(jobsFile, {}, fixtureProcess);
+  const ownership = require('../../../lib/gatewayJobOwnership');
+  const jobs = scopedModule(jobsFile, { '../lib/gatewayJobOwnership': { ...ownership,
+    resolveEnqueueRuntimeNamespace: (currentNamespace, requestedNamespace) => ownership.resolveEnqueueRuntimeNamespace(
+      currentNamespace, requestedNamespace, fixtureProcess.env) } }, fixtureProcess);
   require.cache[jobsFile] = { id: jobsFile, filename: jobsFile, loaded: true, exports: jobs };
   await db.GrupoClinica.create({ id_grupo: 50 });
   for (const id of [1, 2, 3, 4]) await db.Paciente.update({ clinica_id: 100, public_id: 'owned_visit_patient_' + id,
     nombre: 'Paciente ficticio', apellidos: String(id), telefono_movil: '3460000000' + id, idioma_preferido: 'es' }, { where: { id_paciente: id } });
   await require('../../../../migrations/20261006130000-create-appointment-visit-communications').up(qi, S);
   await require('../../../../migrations/20261007130000-add-appointment-visit-runtime-contracts').up(qi, S);
+  await require('../../../../migrations/20261014120000-create-appointment-reminder-sequences').up(qi, S);
   for (const file of ['appointmentvisit', 'appointmentvisitmember', 'appointmentvisitcommunication', 'appointmentvisitbirthrequest', 'appointmentvisitdispatch']) {
     const model = require('../../../../models/' + file)(sql, D); db[model.name] = model;
   }
   for (const name of ['AppointmentVisit', 'AppointmentVisitMember', 'AppointmentVisitCommunication', 'AppointmentVisitBirthRequest', 'AppointmentVisitDispatch']) db[name].associate?.(db);
+  db.AppointmentReminderSequence = require('../../../../models/appointmentremindersequence')(sql, D);
   // Fixture reviewed graph has one details stage, no response waits or clinical
   // policies. No production graph map or feature flag is changed by this test.
   const nodes = [

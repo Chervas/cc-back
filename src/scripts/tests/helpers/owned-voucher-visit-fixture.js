@@ -82,7 +82,7 @@ async function createOwnedVoucherVisitFixture(context) {
     const seal = (body, proposal) => ({ ...body, booking_request_key: proposal.booking_request_key, booking_request_sha256: proposal.booking_request_sha256 });
     const counts = async () => Object.fromEntries(await Promise.all(['CitaPaciente', 'AppointmentBookingOccupancy', 'AppointmentBookingResource',
       'AppointmentVisit', 'AppointmentVisitMember', 'AppointmentVisitBirthRequest', 'AppointmentVisitCommunication', 'PatientOperationalEvent',
-      'PatientVoucherMovement', 'FlowExecutionV2', 'Message', 'AppointmentVisitDispatch', 'JobRequest'].map(async name => [name, await db[name].count()])));
+      'PatientVoucherMovement', 'FlowExecutionV2', 'Message', 'AppointmentVisitDispatch', 'JobRequest', 'AppointmentReminderSequence'].map(async name => [name, await db[name].count()])));
     return { ...f, get managed() { return require('../../../services/appointmentVisitManaged.service').current(); }, service, state,
       request, voucher, payload, seal, counts, close: async () => { await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); await f.close(); } };
   } catch (error) { await f.close(); throw error; }
