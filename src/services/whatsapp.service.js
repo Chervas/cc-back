@@ -503,19 +503,52 @@ class WhatsAppService {
             eligibility.assertClinicNonOperationalAllowed(clinicId, {
                 metadata: { communication_purpose: metadata.flow_domain },
             });
-            const strings = [];
-            const collect = (value, depth = 0) => {
+            const strings = [], purposeStrings = [], buttonUrls = [];
+            const urlPattern = /https?:\/\/[^\s<>"']+/gi;
+            const mediaTypes = new Set(['image', 'video', 'audio', 'document', 'sticker']);
+            const collect = (value, depth = 0, role = 'content') => {
                 if (depth > 12 || strings.length > 10000) return deny();
-                if (typeof value === 'string') strings.push(value);
-                else if (Array.isArray(value)) value.forEach(item => collect(item, depth + 1));
-                else if (value && typeof value === 'object') Object.entries(value).forEach(([key, item]) => {
-                    strings.push(key); collect(item, depth + 1);
-                });
+                if (typeof value === 'string') {
+                    // Catalog fields can be serialized JSON. Classify their
+                    // structure, not JSON escapes or an example image's folder.
+                    if (/^\s*[\[{]/.test(value)) {
+                        let parsed;
+                        try { parsed = JSON.parse(value); }
+                        catch (_notJson) { /* Ordinary visible text stays text. */ }
+                        if (parsed && typeof parsed === 'object') return collect(parsed, depth + 1, role);
+                    }
+                    strings.push(value);
+                    const links = value.match(urlPattern) || [];
+                    if (role === 'button') buttonUrls.push(...links);
+                    // Keep every URL for destination checks below. Only media
+                    // locators/examples lose URL words for PURPOSE detection;
+                    // final body text, bindings, metadata and buttons do not.
+                    const mediaPath = /^(?:data:|\/?[^\s<>]+\/[^\s<>]+$|[^\s<>{}]+\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|tiff?|webp|pdf|mp[34]|m4[av]|mov|webm|ogg|opus|wav|aac)$)/i.test(value.trim());
+                    purposeStrings.push(role === 'asset' || role === 'example'
+                        ? links.length ? value.replace(urlPattern, ' ') : mediaPath ? '' : value
+                        : value);
+                } else if (Array.isArray(value)) value.forEach(item => collect(item, depth + 1, role));
+                else if (value && typeof value === 'object') {
+                    const type = String(value.type || '').trim().toLowerCase();
+                    const media = mediaTypes.has(type) || type === 'header' && mediaTypes.has(String(value.format || '').toLowerCase());
+                    const nodeRole = ['button', 'buttons'].includes(type) ? 'button' : media ? 'asset' : role;
+                    Object.entries(value).forEach(([key, item]) => {
+                        strings.push(key); purposeStrings.push(key);
+                        const field = key.toLowerCase();
+                        const childRole = ['button', 'buttons'].includes(field) ? 'button'
+                            : ['template_usage', 'purpose', 'communication_purpose', 'family_key', 'binding'].includes(field) ? 'content'
+                            : ['example', 'examples'].includes(field) ? 'example'
+                            : mediaTypes.has(field) ? 'asset'
+                            : nodeRole === 'asset' && ['text', 'caption'].includes(field) ? 'content' : nodeRole;
+                        collect(item, depth + 1, childRole);
+                    });
+                }
             };
             // Only outbound content, never the patient's clinical history or notes.
             collect(payload?.text);
             collect(payload?.interactive);
             collect(payload?.document);
+            for (const type of ['image', 'video', 'audio', 'sticker']) collect(payload?.[type], 0, 'asset');
             collect(payload?.template?.components);
             if (payload?.type === 'template') {
                 const template = await db.WhatsappTemplate.findOne({
@@ -534,19 +567,21 @@ class WhatsAppService {
                     eligibility.assertClinicNonOperationalAllowed(clinicId, {
                         templateName: catalog?.name, metadata: { communication_purpose: catalog?.family_key },
                     });
-                    const staticContent = [];
-                    const before = strings.length;
+                    const before = purposeStrings.length;
                     collect(template.variables); collect(template.components);
                     collect(catalog?.family_key); collect(catalog?.variables);
                     collect(catalog?.components); collect(catalog?.body_text);
-                    staticContent.push(...strings.slice(before));
-                    const normalized = staticContent.join(' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+                    const normalized = purposeStrings.slice(before).join(' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
                     if (/\bconsent(?:imiento(?:s)?|_signature|_package|_document|_required)?\b/.test(normalized)
                         || /(?:url_dejar_resena|url_resena_google|google_review_url|review_request|solicitud_resena|firma_resenas|enlace_resena)/.test(normalized)
                         || /\b(?:resena|reviews)\b/.test(normalized)
                         || /\b(?:deja(?:r)?|solicita(?:r)?|escrib(?:e|ir))\b.{0,50}\bresena\b/.test(normalized)) return deny();
                 }
             }
+            // A real button is an outgoing destination, unlike header media or
+            // a catalog example. Do not let an innocuous display label hide its
+            // review/consent route even when the template has a neutral name.
+            if (buttonUrls.some(value => /(?:consent|resena|\breviews?\b)/i.test(value))) return deny();
             const urls = strings.flatMap(value => value.match(/https?:\/\/[^\s<>"']+/gi) || []);
             // Consent PDFs and signing links are recognizable independently of the
             // filename, template name and caller's generic document/package IDs.

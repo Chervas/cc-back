@@ -212,3 +212,100 @@ test('same-day/day-before reminders and operational confirmation/cancellation ac
     await f.send(payload); assert.equal(f.state.graph + f.state.broker, 1);
   }
 });
+
+// Real public catalog example, not patient data. The same reusable header
+// asset appears in reminders and review templates; its storage folder is not
+// evidence of the message's communication purpose.
+const catalogExampleImage = 'https://media.clinicaclick.com/templates/reviews/team-example.jpg';
+const reminderHeader = url => ({ type: 'HEADER', format: 'IMAGE', example: { header_handle: [url] } });
+const reminderBody = { type: 'BODY', text: 'Tu cita es hoy. Te indicamos cómo llegar a la clínica.' };
+test('real reminder IMAGE header example does not acquire the purpose of its /reviews/ storage folder', async () => {
+  for (const clinicId of [66, 72]) for (const broker of [false, true]) {
+    const f = fixture({ clinicId, broker,
+      template: { id: 4464, name: 'custom_v17', catalog_template_id: 61,
+        components: [reminderHeader(catalogExampleImage), reminderBody] },
+      catalog: { id: 61, family_key: 'appointment_reminder' },
+      message: { id: 1, conversation_id: 2, metadata: { communication_scope: 'care', flow_domain: 'appointments' } } });
+    await f.send(templatePayload([{ type: 'header', parameters: [{ type: 'image', image: { link: catalogExampleImage } }] }]));
+    assert.equal(f.state.graph + f.state.broker, 1);
+  }
+});
+
+test('media/example structure works in serialized components, variables and carousel catalogs without template-name exceptions', async () => {
+  const escaped = JSON.stringify([reminderHeader(catalogExampleImage), reminderBody]).replaceAll('/', '\\/');
+  const variants = [
+    { template: { id: 60, components: escaped } },
+    { template: { id: 60, variables: [{ key: 'header_asset', type: 'image', value: catalogExampleImage }] } },
+    { template: { id: 60, variables: JSON.stringify({ header: { examples: [catalogExampleImage] } }) } },
+    { template: { id: 60, components: [reminderHeader('/templates/reviews/team-example.jpg'), reminderBody] } },
+    { template: { id: 60, components: [reminderHeader('reviews/team-example.jpg'), reminderBody] } },
+    { template: { id: 60, components: [reminderHeader('reviews.jpg'), reminderBody] } },
+    { template: { id: 60, components: [reminderHeader('consent-example.png'), reminderBody] } },
+    { template: { id: 60, variables: { type: 'image', filename: 'consent-example.png', link: catalogExampleImage } } },
+    { template: { id: 60, catalog_template_id: 61 }, catalog: { id: 61, components: [reminderHeader(catalogExampleImage), reminderBody] } },
+    { template: { id: 60, catalog_template_id: 61 }, catalog: { id: 61,
+      variables: { media: { type: 'image', example: catalogExampleImage } },
+      components: [{ type: 'CAROUSEL', cards: [{ components: [reminderHeader(catalogExampleImage), reminderBody] }] }] } },
+  ];
+  for (const variant of variants) for (const broker of [false, true]) {
+    const f = fixture({ ...variant, broker }); await f.send(templatePayload());
+    assert.equal(f.state.graph + f.state.broker, 1);
+  }
+});
+
+test('a media folder never erases real review/consent catalog identities, bindings, body text or semantic metadata', async () => {
+  const variants = [
+    { template: { id: 60, catalog_template_id: 9, components: [reminderHeader(catalogExampleImage)] }, catalog: { id: 9 } },
+    { template: { id: 60, catalog_template_id: 61, components: [reminderHeader(catalogExampleImage)] }, catalog: { id: 61, family_key: 'review_request' } },
+    { template: { id: 60, catalog_template_id: 61, components: [reminderHeader(catalogExampleImage)] }, catalog: { id: 61, family_key: 'consent' } },
+    { template: { id: 60, components: [reminderHeader(catalogExampleImage), { type: 'BODY', text: 'Deja una reseña de tu visita.' }] } },
+    { template: { id: 60, components: [reminderHeader(catalogExampleImage)], variables: { url: '{{clinica.url_dejar_resena}}' } } },
+    { template: { id: 60, components: [reminderHeader(catalogExampleImage)], variables: { url: '{{consentimiento.enlace_publico}}' } } },
+    { template: { id: 60, components: [reminderHeader(catalogExampleImage)], variables: JSON.stringify({ template_usage: 'reviews' }) } },
+    { template: { id: 60, components: [reminderHeader(catalogExampleImage)],
+      variables: { type: 'image', template_usage: 'reviews', binding: 'consentimiento.enlace_publico' } } },
+    { template: { id: 60, variables: { type: 'image', binding: 'consentimiento.enlace' } } },
+    { template: { id: 60, variables: { type: 'image', caption: 'Deja una reseña sobre tu visita.' } } },
+    { template: { id: 60, variables: { type: 'image', text: 'Solicitar consentimiento antes de la visita.' } } },
+    { template: { id: 60, components: [reminderHeader(catalogExampleImage)] },
+      message: { id: 1, conversation_id: 2, metadata: { communication_scope: 'care', flow_domain: 'review_request' } } },
+  ];
+  for (const variant of variants) for (const broker of [false, true]) await held(fixture({ ...variant, broker }), templatePayload());
+});
+
+test('final button destinations remain protected even beside an innocuous image example and neutral display label', async () => {
+  for (const url of ['https://custom.invalid/reviews/leave', 'https://g.page/r/FAKE/review',
+    'https://search.google.com/local/writereview?placeid=FAKE',
+    'https://qa.invalid/tablet/consentimientos/FAKE', 'https://custom.invalid/clinic?site=66&utm_medium=button']) {
+    for (const broker of [false, true]) {
+      const template = { id: 60, components: [reminderHeader(catalogExampleImage), reminderBody,
+        { type: 'BUTTONS', buttons: [{ type: 'URL', text: 'Abrir', url }] }] };
+      await held(fixture({ broker, template, reviewUrl: 'https://custom.invalid/clinic?site=66' }), templatePayload());
+      await held(fixture({ broker, template: { id: 60, components: [reminderHeader(catalogExampleImage)] },
+        reviewUrl: 'https://custom.invalid/clinic?site=66' }),
+      templatePayload([{ type: 'button', sub_type: 'url', parameters: [{ type: 'text', text: url }] }]));
+    }
+  }
+});
+
+test('media/example URLs still undergo real consent/Google/configured-review destination checks', async () => {
+  for (const url of ['https://qa.invalid/tablet/consentimientos/FAKE',
+    'https://qa.invalid/api/consentimientos/documents/123/pdf', 'https://g.page/r/FAKE/review',
+    'https://search.google.com/local/writereview?placeid=FAKE', 'https://custom.invalid/clinic?site=66&utm_source=QA']) {
+    for (const broker of [false, true]) {
+      const options = { broker, reviewUrl: 'https://custom.invalid/clinic?site=66' };
+      await held(fixture({ ...options, template: { id: 60, components: [reminderHeader(url), reminderBody] } }), templatePayload());
+      await held(fixture({ ...options, template: { id: 60, variables: JSON.stringify({ example: url }).replaceAll('/', '\\/') } }), templatePayload());
+      await held(fixture(options), { type: 'image', image: { link: url } });
+    }
+  }
+});
+
+test('serialized media classification keeps bounded traversal fail-closed, not a swallowed JSON exception', async () => {
+  let nested = { example: catalogExampleImage };
+  for (let depth = 0; depth < 20; depth++) nested = { nested };
+  for (const broker of [false, true]) {
+    await held(fixture({ broker, template: { id: 60, variables: JSON.stringify(nested) } }), templatePayload());
+    await held(fixture({ broker, template: { id: 60, variables: JSON.stringify({ example: Array(10001).fill('asset.jpg') }) } }), templatePayload());
+  }
+});
