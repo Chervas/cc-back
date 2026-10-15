@@ -2718,12 +2718,12 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
   const sumDefinition = (definition) => businessProfileMetricValueByDate(rows, definition)
     .reduce((sum, point) => sum + toNumber(point.value), 0);
 
-  const reviewWhere = buildEffectiveSnapshotWhere(
+  const reviewWhere = { ...buildEffectiveSnapshotWhere(
     scope,
     'clinica_id',
     'business_location_id',
     effectiveLocationIds
-  );
+  ), google_missing_at: null };
   const [reviewTotals, newReviews] = await Promise.all([
     BusinessProfileReview.findOne({
       where: reviewWhere,
