@@ -10,6 +10,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const db = require('../../models');
 const { consentClinicIds, setConsentGroupScope } = require('../lib/tablet-kiosk-scope');
+const consentDocumentChoices = require('../lib/consent-document-choices');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 // Keep PDFs self-contained: isolated runtimes cannot fetch frontend assets.
@@ -369,6 +370,16 @@ function hashSnapshot(payload) {
         .createHash('sha256')
         .update(JSON.stringify(payload || {}))
         .digest('hex');
+}
+
+function hashRenderedSnapshot(snapshot, html) {
+    if (!consentDocumentChoices.getConsentChoiceForm({ snapshot_json: snapshot })) {
+        return hashSnapshot({ ...snapshot, rendered_html: html });
+    }
+    // Only the newly introduced interactive form uses canonical receipts.
+    // Patient/professional signatures and revocations keep this same version.
+    snapshot.integrity = { algorithm: consentDocumentChoices.CHOICE_HASH_ALGORITHM };
+    return consentDocumentChoices.choiceSnapshotHash(snapshot, html);
 }
 
 function escapeHtml(value) {
@@ -2250,6 +2261,8 @@ async function createPatientIntakePackage(identifier, options = {}) {
     return require('../lib/patient-intake-consents').preparePatientIntake({
         db, patientId: patient.id_paciente, clinicId: options.clinicId, actorId: options.createdBy,
         structuredQuestionnaire: options.structuredQuestionnaire === true,
+        allowLinkedClinic: options.allowLinkedClinic === true,
+        transaction: options.transaction || null,
         snapshot: ({ template: templateRow, version: versionRow, patient: patientRow, clinic: clinicRow }) => {
             const template = getPlain(templateRow), version = getPlain(versionRow), paciente = getPlain(patientRow);
             const context = buildTemplateContext({ paciente, clinica: getPlain(clinicRow) });
@@ -2263,7 +2276,7 @@ async function createPatientIntakePackage(identifier, options = {}) {
                 clinical_policy: { ...policy, pdf_strategy: 'json_snapshot_printable_on_demand' },
                 generated_at: new Date().toISOString(),
             };
-            return { snapshot_json: snapshot, snapshot_html: html, snapshot_hash: hashSnapshot({ ...snapshot, rendered_html: html }) };
+            return { snapshot_json: snapshot, snapshot_html: html, snapshot_hash: hashRenderedSnapshot(snapshot, html) };
         },
     });
 }
@@ -2473,7 +2486,7 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
             title,
             snapshot_json: snapshot,
             snapshot_html: renderedHtml,
-            snapshot_hash: hashSnapshot({ ...snapshot, rendered_html: renderedHtml }),
+            snapshot_hash: hashRenderedSnapshot(snapshot, renderedHtml),
             expires_at: packageRow.expires_at || null,
         }, { transaction });
     }
@@ -3154,6 +3167,7 @@ function serializePublicPackage(packageRow) {
             revoked_at: doc.revoked_at || null,
             requires_representative: requiresRepresentative(doc),
             signature_evidence: publicSignatureEvidenceForDocument(doc),
+            ...consentDocumentChoices.publicDocumentChoices(doc),
         })),
     };
 }
@@ -3242,6 +3256,9 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
     }
     const evidence = normalizeSignatureEvidence(payload, requestMeta);
     requireSignatureEvidence(evidence, plainDoc);
+    consentDocumentChoices.validateDocumentChoiceMap(payload, [plainDoc]);
+    const choiceEvidence = consentDocumentChoices.documentChoiceEvidence(plainDoc, payload);
+    if (choiceEvidence) evidence.consent_choices = choiceEvidence;
     if (plainDoc.package) requireActiveConsentPackage(plainDoc.package);
     if (requiresRepresentative(plainDoc) && evidence.signer_role !== 'representative') {
         const err = new Error('representative_signature_required');
@@ -3251,13 +3268,15 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
     const snapshot = plainDoc.snapshot_json && typeof plainDoc.snapshot_json === 'object' ? plainDoc.snapshot_json : {};
     const nextSnapshot = {
         ...snapshot,
+        ...(choiceEvidence ? { integrity: { algorithm: consentDocumentChoices.CHOICE_HASH_ALGORITHM } } : {}),
         signature_evidence: evidence,
         signed_copy: {
             signed_at: evidence.signed_at,
             snapshot_hash_before_signature: plainDoc.snapshot_hash || null,
         },
     };
-    const nextHash = hashSnapshot({ ...nextSnapshot, rendered_html: plainDoc.snapshot_html || '' });
+    const signedHtml = consentDocumentChoices.appendSignedChoiceHtml(plainDoc.snapshot_html || '', plainDoc, choiceEvidence);
+    const nextHash = hashRenderedSnapshot(nextSnapshot, signedHtml);
     const signedValues = {
         status: 'signed',
         signed_at: new Date(evidence.signed_at),
@@ -3266,6 +3285,7 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
         channel: evidence.method === 'tablet_signature' ? 'tablet' : (plainDoc.channel || 'internal'),
         delivery_status: 'signed',
         snapshot_json: nextSnapshot,
+        ...(choiceEvidence ? { snapshot_html: signedHtml } : {}),
         snapshot_hash: nextHash,
     };
     await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
@@ -3341,7 +3361,7 @@ async function signProfessionalConsentDocument(identifier, payload = {}, userId 
         ...snapshot,
         professional_signature_evidence: evidence,
     };
-    const nextHash = hashSnapshot({ ...nextSnapshot, rendered_html: plainDoc.snapshot_html || '' });
+    const nextHash = hashRenderedSnapshot(nextSnapshot, plainDoc.snapshot_html || '');
     await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
         await lockConsentPackages([plainDoc.package_id], transaction);
         // A patient-signed package is still active for its professional
@@ -3454,9 +3474,11 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
         throw error;
     }
     // Validate the whole selected package before recording its first signature.
+    consentDocumentChoices.validateDocumentChoiceMap(payload, pending);
     const evidence = normalizeSignatureEvidence(payload, requestMeta);
     for (const doc of pending) {
         requireSignatureEvidence(evidence, doc);
+        consentDocumentChoices.documentChoiceEvidence(doc, payload);
         if (doc.expires_at && new Date(doc.expires_at).getTime() <= Date.now()) {
             const error = new Error('consent_document_expired');
             error.statusCode = 410;
@@ -3470,7 +3492,7 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
         }
         if (DOCUMENT_CLOSED_STATUSES.has(doc.status)) continue;
         signed.push(await signConsentDocument(doc.public_id, {
-            ...payload,
+            ...consentDocumentChoices.payloadForDocument(doc, payload),
             method: payload.method || `${token.channel || 'tablet'}_signature`,
         }, requestMeta));
     }
@@ -3505,7 +3527,7 @@ async function revokeConsentDocument(identifier, payload = {}, requestMeta = {})
         const evidence = normalizeRevocationEvidence(payload, requestMeta);
         const snapshot = plainDoc.snapshot_json && typeof plainDoc.snapshot_json === 'object' ? plainDoc.snapshot_json : {};
         const nextSnapshot = { ...snapshot, revocation_evidence: evidence };
-        const nextHash = hashSnapshot({ ...nextSnapshot, rendered_html: plainDoc.snapshot_html || '' });
+        const nextHash = hashRenderedSnapshot(nextSnapshot, plainDoc.snapshot_html || '');
         await current.update({ status: 'revoked', revoked_at: new Date(evidence.revoked_at), snapshot_json: nextSnapshot,
             snapshot_hash: nextHash, delivery_status: 'revoked' }, { transaction });
         await db.ConsentDeliveryEvent.create({

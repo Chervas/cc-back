@@ -19,18 +19,21 @@ async function prepare({ patientId, clinicId, actorId }) {
   if (pendingReview?.status === 'submitted') throw q.error('intake_review_pending', 'El paciente ya ha enviado sus respuestas. El profesional debe revisarlas antes de solicitar otro formulario.', 409);
   // Privacy signature and clinical answers remain distinct. Reuses valid signed
   // privacy evidence; a returning patient can update answers without re-signing it.
-  await require('./consentimientos.service').createPatientIntakePackage(patientId, { clinicId, createdBy: actorId, structuredQuestionnaire: true });
+  const privacy = await require('./consentimientos.service').createPatientIntakePackage(patientId, { clinicId, createdBy: actorId, structuredQuestionnaire: true });
+  const currentPrivacyPackages = privacy.current_package_ids || [];
   return db.sequelize.transaction(async transaction => {
     const patient = await scopedPatient(patientId, clinicId, transaction);
     const previous = await db.PatientIntakeRequest.findOne({ where: { patient_id: patientId, clinic_id: clinicId }, order: [['id', 'DESC']], transaction });
     if (previous?.status === 'submitted') throw q.error('intake_review_pending', 'El paciente ya ha enviado sus respuestas. El profesional debe revisarlas antes de solicitar otro formulario.', 409);
     if (previous?.status === 'pending') {
       const pkg = await db.ConsentSignaturePackage.findByPk(previous.package_id, { transaction });
-      if (pkg && !['expired', 'cancelled'].includes(pkg.status) && new Date(pkg.expires_at) > new Date()) return { package_id: pkg.id, intake_id: previous.id, reused: true };
+      const healthOnly = pkg && privacy.privacy_signed === true
+        && await db.PatientConsentDocument.count({ where: { package_id: pkg.id }, transaction }) === 0;
+      if (pkg && (currentPrivacyPackages.includes(pkg.id) || healthOnly) && !['expired', 'cancelled'].includes(pkg.status) && new Date(pkg.expires_at) > new Date()) return { package_id: pkg.id, intake_id: previous.id, reused: true };
     }
     // Only attach to an unsigned, unclaimed initial-registration package.
     let pkg = await db.ConsentSignaturePackage.findOne({ where: { paciente_id: patientId, clinica_id: clinicId,
-      trigger_source: 'patient_intake', status: { [Op.in]: ['pending', 'sent', 'viewed'] }, expires_at: { [Op.gt]: new Date() } },
+      id: { [Op.in]: currentPrivacyPackages }, trigger_source: 'patient_intake', status: { [Op.in]: ['pending', 'sent', 'viewed'] }, expires_at: { [Op.gt]: new Date() } },
     order: [['id', 'DESC']], transaction });
     if (pkg && await db.PatientIntakeRequest.findOne({ where: { package_id: pkg.id }, transaction })) pkg = null;
     if (!pkg) pkg = await db.ConsentSignaturePackage.create({ public_id: `cpkg_${randomUUID().replace(/-/g, '')}`,

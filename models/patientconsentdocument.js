@@ -87,7 +87,7 @@ module.exports = (sequelize, DataTypes) => {
     locale: { type: DataTypes.STRING(12), allowNull: false, defaultValue: 'es' },
     title: { type: DataTypes.STRING(255), allowNull: false },
     snapshot_json: { type: DataTypes.JSON, allowNull: true },
-    snapshot_html: { type: DataTypes.TEXT, allowNull: true },
+    snapshot_html: { type: DataTypes.TEXT('medium'), allowNull: true },
     snapshot_hash: { type: DataTypes.STRING(128), allowNull: true },
     signed_by_patient_id: { type: DataTypes.INTEGER, allowNull: true },
     signed_by_representative_id: { type: DataTypes.INTEGER, allowNull: true },

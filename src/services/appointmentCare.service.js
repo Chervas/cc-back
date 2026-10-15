@@ -16,6 +16,7 @@ async function record({ appointmentId, clinicId, actorId, action }) {
     if (action === 'arrive' && state.arrived_at || action === 'start' && state.started_at) return { appointment: cita, care: state, replayed: true };
     let documentationSnapshot;
     if (action === 'start') {
+      await require('./appointmentPrivacyEligibility.service').assertPrivacyBeforeStart({ db, appointment: cita, transaction, now });
       let consent;
       try { consent = await assessAppointmentClinicalConsent({ db, appointment: cita, transaction, now }); }
       catch (error) {

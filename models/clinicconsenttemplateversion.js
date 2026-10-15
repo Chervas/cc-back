@@ -23,7 +23,7 @@ module.exports = (sequelize, DataTypes) => {
     locale: { type: DataTypes.STRING(12), allowNull: false, defaultValue: 'es' },
     title: { type: DataTypes.STRING(255), allowNull: false },
     body_json: { type: DataTypes.JSON, allowNull: true },
-    body_html: { type: DataTypes.TEXT, allowNull: true },
+    body_html: { type: DataTypes.TEXT('medium'), allowNull: true },
     variable_schema: { type: DataTypes.JSON, allowNull: true },
     status: {
       type: DataTypes.ENUM('draft', 'published', 'archived'),
