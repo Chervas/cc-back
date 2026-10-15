@@ -591,6 +591,7 @@ async function countTasks({ clinicIds, clinicMap, todayDate }) {
       ? BusinessProfileReview.count({
           where: {
             ...scopedWhere('clinica_id', clinicIds),
+            google_missing_at: null,
             has_reply: false,
           },
         })
@@ -741,6 +742,7 @@ async function loadUnansweredReviewCards({ clinicIds, clinicMap, limit = 4 }) {
   const reviews = await BusinessProfileReview.findAll({
     where: {
       ...scopedWhere('clinica_id', clinicIds),
+      google_missing_at: null,
       has_reply: false,
     },
     attributes: [

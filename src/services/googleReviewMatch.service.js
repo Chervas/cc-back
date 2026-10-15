@@ -300,6 +300,7 @@ async function matchBusinessProfileReview(reviewId) {
   if (!review) {
     return { skipped: true, reason: 'review_not_found', review_id: id };
   }
+  if (review.google_missing_at) return { skipped: true, reason: 'review_no_longer_visible', review_id: id };
 
   if (review.matched_contact_event_id || review.matched_paciente_id) {
     return {

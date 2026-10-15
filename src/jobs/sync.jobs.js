@@ -24,7 +24,7 @@ const SYNC_PROVIDER_HTTP_TIMEOUT_MS = Math.max(
 // límite bloquearía todos los proveedores. La instancia es local para no
 // alterar el timeout de otros controladores del backend.
 const syncHttp = axios.create({ timeout: SYNC_PROVIDER_HTTP_TIMEOUT_MS });
-const { Op } = require('sequelize');
+const { Op, fn, col } = require('sequelize');
 // Unificar lógica: reutilizar las funciones del controlador
 const { 
   syncAdAccountMetrics,
@@ -2778,6 +2778,7 @@ class MetaSyncJobs {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
       const reviews = response.data?.reviews || [];
+      const observedAt = new Date();
       if (page === 1) {
         const providerTotal = Number(response.data?.totalReviewCount);
         if (Number.isInteger(providerTotal) && providerTotal >= 0) expectedReviewCount = providerTotal;
@@ -2820,6 +2821,9 @@ class MetaSyncJobs {
             raw_payload: review
           };
           const existing = existingByName.get(String(reviewName));
+          payload.first_seen_at = existing?.first_seen_at || existing?.created_at || observedAt;
+          payload.last_seen_at = observedAt;
+          payload.google_missing_at = null;
           let shouldUpsert = false;
           if (!existing) {
             newReviewNames.push(reviewName);
@@ -2866,10 +2870,20 @@ class MetaSyncJobs {
               'reply_update_time',
               'has_reply',
               'raw_payload',
+              'first_seen_at',
+              'last_seen_at',
+              'google_missing_at',
               'updated_at'
             ]
           });
         }
+        // Observe unchanged reviews too, without treating them as new matches or
+        // changing their content clock. Reappearing reviews retain their history.
+        if (reviewNames.length) await BusinessProfileReview.update({
+          first_seen_at: fn('COALESCE', col('first_seen_at'), col('created_at')),
+          last_seen_at: observedAt,
+          google_missing_at: null,
+        }, { where: { business_location_id: location.id, review_name: { [Op.in]: reviewNames } }, transaction, silent: true });
         return { payloads, newReviewNames, pageHasChanges };
       });
       processed += payloads.length;
@@ -2896,26 +2910,26 @@ class MetaSyncJobs {
       }
     } while (nextPageToken && page < maxPages);
 
-    // El barrido completo es autoritativo: elimina reseñas que Google ya no
-    // devuelve. El job incremental de 15 minutos corta pronto y nunca borra.
+    // Only a complete, count-consistent observation can establish absence.
+    // Incremental/partial scans and provider failures never archive reviews.
     if (
       !enqueueOnlyNewReviews
       && !nextPageToken
       && expectedReviewCount !== null
-      && seenReviewNames.size >= expectedReviewCount
+      && seenReviewNames.size === expectedReviewCount
     ) {
       let afterId = 0, more = true;
       while (more) {
         const batch = await businessProfileCache.commit(observation, async transaction => {
           const storedRows = await BusinessProfileReview.findAll({
             where: { business_location_id: location.id, id: { [Op.gt]: afterId } },
-            attributes: ['id', 'review_name'], order: [['id', 'ASC']], limit: 500,
+            attributes: ['id', 'review_name', 'google_missing_at'], order: [['id', 'ASC']], limit: 500,
             raw: true, transaction, lock: transaction.LOCK.UPDATE,
           });
-          const staleIds = storedRows.filter(row => !seenReviewNames.has(String(row.review_name)))
+          const staleIds = storedRows.filter(row => !row.google_missing_at && !seenReviewNames.has(String(row.review_name)))
             .map(row => Number(row.id));
-          if (staleIds.length) await BusinessProfileReview.destroy({
-            where: { id: { [Op.in]: staleIds } }, transaction,
+          if (staleIds.length) await BusinessProfileReview.update({ google_missing_at: new Date() }, {
+            where: { id: { [Op.in]: staleIds }, google_missing_at: null }, transaction, silent: true,
           });
           return { lastId: Number(storedRows.at(-1)?.id || afterId), more: storedRows.length === 500 };
         });

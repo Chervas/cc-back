@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 const { DataTypes: D } = require('sequelize');
 module.exports = async ({ sql, models, report, local, consumer, resolved, actor, setBefore, setAfter, writes }) => {
   require('./security_offline_runtime.cjs');
+  const previousRole = process.env.RUNTIME_ROLE;
+  // This fixture owns the business executor, not the external gateway.
+  process.env.RUNTIME_ROLE = 'api';
   models.Sequelize = require('sequelize');
   for (const [name, file] of [['AutomationFlowTemplateV2', 'automationflowtemplatev2'], ['FlowExecutionV2', 'flowexecutionv2'],
     ['FlowExecutionLogV2', 'flowexecutionlogv2'], ['JobRequest', 'jobrequest']]) {
@@ -269,5 +272,6 @@ module.exports = async ({ sql, models, report, local, consumer, resolved, actor,
   } finally {
     local.resolveEffectiveLocations = savedResolve; setBefore(null); setAfter(null);
     if (previousEnv === undefined) delete process.env.JOB_RUNTIME_NAMESPACE; else process.env.JOB_RUNTIME_NAMESPACE = previousEnv;
+    if (previousRole === undefined) delete process.env.RUNTIME_ROLE; else process.env.RUNTIME_ROLE = previousRole;
   }
 };

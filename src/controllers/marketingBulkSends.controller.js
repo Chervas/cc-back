@@ -2,6 +2,13 @@
 
 const { resolveClinicScope } = require('../lib/clinicScope');
 const marketingBulkSendsService = require('../services/marketingBulkSends.service');
+const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
+
+async function requireReviewHistoryAccess(req, scope) {
+  if (!await hasMarketingClinicScopeAccess({ userId: req.userData?.userId, clinicIds: scope.clinicIds, access: 'read' })) {
+    throw Object.assign(new Error('No tienes acceso a las reseñas de estas clínicas'), { status: 403 });
+  }
+}
 
 async function resolveScope(req, { allowAll = false } = {}) {
   const rawScope = req.query.clinicId
@@ -105,6 +112,8 @@ exports.listCampaigns = async (req, res) => {
 exports.getReviewRequestSummary = async (req, res) => {
   try {
     const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });
+    await requireReviewHistoryAccess(req, scope);
+    res.set('Cache-Control', 'no-store');
     const result = await marketingBulkSendsService.getReviewRequestSummary(scope, {
       review_source: req.query.review_source || req.query.reviewSource || null,
       review_group_clinic_ids: req.query.review_group_clinic_ids || req.query.reviewGroupClinicIds || null,
@@ -127,6 +136,20 @@ exports.getReviewRequestSummary = async (req, res) => {
     });
   } catch (error) {
     return sendError(res, error, 'Error cargando resumen de solicitudes de reseñas');
+  }
+};
+
+exports.getMissingGoogleReviews = async (req, res) => {
+  try {
+    const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });
+    await requireReviewHistoryAccess(req, scope);
+    res.set('Cache-Control', 'no-store');
+    return res.json(await marketingBulkSendsService.getMissingGoogleReviews(scope, {
+      review_group_clinic_ids: req.query.review_group_clinic_ids,
+      limit: req.query.limit, offset: req.query.offset,
+    }));
+  } catch (error) {
+    return sendError(res, error, 'Error cargando reseñas no visibles en Google');
   }
 };
 

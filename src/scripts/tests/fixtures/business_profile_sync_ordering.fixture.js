@@ -110,11 +110,11 @@ module.exports = async ({ models, report, broker, local, consumer, resolved, req
     setRead(() => response({ reviews: [review(pair[0].comment)], totalReviewCount: 1 }));
     await sync('reviews');
   } finally { models.sequelize.options.logging = logging; }
-  const pruningReads = statements.filter(statement => /SELECT `id`, `review_name`/.test(statement));
+  const pruningReads = statements.filter(statement => /SELECT `id`, `review_name`, `google_missing_at`/.test(statement));
   assert.equal(pruningReads.length, 2); assert(pruningReads.every(statement => /LIMIT 500/.test(statement)));
-  assert.equal(statements.filter(statement => /DELETE FROM `BusinessProfileReviews`/.test(statement)).length, 2);
-  assert.equal(await models.BusinessProfileReview.count(), 1); assert(await cacheReview());
-  report.checks.push('authoritative prune of 602 absent reviews uses two keyset batches capped at 500, each guarded by the observation transaction; live review preserved');
+  assert.equal(statements.filter(statement => /DELETE FROM `BusinessProfileReviews`/.test(statement)).length, 0);
+  assert.equal(await models.BusinessProfileReview.count({ where: { google_missing_at: null } }), 1); assert(await cacheReview());
+  report.checks.push('authoritative archival of absent reviews uses bounded keyset batches guarded by the observation transaction, never deletes history; live review preserved');
 
   const newest = [{ name: parent + '/media/newest' }];
   await delayed('media', { mediaItems: [] }, async () => {

@@ -2316,30 +2316,7 @@ function buildReviewRatingSummaryText(row = {}) {
 }
 
 function buildReviewResponseHeatmaps(rows = []) {
-  const weekdays = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
-  const hours = Array.from({ length: 24 }, (_item, index) => index);
-  const empty = () => weekdays.map((day) => ({
-    name: day,
-    data: hours.map((hour) => ({ x: `${String(hour).padStart(2, '0')}:00`, y: 0 }))
-  }));
-  const heatmaps = {
-    winter: { label: 'Invierno', total: 0, series: empty() },
-    summer: { label: 'Verano', total: 0, series: empty() },
-  };
-
-  for (const row of rows || []) {
-    const season = String(row.season || '');
-    if (!heatmaps[season]) continue;
-    const weekday = Number(row.weekday);
-    const hour = Number(row.hour);
-    const total = Number(row.total || 0);
-    if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) continue;
-    if (!Number.isInteger(hour) || hour < 0 || hour > 23) continue;
-    heatmaps[season].series[weekday].data[hour].y = total;
-    heatmaps[season].total += total;
-  }
-
-  return heatmaps;
+  return require('../lib/review-response-heatmaps').buildReviewResponseHeatmaps(rows);
 }
 
 function buildGoogleRatingSummary(row = {}) {
@@ -4769,6 +4746,15 @@ function applyReviewClinicReadinessExclusions(itemPayloads = [], clinicStatuses 
   });
 }
 
+async function getMissingGoogleReviews(scope, options = {}) {
+  const effectiveScope = applyReviewClinicFilter(scope, options);
+  const clinicIds = (effectiveScope?.clinicIds || []).filter(Number.isInteger);
+  const locationIds = await resolveReviewBusinessLocationIdsForClinics(clinicIds);
+  return { success: true, ...await require('./googleReviewHistory.service').listMissingReviews(db, {
+    clinicIds, locationIds, limit: options.limit, offset: options.offset,
+  }) };
+}
+
 async function getReviewRequestSummary(scope, options = {}) {
   const reviewSource = normalizeReviewRequestSource(options.review_source || options.reviewSource);
   const treatmentIds = parseReviewTreatmentIds(options);
@@ -4970,30 +4956,9 @@ async function getReviewRequestSummary(scope, options = {}) {
     { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
   );
 
-  const [googleReviewsMatchedRow] = await db.sequelize.query(
-    `
-    SELECT COUNT(DISTINCT r.id) AS total
-    FROM BusinessProfileReviews r
-    INNER JOIN MarketingPatientContactEvents e ON e.id = r.matched_contact_event_id
-    INNER JOIN MarketingPatientLists l ON l.id = e.list_id
-    INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
-    WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
-      AND l.objective_id = :objectiveId
-      AND (
-        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
-        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
-      )
-      AND e.event_type = 'google_review_matched'
-      AND NOT EXISTS (
-        SELECT 1
-        FROM MarketingPatientContactEvents te
-        WHERE te.list_id = i.list_id
-          AND te.item_id = i.id
-          AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
-      )
-    `,
-    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID, reviewBusinessLocationIds }, type: QueryTypes.SELECT }
-  );
+  const reviewHistory = require('./googleReviewHistory.service');
+  const historicalMatches = await reviewHistory.countHistoricalMatches(db, clinicIds);
+  const missingReviews = await reviewHistory.listMissingReviews(db, { clinicIds, locationIds: reviewBusinessLocationIds });
 
   const [googleReviewsAttributedRow] = await db.sequelize.query(
     `
@@ -5121,6 +5086,7 @@ async function getReviewRequestSummary(scope, options = {}) {
       SUM(CASE WHEN CAST(star_rating AS UNSIGNED) = 5 THEN 1 ELSE 0 END) AS five_star_reviews
     FROM BusinessProfileReviews r
     WHERE ${googleReviewScopePredicate}
+      AND r.google_missing_at IS NULL
       AND CAST(star_rating AS UNSIGNED) BETWEEN 1 AND 5
     `,
     { replacements: { clinicIds, reviewBusinessLocationIds }, type: QueryTypes.SELECT }
@@ -5208,7 +5174,8 @@ async function getReviewRequestSummary(scope, options = {}) {
       marketing_opt_outs: Number(reviewOptOutRow?.total || 0),
       ratings_1_to_4: Number(ratingsRow?.ratings_1_to_4 || 0),
       ratings_5: Number(ratingsRow?.ratings_5 || 0),
-      google_reviews_matched: Number(googleReviewsMatchedRow?.total || 0),
+      google_reviews_matched: historicalMatches,
+      google_review_history: missingReviews,
       google_reviews_attributed: Number(googleReviewsAttributedRow?.total || 0),
       low_rating_reasons: (recentPrivateRatings || [])
         .map((row) => ({
@@ -11022,6 +10989,7 @@ module.exports = {
   updateCampaign,
   getReviewRequestAutomationStatus,
   getReviewRequestSummary,
+  getMissingGoogleReviews,
   setReviewRequestAutomation,
   createAndStartReviewRequestForAppointment,
   sendReviewRequestReminder,

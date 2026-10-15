@@ -4776,6 +4776,7 @@ async function loadOwnProfileReviewSummary(clinic) {
     ],
     where: {
       business_location_id: businessLocationId,
+      google_missing_at: null,
       star_rating: { [Op.between]: [1, 5] },
     },
     raw: true,

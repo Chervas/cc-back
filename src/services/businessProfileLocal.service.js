@@ -553,7 +553,7 @@ async function buildOverview(resolved, startDate, endDate) {
     loadMetricRows(locationIds, range),
     locationIds.length
       ? BusinessProfileReview.findOne({
-        where: { business_location_id: { [Op.in]: locationIds } },
+        where: { business_location_id: { [Op.in]: locationIds }, google_missing_at: null },
         attributes: [
           [fn('COUNT', col('id')), 'total'],
           [fn('AVG', col('star_rating')), 'averageRating'],
@@ -567,6 +567,7 @@ async function buildOverview(resolved, startDate, endDate) {
       ? BusinessProfileReview.count({
         where: {
           business_location_id: { [Op.in]: locationIds },
+          google_missing_at: null,
           create_time: { [Op.gte]: range.startObj, [Op.lt]: range.endExclusive },
         },
       })
@@ -709,7 +710,7 @@ async function listReviews(resolved, query = {}) {
   const limit = Math.max(1, clampPage(query.limit, 10, 50));
   const offset = clampPage(query.offset, 0, 100000);
   if (!locationIds.length) return { success: true, items: [], total: 0, limit, offset };
-  const where = { business_location_id: { [Op.in]: locationIds } };
+  const where = { business_location_id: { [Op.in]: locationIds }, google_missing_at: null };
   if (query.rating) where.star_rating = Math.max(1, Math.min(5, Number(query.rating)));
   if (String(query.unreplied) === 'true') where.has_reply = false;
   if (String(query.unreplied) === 'false') where.has_reply = true;
@@ -738,7 +739,7 @@ async function findReviewForMutation(resolved, reviewIdRaw) {
   }
   const reviewId = toInt(reviewIdRaw);
   const reviewName = cleanString(reviewIdRaw);
-  const where = { business_location_id: { [Op.in]: locationIds } };
+  const where = { business_location_id: { [Op.in]: locationIds }, google_missing_at: null };
   if (reviewId) where.id = reviewId;
   else if (reviewName) where.review_name = reviewName;
   else {
@@ -1068,32 +1069,8 @@ async function importLogoFromBusinessProfile(resolved, payload = {}) {
   };
 }
 
-function emptyHeatmap() {
-  const weekdays = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
-  const hours = Array.from({ length: 24 }, (_item, index) => index);
-  return weekdays.map((day) => ({
-    name: day,
-    data: hours.map((hour) => ({ x: `${String(hour).padStart(2, '0')}:00`, y: 0 })),
-  }));
-}
-
 function buildReviewResponseHeatmaps(rows = []) {
-  const heatmaps = {
-    winter: { label: 'Invierno', total: 0, series: emptyHeatmap() },
-    summer: { label: 'Verano', total: 0, series: emptyHeatmap() },
-  };
-  for (const row of rows || []) {
-    const season = String(row.season || '');
-    if (!heatmaps[season]) continue;
-    const weekday = Number(row.weekday);
-    const hour = Number(row.hour);
-    const total = Number(row.total || 0);
-    if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) continue;
-    if (!Number.isInteger(hour) || hour < 0 || hour > 23) continue;
-    heatmaps[season].series[weekday].data[hour].y = total;
-    heatmaps[season].total += total;
-  }
-  return heatmaps;
+  return require('../lib/review-response-heatmaps').buildReviewResponseHeatmaps(rows);
 }
 
 function calculateFiveStarReviewsNeeded(totalReviews, ratingSum, targetAverage) {
@@ -1210,6 +1187,7 @@ async function buildReviewInsights(resolved) {
           SUM(CASE WHEN CAST(star_rating AS UNSIGNED) = 5 THEN 1 ELSE 0 END) AS five_star_reviews
         FROM BusinessProfileReviews
         WHERE business_location_id IN (:locationIds)
+          AND google_missing_at IS NULL
           AND CAST(star_rating AS UNSIGNED) BETWEEN 1 AND 5
         `,
         { replacements: { locationIds }, type: db.Sequelize.QueryTypes.SELECT }

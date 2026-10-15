@@ -125,10 +125,10 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   report.checks.push('Actual assignment, mapped and user fallback resolver SELECTs load GoogleConnection.id only; fictional credential columns remain unread');
   const metrics = await models.BusinessProfileDailyMetric.findAll({ order: [['date', 'ASC']], raw: true });
   assert.equal(metrics.length, 2); assert.equal(metrics[0].value, 0); assert.equal(metrics[1].value, 13);
-  assert.equal(await models.BusinessProfileReview.count({ where: { review_name: 'stale-review' } }), 0);
+  assert((await models.BusinessProfileReview.findOne({ where: { review_name: 'stale-review' } })).google_missing_at);
   assert.equal(await models.BusinessProfileReview.count({ where: { review_name: 'review-first' } }), 1);
-  report.checks.push('Missing metric does not overwrite consolidated value; complete reviews remove stale cache while preserving provider reviewId');
-  await models.BusinessProfileReview.create({ clinica_id: 71, business_location_id: 51, review_name: 'stale-review' });
+  report.checks.push('Missing metric does not overwrite consolidated value; complete reviews archive stale rows while preserving provider reviewId');
+  await models.BusinessProfileReview.update({ google_missing_at: null }, { where: { review_name: 'stale-review' } });
   const context = await service.prepare(location, jobs._ensureGoogleAccessToken, new Map());
   mode = 'failed-page'; await assert.rejects(jobs._syncBusinessProfileReviews(location, context));
   assert.equal(await models.BusinessProfileReview.count({ where: { review_name: 'stale-review' } }), 1);
