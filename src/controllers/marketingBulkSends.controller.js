@@ -124,6 +124,7 @@ exports.getReviewRequestSummary = async (req, res) => {
       excluded_review_patient_ids: req.query.excluded_review_patient_ids || req.query.excludedReviewPatientIds || null,
       review_exclusion_rules: req.query.review_exclusion_rules || req.query.reviewExclusionRules || null,
       preview_limit: req.query.preview_limit || req.query.previewLimit || null,
+      summary_mode: req.query.summary_mode || null,
     });
     return res.json({
       ...result,

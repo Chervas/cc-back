@@ -4604,7 +4604,7 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       isValid: true,
     };
     const [candidateItems, approvedTemplate, approvedReminderTemplate, approvedPhotoTemplate, googleReviewUrlAvailable, whatsappAvailable, clinicAutomationTemplate] = await Promise.all([
-      buildItemsForReviewRequest(clinicScope, {
+      options.summary_mode === 'overview' ? Promise.resolve([]) : buildItemsForReviewRequest(clinicScope, {
         review_request: true,
         review_source: reviewSource,
         review_treatment_ids: treatmentIds,
@@ -4660,7 +4660,8 @@ async function buildReviewClinicStatuses(scope, options = {}) {
       : (ready
         ? 'Puede activarse desde el interruptor general del grupo.'
         : 'No se ejecutará hasta resolver los requisitos pendientes.');
-    const possiblePatients = candidateItems.filter((item) => !String(item.status || '').startsWith('excluded')).length;
+    const possiblePatients = options.summary_mode === 'overview'
+      ? null : candidateItems.filter((item) => !String(item.status || '').startsWith('excluded')).length;
 
     return {
       clinic_id: clinicId,
@@ -4756,13 +4757,14 @@ async function getMissingGoogleReviews(scope, options = {}) {
 }
 
 async function getReviewRequestSummary(scope, options = {}) {
+  const overviewOnly = options.summary_mode === 'overview';
   const reviewSource = normalizeReviewRequestSource(options.review_source || options.reviewSource);
   const treatmentIds = parseReviewTreatmentIds(options);
   const importedListId = parseReviewImportListId(options);
   const effectiveScope = applyReviewClinicFilter(scope, options);
   const previewLimit = clampInteger(options.preview_limit || options.previewLimit, 8, 1, 1000);
   const [candidates, treatmentOptions] = await Promise.all([
-    buildItemsForReviewRequest(effectiveScope, {
+    overviewOnly ? Promise.resolve([]) : buildItemsForReviewRequest(effectiveScope, {
       review_request: true,
       review_source: reviewSource,
       review_treatment_ids: treatmentIds,
@@ -4772,14 +4774,15 @@ async function getReviewRequestSummary(scope, options = {}) {
       review_import_list_id: importedListId,
       limit: REVIEW_REQUEST_CANDIDATE_LIMIT,
     }),
-    importedListId ? Promise.resolve([]) : buildReviewTreatmentOptions(effectiveScope),
+    (overviewOnly || importedListId) ? Promise.resolve([]) : buildReviewTreatmentOptions(effectiveScope),
   ]);
   const clinicIds = Array.isArray(effectiveScope?.clinicIds) ? effectiveScope.clinicIds.filter(Number.isInteger) : [];
   if (!clinicIds.length) {
     return {
       success: true,
       summary: {
-        possible_patients: 0,
+        audience_evaluated: !overviewOnly,
+        possible_patients: overviewOnly ? null : 0,
         candidates_preview: [],
         candidates_preview_total: 0,
         review_exclusions_total: 0,
@@ -5160,7 +5163,8 @@ async function getReviewRequestSummary(scope, options = {}) {
   return {
     success: true,
     summary: {
-      possible_patients: summaryCandidates.length,
+      audience_evaluated: !overviewOnly,
+      possible_patients: overviewOnly ? null : summaryCandidates.length,
       candidates_preview: candidatePool.slice(0, previewLimit).map(serializeItem),
       candidates_preview_total: candidatePool.length,
       candidates_preview_limit: previewLimit,

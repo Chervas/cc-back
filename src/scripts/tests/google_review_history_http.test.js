@@ -16,7 +16,7 @@ function fixture({ allowed = true, valid = true } = {}) {
       assert.equal(options.userId, 91); assert.equal(options.access, 'read'); return allowed;
     } },
     '../services/marketingBulkSends.service': {
-      getReviewRequestSummary: async () => { reads++; return { summary: {} }; },
+      getReviewRequestSummary: async (_scope, options) => { reads++; return { summary: {}, options }; },
       getMissingGoogleReviews: async (_scope, options) => { reads++; return { items: [], ...options }; },
     },
   };
@@ -55,6 +55,13 @@ test('history forwards the attribution filter without creating a synchronization
   const f = fixture(); f.req.query.attribution = 'high_confidence';
   await f.api.getMissingGoogleReviews(f.req, f.res);
   assert.equal(f.res.body.attribution, 'high_confidence');
+  assert.equal(f.reads(), 1);
+});
+
+test('overview mode retains the same authentication and clinic permission boundary', async () => {
+  const f = fixture(); f.req.query.summary_mode = 'overview';
+  await f.api.getReviewRequestSummary(f.req, f.res);
+  assert.equal(f.res.body.options.summary_mode, 'overview');
   assert.equal(f.reads(), 1);
 });
 
