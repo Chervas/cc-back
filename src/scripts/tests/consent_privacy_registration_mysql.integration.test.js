@@ -53,7 +53,7 @@ function defineModels(sql, db) {
   }, { tableName: 'Conversations', timestamps: false });
   for (const name of ['ClinicConsentTemplate', 'ClinicConsentTemplateVersion', 'ConsentTemplateCatalogVersion', 'ConsentSignaturePackage',
     'PatientConsentDocument', 'ConsentDeliveryEvent', 'PatientIntakeRequest', 'PatientCustomField',
-    'PacienteClinica', 'AppointmentCareEvent', 'PatientOperationalEvent', 'TreatmentConsentRequirement']) {
+    'PacienteClinica', 'AppointmentCareEvent', 'PatientOperationalEvent', 'PatientConsentExternalAttestation', 'TreatmentConsentRequirement']) {
     db[name] = require(`../../../models/${name.toLowerCase()}`)(sql, D);
   }
   // Production creates these through explicit migrations. Its implicit sync

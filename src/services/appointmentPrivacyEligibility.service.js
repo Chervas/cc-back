@@ -107,6 +107,12 @@ async function assessPrivacyBeforeStart({ db, appointment, transaction, now = ne
   if (documents.length > 100) fail('appointment_consent_privacy_configuration', 'Revisa la documentación de protección de datos del paciente.');
   const valid = documents.some(document => isValidSignedPrivacyDocument({ document, template, patientId,
     clinicId: clinic, approvedVersions, now }));
+  if (!valid) {
+    const paper = require('../lib/registration-privacy-paper');
+    const evidence = await paper.findRegistrationPrivacyPaper({ db, patientId, clinicId: clinic, template,
+      version, approvedVersions, transaction, now });
+    if (evidence) return paper.paperAssessment(evidence);
+  }
   return { required: true, allowed: valid, reason: valid ? 'current_privacy_signed' : 'current_privacy_pending' };
 }
 

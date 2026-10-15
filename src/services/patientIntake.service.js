@@ -27,7 +27,7 @@ async function prepare({ patientId, clinicId, actorId }) {
     if (previous?.status === 'submitted') throw q.error('intake_review_pending', 'El paciente ya ha enviado sus respuestas. El profesional debe revisarlas antes de solicitar otro formulario.', 409);
     if (previous?.status === 'pending') {
       const pkg = await db.ConsentSignaturePackage.findByPk(previous.package_id, { transaction });
-      const healthOnly = pkg && privacy.privacy_signed === true
+      const healthOnly = pkg && (privacy.privacy_satisfied === true || privacy.privacy_signed === true)
         && await db.PatientConsentDocument.count({ where: { package_id: pkg.id }, transaction }) === 0;
       if (pkg && (currentPrivacyPackages.includes(pkg.id) || healthOnly) && !['expired', 'cancelled'].includes(pkg.status) && new Date(pkg.expires_at) > new Date()) return { package_id: pkg.id, intake_id: previous.id, reused: true };
     }

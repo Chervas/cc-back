@@ -41,3 +41,31 @@ exports.prepare = async (req, res, next) => {
     next(error);
   }
 };
+
+exports.paper = async (req, res, next) => {
+  try {
+    const actorId = Number(req.userData?.userId), id = Number(req.params.id);
+    if (!Number.isSafeInteger(actorId) || actorId < 1) return res.status(401).json({ message: 'auth_failed' });
+    if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ message: 'appointment_id_required' });
+    // Identity, source, actor, legal version and audit fields are server-owned.
+    // Do not accept caller-provided clinic/patient scope or generic checkboxes.
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)
+      || Object.keys(req.body).length !== 1 || req.body.acknowledged !== true) {
+      return res.status(400).json({ code: 'appointment_consent_privacy_paper_acknowledgement_required',
+        message: 'Confirma que ya dispones del consentimiento de protección de datos firmado en papel.' });
+    }
+    const result = await db.sequelize.transaction(async transaction => {
+      const cita = await db.CitaPaciente.findByPk(id, { attributes: ['id_cita', 'paciente_id', 'clinica_id'],
+        raw: true, transaction, lock: transaction.LOCK.UPDATE });
+      if (!cita?.paciente_id) throw Object.assign(new Error('appointment_not_found'), { statusCode: 404 });
+      await assertUserCanAccessFeature({ actorId, featureKey: 'consents.manage', clinicId: Number(cita.clinica_id) });
+      return require('../lib/registration-privacy-paper').recordRegistrationPrivacyPaper({ db, appointment: cita,
+        actorId, acknowledged: true, transaction });
+    });
+    return res.status(result.created ? 201 : 200).json(result);
+  } catch (error) {
+    const status = error.statusCode || error.status;
+    if ([400, 401, 403, 404, 409].includes(status)) return res.status(status).json({ code: error.code, message: error.message });
+    next(error);
+  }
+};

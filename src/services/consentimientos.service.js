@@ -1921,6 +1921,13 @@ async function listPatientExternalAttestations(identifier, filters = {}) {
 }
 
 async function createPatientExternalAttestation(identifier, payload = {}, actorId = null) {
+    // Registration-paper evidence is created only by the appointment-scoped,
+    // audited staff action. A generic external-note API cannot manufacture it.
+    if (String(payload.source ?? payload.origen ?? '').trim().startsWith('registration_privacy_paper/')) {
+        throw Object.assign(new Error('Registra la protección de datos en papel desde la cita.'), {
+            code: 'privacy_paper_requires_appointment', statusCode: 400,
+        });
+    }
     const paciente = await findPacienteByIdentifier(identifier);
     if (!paciente) {
         const err = new Error('patient_not_found');
@@ -2718,7 +2725,12 @@ async function createTabletSession(packageIdRaw, payload = {}) {
     const publicUrl = buildPublicConsentUrl(token, payload.base_url ?? payload.baseUrl);
     const documents = Array.isArray(packageRow.documents) ? packageRow.documents : [];
     const pendingDocuments = documents.filter((doc) => DOCUMENT_PENDING_STATUSES.has(getPlain(doc).status));
-    if (!pendingDocuments.length) {
+    const pendingIntake = !pendingDocuments.length && db.PatientIntakeRequest
+        ? await db.PatientIntakeRequest.findOne({ where: {
+            package_id: packageRow.id, patient_id: packageRow.paciente_id,
+            clinic_id: packageRow.clinica_id, status: 'pending',
+        }, attributes: ['id'] }) : null;
+    if (!pendingDocuments.length && !pendingIntake) {
         const err = new Error('consent_package_has_no_pending_documents');
         err.statusCode = 409;
         throw err;

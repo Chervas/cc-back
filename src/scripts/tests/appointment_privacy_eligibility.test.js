@@ -25,6 +25,7 @@ function fixture({ imported = null, prior = null, documents = [], currentTemplat
     ClinicConsentTemplate: reader('template', currentTemplate), ClinicConsentTemplateVersion: { ...reader('version', currentVersion),
       findAll: async q => { calls.push(['previous_versions', q]); assert.equal(q.transaction, transaction); assert.equal(q.lock, 'SHARE'); assert.equal(q.limit, 101); return oldVersions; } },
     PatientConsentDocument: { findAll: async q => { calls.push(['documents', q]); assert.equal(q.transaction, transaction); assert.equal(q.lock, 'SHARE'); assert.equal(q.limit, 101); return documents; } },
+    PatientConsentExternalAttestation: { findAll: async () => [] }, PatientOperationalEvent: { findAll: async () => [] },
   };
   return { db, transaction, calls, run: extra => assess({ db, transaction, appointment, now, ...extra }), enforce: extra => enforce({ db, transaction, appointment, now, ...extra }) };
 }

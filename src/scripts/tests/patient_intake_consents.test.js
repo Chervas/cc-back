@@ -12,6 +12,7 @@ function fixture({clinic=72,templates=[{id:90,blocking_policy:'hard'}],existing=
  PatientConsentDocument:{findOne:async q=>{queries.push(q);return document||(existing?{id:800,status:'signed'}:null)},
   findAll:async q=>{queries.push(q);assert.equal(q.lock,'SHARE');assert.equal(q.transaction,transaction);assert.equal(q.limit,101);return compatibleDocuments},
   create:async(v,q)=>{assert.equal(q.transaction,transaction);writes.push(v)}},
+ PatientConsentExternalAttestation:{findAll:async()=>[]},PatientOperationalEvent:{findAll:async()=>[]},
  ConsentSignaturePackage:{findByPk:async()=>({id:700,status:'pending',expires_at:'2099-01-01'}),create:async(v,q)=>{assert.equal(q.transaction,transaction);writes.push(v);return{id:900,update:async x=>writes.push(x)}}}};
  return{db,writes,queries,run:()=>preparePatientIntake({db,patientId:82,clinicId:72,actorId:1,snapshot:()=>({snapshot_html:'<p>Publicado</p>',snapshot_json:{},snapshot_hash:'hash'})})};
 }
@@ -51,7 +52,7 @@ const digital = require('../../lib/bs-privacy-digital-template');
 const privacy = require('../../services/appointmentPrivacyEligibility.service');
 const legacyHtml = require('node:fs').readFileSync(require.resolve('./fixtures/bs-privacy-approved-legacy.html'), 'utf8').replace(/\n$/, '');
 const rendered = digital.buildBsPrivacyDigitalHtml();
-const bsTemplate = { id: 90, clinic_id: 72, blocking_policy: 'hard', purpose: 'data_protection', catalog_key: privacy.FINAL_PRIVACY_KEY };
+const bsTemplate = { id: 90, clinic_id: 72, blocking_policy: 'hard', purpose: 'data_protection', status: 'active', is_default: true, catalog_key: privacy.FINAL_PRIVACY_KEY };
 const oldVersion = { id: 312, clinic_template_id: 90, version: 1, status: 'published', locale: 'es', body_html: legacyHtml,
  body_json: { consent_form: rendered.consent_form } };
 const newVersion = { id: 313, clinic_template_id: 90, version: 2, status: 'published', locale: 'es', body_html: rendered.html,
@@ -115,4 +116,24 @@ test('unsigned paper presentation or copied digital metadata cannot create a com
  const f = digitalFixture([bsDocument(oldVersion)], { version: { ...newVersion, body_html: '<p>HTML no aprobado</p>' } });
  const result = await f.run(); assert.equal(result.created_count, 1); assert.equal(result.privacy_signed, false);
  assert.equal(f.queries.some(q => q.where.status === 'signed'), false);
+});
+test('paper privacy satisfies registration without inventing a digital signature or duplicating pending tablet documents', async () => {
+ const paper = require('../../lib/registration-privacy-paper'), at = new Date('2026-01-01T12:00:00Z');
+ const f = digitalFixture([]), original = bsDocument(newVersion, { status: 'pending', signed_at: null });
+ const attestation = { id: 400, paciente_id: 82, clinica_id: 72, tratamiento_id: null, purpose: 'data_protection',
+  source: paper.PAPER_SOURCE, status: 'active', attested_by: 7, attested_at: at, revoked_at: null };
+ const event = { id: 401, patient_id: 82, clinic_id: 72, actor_user_id: 7, source: paper.PAPER_SOURCE,
+  event_type: paper.PAPER_EVENT, channel: 'internal', occurred_at: at, metadata: {
+   schema_version: paper.PAPER_SOURCE, attestation_id: 400, appointment_id: 11, clinic_template_id: 90,
+   clinic_template_version_id: 313, catalog_key: privacy.FINAL_PRIVACY_KEY,
+   source_document_sha256: digital.SOURCE_DOCUMENT_SHA256, legal_text_sha256: digital.LEGAL_TEXT_SHA256,
+   acknowledged: true, recorded_at: at.toISOString() } };
+ f.db.PatientConsentExternalAttestation.findAll = async () => [attestation];
+ f.db.PatientOperationalEvent.findAll = async () => [event];
+ const before = JSON.stringify(original), result = await f.run();
+ assert.equal(result.created_count, 0); assert.equal(result.privacy_satisfied, true); assert.equal(result.privacy_signed, false);
+ assert.equal(result.privacy_on_paper, true); assert.equal(result.paper_count, 1); assert.deepEqual(result.current_package_ids, []);
+ assert.equal(f.writes.length, 0); assert.equal(f.queries.length, 0); assert.equal(JSON.stringify(original), before);
+ attestation.revoked_at = new Date('2026-02-01');
+ const afterRevocation = await f.run(); assert.equal(afterRevocation.created_count, 1); assert.equal(afterRevocation.privacy_satisfied, false);
 });

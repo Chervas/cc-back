@@ -41,7 +41,7 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       order: [['id', 'ASC']], transaction,
     });
     const prepared = [], reused = [], missing = [], currentPackageIds = [];
-    let considered = 0, signed = 0;
+    let considered = 0, signed = 0, paperCount = 0;
     for (const template of templates) {
       // The editable questionnaire already captures these answers separately;
       // never ask the patient to sign the old unfilled medical questionnaire.
@@ -53,6 +53,15 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       });
       if (!version || !String(version.body_html || '').trim()) { missing.push(template.id); continue; }
       const form = getConsentChoiceForm({ snapshot_json: { version: plain(version) } });
+      const privacy = require('../services/appointmentPrivacyEligibility.service');
+      const paper = require('./registration-privacy-paper');
+      if (privacy.CLINICS.includes(Number(clinicId)) && template.catalog_key === privacy.FINAL_PRIVACY_KEY
+        && paper.isApprovedPaperFamilyVersion(plain(version))) {
+        const approvedVersions = await privacy.approvedPrivacyVersions({ db, template: plain(template), version: plain(version), transaction });
+        const evidence = await paper.findRegistrationPrivacyPaper({ db, patientId, clinicId, template: plain(template),
+          version: plain(version), approvedVersions, transaction, now });
+        if (evidence) { paperCount++; continue; }
+      }
       let document = await db.PatientConsentDocument.findOne({
         where: { paciente_id: patientId, clinica_id: clinicId, clinic_template_id: template.id,
           clinic_template_version_id: version.id, status: { [Op.in]: ['pending', 'sent', 'viewed', 'signed'] },
@@ -60,7 +69,6 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
         order: [['id', 'DESC']], transaction,
       });
       let reusable = document && reusableChoiceDocument(document, template, version, form, now);
-      const privacy = require('../services/appointmentPrivacyEligibility.service');
       const bsDigital = privacy.CLINICS.includes(Number(clinicId))
         && Number(template.clinic_id) === Number(clinicId) && template.catalog_key === privacy.FINAL_PRIVACY_KEY
         && require('./bs-privacy-digital-template').isApprovedPrivacyPresentation({ bodyHtml: version.body_html, bodyJson: version.body_json });
@@ -100,7 +108,9 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       prepared.push({ template, version });
     }
     if (!templates.length || missing.length) throw error('intake_published_templates_required', 409);
-    if (!prepared.length) return { package_id: null, created_count: 0, existing_count: reused.length, current_package_ids: [...new Set(currentPackageIds)], privacy_signed: signed === considered };
+    if (!prepared.length) return { package_id: null, created_count: 0, existing_count: reused.length, current_package_ids: [...new Set(currentPackageIds)],
+      privacy_signed: signed === considered, privacy_satisfied: signed + paperCount === considered,
+      privacy_on_paper: paperCount > 0, paper_count: paperCount };
     const expires = new Date(now.getTime() + 30 * 86400000);
     const pkg = await db.ConsentSignaturePackage.create({
       public_id: `cpkg_${randomUUID().replace(/-/g, '')}`, paciente_id: patientId, clinica_id: clinicId,
@@ -121,7 +131,8 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
     }
     await pkg.update({ required_count: prepared.filter(x => x.template.blocking_policy === 'hard').length,
       signed_count: 0 }, { transaction });
-    return { package_id: pkg.id, created_count: prepared.length, existing_count: reused.length, current_package_ids: [...new Set([pkg.id, ...currentPackageIds])], privacy_signed: false };
+    return { package_id: pkg.id, created_count: prepared.length, existing_count: reused.length, current_package_ids: [...new Set([pkg.id, ...currentPackageIds])],
+      privacy_signed: false, privacy_satisfied: false, privacy_on_paper: paperCount > 0, paper_count: paperCount };
   };
   // Only a server-owned caller supplies this transaction (e.g. the actual
   // appointment lock and ACL). Never commit a package outside that anchor.
