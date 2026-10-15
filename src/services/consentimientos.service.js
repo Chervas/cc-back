@@ -2269,6 +2269,7 @@ async function createPatientIntakePackage(identifier, options = {}) {
     return require('../lib/patient-intake-consents').preparePatientIntake({
         db, patientId: patient.id_paciente, clinicId: options.clinicId, actorId: options.createdBy,
         structuredQuestionnaire: options.structuredQuestionnaire === true,
+        privacyOnly: options.privacyOnly === true,
         allowLinkedClinic: options.allowLinkedClinic === true,
         transaction: options.transaction || null,
         snapshot: ({ template: templateRow, version: versionRow, patient: patientRow, clinic: clinicRow }) => {

@@ -49,6 +49,7 @@ router.get('/professional/pending', consentimientosController.listProfessionalPe
 router.post('/external-attestations/:id/revoke', consentimientosController.revokePatientExternalAttestation);
 router.get('/appointments/:id/summary', consentimientosController.getAppointmentSummary);
 router.get('/appointments/:id/privacy', require('../controllers/appointmentPrivacy.controller').status);
+router.get('/appointments/:id/tablet-status', require('../controllers/appointmentPrivacy.controller').tabletStatus);
 router.post('/appointments/:id/privacy-package', require('../controllers/appointmentPrivacy.controller').prepare);
 router.post('/appointments/:id/privacy-paper', require('../controllers/appointmentPrivacy.controller').paper);
 router.post('/appointments/:id/package', consentimientosController.createAppointmentPackage);

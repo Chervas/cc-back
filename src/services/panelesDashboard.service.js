@@ -410,7 +410,7 @@ function mapAppointment(row, maps, now) {
   const end = row.fin instanceof Date ? row.fin : new Date(row.fin || row.inicio);
   const date = dateOnly(start, timeZone);
   const appointmentId = Number(row.id_cita);
-  const care = require('../lib/appointment-care').careState(row, now);
+  const care = require('../lib/appointment-care').careState(row, now, { timeZone });
 
   return {
     id: String(appointmentId),

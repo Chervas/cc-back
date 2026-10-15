@@ -22,7 +22,7 @@ function reusableChoiceDocument(document, template, version, form, now) {
 
 // Called only after the controller checks consents.manage for the patient's
 // primary clinic. A patient row lock serialises double clicks across processes.
-async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot, structuredQuestionnaire = false, allowLinkedClinic = false, now = new Date(), transaction = null }) {
+async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot, structuredQuestionnaire = false, privacyOnly = false, allowLinkedClinic = false, now = new Date(), transaction = null }) {
   const { Op } = db.Sequelize;
   const execute = async transaction => {
     const patient = await db.Paciente.findByPk(patientId, { transaction, lock: transaction.LOCK.UPDATE,
@@ -45,7 +45,7 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
     for (const template of templates) {
       // The editable questionnaire already captures these answers separately;
       // never ask the patient to sign the old unfilled medical questionnaire.
-      if (structuredQuestionnaire && template.catalog_key === 'cc_base_formulario_medico_alta_v1') continue;
+      if ((structuredQuestionnaire || privacyOnly) && template.catalog_key === 'cc_base_formulario_medico_alta_v1') continue;
       considered++;
       const version = await db.ClinicConsentTemplateVersion.findOne({
         where: { clinic_template_id: template.id, status: 'published', locale: 'es' },
@@ -96,7 +96,9 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       if (document && reusable) {
         const existingPackage = document.package_id
           ? await db.ConsentSignaturePackage.findByPk(document.package_id, { transaction }) : null;
-        const available = existingPackage && !['cancelled', 'expired'].includes(existingPackage.status)
+        const hasQuestionnaire = privacyOnly && document.status !== 'signed' && existingPackage
+          && await db.PatientIntakeRequest.findOne({ where: { package_id: existingPackage.id }, transaction });
+        const available = existingPackage && !hasQuestionnaire && !['cancelled', 'expired'].includes(existingPackage.status)
           && (!existingPackage.expires_at || new Date(existingPackage.expires_at) > now);
         if (document.status === 'signed' || available) {
           reused.push(document.id);
@@ -107,7 +109,7 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       }
       prepared.push({ template, version });
     }
-    if (!templates.length || missing.length) throw error('intake_published_templates_required', 409);
+    if (!templates.length || considered === 0 || missing.length) throw error('intake_published_templates_required', 409);
     if (!prepared.length) return { package_id: null, created_count: 0, existing_count: reused.length, current_package_ids: [...new Set(currentPackageIds)],
       privacy_signed: signed === considered, privacy_satisfied: signed + paperCount === considered,
       privacy_on_paper: paperCount > 0, paper_count: paperCount };

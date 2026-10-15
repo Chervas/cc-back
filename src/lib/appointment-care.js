@@ -1,41 +1,48 @@
 'use strict';
 const { CITA_ALLOWED_TRANSITIONS } = require('./status-catalog');
+const { resolveClinicTimezone, formatDateLocal } = require('./availability-calendar');
 const terminal = new Set(['cancelada', 'completada', 'no_asistio']);
 const fail = (code, message) => { throw Object.assign(new Error(message), { statusCode: 409, code }); };
-function careState(cita, now = new Date()) {
+function careState(cita, now = new Date(), { timeZone = resolveClinicTimezone(cita.clinica) } = {}) {
   const sameSchedule = !!cita.care_schedule_start && new Date(cita.care_schedule_start).getTime() === new Date(cita.inicio).getTime();
   const active = !terminal.has(cita.estado);
   const legacy = cita.care_legacy_attendance === true || cita.care_legacy_attendance === 1;
   const arrived = sameSchedule ? cita.arrived_at || null : null;
   const started = sameSchedule ? cita.care_started_at || null : null;
-  const scheduleStarted = !!cita.inicio && Number.isFinite(new Date(cita.inicio).getTime()) && new Date(cita.inicio) <= now;
+  const start = new Date(cita.inicio), current = new Date(now);
+  const validSchedule = !!cita.inicio && Number.isFinite(start.getTime()) && Number.isFinite(current.getTime());
+  const scheduleStarted = validSchedule && start <= current;
+  // Reception may register an early arrival on the clinic's civil appointment
+  // day. Preserve existing past-date behavior; never use the server/browser day.
+  const arrivalDayReached = scheduleStarted || (validSchedule && formatDateLocal(start, timeZone) === formatDateLocal(current, timeZone));
   return {
     arrived_at: arrived,
     started_at: started,
     completed_at: sameSchedule ? cita.care_completed_at || null : null,
     legacy_attendance: legacy,
-    can_arrive: active && !legacy && !cita.es_provisional && !!cita.paciente_id && scheduleStarted && !arrived,
+    can_arrive: active && !legacy && !cita.es_provisional && !!cita.paciente_id && arrivalDayReached && !arrived,
     can_no_show: (CITA_ALLOWED_TRANSITIONS[cita.estado] || []).includes('no_asistio')
       && active && !legacy && !cita.es_provisional && !!cita.paciente_id && scheduleStarted && !arrived && !started,
-    can_start: active && !legacy && !cita.es_provisional && !!cita.paciente_id && !!arrived && ['ha_acudido', 'en_atencion'].includes(cita.estado),
+    can_start: active && !legacy && !cita.es_provisional && !!cita.paciente_id && scheduleStarted && !!arrived && ['ha_acudido', 'en_atencion'].includes(cita.estado),
     can_complete: active && !legacy && !cita.es_provisional && !!cita.paciente_id && !!arrived && !!started && cita.estado === 'en_atencion',
   };
 }
-function assertCareAction(cita, action, now = new Date()) {
+function assertCareAction(cita, action, now = new Date(), options = {}) {
   if (!['arrive', 'start', 'finish'].includes(action)) fail('care_action_invalid', 'Acción de cita no válida.');
-  const state = careState(cita, now);
+  const state = careState(cita, now, options);
   if (action === 'finish' && hasCompletedAppointmentCare(cita)) return state;
   if (state.legacy_attendance) fail('care_legacy_attendance', 'Esta cita conserva una asistencia histórica, no una atención finalizada. No se puede repetir su finalización.');
   if (terminal.has(cita.estado) || cita.es_provisional || !cita.paciente_id) fail('care_appointment_inactive', 'Esta cita no admite registrar llegada ni iniciar atención.');
-  if (action === 'arrive' && !state.arrived_at && !state.can_arrive) fail('care_too_early', 'La llegada se puede registrar a partir de la hora de la cita.');
+  if (action === 'arrive' && !state.arrived_at && !state.can_arrive) fail('care_too_early', 'La llegada se puede registrar a partir del día de la cita, según la hora local de la clínica.');
   if (action === 'start' && !state.arrived_at) fail('care_arrival_required', 'Registra primero que el paciente ha acudido.');
+  if (action === 'start' && state.arrived_at && new Date(cita.inicio) > now) fail('care_too_early', 'La atención se puede iniciar a partir de la hora de la cita.');
   if (action === 'start' && !state.can_start) fail('care_state_invalid', 'El estado de la cita no permite iniciar la atención.');
   if (action === 'finish' && !state.can_complete) fail('care_start_required', 'Inicia la atención de esta cita antes de finalizarla.');
   return state;
 }
 
-function careActionPatch(cita, action, { now = new Date(), actorId } = {}) {
-  assertCareAction(cita, action, now);
+function careActionPatch(cita, action, { now = new Date(), actorId, timeZone } = {}) {
+  assertCareAction(cita, action, now, { timeZone });
   if (!Number.isSafeInteger(Number(actorId)) || Number(actorId) <= 0) fail('care_actor_required', 'La acción necesita un usuario autenticado.');
   if (action === 'arrive') return { estado: 'ha_acudido', arrived_at: now, arrived_by: Number(actorId),
     care_started_at: null, care_started_by: null, care_completed_at: null, care_completed_by: null, care_schedule_start: cita.inicio };

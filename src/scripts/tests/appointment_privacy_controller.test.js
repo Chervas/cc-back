@@ -35,6 +35,10 @@ function harness({ appointment = { id_cita: 10, paciente_id: 20, clinica_id: 72 
         assert(active); assert.equal(options.transaction, transaction); assert.equal(options.appointment, appointment);
         calls.push(['assess']); return { required: true, allowed: false };
       } };
+      if (name === '../services/appointmentTabletStatus.service') return { appointmentTabletStatus: async options => {
+        assert(active); assert.equal(options.transaction, transaction); assert.equal(options.appointment, appointment);
+        calls.push(['tablet-status']); return { privacy: { state: 'not_sent' }, intake: { state: 'not_sent' } };
+      } };
       if (name === '../lib/registration-privacy-paper') return { recordRegistrationPrivacyPaper: async options => {
         assert(active); assert.equal(options.transaction, transaction); assert.equal(options.appointment, appointment);
         calls.push(['paper', options]); writes.push('attestation', 'receipt');
@@ -55,7 +59,7 @@ function harness({ appointment = { id_cita: 10, paciente_id: 20, clinica_id: 72 
   } };
 }
 
-for (const method of ['status', 'prepare', 'paper']) {
+for (const method of ['status', 'tabletStatus', 'prepare', 'paper']) {
   test(`${method}: validates actor/id before reading any appointment`, async () => {
     for (const [req, expected] of [[{ userData: null }, 401], [{ params: { id: '0' } }, 400], [{ params: { id: '10junk' } }, 400]]) {
       const h = harness(), { res, nextError } = await h.request(method, req);
@@ -67,7 +71,7 @@ for (const method of ['status', 'prepare', 'paper']) {
     assert.equal(res.statusCode, 403); assert.equal(nextError, undefined);
     const acl = h.calls.find(([name]) => name === 'acl')[1];
     assert.equal(acl.actorId, 7); assert.equal(acl.clinicId, 72);
-    assert.equal(acl.featureKey, method === 'status' ? 'consents.view' : 'consents.manage');
+    assert.equal(acl.featureKey, ['status', 'tabletStatus'].includes(method) ? 'consents.view' : 'consents.manage');
     assert.equal(h.writes.length, 0); assert(h.calls.some(([name]) => name === 'rollback'));
     assert(!h.calls.some(([name]) => ['prepare', 'assess', 'paper'].includes(name)));
   });
@@ -85,6 +89,7 @@ test('prepare locks exact reservation before ACL and joins the same transaction 
   const prepared = h.calls.find(([name]) => name === 'prepare');
   assert.equal(prepared[1], 20); assert.equal(prepared[2].clinicId, 72);
   assert.equal(prepared[2].createdBy, 7); assert.equal(prepared[2].allowLinkedClinic, true);
+  assert.equal(prepared[2].privacyOnly, true);
   assert.equal(prepared[2].transaction, h.transaction);
 });
 test('prepare failure rolls back its package instead of committing an orphan before returning error', async () => {

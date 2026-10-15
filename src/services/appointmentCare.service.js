@@ -12,7 +12,9 @@ async function record({ appointmentId, clinicId, actorId, action }) {
     const cita = await db.CitaPaciente.findByPk(appointmentId, { transaction, lock: transaction.LOCK.UPDATE });
     if (!cita) throw Object.assign(new Error('Cita no encontrada.'), { statusCode: 404, code: 'appointment_not_found' });
     if (Number(cita.clinica_id) !== Number(clinicId)) throw Object.assign(new Error('La cita ha cambiado de clínica. Vuelve a abrirla.'), { statusCode: 409, code: 'appointment_clinic_changed' });
-    const now = new Date(), state = assertCareAction(cita, action, now);
+    const clinic = await db.Clinica.findByPk(cita.clinica_id, { attributes: ['id_clinica', 'configuracion'], transaction });
+    const timeZone = require('../lib/availability-calendar').resolveClinicTimezone(clinic);
+    const now = new Date(), state = assertCareAction(cita, action, now, { timeZone });
     if (action === 'arrive' && state.arrived_at || action === 'start' && state.started_at) return { appointment: cita, care: state, replayed: true };
     let documentationSnapshot;
     if (action === 'start') {
@@ -32,7 +34,7 @@ async function record({ appointmentId, clinicId, actorId, action }) {
       documentationSnapshot = await createTreatmentDocumentationService(db).captureForStart({ appointment: cita, transaction, now });
     }
     const previousStatus = cita.estado;
-    const patch = careActionPatch(cita, action, { now, actorId });
+    const patch = careActionPatch(cita, action, { now, actorId, timeZone });
     // Arrival/start never claim completion, consume vouchers or dispatch messages.
     await cita.update({ ...patch, updated_by: actorId }, { transaction });
     await require('./appointmentActivity.service').recordAppointmentStatusChange({ appointment: cita,
@@ -44,7 +46,7 @@ async function record({ appointmentId, clinicId, actorId, action }) {
       event_type: 'appointment_care_changed', source: 'agenda', occurred_at: now,
       metadata: { appointment_id: cita.id_cita, action, schedule_start: cita.inicio, care_event_id: careEvent.id,
         ...(action === 'start' ? { documentation_snapshot: documentationSnapshot } : {}) } }, { transaction });
-    return { appointment: cita, care: careState(cita, now), previousStatus, replayed: false };
+    return { appointment: cita, care: careState(cita, now, { timeZone }), previousStatus, replayed: false };
   });
 }
 // A reception correction is audited separately from the canonical status

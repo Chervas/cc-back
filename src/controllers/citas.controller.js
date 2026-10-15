@@ -182,11 +182,12 @@ async function appointmentPrivacyCapabilities(req, clinicIds) {
     return new Map(entries);
 }
 
-function protectAppointmentPayload(citaLike, capabilities = {}) {
+function protectAppointmentPayload(citaLike, capabilities = {}, timeZone) {
     if (!citaLike) return citaLike;
     const plain = citaLike?.toJSON ? citaLike.toJSON() : { ...citaLike };
     const protectedPayload = { ...plain };
-    protectedPayload.care = plain.care || require('../lib/appointment-care').careState(plain);
+    protectedPayload.time_zone = plain.time_zone || timeZone || resolveClinicTimezone(plain.clinica);
+    protectedPayload.care = plain.care || require('../lib/appointment-care').careState(plain, new Date(), { timeZone });
     protectedPayload.import_review = plain.import_review || appointmentImportReview(plain);
     if (bookingCapabilities().simple) {
         protectedPayload.additional_staff = plain.additional_staff || additionalStaffPayload(plain);
@@ -242,11 +243,19 @@ async function protectAppointmentsForRequest(req, citas) {
         req,
         list.map((cita) => cita?.clinica_id ?? cita?.clinic_id),
     );
+    // Detail/list paths do not all include the clinic relation. Resolve missing
+    // care capabilities in one bounded clinic read, also for a group view.
+    const careClinicIds = [...new Set(list.filter(cita => !plainCita(cita)?.care)
+        .map(cita => Number(cita?.clinica_id)).filter(id => Number.isSafeInteger(id) && id > 0))];
+    const careClinics = careClinicIds.length ? await Clinica.findAll({ where: { id_clinica: { [Op.in]: careClinicIds } },
+        attributes: ['id_clinica', 'configuracion'] }) : [];
+    const careTimeZones = new Map(careClinics.map(clinic => [Number(clinic.id_clinica), resolveClinicTimezone(clinic)]));
     await require('../services/appointmentPaymentSummary.service').attach(list.filter(cita =>
         capabilities.get(Number(cita?.clinica_id ?? cita?.clinic_id))?.patientSensitive));
     const protectedList = list.map((cita) => protectAppointmentPayload(
         cita,
         capabilities.get(Number(cita?.clinica_id ?? cita?.clinic_id)) || {},
+        careTimeZones.get(Number(cita?.clinica_id)),
     ));
     return Array.isArray(citas) ? protectedList : (protectedList[0] || null);
 }
@@ -1134,7 +1143,7 @@ function mapCalendarCitaRow(cita, timeZone = DEFAULT_TIMEZONE) {
     const plain = plainCita(cita);
     if (!plain) return null;
     return {
-        care: require('../lib/appointment-care').careState(plain),
+        care: require('../lib/appointment-care').careState(plain, new Date(), { timeZone }),
         id_cita: plain.id_cita,
         created_by: plain.created_by || null,
         clinica_id: plain.clinica_id,

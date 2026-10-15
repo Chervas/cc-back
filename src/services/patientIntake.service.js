@@ -16,30 +16,25 @@ async function prepare({ patientId, clinicId, actorId }) {
   await scopedPatient(patientId, clinicId);
   const pendingReview = await db.PatientIntakeRequest.findOne({ where: { patient_id: patientId, clinic_id: clinicId }, order: [['id', 'DESC']] });
   if (pendingReview?.status === 'submitted') throw q.error('intake_review_pending', 'El paciente ya ha enviado sus respuestas. El profesional debe revisarlas antes de solicitar otro formulario.', 409);
-  // Privacy signature and clinical answers remain distinct. Reuses valid signed
-  // privacy evidence; a returning patient can update answers without re-signing it.
+  // This explicit action prepares clinical answers only. Privacy has its own
+  // action/package; never create a signature request as a side effect here.
   return db.sequelize.transaction(async transaction => {
     const patient = await scopedPatient(patientId, clinicId, transaction);
-    const privacy = await require('./consentimientos.service').createPatientIntakePackage(patientId, {
-      clinicId, createdBy: actorId, structuredQuestionnaire: true, allowLinkedClinic: true, transaction });
-    const currentPrivacyPackages = privacy.current_package_ids || [];
-    // Current read: answers submitted while privacy was checked must not be
+    // Current read: answers submitted while scope was checked must not be
     // hidden by a new empty request. The patient lock serializes preparations.
     const previous = await db.PatientIntakeRequest.findOne({ where: { patient_id: patientId, clinic_id: clinicId },
       order: [['id', 'DESC']], transaction, lock: transaction.LOCK.SHARE || transaction.LOCK.UPDATE });
     if (previous?.status === 'submitted') throw q.error('intake_review_pending', 'El paciente ya ha enviado sus respuestas. El profesional debe revisarlas antes de solicitar otro formulario.', 409);
     if (previous?.status === 'pending') {
       const pkg = await db.ConsentSignaturePackage.findByPk(previous.package_id, { transaction });
-      const healthOnly = pkg && (privacy.privacy_satisfied === true || privacy.privacy_signed === true)
+      const healthOnly = pkg && Number(pkg.paciente_id ?? patientId) === Number(patientId)
+        && Number(pkg.clinica_id ?? clinicId) === Number(clinicId)
         && await db.PatientConsentDocument.count({ where: { package_id: pkg.id }, transaction }) === 0;
-      if (pkg && (currentPrivacyPackages.includes(pkg.id) || healthOnly) && !['expired', 'cancelled'].includes(pkg.status) && new Date(pkg.expires_at) > new Date()) return { package_id: pkg.id, intake_id: previous.id, reused: true };
+      if (healthOnly && !['expired', 'cancelled'].includes(pkg.status) && new Date(pkg.expires_at) > new Date()) return { package_id: pkg.id, intake_id: previous.id, reused: true };
     }
-    // Only attach to an unsigned, unclaimed initial-registration package.
-    let pkg = await db.ConsentSignaturePackage.findOne({ where: { paciente_id: patientId, clinica_id: clinicId,
-      id: { [Op.in]: currentPrivacyPackages }, trigger_source: 'patient_intake', status: { [Op.in]: ['pending', 'sent', 'viewed'] }, expires_at: { [Op.gt]: new Date() } },
-    order: [['id', 'DESC']], transaction });
-    if (pkg && await db.PatientIntakeRequest.findOne({ where: { package_id: pkg.id }, transaction })) pkg = null;
-    if (!pkg) pkg = await db.ConsentSignaturePackage.create({ public_id: `cpkg_${randomUUID().replace(/-/g, '')}`,
+    // Do not attach clinical questions to an existing LOPD package, even if it
+    // is unsigned. Each button controls exactly one independent tablet item.
+    const pkg = await db.ConsentSignaturePackage.create({ public_id: `cpkg_${randomUUID().replace(/-/g, '')}`,
       paciente_id: patientId, clinica_id: clinicId, status: 'pending', trigger_source: 'patient_intake', created_by: actorId,
       expires_at: new Date(Date.now() + 30 * 86400000) }, { transaction });
     const request = await db.PatientIntakeRequest.create({ package_id: pkg.id, patient_id: patientId, clinic_id: clinicId,
@@ -65,6 +60,9 @@ async function publicView(pkg) {
 async function submit(pkg, payload) {
   const input = q.validateSubmission(payload);
   return db.sequelize.transaction(async transaction => {
+    // Same lock order as prepare: patient -> package -> request. A tablet with
+    // an older combined form cannot race a new independent questionnaire.
+    await scopedPatient(pkg.paciente_id, pkg.clinica_id, transaction);
     const active = await db.ConsentSignaturePackage.findByPk(pkg.id, { transaction, lock: transaction.LOCK.UPDATE });
     if (!active || ['expired', 'cancelled'].includes(active.status) || !active.expires_at || new Date(active.expires_at) <= new Date()
       || active.paciente_id !== pkg.paciente_id || active.clinica_id !== pkg.clinica_id) {
@@ -77,6 +75,10 @@ async function submit(pkg, payload) {
       if (isDeepStrictEqual(request.answers, input.answers) && isDeepStrictEqual(request.submitted_personal, input.personal)) return { submitted: true, replayed: true };
       throw q.error('intake_already_submitted', 'Las respuestas ya se enviaron. Pide a recepción un nuevo formulario para corregirlas.', 409);
     }
+    const latest = await db.PatientIntakeRequest.findOne({ where: { patient_id: pkg.paciente_id, clinic_id: pkg.clinica_id },
+      order: [['id', 'DESC']], transaction, lock: transaction.LOCK.SHARE || transaction.LOCK.UPDATE });
+    if (!latest || latest.id !== request.id) throw q.error('intake_request_superseded',
+      'Este formulario se ha sustituido. Vuelve a la tablet y abre el formulario más reciente.', 409);
     if (request.version !== payload.expected_version) throw q.error('intake_version_conflict', 'El formulario ha cambiado. Vuelve a abrirlo.', 409);
     await request.update({ answers: input.answers, submitted_personal: input.personal, status: 'submitted', submitted_at: new Date(), version: request.version + 1 }, { transaction });
     // No Patient update, clinical diagnosis, signature, provider delivery or
