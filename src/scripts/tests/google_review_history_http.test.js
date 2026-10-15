@@ -50,3 +50,30 @@ test('history routes follow the existing session authentication boundary', () =>
   const source = fs.readFileSync(path.resolve(__dirname, '../../routes/marketing.routes.js'), 'utf8');
   assert(source.indexOf("router.get('/review-requests/missing-reviews'") > source.indexOf('router.use(authMiddleware)'));
 });
+
+test('history forwards the attribution filter without creating a synchronization request', async () => {
+  const f = fixture(); f.req.query.attribution = 'high_confidence';
+  await f.api.getMissingGoogleReviews(f.req, f.res);
+  assert.equal(f.res.body.attribution, 'high_confidence');
+  assert.equal(f.reads(), 1);
+});
+
+test('history has a database-only dependency boundary for all filters', async () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../../services/googleReviewHistory.service.js'), 'utf8');
+  assert(!/\brequire\s*\(|\bimport\s|\bfetch\s*\(/.test(source));
+  const history = require('../../services/googleReviewHistory.service');
+  let reads = 0;
+  const db = { Sequelize: { QueryTypes: { SELECT: 'SELECT' } }, sequelize: { query: async query => {
+    reads++;
+    assert(!/\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b/i.test(query));
+    return query.includes('filtered_total')
+      ? [{ total: 2, linked: 1, high_confidence: 1, unattributed: 1, filtered_total: 1 }]
+      : [];
+  } } };
+  for (const attribution of ['all', 'linked', 'high_confidence', 'unattributed']) {
+    const result = await history.listMissingReviews(db, { clinicIds: [59], locationIds: [11], attribution });
+    assert.equal(result.attribution, attribution);
+    assert.equal(result.summary.total, 2);
+  }
+  assert.equal(reads, 8);
+});

@@ -41,10 +41,10 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await sql.query(`INSERT INTO MarketingPatientLists VALUES
     (1,59,'mass_sends','{"review_request":true}'),(2,66,'mass_sends','{"review_request":true}')`);
   await sql.query('INSERT INTO MarketingPatientListItems VALUES (1,1,59),(2,2,66),(3,1,59)');
-  const receipt = (name, item = 1, clinic = 59, location = 11) => sql.query(`INSERT INTO MarketingPatientContactEvents
+  const receipt = (name, item = 1, clinic = 59, location = 11, confidence = undefined) => sql.query(`INSERT INTO MarketingPatientContactEvents
     (list_id,item_id,event_type,created_at,payload) VALUES (:list,:item,'google_review_matched','2026-10-02 10:00:00',:payload)`, {
     replacements: { list: clinic === 59 ? 1 : 2, item, payload: JSON.stringify({ review_name: name,
-      reviewer_name: 'FICTITIOUS ' + name, star_rating: 5, business_location_id: location }) },
+      reviewer_name: 'FICTITIOUS ' + name, star_rating: 5, business_location_id: location, confidence }) },
   });
   await receipt('accounts/1/locations/2/reviews/lost');
   await receipt('accounts/1/locations/2/reviews/lost');
@@ -104,6 +104,49 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await receipt('second');
   const page = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], limit: 1, offset: 1 });
   assert.equal(page.total, 1); assert.equal(page.items.length, 0);
+
+  const archived = async (name, confidence) => models.BusinessProfileReview.create({ clinica_id: 59,
+    business_location_id: 11, review_name: name, reviewer_name: 'FICTITIOUS ' + name, star_rating: 4,
+    first_seen_at: new Date('2026-10-01T10:00:00Z'), google_missing_at: new Date('2026-10-15T10:00:00Z'),
+    match_confidence: confidence,
+  });
+  await archived('organic-no-request');
+  await archived('score-exact-80'); await receipt('score-exact-80', 1, 59, 11, 0.8);
+  await archived('score-below-80'); await receipt('score-below-80', 1, 59, 11, 0.799);
+  await archived('no-score'); await receipt('no-score');
+  await archived('invalid-score'); await receipt('invalid-score', 1, 59, 11, 'invalid');
+  await archived('out-of-range-score'); await receipt('out-of-range-score', 1, 59, 11, 2);
+  await archived('test');
+  await receipt('foreign-location', 1, 59, 999, 1);
+  const allMissing = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], limit: 50 });
+  assert.equal(allMissing.total, 8);
+  assert.deepEqual(allMissing.summary, { total: 8, linked: 6, high_confidence: 1, unattributed: 2 });
+  const organic = allMissing.items.find(row => row.reviewer_name.endsWith('organic-no-request'));
+  assert.equal(organic.attributed_to_clinicaclick, false); assert.equal(organic.match_confidence, null);
+  const high = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], attribution: 'high_confidence' });
+  assert.equal(high.total, 1); assert.equal(high.items[0].match_confidence, 0.8);
+  assert.deepEqual(high.summary, allMissing.summary);
+  const linked = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], attribution: 'linked', limit: 2, offset: 2 });
+  assert.equal(linked.total, 6); assert.equal(linked.items.length, 2);
+  const unattributed = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], attribution: 'unattributed' });
+  assert.equal(unattributed.total, 2); assert(unattributed.items.every(row => !row.attributed_to_clinicaclick));
+  for (const name of ['no-score', 'invalid-score', 'out-of-range-score']) {
+    assert.equal(allMissing.items.find(row => row.reviewer_name.endsWith(name)).match_confidence, null);
+  }
+  await assert.rejects(history.listMissingReviews(models, { clinicIds: [59], attribution: 'all OR 1=1' }), { status: 400 });
+  assert.deepEqual((await history.listMissingReviews(models, { clinicIds: [], attribution: 'linked' })).summary,
+    { total: 0, linked: 0, high_confidence: 0, unattributed: 0 });
+  report.checks.push('organic and linked missing reviews share one local history; strict 80/100 filter, null/invalid scores, invariant scoped totals, pagination, test exclusion and foreign-location isolation');
+  const conversionBeforeOtherFlow = await history.countHistoricalMatches(models, [59]);
+  await sql.query(`INSERT INTO MarketingPatientLists VALUES (3,59,'other_objective',JSON_OBJECT())`);
+  await sql.query('INSERT INTO MarketingPatientListItems VALUES (4,3,59)');
+  await sql.query(`INSERT INTO MarketingPatientContactEvents (list_id,item_id,event_type,created_at,payload)
+    VALUES (3,4,'google_review_matched',NOW(),JSON_OBJECT('review_name','other-request-flow',
+      'reviewer_name','FICTITIOUS other request flow','business_location_id',11,'confidence',0.9))`);
+  const otherFlow = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], attribution: 'high_confidence' });
+  assert.equal(otherFlow.total, 2);
+  assert.equal(await history.countHistoricalMatches(models, [59]), conversionBeforeOtherFlow);
+  report.checks.push('history includes stored matches from other request flows without broadening the campaign conversion numerator');
   const map = heatmaps.buildReviewResponseHeatmaps([{ season: 'other', weekday: 3, hour: 11, total: 4 },
     { season: 'summer', weekday: 3, hour: 11, total: 2 }, { season: 'winter', weekday: 0, hour: 9, total: 1 }]);
   assert.equal(map.all.total, 7); assert.equal(map.all.series[3].data[11].y, 6);

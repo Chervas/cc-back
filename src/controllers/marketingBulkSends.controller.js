@@ -146,7 +146,7 @@ exports.getMissingGoogleReviews = async (req, res) => {
     res.set('Cache-Control', 'no-store');
     return res.json(await marketingBulkSendsService.getMissingGoogleReviews(scope, {
       review_group_clinic_ids: req.query.review_group_clinic_ids,
-      limit: req.query.limit, offset: req.query.offset,
+      limit: req.query.limit, offset: req.query.offset, attribution: req.query.attribution,
     }));
   } catch (error) {
     return sendError(res, error, 'Error cargando reseñas no visibles en Google');

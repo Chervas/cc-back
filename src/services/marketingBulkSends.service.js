@@ -4751,7 +4751,7 @@ async function getMissingGoogleReviews(scope, options = {}) {
   const clinicIds = (effectiveScope?.clinicIds || []).filter(Number.isInteger);
   const locationIds = await resolveReviewBusinessLocationIdsForClinics(clinicIds);
   return { success: true, ...await require('./googleReviewHistory.service').listMissingReviews(db, {
-    clinicIds, locationIds, limit: options.limit, offset: options.offset,
+    clinicIds, locationIds, limit: options.limit, offset: options.offset, attribution: options.attribution,
   }) };
 }
 
