@@ -11,6 +11,7 @@ const jwt = require('jsonwebtoken');
 const db = require('../../models');
 const { consentClinicIds, setConsentGroupScope } = require('../lib/tablet-kiosk-scope');
 const consentDocumentChoices = require('../lib/consent-document-choices');
+const { renderConsentVersionHtml } = require('../lib/consent-version-html');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 // Keep PDFs self-contained: isolated runtimes cannot fetch frontend assets.
@@ -2266,7 +2267,7 @@ async function createPatientIntakePackage(identifier, options = {}) {
         snapshot: ({ template: templateRow, version: versionRow, patient: patientRow, clinic: clinicRow }) => {
             const template = getPlain(templateRow), version = getPlain(versionRow), paciente = getPlain(patientRow);
             const context = buildTemplateContext({ paciente, clinica: getPlain(clinicRow) });
-            const html = renderTemplateHtml(version.body_html, context);
+            const html = renderConsentVersionHtml(version, context, renderTemplateHtml);
             const policy = getSigningPolicyFromVersion(version, template);
             const snapshot = {
                 template_source: 'clinic', template,
@@ -2429,7 +2430,8 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
         resolved.version = getPlain(await getOperationalConsentVersion(resolved, transaction));
         if (!resolved.version) throw Object.assign(new Error('consent_template_version_unavailable'), { statusCode: 409 });
         const title = resolved.version.title || resolved.template.name;
-        const renderedHtml = renderTemplateHtml(resolved.version.body_html || buildDefaultBodyHtml(title), documentContext);
+        const renderedHtml = renderConsentVersionHtml({ ...resolved.version,
+            body_html: resolved.version.body_html || buildDefaultBodyHtml(title) }, documentContext, renderTemplateHtml);
         const signingPolicy = getSigningPolicyFromVersion(resolved.version, resolved.template);
         const snapshot = {
             template_source: resolved.source,

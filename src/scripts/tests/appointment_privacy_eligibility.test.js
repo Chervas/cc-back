@@ -17,12 +17,13 @@ const signed = { id: 800, paciente_id: 2, clinica_id: 72, clinic_template_id: 60
       consent_choices: { schema_version: CHOICE_SCHEMA_VERSION, answers: Object.fromEntries(CHOICE_KEYS.map(key => [key, 'no'])) } },
   } };
 signed.snapshot_hash = choiceSnapshotHash(signed.snapshot_json, signed.snapshot_html);
-function fixture({ imported = null, prior = null, documents = [], currentTemplate = template, currentVersion = version } = {}) {
+function fixture({ imported = null, prior = null, documents = [], currentTemplate = template, currentVersion = version, oldVersions = [] } = {}) {
   const calls = [], transaction = { LOCK: { SHARE: 'SHARE' } }, Op = { ne: Symbol('ne'), lte: Symbol('lte'), or: Symbol('or'), in: Symbol('in') };
   const reader = (name, value) => ({ findOne: async options => { calls.push([name, options]); assert.equal(options.transaction, transaction); assert.equal(options.lock, 'SHARE'); return value; } });
   const db = { Sequelize: { Op }, Paciente: { findByPk: async (_id, q) => { assert.equal(q.lock, 'SHARE'); return { id_paciente: 2, clinica_id: 72 }; } },
     PatientCustomField: { findAll: async options => { calls.push(['imported', options]); assert.equal(options.transaction, transaction); assert.equal(options.lock, 'SHARE'); return Array.isArray(imported) ? imported : imported ? [imported] : []; } }, CitaPaciente: reader('prior_care', prior),
-    ClinicConsentTemplate: reader('template', currentTemplate), ClinicConsentTemplateVersion: reader('version', currentVersion),
+    ClinicConsentTemplate: reader('template', currentTemplate), ClinicConsentTemplateVersion: { ...reader('version', currentVersion),
+      findAll: async q => { calls.push(['previous_versions', q]); assert.equal(q.transaction, transaction); assert.equal(q.lock, 'SHARE'); assert.equal(q.limit, 101); return oldVersions; } },
     PatientConsentDocument: { findAll: async q => { calls.push(['documents', q]); assert.equal(q.transaction, transaction); assert.equal(q.lock, 'SHARE'); assert.equal(q.limit, 101); return documents; } },
   };
   return { db, transaction, calls, run: extra => assess({ db, transaction, appointment, now, ...extra }), enforce: extra => enforce({ db, transaction, appointment, now, ...extra }) };
@@ -76,4 +77,97 @@ test('canonical care start checks privacy before clinical requirements, document
   assert(privacy < source.indexOf('assessAppointmentClinicalConsent({'));
   assert(privacy < source.indexOf('captureForStart({'));
   assert(privacy < source.indexOf('await cita.update('));
+});
+
+const digital = require('../../lib/bs-privacy-digital-template');
+// The repository adds a terminal newline; the approved issued source did not.
+const oldHtml = fs.readFileSync(require.resolve('./fixtures/bs-privacy-approved-legacy.html'), 'utf8').replace(/\n$/, '');
+const legacyVersion = { id: 700, clinic_template_id: template.id, version: 1, locale: 'es', status: 'published',
+  body_html: oldHtml, body_json: { consent_form: form } };
+const built = digital.buildBsPrivacyDigitalHtml();
+const digitalVersion = { id: 701, clinic_template_id: template.id, version: 2, locale: 'es', status: 'published',
+  body_html: built.html, body_json: { consent_form: built.consent_form, digital_presentation: built.metadata } };
+function signedVersion(source, patch = {}) {
+  const doc = { ...signed, clinic_template_version_id: source.id, snapshot_json: structuredClone(signed.snapshot_json), ...patch };
+  doc.snapshot_json.version = { id: source.id, body_json: source.body_json };
+  doc.snapshot_html = require('../../lib/consent-document-choices').appendSignedChoiceHtml(source.body_html.trim(), doc,
+    doc.snapshot_json.signature_evidence.consent_choices);
+  doc.snapshot_hash = choiceSnapshotHash(doc.snapshot_json, doc.snapshot_html);
+  return doc;
+}
+test('approved digital presentation preserves an exact previous four-No signature without rewriting it', async () => {
+  assert.equal(require('node:crypto').createHash('sha256').update(oldHtml).digest('hex'), digital.APPROVED_LEGACY_HTML_SHA256);
+  const old = signedVersion(legacyVersion), before = JSON.stringify(old);
+  const f = fixture({ currentVersion: digitalVersion, oldVersions: [legacyVersion], documents: [old] });
+  assert.equal((await f.enforce()).allowed, true);
+  assert.equal(JSON.stringify(old), before, 'historical signature and snapshot remain byte-for-byte unchanged');
+  const q = f.calls.find(([name]) => name === 'documents')[1];
+  assert.deepEqual(q.where.clinic_template_version_id[f.db.Sequelize.Op.in], [701, 700]);
+  const oldQuery = f.calls.find(([name]) => name === 'previous_versions')[1];
+  assert.equal(oldQuery.where.clinic_template_id, template.id); assert.equal(oldQuery.where.status, 'published');
+  assert.equal(oldQuery.where.locale, 'es');
+});
+test('new digital signature with four explicit No answers permits care', async () => {
+  const f = fixture({ currentVersion: digitalVersion, documents: [signedVersion(digitalVersion)] });
+  assert.equal((await f.enforce()).allowed, true);
+});
+test('digital snapshots bind the exact rendered clauses, escaped patient identity and approved metadata', async () => {
+  const current = signedVersion(digitalVersion);
+  current.snapshot_json.context = { paciente: { nombre_completo: 'Paciente ficticio <QA>', dni: 'NO-REAL' } };
+  current.snapshot_html = require('../../lib/consent-document-choices').appendSignedChoiceHtml(
+    digital.buildBsPrivacyDigitalHtml(current.snapshot_json.context).html, current,
+    current.snapshot_json.signature_evidence.consent_choices);
+  current.snapshot_hash = choiceSnapshotHash(current.snapshot_json, current.snapshot_html);
+  assert.equal((await fixture({ currentVersion: digitalVersion, documents: [current] }).run()).allowed, true);
+  for (const mutate of [doc => { doc.snapshot_html = doc.snapshot_html.replace('INSTITUTO OBES ALICANTE', 'OTRA ENTIDAD'); },
+    doc => { doc.snapshot_json.context.paciente.dni = 'OTRO'; },
+    doc => { delete doc.snapshot_json.version.body_json.digital_presentation; }]) {
+    const changed = structuredClone(current); mutate(changed);
+    changed.snapshot_hash = choiceSnapshotHash(changed.snapshot_json, changed.snapshot_html);
+    assert.equal((await fixture({ currentVersion: digitalVersion, documents: [changed] }).run()).allowed, false);
+  }
+});
+for (const [label, patch] of [
+  ['draft', { status: 'draft' }], ['archived', { status: 'archived' }],
+  ['another template', { clinic_template_id: 999 }], ['another locale', { locale: 'fr' }],
+  ['changed old legal text', { body_html: oldHtml + '<p>Alterado</p>' }],
+  ['missing old choice form', { body_json: {} }],
+]) test('presentation compatibility rejects ' + label, async () => {
+  const f = fixture({ currentVersion: digitalVersion, oldVersions: [{ ...legacyVersion, ...patch }], documents: [signedVersion(legacyVersion)] });
+  assert.equal((await f.run()).allowed, false);
+});
+for (const [label, patch] of [
+  ['another patient', { paciente_id: 3 }], ['another clinic', { clinica_id: 66 }],
+  ['another template', { clinic_template_id: 999 }], ['expired', { expires_at: now }],
+  ['revoked', { revoked_at: now }], ['future signature', { signed_at: '2026-10-16T00:00:00Z' }],
+]) test('compatible old signature still rejects ' + label, async () => {
+  assert.equal((await fixture({ currentVersion: digitalVersion, oldVersions: [legacyVersion],
+    documents: [{ ...signedVersion(legacyVersion), ...patch }] }).run()).allowed, false);
+});
+test('a copied digital marker alone never authorizes historical versions', async () => {
+  for (const fake of [{ ...digitalVersion, body_html: '<p>Otro texto legal</p>' },
+    { ...digitalVersion, body_json: { ...digitalVersion.body_json, digital_presentation: { ...built.metadata, source_html_sha256: 'a'.repeat(64) } } }]) {
+    const f = fixture({ currentVersion: fake, oldVersions: [legacyVersion], documents: [signedVersion(legacyVersion)] });
+    assert.equal((await f.run()).allowed, false);
+    assert.equal(f.calls.some(([name]) => name === 'previous_versions'), false);
+  }
+});
+test('rehashed but different historical rendered text is not the approved presentation', async () => {
+  const old = signedVersion(legacyVersion);
+  old.snapshot_html = old.snapshot_html.replace('INSTITUTO OBES ALICANTE', 'OTRA ENTIDAD');
+  old.snapshot_hash = choiceSnapshotHash(old.snapshot_json, old.snapshot_html);
+  assert.equal((await fixture({ currentVersion: digitalVersion, oldVersions: [legacyVersion], documents: [old] }).run()).allowed, false);
+});
+test('historical choice receipt must have four explicit canonical answers and a current evidence date', async () => {
+  for (const patch of [snapshot => { delete snapshot.signature_evidence.consent_choices.answers.sms; },
+    snapshot => { snapshot.signature_evidence.signed_at = '2026-10-16T00:00:00Z'; },
+    snapshot => { snapshot.version.id = 999; }, snapshot => { snapshot.template.clinic_id = 66; }]) {
+    const old = signedVersion(legacyVersion); patch(old.snapshot_json);
+    old.snapshot_hash = choiceSnapshotHash(old.snapshot_json, old.snapshot_html);
+    assert.equal((await fixture({ currentVersion: digitalVersion, oldVersions: [legacyVersion], documents: [old] }).run()).allowed, false);
+  }
+});
+test('compatibility reads are bounded and fail closed when the version limit is exceeded', async () => {
+  await assert.rejects(fixture({ currentVersion: digitalVersion, oldVersions: Array(101).fill(legacyVersion) }).run(),
+    { code: 'appointment_consent_privacy_configuration' });
 });

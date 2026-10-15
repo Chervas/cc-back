@@ -53,13 +53,39 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       });
       if (!version || !String(version.body_html || '').trim()) { missing.push(template.id); continue; }
       const form = getConsentChoiceForm({ snapshot_json: { version: plain(version) } });
-      const document = await db.PatientConsentDocument.findOne({
+      let document = await db.PatientConsentDocument.findOne({
         where: { paciente_id: patientId, clinica_id: clinicId, clinic_template_id: template.id,
           clinic_template_version_id: version.id, status: { [Op.in]: ['pending', 'sent', 'viewed', 'signed'] },
           [Op.or]: [{ expires_at: null }, { expires_at: { [Op.gt]: now } }] },
         order: [['id', 'DESC']], transaction,
       });
-      if (document && reusableChoiceDocument(document, template, version, form, now)) {
+      let reusable = document && reusableChoiceDocument(document, template, version, form, now);
+      const privacy = require('../services/appointmentPrivacyEligibility.service');
+      const bsDigital = privacy.CLINICS.includes(Number(clinicId))
+        && Number(template.clinic_id) === Number(clinicId) && template.catalog_key === privacy.FINAL_PRIVACY_KEY
+        && require('./bs-privacy-digital-template').isApprovedPrivacyPresentation({ bodyHtml: version.body_html, bodyJson: version.body_json });
+      if (bsDigital && reusable && document.status === 'signed') {
+        reusable = privacy.isValidSignedPrivacyDocument({ document, template: plain(template), patientId, clinicId, now,
+          approvedVersions: new Map([[Number(version.id), { version: plain(version), legacy: false, digital: true }]]) });
+      }
+      if (bsDigital && (!reusable || document.status !== 'signed')) {
+        const approvedVersions = await privacy.approvedPrivacyVersions({ db, template: plain(template), version: plain(version), transaction });
+        const oldIds = [...approvedVersions.keys()].filter(id => id !== Number(version.id));
+        if (oldIds.length) {
+          const signedCandidates = await db.PatientConsentDocument.findAll({ where: {
+            paciente_id: patientId, clinica_id: clinicId, clinic_template_id: template.id,
+            clinic_template_version_id: { [Op.in]: oldIds }, purpose: 'data_protection', status: 'signed',
+          }, order: [['id', 'DESC']], limit: 101, transaction, lock: transaction.LOCK.SHARE });
+          if (signedCandidates.length > 100) throw error('intake_privacy_documents_review_required', 409);
+          const valid = signedCandidates.find(candidate => privacy.isValidSignedPrivacyDocument({ document: candidate,
+            template: plain(template), patientId, clinicId, approvedVersions, now }));
+          // Pending paper-layout documents deliberately do not qualify: the
+          // patient must see the current digital presentation, not be sent back
+          // to the retired paper layout. Existing signatures remain untouched.
+          if (valid) { document = valid; reusable = true; }
+        }
+      }
+      if (document && reusable) {
         const existingPackage = document.package_id
           ? await db.ConsentSignaturePackage.findByPk(document.package_id, { transaction }) : null;
         const available = existingPackage && !['cancelled', 'expired'].includes(existingPackage.status)

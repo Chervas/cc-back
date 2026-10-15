@@ -4,10 +4,69 @@
 // service never prepares a package, starts care, sends a message or signs.
 const CLINICS = Object.freeze([66, 72]);
 const FINAL_PRIVACY_KEY = 'bs-final-20261015-e31760491bf0929ca25a4976f4f2c463cece9af7a41ecb6c0e84508aaddb741f';
+const { createHash } = require('node:crypto');
 const plain = row => row?.toJSON ? row.toJSON() : row;
 const object = value => { if (typeof value === 'string') { try { return JSON.parse(value); } catch { return {}; } } return value || {}; };
 const fail = (code, message) => { throw Object.assign(new Error(message), { code, statusCode: 409,
   details: { action: 'prepare_patient_privacy' } }); };
+
+// Presentation-only replacements must not revoke an already valid signature.
+// The exceptional family is pinned in server code, never accepted from a
+// caller's equivalence flag. Every historical row remains immutable.
+async function approvedPrivacyVersions({ db, template, version, transaction }) {
+  const digital = require('../lib/bs-privacy-digital-template');
+  const currentDigital = digital.isApprovedPrivacyPresentation({ bodyHtml: version.body_html, bodyJson: version.body_json });
+  const approved = new Map([[Number(version.id), { version, legacy: false, digital: currentDigital }]]);
+  if (!currentDigital) return approved;
+  const { Op } = db.Sequelize;
+  const previous = await db.ClinicConsentTemplateVersion.findAll({ where: {
+    clinic_template_id: Number(template.id), status: 'published', locale: 'es', id: { [Op.ne]: Number(version.id) },
+  }, order: [['version', 'DESC'], ['id', 'DESC']], limit: 101, transaction, lock: transaction.LOCK.SHARE });
+  if (previous.length > 100) fail('appointment_consent_privacy_configuration', 'Revisa las versiones publicadas de protección de datos.');
+  const choices = require('../lib/consent-document-choices');
+  for (const raw of previous) {
+    const old = plain(raw);
+    if (!Number.isSafeInteger(Number(old?.id)) || Number(old.id) <= 0
+      || Number(old.clinic_template_id) !== Number(template.id) || old.status !== 'published' || old.locale !== 'es') continue;
+    const isDigital = digital.isApprovedPrivacyPresentation({ bodyHtml: old.body_html, bodyJson: old.body_json });
+    const isLegacy = createHash('sha256').update(String(old.body_html || '')).digest('hex') === digital.APPROVED_LEGACY_HTML_SHA256;
+    if (!isDigital && !isLegacy) continue;
+    try {
+      if (!choices.getConsentChoiceForm({ snapshot_json: { version: { body_json: old.body_json, variable_schema: old.variable_schema } } })) continue;
+      approved.set(Number(old.id), { version: old, legacy: isLegacy, digital: isDigital });
+    } catch { /* An invalid published form never grants eligibility. */ }
+  }
+  return approved;
+}
+
+function isValidSignedPrivacyDocument({ document, template, patientId, clinicId, approvedVersions, now }) {
+  const doc = plain(document), snapshot = object(doc?.snapshot_json);
+  const approved = approvedVersions.get(Number(doc?.clinic_template_version_id));
+  if (!approved || Number(doc.paciente_id) !== Number(patientId) || Number(doc.clinica_id) !== Number(clinicId)
+    || Number(doc.clinic_template_id) !== Number(template.id) || doc.purpose !== 'data_protection'
+    || Number(snapshot?.template?.id) !== Number(template.id) || Number(snapshot?.template?.clinic_id) !== Number(clinicId)
+    || Number(snapshot?.version?.id) !== Number(approved.version.id)
+    || !require('./appointmentConsentEligibility.service').isCurrentSignedDocument(doc, template, now)) return false;
+  const choices = require('../lib/consent-document-choices');
+  const answers = choices.signedConsentChoiceAnswers(doc);
+  const evidenceDate = new Date(snapshot?.signature_evidence?.signed_at).getTime();
+  if (!answers || (approved.legacy || approved.digital)
+    && (!Number.isFinite(evidenceDate) || evidenceDate > now.getTime())) return false;
+  // Old signed snapshots do not contain source HTML. Match their complete
+  // rendered legal body and canonical choice receipt to the pinned old source,
+  // not merely the database version id or a copied metadata marker.
+  if (approved.legacy || approved.digital) {
+    const digital = require('../lib/bs-privacy-digital-template');
+    if (approved.digital && !digital.isApprovedPrivacyPresentation({ bodyHtml: approved.version.body_html,
+      bodyJson: snapshot.version.body_json })) return false;
+    const legalHtml = approved.legacy ? String(approved.version.body_html || '').trim()
+      : digital.buildBsPrivacyDigitalHtml(object(snapshot.context)).html;
+    const expected = choices.appendSignedChoiceHtml(legalHtml, doc,
+      { schema_version: choices.CHOICE_SCHEMA_VERSION, answers });
+    if (doc.snapshot_html !== expected) return false;
+  }
+  return true;
+}
 
 async function assessPrivacyBeforeStart({ db, appointment, transaction, now = new Date() }) {
   const cita = plain(appointment), clinic = Number(cita?.clinica_id), patientId = Number(cita?.paciente_id);
@@ -41,20 +100,13 @@ async function assessPrivacyBeforeStart({ db, appointment, transaction, now = ne
     || !choices.getConsentChoiceForm({ snapshot_json: { version: { body_json: version.body_json } } })) {
     fail('appointment_consent_privacy_configuration', 'Revisa la versión publicada del nuevo modelo de protección de datos.');
   }
+  const approvedVersions = await approvedPrivacyVersions({ db, template, version, transaction });
   const documents = await db.PatientConsentDocument.findAll({ where: { paciente_id: patientId, clinica_id: clinic,
-    clinic_template_id: template.id, clinic_template_version_id: version.id, purpose: 'data_protection', status: 'signed' },
+    clinic_template_id: template.id, clinic_template_version_id: approvedVersions.size === 1 ? version.id : { [Op.in]: [...approvedVersions.keys()] }, purpose: 'data_protection', status: 'signed' },
     order: [['id', 'DESC']], limit: 101, transaction, lock: transaction.LOCK.SHARE });
   if (documents.length > 100) fail('appointment_consent_privacy_configuration', 'Revisa la documentación de protección de datos del paciente.');
-  const valid = documents.some(raw => {
-    const doc = plain(raw), snapshot = object(doc.snapshot_json);
-    return Number(doc.paciente_id) === patientId && Number(doc.clinica_id) === clinic
-      && Number(doc.clinic_template_id) === Number(template.id) && Number(doc.clinic_template_version_id) === Number(version.id)
-      && doc.purpose === 'data_protection'
-      && Number(snapshot?.template?.id) === Number(template.id) && Number(snapshot?.template?.clinic_id) === clinic
-      && Number(snapshot?.version?.id) === Number(version.id)
-      && require('./appointmentConsentEligibility.service').isCurrentSignedDocument(doc, template, now)
-      && !!choices.signedConsentChoiceAnswers(doc);
-  });
+  const valid = documents.some(document => isValidSignedPrivacyDocument({ document, template, patientId,
+    clinicId: clinic, approvedVersions, now }));
   return { required: true, allowed: valid, reason: valid ? 'current_privacy_signed' : 'current_privacy_pending' };
 }
 
@@ -64,4 +116,5 @@ async function assertPrivacyBeforeStart(options) {
   return result;
 }
 
-module.exports = { CLINICS, FINAL_PRIVACY_KEY, assessPrivacyBeforeStart, assertPrivacyBeforeStart };
+module.exports = { CLINICS, FINAL_PRIVACY_KEY, approvedPrivacyVersions, isValidSignedPrivacyDocument,
+  assessPrivacyBeforeStart, assertPrivacyBeforeStart };
