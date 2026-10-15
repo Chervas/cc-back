@@ -8,6 +8,7 @@ function harness({ allowed = true, patientClinic = 121 } = {}) {
     if (name === '../../models') return { Paciente: { findOne: async () => ({ id_paciente: 12, clinica_id: patientClinic }) } };
     if (name.includes('access-policy')) return { canUserAccessFeature: async args => { calls.push({ name: 'access', args }); return allowed; } };
     if (name.includes('patient-intake-questionnaire')) return require('../../lib/patient-intake-questionnaire');
+    if (name.includes('patient-intake-clinic-scope')) return require('../../lib/patient-intake-clinic-scope');
     if (name.includes('patientIntake.service')) return service;
     throw Error(name);
   } });

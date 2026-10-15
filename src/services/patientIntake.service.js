@@ -3,14 +3,13 @@ const { randomUUID, createHash } = require('node:crypto');
 const { isDeepStrictEqual } = require('node:util');
 const db = require('../../models');
 const q = require('../lib/patient-intake-questionnaire');
+const { patientForIntakeClinic } = require('../lib/patient-intake-clinic-scope');
 const { Op } = db.Sequelize;
 const json = row => row?.toJSON ? row.toJSON() : row;
 const patientHash = p => createHash('sha256').update(JSON.stringify({ personal: q.personalSnapshot(p), alergias: p.alergias || '', medicacion: p.medicacion || '', antecedentes: p.antecedentes || '' })).digest('hex');
 
 async function scopedPatient(patientId, clinicId, transaction) {
-  const patient = await db.Paciente.findByPk(patientId, { transaction, ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}) });
-  if (!patient || Number(patient.clinica_id) !== Number(clinicId)) throw q.error('intake_patient_scope', 'El formulario no pertenece a esta clínica.', 403);
-  return patient;
+  return patientForIntakeClinic({ db, identifier: patientId, clinicId, transaction });
 }
 
 async function prepare({ patientId, clinicId, actorId }) {
@@ -19,11 +18,15 @@ async function prepare({ patientId, clinicId, actorId }) {
   if (pendingReview?.status === 'submitted') throw q.error('intake_review_pending', 'El paciente ya ha enviado sus respuestas. El profesional debe revisarlas antes de solicitar otro formulario.', 409);
   // Privacy signature and clinical answers remain distinct. Reuses valid signed
   // privacy evidence; a returning patient can update answers without re-signing it.
-  const privacy = await require('./consentimientos.service').createPatientIntakePackage(patientId, { clinicId, createdBy: actorId, structuredQuestionnaire: true });
-  const currentPrivacyPackages = privacy.current_package_ids || [];
   return db.sequelize.transaction(async transaction => {
     const patient = await scopedPatient(patientId, clinicId, transaction);
-    const previous = await db.PatientIntakeRequest.findOne({ where: { patient_id: patientId, clinic_id: clinicId }, order: [['id', 'DESC']], transaction });
+    const privacy = await require('./consentimientos.service').createPatientIntakePackage(patientId, {
+      clinicId, createdBy: actorId, structuredQuestionnaire: true, allowLinkedClinic: true, transaction });
+    const currentPrivacyPackages = privacy.current_package_ids || [];
+    // Current read: answers submitted while privacy was checked must not be
+    // hidden by a new empty request. The patient lock serializes preparations.
+    const previous = await db.PatientIntakeRequest.findOne({ where: { patient_id: patientId, clinic_id: clinicId },
+      order: [['id', 'DESC']], transaction, lock: transaction.LOCK.SHARE || transaction.LOCK.UPDATE });
     if (previous?.status === 'submitted') throw q.error('intake_review_pending', 'El paciente ya ha enviado sus respuestas. El profesional debe revisarlas antes de solicitar otro formulario.', 409);
     if (previous?.status === 'pending') {
       const pkg = await db.ConsentSignaturePackage.findByPk(previous.package_id, { transaction });
@@ -83,12 +86,14 @@ async function submit(pkg, payload) {
 }
 
 async function reviewView({ patientId, clinicId }) {
-  const patient = await scopedPatient(patientId, clinicId);
-  const request = await db.PatientIntakeRequest.findOne({ where: { patient_id: patientId, clinic_id: clinicId }, order: [['id', 'DESC']] });
-  const current = { alergias: patient.alergias || '', medicacion: patient.medicacion || '', antecedentes: patient.antecedentes || '' };
-  const proposed = q.suggestedSummary(request?.answers || {});
-  const merged = Object.fromEntries(Object.keys(current).map(key => [key, !proposed[key] || current[key].includes(proposed[key]) ? current[key] : [current[key], proposed[key]].filter(Boolean).join('\n\n')]));
-  return { request: request ? json(request) : null, fields: q.fields, current, proposed: merged, personal: q.personalSnapshot(patient), patient_version: patientHash(patient) };
+  return db.sequelize.transaction(async transaction => {
+    const patient = await scopedPatient(patientId, clinicId, transaction);
+    const request = await db.PatientIntakeRequest.findOne({ where: { patient_id: patientId, clinic_id: clinicId }, order: [['id', 'DESC']], transaction });
+    const current = { alergias: patient.alergias || '', medicacion: patient.medicacion || '', antecedentes: patient.antecedentes || '' };
+    const proposed = q.suggestedSummary(request?.answers || {});
+    const merged = Object.fromEntries(Object.keys(current).map(key => [key, !proposed[key] || current[key].includes(proposed[key]) ? current[key] : [current[key], proposed[key]].filter(Boolean).join('\n\n')]));
+    return { request: request ? json(request) : null, fields: q.fields, current, proposed: merged, personal: q.personalSnapshot(patient), patient_version: patientHash(patient) };
+  });
 }
 
 async function confirm({ patientId, clinicId, actorId, payload }) {

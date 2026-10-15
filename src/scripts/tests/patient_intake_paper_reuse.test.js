@@ -20,6 +20,7 @@ for (const [label, privacy] of [['paper', { privacy_satisfied: true, privacy_sig
       if (name === '../../models') return db;
       if (name === './consentimientos.service') return { createPatientIntakePackage: async () => ({ ...privacy, current_package_ids: [] }) };
       if (name === '../lib/patient-intake-questionnaire') return { error: (code, message) => Object.assign(new Error(message), { code }) };
+      if (name === '../lib/patient-intake-clinic-scope') return require('../../lib/patient-intake-clinic-scope');
       if (name.startsWith('node:')) return require(name);
       throw Error('Unexpected dependency ' + name);
     },
