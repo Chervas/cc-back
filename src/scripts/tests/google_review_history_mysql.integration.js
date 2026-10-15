@@ -5,6 +5,7 @@ const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysq
 const { loadBusinessProfileJobs } = require('./fixtures/business_profile_jobs.fixture');
 const history = require('../../services/googleReviewHistory.service');
 const heatmaps = require('../../lib/review-response-heatmaps');
+const fs = require('node:fs'), path = require('node:path');
 
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.Sequelize = S;
@@ -153,4 +154,22 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(map.summer.total, 2); assert.equal(map.winter.total, 1);
   assert.equal(calls > 0, true);
   report.checks.push('paginated history is bounded and scoped; all-year heatmap includes October and adds shared bins without losing seasonal comparisons');
+  const summarySource = fs.readFileSync(path.resolve(__dirname, '../../services/marketingBulkSends.service.js'), 'utf8');
+  const scopeStart = summarySource.indexOf('const reviewItemScopeCte = `') + 'const reviewItemScopeCte = `'.length;
+  const scopeEnd = summarySource.indexOf('`;', scopeStart);
+  assert(scopeStart > 0 && scopeEnd > scopeStart);
+  const itemScope = summarySource.slice(scopeStart, scopeEnd);
+  await sql.query(`INSERT INTO MarketingPatientLists VALUES
+    (10,59,'mass_sends',JSON_OBJECT()),(11,66,'mass_sends',JSON_OBJECT()),(12,NULL,'mass_sends',JSON_OBJECT())`);
+  await sql.query(`INSERT INTO MarketingPatientListItems VALUES
+    (10,10,NULL),(11,11,NULL),(12,11,59),(13,10,66),(14,12,59),(15,12,NULL),(16,10,59)`);
+  for (const clinicIds of [[59], [66], [59, 66]]) {
+    const options = { replacements: { clinicIds }, type: S.QueryTypes.SELECT };
+    const original = await sql.query(`SELECT i.id FROM MarketingPatientListItems i JOIN MarketingPatientLists l ON l.id=i.list_id
+      WHERE COALESCE(i.clinica_id,l.clinica_id) IN (:clinicIds) ORDER BY i.id`, options);
+    const scoped = await sql.query(`${itemScope} SELECT id FROM review_scope_items ORDER BY id`, options);
+    assert.deepEqual(scoped, original);
+    assert.equal(new Set(scoped.map(row => row.id)).size, scoped.length);
+  }
+  report.checks.push('indexed recipient scope equals COALESCE for clinic/group, null fallback, cross-clinic overrides and disjoint deduplication');
 }).catch(error => { console.error(error); process.exitCode = 1; });

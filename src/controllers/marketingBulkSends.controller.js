@@ -265,7 +265,9 @@ exports.prepareCampaign = async (req, res) => {
 exports.getDispatchStatus = async (req, res) => {
   try {
     const scope = await resolveScope(req, { allowAll: false });
-    const result = await marketingBulkSendsService.getDispatchStatus(scope, req.params.id);
+    const result = await marketingBulkSendsService.getDispatchStatus(scope, req.params.id, {
+      progress_only: req.query.progress_only === 'true',
+    });
     return res.json(result);
   } catch (error) {
     return sendError(res, error, 'Error consultando progreso de envío');

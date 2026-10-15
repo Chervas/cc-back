@@ -4807,11 +4807,22 @@ async function getReviewRequestSummary(scope, options = {}) {
   const googleReviewScopePredicate = reviewBusinessLocationIds.length
     ? 'r.business_location_id IN (:reviewBusinessLocationIds)'
     : 'r.clinica_id IN (:clinicIds)';
+  // Disjoint indexed branches preserve COALESCE's item-over-list precedence
+  // without scanning other clinics' recipients for each dashboard metric.
+  const reviewItemScopeCte = `WITH review_scope_items AS (
+    SELECT id FROM MarketingPatientListItems WHERE clinica_id IN (:clinicIds)
+    UNION ALL
+    SELECT i.id FROM MarketingPatientLists l
+    INNER JOIN MarketingPatientListItems i ON i.list_id = l.id
+    WHERE l.clinica_id IN (:clinicIds) AND i.clinica_id IS NULL
+  )`;
 
   const [sentRow] = await db.sequelize.query(
     `
+    ${reviewItemScopeCte}
     SELECT COUNT(DISTINCT i.id) AS total
-    FROM MarketingPatientListItems i
+    FROM review_scope_items si
+    INNER JOIN MarketingPatientListItems i ON i.id = si.id
     INNER JOIN MarketingPatientLists l ON l.id = i.list_id
     WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
       AND l.objective_id = :objectiveId
@@ -4836,6 +4847,7 @@ async function getReviewRequestSummary(scope, options = {}) {
 
   const [activeQueueRow] = await db.sequelize.query(
     `
+    ${reviewItemScopeCte}
     SELECT COUNT(DISTINCT CASE
       WHEN i.paciente_id IS NOT NULL THEN CONCAT('patient:', i.paciente_id)
       WHEN REGEXP_REPLACE(COALESCE(i.phone, ''), '[^0-9]', '') <> ''
@@ -4844,7 +4856,8 @@ async function getReviewRequestSummary(scope, options = {}) {
         THEN CONCAT('email:', LOWER(TRIM(i.email)))
       ELSE CONCAT('item:', i.id)
     END) AS total
-    FROM MarketingPatientListItems i
+    FROM review_scope_items si
+    INNER JOIN MarketingPatientListItems i ON i.id = si.id
     INNER JOIN MarketingPatientLists l ON l.id = i.list_id
     WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
       AND l.objective_id = :objectiveId
@@ -4873,12 +4886,14 @@ async function getReviewRequestSummary(scope, options = {}) {
 
   const [reviewOptOutRow] = await db.sequelize.query(
     `
+    ${reviewItemScopeCte}
     SELECT COUNT(DISTINCT COALESCE(
       CASE WHEN i.paciente_id IS NOT NULL THEN CONCAT('p:', i.paciente_id) END,
       CASE WHEN NULLIF(TRIM(i.phone), '') IS NOT NULL THEN CONCAT('ph:', TRIM(REPLACE(REPLACE(REPLACE(REPLACE(i.phone, '+', ''), ' ', ''), '-', ''), '.', ''))) END,
       CONCAT('i:', i.id)
     )) AS total
-    FROM MarketingPatientListItems i
+    FROM review_scope_items si
+    INNER JOIN MarketingPatientListItems i ON i.id = si.id
     INNER JOIN MarketingPatientLists l ON l.id = i.list_id
     WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
       AND l.objective_id = :objectiveId
@@ -4965,6 +4980,7 @@ async function getReviewRequestSummary(scope, options = {}) {
 
   const [googleReviewsAttributedRow] = await db.sequelize.query(
     `
+    ${reviewItemScopeCte}
     SELECT COUNT(DISTINCT r.id) AS total
     FROM BusinessProfileReviews r
     WHERE ${googleReviewScopePredicate}
@@ -4974,6 +4990,7 @@ async function getReviewRequestSummary(scope, options = {}) {
         FROM MarketingPatientContactEvents e
         INNER JOIN MarketingPatientLists l ON l.id = e.list_id
         INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
+        INNER JOIN review_scope_items si ON si.id = i.id
         WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
           AND l.objective_id = :objectiveId
           AND (
@@ -8924,14 +8941,22 @@ async function updateRecipient(scope, campaignId, itemId, body = {}, userId = nu
   };
 }
 
-async function getDispatchStatus(scope, campaignId) {
+async function getDispatchStatus(scope, campaignId, options = {}) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
-  await reconcileListMessageState(list, scope);
+  const progressOnly = options.progress_only === true;
+  if (progressOnly) {
+    const jobState = await reconcileDispatchJobState(list);
+    if (jobState.reconciled && list.reload) await list.reload();
+  } else {
+    await reconcileListMessageState(list, scope);
+  }
   const dispatch = getDispatchConfig(list);
   const filter = getDispatchItemFilter(dispatch);
-  const counters = await getDispatchScopedCounters(list, filter);
-  const reloaded = await MarketingPatientList.findByPk(list.id);
+  const counters = progressOnly
+    ? computeCounters(await getDispatchScopedItems(list.id, filter))
+    : await getDispatchScopedCounters(list, filter);
+  const reloaded = progressOnly ? list : await MarketingPatientList.findByPk(list.id);
   const accountQuality = await getWhatsappAccountQualityForList(reloaded, scope);
   const context = normalizeDispatchContext(dispatch.context);
   const followUpCounters = context === 'review_request' && String(dispatch.status || '').toLowerCase() === 'completed'

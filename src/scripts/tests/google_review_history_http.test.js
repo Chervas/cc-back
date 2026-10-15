@@ -18,6 +18,7 @@ function fixture({ allowed = true, valid = true } = {}) {
     '../services/marketingBulkSends.service': {
       getReviewRequestSummary: async (_scope, options) => { reads++; return { summary: {}, options }; },
       getMissingGoogleReviews: async (_scope, options) => { reads++; return { items: [], ...options }; },
+      getDispatchStatus: async (_scope, id, options) => { reads++; return { id, options }; },
     },
   };
   vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../../controllers/marketingBulkSends.controller.js'), 'utf8'), {
@@ -63,6 +64,14 @@ test('overview mode retains the same authentication and clinic permission bounda
   await f.api.getReviewRequestSummary(f.req, f.res);
   assert.equal(f.res.body.options.summary_mode, 'overview');
   assert.equal(f.reads(), 1);
+});
+
+test('periodic progress is an explicit opt-in on the existing scoped route', async () => {
+  for (const [value, expected] of [['true', true], ['false', false], [undefined, false], ['true OR 1=1', false]]) {
+    const f = fixture(); f.req.params = { id: '830' }; f.req.query.progress_only = value;
+    await f.api.getDispatchStatus(f.req, f.res);
+    assert.equal(f.res.code, 200); assert.equal(f.res.body.options.progress_only, expected);
+  }
 });
 
 test('history has a database-only dependency boundary for all filters', async () => {
