@@ -11,6 +11,7 @@ const jwt = require('jsonwebtoken');
 const db = require('../../models');
 const { consentClinicIds, setConsentGroupScope } = require('../lib/tablet-kiosk-scope');
 const consentDocumentChoices = require('../lib/consent-document-choices');
+const consentDocumentPersonalData = require('../lib/consent-document-personal-data');
 const { renderConsentVersionHtml } = require('../lib/consent-version-html');
 const { medicalQuestionnaireEnabled, clinicMedicalQuestionnaireEnabled } = require('../lib/patient-intake-configuration');
 const { Op } = db.Sequelize;
@@ -310,6 +311,8 @@ function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesiona
             documento: paciente?.dni || '',
             email: paciente?.email || '',
             telefono: paciente?.telefono_movil || paciente?.telefono || '',
+            telefono2: paciente?.telefono_secundario || '',
+            compania: '',
             fecha_nacimiento: formatDateOnly(paciente?.fecha_nacimiento),
             direccion: paciente?.direccion || paciente?.domicilio || '',
             codigo_postal: paciente?.codigo_postal || paciente?.cp || '',
@@ -2448,6 +2451,8 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
                 id: resolved.template.id,
                 public_id: resolved.template.public_id || null,
                 name: resolved.template.name,
+                clinic_id: resolved.source === 'clinic' ? resolved.template.clinic_id : null,
+                catalog_key: resolved.source === 'clinic' ? resolved.template.catalog_key : null,
                 purpose: resolved.template.purpose,
                 blocking_policy: resolved.template.blocking_policy,
                 validity_mode: resolved.template.validity_mode,
@@ -3153,7 +3158,14 @@ async function createTabletBudgetSignatureSessionForKiosk(requestIdRaw, tokenRaw
 function serializePublicPackage(packageRow) {
     const plain = getPlain(packageRow);
     const documents = Array.isArray(plain.documents) ? plain.documents : [];
-    const patientName = [plain.paciente?.nombre, plain.paciente?.apellidos].filter(Boolean).join(' ').trim();
+    const identityForm = documents.length === 1
+        ? consentDocumentPersonalData.publicDocumentPersonalData(documents[0]).personal_data_form : null;
+    // In a standalone corrected LOPD the public heading must match the frozen
+    // identity being signed, not silently look as if reception edits were lost.
+    // This is presentation only; it never updates the patient's master record.
+    const patientName = identityForm?.confirmed
+        ? [identityForm.values.nombre, identityForm.values.apellidos].filter(Boolean).join(' ').trim()
+        : [plain.paciente?.nombre, plain.paciente?.apellidos].filter(Boolean).join(' ').trim();
     return {
         package: {
             id: plain.id,
@@ -3189,6 +3201,7 @@ function serializePublicPackage(packageRow) {
             requires_representative: requiresRepresentative(doc),
             signature_evidence: publicSignatureEvidenceForDocument(doc),
             ...consentDocumentChoices.publicDocumentChoices(doc),
+            ...consentDocumentPersonalData.publicDocumentPersonalData(doc),
         })),
     };
 }
@@ -3240,6 +3253,54 @@ async function getPublicPackage(tokenRaw, requestMeta = {}) {
     return { ...serializePublicPackage(refreshed), intake: await require('./patientIntake.service').publicView(refreshed) };
 }
 
+async function updatePublicDocumentPersonalData(tokenRaw, identifier, payload = {}, requestMeta = {}) {
+    const token = verifyPackageToken(tokenRaw);
+    const packageRow = await getPackageWithDocumentsByPublicId(token.package_public_id);
+    if (!packageRow) throw Object.assign(new Error('consent_package_not_found'), { statusCode: 404 });
+    requireActiveConsentPackage(packageRow);
+    // Resolve exclusively within this issued package. A valid bearer for one
+    // patient never permits probing/editing another patient's document.
+    const selected = (packageRow.documents || []).map(getPlain).find(doc => String(doc.id) === String(identifier)
+        || String(doc.public_id) === String(identifier));
+    if (!selected) throw Object.assign(new Error('consent_document_not_found'), { statusCode: 404 });
+    await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+        await lockConsentPackages([packageRow.id], transaction);
+        await requireCurrentActiveConsentPackage(packageRow.id, transaction);
+        const current = await db.PatientConsentDocument.findByPk(selected.id, { transaction, lock: transaction.LOCK.UPDATE });
+        const doc = getPlain(current);
+        if (!doc || Number(doc.package_id) !== Number(packageRow.id)
+            || Number(doc.paciente_id) !== Number(packageRow.paciente_id)
+            || Number(doc.clinica_id) !== Number(packageRow.clinica_id)) {
+            throw Object.assign(new Error('consent_document_not_found'), { statusCode: 404 });
+        }
+        if (!DOCUMENT_PENDING_STATUSES.has(doc.status) || doc.signed_at || doc.revoked_at) {
+            throw Object.assign(new Error('El documento ya está cerrado y no se puede modificar.'), {
+                statusCode: 409, code: 'consent_document_already_closed', details: { reason_code: 'consent_document_already_closed' },
+            });
+        }
+        if (doc.expires_at && new Date(doc.expires_at).getTime() <= Date.now()) {
+            throw Object.assign(new Error('El documento ha caducado. Solicita uno nuevo en recepción.'), {
+                statusCode: 410, code: 'consent_document_expired', details: { reason_code: 'consent_document_expired' },
+            });
+        }
+        const corrected = consentDocumentPersonalData.correctedSnapshot(doc, payload, requestMeta);
+        const [changed] = await db.PatientConsentDocument.update(corrected, { transaction, where: {
+            id: doc.id, package_id: packageRow.id, paciente_id: packageRow.paciente_id, clinica_id: packageRow.clinica_id,
+            status: doc.status, signed_at: null, revoked_at: null, snapshot_hash: payload.snapshot_hash,
+        } });
+        if (changed !== 1) throw Object.assign(new Error('El documento ha cambiado. Vuelve a abrirlo antes de guardar los datos.'), {
+            statusCode: 409, code: 'consent_personal_data_changed', details: { reason_code: 'consent_personal_data_changed' },
+        });
+        await db.ConsentDeliveryEvent.create({ package_id: packageRow.id, patient_consent_document_id: doc.id,
+            channel: token.channel || 'tablet', status: 'viewed', recipient: null,
+            event_payload: { event: 'document_personal_data_confirmed', schema_version: consentDocumentPersonalData.SCHEMA_VERSION,
+                previous_snapshot_hash: doc.snapshot_hash, snapshot_hash: corrected.snapshot_hash, profile_updated: false },
+        }, { transaction });
+    });
+    const refreshed = await getPackageWithDocumentsById(packageRow.id);
+    return { ...serializePublicPackage(refreshed), intake: await require('./patientIntake.service').publicView(refreshed) };
+}
+
 async function findDocumentByIdentifier(identifier) {
     const value = toCleanString(identifier);
     if (!value) return null;
@@ -3262,7 +3323,7 @@ async function findDocumentByIdentifier(identifier) {
     });
 }
 
-async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
+async function signConsentDocument(identifier, payload = {}, requestMeta = {}, options = {}) {
     const doc = await findDocumentByIdentifier(identifier);
     if (!doc) {
         const err = new Error('consent_document_not_found');
@@ -3278,6 +3339,8 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
     const evidence = normalizeSignatureEvidence(payload, requestMeta);
     requireSignatureEvidence(evidence, plainDoc);
     consentDocumentChoices.validateDocumentChoiceMap(payload, [plainDoc]);
+    consentDocumentPersonalData.validateSnapshotMap(payload, [plainDoc]);
+    consentDocumentPersonalData.assertReadyToSign(plainDoc, payload);
     const choiceEvidence = consentDocumentChoices.documentChoiceEvidence(plainDoc, payload);
     if (choiceEvidence) evidence.consent_choices = choiceEvidence;
     if (plainDoc.package) requireActiveConsentPackage(plainDoc.package);
@@ -3309,14 +3372,29 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
         ...(choiceEvidence ? { snapshot_html: signedHtml } : {}),
         snapshot_hash: nextHash,
     };
-    await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+    const executeSignature = async transaction => {
         const reusableOptions = reusableDocumentOptions(plainDoc);
-        const candidates = reusableOptions ? await pendingReusableConsentCandidates(reusableOptions, transaction) : [];
+        const candidates = options.reusableCandidates !== undefined ? options.reusableCandidates
+            : reusableOptions ? await pendingReusableConsentCandidates(reusableOptions, transaction) : [];
         await lockConsentPackages([plainDoc.package_id, ...candidates.map(row => row.package_id)], transaction);
         // The package displayed by the tablet may have been cancelled or
         // expired while evidence was captured. Recheck its current lifecycle
         // under the package anchor before any document, event or count write.
         if (plainDoc.package_id) await requireCurrentActiveConsentPackage(plainDoc.package_id, transaction);
+        const locked = getPlain(await db.PatientConsentDocument.findByPk(plainDoc.id,
+            { transaction, lock: transaction.LOCK?.UPDATE }));
+        if (!locked || ['id', 'package_id', 'paciente_id', 'clinica_id', 'status', 'snapshot_hash']
+            .some(key => String(locked[key] ?? '') !== String(plainDoc[key] ?? ''))
+            || locked.signed_at || locked.revoked_at) {
+            throw Object.assign(new Error('consent_document_signature_conflict'), { statusCode: 409 });
+        }
+        if (locked.expires_at && new Date(locked.expires_at).getTime() <= Date.now()) {
+            throw Object.assign(new Error('consent_document_expired'), { statusCode: 410 });
+        }
+        // Identity and guardian rules are checked again on the locked current
+        // row. A second editor cannot change them while this signature commits.
+        consentDocumentPersonalData.assertReadyToSign(locked, payload);
+        requireSignatureEvidence(evidence, locked);
         // A second device, revocation or countersignature may have changed the
         // document since it was displayed. The captured snapshot hash is the
         // compare-and-swap receipt; never replace a committed signature.
@@ -3343,7 +3421,10 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}) {
         }, { transaction });
         if (reusableOptions) await supersedePendingReusableConsents({ ...reusableOptions, candidates, transaction });
         if (plainDoc.package_id) await refreshPackageCounts(plainDoc.package_id, transaction);
-    });
+    };
+    if (options.transaction) await executeSignature(options.transaction);
+    else await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, executeSignature);
+    if (options.transaction) return { ...plainDoc, ...signedValues };
     return findDocumentByIdentifier(plainDoc.id);
 }
 
@@ -3498,10 +3579,12 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
     }
     // Validate the whole selected package before recording its first signature.
     consentDocumentChoices.validateDocumentChoiceMap(payload, pending);
+    consentDocumentPersonalData.validateSnapshotMap(payload, pending);
     const evidence = normalizeSignatureEvidence(payload, requestMeta);
     for (const doc of pending) {
         requireSignatureEvidence(evidence, doc);
         consentDocumentChoices.documentChoiceEvidence(doc, payload);
+        consentDocumentPersonalData.assertReadyToSign(doc, payload);
         if (doc.expires_at && new Date(doc.expires_at).getTime() <= Date.now()) {
             const error = new Error('consent_document_expired');
             error.statusCode = 410;
@@ -3509,16 +3592,32 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
         }
     }
     const signed = [];
-    for (const doc of documents) {
-        if (requestedDocumentIds && !requestedDocumentIds.has(String(doc.id)) && !requestedDocumentIds.has(String(doc.public_id))) {
-            continue;
+    // A batch containing identity edits must commit as one operation: a race
+    // against a second device cannot leave the earlier documents signed while
+    // the changed LOPD fails its final CAS. The outer transaction is reused by
+    // each document, including its events and reusable-document supersession.
+    const signSelected = async transaction => {
+        const candidatesByDocument = new Map();
+        if (transaction) {
+            const otherParents = [];
+            for (const doc of pending) {
+                const reusable = reusableDocumentOptions(doc);
+                const candidates = reusable ? await pendingReusableConsentCandidates(reusable, transaction) : [];
+                candidatesByDocument.set(doc.id, candidates);
+                otherParents.push(...candidates.map(row => row.package_id));
+            }
+            await lockConsentPackages([...pending.map(doc => doc.package_id), ...otherParents], transaction);
         }
-        if (DOCUMENT_CLOSED_STATUSES.has(doc.status)) continue;
-        signed.push(await signConsentDocument(doc.public_id, {
-            ...consentDocumentChoices.payloadForDocument(doc, payload),
-            method: payload.method || `${token.channel || 'tablet'}_signature`,
-        }, requestMeta));
-    }
+        for (const doc of pending) {
+            signed.push(await signConsentDocument(doc.public_id,
+                { ...consentDocumentPersonalData.payloadForDocument(doc, consentDocumentChoices.payloadForDocument(doc, payload)),
+                    method: payload.method || `${token.channel || 'tablet'}_signature` }, requestMeta,
+                { transaction, ...(transaction ? { reusableCandidates: candidatesByDocument.get(doc.id) } : {}) }));
+        }
+    };
+    if (pending.some(doc => consentDocumentPersonalData.isIdentityDocument(doc))) {
+        await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, signSelected);
+    } else await signSelected(null);
     const refreshed = await getPackageWithDocumentsById(packageRow.id);
     return {
         signed_count: signed.length,
@@ -3684,6 +3783,7 @@ module.exports = {
     createTabletSessionForKiosk,
     createTabletBudgetSignatureSessionForKiosk,
     getPublicPackage,
+    updatePublicDocumentPersonalData,
     signPublicPackage,
     getConsentDocument,
     renderConsentDocument,

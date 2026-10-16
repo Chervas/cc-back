@@ -116,11 +116,16 @@ test('independent LOPD/medical actions and status use real isolated MySQL, prese
   const lopdView = await consent.getPublicPackage(lopdSession.public_token);
   assert.equal(lopdView.documents.length, 1); assert.equal(lopdView.intake, null);
   const doc = await db.PatientConsentDocument.findOne({ where: { package_id: privacyPackageId } });
+  const confirmedLopd = await consent.updatePublicDocumentPersonalData(lopdSession.public_token, doc.id, {
+    schema_version: lopdView.documents[0].personal_data_form.schema_version,
+    values: lopdView.documents[0].personal_data_form.values, snapshot_hash: lopdView.documents[0].snapshot_hash,
+  });
   await consent.signPublicPackage(lopdSession.public_token, {
     signer_name: 'Firmante ficticio QA', accepted_statement: true,
     signature_data_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aK1sAAAAASUVORK5CYII=',
     document_choices: { [doc.id]: { schema_version: choices.CHOICE_SCHEMA_VERSION,
       answers: Object.fromEntries(choices.CHOICE_KEYS.map(key => [key, 'no'])) } },
+    document_snapshot_hashes: { [doc.id]: confirmedLopd.documents[0].snapshot_hash },
   });
   const signedDoc = await db.PatientConsentDocument.findByPk(doc.id), signedBefore = rowJson(signedDoc);
   assert.deepEqual(choices.signedConsentChoiceAnswers(signedDoc), Object.fromEntries(choices.CHOICE_KEYS.map(key => [key, 'no'])));
@@ -225,11 +230,16 @@ test('independent LOPD/medical actions and status use real isolated MySQL, prese
     const disabledStatus = await status(combinedA);
     assert.equal(disabledStatus.intake.enabled, false); assert.equal(disabledStatus.intake.state, 'not_sent');
     assert.equal(disabledStatus.privacy.state, 'sent');
+    const confirmedCombined = await consent.updatePublicDocumentPersonalData(combinedSession.public_token, combinedDoc.id, {
+      schema_version: combinedView.documents[0].personal_data_form.schema_version,
+      values: combinedView.documents[0].personal_data_form.values, snapshot_hash: combinedView.documents[0].snapshot_hash,
+    });
     await consent.signPublicPackage(combinedSession.public_token, {
       signer_name: 'Firmante ficticio QA', accepted_statement: true,
       signature_data_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aK1sAAAAASUVORK5CYII=',
       document_choices: { [combinedDoc.id]: { schema_version: choices.CHOICE_SCHEMA_VERSION,
         answers: Object.fromEntries(choices.CHOICE_KEYS.map(key => [key, 'no'])) } },
+      document_snapshot_hashes: { [combinedDoc.id]: confirmedCombined.documents[0].snapshot_hash },
     });
     const counts = await consent.refreshPackageCounts(combinedPkg.id);
     assert.equal(counts.status, 'signed'); assert.equal(counts.required_count, 1); assert.equal(counts.signed_count, 1);

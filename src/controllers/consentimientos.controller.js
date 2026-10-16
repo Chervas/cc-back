@@ -37,6 +37,7 @@ function sendError(res, error) {
             + 'Pide al responsable de consentimientos que revise la plantilla y publique la versión correspondiente; después vuelve a intentarlo.' }
         : { message };
     if (error?.details) payload.details = error.details;
+    if (error?.code) payload.code = error.code;
     return res.status(status).json(payload);
 }
 
@@ -511,6 +512,18 @@ exports.getPublicPackage = asyncHandler(async (req, res) => {
 exports.signPublicPackage = asyncHandler(async (req, res) => {
     try {
         const item = await consentimientosService.signPublicPackage(req.params.token, req.body || {}, {
+            ip: req.ip,
+            userAgent: req.get('user-agent'),
+        });
+        return res.json(item);
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
+exports.updatePublicDocumentPersonalData = asyncHandler(async (req, res) => {
+    try {
+        const item = await consentimientosService.updatePublicDocumentPersonalData(req.params.token, req.params.id, req.body || {}, {
             ip: req.ip,
             userAgent: req.get('user-agent'),
         });

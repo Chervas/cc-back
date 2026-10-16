@@ -28,7 +28,7 @@ function defineModels(sql, db) {
   // Small fictitious parent tables. Consent tables below use their production
   // factories and services; no real model index, associations or env are loaded.
   db.Clinica = sql.define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true },
-    grupoClinicaId: D.INTEGER, nombre_clinica: D.STRING(100), datos_fiscales_clinica: D.JSON,
+    grupoClinicaId: D.INTEGER, nombre_clinica: D.STRING(100), datos_fiscales_clinica: D.JSON, configuracion: D.JSON,
     direccion: D.STRING(150), codigo_postal: D.STRING(12), ciudad: D.STRING(100), provincia: D.STRING(100),
     pais: D.STRING(100), email: D.STRING(100), telefono: D.STRING(40), telefono_whatsapp: D.STRING(40),
   }, { tableName: 'Clinicas', timestamps: false });
@@ -250,8 +250,12 @@ test('actual LOPD + intake + care services, 44 final bodies, two BS clinics, iso
   const q = require('../../lib/patient-intake-questionnaire');
   await intake.submit(regPackage, { schema_version: q.VERSION, reviewed_answers: true, expected_version: 1,
     personal: q.personalSnapshot(await db.Paciente.findByPk(504)), answers: {} });
-  const regDocument = await db.PatientConsentDocument.findOne({ where: { package_id: regPackage.id } });
-  const regSession = await service.createTabletSession(regPackage.id);
+  // Medical preparation and privacy are independent actions. Completing the
+  // former must not implicitly create/sign/send the latter.
+  assert.equal(await db.PatientConsentDocument.count({ where: { package_id: regPackage.id } }), 0);
+  const regPrivacy = await service.createPatientIntakePackage(504, { clinicId: 72, createdBy: 1, privacyOnly: true });
+  const regDocument = await db.PatientConsentDocument.findOne({ where: { package_id: regPrivacy.package_id } });
+  const regSession = await service.createTabletSession(regPrivacy.package_id);
   await signAndVerify(regDocument, 'public', regSession.public_token);
   report.checks.push('registration old pending package is not reused after replacement; current reuse stable; health submission + four No signed, old history unchanged');
 

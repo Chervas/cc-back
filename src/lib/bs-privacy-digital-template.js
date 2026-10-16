@@ -58,9 +58,9 @@ const LEGAL_TEXT_SHA256 = sha256(LEGAL_TEXT);
 
 const IDENTITY_FIELDS = Object.freeze([
   ['nombre_completo', 'Paciente'], ['dni', 'DNI o documento de identidad'],
-  ['fecha_nacimiento', 'Fecha de nacimiento'], ['direccion', 'Dirección'],
+  ['fecha_nacimiento', 'Fecha de nacimiento'], ['compania', 'Compañía'], ['direccion', 'Dirección'],
   ['codigo_postal', 'Código postal'], ['ciudad', 'Población'], ['provincia', 'Provincia'],
-  ['telefono', 'Teléfono'], ['email', 'Correo electrónico'],
+  ['telefono', 'Teléfono'], ['telefono2', 'Segundo teléfono'], ['email', 'Correo electrónico'],
 ].map(([key, label]) => Object.freeze({ key, label })));
 const record = value => value && typeof value === 'object' && !Array.isArray(value);
 function identityValue(value) {

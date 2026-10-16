@@ -25,7 +25,7 @@ async function createOwnedConsentConsistencyFixture({ sql, models: db }) {
   db.Sequelize = S;
   const define = (name, tableName, attrs) => db[name] = sql.define(name, attrs, { tableName, timestamps: false });
   define('Clinica', 'Clinicas', { id_clinica: { type: D.INTEGER, primaryKey: true }, grupoClinicaId: D.INTEGER,
-    nombre_clinica: D.STRING, url_avatar: D.STRING, datos_fiscales_clinica: D.JSON });
+    nombre_clinica: D.STRING, url_avatar: D.STRING, datos_fiscales_clinica: D.JSON, configuracion: D.JSON });
   define('Paciente', 'Pacientes', { id_paciente: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER,
     public_id: D.STRING, nombre: D.STRING, apellidos: D.STRING, fecha_nacimiento: D.DATEONLY,
     dni: D.STRING, telefono_movil: D.STRING, email: D.STRING });

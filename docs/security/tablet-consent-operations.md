@@ -37,6 +37,16 @@ interruptor. Los paquetes combinados antiguos conservan sus documentos y no
 esperan respuestas del cuestionario desactivado para finalizar la firma.
 Cambiar esta opción no envía mensajes ni autoriza proveedores.
 
+La LOPD canónica de BS permite confirmar o corregir datos personales dentro del
+mismo documento, sin preparar un cuestionario. La corrección sólo modifica el
+snapshot pendiente del paquete autorizado por el enlace: exige su hash actual,
+valida campos acotados y vuelve a renderizar el texto legal canónico sin editar
+sus cláusulas. La firma exige confirmar los datos y el hash exacto revisado.
+Los cambios invalidan un trazo anterior; no pueden sustituir una firma existente
+ni eliminar la necesidad de representante ya capturada. Los datos declarados
+quedan en el documento/PDF y no sobrescriben identidad o contacto en la ficha
+global desde una ruta pública. Su traslado a la ficha requiere revisión humana.
+
 Configurar en el proceso efectivo de cada API:
 
 - CRM: `CONSENT_TABLET_BASE_URL` y `BUDGET_SIGNATURE_PUBLIC_BASE_URL` con
