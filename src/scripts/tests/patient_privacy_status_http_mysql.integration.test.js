@@ -8,6 +8,13 @@ const { createOwnedVisitAuthAclFixture } = require('./helpers/owned-visit-auth-a
 const privacy = require('../../services/appointmentPrivacyEligibility.service');
 const digital = require('../../lib/bs-privacy-digital-template');
 const choices = require('../../lib/consent-document-choices');
+const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+const waitSignal = async (promise, label) => {
+  let timer;
+  try { return await Promise.race([promise, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Error('OWNED race barrier timeout: ' + label)), 10000);
+  })]); } finally { clearTimeout(timer); }
+};
 
 test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic/appointment scope', {
   skip: process.env.CAMPAIGN_OPTIMIZATION_MYSQL_TEST !== '1', timeout: 180000,
@@ -144,11 +151,81 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     await expect('POST', `/api/consentimientos/packages/${importedPrepared.package_id}/tablet-session`, {}, reception, 409);
     const reopened = await expect('POST', `${importedPath}/privacy-package`, { clinic_id: 72 }, reception, 200);
     assert.equal(reopened.privacy_satisfied, true); assert.equal(reopened.privacy_signed, false); assert.equal(reopened.created_count, 0);
+    // Hold the real InnoDB locks in both adverse orders. These barriers only
+    // pause native model calls; no controller, ACL, signature or SQL is mocked.
+    const prepareRace = async id => {
+      await db.Paciente.create({ id_paciente: id, clinica_id: 72, public_id: `pac_privacy_http_${id}`,
+        nombre: 'OWNED fictitious race', apellidos: String(id), numero_historia: String(id), historia_scope: 'clinic:72',
+        telefono_movil: null, telefono_secundario: null });
+      const racePath = `/api/consentimientos/patients/pac_privacy_http_${id}`;
+      const issued = await expect('POST', `${racePath}/privacy-package`, { clinic_id: 72 }, reception, 201);
+      const access = await expect('POST', `/api/consentimientos/packages/${issued.package_id}/tablet-session`, {}, reception, 200);
+      const publicPath = `/api/consentimientos/public/${encodeURIComponent(access.public_token)}`;
+      const shown = await expect('GET', publicPath, undefined, undefined, 200), shownDoc = shown.documents[0];
+      const confirmedView = await expect('POST', `${publicPath}/documents/${shownDoc.id}/personal-data`, {
+        schema_version: shownDoc.personal_data_form.schema_version, snapshot_hash: shownDoc.snapshot_hash,
+        values: shownDoc.personal_data_form.values,
+      }, undefined, 200);
+      const current = confirmedView.documents[0];
+      return { id, path: racePath, publicPath, packageId: issued.package_id, documentId: current.id,
+        sign: () => request('POST', `${publicPath}/sign`, { ...signature,
+          document_snapshot_hashes: { [current.id]: current.snapshot_hash },
+          document_choices: { [current.id]: { schema_version: choices.CHOICE_SCHEMA_VERSION,
+            answers: Object.fromEntries(choices.CHOICE_KEYS.map(name => [name, 'no'])) } } }),
+        paper: () => request('POST', `${racePath}/privacy-paper`, { clinic_id: 72, acknowledged: true }, reception) };
+    };
+    {
+      const race = await prepareRace(92504), signedLocked = deferred(), paperWaiting = deferred(), releaseSign = deferred();
+      const originalDocumentRead = db.PatientConsentDocument.findByPk, originalPackageRead = db.ConsentSignaturePackage.findByPk;
+      let signaturePaused = false;
+      db.PatientConsentDocument.findByPk = async function(id, options) {
+        const row = await originalDocumentRead.call(this, id, options);
+        if (Number(id) === race.documentId && options?.lock === 'UPDATE' && !signaturePaused) {
+          signaturePaused = true; signedLocked.resolve(); await releaseSign.promise;
+        }
+        return row;
+      };
+      db.ConsentSignaturePackage.findByPk = async function(id, options) {
+        if (Number(id) === race.packageId && options?.lock === 'UPDATE' && signaturePaused) paperWaiting.resolve();
+        return originalPackageRead.call(this, id, options);
+      };
+      try {
+        const signPromise = race.sign(); await waitSignal(signedLocked.promise, 'signature holds package/document');
+        const paperPromise = race.paper(); await waitSignal(paperWaiting.promise, 'paper holds patient and waits package');
+        releaseSign.resolve();
+        const [signedFirst, paperAfter] = await Promise.all([signPromise, paperPromise]);
+        assert.equal(signedFirst.status, 200, JSON.stringify(signedFirst.body)); assert.equal(paperAfter.status, 201, JSON.stringify(paperAfter.body));
+        assert.equal((await db.PatientConsentDocument.findByPk(race.documentId)).status, 'signed', 'Paper CAS never supersedes a concurrent completed signature');
+      } finally { releaseSign.resolve(); db.PatientConsentDocument.findByPk = originalDocumentRead; db.ConsentSignaturePackage.findByPk = originalPackageRead; }
+    }
+    {
+      const race = await prepareRace(92505), paperLocked = deferred(), signatureWaiting = deferred(), releasePaper = deferred();
+      const originalPackageRead = db.ConsentSignaturePackage.findByPk; let attempts = 0;
+      db.ConsentSignaturePackage.findByPk = async function(id, options) {
+        const matches = Number(id) === race.packageId && options?.lock === 'UPDATE';
+        if (matches && ++attempts === 1) {
+          const row = await originalPackageRead.call(this, id, options);
+          paperLocked.resolve(); await releasePaper.promise; return row;
+        }
+        if (matches && attempts === 2) signatureWaiting.resolve();
+        return originalPackageRead.call(this, id, options);
+      };
+      try {
+        const paperPromise = race.paper(); await waitSignal(paperLocked.promise, 'paper holds patient/package');
+        const signPromise = race.sign(); await waitSignal(signatureWaiting.promise, 'signature waits package');
+        releasePaper.resolve();
+        const [paperFirst, signAfter] = await Promise.all([paperPromise, signPromise]);
+        assert.equal(paperFirst.status, 201, JSON.stringify(paperFirst.body)); assert.equal(signAfter.status, 409, JSON.stringify(signAfter.body));
+        const closed = await db.PatientConsentDocument.findByPk(race.documentId);
+        assert.equal(closed.status, 'superseded'); assert.equal(closed.signed_at, null);
+      } finally { releasePaper.resolve(); db.ConsentSignaturePackage.findByPk = originalPackageRead; }
+    }
     assert.deepEqual(await silent(), quiet, 'No questionnaire, provider message, job, flow, review or operational dispatch is created');
     owned.report.checks.push('Actual JWT/MFA/session/ACL/router: read-only GET, all six UI states, exact patient-clinic-group scope and optional appointment mismatch');
     owned.report.checks.push('Actual patient prepare creates one independent LOPD only; explicit tablet session; four No choices valid; missing choices rejected without signature');
     owned.report.checks.push('Native patient paper v2 without appointment, idempotent, no invented digital document; no provider/job/flow/questionnaire/review sends');
     owned.report.checks.push('Sent LOPD -> paper supersedes outstanding family attempts and removes kiosk task; reopening creates nothing; mixed clinical document preserved and remains usable');
+    owned.report.checks.push('Adversarial native lock races: signature holding package vs paper holding patient completes without deadlock and preserves signed; paper holding package wins before waiting signature with 409, no invented signature');
     owned.report.requests = f.requests; owned.report.externalFetchAttempts = f.externalFetchAttempts;
   } finally { await f.close(); }
 }));
