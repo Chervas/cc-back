@@ -35,6 +35,13 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
       code: f.codeFor(row.challenge_id) }); assert.equal(verified.status, 200); return verified.body.token;
   };
   const patientId = 92501, importedId = 92502, foreignId = 92503, appointmentId = 78501;
+  const calendarTreatment = 93501;
+  const calendarAppointments = [
+    { id_cita: appointmentId, paciente_id: patientId, tratamiento_id: null },
+    { id_cita: 78502, paciente_id: patientId, tratamiento_id: calendarTreatment },
+    { id_cita: 78503, paciente_id: importedId, tratamiento_id: null },
+    { id_cita: 78504, paciente_id: importedId, tratamiento_id: calendarTreatment },
+  ];
   const path = `/api/consentimientos/patients/pac_privacy_http_${patientId}`;
   const fingerprint = async () => ({ ...await f.fingerprint(), paper: await db.PatientConsentExternalAttestation.findAll({ raw: true }),
     imported: await db.PatientCustomField.findAll({ raw: true }) });
@@ -60,8 +67,17 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     await db.PatientCustomField.create({ paciente_id: importedId, clinica_id: 66, field_key: 'qa_http_source', source: 'cliniccloud',
       source_column: 'idContacto', value: '1075' });
     const start = new Date(Date.now() + 3600000);
-    await db.CitaPaciente.create({ id_cita: appointmentId, paciente_id: patientId, clinica_id: 72,
-      inicio: start, fin: new Date(+start + 1800000), estado: 'info_enviada', tipo_cita: 'primera_sin_trat' });
+    await db.Tratamiento.create({ id_tratamiento: calendarTreatment, clinica_id: 72, grupo_clinica_id: ids.group,
+      nombre: 'OWNED calendar consent regression', disciplina: 'medicina', origen: 'clinica', activo: true,
+      precio_base: 0, eliminado_por_clinica: [] });
+    await db.CitaPaciente.bulkCreate(calendarAppointments.map((row, index) => ({ ...row, clinica_id: 72,
+      inicio: new Date(+start + index * 1800000), fin: new Date(+start + (index + 1) * 1800000),
+      estado: 'info_enviada', tipo_cita: row.tratamiento_id ? 'primera_con_trat' : 'primera_sin_trat' })));
+    const clinicalTemplate = await db.ClinicConsentTemplate.create({ public_id: 'qa_privacy_calendar_clinical', clinic_id: 72,
+      catalog_key: 'qa_privacy_calendar_clinical', name: 'Independent clinical requirement', purpose: 'clinical', status: 'active',
+      is_default: false, blocking_policy: 'hard', validity_mode: 'manual' });
+    await db.TreatmentConsentRequirement.create({ tratamiento_id: calendarTreatment, clinica_id: 72,
+      clinic_template_id: clinicalTemplate.id, required: true, blocking_policy: 'hard' });
     const built = digital.buildBsPrivacyDigitalHtml();
     for (const clinicId of [66, 72]) {
       const template = await db.ClinicConsentTemplate.create({ public_id: `qa_privacy_http_${clinicId}`, clinic_id: clinicId,
@@ -72,11 +88,62 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
         variable_schema: { consent_form: built.consent_form } });
     }
     const reception = await login(ids.reception), outsider = await login(ids.outsider), before = await fingerprint(), quiet = await silent();
+    const calendarRoute = '/api/citas/calendar?' + new URLSearchParams({ clinica_id: '72',
+      startDate: new Date(+start - 3600000).toISOString(), endDate: new Date(+start + 86400000).toISOString() });
+    const calendarRead = async ({ state, attention, importedState = 'not_requested', importedAttention = false }) => {
+      const snapshot = await fingerprint(), previousQuiet = await silent();
+      const result = await request('GET', calendarRoute, undefined, reception);
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+      assert.equal(result.headers['x-agenda-endpoint'], 'calendar-lite');
+      assert.equal(result.body.length, calendarAppointments.length);
+      for (const expected of calendarAppointments) {
+        const row = result.body.find(item => Number(item.id_cita) === expected.id_cita);
+        assert(row, `Native calendar DTO preserves appointment ${expected.id_cita}`);
+        assert.equal(row.tratamiento_id, expected.tratamiento_id);
+        assert.equal(Number(row.paciente_id), expected.paciente_id);
+        assert.equal(row.paciente.public_id, `pac_privacy_http_${expected.paciente_id}`);
+        const summary = row.consent_summary;
+        assert(summary?.privacy, `Native calendar must include LOPD projection even without treatment: ${expected.id_cita}`);
+        const isImported = expected.paciente_id === importedId;
+        assert.equal(summary.privacy.state, isImported ? importedState : state);
+        assert.equal(summary.privacy.attention_required, isImported ? importedAttention : attention);
+        assert.equal(summary.privacy.required, !isImported);
+        assert.equal(summary.privacy.patient_id, expected.paciente_id);
+        assert.equal(summary.privacy.clinic_id, 72);
+        assert.equal(summary.privacy.appointment_id, expected.id_cita);
+        // Privacy is independent of treatment consent counters, even when its
+        // attention indicator changes from missing to sent/signed/paper.
+        const clinical = expected.tratamiento_id ? 1 : 0;
+        assert.equal(Number(summary.required_total || 0), clinical);
+        assert.equal(Number(summary.signed_required || 0), 0);
+        assert.equal(Number(summary.pending_required || 0), clinical);
+        assert.equal(Number(summary.pending_optional || 0), 0);
+        assert.equal(!!summary.has_pending, clinical > 0);
+      }
+      const summaryResult = await request('GET', `${calendarRoute}&summary=true`, undefined, reception);
+      assert.equal(summaryResult.status, 200, JSON.stringify(summaryResult.body));
+      assert.equal(summaryResult.headers['x-agenda-endpoint'], 'calendar-summary');
+      assert.equal(summaryResult.body.length, calendarAppointments.length);
+      assert(summaryResult.body.every(row => !Object.hasOwn(row, 'consent_summary') && !Object.hasOwn(row, 'paciente')),
+        'Availability/month summary remains minimal, without per-patient privacy data');
+      assert.deepEqual(await fingerprint(), snapshot, 'All calendar GETs leave domain/signature/package/delivery data unchanged');
+      assert.deepEqual(await silent(), previousQuiet, 'Calendar and summary-only GETs create no message/job/flow/questionnaire/dispatch');
+      return result.body;
+    };
     const initial = await read(reception); assert.equal(initial.state, 'not_requested'); assert.equal(initial.required, true);
     assert.equal(initial.allowed, false); assert.equal(initial.attention_required, true); assert.deepEqual(await fingerprint(), before);
+    await calendarRead({ state: 'not_requested', attention: true });
+    await expect('GET', calendarRoute, undefined, undefined, 401);
+    await expect('GET', calendarRoute, undefined, outsider, 403);
+    await expect('GET', `${calendarRoute}&summary=true`, undefined, outsider, 403);
+    const consentDenied = await db.AccessPolicyOverride.create({ scope_type: 'clinic', scope_id: 72,
+      feature_key: 'consents.view', role_code: 'reception', effect: 'deny', updated_by: ids.owner });
+    const redacted = await expect('GET', calendarRoute, undefined, reception, 200);
+    assert(redacted.every(row => row.consent_summary === null), 'Calendar does not leak LOPD when consents.view is denied');
+    await consentDenied.destroy();
     await expect('GET', `${path}/privacy?clinic_id=72`, undefined, undefined, 401);
     await expect('GET', `${path}/privacy?clinic_id=72`, undefined, outsider, 403);
-    await expect('GET', `${path}/privacy?clinic_id=72&appointment_id=${appointmentId + 1}`, undefined, reception, 404);
+    await expect('GET', `${path}/privacy?clinic_id=72&appointment_id=78503`, undefined, reception, 404);
     await expect('GET', `${path}/privacy?clinic_id=66&appointment_id=${appointmentId}`, undefined, reception, 403);
     await expect('GET', `/api/consentimientos/patients/pac_privacy_http_${foreignId}/privacy?clinic_id=72`, undefined, reception, 403);
     await expect('GET', `${path}/privacy?clinic_id=72&appointment_id=1bad`, undefined, reception, 400);
@@ -89,14 +156,17 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     const prepared = await expect('POST', `${path}/privacy-package`, { clinic_id: 72 }, reception, 201);
     assert.equal(prepared.created_count, 1); assert.equal(await db.PatientIntakeRequest.count(), 0);
     const pending = await read(reception); assert.equal(pending.state, 'pending'); assert.equal(pending.package_id, prepared.package_id);
+    await calendarRead({ state: 'pending', attention: true });
     const docs = await db.PatientConsentDocument.findAll({ where: { package_id: prepared.package_id } });
     assert.equal(docs.length, 1); assert.equal(docs[0].purpose, 'data_protection'); assert.equal(docs[0].tratamiento_id, null);
     const tablet = await expect('POST', `/api/consentimientos/packages/${prepared.package_id}/tablet-session`, {}, reception, 200);
     assert.equal((await read(reception)).state, 'sent');
+    await calendarRead({ state: 'sent', attention: true });
     const tabletPath = `/api/consentimientos/public/${encodeURIComponent(tablet.public_token)}`;
     const viewed = await expect('GET', tabletPath, undefined, undefined, 200);
     assert.equal(viewed.documents.length, 1); assert.equal(viewed.intake, null);
     assert.equal((await read(reception)).state, 'viewed');
+    await calendarRead({ state: 'viewed', attention: true });
     const pkg = await db.ConsentSignaturePackage.findByPk(prepared.package_id); await pkg.update({ status: 'cancelled' });
     assert.equal((await read(reception)).state, 'not_requested');
     await pkg.update({ status: 'pending' });
@@ -117,10 +187,12 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
         answers: Object.fromEntries(choices.CHOICE_KEYS.map(name => [name, 'no'])) } } }, undefined, 200);
     const signed = await read(reception); assert.equal(signed.state, 'signed'); assert.equal(signed.attention_required, false);
     assert.equal(signed.document_id, docs[0].id); assert(!JSON.stringify(signed).includes('consent_choices'));
+    await calendarRead({ state: 'signed', attention: false });
     const importedPath = `/api/consentimientos/patients/pac_privacy_http_${importedId}`;
     const importedPrepared = await expect('POST', `${importedPath}/privacy-package`, { clinic_id: 72 }, reception, 201);
     const importedDoc = await db.PatientConsentDocument.findOne({ where: { package_id: importedPrepared.package_id } });
     await expect('POST', `/api/consentimientos/packages/${importedPrepared.package_id}/tablet-session`, {}, reception, 200);
+    await calendarRead({ state: 'signed', attention: false, importedState: 'sent', importedAttention: true });
     const mixed = await db.ConsentSignaturePackage.create({ public_id: 'qa_mixed_privacy_paper', paciente_id: importedId,
       clinica_id: 72, status: 'pending', expires_at: new Date(Date.now() + 86400000) });
     const originalImported = importedDoc.toJSON();
@@ -141,6 +213,7 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     await expect('POST', paperPath, { clinic_id: 72, acknowledged: true }, reception, 200);
     const paperState = await expect('GET', `/api/consentimientos/patients/pac_privacy_http_${importedId}/privacy?clinic_id=72`, undefined, reception, 200);
     assert.equal(paperState.state, 'paper'); assert.equal(paperState.document_id, null);
+    await calendarRead({ state: 'signed', attention: false, importedState: 'paper', importedAttention: false });
     const evidence = await db.PatientOperationalEvent.findOne({ where: { patient_id: importedId, event_type: 'registration_privacy.paper_recorded' } });
     assert.equal(evidence.metadata.appointment_id, null); assert.equal(evidence.source, 'registration_privacy_paper/v2');
     assert.equal((await importedDoc.reload()).status, 'superseded'); assert.equal((await mixedPrivacy.reload()).status, 'superseded');
@@ -226,6 +299,8 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     owned.report.checks.push('Native patient paper v2 without appointment, idempotent, no invented digital document; no provider/job/flow/questionnaire/review sends');
     owned.report.checks.push('Sent LOPD -> paper supersedes outstanding family attempts and removes kiosk task; reopening creates nothing; mixed clinical document preserved and remains usable');
     owned.report.checks.push('Adversarial native lock races: signature holding package vs paper holding patient completes without deadlock and preserves signed; paper holding package wins before waiting signature with 409, no invented signature');
+    owned.report.checks.push('Native GET calendar-lite/mapCalendar DTO: treatment and treatment-free cards preserve privacy across not_requested/pending/sent/viewed/signed/paper, imported absence neutral; independent clinical counters unchanged');
+    owned.report.checks.push('Native calendar JWT/clinic/consent ACL redacts unauthorized privacy; summary=true remains minimal; all calendar reads preserve domain fingerprints and create no sends/jobs/flows/intake/dispatch');
     owned.report.requests = f.requests; owned.report.externalFetchAttempts = f.externalFetchAttempts;
   } finally { await f.close(); }
 }));

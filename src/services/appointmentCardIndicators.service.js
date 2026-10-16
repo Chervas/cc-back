@@ -3,6 +3,40 @@
 // visual summary is not authorization to start/complete clinical care.
 const { isCurrentSignedDocument } = require('./appointmentConsentEligibility.service');
 const plain = row => row?.toJSON ? row.toJSON() : row;
+function mergeSummary(row, values) {
+  const existing = plain(row)?.consent_summary;
+  const summary = { ...(existing && typeof existing === 'object' ? existing : {}), ...values };
+  if (Object.hasOwn(values, 'privacy')) delete summary.privacy_error;
+  if (values.privacy_error) delete summary.privacy;
+  if (row.setDataValue) row.setDataValue('consent_summary', summary);
+  else row.consent_summary = summary;
+}
+
+// Registration privacy is patient+clinic scoped, not treatment scoped. The
+// lightweight calendar and search must receive it even without a treatment.
+// Keep a single read-only snapshot for the whole page and preserve clinical
+// counters independently; reading the agenda never prepares/sends a document.
+async function attachPrivacy(db, rows) {
+  const clinics = require('./appointmentPrivacyEligibility.service').CLINICS;
+  const appointments = rows.filter(row => {
+    const a = plain(row);
+    return a?.paciente_id && clinics.includes(Number(a.clinica_id));
+  });
+  if (!appointments.length) return;
+  const privacy = require('./patientPrivacyStatus.service');
+  let context;
+  try {
+    context = await db.sequelize.transaction({ readOnly: true, isolationLevel: 'REPEATABLE READ' }, transaction =>
+      privacy.loadPrivacyContext({ db, appointments, transaction }));
+  } catch {
+    for (const row of appointments) mergeSummary(row, { privacy_error: true });
+    return;
+  }
+  for (const row of appointments) {
+    try { mergeSummary(row, { privacy: privacy.privacyStateFromContext({ appointment: row, context }) }); }
+    catch { mergeSummary(row, { privacy_error: true }); }
+  }
+}
 function treatmentIds(a) {
   if (require('../lib/program-appointment-context').hasProgramAppointmentReference(a)) {
     return a.program_context?.status === 'linked' && Array.isArray(a.program_context.treatment_ids)
@@ -11,6 +45,8 @@ function treatmentIds(a) {
   return a.tratamiento_id ? [Number(a.tratamiento_id)] : [];
 }
 async function attach(db, rows) {
+  if (!rows.length) return;
+  await attachPrivacy(db, rows);
   const appointments = rows.map(plain).filter(a => a.paciente_id && a.clinica_id && treatmentIds(a).length);
   if (!appointments.length) return;
   const { Op } = db.Sequelize;
@@ -50,6 +86,6 @@ async function attach(db, rows) {
       pending_required: required - signed, pending_optional: optionalPending,
       has_pending: required > signed || optionalPending > 0 });
   }
-  for (const row of rows) { const summary = projected.get(row.id_cita); if (!summary) continue; if (row.setDataValue) row.setDataValue('consent_summary', summary); else row.consent_summary = summary; }
+  for (const row of rows) { const summary = projected.get(plain(row).id_cita); if (summary) mergeSummary(row, summary); }
 }
 module.exports = { attach };
