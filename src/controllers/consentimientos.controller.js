@@ -340,6 +340,11 @@ exports.getAppointmentSummary = asyncHandler(async (req, res) => {
         });
         if (!cita) return res.status(404).json({ message: 'appointment_not_found' });
         const summary = await consentimientosService.getConsentSummaryForAppointment(cita);
+        try {
+            summary.privacy = await db.sequelize.transaction({ readOnly: true, isolationLevel: 'REPEATABLE READ' }, transaction =>
+                require('../services/patientPrivacyStatus.service').getPatientPrivacyStatus({ db,
+                    patientId: cita.paciente_id, clinicId: cita.clinica_id, appointmentId: cita.id_cita, transaction }));
+        } catch { summary.privacy_error = true; }
         return res.json(summary);
     } catch (error) {
         return sendError(res, error);

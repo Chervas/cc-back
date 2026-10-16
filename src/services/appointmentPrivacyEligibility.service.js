@@ -13,13 +13,13 @@ const fail = (code, message) => { throw Object.assign(new Error(message), { code
 // Presentation-only replacements must not revoke an already valid signature.
 // The exceptional family is pinned in server code, never accepted from a
 // caller's equivalence flag. Every historical row remains immutable.
-async function approvedPrivacyVersions({ db, template, version, transaction }) {
+async function approvedPrivacyVersions({ db, template, version, transaction, publishedVersions = null }) {
   const digital = require('../lib/bs-privacy-digital-template');
   const currentDigital = digital.isApprovedPrivacyPresentation({ bodyHtml: version.body_html, bodyJson: version.body_json });
   const approved = new Map([[Number(version.id), { version, legacy: false, digital: currentDigital }]]);
   if (!currentDigital) return approved;
   const { Op } = db.Sequelize;
-  const previous = await db.ClinicConsentTemplateVersion.findAll({ where: {
+  const previous = publishedVersions || await db.ClinicConsentTemplateVersion.findAll({ where: {
     clinic_template_id: Number(template.id), status: 'published', locale: 'es', id: { [Op.ne]: Number(version.id) },
   }, order: [['version', 'DESC'], ['id', 'DESC']], limit: 101, transaction, lock: transaction.LOCK.SHARE });
   if (previous.length > 100) fail('appointment_consent_privacy_configuration', 'Revisa las versiones publicadas de protección de datos.');

@@ -51,7 +51,10 @@ exports.tabletStatus = async (req, res, next) => {
       const cita = await db.CitaPaciente.findByPk(id, { attributes: ['id_cita', 'paciente_id', 'clinica_id'], raw: true, transaction });
       if (!cita?.paciente_id) throw Object.assign(new Error('appointment_not_found'), { statusCode: 404 });
       await assertUserCanAccessFeature({ actorId, featureKey: 'consents.view', clinicId: Number(cita.clinica_id) });
-      return require('../services/appointmentTabletStatus.service').appointmentTabletStatus({ db, appointment: cita, transaction });
+      const privacyStatus = require('../services/appointmentPrivacyEligibility.service').CLINICS.includes(Number(cita.clinica_id))
+        ? await require('../services/patientPrivacyStatus.service').getPatientPrivacyStatus({ db,
+          patientId: cita.paciente_id, clinicId: cita.clinica_id, appointmentId: cita.id_cita, transaction }) : null;
+      return require('../services/appointmentTabletStatus.service').appointmentTabletStatus({ db, appointment: cita, transaction, privacyStatus });
     });
     return res.json(result);
   } catch (error) {

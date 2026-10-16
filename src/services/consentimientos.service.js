@@ -2248,9 +2248,21 @@ async function getConsentSummaryForAppointment(citaLike) {
 async function attachConsentSummaryToCitas(citas) {
     const list = Array.isArray(citas) ? citas : (citas ? [citas] : []);
     if (!list.length) return citas;
+    // Privacy belongs to patient+clinic, not to a treatment. Resolve the whole
+    // authorized page in one bounded snapshot instead of N reads per card.
+    let privacyContext = null, privacyError = false;
+    try {
+        privacyContext = await db.sequelize.transaction({ readOnly: true, isolationLevel: 'REPEATABLE READ' }, transaction =>
+            require('./patientPrivacyStatus.service').loadPrivacyContext({ db, appointments: list, transaction }));
+    } catch { privacyError = true; }
     await Promise.all(list.map(async (cita) => {
         try {
             const summary = await getConsentSummaryForAppointment(cita);
+            if (privacyError) summary.privacy_error = true;
+            else {
+                try { summary.privacy = require('./patientPrivacyStatus.service').privacyStateFromContext({ appointment: cita, context: privacyContext }); }
+                catch { summary.privacy_error = true; }
+            }
             if (typeof cita?.setDataValue === 'function') {
                 cita.setDataValue('consent_summary', summary);
             } else if (cita && typeof cita === 'object') {

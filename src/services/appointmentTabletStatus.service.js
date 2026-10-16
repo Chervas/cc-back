@@ -11,12 +11,18 @@ const active = (pkg, now, patientId, clinicId) => pkg
   && (!pkg.expires_at || new Date(pkg.expires_at).getTime() > now.getTime());
 
 async function appointmentTabletStatus({ db, appointment, transaction, now = new Date(),
-  assessPrivacy = require('./appointmentPrivacyEligibility.service').assessPrivacyBeforeStart }) {
+  privacyStatus = null, assessPrivacy = require('./appointmentPrivacyEligibility.service').assessPrivacyBeforeStart }) {
   const patientId = Number(appointment.paciente_id), clinicId = Number(appointment.clinica_id), { Op } = db.Sequelize;
   const intakeEnabled = await clinicMedicalQuestionnaireEnabled({ db, clinicId, transaction });
-  const assessment = await assessPrivacy({ db, appointment, transaction, now });
+  const assessment = privacyStatus || await assessPrivacy({ db, appointment, transaction, now });
   const result = { privacy: { state: 'not_sent' }, intake: { enabled: intakeEnabled, state: 'not_sent' } };
-  if (assessment.reason === 'privacy_received_on_paper') result.privacy.state = 'paper';
+  if (privacyStatus) {
+    result.privacy.state = privacyStatus.state === 'signed' ? 'completed' : privacyStatus.state === 'paper' ? 'paper'
+      : ['sent', 'viewed'].includes(privacyStatus.state) ? 'sent' : 'not_sent';
+    if (privacyStatus.package_id) result.privacy.package_id = privacyStatus.package_id;
+    if (['sent', 'viewed'].includes(privacyStatus.state)) result.privacy.sent_at = privacyStatus.updated_at;
+  }
+  else if (assessment.reason === 'privacy_received_on_paper') result.privacy.state = 'paper';
   else if (assessment.reason === 'current_privacy_signed') result.privacy.state = 'completed';
   else {
     const templates = await db.ClinicConsentTemplate.findAll({ where: { clinic_id: clinicId,

@@ -132,8 +132,22 @@ test('native MySQL second-resolution dates remain valid without accepting a diff
 test('paper reads remain patient/clinic/source scoped, bounded and locked; excess history fails closed', async () => {
   const f = fixture(); await f.record();
   const query = f.calls.find(([name]) => name === 'paper-read')[1];
-  assert.deepEqual(query.where, { paciente_id: 2, clinica_id: 72, purpose: 'data_protection', source: paper.PAPER_SOURCE,
+  assert.deepEqual(query.where, { paciente_id: 2, clinica_id: 72, purpose: 'data_protection',
+    source: { [f.db.Sequelize.Op.in]: [paper.PAPER_SOURCE, paper.PATIENT_PAPER_SOURCE] },
     status: 'active', revoked_at: null });
   f.attestations.push(...Array(100).fill(f.attestations[0]));
   await assert.rejects(f.find(), { code: 'appointment_consent_privacy_configuration' });
+});
+
+test('patient-level paper receipt needs no invented appointment and remains idempotent and valid for care', async () => {
+  const f = fixture();
+  const first = await paper.recordPatientRegistrationPrivacyPaper({ db: f.db, patientId: 2, clinicId: 72,
+    actorId: 7, acknowledged: true, transaction: f.transaction, now });
+  assert.equal(first.created, true); assert.equal(f.events[0].metadata.appointment_id, null);
+  assert.equal(f.events[0].metadata.schema_version, paper.PATIENT_PAPER_SOURCE);
+  assert.equal(f.attestations[0].source, paper.PATIENT_PAPER_SOURCE);
+  assert.equal((await f.find()).kind, 'paper'); assert.equal((await f.assess()).allowed, true);
+  const again = await f.record(); assert.equal(again.created, false); assert.equal(f.events.length, 1);
+  f.events[0].metadata.appointment_id = 11;
+  assert.equal(await f.find(), null, 'v2 cannot forge an appointment-linked receipt');
 });
