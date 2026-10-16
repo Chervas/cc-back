@@ -44,6 +44,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.deepEqual(result.totals,{requests_sent:2,google_links_sent:1,google_reviews_total:6,
     google_reviews_attributed:3,google_reviews_unattributed:3,google_reviews_missing:1});
   assert.equal(result.quality.missing_without_date,1); assert.equal(result.quality.reviews_with_observation_date,1);
+  assert.deepEqual(result.missing,{total:2,detected_in_period:1,without_date:1});
   assert.equal(result.heatmaps.responses.all.total,1);
   assert.equal(result.heatmaps.responses.summer.series[4].data[0].y,1);
   assert.deepEqual(result.series[0].data,[{x:'2026-10-15',y:1},{x:'2026-10-16',y:1}]);

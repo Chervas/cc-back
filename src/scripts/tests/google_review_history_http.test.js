@@ -13,12 +13,14 @@ function fixture({ allowed = true, valid = true } = {}) {
     '../lib/clinicScope': { resolveClinicScope: async () => scope },
     '../lib/marketingScopeAccess': { hasMarketingClinicScopeAccess: async options => {
       assert.deepEqual([...options.clinicIds], [59]);
-      assert.equal(options.userId, 91); assert.equal(options.access, 'read'); return allowed;
+      assert.equal(options.userId, 91); assert(['read','write'].includes(options.access)); return allowed;
     } },
     '../services/marketingBulkSends.service': {
       getReviewRequestSummary: async (_scope, options) => { reads++; return { summary: {}, options }; },
       getMissingGoogleReviews: async (_scope, options) => { reads++; return { items: [], ...options }; },
       getReviewActivityReport: async (_scope, options) => { reads++; return { ...options }; },
+      getReviewQueueSchedule: async () => { reads++; return {success:true}; },
+      updateReviewQueueSchedule: async () => { reads++; return {success:true}; },
       getDispatchStatus: async (_scope, id, options) => { reads++; return { id, options }; },
     },
   };
@@ -27,13 +29,13 @@ function fixture({ allowed = true, valid = true } = {}) {
       assert(Object.hasOwn(dependencies, name), name); return dependencies[name];
     },
   });
-  const req = { userData: { userId: 91 }, query: { clinic_id: '59', limit: '10', offset: '20' } };
+  const req = { userData: { userId: 91 }, params:{id:'830'}, query: { clinic_id: '59', limit: '10', offset: '20' } };
   const res = { code: 200, headers: {}, set(k, v) { this.headers[k] = v; return this; },
     status(code) { this.code = code; return this; }, json(value) { this.body = value; return this; } };
   return { api: module.exports, req, res, reads: () => reads };
 }
 
-for (const handler of ['getReviewRequestSummary', 'getMissingGoogleReviews', 'getReviewActivityReport']) {
+for (const handler of ['getReviewRequestSummary', 'getMissingGoogleReviews', 'getReviewActivityReport', 'getReviewQueueSchedule']) {
   test(handler + ' denies a foreign clinic before any review read', async () => {
     const f = fixture({ allowed: false }); await f.api[handler](f.req, f.res);
     assert.equal(f.res.code, 403); assert.equal(f.reads(), 0);
@@ -66,6 +68,16 @@ test('history forwards the attribution filter without creating a synchronization
   await f.api.getMissingGoogleReviews(f.req, f.res);
   assert.equal(f.res.body.attribution, 'high_confidence');
   assert.equal(f.reads(), 1);
+});
+
+test('sorting is forwarded to the backend with pagination and no provider request',async()=>{
+  const f=fixture();Object.assign(f.req.query,{sort_by:'rating',sort_direction:'asc'});
+  await f.api.getMissingGoogleReviews(f.req,f.res);assert.equal(f.res.body.sort_by,'rating');assert.equal(f.res.body.sort_direction,'asc');
+});
+
+test('queue schedule writes require marketing write permission before any change',async()=>{
+  const f=fixture({allowed:false});await f.api.updateReviewQueueSchedule(f.req,f.res);assert.equal(f.res.code,403);assert.equal(f.reads(),0);
+  const allowed=fixture();await allowed.api.updateReviewQueueSchedule(allowed.req,allowed.res);assert.equal(allowed.res.code,200);assert.equal(allowed.reads(),1);
 });
 
 test('overview mode retains the same authentication and clinic permission boundary', async () => {

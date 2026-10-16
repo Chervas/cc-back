@@ -28,6 +28,7 @@ const FILTERS = {
   high_confidence: 'attributed_to_clinicaclick=1 AND match_confidence>=0.8',
   unattributed: 'attributed_to_clinicaclick=0',
 };
+const SORTS = { author: 'reviewer_name', rating: 'star_rating', linkage: 'attributed_to_clinicaclick', detected: 'first_seen_at', missing: 'google_missing_at' };
 
 async function countHistoricalMatches(db, clinicIds) {
   if (!clinicIds.length) return 0;
@@ -38,7 +39,10 @@ async function countHistoricalMatches(db, clinicIds) {
   return Number(rows[0]?.total || 0);
 }
 
-async function listMissingReviews(db, { clinicIds, locationIds = [], limit = 10, offset = 0, attribution = 'all' }) {
+async function listMissingReviews(db, { clinicIds, locationIds = [], limit = 10, offset = 0, attribution = 'all', sort_by = 'missing', sort_direction = 'desc' }) {
+  if (!Object.hasOwn(SORTS, sort_by) || !['asc', 'desc'].includes(sort_direction)) {
+    throw Object.assign(new Error('Invalid review history sort'), { status: 400 });
+  }
   if (!Object.hasOwn(FILTERS, attribution)) {
     const error = new Error('Invalid review attribution filter');
     error.status = 400;
@@ -88,7 +92,9 @@ async function listMissingReviews(db, { clinicIds, locationIds = [], limit = 10,
   const rows = await db.sequelize.query(`${cte} SELECT history_id,reviewer_name,star_rating,clinic_id,
     first_seen_at,last_seen_at,google_missing_at,detection_source,attributed_to_clinicaclick,match_confidence
     FROM missing_reviews WHERE ${FILTERS[attribution]}
-    ORDER BY google_missing_at DESC,first_seen_at DESC,history_id LIMIT :limit OFFSET :offset`, options);
+    ORDER BY ${SORTS[sort_by]} IS NULL,${SORTS[sort_by]} ${sort_direction.toUpperCase()},
+      ${sort_by === 'linkage' ? `match_confidence ${sort_direction.toUpperCase()},` : ''}
+      first_seen_at DESC,history_id LIMIT :limit OFFSET :offset`, options);
   return { items: rows.map(row => ({ ...row, star_rating: Number(row.star_rating) || null,
     clinic_id: Number(row.clinic_id), attributed_to_clinicaclick: Number(row.attributed_to_clinicaclick) === 1,
     match_confidence: row.match_confidence == null ? null : Number(row.match_confidence),

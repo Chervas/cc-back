@@ -122,6 +122,20 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const allMissing = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], limit: 50 });
   assert.equal(allMissing.total, 8);
   assert.deepEqual(allMissing.summary, { total: 8, linked: 6, high_confidence: 1, unattributed: 2 });
+  for (const [sort_by,column] of [['author','reviewer_name'],['rating','star_rating'],['linkage','attributed_to_clinicaclick'],['detected','first_seen_at'],['missing','google_missing_at']]) {
+    for (const sort_direction of ['asc','desc']) {
+      const sorted=await history.listMissingReviews(models,{clinicIds:[59],locationIds:[11],limit:50,sort_by,sort_direction});
+      assert.equal(sorted.total,8);assert.equal(sorted.items.length,8);
+      const values=sorted.items.map(row=>row[column]).filter(value=>value!==null);
+      const compare=(a,b)=>sort_by==='author' ? a.localeCompare(b,'en') : +a-+b;
+      for(let i=1;i<values.length;i++)assert(compare(values[i-1],values[i])*(sort_direction==='asc'?1:-1)<=0,sort_by+sort_direction);
+      if (sorted.items.some(row=>row[column]===null))assert.equal(sorted.items.at(-1)[column],null);
+      const paged=await history.listMissingReviews(models,{clinicIds:[59],locationIds:[11],limit:2,offset:2,sort_by,sort_direction});
+      assert.deepEqual(paged.items,sorted.items.slice(2,4));
+    }
+  }
+  for(const sort_by of ['reviewer_name DESC;DROP TABLE','__proto__'])await assert.rejects(history.listMissingReviews(models,{clinicIds:[59],sort_by}),{status:400});
+  report.checks.push('all five history columns sort on the whole backend result, with stable pagination and nulls last; untrusted sort fragments reject');
   const organic = allMissing.items.find(row => row.reviewer_name.endsWith('organic-no-request'));
   assert.equal(organic.attributed_to_clinicaclick, false); assert.equal(organic.match_confidence, null);
   const high = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], attribution: 'high_confidence' });

@@ -148,6 +148,7 @@ exports.getMissingGoogleReviews = async (req, res) => {
     return res.json(await marketingBulkSendsService.getMissingGoogleReviews(scope, {
       review_group_clinic_ids: req.query.review_group_clinic_ids,
       limit: req.query.limit, offset: req.query.offset, attribution: req.query.attribution,
+      sort_by: req.query.sort_by, sort_direction: req.query.sort_direction,
     }));
   } catch (error) {
     return sendError(res, error, 'Error cargando reseñas no visibles en Google');
@@ -285,6 +286,22 @@ exports.getDispatchStatus = async (req, res) => {
   } catch (error) {
     return sendError(res, error, 'Error consultando progreso de envío');
   }
+};
+
+exports.getReviewQueueSchedule = async (req,res) => {
+  try {
+    const scope = await resolveScope(req,{allowAll:false}); await requireReviewHistoryAccess(req,scope);
+    res.set('Cache-Control','no-store');
+    return res.json(await marketingBulkSendsService.getReviewQueueSchedule(scope,req.params.id));
+  } catch(error) { return sendError(res,error,'No se ha podido leer la programación'); }
+};
+
+exports.updateReviewQueueSchedule = async (req,res) => {
+  try {
+    const scope = await resolveScopeFromRequest(req,{allowAll:false});
+    if (!await hasMarketingClinicScopeAccess({userId:req.userData?.userId,clinicIds:scope.clinicIds,access:'write'})) throw Object.assign(new Error('No tienes permiso para programar esta cola'),{status:403});
+    return res.json(await marketingBulkSendsService.updateReviewQueueSchedule(scope,req.params.id,req.body || {},req.userData?.userId));
+  } catch(error) { return sendError(res,error,'No se ha podido guardar la programación'); }
 };
 
 exports.startDispatch = async (req, res) => {

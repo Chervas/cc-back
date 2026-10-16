@@ -40,6 +40,8 @@ function aggregateReport(rows, range, quality = {}) {
     success: true, timezone: TIMEZONE,
     range: { period: range.period, from: range.from, to: range.to }, periods: PERIODS,
     totals, series: METRICS.map(key => ({ key, data: days.map(day => ({ x: day, y: byDay.get(day)[key] })) })),
+    missing: { total: Number(quality.missing_total || 0), detected_in_period: totals.google_reviews_missing,
+      without_date: Number(quality.missing_without_date || 0) },
     heatmaps: Object.fromEntries(Object.entries(heatmapRows).map(([key, data]) => [key, buildReviewResponseHeatmaps(data)])),
     quality: { missing_without_date: Number(quality.missing_without_date || 0),
       reviews_with_observation_date: Number(quality.reviews_with_observation_date || 0),
@@ -120,7 +122,8 @@ async function readReport(db, { clinicIds = [], locationIds = [], period = '30d'
       WHERE attributed=0 AND published_at >= :start AND published_at < :end GROUP BY at_utc
     UNION ALL SELECT 'google_reviews_missing',DATE_FORMAT(missing_at,'%Y-%m-%dT%H:00:00Z') at_utc,COUNT(*) FROM inventory
       WHERE missing_at >= :start AND missing_at < :end GROUP BY at_utc`, options);
-  const [quality] = await db.sequelize.query(`${inventoryCte} SELECT COALESCE(SUM(missing_without_date),0) missing_without_date,
+  const [quality] = await db.sequelize.query(`${inventoryCte} SELECT COALESCE(SUM(missing_at IS NOT NULL OR missing_without_date=1),0) missing_total,
+    COALESCE(SUM(missing_without_date),0) missing_without_date,
     COALESCE(SUM(observation_date=1 AND published_at >= :start AND published_at < :end),0) reviews_with_observation_date FROM inventory`, options);
   return aggregateReport([...requestRows, ...reviewRows], range, quality);
 }

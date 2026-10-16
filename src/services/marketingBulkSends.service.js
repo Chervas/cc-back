@@ -1414,7 +1414,7 @@ async function countDispatchRemainingItems(listId, filter = null) {
   return items.filter((item) => itemMatchesDispatchFilter(item, filter)).length;
 }
 
-async function findDispatchCandidateBatch(listId, filter = null, limit = DISPATCH_BATCH_SIZE) {
+async function findDispatchCandidateBatch(listId, filter = null, limit = DISPATCH_BATCH_SIZE, recentCare = false) {
   const where = {
     list_id: listId,
     status: 'ready',
@@ -1423,7 +1423,7 @@ async function findDispatchCandidateBatch(listId, filter = null, limit = DISPATC
   };
   const items = await MarketingPatientListItem.findAll({
     where,
-    order: [['id', 'ASC']],
+    order: recentCare ? [[Sequelize.literal(require('../lib/review-recency-order').reviewRecencySql()), 'DESC'], ['id','ASC']] : [['id', 'ASC']],
     ...(!filter ? { limit } : {}),
   });
   return (filter ? items.filter((item) => itemMatchesDispatchFilter(item, filter)) : items).slice(0, limit);
@@ -3256,8 +3256,6 @@ function parseReviewCandidateDate(value) {
   }
   const raw = normalizeText(value);
   if (!raw) return null;
-  const direct = parseDate(raw);
-  if (direct) return direct;
   const spanish = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2}))?/);
   if (spanish) {
     const year = Number(spanish[3].length === 2 ? `20${spanish[3]}` : spanish[3]);
@@ -3268,7 +3266,7 @@ function parseReviewCandidateDate(value) {
     const parsed = new Date(year, month - 1, day, hour, minute, 0, 0);
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
-  return null;
+  return parseDate(raw);
 }
 
 function getReviewCandidateSortTimestamp(item) {
@@ -3280,6 +3278,7 @@ function getReviewCandidateSortTimestamp(item) {
     custom.fecha_fin_realizacion,
     custom.fecha_ultimo_tratamiento,
     custom.fecha_ultima_cita,
+    custom.fecha_ultima_cita_asistida,
     custom.fecha_tratamiento,
     custom.fecha_cita,
     custom.fecha,
@@ -4753,6 +4752,7 @@ async function getMissingGoogleReviews(scope, options = {}) {
   const locationIds = await resolveReviewBusinessLocationIdsForClinics(clinicIds);
   return { success: true, ...await require('./googleReviewHistory.service').listMissingReviews(db, {
     clinicIds, locationIds, limit: options.limit, offset: options.offset, attribution: options.attribution,
+    sort_by: options.sort_by, sort_direction: options.sort_direction,
   }) };
 }
 
@@ -8983,6 +8983,66 @@ async function getDispatchStatus(scope, campaignId, options = {}) {
   };
 }
 
+async function getReviewQueueSchedule(scope, campaignId) {
+  const list = await MarketingPatientList.findByPk(campaignId);
+  ensureScopeAccess(list, scope);
+  const policy = require('../lib/review-queue-schedule');
+  const clinicIds = policy.assertQueue(list, scope, isReviewRequestList, true);
+  const dispatch = getDispatchConfig(list);
+  const job = dispatch.job_id ? await JobRequest.findByPk(dispatch.job_id, { attributes:['id','status','next_run_at'] }) : null;
+  const destinations = [];
+  for (const id of clinicIds) {
+    const profile = await resolveClinicGoogleReviewProfile(id);
+    const location = profile.location || await ClinicBusinessLocation.findOne({where:{clinica_id:id,is_active:true},order:[['id','DESC']],raw:true});
+    destinations.push({ clinic_id:id, name:location?.location_name || profile.links?.review_profile_alias_location_name || profile.clinic?.nombre_clinica || null,
+      business_location_id:Number(location?.id || profile.links?.business_location_id || 0) || null,
+      review_url:profile.links?.url_dejar_resena || null });
+  }
+  return { success:true, revision:new Date(list.updated_at).toISOString(), configuration:policy.pick(dispatch),
+    status:dispatch.status, job_status:job?.status || null, editable:job?.status !== 'running' && !policy.TERMINAL.includes(String(dispatch.status)) && !policy.TERMINAL.includes(String(list.status)), destinations,
+    next_run_at:policy.LIVE.includes(dispatch.status) ? (job?.next_run_at || dispatch.next_allowed_at || null) : null };
+}
+
+async function updateReviewQueueSchedule(scope, campaignId, body = {}, userId = null) {
+  const policy = require('../lib/review-queue-schedule');
+  const initial = await MarketingPatientList.findByPk(campaignId);
+  ensureScopeAccess(initial, scope); policy.assertQueue(initial,scope,isReviewRequestList);
+  const config = policy.normalize(body.configuration);
+  const initialDispatch = getDispatchConfig(initial);
+  const hours = await resolveDispatchBusinessHoursForList(initial,scope,{...initialDispatch,...config});
+  await db.sequelize.transaction(async transaction => {
+    // Lock the native job before the list: a worker may claim it, never run
+    // concurrently with a schedule edit or be replaced by another job here.
+    const job = initialDispatch.job_id ? await JobRequest.findByPk(initialDispatch.job_id,{transaction,lock:transaction.LOCK.UPDATE}) : null;
+    const list = await MarketingPatientList.findByPk(campaignId,{transaction,lock:transaction.LOCK.UPDATE});
+    ensureScopeAccess(list,scope); policy.assertQueue(list,scope,isReviewRequestList);
+    const dispatch = getDispatchConfig(list);
+    if (new Date(list.updated_at).toISOString() !== body.revision || Number(dispatch.job_id || 0) !== Number(initialDispatch.job_id || 0)) throw Object.assign(new Error('La cola ha cambiado. Comprueba su estado y vuelve a guardar.'),{status:409});
+    if (job?.status === 'running') throw Object.assign(new Error('Hay una tanda en curso. Espera a que termine y vuelve a guardar.'),{status:409});
+    if (job && (job.type !== DISPATCH_JOB_TYPE || Number(job.payload?.list_id) !== Number(list.id)
+      || job.payload?.__runtime_namespace !== (process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE))) throw Object.assign(new Error('El trabajo de esta cola no pertenece al entorno actual.'),{status:409});
+    const inFlight = await MarketingPatientListItem.count({where:{list_id:list.id,dispatch_status:{[Op.in]:['queued','accepted','held_quality']}},transaction});
+    if (inFlight) throw Object.assign(new Error('Hay envíos esperando resultado. Vuelve a guardar cuando termine la tanda.'),{status:409});
+    const live = policy.LIVE.includes(dispatch.status) && dispatch.cancel_requested !== true;
+    if (live && (!job || !['pending','queued','waiting'].includes(job.status))) throw Object.assign(new Error('Comprueba el estado del trabajo antes de modificar su programación.'),{status:409});
+    const now = new Date(), scheduled = parseDate(config.scheduled_at);
+    const lastBatch = parseDate(dispatch.last_batch_completed_at);
+    const reference = new Date(Math.max(now.getTime()+1000,scheduled?.getTime() || 0,lastBatch ? lastBatch.getTime()+config.delay_ms : 0));
+    const next = getNextBusinessAllowedAt(reference,hours);
+    const patch = {...config,business_hours:hours};
+    const nextDispatch = {...dispatch,...patch,...(live ? {next_allowed_at:next.toISOString(),status:'scheduled'} : {})};
+    if (live) await job.update({status:'waiting',next_run_at:next},{transaction});
+    await list.update({...(live ? {status:'scheduled'} : {}),criteria:{...list.criteria,
+      dispatch_config:{...(list.criteria.dispatch_config || {}),...patch},dispatch:nextDispatch,
+      schedule_mode:config.time_mode === 'specific_time' ? 'scheduled' : 'now',scheduled_at:config.scheduled_at || null}},{transaction});
+    await MarketingPatientContactEvent.create({list_id:list.id,event_type:'review_dispatch_schedule_updated',channel:'whatsapp',
+      payload:{user_id:userId,before:policy.pick(dispatch),after:patch,paused_preserved:!live,next_run_at:live ? next.toISOString() : null},occurred_at:now},{transaction});
+  });
+  const updated = await MarketingPatientList.findByPk(campaignId);
+  return {success:true,campaign:serializeCampaign(updated),dispatch:getDispatchProgress(updated,updated.counters || null),
+    schedule:await getReviewQueueSchedule(scope,campaignId)};
+}
+
 async function reconcileBulkSendTemplateCategory(templateRow, logger = console) {
   const template = templateRow?.get ? templateRow.get({ plain: true }) : templateRow;
   const templateId = Number(template?.id || 0);
@@ -10144,7 +10204,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
 
   const batchLimit = Math.max(1, Number(deliveryGate.effective_batch_size || batchSize));
   const batch = batchLimit > 0
-    ? await findDispatchCandidateBatch(list.id, filter, batchLimit)
+    ? await findDispatchCandidateBatch(list.id, filter, batchLimit, isReviewRequestList(list))
     : [];
 
   if (!batch.length) {
@@ -10225,7 +10285,8 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     },
     order: [['id', 'ASC']],
   });
-  const filteredFreshBatch = freshBatch.filter((item) => itemMatchesDispatchFilter(item, filter));
+  const freshById = new Map(freshBatch.map(item => [Number(item.id),item]));
+  const filteredFreshBatch = batch.map(item => freshById.get(Number(item.id))).filter(item => item && itemMatchesDispatchFilter(item,filter));
 
   const batchIndex = Number(dispatch.last_batch_index || 0) + 1;
   let sent = 0;
@@ -11026,6 +11087,8 @@ module.exports = {
   getReviewRequestAutomationStatus,
   getReviewRequestSummary,
   getMissingGoogleReviews,
+  getReviewQueueSchedule,
+  updateReviewQueueSchedule,
   getReviewActivityReport,
   setReviewRequestAutomation,
   createAndStartReviewRequestForAppointment,

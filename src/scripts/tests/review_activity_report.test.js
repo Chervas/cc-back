@@ -24,10 +24,11 @@ test('local midnight, empty days, missing-date qualification and totals stay ser
     { metric: 'requests_sent', at_utc: 'bad', total: 5 },
     { metric: 'requests_sent', at_utc: '2026-10-16T12:00:00Z', total: -1 },
     { metric: 'requests_sent', at_utc: '2026-09-01T12:00:00Z', total: 100 },
-  ], report.reportRange('2d', new Date('2026-10-16T12:00:00Z')), { missing_without_date: 4 });
+  ], report.reportRange('2d', new Date('2026-10-16T12:00:00Z')), { missing_without_date: 4, missing_total:4 });
   assert.deepEqual(result.series[0].data, [{ x: '2026-10-15', y: 5 }, { x: '2026-10-16', y: 0 }]);
   assert.equal(result.quality.missing_without_date, 4);
   assert.equal(result.totals.google_reviews_missing, 0);
+  assert.deepEqual(result.missing,{total:4,detected_in_period:0,without_date:4});
   for (const series of result.series) assert.equal(series.data.reduce((sum, point) => sum + point.y, 0), result.totals[series.key]);
   assert.equal(result.heatmaps.google_reviews.all.series[4].data[0].y, 1);
 });

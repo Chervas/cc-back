@@ -191,6 +191,8 @@ router.get('/bulk-sends/campaigns/:id/dispatch', marketingBulkSendsController.ge
 router.patch('/bulk-sends/campaigns/:id', marketingBulkSendsController.updateCampaign);
 router.post('/bulk-sends/campaigns/:id/prepare', marketingBulkSendsController.prepareCampaign);
 router.post('/bulk-sends/campaigns/:id/send', marketingBulkSendsController.startDispatch);
+router.get('/bulk-sends/campaigns/:id/review-schedule', marketingBulkSendsController.getReviewQueueSchedule);
+router.patch('/bulk-sends/campaigns/:id/review-schedule', marketingBulkSendsController.updateReviewQueueSchedule);
 router.post('/bulk-sends/campaigns/:id/cancel', marketingBulkSendsController.cancelDispatch);
 router.post('/bulk-sends/campaigns/:id/resume', marketingBulkSendsController.resumeDispatch);
 router.post('/bulk-sends/campaigns/:id/test-send', marketingBulkSendsController.sendTest);
