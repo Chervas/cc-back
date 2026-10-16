@@ -4,6 +4,7 @@ const { isDeepStrictEqual } = require('node:util');
 const db = require('../../models');
 const q = require('../lib/patient-intake-questionnaire');
 const { patientForIntakeClinic } = require('../lib/patient-intake-clinic-scope');
+const { assertMedicalQuestionnaireEnabled, clinicMedicalQuestionnaireEnabled } = require('../lib/patient-intake-configuration');
 const { Op } = db.Sequelize;
 const json = row => row?.toJSON ? row.toJSON() : row;
 const patientHash = p => createHash('sha256').update(JSON.stringify({ personal: q.personalSnapshot(p), alergias: p.alergias || '', medicacion: p.medicacion || '', antecedentes: p.antecedentes || '' })).digest('hex');
@@ -14,11 +15,15 @@ async function scopedPatient(patientId, clinicId, transaction) {
 
 async function prepare({ patientId, clinicId, actorId }) {
   await scopedPatient(patientId, clinicId);
+  await assertMedicalQuestionnaireEnabled({ db, clinicId });
   const pendingReview = await db.PatientIntakeRequest.findOne({ where: { patient_id: patientId, clinic_id: clinicId }, order: [['id', 'DESC']] });
   if (pendingReview?.status === 'submitted') throw q.error('intake_review_pending', 'El paciente ya ha enviado sus respuestas. El profesional debe revisarlas antes de solicitar otro formulario.', 409);
   // This explicit action prepares clinical answers only. Privacy has its own
   // action/package; never create a signature request as a side effect here.
   return db.sequelize.transaction(async transaction => {
+    // The clinic setting is read again under a current shared lock, before
+    // patient/package locks; a settings update cannot race this creation/reuse.
+    await assertMedicalQuestionnaireEnabled({ db, clinicId, transaction, lock: true });
     const patient = await scopedPatient(patientId, clinicId, transaction);
     // Current read: answers submitted while scope was checked must not be
     // hidden by a new empty request. The patient lock serializes preparations.
@@ -44,6 +49,7 @@ async function prepare({ patientId, clinicId, actorId }) {
 }
 
 async function publicView(pkg) {
+  if (!await clinicMedicalQuestionnaireEnabled({ db, clinicId: pkg.clinica_id })) return null;
   const request = await db.PatientIntakeRequest.findOne({ where: { package_id: pkg.id, patient_id: pkg.paciente_id, clinic_id: pkg.clinica_id } });
   if (!request) return null;
   let answers = request.answers;
@@ -58,9 +64,10 @@ async function publicView(pkg) {
 }
 
 async function submit(pkg, payload) {
-  const input = q.validateSubmission(payload);
   return db.sequelize.transaction(async transaction => {
-    // Same lock order as prepare: patient -> package -> request. A tablet with
+    await assertMedicalQuestionnaireEnabled({ db, clinicId: pkg.clinica_id, transaction, lock: true });
+    const input = q.validateSubmission(payload);
+    // Same lock order as prepare: clinic -> patient -> package -> request. A tablet with
     // an older combined form cannot race a new independent questionnaire.
     await scopedPatient(pkg.paciente_id, pkg.clinica_id, transaction);
     const active = await db.ConsentSignaturePackage.findByPk(pkg.id, { transaction, lock: transaction.LOCK.UPDATE });

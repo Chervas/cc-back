@@ -3,12 +3,14 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const { appointmentTabletStatus } = require('../../services/appointmentTabletStatus.service');
 
 function fixture({ reason = 'current_privacy_pending', privacyQueued = false, questionnaire = null,
-  packageStatus = 'pending', expires = '2026-10-16', foreignPackage = false, combinedPrivacy = false } = {}) {
+  packageStatus = 'pending', expires = '2026-10-16', foreignPackage = false, combinedPrivacy = false, enabled = true } = {}) {
   const queries = [], transaction = {}, Op = { in: Symbol('in'), or: Symbol('or'), gt: Symbol('gt') };
   const pkg = { id: 21, paciente_id: foreignPackage ? 99 : 17, clinica_id: 72, status: packageStatus, expires_at: expires };
   const request = questionnaire && { id: 22, package_id: 21, status: questionnaire, created_at: '2026-10-15T07:00:00Z',
     answers: { allergies: 'PRIVATE - must never leak' }, submitted_personal: { dni: 'PRIVATE' } };
   const db = { Sequelize: { Op },
+    Clinica: { findByPk: async (id, options) => { queries.push(['clinic', options]);
+      return { id_clinica: id, configuracion: { patient_intake: { medical_questionnaire_enabled: enabled } } }; } },
     ClinicConsentTemplate: { findAll: async options => { queries.push(['templates', options]); return [{ id: 5 }]; } },
     ClinicConsentTemplateVersion: { findOne: async options => { queries.push(['version', options]); return { id: 6 }; } },
     PatientConsentDocument: { findAll: async options => { queries.push(['documents', options]); return [{ id: 7, package_id: 21 }]; } },
@@ -24,7 +26,7 @@ function fixture({ reason = 'current_privacy_pending', privacyQueued = false, qu
 }
 test('opening status does not imply either send, create questionnaires or expose clinical answers', async () => {
   const f = fixture(), result = await f.run();
-  assert.deepEqual(result, { privacy: { state: 'not_sent' }, intake: { state: 'not_sent' } });
+  assert.deepEqual(result, { privacy: { state: 'not_sent' }, intake: { enabled: true, state: 'not_sent' } });
   assert(f.queries.every(([, options]) => options.transaction === f.transaction));
   assert(f.queries.filter(([name]) => name === 'request').every(([, options]) => !options.attributes.includes('answers')));
 });
@@ -61,6 +63,19 @@ for (const [questionnaire, state] of [['submitted', 'submitted'], ['reviewed', '
 test('a historical combined hand-off is not falsely represented as an independent LOPD item', async () => {
   const result = await fixture({ privacyQueued: true, combinedPrivacy: true }).run();
   assert.equal(result.privacy.state, 'not_sent');
+});
+test('disabled questionnaire hides pending health but leaves a combined LOPD hand-off usable', async () => {
+  const result = await fixture({ enabled: false, questionnaire: 'pending', privacyQueued: true, combinedPrivacy: true }).run();
+  assert.equal(result.privacy.state, 'sent');
+  assert.deepEqual(result.intake, { enabled: false, state: 'not_sent' });
+  assert(!JSON.stringify(result).includes('PRIVATE'));
+});
+test('disabling new questionnaires does not hide submitted or reviewed reception states', async () => {
+  for (const [questionnaire, state] of [['submitted', 'submitted'], ['reviewed', 'confirmed']]) {
+    const result = await fixture({ enabled: false, questionnaire }).run();
+    assert.equal(result.intake.enabled, false); assert.equal(result.intake.state, state);
+    assert(!JSON.stringify(result).includes('PRIVATE'));
+  }
 });
 test('clinic and patient scope are explicit on every document/questionnaire read', async () => {
   const f = fixture(); await f.run();

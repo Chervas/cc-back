@@ -11,12 +11,12 @@ function service(db) {
   } }); return module.exports;
 }
 test('repeating preparation cannot hide submitted answers behind a new empty questionnaire', async () => {
-  const db = { Sequelize: { Op: {} }, Paciente: { findByPk: async () => ({ clinica_id: 121 }) }, PatientIntakeRequest: { findOne: async () => ({ status: 'submitted' }) } };
+  const db = { Sequelize: { Op: {} }, Clinica: { findByPk: async () => ({ id_clinica: 121 }) }, Paciente: { findByPk: async () => ({ clinica_id: 121 }) }, PatientIntakeRequest: { findOne: async () => ({ status: 'submitted' }) } };
   await assert.rejects(service(db).prepare({ patientId: 1, clinicId: 121, actorId: 1 }), { code: 'intake_review_pending', statusCode: 409 });
 });
 test('returning patient receives their earlier answers but not clinician edits or private history', async () => {
   let i = 0;
-  const db = { Sequelize: { Op: { lt: Symbol('lt'), ne: Symbol('ne') } }, PatientIntakeRequest: { findOne: async () => ++i === 1
+  const db = { Sequelize: { Op: { lt: Symbol('lt'), ne: Symbol('ne') } }, Clinica: { findByPk: async () => ({ id_clinica: 121 }) }, PatientIntakeRequest: { findOne: async () => ++i === 1
     ? { id: 2, patient_id: 1, clinic_id: 121, status: 'pending', answers: null, personal_snapshot: { nombre: 'Ficticio' }, confirmed_summary: { private: 'not patient data' } }
     : { answers: { allergies: 'Respuesta original' }, confirmed_summary: { alergias: 'Edición profesional' } } } };
   const view = await service(db).publicView({ id: 22, paciente_id: 1, clinica_id: 121 });

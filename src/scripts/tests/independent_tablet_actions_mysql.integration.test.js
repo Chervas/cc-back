@@ -15,7 +15,7 @@ const { appointmentTabletStatus } = require('../../services/appointmentTabletSta
 function defineModels(sql, db) {
   db.Sequelize = Sequelize;
   db.Clinica = sql.define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true },
-    grupoClinicaId: D.INTEGER, nombre_clinica: D.STRING(100), datos_fiscales_clinica: D.JSON,
+    grupoClinicaId: D.INTEGER, nombre_clinica: D.STRING(100), datos_fiscales_clinica: D.JSON, configuracion: D.JSON,
     direccion: D.STRING(100), ciudad: D.STRING(100), provincia: D.STRING(100), pais: D.STRING(100),
     codigo_postal: D.STRING(20), telefono: D.STRING(30), telefono_whatsapp: D.STRING(30), email: D.STRING(100),
   }, { tableName: 'Clinicas', timestamps: false });
@@ -75,13 +75,13 @@ test('independent LOPD/medical actions and status use real isolated MySQL, prese
     await db.PacienteClinica.create({ paciente_id: id, clinica_id: 72, es_principal: primary === 72 });
     return row;
   };
-  const appointment = async id => db.CitaPaciente.create({ id_cita: id, paciente_id: id, clinica_id: 72,
+  const appointment = async (id, clinicId = 72) => db.CitaPaciente.create({ id_cita: id, paciente_id: id, clinica_id: clinicId,
     inicio: new Date(Date.now() - 60000), estado: 'info_confirmada' });
   const status = a => sql.transaction({ readOnly: true, isolationLevel: 'REPEATABLE READ' }, transaction =>
     appointmentTabletStatus({ db, appointment: a.toJSON(), transaction }));
-  const prepHealth = id => intake.prepare({ patientId: id, clinicId: 72, actorId: 7 });
-  const prepPrivacy = id => consent.createPatientIntakePackage(String(id), {
-    clinicId: 72, createdBy: 7, privacyOnly: true, allowLinkedClinic: true });
+  const prepHealth = (id, clinicId = 72) => intake.prepare({ patientId: id, clinicId, actorId: 7 });
+  const prepPrivacy = (id, clinicId = 72) => consent.createPatientIntakePackage(String(id), {
+    clinicId, createdBy: 7, privacyOnly: true, allowLinkedClinic: true });
   const payload = p => ({ schema_version: q.VERSION, expected_version: 1, reviewed_answers: true,
     personal: q.personalSnapshot(p), answers: Object.fromEntries(q.fields.map(f => [f.key, f.type === 'choice' ? 'no' : ''])) });
   const rowJson = row => JSON.stringify(row.toJSON());
@@ -89,7 +89,7 @@ test('independent LOPD/medical actions and status use real isolated MySQL, prese
   const p = await patient(17, 66), a = await appointment(17);
   await p.reload();
   const patientBefore = rowJson(p);
-  assert.deepEqual(await status(a), { privacy: { state: 'not_sent' }, intake: { state: 'not_sent' } });
+  assert.deepEqual(await status(a), { privacy: { state: 'not_sent' }, intake: { enabled: true, state: 'not_sent' } });
   const [h1, h2] = await Promise.all([prepHealth(17), prepHealth(17)]);
   assert.equal(h1.package_id, h2.package_id); assert.equal(h1.intake_id, h2.intake_id);
   assert.equal(await db.PatientIntakeRequest.count(), 1); assert.equal(await db.PatientConsentDocument.count(), 0);
@@ -185,6 +185,63 @@ test('independent LOPD/medical actions and status use real isolated MySQL, prese
   assert.equal((await status(importedA)).privacy.state, 'not_sent');
   assert.equal(await db.PatientConsentDocument.count({ where: { paciente_id: importedP.id_paciente } }), 0);
   assert.equal(rowJson(await db.PatientConsentDocument.findByPk(doc.id)), signedBefore);
+  // Both BS scopes retain real LOPD documents in historical combined packages
+  // while the optional health questionnaire is disabled. Never cancel a combined
+  // package or edit/delete a request merely to hide its questions.
+  const capilarTemplate = await db.ClinicConsentTemplate.create({ public_id: 'qa_disabled_privacy_66', clinic_id: 66,
+    catalog_key: privacy.FINAL_PRIVACY_KEY, name: 'LOPD QA desactivación 66', purpose: 'data_protection',
+    status: 'active', blocking_policy: 'hard', validity_mode: 'manual', is_default: true });
+  await db.ClinicConsentTemplateVersion.create({ clinic_template_id: capilarTemplate.id, version: 2, locale: 'es',
+    status: 'published', title: 'LOPD QA desactivación 66', body_html: built.html,
+    body_json: { consent_form: built.consent_form, digital_presentation: built.metadata } });
+  for (const [clinicId, id] of [[66, 21], [72, 22]]) {
+    const combinedP = await patient(id, clinicId), combinedA = await appointment(id, clinicId);
+    const lopd = await prepPrivacy(id, clinicId);
+    const combinedPkg = await db.ConsentSignaturePackage.findByPk(lopd.package_id);
+    const combinedRequest = await db.PatientIntakeRequest.create({ package_id: combinedPkg.id, patient_id: id, clinic_id: clinicId,
+      schema_version: q.VERSION, personal_snapshot: q.personalSnapshot(combinedP), created_by: 7 });
+    const combinedDoc = await db.PatientConsentDocument.findOne({ where: { package_id: combinedPkg.id } });
+    const combinedSession = await consent.createTabletSession(combinedPkg.id, { base_url: 'http://tablet.invalid' });
+    const healthP = await patient(id + 10, clinicId), health = await prepHealth(id + 10, clinicId);
+    const healthPkg = await db.ConsentSignaturePackage.findByPk(health.package_id);
+    const healthSessionBeforeDisable = await consent.createTabletSession(healthPkg.id, { base_url: 'http://tablet.invalid' });
+    const answeredP = await patient(id + 20, clinicId), answered = await prepHealth(id + 20, clinicId);
+    await intake.submit(await db.ConsentSignaturePackage.findByPk(answered.package_id), payload(answeredP));
+    const requestsBefore = JSON.stringify((await db.PatientIntakeRequest.findAll({ order: [['id', 'ASC']], raw: true })));
+    const patientsBefore = JSON.stringify((await db.Paciente.findAll({ order: [['id_paciente', 'ASC']], raw: true })));
+    await db.Clinica.update({ configuracion: { unrelated: { preserve: true },
+      patient_intake: { medical_questionnaire_enabled: false } } }, { where: { id_clinica: clinicId } });
+    await assert.rejects(prepHealth(id, clinicId), { code: 'patient_intake_disabled', statusCode: 409 });
+    await assert.rejects(prepHealth(id + 10, clinicId), { code: 'patient_intake_disabled', statusCode: 409 });
+    await assert.rejects(intake.submit(combinedPkg, payload(combinedP)), { code: 'patient_intake_disabled', statusCode: 409 });
+    await assert.rejects(intake.submit(healthPkg, payload(healthP)), { code: 'patient_intake_disabled', statusCode: 409 });
+    assert.equal(await intake.publicView(combinedPkg), null);
+    const combinedView = await consent.getPublicPackage(combinedSession.public_token);
+    assert.equal(combinedView.intake, null); assert.equal(combinedView.documents.length, 1);
+    assert.equal((await consent.getPublicPackage(healthSessionBeforeDisable.public_token)).intake, null);
+    await assert.rejects(consent.createTabletSession(healthPkg.id), { message: 'consent_package_has_no_pending_documents', statusCode: 409 });
+    const retained = await prepPrivacy(id, clinicId);
+    assert.equal(retained.created_count, 0); assert(retained.current_package_ids.includes(combinedPkg.id));
+    const disabledStatus = await status(combinedA);
+    assert.equal(disabledStatus.intake.enabled, false); assert.equal(disabledStatus.intake.state, 'not_sent');
+    assert.equal(disabledStatus.privacy.state, 'sent');
+    await consent.signPublicPackage(combinedSession.public_token, {
+      signer_name: 'Firmante ficticio QA', accepted_statement: true,
+      signature_data_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aK1sAAAAASUVORK5CYII=',
+      document_choices: { [combinedDoc.id]: { schema_version: choices.CHOICE_SCHEMA_VERSION,
+        answers: Object.fromEntries(choices.CHOICE_KEYS.map(key => [key, 'no'])) } },
+    });
+    const counts = await consent.refreshPackageCounts(combinedPkg.id);
+    assert.equal(counts.status, 'signed'); assert.equal(counts.required_count, 1); assert.equal(counts.signed_count, 1);
+    assert.equal((await status(combinedA)).privacy.state, 'completed');
+    assert.equal((await db.PatientConsentDocument.findByPk(combinedDoc.id)).status, 'signed');
+    assert.equal((await combinedRequest.reload()).status, 'pending', 'Pending historical request is preserved, not cancelled or signed');
+    assert.equal(JSON.stringify((await db.PatientIntakeRequest.findAll({ order: [['id', 'ASC']], raw: true }))), requestsBefore);
+    assert.equal(JSON.stringify((await db.Paciente.findAll({ order: [['id_paciente', 'ASC']], raw: true }))), patientsBefore);
+    const reviewDisabled = await intake.reviewView({ patientId: id + 20, clinicId });
+    assert.equal(reviewDisabled.request.status, 'submitted'); assert.equal(reviewDisabled.request.id, answered.intake_id);
+    report.checks.push(`clinic ${clinicId} disabled in real JSON: prepare/submit 409, health-only tablet denied, combined LOPD reused/publicly signed/completed, all requests/answers/patients unchanged and existing answers reviewable`);
+  }
   const channels = await db.ConsentDeliveryEvent.findAll({ attributes: ['channel'], raw: true });
   assert(channels.every(event => event.channel === 'tablet'));
   assert.equal(await db.Paciente.count({ where: { acepta_marketing: true } }), 0);

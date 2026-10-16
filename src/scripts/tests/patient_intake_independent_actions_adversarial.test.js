@@ -29,6 +29,7 @@ function signedStatusFixture(reason, patch = {}) {
   document.snapshot_html = choices.appendSignedChoiceHtml(built.html, document, document.snapshot_json.signature_evidence.consent_choices);
   document.snapshot_hash = choices.choiceSnapshotHash(document.snapshot_json, document.snapshot_html);
   const db = { Sequelize: { Op },
+    Clinica: { findByPk: async (id, options) => { calls.push(options); return { id_clinica: id }; } },
     ClinicConsentTemplate: { findAll: async options => { calls.push(options); return [options.attributes
       ? Object.fromEntries(options.attributes.map(key => [key, template[key]])) : template]; } },
     ClinicConsentTemplateVersion: { findOne: async options => { calls.push(options); return version; }, findAll: async options => { calls.push(options); return []; } },
@@ -116,6 +117,7 @@ function healthFixture({ oldCombined = false, oldSubmitted = false } = {}) {
     try { return await callback(transaction); } finally { release(); }
   } }, Paciente: { findByPk: async (key, options) => { calls.push(['patient', options]);
     assert.equal(key, 17); if (options?.transaction) assert.equal(options.lock, 'UPDATE'); return patient; } },
+  Clinica: { findByPk: async id => ({ id_clinica: id }) },
   PatientIntakeRequest: {
     findOne: async options => { calls.push(['request', options]); return requests.filter(r => matches(r, options.where)).sort((a, b) => b.id - a.id)[0] || null; },
     create: async (values, options) => { assert(options.transaction); const created = row({ id: ++id, ...values });

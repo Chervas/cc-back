@@ -12,6 +12,7 @@ const db = require('../../models');
 const { consentClinicIds, setConsentGroupScope } = require('../lib/tablet-kiosk-scope');
 const consentDocumentChoices = require('../lib/consent-document-choices');
 const { renderConsentVersionHtml } = require('../lib/consent-version-html');
+const { medicalQuestionnaireEnabled, clinicMedicalQuestionnaireEnabled } = require('../lib/patient-intake-configuration');
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
 // Keep PDFs self-contained: isolated runtimes cannot fetch frontend assets.
@@ -2518,7 +2519,7 @@ async function refreshPackageCounts(packageIdRaw, transaction = null) {
     if (!transaction) return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' },
         tx => refreshPackageCounts(packageId, tx));
     await lockConsentPackages([packageId], transaction);
-    const packageRow = await db.ConsentSignaturePackage.findByPk(packageId, { attributes: ['id', 'status'], transaction });
+    const packageRow = await db.ConsentSignaturePackage.findByPk(packageId, { attributes: ['id', 'status', 'clinica_id'], transaction });
     if (!packageRow) return null;
     const documents = await db.PatientConsentDocument.findAll({
         transaction,
@@ -2538,7 +2539,9 @@ async function refreshPackageCounts(packageIdRaw, transaction = null) {
     const requiredCount = currentDocuments.filter((doc) => !!doc.required).length;
     const signedCount = currentDocuments.filter((doc) => !!doc.required && doc.status === 'signed' && !doc.revoked_at).length;
     const pending = currentDocuments.some((doc) => DOCUMENT_PENDING_STATUSES.has(doc.status));
-    const intake = await db.PatientIntakeRequest.findOne({ where: { package_id: packageId }, transaction });
+    const intakeRequest = await db.PatientIntakeRequest.findOne({ where: { package_id: packageId }, transaction });
+    const intake = intakeRequest && await clinicMedicalQuestionnaireEnabled({ db, clinicId: packageRow.clinica_id, transaction })
+        ? intakeRequest : null;
     const status = ['cancelled', 'expired'].includes(packageRow.status) ? packageRow.status
         : intake?.status === 'pending' ? 'pending'
         : !currentDocuments.length && intake ? 'signed'
@@ -2607,7 +2610,9 @@ async function sendPackageMock(packageIdRaw, payload = {}) {
     await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
         await lockConsentPackages([packageRow.id], transaction);
         await requireCurrentActiveConsentPackage(packageRow.id, transaction);
-        const intake = await db.PatientIntakeRequest.findOne({ where: { package_id: packageRow.id, status: 'pending' }, transaction });
+        const intakeRequest = await db.PatientIntakeRequest.findOne({ where: { package_id: packageRow.id, status: 'pending' }, transaction });
+        const intake = intakeRequest && await clinicMedicalQuestionnaireEnabled({ db, clinicId: packageRow.clinica_id, transaction })
+            ? intakeRequest : null;
         let changed = 0;
         for (const doc of pendingDocuments) {
             const plainDoc = getPlain(doc);
@@ -2727,6 +2732,7 @@ async function createTabletSession(packageIdRaw, payload = {}) {
     const documents = Array.isArray(packageRow.documents) ? packageRow.documents : [];
     const pendingDocuments = documents.filter((doc) => DOCUMENT_PENDING_STATUSES.has(getPlain(doc).status));
     const pendingIntake = !pendingDocuments.length && db.PatientIntakeRequest
+        && await clinicMedicalQuestionnaireEnabled({ db, clinicId: packageRow.clinica_id })
         ? await db.PatientIntakeRequest.findOne({ where: {
             package_id: packageRow.id, patient_id: packageRow.paciente_id,
             clinic_id: packageRow.clinica_id, status: 'pending',
@@ -3013,7 +3019,7 @@ function serializeKioskPackage(packageRow) {
         required_count: plain.required_count,
         signed_count: plain.signed_count,
         pending_count: pendingDocuments.length,
-        intake_pending: plain.intakeRequest?.status === 'pending',
+        intake_pending: medicalQuestionnaireEnabled(plain.clinica?.configuracion) && plain.intakeRequest?.status === 'pending',
         time_zone: require('../lib/availability-calendar').resolveClinicTimezone(plain.clinica),
         blocking_pending: blockingPending,
         clinic: { id_clinica: plain.clinica_id, nombre_clinica: plain.clinica?.nombre_clinica || '' },
@@ -3475,7 +3481,9 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
     }
     requireActiveConsentPackage(packageRow);
     const intake = await db.PatientIntakeRequest.findOne({ where: { package_id: packageRow.id } });
-    if (intake?.status === 'pending') throw Object.assign(new Error('Completa primero tus datos y el formulario de salud.'), { statusCode: 409 });
+    if (intake?.status === 'pending' && await clinicMedicalQuestionnaireEnabled({ db, clinicId: packageRow.clinica_id })) {
+        throw Object.assign(new Error('Completa primero tus datos y el formulario de salud.'), { statusCode: 409 });
+    }
     const plain = getPlain(packageRow);
     const documents = Array.isArray(plain.documents) ? plain.documents : [];
     const requestedDocumentIds = Array.isArray(payload.document_ids)

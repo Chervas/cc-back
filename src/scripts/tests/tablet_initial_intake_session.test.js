@@ -9,13 +9,14 @@ const end = source.indexOf('\nfunction serializeKioskAccess(', start);
 assert(start > 0 && end > start);
 const functionSource = source.slice(start, end);
 
-function harness({ pendingIntake = false, documents = [], active = true } = {}) {
+function harness({ pendingIntake = false, documents = [], active = true, enabled = true } = {}) {
   const calls = [], writes = [];
   const pkg = { id: 136, paciente_id: 33238, clinica_id: 72, public_id: 'fictitious-package', documents };
   const context = {
     getPackageWithDocumentsById: async () => pkg,
     requireActiveConsentPackage: () => { if (!active) throw Object.assign(new Error('consent_package_expired'), { statusCode: 410 }); },
     signPackageToken: () => 'fictitious-token', buildPublicConsentUrl: () => '/tablet/fictitious',
+    clinicMedicalQuestionnaireEnabled: async () => enabled,
     DOCUMENT_PENDING_STATUSES: new Set(['pending', 'sent', 'viewed']), getPlain: value => value,
     db: {
       PatientIntakeRequest: { findOne: async options => {
@@ -50,6 +51,13 @@ test('normal pending consent sessions retain their existing delivery path', asyn
   const h = harness({ documents: [doc] }); await h.create();
   assert.equal(h.calls.length, 0); assert.equal(h.writes.length, 1); assert(updated);
   assert.equal(h.writes[0].channel, 'tablet');
+});
+test('disabled health-only session cannot be opened, while a combined LOPD still can', async () => {
+  const health = harness({ pendingIntake: true, enabled: false });
+  await assert.rejects(health.create(), { message: 'consent_package_has_no_pending_documents' });
+  assert.equal(health.writes.length, 0); assert.equal(health.calls.length, 0);
+  const lopd = harness({ pendingIntake: true, enabled: false, documents: [{ id: 1, status: 'pending', update: async () => {} }] });
+  assert.equal((await lopd.create()).package_id, 136); assert.equal(lopd.writes.length, 1);
 });
 
 const externalStart = source.indexOf('async function createPatientExternalAttestation(');

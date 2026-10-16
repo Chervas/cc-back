@@ -27,6 +27,16 @@ estados y evidencias propios. No se acredita una prueba de carga masiva.
 
 ## Configuración y PDF
 
+El cuestionario independiente de datos médicos se configura por clínica desde
+Clínicas → Editar → Accesos y dispositivos. Su clave es
+`configuracion.patient_intake.medical_questionnaire_enabled`: ausente equivale a
+activado; `false` desactiva preparar/responder y la presencia en recepción y
+tablet. Las respuestas ya recibidas siguen disponibles para revisión clínica.
+La LOPD se gestiona en la biblioteca de Consentimientos y no depende de ese
+interruptor. Los paquetes combinados antiguos conservan sus documentos y no
+esperan respuestas del cuestionario desactivado para finalizar la firma.
+Cambiar esta opción no envía mensajes ni autoriza proveedores.
+
 Configurar en el proceso efectivo de cada API:
 
 - CRM: `CONSENT_TABLET_BASE_URL` y `BUDGET_SIGNATURE_PUBLIC_BASE_URL` con

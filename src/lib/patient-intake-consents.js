@@ -2,6 +2,7 @@
 const { randomUUID } = require('node:crypto');
 const { getConsentChoiceForm, signedConsentChoiceAnswers } = require('./consent-document-choices');
 const { isCurrentSignedDocument } = require('../services/appointmentConsentEligibility.service');
+const { medicalQuestionnaireEnabled } = require('./patient-intake-configuration');
 const error = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const plain = value => value?.toJSON ? value.toJSON() : value;
 const object = value => { if (typeof value === 'string') { try { return JSON.parse(value); } catch { return {}; } } return value || {}; };
@@ -25,12 +26,13 @@ function reusableChoiceDocument(document, template, version, form, now) {
 async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot, structuredQuestionnaire = false, privacyOnly = false, allowLinkedClinic = false, now = new Date(), transaction = null }) {
   const { Op } = db.Sequelize;
   const execute = async transaction => {
+    const clinic = await db.Clinica.findByPk(clinicId, { transaction, lock: transaction.LOCK.SHARE || transaction.LOCK.UPDATE });
+    if (!clinic) throw error('clinic_not_found', 404);
+    const questionnaireEnabled = medicalQuestionnaireEnabled(clinic.configuracion);
     const patient = await db.Paciente.findByPk(patientId, { transaction, lock: transaction.LOCK.UPDATE,
       include: db.PacienteRelacion ? [{ model: db.PacienteRelacion, as: 'relaciones', required: false }] : [],
     });
     if (!patient) throw error('patient_clinic_changed', 409);
-    const clinic = await db.Clinica.findByPk(clinicId, { transaction });
-    if (!clinic) throw error('clinic_not_found', 404);
     if (Number(patient.clinica_id) !== Number(clinicId)) {
       const linked = allowLinkedClinic && await db.PacienteClinica.findOne({ where: { paciente_id: patientId, clinica_id: clinicId }, transaction, lock: transaction.LOCK.SHARE });
       const primary = linked && await db.Clinica.findByPk(patient.clinica_id, { transaction });
@@ -45,7 +47,7 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
     for (const template of templates) {
       // The editable questionnaire already captures these answers separately;
       // never ask the patient to sign the old unfilled medical questionnaire.
-      if ((structuredQuestionnaire || privacyOnly) && template.catalog_key === 'cc_base_formulario_medico_alta_v1') continue;
+      if ((structuredQuestionnaire || privacyOnly || !questionnaireEnabled) && template.catalog_key === 'cc_base_formulario_medico_alta_v1') continue;
       considered++;
       const version = await db.ClinicConsentTemplateVersion.findOne({
         where: { clinic_template_id: template.id, status: 'published', locale: 'es' },
@@ -96,7 +98,7 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       if (document && reusable) {
         const existingPackage = document.package_id
           ? await db.ConsentSignaturePackage.findByPk(document.package_id, { transaction }) : null;
-        const hasQuestionnaire = privacyOnly && document.status !== 'signed' && existingPackage
+        const hasQuestionnaire = questionnaireEnabled && privacyOnly && document.status !== 'signed' && existingPackage
           && await db.PatientIntakeRequest.findOne({ where: { package_id: existingPackage.id }, transaction });
         const available = existingPackage && !hasQuestionnaire && !['cancelled', 'expired'].includes(existingPackage.status)
           && (!existingPackage.expires_at || new Date(existingPackage.expires_at) > now);

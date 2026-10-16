@@ -57,6 +57,10 @@ function normalizeClinicConfigurationForRead(value) {
       ? configuration.disciplinas
       : ['dental'],
     access_guidance: normalizeAccessGuidance(configuration.access_guidance),
+    patient_intake: {
+      ...(isPlainObject(configuration.patient_intake) ? configuration.patient_intake : {}),
+      medical_questionnaire_enabled: configuration.patient_intake?.medical_questionnaire_enabled !== false,
+    },
   };
 }
 
@@ -174,6 +178,16 @@ function mergeClinicConfiguration(currentValue, patchValue) {
 
   const current = parseConfiguration(currentValue);
   const patch = { ...patchValue };
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'patient_intake')) {
+    if (!isPlainObject(patch.patient_intake)) {
+      throw createValidationError('clinic_patient_intake_must_be_an_object');
+    }
+    if (Object.prototype.hasOwnProperty.call(patch.patient_intake, 'medical_questionnaire_enabled')
+      && typeof patch.patient_intake.medical_questionnaire_enabled !== 'boolean') {
+      throw createValidationError('clinic_patient_intake_medical_questionnaire_enabled_must_be_boolean');
+    }
+  }
 
   if (Object.prototype.hasOwnProperty.call(patch, 'access_guidance')) {
     validateAccessGuidancePatch(patch.access_guidance);

@@ -9,6 +9,7 @@ for (const [label, privacy] of [['paper', { privacy_satisfied: true, privacy_sig
   const transaction = { LOCK: { UPDATE: 'UPDATE' } }, writes = [], previous = { id: 4, package_id: 99, status: 'pending' };
   const db = { Sequelize: { Op: {} }, sequelize: { transaction: callback => callback(transaction) },
     Paciente: { findByPk: async () => ({ id_paciente: 2, clinica_id: 72 }) },
+    Clinica: { findByPk: async () => ({ id_clinica: 72 }) },
     PatientIntakeRequest: { findOne: async () => previous, create: async () => { writes.push('intake'); throw Error('duplicate intake'); } },
     ConsentSignaturePackage: { findByPk: async () => ({ id: 99, status: 'pending', expires_at: new Date('2099-01-01') }),
       create: async () => { writes.push('package'); throw Error('duplicate package'); } },
@@ -21,6 +22,7 @@ for (const [label, privacy] of [['paper', { privacy_satisfied: true, privacy_sig
       if (name === './consentimientos.service') return { createPatientIntakePackage: async () => ({ ...privacy, current_package_ids: [] }) };
       if (name === '../lib/patient-intake-questionnaire') return { error: (code, message) => Object.assign(new Error(message), { code }) };
       if (name === '../lib/patient-intake-clinic-scope') return require('../../lib/patient-intake-clinic-scope');
+      if (name === '../lib/patient-intake-configuration') return require('../../lib/patient-intake-configuration');
       if (name.startsWith('node:')) return require(name);
       throw Error('Unexpected dependency ' + name);
     },
