@@ -50,11 +50,11 @@ function receptionService(timeZone) {
   const fs = require('node:fs'), vm = require('node:vm'), { createRequire } = require('node:module');
   const filename = require.resolve('../../services/appointmentCare.service'), nativeRequire = createRequire(filename);
   const clock = { now: '2026-10-15T01:00:00Z' }, writes = [], reads = [], careEvents = [];
-  const transaction = { LOCK: { UPDATE: 'UPDATE' } };
-  const appointment = { ...base, inicio: '2026-10-15T20:00:00Z', async update(patch, options) {
+  const transaction = { LOCK: { UPDATE: 'UPDATE' }, options: { isolationLevel: 'READ COMMITTED' } };
+  const appointment = { ...base, inicio: '2026-10-15T20:00:00Z', toJSON() { return { ...this }; }, async update(patch, options) {
     assert.equal(options.transaction, transaction); writes.push(patch); Object.assign(this, patch);
   } };
-  const db = { sequelize: { transaction: fn => fn(transaction) },
+  const db = { sequelize: { transaction: (options, fn) => { assert.equal(options.isolationLevel, 'READ COMMITTED'); return fn(transaction); } },
     CitaPaciente: { findByPk: async (id, options) => { assert.equal(options.lock, 'UPDATE'); return appointment; } },
     Clinica: { findByPk: async (id, options) => { reads.push(id); assert.equal(options.transaction, transaction);
       return { id_clinica: id, configuracion: { timezone: timeZone } }; } },
@@ -64,7 +64,9 @@ function receptionService(timeZone) {
   class ClockDate extends Date { constructor(...args) { super(...(args.length ? args : [clock.now])); } }
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports, Date: ClockDate,
     require: name => name === '../../models' ? db
-      : name === './appointmentActivity.service' ? { recordAppointmentStatusChange: async () => {} }
+      : name === './appointmentPatientLinks.service' ? { load: async () => null }
+        : name === './appointmentConfirmationUndo.service' ? { createAppointmentConfirmationUndoService: () => ({ record: async () => null }) }
+          : name === './appointmentActivity.service' ? { recordAppointmentStatusChange: async () => {} }
         : name === './appointmentConsentEligibility.service' ? { assessAppointmentClinicalConsent: async () => assert.fail('Early care cannot consult or bypass consent') }
           : name === './treatmentDocumentation.service' ? { createTreatmentDocumentationService: () => assert.fail('Arrival cannot start clinical work') }
             : nativeRequire(name) });

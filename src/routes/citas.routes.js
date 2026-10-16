@@ -21,6 +21,7 @@ router.get('/:id/clinical-report', authMiddleware, clinicalReportsController.get
 router.put('/:id/clinical-report', authMiddleware, clinicalReportsController.save);
 router.post('/:id/clinical-report/finalize', authMiddleware, clinicalReportsController.finalize);
 router.patch('/:id/estado', authMiddleware, citasController.updateCitaEstado);
+router.post('/:id/estado/deshacer', authMiddleware, citasController.undoCitaConfirmation);
 router.patch('/:id/cambio-solicitado/resolver', authMiddleware, citasController.resolveRequestedAppointmentChange);
 router.patch('/:id/nota', authMiddleware, citasController.updateCitaNota);
 router.patch('/:id/reagendar', authMiddleware, citasController.reagendarCita);

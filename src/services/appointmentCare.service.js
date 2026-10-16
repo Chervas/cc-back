@@ -8,7 +8,8 @@ async function record({ appointmentId, clinicId, actorId, action }) {
   if (!['arrive', 'start'].includes(action)) throw Object.assign(new Error('Finaliza la atención mediante el cambio de estado canónico.'), {
     statusCode: 400, code: 'care_action_invalid',
   });
-  return db.sequelize.transaction(async transaction => {
+  return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+    if (action === 'arrive') await require('./appointmentPatientLinks.service').load(db, appointmentId, transaction, true);
     const cita = await db.CitaPaciente.findByPk(appointmentId, { transaction, lock: transaction.LOCK.UPDATE });
     if (!cita) throw Object.assign(new Error('Cita no encontrada.'), { statusCode: 404, code: 'appointment_not_found' });
     if (Number(cita.clinica_id) !== Number(clinicId)) throw Object.assign(new Error('La cita ha cambiado de clínica. Vuelve a abrirla.'), { statusCode: 409, code: 'appointment_clinic_changed' });
@@ -33,10 +34,14 @@ async function record({ appointmentId, clinicId, actorId, action }) {
       // client references or backfill an already-started historical visit.
       documentationSnapshot = await createTreatmentDocumentationService(db).captureForStart({ appointment: cita, transaction, now });
     }
-    const previousStatus = cita.estado;
+    const previousStatus = cita.estado, before = cita.toJSON();
     const patch = careActionPatch(cita, action, { now, actorId, timeZone });
+    const managed = action === 'arrive' && db.AppointmentVisitMember && db.AppointmentVisit
+      ? require('./appointmentVisitManaged.service').current() : null;
+    const visitProof = managed ? await managed.prepareMutation({ appointmentId, clinicId, actorId, transaction }) : null;
     // Arrival/start never claim completion, consume vouchers or dispatch messages.
     await cita.update({ ...patch, updated_by: actorId }, { transaction });
+    if (visitProof) await managed.persistMutation(visitProof, { appointment: cita, transaction, suppressCommunications: true });
     await require('./appointmentActivity.service').recordAppointmentStatusChange({ appointment: cita,
       previousStatus, newStatus: patch.estado, actorUserId: actorId, source: 'agenda',
       metadata: { care_action: action }, occurredAt: now, transaction });
@@ -46,7 +51,11 @@ async function record({ appointmentId, clinicId, actorId, action }) {
       event_type: 'appointment_care_changed', source: 'agenda', occurred_at: now,
       metadata: { appointment_id: cita.id_cita, action, schedule_start: cita.inicio, care_event_id: careEvent.id,
         ...(action === 'start' ? { documentation_snapshot: documentationSnapshot } : {}) } }, { transaction });
-    return { appointment: cita, care: careState(cita, now, { timeZone }), previousStatus, replayed: false };
+    const confirmationUndo = action === 'arrive'
+      ? await require('./appointmentConfirmationUndo.service').createAppointmentConfirmationUndoService({ db }).record({
+        appointment: cita, beforeRows: [before], changedRows: [cita], actorId, transaction }) : null;
+    return { appointment: cita, care: careState(cita, now, { timeZone }), previousStatus, replayed: false,
+      confirmation_undo: confirmationUndo };
   });
 }
 // A reception correction is audited separately from the canonical status

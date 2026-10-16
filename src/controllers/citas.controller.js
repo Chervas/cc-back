@@ -2902,11 +2902,42 @@ exports.recordAppointmentCare = asyncHandler(async (req, res) => {
                 catch (error) { console.warn(`[appointment-care] ${name} pendiente para cita ${id}:`, error.code || error.name); }
             }
         }
-        return res.json({ ...await protectAppointmentsForRequest(req, result.appointment), care: result.care, replayed: result.replayed });
+        return res.json({ ...await protectAppointmentsForRequest(req, result.appointment), care: result.care, replayed: result.replayed,
+            ...(result.confirmation_undo ? { confirmation_undo: result.confirmation_undo } : {}) });
     } catch (error) {
         if ([400, 404, 409].includes(error.statusCode)) return res.status(error.statusCode).json({ code: error.code, message: error.message });
         throw error;
     }
+});
+
+// Short-lived inverse of the exact manual action, never a generic status PATCH.
+// Keep it outside normal state/care handlers so undo cannot replay messaging.
+exports.undoCitaConfirmation = asyncHandler(async (req, res) => {
+    const id = Number(req.params.id), changeId = req.body?.change_id;
+    if (!Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(changeId) || changeId <= 0
+        || Object.keys(req.body || {}).some(key => key !== 'change_id')) {
+        return res.status(400).json({ code: 'appointment_confirmation_undo_invalid', message: 'El cambio que quieres deshacer no es válido.' });
+    }
+    const current = await CitaPaciente.findByPk(id, { attributes: ['id_cita', 'clinica_id'] });
+    if (!current) return res.status(404).json({ message: 'Cita no encontrada.' });
+    if (await denyAppointmentManageAccessIfNeeded(req, res, current.clinica_id)) return;
+    const result = await require('../services/appointmentConfirmationUndo.service').createAppointmentConfirmationUndoService({ db }).undo({
+        appointmentId: id, changeId, clinicId: Number(current.clinica_id), actorId: Number(req.userData.userId) });
+    const rows = [];
+    for (const changed of result.rows) {
+        const row = await CitaPaciente.findByPk(changed.id_cita, { include: [
+            { model: Paciente, as: 'paciente' }, { model: LeadIntake, as: 'lead' }, { model: Clinica, as: 'clinica' },
+            { model: Instalacion, as: 'instalacion', required: false }, { model: Tratamiento, as: 'tratamiento', required: false },
+            db.Usuario ? { model: db.Usuario, as: 'doctor', required: false,
+                attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'] } : null,
+        ].filter(Boolean) });
+        await attachFlowSummaryToCitas(row);
+        await attachUnreadCountsToCitas(row, req.userData.userId);
+        await consentimientosService.attachConsentSummaryToCitas(row);
+        emitAppointmentSocketEvent('appointment:updated', row.toJSON());
+        rows.push(await protectAppointmentsForRequest(req, row));
+    }
+    return res.json({ appointment: rows.find(row => Number(row.id_cita) === id), appointments: rows, undone: true });
 });
 
 exports.updateCitaNota = asyncHandler(async (req, res) => {
