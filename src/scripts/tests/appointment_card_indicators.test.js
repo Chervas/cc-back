@@ -112,13 +112,28 @@ test('lightweight appointment without a treatment includes required LOPD without
   assert.equal(row.consent_summary.privacy.document_id, null); assert.equal(snapshots.length, 1);
   assert(db.calls.every(([name]) => name.startsWith('privacy:')));
 });
-test('imported or previously attended patients without a current request remain quiet, never falsely signed', async () => {
+test('imported or previously attended patients show missing LOPD without losing their care exemption or inventing a request', async () => {
   for (const options of [{ imported: [{ paciente_id: 2, value: '1075' }] },
     { care: [{ paciente_id: 2, clinica_id: 72, first_care_id: 9, last_care_id: 9 }] }]) {
     const { db } = privacyFake(options), row = privacyAppointment(); await attach(db, [row]);
     assert.equal(row.consent_summary.privacy.state, 'not_requested');
-    assert.equal(row.consent_summary.privacy.attention_required, false);
+    assert.equal(row.consent_summary.privacy.attention_required, true);
     assert.equal(row.consent_summary.privacy.required, false);
+    assert.equal(row.consent_summary.privacy.allowed, true);
+    assert.equal(row.consent_summary.privacy.has_pending, false);
+    assert.equal(row.consent_summary.privacy.document_id, null);
+  }
+});
+test('both BS clinics project missing or cancelled LOPD on imported cards without reactivating documents', async () => {
+  for (const clinicId of [66, 72]) for (const cancelled of [false, true]) {
+    const { db } = privacyFake({ templates: [{ ...template, clinic_id: clinicId }],
+      imported: [{ paciente_id: 2, value: '1075' }],
+      documents: cancelled ? [{ ...pendingPrivacy, clinica_id: clinicId, status: 'cancelled' }] : [] });
+    const row = privacyAppointment(1, { clinica_id: clinicId }); await attach(db, [row]);
+    const result = row.consent_summary.privacy;
+    assert.equal(result.state, 'not_requested'); assert.equal(result.attention_required, true);
+    assert.equal(result.allowed, true); assert.equal(result.required, false); assert.equal(result.has_pending, false);
+    assert.equal(result.document_id, null); assert.equal(result.package_id, null);
   }
 });
 for (const state of ['pending', 'sent', 'viewed']) {
@@ -201,6 +216,16 @@ test('many cards share one bounded privacy snapshot, not a query per card', asyn
   const rows = Array.from({ length: 200 }, (_, index) => privacyAppointment(index + 1)); await attach(many.db, rows);
   assert.equal(many.snapshots.length, 1); assert.equal(many.db.calls.length, one.db.calls.length);
   assert(many.db.calls.length <= 9); assert(rows.every(row => row.consent_summary.privacy.state === 'pending'));
+});
+test('many imported cards without LOPD keep one bounded snapshot without inventing clinical counters', async () => {
+  const f = privacyFake({ imported: [{ paciente_id: 2, value: '1075' }] });
+  const rows = Array.from({ length: 200 }, (_, index) => privacyAppointment(index + 1)); await attach(f.db, rows);
+  assert.equal(f.snapshots.length, 1); assert(f.db.calls.length <= 7);
+  for (const row of rows) {
+    assert.deepEqual(Object.keys(row.consent_summary), ['privacy']);
+    assert.equal(row.consent_summary.privacy.attention_required, true);
+    assert.equal(row.consent_summary.privacy.has_pending, false); assert.equal(row.consent_summary.privacy.allowed, true);
+  }
 });
 test('model rows receive merged privacy and clinical summaries via setDataValue', async () => {
   const values = privacyAppointment(1, { tratamiento_id: 4, consent_summary: { privacy_error: true } });

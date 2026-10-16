@@ -90,7 +90,7 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     const reception = await login(ids.reception), outsider = await login(ids.outsider), before = await fingerprint(), quiet = await silent();
     const calendarRoute = '/api/citas/calendar?' + new URLSearchParams({ clinica_id: '72',
       startDate: new Date(+start - 3600000).toISOString(), endDate: new Date(+start + 86400000).toISOString() });
-    const calendarRead = async ({ state, attention, importedState = 'not_requested', importedAttention = false }) => {
+    const calendarRead = async ({ state, attention, importedState = 'not_requested', importedAttention = true }) => {
       const snapshot = await fingerprint(), previousQuiet = await silent();
       const result = await request('GET', calendarRoute, undefined, reception);
       assert.equal(result.status, 200, JSON.stringify(result.body));
@@ -108,6 +108,9 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
         assert.equal(summary.privacy.state, isImported ? importedState : state);
         assert.equal(summary.privacy.attention_required, isImported ? importedAttention : attention);
         assert.equal(summary.privacy.required, !isImported);
+        assert.equal(summary.privacy.allowed, isImported || state === 'signed', 'Visual LOPD alert never tightens the imported care gate');
+        assert.equal(summary.privacy.has_pending, ['pending', 'sent', 'viewed'].includes(isImported ? importedState : state),
+          'An absent document is an attention item, not an invented pending request');
         assert.equal(summary.privacy.patient_id, expected.paciente_id);
         assert.equal(summary.privacy.clinic_id, 72);
         assert.equal(summary.privacy.appointment_id, expected.id_cita);
@@ -152,7 +155,9 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     await expect('POST', `${path}/privacy-paper`, { clinic_id: 72, acknowledged: true, appointment_id: appointmentId }, reception, 400);
     assert.deepEqual(await fingerprint(), before, 'Rejected native requests mutate no domain/clinical/signature record');
     const imported = await expect('GET', `/api/consentimientos/patients/pac_privacy_http_${importedId}/privacy?clinic_id=72`, undefined, reception, 200);
-    assert.equal(imported.required, false); assert.equal(imported.attention_required, false); assert.equal(imported.state, 'not_requested');
+    assert.equal(imported.required, false); assert.equal(imported.allowed, true);
+    assert.equal(imported.attention_required, true); assert.equal(imported.state, 'not_requested');
+    assert.equal(imported.has_pending, false); assert.equal(imported.document_id, null);
     const prepared = await expect('POST', `${path}/privacy-package`, { clinic_id: 72 }, reception, 201);
     assert.equal(prepared.created_count, 1); assert.equal(await db.PatientIntakeRequest.count(), 0);
     const pending = await read(reception); assert.equal(pending.state, 'pending'); assert.equal(pending.package_id, prepared.package_id);
@@ -189,10 +194,35 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     assert.equal(signed.document_id, docs[0].id); assert(!JSON.stringify(signed).includes('consent_choices'));
     await calendarRead({ state: 'signed', attention: false });
     const importedPath = `/api/consentimientos/patients/pac_privacy_http_${importedId}`;
+    const cancelledImported = await expect('POST', `${importedPath}/privacy-package`, { clinic_id: 72 }, reception, 201);
+    const importedPending = await expect('GET', `${importedPath}/privacy?clinic_id=72`, undefined, reception, 200);
+    assert.equal(importedPending.state, 'pending'); assert.equal(importedPending.attention_required, true);
+    assert.equal(importedPending.allowed, true); assert.equal(importedPending.required, false); assert.equal(importedPending.has_pending, true);
+    await calendarRead({ state: 'signed', attention: false, importedState: 'pending' });
+    const cancelledImportedPackage = await db.ConsentSignaturePackage.findByPk(cancelledImported.package_id);
+    const cancelledImportedDoc = await db.PatientConsentDocument.findOne({ where: { package_id: cancelledImported.package_id } });
+    await cancelledImportedPackage.update({ status: 'cancelled' });
+    await cancelledImportedDoc.update({ status: 'cancelled' });
+    const cancelledSnapshot = (await cancelledImportedDoc.reload()).toJSON();
+    const importedAbsent = await expect('GET', `${importedPath}/privacy?clinic_id=72`, undefined, reception, 200);
+    assert.equal(importedAbsent.state, 'not_requested'); assert.equal(importedAbsent.attention_required, true);
+    assert.equal(importedAbsent.allowed, true); assert.equal(importedAbsent.required, false);
+    assert.equal(importedAbsent.has_pending, false); assert.equal(importedAbsent.document_id, null); assert.equal(importedAbsent.package_id, null);
+    await calendarRead({ state: 'signed', attention: false });
+    assert.deepEqual((await cancelledImportedDoc.reload()).toJSON(), cancelledSnapshot,
+      'Read-only missing-signature alert does not reopen or alter a cancelled imported document');
     const importedPrepared = await expect('POST', `${importedPath}/privacy-package`, { clinic_id: 72 }, reception, 201);
     const importedDoc = await db.PatientConsentDocument.findOne({ where: { package_id: importedPrepared.package_id } });
-    await expect('POST', `/api/consentimientos/packages/${importedPrepared.package_id}/tablet-session`, {}, reception, 200);
+    const importedTablet = await expect('POST', `/api/consentimientos/packages/${importedPrepared.package_id}/tablet-session`, {}, reception, 200);
+    const importedSent = await expect('GET', `${importedPath}/privacy?clinic_id=72`, undefined, reception, 200);
+    assert.equal(importedSent.state, 'sent'); assert.equal(importedSent.attention_required, true);
+    assert.equal(importedSent.required, false); assert.equal(importedSent.allowed, true); assert.equal(importedSent.has_pending, true);
     await calendarRead({ state: 'signed', attention: false, importedState: 'sent', importedAttention: true });
+    await expect('GET', `/api/consentimientos/public/${encodeURIComponent(importedTablet.public_token)}`, undefined, undefined, 200);
+    const importedViewed = await expect('GET', `${importedPath}/privacy?clinic_id=72`, undefined, reception, 200);
+    assert.equal(importedViewed.state, 'viewed'); assert.equal(importedViewed.attention_required, true);
+    assert.equal(importedViewed.required, false); assert.equal(importedViewed.allowed, true);
+    await calendarRead({ state: 'signed', attention: false, importedState: 'viewed' });
     const mixed = await db.ConsentSignaturePackage.create({ public_id: 'qa_mixed_privacy_paper', paciente_id: importedId,
       clinica_id: 72, status: 'pending', expires_at: new Date(Date.now() + 86400000) });
     const originalImported = importedDoc.toJSON();
@@ -299,7 +329,8 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     owned.report.checks.push('Native patient paper v2 without appointment, idempotent, no invented digital document; no provider/job/flow/questionnaire/review sends');
     owned.report.checks.push('Sent LOPD -> paper supersedes outstanding family attempts and removes kiosk task; reopening creates nothing; mixed clinical document preserved and remains usable');
     owned.report.checks.push('Adversarial native lock races: signature holding package vs paper holding patient completes without deadlock and preserves signed; paper holding package wins before waiting signature with 409, no invented signature');
-    owned.report.checks.push('Native GET calendar-lite/mapCalendar DTO: treatment and treatment-free cards preserve privacy across not_requested/pending/sent/viewed/signed/paper, imported absence neutral; independent clinical counters unchanged');
+    owned.report.checks.push('Native GET calendar-lite/mapCalendar DTO: treatment and treatment-free cards preserve privacy across not_requested/pending/sent/viewed/signed/paper; missing imported signature is visible without tightening allowed/required care gate; independent clinical counters unchanged');
+    owned.report.checks.push('Imported cancelled historical LOPD remains cancelled and unmodified: patient/calendar attention=true, no active document/request, allowed=true, required=false; explicit manual pending/sent/viewed/paper workflow remains usable without automatic sends');
     owned.report.checks.push('Native calendar JWT/clinic/consent ACL redacts unauthorized privacy; summary=true remains minimal; all calendar reads preserve domain fingerprints and create no sends/jobs/flows/intake/dispatch');
     owned.report.requests = f.requests; owned.report.externalFetchAttempts = f.externalFetchAttempts;
   } finally { await f.close(); }

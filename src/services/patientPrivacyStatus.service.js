@@ -149,7 +149,7 @@ function privacyStateFromContext({ appointment, context }) {
   if (cached) return { ...cached, appointment_id: result.appointment_id };
   const complete = value => { context.stateCache.set(cacheKey, value); return value; };
   const template = context.templates.get(clinicId), published = template && context.versions.get(Number(template.id));
-  if (!published) return complete({ ...result, configuration_error: true, attention_required: result.required });
+  if (!published) return complete({ ...result, configuration_error: true, attention_required: true });
   const { version, approved } = published;
   const documents = context.documents.filter(doc => Number(doc.paciente_id) === patientId && Number(doc.clinica_id) === clinicId
     && Number(doc.clinic_template_id) === Number(template.id));
@@ -182,7 +182,12 @@ function privacyStateFromContext({ appointment, context }) {
       : pending.status === 'sent' || safeDelivery ? 'sent' : 'pending';
     Object.assign(result, { document_id: Number(pending.id), package_id: Number(pending.package_id), document: safeDocument(pending),
       has_pending: true, attention_required: true, updated_at: stamp(safeDelivery?.createdAt || pending.updatedAt || pending.createdAt) || result.updated_at });
-  } else result.attention_required = result.required;
+  } else {
+    // Reception must see missing LOPD evidence on existing/imported patients as
+    // well. This visual action is independent of the new-patient care gate:
+    // preserve required/allowed and never invent a pending document/request.
+    result.attention_required = true;
+  }
   return complete(result);
 }
 

@@ -41,14 +41,15 @@ function fixture(options = {}) {
     run: extra => status.getPatientPrivacyStatus({ db, patientId: 2, clinicId: 72, appointmentId: 11, transaction, now, ...extra }),
     load: appointments => status.loadPrivacyContext({ db, appointments, transaction, now }) };
 }
-test('new patient is required without inventing a request; imported patient is exempt but not falsely signed', async () => {
+test('new patient is required without inventing a request; imported patient keeps its care exemption and missing-LOPD action', async () => {
   const f = fixture(), result = await f.run();
   assert.equal(result.state, 'not_requested'); assert.equal(result.required, true); assert.equal(result.allowed, false);
   assert.equal(result.attention_required, true); assert.equal(result.has_pending, false); assert.equal(result.document_id, null);
   assert.equal(result.updated_at, null, 'a read clock is not a documentation mutation');
   const imported = await fixture({ imported: [{ paciente_id: 2, value: '1075' }] }).run();
   assert.equal(imported.state, 'not_requested'); assert.equal(imported.required, false); assert.equal(imported.allowed, true);
-  assert.equal(imported.attention_required, false); assert.equal(imported.reason, 'existing_imported_patient');
+  assert.equal(imported.attention_required, true); assert.equal(imported.reason, 'existing_imported_patient');
+  assert.equal(imported.has_pending, false); assert.equal(imported.document_id, null); assert.equal(imported.package_id, null);
 });
 test('prior care excludes current appointment and is aggregated in one bounded query', async () => {
   const f = fixture({ care: [{ paciente_id: 2, clinica_id: 72, first_care_id: 11, last_care_id: 11 }] });
@@ -113,6 +114,71 @@ test('missing publication is explicit and does not invent authorization', async 
 });
 test('other clinics retain existing policy without reads', async () => {
   const f = fixture(), result = await f.run({ clinicId: 99 }); assert.equal(result.applicable, false); assert.equal(f.calls.length, 0);
+  assert.equal(result.attention_required, false); assert.equal(result.required, false); assert.equal(result.allowed, true);
+});
+for (const clinicId of [66, 72]) {
+  const localTemplate = { ...template, clinic_id: clinicId };
+  const localPending = { ...structuredClone(pending), clinica_id: clinicId,
+    snapshot_json: { ...structuredClone(pending.snapshot_json), template: localTemplate } };
+  for (const [origin, evidence, reason] of [
+    ['imported', { imported: [{ paciente_id: 2, value: '1075' }] }, 'existing_imported_patient'],
+    ['prior care', { care: [{ paciente_id: 2, clinica_id: clinicId, first_care_id: 10, last_care_id: 10 }] }, 'existing_clinical_patient'],
+  ]) {
+    test(`${clinicId}: ${origin} missing/cancelled LOPD shows a reception action, not a fabricated request or care block`, async () => {
+      for (const history of [{}, { documents: [{ ...localPending, status: 'cancelled' }] },
+        { documents: [localPending], packages: [{ ...pkg, clinica_id: clinicId, status: 'cancelled' }] }]) {
+        const result = await fixture({ templates: [localTemplate], packages: [{ ...pkg, clinica_id: clinicId }], ...evidence, ...history }).run({ clinicId });
+        assert.equal(result.attention_required, true); assert.equal(result.required, false); assert.equal(result.allowed, true);
+        assert.equal(result.reason, reason); assert.equal(result.state, 'not_requested'); assert.equal(result.has_pending, false);
+        assert.equal(result.document_id, null); assert.equal(result.package_id, null); assert.equal(result.updated_at, null);
+      }
+    });
+    test(`${clinicId}: ${origin} current pending/sent/viewed request stays actionable without losing the care exemption`, async () => {
+      for (const requestState of ['pending', 'sent', 'viewed']) {
+        const result = await fixture({ templates: [localTemplate], documents: [{ ...localPending, status: requestState }],
+          packages: [{ ...pkg, clinica_id: clinicId }], ...evidence }).run({ clinicId });
+        assert.equal(result.attention_required, true); assert.equal(result.has_pending, true); assert.equal(result.state, requestState);
+        assert.equal(result.required, false); assert.equal(result.allowed, true); assert.equal(result.reason, reason);
+      }
+    });
+    test(`${clinicId}: ${origin} valid signature or audited paper clears the reception action`, async () => {
+      const signed = signedDocument(); signed.clinica_id = clinicId; signed.snapshot_json.template = localTemplate;
+      signed.snapshot_hash = choices.choiceSnapshotHash(signed.snapshot_json, signed.snapshot_html);
+      const signedResult = await fixture({ templates: [localTemplate], documents: [signed], ...evidence }).run({ clinicId });
+      assert.equal(signedResult.state, 'signed'); assert.equal(signedResult.attention_required, false);
+      assert.equal(signedResult.required, false); assert.equal(signedResult.allowed, true); assert.equal(signedResult.has_pending, false);
+      const source = paper.PATIENT_PAPER_SOURCE;
+      const attestation = { id: 5, paciente_id: 2, clinica_id: clinicId, tratamiento_id: null, purpose: 'data_protection',
+        source, status: 'active', attested_by: 7, attested_at: now, revoked_at: null, revoked_by: null };
+      const event = { id: 6, patient_id: 2, clinic_id: clinicId, actor_user_id: 7, event_type: paper.PAPER_EVENT,
+        source, channel: 'internal', occurred_at: now, metadata: { schema_version: source, attestation_id: 5,
+          appointment_id: null, clinic_template_id: 600, clinic_template_version_id: 700, catalog_key: privacy.FINAL_PRIVACY_KEY,
+          source_document_sha256: digital.SOURCE_DOCUMENT_SHA256, legal_text_sha256: digital.LEGAL_TEXT_SHA256,
+          acknowledged: true, recorded_at: now.toISOString() } };
+      const paperResult = await fixture({ templates: [localTemplate], attestations: [attestation], events: [event], ...evidence }).run({ clinicId });
+      assert.equal(paperResult.state, 'paper'); assert.equal(paperResult.attention_required, false);
+      assert.equal(paperResult.required, false); assert.equal(paperResult.allowed, true); assert.equal(paperResult.has_pending, false);
+    });
+    test(`${clinicId}: ${origin} configuration failure remains visible but does not fabricate a new-patient care requirement`, async () => {
+      const result = await fixture({ templates: [], ...evidence }).run({ clinicId });
+      assert.equal(result.configuration_error, true); assert.equal(result.attention_required, true);
+      assert.equal(result.required, false); assert.equal(result.allowed, true); assert.equal(result.reason, reason);
+      assert.equal(result.state, 'not_requested'); assert.equal(result.has_pending, false); assert.equal(result.document_id, null);
+    });
+  }
+}
+test('missing LOPD actions for many imported/prior-care cards share one bounded context and never issue documents', async () => {
+  for (const evidence of [{ imported: [{ paciente_id: 2, value: '1075' }] },
+    { care: [{ paciente_id: 2, clinica_id: 72, first_care_id: 1, last_care_id: 1 }] }]) {
+    const f = fixture(evidence), appointments = Array.from({ length: 200 }, (_, index) => ({ ...appointment, id_cita: index + 11 }));
+    const context = await f.load(appointments), count = f.calls.length;
+    for (const cita of appointments) {
+      const result = status.privacyStateFromContext({ appointment: cita, context });
+      assert.equal(result.attention_required, true); assert.equal(result.required, false); assert.equal(result.allowed, true);
+      assert.equal(result.has_pending, false); assert.equal(result.document_id, null);
+    }
+    assert.equal(f.calls.length, count); assert(count <= 7); assert.equal(context.stateCache.size, 1);
+  }
 });
 test('one bounded context serves eighty cards without any per-card queries', async () => {
   const f = fixture({ documents: [pending] }), appointments = Array.from({ length: 80 }, (_, index) => ({ ...appointment, id_cita: index + 11 }));

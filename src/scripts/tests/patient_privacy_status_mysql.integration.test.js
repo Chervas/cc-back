@@ -31,7 +31,8 @@ test('native MySQL privacy projection, paper without appointment, scope and batc
     { id_clinica: 72, grupoClinicaId: 9, nombre_clinica: 'Clínica QA 72' },
     { id_clinica: 88, grupoClinicaId: 10, nombre_clinica: 'Otro grupo QA' }]);
   await db.Paciente.bulkCreate([{ id_paciente: 2, clinica_id: 72, public_id: 'pac_privacy_qa_2', nombre: 'Paciente ficticio' },
-    { id_paciente: 3, clinica_id: 66, public_id: 'pac_privacy_qa_3', nombre: 'Importado ficticio' }]);
+    { id_paciente: 3, clinica_id: 66, public_id: 'pac_privacy_qa_3', nombre: 'Importado ficticio' },
+    { id_paciente: 4, clinica_id: 72, public_id: 'pac_privacy_qa_4', nombre: 'Atendido ficticio' }]);
   await db.PacienteClinica.create({ paciente_id: 3, clinica_id: 72 });
   const built = digital.buildBsPrivacyDigitalHtml(), versions = {};
   for (const clinicId of [66, 72]) {
@@ -45,7 +46,9 @@ test('native MySQL privacy projection, paper without appointment, scope and batc
     versions[clinicId] = { template: template.toJSON(), version: version.toJSON() };
   }
   await db.CitaPaciente.bulkCreate([{ id_cita: 11, paciente_id: 2, clinica_id: 72 }, { id_cita: 12, paciente_id: 2, clinica_id: 72 },
-    { id_cita: 13, paciente_id: 3, clinica_id: 66 }]);
+    { id_cita: 13, paciente_id: 3, clinica_id: 66 },
+    { id_cita: 14, paciente_id: 4, clinica_id: 72, care_started_at: new Date(Date.now() - 1000) },
+    { id_cita: 15, paciente_id: 4, clinica_id: 72 }]);
   const state = (patientId = 2, clinicId = 72, appointmentId = 11) => sql.transaction({ readOnly: true, isolationLevel: 'REPEATABLE READ' },
     transaction => status.getPatientPrivacyStatus({ db, patientId, clinicId, appointmentId, transaction }));
   const counts = async () => Promise.all(Object.values(db).filter(model => typeof model.count === 'function').map(model => model.count()));
@@ -53,7 +56,21 @@ test('native MySQL privacy projection, paper without appointment, scope and batc
   assert.equal(empty.state, 'not_requested'); assert.equal(empty.required, true); assert.equal(empty.allowed, false);
   await state(); await state(); assert.deepEqual(await counts(), before, 'GET is completely non-mutating');
   await db.PatientCustomField.create({ paciente_id: 3, clinica_id: 66, source: 'cliniccloud', source_column: 'idContacto', field_key: 'qa_source', value: '1075' });
-  const imported = await state(3, 66, 13); assert.equal(imported.required, false); assert.equal(imported.attention_required, false);
+  const imported = await state(3, 66, 13); assert.equal(imported.required, false); assert.equal(imported.attention_required, true);
+  assert.equal(imported.allowed, true); assert.equal(imported.state, 'not_requested'); assert.equal(imported.has_pending, false);
+  assert.equal(imported.document_id, null); assert.equal(imported.package_id, null);
+  const importedOtherClinic = await state(3, 72, null);
+  assert.equal(importedOtherClinic.attention_required, true); assert.equal(importedOtherClinic.required, false);
+  assert.equal(importedOtherClinic.allowed, true); assert.equal(importedOtherClinic.reason, 'existing_imported_patient');
+  const prior = await state(4, 72, 15);
+  assert.equal(prior.attention_required, true); assert.equal(prior.required, false); assert.equal(prior.allowed, true);
+  assert.equal(prior.reason, 'existing_clinical_patient'); assert.equal(prior.has_pending, false);
+  const missingCounts = await counts(); await state(3, 66, 13); await state(4, 72, 15);
+  assert.deepEqual(await counts(), missingCounts, 'Missing evidence action never creates or sends a document');
+  for (const appointment of [{ id_cita: 13, paciente_id: 3, clinica_id: 66 }, { id_cita: 15, paciente_id: 4, clinica_id: 72 }]) {
+    const care = await sql.transaction(transaction => privacy.assessPrivacyBeforeStart({ db, appointment, transaction }));
+    assert.equal(care.required, false); assert.equal(care.allowed, true);
+  }
   await sql.transaction(async transaction => {
     assert.equal((await status.patientForPrivacyClinic({ db, identifier: 'pac_privacy_qa_3', clinicId: 72, transaction })).id_paciente, 3);
     await assert.rejects(status.patientForPrivacyClinic({ db, identifier: 'pac_privacy_qa_3', clinicId: 88, transaction }), { statusCode: 403 });
@@ -87,6 +104,7 @@ test('native MySQL privacy projection, paper without appointment, scope and batc
   assert.equal(Number(one.created) + Number(two.created), 1); assert.equal(await db.PatientConsentExternalAttestation.count(), 1);
   const receipt = (await db.PatientOperationalEvent.findOne()).toJSON(); assert.equal(receipt.metadata.appointment_id, null);
   const onPaper = await state(); assert.equal(onPaper.state, 'paper'); assert.equal(onPaper.document_id, null); assert.equal(onPaper.allowed, true);
+  assert.equal(onPaper.attention_required, false);
   assert.equal((await db.PatientConsentDocument.findByPk(doc.id)).status, 'superseded');
   assert.equal((await db.ConsentSignaturePackage.findByPk(pkg.id)).status, 'draft');
   const careAssessment = await sql.transaction(transaction => privacy.assessPrivacyBeforeStart({ db,
@@ -100,6 +118,7 @@ test('native MySQL privacy projection, paper without appointment, scope and batc
   await doc.update({ status: 'signed', signed_at: signedAt, snapshot_json: frozen.snapshot_json, snapshot_html: html,
     snapshot_hash: choices.choiceSnapshotHash(frozen.snapshot_json, html) });
   const signed = await state(); assert.equal(signed.state, 'signed'); assert.equal(signed.document_id, doc.id);
+  assert.equal(signed.attention_required, false);
   assert(!JSON.stringify(signed).includes('consent_choices'));
   await db.CitaPaciente.update({ care_started_at: new Date(Date.now() - 1000) }, { where: { id_cita: 13 } });
   // Native grouped SQL must work under ONLY_FULL_GROUP_BY with nullable dates.
@@ -112,6 +131,7 @@ test('native MySQL privacy projection, paper without appointment, scope and batc
     assert.equal(summary.privacy.state, 'signed'); assert.equal(summary.privacy_error, undefined);
   }
   report.checks.push('native grouped read-only privacy status: new/imported/pending/sent/viewed/cancelled/signed/paper');
+  report.checks.push('imported and prior-care missing LOPD creates a visible reception action without changing care authorization or issuing documents');
   report.checks.push('patient-level paper double-click serializes to one append-only receipt with null appointment; legal care gate accepts it');
   report.checks.push('exact clinic/group membership; no GET writes, tokens, PHI or clinical count changes; batched agenda DTO uses same state');
 }));
