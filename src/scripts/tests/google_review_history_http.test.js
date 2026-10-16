@@ -18,6 +18,7 @@ function fixture({ allowed = true, valid = true } = {}) {
     '../services/marketingBulkSends.service': {
       getReviewRequestSummary: async (_scope, options) => { reads++; return { summary: {}, options }; },
       getMissingGoogleReviews: async (_scope, options) => { reads++; return { items: [], ...options }; },
+      getReviewActivityReport: async (_scope, options) => { reads++; return { ...options }; },
       getDispatchStatus: async (_scope, id, options) => { reads++; return { id, options }; },
     },
   };
@@ -32,7 +33,7 @@ function fixture({ allowed = true, valid = true } = {}) {
   return { api: module.exports, req, res, reads: () => reads };
 }
 
-for (const handler of ['getReviewRequestSummary', 'getMissingGoogleReviews']) {
+for (const handler of ['getReviewRequestSummary', 'getMissingGoogleReviews', 'getReviewActivityReport']) {
   test(handler + ' denies a foreign clinic before any review read', async () => {
     const f = fixture({ allowed: false }); await f.api[handler](f.req, f.res);
     assert.equal(f.res.code, 403); assert.equal(f.reads(), 0);
@@ -50,6 +51,14 @@ for (const handler of ['getReviewRequestSummary', 'getMissingGoogleReviews']) {
 test('history routes follow the existing session authentication boundary', () => {
   const source = fs.readFileSync(path.resolve(__dirname, '../../routes/marketing.routes.js'), 'utf8');
   assert(source.indexOf("router.get('/review-requests/missing-reviews'") > source.indexOf('router.use(authMiddleware)'));
+  assert(source.indexOf("router.get('/review-requests/activity'") > source.indexOf('router.use(authMiddleware)'));
+});
+
+test('activity forwards only period and the authorized clinic subset', async () => {
+  const f = fixture(); f.req.query.period = '7d'; f.req.query.review_group_clinic_ids = '59';
+  await f.api.getReviewActivityReport(f.req, f.res);
+  assert.equal(f.res.body.period, '7d'); assert.equal(f.res.body.review_group_clinic_ids, '59');
+  assert.equal(f.reads(), 1);
 });
 
 test('history forwards the attribution filter without creating a synchronization request', async () => {

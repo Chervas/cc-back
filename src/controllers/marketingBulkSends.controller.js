@@ -154,6 +154,19 @@ exports.getMissingGoogleReviews = async (req, res) => {
   }
 };
 
+exports.getReviewActivityReport = async (req, res) => {
+  try {
+    const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });
+    await requireReviewHistoryAccess(req, scope);
+    res.set('Cache-Control', 'no-store');
+    return res.json(await marketingBulkSendsService.getReviewActivityReport(scope, {
+      review_group_clinic_ids: req.query.review_group_clinic_ids, period: req.query.period,
+    }));
+  } catch (error) {
+    return sendError(res, error, 'Error cargando actividad de solicitudes de reseñas');
+  }
+};
+
 exports.getReviewRequestAutomationStatus = async (req, res) => {
   try {
     // Mismo resolver y permisos que el summary, pero el servicio solo lee la

@@ -4756,6 +4756,13 @@ async function getMissingGoogleReviews(scope, options = {}) {
   }) };
 }
 
+async function getReviewActivityReport(scope, options = {}) {
+  const effectiveScope = applyReviewClinicFilter(scope, options);
+  const clinicIds = Array.isArray(effectiveScope?.clinicIds) ? effectiveScope.clinicIds.filter(Number.isInteger) : [];
+  const locationIds = await resolveReviewBusinessLocationIdsForClinics(clinicIds);
+  return require('./reviewActivityReport.service').readReport(db, { clinicIds, locationIds, period: options.period });
+}
+
 async function getReviewRequestSummary(scope, options = {}) {
   const overviewOnly = options.summary_mode === 'overview';
   const reviewSource = normalizeReviewRequestSource(options.review_source || options.reviewSource);
@@ -11019,6 +11026,7 @@ module.exports = {
   getReviewRequestAutomationStatus,
   getReviewRequestSummary,
   getMissingGoogleReviews,
+  getReviewActivityReport,
   setReviewRequestAutomation,
   createAndStartReviewRequestForAppointment,
   sendReviewRequestReminder,
