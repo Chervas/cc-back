@@ -31,7 +31,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   }
   const qi = sql.getQueryInterface();
   for (const name of ['20260912210000-create-platform-audit-events', '20260912213000-create-platform-audit-delivery-states',
-    '20260912220000-create-auth-sessions', '20260913003000-add-platform-audit-result-part', '20260913130000-create-auth-email-challenges']) {
+    '20260912220000-create-auth-sessions', '20260913003000-add-platform-audit-result-part', '20260913130000-create-auth-email-challenges',
+    '20260914220000-create-auth-trusted-devices']) {
     await require('../../../migrations/' + name).up(qi, D);
   }
   for (const [name, filename] of [['AuthSession', 'authsession'], ['AuthEmailChallenge', 'authemailchallenge'], ['PlatformAuditEvent', 'platformauditevent']]) {
