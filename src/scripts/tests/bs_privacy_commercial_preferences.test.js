@@ -7,6 +7,23 @@ const digital = require('../../lib/bs-privacy-digital-template');
 const choices = require('../../lib/consent-document-choices');
 const eligibility = require('../../services/appointmentPrivacyEligibility.service');
 const now = new Date('2026-10-17T10:00:00Z');
+test('production MySQL query generator keeps the fixed frozen-phone JSON path single-dollar, never Sequelize fn bind escaping', async () => {
+  const sql = new S.Sequelize('owned_offline_only', 'unused', 'unused', { dialect: 'mysql', logging: false });
+  const generated = [];
+  const db = { Sequelize: S, PatientConsentDocument: { findAll: async options => {
+    generated.push(sql.getQueryInterface().queryGenerator.selectQuery('PatientConsentDocuments', options));
+    return [];
+  } } };
+  try {
+    await helper.channelRefusals({ db, clinicIds: [88], patientIds: [130], phone: '+34 600 000 003', now });
+    await helper.channelRefusals({ db, clinicIds: [88], phones: ['+34 600 000 003', '+34 600 000 004'], now });
+    assert.equal(generated.length, 2);
+    for (const query of generated) {
+      assert(query.includes("JSON_EXTRACT(`snapshot_json`, '$.context.paciente.telefono')"));
+      assert(!query.includes('$$'), 'Double dollar is an invalid MySQL JSON path and broke native patient detail/QuickChat');
+    }
+  } finally { await sql.close(); }
+});
 function document(answer = 'no') {
   const built = digital.buildBsPrivacyDigitalHtml();
   const evidence = { schema_version: choices.CHOICE_SCHEMA_VERSION,
