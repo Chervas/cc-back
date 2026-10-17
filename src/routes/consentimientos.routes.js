@@ -38,6 +38,8 @@ router.put('/treatments/:id/requirements', consentimientosController.saveTreatme
 
 router.get('/patients/:id/documents', consentimientosController.listPatientDocuments);
 router.get('/patients/:id/privacy', require('../controllers/patientPrivacy.controller').status);
+router.get('/patients/:id/privacy-profile', require('../controllers/patientPrivacy.controller').profile);
+router.post('/patients/:id/privacy-profile', require('../controllers/patientPrivacy.controller').applyProfile);
 router.post('/patients/:id/privacy-package', require('../controllers/patientPrivacy.controller').prepare);
 router.post('/patients/:id/privacy-paper', require('../controllers/patientPrivacy.controller').paper);
 router.post('/patients/:id/intake-package', consentimientosController.createPatientIntakePackage);

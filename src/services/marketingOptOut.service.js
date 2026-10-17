@@ -862,9 +862,10 @@ async function getActiveOptOutSetsForScope(scope, transaction = null) {
     raw: true,
     transaction,
   });
+  const privacyRefusals = await require('../lib/bs-privacy-commercial-preferences').commercialRefusals({ db, clinicIds, transaction });
   return {
-    patientIds: new Set(rows.map((row) => Number(row.paciente_id || 0)).filter((id) => Number.isInteger(id) && id > 0)),
-    phoneDigits: new Set(rows.map((row) => cleanString(row.phone_digits)).filter(Boolean)),
+    patientIds: new Set([...rows.map((row) => Number(row.paciente_id || 0)).filter((id) => Number.isInteger(id) && id > 0), ...privacyRefusals.patientIds]),
+    phoneDigits: new Set([...rows.map((row) => cleanString(row.phone_digits)).filter(Boolean), ...privacyRefusals.phoneDigits]),
   };
 }
 
@@ -876,6 +877,9 @@ async function assertAutomationCommunicationAllowed({ clinicId, patientId = null
   if (!normalizedClinicId || (!phoneDigits && !normalizedPatientId)) return;
 
   const normalizedScope = cleanString(scope).toLowerCase() === 'marketing' ? 'marketing' : 'care';
+  if (normalizedScope === 'marketing') await require('../lib/bs-privacy-commercial-preferences').assertCommercialAllowed({
+    db, clinicIds: [normalizedClinicId], patientIds: normalizedPatientId > 0 ? [normalizedPatientId] : null, phone,
+  });
   const identityWhere = [];
   if (normalizedPatientId > 0) identityWhere.push({ paciente_id: normalizedPatientId });
   if (phoneDigits) identityWhere.push({ phone_digits: phoneDigits });
@@ -1074,6 +1078,7 @@ module.exports = {
   getActiveContactRestrictionsForPatient,
   getActiveOptOutSetsForScope,
   includesOptOutKeyword,
+  isMarketingOutboundMessage,
   isContactOptedOut,
   resolveWhatsappNumberRestrictionAfterChange,
   __testing: {

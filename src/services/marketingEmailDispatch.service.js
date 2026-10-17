@@ -39,9 +39,9 @@ function denyUnverifiedReviewScope(message) {
 
 /** Called again at the actual email transport boundary, including old queued
  * messages which predate explicit purpose metadata. This is read-only. */
-async function assertEmailReviewCanDispatch(message) {
+async function assertEmailReviewCanDispatch(message, { recipientEmail = null } = {}) {
   const current = message?.id ? await db.EmailMessage.findByPk(message.id, {
-    attributes: ['id', 'clinica_id', 'stream', 'template_key', 'related_type', 'related_id', 'metadata'],
+    attributes: ['id', 'clinica_id', 'paciente_id', 'stream', 'template_key', 'related_type', 'related_id', 'metadata'],
   }) : null;
   if (!current) fail('email_outbox_no_longer_available', 409, 'El mensaje de email ya no está disponible.');
   const metadata = current.metadata && typeof current.metadata === 'object' ? current.metadata : {};
@@ -50,6 +50,12 @@ async function assertEmailReviewCanDispatch(message) {
   const explicitReview = eligibility.nonOperationalClinicCommunication(communication);
   if (explicitReview) eligibility.assertClinicNonOperationalAllowed(Number(current.clinica_id), communication);
   const relatedCampaign = ['marketing_bulk_send', 'marketing_bulk_send_test'].includes(current.related_type);
+  const checkPrivacyRefusal = async (clinicId, patientId) => {
+    if (![66, 72].includes(Number(clinicId))) return;
+    await require('../lib/bs-privacy-commercial-preferences').assertCommercialAllowed({ db, clinicIds: [Number(clinicId)],
+      patientIds: Number(patientId) > 0 ? [Number(patientId)] : null, email: recipientEmail });
+  };
+  if (current.stream === 'marketing' || relatedCampaign) await checkPrivacyRefusal(current.clinica_id, current.paciente_id);
   // Other domains may legitimately use a list_id; it is not campaign authority
   // without the actual marketing stream/relation. Purpose-only review emails
   // have already passed the clinic-wide gate above.
@@ -66,6 +72,7 @@ async function assertEmailReviewCanDispatch(message) {
   // A deleted campaign/recipient cannot turn an unclassifiable old outbox into
   // ordinary marketing permission, including old campaign test messages.
   if (!list || itemId && !item) denyUnverifiedReviewScope('El email de campaña no conserva su lista o destinatario verificados.');
+  await checkPrivacyRefusal(item?.clinica_id || list.clinica_id, item?.paciente_id || current.paciente_id);
   const decision = await assertReviewAllowed(list, item, explicitReview);
   if (decision.review) {
     eligibility.assertClinicNonOperationalAllowed(Number(current.clinica_id), {

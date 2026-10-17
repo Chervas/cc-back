@@ -11,18 +11,21 @@ const from = source.indexOf(marker) + marker.length;
 const to = source.indexOf('      const dispatchState = await marketingDispatchDeliveryState(current);', from);
 assert.ok(from > marker.length && to > from);
 
-async function providerAttempt(current, { listHeld = false, rendered = {} } = {}) {
+async function providerAttempt(current, { listHeld = false, commercialRefused = false, rendered = {} } = {}) {
   let attempts = 0, listChecks = 0;
   // Exercise the real final pre-provider block using a stored EmailMessage,
   // never an actual mail provider, database, application or environment.
   const run = vm.runInNewContext(`(async () => { ${source.slice(from, to)} })`, {
-    message: { id: 1 }, rendered, db: { EmailMessage: { findByPk: async id => { assert.equal(id, 1); return current; } } },
+    message: { id: 1 }, recipient: 'qa@example.invalid', rendered, db: { EmailMessage: { findByPk: async id => { assert.equal(id, 1); return current; } } },
     require: name => {
       if (name === '../lib/automation-runtime-stop') return { assertEmailCanDispatch: async () => {} };
       if (name === '../lib/whatsappAppointmentEligibility') return eligibility;
       if (name === './marketingEmailDispatch.service') return { assertEmailReviewCanDispatch: async row => {
         assert.equal(row, current); listChecks++;
         if (listHeld) eligibility.assertClinicNonOperationalAllowed(66, { metadata: { communication_purpose: 'review_request' } });
+        if (commercialRefused) throw Object.assign(Error('privacy_commercial_communications_restricted'), {
+          code: 'AUTOMATION_COMMUNICATIONS_RESTRICTED', details: { reason_code: 'lopd_commercial_refused' }, retryable: false,
+        });
       } };
       throw Error('unexpected_dependency');
     },
@@ -39,6 +42,13 @@ test('fresh stored BS email scope blocks consent and review before any provider 
     const result = await providerAttempt({ status: 'sending', clinica_id, ...communication });
     assert.equal(result.attempts, 0); assert.equal(result.code, 'whatsapp_appointment_nonoperational_clinic_held');
   }
+});
+
+test('a signed LOPD commercial refusal stops an already queued marketing email at the final provider boundary', async () => {
+  const result = await providerAttempt({ status: 'sending', clinica_id: 66, stream: 'marketing',
+    template_key: 'marketing.campaign', metadata: {} }, { commercialRefused: true });
+  assert.equal(result.attempts, 0); assert.equal(result.listChecks, 1);
+  assert.equal(result.code, 'AUTOMATION_COMMUNICATIONS_RESTRICTED');
 });
 
 test('already pending review email also requires the independently stored list/recipient binding', async () => {

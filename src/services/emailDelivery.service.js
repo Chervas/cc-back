@@ -443,7 +443,7 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
         templateName: current.template_key, metadata: current.metadata,
         payload: { text: rendered.text, html: rendered.html },
       });
-      await require('./marketingEmailDispatch.service').assertEmailReviewCanDispatch(current);
+      await require('./marketingEmailDispatch.service').assertEmailReviewCanDispatch(current, { recipientEmail: recipient });
       const dispatchState = await marketingDispatchDeliveryState(current);
       if (dispatchState === 'paused') {
         await settleMessageIfActive(message, { status: 'queued', completed_at: null });
@@ -518,6 +518,11 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       },
     };
   } catch (error) {
+    if (error?.details?.reason_code === 'lopd_commercial_refused' && !providerResult?.providerMessageId) {
+      await settleMessageIfActive(message, { status: 'suppressed', suppressed_at: new Date(), completed_at: new Date(),
+        last_error_code: 'lopd_commercial_refused', last_error_message: 'El paciente no autoriza comunicaciones comerciales en la LOPD firmada.' });
+      return { status: 'completed', result: { email_message_id: message.id, skipped: true, reason: 'lopd_commercial_refused' } };
+    }
     if (error?.code === 'whatsapp_appointment_nonoperational_clinic_held' && !providerResult?.providerMessageId) {
       await settleMessageIfActive(message, { status: 'suppressed', completed_at: new Date(),
         last_error_code: error.code,

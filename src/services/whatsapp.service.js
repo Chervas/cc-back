@@ -623,6 +623,42 @@ class WhatsAppService {
         }
     }
 
+    async assertPrivacyCommercialAllowed(payload, clinicConfig = {}, message = null) {
+        const clinicId = Number(clinicConfig.clinicId || clinicConfig.clinicaId);
+        if (![66, 72].includes(clinicId)) return;
+        // Classify explicit intent and the actual approved template category,
+        // never media filenames, folders or examples containing "reviews".
+        let commercial = require('./marketingOptOut.service').isMarketingOutboundMessage?.(message) === true;
+        if (payload.type === 'template') {
+            const template = await db.WhatsappTemplate.findOne({ where: { waba_id: String(clinicConfig.wabaId || ''),
+                name: payload.template?.name, language: payload.template?.language?.code },
+            attributes: ['id', 'category', 'catalog_template_id'], raw: true });
+            const metaMarketing = String(template?.category || '').toUpperCase() === 'MARKETING';
+            if (!commercial && Number(template?.catalog_template_id) > 0) {
+                const catalog = await db.WhatsappTemplateCatalog.findByPk(template.catalog_template_id, { attributes: ['category', 'family_key'], raw: true });
+                const category = String(catalog?.category || '').toUpperCase();
+                // Meta may recategorize a reminder as MARKETING for pricing.
+                // Its verified server-owned operational catalog purpose stays
+                // operational; neither the payload name nor a caller's "care"
+                // label can establish this exception for an arbitrary template.
+                const operationalCatalog = (category === 'UTILITY' || String(template?.category || '').toUpperCase() === 'UTILITY')
+                    && /^clinicaclick_(?:confirmacion_datos_cita_(?:(?:24|48|hoy)(?:_sin_respuesta)?|reprogramada_(?:24|48|hoy))|recordatorio_(?:dia_antes(?:_sin_respuesta)?|mismo_dia(?:_primera_visita(?:_acceso_dificil)?)?)|aviso_cita_sin_confirmar_noche)$/.test(String(catalog?.family_key || ''));
+                commercial = !operationalCatalog && (category === 'MARKETING' || metaMarketing);
+            } else commercial ||= metaMarketing;
+        }
+        if (!commercial) return;
+        let patientId = null;
+        if (message?.conversation_id) {
+            const conversation = await db.Conversation.findByPk(message.conversation_id, { attributes: ['clinic_id', 'patient_id'], raw: true });
+            if (!conversation || Number(conversation.clinic_id) !== clinicId) throw Object.assign(new Error('whatsapp_automation_scope_changed'), {
+                code: 'whatsapp_automation_scope_changed', statusCode: 409, retryable: false,
+            });
+            patientId = Number(conversation.patient_id) || null;
+        }
+        await require('../lib/bs-privacy-commercial-preferences').assertCommercialAllowed({ db, clinicIds: [clinicId],
+            patientIds: patientId ? [patientId] : null, phone: payload.to });
+    }
+
     async dispatchMessage(payload, clinicConfig = {}, healthContext = {}) {
         let storedMessage = null;
         if (healthContext.messageId) {
@@ -637,6 +673,7 @@ class WhatsAppService {
             }
         }
         await this.assertClinicNonOperationalAllowed(payload, clinicConfig, storedMessage);
+        await this.assertPrivacyCommercialAllowed(payload, clinicConfig, storedMessage);
         if (payload.type === 'template') {
             await require('./whatsappTemplateScope.service').assertTemplateInWaba({
                 wabaId: clinicConfig.wabaId, clinicId: clinicConfig.clinicId || clinicConfig.clinicaId,

@@ -180,7 +180,9 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     await expect('POST', `/api/consentimientos/documents/${docs[0].id}/sign`, signature, reception, 409);
     const confirmed = await expect('POST', `${tabletPath}/documents/${docs[0].id}/personal-data`, {
       schema_version: viewed.documents[0].personal_data_form.schema_version, snapshot_hash: viewed.documents[0].snapshot_hash,
-      values: viewed.documents[0].personal_data_form.values,
+      values: { ...viewed.documents[0].personal_data_form.values, dni: 'QA-PRIVACY-NO-REAL',
+        direccion: 'Calle ficticia QA 19', ciudad: 'Alicante', email: 'privacy-review@example.invalid',
+        fecha_nacimiento: '1980-01-02', telefono: '+34000000009' },
     }, undefined, 200);
     const currentDoc = confirmed.documents[0]; assert.equal(currentDoc.personal_data_form.confirmed, true);
     await expect('POST', `${tabletPath}/sign`, { ...signature,
@@ -192,6 +194,88 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
         answers: Object.fromEntries(choices.CHOICE_KEYS.map(name => [name, 'no'])) } } }, undefined, 200);
     const signed = await read(reception); assert.equal(signed.state, 'signed'); assert.equal(signed.attention_required, false);
     assert.equal(signed.document_id, docs[0].id); assert(!JSON.stringify(signed).includes('consent_choices'));
+    {
+      const reviewPath = `${path}/privacy-profile`, getReview = () => expect('GET', `${reviewPath}?clinic_id=72`, undefined, reception, 200);
+      const frozenDoc = (await docs[0].reload()).toJSON(), beforeReview = await fingerprint();
+      const review = await getReview();
+      assert.equal(review.available, true); assert.equal(review.commercial_choice, 'no');
+      assert.equal(review.document.id, docs[0].id);
+      assert.equal(review.fields.find(field => field.key === 'direccion').selected_by_default, true);
+      assert.equal(review.fields.find(field => field.key === 'email').selected_by_default, false);
+      assert.equal(review.fields.find(field => field.key === 'telefono_movil').selected_by_default, false);
+      assert.deepEqual(await fingerprint(), beforeReview, 'Review GET never synchronizes publicly submitted fields automatically');
+      await expect('GET', `${reviewPath}?clinic_id=72`, undefined, undefined, 401);
+      await expect('GET', `${reviewPath}?clinic_id=72`, undefined, outsider, 403);
+      const body = { clinic_id: 72, document_id: review.document.id, snapshot_hash: review.document.snapshot_hash,
+        patient_version: review.patient_version, fields: ['dni', 'direccion', 'poblacion', 'fecha_nacimiento', 'email'] };
+      await expect('POST', reviewPath, body, reception, 400);
+      await expect('POST', reviewPath, { ...body, patient_version: 'stale', acknowledge_contact_changes: true }, reception, 409);
+      await expect('POST', reviewPath, { ...body, fields: ['notas_medicas'] }, reception, 400);
+      const denyEdit = await db.AccessPolicyOverride.create({ scope_type: 'clinic', scope_id: 72,
+        feature_key: 'patients.edit', role_code: 'reception', effect: 'deny', updated_by: ids.owner });
+      await expect('POST', reviewPath, { ...body, acknowledge_contact_changes: true }, reception, 403); await denyEdit.destroy();
+      const pauseBeforeAnchors = async (change, expectedStatus) => {
+        const reached = deferred(), release = deferred(), original = db.Clinica.findByPk; let paused = false;
+        db.Clinica.findByPk = async function(id, options) {
+          if (options?.lock === 'UPDATE' && !paused) { paused = true; reached.resolve(); await release.promise; }
+          return original.call(this, id, options);
+        };
+        try {
+          const pendingApply = request('POST', reviewPath, { ...body, acknowledge_contact_changes: true }, reception);
+          await waitSignal(reached.promise, 'profile apply awaits sorted clinic anchors');
+          const cleanup = await change(); release.resolve();
+          const response = await pendingApply; assert.equal(response.status, expectedStatus, JSON.stringify(response.body));
+          if (cleanup) await cleanup();
+        } finally { release.resolve(); db.Clinica.findByPk = original; }
+      };
+      await pauseBeforeAnchors(async () => {
+        await db.Paciente.update({ direccion: 'Cambio concurrente ficticio' }, { where: { id_paciente: patientId } });
+        return () => db.Paciente.update({ direccion: null }, { where: { id_paciente: patientId } });
+      }, 409);
+      await pauseBeforeAnchors(async () => {
+        const revoked = await db.AccessPolicyOverride.create({ scope_type: 'clinic', scope_id: 72,
+          feature_key: 'patients.edit', role_code: 'reception', effect: 'deny', updated_by: ids.owner });
+        return () => revoked.destroy();
+      }, 403);
+      const applied = await expect('POST', reviewPath, { ...body, acknowledge_contact_changes: true }, reception, 200);
+      assert.equal(applied.applied, true);
+      const master = await db.Paciente.findByPk(patientId);
+      assert.equal(master.dni, 'QA-PRIVACY-NO-REAL'); assert.equal(master.direccion, 'Calle ficticia QA 19');
+      assert.equal(master.poblacion, 'Alicante'); assert.equal(master.email, 'privacy-review@example.invalid');
+      assert.equal(master.telefono_movil, null, 'Unselected contact is never changed');
+      assert.deepEqual((await docs[0].reload()).toJSON(), frozenDoc, 'Applying reviewed master data leaves every signed document byte immutable');
+      assert.equal(await db.PatientOperationalEvent.count({ where: { patient_id: patientId, event_type: 'patient.privacy_profile_applied' } }), 1);
+      await expect('POST', reviewPath, { ...body, acknowledge_contact_changes: true }, reception, 409);
+      const next = await getReview();
+      await db.Paciente.update({ telefono_movil: '+34 000 000 009' }, { where: { id_paciente: importedId } });
+      const collision = await expect('POST', reviewPath, { clinic_id: 72, document_id: next.document.id,
+        snapshot_hash: next.document.snapshot_hash, patient_version: next.patient_version,
+        fields: ['telefono_movil'], acknowledge_contact_changes: true }, reception, 409);
+      assert.equal(collision.code, 'privacy_profile_contact_collision');
+      assert.equal((await master.reload()).telefono_movil, null);
+      await db.Paciente.update({ telefono_movil: null }, { where: { id_paciente: importedId } });
+      const phoneBody = { clinic_id: 72, document_id: next.document.id, snapshot_hash: next.document.snapshot_hash,
+        patient_version: next.patient_version, fields: ['telefono_movil'], acknowledge_contact_changes: true };
+      const foreignChat = await db.Conversation.create({ clinic_id: 72, channel: 'whatsapp',
+        patient_id: importedId, contact_id: '+34 000 000 009' });
+      const chatCollision = await expect('POST', reviewPath, phoneBody, reception, 409);
+      assert.equal(chatCollision.code, 'privacy_profile_phone_chat_collision');
+      await foreignChat.destroy();
+      const existingChat = await db.Conversation.create({ clinic_id: 72, channel: 'whatsapp',
+        patient_id: patientId, contact_id: '34000000008' });
+      const identityConflict = await expect('POST', reviewPath, phoneBody, reception, 409);
+      assert.equal(identityConflict.code, 'privacy_profile_phone_chat_review_required');
+      await existingChat.destroy();
+      const contactApplied = await expect('POST', reviewPath, phoneBody, reception, 200);
+      assert.equal(contactApplied.applied, true); assert.equal((await master.reload()).telefono_movil, '34000000009');
+      assert.deepEqual((await docs[0].reload()).toJSON(), frozenDoc, 'Explicit safe contact copy never changes the signed source snapshot');
+      const refused = await require('../../lib/bs-privacy-commercial-preferences').commercialRefusals({ db,
+        clinicIds: [72], patientIds: [patientId] });
+      assert(refused.patientIds.has(patientId));
+      await assert.rejects(require('../../lib/bs-privacy-commercial-preferences').assertCommercialAllowed({ db,
+        clinicIds: [66], patientIds: [patientId] }), error => error.code === 'AUTOMATION_COMMUNICATIONS_RESTRICTED');
+      owned.report.checks.push('Authenticated signed-LOPD profile review: exact signed snapshot and master receipt, opt-in selected-field application, contact acknowledgement/collision rejection, patients.edit ACL, no blank clears, immutable signed history, audited one-time apply; commercial No derived read-only across BS clinics');
+    }
     await calendarRead({ state: 'signed', attention: false });
     const importedPath = `/api/consentimientos/patients/pac_privacy_http_${importedId}`;
     const cancelledImported = await expect('POST', `${importedPath}/privacy-package`, { clinic_id: 72 }, reception, 201);

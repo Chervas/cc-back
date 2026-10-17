@@ -17,8 +17,8 @@ const templatePayload = (components = []) => ({ messaging_product: 'whatsapp', t
   type: 'template', template: { name: 'custom_v17', language: { code: 'es' }, components } });
 function fixture({ clinicId = 66, broker = false, template = null, catalog = null, message = null,
   conversationClinic = clinicId, reviewUrl = null, databaseError = false, conversationError = false,
-  reviewAliasClinic = null } = {}) {
-  const state = { graph: 0, broker: 0, managed: 0, scope: 0, reads: [] };
+  reviewAliasClinic = null, commercialRefused = false } = {}) {
+  const state = { graph: 0, broker: 0, managed: 0, scope: 0, privacyChecks: 0, reads: [] };
   const db = {
     Message: { findByPk: async id => { state.reads.push(['message', id]); return structuredClone(message); } },
     Conversation: { findByPk: async (id, options) => { state.reads.push(['conversation', id, options]);
@@ -51,6 +51,13 @@ function fixture({ clinicId = 66, broker = false, template = null, catalog = nul
     './whatsappAccountHealth.service': {}, './whatsappChannelBindings.service': {},
     '../lib/whatsappAppointmentEligibility': eligibility, '../lib/whatsapp-template-workflow': workflow,
     './googleLocalLinks.service': localLinksModule.exports,
+    './marketingOptOut.service': { isMarketingOutboundMessage: value => value?.metadata?.communication_scope === 'marketing' },
+    '../lib/bs-privacy-commercial-preferences': { assertCommercialAllowed: async () => {
+      state.privacyChecks++;
+      if (commercialRefused) throw Object.assign(Error('privacy_commercial_communications_restricted'), {
+        code: 'AUTOMATION_COMMUNICATIONS_RESTRICTED', statusCode: 409, retryable: false,
+      });
+    } },
     '../lib/automation-runtime-stop': { assertMessageCanDispatch: async () => {} },
     './whatsappTemplateScope.service': { assertTemplateInWaba: async () => { state.scope++; } },
     './securityMonitoring.service': { assertTemplateAllowed: async () => {} },
@@ -80,6 +87,39 @@ test('all BS patients: actual consent/review payload is held before broker AND l
     for (const name of ['clinicaclick_solicitar_resena_v1', 'nuevo_consentimiento_custom']) {
       const payload = templatePayload(); payload.template.name = name;
       const f = fixture({ clinicId, broker }); await held(f, payload); assert.equal(f.state.scope, 0);
+    }
+  }
+});
+
+test('signed commercial refusal is rechecked before both transports; actual marketing category/intent only, not access-image folder', async () => {
+  for (const broker of [false, true]) {
+    for (const category of ['MARKETING', null]) {
+      const f = fixture({ broker, commercialRefused: true, template: { id: 8, category },
+        message: category ? null : { id: 10, conversation_id: 11, metadata: { communication_scope: 'marketing' } } });
+      await assert.rejects(f.send(templatePayload()), error => error.code === 'AUTOMATION_COMMUNICATIONS_RESTRICTED');
+      assert.equal(f.state.privacyChecks, 1); assert.equal(f.state.graph + f.state.broker, 0);
+    }
+    const utility = fixture({ broker, commercialRefused: true, template: { id: 8, category: 'UTILITY' } });
+    await utility.send(templatePayload([{ type: 'header', format: 'IMAGE', example: { header_handle: ['https://qa.invalid/reviews/access-photo.jpg'] } }]));
+    assert.equal(utility.state.privacyChecks, 0); assert.equal(utility.state.graph + utility.state.broker, 1);
+    for (const family_key of ['clinicaclick_confirmacion_datos_cita_24_sin_respuesta', 'clinicaclick_recordatorio_dia_antes_sin_respuesta']) {
+      for (const [actual, catalogCategory] of [['MARKETING', 'UTILITY'], ['UTILITY', 'MARKETING']]) {
+        const repriced = fixture({ broker, commercialRefused: true, template: { id: 8, category: actual, catalog_template_id: 100 },
+          catalog: { id: 100, category: catalogCategory, family_key } });
+        await repriced.send(templatePayload());
+        assert.equal(repriced.state.privacyChecks, 0); assert.equal(repriced.state.graph + repriced.state.broker, 1);
+        const explicitMarketing = fixture({ broker, commercialRefused: true, template: { id: 8, category: actual, catalog_template_id: 100 },
+          catalog: { id: 100, category: catalogCategory, family_key },
+          message: { id: 10, conversation_id: 11, metadata: { communication_scope: 'marketing' } } });
+        await assert.rejects(explicitMarketing.send(templatePayload()), error => error.code === 'AUTOMATION_COMMUNICATIONS_RESTRICTED');
+        assert.equal(explicitMarketing.state.graph + explicitMarketing.state.broker, 0);
+      }
+    }
+    for (const [category, family_key] of [['UTILITY', 'arbitrary_reminder_name'], ['MARKETING', 'clinicaclick_recordatorio_dia_antes']]) {
+      const commercial = fixture({ broker, commercialRefused: true, template: { id: 8, category, catalog_template_id: 100 },
+        catalog: { id: 100, category: 'MARKETING', family_key } });
+      await assert.rejects(commercial.send(templatePayload()), error => error.code === 'AUTOMATION_COMMUNICATIONS_RESTRICTED');
+      assert.equal(commercial.state.graph + commercial.state.broker, 0);
     }
   }
 });

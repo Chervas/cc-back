@@ -97,6 +97,18 @@ async function decorate(db, rows) {
   for (const member of members) {
     if (!groups.has(member.link_id)) groups.set(member.link_id, await load(db, member.appointment_id));
   }
+  // The validated groups contain only members of the same patient/clinic.
+  // Resolve their actual treatment labels in one batch, including members not
+  // loaded on the current calendar/list page. Never derive labels from notes or
+  // mutate a link, treatment assignment or canonical appointment.
+  const treatmentIds = [...new Set([...groups.values()].flatMap(group => group.rows)
+    .map(row => Number(row.tratamiento_id)).filter(id => Number.isSafeInteger(id) && id > 0))];
+  const treatmentNames = new Map();
+  if (treatmentIds.length && db.Tratamiento) {
+    const treatments = await db.Tratamiento.findAll({ where: { id_tratamiento: { [db.Sequelize.Op.in]: treatmentIds } },
+      attributes: ['id_tratamiento', 'nombre'] });
+    for (const treatment of treatments) treatmentNames.set(Number(treatment.id_tratamiento), String(treatment.nombre || '').trim().slice(0, 255) || null);
+  }
   for (const row of list.filter(Boolean)) {
     const member = members.find(item => Number(item.appointment_id) === Number(row.id_cita));
     if (!member) continue;
@@ -104,7 +116,8 @@ async function decorate(db, rows) {
     const projection = { id: group.link.id, owner_appointment_id: group.link.owner_appointment_id,
       revision: group.link.revision, index: group.rows.findIndex(item => Number(item.id_cita) === Number(row.id_cita)) + 1,
       count: group.rows.length, can_unlink: group.rows.every(eligible), members: group.rows.map(item => ({ appointment_id: item.id_cita,
-        start_at: item.inicio, end_at: item.fin, doctor_id: item.doctor_id, installation_id: item.instalacion_id })) };
+        start_at: item.inicio, end_at: item.fin, doctor_id: item.doctor_id, installation_id: item.instalacion_id,
+        treatment_name: treatmentNames.get(Number(item.tratamiento_id)) || null })) };
     if (row.setDataValue) row.setDataValue('appointment_link', projection); else row.appointment_link = projection;
   }
   return rows;

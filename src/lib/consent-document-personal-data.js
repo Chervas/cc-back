@@ -14,7 +14,7 @@ const FIELDS = Object.freeze([
   ['compania', 'Compañía', 'text', false, 150],
   ['direccion', 'Dirección', 'text', false, 250], ['codigo_postal', 'Código postal', 'text', false, 20],
   ['ciudad', 'Población', 'text', false, 120], ['provincia', 'Provincia', 'text', false, 120],
-  ['telefono', 'Primer teléfono', 'tel', false, 40], ['telefono2', 'Segundo teléfono', 'tel', false, 40],
+  ['telefono', 'Teléfono móvil', 'tel', false, 40], ['telefono2', 'Teléfono fijo u otro teléfono', 'tel', false, 40],
   ['email', 'Correo electrónico', 'email', false, 254],
 ].map(([key, label, type, required, max_length]) => Object.freeze({ key, label, type, required, max_length })));
 const KEYS = FIELDS.map(field => field.key);

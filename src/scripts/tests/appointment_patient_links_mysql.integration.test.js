@@ -17,6 +17,18 @@ test('patient links: real SQL birth, scope, confirmed owner, atomic movement, ro
     await require('../../../migrations/20261007170000-create-appointment-patient-links').up(sql.getQueryInterface(), S);
     db.AppointmentPatientLink = require('../../../models/appointmentpatientlink')(sql, S.DataTypes);
     db.AppointmentPatientLinkMember = require('../../../models/appointmentpatientlinkmember')(sql, S.DataTypes);
+    // The current runtime inspects the patient/clinic/day communication ledger
+    // before deciding whether this linked member may schedule a reminder. Use
+    // actual models/migration/service on the owned SQL socket, not a follower
+    // stub: a linked follower must also remain a daily-arrival follower.
+    db.Conversation = sql.define('ReminderFixtureConversation', {
+      id: { type: S.DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    }, { tableName: 'Conversations', timestamps: false });
+    db.Message = require('../../../models/message')(sql, S.DataTypes);
+    db.FlowExecutionV2 = require('../../../models/flowexecutionv2')(sql, S.DataTypes);
+    await db.Conversation.sync(); await db.Message.sync(); await db.FlowExecutionV2.sync();
+    await require('../../../migrations/20261014120000-create-appointment-reminder-sequences').up(sql.getQueryInterface(), S);
+    db.AppointmentReminderSequence = require('../../../models/appointmentremindersequence')(sql, S.DataTypes);
     const treatment = await db.Tratamiento.findByPk(4), config = structuredClone(treatment.clinical_config);
     config.booking_profile.phases[0].installation_ids = [101, 102];
     await treatment.update({ clinical_config: config });
@@ -44,12 +56,23 @@ test('patient links: real SQL birth, scope, confirmed owner, atomic movement, ro
       require: name => name === '../../models' ? runtimeDb : name === './appointmentVisitManaged.service'
         ? { current: () => ({ publishCita: async () => null, syncReminderIntents: async () => null }) }
         : name === './jobScheduler.service' ? { triggerImmediate: () => { queued.push('unexpected'); throw Error('unexpected scheduler'); } }
-          : name === './jobRequests.service' ? { enqueueUniqueJobRequest: async () => { queued.push('unexpected'); throw Error('unexpected queue'); } }
+          : name === './jobRequests.service' ? {
+            enqueueUniqueJobRequest: async () => { queued.push('unexpected'); throw Error('unexpected queue'); },
+            enqueueJobRequest: async () => { queued.push('unexpected'); throw Error('unexpected scheduled queue'); },
+          }
           : actualRequire(name), console, process, Date, Map, Set, Buffer, URL, setTimeout, clearTimeout }, { filename: runtimeFile });
-    for (const result of [await runtimeModule.exports.enqueueExecutionForCita(follower, { event_name: 'appointment_created' }),
-      await runtimeModule.exports.enqueueExecutionForTemplate(follower, { trigger_type: 'appointment_reminder_window' }),
-      await runtimeModule.exports.syncScheduledTriggersForCita(follower)]) assert.equal(result.reason, 'linked_appointment_uses_first_notice');
+    const created = await runtimeModule.exports.enqueueExecutionForCita(follower, { event_name: 'appointment_created' });
+    assert.equal(created.reason, 'linked_appointment_uses_first_notice'); assert.equal(created.skipped, true);
+    const reminder = await runtimeModule.exports.enqueueExecutionForTemplate(follower, { trigger_type: 'appointment_reminder_window' });
+    assert.equal(reminder.reason, 'appointment_day_uses_first_arrival'); assert.equal(reminder.skipped, true);
+    const scheduled = await runtimeModule.exports.syncScheduledTriggersForCita(follower);
+    assert.equal(scheduled.success, true); assert.equal(scheduled.desired_count, 0);
+    assert.deepEqual(Array.from(scheduled.scheduled_jobs), []); assert.deepEqual(Array.from(scheduled.cancelled_jobs), []);
+    assert.equal(await db.AppointmentReminderSequence.count(), 0, 'Read-only ownership inspection must not claim delivery rights');
+    assert.equal(await db.FlowExecutionV2.count(), 0, 'No independent follower sequence may be materialized');
+    assert.equal(await db.Message.count(), 0, 'No patient communication may be materialized');
     assert.equal(queued.length, 0);
+    report.checks.push('Current native reminder ledger inspected without writes: linked creation suppressed, reminder uses first patient/clinic/day arrival, schedule desired_count=0, no job/execution/message or ledger right');
     const rows = await db.CitaPaciente.findAll(); await links.decorate(db, rows);
     assert.equal(rows.find(row => row.id_cita === owner.id_cita).getDataValue('appointment_link').index, 1);
     assert.equal(rows.find(row => row.id_cita === follower.id_cita).getDataValue('appointment_link').index, 2);

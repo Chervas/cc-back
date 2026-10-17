@@ -49,6 +49,42 @@ exports.status = async (req, res, next) => {
   } catch (error) { return replyError(error, res, next); }
 };
 
+exports.profile = async (req, res, next) => {
+  try {
+    if (Object.keys(req.query || {}).some(name => !['clinic_id', 'clinica_id'].includes(name))) throw failure('patient_privacy_query_invalid', 400);
+    const result = await db.sequelize.transaction({ readOnly: true, isolationLevel: 'REPEATABLE READ' }, async transaction => {
+      const target = await scope(req, 'consents.view', transaction);
+      await assertUserCanAccessFeature({ actorId: target.actorId, featureKey: 'patients.view', clinicId: target.clinicId });
+      return require('../services/patientPrivacyProfile.service').view({ db, ...target, transaction });
+    });
+    return res.json(result);
+  } catch (error) { return replyError(error, res, next); }
+};
+
+exports.applyProfile = async (req, res, next) => {
+  try {
+    if (!req.body || Array.isArray(req.body)) throw failure('privacy_profile_payload_invalid', 400);
+    const result = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+      // Authorize without acquiring patient/package locks; reconciliation takes
+      // sorted clinic anchors first so contact collision checks are serialized.
+      const target = await scope({ ...req, query: req.body }, 'consents.view', transaction);
+      const patient = await db.Paciente.findByPk(target.patientId, { attributes: ['clinica_id'], transaction });
+      for (const clinicId of [...new Set([target.clinicId, Number(patient.clinica_id)])]) {
+        await assertUserCanAccessFeature({ actorId: target.actorId, featureKey: 'patients.edit', clinicId });
+      }
+      return require('../services/patientPrivacyProfile.service').apply({ db, ...target,
+        authorizedPrimaryClinicId: Number(patient.clinica_id), payload: req.body, transaction,
+        authorizeCurrent: async primaryClinicId => {
+          await assertUserCanAccessFeature({ actorId: target.actorId, featureKey: 'consents.view', clinicId: target.clinicId });
+          for (const clinicId of [...new Set([target.clinicId, primaryClinicId])]) {
+            await assertUserCanAccessFeature({ actorId: target.actorId, featureKey: 'patients.edit', clinicId });
+          }
+        } });
+    });
+    return res.json(result);
+  } catch (error) { return replyError(error, res, next); }
+};
+
 exports.prepare = async (req, res, next) => {
   try {
     if (!req.body || Array.isArray(req.body) || Object.keys(req.body).some(name => !['clinic_id', 'clinica_id'].includes(name))) throw failure('patient_privacy_payload_invalid', 400);

@@ -718,6 +718,14 @@ function buildPrintableHtml(documentRow) {
     p, li { font-size: 14px; line-height: 1.65; }
     .content { margin-top: 0; }
     .content h1, .content h2 { margin: 24px 0 10px; }
+    /* The printable wrapper already renders the document title. This is a
+       presentation rule only: signed snapshot_html and its hash stay intact. */
+    .content > .bs-privacy-digital > h2:first-child { display: none; }
+    .consent-patient-identity { margin: 24px 0; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; }
+    .consent-patient-identity h3 { margin: 0 0 16px; font-size: 15px; }
+    .consent-patient-identity dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 24px; margin: 0; }
+    .consent-patient-identity dl > div { min-width: 0; }
+    .consent-patient-identity dd { margin-top: 4px; font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; }
     .evidence-panel { border: 1px solid #e2e8f0; border-top: 4px solid #334155; background: #f8fafc; border-radius: 12px; padding: 22px; margin-top: 40px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
     .evidence-panel.professional { border-top-color: #475569; }
     .evidence-panel.warning { border-color: #fecaca; border-top-color: #b91c1c; background: #fff7f7; }
@@ -747,6 +755,7 @@ function buildPrintableHtml(documentRow) {
       .status-box { text-align: left; }
       .header-grid, .signature-layout { grid-template-columns: 1fr; display: grid; }
       .detail-grid { grid-template-columns: 1fr; }
+      .consent-patient-identity dl { grid-template-columns: 1fr; }
       footer { align-items: flex-start; flex-direction: column; }
     }
     @media print {
