@@ -66,6 +66,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   report.checks.push('8 concurrent future-link schedules share actual unique execution/job indexes');
   const exec = await models.FlowExecutionV2.findByPk(results[0].execution_id);
   const template = await models.AutomationFlowTemplateV2.findByPk(exec.template_version_id);
+  assert.equal(template.is_system, false); assert.equal(template.clinic_id, 59);
   const readNode = template.nodes.find(n => n.type === 'condition/google_review_check');
   const processEngine = loadSource('flowEngineV2.service', { '../../models': models,
     './jobRequests.service': { getCurrentRuntimeNamespace: () => 'test' }, './marketingBulkSends.service': bulk,

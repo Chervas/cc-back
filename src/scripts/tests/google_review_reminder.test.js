@@ -47,6 +47,8 @@ test('native catalog is a readable five-node V2 flow, no model calls or paid-tem
   assert.deepEqual(d.nodes[2].outputs, { on_found: 'N5', on_not_detected: 'N4', on_unknown: 'N5' });
   assert.equal(d.nodes[1].config.datetime_expression, '{{trigger.data.followup_due_at}}'); assert.equal(DELAY_MS, 72000000);
   assert(!JSON.stringify(d).includes('ai_analysis'));
+  assert.equal(d.is_system, true); assert.equal(definition(59, d).is_system, false);
+  assert.equal(definition(59, d).clinic_id, 59);
 });
 test('the installed graph passes the actual administrator API validator without database or provider access', async () => {
   const fs = require('node:fs'), vm = require('node:vm'), { createRequire } = require('node:module');

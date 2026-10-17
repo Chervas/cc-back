@@ -17,7 +17,7 @@ function definition(clinicId = null, master = null) {
     name: 'Recordar la publicación de la reseña en Google',
     description: 'Un único seguimiento de nuevos enlaces, a partir de 20 h, con comprobación local reciente, horario seguro y ventana WhatsApp abierta. Sin plantilla de pago ni recuperación histórica.',
     trigger_type: 'review_google_link_sent', trigger_config: { managed_feature: 'review_google_publication_reminder', future_links_only: true },
-    is_active: true, is_system: true, clinic_id: clinicId, group_id: null, entry_node_id: 'N1',
+    is_active: true, is_system: !clinicId, clinic_id: clinicId, group_id: null, entry_node_id: 'N1',
     nodes: master?.nodes || [
       node('N1', 'trigger/review_google_link_sent', {}, { on_success: 'N2' }, 0, 0),
       node('N2', 'delay/wait_until', { datetime_expression: '{{trigger.data.followup_due_at}}' }, { on_complete: 'N3' }, 0, 130),
