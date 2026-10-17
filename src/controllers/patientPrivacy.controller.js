@@ -82,7 +82,15 @@ exports.applyProfile = async (req, res, next) => {
         } });
     });
     return res.json(result);
-  } catch (error) { return replyError(error, res, next); }
+  } catch (error) {
+    // Older intake writers use another clinic/patient lock order. MySQL may
+    // choose either transaction as the recoverable deadlock victim; Sequelize
+    // has already rolled this reconciliation back before reaching this catch.
+    if (['ER_LOCK_DEADLOCK', 'ER_LOCK_WAIT_TIMEOUT'].includes(error.original?.code || error.parent?.code || error.code)) {
+      return replyError(failure('privacy_profile_changed', 409), res, next);
+    }
+    return replyError(error, res, next);
+  }
 };
 
 exports.prepare = async (req, res, next) => {

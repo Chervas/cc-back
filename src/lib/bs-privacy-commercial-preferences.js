@@ -6,6 +6,7 @@
 const eligibility = require('../services/appointmentPrivacyEligibility.service');
 const choices = require('./consent-document-choices');
 const digital = require('./bs-privacy-digital-template');
+const { createHash } = require('node:crypto');
 const { normalizePhoneDigits, getPhoneIdentityCandidates } = require('./phone');
 const plain = value => value?.toJSON ? value.toJSON() : value;
 const record = value => {
@@ -13,7 +14,7 @@ const record = value => {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 };
 
-function isVerifiedCommercialRefusal(document, now = new Date()) {
+function signedRefusalCandidate(document, now) {
   const doc = plain(document), snapshot = record(doc?.snapshot_json);
   if (!eligibility.CLINICS.includes(Number(doc?.clinica_id)) || doc.purpose !== 'data_protection'
     || doc.status !== 'signed' || doc.revoked_at || !doc.signed_at || !Number.isFinite(new Date(doc.signed_at).getTime()) || new Date(doc.signed_at) > now
@@ -24,12 +25,36 @@ function isVerifiedCommercialRefusal(document, now = new Date()) {
     || Number(snapshot.template?.clinic_id) !== Number(doc.clinica_id)
     || Number(snapshot.version?.id) !== Number(doc.clinic_template_version_id)
     || Number(snapshot.context?.paciente?.id) !== Number(doc.paciente_id)
-    || Number(snapshot.context?.clinica?.id) !== Number(doc.clinica_id)) return false;
+    || Number(snapshot.context?.clinica?.id) !== Number(doc.clinica_id)) return null;
   const answers = choices.signedConsentChoiceAnswers(doc);
-  if (answers?.commercial !== 'no') return false;
+  return answers?.commercial === 'no' ? { doc, snapshot, answers } : null;
+}
+
+function isVerifiedCommercialRefusal(document, now = new Date(), legacySourceVersion = null) {
+  const candidate = signedRefusalCandidate(document, now);
+  if (!candidate) return false;
+  const { doc, snapshot, answers } = candidate;
   const bodyJson = record(snapshot.version).body_json;
-  if (!digital.isApprovedPrivacyPresentation({ bodyHtml: digital.buildBsPrivacyDigitalHtml().html, bodyJson })) return false;
-  const expected = choices.appendSignedChoiceHtml(digital.buildBsPrivacyDigitalHtml(snapshot.context).html, doc,
+  let legalHtml;
+  if (digital.isApprovedPrivacyPresentation({ bodyHtml: digital.buildBsPrivacyDigitalHtml().html, bodyJson })) {
+    legalHtml = digital.buildBsPrivacyDigitalHtml(snapshot.context).html;
+  } else {
+    // Historical paper-style documents did not embed their source HTML. A
+    // caller's copied body_json marker cannot prove them: fetch their bounded
+    // immutable source version and require the exact server-pinned legacy body.
+    const source = plain(legacySourceVersion);
+    if (!source || Number(source.id) !== Number(doc.clinic_template_version_id)
+      || Number(source.clinic_template_id) !== Number(doc.clinic_template_id)
+      || !['published', 'archived'].includes(source.status) || source.locale !== 'es'
+      || createHash('sha256').update(String(source.body_html || '')).digest('hex') !== digital.APPROVED_LEGACY_HTML_SHA256) return false;
+    try {
+      if (!choices.getConsentChoiceForm({ snapshot_json: { version: {
+        body_json: source.body_json, variable_schema: source.variable_schema,
+      } } })) return false;
+    } catch { return false; }
+    legalHtml = String(source.body_html).trim();
+  }
+  const expected = choices.appendSignedChoiceHtml(legalHtml, doc,
     { schema_version: choices.CHOICE_SCHEMA_VERSION, answers });
   return expected === doc.snapshot_html;
 }
@@ -65,10 +90,27 @@ async function commercialRefusals({ db, clinicIds = [], patientIds = null, phone
   const matchSignedEmail = !!normalizedEmail && !selected?.length;
   const where = { clinica_id: { [Op.in]: eligibility.CLINICS }, purpose: 'data_protection', status: 'signed', revoked_at: null,
     ...(selected?.length ? { paciente_id: { [Op.in]: selected } } : {}) };
-  const limit = selected ? Math.max(101, selected.length * 101) : 10001;
+  const limit = selected?.length ? Math.max(101, selected.length * 101) : 10001;
   const rows = await db.PatientConsentDocument.findAll({ where, order: [['id', 'DESC']], transaction, limit });
   if (rows.length >= limit) throw Object.assign(new Error('privacy_commercial_review_required'), { code: 'privacy_commercial_review_required', statusCode: 409 });
-  const valid = rows.map(plain).filter(doc => isVerifiedCommercialRefusal(doc, now)
+  const documents = rows.map(plain), legacyCandidates = documents.filter(doc => {
+    const candidate = signedRefusalCandidate(doc, now);
+    return candidate && !digital.isApprovedPrivacyPresentation({ bodyHtml: digital.buildBsPrivacyDigitalHtml().html,
+      bodyJson: record(candidate.snapshot.version).body_json });
+  });
+  const legacyVersions = new Map();
+  if (legacyCandidates.length) {
+    if (!db.ClinicConsentTemplateVersion) throw Object.assign(new Error('privacy_commercial_review_required'), { code: 'privacy_commercial_review_required', statusCode: 409 });
+    const ids = [...new Set(legacyCandidates.map(doc => Number(doc.clinic_template_version_id)))];
+    const templateIds = [...new Set(legacyCandidates.map(doc => Number(doc.clinic_template_id)))];
+    const versions = await db.ClinicConsentTemplateVersion.findAll({ where: { id: { [Op.in]: ids },
+      clinic_template_id: { [Op.in]: templateIds }, locale: 'es', status: { [Op.in]: ['published', 'archived'] } },
+    attributes: ['id', 'clinic_template_id', 'locale', 'status', 'body_html', 'body_json', 'variable_schema'],
+    transaction, limit: ids.length + 1 });
+    if (versions.length > ids.length) throw Object.assign(new Error('privacy_commercial_review_required'), { code: 'privacy_commercial_review_required', statusCode: 409 });
+    for (const raw of versions) { const source = plain(raw); legacyVersions.set(Number(source.id), source); }
+  }
+  const valid = documents.filter(doc => isVerifiedCommercialRefusal(doc, now, legacyVersions.get(Number(doc.clinic_template_version_id)))
     && (!matchSignedPhone || normalizePhoneDigits(record(doc.snapshot_json).context?.paciente?.telefono) === normalizePhoneDigits(phone))
     && (!matchSignedEmail || String(record(doc.snapshot_json).context?.paciente?.email || '').trim().toLowerCase() === normalizedEmail));
   for (const doc of valid) {

@@ -130,6 +130,42 @@ test('native MySQL privacy projection, paper without appointment, scope and batc
     const summary = row.getDataValue('consent_summary'); assert.equal(summary.status, 'none'); assert.equal(summary.has_pending, false);
     assert.equal(summary.privacy.state, 'signed'); assert.equal(summary.privacy_error, undefined);
   }
+  {
+    const commercial = require('../../lib/bs-privacy-commercial-preferences');
+    const legacyHtml = require('node:fs').readFileSync(require.resolve('./fixtures/bs-privacy-approved-legacy.html'), 'utf8').trim();
+    const source = await db.ClinicConsentTemplateVersion.create({ clinic_template_id: template.id, version: 1,
+      locale: 'es', status: 'archived', title: 'LOPD QA anterior', body_html: legacyHtml,
+      body_json: { consent_form: built.consent_form }, variable_schema: { consent_form: built.consent_form } });
+    const snapshot = { template, version: { id: source.id, body_json: { consent_form: built.consent_form } },
+      context: { paciente: { id: 2, nombre: 'Paciente ficticio QA', telefono: '+34000000009' }, clinica: { id: 72 } },
+      integrity: { algorithm: choices.CHOICE_HASH_ALGORITHM }, signature_evidence: { accepted_statement: true,
+        signed_at: signedAt, consent_choices: { schema_version: choices.CHOICE_SCHEMA_VERSION,
+          answers: Object.fromEntries(choices.CHOICE_KEYS.map(key => [key, 'no'])) } } };
+    const signedHtml = choices.appendSignedChoiceHtml(legacyHtml, { snapshot_json: snapshot }, snapshot.signature_evidence.consent_choices);
+    const legacyDoc = await db.PatientConsentDocument.create({ public_id: 'cdoc_privacy_qa_legacy', paciente_id: 2, clinica_id: 72,
+      package_id: pkg.id, clinic_template_id: template.id, clinic_template_version_id: source.id,
+      purpose: 'data_protection', status: 'signed', signed_at: signedAt, title: 'LOPD QA anterior', snapshot_json: snapshot,
+      snapshot_html: signedHtml, snapshot_hash: choices.choiceSnapshotHash(snapshot, signedHtml) });
+    const readRefusals = () => sql.transaction({ readOnly: true, isolationLevel: 'REPEATABLE READ' }, transaction =>
+      commercial.commercialRefusals({ db, clinicIds: [66], patientIds: [2], transaction }));
+    const signedFrozen = (await legacyDoc.reload()).toJSON(), countsBefore = await counts();
+    const found = await readRefusals(); assert(found.patientIds.has(2)); assert.deepEqual(found.documentIds, [legacyDoc.id]);
+    assert.deepEqual(await counts(), countsBefore, 'Archived source validation remains entirely read-only');
+    assert.deepEqual((await legacyDoc.reload()).toJSON(), signedFrozen);
+    await source.update({ body_html: legacyHtml + '<p>Cláusula no aprobada QA</p>' });
+    assert.equal((await readRefusals()).patientIds.size, 0, 'A source version id or copied choice schema is not sufficient without the pinned whole legal body');
+    await source.update({ body_html: legacyHtml, status: 'published' });
+    assert((await readRefusals()).patientIds.has(2), 'Both approved published and archived legacy source versions remain verifiable');
+    const changedHtml = signedHtml + '<p>Alteración QA</p>';
+    await legacyDoc.update({ snapshot_html: changedHtml, snapshot_hash: choices.choiceSnapshotHash(snapshot, changedHtml) });
+    assert.equal((await readRefusals()).patientIds.size, 0, 'A self-consistent but unapproved signed body is not interpreted as authoritative');
+    await legacyDoc.update({ snapshot_html: signedHtml, snapshot_hash: signedFrozen.snapshot_hash,
+      clinic_template_version_id: versions[66].version.id });
+    assert.equal((await readRefusals()).patientIds.size, 0, 'A mismatched source-version/template/clinic never proves a refusal');
+    await legacyDoc.update({ clinic_template_version_id: source.id });
+    assert((await readRefusals()).patientIds.has(2));
+    report.checks.push('Native signed legacy commercial No: one bounded immutable published/archived source-version batch, exact legal SHA and signed choices/hash/scope; tampered source/body/version rejected without rewriting or sending');
+  }
   report.checks.push('native grouped read-only privacy status: new/imported/pending/sent/viewed/cancelled/signed/paper');
   report.checks.push('imported and prior-care missing LOPD creates a visible reception action without changing care authorization or issuing documents');
   report.checks.push('patient-level paper double-click serializes to one append-only receipt with null appointment; legal care gate accepts it');

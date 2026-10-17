@@ -18,7 +18,10 @@ const specs = [
   ['email', 'email', 'Correo electrónico', true],
 ];
 const text = value => value == null ? '' : String(value).trim();
-const date = value => value ? new Date(value).toISOString().slice(0, 10) : '';
+const date = value => {
+  const parsed = value ? new Date(value) : null;
+  return parsed && Number.isFinite(parsed.getTime()) && parsed.getUTCFullYear() > 0 ? parsed.toISOString().slice(0, 10) : '';
+};
 const currentValue = (patient, key) => key === 'fecha_nacimiento' ? date(patient[key]) : text(patient[key]);
 const patientVersion = patient => createHash('sha256').update(JSON.stringify([Number(patient.id_paciente),
   ...specs.map(([key]) => [key, currentValue(patient, key)])])).digest('hex');

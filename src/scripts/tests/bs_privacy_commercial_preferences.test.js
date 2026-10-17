@@ -23,6 +23,17 @@ function document(answer = 'no') {
   return doc;
 }
 
+function legacyDocument(answer = 'no') {
+  const doc = document(answer), built = digital.buildBsPrivacyDigitalHtml();
+  delete doc.snapshot_json.version.body_json.digital_presentation;
+  const version = { id: 20, clinic_template_id: 10, locale: 'es', status: 'archived',
+    body_html: require('node:fs').readFileSync(require.resolve('./fixtures/bs-privacy-approved-legacy.html'), 'utf8').trim(),
+    body_json: { consent_form: built.consent_form }, variable_schema: { consent_form: built.consent_form } };
+  doc.snapshot_html = choices.appendSignedChoiceHtml(version.body_html, doc, doc.snapshot_json.signature_evidence.consent_choices);
+  doc.snapshot_hash = choices.choiceSnapshotHash(doc.snapshot_json, doc.snapshot_html);
+  return { doc, version };
+}
+
 test('only an exact approved signed No is a commercial restriction; not a grant, forged body or future/revoked evidence', () => {
   assert.equal(helper.isVerifiedCommercialRefusal(document(), now), true);
   assert.equal(helper.isVerifiedCommercialRefusal(document('yes'), now), false);
@@ -68,6 +79,41 @@ test('review overflow fails closed and unsigned/yes-only documents cannot invent
   db.PatientConsentDocument.findAll = async () => Array(101).fill(document());
   await assert.rejects(helper.commercialRefusals({ db, clinicIds: [72], patientIds: [30], now }),
     error => error.code === 'privacy_commercial_review_required');
+});
+
+test('pinned legacy No uses one bounded source-version batch, never copied body markers or forged legal bodies', async () => {
+  const { doc, version } = legacyDocument(), frozen = JSON.stringify(doc), calls = [];
+  const db = { Sequelize: S, PatientConsentDocument: { findAll: async () => [doc, { ...doc, id: 41 }] },
+    ClinicConsentTemplateVersion: { findAll: async options => { calls.push(options); return [version]; } } };
+  assert.equal(helper.isVerifiedCommercialRefusal(doc, now), false, 'A copied snapshot alone cannot authorize legacy verification');
+  assert.equal(helper.isVerifiedCommercialRefusal(doc, now, version), true);
+  for (const mutate of [v => { v.id = 21; }, v => { v.clinic_template_id = 11; }, v => { v.locale = 'en'; },
+    v => { v.status = 'draft'; }, v => { v.body_html += '<p>Not approved</p>'; }, v => { v.body_json = {}; v.variable_schema = {}; }]) {
+    const bad = structuredClone(version); mutate(bad); assert.equal(helper.isVerifiedCommercialRefusal(doc, now, bad), false);
+  }
+  const changed = structuredClone(doc); changed.snapshot_html += '<p>Changed signed body</p>';
+  changed.snapshot_hash = choices.choiceSnapshotHash(changed.snapshot_json, changed.snapshot_html);
+  assert.equal(helper.isVerifiedCommercialRefusal(changed, now, version), false, 'Even a self-consistent forged snapshot must match the exact pinned legal source');
+  const result = await helper.commercialRefusals({ db, clinicIds: [66], patientIds: [30], now });
+  assert(result.patientIds.has(30)); assert.deepEqual(result.documentIds, [40, 41]); assert.equal(calls.length, 1);
+  assert.equal(calls[0].limit, 2); assert.deepEqual(calls[0].where.id[S.Op.in], [20]);
+  assert.deepEqual(calls[0].where.status[S.Op.in], ['published', 'archived']);
+  assert.equal(JSON.stringify(doc), frozen, 'Legacy signature/source evidence is never rewritten');
+  db.ClinicConsentTemplateVersion.findAll = async () => [{ ...version, body_html: '<p>Unapproved source</p>' }];
+  assert.equal((await helper.commercialRefusals({ db, clinicIds: [66], patientIds: [30], now })).patientIds.size, 0);
+  const yes = legacyDocument('yes'); let lookups = 0;
+  db.PatientConsentDocument.findAll = async () => [yes.doc];
+  db.ClinicConsentTemplateVersion.findAll = async () => { lookups++; return [yes.version]; };
+  assert.equal((await helper.commercialRefusals({ db, clinicIds: [66], now })).patientIds.size, 0); assert.equal(lookups, 0);
+});
+
+test('phone/email fallback stays bounded at 10001 rather than rejecting more than 100 unrelated signed records', async () => {
+  const docs = Array.from({ length: 150 }, (_, index) => ({ ...document('yes'), id: 100 + index }));
+  const reads = [], db = { Sequelize: S, Paciente: { findAll: async () => [] },
+    PatientConsentDocument: { findAll: async options => { reads.push(options); return docs; } } };
+  assert.equal((await helper.commercialRefusals({ db, clinicIds: [66], phone: '600000002', now })).patientIds.size, 0);
+  assert.equal((await helper.commercialRefusals({ db, clinicIds: [66], email: 'other@example.invalid', now })).patientIds.size, 0);
+  assert(reads.every(options => options.limit === 10001));
 });
 
 test('actual email boundary uses persisted marketing patient/recipient scope, while auth and care stay outside commercial refusal', async () => {

@@ -237,6 +237,24 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
           feature_key: 'patients.edit', role_code: 'reception', effect: 'deny', updated_by: ids.owner });
         return () => revoked.destroy();
       }, 403);
+      {
+        const auditCreate = db.PatientOperationalEvent.create, masterBefore = (await db.Paciente.findByPk(patientId)).toJSON();
+        try {
+          for (const code of ['ER_LOCK_DEADLOCK', 'ER_LOCK_WAIT_TIMEOUT']) {
+            db.PatientOperationalEvent.create = async function(values, options) {
+              if (values.event_type === 'patient.privacy_profile_applied') {
+                throw Object.assign(Error('OWNED recoverable SQL lock fixture'), { original: { code } });
+              }
+              return auditCreate.call(this, values, options);
+            };
+            const locked = await expect('POST', reviewPath, { ...body, acknowledge_contact_changes: true }, reception, 409);
+            assert.equal(locked.code, 'privacy_profile_changed');
+            assert.deepEqual((await db.Paciente.findByPk(patientId)).toJSON(), masterBefore,
+              'A recoverable database lock error rolls back the earlier selected patient writes atomically');
+            assert.equal(await db.PatientOperationalEvent.count({ where: { patient_id: patientId, event_type: 'patient.privacy_profile_applied' } }), 0);
+          }
+        } finally { db.PatientOperationalEvent.create = auditCreate; }
+      }
       const applied = await expect('POST', reviewPath, { ...body, acknowledge_contact_changes: true }, reception, 200);
       assert.equal(applied.applied, true);
       const master = await db.Paciente.findByPk(patientId);
