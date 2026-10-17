@@ -5,6 +5,11 @@ const { createRequire } = require('node:module');
 const blocks = require('../../lib/consent-document-blocks'), choices = require('../../lib/consent-document-choices');
 const completion = require('../../lib/consent-document-completion'), personal = require('../../lib/consent-document-personal-data');
 const clone = value => JSON.parse(JSON.stringify(value));
+test('legacy documents without an embedded version remain outside the new block renderer', () => {
+  assert.equal(blocks.renderVersion(undefined, {}), null);
+  assert.equal(blocks.renderVersion(null, {}), null);
+  assert.equal(blocks.renderVersion({}, {}), null);
+});
 const definition = () => ({ schema_version: blocks.SCHEMA, blocks: [
   { id: 'intro', type: 'text', html: '<h3><strong>Información</strong></h3><p>{{paciente.nombre_completo}}</p>' },
   { id: 'questions', type: 'fields', title: 'Preferencias del paciente', fields: [

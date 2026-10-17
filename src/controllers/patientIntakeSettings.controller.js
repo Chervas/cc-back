@@ -7,9 +7,16 @@ const fail = (code, statusCode = 400) => Object.assign(new Error(code), { code, 
 const plain = row => row?.toJSON ? row.toJSON() : row;
 function previewBranding(clinic, group) {
   const baseUrl = process.env.FRONTEND_PUBLIC_URL || 'https://crm.clinicaclick.com';
+  const configuration = config.object(clinic?.configuracion), intake = config.object(configuration.patient_intake);
+  // Defaults are live UI metadata, not document snapshots. Resolve each source
+  // without the persisted override so clearing its URL can be previewed before Save.
+  const tabletDefault = source => documentBranding.resolveTabletBranding({ ...clinic, configuracion: {
+    ...configuration, patient_intake: { ...intake, tablet_branding: { source, logo_url: null, logo_background: 'light' } },
+  } }, group, { baseUrl });
   return { document_branding: documentBranding.buildDocumentBranding(clinic, { purpose: 'data_protection', baseUrl }),
     additional_document_branding: documentBranding.buildDocumentBranding(clinic, { purpose: 'other', baseUrl }),
     tablet_branding: documentBranding.resolveTabletBranding(clinic, group, { baseUrl }),
+    tablet_branding_defaults: { clinic: tabletDefault('clinic'), group: group ? tabletDefault('group') : null },
     tablet_branding_group: group ? { id: group.id_grupo, name: group.nombre_grupo } : null };
 }
 async function authorize(req, feature) {
