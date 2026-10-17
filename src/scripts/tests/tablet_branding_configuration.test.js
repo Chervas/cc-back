@@ -41,3 +41,22 @@ test('live tablet identity leaves historical document branding byte-for-byte int
   assert.equal(JSON.stringify(document), before);
   assert.equal(branding.brandingFromSnapshot(document).logos.length, 2);
 });
+
+test('settings defaults resolve live clinic/group sources without the persisted override or mutating the input', () => {
+  const fs = require('node:fs'), vm = require('node:vm');
+  const source = fs.readFileSync(require.resolve('../../controllers/patientIntakeSettings.controller'), 'utf8');
+  const block = source.slice(source.indexOf('function previewBranding('), source.indexOf('\nasync function authorize('));
+  assert(block.startsWith('function previewBranding('));
+  const preview = vm.runInNewContext(block + '\npreviewBranding', { config, documentBranding: branding, process: { env: {} } });
+  const input = configured({ source: 'group', logo_url: 'https://cdn.clinicaclick.com/override.png', logo_background: 'dark' });
+  const group = { id_grupo: 50, nombre_grupo: 'Grupo de prueba' }, before = JSON.stringify(input);
+  const resolved = preview(input, group);
+  assert.equal(resolved.tablet_branding.logo_url, 'https://cdn.clinicaclick.com/override.png');
+  assert.deepEqual(JSON.parse(JSON.stringify(resolved.tablet_branding_defaults)), {
+    clinic: { display_name: clinic.nombre_clinica, source: 'clinic', logo_url: clinic.url_avatar, logo_background: 'light' },
+    group: { display_name: group.nombre_grupo, source: 'group', logo_url: null, logo_background: 'light' },
+  });
+  assert.equal(JSON.stringify(input), before);
+  assert.equal(preview({ ...input, grupoClinicaId: null }, null).tablet_branding_defaults.group, null);
+  assert.equal(preview({ ...input, url_avatar: null }, group).tablet_branding_defaults.clinic.logo_background, 'dark', 'The BS original mark retains its real dark default');
+});
