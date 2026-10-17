@@ -91,7 +91,8 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
         order: [['id', 'DESC']], transaction,
       });
       let reusable = document && reusableChoiceDocument(document, template, version, form, now);
-      const genericRegistration = !!require('./registration-privacy-template').schema(version.body_json);
+      const genericRegistration = !!require('./registration-privacy-template').schema(version.body_json)
+        || template.purpose === 'data_protection' && !!require('./consent-document-blocks').versionBlocks(plain(version), plain(template));
       const bsDigital = genericRegistration || privacy.CLINICS.includes(Number(clinicId))
         && Number(template.clinic_id) === Number(clinicId) && template.catalog_key === privacy.FINAL_PRIVACY_KEY
         && require('./bs-privacy-digital-template').isApprovedPrivacyPresentation({ bodyHtml: version.body_html, bodyJson: version.body_json });

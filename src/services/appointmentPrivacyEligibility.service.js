@@ -15,7 +15,7 @@ const fail = (code, message) => { throw Object.assign(new Error(message), { code
 // caller's equivalence flag. Every historical row remains immutable.
 async function approvedPrivacyVersions({ db, template, version, transaction, publishedVersions = null }) {
   const registration = require('../lib/registration-privacy-template');
-  if (registration.schema(version.body_json)) {
+  if (registration.schema(version.body_json) || require('../lib/consent-document-blocks').versionBlocks(version, template)) {
     const approved = new Map([[Number(version.id), { version, registration: true }]]);
     // New channel choices never reinterpret old SMS answers. Existing verified
     // BS evidence remains equivalent only for the unchanged legal notice gate.
@@ -76,6 +76,11 @@ function isValidSignedPrivacyDocument({ document, template, patientId, clinicId,
     if (!Number.isFinite(evidenceDate) || evidenceDate > now.getTime()
       || snapshot.version.body_html !== approved.version.body_html
       || JSON.stringify(canonical(object(object(snapshot.version).body_json))) !== JSON.stringify(canonical(object(approved.version.body_json)))) return false;
+    const blockHtml = require('../lib/consent-document-blocks').renderVersion(approved.version, object(snapshot.context), {
+      answers: snapshot.document_block_answers?.answers || {},
+      choiceEvidence: { schema_version: choices.getConsentChoiceForm(doc).schema_version, answers },
+    });
+    if (blockHtml !== null) return doc.snapshot_html === blockHtml;
     const html = require('../lib/registration-privacy-template').render(approved.version, object(snapshot.context));
     return doc.snapshot_html === choices.appendSignedChoiceHtml(html, doc, { schema_version: choices.getConsentChoiceForm(doc).schema_version, answers });
   }

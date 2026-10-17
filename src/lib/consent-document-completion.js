@@ -33,6 +33,7 @@ function documentPolicy(document) {
   return resolved;
 }
 function validateTemplate(version, template) {
+  require('./consent-document-blocks').versionBlocks(version, template, 400);
   policy(version, template, 400);
   if (template?.purpose === 'data_protection' && template.requires_patient_signature === false) {
     throw fail('consent_privacy_patient_signature_required', 400);
@@ -56,12 +57,20 @@ function isCompleted(document, now = new Date()) {
     || Number(snapshot.template.id) !== Number(doc.clinic_template_id || doc.catalog_template_id)
     || Number(snapshot.version.id) !== Number(doc.clinic_template_version_id || doc.catalog_template_version_id)) return false;
   const { completion_evidence: _receipt, ...before } = snapshot;
-  return evidence.snapshot_hash_before_completion === hash(before, doc.snapshot_html)
+  let beforeHtml = doc.snapshot_html;
+  try {
+    if (require('./consent-document-blocks').documentBlocks(doc)) {
+      delete before.document_block_answers;
+      beforeHtml = require('./consent-document-blocks').renderVersion(before.version, before.context);
+    }
+  } catch { return false; }
+  return evidence.snapshot_hash_before_completion === hash(before, beforeHtml)
     && doc.snapshot_hash === hash(snapshot, doc.snapshot_html);
 }
 function completedValues(document, payload, requestMeta = {}, now = new Date()) {
   const doc = plain(document);
   assertUnsigned(doc);
+  require('./consent-document-personal-data').assertReadyToSign(doc, payload);
   if (payload.acknowledged !== true) throw fail('consent_document_acknowledgement_required', 400);
   if (!['pending', 'sent', 'viewed'].includes(doc.status) || doc.signed_at || doc.revoked_at) throw fail('consent_document_already_closed');
   if (doc.expires_at && (!Number.isFinite(new Date(doc.expires_at).getTime()) || new Date(doc.expires_at) <= now)) throw fail('consent_document_expired', 410);
@@ -75,8 +84,13 @@ function completedValues(document, payload, requestMeta = {}, now = new Date()) 
     completed_at: now.toISOString(), snapshot_hash_before_completion: doc.snapshot_hash,
     ip: typeof requestMeta.ip === 'string' ? requestMeta.ip.slice(0, 80) : null,
     user_agent: typeof requestMeta.userAgent === 'string' ? requestMeta.userAgent.slice(0, 500) : null };
-  const next = { ...snapshot, completion_evidence: evidence };
-  return { status: 'completed', delivery_status: 'completed', snapshot_json: next, snapshot_hash: hash(next, doc.snapshot_html) };
+  const blocks = require('./consent-document-blocks');
+  blocks.validateAnswerMap(payload, [doc]);
+  const answers = blocks.answerEvidence(doc, payload, now);
+  const next = { ...snapshot, ...(answers ? { document_block_answers: answers } : {}), completion_evidence: evidence };
+  const html = blocks.renderVersion(snapshot.version, snapshot.context, { answers: answers?.answers || {} }) ?? doc.snapshot_html;
+  return { status: 'completed', delivery_status: 'completed', snapshot_json: next,
+    ...(html !== doc.snapshot_html ? { snapshot_html: html } : {}), snapshot_hash: hash(next, html) };
 }
 function publicFields(document) {
   const doc = plain(document);

@@ -28,6 +28,15 @@ function failure(code, message, statusCode = 400, field = null) {
 }
 function isIdentityDocument(document) {
   const doc = plain(document), snapshot = object(doc?.snapshot_json), template = object(snapshot.template);
+  // Explicit new block versions may collect identity without granting any
+  // authorization. Free-form question blocks never enter this path.
+  if (require('./consent-document-blocks').documentBlocks(doc)?.blocks.some(block => block.type === 'patient_data')) {
+    return Number(template.id) === Number(doc.clinic_template_id || doc.catalog_template_id)
+      && (!doc.clinic_template_id || Number(template.clinic_id) === Number(doc.clinica_id))
+      && Number(snapshot.version?.id) === Number(doc.clinic_template_version_id || doc.catalog_template_version_id)
+      && Number(snapshot.context?.paciente?.id) === Number(doc.paciente_id) && Number(snapshot.context?.clinica?.id) === Number(doc.clinica_id)
+      && typeof snapshot.version.body_html === 'string';
+  }
   if (doc?.purpose === 'data_protection' && require('./registration-privacy-template').schema(object(snapshot.version).body_json)) {
     return Number(template.id) === Number(doc.clinic_template_id) && Number(template.clinic_id) === Number(doc.clinica_id)
       && Number(snapshot.context?.paciente?.id) === Number(doc.paciente_id) && Number(snapshot.context?.clinica?.id) === Number(doc.clinica_id)
@@ -94,7 +103,8 @@ function identityConfirmed(document) {
 function publicDocumentPersonalData(document) {
   const doc = plain(document);
   if (!isIdentityDocument(doc)) return {};
-  return { personal_data_form: { schema_version: identitySchema(doc), fields: FIELDS.map(field => ({ ...field })),
+  const selected = require('./consent-document-blocks').documentBlocks(doc)?.blocks.find(block => block.type === 'patient_data')?.fields;
+  return { personal_data_form: { schema_version: identitySchema(doc), fields: FIELDS.filter(field => !selected || selected.includes(field.key)).map(field => ({ ...field })),
     values: contextValues(object(doc.snapshot_json).context),
     editable: ['pending', 'sent', 'viewed'].includes(doc.status) && !doc.signed_at && !doc.revoked_at,
     confirmed: identityConfirmed(doc) } };
@@ -158,10 +168,13 @@ function correctedSnapshot(document, payload, requestMeta = {}, now = new Date()
   return { snapshot_json: next, snapshot_html: html, snapshot_hash: choices.choiceSnapshotHash(next, html) };
 }
 function identitySchema(document) {
-  return require('./registration-privacy-template').schema(object(object(plain(document)?.snapshot_json).version).body_json)
+  return require('./consent-document-blocks').documentBlocks(document)
+    || require('./registration-privacy-template').schema(object(object(plain(document)?.snapshot_json).version).body_json)
     ? 'cc-registration-identity/v2' : SCHEMA_VERSION;
 }
 function renderedIdentity(snapshot) {
+  const composed = require('./consent-document-blocks').renderVersion(snapshot.version, snapshot.context);
+  if (composed !== null) return composed;
   return require('./registration-privacy-template').schema(object(snapshot.version).body_json)
     ? require('./registration-privacy-template').render(snapshot.version, snapshot.context)
     : digital.buildBsPrivacyDigitalHtml(snapshot.context).html;

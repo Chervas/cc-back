@@ -13,6 +13,8 @@ const { consentClinicIds, setConsentGroupScope } = require('../lib/tablet-kiosk-
 const consentDocumentChoices = require('../lib/consent-document-choices');
 const consentDocumentPersonalData = require('../lib/consent-document-personal-data');
 const documentCompletion = require('../lib/consent-document-completion');
+const documentBlocks = require('../lib/consent-document-blocks');
+const documentBranding = require('../lib/consent-document-branding');
 const { renderConsentVersionHtml } = require('../lib/consent-version-html');
 const { medicalQuestionnaireEnabled, clinicMedicalQuestionnaireEnabled } = require('../lib/patient-intake-configuration');
 const { Op } = db.Sequelize;
@@ -248,7 +250,7 @@ function normalizeVersionPayload(payload = {}, fallback = {}) {
         : Object.prototype.hasOwnProperty.call(payload, 'published_at') ? payload.published_at
         : fallback.published_at !== undefined ? fallback.published_at
         : status === 'published' ? new Date() : null;
-    return {
+    const version = documentBlocks.normalizeVersion({
         version: toIntOrNull(payload.version) || fallback.version || 1,
         locale: toCleanString(payload.locale ?? payload.idioma) || fallback.locale || 'es',
         title: toCleanString(payload.title ?? payload.titulo) || fallback.title || toCleanString(payload.name ?? payload.nombre) || 'Consentimiento',
@@ -257,7 +259,11 @@ function normalizeVersionPayload(payload = {}, fallback = {}) {
         variable_schema: payload.variable_schema ?? payload.variables ?? fallback.variable_schema ?? null,
         status,
         published_at: publishedAt,
-    };
+    }, { purpose: payload.purpose || fallback.purpose || 'other' });
+    if (Object.hasOwn(parseJsonObject(version.body_json), 'document_branding')) {
+        documentBranding.validateDocumentBrandingConfig(parseJsonObject(version.body_json).document_branding);
+    }
+    return version;
 }
 
 function buildDefaultBodyHtml(title) {
@@ -385,6 +391,10 @@ function hashSnapshot(payload) {
 }
 
 function hashRenderedSnapshot(snapshot, html) {
+    if (documentBlocks.versionBlocks(snapshot.version, snapshot.template)) {
+        snapshot.integrity = { algorithm: consentDocumentChoices.CHOICE_HASH_ALGORITHM };
+        return consentDocumentChoices.choiceSnapshotHash(snapshot, html);
+    }
     if (documentCompletion.policy(snapshot.version, snapshot.template)) {
         snapshot.integrity = { algorithm: consentDocumentChoices.CHOICE_HASH_ALGORITHM };
         return documentCompletion.hash(snapshot, html);
@@ -616,6 +626,7 @@ function buildPrintableHtml(documentRow) {
     const appointment = snapshot.context?.cita || {};
     const professional = snapshot.context?.profesional || {};
     const safeHtml = doc.snapshot_html || '';
+    const frozenBranding = documentBranding.brandingFromSnapshot(doc);
     const roleLabel = (role) => {
         if (role === 'representative') return 'Representante legal';
         if (role === 'professional') return 'Profesional';
@@ -733,6 +744,17 @@ function buildPrintableHtml(documentRow) {
     h2 { font-size: 17px; margin: 0; }
     p, li { font-size: 14px; line-height: 1.65; }
     .content { margin-top: 0; }
+    .consent-clinic-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 0 0 24px; }
+    .consent-clinic-name { font-size: 13px; font-weight: 700; color: #475569; }
+    .consent-clinic-logos { display: flex; align-items: center; gap: 12px; }
+    .consent-clinic-logo-frame { display: inline-flex; align-items: center; justify-content: center; padding: 8px 12px; border-radius: 6px; background: #fff; }
+    .consent-clinic-logo-frame.on-dark { background: #111; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .consent-clinic-logo-frame img { display: block; width: 96px; height: 80px; object-fit: contain; }
+    .consent-clinic-footer { font-size: 10px; line-height: 1.5; color: #64748b; overflow-wrap: anywhere; }
+    .consent-custom-fields { margin: 24px 0; }
+    .consent-custom-fields dl { display: grid; gap: 16px; }
+    .consent-custom-fields dt { font-weight: 700; }
+    .consent-custom-fields dd { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
     .content h1, .content h2 { margin: 24px 0 10px; }
     /* The printable wrapper already renders the document title. This is a
        presentation rule only: signed snapshot_html and its hash stay intact. */
@@ -854,6 +876,7 @@ function buildPrintableHtml(documentRow) {
         </dl>
       </div>
     </header>
+    ${documentBranding.renderDocumentBrandingHtml(frozenBranding, 'header')}
     <h1>${escapeHtml(doc.title || 'Consentimiento')}</h1>
     <section class="content">${safeHtml}</section>
     ${signatureBlock}
@@ -861,6 +884,7 @@ function buildPrintableHtml(documentRow) {
     ${professionalSignatureBlock}
     ${revocationBlock}
     <footer>
+      ${documentBranding.renderDocumentBrandingHtml(frozenBranding, 'footer')}
       <div class="footer-meta">Documento ${escapeHtml(doc.public_id || doc.id)}. Hash: ${escapeHtml(doc.snapshot_hash || 'pendiente')}.</div>
       <div class="brand-lockup">${brandLogo}</div>
     </footer>
@@ -2334,8 +2358,11 @@ async function createPatientIntakePackage(identifier, options = {}) {
                 template_source: 'clinic', template,
                 version: { id: version.id, version: version.version, locale: version.locale,
                     title: version.title, body_json: version.body_json || null, variable_schema: version.variable_schema || null,
-                    ...(require('../lib/registration-privacy-template').schema(version.body_json) ? { body_html: version.body_html } : {}) },
+                    ...(require('../lib/registration-privacy-template').schema(version.body_json) || documentBlocks.versionBlocks(version, template)
+                        ? { body_html: version.body_html || '' } : {}) },
                 context, patient_flags: { is_minor: isMinorPatient(paciente), representatives: getRepresentativeSnapshot(paciente) },
+                document_branding: documentBranding.buildDocumentBranding(getPlain(clinicRow), {
+                    purpose: template.purpose, configuration: parseJsonObject(version.body_json).document_branding }),
                 clinical_policy: { ...policy, pdf_strategy: 'json_snapshot_printable_on_demand' },
                 generated_at: new Date().toISOString(),
             };
@@ -2520,10 +2547,13 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
                 locale: resolved.version.locale,
                 title,
                 body_json: resolved.version.body_json || null,
-                ...(require('../lib/registration-privacy-template').schema(resolved.version.body_json) ? { body_html: resolved.version.body_html } : {}),
+                ...(require('../lib/registration-privacy-template').schema(resolved.version.body_json) || documentBlocks.versionBlocks(resolved.version, resolved.template)
+                    ? { body_html: resolved.version.body_html || '' } : {}),
                 variable_schema: resolved.version.variable_schema || null,
             },
             context: documentContext,
+            document_branding: documentBranding.buildDocumentBranding(plainCita.clinica, {
+                purpose: resolved.template.purpose, configuration: parseJsonObject(resolved.version.body_json).document_branding }),
             patient_flags: {
                 is_minor: isMinorPatient(plainCita.paciente),
                 representatives: getRepresentativeSnapshot(plainCita.paciente),
@@ -3295,6 +3325,8 @@ function serializePublicPackage(packageRow) {
             ...documentCompletion.publicFields(doc),
             ...consentDocumentChoices.publicDocumentChoices(doc),
             ...consentDocumentPersonalData.publicDocumentPersonalData(doc),
+            ...documentBlocks.publicFields(doc),
+            document_branding: documentBranding.brandingFromSnapshot(doc),
         })),
     };
 }
@@ -3434,6 +3466,8 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}, o
     consentDocumentChoices.validateDocumentChoiceMap(payload, [plainDoc]);
     consentDocumentPersonalData.validateSnapshotMap(payload, [plainDoc]);
     consentDocumentPersonalData.assertReadyToSign(plainDoc, payload);
+    documentBlocks.validateAnswerMap(payload, [plainDoc]);
+    const blockAnswers = documentBlocks.answerEvidence(plainDoc, payload);
     const choiceEvidence = consentDocumentChoices.documentChoiceEvidence(plainDoc, payload);
     if (choiceEvidence) evidence.consent_choices = choiceEvidence;
     if (plainDoc.package) requireActiveConsentPackage(plainDoc.package);
@@ -3445,6 +3479,7 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}, o
     const snapshot = plainDoc.snapshot_json && typeof plainDoc.snapshot_json === 'object' ? plainDoc.snapshot_json : {};
     const nextSnapshot = {
         ...snapshot,
+        ...(blockAnswers ? { document_block_answers: blockAnswers } : {}),
         ...(choiceEvidence ? { integrity: { algorithm: consentDocumentChoices.CHOICE_HASH_ALGORITHM } } : {}),
         signature_evidence: evidence,
         signed_copy: {
@@ -3452,7 +3487,9 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}, o
             snapshot_hash_before_signature: plainDoc.snapshot_hash || null,
         },
     };
-    const signedHtml = consentDocumentChoices.appendSignedChoiceHtml(plainDoc.snapshot_html || '', plainDoc, choiceEvidence);
+    const signedHtml = documentBlocks.renderVersion(snapshot.version, snapshot.context,
+        { answers: blockAnswers?.answers || {}, choiceEvidence })
+        ?? consentDocumentChoices.appendSignedChoiceHtml(plainDoc.snapshot_html || '', plainDoc, choiceEvidence);
     const nextHash = hashRenderedSnapshot(nextSnapshot, signedHtml);
     const signedValues = {
         status: 'signed',
@@ -3462,7 +3499,7 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}, o
         channel: evidence.method === 'tablet_signature' ? 'tablet' : (plainDoc.channel || 'internal'),
         delivery_status: 'signed',
         snapshot_json: nextSnapshot,
-        ...(choiceEvidence ? { snapshot_html: signedHtml } : {}),
+        ...(choiceEvidence || documentBlocks.documentBlocks(plainDoc) ? { snapshot_html: signedHtml } : {}),
         snapshot_hash: nextHash,
     };
     const executeSignature = async transaction => {
@@ -3491,6 +3528,7 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}, o
         // Identity and guardian rules are checked again on the locked current
         // row. A second editor cannot change them while this signature commits.
         consentDocumentPersonalData.assertReadyToSign(locked, payload);
+        documentBlocks.answerEvidence(locked, payload);
         requireSignatureEvidence(evidence, locked);
         // A second device, revocation or countersignature may have changed the
         // document since it was displayed. The captured snapshot hash is the
@@ -3518,7 +3556,7 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}, o
         }, { transaction });
         if (reusableOptions) await supersedePendingReusableConsents({ ...reusableOptions, candidates, transaction });
         if (plainDoc.package_id) await refreshPackageCounts(plainDoc.package_id, transaction);
-        if (consentDocumentPersonalData.isIdentityDocument(plainDoc)) {
+        if (plainDoc.purpose === 'data_protection' && consentDocumentPersonalData.isIdentityDocument(plainDoc)) {
             await profileSync.autofillEmptyFromDocument({ db, documentId: plainDoc.id, transaction, anchorsLocked: true });
         }
     };
@@ -3680,11 +3718,13 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
     // Validate the whole selected package before recording its first signature.
     consentDocumentChoices.validateDocumentChoiceMap(payload, pending);
     consentDocumentPersonalData.validateSnapshotMap(payload, pending);
+    documentBlocks.validateAnswerMap(payload, pending);
     const evidence = normalizeSignatureEvidence(payload, requestMeta);
     for (const doc of pending) {
         requireSignatureEvidence(evidence, doc);
         consentDocumentChoices.documentChoiceEvidence(doc, payload);
         consentDocumentPersonalData.assertReadyToSign(doc, payload);
+        documentBlocks.answerEvidence(doc, payload);
         if (doc.expires_at && new Date(doc.expires_at).getTime() <= Date.now()) {
             const error = new Error('consent_document_expired');
             error.statusCode = 410;
@@ -3711,12 +3751,12 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
         }
         for (const doc of pending) {
             signed.push(await signConsentDocument(doc.public_id,
-                { ...consentDocumentPersonalData.payloadForDocument(doc, consentDocumentChoices.payloadForDocument(doc, payload)),
+                { ...documentBlocks.payloadForDocument(doc, consentDocumentPersonalData.payloadForDocument(doc, consentDocumentChoices.payloadForDocument(doc, payload))),
                     method: payload.method || `${token.channel || 'tablet'}_signature` }, requestMeta,
                 { transaction, ...(transaction ? { reusableCandidates: candidatesByDocument.get(doc.id), profileAnchorsLocked: true } : {}) }));
         }
     };
-    if (pending.some(doc => consentDocumentPersonalData.isIdentityDocument(doc))) {
+    if (pending.some(doc => consentDocumentPersonalData.isIdentityDocument(doc) || documentBlocks.documentBlocks(doc))) {
         await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, signSelected);
     } else await signSelected(null);
     const refreshed = await getPackageWithDocumentsById(packageRow.id);
@@ -3732,7 +3772,7 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
 async function completePublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
     const token = verifyPackageToken(tokenRaw);
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)
-        || Object.keys(payload).some(key => !['document_ids', 'document_snapshot_hashes', 'acknowledged'].includes(key))
+        || Object.keys(payload).some(key => !['document_ids', 'document_snapshot_hashes', 'document_block_answers', 'acknowledged'].includes(key))
         || payload.acknowledged !== true || !Array.isArray(payload.document_ids) || !payload.document_ids.length
         || payload.document_ids.length > 100 || payload.document_ids.some(id => !Number.isSafeInteger(id) || id <= 0)
         || new Set(payload.document_ids).size !== payload.document_ids.length) {
@@ -3756,6 +3796,7 @@ async function completePublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
             paciente_id: packageRow.paciente_id, clinica_id: packageRow.clinica_id }, order: [['id', 'ASC']],
             transaction, lock: transaction.LOCK.UPDATE });
         if (docs.length !== payload.document_ids.length) throw Object.assign(new Error('consent_document_completion_scope_invalid'), { statusCode: 404 });
+        documentBlocks.validateAnswerMap(payload, docs);
         const updates = [];
         for (const row of docs) {
             const doc = getPlain(row);
@@ -3763,9 +3804,15 @@ async function completePublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
             if (documentCompletion.isCompleted(doc)) {
                 const previous = doc.snapshot_json.completion_evidence.snapshot_hash_before_completion;
                 if (![doc.snapshot_hash, previous].includes(hashes[String(doc.id)])) throw Object.assign(new Error('consent_document_completion_changed'), { statusCode: 409 });
+                const savedAnswers = doc.snapshot_json.document_block_answers?.answers;
+                const repeatedAnswers = payload.document_block_answers?.[String(doc.id)]?.answers;
+                if ((savedAnswers || repeatedAnswers) && consentDocumentChoices.choiceSnapshotHash({ answers: savedAnswers }, '')
+                    !== consentDocumentChoices.choiceSnapshotHash({ answers: repeatedAnswers }, '')) {
+                    throw Object.assign(new Error('consent_document_already_closed'), { statusCode: 409 });
+                }
                 continue; // The same double-click is an idempotent read.
             }
-            updates.push({ doc, values: documentCompletion.completedValues(doc, payload, requestMeta) });
+            updates.push({ doc, values: documentCompletion.completedValues(doc, documentBlocks.payloadForDocument(doc, payload), requestMeta) });
         }
         // Validate every selected document before the first write. Any failure
         // or concurrent change rolls back documents, counts AND delivery events.
