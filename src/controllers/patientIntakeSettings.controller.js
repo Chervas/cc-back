@@ -2,8 +2,14 @@
 const db = require('../../models');
 const { assertUserCanAccessFeature } = require('../lib/access-policy');
 const config = require('../lib/registration-privacy-configuration');
+const documentBranding = require('../lib/consent-document-branding');
 const fail = (code, statusCode = 400) => Object.assign(new Error(code), { code, statusCode });
 const plain = row => row?.toJSON ? row.toJSON() : row;
+function previewBranding(clinic) {
+  const baseUrl = process.env.FRONTEND_PUBLIC_URL || 'https://crm.clinicaclick.com';
+  return { document_branding: documentBranding.buildDocumentBranding(clinic, { purpose: 'data_protection', baseUrl }),
+    additional_document_branding: documentBranding.buildDocumentBranding(clinic, { purpose: 'other', baseUrl }) };
+}
 async function authorize(req, feature) {
   const actorId = Number(req.userData?.userId), clinicId = Number(req.params.id);
   if (!Number.isSafeInteger(actorId) || actorId <= 0) throw fail('auth_failed', 401);
@@ -30,6 +36,7 @@ async function read(clinicId, transaction) {
   if (config.policy(clinic).legacy && !settings.privacy_template_id) settings.privacy_template_id =
     templates.find(row => row.catalog_key === config.BS_KEY && row.status === 'active' && row.is_default)?.id || null;
   return { clinic_id: clinicId, patient_intake: settings, version: config.version(clinic), standard_template_available: true,
+    ...previewBranding(clinic),
     templates: templates.map(row => { const latest = versions.find(version => Number(version.clinic_template_id) === Number(row.id));
       return { id: row.id, name: row.name, title: latest?.title || row.name, status: row.status, purpose: row.purpose,
         version_status: latest?.status || null, published: versions.some(version => Number(version.clinic_template_id) === Number(row.id) && version.status === 'published') }; }) };
@@ -107,7 +114,7 @@ exports.standardDraft = async (req, res, next) => { try {
   const draft = await db.sequelize.transaction({ readOnly: true, isolationLevel: 'REPEATABLE READ' }, async transaction => {
     const clinic = plain(await db.Clinica.findByPk(clinicId, { transaction }));
     if (!clinic) throw fail('clinic_not_found', 404);
-    return require('../lib/registration-privacy-template').standardDraft(clinic);
+    return { ...require('../lib/registration-privacy-template').standardDraft(clinic), ...previewBranding(clinic) };
   });
   return res.json(draft);
 } catch (error) { return reply(error, res, next); } };

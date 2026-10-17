@@ -43,7 +43,11 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     await expect('GET', route, undefined, outsider, 403);
     const countsBeforeDraft = await f.fingerprint(), versionBeforeDraft = setting.version;
     const draftBody = await expect('GET', `${route}/standard-template-draft`, undefined, owner, 200);
-    assert.deepEqual(draftBody, registration.standardDraft({ id_clinica: clinicId }));
+    const { document_branding: privacyBranding, additional_document_branding: additionalBranding, ...legalDraft } = draftBody;
+    assert.deepEqual(legalDraft, registration.standardDraft({ id_clinica: clinicId }), 'Adding presentation metadata does not alter legal source');
+    assert.deepEqual(privacyBranding, setting.document_branding);
+    assert.deepEqual(additionalBranding, setting.additional_document_branding);
+    assert.equal(privacyBranding.schema_version, 'cc-document-branding/v1');
     assert.equal((await f.fingerprint()).sha256, countsBeforeDraft.sha256, 'Opening the complete source draft performs no write');
     assert.equal((await expect('GET', route, undefined, owner, 200)).version, versionBeforeDraft, 'No CAS/configuration version changes on editor open');
     await expect('GET', `${route}/standard-template-draft`, undefined, undefined, 401);
