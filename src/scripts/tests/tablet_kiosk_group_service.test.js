@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const servicePath = path.resolve(__dirname, '../../services/consentimientos.service.js');
 function harness(granted = null, packageClinic = 66) {
-    const calls = [], Op = { in: Symbol('in'), or: Symbol('or'), gt: Symbol('gt') };
+    const calls = [], Op = { in: Symbol('in'), or: Symbol('or'), gt: Symbol('gt'), and: Symbol('and') };
     const kiosk = { id: 31, clinic_id: 72, consent_group_id: granted, update: async () => {} };
     const pack = { id: 9, public_id: 'synthetic', clinica_id: packageClinic, status: 'pending', documents: [{ id: 4, status: 'sent' }] };
     const db = { Sequelize: { Op }, ClinicTabletKiosk: { findOne: async () => kiosk },
@@ -28,6 +28,11 @@ test('listing default is own-clinic; explicitly opted in expands consents but ne
     for (const grant of [null, 29]) {
         const h = harness(grant); await h.service.listTabletKioskPackages('synthetic');
         assert.deepEqual(Array.from(h.calls[0][1].where.clinica_id[h.Op.in]), grant ? [72, 66] : [72]);
+        assert.deepEqual(Array.from(h.calls[0][1].where.status[h.Op.in]), ['pending', 'sent', 'viewed', 'signed', 'completed']);
+        const predicate = h.calls[0][1].where[h.Op.and].val;
+        assert(predicate.includes('EXISTS (SELECT 1 FROM PatientConsentDocuments'));
+        assert(predicate.includes('kiosk_pending_document.revoked_at IS NULL'));
+        assert(predicate.includes('kiosk_pending_document.expires_at > UTC_TIMESTAMP()'));
         assert.equal(h.calls[1][1].clinicId, 72);
         await h.service.createTabletBudgetSignatureSessionForKiosk(1, 'synthetic');
         assert.equal(h.calls[2][1].clinicId, 72);

@@ -3075,7 +3075,10 @@ function serializeKioskPackage(packageRow) {
     const plain = getPlain(packageRow);
     const documents = Array.isArray(plain.documents) ? plain.documents : [];
     const patientName = [plain.paciente?.nombre, plain.paciente?.apellidos].filter(Boolean).join(' ').trim();
-    const pendingDocuments = documents.filter((doc) => DOCUMENT_PENDING_STATUSES.has(doc.status));
+    const pendingDocuments = documents.filter((doc) => DOCUMENT_PENDING_STATUSES.has(doc.status)
+        && Number(doc.package_id) === Number(plain.id) && Number(doc.paciente_id) === Number(plain.paciente_id)
+        && Number(doc.clinica_id) === Number(plain.clinica_id) && !doc.signed_at && !doc.revoked_at
+        && (!doc.expires_at || new Date(doc.expires_at).getTime() > Date.now()));
     const blockingPending = pendingDocuments.filter((doc) => doc.required && doc.blocking_policy === 'hard').length;
     return {
         id: plain.id,
@@ -3147,11 +3150,33 @@ async function listTabletKioskPackages(tokenRaw, filters = {}) {
     const packageRows = await db.ConsentSignaturePackage.findAll({
         where: {
             clinica_id: { [Op.in]: clinicIds },
-            status: { [Op.in]: ['pending', 'sent', 'viewed'] },
+            status: { [Op.in]: ['pending', 'sent', 'viewed', 'signed', 'completed'] },
             [Op.or]: [
                 { expires_at: null },
                 { expires_at: { [Op.gt]: new Date() } },
             ],
+            // Required documents may have closed the parent while an optional
+            // signature/acknowledgement remains pending. Select live children
+            // in SQL BEFORE LIMIT: fully resolved parents must not starve the
+            // queue, and cancelled/revoked/expired children never reopen it.
+            [Op.and]: require('sequelize').literal(`(
+                EXISTS (SELECT 1 FROM PatientConsentDocuments AS kiosk_pending_document
+                    WHERE kiosk_pending_document.package_id = ConsentSignaturePackage.id
+                    AND kiosk_pending_document.paciente_id = ConsentSignaturePackage.paciente_id
+                    AND kiosk_pending_document.clinica_id = ConsentSignaturePackage.clinica_id
+                    AND kiosk_pending_document.status IN ('pending','sent','viewed')
+                    AND kiosk_pending_document.signed_at IS NULL AND kiosk_pending_document.revoked_at IS NULL
+                    AND (kiosk_pending_document.expires_at IS NULL OR kiosk_pending_document.expires_at > UTC_TIMESTAMP()))
+                OR EXISTS (SELECT 1 FROM PatientIntakeRequests AS kiosk_pending_intake
+                    INNER JOIN Clinicas AS kiosk_intake_clinic ON kiosk_intake_clinic.id_clinica = kiosk_pending_intake.clinic_id
+                    WHERE kiosk_pending_intake.package_id = ConsentSignaturePackage.id
+                    AND kiosk_pending_intake.patient_id = ConsentSignaturePackage.paciente_id
+                    AND kiosk_pending_intake.clinic_id = ConsentSignaturePackage.clinica_id
+                    AND kiosk_pending_intake.status = 'pending'
+                    AND (JSON_TYPE(JSON_EXTRACT(kiosk_intake_clinic.configuracion, '$.patient_intake.medical_questionnaire_enabled')) IS NULL
+                        OR JSON_TYPE(JSON_EXTRACT(kiosk_intake_clinic.configuracion, '$.patient_intake.medical_questionnaire_enabled')) <> 'BOOLEAN'
+                        OR JSON_UNQUOTE(JSON_EXTRACT(kiosk_intake_clinic.configuracion, '$.patient_intake.medical_questionnaire_enabled')) <> 'false'))
+            )`),
         },
         include: [
             { model: db.PatientConsentDocument, as: 'documents', required: false },
