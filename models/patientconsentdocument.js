@@ -74,7 +74,7 @@ module.exports = (sequelize, DataTypes) => {
       defaultValue: 'clinical',
     },
     status: {
-      type: DataTypes.ENUM('pending', 'sent', 'viewed', 'signed', 'rejected', 'revoked', 'expired', 'cancelled', 'superseded', 'voided'),
+      type: DataTypes.ENUM('pending', 'sent', 'viewed', 'signed', 'rejected', 'revoked', 'expired', 'cancelled', 'superseded', 'voided', 'completed'),
       allowNull: false,
       defaultValue: 'pending',
     },

@@ -8,6 +8,7 @@ const config = require('../lib/registration-privacy-configuration');
 const privacy = require('./appointmentPrivacyEligibility.service');
 const { reusableChoiceDocument } = require('../lib/patient-intake-consents');
 const { getConsentChoiceForm } = require('../lib/consent-document-choices');
+const completion = require('../lib/consent-document-completion');
 const plain = row => row?.toJSON ? row.toJSON() : row;
 const fail = (code, message = code, statusCode = 409) => Object.assign(new Error(message), { code, statusCode });
 const optionalPurpose = purpose => ['commercial_communications', 'marketing_image'].includes(purpose);
@@ -53,7 +54,7 @@ async function registrationDocuments({ db, appointment, transaction, now = new D
     throw fail('intake_additional_documents_review_required');
   }
   const documents = (await db.PatientConsentDocument.findAll({ where: { paciente_id: patientId, clinica_id: clinicId,
-    clinic_template_id: { [Op.in]: ids }, revoked_at: null, status: { [Op.in]: ['pending', 'sent', 'viewed', 'signed'] } },
+    clinic_template_id: { [Op.in]: ids }, revoked_at: null, status: { [Op.in]: ['pending', 'sent', 'viewed', 'signed', 'completed'] } },
     order: [['id', 'DESC']], transaction, ...shared, limit: ids.length * 101 })).map(plain);
   if (documents.length >= ids.length * 101 || ids.some(id => documents.filter(row => Number(row.clinic_template_id) === id).length > 100)) {
     throw fail('intake_additional_documents_review_required');
@@ -69,6 +70,7 @@ async function registrationDocuments({ db, appointment, transaction, now = new D
     const template = templates.find(row => Number(row.id) === Number(entry.template_id));
     const version = versions.find(row => Number(row.clinic_template_id) === Number(template.id));
     if (!version || !String(version.body_html || '').trim()) throw fail('intake_additional_document_unavailable');
+    const completionPolicy = completion.policy(version, template);
     let form;
     try { form = getConsentChoiceForm({ snapshot_json: { version } }); }
     catch { throw fail('intake_additional_document_unavailable'); }
@@ -78,13 +80,15 @@ async function registrationDocuments({ db, appointment, transaction, now = new D
       && (!doc.expires_at || new Date(doc.expires_at) > now)
       && (doc.status !== 'signed' || require('./appointmentConsentEligibility.service').isCurrentSignedDocument(doc, template, now))
       && reusableChoiceDocument(doc, template, version, form, now));
-    const doc = candidates.find(row => row.status === 'signed') || candidates.find(row => activePackage(packages.find(pkg => Number(pkg.id) === Number(row.package_id)), now));
+    const doc = candidates.find(row => row.status === 'signed' || completion.isCompleted(row, now))
+      || candidates.find(row => ['pending', 'sent', 'viewed'].includes(row.status) && activePackage(packages.find(pkg => Number(pkg.id) === Number(row.package_id)), now));
     const item = { template_id: Number(template.id), title: version.title || template.name,
       required: entry.required && !optionalPurpose(template.purpose), state: 'not_requested',
+      completion_mode: completionPolicy ? 'acknowledge' : 'signature',
       ...(optionalPurpose(template.purpose) ? { purpose: template.purpose } : {}) };
     if (doc) {
       const delivery = deliveries.find(row => Number(row.patient_consent_document_id) === Number(doc.id));
-      item.state = doc.status === 'signed' ? 'signed' : doc.status === 'viewed' || delivery?.status === 'viewed' ? 'viewed'
+      item.state = doc.status === 'completed' ? 'completed' : doc.status === 'signed' ? 'signed' : doc.status === 'viewed' || delivery?.status === 'viewed' ? 'viewed'
         : doc.status === 'sent' || delivery ? 'sent' : 'pending';
       item.document_id = Number(doc.id); item.package_id = Number(doc.package_id) || null;
     }
@@ -95,7 +99,7 @@ async function registrationDocuments({ db, appointment, transaction, now = new D
 
 async function assertRegistrationDocumentsBeforeStart(options) {
   const result = await registrationDocuments({ ...options, lock: true, requiredOnly: true });
-  const missing = result.required_before_first_care && result.items.filter(row => row.required && row.state !== 'signed');
+  const missing = result.required_before_first_care && result.items.filter(row => row.required && !['signed', 'completed'].includes(row.state));
   if (missing?.length) {
     const error = fail('appointment_intake_documents_required', 'Antes de iniciar la primera cita, solicita desde recepción los documentos de alta obligatorios pendientes.');
     error.details = { action: 'prepare_registration_documents', template_ids: missing.map(row => row.template_id), blocking_count: missing.length };

@@ -8,6 +8,11 @@ const plain = value => value?.toJSON ? value.toJSON() : value;
 const object = value => { if (typeof value === 'string') { try { return JSON.parse(value); } catch { return {}; } } return value || {}; };
 
 function reusableChoiceDocument(document, template, version, form, now) {
+  if (plain(document)?.status === 'completed') {
+    const row = plain(document), frozen = object(row.snapshot_json);
+    return Number(frozen.template?.id) === Number(template.id) && Number(frozen.template?.clinic_id) === Number(template.clinic_id)
+      && Number(frozen.version?.id) === Number(version.id) && require('./consent-document-completion').isCompleted(row, now);
+  }
   if (!form) return true; // Preserve the historical non-interactive contract.
   try {
     const row = plain(document), frozen = object(row.snapshot_json);
@@ -56,7 +61,7 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
     if ([...extraById.keys()].some(id => !templates.some(row => Number(row.id) === id))) throw error('intake_additional_documents_invalid', 409);
     templates.sort((a, b) => (extraById.get(Number(a.id))?.sort_order ?? -1) - (extraById.get(Number(b.id))?.sort_order ?? -1));
     const prepared = [], reused = [], missing = [], currentPackageIds = [];
-    let considered = 0, signed = 0, paperCount = 0;
+    let considered = 0, signed = 0, completed = 0, paperCount = 0;
     for (const template of templates) {
       // The editable questionnaire already captures these answers separately;
       // never ask the patient to sign the old unfilled medical questionnaire.
@@ -68,6 +73,7 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
         order: [['version', 'DESC'], ['id', 'DESC']], transaction,
       });
       if (!version || !String(version.body_html || '').trim()) { missing.push(template.id); continue; }
+      require('./consent-document-completion').policy(plain(version), plain(template));
       const form = getConsentChoiceForm({ snapshot_json: { version: plain(version) } });
       const privacy = require('../services/appointmentPrivacyEligibility.service');
       const paper = require('./registration-privacy-paper');
@@ -80,7 +86,7 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       }
       let document = await db.PatientConsentDocument.findOne({
         where: { paciente_id: patientId, clinica_id: clinicId, clinic_template_id: template.id,
-          clinic_template_version_id: version.id, status: { [Op.in]: ['pending', 'sent', 'viewed', 'signed'] },
+          clinic_template_version_id: version.id, status: { [Op.in]: ['pending', 'sent', 'viewed', 'signed', 'completed'] },
           [Op.or]: [{ expires_at: null }, { expires_at: { [Op.gt]: now } }] },
         order: [['id', 'DESC']], transaction,
       });
@@ -120,18 +126,20 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
         // Reject a hidden legacy questionnaire as well as extra documents,
         // even when it is temporarily disabled in clinic settings: a later
         // reactivation must not change what this independent action selected.
-        const hasQuestionnaire = independentSelection && document.status !== 'signed' && existingPackage
+        const closed = ['signed', 'completed'].includes(document.status);
+        const hasQuestionnaire = independentSelection && !closed && existingPackage
           && await db.PatientIntakeRequest.findOne({ where: { package_id: existingPackage.id }, transaction });
-        const packageDocuments = independentSelection && existingPackage && document.status !== 'signed'
+        const packageDocuments = independentSelection && existingPackage && !closed
           ? await db.PatientConsentDocument.findAll({ where: { package_id: existingPackage.id }, attributes: ['id'], transaction, limit: 2 }) : null;
-        const independent = !independentSelection || document.status === 'signed'
+        const independent = !independentSelection || closed
           || packageDocuments?.length === 1 && Number(packageDocuments[0].id) === Number(document.id);
         const available = existingPackage && independent && !hasQuestionnaire && !['cancelled', 'expired'].includes(existingPackage.status)
           && (!existingPackage.expires_at || new Date(existingPackage.expires_at) > now);
-        if (document.status === 'signed' || available) {
+        if (closed || available) {
           reused.push(document.id);
           if (document.status === 'signed') signed++;
-          if (available && (!independentSelection || document.status !== 'signed')) currentPackageIds.push(document.package_id);
+          if (document.status === 'completed') completed++;
+          if (available && (!independentSelection || !closed)) currentPackageIds.push(document.package_id);
           continue;
         }
       }
@@ -141,7 +149,7 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
     }
     if (!templates.length || considered === 0 || missing.length) throw error('intake_published_templates_required', 409);
     if (!prepared.length) return { package_id: null, created_count: 0, existing_count: reused.length, current_package_ids: [...new Set(currentPackageIds)],
-      privacy_signed: signed === considered, privacy_satisfied: signed + paperCount === considered,
+      privacy_signed: signed === considered, privacy_satisfied: signed + completed + paperCount === considered,
       privacy_on_paper: paperCount > 0, paper_count: paperCount };
     // Enforce at actual issue as well as settings-save: a published default
     // can be prepared directly before registration has been configured. Never

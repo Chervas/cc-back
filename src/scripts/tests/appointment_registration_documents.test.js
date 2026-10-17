@@ -24,7 +24,7 @@ const signed = { id: 4, package_id: 3, paciente_id: 8, clinica_id: 7, clinic_tem
   purpose: 'other', status: 'signed', signed_at: '2026-10-16T10:00:00Z' };
 test('read-only rows show not requested; exact first-care hard requirement blocks without writes', async () => {
   const f = fixture(), result = await f.run();
-  assert.deepEqual(result.items, [{ template_id: 6, title: 'Documento adicional', required: true, state: 'not_requested' }]);
+  assert.deepEqual(result.items, [{ template_id: 6, title: 'Documento adicional', required: true, state: 'not_requested', completion_mode: 'signature' }]);
   assert.equal(result.required_before_first_care, true);
   await assert.rejects(f.gate(), error => error.code === 'appointment_intake_documents_required'
     && error.details.action === 'prepare_registration_documents' && error.details.template_ids[0] === 6);

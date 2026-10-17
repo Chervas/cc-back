@@ -8,6 +8,7 @@ const intakeController = require('../controllers/patientIntake.controller');
 
 router.get('/public/:token', consentimientosController.getPublicPackage);
 router.post('/public/:token/sign', consentimientosController.signPublicPackage);
+router.post('/public/:token/complete', consentimientosController.completePublicPackage);
 router.post('/public/:token/documents/:id/personal-data', consentimientosController.updatePublicDocumentPersonalData);
 router.post('/public/:token/intake', intakeController.submit);
 router.post('/tablet/login', consentimientosController.loginTabletKiosk);

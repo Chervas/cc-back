@@ -46,7 +46,7 @@ module.exports = (sequelize, DataTypes) => {
     cita_id: { type: DataTypes.INTEGER, allowNull: true },
     tratamiento_id: { type: DataTypes.INTEGER, allowNull: true },
     status: {
-      type: DataTypes.ENUM('draft', 'pending', 'sent', 'viewed', 'signed', 'expired', 'cancelled'),
+      type: DataTypes.ENUM('draft', 'pending', 'sent', 'viewed', 'signed', 'expired', 'cancelled', 'completed'),
       allowNull: false,
       defaultValue: 'pending',
     },

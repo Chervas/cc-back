@@ -535,6 +535,14 @@ exports.signPublicPackage = asyncHandler(async (req, res) => {
     }
 });
 
+exports.completePublicPackage = asyncHandler(async (req, res) => {
+    try {
+        return res.json(await consentimientosService.completePublicPackage(req.params.token, req.body || {}, {
+            ip: req.ip, userAgent: req.get('user-agent'),
+        }));
+    } catch (error) { return sendError(res, error); }
+});
+
 exports.updatePublicDocumentPersonalData = asyncHandler(async (req, res) => {
     try {
         const item = await consentimientosService.updatePublicDocumentPersonalData(req.params.token, req.params.id, req.body || {}, {
