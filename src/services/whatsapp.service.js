@@ -638,7 +638,10 @@ class WhatsAppService {
 
     async assertPrivacyCommercialAllowed(payload, clinicConfig = {}, message = null) {
         const clinicId = Number(clinicConfig.clinicId || clinicConfig.clinicaId);
-        if (![66, 72].includes(clinicId)) return;
+        // The versioned registration form is available to every clinic. A
+        // verified commercial refusal must reach this last transport boundary
+        // too; lack of a document/answer still does not create a refusal.
+        if (!Number.isSafeInteger(clinicId) || clinicId <= 0) return;
         // Classify explicit intent and the actual approved template category,
         // never media filenames, folders or examples containing "reviews".
         let commercial = require('./marketingOptOut.service').isMarketingOutboundMessage?.(message) === true;

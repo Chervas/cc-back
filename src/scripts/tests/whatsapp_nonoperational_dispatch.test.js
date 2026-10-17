@@ -57,8 +57,9 @@ function fixture({ clinicId = 66, broker = false, template = null, catalog = nul
     '../lib/whatsappAppointmentEligibility': eligibility, '../lib/whatsapp-template-workflow': workflow,
     './googleLocalLinks.service': localLinksModule.exports,
     './marketingOptOut.service': { isMarketingOutboundMessage: value => value?.metadata?.communication_scope === 'marketing' },
-    '../lib/bs-privacy-commercial-preferences': { assertCommercialAllowed: async () => {
+    '../lib/bs-privacy-commercial-preferences': { assertCommercialAllowed: async options => {
       state.privacyChecks++;
+      state.reads.push(['privacy_commercial', options]);
       if (commercialRefused) throw Object.assign(Error('privacy_commercial_communications_restricted'), {
         code: 'AUTOMATION_COMMUNICATIONS_RESTRICTED', statusCode: 409, retryable: false,
       });
@@ -145,6 +146,44 @@ test('signed commercial refusal is rechecked before both transports; actual mark
         catalog: { id: 100, category: 'MARKETING', family_key } });
       await assert.rejects(commercial.send(templatePayload()), error => error.code === 'AUTOMATION_COMMUNICATIONS_RESTRICTED');
       assert.equal(commercial.state.graph + commercial.state.broker, 0);
+    }
+  }
+});
+
+test('standard registration clinics: manual MARKETING templates and stored marketing intent respect verified refusal before either transport', async () => {
+  for (const clinicId of [88, 123]) for (const broker of [false, true]) {
+    const variants = [
+      { template: { id: 8, category: 'MARKETING' } },
+      { template: { id: 8, category: 'UTILITY', catalog_template_id: 100 },
+        catalog: { id: 100, category: 'MARKETING', family_key: 'generic_promotional_campaign' } },
+      { template: { id: 8, category: 'UTILITY' },
+        message: { id: 10, conversation_id: 11, metadata: { communication_scope: 'marketing' } } },
+    ];
+    for (const variant of variants) {
+      const f = fixture({ clinicId, broker, commercialRefused: true, ...variant });
+      await assert.rejects(f.send(templatePayload()), error => error.code === 'AUTOMATION_COMMUNICATIONS_RESTRICTED' && error.retryable === false);
+      assert.equal(f.state.privacyChecks, 1); assert.equal(f.state.graph + f.state.broker, 0);
+      const check = f.state.reads.find(([kind]) => kind === 'privacy_commercial')[1];
+      assert.deepEqual(Array.from(check.clinicIds), [clinicId]); assert.equal(check.phone, '34000000001');
+      const lookup = f.state.reads.find(([kind]) => kind === 'template')[1];
+      assert.equal(lookup.where.waba_id, '501'); assert.equal(lookup.where.name, 'custom_v17'); assert.equal(lookup.where.language, 'es');
+    }
+    const manualText = fixture({ clinicId, broker, commercialRefused: true,
+      message: { id: 10, conversation_id: 11, metadata: { communication_scope: 'marketing' } } });
+    await assert.rejects(manualText.send(plainPayload()), error => error.code === 'AUTOMATION_COMMUNICATIONS_RESTRICTED');
+    assert.equal(manualText.state.graph + manualText.state.broker, 0);
+
+    const unknown = fixture({ clinicId, broker, commercialRefused: false, template: { id: 8, category: 'MARKETING' } });
+    await unknown.send(templatePayload());
+    assert.equal(unknown.state.privacyChecks, 1); assert.equal(unknown.state.graph + unknown.state.broker, 1,
+      'No verified refusal is not a new generic block or an implicit opt-in record');
+    const operational = fixture({ clinicId, broker, commercialRefused: true, template: { id: 8, category: 'UTILITY' } });
+    await operational.send(templatePayload());
+    assert.equal(operational.state.privacyChecks, 0); assert.equal(operational.state.graph + operational.state.broker, 1);
+    for (const [actual, catalogCategory] of [['MARKETING', 'UTILITY'], ['UTILITY', 'MARKETING']]) {
+      const care = fixture({ clinicId, broker, commercialRefused: true, template: { id: 8, category: actual, catalog_template_id: 100 },
+        catalog: { id: 100, category: catalogCategory, family_key: 'clinicaclick_recordatorio_dia_antes_sin_respuesta' } });
+      await care.send(templatePayload()); assert.equal(care.state.privacyChecks, 0); assert.equal(care.state.graph + care.state.broker, 1);
     }
   }
 });
