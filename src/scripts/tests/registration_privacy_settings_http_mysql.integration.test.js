@@ -173,8 +173,19 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     const mixedBefore = JSON.stringify(await db.PatientConsentDocument.findAll({ where: { package_id: mixed.package_id }, raw: true }));
     const laterStart = new Date(new Date(f.body().inicio).getTime() + 3 * 3600000).toISOString();
     const mixedBooking = await expect('POST', '/api/citas', f.body({ paciente: { id_paciente: mixedPatient }, inicio: laterStart }), owner, 201);
+    const privacyOnlyRoute = `/api/consentimientos/appointments/${mixedBooking.id_cita}/privacy-package`;
+    const independentPrivacy = await expect('POST', privacyOnlyRoute, {}, owner, 201);
+    assert.equal(independentPrivacy.created_count, 1); assert.notEqual(independentPrivacy.package_id, mixed.package_id);
+    const privacyDocs = await db.PatientConsentDocument.findAll({ where: { package_id: independentPrivacy.package_id }, raw: true });
+    assert.equal(privacyDocs.length, 1); assert.equal(privacyDocs[0].clinic_template_id, template.id);
+    assert.equal(privacyDocs[0].purpose, 'data_protection');
+    const privacyFingerprint = (await f.fingerprint()).sha256;
+    const repeatedPrivacy = await expect('POST', privacyOnlyRoute, {}, owner, 200);
+    assert.deepEqual(repeatedPrivacy.current_package_ids, [independentPrivacy.package_id]);
+    assert.equal((await f.fingerprint()).sha256, privacyFingerprint);
     const independent = await expect('POST', `/api/consentimientos/appointments/${mixedBooking.id_cita}/registration-documents/${clinical.id}/package`, {}, owner, 201);
     assert.notEqual(independent.package_id, mixed.package_id);
+    assert.notEqual(independent.package_id, independentPrivacy.package_id);
     const independentDocs = await db.PatientConsentDocument.findAll({ where: { package_id: independent.package_id }, raw: true });
     assert.equal(independentDocs.length, 1); assert.equal(independentDocs[0].clinic_template_id, clinical.id);
     assert.equal(JSON.stringify(await db.PatientConsentDocument.findAll({ where: { package_id: mixed.package_id }, raw: true })), mixedBefore);
@@ -183,7 +194,15 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     assert.equal((await f.fingerprint()).sha256, independentFingerprint);
     assert.equal(await db.PatientIntakeRequest.count(), 0);
     assert.equal(f.externalFetchAttempts, 0);
-    owned.report.checks.push('native explicit extra never reopens mixed pending LOPD package: creates one independent document, preserves every old row, repeats without writes; zero questionnaire/provider requests');
+    const beforeSignedPrivacy = (await f.fingerprint()).sha256;
+    const alreadySignedPrivacy = await expect('POST', `/api/consentimientos/appointments/${appointmentId}/privacy-package`, {}, owner, 200);
+    assert.equal(alreadySignedPrivacy.created_count, 0); assert.equal(alreadySignedPrivacy.privacy_signed, true);
+    assert.deepEqual(alreadySignedPrivacy.current_package_ids, [], 'A signed selected LOPD never reopens any previous package');
+    const alreadySignedExtra = await expect('POST', `${docsRoute}/${clinical.id}/package`, {}, owner, 200);
+    assert.equal(alreadySignedExtra.created_count, 0); assert.deepEqual(alreadySignedExtra.current_package_ids, []);
+    assert.equal((await f.fingerprint()).sha256, beforeSignedPrivacy);
+    assert.equal(JSON.stringify(await db.PatientConsentDocument.findAll({ where: { package_id: mixed.package_id }, raw: true })), mixedBefore);
+    owned.report.checks.push('native LOPD-only and explicit extra never reopen mixed pending packages: each creates one independent selected document, preserves every old row, repeats without writes; already signed selections return no package IDs; zero questionnaire/provider requests');
 
     const paperPatient = 92602;
     await db.Paciente.create({ id_paciente: paperPatient, clinica_id: clinicId, public_id: 'pac_generic_paper_qa', nombre: 'Papel', apellidos: 'Ficticio',

@@ -115,18 +115,20 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
           ? await db.ConsentSignaturePackage.findByPk(document.package_id, { transaction }) : null;
         const hasQuestionnaire = questionnaireEnabled && privacyOnly && document.status !== 'signed' && existingPackage
           && await db.PatientIntakeRequest.findOne({ where: { package_id: existingPackage.id }, transaction });
-        // A per-row reception action must never reopen a package containing
-        // LOPD or other additional documents. Keep its selection independent.
-        const packageDocuments = additionalTemplateId !== null && existingPackage && document.status !== 'signed'
+        // Both the LOPD button and a per-row additional document action must
+        // remain independent, even if an old pending package bundled them.
+        // The legacy explicit full-intake action preserves its old contract.
+        const independentSelection = privacyOnly || additionalTemplateId !== null;
+        const packageDocuments = independentSelection && existingPackage && document.status !== 'signed'
           ? await db.PatientConsentDocument.findAll({ where: { package_id: existingPackage.id }, attributes: ['id'], transaction, limit: 2 }) : null;
-        const independent = additionalTemplateId === null || document.status === 'signed'
+        const independent = !independentSelection || document.status === 'signed'
           || packageDocuments?.length === 1 && Number(packageDocuments[0].id) === Number(document.id);
         const available = existingPackage && independent && !hasQuestionnaire && !['cancelled', 'expired'].includes(existingPackage.status)
           && (!existingPackage.expires_at || new Date(existingPackage.expires_at) > now);
         if (document.status === 'signed' || available) {
           reused.push(document.id);
           if (document.status === 'signed') signed++;
-          if (available && (additionalTemplateId === null || document.status !== 'signed')) currentPackageIds.push(document.package_id);
+          if (available && (!independentSelection || document.status !== 'signed')) currentPackageIds.push(document.package_id);
           continue;
         }
       }
