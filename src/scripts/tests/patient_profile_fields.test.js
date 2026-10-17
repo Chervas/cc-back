@@ -80,6 +80,7 @@ function controllerFixture({ denied = false, sensitive = true, row = {} } = {}) 
     '../lib/name': require('../../lib/name'),
     '../lib/patient-language': require('../../lib/patient-language'),
     '../lib/patient-profile-fields': profile,
+    '../lib/patient-declared-origin': require('../../lib/patient-declared-origin'),
     '../lib/access-policy': {
       async assertUserCanAccessFeature() {
         if (denied) throw Object.assign(new Error('access_policy_forbidden'), { status: 403, details: { feature_key: 'patients.edit' } });
@@ -252,6 +253,17 @@ test('PATCH omission preserves all new profile values and explicit null clears o
   assert.equal((await f.invoke('updatePaciente', { notas_medicas: null, tiene_hijos: null })).status, 200);
   assert.equal(f.patient.notas_medicas, null); assert.equal(f.patient.tiene_hijos, null);
   assert.equal(f.patient.pais_origen, 'PT'); assert.equal(f.patient.antecedentes, 'Antecedente previo');
+});
+
+test('declared acquisition source uses stable explicit codes without overwriting legacy or platform provenance', async () => {
+  const f = controllerFixture({ row: { como_nos_conocio: 'recomendación', procedencia: 42 } });
+  assert.equal((await f.invoke('updatePaciente', { como_nos_conocio_codigo: 'family_friend' })).status, 200);
+  assert.equal(f.patient.como_nos_conocio_codigo, 'family_friend'); assert.equal(f.patient.como_nos_conocio, 'recomendación'); assert.equal(f.patient.procedencia, 42);
+  const before = f.state.saves;
+  assert.equal((await f.invoke('updatePaciente', { nombre: 'Must not save', como_nos_conocio_codigo: 'invented_campaign' })).status, 400);
+  assert.equal(f.state.saves, before); assert.equal(f.patient.nombre, 'Paciente ficticio');
+  assert.equal((await f.invoke('createPaciente', { nombre: 'Paciente nuevo', clinica_id: 71, email: 'fictitious@example.invalid', como_nos_conocio_codigo: 'invented_campaign' })).status, 400);
+  assert.equal(f.state.creates + f.state.transactions, 0);
 });
 
 test('invalid mixed PATCH rejects atomically before any model mutation or write', async () => {

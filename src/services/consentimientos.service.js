@@ -299,6 +299,7 @@ function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesiona
     const patientName = [paciente?.nombre, paciente?.apellidos].filter(Boolean).join(' ').trim();
     const professionalName = [profesional?.nombre, profesional?.apellidos].filter(Boolean).join(' ').trim();
     const fiscal = parseJsonObject(clinica?.datos_fiscales_clinica);
+    const responsible = require('../lib/registration-privacy-configuration').controller(clinica);
     const now = new Date();
     return {
         paciente: {
@@ -312,18 +313,21 @@ function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesiona
             email: paciente?.email || '',
             telefono: paciente?.telefono_movil || paciente?.telefono || '',
             telefono2: paciente?.telefono_secundario || '',
+            telefono_movil: paciente?.telefono_movil || paciente?.telefono || '',
+            telefono_fijo: paciente?.telefono_secundario || '',
             compania: '',
             fecha_nacimiento: formatDateOnly(paciente?.fecha_nacimiento),
             direccion: paciente?.direccion || paciente?.domicilio || '',
             codigo_postal: paciente?.codigo_postal || paciente?.cp || '',
             ciudad: paciente?.ciudad || paciente?.poblacion || paciente?.localidad || '',
             provincia: paciente?.provincia || '',
+            pais: paciente?.pais || '',
         },
         clinica: {
             id: clinica?.id_clinica || clinica?.id || null,
             nombre: clinica?.nombre_clinica || clinica?.nombre || '',
-            razon_social: fiscal.razon_social || fiscal.razonSocial || fiscal.nombre_fiscal || clinica?.nombre_clinica || clinica?.nombre || '',
-            cif: fiscal.cif || fiscal.nif || fiscal.documento || '',
+            razon_social: fiscal.denominacion_social || fiscal.razon_social || fiscal.razonSocial || fiscal.nombre_fiscal || '',
+            cif: fiscal.cif_nif || fiscal.cif || fiscal.nif || fiscal.documento || '',
             email: clinica?.email || '',
             telefono: clinica?.telefono_whatsapp || clinica?.telefono_movil || clinica?.telefono || '',
             direccion: clinica?.direccion || '',
@@ -332,6 +336,8 @@ function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesiona
             provincia: clinica?.provincia || '',
             pais: clinica?.pais || '',
         },
+        responsable: { razon_social: responsible.legal_name, cif: responsible.tax_id, direccion: responsible.address,
+            email: responsible.email, telefono: responsible.phone, dpo_nombre: responsible.dpo_name, dpo_email: responsible.dpo_email },
         tratamiento: {
             id: tratamiento?.id_tratamiento || tratamiento?.id || null,
             nombre: tratamiento?.nombre || '',
@@ -2305,7 +2311,8 @@ async function createPatientIntakePackage(identifier, options = {}) {
             const snapshot = {
                 template_source: 'clinic', template,
                 version: { id: version.id, version: version.version, locale: version.locale,
-                    title: version.title, body_json: version.body_json || null, variable_schema: version.variable_schema || null },
+                    title: version.title, body_json: version.body_json || null, variable_schema: version.variable_schema || null,
+                    ...(require('../lib/registration-privacy-template').schema(version.body_json) ? { body_html: version.body_html } : {}) },
                 context, patient_flags: { is_minor: isMinorPatient(paciente), representatives: getRepresentativeSnapshot(paciente) },
                 clinical_policy: { ...policy, pdf_strategy: 'json_snapshot_printable_on_demand' },
                 generated_at: new Date().toISOString(),
@@ -2462,6 +2469,9 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
 
         resolved.version = getPlain(await getOperationalConsentVersion(resolved, transaction));
         if (!resolved.version) throw Object.assign(new Error('consent_template_version_unavailable'), { statusCode: 409 });
+        if (require('../lib/registration-privacy-template').schema(resolved.version.body_json)) {
+            require('../lib/registration-privacy-configuration').assertLegalControllerForIssue(plainCita.clinica);
+        }
         const title = resolved.version.title || resolved.template.name;
         const renderedHtml = renderConsentVersionHtml({ ...resolved.version,
             body_html: resolved.version.body_html || buildDefaultBodyHtml(title) }, documentContext, renderTemplateHtml);
@@ -2487,6 +2497,7 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
                 locale: resolved.version.locale,
                 title,
                 body_json: resolved.version.body_json || null,
+                ...(require('../lib/registration-privacy-template').schema(resolved.version.body_json) ? { body_html: resolved.version.body_html } : {}),
                 variable_schema: resolved.version.variable_schema || null,
             },
             context: documentContext,
@@ -3394,6 +3405,10 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}, o
         snapshot_hash: nextHash,
     };
     const executeSignature = async transaction => {
+        const profileSync = require('./patientPrivacyProfile.service');
+        if (!options.profileAnchorsLocked && consentDocumentPersonalData.isIdentityDocument(plainDoc)) {
+            await profileSync.lockAutofillAnchors({ db, documents: [plainDoc], transaction });
+        }
         const reusableOptions = reusableDocumentOptions(plainDoc);
         const candidates = options.reusableCandidates !== undefined ? options.reusableCandidates
             : reusableOptions ? await pendingReusableConsentCandidates(reusableOptions, transaction) : [];
@@ -3442,6 +3457,9 @@ async function signConsentDocument(identifier, payload = {}, requestMeta = {}, o
         }, { transaction });
         if (reusableOptions) await supersedePendingReusableConsents({ ...reusableOptions, candidates, transaction });
         if (plainDoc.package_id) await refreshPackageCounts(plainDoc.package_id, transaction);
+        if (consentDocumentPersonalData.isIdentityDocument(plainDoc)) {
+            await profileSync.autofillEmptyFromDocument({ db, documentId: plainDoc.id, transaction, anchorsLocked: true });
+        }
     };
     if (options.transaction) await executeSignature(options.transaction);
     else await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, executeSignature);
@@ -3620,6 +3638,7 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
     const signSelected = async transaction => {
         const candidatesByDocument = new Map();
         if (transaction) {
+            await require('./patientPrivacyProfile.service').lockAutofillAnchors({ db, documents: pending, transaction });
             const otherParents = [];
             for (const doc of pending) {
                 const reusable = reusableDocumentOptions(doc);
@@ -3633,7 +3652,7 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
             signed.push(await signConsentDocument(doc.public_id,
                 { ...consentDocumentPersonalData.payloadForDocument(doc, consentDocumentChoices.payloadForDocument(doc, payload)),
                     method: payload.method || `${token.channel || 'tablet'}_signature` }, requestMeta,
-                { transaction, ...(transaction ? { reusableCandidates: candidatesByDocument.get(doc.id) } : {}) }));
+                { transaction, ...(transaction ? { reusableCandidates: candidatesByDocument.get(doc.id), profileAnchorsLocked: true } : {}) }));
         }
     };
     if (pending.some(doc => consentDocumentPersonalData.isIdentityDocument(doc))) {

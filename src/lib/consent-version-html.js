@@ -9,6 +9,9 @@ function renderConsentVersionHtml(version, context, legacyRenderer) {
   if (typeof body === 'string') {
     try { body = JSON.parse(body); } catch { body = null; }
   }
+  if (require('./registration-privacy-template').schema(body)) {
+    return require('./registration-privacy-template').render(version, context);
+  }
   if (body && Object.prototype.hasOwnProperty.call(body, 'digital_presentation')) {
     if (!privacy.isApprovedPrivacyPresentation({ bodyHtml: version.body_html, bodyJson: body })) {
       throw Object.assign(new Error('consent_digital_presentation_invalid'), {

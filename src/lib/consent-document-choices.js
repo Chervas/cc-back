@@ -24,11 +24,22 @@ function failure(code, message, statusCode = 400) {
 const invalidSchema = () => failure('consent_document_choice_schema_invalid',
   'La configuración de las opciones del documento no es válida. Solicita una nueva revisión.', 409);
 const invalidAnswers = () => failure('consent_document_choices_required',
-  'Responde Sí o No a cada una de las cuatro opciones de protección de datos antes de firmar.');
+  'Responde Sí o No a cada opción de protección de datos antes de firmar.');
 const sameKeys = (value, expected) => record(value) && Object.keys(value).length === expected.length
   && expected.every(key => own(value, key));
 
 function validateForm(raw) {
+  if (raw?.schema_version === 'cc-registration-choices/v2') {
+    const allowed = ['health_nonmedical', 'commercial', 'financing', 'sms_whatsapp'];
+    if (!sameKeys(raw, ['schema_version', 'fields']) || !Array.isArray(raw.fields) || !raw.fields.length
+      || raw.fields.length > allowed.length || new Set(raw.fields.map(field => field?.key)).size !== raw.fields.length) throw invalidSchema();
+    return { schema_version: raw.schema_version, fields: raw.fields.map(field => {
+      if (!sameKeys(field, ['key', 'type', 'required', 'label']) || !allowed.includes(field.key)
+        || field.type !== 'yes_no' || field.required !== true || typeof field.label !== 'string'
+        || !field.label.trim() || field.label.length > 1000 || /[\u0000-\u001f<>]/.test(field.label)) throw invalidSchema();
+      return { ...field };
+    }) };
+  }
   if (!sameKeys(raw, ['schema_version', 'fields']) || raw.schema_version !== CHOICE_SCHEMA_VERSION
     || !Array.isArray(raw.fields) || raw.fields.length !== CHOICE_KEYS.length) throw invalidSchema();
   const fields = raw.fields.map((field, index) => {
@@ -54,7 +65,7 @@ function getConsentChoiceForm(document) {
 
 function validateChoiceEntry(form, entry) {
   if (!sameKeys(entry, ['schema_version', 'answers']) || entry.schema_version !== form.schema_version
-    || !sameKeys(entry.answers, CHOICE_KEYS)) throw invalidAnswers();
+    || !sameKeys(entry.answers, form.fields.map(field => field.key))) throw invalidAnswers();
   const answers = {};
   for (const field of form.fields) {
     const answer = entry.answers[field.key];
@@ -117,7 +128,7 @@ function appendSignedChoiceHtml(original, document, evidence) {
   const form = getConsentChoiceForm(document), canonical = validateChoiceEntry(form, evidence);
   const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
   const fields = form.fields.map(field => `<li><p>${escape(field.label)}</p><p><strong>${canonical.answers[field.key] === 'yes' ? '☑ Sí · ☐ No' : '☐ Sí · ☑ No'}</strong></p></li>`).join('\n');
-  return String(original || '') + '\n<section class="consent-choice-evidence" data-consent-choice-schema="' + CHOICE_SCHEMA_VERSION
+  return String(original || '') + '\n<section class="consent-choice-evidence" data-consent-choice-schema="' + form.schema_version
     + '"><h2>Opciones indicadas al firmar</h2><ul>' + fields + '</ul></section>';
 }
 

@@ -28,6 +28,11 @@ function failure(code, message, statusCode = 400, field = null) {
 }
 function isIdentityDocument(document) {
   const doc = plain(document), snapshot = object(doc?.snapshot_json), template = object(snapshot.template);
+  if (doc?.purpose === 'data_protection' && require('./registration-privacy-template').schema(object(snapshot.version).body_json)) {
+    return Number(template.id) === Number(doc.clinic_template_id) && Number(template.clinic_id) === Number(doc.clinica_id)
+      && Number(snapshot.context?.paciente?.id) === Number(doc.paciente_id) && Number(snapshot.context?.clinica?.id) === Number(doc.clinica_id)
+      && typeof snapshot.version.body_html === 'string' && !!snapshot.version.body_html.trim();
+  }
   return [66, 72].includes(Number(doc?.clinica_id)) && doc.purpose === 'data_protection'
     && Number(template.id) === Number(doc.clinic_template_id)
     && Number(template.clinic_id) === Number(doc.clinica_id) && template.catalog_key === PRIVACY_KEY
@@ -81,7 +86,7 @@ function validateValues(raw, now = new Date()) {
 }
 function identityConfirmed(document) {
   const snapshot = object(plain(document)?.snapshot_json), evidence = object(snapshot.patient_identity);
-  if (evidence.schema_version !== SCHEMA_VERSION || evidence.confirmed !== true
+  if (evidence.schema_version !== identitySchema(document) || evidence.confirmed !== true
     || !Number.isFinite(new Date(evidence.confirmed_at).getTime())) return false;
   try { return JSON.stringify(validateValues(evidence.values)) === JSON.stringify(contextValues(snapshot.context)); }
   catch { return false; }
@@ -89,14 +94,14 @@ function identityConfirmed(document) {
 function publicDocumentPersonalData(document) {
   const doc = plain(document);
   if (!isIdentityDocument(doc)) return {};
-  return { personal_data_form: { schema_version: SCHEMA_VERSION, fields: FIELDS.map(field => ({ ...field })),
+  return { personal_data_form: { schema_version: identitySchema(doc), fields: FIELDS.map(field => ({ ...field })),
     values: contextValues(object(doc.snapshot_json).context),
     editable: ['pending', 'sent', 'viewed'].includes(doc.status) && !doc.signed_at && !doc.revoked_at,
     confirmed: identityConfirmed(doc) } };
 }
 function assertRenderedIdentity(document) {
   const doc = plain(document), snapshot = object(doc.snapshot_json);
-  if (doc.snapshot_html !== digital.buildBsPrivacyDigitalHtml(snapshot.context).html
+  if (doc.snapshot_html !== renderedIdentity(snapshot)
     || doc.snapshot_hash !== choices.choiceSnapshotHash(snapshot, doc.snapshot_html)) {
     throw failure('consent_personal_data_snapshot_invalid', 'El documento ha cambiado. Vuelve a abrirlo antes de continuar.', 409);
   }
@@ -129,7 +134,7 @@ function correctedSnapshot(document, payload, requestMeta = {}, now = new Date()
   if (!isIdentityDocument(doc)) throw failure('consent_personal_data_not_available',
     'Este documento no permite modificar los datos personales.', 409);
   if (!record(payload) || Object.keys(payload).some(key => !['schema_version', 'values', 'snapshot_hash'].includes(key))
-    || payload.schema_version !== SCHEMA_VERSION) throw failure('consent_personal_data_schema_invalid',
+    || payload.schema_version !== identitySchema(doc)) throw failure('consent_personal_data_schema_invalid',
     'Vuelve a abrir el documento para revisar los datos personales.');
   if (payload.snapshot_hash !== doc.snapshot_hash) throw failure('consent_personal_data_changed',
     'El documento ha cambiado. Vuelve a abrirlo antes de guardar los datos.', 409);
@@ -137,16 +142,29 @@ function correctedSnapshot(document, payload, requestMeta = {}, now = new Date()
   const values = validateValues(payload.values, now), patient = { ...snapshot.context.paciente, ...values,
     nombre_completo: `${values.nombre} ${values.apellidos}`.trim(), documento: values.dni,
     fecha_nacimiento: values.fecha_nacimiento ? values.fecha_nacimiento.split('-').reverse().join('/') : '' };
+  if (identitySchema(doc) === 'cc-registration-identity/v2') {
+    patient.telefono_movil = values.telefono;
+    patient.telefono_fijo = values.telefono2;
+  }
   const next = { ...snapshot, context: { ...snapshot.context, paciente: patient },
     patient_flags: { ...snapshot.patient_flags,
       is_minor: snapshot.patient_flags?.is_minor === true || isMinorDate(values.fecha_nacimiento, now) },
-    patient_identity: { schema_version: SCHEMA_VERSION, confirmed: true, values,
+    patient_identity: { schema_version: identitySchema(doc), confirmed: true, values,
       confirmed_at: now.toISOString(), previous_snapshot_hash: doc.snapshot_hash,
       source: 'public_document_identity', profile_updated: false,
       ip: typeof requestMeta.ip === 'string' ? requestMeta.ip.slice(0, 80) : null,
       user_agent: typeof requestMeta.userAgent === 'string' ? requestMeta.userAgent.slice(0, 500) : null } };
-  const html = digital.buildBsPrivacyDigitalHtml(next.context).html;
+  const html = renderedIdentity(next);
   return { snapshot_json: next, snapshot_html: html, snapshot_hash: choices.choiceSnapshotHash(next, html) };
+}
+function identitySchema(document) {
+  return require('./registration-privacy-template').schema(object(object(plain(document)?.snapshot_json).version).body_json)
+    ? 'cc-registration-identity/v2' : SCHEMA_VERSION;
+}
+function renderedIdentity(snapshot) {
+  return require('./registration-privacy-template').schema(object(snapshot.version).body_json)
+    ? require('./registration-privacy-template').render(snapshot.version, snapshot.context)
+    : digital.buildBsPrivacyDigitalHtml(snapshot.context).html;
 }
 function isMinorDate(date, now) {
   if (!date) return false;

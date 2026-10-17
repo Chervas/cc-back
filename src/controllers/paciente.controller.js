@@ -21,6 +21,7 @@ const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 const patientReadAudit = require('../services/platformAudit.patientReads');
 const { normalizePhoneDigits } = require('../lib/phone');
+const { validatePatientDeclaredOrigin } = require('../lib/patient-declared-origin');
 const { normalizeHumanName } = require('../lib/name');
 const {
   normalizePatientLanguage,
@@ -235,6 +236,7 @@ function redactEmbeddedPatient(paciente) {
     'fecha_nacimiento', 'edad', 'estatura', 'peso', 'sexo', 'profesion',
     'alergias', 'antecedentes', 'medicacion',
     'numero_historia', 'notas_paciente', 'historia_scope',
+    'como_nos_conocio_codigo',
     ...PATIENT_PROFILE_FIELD_NAMES,
   ];
   const redacted = {
@@ -2007,7 +2009,7 @@ exports.createPaciente = async (req, res) => {
     }
     await assertPatientEditAccess(req, clinica_id);
 
-    const patientProfileFields = validatePatientProfileFields(req.body);
+    const patientProfileFields = { ...validatePatientProfileFields(req.body), ...validatePatientDeclaredOrigin(req.body) };
 
     let tutorPaciente = null;
     if (tutor?.id_paciente_relacionado) {
@@ -2122,7 +2124,7 @@ exports.createPaciente = async (req, res) => {
     if (transaction && !transaction.finished) {
       await transaction.rollback();
     }
-    if (error.status === 400 && error.message === 'invalid_patient_profile_field') {
+    if (error.status === 400 && ['invalid_patient_profile_field', 'invalid_patient_declared_origin'].includes(error.message)) {
       return res.status(400).json({ message: 'Datos de la ficha del paciente inválidos', error: error.message, details: error.details });
     }
     if (error.status === 400 && error.message === 'unsupported_patient_language') {
@@ -2205,7 +2207,7 @@ exports.updatePaciente = async (req, res) => {
     }
     // Validate every new field before mutating the in-memory patient or saving
     // any part of a mixed PATCH. Invalid clinical/profile input is atomic.
-    const patientProfileFields = validatePatientProfileFields(req.body);
+    const patientProfileFields = { ...validatePatientProfileFields(req.body), ...validatePatientDeclaredOrigin(req.body) };
     const nextTelefono = req.body.telefono_movil !== undefined ? req.body.telefono_movil : paciente.telefono_movil;
     const nextEmail = req.body.email !== undefined ? req.body.email : paciente.email;
     const normPhone = normalizePhone(nextTelefono);
@@ -2268,7 +2270,7 @@ exports.updatePaciente = async (req, res) => {
       paciente
     });
   } catch (error) {
-    if (error.status === 400 && error.message === 'invalid_patient_profile_field') {
+    if (error.status === 400 && ['invalid_patient_profile_field', 'invalid_patient_declared_origin'].includes(error.message)) {
       return res.status(400).json({ message: 'Datos de la ficha del paciente inválidos', error: error.message, details: error.details });
     }
     if (error.status === 400 && error.message === 'unsupported_patient_language') {

@@ -17,10 +17,9 @@ function mergeSummary(row, values) {
 // Keep a single read-only snapshot for the whole page and preserve clinical
 // counters independently; reading the agenda never prepares/sends a document.
 async function attachPrivacy(db, rows) {
-  const clinics = require('./appointmentPrivacyEligibility.service').CLINICS;
   const appointments = rows.filter(row => {
     const a = plain(row);
-    return a?.paciente_id && clinics.includes(Number(a.clinica_id));
+    return a?.paciente_id && a?.clinica_id;
   });
   if (!appointments.length) return;
   const privacy = require('./patientPrivacyStatus.service');

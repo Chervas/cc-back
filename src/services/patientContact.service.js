@@ -230,6 +230,8 @@ async function findPatientContactTargets({
     if (!conversationByPatient.has(patientId)) conversationByPatient.set(patientId, conversation);
   });
   const authorizedPatientIds = new Set(authorizationEvents.map((event) => Number(event.patient_id)));
+  const restrictions = await require('./patientCommunicationPreferences.service').channelRestrictions({ db,
+    clinicId: Number(selectedClinicId), phones: patients.map(patient => patient.telefono_movil), patientIds });
 
   return {
     query: normalizeContactSearchQuery(query),
@@ -244,6 +246,8 @@ async function findPatientContactTargets({
         conversation_id: conversation?.id || null,
         linked_to_selected_clinic: isPatientLinkedToClinic(plain, selectedClinicId),
         whatsapp_contact_authorized: authorizedPatientIds.has(patientId),
+        whatsapp_contact_allowed_default: restrictions.get(normalizePhoneDigits(plain.telefono_movil)) !== true,
+        whatsapp_contact_blocked: restrictions.get(normalizePhoneDigits(plain.telefono_movil)) === true,
       };
     }),
   };
@@ -393,17 +397,20 @@ async function startPatientWhatsappConversation({
     throw error;
   }
 
+  const restrictions = await require('./patientCommunicationPreferences.service').channelRestrictions({ db,
+    clinicId: normalizedClinicId, phones: [contactPhone], patientIds: [Number(patient.id_paciente)], transaction });
+  if (restrictions.get(contactPhone)) throw Object.assign(new Error('Este paciente ha pedido no ser notificado por WhatsApp'), {
+    code: 'WHATSAPP_CHANNEL_REFUSED', status: 409, statusCode: 409, retryable: false,
+  });
+
   const alreadyAuthorized = await hasWhatsappContactAuthorization({
     patientId: patient.id_paciente,
     clinicId: normalizedClinicId,
     transaction,
   });
-  if (!alreadyAuthorized && authorizationConfirmed !== true) {
-    const error = new Error('whatsapp_contact_authorization_required');
-    error.status = 409;
-    throw error;
-  }
-  if (!alreadyAuthorized) {
+  // Starting a care chat is an operational action, not proof of legal consent.
+  // Preserve a separate attestation only when it was explicitly provided.
+  if (!alreadyAuthorized && authorizationConfirmed === true) {
     await recordPatientOperationalEvent({
       patientId: patient.id_paciente,
       clinicId: normalizedClinicId,
@@ -455,7 +462,7 @@ async function startPatientWhatsappConversation({
     conversation,
     patientCreated,
     conversationCreated: !existingConversation,
-    authorizationRecorded: !alreadyAuthorized,
+    authorizationRecorded: !alreadyAuthorized && authorizationConfirmed === true,
   };
 }
 

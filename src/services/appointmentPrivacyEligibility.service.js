@@ -14,6 +14,26 @@ const fail = (code, message) => { throw Object.assign(new Error(message), { code
 // The exceptional family is pinned in server code, never accepted from a
 // caller's equivalence flag. Every historical row remains immutable.
 async function approvedPrivacyVersions({ db, template, version, transaction, publishedVersions = null }) {
+  const registration = require('../lib/registration-privacy-template');
+  if (registration.schema(version.body_json)) {
+    const approved = new Map([[Number(version.id), { version, registration: true }]]);
+    // New channel choices never reinterpret old SMS answers. Existing verified
+    // BS evidence remains equivalent only for the unchanged legal notice gate.
+    if (template.catalog_key === FINAL_PRIVACY_KEY) {
+      const previous = publishedVersions || await db.ClinicConsentTemplateVersion.findAll({ where: {
+        clinic_template_id: Number(template.id), status: 'published', locale: 'es' },
+      order: [['version', 'DESC'], ['id', 'DESC']], limit: 101, transaction });
+      if (previous.length > 100) fail('appointment_consent_privacy_configuration', 'Revisa las versiones de protección de datos.');
+      for (const raw of previous) {
+        const old = plain(raw), digital = require('../lib/bs-privacy-digital-template');
+        if (Number(old.clinic_template_id) !== Number(template.id) || old.status !== 'published' || old.locale !== 'es') continue;
+        const isDigital = digital.isApprovedPrivacyPresentation({ bodyHtml: old.body_html, bodyJson: old.body_json });
+        const legacy = createHash('sha256').update(String(old.body_html || '')).digest('hex') === digital.APPROVED_LEGACY_HTML_SHA256;
+        if (isDigital || legacy) approved.set(Number(old.id), { version: old, digital: isDigital, legacy });
+      }
+    }
+    return approved;
+  }
   const digital = require('../lib/bs-privacy-digital-template');
   const currentDigital = digital.isApprovedPrivacyPresentation({ bodyHtml: version.body_html, bodyJson: version.body_json });
   const approved = new Map([[Number(version.id), { version, legacy: false, digital: currentDigital }]]);
@@ -52,6 +72,13 @@ function isValidSignedPrivacyDocument({ document, template, patientId, clinicId,
   const evidenceDate = new Date(snapshot?.signature_evidence?.signed_at).getTime();
   if (!answers || (approved.legacy || approved.digital)
     && (!Number.isFinite(evidenceDate) || evidenceDate > now.getTime())) return false;
+  if (approved.registration) {
+    if (!Number.isFinite(evidenceDate) || evidenceDate > now.getTime()
+      || snapshot.version.body_html !== approved.version.body_html
+      || JSON.stringify(canonical(object(object(snapshot.version).body_json))) !== JSON.stringify(canonical(object(approved.version.body_json)))) return false;
+    const html = require('../lib/registration-privacy-template').render(approved.version, object(snapshot.context));
+    return doc.snapshot_html === choices.appendSignedChoiceHtml(html, doc, { schema_version: choices.getConsentChoiceForm(doc).schema_version, answers });
+  }
   // Old signed snapshots do not contain source HTML. Match their complete
   // rendered legal body and canonical choice receipt to the pinned old source,
   // not merely the database version id or a copied metadata marker.
@@ -70,7 +97,8 @@ function isValidSignedPrivacyDocument({ document, template, patientId, clinicId,
 
 async function assessPrivacyBeforeStart({ db, appointment, transaction, now = new Date() }) {
   const cita = plain(appointment), clinic = Number(cita?.clinica_id), patientId = Number(cita?.paciente_id);
-  if (!CLINICS.includes(clinic)) return { required: false, allowed: true, reason: 'outside_registration_scope' };
+  const policy = await registrationPolicy({ db, clinicId: clinic, transaction });
+  if (!policy.enabled || !policy.beforeFirstCare) return { required: false, allowed: true, reason: 'outside_registration_scope' };
   if (!transaction || !Number.isSafeInteger(patientId) || patientId <= 0) fail('appointment_consent_privacy_configuration', 'Revisa el paciente y la clínica antes de iniciar la cita.');
   const { Op } = db.Sequelize;
   const patient = plain(await db.Paciente.findByPk(patientId, { attributes: ['id_paciente', 'clinica_id'],
@@ -79,7 +107,7 @@ async function assessPrivacyBeforeStart({ db, appointment, transaction, now = ne
   // Imported provenance is server-held evidence, not caller-supplied fields or
   // fecha_alta/paciente_conocido. Existing imported patients are not a new alta.
   const imported = await db.PatientCustomField.findAll({ where: { paciente_id: patientId, source: 'cliniccloud',
-    clinica_id: { [Op.in]: CLINICS }, source_column: 'idContacto' }, attributes: ['value'],
+    source_column: 'idContacto' }, attributes: ['value'],
     order: [['id', 'ASC']], limit: 20, transaction, lock: transaction.LOCK.SHARE });
   // Historical keys may include an explicit source-id suffix. source_column
   // identifies their meaning; never depend on the presentation field_key.
@@ -89,9 +117,8 @@ async function assessPrivacyBeforeStart({ db, appointment, transaction, now = ne
       { care_started_at: { [Op.ne]: null, [Op.lte]: now } }, { care_legacy_attendance: true },
     ] }, attributes: ['id_cita'], transaction, lock: transaction.LOCK.SHARE });
   if (priorCare) return { required: false, allowed: true, reason: 'existing_clinical_patient' };
-  const template = plain(await db.ClinicConsentTemplate.findOne({ where: { clinic_id: clinic,
-    catalog_key: FINAL_PRIVACY_KEY, purpose: 'data_protection', status: 'active', is_default: true,
-    blocking_policy: 'hard' }, transaction, lock: transaction.LOCK.SHARE }));
+  const template = plain(await db.ClinicConsentTemplate.findOne({ where: registrationTemplateWhere(clinic, policy),
+    transaction, lock: transaction.LOCK.SHARE }));
   if (!template) fail('appointment_consent_privacy_configuration', 'Falta publicar el nuevo modelo de protección de datos de esta clínica. No se puede iniciar el alta clínica.');
   const version = plain(await db.ClinicConsentTemplateVersion.findOne({ where: { clinic_template_id: template.id,
     status: 'published', locale: 'es' }, order: [['version', 'DESC'], ['id', 'DESC']], transaction, lock: transaction.LOCK.SHARE }));
@@ -123,4 +150,16 @@ async function assertPrivacyBeforeStart(options) {
 }
 
 module.exports = { CLINICS, FINAL_PRIVACY_KEY, approvedPrivacyVersions, isValidSignedPrivacyDocument,
-  assessPrivacyBeforeStart, assertPrivacyBeforeStart };
+  assessPrivacyBeforeStart, assertPrivacyBeforeStart, registrationPolicy, registrationTemplateWhere };
+
+async function registrationPolicy({ db, clinicId, transaction }) {
+  const clinic = db.Clinica?.findByPk ? plain(await db.Clinica.findByPk(clinicId, {
+    attributes: ['id_clinica', 'configuracion'], transaction })) : { id_clinica: clinicId };
+  return require('../lib/registration-privacy-configuration').policy({ id_clinica: clinicId, ...clinic });
+}
+function registrationTemplateWhere(clinicId, policy) {
+  return { clinic_id: Number(clinicId), purpose: 'data_protection', status: 'active',
+    ...(policy.templateId ? { id: policy.templateId } : { catalog_key: FINAL_PRIVACY_KEY, is_default: true, blocking_policy: 'hard' }) };
+}
+const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;

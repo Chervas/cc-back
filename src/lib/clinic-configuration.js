@@ -187,6 +187,7 @@ function mergeClinicConfiguration(currentValue, patchValue) {
       && typeof patch.patient_intake.medical_questionnaire_enabled !== 'boolean') {
       throw createValidationError('clinic_patient_intake_medical_questionnaire_enabled_must_be_boolean');
     }
+    require('./registration-privacy-configuration').validate(patch.patient_intake);
   }
 
   if (Object.prototype.hasOwnProperty.call(patch, 'access_guidance')) {

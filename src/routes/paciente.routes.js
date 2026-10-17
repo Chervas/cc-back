@@ -15,6 +15,8 @@ router.get('/check-duplicates', pacienteController.checkDuplicates);
 router.get('/:id/consents', pacienteController.getConsents);
 router.get('/:id/consentimientos', consentimientosController.listPatientDocuments);
 router.get('/:id/activity', pacienteController.getPacienteActivity);
+router.get('/:id/communication-preferences', require('../controllers/patientCommunication.controller').get);
+router.post('/:id/communication-preferences', require('../controllers/patientCommunication.controller').set);
 router.get('/:id/clinical-attachments', patientClinicalAttachmentsController.listPatientClinicalAttachments);
 router.post('/:id/clinical-attachments', patientClinicalAttachmentsController.createPatientClinicalAttachment);
 router.get('/:id/clinical-attachments/:attachmentId', patientClinicalAttachmentsController.getPatientClinicalAttachment);

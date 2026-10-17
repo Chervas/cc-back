@@ -17,9 +17,14 @@ const templatePayload = (components = []) => ({ messaging_product: 'whatsapp', t
   type: 'template', template: { name: 'custom_v17', language: { code: 'es' }, components } });
 function fixture({ clinicId = 66, broker = false, template = null, catalog = null, message = null,
   conversationClinic = clinicId, reviewUrl = null, databaseError = false, conversationError = false,
-  reviewAliasClinic = null, commercialRefused = false } = {}) {
+  reviewAliasClinic = null, commercialRefused = false, channelRestriction = null, signedChannelRefused = false } = {}) {
   const state = { graph: 0, broker: 0, managed: 0, scope: 0, privacyChecks: 0, reads: [] };
   const db = {
+    MarketingContactOptOut: { findOne: async options => {
+      const row = channelRestriction;
+      return row && row.clinica_id === options.where.clinica_id && row.phone_digits === options.where.phone_digits
+        && options.where.scope[require('sequelize').Op.in].includes(row.scope) ? row : null;
+    } },
     Message: { findByPk: async id => { state.reads.push(['message', id]); return structuredClone(message); } },
     Conversation: { findByPk: async (id, options) => { state.reads.push(['conversation', id, options]);
       if (conversationError) throw Error('PRIVATE_SQL_OR_TOKEN_MUST_NOT_ESCAPE');
@@ -47,7 +52,7 @@ function fixture({ clinicId = 66, broker = false, template = null, catalog = nul
   vm.runInNewContext(localLinksSource, { module: localLinksModule,
     require: name => { assert.equal(name, '../../models'); return db; } }, { filename: 'googleLocalLinks.service.js' });
   const modules = {
-    '../../models': db, sequelize: { Op: {} }, '../lib/phone': {}, '../lib/whatsapp-channel-role': {},
+    '../../models': db, sequelize: { Op: require('sequelize').Op }, '../lib/phone': require('../../lib/phone'), '../lib/whatsapp-channel-role': {},
     './whatsappAccountHealth.service': {}, './whatsappChannelBindings.service': {},
     '../lib/whatsappAppointmentEligibility': eligibility, '../lib/whatsapp-template-workflow': workflow,
     './googleLocalLinks.service': localLinksModule.exports,
@@ -57,7 +62,9 @@ function fixture({ clinicId = 66, broker = false, template = null, catalog = nul
       if (commercialRefused) throw Object.assign(Error('privacy_commercial_communications_restricted'), {
         code: 'AUTOMATION_COMMUNICATIONS_RESTRICTED', statusCode: 409, retryable: false,
       });
-    } },
+    }, channelRefusals: async ({ clinicIds, phone }) => ({
+      patientIds: new Set(), phoneDigits: new Set(), documentIds: signedChannelRefused && clinicIds.includes(clinicId) && phone === '34000000001' ? [99] : [],
+    }) },
     '../lib/automation-runtime-stop': { assertMessageCanDispatch: async () => {} },
     './whatsappTemplateScope.service': { assertTemplateInWaba: async () => { state.scope++; } },
     './securityMonitoring.service': { assertTemplateAllowed: async () => {} },
@@ -81,6 +88,24 @@ async function held(f, payload) {
   });
   assert.equal(f.state.graph, 0); assert.equal(f.state.broker, 0);
 }
+
+test('explicit clinic/full-number WhatsApp channel refusal stops every transport and payload; commercial/legacy care and missing LOPD do not become channel refusals', async () => {
+  const restriction = { id: 91, clinica_id: 66, phone_digits: '34000000001', scope: 'whatsapp_channel' };
+  for (const broker of [false, true]) for (const payload of [plainPayload(), templatePayload(), { ...plainPayload(), type: 'interactive' }]) {
+    const f = fixture({ broker, channelRestriction: restriction });
+    await assert.rejects(f.send(payload), error => error.code === 'WHATSAPP_CHANNEL_REFUSED' && error.retryable === false && error.statusCode === 409);
+    assert.equal(f.state.graph + f.state.broker, 0);
+  }
+  for (const patch of [{ scope: 'marketing' }, { scope: 'care' }, { clinica_id: 72 }, { phone_digits: '34000000002' }]) {
+    const f = fixture({ channelRestriction: { ...restriction, ...patch } }); await f.send(plainPayload()); assert.equal(f.state.graph, 1);
+  }
+  const missing = fixture(); await missing.send(plainPayload()); assert.equal(missing.state.graph, 1);
+  for (const broker of [false, true]) for (const payload of [plainPayload(), templatePayload(), { ...plainPayload(), type: 'interactive' }]) {
+    const signed = fixture({ broker, signedChannelRefused: true });
+    await assert.rejects(signed.send(payload), error => error.code === 'WHATSAPP_CHANNEL_REFUSED' && error.details.source === 'signed_privacy_document');
+    assert.equal(signed.state.graph + signed.state.broker, 0);
+  }
+});
 
 test('all BS patients: actual consent/review payload is held before broker AND legacy Graph without execution or importer HOLD', async () => {
   for (const clinicId of [66, 72]) for (const broker of [false, true]) {

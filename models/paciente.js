@@ -100,6 +100,7 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: true
     },
     procedencia: DataTypes.INTEGER,
+    como_nos_conocio_codigo: { type: DataTypes.STRING(64), allowNull: true, defaultValue: null },
     clinica_id: {
       type: DataTypes.INTEGER,
       allowNull: false,

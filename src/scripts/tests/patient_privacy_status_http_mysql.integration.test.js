@@ -195,6 +195,15 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     const signed = await read(reception); assert.equal(signed.state, 'signed'); assert.equal(signed.attention_required, false);
     assert.equal(signed.document_id, docs[0].id); assert(!JSON.stringify(signed).includes('consent_choices'));
     {
+      const autoMaster = await db.Paciente.findByPk(patientId);
+      assert.equal(autoMaster.dni, 'QA-PRIVACY-NO-REAL'); assert.equal(autoMaster.direccion, 'Calle ficticia QA 19');
+      assert.equal(autoMaster.email, 'privacy-review@example.invalid'); assert.equal(autoMaster.telefono_movil, '34000000009');
+      assert.equal(await db.PatientOperationalEvent.count({ where: { patient_id: patientId,
+        event_type: 'patient.privacy_profile_autofilled' } }), 1);
+      // Explicitly seed the pre-rollout document-only situation in this owned
+      // database; it still needs safe per-field reconciliation/backfill support.
+      await db.Paciente.update({ dni: null, direccion: null, poblacion: null, fecha_nacimiento: null,
+        email: null, telefono_movil: null }, { where: { id_paciente: patientId } });
       const reviewPath = `${path}/privacy-profile`, getReview = () => expect('GET', `${reviewPath}?clinic_id=72`, undefined, reception, 200);
       const frozenDoc = (await docs[0].reload()).toJSON(), beforeReview = await fingerprint();
       const review = await getReview();
@@ -281,11 +290,13 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
       await foreignChat.destroy();
       const existingChat = await db.Conversation.create({ clinic_id: 72, channel: 'whatsapp',
         patient_id: patientId, contact_id: '34000000008' });
-      const identityConflict = await expect('POST', reviewPath, phoneBody, reception, 409);
-      assert.equal(identityConflict.code, 'privacy_profile_phone_chat_review_required');
-      await existingChat.destroy();
+      const oldChat = (await existingChat.reload()).toJSON();
       const contactApplied = await expect('POST', reviewPath, phoneBody, reception, 200);
       assert.equal(contactApplied.applied, true); assert.equal((await master.reload()).telefono_movil, '34000000009');
+      assert.deepEqual((await existingChat.reload()).toJSON(), oldChat, 'Explicit acceptance changes master contact, never repoints or merges the old conversation');
+      await expect('POST', reviewPath, phoneBody, reception, 409);
+      assert.equal(await db.PatientOperationalEvent.count({ where: { patient_id: patientId,
+        event_type: 'patient.mobile_verification_requested' } }), 1, 'Exactly one pending verification event, no automatic send');
       assert.deepEqual((await docs[0].reload()).toJSON(), frozenDoc, 'Explicit safe contact copy never changes the signed source snapshot');
       const refused = await require('../../lib/bs-privacy-commercial-preferences').commercialRefusals({ db,
         clinicIds: [72], patientIds: [patientId] });
@@ -381,7 +392,7 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     };
     {
       const race = await prepareRace(92504), signedLocked = deferred(), paperWaiting = deferred(), releaseSign = deferred();
-      const originalDocumentRead = db.PatientConsentDocument.findByPk, originalPackageRead = db.ConsentSignaturePackage.findByPk;
+      const originalDocumentRead = db.PatientConsentDocument.findByPk, originalClinicRead = db.Clinica.findByPk;
       let signaturePaused = false;
       db.PatientConsentDocument.findByPk = async function(id, options) {
         const row = await originalDocumentRead.call(this, id, options);
@@ -390,47 +401,50 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
         }
         return row;
       };
-      db.ConsentSignaturePackage.findByPk = async function(id, options) {
-        if (Number(id) === race.packageId && options?.lock === 'UPDATE' && signaturePaused) paperWaiting.resolve();
-        return originalPackageRead.call(this, id, options);
+      db.Clinica.findByPk = async function(id, options) {
+        if (Number(id) === 72 && options?.lock === 'SHARE' && signaturePaused) paperWaiting.resolve();
+        return originalClinicRead.call(this, id, options);
       };
       try {
         const signPromise = race.sign(); await waitSignal(signedLocked.promise, 'signature holds package/document');
-        const paperPromise = race.paper(); await waitSignal(paperWaiting.promise, 'paper holds patient and waits package');
+        const paperPromise = race.paper(); await waitSignal(paperWaiting.promise, 'paper waits at the shared clinic anchor held by signing');
         releaseSign.resolve();
         const [signedFirst, paperAfter] = await Promise.all([signPromise, paperPromise]);
         assert.equal(signedFirst.status, 200, JSON.stringify(signedFirst.body)); assert.equal(paperAfter.status, 201, JSON.stringify(paperAfter.body));
         assert.equal((await db.PatientConsentDocument.findByPk(race.documentId)).status, 'signed', 'Paper CAS never supersedes a concurrent completed signature');
-      } finally { releaseSign.resolve(); db.PatientConsentDocument.findByPk = originalDocumentRead; db.ConsentSignaturePackage.findByPk = originalPackageRead; }
+      } finally { releaseSign.resolve(); db.PatientConsentDocument.findByPk = originalDocumentRead; db.Clinica.findByPk = originalClinicRead; }
     }
     {
       const race = await prepareRace(92505), paperLocked = deferred(), signatureWaiting = deferred(), releasePaper = deferred();
-      const originalPackageRead = db.ConsentSignaturePackage.findByPk; let attempts = 0;
+      const originalPackageRead = db.ConsentSignaturePackage.findByPk, originalClinicRead = db.Clinica.findByPk; let attempts = 0;
       db.ConsentSignaturePackage.findByPk = async function(id, options) {
         const matches = Number(id) === race.packageId && options?.lock === 'UPDATE';
         if (matches && ++attempts === 1) {
           const row = await originalPackageRead.call(this, id, options);
           paperLocked.resolve(); await releasePaper.promise; return row;
         }
-        if (matches && attempts === 2) signatureWaiting.resolve();
         return originalPackageRead.call(this, id, options);
+      };
+      db.Clinica.findByPk = async function(id, options) {
+        if (Number(id) === 72 && options?.lock === 'UPDATE') signatureWaiting.resolve();
+        return originalClinicRead.call(this, id, options);
       };
       try {
         const paperPromise = race.paper(); await waitSignal(paperLocked.promise, 'paper holds patient/package');
-        const signPromise = race.sign(); await waitSignal(signatureWaiting.promise, 'signature waits package');
+        const signPromise = race.sign(); await waitSignal(signatureWaiting.promise, 'signature waits at the clinic anchor held by paper');
         releasePaper.resolve();
         const [paperFirst, signAfter] = await Promise.all([paperPromise, signPromise]);
         assert.equal(paperFirst.status, 201, JSON.stringify(paperFirst.body)); assert.equal(signAfter.status, 409, JSON.stringify(signAfter.body));
         const closed = await db.PatientConsentDocument.findByPk(race.documentId);
         assert.equal(closed.status, 'superseded'); assert.equal(closed.signed_at, null);
-      } finally { releasePaper.resolve(); db.ConsentSignaturePackage.findByPk = originalPackageRead; }
+      } finally { releasePaper.resolve(); db.ConsentSignaturePackage.findByPk = originalPackageRead; db.Clinica.findByPk = originalClinicRead; }
     }
     assert.deepEqual(await silent(), quiet, 'No questionnaire, provider message, job, flow, review or operational dispatch is created');
     owned.report.checks.push('Actual JWT/MFA/session/ACL/router: read-only GET, all six UI states, exact patient-clinic-group scope and optional appointment mismatch');
     owned.report.checks.push('Actual patient prepare creates one independent LOPD only; explicit tablet session; four No choices valid; missing choices rejected without signature');
     owned.report.checks.push('Native patient paper v2 without appointment, idempotent, no invented digital document; no provider/job/flow/questionnaire/review sends');
     owned.report.checks.push('Sent LOPD -> paper supersedes outstanding family attempts and removes kiosk task; reopening creates nothing; mixed clinical document preserved and remains usable');
-    owned.report.checks.push('Adversarial native lock races: signature holding package vs paper holding patient completes without deadlock and preserves signed; paper holding package wins before waiting signature with 409, no invented signature');
+    owned.report.checks.push('Adversarial native clinic->patient->package lock races: signature-first preserves signed evidence; paper-first rejects the waiting signature with 409; no deadlock or invented signature');
     owned.report.checks.push('Native GET calendar-lite/mapCalendar DTO: treatment and treatment-free cards preserve privacy across not_requested/pending/sent/viewed/signed/paper; missing imported signature is visible without tightening allowed/required care gate; independent clinical counters unchanged');
     owned.report.checks.push('Imported cancelled historical LOPD remains cancelled and unmodified: patient/calendar attention=true, no active document/request, allowed=true, required=false; explicit manual pending/sent/viewed/paper workflow remains usable without automatic sends');
     owned.report.checks.push('Native calendar JWT/clinic/consent ACL redacts unauthorized privacy; summary=true remains minimal; all calendar reads preserve domain fingerprints and create no sends/jobs/flows/intake/dispatch');

@@ -7,6 +7,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const digital = require('./bs-privacy-digital-template');
 const PAPER_SOURCE = 'registration_privacy_paper/v1';
 const PATIENT_PAPER_SOURCE = 'registration_privacy_paper/v2';
+const CONFIGURED_PAPER_SOURCE = 'registration_privacy_paper/v3';
 const PAPER_EVENT = 'registration_privacy.paper_recorded';
 const FINAL_PRIVACY_KEY = `bs-final-20261015-${digital.SOURCE_DOCUMENT_SHA256}`;
 const PAPER_TITLE = 'Protección de datos firmada en papel';
@@ -24,6 +25,10 @@ const dateValue = value => value ? new Date(value).getTime() : NaN;
 
 function isApprovedPaperFamilyVersion(version) {
   if (!version || version.status !== 'published' || version.locale !== 'es') return false;
+  if (require('./registration-privacy-template').schema(version.body_json)) {
+    try { return !!String(version.body_html || '').trim() && !!require('./consent-document-choices')
+      .getConsentChoiceForm({ snapshot_json: { version } }); } catch { return false; }
+  }
   const html = String(version.body_html || '');
   if (!digital.isApprovedPrivacyPresentation({ bodyHtml: html, bodyJson: version.body_json })
     && createHash('sha256').update(html).digest('hex') !== digital.APPROVED_LEGACY_HTML_SHA256) return false;
@@ -35,6 +40,14 @@ function isApprovedPaperFamilyVersion(version) {
 }
 
 function receiptMetadata({ attestationId, appointmentId, template, version, recordedAt, patientOnly = false }) {
+  if (require('./registration-privacy-template').schema(version.body_json)) return {
+    schema_version: CONFIGURED_PAPER_SOURCE, attestation_id: Number(attestationId),
+    appointment_id: patientOnly ? null : Number(appointmentId), clinic_template_id: Number(template.id),
+    clinic_template_version_id: Number(version.id), catalog_key: template.catalog_key || null,
+    source_html_sha256: createHash('sha256').update(String(version.body_html || '')).digest('hex'),
+    source_json_sha256: createHash('sha256').update(JSON.stringify(canonical(object(version.body_json)))).digest('hex'),
+    acknowledged: true, recorded_at: recordedAt,
+  };
   return { schema_version: patientOnly ? PATIENT_PAPER_SOURCE : PAPER_SOURCE, attestation_id: Number(attestationId),
     appointment_id: patientOnly ? null : Number(appointmentId),
     clinic_template_id: Number(template.id), clinic_template_version_id: Number(version.id), catalog_key: FINAL_PRIVACY_KEY,
@@ -44,14 +57,16 @@ function receiptMetadata({ attestationId, appointmentId, template, version, reco
 
 function matchesPaperEvidence({ attestation, event, patientId, clinicId, template, approvedVersions, now }) {
   const row = plain(attestation), audit = plain(event), metadata = object(audit?.metadata);
-  const patientOnly = row?.source === PATIENT_PAPER_SOURCE;
-  const source = patientOnly ? PATIENT_PAPER_SOURCE : PAPER_SOURCE;
+  const configured = row?.source === CONFIGURED_PAPER_SOURCE;
+  const patientOnly = row?.source === PATIENT_PAPER_SOURCE || configured && metadata.appointment_id === null;
+  const source = configured ? CONFIGURED_PAPER_SOURCE : patientOnly ? PATIENT_PAPER_SOURCE : PAPER_SOURCE;
   const approved = approvedVersions.get(Number(metadata.clinic_template_version_id));
   if (!approved || !isApprovedPaperFamilyVersion(approved.version)
     || Number(approved.version.clinic_template_id) !== Number(template.id)
-    || template.catalog_key !== FINAL_PRIVACY_KEY || Number(template.clinic_id) !== Number(clinicId)
-    || template.purpose !== 'data_protection' || template.status !== 'active' || template.is_default !== true
-    || template.blocking_policy !== 'hard' || !positive(row?.id)
+    || (configured ? !require('./registration-privacy-template').schema(approved.version.body_json)
+      : template.catalog_key !== FINAL_PRIVACY_KEY || template.is_default !== true || template.blocking_policy !== 'hard')
+    || Number(template.clinic_id) !== Number(clinicId)
+    || template.purpose !== 'data_protection' || template.status !== 'active' || !positive(row?.id)
     || (patientOnly ? metadata.appointment_id !== null : !positive(metadata.appointment_id))
     || Number(row.paciente_id) !== Number(patientId) || Number(row.clinica_id) !== Number(clinicId)
     || row.tratamiento_id != null || row.purpose !== 'data_protection' || row.source !== source
@@ -72,7 +87,7 @@ async function findRegistrationPrivacyPaper({ db, patientId, clinicId, template,
   if (!isApprovedPaperFamilyVersion(version)) return null;
   if (!transaction || !db.PatientConsentExternalAttestation || !db.PatientOperationalEvent) throw invalidConfiguration();
   const { Op } = db.Sequelize;
-  const sources = { [Op.in]: [PAPER_SOURCE, PATIENT_PAPER_SOURCE] };
+  const sources = { [Op.in]: [PAPER_SOURCE, PATIENT_PAPER_SOURCE, CONFIGURED_PAPER_SOURCE] };
   const attestations = await db.PatientConsentExternalAttestation.findAll({ where: { paciente_id: Number(patientId),
     clinica_id: Number(clinicId), purpose: 'data_protection', source: sources, status: 'active', revoked_at: null },
     order: [['id', 'DESC']], limit: 101, transaction, lock: transaction.LOCK.SHARE });
@@ -144,11 +159,15 @@ async function retirePendingPrivacyRequests({ db, patientId, clinicId, template,
 async function recordPaper({ db, appointment, patientId: patientIdRaw, clinicId: clinicIdRaw,
   actorId, acknowledged, transaction, now = null, patientOnly = false }) {
   const cita = plain(appointment), patientId = Number(patientOnly ? patientIdRaw : cita?.paciente_id),
-    clinicId = Number(patientOnly ? clinicIdRaw : cita?.clinica_id), source = patientOnly ? PATIENT_PAPER_SOURCE : PAPER_SOURCE;
+    clinicId = Number(patientOnly ? clinicIdRaw : cita?.clinica_id);
+  let source = patientOnly ? PATIENT_PAPER_SOURCE : PAPER_SOURCE;
   if (acknowledged !== true) throw failure('appointment_consent_privacy_paper_acknowledgement_required',
     'Confirma que ya dispones del consentimiento de protección de datos firmado en papel.', 400);
   if (!transaction || !positive(actorId) || (!patientOnly && !positive(cita?.id_cita)) || !positive(patientId)
-    || ![66, 72].includes(clinicId)) throw invalidConfiguration();
+    || !positive(clinicId)) throw invalidConfiguration();
+  const eligibility = require('../services/appointmentPrivacyEligibility.service');
+  const policy = await eligibility.registrationPolicy({ db, clinicId, transaction });
+  if (!policy.enabled) throw invalidConfiguration();
   const patient = await db.Paciente.findByPk(patientId, { attributes: ['id_paciente'], transaction, lock: transaction.LOCK.UPDATE });
   if (!patient) throw failure('appointment_not_found', 'No se encontró el paciente de la cita.', 404);
   // Capture the operating clock only after acquiring the patient anchor. A
@@ -156,12 +175,13 @@ async function recordPaper({ db, appointment, patientId: patientIdRaw, clinicId:
   // that committed receipt as past evidence, not as a future observation.
   now = now || new Date();
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw invalidConfiguration();
-  const template = plain(await db.ClinicConsentTemplate.findOne({ where: { clinic_id: clinicId, catalog_key: FINAL_PRIVACY_KEY,
-    purpose: 'data_protection', status: 'active', is_default: true, blocking_policy: 'hard' }, transaction, lock: transaction.LOCK.SHARE }));
+  const template = plain(await db.ClinicConsentTemplate.findOne({ where: eligibility.registrationTemplateWhere(clinicId, policy),
+    transaction, lock: transaction.LOCK.SHARE }));
   if (!template) throw invalidConfiguration();
   const version = plain(await db.ClinicConsentTemplateVersion.findOne({ where: { clinic_template_id: template.id,
     status: 'published', locale: 'es' }, order: [['version', 'DESC'], ['id', 'DESC']], transaction, lock: transaction.LOCK.SHARE }));
   if (!isApprovedPaperFamilyVersion(version)) throw invalidConfiguration();
+  if (require('./registration-privacy-template').schema(version.body_json)) source = CONFIGURED_PAPER_SOURCE;
   const approvedVersions = await require('../services/appointmentPrivacyEligibility.service').approvedPrivacyVersions({ db, template, version, transaction });
   const existing = await findRegistrationPrivacyPaper({ db, patientId, clinicId, template, version, approvedVersions, transaction, now });
   if (existing) {
@@ -186,6 +206,8 @@ async function recordPaper({ db, appointment, patientId: patientIdRaw, clinicId:
 const recordRegistrationPrivacyPaper = options => recordPaper({ ...options, patientOnly: false });
 const recordPatientRegistrationPrivacyPaper = options => recordPaper({ ...options, patientOnly: true });
 
-module.exports = { PAPER_SOURCE, PATIENT_PAPER_SOURCE, PAPER_EVENT, PAPER_TITLE, PAPER_NOTE, FINAL_PRIVACY_KEY,
+const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+module.exports = { PAPER_SOURCE, PATIENT_PAPER_SOURCE, CONFIGURED_PAPER_SOURCE, PAPER_EVENT, PAPER_TITLE, PAPER_NOTE, FINAL_PRIVACY_KEY,
   isApprovedPaperFamilyVersion, matchesPaperEvidence, findRegistrationPrivacyPaper, paperAssessment,
   recordRegistrationPrivacyPaper, recordPatientRegistrationPrivacyPaper, retirePendingPrivacyRequests };

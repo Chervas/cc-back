@@ -43,7 +43,7 @@ function defineModels(sql, db) {
   db.Paciente = sql.define('Paciente', { id_paciente: { type: D.INTEGER, primaryKey: true },
     clinica_id: D.INTEGER, public_id: D.STRING(80), nombre: D.STRING(100), apellidos: D.STRING(100),
     dni: D.STRING(40), email: D.STRING(100), telefono_movil: D.STRING(40), telefono_secundario: D.STRING(40), fecha_nacimiento: D.DATEONLY,
-    direccion: D.STRING(150), codigo_postal: D.STRING(12), ciudad: D.STRING(100), provincia: D.STRING(100),
+    direccion: D.STRING(150), codigo_postal: D.STRING(12), ciudad: D.STRING(100), poblacion: D.STRING(100), provincia: D.STRING(100),
     alergias: D.TEXT, medicacion: D.TEXT, antecedentes: D.TEXT, edad: D.INTEGER,
     acepta_marketing: { type: D.BOOLEAN, defaultValue: false },
   }, { tableName: 'Pacientes', timestamps: false });
@@ -103,7 +103,7 @@ test('editable independent BS LOPD identity: native MySQL scope, CAS, frozen evi
     const id = ++patientId;
     const patient = await db.Paciente.create({ id_paciente: id, clinica_id: clinicId, public_id: `qa_identity_patient_${id}`,
       nombre: 'Paciente', apellidos: `Ficticio ${id}`, dni: 'QA-NO-REAL', fecha_nacimiento: '1980-01-02',
-      direccion: 'Calle inicial 1', codigo_postal: '03003', ciudad: 'Alicante', provincia: 'Alicante',
+      direccion: 'Calle inicial 1', codigo_postal: '03003', ciudad: 'Alicante', poblacion: 'Alicante', provincia: 'Alicante',
       telefono_movil: '+34000000000', telefono_secundario: '+34000000001',
       email: `qa-${id}@example.invalid`, acepta_marketing: false, ...patch });
     const prepared = await service.createPatientIntakePackage(id, { clinicId, createdBy: 1 });
@@ -217,6 +217,106 @@ test('editable independent BS LOPD identity: native MySQL scope, CAS, frozen evi
     assert.equal(await db.PatientIntakeRequest.count({ where: { patient_id: item.patientId } }), 0);
     report.checks.push(`clinic ${clinicId}: all 12 identity fields including optional company and secondary phone prefill/edit -> same frozen LOPD; explicit choices + current-hash required; four No signed; real PDF text + first-care eligibility; immutable history; no master/intake mutation`);
   }
+
+  const profile = require('../../services/patientPrivacyProfile.service');
+  const empty = await prepare(66, { dni: null, fecha_nacimiento: null, direccion: null, codigo_postal: null,
+    ciudad: null, poblacion: null, provincia: null, telefono_movil: null, telefono_secundario: null, email: null });
+  const emptyBefore = snapshotOf(await db.Paciente.findByPk(empty.patientId));
+  const emptyCorrected = await confirm(empty, { ...empty.doc.personal_data_form.values,
+    nombre: 'Nombre declarado distinto', dni: 'QA-EMPTY-ONLY', fecha_nacimiento: '1984-02-29',
+    direccion: 'Dirección aportada 21', codigo_postal: '03004', ciudad: 'Elche', provincia: 'Alicante',
+    telefono: '+34000000991', telefono2: '+34000000992', email: 'empty-autofill@example.invalid' });
+  assert.equal(snapshotOf(await db.Paciente.findByPk(empty.patientId)), emptyBefore, 'Typing/confirming is still document-only');
+  await service.signPublicPackage(empty.session.public_token, signPayload(emptyCorrected));
+  const emptyAfter = await db.Paciente.findByPk(empty.patientId);
+  assert.equal(emptyAfter.nombre, 'Paciente', 'A non-empty master value is never overwritten by signing');
+  assert.equal(emptyAfter.dni, 'QA-EMPTY-ONLY'); assert.equal(emptyAfter.fecha_nacimiento, '1984-02-29');
+  assert.equal(emptyAfter.direccion, 'Dirección aportada 21'); assert.equal(emptyAfter.poblacion, 'Elche');
+  assert.equal(emptyAfter.email, 'empty-autofill@example.invalid'); assert.equal(emptyAfter.telefono_movil, '34000000991');
+  const emptyFrozen = snapshotOf(await refresh(empty));
+  const autoEvents = await db.PatientOperationalEvent.count({ where: { patient_id: empty.patientId, event_type: 'patient.privacy_profile_autofilled' } });
+  assert.equal(autoEvents, 1);
+  assert.equal((await profile.autofillEmptyFromDocument({ db, documentId: empty.doc.id })).applied, false);
+  assert.equal(await db.PatientOperationalEvent.count({ where: { patient_id: empty.patientId, event_type: 'patient.privacy_profile_autofilled' } }), autoEvents);
+  let review = await profile.view({ db, patientId: empty.patientId, clinicId: empty.clinicId });
+  assert.deepEqual(review.fields.map(field => field.key), ['nombre']);
+  await sql.transaction(async transaction => profile.apply({ db, patientId: empty.patientId, clinicId: empty.clinicId,
+    actorId: 1, authorizedPrimaryClinicId: empty.clinicId, transaction, payload: { clinic_id: empty.clinicId,
+      document_id: review.document.id, snapshot_hash: review.document.snapshot_hash, patient_version: review.patient_version, fields: ['nombre'] } }));
+  assert.equal((await db.Paciente.findByPk(empty.patientId)).nombre, 'Nombre declarado distinto');
+  assert.equal(snapshotOf(await refresh(empty)), emptyFrozen);
+  report.checks.push('signing atomically fills empty identity and contacts only; conflicts remain per-field; explicit single-field CAS updates preserve signed document; replay has zero writes');
+
+  const phoneChange = await prepare(72, { telefono_movil: '+34000000993' });
+  const phoneCorrected = await confirm(phoneChange, { ...phoneChange.doc.personal_data_form.values, telefono: '+34000000994' });
+  await service.signPublicPackage(phoneChange.session.public_token, signPayload(phoneCorrected));
+  assert.equal((await db.Paciente.findByPk(phoneChange.patientId)).telefono_movil, '+34000000993');
+  review = await profile.view({ db, patientId: phoneChange.patientId, clinicId: phoneChange.clinicId });
+  await sql.transaction(transaction => profile.apply({ db, patientId: phoneChange.patientId, clinicId: phoneChange.clinicId,
+    actorId: 1, authorizedPrimaryClinicId: phoneChange.clinicId, transaction, payload: { clinic_id: phoneChange.clinicId,
+      document_id: review.document.id, snapshot_hash: review.document.snapshot_hash, patient_version: review.patient_version,
+      fields: ['telefono_movil'], acknowledge_contact_changes: true } }));
+  const verificationEvents = await db.PatientOperationalEvent.findAll({ where: {
+    patient_id: phoneChange.patientId, event_type: 'patient.mobile_verification_requested' } });
+  assert.equal(verificationEvents.length, 1);
+  assert.equal(verificationEvents[0].metadata.phone, '34000000994');
+  assert.equal(verificationEvents[0].metadata.delivery_enabled, false);
+  assert.equal(verificationEvents[0].metadata.state, 'pending');
+  report.checks.push('explicit mobile overwrite creates one durable pending verification handoff with delivery disabled; no appointment or marketing authorization is changed');
+
+  const collisionEmpty = await prepare(66, { email: null, direccion: null });
+  const collisionCorrected = await confirm(collisionEmpty, { ...collisionEmpty.doc.personal_data_form.values,
+    email: 'qa-1001@example.invalid', direccion: 'Dirección sin colisión 7' });
+  await service.signPublicPackage(collisionEmpty.session.public_token, signPayload(collisionCorrected));
+  const collisionMaster = await db.Paciente.findByPk(collisionEmpty.patientId);
+  assert.equal(collisionMaster.email, null); assert.equal(collisionMaster.direccion, 'Dirección sin colisión 7');
+  const collisionAudit = await db.PatientOperationalEvent.findOne({ where: {
+    patient_id: collisionEmpty.patientId, event_type: 'patient.privacy_profile_autofilled' } });
+  assert.deepEqual(collisionAudit.metadata.skipped_fields, [{ key: 'email', reason: 'privacy_profile_contact_collision' }]);
+  report.checks.push('contact collision never steals another identity or prevents signing; safe empty fields fill and skipped conflict is auditable');
+
+  const autoRollback = await prepare(72, { direccion: null });
+  const autoRollbackConfirmed = await confirm(autoRollback, { ...autoRollback.doc.personal_data_form.values, direccion: 'No debe quedar guardada' });
+  const autoRollbackDoc = snapshotOf(await refresh(autoRollback));
+  const autoRollbackPatient = snapshotOf(await db.Paciente.findByPk(autoRollback.patientId));
+  db.PatientOperationalEvent.addHook('beforeCreate', 'qa-autofill-rollback', row => {
+    if (row.patient_id === autoRollback.patientId && row.event_type === 'patient.privacy_profile_autofilled') {
+      throw Error('OWNED_AUTOFILL_AUDIT_FAILURE');
+    }
+  });
+  await assert.rejects(service.signPublicPackage(autoRollback.session.public_token, signPayload(autoRollbackConfirmed)), /OWNED_AUTOFILL_AUDIT_FAILURE/);
+  db.PatientOperationalEvent.removeHook('beforeCreate', 'qa-autofill-rollback');
+  assert.equal(snapshotOf(await refresh(autoRollback)), autoRollbackDoc);
+  assert.equal(snapshotOf(await db.Paciente.findByPk(autoRollback.patientId)), autoRollbackPatient);
+  assert.equal((await db.ConsentSignaturePackage.findByPk(autoRollback.prepared.package_id)).signed_count, 0);
+  await service.signPublicPackage(autoRollback.session.public_token, signPayload(autoRollbackConfirmed));
+  assert.equal((await db.Paciente.findByPk(autoRollback.patientId)).direccion, 'No debe quedar guardada');
+  report.checks.push('autofill audit failure rolls back both master data and signature/package counts; retry succeeds atomically');
+
+  const backfill = require('../patient-privacy-empty-fields-backfill');
+  // Simulate a valid already-signed pre-rollout document whose master address
+  // was not transferred by the previous document-only implementation.
+  await db.Paciente.update({ direccion: null }, { where: { id_paciente: autoRollback.patientId } });
+  const backfillPlan = await backfill.buildPlan({ db, clinicIds: [66, 72] });
+  assert(backfillPlan.entries.some(entry => entry.patient_id === autoRollback.patientId && entry.fields.includes('direccion')));
+  const beforeBackfillDoc = snapshotOf(await refresh(autoRollback));
+  const beforeBackfillEvents = await db.PatientOperationalEvent.count();
+  const rehearsal = await backfill.applyPlan({ db, plan: backfillPlan, dryRun: true });
+  assert(rehearsal.applied_patients >= 1);
+  assert.equal((await db.Paciente.findByPk(autoRollback.patientId)).direccion, null);
+  assert.equal(await db.PatientOperationalEvent.count(), beforeBackfillEvents);
+  let backupCalled = false;
+  const backfilled = await backfill.applyPlan({ db, plan: backfillPlan, dryRun: false, backup: value => {
+    backupCalled = true; assert(value.before.some(row => row.patient.id_paciente === autoRollback.patientId));
+  } });
+  assert(backupCalled); assert(backfilled.applied_patients >= 1);
+  assert.equal((await db.Paciente.findByPk(autoRollback.patientId)).direccion, 'No debe quedar guardada');
+  assert.equal(snapshotOf(await refresh(autoRollback)), beforeBackfillDoc);
+  const afterBackfillEvents = await db.PatientOperationalEvent.count();
+  const replayBackfill = await backfill.applyPlan({ db, plan: backfillPlan, dryRun: false });
+  assert.equal(replayBackfill.applied_patients, 0);
+  assert.equal(await db.PatientOperationalEvent.count(), afterBackfillEvents);
+  report.checks.push('bounded historical empty-field plan is privately backed up, SQL-rehearsed with rollback, applied without touching signatures, and replayed with zero writes');
 
   const invalid = await prepare();
   const base = payload(invalid.doc);

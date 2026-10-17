@@ -38,10 +38,19 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       const primary = linked && await db.Clinica.findByPk(patient.clinica_id, { transaction });
       if (!linked || !primary?.grupoClinicaId || Number(primary.grupoClinicaId) !== Number(clinic.grupoClinicaId)) throw error('patient_clinic_changed', 409);
     }
+    const registration = require('./registration-privacy-configuration').policy(plain(clinic));
+    const additional = privacyOnly ? [] : object(object(plain(clinic).configuracion).patient_intake).additional_documents || [];
+    const extraById = new Map(additional.map(row => [Number(row.template_id), row]));
+    const primaryWhere = registration.enabled && registration.templateId
+      ? { clinic_id: clinicId, id: registration.templateId, purpose: 'data_protection', status: 'active' }
+      : { clinic_id: clinicId, purpose: 'data_protection', status: 'active', is_default: true };
     const templates = await db.ClinicConsentTemplate.findAll({
-      where: { clinic_id: clinicId, purpose: 'data_protection', status: 'active', is_default: true },
+      where: extraById.size ? { [Op.or]: [primaryWhere,
+        { clinic_id: clinicId, id: { [Op.in]: [...extraById.keys()] }, status: 'active' }] } : primaryWhere,
       order: [['id', 'ASC']], transaction,
     });
+    if ([...extraById.keys()].some(id => !templates.some(row => Number(row.id) === id))) throw error('intake_additional_documents_invalid', 409);
+    templates.sort((a, b) => (extraById.get(Number(a.id))?.sort_order ?? -1) - (extraById.get(Number(b.id))?.sort_order ?? -1));
     const prepared = [], reused = [], missing = [], currentPackageIds = [];
     let considered = 0, signed = 0, paperCount = 0;
     for (const template of templates) {
@@ -57,7 +66,7 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       const form = getConsentChoiceForm({ snapshot_json: { version: plain(version) } });
       const privacy = require('../services/appointmentPrivacyEligibility.service');
       const paper = require('./registration-privacy-paper');
-      if (privacy.CLINICS.includes(Number(clinicId)) && template.catalog_key === privacy.FINAL_PRIVACY_KEY
+      if (registration.enabled && Number(template.id) === Number(registration.templateId || template.id)
         && paper.isApprovedPaperFamilyVersion(plain(version))) {
         const approvedVersions = await privacy.approvedPrivacyVersions({ db, template: plain(template), version: plain(version), transaction });
         const evidence = await paper.findRegistrationPrivacyPaper({ db, patientId, clinicId, template: plain(template),
@@ -71,12 +80,13 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
         order: [['id', 'DESC']], transaction,
       });
       let reusable = document && reusableChoiceDocument(document, template, version, form, now);
-      const bsDigital = privacy.CLINICS.includes(Number(clinicId))
+      const genericRegistration = !!require('./registration-privacy-template').schema(version.body_json);
+      const bsDigital = genericRegistration || privacy.CLINICS.includes(Number(clinicId))
         && Number(template.clinic_id) === Number(clinicId) && template.catalog_key === privacy.FINAL_PRIVACY_KEY
         && require('./bs-privacy-digital-template').isApprovedPrivacyPresentation({ bodyHtml: version.body_html, bodyJson: version.body_json });
       if (bsDigital && reusable && document.status === 'signed') {
         reusable = privacy.isValidSignedPrivacyDocument({ document, template: plain(template), patientId, clinicId, now,
-          approvedVersions: new Map([[Number(version.id), { version: plain(version), legacy: false, digital: true }]]) });
+          approvedVersions: new Map([[Number(version.id), { version: plain(version), legacy: false, digital: !genericRegistration, registration: genericRegistration }]]) });
       }
       if (bsDigital && (!reusable || document.status !== 'signed')) {
         const approvedVersions = await privacy.approvedPrivacyVersions({ db, template: plain(template), version: plain(version), transaction });
@@ -109,12 +119,19 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
           continue;
         }
       }
-      prepared.push({ template, version });
+      const extra = extraById.get(Number(template.id));
+      prepared.push({ template: extra ? { ...plain(template), blocking_policy: extra.required ? 'hard' : 'optional' } : template, version });
     }
     if (!templates.length || considered === 0 || missing.length) throw error('intake_published_templates_required', 409);
     if (!prepared.length) return { package_id: null, created_count: 0, existing_count: reused.length, current_package_ids: [...new Set(currentPackageIds)],
       privacy_signed: signed === considered, privacy_satisfied: signed + paperCount === considered,
       privacy_on_paper: paperCount > 0, paper_count: paperCount };
+    // Enforce at actual issue as well as settings-save: a published default
+    // can be prepared directly before registration has been configured. Never
+    // emit blank controller variables or reinterpret existing signed/paper data.
+    if (prepared.some(({ version }) => require('./registration-privacy-template').schema(version.body_json))) {
+      require('./registration-privacy-configuration').assertLegalControllerForIssue(plain(clinic));
+    }
     const expires = new Date(now.getTime() + 30 * 86400000);
     const pkg = await db.ConsentSignaturePackage.create({
       public_id: `cpkg_${randomUUID().replace(/-/g, '')}`, paciente_id: patientId, clinica_id: clinicId,
@@ -127,7 +144,7 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
         public_id: `cdoc_${randomUUID().replace(/-/g, '')}`, package_id: pkg.id,
         paciente_id: patientId, clinica_id: clinicId, cita_id: null, tratamiento_id: null,
         clinic_template_id: template.id, clinic_template_version_id: version.id,
-        purpose: 'data_protection', status: 'pending', required: template.blocking_policy === 'hard',
+        purpose: template.purpose || 'data_protection', status: 'pending', required: template.blocking_policy === 'hard',
         blocking_policy: template.blocking_policy, locale: version.locale,
         // The signature session expires, not a signed data-protection notice.
         title: version.title || template.name, expires_at: null, ...frozen,

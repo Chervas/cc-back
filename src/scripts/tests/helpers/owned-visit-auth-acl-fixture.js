@@ -53,7 +53,7 @@ const DOMAIN_TABLES = [
 
 async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registerOwnedLoopbackServer,
   includeConsentRoutes = false, includeProgramLedger = false, includeAvailabilityRoutes = false,
-  includeInstallationRoutes = false, nativeFinalHandler = false }) {
+  includeInstallationRoutes = false, includePatientCommunicationRoutes = false, includePatientIntakeSettingsRoutes = false, nativeFinalHandler = false }) {
   assert(sql.options.dialectOptions?.socketPath?.startsWith('/tmp/cc-campaign-opt-mysql-'));
   const [[owned]] = await sql.query('SELECT @@skip_networking AS isolated, DATABASE() AS name');
   assert.equal(Number(owned.isolated), 1); assert.equal(owned.name, 'campaign_optimization_qa');
@@ -95,6 +95,10 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
   }
   for (const name of ASSOCIATED) db[name]?.associate?.(db);
   await sql.sync();
+  if (includePatientCommunicationRoutes) {
+    db.MarketingContactOptOut = require('../../../../models/marketingcontactoptout')(sql, S.DataTypes);
+    await db.MarketingContactOptOut.sync();
+  }
   const qi = sql.getQueryInterface();
   // Use additive native DDL for append-only history/protocol revision indexes,
   // including MySQL-safe named indexes and the exact revision UNIQUE key.
@@ -198,6 +202,21 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
   if (includeInstallationRoutes) app.use('/api/instalaciones', require('../../../routes/instalaciones.routes'));
   app.use('/api/treatment-documentation', require('../../../routes/treatmentDocumentation.routes'));
   if (includeConsentRoutes) app.use('/api/consentimientos', require('../../../routes/consentimientos.routes'));
+  if (includePatientIntakeSettingsRoutes) {
+    const router = require('express').Router(), controller = require('../../../controllers/patientIntakeSettings.controller');
+    router.use(require('../../../routes/auth.middleware'));
+    router.get('/:id/patient-intake-settings', controller.get);
+    router.put('/:id/patient-intake-settings', controller.put);
+    router.post('/:id/patient-intake-settings/standard-template', controller.standard);
+    app.use('/api/clinicas', router);
+  }
+  if (includePatientCommunicationRoutes) {
+    const router = require('express').Router(), controller = require('../../../controllers/patientCommunication.controller');
+    router.use(require('../../../routes/auth.middleware'));
+    router.get('/:id/communication-preferences', controller.get);
+    router.post('/:id/communication-preferences', controller.set);
+    app.use('/api/pacientes', router);
+  }
   // Native error-contract acceptance must reach each real router's own
   // middleware. The legacy fixture fallback could otherwise hide a missing
   // domain handler by manufacturing JSON that production does not return.

@@ -328,29 +328,39 @@ class WhatsAppService {
     }
 
     async assertRecipientCanReceive({ to, clinicConfig = {} }) {
-        if (!MarketingContactOptOut) return;
         const phoneDigits = String(this.normalizePhoneNumber(to) || to || '').replace(/\D+/g, '');
         const clinicId = Number(clinicConfig.clinicId || clinicConfig.clinicaId || 0);
         if (!phoneDigits || !clinicId) return;
-        const restriction = await MarketingContactOptOut.findOne({
+        const restriction = MarketingContactOptOut && await MarketingContactOptOut.findOne({
             where: {
                 clinica_id: clinicId,
                 phone_digits: phoneDigits,
                 channel: 'whatsapp',
-                scope: 'whatsapp_number',
+                scope: { [Op.in]: ['whatsapp_number', 'whatsapp_channel'] },
                 status: 'active',
             },
             order: [['updated_at', 'DESC']],
         });
-        if (!restriction) return;
-        const error = new Error('whatsapp_recipient_number_restricted');
-        error.code = 'WHATSAPP_RECIPIENT_NUMBER_RESTRICTED';
-        error.status = 409;
-        error.details = {
-            restriction_id: restriction.id,
-            reason: restriction.reason_text || 'Número marcado como erróneo o perteneciente a otra persona',
-        };
-        throw error;
+        if (restriction?.scope === 'whatsapp_channel') throw Object.assign(new Error('Este paciente ha pedido no ser notificado por WhatsApp'), {
+            code: 'WHATSAPP_CHANNEL_REFUSED', status: 409, statusCode: 409, retryable: false,
+            details: { scope: 'whatsapp_channel', restriction_id: restriction.id },
+        });
+        if (restriction) {
+            const error = new Error('whatsapp_recipient_number_restricted');
+            error.code = 'WHATSAPP_RECIPIENT_NUMBER_RESTRICTED';
+            error.status = 409;
+            error.details = {
+                restriction_id: restriction.id,
+                reason: restriction.reason_text || 'Número marcado como erróneo o perteneciente a otra persona',
+            };
+            throw error;
+        }
+        const signed = await require('../lib/bs-privacy-commercial-preferences').channelRefusals({ db,
+            clinicIds: [clinicId], phone: phoneDigits });
+        if (signed.documentIds.length) throw Object.assign(new Error('Este paciente ha pedido no ser notificado por WhatsApp'), {
+            code: 'WHATSAPP_CHANNEL_REFUSED', status: 409, statusCode: 409, retryable: false,
+            details: { scope: 'whatsapp_channel', source: 'signed_privacy_document' },
+        });
     }
 
     /**
@@ -493,6 +503,9 @@ class WhatsAppService {
                 }
                 clinicId = Number(conversation.clinic_id);
                 if (clinicId !== configuredClinicId) {
+                    // A queued message cannot evade an exact-clinic channel
+                    // refusal by presenting another clinic's sender config.
+                    await this.assertRecipientCanReceive({ to: payload.to, clinicConfig: { clinicId } });
                     if (heldClinic(clinicId) || heldClinic(configuredClinicId)) return deny();
                     return;
                 }
@@ -660,6 +673,9 @@ class WhatsAppService {
     }
 
     async dispatchMessage(payload, clinicConfig = {}, healthContext = {}) {
+        // This final boundary covers manual sends, templates, direct callers
+        // and both transports; absence of a LOPD is never a channel refusal.
+        await this.assertRecipientCanReceive({ to: payload.to, clinicConfig });
         let storedMessage = null;
         if (healthContext.messageId) {
             const message = await db.Message.findByPk(healthContext.messageId);

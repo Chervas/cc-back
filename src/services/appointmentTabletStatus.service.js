@@ -25,8 +25,11 @@ async function appointmentTabletStatus({ db, appointment, transaction, now = new
   else if (assessment.reason === 'privacy_received_on_paper') result.privacy.state = 'paper';
   else if (assessment.reason === 'current_privacy_signed') result.privacy.state = 'completed';
   else {
-    const templates = await db.ClinicConsentTemplate.findAll({ where: { clinic_id: clinicId,
-      purpose: 'data_protection', status: 'active', is_default: true },
+    const privacy = require('./appointmentPrivacyEligibility.service');
+    const policy = await privacy.registrationPolicy({ db, clinicId, transaction });
+    const templates = await db.ClinicConsentTemplate.findAll({ where: policy.enabled
+      ? privacy.registrationTemplateWhere(clinicId, policy) : { clinic_id: clinicId,
+        purpose: 'data_protection', status: 'active', is_default: true },
     transaction });
     let considered = 0, completed = 0, paperReceived = 0;
     for (const rawTemplate of templates) {
@@ -36,8 +39,8 @@ async function appointmentTabletStatus({ db, appointment, transaction, now = new
       const version = plain(await db.ClinicConsentTemplateVersion.findOne({ where: { clinic_template_id: template.id,
         status: 'published', locale: 'es' }, order: [['version', 'DESC'], ['id', 'DESC']], transaction }));
       if (!version) continue;
-      const privacy = require('./appointmentPrivacyEligibility.service');
-      const bsPrivacy = privacy.CLINICS.includes(clinicId) && template.catalog_key === privacy.FINAL_PRIVACY_KEY;
+      const bsPrivacy = !!require('../lib/registration-privacy-template').schema(version.body_json)
+        || privacy.CLINICS.includes(clinicId) && template.catalog_key === privacy.FINAL_PRIVACY_KEY;
       const approvedVersions = bsPrivacy
         ? await privacy.approvedPrivacyVersions({ db, template, version, transaction })
         : new Map([[Number(version.id), { version }]]);

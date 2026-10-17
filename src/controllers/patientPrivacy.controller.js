@@ -98,7 +98,8 @@ exports.prepare = async (req, res, next) => {
     if (!req.body || Array.isArray(req.body) || Object.keys(req.body).some(name => !['clinic_id', 'clinica_id'].includes(name))) throw failure('patient_privacy_payload_invalid', 400);
     const result = await db.sequelize.transaction(async transaction => {
       const target = await scope(req, 'consents.manage', transaction, true);
-      if (!require('../services/appointmentPrivacyEligibility.service').CLINICS.includes(target.clinicId)) throw failure('patient_privacy_registration_scope', 409);
+      const policy = await require('../services/appointmentPrivacyEligibility.service').registrationPolicy({ db, clinicId: target.clinicId, transaction });
+      if (!policy.enabled) throw failure('patient_privacy_registration_scope', 409);
       return require('../services/consentimientos.service').createPatientIntakePackage(target.patientId,
         { clinicId: target.clinicId, createdBy: target.actorId, allowLinkedClinic: true, privacyOnly: true, transaction });
     });

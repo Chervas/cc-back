@@ -34,6 +34,61 @@ function legacyDocument(answer = 'no') {
   return { doc, version };
 }
 
+function standardDocument() {
+  const registration = require('../../lib/registration-privacy-template'), source = registration.standardDraft();
+  const template = { id: 110, clinic_id: 88, purpose: 'data_protection' }, version = { id: 120,
+    clinic_template_id: 110, locale: 'es', status: 'published', ...source };
+  const snapshot = { template, version: { id: version.id, body_html: version.body_html, body_json: version.body_json },
+    context: { paciente: { id: 130, telefono: '+34 600 000 003', nombre_completo: 'Prueba genérica' }, clinica: { id: 88 },
+      responsable: { razon_social: 'Sociedad ficticia', cif: 'QA-NO-REAL' } },
+    integrity: { algorithm: choices.CHOICE_HASH_ALGORITHM }, signature_evidence: { accepted_statement: true,
+      signed_at: '2026-10-16T10:00:00Z', consent_choices: { schema_version: source.body_json.consent_form.schema_version,
+        answers: { commercial: 'no', sms_whatsapp: 'no' } } } };
+  const doc = { id: 140, paciente_id: 130, clinica_id: 88, clinic_template_id: 110, clinic_template_version_id: 120,
+    purpose: 'data_protection', status: 'signed', signed_at: '2026-10-16T10:00:00Z', snapshot_json: snapshot };
+  doc.snapshot_html = choices.appendSignedChoiceHtml(registration.render(version, snapshot.context), doc, snapshot.signature_evidence.consent_choices);
+  doc.snapshot_hash = choices.choiceSnapshotHash(snapshot, doc.snapshot_html);
+  return { doc, version, template };
+}
+
+test('generic standard No is verified against actual clinic source/version; channel stays scoped to full number, never legacy SMS', async () => {
+  const { doc, version, template } = standardDocument(), frozen = JSON.stringify(doc), calls = [];
+  assert.equal(helper.isVerifiedCommercialRefusal(doc, now), false);
+  assert.deepEqual(helper.verifiedSignedChoices(doc, { now, sourceVersion: version, sourceTemplate: template }), { commercial: 'no', sms_whatsapp: 'no' });
+  for (const change of [v => { v.body_html += '<p>changed</p>'; }, v => { v.status = 'draft'; }, v => { v.clinic_template_id = 111; },
+    v => { v.body_json.consent_form.fields[0].label = 'Changed'; }]) {
+    const source = structuredClone(version); change(source);
+    assert.equal(helper.verifiedSignedChoices(doc, { now, sourceVersion: source, sourceTemplate: template }), null);
+  }
+  assert.equal(helper.verifiedSignedChoices(doc, { now, sourceVersion: version, sourceTemplate: { ...template, clinic_id: 89 } }), null);
+  const db = { Sequelize: S, PatientConsentDocument: { findAll: async options => { calls.push(['documents', options]); return [doc]; } },
+    ClinicConsentTemplateVersion: { findAll: async options => { calls.push(['versions', options]); return [version]; } },
+    ClinicConsentTemplate: { findAll: async options => { calls.push(['templates', options]); return [template]; } } };
+  assert.equal((await helper.commercialRefusals({ db, clinicIds: [88], patientIds: [130], now })).patientIds.has(130), true);
+  assert.equal((await helper.channelRefusals({ db, clinicIds: [88], patientIds: [130], phone: '+34 600 000 003', now })).patientIds.has(130), true);
+  assert.equal((await helper.channelRefusals({ db, clinicIds: [88], patientIds: [130], phone: '+34 600 000 004', now })).patientIds.size, 0);
+  assert.equal((await helper.channelRefusals({ db, clinicIds: [89], patientIds: [130], phone: '+34 600 000 003', now })).patientIds.size, 0);
+  assert(calls.filter(([kind]) => kind === 'versions').every(([, query]) => query.limit === 2));
+  assert.equal(JSON.stringify(doc), frozen);
+  const later = structuredClone(doc);
+  later.id = 139; // Earlier preparation id, later real signature must win.
+  later.signed_at = '2026-10-17T09:00:00Z';
+  later.snapshot_json.signature_evidence.signed_at = later.signed_at;
+  later.snapshot_json.signature_evidence.consent_choices.answers.sms_whatsapp = 'yes';
+  later.snapshot_html = choices.appendSignedChoiceHtml(require('../../lib/registration-privacy-template').render(version, later.snapshot_json.context),
+    later, later.snapshot_json.signature_evidence.consent_choices);
+  later.snapshot_hash = choices.choiceSnapshotHash(later.snapshot_json, later.snapshot_html);
+  db.PatientConsentDocument.findAll = async options => { calls.push(['batch', options]); return [doc, later]; };
+  assert.equal((await helper.channelRefusals({ db, clinicIds: [88], patientIds: [130], phones: ['+34 600 000 003', '+34 600 000 004'], now })).patientIds.size, 0,
+    'Later verified combined-channel Yes supersedes prior signed No for the same full number only');
+  assert.equal(calls.find(([kind]) => kind === 'batch')[1].limit, 202);
+  assert.equal((await helper.commercialRefusals({ db, clinicIds: [88], patientIds: [130], now })).patientIds.has(130), true,
+    'A channel Yes never grants commercial consent');
+  db.PatientConsentDocument.findAll = async () => [document()];
+  assert.equal((await helper.channelRefusals({ db, clinicIds: [72], patientIds: [30], phone: '+34 600 000 001', now })).patientIds.size, 0,
+    'An old SMS No is not a WhatsApp No; missing document is not an opt-out');
+});
+
 test('only an exact approved signed No is a commercial restriction; not a grant, forged body or future/revoked evidence', () => {
   assert.equal(helper.isVerifiedCommercialRefusal(document(), now), true);
   assert.equal(helper.isVerifiedCommercialRefusal(document('yes'), now), false);
@@ -69,7 +124,8 @@ test('bounded read-only audience and phone-only checks recognize historical sign
   assert(reads.every(options => options.where.purpose === 'data_protection' && options.where.status === 'signed' && options.limit <= 10001));
   const count = reads.length;
   assert.equal((await helper.commercialRefusals({ db, clinicIds: [123], now })).patientIds.size, 0);
-  assert.equal(reads.length, count, 'Other clinics acquire no new consent query or restriction');
+  assert.equal(reads.length, count + 1, 'Other clinics can read their own new standard notices without inheriting foreign BS restrictions');
+  assert.deepEqual(reads.at(-1).where.clinica_id[S.Op.in], [123]);
 });
 
 test('review overflow fails closed and unsigned/yes-only documents cannot invent a refusal', async () => {

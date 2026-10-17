@@ -226,7 +226,8 @@ function controllerFixture() {
     if (name.includes('access-policy')) return { assertUserCanAccessFeature: async value => { calls.push(['acl', value]); } };
     if (name.includes('patientPrivacyStatus')) return { patientForPrivacyClinic: async value => { calls.push(['scope', value]); return { id_paciente: 2 }; },
       getPatientPrivacyStatus: async value => { calls.push(['status', value]); return { state: 'not_requested' }; } };
-    if (name.includes('appointmentPrivacyEligibility')) return { CLINICS: [66, 72] };
+    if (name.includes('appointmentPrivacyEligibility')) return { CLINICS: [66, 72],
+      registrationPolicy: async () => ({ enabled: true }) };
     if (name.includes('consentimientos.service')) return { createPatientIntakePackage: async (id, value) => { calls.push(['prepare', id, value]); return { created_count: 1 }; } };
     if (name.includes('registration-privacy-paper')) return { recordPatientRegistrationPrivacyPaper: async value => { calls.push(['paper', value]); return { created: true }; } };
     throw Error(name);

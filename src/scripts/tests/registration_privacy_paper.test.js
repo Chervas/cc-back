@@ -133,7 +133,7 @@ test('paper reads remain patient/clinic/source scoped, bounded and locked; exces
   const f = fixture(); await f.record();
   const query = f.calls.find(([name]) => name === 'paper-read')[1];
   assert.deepEqual(query.where, { paciente_id: 2, clinica_id: 72, purpose: 'data_protection',
-    source: { [f.db.Sequelize.Op.in]: [paper.PAPER_SOURCE, paper.PATIENT_PAPER_SOURCE] },
+    source: { [f.db.Sequelize.Op.in]: [paper.PAPER_SOURCE, paper.PATIENT_PAPER_SOURCE, paper.CONFIGURED_PAPER_SOURCE] },
     status: 'active', revoked_at: null });
   f.attestations.push(...Array(100).fill(f.attestations[0]));
   await assert.rejects(f.find(), { code: 'appointment_consent_privacy_configuration' });

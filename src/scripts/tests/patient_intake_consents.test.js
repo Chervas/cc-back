@@ -22,6 +22,38 @@ test('clinic drift fails closed before reading templates or writing a package',a
 test('no active templates or published version fails without creating an empty package',async()=>{for(const config of [{templates:[]},{published:false}]){const f=fixture(config);await assert.rejects(f.run(),/intake_published_templates_required/);assert.equal(f.writes.length,0)}});
 test('nonmandatory onboarding documents stay optional',async()=>{const f=fixture({templates:[{id:92,blocking_policy:'optional'}]});await f.run();assert.equal(f.writes[1].required,false);assert.equal(f.writes[2].required_count,0)});
 
+test('new registration v2 issue checks four legal controller fields even through a direct default-template call, before any write', async () => {
+ const registration = require('../../lib/registration-privacy-template'), body = registration.standardDraft();
+ const template = { id:90, clinic_id:72, purpose:'data_protection', status:'active', blocking_policy:'hard' };
+ const version = { id:312, clinic_template_id:90, version:1, status:'published', locale:'es', ...body };
+ const controller = { legal_name:'Sociedad ficticia', tax_id:'QA-NO-REAL', address:'Dirección fiscal ficticia', email:'qa@example.invalid' };
+ for (const missing of ['legal_name','tax_id','address','email']) {
+  const current = { ...controller, [missing]:'' }, f = fixture({ templates:[template], version });
+  f.db.Clinica.findByPk = async () => ({ id_clinica:72, nombre_clinica:'Marca no es entidad legal', configuracion:{ patient_intake:{ privacy_enabled:false, privacy_controller:current } } });
+  await assert.rejects(f.run(), { code:'patient_intake_legal_controller_incomplete', statusCode:409 });
+  assert.equal(f.writes.length,0);
+ }
+ const valid = fixture({ templates:[template], version });
+ valid.db.Clinica.findByPk = async () => ({ id_clinica:72, configuracion:{ patient_intake:{ privacy_enabled:false, privacy_controller:controller } } });
+ assert.equal((await valid.run()).created_count,1);
+});
+
+test('an already verified signed registration v2 remains reusable if live legal configuration is later incomplete', async () => {
+ const registration = require('../../lib/registration-privacy-template'), body = registration.standardDraft();
+ const template = { id:90, clinic_id:72, purpose:'data_protection', status:'active', blocking_policy:'hard', validity_mode:'manual' };
+ const version = { id:312, clinic_template_id:90, version:1, status:'published', locale:'es', ...body };
+ const snapshot = { template, version, context:{ paciente:{ id:82 }, clinica:{ id:72 }, responsable:{ razon_social:'Sociedad ficticia', cif:'QA', direccion:'Dirección', email:'qa@example.invalid' } },
+  integrity:{ algorithm:choices.CHOICE_HASH_ALGORITHM }, signature_evidence:{ accepted_statement:true, signed_at:'2026-01-01T10:00:00Z',
+   consent_choices:{ schema_version:registration.CHOICE_SCHEMA, answers:{ commercial:'no',sms_whatsapp:'no' } } } };
+ const doc = { id:800, package_id:700, paciente_id:82, clinica_id:72, clinic_template_id:90, clinic_template_version_id:312,
+  purpose:'data_protection', status:'signed', signed_at:'2026-01-01T10:00:00Z', snapshot_json:snapshot };
+ doc.snapshot_html = choices.appendSignedChoiceHtml(registration.render(version,snapshot.context),doc,snapshot.signature_evidence.consent_choices);
+ doc.snapshot_hash = choices.choiceSnapshotHash(snapshot,doc.snapshot_html);
+ const before=JSON.stringify(doc), f=fixture({ templates:[template], version, document:doc });
+ const result=await f.run();
+ assert.equal(result.created_count,0); assert.equal(result.privacy_signed,true); assert.equal(f.writes.length,0); assert.equal(JSON.stringify(doc),before);
+});
+
 const choices=require('../../lib/consent-document-choices');
 function interactiveFixture(patch={}){
  const form={schema_version:choices.CHOICE_SCHEMA_VERSION,fields:choices.CHOICE_KEYS.map(key=>({key,type:'yes_no',required:true,label:choices.CHOICE_LABELS[key]}))};

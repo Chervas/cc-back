@@ -1937,6 +1937,7 @@ exports.startPatientContact = async (req, res) => {
     if (transaction && !transaction.finished) {
       await transaction.rollback();
     }
+    if (err.code === 'WHATSAPP_CHANNEL_REFUSED') return res.status(409).json({ code: err.code, error: err.code, message: err.message });
     const status = Number(err?.status) || 500;
     const knownErrors = new Set([
       'patient_not_found',
@@ -2155,6 +2156,7 @@ exports.postMessage = async (req, res) => {
         await transaction.rollback();
         return res.status(400).json({ error: 'contacto_sin_numero' });
       }
+      await whatsappService.assertRecipientCanReceive({ to, clinicConfig: { clinicId: conversation.clinic_id } });
       if (conversation.contact_id !== to) {
         if (whatsappService.normalizePhoneNumber(conversation.contact_id) !== to) {
           await transaction.rollback();
@@ -2515,6 +2517,7 @@ exports.postMessage = async (req, res) => {
     return res.json({ message: msg });
   } catch (err) {
     await transaction.rollback();
+    if (['WHATSAPP_CHANNEL_REFUSED', 'WHATSAPP_RECIPIENT_NUMBER_RESTRICTED'].includes(err.code)) return res.status(409).json({ code: err.code, error: err.code, message: err.message });
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error postMessage', err);
     return res.status(500).json({ error: 'Error enviando mensaje' });
@@ -2573,6 +2576,7 @@ exports.sendScheduledMessageNow = async (req, res) => {
     if (!to) {
       return res.status(400).json({ error: 'contacto_sin_numero' });
     }
+    await whatsappService.assertRecipientCanReceive({ to, clinicConfig });
 
     const useTemplate = String(msg.message_type || '').toLowerCase() === 'template';
     const nextMetadata = {
@@ -2614,6 +2618,7 @@ exports.sendScheduledMessageNow = async (req, res) => {
 
     return res.json({ success: true, message: msg });
   } catch (err) {
+    if (['WHATSAPP_CHANNEL_REFUSED', 'WHATSAPP_RECIPIENT_NUMBER_RESTRICTED'].includes(err.code)) return res.status(409).json({ code: err.code, error: err.code, message: err.message });
     console.error('Error sendScheduledMessageNow', err);
     return res.status(500).json({ error: 'send_now_failed', message: err.message });
   }
@@ -2630,6 +2635,7 @@ exports.retryFailedTemplate = async (req, res) => {
       authorize: async conversation => {
         if (!ensureAccess(access, conversation.clinic_id)) throw Object.assign(Error('clinic_forbidden'), { code: 'clinic_forbidden', status: 403 });
         await ensureQuickChatConversationReadAccess(userId, conversation);
+        await whatsappService.assertRecipientCanReceive({ to: conversation.contact_id, clinicConfig: { clinicId: conversation.clinic_id } });
       } });
     const io = getIO(), room = `clinic:${result.conversation.clinic_id}`;
     if (io) {
@@ -2645,6 +2651,7 @@ exports.retryFailedTemplate = async (req, res) => {
       whatsapp_template_not_available: 'La plantilla debe estar activa y aprobada en la cuenta de WhatsApp de origen.',
       WHATSAPP_SENDER_HEALTH_BLOCKED: 'Este WhatsApp sigue bloqueado. Resuelve el problema del número antes de reenviar.',
       AUTOMATION_COMMUNICATIONS_RESTRICTED: 'Este contacto tiene una baja o una cuarentena que impide el envío.',
+      WHATSAPP_CHANNEL_REFUSED: 'Este paciente ha pedido no ser notificado por WhatsApp',
       whatsapp_appointment_already_confirmed: 'La cita ya está confirmada. No se enviará otra petición de confirmación.',
     };
     if (error?.status === 403) return res.status(403).json({ error: 'conversation_forbidden' });

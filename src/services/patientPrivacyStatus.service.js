@@ -61,17 +61,26 @@ async function bounded(model, options, limit) {
 // Every query is bounded, uses the same snapshot and carries explicit scope.
 async function loadPrivacyContext({ db, appointments, transaction, now = new Date() }) {
   const { Op } = db.Sequelize;
-  const pairs = [...new Map(appointments.map(plain).filter(cita => positive(cita?.paciente_id)
-    && eligibility.CLINICS.includes(Number(cita.clinica_id))).map(cita => [key(cita.paciente_id, cita.clinica_id),
+  const candidates = [...new Map(appointments.map(plain).filter(cita => positive(cita?.paciente_id)
+    && positive(cita.clinica_id)).map(cita => [key(cita.paciente_id, cita.clinica_id),
     { patientId: Number(cita.paciente_id), clinicId: Number(cita.clinica_id) }])).values()];
+  const requestedClinics = [...new Set(candidates.map(pair => pair.clinicId))];
+  const policies = new Map();
+  if (db.Clinica?.findAll && requestedClinics.length) {
+    const clinics = await db.Clinica.findAll({ where: { id_clinica: { [Op.in]: requestedClinics } },
+      attributes: ['id_clinica', 'configuracion'], transaction, limit: requestedClinics.length + 1 });
+    for (const raw of clinics) { const clinic = plain(raw);
+      policies.set(Number(clinic.id_clinica), require('../lib/registration-privacy-configuration').policy(clinic)); }
+  } else for (const clinicId of requestedClinics) policies.set(clinicId,
+    require('../lib/registration-privacy-configuration').policy({ id_clinica: clinicId }));
+  const pairs = candidates.filter(pair => policies.get(pair.clinicId)?.enabled);
   const context = { pairs, now, templates: new Map(), versions: new Map(), imported: new Set(), care: [],
-    documents: [], packages: new Map(), deliveries: new Map(), attestations: [], events: [], stateCache: new Map() };
+    documents: [], packages: new Map(), deliveries: new Map(), attestations: [], events: [], stateCache: new Map(), policies };
   if (!pairs.length) return context;
   if (pairs.length > 1000) throw failure('patient_privacy_review_required');
   const clinicIds = [...new Set(pairs.map(pair => pair.clinicId))], patientIds = [...new Set(pairs.map(pair => pair.patientId))];
-  const templates = await bounded(db.ClinicConsentTemplate, { where: { clinic_id: { [Op.in]: clinicIds },
-    catalog_key: eligibility.FINAL_PRIVACY_KEY, purpose: 'data_protection', status: 'active', is_default: true,
-    blocking_policy: 'hard' }, transaction }, clinicIds.length * 2);
+  const templates = await bounded(db.ClinicConsentTemplate, { where: { [Op.or]: clinicIds.map(clinicId =>
+    eligibility.registrationTemplateWhere(clinicId, policies.get(clinicId))) }, transaction }, clinicIds.length * 2);
   for (const template of templates) {
     if (context.templates.has(Number(template.clinic_id))) throw failure('patient_privacy_configuration');
     context.templates.set(Number(template.clinic_id), template);
@@ -93,7 +102,7 @@ async function loadPrivacyContext({ db, appointments, transaction, now = new Dat
     context.versions.set(Number(template.id), { version, approved });
   }
   const imported = await bounded(db.PatientCustomField, { where: { paciente_id: { [Op.in]: patientIds },
-    source: 'cliniccloud', clinica_id: { [Op.in]: eligibility.CLINICS }, source_column: 'idContacto' },
+    source: 'cliniccloud', source_column: 'idContacto' },
   attributes: ['paciente_id', 'value'], transaction }, patientIds.length * 100);
   for (const row of imported) if (/^[1-9]\d*$/.test(String(row.value || '').trim())) context.imported.add(Number(row.paciente_id));
   context.care = await bounded(db.CitaPaciente, { where: { [Op.and]: [{ [Op.or]: pairWhere(pairs) }, { [Op.or]: [
@@ -121,7 +130,7 @@ async function loadPrivacyContext({ db, appointments, transaction, now = new Dat
       context.deliveries.set(Number(delivery.patient_consent_document_id), delivery);
     }
   }
-  const sources = { [Op.in]: [paper.PAPER_SOURCE, paper.PATIENT_PAPER_SOURCE] };
+  const sources = { [Op.in]: [paper.PAPER_SOURCE, paper.PATIENT_PAPER_SOURCE, paper.CONFIGURED_PAPER_SOURCE] };
   context.attestations = await bounded(db.PatientConsentExternalAttestation, { where: {
     [Op.or]: pairWhere(pairs), purpose: 'data_protection', source: sources, status: 'active', revoked_at: null },
   order: [['id', 'DESC']], transaction }, pairs.length * 101);
@@ -133,12 +142,14 @@ async function loadPrivacyContext({ db, appointments, transaction, now = new Dat
 
 function privacyStateFromContext({ appointment, context }) {
   const cita = plain(appointment), { now } = context, result = empty(cita, now);
+  const policy = context.policies?.get(Number(cita.clinica_id));
+  if (policy) result.applicable = policy.enabled;
   if (!result.applicable) return result;
   const patientId = result.patient_id, clinicId = result.clinic_id;
   const imported = context.imported.has(patientId), prior = context.care.some(row => Number(row.paciente_id) === patientId
     && Number(row.clinica_id) === clinicId && (Number(row.first_care_id) !== result.appointment_id
       || Number(row.last_care_id) !== result.appointment_id));
-  result.required = !imported && !prior;
+  result.required = (policy?.beforeFirstCare ?? true) && !imported && !prior;
   result.reason = imported ? 'existing_imported_patient' : prior ? 'existing_clinical_patient' : 'current_privacy_pending';
   result.allowed = !result.required;
   // A combined visit can have many cards for the same patient and clinic.
@@ -154,7 +165,8 @@ function privacyStateFromContext({ appointment, context }) {
   const documents = context.documents.filter(doc => Number(doc.paciente_id) === patientId && Number(doc.clinica_id) === clinicId
     && Number(doc.clinic_template_id) === Number(template.id));
   if (documents.length > 100) throw failure('patient_privacy_review_required');
-  const signed = documents.find(document => eligibility.isValidSignedPrivacyDocument({ document, template,
+  const signed = documents.filter(document => document.status === 'signed').sort((a, b) =>
+    new Date(b.signed_at).getTime() - new Date(a.signed_at).getTime() || Number(b.id) - Number(a.id)).find(document => eligibility.isValidSignedPrivacyDocument({ document, template,
     patientId, clinicId, approvedVersions: approved, now }));
   if (signed) return complete({ ...result, allowed: true, reason: 'current_privacy_signed', state: 'signed',
     document_id: Number(signed.id), document: safeDocument(signed), updated_at: stamp(signed.signed_at) || result.updated_at });

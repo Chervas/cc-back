@@ -876,6 +876,15 @@ async function assertAutomationCommunicationAllowed({ clinicId, patientId = null
   const normalizedPatientId = Number(patientId || 0);
   if (!normalizedClinicId || (!phoneDigits && !normalizedPatientId)) return;
 
+  if (phoneDigits) {
+    const signed = await require('../lib/bs-privacy-commercial-preferences').channelRefusals({ db,
+      clinicIds: [normalizedClinicId], patientIds: normalizedPatientId > 0 ? [normalizedPatientId] : null, phone });
+    if (signed.documentIds.length) throw Object.assign(new Error('Este paciente ha pedido no ser notificado por WhatsApp'), {
+      code: 'WHATSAPP_CHANNEL_REFUSED', status: 409, statusCode: 409, retryable: false,
+      details: { scope: 'whatsapp_channel', source: 'signed_privacy_document' },
+    });
+  }
+
   const normalizedScope = cleanString(scope).toLowerCase() === 'marketing' ? 'marketing' : 'care';
   if (normalizedScope === 'marketing') await require('../lib/bs-privacy-commercial-preferences').assertCommercialAllowed({
     db, clinicIds: [normalizedClinicId], patientIds: normalizedPatientId > 0 ? [normalizedPatientId] : null, phone,
@@ -887,9 +896,9 @@ async function assertAutomationCommunicationAllowed({ clinicId, patientId = null
     where: {
       clinica_id: normalizedClinicId,
       channel: 'whatsapp',
-      scope: normalizedScope,
       status: 'active',
-      [Op.or]: identityWhere,
+      [Op.or]: [{ scope: normalizedScope, [Op.or]: identityWhere },
+        ...(phoneDigits ? [{ scope: 'whatsapp_channel', phone_digits: phoneDigits }] : [])],
     },
     order: [['updated_at', 'DESC']],
   });
@@ -915,6 +924,7 @@ function emptyContactRestrictions() {
     marketing_opt_out: false,
     care_communications_opt_out: false,
     whatsapp_number_invalid: false,
+    whatsapp_channel_opt_out: false,
     items: [],
   };
 }
@@ -932,8 +942,16 @@ function serializeContactRestrictions(rows = []) {
     marketing_opt_out: items.some((item) => item.scope === 'marketing'),
     care_communications_opt_out: items.some((item) => item.scope === 'care'),
     whatsapp_number_invalid: items.some((item) => item.scope === 'whatsapp_number'),
+    whatsapp_channel_opt_out: items.some((item) => item.scope === 'whatsapp_channel'),
     items,
   };
+}
+
+function withSignedChannelRestriction(restrictions, signed) {
+  if (!signed) return restrictions;
+  return { ...restrictions, active: true, whatsapp_channel_opt_out: true,
+    items: [...restrictions.items, { id: 0, scope: 'whatsapp_channel',
+      reason_text: 'Este paciente ha pedido no ser notificado por WhatsApp', source: 'signed_privacy_document', restricted_at: null }] };
 }
 
 async function getActiveContactRestrictionsForConversations(conversations = [], transaction = null) {
@@ -972,7 +990,7 @@ async function getActiveContactRestrictionsForConversations(conversations = [], 
     where: {
       clinica_id: { [Op.in]: clinicIds },
       channel: 'whatsapp',
-      scope: { [Op.in]: ['marketing', 'care', 'whatsapp_number'] },
+      scope: { [Op.in]: ['marketing', 'care', 'whatsapp_number', 'whatsapp_channel'] },
       status: 'active',
       [Op.or]: identityWhere,
     },
@@ -991,11 +1009,27 @@ async function getActiveContactRestrictionsForConversations(conversations = [], 
     transaction,
   });
 
+  // One bounded evidence read per clinic, never a query per conversation/card.
+  const signedByClinic = new Map(await Promise.all(clinicIds.map(async clinicId => {
+    const selected = targets.filter(target => target.clinicId === clinicId && target.phoneDigits);
+    if (!selected.length) return [clinicId, null];
+    const signedPhones = new Set();
+    for (let start = 0; start < selected.length; start += 200) {
+      const batch = selected.slice(start, start + 200);
+      const signed = await require('../lib/bs-privacy-commercial-preferences').channelRefusals({ db, clinicIds: [clinicId],
+        patientIds: batch.map(target => target.patientId).filter(id => id > 0),
+        phones: [...new Set(batch.map(target => target.phoneDigits))], transaction });
+      for (const phone of signed.phoneDigits) signedPhones.add(phone);
+    }
+    return [clinicId, { phoneDigits: signedPhones }];
+  })));
   for (const target of targets) {
     const matches = rows.filter((row) => Number(row.clinica_id) === target.clinicId
-      && ((target.patientId > 0 && Number(row.paciente_id) === target.patientId)
-        || (!!target.phoneDigits && cleanString(row.phone_digits) === target.phoneDigits)));
-    result.set(target.id, serializeContactRestrictions(matches));
+      && (row.scope === 'whatsapp_channel' ? !!target.phoneDigits && cleanString(row.phone_digits) === target.phoneDigits
+        : ((target.patientId > 0 && Number(row.paciente_id) === target.patientId)
+        || (!!target.phoneDigits && cleanString(row.phone_digits) === target.phoneDigits))));
+    result.set(target.id, withSignedChannelRestriction(serializeContactRestrictions(matches),
+      signedByClinic.get(target.clinicId)?.phoneDigits.has(target.phoneDigits)));
   }
   return result;
 }
@@ -1014,16 +1048,19 @@ async function getActiveContactRestrictionsForPatient({ clinicIds = [], patientI
     where: {
       clinica_id: { [Op.in]: normalizedClinicIds },
       channel: 'whatsapp',
-      scope: { [Op.in]: ['marketing', 'care', 'whatsapp_number'] },
+      scope: { [Op.in]: ['marketing', 'care', 'whatsapp_number', 'whatsapp_channel'] },
       status: 'active',
       [Op.or]: identityWhere,
     },
-    attributes: ['id', 'scope', 'reason_text', 'source', 'opted_out_at'],
+    attributes: ['id', 'scope', 'reason_text', 'source', 'opted_out_at', 'phone_digits'],
     order: [['opted_out_at', 'DESC'], ['id', 'DESC']],
     raw: true,
     transaction,
   });
-  return serializeContactRestrictions(rows);
+  const signed = phoneDigits && await require('../lib/bs-privacy-commercial-preferences').channelRefusals({ db,
+    clinicIds: normalizedClinicIds, patientIds: normalizedPatientId > 0 ? [normalizedPatientId] : null, phone, transaction });
+  return withSignedChannelRestriction(serializeContactRestrictions(rows.filter(row => row.scope !== 'whatsapp_channel'
+    || !!phoneDigits && cleanString(row.phone_digits) === phoneDigits)), signed?.phoneDigits?.has(phoneDigits));
 }
 
 async function resolveWhatsappNumberRestrictionAfterChange({ patientId, previousPhone, nextPhone, actorUserId = null } = {}) {

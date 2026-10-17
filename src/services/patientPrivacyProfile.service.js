@@ -1,8 +1,8 @@
 'use strict';
 
-// Reception may copy explicitly selected, verified signed LOPD answers into the
-// patient record. The public tablet never writes the master/contact identity;
-// signed evidence is immutable and existing values are never cleared here.
+// A completed, verified LOPD fills only still-empty master fields atomically
+// with signing. Reception explicitly accepts each conflicting value inline.
+// Signed evidence is immutable and existing values are never cleared here.
 const { createHash } = require('node:crypto');
 const privacy = require('./patientPrivacyStatus.service');
 const identity = require('../lib/consent-document-personal-data');
@@ -41,10 +41,11 @@ async function view({ db, patientId, clinicId, transaction }) {
     current: currentValue(patient, key), proposed: text(values[source]), contact,
     selected_by_default: !contact && !currentValue(patient, key) && !!text(values[source]),
   })).filter(field => field.proposed && !equivalent(field.key, field.current, field.proposed)) : [];
-  return { available, document: available ? { id: Number(doc.id), public_id: doc.public_id, title: doc.title,
+  return { available, privacy_state: state.state, document: available ? { id: Number(doc.id), public_id: doc.public_id, title: doc.title,
     signed_at: new Date(doc.signed_at).toISOString(), snapshot_hash: doc.snapshot_hash } : null,
   patient_version: patientVersion(patient), fields,
-  commercial_choice: available ? choices.signedConsentChoiceAnswers(doc)?.commercial || null : null };
+  commercial_choice: available ? choices.signedConsentChoiceAnswers(doc)?.commercial || null : null,
+  choice_answers: available ? choices.signedConsentChoiceAnswers(doc) : null };
 }
 
 async function groupClinicIds(db, clinicId, transaction) {
@@ -55,7 +56,7 @@ async function groupClinicIds(db, clinicId, transaction) {
   return clinics.map(row => Number(plain(row).id_clinica)).sort((a, b) => a - b);
 }
 
-async function checkContactCollisions({ db, patient, patch, clinicIds, transaction }) {
+async function checkContactCollisions({ db, patient, patch, clinicIds, transaction, allowExistingPatientChat = false }) {
   const { Op } = db.Sequelize, predicates = [];
   const phoneMatch = (column, raw, negate = false) => db.Sequelize.where(db.Sequelize.fn('REGEXP_REPLACE',
     db.Sequelize.fn('REGEXP_REPLACE', db.Sequelize.col(column), '[^0-9]', ''), '^00', ''), {
@@ -80,7 +81,8 @@ async function checkContactCollisions({ db, patient, patch, clinicIds, transacti
     if (other) throw fail('privacy_profile_phone_chat_collision', 'El teléfono está asociado a otra conversación. Revísalo en la ficha del paciente.');
     const currentChat = await db.Conversation.findOne({ where: { clinic_id: { [Op.in]: clinicIds }, channel: 'whatsapp', patient_id: patient.id_paciente,
       [Op.and]: [phoneMatch('contact_id', patch.telefono_movil, true)] }, transaction, lock: transaction.LOCK.SHARE });
-    if (currentChat) throw fail('privacy_profile_phone_chat_review_required', 'El paciente tiene una conversación con otro teléfono. Cambia el móvil desde su ficha para revisar la identidad de contacto.');
+    if (currentChat && !allowExistingPatientChat) throw fail('privacy_profile_phone_chat_review_required',
+      'El paciente tiene una conversación con otro teléfono. Revisa el cambio desde su ficha.');
   }
 }
 
@@ -120,7 +122,8 @@ async function apply({ db, patientId, clinicId, actorId, authorizedPrimaryClinic
   const patch = Object.fromEntries(selected.map(field => [field.key, field.key.startsWith('telefono_')
     ? normalizePhoneDigits(field.proposed) : field.key === 'email' ? field.proposed.toLowerCase() : field.proposed]));
   if (Object.entries(patch).some(([, value]) => !value)) throw fail('privacy_profile_payload_invalid', 'No se pueden borrar datos desde este documento.', 400);
-  await checkContactCollisions({ db, patient, patch, clinicIds, transaction });
+  await checkContactCollisions({ db, patient, patch, clinicIds, transaction,
+    allowExistingPatientChat: payload.acknowledge_contact_changes === true });
   if (patch.fecha_nacimiento) patch.edad = null;
   await patientRow.update(patch, { transaction });
   await db.PatientOperationalEvent.create({ patient_id: patientId, clinic_id: clinicId, actor_user_id: actorId,
@@ -129,7 +132,91 @@ async function apply({ db, patientId, clinicId, actorId, authorizedPrimaryClinic
       fields: selected.map(field => field.key), previous: Object.fromEntries(selected.map(field => [field.key, field.current])),
       applied: Object.fromEntries(selected.map(field => [field.key, patch[field.key]])),
     } }, { transaction });
+  // This is a durable handoff to the separately owned verification automation,
+  // NOT a WhatsApp send or a grant of messaging/marketing permission.
+  if (patch.telefono_movil && !equivalent('telefono_movil', patient.telefono_movil, patch.telefono_movil)) {
+    await db.PatientOperationalEvent.create({ patient_id: patientId, clinic_id: clinicId, actor_user_id: actorId,
+      event_type: 'patient.mobile_verification_requested', source: 'privacy_profile_review', channel: 'internal', metadata: {
+        schema_version: 'patient-mobile-verification/v1', document_id: current.document.id,
+        snapshot_hash: current.document.snapshot_hash, previous_phone: currentValue(patient, 'telefono_movil'),
+        phone: patch.telefono_movil, state: 'pending', delivery_enabled: false,
+      } }, { transaction });
+  }
   return { applied: true, fields: selected.map(field => field.key), review: await view({ db, patientId, clinicId, transaction }) };
 }
 
-module.exports = { view, apply, patientVersion, checkContactCollisions };
+const identityDocument = document => {
+  const doc = plain(document);
+  return doc?.purpose === 'data_protection' && identity.isIdentityDocument(doc);
+};
+
+// Acquire all clinic anchors before all patients before package/document locks.
+// Package signing calls this once for the complete selected set, preventing an
+// identity batch from acquiring another patient's anchor after a document lock.
+async function lockAutofillAnchors({ db, documents, transaction }) {
+  const relevant = documents.map(plain).filter(identityDocument);
+  const clinicIds = new Set();
+  for (const clinicId of [...new Set(relevant.map(doc => Number(doc.clinica_id)))].sort((a, b) => a - b)) {
+    for (const id of await groupClinicIds(db, clinicId, transaction)) clinicIds.add(id);
+  }
+  for (const clinicId of [...clinicIds].sort((a, b) => a - b)) {
+    await db.Clinica.findByPk(clinicId, { attributes: ['id_clinica'], transaction, lock: transaction.LOCK.UPDATE });
+  }
+  for (const patientId of [...new Set(relevant.map(doc => Number(doc.paciente_id)))].sort((a, b) => a - b)) {
+    await db.Paciente.findByPk(patientId, { transaction, lock: transaction.LOCK.UPDATE });
+  }
+}
+
+function emptyCandidates(review) {
+  return review?.available ? review.fields.filter(field => !text(field.current) && text(field.proposed)) : [];
+}
+
+async function autofillEmptyFromDocument({ db, documentId, actorId = null, transaction, anchorsLocked = false }) {
+  if (!transaction) return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, tx =>
+    autofillEmptyFromDocument({ db, documentId, actorId, transaction: tx }));
+  const initial = plain(await db.PatientConsentDocument.findByPk(documentId, { transaction }));
+  if (!identityDocument(initial) || initial.status !== 'signed' || initial.revoked_at
+    || initial.snapshot_json?.patient_identity?.confirmed !== true) return { applied: false, fields: [], skipped_fields: [] };
+  if (!anchorsLocked) await lockAutofillAnchors({ db, documents: [initial], transaction });
+  const patientRow = await db.Paciente.findByPk(initial.paciente_id, { transaction, lock: transaction.LOCK.UPDATE });
+  if (!patientRow) throw fail('patient_not_found', 'No se encuentra el paciente.', 404);
+  await privacy.patientForPrivacyClinic({ db, identifier: initial.paciente_id, clinicId: initial.clinica_id, transaction, lock: true });
+  const review = await view({ db, patientId: initial.paciente_id, clinicId: initial.clinica_id, transaction });
+  if (!review.available || review.document.id !== Number(documentId) || review.document.snapshot_hash !== initial.snapshot_hash) {
+    return { applied: false, fields: [], skipped_fields: [] };
+  }
+  const source = plain(await db.PatientConsentDocument.findByPk(documentId, { transaction, lock: transaction.LOCK.SHARE }));
+  if (!source || source.status !== 'signed' || source.revoked_at || source.snapshot_hash !== initial.snapshot_hash) {
+    throw fail('privacy_profile_changed', 'El documento ha cambiado. Vuelve a revisar los datos.');
+  }
+  const candidates = emptyCandidates(review), patient = plain(patientRow), patch = {}, skipped = [];
+  const clinicIds = await groupClinicIds(db, initial.clinica_id, transaction);
+  for (const field of candidates) {
+    const value = field.key.startsWith('telefono_') ? normalizePhoneDigits(field.proposed)
+      : field.key === 'email' ? field.proposed.toLowerCase() : field.proposed;
+    if (!value) continue;
+    if (field.contact) {
+      try { await checkContactCollisions({ db, patient, patch: { [field.key]: value }, clinicIds, transaction }); }
+      catch (error) {
+        if (!['privacy_profile_contact_collision', 'privacy_profile_phone_chat_collision', 'privacy_profile_phone_chat_review_required'].includes(error.code)) throw error;
+        skipped.push({ key: field.key, reason: error.code });
+        continue;
+      }
+    }
+    patch[field.key] = value;
+  }
+  const fields = Object.keys(patch);
+  if (!fields.length) return { applied: false, fields: [], skipped_fields: skipped };
+  if (patch.fecha_nacimiento) patch.edad = null;
+  await patientRow.update(patch, { transaction });
+  await db.PatientOperationalEvent.create({ patient_id: initial.paciente_id, clinic_id: initial.clinica_id, actor_user_id: actorId,
+    event_type: 'patient.privacy_profile_autofilled', source: 'signed_privacy_document', channel: 'internal', metadata: {
+      schema_version: 'patient-privacy-autofill/v1', document_id: Number(documentId), snapshot_hash: source.snapshot_hash,
+      fields, previous: Object.fromEntries(fields.map(key => [key, currentValue(patient, key)])),
+      applied: Object.fromEntries(fields.map(key => [key, patch[key]])), skipped_fields: skipped,
+    } }, { transaction });
+  return { applied: true, fields, skipped_fields: skipped };
+}
+
+module.exports = { view, apply, patientVersion, checkContactCollisions, emptyCandidates,
+  lockAutofillAnchors, autofillEmptyFromDocument };
