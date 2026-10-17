@@ -60,7 +60,7 @@ function standardDocument() {
       responsable: { razon_social: 'Sociedad ficticia', cif: 'QA-NO-REAL' } },
     integrity: { algorithm: choices.CHOICE_HASH_ALGORITHM }, signature_evidence: { accepted_statement: true,
       signed_at: '2026-10-16T10:00:00Z', consent_choices: { schema_version: source.body_json.consent_form.schema_version,
-        answers: { commercial: 'no', sms_whatsapp: 'no' } } } };
+        answers: Object.fromEntries(source.body_json.consent_form.fields.map(row => [row.key, 'no'])) } } };
   const doc = { id: 140, paciente_id: 130, clinica_id: 88, clinic_template_id: 110, clinic_template_version_id: 120,
     purpose: 'data_protection', status: 'signed', signed_at: '2026-10-16T10:00:00Z', snapshot_json: snapshot };
   doc.snapshot_html = choices.appendSignedChoiceHtml(registration.render(version, snapshot.context), doc, snapshot.signature_evidence.consent_choices);
@@ -71,7 +71,8 @@ function standardDocument() {
 test('generic standard No is verified against actual clinic source/version; channel stays scoped to full number, never legacy SMS', async () => {
   const { doc, version, template } = standardDocument(), frozen = JSON.stringify(doc), calls = [];
   assert.equal(helper.isVerifiedCommercialRefusal(doc, now), false);
-  assert.deepEqual(helper.verifiedSignedChoices(doc, { now, sourceVersion: version, sourceTemplate: template }), { commercial: 'no', sms_whatsapp: 'no' });
+  assert.deepEqual(helper.verifiedSignedChoices(doc, { now, sourceVersion: version, sourceTemplate: template }),
+    { health_nonmedical: 'no', commercial: 'no', financing: 'no', sms_whatsapp: 'no' });
   for (const change of [v => { v.body_html += '<p>changed</p>'; }, v => { v.status = 'draft'; }, v => { v.clinic_template_id = 111; },
     v => { v.body_json.consent_form.fields[0].label = 'Changed'; }]) {
     const source = structuredClone(version); change(source);

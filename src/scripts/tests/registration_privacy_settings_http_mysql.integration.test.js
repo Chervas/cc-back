@@ -38,10 +38,24 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     const clinicId = ids.clinic, route = `/api/clinicas/${clinicId}/patient-intake-settings`;
     let setting = await expect('GET', route, undefined, owner, 200);
     assert.equal(setting.patient_intake.privacy_enabled, false);
+    assert.equal(setting.patient_intake.privacy_before_first_care, true);
     await expect('GET', route, undefined, undefined, 401);
     await expect('GET', route, undefined, outsider, 403);
+    const countsBeforeDraft = await f.fingerprint(), versionBeforeDraft = setting.version;
+    const draftBody = await expect('GET', `${route}/standard-template-draft`, undefined, owner, 200);
+    assert.deepEqual(draftBody, registration.standardDraft({ id_clinica: clinicId }));
+    assert.equal((await f.fingerprint()).sha256, countsBeforeDraft.sha256, 'Opening the complete source draft performs no write');
+    assert.equal((await expect('GET', route, undefined, owner, 200)).version, versionBeforeDraft, 'No CAS/configuration version changes on editor open');
+    await expect('GET', `${route}/standard-template-draft`, undefined, undefined, 401);
+    await expect('GET', `${route}/standard-template-draft`, undefined, outsider, 403);
+    await expect('GET', '/api/consentimientos/admin/standard-template-draft', undefined, owner, 403);
+    const deniedDraft = await db.AccessPolicyOverride.create({ scope_type: 'clinic', scope_id: clinicId,
+      feature_key: 'consents.manage', role_code: 'reception', effect: 'deny', updated_by: ids.owner });
+    await expect('GET', `${route}/standard-template-draft`, undefined, reception, 403);
+    await deniedDraft.destroy();
     const clinical = await db.ClinicConsentTemplate.create({ public_id: 'qa_generic_optional', clinic_id: clinicId,
-      name: 'Documento adicional ficticio', purpose: 'clinical', status: 'active', is_default: false, blocking_policy: 'optional' });
+      name: 'Documento adicional ficticio', purpose: 'clinical', status: 'active', is_default: false, blocking_policy: 'optional',
+      catalog_key: 'cc_base_formulario_medico_alta_v1' });
     await db.ClinicConsentTemplateVersion.create({ clinic_template_id: clinical.id, version: 1, locale: 'es', status: 'published',
       title: 'Documento adicional', body_html: '<p>Documento adicional ficticio de prueba.</p>' });
     const draft = await expect('POST', `${route}/standard-template`, {}, owner, 201);
@@ -59,6 +73,7 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     const denied = await db.AccessPolicyOverride.create({ scope_type: 'clinic', scope_id: clinicId,
       feature_key: 'clinic.settings.edit', role_code: 'reception', effect: 'deny', updated_by: ids.owner });
     await expect('PUT', route, { patient_intake: update, expected_version: setting.version }, reception, 403);
+    await expect('GET', `${route}/standard-template-draft`, undefined, reception, 200, 'Library author needs consents.manage, not settings edit');
     await denied.destroy();
     setting = await expect('PUT', route, { patient_intake: update, expected_version: setting.version }, owner, 200);
     assert.equal(setting.patient_intake.additional_documents[0].template_id, clinical.id);
@@ -79,7 +94,7 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     const publicRoute = '/api/consentimientos/public/' + encodeURIComponent(session.public_token);
     const viewed = await expect('GET', publicRoute, undefined, undefined, 200), doc = viewed.documents[0];
     assert.equal(doc.personal_data_form.schema_version, registration.IDENTITY_SCHEMA);
-    assert.deepEqual(doc.choice_form.fields.map(row => row.key), ['commercial', 'sms_whatsapp']);
+    assert.deepEqual(doc.choice_form.fields.map(row => row.key), ['health_nonmedical', 'commercial', 'financing', 'sms_whatsapp']);
     assert(doc.snapshot_html.includes('Sociedad clínica A ficticia')); assert(!doc.snapshot_html.includes('INSTITUTO OBES'));
     const corrected = await expect('POST', `${publicRoute}/documents/${doc.id}/personal-data`, {
       schema_version: registration.IDENTITY_SCHEMA, snapshot_hash: doc.snapshot_hash,
@@ -89,9 +104,9 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     const current = corrected.documents[0];
     await expect('POST', publicRoute + '/sign', { ...signature,
       document_snapshot_hashes: { [doc.id]: current.snapshot_hash }, document_choices: { [doc.id]: {
-        schema_version: registration.CHOICE_SCHEMA, answers: { commercial: 'no', sms_whatsapp: 'no' } } } }, undefined, 200);
+        schema_version: registration.CHOICE_SCHEMA, answers: { health_nonmedical: 'no', commercial: 'no', financing: 'no', sms_whatsapp: 'no' } } } }, undefined, 200);
     const signed = await db.PatientConsentDocument.findByPk(doc.id);
-    assert.deepEqual(choices.signedConsentChoiceAnswers(signed), { commercial: 'no', sms_whatsapp: 'no' });
+    assert.deepEqual(choices.signedConsentChoiceAnswers(signed), { health_nonmedical: 'no', commercial: 'no', financing: 'no', sms_whatsapp: 'no' });
     const frozen = JSON.stringify(signed.toJSON());
     const state = await db.sequelize.transaction(transaction => require('../../services/patientPrivacyStatus.service').getPatientPrivacyStatus({ db, patientId, clinicId, transaction }));
     assert.equal(state.state, 'signed'); assert.equal(state.allowed, true);
@@ -107,6 +122,68 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     assert.equal(await db.PatientIntakeRequest.count(), 0);
     assert.equal(JSON.stringify((await signed.reload()).toJSON()), frozen, 'All later reads/preparations preserve signed snapshot');
     owned.report.checks.push('generic tablet: native identity12 + combined explicit choices, No valid for care, scoped channel refusal, immutable signed evidence, privacy-only vs explicit extras, no medical form');
+
+    // Native reception per-row API and actual start-care gate. The explicitly
+    // selected legacy medical *document* is independent from the retired
+    // structured medical questionnaire, which remains disabled and uncreated.
+    const booked = await expect('POST', '/api/citas', f.body({ paciente: { id_paciente: patientId } }), owner, 201);
+    const appointmentId = booked.id_cita, docsRoute = `/api/consentimientos/appointments/${appointmentId}/registration-documents`;
+    const readFingerprint = (await f.fingerprint()).sha256;
+    const rows = await expect('GET', docsRoute, undefined, owner, 200);
+    assert.equal(rows.items.length, 1); assert.equal(rows.items[0].template_id, clinical.id);
+    assert.equal(rows.items[0].state, 'pending'); assert.equal(rows.items[0].required, false);
+    assert.equal((await f.fingerprint()).sha256, readFingerprint, 'The row projection cannot issue, send or mutate');
+    await expect('GET', docsRoute, undefined, undefined, 401);
+    await expect('GET', docsRoute, undefined, outsider, 403);
+    await expect('POST', `${docsRoute}/${foreign.id}/package`, {}, owner, 409);
+    await expect('POST', `${docsRoute}/${clinical.id}/package`, { clinic_id: ids.peerClinic }, owner, 400);
+    const denyExtra = await db.AccessPolicyOverride.create({ scope_type: 'clinic', scope_id: clinicId,
+      feature_key: 'consents.manage', role_code: 'reception', effect: 'deny', updated_by: ids.owner });
+    await expect('POST', `${docsRoute}/${clinical.id}/package`, {}, reception, 403);
+    await denyExtra.destroy();
+    const beforeRepeated = (await f.fingerprint()).sha256;
+    const repeated = await Promise.all([expect('POST', `${docsRoute}/${clinical.id}/package`, {}, owner, 200),
+      expect('POST', `${docsRoute}/${clinical.id}/package`, {}, owner, 200)]);
+    assert(repeated.every(row => row.current_package_ids[0] === full.package_id));
+    assert.equal((await f.fingerprint()).sha256, beforeRepeated, 'Concurrent exact preparation reuses without writes or provider events');
+    setting = await expect('PUT', route, { patient_intake: { additional_documents: [{ template_id: clinical.id, required: true, sort_order: 1 }] },
+      expected_version: setting.version }, owner, 200);
+    await expect('POST', `/api/citas/${appointmentId}/care/arrive`, { clinic_id: clinicId }, owner, 200);
+    const beforeBlocked = (await f.fingerprint()).sha256;
+    const blocked = await expect('POST', `/api/citas/${appointmentId}/care/start`, { clinic_id: clinicId }, owner, 409);
+    assert.equal(blocked.code, 'appointment_intake_documents_required');
+    assert.equal((await f.fingerprint()).sha256, beforeBlocked, 'The actual care gate rolls back every state/event write');
+    const extraSession = await service.createTabletSession(full.package_id, { createdBy: ids.owner });
+    const extraRoute = '/api/consentimientos/public/' + encodeURIComponent(extraSession.public_token);
+    const extraViewed = await expect('GET', extraRoute, undefined, undefined, 200);
+    assert.equal(extraViewed.documents.length, 1); assert.equal(extraViewed.documents[0].id, extra.id);
+    await expect('POST', extraRoute + '/sign', signature, undefined, 200);
+    assert.equal((await expect('GET', docsRoute, undefined, owner, 200)).items[0].state, 'signed');
+    await expect('POST', `/api/citas/${appointmentId}/care/start`, { clinic_id: clinicId }, owner, 200);
+    assert.equal(await db.PatientIntakeRequest.count(), 0, 'Selecting the legacy medical document never reactivates its structured questionnaire');
+    assert.equal(JSON.stringify((await signed.reload()).toJSON()), frozen);
+    owned.report.checks.push('native per-row extra API: JWT/ACL/current scope/body validation, read-only projection, concurrent idempotent preparation, explicit medical document with questionnaire disabled; actual care start409 until signature then200; no mutation on rejection');
+
+    const mixedPatient = 92603;
+    await db.Paciente.create({ id_paciente: mixedPatient, clinica_id: clinicId, public_id: 'pac_generic_mixed_qa', nombre: 'Paquete', apellidos: 'Ficticio',
+      numero_historia: String(mixedPatient), historia_scope: `clinic:${clinicId}` });
+    await db.PacienteClinica.create({ paciente_id: mixedPatient, clinica_id: clinicId, es_principal: true });
+    const mixed = await service.createPatientIntakePackage(mixedPatient, { clinicId, createdBy: ids.owner, privacyOnly: false });
+    assert.equal(mixed.created_count, 2);
+    const mixedBefore = JSON.stringify(await db.PatientConsentDocument.findAll({ where: { package_id: mixed.package_id }, raw: true }));
+    const laterStart = new Date(new Date(f.body().inicio).getTime() + 3 * 3600000).toISOString();
+    const mixedBooking = await expect('POST', '/api/citas', f.body({ paciente: { id_paciente: mixedPatient }, inicio: laterStart }), owner, 201);
+    const independent = await expect('POST', `/api/consentimientos/appointments/${mixedBooking.id_cita}/registration-documents/${clinical.id}/package`, {}, owner, 201);
+    assert.notEqual(independent.package_id, mixed.package_id);
+    const independentDocs = await db.PatientConsentDocument.findAll({ where: { package_id: independent.package_id }, raw: true });
+    assert.equal(independentDocs.length, 1); assert.equal(independentDocs[0].clinic_template_id, clinical.id);
+    assert.equal(JSON.stringify(await db.PatientConsentDocument.findAll({ where: { package_id: mixed.package_id }, raw: true })), mixedBefore);
+    const independentFingerprint = (await f.fingerprint()).sha256;
+    await expect('POST', `/api/consentimientos/appointments/${mixedBooking.id_cita}/registration-documents/${clinical.id}/package`, {}, owner, 200);
+    assert.equal((await f.fingerprint()).sha256, independentFingerprint);
+    assert.equal(await db.PatientIntakeRequest.count(), 0);
+    assert.equal(f.externalFetchAttempts, 0);
+    owned.report.checks.push('native explicit extra never reopens mixed pending LOPD package: creates one independent document, preserves every old row, repeats without writes; zero questionnaire/provider requests');
 
     const paperPatient = 92602;
     await db.Paciente.create({ id_paciente: paperPatient, clinica_id: clinicId, public_id: 'pac_generic_paper_qa', nombre: 'Papel', apellidos: 'Ficticio',

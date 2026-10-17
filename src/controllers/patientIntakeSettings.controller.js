@@ -74,6 +74,7 @@ exports.put = async (req, res, next) => { try {
       const version = template && await db.ClinicConsentTemplateVersion.findOne({ where: { clinic_template_id: template.id,
         status: 'published', locale: 'es' }, order: [['version', 'DESC'], ['id', 'DESC']], transaction, lock: transaction.LOCK.SHARE });
       if (!version || !String(version.body_html || '').trim() || template.purpose === 'data_protection') throw fail('patient_intake_additional_document_invalid');
+      if (extra.required && ['commercial_communications', 'marketing_image'].includes(template.purpose)) throw fail('patient_intake_additional_document_optional_required');
     }
     await row.update({ configuracion: configured }, { transaction });
     if (db.PatientOperationalEvent) await db.PatientOperationalEvent.create({ patient_id: null, clinic_id: clinicId,
@@ -87,9 +88,26 @@ exports.standard = async (req, res, next) => { try {
   const { clinicId, actorId } = await authorize(req, 'clinic.settings.edit');
   await assertUserCanAccessFeature({ actorId, clinicId, featureKey: 'consents.manage' });
   if (Array.isArray(req.body) || req.body != null && typeof req.body !== 'object' || Object.keys(req.body || {}).length) throw fail('patient_intake_settings_invalid');
-  const body = require('../lib/registration-privacy-template').standardDraft();
+  const clinic = plain(await db.Clinica.findByPk(clinicId));
+  if (!clinic) throw fail('clinic_not_found', 404);
+  const body = require('../lib/registration-privacy-template').standardDraft(clinic);
   const template = await require('../services/consentimientos.service').createClinicTemplate({ clinic_id: clinicId,
     name: body.title, purpose: 'data_protection', status: 'draft', version_status: 'draft', is_default: false,
     blocking_policy: 'hard', validity_mode: 'manual', ...body }, actorId);
   return res.status(201).json({ template_id: template.id, created: true });
+} catch (error) { return reply(error, res, next); } };
+
+// Opening the editor is not creation: no template, version, operational event,
+// settings mutation or provider action is allowed from this read-only route.
+exports.standardDraft = async (req, res, next) => { try {
+  // The library also opens this draft. Consent management already enforces
+  // clinic membership/visibility; settings editing is not required to author a
+  // consent from that library. Saving intake settings retains its own ACL.
+  const { clinicId } = await authorize(req, 'consents.manage');
+  const draft = await db.sequelize.transaction({ readOnly: true, isolationLevel: 'REPEATABLE READ' }, async transaction => {
+    const clinic = plain(await db.Clinica.findByPk(clinicId, { transaction }));
+    if (!clinic) throw fail('clinic_not_found', 404);
+    return require('../lib/registration-privacy-template').standardDraft(clinic);
+  });
+  return res.json(draft);
 } catch (error) { return reply(error, res, next); } };

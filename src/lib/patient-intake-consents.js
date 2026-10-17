@@ -23,7 +23,7 @@ function reusableChoiceDocument(document, template, version, form, now) {
 
 // Called only after the controller checks consents.manage for the patient's
 // primary clinic. A patient row lock serialises double clicks across processes.
-async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot, structuredQuestionnaire = false, privacyOnly = false, allowLinkedClinic = false, now = new Date(), transaction = null }) {
+async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot, structuredQuestionnaire = false, privacyOnly = false, additionalTemplateId = null, allowLinkedClinic = false, now = new Date(), transaction = null }) {
   const { Op } = db.Sequelize;
   const execute = async transaction => {
     const clinic = await db.Clinica.findByPk(clinicId, { transaction, lock: transaction.LOCK.SHARE || transaction.LOCK.UPDATE });
@@ -39,13 +39,17 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       if (!linked || !primary?.grupoClinicaId || Number(primary.grupoClinicaId) !== Number(clinic.grupoClinicaId)) throw error('patient_clinic_changed', 409);
     }
     const registration = require('./registration-privacy-configuration').policy(plain(clinic));
-    const additional = privacyOnly ? [] : object(object(plain(clinic).configuracion).patient_intake).additional_documents || [];
+    const configured = object(object(plain(clinic).configuracion).patient_intake).additional_documents || [];
+    if (additionalTemplateId !== null && (!Number.isSafeInteger(additionalTemplateId) || additionalTemplateId <= 0 || privacyOnly)) throw error('registration_document_id_invalid');
+    if (additionalTemplateId !== null && !configured.some(row => Number(row.template_id) === additionalTemplateId)) throw error('intake_additional_document_not_configured', 409);
+    const additional = privacyOnly ? [] : additionalTemplateId === null ? configured : configured.filter(row => Number(row.template_id) === additionalTemplateId);
     const extraById = new Map(additional.map(row => [Number(row.template_id), row]));
     const primaryWhere = registration.enabled && registration.templateId
       ? { clinic_id: clinicId, id: registration.templateId, purpose: 'data_protection', status: 'active' }
       : { clinic_id: clinicId, purpose: 'data_protection', status: 'active', is_default: true };
     const templates = await db.ClinicConsentTemplate.findAll({
-      where: extraById.size ? { [Op.or]: [primaryWhere,
+      where: additionalTemplateId !== null ? { clinic_id: clinicId, id: additionalTemplateId, status: 'active' }
+        : extraById.size ? { [Op.or]: [primaryWhere,
         { clinic_id: clinicId, id: { [Op.in]: [...extraById.keys()] }, status: 'active' }] } : primaryWhere,
       order: [['id', 'ASC']], transaction,
     });
@@ -56,7 +60,8 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
     for (const template of templates) {
       // The editable questionnaire already captures these answers separately;
       // never ask the patient to sign the old unfilled medical questionnaire.
-      if ((structuredQuestionnaire || privacyOnly || !questionnaireEnabled) && template.catalog_key === 'cc_base_formulario_medico_alta_v1') continue;
+      if (!extraById.has(Number(template.id)) && (structuredQuestionnaire || privacyOnly || !questionnaireEnabled)
+        && template.catalog_key === 'cc_base_formulario_medico_alta_v1') continue;
       considered++;
       const version = await db.ClinicConsentTemplateVersion.findOne({
         where: { clinic_template_id: template.id, status: 'published', locale: 'es' },
@@ -110,17 +115,24 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
           ? await db.ConsentSignaturePackage.findByPk(document.package_id, { transaction }) : null;
         const hasQuestionnaire = questionnaireEnabled && privacyOnly && document.status !== 'signed' && existingPackage
           && await db.PatientIntakeRequest.findOne({ where: { package_id: existingPackage.id }, transaction });
-        const available = existingPackage && !hasQuestionnaire && !['cancelled', 'expired'].includes(existingPackage.status)
+        // A per-row reception action must never reopen a package containing
+        // LOPD or other additional documents. Keep its selection independent.
+        const packageDocuments = additionalTemplateId !== null && existingPackage && document.status !== 'signed'
+          ? await db.PatientConsentDocument.findAll({ where: { package_id: existingPackage.id }, attributes: ['id'], transaction, limit: 2 }) : null;
+        const independent = additionalTemplateId === null || document.status === 'signed'
+          || packageDocuments?.length === 1 && Number(packageDocuments[0].id) === Number(document.id);
+        const available = existingPackage && independent && !hasQuestionnaire && !['cancelled', 'expired'].includes(existingPackage.status)
           && (!existingPackage.expires_at || new Date(existingPackage.expires_at) > now);
         if (document.status === 'signed' || available) {
           reused.push(document.id);
           if (document.status === 'signed') signed++;
-          if (available) currentPackageIds.push(document.package_id);
+          if (available && (additionalTemplateId === null || document.status !== 'signed')) currentPackageIds.push(document.package_id);
           continue;
         }
       }
       const extra = extraById.get(Number(template.id));
-      prepared.push({ template: extra ? { ...plain(template), blocking_policy: extra.required ? 'hard' : 'optional' } : template, version });
+      prepared.push({ template: extra ? { ...plain(template), blocking_policy: extra.required
+        && !['commercial_communications', 'marketing_image'].includes(template.purpose) ? 'hard' : 'optional' } : template, version });
     }
     if (!templates.length || considered === 0 || missing.length) throw error('intake_published_templates_required', 409);
     if (!prepared.length) return { package_id: null, created_count: 0, existing_count: reused.length, current_package_ids: [...new Set(currentPackageIds)],
@@ -159,4 +171,4 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
   // appointment lock and ACL). Never commit a package outside that anchor.
   return transaction ? execute(transaction) : db.sequelize.transaction(execute);
 }
-module.exports = { preparePatientIntake };
+module.exports = { preparePatientIntake, reusableChoiceDocument };

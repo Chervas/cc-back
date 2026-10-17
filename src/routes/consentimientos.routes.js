@@ -19,6 +19,7 @@ router.post('/tablet/budget-signatures/:id/session', consentimientosController.c
 router.use(authMiddleware);
 
 router.get('/admin/templates', consentimientosController.listAdminTemplates);
+router.get('/admin/standard-template-draft', consentimientosController.getAdminStandardRegistrationDraft);
 router.post('/admin/templates', consentimientosController.createAdminTemplate);
 router.put('/admin/templates/:id', consentimientosController.updateAdminTemplate);
 router.post('/admin/templates/:id/propagate', consentimientosController.propagateAdminTemplate);
@@ -54,6 +55,8 @@ router.get('/clinic/pending-documents', consentimientosController.listClinicPend
 router.get('/professional/pending', consentimientosController.listProfessionalPendingDocuments);
 router.post('/external-attestations/:id/revoke', consentimientosController.revokePatientExternalAttestation);
 router.get('/appointments/:id/summary', consentimientosController.getAppointmentSummary);
+router.get('/appointments/:id/registration-documents', require('../controllers/appointmentRegistrationDocuments.controller').get);
+router.post('/appointments/:id/registration-documents/:templateId/package', require('../controllers/appointmentRegistrationDocuments.controller').prepare);
 router.get('/appointments/:id/privacy', require('../controllers/appointmentPrivacy.controller').status);
 router.get('/appointments/:id/tablet-status', require('../controllers/appointmentPrivacy.controller').tabletStatus);
 router.post('/appointments/:id/privacy-package', require('../controllers/appointmentPrivacy.controller').prepare);

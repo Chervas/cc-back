@@ -44,7 +44,7 @@ test('an already verified signed registration v2 remains reusable if live legal 
  const version = { id:312, clinic_template_id:90, version:1, status:'published', locale:'es', ...body };
  const snapshot = { template, version, context:{ paciente:{ id:82 }, clinica:{ id:72 }, responsable:{ razon_social:'Sociedad ficticia', cif:'QA', direccion:'Dirección', email:'qa@example.invalid' } },
   integrity:{ algorithm:choices.CHOICE_HASH_ALGORITHM }, signature_evidence:{ accepted_statement:true, signed_at:'2026-01-01T10:00:00Z',
-   consent_choices:{ schema_version:registration.CHOICE_SCHEMA, answers:{ commercial:'no',sms_whatsapp:'no' } } } };
+   consent_choices:{ schema_version:registration.CHOICE_SCHEMA, answers:Object.fromEntries(body.body_json.consent_form.fields.map(row=>[row.key,'no'])) } } };
  const doc = { id:800, package_id:700, paciente_id:82, clinica_id:72, clinic_template_id:90, clinic_template_version_id:312,
   purpose:'data_protection', status:'signed', signed_at:'2026-01-01T10:00:00Z', snapshot_json:snapshot };
  doc.snapshot_html = choices.appendSignedChoiceHtml(registration.render(version,snapshot.context),doc,snapshot.signature_evidence.consent_choices);

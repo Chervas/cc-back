@@ -16,6 +16,7 @@ router.put('/:id/horarios', authMiddleware, clinicaController.putHorarios);
 router.get('/:id/patient-intake-settings', authMiddleware, require('../controllers/patientIntakeSettings.controller').get);
 router.put('/:id/patient-intake-settings', authMiddleware, require('../controllers/patientIntakeSettings.controller').put);
 router.post('/:id/patient-intake-settings/standard-template', authMiddleware, require('../controllers/patientIntakeSettings.controller').standard);
+router.get('/:id/patient-intake-settings/standard-template-draft', authMiddleware, require('../controllers/patientIntakeSettings.controller').standardDraft);
 
 // Ruta para obtener una clínica por ID
 router.get('/:id', authMiddleware, clinicaController.getClinicaById);

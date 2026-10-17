@@ -20,6 +20,7 @@ async function record({ appointmentId, clinicId, actorId, action }) {
     let documentationSnapshot;
     if (action === 'start') {
       await require('./appointmentPrivacyEligibility.service').assertPrivacyBeforeStart({ db, appointment: cita, transaction, now });
+      await require('./appointmentRegistrationDocuments.service').assertRegistrationDocumentsBeforeStart({ db, appointment: cita, transaction, now });
       let consent;
       try { consent = await assessAppointmentClinicalConsent({ db, appointment: cita, transaction, now }); }
       catch (error) {

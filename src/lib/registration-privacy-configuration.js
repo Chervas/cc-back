@@ -10,7 +10,7 @@ function policy(clinic) {
   const settings = object(object(clinic?.configuracion).patient_intake), explicit = Object.hasOwn(settings, 'privacy_enabled');
   const legacy = !explicit && [66, 72].includes(Number(clinic?.id_clinica));
   return { enabled: settings.privacy_enabled === true || legacy,
-    beforeFirstCare: settings.privacy_before_first_care === true || legacy,
+    beforeFirstCare: Object.hasOwn(settings, 'privacy_before_first_care') ? settings.privacy_before_first_care === true : true,
     templateId: positive(settings.privacy_template_id), legacy, catalogKey: legacy ? BS_KEY : null,
     medicalQuestionnaireEnabled: settings.medical_questionnaire_enabled !== false };
 }

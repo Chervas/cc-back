@@ -208,6 +208,7 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
     router.get('/:id/patient-intake-settings', controller.get);
     router.put('/:id/patient-intake-settings', controller.put);
     router.post('/:id/patient-intake-settings/standard-template', controller.standard);
+    router.get('/:id/patient-intake-settings/standard-template-draft', controller.standardDraft);
     app.use('/api/clinicas', router);
   }
   if (includePatientCommunicationRoutes) {

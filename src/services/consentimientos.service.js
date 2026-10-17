@@ -2301,6 +2301,7 @@ async function createPatientIntakePackage(identifier, options = {}) {
         db, patientId: patient.id_paciente, clinicId: options.clinicId, actorId: options.createdBy,
         structuredQuestionnaire: options.structuredQuestionnaire === true,
         privacyOnly: options.privacyOnly === true,
+        additionalTemplateId: options.additionalTemplateId ?? null,
         allowLinkedClinic: options.allowLinkedClinic === true,
         transaction: options.transaction || null,
         snapshot: ({ template: templateRow, version: versionRow, patient: patientRow, clinic: clinicRow }) => {

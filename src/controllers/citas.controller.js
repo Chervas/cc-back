@@ -2905,7 +2905,8 @@ exports.recordAppointmentCare = asyncHandler(async (req, res) => {
         return res.json({ ...await protectAppointmentsForRequest(req, result.appointment), care: result.care, replayed: result.replayed,
             ...(result.confirmation_undo ? { confirmation_undo: result.confirmation_undo } : {}) });
     } catch (error) {
-        if ([400, 404, 409].includes(error.statusCode)) return res.status(error.statusCode).json({ code: error.code, message: error.message });
+        if ([400, 404, 409].includes(error.statusCode)) return res.status(error.statusCode).json({ code: error.code, message: error.message,
+            ...(error.details ? { details: error.details } : {}) });
         throw error;
     }
 });

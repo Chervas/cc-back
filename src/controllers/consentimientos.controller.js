@@ -152,6 +152,15 @@ exports.listAdminTemplates = asyncHandler(async (req, res) => {
     }
 });
 
+exports.getAdminStandardRegistrationDraft = asyncHandler(async (req, res) => {
+    try {
+        requireAdminConsentCatalog(req);
+        return res.json(require('../lib/registration-privacy-template').standardDraft());
+    } catch (error) {
+        return sendError(res, error);
+    }
+});
+
 exports.createAdminTemplate = asyncHandler(async (req, res) => {
     try {
         requireAdminConsentCatalog(req);

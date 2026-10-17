@@ -27,18 +27,15 @@ function render(version, context, renderHtml) {
 function form(keys = ['commercial', 'sms_whatsapp']) {
   return { schema_version: CHOICE_SCHEMA, fields: keys.map(key => ({ key, type: 'yes_no', required: true, label: CHOICE_LABELS[key] })) };
 }
-function standardDraft() {
-  // Existing system catalogue wording, with factual controller variables. This
-  // is a reviewable draft, not an automatically published legal opinion.
-  return { title: 'Información de protección de datos y asistencia sanitaria', body_html: [
-    '<h2>Información de protección de datos y asistencia sanitaria</h2>',
-    '<p><strong>Responsable:</strong> {{responsable.razon_social}} · {{responsable.cif}}</p>',
-    '<p><strong>Dirección:</strong> {{responsable.direccion}} · <strong>Contacto:</strong> {{responsable.email}} · {{responsable.telefono}}</p>',
-    '<p><strong>Delegado de protección de datos:</strong> {{responsable.dpo_nombre}} · {{responsable.dpo_email}}</p>',
-    '<p>La clínica informa al paciente de que sus datos personales, incluidos datos de salud, serán tratados para prestarle asistencia sanitaria, gestionar su historia clínica, organizar citas, emitir presupuestos, cumplir obligaciones legales y mantener comunicaciones necesarias sobre su atención.</p>',
-    '<p>El paciente declara haber recibido esta información de forma clara y comprensible, y entiende que puede solicitar información adicional sobre responsable del tratamiento, derechos de acceso, rectificación, supresión, oposición, limitación y portabilidad, así como sobre los canales habilitados para ejercerlos.</p>',
-    '<p>Las comunicaciones comerciales, la cesión de datos no necesaria para la asistencia y el uso publicitario de imágenes requieren autorizaciones separadas y opcionales.</p>',
-  ].join('\n'), body_json: { registration_privacy: { schema_version: SCHEMA, identity_editable: true, source: 'standard' }, consent_form: form() } };
+function standardDraft(clinic = null) {
+  // A new, reviewable draft only. Reuse the complete pinned patient-supplied
+  // source rather than inventing a shorter notice. Regional/services/website
+  // clauses remain explicit for review; this never rewrites published models
+  // or signed snapshots and it does not claim legal applicability elsewhere.
+  const draft = bsDraft();
+  draft.body_json.registration_privacy.source = 'standard';
+  draft.body_json.registration_privacy.source_review_required = ![66, 72].includes(Number(clinic?.id_clinica));
+  return draft;
 }
 function bsDraft() {
   const source = require('./bs-privacy-digital-template'), choices = require('./consent-document-choices');

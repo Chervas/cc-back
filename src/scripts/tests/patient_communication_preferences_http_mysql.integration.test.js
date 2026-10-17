@@ -73,7 +73,8 @@ test('native communication preferences enforce real auth/clinic/patient ACL, ful
     const version = await db.ClinicConsentTemplateVersion.create({ clinic_template_id: template.id, locale: 'es',
       status: 'published', ...source });
     const signedDocument = async (answer, signedAt, publicId) => {
-      const evidence = { schema_version: source.body_json.consent_form.schema_version, answers: { commercial: 'yes', sms_whatsapp: answer } };
+      const evidence = { schema_version: source.body_json.consent_form.schema_version,
+        answers: { health_nonmedical: 'no', commercial: 'yes', financing: 'no', sms_whatsapp: answer } };
       const snapshot = { template: { id: template.id, clinic_id: 100 },
         version: { id: version.id, body_html: version.body_html, body_json: version.body_json },
         context: { paciente: { id: ids.patient, telefono: '34000000009', nombre_completo: 'OWNED fictitious patient' },

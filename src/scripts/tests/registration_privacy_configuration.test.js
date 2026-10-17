@@ -8,6 +8,7 @@ const digital = require('../../lib/bs-privacy-digital-template');
 test('only configured registration is enabled outside legacy BS; medical questionnaire remains independent', () => {
   assert.equal(config.policy({ id_clinica: 66 }).legacy, true);
   assert.equal(config.policy({ id_clinica: 88 }).enabled, false);
+  assert.equal(config.policy({ id_clinica: 88 }).beforeFirstCare, true, 'New configuration requests alta before first care by default');
   const clinic = { id_clinica: 88, configuracion: { patient_intake: { privacy_enabled: true,
     privacy_before_first_care: false, privacy_template_id: 19, medical_questionnaire_enabled: false } } };
   assert.deepEqual(config.policy(clinic), { enabled: true, beforeFirstCare: false, templateId: 19,
@@ -65,4 +66,20 @@ test('generic standard uses native identity and escapes both patient and clinic 
   assert(html.includes('consent-patient-identity'));
   assert(html.includes('&lt;Ficticio&gt;')); assert(html.includes('&lt;Sociedad&gt;')); assert(html.includes('A&amp;B'));
   assert(!html.includes('INSTITUTO OBES')); assert(!html.includes('{{'));
+});
+test('the new standard draft contains the complete pinned original, four explicit decisions and provenance; BS source is immutable', () => {
+  const before = JSON.stringify(registration.bsDraft()), source = registration.standardDraft({ id_clinica: 88 });
+  const bs = registration.bsDraft();
+  assert.equal(source.title, bs.title); assert.equal(source.body_html, bs.body_html);
+  assert.equal(source.body_json.registration_privacy.source, 'standard');
+  assert.equal(source.body_json.registration_privacy.source_document_sha256, digital.SOURCE_DOCUMENT_SHA256);
+  assert.equal(source.body_json.registration_privacy.previous_legal_body_sha256, digital.LEGAL_BODY_SHA256);
+  assert.equal(source.body_json.registration_privacy.source_review_required, true);
+  for (const id_clinica of [66, 72]) assert.equal(registration.standardDraft({ id_clinica }).body_json.registration_privacy.source_review_required, false);
+  assert.deepEqual(source.body_json.consent_form, bs.body_json.consent_form);
+  assert.deepEqual(source.body_json.consent_form.fields.map(row => row.key), ['health_nonmedical', 'commercial', 'financing', 'sms_whatsapp']);
+  assert(source.body_html.includes('Ley 10/2014')); assert(source.body_html.includes('www.bsmedical.es'));
+  assert(source.body_html.includes('¿A qué destinatarios se comunicarán sus datos personales?'));
+  assert(!source.body_html.includes('Datos del paciente'), 'The engine renders identity once, independently from the legal text');
+  assert.equal(JSON.stringify(registration.bsDraft()), before);
 });
