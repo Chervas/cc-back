@@ -63,7 +63,7 @@ test('native block builder authoring + ordered immutable signed/completed answer
       requires_patient_signature: true, requires_representative_when_minor: true,
       body_json: { document_blocks: definition(true) } }, owner, 201);
     const clinic = await db.Clinica.findByPk(ids.clinic);
-    await clinic.update({ configuracion: { ...clinic.configuracion, patient_intake: { privacy_enabled: false, privacy_before_first_care: true,
+    await clinic.update({ url_avatar: '/uploads/qa-clinic-logo.png', configuracion: { ...clinic.configuracion, patient_intake: { privacy_enabled: false, privacy_before_first_care: true,
       medical_questionnaire_enabled: false, additional_documents: [{ template_id: unsigned.id, required: true, sort_order: 0 },
         { template_id: signed.id, required: true, sort_order: 1 }] } } });
     const patientId = 92891;
@@ -79,6 +79,7 @@ test('native block builder authoring + ordered immutable signed/completed answer
     assert(signDoc && completeDoc); assert.equal(completeDoc.document_blocks.schema_version, blocks.SCHEMA);
     assert.equal(completeDoc.document_block_answers, null); assert.equal(signDoc.personal_data_form.fields.length, 12);
     assert(signDoc.document_branding && completeDoc.document_branding);
+    assert.equal(completeDoc.document_branding.logos[0].url, 'https://crm.clinicaclick.com/uploads/qa-clinic-logo.png');
     assert(!signDoc.snapshot_html.includes('data-document-branding'), 'Branding is outside the frozen body to avoid duplicate tablet headers');
     const values = { commercial: 'no', score: 0, notes: 'Texto <literal>\nsegunda línea.' };
     const answerPayload = doc => ({ document_ids: [doc.id], document_snapshot_hashes: { [doc.id]: doc.snapshot_hash },
@@ -128,9 +129,9 @@ test('native block builder authoring + ordered immutable signed/completed answer
     // The new folio is also a real LOPD, not merely a successful signature
     // which the first-care gate would reject/re-request afterwards.
     const registration = require('../../lib/registration-privacy-template'), privacyDraft = registration.bsDraft();
-    const privacyDefinition = definition(true);
-    privacyDefinition.blocks[0].html = privacyDraft.body_html;
-    privacyDefinition.blocks.splice(-1, 0, { id: 'decisions', type: 'decisions' });
+    const privacyDefinition = { schema_version: blocks.SCHEMA, blocks: [
+      { id: 'identity', type: 'patient_data', fields: [...blocks.KEYS] }, { id: 'legal', type: 'text', html: privacyDraft.body_html },
+      { id: 'decisions', type: 'decisions' }, { id: 'signature', type: 'signature' }] };
     const privacyTemplate = await expect('POST', '/api/consentimientos/clinic/templates', { ...base,
       name: 'LOPD compuesta ficticia', title: privacyDraft.title, purpose: 'data_protection', is_default: true,
       requires_patient_signature: true, requires_representative_when_minor: true,
@@ -155,7 +156,8 @@ test('native block builder authoring + ordered immutable signed/completed answer
       schema_version: privacyDoc.personal_data_form.schema_version, snapshot_hash: privacyDoc.snapshot_hash,
       values: privacyDoc.personal_data_form.values }, undefined, 200);
     privacyDoc = privacyCorrected.documents[0];
-    await expect('POST', privacyRoute + '/sign', { ...signature, ...answerPayload(privacyDoc), document_choices: { [privacyDoc.id]: {
+    await expect('POST', privacyRoute + '/sign', { ...signature, document_ids: [privacyDoc.id],
+      document_snapshot_hashes: { [privacyDoc.id]: privacyDoc.snapshot_hash }, document_choices: { [privacyDoc.id]: {
       schema_version: privacyDoc.choice_form.schema_version,
       answers: Object.fromEntries(privacyDoc.choice_form.fields.map(field => [field.key, 'no'])) } } }, undefined, 200);
     const privacySaved = await db.PatientConsentDocument.findByPk(privacyDoc.id), frozenPrivacy = JSON.stringify(privacySaved.toJSON());
@@ -164,13 +166,51 @@ test('native block builder authoring + ordered immutable signed/completed answer
       approvedVersions: await require('../../services/appointmentPrivacyEligibility.service').approvedPrivacyVersions({ db,
         template: (await db.ClinicConsentTemplate.findByPk(privacyTemplate.id)).toJSON(),
         version: (await db.ClinicConsentTemplateVersion.findOne({ where: { clinic_template_id: privacyTemplate.id } })).toJSON() }), now: new Date() }), true);
+    const reordered = JSON.parse(JSON.stringify(privacySaved.snapshot_json.version.body_json));
+    [reordered.document_blocks.blocks[0], reordered.document_blocks.blocks[1]] = [reordered.document_blocks.blocks[1], reordered.document_blocks.blocks[0]];
+    await expect('PUT', '/api/consentimientos/clinic/templates/' + privacyTemplate.id, { body_html: privacyDraft.body_html, body_json: reordered }, owner, 200);
+    const assess = () => db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, transaction =>
+      require('../../services/appointmentPrivacyEligibility.service').assessPrivacyBeforeStart({ db,
+        appointment: { id_cita: appointment.id_cita, paciente_id: privacyPatient, clinica_id: ids.clinic }, transaction }));
+    assert.equal((await assess()).allowed, true, 'A layout-only new version preserves the exact earlier LOPD signature');
+    const changedLegal = JSON.parse(JSON.stringify(reordered)); changedLegal.document_blocks.blocks.find(block => block.type === 'text').html = '<p>Cláusula legal distinta.</p>';
+    await expect('PUT', '/api/consentimientos/clinic/templates/' + privacyTemplate.id, { body_html: '<p>Cláusula legal distinta.</p>', body_json: changedLegal }, owner, 200);
+    assert.equal((await assess()).allowed, false, 'A changed clause does not inherit the old signature');
+    const changedChoices = JSON.parse(JSON.stringify(reordered)); changedChoices.consent_form.fields[0].label += ' Condición distinta.';
+    await expect('PUT', '/api/consentimientos/clinic/templates/' + privacyTemplate.id, { body_html: privacyDraft.body_html, body_json: changedChoices }, owner, 200);
+    assert.equal((await assess()).allowed, false, 'A changed choice does not inherit the old signature');
+    await expect('PUT', '/api/consentimientos/clinic/templates/' + privacyTemplate.id, { body_html: privacyDraft.body_html, body_json: reordered }, owner, 200);
     const reusedPrivacy = await service.createPatientIntakePackage(privacyPatient, { clinicId: ids.clinic, createdBy: ids.owner, privacyOnly: true });
     assert.equal(reusedPrivacy.created_count, 0); assert.equal(reusedPrivacy.privacy_signed, true);
     await expect('POST', '/api/citas/' + appointment.id_cita + '/care/start', { clinic_id: ids.clinic }, owner, 200);
     assert.equal(JSON.stringify((await privacySaved.reload()).toJSON()), frozenPrivacy, 'Care/reuse does not rewrite the issued signed folio');
+    const phoneOnly = await expect('POST', '/api/consentimientos/clinic/templates', { ...base, name: 'Teléfono ficticio sin apellidos',
+      body_json: { document_completion: marker, document_blocks: { schema_version: blocks.SCHEMA, blocks: [
+        { id: 'identity', type: 'patient_data', fields: ['telefono'] }, { id: 'text', type: 'text', html: '<p>Datos de contacto del documento.</p>' },
+        { id: 'signature', type: 'signature' }] } } }, owner, 201);
+    await clinic.update({ configuracion: { ...clinic.configuracion, patient_intake: { privacy_enabled: false,
+      medical_questionnaire_enabled: false, additional_documents: [{ template_id: phoneOnly.id, required: true, sort_order: 0 }] } } });
+    const phonePatient = patientId + 2;
+    await db.Paciente.create({ id_paciente: phonePatient, clinica_id: ids.clinic, public_id: 'pac_block_phone_only_owned', nombre: 'Nombre Completo Histórico',
+      apellidos: '', email: 'legacy-invalid-email', numero_historia: String(phonePatient), historia_scope: `clinic:${ids.clinic}` });
+    const phonePatientBefore = JSON.stringify((await db.Paciente.findByPk(phonePatient)).toJSON());
+    const phonePack = await service.createPatientIntakePackage(phonePatient, { clinicId: ids.clinic, createdBy: ids.owner, additionalTemplateId: phoneOnly.id });
+    const phoneSession = await service.createTabletSession(phonePack.package_id), phoneRoute = '/api/consentimientos/public/' + encodeURIComponent(phoneSession.public_token);
+    let phoneDoc = (await expect('GET', phoneRoute, undefined, undefined, 200)).documents[0];
+    assert.deepEqual(phoneDoc.personal_data_form.fields.map(field => field.key), ['telefono']);
+    const phoneData = { ...phoneDoc.personal_data_form.values, telefono: '+34 600 000 777', apellidos: 'Cambio invisible no permitido', email: 'hidden@example.invalid' };
+    phoneDoc = (await expect('POST', phoneRoute + '/documents/' + phoneDoc.id + '/personal-data', {
+      schema_version: phoneDoc.personal_data_form.schema_version, snapshot_hash: phoneDoc.snapshot_hash, values: phoneData }, undefined, 200)).documents[0];
+    assert.equal(phoneDoc.personal_data_form.confirmed, true); assert.equal(phoneDoc.personal_data_form.values.apellidos, '');
+    assert.equal(phoneDoc.personal_data_form.values.email, 'legacy-invalid-email');
+    await expect('POST', phoneRoute + '/complete', { acknowledged: true, document_ids: [phoneDoc.id],
+      document_snapshot_hashes: { [phoneDoc.id]: phoneDoc.snapshot_hash } }, undefined, 200);
+    assert(completion.isCompleted(await db.PatientConsentDocument.findByPk(phoneDoc.id)));
+    assert.equal(JSON.stringify((await db.Paciente.findByPk(phonePatient)).toJSON()), phonePatientBefore);
     for (const model of ['Message', 'FlowExecutionV2', 'JobRequest']) assert.equal(await db[model].count(), 0);
     assert.equal(f.externalFetchAttempts, 0);
     owned.report.checks.push('Real HTTP authoring ACL, strict block HTML schema/sanitization, ordered new version without rewriting priorversion, 12-field Other identity confirmation CAS, generic all-No/0 answers, concurrent completion idempotence, signed immutable ordered HTML/hash and readback, frozen branding/PDF, mixed counts, no marketing/profile/messages/automation/provider effects');
     owned.report.checks.push('New block LOPD all-No signature remains verified and reusable; real first-care gate 409 before and 200 after, no duplicate issued document and no mutation of signed snapshot');
+    owned.report.checks.push('Other phone-only patient_data: legacy empty surname and hidden invalid email do not block completion; hidden edits ignored; exact patient master row remains unchanged');
   } finally { await f.close(); }
 }));

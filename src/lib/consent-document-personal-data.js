@@ -61,13 +61,20 @@ function contextValues(context) {
   return Object.fromEntries(FIELDS.map(({ key }) => [key, key === 'fecha_nacimiento' ? isoDate(patient[key])
     : typeof patient[key] === 'string' ? patient[key] : '']));
 }
-function validateValues(raw, now = new Date()) {
+function identityValidationFields(document) {
+  const doc = plain(document);
+  return doc?.purpose === 'other'
+    ? require('./consent-document-blocks').documentBlocks(doc)?.blocks.find(block => block.type === 'patient_data')?.fields || KEYS
+    : KEYS;
+}
+function validateValues(raw, now = new Date(), fields = KEYS) {
   if (!record(raw) || Object.keys(raw).length !== KEYS.length || KEYS.some(key => !own(raw, key))) {
     throw failure('consent_personal_data_invalid', 'Revisa los campos de datos personales del documento.');
   }
   const values = {};
   for (const field of FIELDS) {
     const value = raw[field.key];
+    if (!fields.includes(field.key)) { values[field.key] = value; continue; }
     if (typeof value !== 'string' || value.length > field.max_length || /[\u0000-\u001f\u007f]/u.test(value)) {
       throw failure('consent_personal_data_invalid', `Revisa el campo «${field.label}».`, 400, field.key);
     }
@@ -75,7 +82,7 @@ function validateValues(raw, now = new Date()) {
     if (field.required && !values[field.key]) throw failure('consent_personal_data_required',
       `Completa el campo «${field.label}».`, 400, field.key);
   }
-  if (values.fecha_nacimiento) {
+  if (fields.includes('fecha_nacimiento') && values.fecha_nacimiento) {
     const date = new Date(values.fecha_nacimiento + 'T00:00:00Z');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(values.fecha_nacimiento) || !Number.isFinite(date.getTime())
       || date.toISOString().slice(0, 10) !== values.fecha_nacimiento || values.fecha_nacimiento < '1850-01-01'
@@ -83,11 +90,11 @@ function validateValues(raw, now = new Date()) {
       throw failure('consent_personal_data_invalid', 'Revisa la fecha de nacimiento.', 400, 'fecha_nacimiento');
     }
   }
-  if (values.email && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/u.test(values.email)) {
+  if (fields.includes('email') && values.email && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/u.test(values.email)) {
     throw failure('consent_personal_data_invalid', 'Revisa el correo electrónico.', 400, 'email');
   }
   for (const phone of ['telefono', 'telefono2']) {
-    if (values[phone] && !/^\+?[\d ()/.\-]{5,40}$/u.test(values[phone])) {
+    if (fields.includes(phone) && values[phone] && !/^\+?[\d ()/.\-]{5,40}$/u.test(values[phone])) {
       throw failure('consent_personal_data_invalid', 'Revisa el teléfono.', 400, phone);
     }
   }
@@ -97,7 +104,7 @@ function identityConfirmed(document) {
   const snapshot = object(plain(document)?.snapshot_json), evidence = object(snapshot.patient_identity);
   if (evidence.schema_version !== identitySchema(document) || evidence.confirmed !== true
     || !Number.isFinite(new Date(evidence.confirmed_at).getTime())) return false;
-  try { return JSON.stringify(validateValues(evidence.values)) === JSON.stringify(contextValues(snapshot.context)); }
+  try { return JSON.stringify(validateValues(evidence.values, new Date(), identityValidationFields(document))) === JSON.stringify(contextValues(snapshot.context)); }
   catch { return false; }
 }
 function publicDocumentPersonalData(document) {
@@ -149,7 +156,11 @@ function correctedSnapshot(document, payload, requestMeta = {}, now = new Date()
   if (payload.snapshot_hash !== doc.snapshot_hash) throw failure('consent_personal_data_changed',
     'El documento ha cambiado. Vuelve a abrirlo antes de guardar los datos.', 409);
   assertRenderedIdentity(doc);
-  const values = validateValues(payload.values, now), patient = { ...snapshot.context.paciente, ...values,
+  const visibleFields = identityValidationFields(doc);
+  const rawValues = doc.purpose === 'other' && record(payload.values)
+    ? { ...payload.values, ...Object.fromEntries(Object.entries(contextValues(snapshot.context)).filter(([key]) => !visibleFields.includes(key))) }
+    : payload.values;
+  const values = validateValues(rawValues, now, visibleFields), patient = { ...snapshot.context.paciente, ...values,
     nombre_completo: `${values.nombre} ${values.apellidos}`.trim(), documento: values.dni,
     fecha_nacimiento: values.fecha_nacimiento ? values.fecha_nacimiento.split('-').reverse().join('/') : '' };
   if (identitySchema(doc) === 'cc-registration-identity/v2') {

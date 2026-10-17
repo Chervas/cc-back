@@ -17,9 +17,10 @@ async function approvedPrivacyVersions({ db, template, version, transaction, pub
   const registration = require('../lib/registration-privacy-template');
   if (registration.schema(version.body_json) || require('../lib/consent-document-blocks').versionBlocks(version, template)) {
     const approved = new Map([[Number(version.id), { version, registration: true }]]);
+    const layoutOnly = require('../lib/consent-document-blocks').unchangedPrivacyLayout(version, template);
     // New channel choices never reinterpret old SMS answers. Existing verified
     // BS evidence remains equivalent only for the unchanged legal notice gate.
-    if (template.catalog_key === FINAL_PRIVACY_KEY) {
+    if (template.catalog_key === FINAL_PRIVACY_KEY || layoutOnly) {
       const previous = publishedVersions || await db.ClinicConsentTemplateVersion.findAll({ where: {
         clinic_template_id: Number(template.id), status: 'published', locale: 'es' },
       order: [['version', 'DESC'], ['id', 'DESC']], limit: 101, transaction });
@@ -27,6 +28,13 @@ async function approvedPrivacyVersions({ db, template, version, transaction, pub
       for (const raw of previous) {
         const old = plain(raw), digital = require('../lib/bs-privacy-digital-template');
         if (Number(old.clinic_template_id) !== Number(template.id) || old.status !== 'published' || old.locale !== 'es') continue;
+        if (Number(old.id) !== Number(version.id) && Number(old.version) < Number(version.version) && layoutOnly && registration.schema(old.body_json)
+          && old.body_html === version.body_html
+          && JSON.stringify(canonical(object(old.body_json).consent_form)) === JSON.stringify(canonical(object(version.body_json).consent_form))
+          && (!object(old.body_json).document_blocks || require('../lib/consent-document-blocks').unchangedPrivacyLayout(old, template))) {
+          approved.set(Number(old.id), { version: old, registration: true, layoutEquivalent: true });
+          continue;
+        }
         const isDigital = digital.isApprovedPrivacyPresentation({ bodyHtml: old.body_html, bodyJson: old.body_json });
         const legacy = createHash('sha256').update(String(old.body_html || '')).digest('hex') === digital.APPROVED_LEGACY_HTML_SHA256;
         if (isDigital || legacy) approved.set(Number(old.id), { version: old, digital: isDigital, legacy });
@@ -73,6 +81,9 @@ function isValidSignedPrivacyDocument({ document, template, patientId, clinicId,
   if (!answers || (approved.legacy || approved.digital)
     && (!Number.isFinite(evidenceDate) || evidenceDate > now.getTime())) return false;
   if (approved.registration) {
+    if (approved.layoutEquivalent && (doc.required !== (template.blocking_policy === 'hard')
+      || ['requires_patient_signature', 'requires_representative_when_minor', 'requires_professional_signature', 'blocking_policy', 'validity_mode']
+        .some(key => snapshot.template[key] !== template[key]))) return false;
     if (!Number.isFinite(evidenceDate) || evidenceDate > now.getTime()
       || snapshot.version.body_html !== approved.version.body_html
       || JSON.stringify(canonical(object(object(snapshot.version).body_json))) !== JSON.stringify(canonical(object(approved.version.body_json)))) return false;

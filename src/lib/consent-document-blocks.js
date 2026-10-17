@@ -109,6 +109,19 @@ function documentBlocks(document) {
   const snapshot = object(plain(document)?.snapshot_json);
   return versionBlocks(object(snapshot.version), object(snapshot.template));
 }
+// Equivalence is deliberately limited to presentation-only privacy layouts.
+// A question, removed identity field or altered clause never inherits an old
+// signature merely by copying a document id or a registration marker.
+function unchangedPrivacyLayout(version, template) {
+  try {
+    const definition = versionBlocks(version, template);
+    if (!definition || !definition.blocks.every(block => ['text', 'patient_data', 'decisions', 'signature'].includes(block.type))) return false;
+    const identity = definition.blocks.find(block => block.type === 'patient_data');
+    return !!identity && identity.fields.length === KEYS.length && KEYS.every(key => identity.fields.includes(key))
+      && definition.blocks.some(block => block.type === 'decisions')
+      && definition.blocks.filter(block => block.type === 'text').map(block => block.html).join('\n').trim() === cleanHtml(version.body_html || '').trim();
+  } catch { return false; }
+}
 function replaceVariables(html, context) {
   return html.replace(/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g, (_match, key) => escape(key.split('.').reduce(
     (node, part) => node && own(node, part) ? node[part] : '', context) ?? ''));
@@ -208,4 +221,4 @@ function publicFields(document) {
   document_block_answers: closed ? evidence.answers : null };
 }
 module.exports = { SCHEMA, KEYS, validate, versionBlocks, documentBlocks, normalizeVersion, renderVersion,
-  validateAnswerMap, answerEvidence, payloadForDocument, publicFields, escape, object };
+  validateAnswerMap, answerEvidence, payloadForDocument, publicFields, unchangedPrivacyLayout, escape, object };

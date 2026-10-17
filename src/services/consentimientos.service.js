@@ -2362,7 +2362,8 @@ async function createPatientIntakePackage(identifier, options = {}) {
                         ? { body_html: version.body_html || '' } : {}) },
                 context, patient_flags: { is_minor: isMinorPatient(paciente), representatives: getRepresentativeSnapshot(paciente) },
                 document_branding: documentBranding.buildDocumentBranding(getPlain(clinicRow), {
-                    purpose: template.purpose, configuration: parseJsonObject(version.body_json).document_branding }),
+                    purpose: template.purpose, configuration: parseJsonObject(version.body_json).document_branding,
+                    baseUrl: process.env.FRONTEND_PUBLIC_URL || 'https://crm.clinicaclick.com' }),
                 clinical_policy: { ...policy, pdf_strategy: 'json_snapshot_printable_on_demand' },
                 generated_at: new Date().toISOString(),
             };
@@ -2553,7 +2554,8 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
             },
             context: documentContext,
             document_branding: documentBranding.buildDocumentBranding(plainCita.clinica, {
-                purpose: resolved.template.purpose, configuration: parseJsonObject(resolved.version.body_json).document_branding }),
+                purpose: resolved.template.purpose, configuration: parseJsonObject(resolved.version.body_json).document_branding,
+                baseUrl: process.env.FRONTEND_PUBLIC_URL || 'https://crm.clinicaclick.com' }),
             patient_flags: {
                 is_minor: isMinorPatient(plainCita.paciente),
                 representatives: getRepresentativeSnapshot(plainCita.paciente),

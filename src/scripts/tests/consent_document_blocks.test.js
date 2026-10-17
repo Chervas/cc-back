@@ -142,6 +142,23 @@ test('Other identity corrections alter only the issued document, preserve blocks
   assert.deepEqual(blocks.publicFields(done).document_block_answers, validAnswers());
   assert.equal(personal.publicDocumentPersonalData(done).personal_data_form.editable, false);
 });
+test('Other phone-only identity does not require hidden legacy surname or validate/change hidden malformed contacts', () => {
+  const doc = fixture({ unsigned: true, identity: true }), snapshot = doc.snapshot_json;
+  snapshot.version.body_json.document_blocks.blocks.find(block => block.type === 'patient_data').fields = ['telefono'];
+  snapshot.context.paciente.apellidos = '';
+  snapshot.context.paciente.email = 'legacy-invalid-email';
+  doc.snapshot_html = blocks.renderVersion(snapshot.version, snapshot.context);
+  doc.snapshot_hash = choices.choiceSnapshotHash(snapshot, doc.snapshot_html);
+  const values = { ...personal.contextValues(snapshot.context), telefono: '+34 600 000 123', apellidos: 'Unauthorized hidden edit', email: 'injected@example.invalid' };
+  const corrected = personal.correctedSnapshot(doc, { schema_version: 'cc-registration-identity/v2', values, snapshot_hash: doc.snapshot_hash });
+  const current = { ...doc, ...corrected };
+  assert.equal(current.snapshot_json.context.paciente.apellidos, '');
+  assert.equal(current.snapshot_json.context.paciente.email, 'legacy-invalid-email');
+  assert.equal(current.snapshot_json.context.paciente.telefono, values.telefono);
+  assert.equal(personal.publicDocumentPersonalData(current).personal_data_form.confirmed, true);
+  assert.equal(personal.publicDocumentPersonalData(current).personal_data_form.fields.length, 1);
+  assert(completion.isCompleted({ ...current, ...completion.completedValues(current, payload(current)) }));
+});
 test('unsigned block answers become immutable printable receipt, not a signature or permission', () => {
   const doc = fixture({ unsigned: true }), original = clone(doc);
   const done = { ...doc, ...completion.completedValues(doc, payload(doc)) };
@@ -174,6 +191,36 @@ test('a new block LOPD remains valid for the privacy gate with exact frozen clau
   const tampered = clone(doc); tampered.snapshot_html += '<p>Otra cláusula</p>';
   tampered.snapshot_hash = choices.choiceSnapshotHash(tampered.snapshot_json, tampered.snapshot_html);
   assert.equal(gate.isValidSignedPrivacyDocument({ ...request, document: tampered }), false);
+});
+test('only the same published registration family with byte-exact clauses/choices gains layout-only equivalence', async () => {
+  const gate = require('../../services/appointmentPrivacyEligibility.service'), registration = require('../../lib/registration-privacy-template');
+  const template = { id: 10, clinic_id: 72, purpose: 'data_protection', blocking_policy: 'hard', validity_mode: 'manual',
+    requires_patient_signature: true, requires_representative_when_minor: true, requires_professional_signature: false };
+  const old = { id: 19, clinic_template_id: 10, version: 1, status: 'published', locale: 'es', body_html: '<p>Cláusulas exactas.</p>',
+    body_json: { registration_privacy: { schema_version: registration.SCHEMA, identity_editable: true, source: 'clinic' }, consent_form: registration.form() } };
+  const current = { ...clone(old), id: 20, version: 2 };
+  current.body_json.document_blocks = { schema_version: blocks.SCHEMA, blocks: [
+      { id: 'legal', type: 'text', html: old.body_html + '\n' }, { id: 'identity', type: 'patient_data', fields: [...blocks.KEYS] },
+    { id: 'choices', type: 'decisions' }, { id: 'signature', type: 'signature' }] };
+  const invalid = [ { ...clone(old), id: 18, clinic_template_id: 11 }, { ...clone(old), id: 17, status: 'draft' },
+    { ...clone(old), id: 16, locale: 'en' }, { ...clone(old), id: 15, version: 3 },
+    { ...clone(old), id: 14, body_html: '<p>Otra cláusula.</p>' } ];
+  const changedChoice = { ...clone(old), id: 13 }; changedChoice.body_json.consent_form.fields[0].label += ' Cambiada.'; invalid.push(changedChoice);
+  const approved = await gate.approvedPrivacyVersions({ db: {}, template, version: current, publishedVersions: [current, old, ...invalid] });
+  assert.deepEqual([...approved.keys()].sort(), [19, 20]); assert.equal(approved.get(19).layoutEquivalent, true);
+  const doc = fixture({ identity: true }); doc.purpose = 'data_protection'; doc.clinic_template_version_id = 19;
+  doc.status = 'signed'; doc.signed_at = new Date().toISOString(); doc.snapshot_json.template = clone(template); doc.snapshot_json.version = clone(old);
+  const decision = { schema_version: registration.CHOICE_SCHEMA, answers: { commercial: 'no', sms_whatsapp: 'no' } };
+  doc.snapshot_json.signature_evidence = { accepted_statement: true, signed_at: doc.signed_at, consent_choices: decision };
+  doc.snapshot_html = choices.appendSignedChoiceHtml(registration.render(old, doc.snapshot_json.context), doc, decision);
+  doc.snapshot_hash = choices.choiceSnapshotHash(doc.snapshot_json, doc.snapshot_html);
+  const frozen = JSON.stringify(doc), request = { document: doc, template, patientId: 30, clinicId: 72, approvedVersions: approved, now: new Date() };
+  assert(gate.isValidSignedPrivacyDocument(request)); assert.equal(JSON.stringify(doc), frozen);
+  assert.equal(gate.isValidSignedPrivacyDocument({ ...request, template: { ...template, requires_professional_signature: true } }), false);
+  assert.equal(gate.isValidSignedPrivacyDocument({ ...request, template: { ...template, blocking_policy: 'optional' } }), false);
+  const extraQuestions = clone(current); extraQuestions.body_json.document_blocks.blocks.splice(-1, 0,
+    { id: 'questions', type: 'fields', fields: [{ key: 'extra', type: 'text', label: 'Dato nuevo', required: true }] });
+  assert.equal((await gate.approvedPrivacyVersions({ db: {}, template, version: extraQuestions, publishedVersions: [old] })).has(19), false);
 });
 
 function harness({ documents = [fixture()], conflict = false } = {}) {
