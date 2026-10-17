@@ -17,6 +17,7 @@ function harness({ pendingIntake = false, documents = [], active = true, enabled
     requireActiveConsentPackage: () => { if (!active) throw Object.assign(new Error('consent_package_expired'), { statusCode: 410 }); },
     signPackageToken: () => 'fictitious-token', buildPublicConsentUrl: () => '/tablet/fictitious',
     clinicMedicalQuestionnaireEnabled: async () => enabled,
+    documentCompletion: require('../../lib/consent-document-completion'),
     DOCUMENT_PENDING_STATUSES: new Set(['pending', 'sent', 'viewed']), getPlain: value => value,
     db: {
       PatientIntakeRequest: { findOne: async options => {

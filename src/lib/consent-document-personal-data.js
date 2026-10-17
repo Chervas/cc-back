@@ -67,7 +67,7 @@ function identityValidationFields(document) {
     ? require('./consent-document-blocks').documentBlocks(doc)?.blocks.find(block => block.type === 'patient_data')?.fields || KEYS
     : KEYS;
 }
-function validateValues(raw, now = new Date(), fields = KEYS) {
+function validateValues(raw, now = new Date(), fields = KEYS, timeZone) {
   if (!record(raw) || Object.keys(raw).length !== KEYS.length || KEYS.some(key => !own(raw, key))) {
     throw failure('consent_personal_data_invalid', 'Revisa los campos de datos personales del documento.');
   }
@@ -86,7 +86,7 @@ function validateValues(raw, now = new Date(), fields = KEYS) {
     const date = new Date(values.fecha_nacimiento + 'T00:00:00Z');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(values.fecha_nacimiento) || !Number.isFinite(date.getTime())
       || date.toISOString().slice(0, 10) !== values.fecha_nacimiento || values.fecha_nacimiento < '1850-01-01'
-      || values.fecha_nacimiento > now.toISOString().slice(0, 10)) {
+      || values.fecha_nacimiento > require('./consent-clinic-time').localCalendarDate(now, timeZone)) {
       throw failure('consent_personal_data_invalid', 'Revisa la fecha de nacimiento.', 400, 'fecha_nacimiento');
     }
   }
@@ -104,14 +104,16 @@ function identityConfirmed(document) {
   const snapshot = object(plain(document)?.snapshot_json), evidence = object(snapshot.patient_identity);
   if (evidence.schema_version !== identitySchema(document) || evidence.confirmed !== true
     || !Number.isFinite(new Date(evidence.confirmed_at).getTime())) return false;
-  try { return JSON.stringify(validateValues(evidence.values, new Date(), identityValidationFields(document))) === JSON.stringify(contextValues(snapshot.context)); }
+  try { return JSON.stringify(validateValues(evidence.values, new Date(), identityValidationFields(document),
+    require('./consent-clinic-time').documentTimezone(document))) === JSON.stringify(contextValues(snapshot.context)); }
   catch { return false; }
 }
 function publicDocumentPersonalData(document) {
   const doc = plain(document);
   if (!isIdentityDocument(doc)) return {};
   const selected = require('./consent-document-blocks').documentBlocks(doc)?.blocks.find(block => block.type === 'patient_data')?.fields;
-  return { personal_data_form: { schema_version: identitySchema(doc), fields: FIELDS.filter(field => !selected || selected.includes(field.key)).map(field => ({ ...field })),
+  return { personal_data_form: { schema_version: identitySchema(doc), fields: FIELDS.filter(field => !selected || selected.includes(field.key))
+    .map(field => ({ ...field, label: field.key === 'telefono2' ? 'Teléfono fijo' : field.label })),
     values: contextValues(object(doc.snapshot_json).context),
     editable: ['pending', 'sent', 'viewed'].includes(doc.status) && !doc.signed_at && !doc.revoked_at,
     confirmed: identityConfirmed(doc) } };
@@ -160,7 +162,8 @@ function correctedSnapshot(document, payload, requestMeta = {}, now = new Date()
   const rawValues = doc.purpose === 'other' && record(payload.values)
     ? { ...payload.values, ...Object.fromEntries(Object.entries(contextValues(snapshot.context)).filter(([key]) => !visibleFields.includes(key))) }
     : payload.values;
-  const values = validateValues(rawValues, now, visibleFields), patient = { ...snapshot.context.paciente, ...values,
+  const timeZone = require('./consent-clinic-time').documentTimezone(doc);
+  const values = validateValues(rawValues, now, visibleFields, timeZone), patient = { ...snapshot.context.paciente, ...values,
     nombre_completo: `${values.nombre} ${values.apellidos}`.trim(), documento: values.dni,
     fecha_nacimiento: values.fecha_nacimiento ? values.fecha_nacimiento.split('-').reverse().join('/') : '' };
   if (identitySchema(doc) === 'cc-registration-identity/v2') {
@@ -169,7 +172,7 @@ function correctedSnapshot(document, payload, requestMeta = {}, now = new Date()
   }
   const next = { ...snapshot, context: { ...snapshot.context, paciente: patient },
     patient_flags: { ...snapshot.patient_flags,
-      is_minor: snapshot.patient_flags?.is_minor === true || isMinorDate(values.fecha_nacimiento, now) },
+      is_minor: snapshot.patient_flags?.is_minor === true || require('./consent-clinic-time').isMinor(values.fecha_nacimiento, { now, timeZone }) },
     patient_identity: { schema_version: identitySchema(doc), confirmed: true, values,
       confirmed_at: now.toISOString(), previous_snapshot_hash: doc.snapshot_hash,
       source: 'public_document_identity', profile_updated: false,
@@ -189,13 +192,6 @@ function renderedIdentity(snapshot) {
   return require('./registration-privacy-template').schema(object(snapshot.version).body_json)
     ? require('./registration-privacy-template').render(snapshot.version, snapshot.context)
     : digital.buildBsPrivacyDigitalHtml(snapshot.context).html;
-}
-function isMinorDate(date, now) {
-  if (!date) return false;
-  const [year, month, day] = date.split('-').map(Number);
-  let age = now.getUTCFullYear() - year;
-  if (now.getUTCMonth() + 1 < month || now.getUTCMonth() + 1 === month && now.getUTCDate() < day) age--;
-  return age < 18;
 }
 module.exports = { SCHEMA_VERSION, FIELDS, isIdentityDocument, contextValues, validateValues,
   publicDocumentPersonalData, correctedSnapshot, validateSnapshotMap, assertReadyToSign, payloadForDocument };

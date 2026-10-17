@@ -43,10 +43,14 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     await expect('GET', route, undefined, outsider, 403);
     const countsBeforeDraft = await f.fingerprint(), versionBeforeDraft = setting.version;
     const draftBody = await expect('GET', `${route}/standard-template-draft`, undefined, owner, 200);
-    const { document_branding: privacyBranding, additional_document_branding: additionalBranding, ...legalDraft } = draftBody;
+    const { document_branding: privacyBranding, additional_document_branding: additionalBranding,
+      tablet_branding: tabletBranding, tablet_branding_group: tabletBrandingGroup, ...legalDraft } = draftBody;
     assert.deepEqual(legalDraft, registration.standardDraft({ id_clinica: clinicId }), 'Adding presentation metadata does not alter legal source');
     assert.deepEqual(privacyBranding, setting.document_branding);
     assert.deepEqual(additionalBranding, setting.additional_document_branding);
+    assert.deepEqual(tabletBranding, setting.tablet_branding);
+    assert.equal(tabletBranding.source, 'clinic');
+    assert.equal(tabletBrandingGroup.id, ids.group);
     assert.equal(privacyBranding.schema_version, 'cc-document-branding/v1');
     assert.equal((await f.fingerprint()).sha256, countsBeforeDraft.sha256, 'Opening the complete source draft performs no write');
     assert.equal((await expect('GET', route, undefined, owner, 200)).version, versionBeforeDraft, 'No CAS/configuration version changes on editor open');
@@ -87,6 +91,40 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     await expect('PUT', route, { patient_intake: { additional_documents: [{ template_id: foreign.id, required: false, sort_order: 0 }] }, expected_version: setting.version }, owner, 400);
     owned.report.checks.push('native settings HTTP: JWT/MFA/clinic ACL, draft never activates, template scope/publication, CAS and ordered extras validated');
 
+    const clinic = await db.Clinica.findByPk(clinicId);
+    await clinic.update({ configuracion: { ...clinic.configuracion, timezone: 'America/New_York' },
+      url_avatar: 'https://example.com/owned-clinic-logo.png' });
+    const groupBrand = { source: 'group', logo_url: 'https://example.com/owned-group-logo.png', logo_background: 'dark' };
+    const beforeBrandVersion = setting.version;
+    setting = await expect('PUT', route, { patient_intake: { tablet_branding: groupBrand }, expected_version: setting.version }, owner, 200);
+    assert.equal(setting.tablet_branding.source, 'group');
+    assert.equal(setting.tablet_branding.display_name, tabletBrandingGroup.name);
+    assert.equal(setting.tablet_branding.logo_url, groupBrand.logo_url);
+    const refreshedSettings = await expect('GET', route, undefined, owner, 200);
+    assert.deepEqual(refreshedSettings.patient_intake.tablet_branding, groupBrand);
+    assert.deepEqual(refreshedSettings.tablet_branding, setting.tablet_branding);
+    await expect('PUT', route, { patient_intake: { tablet_branding: { ...groupBrand, group_id: ids.group + 1 } }, expected_version: setting.version }, owner, 400);
+    await expect('PUT', route, { patient_intake: { tablet_branding: { ...groupBrand, logo_url: 'http://127.0.0.1/private.png' } }, expected_version: setting.version }, owner, 400);
+    await expect('PUT', route, { patient_intake: { tablet_branding: { source: 'clinic', logo_url: null, logo_background: 'light' } }, expected_version: beforeBrandVersion }, owner, 409);
+    const priorGroup = clinic.grupoClinicaId;
+    await clinic.update({ grupoClinicaId: null });
+    const noGroupSettings = await expect('GET', route, undefined, owner, 200);
+    await expect('PUT', route, { patient_intake: { tablet_branding: groupBrand }, expected_version: noGroupSettings.version }, owner, 400);
+    await clinic.update({ grupoClinicaId: priorGroup });
+
+    const kioskAccess = await expect('POST', `/api/consentimientos/clinic/${clinicId}/tablet-kiosk`, { display_name: 'Tablet QA aislada' }, owner, 201);
+    const kioskLogin = await expect('POST', '/api/consentimientos/tablet/login', {
+      username: kioskAccess.kiosk.username, password: kioskAccess.kiosk.one_time_password }, undefined, 200);
+    assert.equal(kioskLogin.clinic.time_zone, 'America/New_York');
+    assert.deepEqual(kioskLogin.tablet_branding, setting.tablet_branding);
+    assert.equal(kioskLogin.kiosk.include_group_consents, false, 'Shared visual identity never grants access to group queue');
+    const kioskSession = await expect('GET', '/api/consentimientos/tablet/session', undefined, kioskLogin.token, 200);
+    assert.deepEqual(kioskSession.tablet_branding, setting.tablet_branding);
+    assert.equal(kioskSession.clinic.time_zone, 'America/New_York');
+    assert.equal(kioskSession.clinic.configuracion, undefined, 'Public device metadata does not expose clinic configuration');
+    assert.equal((await expect('GET', `/api/consentimientos/clinic/${clinicId}/tablet-kiosk`, undefined, owner, 200)).time_zone, 'America/New_York');
+    owned.report.checks.push('native tablet branding settings: scoped group name, logo URL validation, stale CAS, group membership required, persistent reread, kiosk login/session timezone; branding does not opt into group queue');
+
     const service = require('../../services/consentimientos.service'), patientId = 92601;
     await db.Paciente.create({ id_paciente: patientId, clinica_id: clinicId, public_id: 'pac_generic_qa', nombre: 'Paciente', apellidos: 'Ficticio',
       numero_historia: String(patientId), historia_scope: `clinic:${clinicId}`, telefono_movil: null, telefono_secundario: null });
@@ -97,6 +135,15 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     const session = await service.createTabletSession(prepared.package_id, { createdBy: ids.owner });
     const publicRoute = '/api/consentimientos/public/' + encodeURIComponent(session.public_token);
     const viewed = await expect('GET', publicRoute, undefined, undefined, 200), doc = viewed.documents[0];
+    assert.equal(viewed.clinica.time_zone, 'America/New_York');
+    assert.deepEqual(viewed.tablet_branding, setting.tablet_branding);
+    const pendingStored = await db.PatientConsentDocument.findByPk(doc.id);
+    assert.equal(pendingStored.snapshot_json.context.clinica.time_zone, 'America/New_York');
+    assert.equal(pendingStored.snapshot_json.context.document_presentation.patient_identity_labels, 'mobile_fixed/v1');
+    const kioskQueue = await expect('GET', '/api/consentimientos/tablet/packages', undefined, kioskLogin.token, 200);
+    assert.equal(kioskQueue.include_group_consents, false);
+    const queued = kioskQueue.items.find(row => row.id === prepared.package_id && row.type === 'consent');
+    assert(queued); assert.equal(queued.time_zone, 'America/New_York'); assert.equal(queued.documents[0].title, doc.title);
     assert.equal(doc.personal_data_form.schema_version, registration.IDENTITY_SCHEMA);
     assert.deepEqual(doc.choice_form.fields.map(row => row.key), ['health_nonmedical', 'commercial', 'financing', 'sms_whatsapp']);
     assert(doc.snapshot_html.includes('Sociedad clínica A ficticia')); assert(!doc.snapshot_html.includes('INSTITUTO OBES'));
@@ -110,10 +157,23 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
       document_snapshot_hashes: { [doc.id]: current.snapshot_hash }, document_choices: { [doc.id]: {
         schema_version: registration.CHOICE_SCHEMA, answers: { health_nonmedical: 'no', commercial: 'no', financing: 'no', sms_whatsapp: 'no' } } } }, undefined, 200);
     const signed = await db.PatientConsentDocument.findByPk(doc.id);
+    assert(signed.snapshot_html.includes('<dt>Teléfono móvil</dt>')); assert(signed.snapshot_html.includes('<dt>Teléfono fijo</dt>'));
     assert.deepEqual(choices.signedConsentChoiceAnswers(signed), { health_nonmedical: 'no', commercial: 'no', financing: 'no', sms_whatsapp: 'no' });
     const frozen = JSON.stringify(signed.toJSON());
+    setting = await expect('PUT', route, { patient_intake: { tablet_branding: { source: 'clinic', logo_url: null, logo_background: 'light' } },
+      expected_version: setting.version }, owner, 200);
+    const afterBrandChange = await expect('GET', publicRoute, undefined, undefined, 200);
+    assert.equal(afterBrandChange.tablet_branding.source, 'clinic');
+    assert.equal(afterBrandChange.tablet_branding.logo_url, 'https://example.com/owned-clinic-logo.png');
+    assert.deepEqual(afterBrandChange.documents[0].document_branding, viewed.documents[0].document_branding);
+    assert.equal(JSON.stringify((await signed.reload()).toJSON()), frozen, 'Live UI branding changes never rewrite signed branding, legal context, ISO evidence or hash');
     const state = await db.sequelize.transaction(transaction => require('../../services/patientPrivacyStatus.service').getPatientPrivacyStatus({ db, patientId, clinicId, transaction }));
     assert.equal(state.state, 'signed'); assert.equal(state.allowed, true);
+    assert.equal(state.time_zone, 'America/New_York');
+    const patientDocuments = await expect('GET', `/api/consentimientos/patients/${patientId}/documents?clinic_id=${clinicId}`, undefined, owner, 200);
+    assert.equal(patientDocuments.items[0].time_zone, 'America/New_York');
+    assert.equal(patientDocuments.items[0].clinica.time_zone, 'America/New_York');
+    assert.equal(patientDocuments.items[0].clinica.configuracion, undefined);
     const assessment = await db.sequelize.transaction(transaction => privacy.assessPrivacyBeforeStart({ db,
       appointment: { id_cita: 99001, paciente_id: patientId, clinica_id: clinicId }, transaction }));
     assert.equal(assessment.allowed, true);

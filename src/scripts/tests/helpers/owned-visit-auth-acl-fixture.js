@@ -83,7 +83,9 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
   // Only the group metadata table is reduced: no external asset/billing FKs
   // are needed to exercise the actual native group/clinic ACL precedence.
   db.GrupoClinica = sql.define('GrupoClinica', { id_grupo: { type: S.DataTypes.INTEGER, primaryKey: true },
-    nombre: S.DataTypes.STRING }, { tableName: 'GruposClinicas', timestamps: false });
+    nombre_grupo: S.DataTypes.STRING,
+    nombre: { type: S.DataTypes.VIRTUAL, get() { return this.getDataValue('nombre_grupo'); },
+      set(value) { this.setDataValue('nombre_grupo', value); } } }, { tableName: 'GruposClinicas', timestamps: false });
   const modelFiles = includeProgramLedger
     ? [...CORE_MODELS, 'patientvoucher', 'patientvouchermovement', 'patientprogramsession'] : CORE_MODELS;
   for (const file of modelFiles) {

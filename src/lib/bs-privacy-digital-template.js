@@ -69,7 +69,9 @@ function identityValue(value) {
 }
 function renderIdentity(context) {
   const patient = record(context?.paciente) ? context.paciente : {};
-  const fields = IDENTITY_FIELDS.map(field => ({ ...field, value: Object.prototype.hasOwnProperty.call(patient, field.key)
+  const fields = IDENTITY_FIELDS.map(field => ({ ...field,
+    label: require('./consent-document-presentation').identityLabel(field, context),
+    value: Object.prototype.hasOwnProperty.call(patient, field.key)
     ? identityValue(patient[field.key]) : '' }))
     .filter(field => field.value);
   if (!fields.length) return '';

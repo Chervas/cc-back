@@ -51,10 +51,17 @@ function legacyDocument(answer = 'no') {
   return { doc, version };
 }
 
-function standardDocument() {
+function standardDocument(withBlocks = false) {
   const registration = require('../../lib/registration-privacy-template'), source = registration.standardDraft();
   const template = { id: 110, clinic_id: 88, purpose: 'data_protection' }, version = { id: 120,
     clinic_template_id: 110, locale: 'es', status: 'published', ...source };
+  const blocks = require('../../lib/consent-document-blocks');
+  if (withBlocks) version.body_json.document_blocks = { schema_version: blocks.SCHEMA, blocks: [
+    { id: 'identity', type: 'patient_data', fields: blocks.KEYS },
+    { id: 'legal', type: 'text', html: version.body_html },
+    { id: 'questions', type: 'fields', fields: [{ key: 'free_answer', label: 'Pregunta no operativa', type: 'text', required: false }] },
+    { id: 'decisions', type: 'decisions' }, { id: 'signature', type: 'signature' },
+  ] };
   const snapshot = { template, version: { id: version.id, body_html: version.body_html, body_json: version.body_json },
     context: { paciente: { id: 130, telefono: '+34 600 000 003', nombre_completo: 'Prueba genérica' }, clinica: { id: 88 },
       responsable: { razon_social: 'Sociedad ficticia', cif: 'QA-NO-REAL' } },
@@ -63,10 +70,77 @@ function standardDocument() {
         answers: Object.fromEntries(source.body_json.consent_form.fields.map(row => [row.key, 'no'])) } } };
   const doc = { id: 140, paciente_id: 130, clinica_id: 88, clinic_template_id: 110, clinic_template_version_id: 120,
     purpose: 'data_protection', status: 'signed', signed_at: '2026-10-16T10:00:00Z', snapshot_json: snapshot };
-  doc.snapshot_html = choices.appendSignedChoiceHtml(registration.render(version, snapshot.context), doc, snapshot.signature_evidence.consent_choices);
+  if (withBlocks) snapshot.document_block_answers = { schema_version: blocks.SCHEMA, answers: { free_answer: 'Sí, respuesta libre sin autorización' } };
+  doc.snapshot_html = blocks.renderVersion(version, snapshot.context,
+    { answers: snapshot.document_block_answers?.answers, choiceEvidence: snapshot.signature_evidence.consent_choices })
+    ?? choices.appendSignedChoiceHtml(registration.render(version, snapshot.context), doc, snapshot.signature_evidence.consent_choices);
   doc.snapshot_hash = choices.choiceSnapshotHash(snapshot, doc.snapshot_html);
   return { doc, version, template };
 }
+
+test('ordered signed folios project commercial and SMS/WhatsApp No without mutating evidence or interpreting free answers', async () => {
+  const { doc, version, template } = standardDocument(true), frozen = JSON.stringify(doc);
+  const expected = { health_nonmedical: 'no', commercial: 'no', financing: 'no', sms_whatsapp: 'no' };
+  assert.deepEqual(choices.signedConsentChoiceAnswers(doc), expected);
+  assert.deepEqual(helper.verifiedSignedChoices(doc, { now, sourceVersion: version, sourceTemplate: template }), expected);
+  const db = { Sequelize: S, PatientConsentDocument: { findAll: async () => [doc] },
+    ClinicConsentTemplateVersion: { findAll: async () => [version] }, ClinicConsentTemplate: { findAll: async () => [template] } };
+  assert.equal((await helper.commercialRefusals({ db, clinicIds: [88], patientIds: [130], now })).patientIds.has(130), true);
+  assert.equal((await helper.channelRefusals({ db, clinicIds: [88], patientIds: [130], phone: '+34 600 000 003', now })).patientIds.has(130), true);
+  assert.equal((await helper.channelRefusals({ db, clinicIds: [88], patientIds: [130], phone: '+34 600 000 004', now })).patientIds.size, 0);
+  assert.equal(JSON.stringify(doc), frozen, 'A refusal is projected from frozen signed evidence, never rewritten');
+  const yes = structuredClone(doc);
+  const evidence = yes.snapshot_json.signature_evidence.consent_choices;
+  evidence.answers.commercial = 'yes'; evidence.answers.sms_whatsapp = 'yes';
+  yes.snapshot_json.document_block_answers.answers.free_answer = 'No, texto libre sin efectos';
+  yes.snapshot_html = require('../../lib/consent-document-blocks').renderVersion(version, yes.snapshot_json.context,
+    { answers: yes.snapshot_json.document_block_answers.answers, choiceEvidence: evidence });
+  yes.snapshot_hash = choices.choiceSnapshotHash(yes.snapshot_json, yes.snapshot_html);
+  assert.equal(helper.isVerifiedCommercialRefusal(yes, now, version, template), false);
+  assert.equal(helper.verifiedSignedChoices(yes, { now, sourceVersion: version, sourceTemplate: template }).sms_whatsapp, 'yes');
+});
+
+test('block verification retains exact source, scope, hash and signed-choice guards', () => {
+  for (const change of [d => { d.status = 'pending'; }, d => { d.revoked_at = now; },
+    d => { d.snapshot_hash = 'a'.repeat(64); }, d => { d.snapshot_json.context.paciente.id = 131; },
+    d => { d.clinica_id = 89; }, d => { d.snapshot_json.version.id = 121; },
+    d => { d.snapshot_json.signature_evidence.consent_choices.answers.commercial = 'yes'; },
+    d => { d.snapshot_json.document_block_answers.answers.free_answer = 'Forged answer'; },
+    d => { d.snapshot_html += '<p>Forged legal body</p>'; d.snapshot_hash = choices.choiceSnapshotHash(d.snapshot_json, d.snapshot_html); },
+  ]) {
+    const { doc, version, template } = standardDocument(true); change(doc);
+    assert.equal(helper.verifiedSignedChoices(doc, { now, sourceVersion: version, sourceTemplate: template }), null, String(change));
+  }
+  const { doc, version, template } = standardDocument(true);
+  for (const change of [v => { v.body_html += '<p>Changed source</p>'; }, v => { v.status = 'draft'; },
+    v => { v.body_json.document_blocks.blocks[1].html += '<p>Changed block</p>'; },
+    v => { v.body_json.consent_form.fields[0].label = 'Changed authorization'; }]) {
+    const source = structuredClone(version); change(source);
+    assert.equal(helper.verifiedSignedChoices(doc, { now, sourceVersion: source, sourceTemplate: template }), null);
+  }
+  assert.equal(helper.verifiedSignedChoices(doc, { now, sourceVersion: version, sourceTemplate: { ...template, clinic_id: 89 } }), null);
+  assert.equal(helper.verifiedSignedChoices(doc, { now }), null, 'Unproven copies of source markers remain untrusted');
+});
+
+test('new frozen mobile/fixed presentation remains verified; changing that marker cannot rewrite historical evidence', () => {
+  for (const withBlocks of [false, true]) {
+    const { doc, version, template } = standardDocument(withBlocks);
+    doc.snapshot_json.context.document_presentation = require('../../lib/consent-document-presentation').newPresentation();
+    doc.snapshot_json.context.paciente.telefono2 = '+34 965 000 000';
+    const evidence = doc.snapshot_json.signature_evidence.consent_choices;
+    doc.snapshot_html = require('../../lib/consent-document-blocks').renderVersion(version, doc.snapshot_json.context,
+      { answers: doc.snapshot_json.document_block_answers?.answers, choiceEvidence: evidence })
+      ?? choices.appendSignedChoiceHtml(require('../../lib/registration-privacy-template').render(version, doc.snapshot_json.context), doc, evidence);
+    doc.snapshot_hash = choices.choiceSnapshotHash(doc.snapshot_json, doc.snapshot_html);
+    assert(doc.snapshot_html.includes('<dt>Teléfono móvil</dt>')); assert(doc.snapshot_html.includes('<dt>Teléfono fijo</dt>'));
+    assert.equal(helper.verifiedSignedChoices(doc, { now, sourceVersion: version, sourceTemplate: template }).commercial, 'no');
+    const altered = structuredClone(doc); delete altered.snapshot_json.context.document_presentation;
+    assert.equal(helper.verifiedSignedChoices(altered, { now, sourceVersion: version, sourceTemplate: template }), null);
+    altered.snapshot_hash = choices.choiceSnapshotHash(altered.snapshot_json, altered.snapshot_html);
+    assert.equal(helper.verifiedSignedChoices(altered, { now, sourceVersion: version, sourceTemplate: template }), null,
+      'Even a self-consistent hash must match the exact presentation frozen in its context');
+  }
+});
 
 test('generic standard No is verified against actual clinic source/version; channel stays scoped to full number, never legacy SMS', async () => {
   const { doc, version, template } = standardDocument(), frozen = JSON.stringify(doc), calls = [];

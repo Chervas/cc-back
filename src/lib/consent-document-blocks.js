@@ -127,7 +127,7 @@ function replaceVariables(html, context) {
     (node, part) => node && own(node, part) ? node[part] : '', context) ?? ''));
 }
 function renderVersion(version, context, { answers = {}, choiceEvidence = null } = {}) {
-  const body = object(version.body_json), definition = versionBlocks(version);
+  const body = object(version?.body_json), definition = versionBlocks(version);
   if (!definition) return null;
   const personal = require('./consent-document-personal-data'), values = personal.contextValues(context);
   const fieldValue = field => {
@@ -145,7 +145,7 @@ function renderVersion(version, context, { answers = {}, choiceEvidence = null }
     if (block.type === 'patient_data') return '<section class="consent-patient-identity"' + attr + '><h3>Datos del paciente</h3><dl>'
       + block.fields.map(key => { const field = personal.FIELDS.find(field => field.key === key); let value = values[key];
         if (key === 'fecha_nacimiento' && value) value = value.split('-').reverse().join('/');
-        return '<div><dt>' + escape(field.label) + '</dt><dd>' + escape(value || '—') + '</dd></div>'; }).join('') + '</dl></section>';
+        return '<div><dt>' + escape(require('./consent-document-presentation').identityLabel(field, context)) + '</dt><dd>' + escape(value || '—') + '</dd></div>'; }).join('') + '</dl></section>';
     if (block.type === 'fields') return '<section class="consent-custom-fields"' + attr + '>' + (block.title ? '<h3>' + escape(block.title) + '</h3>' : '')
       + '<dl>' + block.fields.map(field => '<div><dt>' + escape(field.label) + '</dt><dd>' + escape(fieldValue(field)) + '</dd></div>').join('') + '</dl></section>';
     if (block.type === 'decisions') return '<section class="consent-document-decisions"' + attr + '><h3>Autorizaciones</h3><ul>'

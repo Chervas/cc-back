@@ -56,6 +56,36 @@ function safeLogoUrl(value, baseUrl = null) {
   } catch (_) { return null; }
 }
 const publicLogo = logo => ({ url: logo.url, alt: logo.alt, background: logo.background });
+// Tablet identity is live UI configuration, NOT evidence embedded in a signed
+// document. Never use it to rebuild or replace document_branding snapshots.
+function normalizeTabletBrandingConfig(value) {
+  const source = object(value);
+  return { source: source.source === 'group' ? 'group' : 'clinic',
+    logo_url: typeof source.logo_url === 'string' && source.logo_url.trim() ? source.logo_url.trim() : null,
+    logo_background: source.logo_background === 'dark' ? 'dark' : 'light' };
+}
+function validateTabletBrandingConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).some(key => !['source', 'logo_url', 'logo_background'].includes(key))
+    || !['clinic', 'group'].includes(value.source) || !['light', 'dark'].includes(value.logo_background)
+    || value.logo_url !== null && (typeof value.logo_url !== 'string' || !safeLogoUrl(value.logo_url))) {
+    throw Object.assign(new Error('tablet_branding_invalid'), { code: 'tablet_branding_invalid', statusCode: 400 });
+  }
+  return normalizeTabletBrandingConfig(value);
+}
+function resolveTabletBranding(clinic, group = null, options = {}) {
+  const configured = normalizeTabletBrandingConfig(object(object(clinic?.configuracion).patient_intake).tablet_branding);
+  const groupId = Number(clinic?.grupoClinicaId || clinic?.grupo_clinica_id);
+  const shared = configured.source === 'group' && Number.isSafeInteger(groupId) && groupId > 0
+    && Number(group?.id_grupo) === groupId;
+  const displayName = clean(shared ? group.nombre_grupo : clinic?.nombre_clinica || clinic?.nombre, 255);
+  const override = (configured.source !== 'group' || shared) && safeLogoUrl(configured.logo_url, options.baseUrl);
+  const clinicLogo = !shared && safeLogoUrl(clinic?.url_avatar, options.baseUrl);
+  const original = !shared && SOURCE_LOGOS.find(logo => logo.clinic_id === Number(clinic?.id_clinica || clinic?.id));
+  return { display_name: displayName || 'Clínica', source: shared ? 'group' : 'clinic',
+    logo_url: override || clinicLogo || original?.url || null,
+    logo_background: override || clinicLogo ? configured.logo_background : original ? original.background : 'light' };
+}
 function buildDocumentBranding(clinic, options = {}) {
   const configuration = validateDocumentBrandingConfig(options.configuration);
   const clinicId = Number(clinic?.id_clinica || clinic?.id);
@@ -117,5 +147,6 @@ function renderDocumentBrandingHtml(value, position = 'header') {
       + '"><img src="' + escape(logo.url) + '" alt="' + escape(logo.alt) + '" /></span>').join('') + '</div></div>';
 }
 module.exports = { SCHEMA, SOURCE_DOCUMENT_SHA256, SOURCE_LOGOS, validateDocumentBrandingConfig,
-  safeLogoUrl, buildDocumentBranding, normalizeDocumentBranding, brandingFromSnapshot, renderDocumentBrandingHtml };
+  safeLogoUrl, buildDocumentBranding, normalizeDocumentBranding, brandingFromSnapshot, renderDocumentBrandingHtml,
+  normalizeTabletBrandingConfig, validateTabletBrandingConfig, resolveTabletBranding };
 

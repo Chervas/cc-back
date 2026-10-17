@@ -70,7 +70,9 @@ test('generic standard uses native identity and escapes both patient and clinic 
 test('the new standard draft contains the complete pinned original, four explicit decisions and provenance; BS source is immutable', () => {
   const before = JSON.stringify(registration.bsDraft()), source = registration.standardDraft({ id_clinica: 88 });
   const bs = registration.bsDraft();
-  assert.equal(source.title, bs.title); assert.equal(source.body_html, bs.body_html);
+  assert.equal(source.title, bs.title);
+  assert.equal(source.body_html, require('../../lib/registration-privacy-spelling').correctDraft(bs).body_html);
+  assert.notEqual(source.body_html, bs.body_html, 'Only the new reviewable draft corrects spelling; the pinned source stays immutable');
   assert.equal(source.body_json.registration_privacy.source, 'standard');
   assert.equal(source.body_json.registration_privacy.source_document_sha256, digital.SOURCE_DOCUMENT_SHA256);
   assert.equal(source.body_json.registration_privacy.previous_legal_body_sha256, digital.LEGAL_BODY_SHA256);

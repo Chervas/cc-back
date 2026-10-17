@@ -112,6 +112,8 @@ test('native block builder authoring + ordered immutable signed/completed answer
     const signedView = await expect('POST', route + '/sign', signPayload, undefined, 200);
     assert.deepEqual(signedView.documents.find(doc => doc.id === signDoc.id).document_block_answers, values);
     const actualSigned = await db.PatientConsentDocument.findByPk(signDoc.id), signedFrozen = JSON.stringify(actualSigned.toJSON());
+    assert.equal(actualSigned.snapshot_json.context.document_presentation.patient_identity_labels, 'mobile_fixed/v1');
+    assert(actualSigned.snapshot_html.includes('<dt>Teléfono móvil</dt>')); assert(actualSigned.snapshot_html.includes('<dt>Teléfono fijo</dt>'));
     assert.equal(actualSigned.snapshot_hash, choices.choiceSnapshotHash(actualSigned.snapshot_json, actualSigned.snapshot_html));
     assert(actualSigned.snapshot_html.indexOf('Datos del paciente') < actualSigned.snapshot_html.indexOf('Preguntas de prueba'));
     assert.equal(actualSigned.snapshot_json.context.paciente.telefono, personalValues.telefono);
@@ -154,13 +156,22 @@ test('native block builder authoring + ordered immutable signed/completed answer
     const privacyView = await expect('GET', privacyRoute, undefined, undefined, 200); let privacyDoc = privacyView.documents[0];
     const privacyCorrected = await expect('POST', privacyRoute + '/documents/' + privacyDoc.id + '/personal-data', {
       schema_version: privacyDoc.personal_data_form.schema_version, snapshot_hash: privacyDoc.snapshot_hash,
-      values: privacyDoc.personal_data_form.values }, undefined, 200);
+      values: { ...privacyDoc.personal_data_form.values, telefono: '+447700900183' } }, undefined, 200);
     privacyDoc = privacyCorrected.documents[0];
     await expect('POST', privacyRoute + '/sign', { ...signature, document_ids: [privacyDoc.id],
       document_snapshot_hashes: { [privacyDoc.id]: privacyDoc.snapshot_hash }, document_choices: { [privacyDoc.id]: {
       schema_version: privacyDoc.choice_form.schema_version,
       answers: Object.fromEntries(privacyDoc.choice_form.fields.map(field => [field.key, 'no'])) } } }, undefined, 200);
     const privacySaved = await db.PatientConsentDocument.findByPk(privacyDoc.id), frozenPrivacy = JSON.stringify(privacySaved.toJSON());
+    assert(privacySaved.snapshot_html.includes('<dt>Teléfono móvil</dt>')); assert(privacySaved.snapshot_html.includes('<dt>Teléfono fijo</dt>'));
+    const refusalProjection = require('../../lib/bs-privacy-commercial-preferences');
+    const assertRealBlockRefusals = async () => {
+      assert.equal((await refusalProjection.commercialRefusals({ db, clinicIds: [ids.clinic], patientIds: [privacyPatient] })).patientIds.has(privacyPatient), true);
+      assert.equal((await refusalProjection.channelRefusals({ db, clinicIds: [ids.clinic], patientIds: [privacyPatient], phone: '+447700900183' })).phoneDigits.has('447700900183'), true);
+      assert.equal((await refusalProjection.channelRefusals({ db, clinicIds: [ids.clinic], patientIds: [privacyPatient], phone: '+447700900184' })).patientIds.size, 0);
+      assert.equal(JSON.stringify((await privacySaved.reload()).toJSON()), frozenPrivacy);
+    };
+    await assertRealBlockRefusals();
     assert.equal(require('../../services/appointmentPrivacyEligibility.service').isValidSignedPrivacyDocument({ document: privacySaved,
       template: await db.ClinicConsentTemplate.findByPk(privacyTemplate.id), patientId: privacyPatient, clinicId: ids.clinic,
       approvedVersions: await require('../../services/appointmentPrivacyEligibility.service').approvedPrivacyVersions({ db,
@@ -173,6 +184,7 @@ test('native block builder authoring + ordered immutable signed/completed answer
       require('../../services/appointmentPrivacyEligibility.service').assessPrivacyBeforeStart({ db,
         appointment: { id_cita: appointment.id_cita, paciente_id: privacyPatient, clinica_id: ids.clinic }, transaction }));
     assert.equal((await assess()).allowed, true, 'A layout-only new version preserves the exact earlier LOPD signature');
+    await assertRealBlockRefusals();
     const changedLegal = JSON.parse(JSON.stringify(reordered)); changedLegal.document_blocks.blocks.find(block => block.type === 'text').html = '<p>Cláusula legal distinta.</p>';
     await expect('PUT', '/api/consentimientos/clinic/templates/' + privacyTemplate.id, { body_html: '<p>Cláusula legal distinta.</p>', body_json: changedLegal }, owner, 200);
     assert.equal((await assess()).allowed, false, 'A changed clause does not inherit the old signature');

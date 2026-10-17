@@ -15,6 +15,7 @@ const consentDocumentPersonalData = require('../lib/consent-document-personal-da
 const documentCompletion = require('../lib/consent-document-completion');
 const documentBlocks = require('../lib/consent-document-blocks');
 const documentBranding = require('../lib/consent-document-branding');
+const consentClinicTime = require('../lib/consent-clinic-time');
 const { renderConsentVersionHtml } = require('../lib/consent-version-html');
 const { medicalQuestionnaireEnabled, clinicMedicalQuestionnaireEnabled } = require('../lib/patient-intake-configuration');
 const { Op } = db.Sequelize;
@@ -278,29 +279,7 @@ function buildDefaultBodyHtml(title) {
     ].join('\n');
 }
 
-function formatDateTime(value) {
-    if (!value) return '';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return String(value);
-    return date.toLocaleString('es-ES', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-    });
-}
-
-function formatDateOnly(value) {
-    if (!value) return '';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return String(value);
-    return date.toLocaleDateString('es-ES', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-    });
-}
+const { formatDateTime, formatDateOnly } = consentClinicTime;
 
 function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesional } = {}) {
     const patientName = [paciente?.nombre, paciente?.apellidos].filter(Boolean).join(' ').trim();
@@ -308,7 +287,9 @@ function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesiona
     const fiscal = parseJsonObject(clinica?.datos_fiscales_clinica);
     const responsible = require('../lib/registration-privacy-configuration').controller(clinica);
     const now = new Date();
+    const timeZone = consentClinicTime.resolveClinicTimezone(clinica);
     return {
+        document_presentation: require('../lib/consent-document-presentation').newPresentation(),
         paciente: {
             id: paciente?.id_paciente || paciente?.id || null,
             public_id: paciente?.public_id || null,
@@ -323,7 +304,7 @@ function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesiona
             telefono_movil: paciente?.telefono_movil || paciente?.telefono || '',
             telefono_fijo: paciente?.telefono_secundario || '',
             compania: '',
-            fecha_nacimiento: formatDateOnly(paciente?.fecha_nacimiento),
+            fecha_nacimiento: consentClinicTime.formatCalendarDate(paciente?.fecha_nacimiento),
             direccion: paciente?.direccion || paciente?.domicilio || '',
             codigo_postal: paciente?.codigo_postal || paciente?.cp || '',
             ciudad: paciente?.ciudad || paciente?.poblacion || paciente?.localidad || '',
@@ -333,6 +314,7 @@ function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesiona
         clinica: {
             id: clinica?.id_clinica || clinica?.id || null,
             nombre: clinica?.nombre_clinica || clinica?.nombre || '',
+            time_zone: timeZone,
             razon_social: fiscal.denominacion_social || fiscal.razon_social || fiscal.razonSocial || fiscal.nombre_fiscal || '',
             cif: fiscal.cif_nif || fiscal.cif || fiscal.nif || fiscal.documento || '',
             email: clinica?.email || '',
@@ -355,7 +337,7 @@ function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesiona
             id: cita?.id_cita || cita?.id || null,
             inicio: cita?.inicio || null,
             fin: cita?.fin || null,
-            fecha: formatDateTime(cita?.inicio),
+            fecha: formatDateTime(cita?.inicio, timeZone),
         },
         profesional: {
             id: profesional?.id_usuario || profesional?.id || null,
@@ -363,8 +345,8 @@ function buildTemplateContext({ paciente, clinica, tratamiento, cita, profesiona
             email: profesional?.email_usuario || profesional?.email || '',
         },
         fecha: {
-            firma: formatDateOnly(now),
-            generacion: formatDateTime(now),
+            firma: formatDateOnly(now, timeZone),
+            generacion: formatDateTime(now, timeZone),
         },
     };
 }
@@ -501,16 +483,9 @@ function verifyKioskToken(tokenRaw) {
     }
 }
 
-function isMinorPatient(paciente) {
-    const birthValue = paciente?.fecha_nacimiento;
-    if (!birthValue) return false;
-    const birth = new Date(birthValue);
-    if (!Number.isFinite(birth.getTime())) return false;
-    const today = new Date();
-    let age = today.getFullYear() - birth.getFullYear();
-    const monthDelta = today.getMonth() - birth.getMonth();
-    if (monthDelta < 0 || (monthDelta === 0 && today.getDate() < birth.getDate())) age -= 1;
-    return age < 18;
+function isMinorPatient(paciente, clinica) {
+    return consentClinicTime.isMinor(paciente?.fecha_nacimiento,
+        { timeZone: consentClinicTime.resolveClinicTimezone(clinica) });
 }
 
 function getRepresentativeSnapshot(paciente) {
@@ -622,6 +597,7 @@ function buildPrintableHtml(documentRow) {
     const revocation = snapshot.revocation_evidence || null;
     const patient = snapshot.context?.paciente || {};
     const clinic = snapshot.context?.clinica || {};
+    const timeZone = consentClinicTime.documentTimezone(doc);
     const treatment = snapshot.context?.tratamiento || {};
     const appointment = snapshot.context?.cita || {};
     const professional = snapshot.context?.profesional || {};
@@ -655,7 +631,7 @@ function buildPrintableHtml(documentRow) {
     }[status] || status || 'Sin estado');
     const brandLogo = `<img class="brand-logo" alt="ClinicaClick" src="${DOCUMENT_BRAND_LOGO}" />`;
     const completionEvidence = documentCompletion.isCompleted(doc) ? snapshot.completion_evidence : null;
-    const completionBlock = completionEvidence ? `<section class="evidence-panel"><div class="section-heading"><div><div class="eyebrow">Recepción</div><h2>Documento completado sin firma</h2></div><span class="status-chip">Completado</span></div><dl class="detail-grid"><div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(completionEvidence.completed_at))}</dd></div><div><dt>Acción</dt><dd>Lectura confirmada por el paciente. No constituye una firma.</dd></div></dl></section>` : '';
+    const completionBlock = completionEvidence ? `<section class="evidence-panel"><div class="section-heading"><div><div class="eyebrow">Recepción</div><h2>Documento completado sin firma</h2></div><span class="status-chip">Completado</span></div><dl class="detail-grid"><div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(completionEvidence.completed_at, timeZone))}</dd></div><div><dt>Acción</dt><dd>Lectura confirmada por el paciente. No constituye una firma.</dd></div></dl></section>` : '';
     const signatureBlock = evidence ? `
         <section class="evidence-panel">
             <div class="section-heading">
@@ -669,7 +645,7 @@ function buildPrintableHtml(documentRow) {
                 <dl class="detail-grid">
                     <div><dt>Firmante</dt><dd>${escapeHtml(evidence.signer_name || patient.nombre_completo || 'Paciente')}</dd></div>
                     <div><dt>Rol</dt><dd>${escapeHtml(roleLabel(evidence.signer_role))}</dd></div>
-                    <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(evidence.signed_at || doc.signed_at))}</dd></div>
+                    <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(evidence.signed_at || doc.signed_at, timeZone))}</dd></div>
                     <div><dt>Método</dt><dd>${escapeHtml(methodLabel(evidence.method || 'tablet_signature'))}</dd></div>
                     ${evidence.ip ? `<div><dt>IP</dt><dd>${escapeHtml(evidence.ip)}</dd></div>` : ''}
                     ${evidence.relationship ? `<div><dt>Relación</dt><dd>${escapeHtml(evidence.relationship)}</dd></div>` : ''}
@@ -694,7 +670,7 @@ function buildPrintableHtml(documentRow) {
             </div>
             <dl class="detail-grid">
                 <div><dt>Profesional</dt><dd>${escapeHtml(professionalEvidence.professional_name || professional.nombre || 'Profesional')}</dd></div>
-                <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(professionalEvidence.signed_at || doc.professional_signed_at))}</dd></div>
+                <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(professionalEvidence.signed_at || doc.professional_signed_at, timeZone))}</dd></div>
                 <div><dt>Método</dt><dd>${escapeHtml(methodLabel(professionalEvidence.method || 'professional_confirmation'))}</dd></div>
             </dl>
         </section>
@@ -708,7 +684,7 @@ function buildPrintableHtml(documentRow) {
                 </div>
                 <span class="status-chip red">Revocado</span>
             </div>
-            <p>Revocado el ${escapeHtml(formatDateTime(revocation.revoked_at || doc.revoked_at))}. Motivo: ${escapeHtml(revocation.reason || 'No indicado')}.</p>
+            <p>Revocado el ${escapeHtml(formatDateTime(revocation.revoked_at || doc.revoked_at, timeZone))}. Motivo: ${escapeHtml(revocation.reason || 'No indicado')}.</p>
         </section>
     ` : '';
 
@@ -1934,7 +1910,7 @@ async function listPatientDocuments(identifier, filters = {}) {
         where,
         include: [
             { model: db.ConsentSignaturePackage, as: 'package', required: false },
-            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica', 'configuracion'] },
             { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre', 'disciplina'] },
         ],
         order: [['createdAt', 'DESC']],
@@ -1947,7 +1923,7 @@ async function listPatientDocuments(identifier, filters = {}) {
         : [];
     return {
         paciente: getPlain(paciente),
-        items: documents.map(doc => ({ ...getPlain(doc), ...documentCompletion.publicFields(doc) })),
+        items: documents.map(doc => ({ ...withConsentClinicTime(doc), ...documentCompletion.publicFields(doc) })),
         legacy_items: legacyItems,
         summary: summarizeDocuments(documents),
     };
@@ -1968,16 +1944,17 @@ async function listPatientExternalAttestations(identifier, filters = {}) {
     const status = toCleanString(filters.status ?? filters.estado);
     if (status && status !== 'all') where.status = status;
 
-    return db.PatientConsentExternalAttestation.findAll({
+    const rows = await db.PatientConsentExternalAttestation.findAll({
         where,
         include: [
-            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica', 'configuracion'] },
             { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre', 'disciplina'] },
             db.Usuario ? { model: db.Usuario, as: 'attestedByUser', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'] } : null,
             db.Usuario ? { model: db.Usuario, as: 'revokedByUser', required: false, attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario'] } : null,
         ].filter(Boolean),
         order: [['attested_at', 'DESC'], ['id', 'DESC']],
     });
+    return rows.map(withConsentClinicTime);
 }
 
 async function createPatientExternalAttestation(identifier, payload = {}, actorId = null) {
@@ -2360,7 +2337,7 @@ async function createPatientIntakePackage(identifier, options = {}) {
                     title: version.title, body_json: version.body_json || null, variable_schema: version.variable_schema || null,
                     ...(require('../lib/registration-privacy-template').schema(version.body_json) || documentBlocks.versionBlocks(version, template)
                         ? { body_html: version.body_html || '' } : {}) },
-                context, patient_flags: { is_minor: isMinorPatient(paciente), representatives: getRepresentativeSnapshot(paciente) },
+                context, patient_flags: { is_minor: isMinorPatient(paciente, getPlain(clinicRow)), representatives: getRepresentativeSnapshot(paciente) },
                 document_branding: documentBranding.buildDocumentBranding(getPlain(clinicRow), {
                     purpose: template.purpose, configuration: parseJsonObject(version.body_json).document_branding,
                     baseUrl: process.env.FRONTEND_PUBLIC_URL || 'https://crm.clinicaclick.com' }),
@@ -2557,7 +2534,7 @@ async function createPackageForLockedAppointment(cita, options, transaction) {
                 purpose: resolved.template.purpose, configuration: parseJsonObject(resolved.version.body_json).document_branding,
                 baseUrl: process.env.FRONTEND_PUBLIC_URL || 'https://crm.clinicaclick.com' }),
             patient_flags: {
-                is_minor: isMinorPatient(plainCita.paciente),
+                is_minor: isMinorPatient(plainCita.paciente, plainCita.clinica),
                 representatives: getRepresentativeSnapshot(plainCita.paciente),
             },
             clinical_policy: {
@@ -2758,7 +2735,7 @@ async function getPackageWithDocumentsByPublicId(publicIdRaw) {
         include: [
             { model: db.PatientConsentDocument, as: 'documents', required: false },
             { model: db.Paciente, as: 'paciente', required: false },
-            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+            consentPresentationClinicInclude('clinica'),
             { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre', 'disciplina'] },
         ],
     });
@@ -2771,7 +2748,7 @@ async function getPackageWithDocumentsById(packageIdRaw) {
         include: [
             { model: db.PatientConsentDocument, as: 'documents', required: false },
             { model: db.Paciente, as: 'paciente', required: false },
-            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+            consentPresentationClinicInclude('clinica'),
             { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre', 'disciplina'] },
         ],
     });
@@ -2922,6 +2899,7 @@ async function getClinicKioskAccess(clinicIdRaw) {
     const serialized = kiosks.map((kiosk) => serializeKioskAccess(kiosk));
     return {
         exists: serialized.length > 0,
+        time_zone: consentClinicTime.resolveClinicTimezone(clinic),
         suggested_username: `tablet-${clinicId}-${slugifyKioskPart(clinic.nombre_clinica) || 'clinica'}`,
         kiosk: serialized.find((item) => item.status === 'active') || serialized[0] || null,
         kiosks: serialized,
@@ -3036,6 +3014,34 @@ async function resetClinicKioskAccess(clinicIdRaw, userId = null) {
     return createClinicKioskAccess(clinicId, userId);
 }
 
+function consentPresentationClinicInclude(as) {
+    return { model: db.Clinica, as, required: false,
+        attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'configuracion', 'grupoClinicaId'],
+        include: [{ model: db.GrupoClinica, as: 'grupoClinica', required: false, attributes: ['id_grupo', 'nombre_grupo'] }] };
+}
+
+function tabletPresentationForClinic(clinicRow) {
+    const clinic = getPlain(clinicRow) || {};
+    return documentBranding.resolveTabletBranding(clinic, clinic.grupoClinica,
+        { baseUrl: process.env.FRONTEND_PUBLIC_URL || 'https://crm.clinicaclick.com' });
+}
+
+function serializeTabletClinic(clinicRow, clinicId) {
+    const clinic = getPlain(clinicRow) || {};
+    return { id_clinica: clinic.id_clinica || clinicId, nombre_clinica: clinic.nombre_clinica || '',
+        url_avatar: clinic.url_avatar || null, time_zone: consentClinicTime.resolveClinicTimezone(clinic) };
+}
+
+function withConsentClinicTime(row) {
+    const value = getPlain(row), clinic = value.clinica;
+    const timeZone = consentClinicTime.documentTimezone(value);
+    // Configuration is read only to resolve clinic-local display. Do not add
+    // it to the pre-existing staff document DTO or alter stored evidence.
+    const { configuracion: _configuration, ...publicClinic } = clinic || {};
+    return { ...value, time_zone: timeZone,
+        ...(clinic ? { clinica: { ...publicClinic, time_zone: timeZone } } : {}) };
+}
+
 async function loginTabletKiosk(payload = {}) {
     const username = toCleanString(payload.username ?? payload.usuario);
     const password = toCleanString(payload.password ?? payload.contrasena ?? payload.contraseña);
@@ -3046,7 +3052,7 @@ async function loginTabletKiosk(payload = {}) {
     }
     const kiosk = await db.ClinicTabletKiosk.findOne({
         where: { username, status: 'active' },
-        include: [{ model: db.Clinica, as: 'clinic', required: false, attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] }],
+        include: [consentPresentationClinicInclude('clinic')],
     });
     const passwordMatches = kiosk ? await bcrypt.compare(password, kiosk.password_hash) : false;
     if (!kiosk || !passwordMatches) {
@@ -3068,11 +3074,8 @@ async function loginTabletKiosk(payload = {}) {
         token,
         expires_at: decoded?.exp ? new Date(decoded.exp * 1000).toISOString() : null,
         kiosk: serializeKioskAccess(kiosk),
-        clinic: {
-            id_clinica: kiosk.clinic?.id_clinica || kiosk.clinic_id,
-            nombre_clinica: kiosk.clinic?.nombre_clinica || '',
-            url_avatar: kiosk.clinic?.url_avatar || null,
-        },
+        clinic: serializeTabletClinic(kiosk.clinic, kiosk.clinic_id),
+        tablet_branding: tabletPresentationForClinic(kiosk.clinic),
     };
 }
 
@@ -3080,7 +3083,7 @@ async function requireKioskSession(tokenRaw) {
     const payload = verifyKioskToken(tokenRaw);
     const kiosk = await db.ClinicTabletKiosk.findOne({
         where: { id: payload.kiosk_id, clinic_id: payload.clinic_id, status: 'active' },
-        include: [{ model: db.Clinica, as: 'clinic', required: false, attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] }],
+        include: [consentPresentationClinicInclude('clinic')],
     });
     if (!kiosk) {
         const err = new Error('tablet_kiosk_not_found');
@@ -3095,11 +3098,8 @@ async function getTabletKioskSession(tokenRaw) {
     const kiosk = await requireKioskSession(tokenRaw);
     return {
         kiosk: serializeKioskAccess(kiosk),
-        clinic: {
-            id_clinica: kiosk.clinic?.id_clinica || kiosk.clinic_id,
-            nombre_clinica: kiosk.clinic?.nombre_clinica || '',
-            url_avatar: kiosk.clinic?.url_avatar || null,
-        },
+        clinic: serializeTabletClinic(kiosk.clinic, kiosk.clinic_id),
+        tablet_branding: tabletPresentationForClinic(kiosk.clinic),
     };
 }
 
@@ -3124,9 +3124,10 @@ function serializeKioskPackage(packageRow) {
         satisfied_count: documents.filter(doc => doc.status === 'signed' || documentCompletion.isCompleted(doc)).length,
         pending_count: pendingDocuments.length,
         intake_pending: medicalQuestionnaireEnabled(plain.clinica?.configuracion) && plain.intakeRequest?.status === 'pending',
-        time_zone: require('../lib/availability-calendar').resolveClinicTimezone(plain.clinica),
+        time_zone: consentClinicTime.resolveClinicTimezone(plain.clinica),
         blocking_pending: blockingPending,
-        clinic: { id_clinica: plain.clinica_id, nombre_clinica: plain.clinica?.nombre_clinica || '' },
+        clinic: { id_clinica: plain.clinica_id, nombre_clinica: plain.clinica?.nombre_clinica || '',
+            time_zone: consentClinicTime.resolveClinicTimezone(plain.clinica) },
         paciente: {
             id_paciente: plain.paciente?.id_paciente || null,
             public_id: plain.paciente?.public_id || null,
@@ -3213,7 +3214,7 @@ async function listTabletKioskPackages(tokenRaw, filters = {}) {
         include: [
             { model: db.PatientConsentDocument, as: 'documents', required: false },
             { model: db.PatientIntakeRequest, as: 'intakeRequest', required: false, attributes: ['id', 'status'] },
-            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica', 'configuracion'] },
+            consentPresentationClinicInclude('clinica'),
             { model: db.Paciente, as: 'paciente', required: false },
             { model: db.CitaPaciente, as: 'cita', required: false },
             { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre'] },
@@ -3305,7 +3306,9 @@ function serializePublicPackage(packageRow) {
         },
         clinica: {
             nombre: plain.clinica?.nombre_clinica || '',
+            time_zone: consentClinicTime.resolveClinicTimezone(plain.clinica),
         },
+        tablet_branding: tabletPresentationForClinic(plain.clinica),
         tratamiento: {
             nombre: plain.tratamiento?.nombre || '',
         },
@@ -3410,7 +3413,7 @@ async function updatePublicDocumentPersonalData(tokenRaw, identifier, payload = 
                 statusCode: 410, code: 'consent_document_expired', details: { reason_code: 'consent_document_expired' },
             });
         }
-        const corrected = consentDocumentPersonalData.correctedSnapshot(doc, payload, requestMeta);
+        const corrected = consentDocumentPersonalData.correctedSnapshot({ ...doc, clinica: getPlain(packageRow).clinica }, payload, requestMeta);
         const [changed] = await db.PatientConsentDocument.update(corrected, { transaction, where: {
             id: doc.id, package_id: packageRow.id, paciente_id: packageRow.paciente_id, clinica_id: packageRow.clinica_id,
             status: doc.status, signed_at: null, revoked_at: null, snapshot_hash: payload.snapshot_hash,
@@ -3644,7 +3647,7 @@ async function listProfessionalPendingDocuments(filters = {}, userId = null) {
         include: [
             { model: db.ConsentSignaturePackage, as: 'package', required: false },
             { model: db.Paciente, as: 'paciente', required: false, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos'] },
-            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica', 'configuracion'] },
             { model: db.CitaPaciente, as: 'cita', required: false, attributes: ['id_cita', 'inicio', 'doctor_id'] },
             { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre', 'disciplina'] },
         ],
@@ -3653,7 +3656,7 @@ async function listProfessionalPendingDocuments(filters = {}, userId = null) {
     });
 
     return documents
-        .map(getPlain)
+        .map(withConsentClinicTime)
         .filter((doc) => documentRequiresProfessionalSignature(doc))
         .filter((doc) => {
             const filterUserId = toIntOrNull(userId);
@@ -3675,7 +3678,7 @@ async function listClinicPendingPatientDocuments(filters = {}, userId = null) {
         include: [
             { model: db.ConsentSignaturePackage, as: 'package', required: false },
             { model: db.Paciente, as: 'paciente', required: false, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos'] },
-            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica'] },
+            { model: db.Clinica, as: 'clinica', required: false, attributes: ['id_clinica', 'nombre_clinica', 'configuracion'] },
             { model: db.CitaPaciente, as: 'cita', required: false, attributes: ['id_cita', 'inicio', 'doctor_id', 'estado'] },
             { model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['id_tratamiento', 'nombre', 'disciplina'] },
         ],
@@ -3684,7 +3687,7 @@ async function listClinicPendingPatientDocuments(filters = {}, userId = null) {
     });
 
     return documents
-        .map(getPlain)
+        .map(withConsentClinicTime)
         .filter((doc) => {
             const filterUserId = toIntOrNull(userId);
             if (!filterUserId || !normalizeBoolean(filters.only_mine ?? filters.solo_mios, false)) return true;
@@ -3906,7 +3909,7 @@ async function getConsentDocument(identifier) {
         err.statusCode = 404;
         throw err;
     }
-    return { ...getPlain(doc), ...documentCompletion.publicFields(doc) };
+    return { ...withConsentClinicTime(doc), ...documentCompletion.publicFields(doc) };
 }
 
 async function ensurePackageForAppointment(citaIdRaw, options = {}) {

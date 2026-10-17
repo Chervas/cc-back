@@ -5,6 +5,7 @@
 // is delegated to the same pinned checks used by the care-start gate.
 const eligibility = require('./appointmentPrivacyEligibility.service');
 const paper = require('../lib/registration-privacy-paper');
+const { resolveClinicTimezone } = require('../lib/consent-clinic-time');
 const plain = value => value?.toJSON ? value.toJSON() : value;
 const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const stamp = value => value && Number.isFinite(new Date(value).getTime()) ? new Date(value).toISOString() : null;
@@ -49,7 +50,7 @@ const empty = (appointment, now) => ({ patient_id: Number(appointment.paciente_i
   appointment_id: positive(appointment.id_cita), applicable: eligibility.CLINICS.includes(Number(appointment.clinica_id)),
   required: false, allowed: true, reason: 'outside_registration_scope', state: 'not_requested',
   has_pending: false, attention_required: false, document_id: null, package_id: null, document: null,
-  evidence: null, updated_at: null });
+  evidence: null, updated_at: null, time_zone: resolveClinicTimezone(appointment.clinica) });
 
 async function bounded(model, options, limit) {
   const rows = (await model.findAll({ ...options, limit: limit + 1 })).map(plain);
@@ -65,17 +66,18 @@ async function loadPrivacyContext({ db, appointments, transaction, now = new Dat
     && positive(cita.clinica_id)).map(cita => [key(cita.paciente_id, cita.clinica_id),
     { patientId: Number(cita.paciente_id), clinicId: Number(cita.clinica_id) }])).values()];
   const requestedClinics = [...new Set(candidates.map(pair => pair.clinicId))];
-  const policies = new Map();
+  const policies = new Map(), timeZones = new Map();
   if (db.Clinica?.findAll && requestedClinics.length) {
     const clinics = await db.Clinica.findAll({ where: { id_clinica: { [Op.in]: requestedClinics } },
       attributes: ['id_clinica', 'configuracion'], transaction, limit: requestedClinics.length + 1 });
     for (const raw of clinics) { const clinic = plain(raw);
-      policies.set(Number(clinic.id_clinica), require('../lib/registration-privacy-configuration').policy(clinic)); }
+      policies.set(Number(clinic.id_clinica), require('../lib/registration-privacy-configuration').policy(clinic));
+      timeZones.set(Number(clinic.id_clinica), resolveClinicTimezone(clinic)); }
   } else for (const clinicId of requestedClinics) policies.set(clinicId,
     require('../lib/registration-privacy-configuration').policy({ id_clinica: clinicId }));
   const pairs = candidates.filter(pair => policies.get(pair.clinicId)?.enabled);
   const context = { pairs, now, templates: new Map(), versions: new Map(), imported: new Set(), care: [],
-    documents: [], packages: new Map(), deliveries: new Map(), attestations: [], events: [], stateCache: new Map(), policies };
+    documents: [], packages: new Map(), deliveries: new Map(), attestations: [], events: [], stateCache: new Map(), policies, timeZones };
   if (!pairs.length) return context;
   if (pairs.length > 1000) throw failure('patient_privacy_review_required');
   const clinicIds = [...new Set(pairs.map(pair => pair.clinicId))], patientIds = [...new Set(pairs.map(pair => pair.patientId))];
@@ -142,6 +144,7 @@ async function loadPrivacyContext({ db, appointments, transaction, now = new Dat
 
 function privacyStateFromContext({ appointment, context }) {
   const cita = plain(appointment), { now } = context, result = empty(cita, now);
+  result.time_zone = context.timeZones?.get(Number(cita.clinica_id)) || result.time_zone;
   const policy = context.policies?.get(Number(cita.clinica_id));
   if (policy) result.applicable = policy.enabled;
   if (!result.applicable) return result;

@@ -41,7 +41,9 @@ function assertLegalControllerForIssue(clinic) {
 function validate(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw fail('patient_intake_settings_invalid');
   const allowed = ['privacy_enabled', 'privacy_template_id', 'privacy_before_first_care', 'medical_questionnaire_enabled', 'privacy_controller', 'additional_documents'];
+  allowed.push('tablet_branding');
   if (Object.keys(raw).some(key => !allowed.includes(key))) throw fail('patient_intake_settings_unknown_field');
+  if (Object.hasOwn(raw, 'tablet_branding')) require('./consent-document-branding').validateTabletBrandingConfig(raw.tablet_branding);
   for (const key of allowed.filter(key => key.endsWith('_enabled') || key === 'privacy_before_first_care')) {
     if (Object.hasOwn(raw, key) && typeof raw[key] !== 'boolean') throw fail('patient_intake_settings_invalid');
   }

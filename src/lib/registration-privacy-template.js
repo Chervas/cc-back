@@ -35,7 +35,7 @@ function standardDraft(clinic = null) {
   const draft = bsDraft();
   draft.body_json.registration_privacy.source = 'standard';
   draft.body_json.registration_privacy.source_review_required = ![66, 72].includes(Number(clinic?.id_clinica));
-  return draft;
+  return require('./registration-privacy-spelling').correctDraft(draft);
 }
 function bsDraft() {
   const source = require('./bs-privacy-digital-template'), choices = require('./consent-document-choices');

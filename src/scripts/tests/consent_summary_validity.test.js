@@ -9,6 +9,7 @@ const source = fs.readFileSync(servicePath, 'utf8');
 const start = source.indexOf('function summarizeDocuments(');
 const end = source.indexOf('\nasync function getConsentSummaryForAppointment', start);
 const sandbox = { require: createRequire(servicePath), getPlain: value => value,
+  documentCompletion: require('../../lib/consent-document-completion'),
   DOCUMENT_PENDING_STATUSES: new Set(['pending', 'sent', 'viewed']) };
 vm.runInNewContext(source.slice(start, end), sandbox);
 const summarize = sandbox.summarizeDocuments;

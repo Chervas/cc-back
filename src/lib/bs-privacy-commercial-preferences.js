@@ -64,8 +64,13 @@ function verifiedSignedChoices(document, { now = new Date(), sourceVersion = nul
     } catch { return null; }
     legalHtml = String(source.body_html).trim();
   }
-  const expected = choices.appendSignedChoiceHtml(legalHtml, doc,
-    { schema_version: choices.getConsentChoiceForm(doc).schema_version, answers });
+  const evidence = { schema_version: choices.getConsentChoiceForm(doc).schema_version, answers };
+  // Ordered folios render the verified authorizations in their decisions block.
+  // Only use the immutable source already checked above, never caller-supplied
+  // block definitions or free-form answers as a substitute for consent choices.
+  const ordered = generic ? require('./consent-document-blocks').renderVersion(plain(sourceVersion), snapshot.context,
+    { answers: record(snapshot.document_block_answers).answers || {}, choiceEvidence: evidence }) : null;
+  const expected = ordered ?? choices.appendSignedChoiceHtml(legalHtml, doc, evidence);
   return expected === doc.snapshot_html ? answers : null;
 }
 function isVerifiedCommercialRefusal(document, now = new Date(), sourceVersion = null, sourceTemplate = null) {
