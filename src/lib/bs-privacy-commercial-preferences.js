@@ -114,7 +114,10 @@ async function verifiedRefusals({ db, clinicIds = [], patientIds = null, phone =
     // since changed; bounded batches avoid N-per-card reads in QuickChat.
     const digits = [...new Set(targetPhones.flatMap(value => getPhoneIdentityCandidates(value)).map(value => value.replace(/\D/g, '')))];
     const frozenPhone = db.Sequelize.where(db.Sequelize.fn('REGEXP_REPLACE', db.Sequelize.fn('REGEXP_REPLACE',
-      db.Sequelize.fn('JSON_UNQUOTE', db.Sequelize.fn('JSON_EXTRACT', db.Sequelize.col('snapshot_json'), '$.context.paciente.telefono')),
+      // Sequelize v6 doubles dollars in string fn arguments for bind escaping.
+      // This path is a fixed server literal, never caller-provided SQL/input.
+      db.Sequelize.fn('JSON_UNQUOTE', db.Sequelize.fn('JSON_EXTRACT', db.Sequelize.col('snapshot_json'),
+        db.Sequelize.literal("'$.context.paciente.telefono'"))),
       '[^0-9]', ''), '^00', ''), { [Op.in]: digits });
     delete where.paciente_id;
     where[Op.or] = [...(selected?.length ? [{ paciente_id: { [Op.in]: selected } }] : []), frozenPhone];
