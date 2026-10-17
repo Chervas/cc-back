@@ -85,6 +85,7 @@ function validate(raw, { purpose = 'other', body = {} } = {}) {
   if (totalFields > 100 || blocks.filter(block => block.type === 'patient_data').length > 1
     || blocks.filter(block => block.type === 'decisions').length > 1
     || blocks.filter(block => block.type === 'signature').length !== 1 || blocks.at(-1).type !== 'signature') throw schemaError();
+  if (blocks.some(block => block.type === 'patient_data') && !['data_protection', 'other'].includes(purpose)) throw schemaError();
   if (blocks.some(block => block.type === 'decisions')) choices.validateForm(body.consent_form);
   else if (own(body, 'consent_form')) throw schemaError();
   if (purpose === 'data_protection') {
@@ -171,7 +172,7 @@ function answerEvidence(document, payload = {}, now = new Date()) {
       continue;
     }
     let valid = true;
-    if (field.type === 'checkbox') valid = typeof value === 'boolean';
+    if (field.type === 'checkbox') valid = typeof value === 'boolean' && (!field.required || value === true);
     else if (field.type === 'number') valid = typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1e12
       && (field.min == null || value >= field.min) && (field.max == null || value <= field.max);
     else {

@@ -11,7 +11,7 @@ const definition = () => ({ schema_version: blocks.SCHEMA, blocks: [
     { key: 'commercial', type: 'yes_no', label: '¿Deseas una copia?', required: true },
     { key: 'notes', type: 'textarea', label: 'Observaciones', required: false, max_length: 200 },
     { key: 'score', type: 'number', label: 'Valoración', required: true, min: 0, max: 10 },
-    { key: 'read', type: 'checkbox', label: 'He leído la información', required: true },
+    { key: 'read', type: 'checkbox', label: 'Solicito también copia en papel', required: false },
     { key: 'choice', type: 'select', label: 'Formato', required: true, options: [{ value: 'digital', label: 'Digital' }, { value: 'paper', label: 'Papel' }] },
     { key: 'day', type: 'date', label: 'Día elegido', required: false },
     { key: 'mail', type: 'email', label: 'Correo para copia', required: false },
@@ -109,6 +109,22 @@ test('answers are scoped to selected documents and exact displayed canonical sna
   const altered = fixture(); altered.snapshot_html += '<p>changed</p>'; assert.throws(() => blocks.answerEvidence(altered, payload(altered)), { statusCode: 409 });
   const empty = fixture(); empty.snapshot_json.version.body_json.document_blocks.blocks.splice(1, 1);
   assert.throws(() => blocks.answerEvidence(empty, payload(empty)), /no incluye preguntas/);
+});
+test('a mandatory acknowledgement checkbox requires true; optional checkbox false and independent yes/no No remain valid', () => {
+  const doc = fixture();
+  doc.snapshot_json.version.body_json.document_blocks.blocks[1].fields.find(field => field.key === 'read').required = true;
+  doc.snapshot_html = blocks.renderVersion(doc.snapshot_json.version, doc.snapshot_json.context);
+  doc.snapshot_hash = choices.choiceSnapshotHash(doc.snapshot_json, doc.snapshot_html);
+  assert.throws(() => blocks.answerEvidence(doc, payload(doc)), { code: 'consent_document_block_answer_invalid' });
+  const answers = { ...validAnswers(), read: true };
+  assert.deepEqual(blocks.answerEvidence(doc, payload(doc, answers)).answers, answers);
+  assert.equal(blocks.answerEvidence(fixture(), payload(fixture())).answers.read, false);
+  assert.equal(blocks.answerEvidence(doc, payload(doc, answers)).answers.commercial, 'no');
+});
+test('editable patient identity blocks are scoped to LOPD and Other, never silently introduced into clinical templates', () => {
+  const doc = fixture({ identity: true });
+  assert.throws(() => blocks.versionBlocks(doc.snapshot_json.version, { purpose: 'clinical' }));
+  assert(blocks.versionBlocks(doc.snapshot_json.version, { purpose: 'other' }));
 });
 test('Other identity corrections alter only the issued document, preserve blocks and prevent stale completion', () => {
   const doc = fixture({ unsigned: true, identity: true });
