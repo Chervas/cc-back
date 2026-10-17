@@ -94,11 +94,13 @@ function createRuntime(deps) {
       }
     }
     if (!['running', 'waiting'].includes(execution.status)) return { execution_id: execution.id, deduplicated: true };
-    const { job } = await enqueueJob({ type: 'automations_v2_execute', priority: 'normal', status: 'waiting',
-      origin: 'review_google_publication_reminder', nextRunAt: dueAt,
+    // Let the native delay node persist the wait. Leaving an unstarted execution
+    // in running for 20 h would generate false stuck-flow monitoring alerts.
+    const { job } = await enqueueJob({ type: 'automations_v2_execute', priority: 'normal', status: 'pending',
+      origin: 'review_google_publication_reminder',
       payload: { execution_id: execution.id }, dedupeScope: `flow_execution:${execution.id}`,
       requestedBy: template.created_by, requestedByRole: 'system' });
-    if (job && dueAt <= new Date()) triggerJob(job.id).catch(() => {});
+    if (job) triggerJob(job.id).catch(() => {});
     return { execution_id: execution.id, job_id: job?.id || null, due_at: dueAt.toISOString() };
   }
 

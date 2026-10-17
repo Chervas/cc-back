@@ -63,8 +63,8 @@ test('the installed graph passes the actual administrator API validator without 
 test('activation applies to future confirmed real links only, with one native durable execution and normal-priority job', async () => {
   const f = fixture(); await f.runtime.schedule(f.state.event); await f.runtime.schedule(f.state.event);
   assert.equal(f.state.executions.length, 1); assert.equal(f.state.jobs.length, 1);
-  assert.equal(f.state.jobs[0].priority, 'normal'); assert.equal(f.state.jobs[0].status, 'waiting');
-  assert.equal(f.state.jobs[0].nextRunAt.toISOString(), now.toISOString()); assert.equal(f.state.templates.length, 2);
+  assert.equal(f.state.jobs[0].priority, 'normal'); assert.equal(f.state.jobs[0].status, 'pending');
+  assert.equal(f.state.jobs[0].nextRunAt, undefined); assert.equal(f.state.templates.length, 2);
   assert.equal(f.state.transport.length, 0);
   f.state.templates[1].is_active = false;
   assert.equal((await f.runtime.schedule(f.state.event)).reason, 'automation_deactivated');
