@@ -2760,6 +2760,7 @@ class MetaSyncJobs {
     }
 
     const observation = await this._beginBusinessProfileObservation(location, accessToken, 'reviews');
+    const observationStartedAt = new Date();
     await this._expireOldBusinessProfileReviews(location);
 
     const maxPages = Math.max(1, Number(options.maxPages || 0) || Number.MAX_SAFE_INTEGER);
@@ -2935,6 +2936,10 @@ class MetaSyncJobs {
         });
         afterId = batch.lastId; more = batch.more;
       }
+      await businessProfileCache.commit(observation, transaction => this._mergeBusinessProfileLocation(location, {
+        clinicaclick_reviews_complete_synced_at: observationStartedAt.toISOString(),
+        clinicaclick_reviews_complete_count: expectedReviewCount,
+      }, {}, { transaction }));
     }
 
     return processed;

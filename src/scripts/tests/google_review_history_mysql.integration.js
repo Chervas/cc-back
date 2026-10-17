@@ -122,6 +122,15 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const allMissing = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], limit: 50 });
   assert.equal(allMissing.total, 8);
   assert.deepEqual(allMissing.summary, { total: 8, linked: 6, high_confidence: 1, unattributed: 2 });
+  const lastWeek = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], period: '7d', now: new Date('2026-10-17T12:00:00Z') });
+  assert.equal(lastWeek.total,7);assert.equal(lastWeek.undated_total,1);assert.deepEqual(lastWeek.summary,allMissing.summary);
+  assert(lastWeek.items.every(row=>row.google_missing_at));
+  const lastTwoDays = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], period: '2d', now: new Date('2026-10-17T12:00:00Z') });
+  assert.equal(lastTwoDays.total,0);assert.equal(lastTwoDays.undated_total,1);assert.equal(lastTwoDays.summary.total,8);
+  const highWeek = await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11], period: '7d', attribution:'high_confidence', now: new Date('2026-10-17T12:00:00Z') });
+  assert.equal(highWeek.total,1);assert.equal(highWeek.items[0].match_confidence,0.8);
+  await assert.rejects(history.listMissingReviews(models,{clinicIds:[59],period:'30d OR 1=1'}),{status:400});
+  report.checks.push('server-side disappearance-date presets precede sorting/pagination, preserve scoped KPI totals, exclude undated historical matches only in finite periods, and reject invalid periods');
   for (const [sort_by,column] of [['author','reviewer_name'],['rating','star_rating'],['linkage','attributed_to_clinicaclick'],['detected','first_seen_at'],['missing','google_missing_at']]) {
     for (const sort_direction of ['asc','desc']) {
       const sorted=await history.listMissingReviews(models,{clinicIds:[59],locationIds:[11],limit:50,sort_by,sort_direction});

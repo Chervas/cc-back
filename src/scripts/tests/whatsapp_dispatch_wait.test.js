@@ -3,7 +3,7 @@ const test = require('node:test'); const assert = require('node:assert/strict');
 const { createJobClaim } = require('../../services/jobClaim.service');
 const W = require('../../lib/whatsapp-dispatch-wait');
 const service = require('../../services/whatsappDispatchWait.service');
-function fixture(t, { receipt = 'absent', expired = false, disabled = false, blocked = false, brokerDown = false, testSend = false, outsideHours = false, receiptLimited = false } = {}) {
+function fixture(t, { receipt = 'absent', expired = false, disabled = false, blocked = false, brokerDown = false, testSend = false, outsideHours = false, receiptLimited = false, reviewAllowed = true } = {}) {
   const original = Module._load; const now = Date.now(); const sent = [], queued = new Map();
   const intent = { messageId: '91', clinicId: 2, assetId: 3, expectedBinding: { phoneId: '123', wabaId: '456' },
     message: { messaging_product: 'whatsapp', to: '34000000123', type: 'text', text: { body: 'FICTITIOUS_ONLY' } } };
@@ -34,6 +34,11 @@ function fixture(t, { receipt = 'absent', expired = false, disabled = false, blo
     [require.resolve('../../services/marketingOptOut.service'), { assertAutomationCommunicationAllowed: async () => {} }],
     [require.resolve('../../services/marketingBulkSends.service'), { deferredDispatchAllowedAt: async () => outsideHours ? new Date(Date.now() + 3600000) : null }],
     [require.resolve('../../services/socket.service'), { getIO: () => null }],
+    [require.resolve('../../services/googleReviewReminder.service'), { current: () => ({
+      authorizeTransport: async () => { if (!reviewAllowed) await message.update({ status: 'failed', metadata: { ...message.metadata, google_review_reminder_skipped: true } });
+        return { allowed: reviewAllowed, reason: reviewAllowed ? null : 'whatsapp_window_not_proven' }; },
+      registerAcceptedLink: async () => { message.reminderScheduled = true; },
+    }) }],
     [require.resolve('../../services/appointmentWhatsappDeliveryAlert.service'), { reconcileAppointmentWhatsappDelivery: async () => {} }],
   ]);
   Module._load = function(request, parent, isMain) {
@@ -104,4 +109,19 @@ test('patient replies use clinical priority; batches use commercial and controls
   assert.equal(W.decision({ code: 'broker_unavailable' }), null);
   assert.equal(W.decision({ code: 'broker_unavailable', beforeDispatch: true }), 'waiting');
   assert.equal(W.decision({ code: 'scope_denied' }), null);
+});
+test('a review reminder delayed by capacity cannot POST after its service window closes', async t => {
+  const f = fixture(t, { reviewAllowed: false }); f.message.metadata.google_review_link_event_id = 9;
+  await f.defer(); const r = await f.run();
+  assert.equal(r.status, 'completed'); assert.equal(r.result.skipped, true); assert.equal(f.sent.length, 0);
+  assert.equal(f.message.metadata.google_review_reminder_skipped, true);
+});
+test('an already accepted review reminder still reconciles after its service window closes, without another POST', async t => {
+  const f = fixture(t, { reviewAllowed: false, receipt: 'accepted' }); f.message.metadata.google_review_link_event_id = 9;
+  await f.defer(true); const r = await f.run(); assert.equal(r.result.provider_accepted, true);
+  assert.equal(f.sent.length, 0); assert.equal(f.message.metadata.wamid, 'wamid.FICTITIOUS');
+});
+test('a newly accepted deferred Google link schedules its future follow-up, without replaying the link', async t => {
+  const f = fixture(t); Object.assign(f.message.metadata, { google_publication_reminder_enabled: true, kind: 'review_google_link_followup' });
+  await f.defer(); await f.run(); await f.run(); assert.equal(f.sent.length, 1); assert.equal(f.message.reminderScheduled, true);
 });

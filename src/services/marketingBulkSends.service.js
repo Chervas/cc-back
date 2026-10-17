@@ -3145,6 +3145,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   let providerMessageId = null;
   let status = 'sent';
   let errorPayload = null;
+  let reminderSender = null;
 
   try {
     await assertReviewRequestCommunicationAllowed({ list, item, conversation, forceReview: true, channel: 'whatsapp' });
@@ -3154,6 +3155,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
     if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
       throw new Error('whatsapp_config_missing_for_review_followup');
     }
+    reminderSender = { sender_origin_id: clinicConfig.originId, phoneNumberId: clinicConfig.phoneNumberId, wabaId: clinicConfig.wabaId };
 
     appMessage = await Message.create({
       conversation_id: conversation.id,
@@ -3175,6 +3177,10 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
         review_gift_description: rewardEnabled ? rewardDescription : null,
         review_team_members_text: reviewTeamMembersText || null,
         google_review_link_mode: isPositive && googleReviewUrl ? 'text_url' : null,
+        ...(isPositive && googleReviewUrl && !isTestSend ? {
+          google_publication_reminder_enabled: true, google_review_url: googleReviewUrl,
+          recipient_patient_id: item.paciente_id || null, ...reminderSender,
+        } : {}),
         trigger_message_id: triggerMessage?.id || null,
         recipient: followUpRecipient,
         test_send: isTestSend,
@@ -3220,7 +3226,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
     }
   }
 
-  await MarketingPatientContactEvent.create({
+  const followUpEvent = await MarketingPatientContactEvent.create({
     list_id: list.id,
     item_id: item.id,
     paciente_id: isTestSend ? null : item.paciente_id || null,
@@ -3238,9 +3244,30 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
       app_message_id: appMessage?.id || null,
       provider_message_id: providerMessageId,
       error: errorPayload || null,
+      ...(status === 'sent' && isPositive && googleReviewUrl && !isTestSend ? {
+        google_publication_reminder_enabled: true,
+        google_link_sent_at: appMessage.sent_at.toISOString(),
+        google_review_url: googleReviewUrl,
+        clinic_id: clinicId,
+        conversation_id: conversation.id,
+        ...reminderSender,
+      } : {}),
     },
     occurred_at: occurredAt,
   });
+
+  if (followUpEvent?.payload?.google_publication_reminder_enabled) {
+    try { await require('./googleReviewReminder.service').current().schedule(followUpEvent); }
+    catch (error) {
+      // The link was already accepted. Scheduling failure must not replay it.
+      console.warn('[review reminder] Future follow-up not scheduled', { eventId: followUpEvent.id, code: error.code || error.name });
+      await jobRequestsService.enqueueUniqueJobRequest({ type: 'whatsapp_authorized_dispatch_retry',
+        payload: { message_id: appMessage.id, clinicId }, priority: 'normal', status: 'waiting',
+        origin: 'review_google_reminder_registration', nextRunAt: new Date(Date.now() + 60000),
+        maxAttempts: 4096, dedupeScope: `whatsapp-message:${appMessage.id}`,
+      }).catch(() => console.warn('[review reminder] Registration recovery requires inspection', { eventId: followUpEvent.id }));
+    }
+  }
 
   return { sent: status === 'sent', status, kind: followUpKind };
 }
@@ -4753,6 +4780,7 @@ async function getMissingGoogleReviews(scope, options = {}) {
   return { success: true, ...await require('./googleReviewHistory.service').listMissingReviews(db, {
     clinicIds, locationIds, limit: options.limit, offset: options.offset, attribution: options.attribution,
     sort_by: options.sort_by, sort_direction: options.sort_direction,
+    period: options.period,
   }) };
 }
 
@@ -4761,6 +4789,14 @@ async function getReviewActivityReport(scope, options = {}) {
   const clinicIds = Array.isArray(effectiveScope?.clinicIds) ? effectiveScope.clinicIds.filter(Number.isInteger) : [];
   const locationIds = await resolveReviewBusinessLocationIdsForClinics(clinicIds);
   return require('./reviewActivityReport.service').readReport(db, { clinicIds, locationIds, period: options.period });
+}
+
+async function getGoogleReviewPublicationState({ clinicId, listId, itemId }) {
+  const clinic = Number(clinicId);
+  if (!Number.isInteger(clinic) || clinic <= 0) return { state: 'unknown', reason: 'invalid_clinic' };
+  const locationIds = await resolveReviewBusinessLocationIdsForClinics([clinic]);
+  return require('./googleReviewPublication.service').checkStoredPublication(db,
+    { clinicId: clinic, listId, itemId, locationIds }, require('./googleReviewMatch.service').scoreNameMatch);
 }
 
 async function getReviewRequestSummary(scope, options = {}) {
@@ -7604,6 +7640,15 @@ async function deferredDispatchAllowedAt(list) {
   const dispatch = getDispatchConfig(list);
   const businessHours = await resolveDispatchBusinessHoursForList(list, {}, dispatch);
   return isWithinBusinessHours(new Date(), businessHours) ? null : getNextBusinessAllowedAt(new Date(), businessHours);
+}
+
+async function reviewReminderAllowedAt(list, reference) {
+  const dispatch = getDispatchConfig(list);
+  const hours = await resolveDispatchBusinessHoursForList(list, {}, dispatch);
+  if (!usesExplicitDispatchWindow(dispatch) && ![
+    'clinic_hours', 'business_profile_hours', 'review_alias_clinic_hours', 'review_alias_business_profile_hours',
+  ].includes(hours.source)) return { reason: 'clinic_schedule_unavailable' };
+  return { at: isWithinBusinessHours(reference, hours) ? reference : getNextBusinessAllowedAt(reference, hours) };
 }
 
 async function loadClinicForTemplateVariables(clinicId) {
@@ -11078,6 +11123,7 @@ async function removeCampaign(scope, campaignId, userId = null) {
 }
 
 module.exports = {
+  reviewReminderAllowedAt,
   assertReviewRequestCommunicationAllowed,
   deferredDispatchAllowedAt,
   listCampaigns,
@@ -11090,6 +11136,7 @@ module.exports = {
   getReviewQueueSchedule,
   updateReviewQueueSchedule,
   getReviewActivityReport,
+  getGoogleReviewPublicationState,
   setReviewRequestAutomation,
   createAndStartReviewRequestForAppointment,
   sendReviewRequestReminder,

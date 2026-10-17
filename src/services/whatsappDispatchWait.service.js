@@ -46,7 +46,13 @@ async function terminal(message, claim, state, reason, status = 'failed') {
 async function run(payload, _job, claim) {
   const models = db();
   let message = await models.Message.findByPk(Number(payload.message_id));
-  if (!message || W.accepted(message)) return { status: 'completed', result: { already_accepted: !!message } };
+  if (!message || W.accepted(message)) {
+    if (message?.metadata?.google_publication_reminder_enabled === true) {
+      try { await require('./googleReviewReminder.service').current().registerAcceptedLink(message, Number(payload.clinicId)); }
+      catch { return { status: 'waiting', nextAllowedAt: W.retryAt(message.id), result: { provider_accepted: true, followup_schedule_pending: true } }; }
+    }
+    return { status: 'completed', result: { already_accepted: !!message } };
+  }
   const wait = message.metadata?.dispatch_wait;
   if (!wait || wait.version !== 1 || !['waiting', 'reconciling'].includes(wait.state)
     || !Number.isFinite(Date.parse(wait.expires_at))
@@ -104,6 +110,12 @@ async function run(payload, _job, claim) {
       const binding = wait.intent.expectedBinding;
       const config = { clinicId: wait.intent.clinicId, originId: wait.intent.assetId,
         phoneNumberId: binding.phoneId, wabaId: binding.wabaId, authorizedBroker: binding };
+      if (message.metadata.google_review_link_event_id) {
+        const check = await require('./googleReviewReminder.service').current().authorizeTransport({
+          message, to: wait.intent.message.to, useTemplate: wait.intent.message.type === 'template', sender: config,
+        });
+        if (!check.allowed) return { status: 'completed', result: { skipped: true, reason: check.reason } };
+      }
       await require('./whatsappAccountHealth.service').assertCanSend({ clinicConfig: config,
         source: 'whatsapp_dispatch_retry', messageId: message.id, jobId: claim.id });
       await require('./whatsapp.service').assertRecipientCanReceive({ to: wait.intent.message.to, clinicConfig: config });
@@ -151,6 +163,10 @@ async function run(payload, _job, claim) {
       }
     });
     if (message.metadata.execution_id) await wakeExecution(message).catch(() => null);
+    if (message.metadata.google_publication_reminder_enabled === true) {
+      try { await require('./googleReviewReminder.service').current().registerAcceptedLink(message, wait.intent.clinicId); }
+      catch { return { status: 'waiting', nextAllowedAt: W.retryAt(message.id), result: { provider_accepted: true, followup_schedule_pending: true } }; }
+    }
     if (wait.intent.message.type === 'template') {
       await require('./whatsappDeliveryGovernance.service').recordImmediateSendResponse({ response: result,
         clinicId: wait.intent.clinicId, wabaId: wait.intent.expectedBinding.wabaId,

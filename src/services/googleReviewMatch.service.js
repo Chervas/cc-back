@@ -366,6 +366,7 @@ async function runBusinessProfileReviewMatchJob(payload = {}) {
 
 module.exports = {
   JOB_TYPE,
+  scoreNameMatch,
   enqueueBusinessProfileReviewMatch,
   matchBusinessProfileReview,
   runBusinessProfileReviewMatchJob,

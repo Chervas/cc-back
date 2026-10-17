@@ -6481,6 +6481,10 @@ async function processNode(node, context, runtime = {}) {
   }
 
   switch (nodeType) {
+    case 'action/remind_google_review': {
+      if (simulation) return { kind: 'success', output: { status: 'simulated', no_send: true }, next_node_id: readOutputTarget(node, 'on_success') };
+      return require('./googleReviewReminder.service').current().action({ execution: runtime.execution, context, node });
+    }
     case 'control/rate_limit': {
       if (simulation) {
         return {
@@ -7366,6 +7370,27 @@ async function processNode(node, context, runtime = {}) {
         output: aiOutput,
         next_node_id: resolveAiAnalysisNextNode(node, presetKey, aiOutput),
       };
+    }
+
+    case 'condition/google_review_check': {
+      const targets = resolveRuntimeTargets(runtime?.execution, context);
+      let state;
+      if (simulation) {
+        const value = context?.simulation_inputs?.google_review_publication;
+        state = { state: ['found', 'not_detected', 'unknown'].includes(value) ? value : 'unknown', simulated: true };
+      } else {
+        try {
+          state = await marketingBulkSendsService.getGoogleReviewPublicationState({
+            clinicId: targets.clinic_id,
+            listId: resolveTemplateValue(config?.list_id, context),
+            itemId: resolveTemplateValue(config?.item_id, context),
+          });
+        } catch {
+          state = { state: 'unknown', reason: 'local_review_check_unavailable' };
+        }
+      }
+      const nextOutput = state?.state === 'found' ? 'on_found' : state?.state === 'not_detected' ? 'on_not_detected' : 'on_unknown';
+      return { kind: 'success', output: { ...state, next_output_key: nextOutput }, next_node_id: readOutputTarget(node, nextOutput) };
     }
 
     case 'condition/field_check': {
@@ -8607,6 +8632,7 @@ function canRunNodeAfterHumanTakeover(node, context = {}) {
 }
 
 module.exports = {
+  computeQuietHoursDelayMs,
   runExecution,
   buildAutomationWhatsappDeliveryKey,
   buildAutomationWhatsappRowDeliveryKey,

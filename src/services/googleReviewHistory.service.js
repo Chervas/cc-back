@@ -1,5 +1,7 @@
 'use strict';
 
+const { reportRange } = require('./reviewActivityReport.service');
+
 // The immutable match receipt credits historical conversion even if Google's
 // complete feed later loses the review. Public reputation uses visible rows only.
 const REVIEW_LINKS = `
@@ -39,7 +41,10 @@ async function countHistoricalMatches(db, clinicIds) {
   return Number(rows[0]?.total || 0);
 }
 
-async function listMissingReviews(db, { clinicIds, locationIds = [], limit = 10, offset = 0, attribution = 'all', sort_by = 'missing', sort_direction = 'desc' }) {
+async function listMissingReviews(db, { clinicIds, locationIds = [], limit = 10, offset = 0, attribution = 'all', sort_by = 'missing', sort_direction = 'desc', period = 'all', now = new Date() }) {
+  const range = period === 'all' ? null : reportRange(period, now);
+  const dateFilter = range ? 'google_missing_at >= :historyStart AND google_missing_at < :historyEnd' : '1=1';
+  const periodInfo = range ? { period, from: range.from, to: range.to } : { period: 'all', from: null, to: null };
   if (!Object.hasOwn(SORTS, sort_by) || !['asc', 'desc'].includes(sort_direction)) {
     throw Object.assign(new Error('Invalid review history sort'), { status: 400 });
   }
@@ -52,7 +57,7 @@ async function listMissingReviews(db, { clinicIds, locationIds = [], limit = 10,
   limit = Math.min(50, Math.max(1, Number.parseInt(limit, 10) || 10));
   offset = Math.min(100000, Math.max(0, Number.parseInt(offset, 10) || 0));
   const emptySummary = { total: 0, linked: 0, high_confidence: 0, unattributed: 0 };
-  if (!clinicIds.length) return { items: [], total: 0, limit, offset, attribution, summary: emptySummary };
+  if (!clinicIds.length) return { items: [], total: 0, limit, offset, attribution, range: periodInfo, undated_total: 0, summary: emptySummary };
   const scope = locationIds.length ? 'r.business_location_id IN (:locationIds)' : 'r.clinica_id IN (:clinicIds)';
   const matchScope = locationIds.length ? 'm.location_id IN (:locationIds)' : 'm.clinic_id IN (:clinicIds)';
   const cte = `WITH matches AS (${REVIEW_LINKS}), ranked_matches AS (
@@ -83,22 +88,23 @@ async function listMissingReviews(db, { clinicIds, locationIds = [], limit = 10,
       THEN CAST(JSON_UNQUOTE(confidence_value) AS DECIMAL(8,4)) ELSE NULL END match_confidence
     FROM observed_missing
   )`;
-  const options = { replacements: { clinicIds, locationIds, limit, offset }, type: db.Sequelize.QueryTypes.SELECT };
+  const options = { replacements: { clinicIds, locationIds, limit, offset, historyStart: range?.start, historyEnd: range?.end }, type: db.Sequelize.QueryTypes.SELECT };
   const [counts] = await db.sequelize.query(`${cte} SELECT COUNT(*) total,
     COALESCE(SUM(attributed_to_clinicaclick=1),0) linked,
     COALESCE(SUM(attributed_to_clinicaclick=1 AND match_confidence>=0.8),0) high_confidence,
     COALESCE(SUM(attributed_to_clinicaclick=0),0) unattributed,
-    COALESCE(SUM(${FILTERS[attribution]}),0) filtered_total FROM missing_reviews`, options);
+    COALESCE(SUM(google_missing_at IS NULL AND (${FILTERS[attribution]})),0) undated_total,
+    COALESCE(SUM((${FILTERS[attribution]}) AND (${dateFilter})),0) filtered_total FROM missing_reviews`, options);
   const rows = await db.sequelize.query(`${cte} SELECT history_id,reviewer_name,star_rating,clinic_id,
     first_seen_at,last_seen_at,google_missing_at,detection_source,attributed_to_clinicaclick,match_confidence
-    FROM missing_reviews WHERE ${FILTERS[attribution]}
+    FROM missing_reviews WHERE (${FILTERS[attribution]}) AND (${dateFilter})
     ORDER BY ${SORTS[sort_by]} IS NULL,${SORTS[sort_by]} ${sort_direction.toUpperCase()},
       ${sort_by === 'linkage' ? `match_confidence ${sort_direction.toUpperCase()},` : ''}
       first_seen_at DESC,history_id LIMIT :limit OFFSET :offset`, options);
   return { items: rows.map(row => ({ ...row, star_rating: Number(row.star_rating) || null,
     clinic_id: Number(row.clinic_id), attributed_to_clinicaclick: Number(row.attributed_to_clinicaclick) === 1,
     match_confidence: row.match_confidence == null ? null : Number(row.match_confidence),
-  })), total: Number(counts.filtered_total || 0), limit, offset, attribution,
+  })), total: Number(counts.filtered_total || 0), limit, offset, attribution, range: periodInfo, undated_total: Number(counts.undated_total || 0),
     summary: Object.fromEntries(Object.keys(emptySummary).map(key => [key, Number(counts[key] || 0)])) };
 }
 

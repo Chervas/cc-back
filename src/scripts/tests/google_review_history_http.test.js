@@ -75,6 +75,11 @@ test('sorting is forwarded to the backend with pagination and no provider reques
   await f.api.getMissingGoogleReviews(f.req,f.res);assert.equal(f.res.body.sort_by,'rating');assert.equal(f.res.body.sort_direction,'asc');
 });
 
+test('history forwards its period without synchronizing or broadening the authorized scope',async()=>{
+  const f=fixture();f.req.query.period='7d';await f.api.getMissingGoogleReviews(f.req,f.res);
+  assert.equal(f.res.body.period,'7d');assert.equal(f.reads(),1);
+});
+
 test('queue schedule writes require marketing write permission before any change',async()=>{
   const f=fixture({allowed:false});await f.api.updateReviewQueueSchedule(f.req,f.res);assert.equal(f.res.code,403);assert.equal(f.reads(),0);
   const allowed=fixture();await allowed.api.updateReviewQueueSchedule(allowed.req,allowed.res);assert.equal(allowed.res.code,200);assert.equal(allowed.reads(),1);
@@ -97,7 +102,8 @@ test('periodic progress is an explicit opt-in on the existing scoped route', asy
 
 test('history has a database-only dependency boundary for all filters', async () => {
   const source = fs.readFileSync(path.resolve(__dirname, '../../services/googleReviewHistory.service.js'), 'utf8');
-  assert(!/\brequire\s*\(|\bimport\s|\bfetch\s*\(/.test(source));
+  assert(!/\bimport\s|\bfetch\s*\(/.test(source));
+  assert.deepEqual([...source.matchAll(/require\('([^']+)'\)/g)].map(match=>match[1]),['./reviewActivityReport.service']);
   const history = require('../../services/googleReviewHistory.service');
   let reads = 0;
   const db = { Sequelize: { QueryTypes: { SELECT: 'SELECT' } }, sequelize: { query: async query => {

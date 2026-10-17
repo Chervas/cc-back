@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('node:fs'), vm = require('node:vm'), { createRequire } = require('node:module');
 // Actual engine/executor source, with no app bootstrap, sockets, cron or providers.
-function loadSource(relative, dependencies, env) {
+function loadSource(relative, dependencies, env, timeout = 2000) {
   const filename = require.resolve('../../../services/' + relative), actual = createRequire(filename);
   const fail = () => { throw Error('UNEXPECTED_FLOW_DEPENDENCY'); };
   const blocked = new Proxy({}, { get: () => fail });
@@ -11,7 +11,7 @@ function loadSource(relative, dependencies, env) {
     process: { env }, console: { log() {}, warn() {}, error() {} },
     require: name => Object.hasOwn(dependencies, name) ? dependencies[name]
       : name.startsWith('../lib/') || name.startsWith('../config/') || ['sequelize', 'crypto'].includes(name) ? actual(name) : blocked,
-  }, { filename, timeout: 2000 });
+  }, { filename, timeout });
   return module.exports;
 }
 module.exports = ({ models, local, requests, automation, timeoutMs = 30000, onExecutionSettled }) => {

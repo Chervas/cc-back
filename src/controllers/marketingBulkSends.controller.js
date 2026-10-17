@@ -149,6 +149,7 @@ exports.getMissingGoogleReviews = async (req, res) => {
       review_group_clinic_ids: req.query.review_group_clinic_ids,
       limit: req.query.limit, offset: req.query.offset, attribution: req.query.attribution,
       sort_by: req.query.sort_by, sort_direction: req.query.sort_direction,
+      period: req.query.period,
     }));
   } catch (error) {
     return sendError(res, error, 'Error cargando reseñas no visibles en Google');

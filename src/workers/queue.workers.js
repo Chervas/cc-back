@@ -808,6 +808,12 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             resolveScheduled: value => require('../services/flowEngineV2.service').resolveScheduledWhatsappSenderConfig(value),
         });
         const whatsappChannelRole = resolveWhatsappChannelRole(effectiveClinicConfig);
+        if (messageMetadata.google_review_link_event_id) {
+            const check = await require('../services/googleReviewReminder.service').current().authorizeTransport({
+                message: msg, to, useTemplate, sender: effectiveClinicConfig,
+            });
+            if (!check.allowed) return { skipped: true, reason: check.reason };
+        }
         msg.metadata = {
             ...(msg.metadata || {}),
             ...(effectiveClinicConfig?.phoneNumberId

@@ -931,6 +931,7 @@ const TRIGGER_TYPES_V2 = [
   { value: 'patient_reactivation', label: 'Reactivación de pacientes' },
   { value: 'scheduled_once', label: 'Una fecha programada' },
   { value: 'manual', label: 'Manual' },
+  { value: 'review_google_link_sent', label: 'Enlace de reseña Google enviado' },
 ];
 const TRIGGER_NODE_PREFIX = 'trigger/';
 const TRIGGER_NODE_TYPES_V2 = TRIGGER_TYPES_V2.map((trigger) => ({
@@ -1465,6 +1466,24 @@ const NODE_TYPES_V2 = [
     config_schema: [
       { key: 'datetime_expression', label: 'Expresión fecha/hora', input_type: 'string', required: true },
     ],
+  },
+  {
+    type: 'condition/google_review_check',
+    category: 'condition',
+    label: 'Comprobar reseña en Google',
+    description: 'Comprueba la publicación con las reseñas y coincidencias guardadas. Una comprobación incompleta o antigua nunca se interpreta como ausencia.',
+    output_keys: ['on_found', 'on_not_detected', 'on_unknown'],
+    runtime_status: 'real',
+    default_config: { list_id: '{{outputs.N3.list_id}}', item_id: '{{outputs.N3.item_id}}' },
+    config_schema: [
+      { key: 'list_id', label: 'Lista de la solicitud', input_type: 'string', required: true },
+      { key: 'item_id', label: 'Destinatario de la solicitud', input_type: 'string', required: true },
+    ],
+  },
+  {
+    type: 'action/remind_google_review', category: 'action', label: 'Recordar publicación en Google',
+    description: 'Un solo mensaje de texto, sin plantilla, si siguen permitiéndolo el horario, la ventana WhatsApp, las bajas y la comprobación local reciente.',
+    output_keys: ['on_success'], runtime_status: 'real', default_config: {}, config_schema: [],
   },
   {
     type: 'condition/field_check',
