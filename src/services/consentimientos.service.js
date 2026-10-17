@@ -3020,9 +3020,9 @@ function consentPresentationClinicInclude(as) {
         include: [{ model: db.GrupoClinica, as: 'grupoClinica', required: false, attributes: ['id_grupo', 'nombre_grupo'] }] };
 }
 
-function tabletPresentationForClinic(clinicRow) {
+async function tabletPresentationForClinic(clinicRow) {
     const clinic = getPlain(clinicRow) || {};
-    return documentBranding.resolveTabletBranding(clinic, clinic.grupoClinica,
+    return require('./consentTabletBranding.service').resolveTabletBrandingForClinic(clinic, clinic.grupoClinica,
         { baseUrl: process.env.FRONTEND_PUBLIC_URL || 'https://crm.clinicaclick.com' });
 }
 
@@ -3075,7 +3075,7 @@ async function loginTabletKiosk(payload = {}) {
         expires_at: decoded?.exp ? new Date(decoded.exp * 1000).toISOString() : null,
         kiosk: serializeKioskAccess(kiosk),
         clinic: serializeTabletClinic(kiosk.clinic, kiosk.clinic_id),
-        tablet_branding: tabletPresentationForClinic(kiosk.clinic),
+        tablet_branding: await tabletPresentationForClinic(kiosk.clinic),
     };
 }
 
@@ -3099,7 +3099,7 @@ async function getTabletKioskSession(tokenRaw) {
     return {
         kiosk: serializeKioskAccess(kiosk),
         clinic: serializeTabletClinic(kiosk.clinic, kiosk.clinic_id),
-        tablet_branding: tabletPresentationForClinic(kiosk.clinic),
+        tablet_branding: await tabletPresentationForClinic(kiosk.clinic),
     };
 }
 
@@ -3278,7 +3278,7 @@ async function createTabletBudgetSignatureSessionForKiosk(requestIdRaw, tokenRaw
     });
 }
 
-function serializePublicPackage(packageRow) {
+async function serializePublicPackage(packageRow) {
     const plain = getPlain(packageRow);
     const documents = Array.isArray(plain.documents) ? plain.documents : [];
     const identityForm = documents.length === 1
@@ -3308,7 +3308,7 @@ function serializePublicPackage(packageRow) {
             nombre: plain.clinica?.nombre_clinica || '',
             time_zone: consentClinicTime.resolveClinicTimezone(plain.clinica),
         },
-        tablet_branding: tabletPresentationForClinic(plain.clinica),
+        tablet_branding: await tabletPresentationForClinic(plain.clinica),
         tratamiento: {
             nombre: plain.tratamiento?.nombre || '',
         },
@@ -3380,7 +3380,7 @@ async function getPublicPackage(tokenRaw, requestMeta = {}) {
         await refreshPackageCounts(packageRow.id, transaction);
     });
     const refreshed = await getPackageWithDocumentsById(packageRow.id);
-    return { ...serializePublicPackage(refreshed), intake: await require('./patientIntake.service').publicView(refreshed) };
+    return { ...(await serializePublicPackage(refreshed)), intake: await require('./patientIntake.service').publicView(refreshed) };
 }
 
 async function updatePublicDocumentPersonalData(tokenRaw, identifier, payload = {}, requestMeta = {}) {
@@ -3428,7 +3428,7 @@ async function updatePublicDocumentPersonalData(tokenRaw, identifier, payload = 
         }, { transaction });
     });
     const refreshed = await getPackageWithDocumentsById(packageRow.id);
-    return { ...serializePublicPackage(refreshed), intake: await require('./patientIntake.service').publicView(refreshed) };
+    return { ...(await serializePublicPackage(refreshed)), intake: await require('./patientIntake.service').publicView(refreshed) };
 }
 
 async function findDocumentByIdentifier(identifier) {
@@ -3767,7 +3767,7 @@ async function signPublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
     const refreshed = await getPackageWithDocumentsById(packageRow.id);
     return {
         signed_count: signed.length,
-        ...serializePublicPackage(refreshed),
+        ...(await serializePublicPackage(refreshed)),
     };
 }
 
@@ -3834,7 +3834,7 @@ async function completePublicPackage(tokenRaw, payload = {}, requestMeta = {}) {
         }
         if (updates.length) await refreshPackageCounts(packageRow.id, transaction);
     });
-    return { completed_count: completedCount, ...serializePublicPackage(await getPackageWithDocumentsById(packageRow.id)) };
+    return { completed_count: completedCount, ...(await serializePublicPackage(await getPackageWithDocumentsById(packageRow.id))) };
 }
 
 async function revokeConsentDocument(identifier, payload = {}, requestMeta = {}) {

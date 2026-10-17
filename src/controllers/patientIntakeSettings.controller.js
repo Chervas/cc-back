@@ -5,17 +5,18 @@ const config = require('../lib/registration-privacy-configuration');
 const documentBranding = require('../lib/consent-document-branding');
 const fail = (code, statusCode = 400) => Object.assign(new Error(code), { code, statusCode });
 const plain = row => row?.toJSON ? row.toJSON() : row;
-function previewBranding(clinic, group) {
+async function previewBranding(clinic, group) {
   const baseUrl = process.env.FRONTEND_PUBLIC_URL || 'https://crm.clinicaclick.com';
+  const effectiveClinic = await require('../services/consentTabletBranding.service').effectiveClinicAvatar(clinic, { baseUrl });
   const configuration = config.object(clinic?.configuracion), intake = config.object(configuration.patient_intake);
   // Defaults are live UI metadata, not document snapshots. Resolve each source
   // without the persisted override so clearing its URL can be previewed before Save.
-  const tabletDefault = source => documentBranding.resolveTabletBranding({ ...clinic, configuracion: {
+  const tabletDefault = source => documentBranding.resolveTabletBranding({ ...effectiveClinic, configuracion: {
     ...configuration, patient_intake: { ...intake, tablet_branding: { source, logo_url: null, logo_background: 'light' } },
   } }, group, { baseUrl });
   return { document_branding: documentBranding.buildDocumentBranding(clinic, { purpose: 'data_protection', baseUrl }),
     additional_document_branding: documentBranding.buildDocumentBranding(clinic, { purpose: 'other', baseUrl }),
-    tablet_branding: documentBranding.resolveTabletBranding(clinic, group, { baseUrl }),
+    tablet_branding: documentBranding.resolveTabletBranding(effectiveClinic, group, { baseUrl }),
     tablet_branding_defaults: { clinic: tabletDefault('clinic'), group: group ? tabletDefault('group') : null },
     tablet_branding_group: group ? { id: group.id_grupo, name: group.nombre_grupo } : null };
 }
@@ -48,7 +49,7 @@ async function read(clinicId, transaction) {
   if (config.policy(clinic).legacy && !settings.privacy_template_id) settings.privacy_template_id =
     templates.find(row => row.catalog_key === config.BS_KEY && row.status === 'active' && row.is_default)?.id || null;
   return { clinic_id: clinicId, patient_intake: settings, version: config.version(clinic), standard_template_available: true,
-    ...previewBranding(clinic, group),
+    ...(await previewBranding(clinic, group)),
     templates: templates.map(row => { const latest = versions.find(version => Number(version.clinic_template_id) === Number(row.id));
       return { id: row.id, name: row.name, title: latest?.title || row.name, status: row.status, purpose: row.purpose,
         version_status: latest?.status || null, published: versions.some(version => Number(version.clinic_template_id) === Number(row.id) && version.status === 'published') }; }) };
@@ -134,7 +135,7 @@ exports.standardDraft = async (req, res, next) => { try {
     const groupId = Number(clinic.grupoClinicaId || clinic.grupo_clinica_id);
     const group = Number.isSafeInteger(groupId) && groupId > 0 && db.GrupoClinica
       ? plain(await db.GrupoClinica.findByPk(groupId, { attributes: ['id_grupo', 'nombre_grupo'], transaction })) : null;
-    return { ...require('../lib/registration-privacy-template').standardDraft(clinic), ...previewBranding(clinic, group) };
+    return { ...require('../lib/registration-privacy-template').standardDraft(clinic), ...(await previewBranding(clinic, group)) };
   });
   return res.json(draft);
 } catch (error) { return reply(error, res, next); } };

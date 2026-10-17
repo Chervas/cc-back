@@ -85,7 +85,7 @@ function uploadFeatureForPurpose(purpose) {
   // La imagen de acceso forma parte de la configuracion de la clinica. Los
   // assets de campanas conservan su permiso de marketing (incluido el flujo
   // de foto de resenas que puede gestionar una agencia).
-  if (['clinic_access_image', 'invoice_logo'].includes(purpose)) return CLINIC_EDIT_FEATURE;
+  if (['clinic_access_image', 'invoice_logo', 'tablet_logo'].includes(purpose)) return CLINIC_EDIT_FEATURE;
   if (purpose === 'web_editor_media') return MARKETING_WEB_EDIT_FEATURE;
   return MARKETING_FEATURE;
 }
@@ -263,6 +263,13 @@ exports.upload = async (req, res) => {
   try {
     const scope = resolveScope(req);
     const purpose = String(req.body?.purpose || 'public_asset').trim().toLowerCase();
+    // El logo de la tablet es una preferencia de esta clinica, no un asset de
+    // marketing ni un mecanismo para editar el avatar de la clinica o grupo.
+    if (purpose === 'tablet_logo' && scope.scopeType !== 'clinic') {
+      const error = new Error('tablet_logo_requires_clinic_scope');
+      error.status = 400;
+      throw error;
+    }
     if (scope.scopeType === 'catalog' && purpose !== 'marketing_image') {
       const error = new Error('public_media_catalog_requires_marketing_image');
       error.status = 400;
@@ -291,8 +298,10 @@ exports.upload = async (req, res) => {
       ? 'clinic_access_guidance'
       : purpose === 'invoice_logo'
         ? 'invoice_branding'
-        : (String(req.body?.owner_type || req.body?.ownerType || '').trim() || null);
-    const ownerId = ['clinic_access_image', 'invoice_logo'].includes(purpose)
+        : purpose === 'tablet_logo'
+          ? 'tablet_branding'
+          : (String(req.body?.owner_type || req.body?.ownerType || '').trim() || null);
+    const ownerId = ['clinic_access_image', 'invoice_logo', 'tablet_logo'].includes(purpose)
       ? String(scope.clinicId)
       : (String(req.body?.owner_id || req.body?.ownerId || '').trim() || null);
 
@@ -350,7 +359,7 @@ exports.upload = async (req, res) => {
           status: quarantined ? 'quarantine' : 'active',
           metadata: {
             source: 'public_media_upload',
-            original_filename: ['clinic_access_image', 'invoice_logo'].includes(purpose)
+            original_filename: ['clinic_access_image', 'invoice_logo', 'tablet_logo'].includes(purpose)
               ? null
               : (req.body?.file_name || req.body?.fileName || null),
             non_clinical_asserted: true,

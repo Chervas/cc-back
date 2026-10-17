@@ -19,6 +19,18 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
   await owned.models.EconomicBudgetSignatureRequest.sync();
   const f = await createOwnedVisitAuthAclFixture({ ...owned, includeConsentRoutes: true, includePatientIntakeSettingsRoutes: true });
   const { db, ids, request } = f;
+  // Only the local effective-inventory boundary is substituted. The shared
+  // clinic avatar resolver, native controllers/services, JWT/ACL, HTTP and SQL
+  // remain real. No Business Profile provider or external socket is contacted.
+  const clinicBranding = require('../../services/clinicBranding.service');
+  const resolveClinicAvatar = clinicBranding.resolveClinicAvatar;
+  const googleAvatar = 'https://example.com/owned-effective-local-avatar.png';
+  let effectiveInventoryReads = 0;
+  clinicBranding.resolveClinicAvatar = (input, dependencies) => resolveClinicAvatar(input,
+    Number(input?.id_clinica) === ids.clinic ? { resolveEffectiveLocations: async clinicId => {
+      assert.equal(Number(clinicId), ids.clinic); effectiveInventoryReads++;
+      return { locations: [{ raw_payload: { clinicaclick_media_items: [{ category: 'LOGO', googleUrl: googleAvatar }] } }] };
+    } } : dependencies);
   for (const name of ['PatientCustomField', 'PatientConsentExternalAttestation']) {
     db[name] = require(`../../../models/${name.toLowerCase()}`)(owned.sql, S.DataTypes); await db[name].sync();
   }
@@ -39,16 +51,20 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     let setting = await expect('GET', route, undefined, owner, 200);
     assert.equal(setting.patient_intake.privacy_enabled, false);
     assert.equal(setting.patient_intake.privacy_before_first_care, true);
+    assert.equal(setting.tablet_branding.logo_url, googleAvatar, 'Settings uses the same effective local avatar as /clinicas');
+    assert.equal(setting.tablet_branding_defaults.clinic.logo_url, googleAvatar);
     await expect('GET', route, undefined, undefined, 401);
     await expect('GET', route, undefined, outsider, 403);
     const countsBeforeDraft = await f.fingerprint(), versionBeforeDraft = setting.version;
     const draftBody = await expect('GET', `${route}/standard-template-draft`, undefined, owner, 200);
     const { document_branding: privacyBranding, additional_document_branding: additionalBranding,
-      tablet_branding: tabletBranding, tablet_branding_group: tabletBrandingGroup, ...legalDraft } = draftBody;
+      tablet_branding: tabletBranding, tablet_branding_defaults: tabletBrandingDefaults,
+      tablet_branding_group: tabletBrandingGroup, ...legalDraft } = draftBody;
     assert.deepEqual(legalDraft, registration.standardDraft({ id_clinica: clinicId }), 'Adding presentation metadata does not alter legal source');
     assert.deepEqual(privacyBranding, setting.document_branding);
     assert.deepEqual(additionalBranding, setting.additional_document_branding);
     assert.deepEqual(tabletBranding, setting.tablet_branding);
+    assert.deepEqual(tabletBrandingDefaults, setting.tablet_branding_defaults);
     assert.equal(tabletBranding.source, 'clinic');
     assert.equal(tabletBrandingGroup.id, ids.group);
     assert.equal(privacyBranding.schema_version, 'cc-document-branding/v1');
@@ -167,6 +183,32 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     assert.equal(afterBrandChange.tablet_branding.logo_url, 'https://example.com/owned-clinic-logo.png');
     assert.deepEqual(afterBrandChange.documents[0].document_branding, viewed.documents[0].document_branding);
     assert.equal(JSON.stringify((await signed.reload()).toJSON()), frozen, 'Live UI branding changes never rewrite signed branding, legal context, ISO evidence or hash');
+    await clinic.reload(); await clinic.update({ url_avatar: null });
+    const effectiveSettings = await expect('GET', route, undefined, owner, 200);
+    assert.equal(effectiveSettings.tablet_branding.logo_url, googleAvatar);
+    assert.equal(effectiveSettings.tablet_branding_defaults.clinic.logo_url, googleAvatar);
+    const effectivePublic = await expect('GET', publicRoute, undefined, undefined, 200);
+    assert.equal(effectivePublic.tablet_branding.logo_url, googleAvatar);
+    const effectiveKiosk = await expect('GET', '/api/consentimientos/tablet/session', undefined, kioskLogin.token, 200);
+    assert.equal(effectiveKiosk.tablet_branding.logo_url, googleAvatar);
+    const effectiveLogin = await expect('POST', '/api/consentimientos/tablet/login', {
+      username: kioskAccess.kiosk.username, password: kioskAccess.kiosk.one_time_password }, undefined, 200);
+    assert.equal(effectiveLogin.tablet_branding.logo_url, googleAvatar);
+    assert.equal((await clinic.reload()).url_avatar, null, 'A fallback read never writes a custom clinic avatar');
+    const manualClinicBrand = { source: 'clinic', logo_url: 'https://example.com/owned-manual-tablet-logo.png', logo_background: 'light' };
+    setting = await expect('PUT', route, { patient_intake: { tablet_branding: manualClinicBrand },
+      expected_version: effectiveSettings.version }, owner, 200);
+    assert.equal(setting.tablet_branding.logo_url, manualClinicBrand.logo_url);
+    assert.equal(setting.tablet_branding_defaults.clinic.logo_url, googleAvatar, 'Default preview remains the live avatar even while a manual logo is configured');
+    const readsBeforeManualPublic = effectiveInventoryReads;
+    assert.equal((await expect('GET', publicRoute, undefined, undefined, 200)).tablet_branding.logo_url, manualClinicBrand.logo_url);
+    assert.equal(effectiveInventoryReads, readsBeforeManualPublic, 'Valid manual tablet identity does not need an avatar/inventory lookup');
+    setting = await expect('PUT', route, { patient_intake: { tablet_branding: { source: 'clinic', logo_url: null, logo_background: 'light' } },
+      expected_version: setting.version }, owner, 200);
+    assert.equal(setting.tablet_branding.logo_url, googleAvatar, 'Clearing the manual override returns to the effective avatar');
+    assert.equal((await expect('GET', publicRoute, undefined, undefined, 200)).tablet_branding.logo_url, googleAvatar);
+    assert.equal(JSON.stringify((await signed.reload()).toJSON()), frozen, 'Effective-avatar and manual-override reads preserve every byte of existing signed evidence');
+    owned.report.checks.push('native HTTP tablet avatar: Settings/draft, kiosk login/session and signed public package share the real central resolver with an owned local-inventory boundary; custom clinic avatar and tablet override precedence, clear restores default, no fallback persistence or signed-document rewrite');
     const state = await db.sequelize.transaction(transaction => require('../../services/patientPrivacyStatus.service').getPatientPrivacyStatus({ db, patientId, clinicId, transaction }));
     assert.equal(state.state, 'signed'); assert.equal(state.allowed, true);
     assert.equal(state.time_zone, 'America/New_York');
@@ -354,5 +396,5 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
       assert(replayPlan.entries.every(row => row.create_version === false), 'A reviewed replay does not duplicate published versions');
     } finally { await db.sequelize.connectionManager.releaseConnection(raw); }
     owned.report.checks.push('real BS SQL release: read plan, backup before DML, locked dry-run rollback exact, additive v2 only, old approved v1 remains eligible, unrelated settings/signed rows intact, stale plan rejected and fresh replay creates no duplicate version');
-  } finally { await f.close(); }
+  } finally { clinicBranding.resolveClinicAvatar = resolveClinicAvatar; await f.close(); }
 }));

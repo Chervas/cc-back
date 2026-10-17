@@ -86,7 +86,7 @@ test('printable evidence uses clinic timezone while signed body, context, ISO ev
   assert.equal(time.documentTimezone({ snapshot_json: doc.snapshot_json }), 'Europe/Madrid');
 });
 
-test('public and kiosk DTO expose effective clinic zone and passive app branding, not configuration or queue-scope changes', () => {
+test('public and kiosk DTO expose effective clinic zone and passive app branding, not configuration or queue-scope changes', async () => {
   const helpers = extract('function consentPresentationClinicInclude(', '\nasync function loginTabletKiosk(');
   const compileDto = (start, end, name) => vm.runInNewContext(helpers + '\n' + extract(start, end) + '\n' + name,
     { ...shared, requiresRepresentative: () => false, publicSignatureEvidenceForDocument: () => null,
@@ -98,7 +98,7 @@ test('public and kiosk DTO expose effective clinic zone and passive app branding
   const pack = { id: 4, clinica_id: 72, paciente_id: 1, clinica: clinic, paciente: { nombre: 'QA' },
     documents: [{ id: 8, package_id: 4, paciente_id: 1, clinica_id: 72, title: 'Título para el paciente', status: 'pending' }] };
   const frozen = JSON.stringify(pack);
-  const publicDto = compileDto('function serializePublicPackage(', '\nasync function resolveActivePublicPackage(', 'serializePublicPackage')(pack);
+  const publicDto = await compileDto('async function serializePublicPackage(', '\nasync function resolveActivePublicPackage(', 'serializePublicPackage')(pack);
   assert.equal(publicDto.clinica.time_zone, 'Pacific/Auckland'); assert.equal(publicDto.tablet_branding.source, 'group');
   assert.equal(publicDto.tablet_branding.display_name, 'Grupo QA'); assert.equal(publicDto.tablet_branding.logo_url, 'https://example.com/group.png');
   assert.equal(publicDto.documents[0].title, 'Título para el paciente'); assert.equal(publicDto.documents[0].document_branding, null);
@@ -108,7 +108,7 @@ test('public and kiosk DTO expose effective clinic zone and passive app branding
   assert.equal(kioskDto.pending_count, 1); assert.equal(kioskDto.documents[0].title, 'Título para el paciente');
   assert.equal(JSON.stringify(pack), frozen);
   const foreign = { ...clinic, grupoClinica: { id_grupo: 6, nombre_grupo: 'Grupo ajeno' } };
-  const denied = publicDto && compileDto('function serializePublicPackage(', '\nasync function resolveActivePublicPackage(', 'serializePublicPackage')({ ...pack, clinica: foreign });
+  const denied = publicDto && await compileDto('async function serializePublicPackage(', '\nasync function resolveActivePublicPackage(', 'serializePublicPackage')({ ...pack, clinica: foreign });
   assert.equal(denied.tablet_branding.source, 'clinic'); assert.equal(denied.tablet_branding.display_name, 'Clínica QA');
   assert.equal(denied.tablet_branding.logo_url, 'https://example.com/clinic.png', 'Foreign group metadata cannot supply a group name or logo');
 });

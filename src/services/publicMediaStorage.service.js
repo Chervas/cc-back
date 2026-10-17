@@ -61,6 +61,7 @@ function assertAllowedPurpose(purpose) {
     'clinic_access_image',
     'clinic_logo',
     'invoice_logo',
+    'tablet_logo',
     'marketing_image',
     'web_editor_media',
     'frontend_asset',
@@ -263,7 +264,7 @@ async function preparePublicMediaPayload(input = {}) {
     buffer = await normalizeWhatsappImageToJpeg(buffer);
     contentType = 'image/jpeg';
     transformed = true;
-  } else if (['web_editor_media', 'invoice_logo', 'marketing_image'].includes(purpose)) {
+  } else if (['web_editor_media', 'invoice_logo', 'tablet_logo', 'marketing_image'].includes(purpose)) {
     buffer = await normalizeWebEditorImageToWebp(buffer);
     contentType = 'image/webp';
     transformed = true;
@@ -293,9 +294,9 @@ async function preparePublicMediaPayload(input = {}) {
       output_width: outputImage?.width || null,
       output_height: outputImage?.height || null,
       transformed,
-      metadata_stripped: transformed && ['clinic_access_image', 'web_editor_media', 'invoice_logo', 'marketing_image', 'review_team_photo', 'whatsapp_image'].includes(purpose),
-      content_disarm: ['web_editor_media', 'marketing_image'].includes(purpose) ? 'sharp_reencode_v1' : null,
-      malware_scan_status: ['web_editor_media', 'marketing_image'].includes(purpose) ? 'not_available' : null,
+      metadata_stripped: transformed && ['clinic_access_image', 'web_editor_media', 'invoice_logo', 'tablet_logo', 'marketing_image', 'review_team_photo', 'whatsapp_image'].includes(purpose),
+      content_disarm: ['web_editor_media', 'tablet_logo', 'marketing_image'].includes(purpose) ? 'sharp_reencode_v1' : null,
+      malware_scan_status: ['web_editor_media', 'tablet_logo', 'marketing_image'].includes(purpose) ? 'not_available' : null,
       whatsapp_compatible: ['clinic_access_image', 'review_team_photo', 'whatsapp_image'].includes(purpose)
         ? buffer.length <= MAX_WHATSAPP_IMAGE_BYTES
         : null,
@@ -317,6 +318,7 @@ function prefixForPurpose(purpose) {
     case 'clinic_access_image':
       return 'whatsapp/clinic-access';
     case 'clinic_logo':
+    case 'tablet_logo':
       return 'logos/clinicas';
     case 'invoice_logo':
       return 'logos/facturas';

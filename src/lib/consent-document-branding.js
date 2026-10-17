@@ -81,10 +81,9 @@ function resolveTabletBranding(clinic, group = null, options = {}) {
   const displayName = clean(shared ? group.nombre_grupo : clinic?.nombre_clinica || clinic?.nombre, 255);
   const override = (configured.source !== 'group' || shared) && safeLogoUrl(configured.logo_url, options.baseUrl);
   const clinicLogo = !shared && safeLogoUrl(clinic?.url_avatar, options.baseUrl);
-  const original = !shared && SOURCE_LOGOS.find(logo => logo.clinic_id === Number(clinic?.id_clinica || clinic?.id));
   return { display_name: displayName || 'Clínica', source: shared ? 'group' : 'clinic',
-    logo_url: override || clinicLogo || original?.url || null,
-    logo_background: override || clinicLogo ? configured.logo_background : original ? original.background : 'light' };
+    logo_url: override || clinicLogo || null,
+    logo_background: override || clinicLogo ? configured.logo_background : 'light' };
 }
 function buildDocumentBranding(clinic, options = {}) {
   const configuration = validateDocumentBrandingConfig(options.configuration);
