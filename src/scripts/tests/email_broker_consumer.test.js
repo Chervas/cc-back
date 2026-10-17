@@ -66,6 +66,39 @@ test('broker transport failures never become SES throttles, retries, or direct-k
   }
 });
 
+test('explicit transactional v1 omits the marketing field without changing default v2 or using send retries', async t => {
+  const env = { EMAIL_PROVIDER: 'ses', EMAIL_ENABLED: 'true', EMAIL_RECIPIENT_ALLOWLIST: 'qa@example.test', ...brokerEnv() };
+  const calls = [];
+  t.mock.method(SESv2Client.prototype, 'send', () => assert.fail('no direct SES fallback'));
+  t.mock.method(emailBroker, 'createEmailBroker', () => ({ async send(p) { calls.push(p); contract.validate(p); return accepted(); } }));
+  for (const templateKey of ['auth.email_verification', 'auth.password_reset']) {
+    const message = { to: 'qa@example.test', from: 'QA <no-reply@example.test>', outboxId: `em_${randomUUID()}`,
+      deliveryAttempt: 1, stream: 'transactional', templateKey, subject: 'FICTITIOUS', text: 'FICTITIOUS', html: '' };
+    for (const cohort of ['email-ses-transactional-v1', 'email-ses-v2', undefined]) {
+      await provider.sendEmail(message, { env: { ...env, ...(cohort ? { EMAIL_BROKER_COHORT: cohort } : {}) } });
+      const p = calls.at(-1);
+      assert.equal(Object.hasOwn(p, 'identityName'), cohort !== 'email-ses-transactional-v1');
+      if (cohort !== 'email-ses-transactional-v1') assert.equal(p.identityName, null);
+      assert.equal(p.outboxId, message.outboxId); assert.equal(p.attempt, 1);
+      assert.equal(p.templateKey, templateKey); assert.equal(p.recipientPolicy, 'allowlist');
+    }
+  }
+  assert.equal(calls.length, 6);
+  assert.equal(provider.publicConfig({ ...env, EMAIL_BROKER_COHORT: 'email-ses-transactional-v1' }).brokerCohort, 'email-ses-transactional-v1');
+});
+
+test('unknown cohort and commercial or generic messages on transactional v1 fail before transport', async t => {
+  const env = { EMAIL_PROVIDER: 'ses', EMAIL_ENABLED: 'true', EMAIL_MARKETING_ENABLED: 'true', ...brokerEnv() };
+  t.mock.method(emailBroker, 'createEmailBroker', () => assert.fail('invalid cohort reached transport'));
+  for (const [cohort, templateKey, stream] of [
+    ['unknown', 'auth.email_verification', 'transactional'],
+    ['email-ses-transactional-v1', 'ops.email_test', 'transactional'],
+    ['email-ses-transactional-v1', 'automation.generic', 'automation'],
+    ['email-ses-transactional-v1', 'marketing.campaign', 'marketing'],
+  ]) await assert.rejects(provider.sendEmail({ templateKey, stream }, { env: { ...env, EMAIL_BROKER_COHORT: cohort } }),
+    { code: 'email_broker_configuration_invalid', retryable: false });
+});
+
 test('stable attempt IDs survive process recreation and only a typed SES rejection permits retry', async () => {
   const p = payload(), commands = [];
   const factory = result => emailBroker.createEmailBroker({ env: brokerEnv(), readFile: () => Buffer.from('fictitious'),

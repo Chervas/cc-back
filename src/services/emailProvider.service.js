@@ -26,6 +26,7 @@ function splitList(value) {
 function getConfig(env = process.env) {
   const provider = (cleanString(env.EMAIL_PROVIDER) || 'mock').toLowerCase();
   const brokerEnabled = env.EMAIL_BROKER_ENABLED === 'true';
+  const brokerCohort = cleanString(env.EMAIL_BROKER_COHORT) || 'email-ses-v2';
   const region = cleanString(env.EMAIL_AWS_REGION) || cleanString(env.AWS_REGION) || 'eu-west-3';
   const accessKeyId = brokerEnabled ? null : cleanString(env.EMAIL_AWS_ACCESS_KEY_ID);
   const secretAccessKey = brokerEnabled ? null : cleanString(env.EMAIL_AWS_SECRET_ACCESS_KEY);
@@ -45,6 +46,7 @@ function getConfig(env = process.env) {
   return {
     provider,
     brokerEnabled,
+    brokerCohort,
     region,
     enabled: parseBool(env.EMAIL_ENABLED, provider === 'mock'),
     marketingEnabled: parseBool(env.EMAIL_MARKETING_ENABLED, false),
@@ -134,6 +136,11 @@ async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
   if (config.brokerEnabled && provider !== 'ses') {
     throw Object.assign(new Error('email_broker_configuration_invalid'), { code: 'email_broker_configuration_invalid', retryable: false });
   }
+  if (config.brokerEnabled && (!['email-ses-transactional-v1', 'email-ses-v2'].includes(config.brokerCohort)
+    || config.brokerCohort === 'email-ses-transactional-v1'
+      && (isMarketing || !['auth.email_verification', 'auth.password_reset'].includes(message.templateKey)))) {
+    throw Object.assign(new Error('email_broker_configuration_invalid'), { code: 'email_broker_configuration_invalid', retryable: false });
+  }
   if (provider === 'mock') {
     if (beforeDispatch) await beforeDispatch();
     return {
@@ -185,9 +192,11 @@ async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
       templateKey: message.templateKey, stream: message.stream, recipientPolicy,
       to: message.to, from: cleanString(message.from) || config.defaultFrom, replyTo: cleanString(message.replyTo),
       configurationSet, subject: message.subject, text: message.text || '', html: message.html || '',
-      identityName: isMarketing
-        ? identityNameFromAddress(cleanString(message.from) || config.defaultFrom)
-        : null,
+      // V1 rejects this property entirely; deployed V2 requires explicit null
+      // for transactional mail. Never discover the version by retrying a send.
+      ...(isMarketing || config.brokerCohort === 'email-ses-v2' ? {
+        identityName: isMarketing ? identityNameFromAddress(cleanString(message.from) || config.defaultFrom) : null,
+      } : {}),
     }, { beforeDispatch: async () => {
       if (!getConfig(env).enabled) throw Object.assign(Error('email_provider_disabled'), { code: 'email_provider_disabled', retryable: false });
       if (beforeDispatch) {
@@ -305,6 +314,7 @@ function publicConfig(env = process.env) {
   return {
     provider: config.provider,
     brokerEnabled: config.brokerEnabled,
+    brokerCohort: config.brokerCohort,
     brokerConfigured: config.brokerEnabled && require('./emailBroker.service').isConfigured(env),
     enabled: config.enabled,
     marketingEnabled: config.marketingEnabled,

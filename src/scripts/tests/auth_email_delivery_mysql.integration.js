@@ -21,6 +21,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     AUTH_EMAIL_MFA_MODE: 'enforce', AUTH_SESSION_MODE: 'enforce',
     PLATFORM_AUDIT_AUTH_ENABLED: 'true', PLATFORM_AUDIT_AUTH_POLICY: 'auth-durable-v1',
     RUNTIME_ROLE: 'gateway', JOB_RUNTIME_NAMESPACE: 'gateway', QUEUE_PREFIX: 'gateway', JOBS_WORKER_ENABLED: 'false',
+    AUTOMATIONS_V2_FALLBACK_RUNTIME_NAMESPACE: 'staging',
   });
   models.Sequelize = require('sequelize');
   for (const [name, filename] of [['Usuario', 'usuario'], ['EmailMessage', 'emailmessage'],
