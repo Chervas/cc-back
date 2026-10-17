@@ -113,12 +113,15 @@ async function preparePatientIntake({ db, patientId, clinicId, actorId, snapshot
       if (document && reusable) {
         const existingPackage = document.package_id
           ? await db.ConsentSignaturePackage.findByPk(document.package_id, { transaction }) : null;
-        const hasQuestionnaire = questionnaireEnabled && privacyOnly && document.status !== 'signed' && existingPackage
-          && await db.PatientIntakeRequest.findOne({ where: { package_id: existingPackage.id }, transaction });
         // Both the LOPD button and a per-row additional document action must
         // remain independent, even if an old pending package bundled them.
         // The legacy explicit full-intake action preserves its old contract.
         const independentSelection = privacyOnly || additionalTemplateId !== null;
+        // Reject a hidden legacy questionnaire as well as extra documents,
+        // even when it is temporarily disabled in clinic settings: a later
+        // reactivation must not change what this independent action selected.
+        const hasQuestionnaire = independentSelection && document.status !== 'signed' && existingPackage
+          && await db.PatientIntakeRequest.findOne({ where: { package_id: existingPackage.id }, transaction });
         const packageDocuments = independentSelection && existingPackage && document.status !== 'signed'
           ? await db.PatientConsentDocument.findAll({ where: { package_id: existingPackage.id }, attributes: ['id'], transaction, limit: 2 }) : null;
         const independent = !independentSelection || document.status === 'signed'

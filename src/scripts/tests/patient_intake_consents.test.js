@@ -14,13 +14,34 @@ function fixture({clinic=72,templates=[{id:90,blocking_policy:'hard'}],existing=
   create:async(v,q)=>{assert.equal(q.transaction,transaction);writes.push(v)}},
  PatientConsentExternalAttestation:{findAll:async()=>[]},PatientOperationalEvent:{findAll:async()=>[]},
  ConsentSignaturePackage:{findByPk:async()=>({id:700,status:'pending',expires_at:'2099-01-01'}),create:async(v,q)=>{assert.equal(q.transaction,transaction);writes.push(v);return{id:900,update:async x=>writes.push(x)}}}};
- return{db,writes,queries,run:()=>preparePatientIntake({db,patientId:82,clinicId:72,actorId:1,snapshot:()=>({snapshot_html:'<p>Publicado</p>',snapshot_json:{},snapshot_hash:'hash'})})};
+ return{db,writes,queries,run:(options={})=>preparePatientIntake({db,patientId:82,clinicId:72,actorId:1,...options,snapshot:()=>({snapshot_html:'<p>Publicado</p>',snapshot_json:{},snapshot_hash:'hash'})})};
 }
 test('prepares only published default data-protection templates without a treatment, appointment or delivery',async()=>{const f=fixture();const r=await f.run();assert.equal(r.created_count,1);assert.equal(f.writes[0].trigger_source,'patient_intake');assert.equal(f.writes[1].cita_id,null);assert.equal(f.writes[1].tratamiento_id,null);assert.equal(f.writes[1].status,'pending');assert.deepEqual(f.writes[2],{required_count:1,signed_count:0});});
 test('repeated preparation preserves the existing pending or signed document',async()=>{const f=fixture({existing:true});const r=await f.run();assert.equal(r.created_count,0);assert.equal(r.existing_count,1);assert.equal(f.writes.length,0)});
 test('clinic drift fails closed before reading templates or writing a package',async()=>{const f=fixture({clinic:66});await assert.rejects(f.run(),/patient_clinic_changed/);assert.equal(f.writes.length,0)});
 test('no active templates or published version fails without creating an empty package',async()=>{for(const config of [{templates:[]},{published:false}]){const f=fixture(config);await assert.rejects(f.run(),/intake_published_templates_required/);assert.equal(f.writes.length,0)}});
 test('nonmandatory onboarding documents stay optional',async()=>{const f=fixture({templates:[{id:92,blocking_policy:'optional'}]});await f.run();assert.equal(f.writes[1].required,false);assert.equal(f.writes[2].required_count,0)});
+
+test('every independent selection excludes an old single-document package with a questionnaire, even when temporarily disabled', async () => {
+ for (const enabled of [true, false]) for (const selection of [{ privacyOnly:true }, { additionalTemplateId:90 }]) {
+  const old={ id:800,package_id:700,status:'pending' }, oldRequest={ id:601,package_id:700,status:'pending' }, before=JSON.stringify([old,oldRequest]);
+  const template={ id:90,clinic_id:72,purpose:selection.privacyOnly?'data_protection':'other',blocking_policy:'hard' };
+  const f=fixture({ document:old,templates:[template] }); let requestReads=0;
+  f.db.Clinica.findByPk=async()=>({ id_clinica:72,configuracion:{ patient_intake:{ medical_questionnaire_enabled:enabled,
+   additional_documents:[{ template_id:90,required:false,sort_order:0 }] } } });
+  f.db.ClinicConsentTemplate.findAll=async()=>[template];
+  f.db.PatientIntakeRequest={ findOne:async q=>{ requestReads++;assert.equal(q.where.package_id,700);return oldRequest; } };
+  f.db.PatientConsentDocument.findAll=async q=>{ assert.deepEqual(q.where,{ package_id:700 });assert.equal(q.limit,2);return [{ id:800 }]; };
+  const result=await f.run(selection);
+  assert.equal(requestReads,1); assert.equal(result.created_count,1); assert.deepEqual(result.current_package_ids,[900]);
+  assert.equal(JSON.stringify([old,oldRequest]),before); assert.equal(f.writes[1].clinic_template_id,90);
+ }
+});
+test('the explicit legacy full-intake action retains its questionnaire package reuse contract', async () => {
+ const f=fixture({ document:{ id:800,package_id:700,status:'pending' } });
+ f.db.PatientIntakeRequest={ findOne:async()=>assert.fail('Full-intake is not an independent selection') };
+ const result=await f.run();assert.equal(result.created_count,0);assert.deepEqual(result.current_package_ids,[700]);assert.equal(f.writes.length,0);
+});
 
 test('new registration v2 issue checks four legal controller fields even through a direct default-template call, before any write', async () => {
  const registration = require('../../lib/registration-privacy-template'), body = registration.standardDraft();

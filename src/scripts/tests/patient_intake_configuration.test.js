@@ -107,7 +107,9 @@ test('previously submitted answers can still be reviewed and professionally conf
   assert.equal(f.patient.alergias, 'Respuesta ya recibida');
 });
 
-test('legacy preparation excludes the disabled medical template while preserving LOPD and its pending combined package', async () => {
+for (const privacyOnly of [false, true]) test(privacyOnly
+  ? 'privacy-only preparation reuses a single LOPD package only after excluding any legacy questionnaire'
+  : 'legacy full preparation excludes the disabled medical template while preserving its pending package contract', async () => {
   const calls = [], writes = [], transaction = { LOCK: { SHARE: 'SHARE', UPDATE: 'UPDATE' } };
   const db = { Sequelize: { Op: { in: Symbol('in'), or: Symbol('or'), gt: Symbol('gt') } },
     sequelize: { transaction: async callback => callback(transaction) },
@@ -116,13 +118,21 @@ test('legacy preparation excludes the disabled medical template while preserving
     Paciente: { findByPk: async (id, options) => { calls.push(['patient', options]); return { id_paciente: id, clinica_id: 72 }; } },
     ClinicConsentTemplate: { findAll: async () => [{ id: 1 }, { id: 2, catalog_key: 'cc_base_formulario_medico_alta_v1' }] },
     ClinicConsentTemplateVersion: { findOne: async options => { assert.equal(options.where.clinic_template_id, 1); return { id: 3, body_html: '<p>LOPD</p>' }; } },
-    PatientConsentDocument: { findOne: async () => ({ id: 4, package_id: 5, status: 'pending' }) },
+    PatientConsentDocument: { findOne: async () => ({ id: 4, package_id: 5, status: 'pending' }),
+      findAll: async options => { assert.equal(privacyOnly, true); calls.push(['package-documents', options]);
+        assert.deepEqual(options.where, { package_id: 5 }); assert.equal(options.transaction, transaction);
+        assert.equal(options.limit, 2); return [{ id: 4 }]; } },
     ConsentSignaturePackage: { findByPk: async () => ({ id: 5, status: 'pending', expires_at: '2099-01-01' }),
       create: async () => { writes.push('package'); throw Error('LOPD must be reused'); } },
-    PatientIntakeRequest: { findOne: async () => { throw Error('Disabled questionnaire must not disqualify an otherwise valid LOPD'); } },
+    PatientIntakeRequest: { findOne: async options => { assert.equal(privacyOnly, true,
+      'The explicit full-intake action preserves its legacy package contract');
+      calls.push(['legacy-intake', options]); assert.deepEqual(options.where, { package_id: 5 });
+      assert.equal(options.transaction, transaction); return null; } },
   };
-  const result = await preparePatientIntake({ db, patientId: 17, clinicId: 72, actorId: 7, privacyOnly: true,
+  const result = await preparePatientIntake({ db, patientId: 17, clinicId: 72, actorId: 7, privacyOnly,
     snapshot: () => { throw Error('LOPD must be reused'); } });
   assert.equal(result.created_count, 0); assert.equal(result.existing_count, 1); assert.deepEqual(result.current_package_ids, [5]);
   assert.equal(writes.length, 0); assert.equal(calls[0][0], 'clinic'); assert.equal(calls[0][1].lock, 'SHARE');
+  assert.equal(calls.some(([name]) => name === 'legacy-intake'), privacyOnly);
+  assert.equal(calls.some(([name]) => name === 'package-documents'), privacyOnly);
 });

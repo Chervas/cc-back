@@ -204,6 +204,27 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     assert.equal(JSON.stringify(await db.PatientConsentDocument.findAll({ where: { package_id: mixed.package_id }, raw: true })), mixedBefore);
     owned.report.checks.push('native LOPD-only and explicit extra never reopen mixed pending packages: each creates one independent selected document, preserves every old row, repeats without writes; already signed selections return no package IDs; zero questionnaire/provider requests');
 
+    // A historical one-document package can still carry a separate medical
+    // questionnaire. Selecting that document must not select the questionnaire,
+    // including if the clinic disables and later re-enables its old flow.
+    const legacyRequest = await db.PatientIntakeRequest.create({ package_id: independent.package_id, patient_id: mixedPatient,
+      clinic_id: clinicId, schema_version:'cc-patient-intake/v1', status:'pending', personal_snapshot:{}, created_by:ids.owner });
+    const legacyRequestBefore=JSON.stringify((await legacyRequest.reload()).toJSON());
+    const legacyExtraBefore=JSON.stringify(await db.PatientConsentDocument.findAll({ where:{ package_id:independent.package_id },raw:true }));
+    setting=await expect('PUT',route,{ patient_intake:{ medical_questionnaire_enabled:true },expected_version:setting.version },owner,200);
+    const isolatedExtra=await expect('POST',`/api/consentimientos/appointments/${mixedBooking.id_cita}/registration-documents/${clinical.id}/package`,{},owner,201);
+    assert.notEqual(isolatedExtra.package_id,independent.package_id);
+    const isolatedDocs=await db.PatientConsentDocument.findAll({ where:{ package_id:isolatedExtra.package_id },raw:true });
+    assert.equal(isolatedDocs.length,1);assert.equal(isolatedDocs[0].clinic_template_id,clinical.id);
+    assert.equal(await db.PatientIntakeRequest.count({ where:{ package_id:isolatedExtra.package_id } }),0);
+    assert.equal(JSON.stringify((await legacyRequest.reload()).toJSON()),legacyRequestBefore);
+    assert.equal(JSON.stringify(await db.PatientConsentDocument.findAll({ where:{ package_id:independent.package_id },raw:true })),legacyExtraBefore);
+    const isolatedFingerprint=(await f.fingerprint()).sha256;
+    const isolatedReplay=await expect('POST',`/api/consentimientos/appointments/${mixedBooking.id_cita}/registration-documents/${clinical.id}/package`,{},owner,200);
+    assert.deepEqual(isolatedReplay.current_package_ids,[isolatedExtra.package_id]);assert.equal((await f.fingerprint()).sha256,isolatedFingerprint);
+    setting=await expect('PUT',route,{ patient_intake:{ medical_questionnaire_enabled:false },expected_version:setting.version },owner,200);
+    owned.report.checks.push('native one-document legacy package with active medical questionnaire is never reused for a selected extra: independent package contains exactly that document, no new intake request, old request/documents immutable and repeat idempotent');
+
     const paperPatient = 92602;
     await db.Paciente.create({ id_paciente: paperPatient, clinica_id: clinicId, public_id: 'pac_generic_paper_qa', nombre: 'Papel', apellidos: 'Ficticio',
       numero_historia: String(paperPatient), historia_scope: `clinic:${clinicId}` });
