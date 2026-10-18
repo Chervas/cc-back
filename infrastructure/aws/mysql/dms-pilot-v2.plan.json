@@ -1,0 +1,137 @@
+{
+  "schema": "clinicaclick-synthetic-dms-v2-preparation/1",
+  "status": "PREPARED_OFFLINE_NOT_DEPLOYED_NOT_STARTED",
+  "scope": "Repeat only the exact12 fictional tables with a fresh native seed. No clinical source clone, app units, kernel profile, operator IAM grants or host network changes are performed by this preparation.",
+  "previous_pilot": {
+    "result": "INCONCLUSIVE",
+    "reason": "Source ended after an unattributed signal; no applied CDC event or recovery checkpoint was established. A running task alone was not acceptance.",
+    "evidence_preserved": true,
+    "source_port": 23306,
+    "known_run_reuse_forbidden": "56b3538248370bf5b52d1b881e07280f",
+    "new_paid_resources_allowed_before_v1_deleted": false
+  },
+  "artifacts": {
+    "template": "dms-pilot-v2.cloudformation.json",
+    "offline_validator_and_launch_planner": "dms_pilot_v2.py",
+    "tests": "test_dms_pilot_v2.py",
+    "source_unchanged": "dms_pilot_source.py at e581136e: owned TMP TLS copies, have_sslYES and exact TLS paths before bootstrap/READY",
+    "native_fixture_unchanged": "dms_pilot_b_fixture.cjs",
+    "native_seed_harness_unchanged": "dms_pilot_b_harness.cjs"
+  },
+  "names": {
+    "identifier_pattern": "^cc-mysql-v2-[a-z0-9]{8}$",
+    "replication_instance_identifier_and_resource_identifier": "PilotV2Identifier",
+    "instance_arn_suffix": "rep:<PilotV2Identifier>",
+    "task_identifier_and_resource_identifier": "<PilotV2Identifier>-cdc",
+    "log_group": "dms-tasks-<PilotV2Identifier>",
+    "log_stream": "dms-task-<external task ARN resource ID>",
+    "task_settings_log_name_override": false,
+    "new_stack_endpoints_certificates_secret_paths": true,
+    "schema_and_user": "cc_dms_pilot",
+    "target_disposition": "Root explicitly retires only V1 target/user after metadata/marker/FK and final evidence, when old DMS is absent; V2 harness recreates an empty target. This preparation contains no DROP or cleanup execution.",
+    "tag_contract": "purpose=mysql-synthetic-pilot is preserved for unchanged source/operator contracts; pilot-version=v2 and new own names identify this repeat."
+  },
+  "iam_and_logging": {
+    "operator_permissions_modified": false,
+    "reuse_existing_role": "dms-vpc-role after fresh exact trust/policy review; this template does not create or modify it",
+    "new_named_role": "dms-cloudwatch-logs-role only after a fresh absence check; never adopt/replace an existing shared role",
+    "logs_trust": "dms.amazonaws.com, sts:AssumeRole, StringEquals aws:SourceAccount=AWS::AccountId",
+    "logs_policy": "Required provisioned-DMS log actions scoped to current account/region and exact V2 group/task streams. DescribeLogGroups Resource* is the sole global read action. No serverless, log read/delete, PassRole or operator policies added.",
+    "capability": "CAPABILITY_NAMED_IAM is needed later. A permission denial does not authorize widening the operator role.",
+    "enabled_components": [
+      "SOURCE_CAPTURE",
+      "TARGET_APPLY",
+      "TASK_MANAGER"
+    ],
+    "severity": "LOGGER_SEVERITY_INFO",
+    "retention_days": 1,
+    "log_group_deletion_and_update_replace_policy": "Delete",
+    "actual_delivery_required": "Read fresh stream and TASK_MANAGER events before source mutations. Role/group/template existence is not delivery evidence.",
+    "network_limit": "No new NAT, public egress or speculative Logs endpoint. If delivery is absent, stop and diagnose service/IAM/transport; do not silently broaden networking.",
+    "cleanup": "Export sanitized task/source/unit/checkpoint evidence before deleting own group. Delete only this stack's logs role after its consumers are gone. Retained VPC role stays until final pilot cleanup. Generated secrets remain subject to explicit owner cleanup."
+  },
+  "source_supervision": {
+    "planner_only": true,
+    "unit_pattern": "cc-dms-pilot-source-v2-<fresh32hex>.service",
+    "user_and_group": "ubuntu",
+    "type": "exec",
+    "restart": "no",
+    "source_runtime_range_seconds": [
+      600,
+      7200
+    ],
+    "runtime_max_seconds": "RuntimeMaxSec limits active runtime to source runtime+600 (<=7800); TimeoutStopSec can add up to90s, so service elapsed cap is <=7890s.",
+    "timeout_stop_seconds": 90,
+    "kill_mode": "mixed: TERM own Python main, allow bounded owned mysqld shutdown; final KILL only this unit cgroup on timeout",
+    "private_tmp": false,
+    "output": "Fresh owned0700 directory and precreated0600 stdout/stderr files. Detached manager owns service. No scope/pipe/PTY/collect/wait or controller-tied output.",
+    "readiness": "Type=exec proves exec only. Require fresh ready.json and independently owned socket/run/8.0.42/TLS metadata before endpoint/task use.",
+    "signal_provenance": "Save unit MainPID/ActiveState/SubState/Result/ExecMainCode/ExecMainStatus, source result, journal and controlled stop timestamps. This does not identify every external same-UID signal sender; no audit/kernel policy changes.",
+    "credentials": "No inherited EnvironmentFile or command-line password. Source reads only its reviewed generated secret in memory with explicit profile. Prove systemd authentication independently; no identity fallback.",
+    "cleanup": "Existing successful source lifecycle removes owned data+TLS and preserves logs/results; failure or keep-data retains private files for explicit owner review.",
+    "maximum_service_seconds_including_stop": 7890
+  },
+  "protocol": [
+    {
+      "phase": "V0_previous_pilot_absent",
+      "root_action_later": "Fresh proof old task/instance/endpoints/certificates/temporary endpoint/rules and source listener are absent. Preserve V1 evidence and retained-secret disposition. Verify VPC role and logs-role absence.",
+      "exit": "No paid V1 replication resources remain. CFN confirmations default no; no live state is verified by this preparation."
+    },
+    {
+      "phase": "V1_private_infrastructure_idle",
+      "root_action_later": "Choose fresh8hex identifier; verify region/account/private subnets/routes and engine orderability. Create CFN with CreatePilotTask=false, seed fields PENDING. New source/target secrets are generated, never output.",
+      "exit": "Private instance available, exact names/ARNs/tags known, own1d group+minimal role present. No CDC acceptance."
+    },
+    {
+      "phase": "V2_detached_owned_source",
+      "root_action_later": "Only once new DMS IP is known, root prepares its23306 firewall rule. Prepare fresh config/output files, inspect source-plan array/SHA and installed systemd feature support. Root alone runs the reviewed transient unit.",
+      "exit": "Fresh source READY independently proven, TLSYES/exact runtime paths,8.0.42/ROW/FULL, no clinical/DEV schema. Unit active alone is insufficient."
+    },
+    {
+      "phase": "V3_tls_native_seed",
+      "root_action_later": "Use unchanged12-fixture harness. Create target user from new secret in memory and empty target only as approved by root. Prove wrong CA/name rejection plus restored positive verify-full on both endpoints. Export one consistent native seed with new run/SHA/file:position; restore exact schema/indexes/FK/generated/NOTNULL/2synthetic guards.",
+      "exit": "Fresh validated seed receipt and12-table equality; V1 run/seed rejected. Native NOTNULL first, target FOREIGN_KEY_CHECKS=1. Synthetic guards do not accredit real WhatsApp guards."
+    },
+    {
+      "phase": "V4_cdc_create_and_diagnostics",
+      "root_action_later": "Update CFN opt-in idle task with exact new receipt SourceRunId/NativeSeedSha256/CdcStartPosition. Preserve12 selections+5 generated exclusions, FullLOB64KiB/no batch/control schema. Bind a NEW private observer to exact new source/task/instance/seed/endpoints; root explicitly starts CDC once.",
+      "exit": "Running state, actual diagnostic stream/events and exact bindings verified before fixture mutation. Old observer constants must not be reused. Missing logs/lifetime proof stops the exercise."
+    },
+    {
+      "phase": "V5_applied_events_checkpoint_resume",
+      "root_action_later": "Run known harness stages after two exact running reads+source ownership checks. Save per-table counts/status, fresh RecoveryCheckpoint and source coordinate progress; independently compare12 tables. Root may stop/resume own task at documented boundary, mutate only own source and prove catch-up without duplicates. No automatic retry/new seed.",
+      "exit": "At least one applied CDC event and nonempty saved checkpoint evidenced; full LOB/FK/generated/NOTNULL/receipt data match; controlled resume succeeds. Running state or zero exceptions alone is insufficient."
+    },
+    {
+      "phase": "V6_fence_and_close",
+      "root_action_later": "Fence every synthetic writer, commit final marker once, wait for exact equality, stop own task. Verify12 hashes/metadata/FKs/generated/control rows/full validation and save timing/log/checkpoint proof. Stop only own unit; require closed source/no listener before own firewall removal. Delete own task/instance/endpoints/VPCE/rules/group/logs role; review retained secrets/VPC role.",
+      "exit": "Complete evidence or explicit INCONCLUSIVE/FAIL. Cleanup is not migration approval."
+    }
+  ],
+  "limits": {
+    "clinical_copy_authorized": false,
+    "application_cutover_authorized": false,
+    "all_inherited_gates_passed": false,
+    "new_seed_cdc_proven": false,
+    "unknown_commit_outcome_certified": false,
+    "real_guard_contract_separate": true,
+    "86_table_lob_timing_and_120s_total_cutover_still_pending": true,
+    "runtime_max_limits_source_not_paid_aws_resources": true,
+    "cfn_rules_are_attestations_not_live_inventory_verification": true
+  },
+  "offline_commands": [
+    "python3 -B dms_pilot_v2.py check-template",
+    "python3 -B -m unittest -v test_dms_pilot_v2.py test_dms_pilot_source.py"
+  ],
+  "primary_references": {
+    "logs_role": "https://docs.aws.amazon.com/dms/latest/userguide/security-iam.html#CHAP_Security.APIRole",
+    "logs_policy": "https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonDMSCloudWatchLogsRole.html",
+    "trust_source_account": "https://docs.aws.amazon.com/dms/latest/userguide/cross-service-confused-deputy-prevention.html",
+    "logs_naming_components": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TaskSettings.Logging.html",
+    "log_group_arns": "https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_LogGroup.html",
+    "native_cdc": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Task.CDC.html",
+    "systemd_transient": "https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html",
+    "systemd_stop_limits": "https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html",
+    "systemd_killmode": "https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html"
+  }
+}
