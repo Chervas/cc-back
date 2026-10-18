@@ -160,4 +160,6 @@ function compileTriggers(triggers) {
   return out;
 }
 module.exports={SOURCE_SCHEMA,TARGET_SCHEMA,EXPECTED_TABLES,EXPECTED_BODY_SHA256,SQL_MODE,sha,
-  compileTables,compileTriggers,validateSourceMeta,assertApproved,need,refuse};
+  compileTables,compileTriggers,validateSourceMeta,assertApproved,need,refuse,
+  // Read-only lexical helpers convey no approval to the M6 execution API.
+  inspectStatementsForSyntheticSeed:split,isSafeDumpSessionStatement:safeDumpSet,skipQuotedSql:quotedEnd};

@@ -1,0 +1,90 @@
+{
+  "schema": "clinicaclick-dms-synthetic-route-b/1",
+  "status": "prepared_offline_not_executed",
+  "prepared_date": "2026-10-18",
+  "code": ["dms_pilot_b_fixture.cjs", "dms_pilot_b_harness.cjs", "test_dms_pilot_b_harness.cjs"],
+  "authorization": {
+    "new_aws_resources_created": false,
+    "aws_task_created_or_started": false,
+    "mysql_connections_opened_by_offline_tests": false,
+    "clinical_data_access_or_copy": false,
+    "clinical_cutover_authorized": false,
+    "server_changes_performed": false,
+    "execution_requires_operator_review": true
+  },
+  "inherited_evidence": {
+    "plan": "dms-pilot.plan.json",
+    "required_checks": "Every required_pilot_checks entry remains mandatory, together with all later operator/central-runbook gates. This file does not replace or reduce that set.",
+    "all_inherited_gates_passed": false,
+    "real_whatsapp_trigger_digest": "4d73f93344d76cb2c8375605bad8a74d56870d9ecbc6e023c054d4bfa5f68dc8",
+    "real_whatsapp_guards_semantically_accredited": false,
+    "real_whatsapp_guard_limit": "The two b_guard_catalog_* fixtures are illustrative synthetic guards, not the actual source bodies. M6 schema-only preservation plus a separately reviewed exact-body behavior rehearsal and application regression remain necessary. Neither this harness nor its offline tests satisfy that gate."
+  },
+  "identities": {
+    "source": "Only the supervised dms_pilot_source.py instance: /tmp/cc-dms-pilot-source-*, owned private directory/inode, process PID/start_ticks/argv, private socket, run_id marker and actual server variables must all match. Bind 172.26.0.110:23306; server_id 183306; ROW/FULL; GTID OFF; TLS required. A real 3306 server is rejected before fixture data reads/writes.",
+    "target": "Only private clinicaclick-mysql.<id>.eu-west-3.rds.amazonaws.com MySQL8.4.11 with certificate and identity verification. Refuse if clinicaclick exists, or if cc_dms_pilot has any existing objects. No DROP or automatic cleanup.",
+    "schema": "cc_dms_pilot",
+    "table_selection": "Twelve exact fictional names; no wildcard. Five exact generated-column remove-column transformations. No clinical table/schema substitution.",
+    "target_credentials": "The existing independently reviewed private target operator obtains the secret in memory and verifies account/region. This module does not accept passwords, persist dumps or start AWS tasks. Never use RDS master credentials in DMS endpoints.",
+    "source_root": "Empty root password is specific to the owned disposable socket-only bootstrap account. No shared socket, .env, canonical DB_* variables or client login file is accepted."
+  },
+  "fixtures": {
+    "lob_document_bytes": [0, 32769, 65535, 65536, 65537, 1048576, 1048577],
+    "lob_types": ["JSON NOT NULL", "MEDIUMTEXT NOT NULL", "LONGTEXT NULL with NULL versus empty string"],
+    "encoding": "Four-byte UTF-8 plus escaped JSON and accented/CJK text. New INSERT and UPDATE after seed include LOBs larger than32KiB.",
+    "generated_columns": "Three normalized nullable text columns under a unique index, one DATETIME(3) expression, one conditional nullable identifier under a unique index.",
+    "foreign_keys": "DELETE/UPDATE CASCADE and DELETE/UPDATE SET NULL. Children exported before parent to make a concurrent source parent change meaningful; native single-transaction supplies one read view.",
+    "transactions": "Each fixed mutation stage commits one transaction and rolls back on any failed/incomplete write. Queue pending-to-leased-to-acked data is fictional, with sendForbidden=true and no provider integration.",
+    "guards": "Two deliberately synthetic INSERT/UPDATE guards; negative probes always roll back. Never claim equivalence to the actual WhatsApp guards.",
+    "external_sends": false
+  },
+  "native_seed": {
+    "command": "Owned socket only: mysqldump --no-defaults --single-transaction --source-data=2 --quick --no-tablespaces --set-gtid-purged=OFF --skip-triggers --skip-lock-tables --skip-add-drop-table --skip-comments --skip-add-locks --skip-disable-keys --complete-insert cc_dms_pilot <exact table list>.",
+    "buffer_limit_mib": 32,
+    "seed_storage": "One bounded in-memory string. No dump file, rows or LOB values are printed by this module. The receipt carries SHA256, size and native file:position extracted from that same buffer.",
+    "coordinate": "Exactly one genuine commented CHANGE REPLICATION SOURCE statement, pilot-bin.NNNNNN with position>=4. Quoted lookalikes, duplicate coordinates, other binlog prefixes and guessed timestamps are rejected. Never replace it with a later SHOW MASTER STATUS.",
+    "target_execution": "Seed parser accepts only the exact twelve native InnoDB CREATE TABLE definitions and complete INSERTs with literal values in known writable columns; generated fields are excluded. It rejects USE, DROP, other DML, executable-statement escapes, external/qualified names, table-copy clauses and expression-valued data. Execute on current cc_dms_pilot only; FK checks disabled only for coherent native restore, then always reenabled before CDC.",
+    "pilot_timeout": "timeout15s TERM/kill-after2s bounds the entire fictional export. This is not an independent FTWRL acquisition/hold measurement and does not approve a real clinical lock budget.",
+    "real_seed_limits": "Before any separately authorized real export, prohibit concurrent DDL and independently watchdog FTWRL acquisition/hold. mysqldump can wait behind long updating statements; its initial global lock also affects DEV on the shared source. Retain the complete binlog chain through recovery proof.",
+    "interleaving_independently_demonstrated": false
+  },
+  "rehearsal_sequence": [
+    "Operator reviews source lifecycle, host firewall/DMS private IPs, both strict verify-full endpoints, wrong-CA and wrong-identity failures, exact grants and settings runtime acceptance. No task is created or started by this harness.",
+    "Open the independently identifiable synthetic source, prepare fixed fixtures and run the two rollback-only synthetic guard probes. Export the native seed and inspect its immutable receipt.",
+    "Instrument source parent DELETE during the seed after a child has been read but before the parent table is read. Record independent ordering evidence. The module exposes fixed mutations but does not claim its offline tests or an unobserved asynchronous race establish this interleaving. Also retain route A's adversarial snapshot test if route A remains under consideration.",
+    "Open a fresh target schema and restore the same validated seed with lobVariant=native_notnull FIRST. Native restore does not need temporary LOB NULLs. Install the two synthetic guards and verify FK checks ON, zero orphans and complete fictional table/LOB equality.",
+    "Produce, review and runtime-validate the separate CDC-only proposal using the seed's exact file:position. FullLOB64KiB, BatchApplyEnabled=false, DO_NOTHING, all LOB validation, stop-on-error policies and FK ON from the first CDC connection; both endpoints verify-full. No ARN, CreateTask or StartTask action is performed here.",
+    "With CDC active only under later authorization, commit the fixed after_seed_update transaction, new NOT NULL JSON/MEDIUMTEXT INSERT, large LOB UPDATE, generated changes, cascade/SET NULL updates and fictional queue lease/ack. Repeat endpoint loss/reconnect/resume and require complete fictional comparison and zero DMS errors. Direct FullLOB-to-NOTNULL compatibility remains unproven until this run.",
+    "If direct NOT NULL fails, preserve the failed receipt and stop. Only a separately reviewed fresh synthetic target may try nullable_target_lob: five fixture columns across four tables, exact definitions retained. No automatic fallback, DROP, task restart or limited/inline-LOB substitution.",
+    "Fence and drain every fictional writer, commit final_marker, prove its target application plus complete transactions and full comparison, then stop CDC. A marker alone or lag=0 is insufficient. The harness does not independently enforce the source fence or start/stop DMS.",
+    "If the nullable experiment is used, time the four fixture ALTERs only after independently proving the fence and stopped CDC. Caller assertions are recorded as unverified; the result cannot prove86table/0.535GiB finalization within120s. Trigger restoration, app reconnect and abort margin require representative separate timing.",
+    "Retain receipts and close both SQL connections explicitly. Source supervisor controls only its own process/data lifecycle; this harness does not delete target schemas/resources. Parent controls later synthetic cleanup and the24h DMS cost deadline."
+  ],
+  "cdc_draft": {
+    "migration_type": "cdc",
+    "position_from_validated_seed_only": true,
+    "target_table_prep_mode": "DO_NOTHING",
+    "full_lob": true,
+    "lob_chunk_kib": 64,
+    "limited_lob": false,
+    "inline_lob_max_size_kib": 0,
+    "batch_apply": false,
+    "foreign_key_checks": 1,
+    "skip_lob_validation": false,
+    "task_logging": false,
+    "endpoint_test_connection_or_runtime_acceptance_performed": false
+  },
+  "rollback": {
+    "synthetic_failed_restore": "Leave the partial own schema and preserve the receipt; no silent resume, replacement dump or auto-DROP.",
+    "before_target_writers": "A return to source requires proof that no destination-only application writes exist and that source remains authoritative. Do not enable independent writers on both sides.",
+    "after_target_writers": "Keep old source fenced and recover forward on8.4. Target writers include sessions, identities and leases, not only visible business edits; no blind rollback to8.0.",
+    "clinical_scope": "Preparation and fictional tests grant no authorization to copy clinical data, acquire shared-source locks, change real TLS or stop application services."
+  },
+  "references": {
+    "native_consistency_and_source_data": "https://dev.mysql.com/doc/refman/8.0/en/mysqldump.html",
+    "native_cdc_position": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Task.CDC.html",
+    "mysql_fk_cascade": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Troubleshooting.html",
+    "lob": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.LOBSupport.html",
+    "strict_tls": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Security.SSL.html"
+  }
+}
