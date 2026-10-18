@@ -35,6 +35,8 @@ const reasons = {
   conversation_conflict: 'Es necesario revisar la conversación del nuevo teléfono',
   source_changed: 'La solicitud o el documento de origen ya no están vigentes',
   response_unclear: 'La respuesta no permite verificar el número',
+  phone_changed: 'El móvil de la ficha ha cambiado',
+  phone_corrected: 'Recepción ha corregido el móvil',
 };
 
 function definition(clinicId = null) {

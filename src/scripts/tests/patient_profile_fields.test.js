@@ -92,6 +92,10 @@ function controllerFixture({ denied = false, sensitive = true, row = {} } = {}) 
       recordPatientOperationalEvent: async () => { state.operationalWrites++; } },
     '../services/appointmentActivity.service': {},
     '../services/marketingOptOut.service': { getActiveContactRestrictionsForPatient: async () => [], resolveWhatsappNumberRestrictionAfterChange: async () => {} },
+    '../services/patientMobileVerification.service': { withPatientMobileChange: async (values, save) => {
+      state.mobileChange = values;
+      return save();
+    } },
     '../lib/cliniccloud-patient-history': require('../../lib/cliniccloud-patient-history'),
     '../services/temporaryPatientDirection.service': { observePatient: async () => { state.observerCalls++; } },
   };
@@ -253,6 +257,17 @@ test('PATCH omission preserves all new profile values and explicit null clears o
   assert.equal((await f.invoke('updatePaciente', { notas_medicas: null, tiene_hijos: null })).status, 200);
   assert.equal(f.patient.notas_medicas, null); assert.equal(f.patient.tiene_hijos, null);
   assert.equal(f.patient.pais_origen, 'PT'); assert.equal(f.patient.antecedentes, 'Antecedente previo');
+});
+
+test('PATCH delegates mobile persistence and prior-verification invalidation with the original phone and clinic', async () => {
+  const f = controllerFixture({ row: { telefono_movil: '34600000001' } });
+  const response = await f.invoke('updatePaciente', { telefono_movil: '+34 600 000 002' });
+  assert.equal(response.status, 200); assert.equal(f.state.saves, 1);
+  const values = f.state.mobileChange;
+  assert.equal(values.patientId, 901); assert.equal(values.actorId, 501);
+  assert.equal(values.clinicId, 71); assert.equal(values.nextClinicId, 71);
+  assert.equal(values.previousPhone, '34600000001'); assert.equal(values.nextPhone, '34600000002');
+  assert.equal(typeof values.authorizeCurrent, 'function');
 });
 
 test('declared acquisition source uses stable explicit codes without overwriting legacy or platform provenance', async () => {

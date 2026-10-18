@@ -216,6 +216,7 @@ async function findCanonicalWhatsappConversation({
   leadId = null,
   createIfMissing = false,
   requireExactContact = false,
+  isolatePatientContact = false,
   lastMessageAt = null,
   transaction = null,
 } = {}) {
@@ -225,6 +226,33 @@ async function findCanonicalWhatsappConversation({
   }
 
   const contactCandidates = normalizeContactCandidates(contactId);
+  if (isolatePatientContact) {
+    // Explicit number verification is allowed to open a separate chat, never to
+    // repoint the patient's old one. Serialize lookup/create with source edits
+    // and keep every existing conversation and message untouched.
+    if (!requireExactContact || !Number.isSafeInteger(Number(patientId)) || Number(patientId) <= 0
+      || leadId || !contactCandidates.length) {
+      throw Object.assign(new Error('La verificación requiere un paciente y un teléfono de destino exactos.'),
+        { code: 'whatsapp_contact_identity_conflict', status: 409 });
+    }
+    if (!transaction) return db.sequelize.transaction(owned => findCanonicalWhatsappConversation({
+      clinicId, contactId, patientId, leadId, createIfMissing, requireExactContact,
+      isolatePatientContact, lastMessageAt, transaction: owned,
+    }));
+    await db.Clinica.findByPk(normalizedClinicId, { transaction, lock: transaction.LOCK.SHARE });
+    const patient = await db.Paciente.findByPk(patientId, { transaction, lock: transaction.LOCK.UPDATE });
+    if (!patient || normalizePhoneE164(patient.telefono_movil) !== normalizePhoneE164(contactId)) {
+      throw Object.assign(new Error('El teléfono del paciente ha cambiado. Revisa la ficha antes de enviar.'),
+        { code: 'whatsapp_contact_identity_conflict', status: 409 });
+    }
+    const belongs = Number(patient.clinica_id) === normalizedClinicId || await db.PacienteClinica.findOne({
+      where: { paciente_id: patientId, clinica_id: normalizedClinicId }, transaction, lock: transaction.LOCK.SHARE,
+    });
+    if (!belongs) {
+      throw Object.assign(new Error('El paciente ya no pertenece a la clínica de la verificación.'),
+        { code: 'whatsapp_contact_identity_conflict', status: 409 });
+    }
+  }
   const where = {
     clinic_id: normalizedClinicId,
     channel: 'whatsapp',
@@ -232,12 +260,15 @@ async function findCanonicalWhatsappConversation({
 
   const contactOr = [];
   if (contactCandidates.length) {
-    contactOr.push({ contact_id: { [Op.in]: contactCandidates } });
+    contactOr.push(isolatePatientContact ? db.Sequelize.where(db.Sequelize.fn('REGEXP_REPLACE',
+      db.Sequelize.fn('REGEXP_REPLACE', db.Sequelize.col('contact_id'), '[^0-9]', ''), '^00', ''), {
+      [Op.in]: [...new Set(contactCandidates.map(value => value.replace(/\D/g, '')))],
+    }) : { contact_id: { [Op.in]: contactCandidates } });
   }
-  if (patientId) {
+  if (patientId && !isolatePatientContact) {
     contactOr.push({ patient_id: patientId });
   }
-  if (leadId) {
+  if (leadId && !isolatePatientContact) {
     contactOr.push({ lead_id: leadId });
   }
 
@@ -275,6 +306,14 @@ async function findCanonicalWhatsappConversation({
 
   const requestedPhone = normalizePhoneE164(contactId);
   const exact = conversations.filter(c => normalizePhoneE164(c.contact_id) === requestedPhone);
+  if (isolatePatientContact) {
+    if (conversations.length !== 1 || exact.length !== 1
+      || Number(exact[0].patient_id) !== Number(patientId) || exact[0].lead_id) {
+      throw Object.assign(new Error('Es necesario revisar la conversación del nuevo teléfono.'),
+        { code: 'whatsapp_contact_identity_conflict', status: 409 });
+    }
+    return require('../services/temporaryPatientDirection.service').observeConversation(exact[0], { transaction });
+  }
   // Looking up a patient's existing chat must not change its destination or
   // merge a second number into it. Different numbers remain separate records.
   if (requireExactContact && !exact.length) {

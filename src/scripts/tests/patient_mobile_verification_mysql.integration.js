@@ -125,8 +125,11 @@ withIsolatedCampaignMysql(async scope => {
   const manualPending = await start(); await accept(manualPending.message); await manual(manualPending.request, 'pending');
   assert.equal((await t.runtime.authorizeTransport({ message: manualPending.message, to: manualPending.request.metadata.phone,
     sender: t.sender, useTemplate: true, templateName: manualPending.message.metadata.template_name,
-    templateLanguage: manualPending.message.metadata.template_language, templateComponents: manualPending.message.metadata.template_components })).allowed, false);
-  assert.equal((await reply(manualPending, 'yes')).result.ignored, true); const revision = (await t.runtime.state(manualPending.request)).revision;
+    templateLanguage: manualPending.message.metadata.template_language, templateComponents: manualPending.message.metadata.template_components })).allowed, true);
+  assert.equal((await t.runtime.state(manualPending.request)).provenance, 'manual_pending');
+  assert.equal((await t.runtime.state(manualPending.request)).manually_resolved, false);
+  assert.equal((await t.runtime.state(manualPending.request)).actor_user_id, 16);
+  assert.equal((await reply(manualPending, 'yes')).result.correlated, true); const revision = (await t.runtime.state(manualPending.request)).revision;
   await manual(manualPending.request, 'confirm'); assert.equal((await reply(manualPending, 'no')).result.ignored, true);
   assert((await t.runtime.state(manualPending.request)).manually_resolved);
   await assert.rejects(sql.transaction(transaction => t.runtime.manual({ patientId: manualPending.request.patient_id, clinicId: 72, actorId: 16,
@@ -138,7 +141,7 @@ withIsolatedCampaignMysql(async scope => {
   assert.equal((await reply(corrected, 'yes')).result.ignored, true);
   await manual(next, 'correct', { phone: corrected.request.metadata.phone, acknowledged: true });
   assert.equal((await reply(corrected, 'yes')).result.ignored, true);
-  check('manual pending/confirmation and correction override automation; stale revisions, superseded requests and ABA phones cannot resolve');
+  check('manual pending remains unresolved; manual confirmation and correction override automation; stale revisions, superseded requests and ABA phones cannot resolve');
 
   const transportArgs = message => ({ message, to: message.metadata.recipient, sender: t.sender, useTemplate: true,
     templateName: message.metadata.template_name, templateLanguage: message.metadata.template_language, templateComponents: message.metadata.template_components });

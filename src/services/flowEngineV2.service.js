@@ -4405,6 +4405,7 @@ async function handleSendWhatsapp(node, context, runtime) {
 
   conversation = await findCanonicalWhatsappConversation({
     requireExactContact: true,
+    isolatePatientContact: mobileProtocol,
     clinicId,
     contactId: recipientData.recipient,
     patientId: targetPatientId,
@@ -4449,6 +4450,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     }
     conversation = await findCanonicalWhatsappConversation({
       requireExactContact: true,
+      isolatePatientContact: mobileProtocol,
       clinicId,
       contactId: recipientData.recipient,
       patientId: targetPatientId,

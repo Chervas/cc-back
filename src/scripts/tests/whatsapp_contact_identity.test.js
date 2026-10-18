@@ -2,12 +2,13 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const phone=require('../../lib/phone');
 function fixture(rows){
- const changes=[],deletions=[];for(const r of rows)r.update=async p=>{changes.push(p);Object.assign(r,p)};
+ const changes=[],deletions=[],observed=[];for(const r of rows)r.update=async p=>{changes.push(p);Object.assign(r,p)};
  const Op={or:Symbol('or'),in:Symbol('in')};
  const db={Sequelize:{Op},Conversation:{findAll:async()=>rows,destroy:async x=>deletions.push(x)}};
- const s={module:{exports:{}},require:n=>n==='../../models'?db:n==='./phone'?phone:{},process:{env:{}},Date,Number,Map,Set};
+ const observer={observeConversation:async row=>{observed.push(row.id);return row;}};
+ const s={module:{exports:{}},require:n=>n==='../../models'?db:n==='./phone'?phone:n==='../services/temporaryPatientDirection.service'?observer:{},process:{env:{}},Date,Number,Map,Set};
  vm.createContext(s);vm.runInContext(fs.readFileSync(require.resolve('../../lib/canonical-conversation'),'utf8'),s);
- return {run:args=>s.module.exports.findCanonicalWhatsappConversation({clinicId:2,...args}),changes,deletions};
+ return {run:args=>s.module.exports.findCanonicalWhatsappConversation({clinicId:2,...args}),changes,deletions,observed};
 }
 test('international identity never collapses countries with the same nine-digit suffix',()=>{
  const a=phone.getPhoneIdentityCandidates('+213665519703'),b=phone.getPhoneIdentityCandidates('+34665519703');
@@ -17,10 +18,12 @@ test('opening a patient with an old phone keeps the current chat address and his
  const row={id:3,clinic_id:2,patient_id:4,contact_id:'+213555902016'};const f=fixture([row]);
  assert.equal((await f.run({patientId:4,contactId:'665519703'})).id,3);
  assert.equal(row.contact_id,'+213555902016');assert.equal(f.changes.length,0);assert.equal(f.deletions.length,0);
+ assert.deepEqual(f.observed,[3]);
 });
 test('the same patient can have two numbers without merging their histories',async()=>{
  const f=fixture([{id:3,patient_id:4,contact_id:'+213665519703'},{id:8,patient_id:4,contact_id:'+34665519703'}]);
  assert.equal((await f.run({patientId:4,contactId:'+213665519703'})).id,3);assert.equal(f.deletions.length,0);
+ assert.deepEqual(f.observed,[3]);assert.equal(f.changes.length,0);
 });
 test('a phone owned by another patient cannot be silently reassigned',async()=>{
  const f=fixture([{id:3,patient_id:99,contact_id:'+34665519703'}]);

@@ -36,6 +36,7 @@ function createRuntime(deps) {
       || !C.phone(m.phone) || C.phone(patient.telefono_movil) !== C.phone(m.phone)) return false;
     const newest = await latest(request.patient_id, transaction);
     if (Number(newest?.id) !== Number(request.id)) return false;
+    if (!(await state(request, transaction)).current) return false;
     const belongs = Number(patient.clinica_id) === Number(request.clinic_id) || await db.PacienteClinica.findOne({
       where: { paciente_id: request.patient_id, clinica_id: request.clinic_id }, transaction });
     if (!belongs) return false;
@@ -91,6 +92,20 @@ function createRuntime(deps) {
     return rows[0];
   }
 
+  async function invalidateForPhoneChange({ patientId, actorId, previousPhone, nextPhone, transaction }) {
+    if (C.phone(previousPhone) === C.phone(nextPhone)) return { invalidated: false };
+    const request = await latest(patientId, transaction);
+    if (!request) return { invalidated: false };
+    const previous = await state(request, transaction);
+    if (!previous.current) return { invalidated: false };
+    // A generic master edit does not request another verification. It only
+    // retires existing evidence, so A -> B -> A cannot revive an old reply.
+    await transition(request, previous, { current: false, reason: 'phone_changed', provenance: 'manual_review',
+      actor_user_id: actorId, resolved_at: now().toISOString() }, transaction, true);
+    await closeTasks(request, transaction, 'superseded');
+    await wake(request, transaction);
+    return { invalidated: true, request_event_id: Number(request.id) };
+  }
   // Only explicit reception acceptance/correction calls this producer. There
   // is deliberately no scan for historical requests or generic phone changes.
   async function recordRequest(values, { transaction }) {
@@ -354,6 +369,7 @@ function createRuntime(deps) {
         if (transport.status !== 'delivery_failed' || !transport.message && !failedSend) return done('on_fail', { applied: false, reason: 'delivery_failure_required' });
       }
       const updated = await transition(request, previous, { state: result, reason, provenance: proof ? 'patient_reply' : 'automation',
+        actor_user_id: null,
         inbound_message_id: proof?.response_message_id || null, resolved_at: now().toISOString(),
         accepted_at: transport.message?.metadata?.provider_acceptance_at || null, delivery_status: transport.delivery_status || 'accepted' }, transaction, true);
       if (result === 'confirmed') await closeTasks(request, transaction, 'patient_confirmed');
@@ -477,14 +493,50 @@ function createRuntime(deps) {
     }
     if (previous.manually_resolved || previous.state === 'confirmed') return { unchanged: true };
     await transition(request, previous, { state: payload.action === 'confirm' ? 'confirmed' : previous.state,
-      reason: payload.action === 'confirm' ? null : previous.reason, provenance: 'manual_review', actor_user_id: actorId,
+      reason: payload.action === 'confirm' ? null : previous.reason,
+      provenance: payload.action === 'confirm' ? 'manual_review' : 'manual_pending', actor_user_id: actorId,
       manually_resolved: payload.action === 'confirm', resolved_at: payload.action === 'confirm' ? now().toISOString() : previous.resolved_at }, transaction, payload.action === 'confirm');
     if (payload.action === 'confirm') await closeTasks(request, transaction, 'manual_confirmed');
     await wake(request, transaction);
     return { confirmed: payload.action === 'confirm', pending: payload.action === 'pending' };
   }
-  return { recordRequest, dispatch, sendPreflight, sendEnvelope, waitContext, resolveAction, attestAnalysis, withNotification,
+  return { recordRequest, invalidateForPhoneChange, dispatch, sendPreflight, sendEnvelope, waitContext, resolveAction, attestAnalysis, withNotification,
     authorizeTransport, inbound, view, manual, state, current };
+}
+function originRuntime(db) {
+  return createRuntime({ db,
+    enqueueJob: (...args) => require('./jobRequests.service').enqueueUniqueJobRequest(...args),
+    wake: (execution, transaction) => wakeNativeJob(db, execution, transaction),
+    notificationUpdated: notification => require('./notificationsRealtime.service').emitNotificationUpdated(notification),
+  });
+}
+// Existing generic reception editors need invalidation, not a second producer.
+// Keep their mobile write and retirement of the old verification atomic. Empty
+// or equivalent-phone edits retain their ordinary save path and never emit work.
+async function withPatientMobileChange({ db, patientId, clinicId, nextClinicId = clinicId,
+  previousPhone, nextPhone, actorId, authorizeCurrent }, save) {
+  if (C.phone(previousPhone) === C.phone(nextPhone)) return save();
+  return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+    const clinicIds = new Set();
+    for (const id of new Set([Number(clinicId), Number(nextClinicId)])) {
+      for (const groupId of await require('./patientPrivacyProfile.service').groupClinicIds(db, id, transaction)) clinicIds.add(groupId);
+    }
+    for (const id of [...clinicIds].sort((a, b) => a - b)) {
+      await db.Clinica.findByPk(id, { transaction, lock: transaction.LOCK.UPDATE });
+    }
+    const patient = await db.Paciente.findByPk(patientId, { transaction, lock: transaction.LOCK.UPDATE });
+    if (!patient || Number(patient.clinica_id) !== Number(clinicId)
+      || C.phone(patient.telefono_movil) !== C.phone(previousPhone)) throw fail('mobile_verification_changed');
+    if (authorizeCurrent) await authorizeCurrent(patient);
+    const result = await save(transaction);
+    await originRuntime(db).invalidateForPhoneChange({ patientId, actorId, previousPhone, nextPhone, transaction });
+    return result;
+  }).catch(error => {
+    if (['ER_LOCK_DEADLOCK', 'ER_LOCK_WAIT_TIMEOUT'].includes(error.original?.code || error.parent?.code || error.code)) {
+      throw fail('mobile_verification_changed');
+    }
+    throw error;
+  });
 }
 
 let runtime;
@@ -517,10 +569,6 @@ function current() {
   }
   return runtime;
 }
-module.exports = { createRuntime, current,
-  recordRequest: ({ db, ...values }, options) => createRuntime({ db,
-    enqueueJob: (...args) => require('./jobRequests.service').enqueueUniqueJobRequest(...args),
-    wake: (execution, transaction) => wakeNativeJob(db, execution, transaction),
-    notificationUpdated: notification => require('./notificationsRealtime.service').emitNotificationUpdated(notification),
-  }).recordRequest(values, options),
+module.exports = { createRuntime, current, withPatientMobileChange,
+  recordRequest: ({ db, ...values }, options) => originRuntime(db).recordRequest(values, options),
 };

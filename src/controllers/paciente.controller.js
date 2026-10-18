@@ -2200,6 +2200,7 @@ exports.updatePaciente = async (req, res) => {
       return res.status(404).json({ message: 'Paciente not found' });
     }
     const nextClinicaId = req.body.clinica_id !== undefined ? req.body.clinica_id : paciente.clinica_id;
+    const previousClinicaId = paciente.clinica_id;
     const previousTelefono = paciente.telefono_movil;
     await assertPatientEditAccess(req, paciente.clinica_id);
     if (Number(nextClinicaId) !== Number(paciente.clinica_id)) {
@@ -2256,7 +2257,15 @@ exports.updatePaciente = async (req, res) => {
         paciente[field] = req.body[field];
       }
     });
-    await paciente.save();
+    await require('../services/patientMobileVerification.service').withPatientMobileChange({
+      db: require('../../models'), patientId: paciente.id_paciente, clinicId: previousClinicaId,
+      nextClinicId: nextClinicaId, previousPhone: previousTelefono, nextPhone: paciente.telefono_movil,
+      actorId: req.userData?.userId || null,
+      authorizeCurrent: async currentPatient => {
+        await assertPatientEditAccess(req, currentPatient.clinica_id);
+        if (Number(nextClinicaId) !== Number(currentPatient.clinica_id)) await assertPatientEditAccess(req, nextClinicaId);
+      },
+    }, transaction => paciente.save(transaction ? { transaction } : undefined));
     if (req.body.telefono_movil !== undefined) {
       await resolveWhatsappNumberRestrictionAfterChange({
         patientId: paciente.id_paciente,
@@ -2270,6 +2279,9 @@ exports.updatePaciente = async (req, res) => {
       paciente
     });
   } catch (error) {
+    if (error.code === 'mobile_verification_changed') {
+      return res.status(409).json({ code: error.code, message: 'El móvil o la clínica de la ficha han cambiado. Vuelve a revisar los datos.' });
+    }
     if (error.status === 400 && ['invalid_patient_profile_field', 'invalid_patient_declared_origin'].includes(error.message)) {
       return res.status(400).json({ message: 'Datos de la ficha del paciente inválidos', error: error.message, details: error.details });
     }
@@ -2325,10 +2337,13 @@ exports.transferirContacto = async (req, res) => {
     }
 
     // Actualizar paciente con sus datos de contacto
-    await paciente.update({
-      telefono_movil: normPhone || paciente.telefono_movil,
-      email: normEmail || paciente.email
-    });
+    const contactPatch = { telefono_movil: normPhone || paciente.telefono_movil, email: normEmail || paciente.email };
+    await require('../services/patientMobileVerification.service').withPatientMobileChange({
+      db: require('../../models'), patientId: paciente.id_paciente, clinicId: paciente.clinica_id,
+      previousPhone: paciente.telefono_movil, nextPhone: contactPatch.telefono_movil,
+      actorId: req.userData?.userId || null,
+      authorizeCurrent: currentPatient => assertPatientEditAccess(req, currentPatient.clinica_id),
+    }, transaction => paciente.update(contactPatch, transaction ? { transaction } : undefined));
 
     // Cerrar relaciones de tutoría como contacto principal
     await PacienteRelacion.update(
@@ -2342,6 +2357,9 @@ exports.transferirContacto = async (req, res) => {
 
     res.json({ message: 'Contacto transferido al paciente', paciente: updated });
   } catch (error) {
+    if (error.code === 'mobile_verification_changed') {
+      return res.status(409).json({ code: error.code, message: 'El móvil o la clínica de la ficha han cambiado. Vuelve a revisar los datos.' });
+    }
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
     res.status(500).json({ message: 'Error al transferir contacto', error: error.message });

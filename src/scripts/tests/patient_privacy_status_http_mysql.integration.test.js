@@ -314,7 +314,46 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
       assert.equal(verified.items[0].state, 'confirmed'); assert.equal(verified.items[0].actor_user_id, ids.reception);
       assert.equal(verified.items[0].provenance, 'manual_review'); assert(verified.items[0].resolved_at);
       assert.equal((await master.reload()).telefono_movil, '34000000009');
+      const correctionBody = { clinic_id: 72, action: 'correct', request_event_id: verified.items[0].request_event_id,
+        revision: verified.items[0].revision, phone: '34000000010', acknowledged: true };
+      await expect('POST', verificationPath, { ...correctionBody, acknowledged: false }, reception, 400);
+      assert.equal((await master.reload()).telefono_movil, '34000000009');
+      const replacement = await expect('POST', verificationPath, correctionBody, reception, 200);
+      assert.equal(replacement.corrected, true);
+      const replacementEvent = await db.PatientOperationalEvent.findByPk(replacement.request_event_id);
+      assert.equal(replacementEvent.source, 'reception_mobile_verification');
+      assert.equal(replacementEvent.metadata.document_id, docs[0].id);
+      assert.equal(replacementEvent.metadata.snapshot_hash, frozenDoc.snapshot_hash);
+      assert.equal(replacementEvent.metadata.previous_phone, '34000000009');
+      assert.equal(replacementEvent.metadata.phone, '34000000010');
+      assert.equal(replacementEvent.metadata.delivery_enabled, false);
+      assert.equal((await master.reload()).telefono_movil, '34000000010');
+      await expect('POST', verificationPath, correctionBody, reception, 409);
+      const correctedState = await expect('GET', `${verificationPath}?clinic_id=72`, undefined, reception, 200);
+      assert.equal(correctedState.items[0].request_event_id, replacement.request_event_id);
+      assert.equal(correctedState.items[0].current, true);
+      assert.equal(correctedState.items[1].current, false);
+      assert(!JSON.stringify(correctedState).includes('reply_token'));
+      const pendingBody = { clinic_id: 72, action: 'pending', request_event_id: replacement.request_event_id,
+        revision: correctedState.items[0].revision };
+      await expect('POST', verificationPath, pendingBody, reception, 200);
+      const keptPending = await expect('GET', `${verificationPath}?clinic_id=72`, undefined, reception, 200);
+      assert.equal(keptPending.items[0].state, 'pending');
+      assert.equal(keptPending.items[0].provenance, 'manual_pending');
+      assert.equal(keptPending.items[0].manually_resolved, false);
+      assert.equal(keptPending.items[0].resolved_at, null);
+      const concurrentBody = { ...pendingBody, action: 'confirm', revision: keptPending.items[0].revision };
+      const competing = await Promise.all([request('POST', verificationPath, concurrentBody, reception),
+        request('POST', verificationPath, { ...concurrentBody, action: 'pending' }, reception)]);
+      assert.deepEqual(competing.map(row => row.status).sort(), [200, 409], 'Same-revision native mutations serialize with one CAS winner');
+      const finalProjection = await expect('GET', `${verificationPath}?clinic_id=72`, undefined, reception, 200);
+      if (finalProjection.items[0].state !== 'confirmed') {
+        await expect('POST', verificationPath, { ...concurrentBody, revision: finalProjection.items[0].revision }, reception, 200);
+      }
+      assert.equal((await master.reload()).telefono_movil, '34000000010');
+      assert.deepEqual((await existingChat.reload()).toJSON(), oldChat, 'Manual verification/correction never transports or merges an old-number conversation');
       owned.report.checks.push('Native JWT/MFA/ACL patient-mobile routes: explicit reception acceptance produces an inactive request, scoped/token-free GET, forbidden and stale POST rejected, audited manual confirmation without sending');
+      owned.report.checks.push('Native reception correction requires explicit acknowledgement and creates one disabled replacement using the same document receipt; manual-pending stays unresolved; concurrent same-revision actions have one CAS winner; old request and chat stay retired/immutable');
       assert.deepEqual((await docs[0].reload()).toJSON(), frozenDoc, 'Explicit safe contact copy never changes the signed source snapshot');
       const refused = await require('../../lib/bs-privacy-commercial-preferences').commercialRefusals({ db,
         clinicIds: [72], patientIds: [patientId] });

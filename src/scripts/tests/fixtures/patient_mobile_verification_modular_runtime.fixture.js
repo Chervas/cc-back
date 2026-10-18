@@ -94,7 +94,10 @@ module.exports = async function modularRuntime({ sql, models: db }) {
   const deps = { db, engine, stop, now: () => t.clock, enabled: () => t.enabled, enqueueJob: requests.enqueueUniqueJobRequest,
     authorizeActor: async () => { if (t.blocked) throw Error('TESTONLY_ACCESS_DENIED'); }, patientHeld: async () => t.held,
     communicationAllowed: async () => { if (t.blocked) throw Error('TESTONLY_COMMUNICATION_BLOCKED'); },
-    checkCorrection: async () => { if (t.blocked) throw Error('TESTONLY_COLLISION'); }, groupClinicIds: async () => [72, 73],
+    checkCorrection: async args => {
+      if (t.checkCorrection) return t.checkCorrection(args);
+      if (t.blocked) throw Error('TESTONLY_COLLISION');
+    }, groupClinicIds: async () => [72, 73],
     wake: async (execution, transaction) => sql.query("UPDATE JobRequests SET next_run_at=:at WHERE type='automations_v2_execute' AND status IN ('pending','waiting') AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.execution_id'))=:id", {
       replacements: { at: execution.wait_until, id: String(execution.id) }, transaction }) };
   runtime = createRuntime(deps);
