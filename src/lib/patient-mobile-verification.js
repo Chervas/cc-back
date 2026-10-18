@@ -130,7 +130,7 @@ function graphValid(nodes) {
 function isFlow(execution) { return execution?.trigger_type === REQUEST; }
 
 function templateValid(template) {
-  if (!template || template.status !== 'APPROVED' || template.is_active === false
+  if (!template || template.status !== 'APPROVED' || template.is_active === false || template.is_active === 0
     || template.category !== 'UTILITY') return false;
   const components = template.components;
   if (!Array.isArray(components)) return false;

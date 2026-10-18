@@ -711,6 +711,7 @@ async function createDefaultAutomationsForClinic({ clinicId }) {
     assignmentScope: 'clinic',
     groupId: null,
   });
+  await require('./patientMobileVerificationLifecycle.service').signal(clinicId);
 
   return {
     automations: createdCount,
@@ -782,6 +783,7 @@ async function enqueueDefaultAutomations(data) {
 }
 
 module.exports = {
+  publishClinicTemplateVersion,
   catalogTemplateMatchesDesired,
   createDefaultAutomationsForClinic,
   ensureCatalogTemplateForClinic,

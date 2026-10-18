@@ -440,6 +440,7 @@ async function handleCriticalTick() {
 
 async function handleStandardTick() {
   if (IS_GATEWAY_RUNTIME) return 0;
+  if (process.env.PATIENT_MOBILE_VERIFICATION_ENABLED === 'true') await require('./patientMobileVerificationLifecycle.service').tick();
   if (externalDispatcher) {
     return externalDispatcher('standard');
   }

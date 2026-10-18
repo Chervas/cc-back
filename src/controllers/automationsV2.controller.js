@@ -2900,6 +2900,13 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
   return base;
 }
 
+async function withMobileLifecycle(mapped, cache = new Map()) {
+  if (mapped.trigger_type !== 'patient.mobile_verification_requested' || !mapped.clinic_id || mapped.is_system) return mapped;
+  const lifecycle = require('../services/patientMobileVerificationLifecycle.service');
+  if (!cache.has(mapped.clinic_id)) cache.set(mapped.clinic_id, lifecycle.current().inspect(mapped.clinic_id));
+  return { ...mapped, mobile_verification: lifecycle.publicState(await cache.get(mapped.clinic_id)) };
+}
+
 function stripCatalogClinicScopeSuffixes(rawTemplateKey) {
   const normalized = cleanString(rawTemplateKey);
   if (!normalized) return null;
@@ -5790,18 +5797,19 @@ exports.listTemplates = async (req, res) => {
       visibleRows.map((row) => row.public_id || row.template_key)
     );
     const hiddenManagedRows = rows.length - visibleRows.length;
+    const mobileLifecycleCache = new Map();
 
     return res.json({
       success: true,
-      data: visibleRows.map((row) =>
-        mapTemplateWithLifecycle(row, {
+      data: await Promise.all(visibleRows.map((row) =>
+        withMobileLifecycle(mapTemplateWithLifecycle(row, {
           includeNodes,
           access,
           clinicNameMap,
           catalogBindingMap,
           latestActivePublishedVersionMap,
-        })
-      ),
+        }), mobileLifecycleCache)
+      )),
       pagination: {
         total: Math.max(visibleRows.length, count - hiddenManagedRows),
         limit,
@@ -6175,6 +6183,18 @@ exports.updateTemplateDraft = async (req, res) => {
       const wasActive = row.is_active !== false;
       const nextActive = parseBool(body.is_active, row.is_active);
 
+      if (row.trigger_type === 'patient.mobile_verification_requested') {
+        const lifecycle = require('../services/patientMobileVerificationLifecycle.service');
+        const stopped = await lifecycle.current().setEnabled(row, nextActive, access.user_id);
+        const current = await AutomationFlowTemplateV2.findOne({ where: { ...familyWhere, published_at: { [Op.ne]: null } },
+          order: [['version', 'DESC'], ['id', 'DESC']] });
+        const clinicNameMap = await loadClinicNameMapFromRows([current]);
+        const catalogBindingMap = await loadCatalogBindingMapForRows([current]);
+        return res.json({ success: true, data: await withMobileLifecycle(mapTemplateWithLifecycle(current, {
+          includeNodes: true, access, clinicNameMap, catalogBindingMap,
+        })), ...(!nextActive ? { stopped } : {}) });
+      }
+
       if (nextActive && !wasActive) {
         const readiness = await leadAutoReplyService.validateFlowActivation(row);
         if (readiness.managed && !readiness.ready) {
@@ -6354,7 +6374,7 @@ exports.updateTemplateDraft = async (req, res) => {
     });
   } catch (err) {
     console.error('Error updateTemplateDraft v2', err);
-    return res.status(500).json({ success: false, error: 'update_failed', message: err.message });
+    return res.status(err.statusCode || 500).json({ success: false, error: 'update_failed', message: err.message });
   }
 };
 
@@ -6487,10 +6507,25 @@ exports.publishTemplateVersion = async (req, res) => {
       });
     }
 
-    const activateOnPublish = triggerResolution.trigger_type !== 'patient.mobile_verification_requested'
-      || process.env.PATIENT_MOBILE_VERIFICATION_ENABLED === 'true' && !row.is_system && !!row.clinic_id
-        && require('../lib/patient-mobile-verification').configValid(triggerConfigResolution.trigger_config);
+    let activateOnPublish = triggerResolution.trigger_type !== 'patient.mobile_verification_requested';
     await db.sequelize.transaction(async (transaction) => {
+      if (row.trigger_type === 'patient.mobile_verification_requested' && row.clinic_id && !row.is_system) {
+        const lifecycle = require('../services/patientMobileVerificationLifecycle.service');
+        const clinic = await db.Clinica.findByPk(row.clinic_id, { transaction, lock: transaction.LOCK.UPDATE });
+        if (clinic.configuracion?.patient_mobile_verification?.enabled == null) {
+          const previous = await AutomationFlowTemplateV2.findOne({ where: { clinic_id: row.clinic_id,
+            trigger_type: row.trigger_type, published_at: { [Op.ne]: null } }, order: [['version', 'DESC'], ['id', 'DESC']], transaction });
+          const legacyStop = previous && !previous.is_active && require('../lib/patient-mobile-verification').configValid(previous.trigger_config);
+          await clinic.update({ configuracion: { ...clinic.configuracion,
+            patient_mobile_verification: { enabled: !legacyStop, source: 'native_publication' } } }, { transaction });
+        }
+        const candidate = { ...row.toJSON(), nodes: normalizedNodes, trigger_config: triggerConfigResolution.trigger_config,
+          published_at: new Date(), is_active: true };
+        const otherFamilies = await AutomationFlowTemplateV2.findAll({ where: { clinic_id: row.clinic_id,
+          trigger_type: row.trigger_type, public_id: { [Op.ne]: row.public_id } }, transaction });
+        const state = await lifecycle.current().inspect(row.clinic_id, { clinic, rows: [candidate, ...otherFamilies], transaction });
+        activateOnPublish = state.ready && require('../lib/patient-mobile-verification').configValid(candidate.trigger_config);
+      }
       await AutomationFlowTemplateV2.update(
         { is_active: false },
         {

@@ -47,6 +47,7 @@ function createService({
       previousHealth,
     });
     if (!health) throw Object.assign(new Error('whatsapp_authorized_binding_changed'), { code: 'whatsapp_authorized_binding_changed' });
+    await require('./patientMobileVerificationLifecycle.service').signal(Number(clinicId));
     return { profile, health: health.health };
   }
   return Object.freeze({ refresh });

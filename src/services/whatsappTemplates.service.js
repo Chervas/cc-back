@@ -3319,6 +3319,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
 
   await enqueueStalePendingTemplateResubmissions({ wabaId, now });
   await whatsappInboxAdminSync.markReconciled(wabaId, syncStartedAt);
+  await require('./patientMobileVerificationLifecycle.service').signal();
 }
 
 async function enqueueCreateTemplatesJob(data) {

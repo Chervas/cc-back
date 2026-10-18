@@ -72,7 +72,7 @@ async function upsertClinicBinding({
     throw error;
   }
 
-  return db.sequelize.transaction(async (transaction) => {
+  const binding = await db.sequelize.transaction(async (transaction) => {
     const [clinic, asset] = await Promise.all([
       Clinica.findByPk(normalizedClinicId, {
         attributes: ['id_clinica', 'grupoClinicaId'],
@@ -122,6 +122,8 @@ async function upsertClinicBinding({
       updated_by: toInt(actorUserId),
     }, { transaction });
   });
+  await require('./patientMobileVerificationLifecycle.service').signal(normalizedClinicId);
+  return binding;
 }
 
 async function removeClinicBinding({ clinicId, role, actorUserId = null }) {

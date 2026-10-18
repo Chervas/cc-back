@@ -92,6 +92,7 @@ module.exports = async function modularRuntime({ sql, models: db }) {
     }
   });
   const deps = { db, engine, stop, now: () => t.clock, enabled: () => t.enabled, enqueueJob: requests.enqueueUniqueJobRequest,
+    deliveryReady: (...args) => t.deliveryReady ? t.deliveryReady(...args) : true,
     authorizeActor: async () => { if (t.blocked) throw Error('TESTONLY_ACCESS_DENIED'); }, patientHeld: async () => t.held,
     communicationAllowed: async () => { if (t.blocked) throw Error('TESTONLY_COMMUNICATION_BLOCKED'); },
     checkCorrection: async args => {

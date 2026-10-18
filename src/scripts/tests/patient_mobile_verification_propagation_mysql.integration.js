@@ -57,6 +57,7 @@ withIsolatedCampaignMysql(async scope => {
 
   const controller = loadSource('../controllers/automationsV2.controller', { '../../models': db,
     '../services/leadAutoReply.service': { validateFlowActivation: async () => ({ managed: false, ready: true }) },
+    '../services/patientMobileVerificationLifecycle.service': { current: () => ({ inspect: async () => ({ ready: false }) }) },
   }, { PATIENT_MOBILE_VERIFICATION_ENABLED: 'false' }, 10000);
   const invoke = async (handler, params, body, subject = controller) => {
     const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(value) { this.body = value; return this; } };
@@ -88,6 +89,7 @@ withIsolatedCampaignMysql(async scope => {
 
   const enabledController = loadSource('../controllers/automationsV2.controller', { '../../models': db,
     '../services/leadAutoReply.service': { validateFlowActivation: async () => ({ managed: false, ready: true }) },
+    '../services/patientMobileVerificationLifecycle.service': { current: () => ({ inspect: async () => ({ ready: true }) }) },
   }, { PATIENT_MOBILE_VERIFICATION_ENABLED: 'true' }, 10000);
   const next = await invoke('createTemplateDraft', {}, definition, enabledController);
   const active = await invoke('publishTemplateVersion', { template_ref: next.public_id, version: next.version }, {}, enabledController);
@@ -96,5 +98,5 @@ withIsolatedCampaignMysql(async scope => {
   const masterDraft = await invoke('createTemplateDraft', {}, master, enabledController);
   const publishedMaster = await invoke('publishTemplateVersion', { template_ref: masterDraft.public_id, version: masterDraft.version }, {}, enabledController);
   assert.equal(publishedMaster.is_active, false);
-  report.checks.push('enabled gate activates exactly the configured local version; the configured system master still never activates');
+  report.checks.push('enabled gate plus simulated sender/template readiness activates exactly the configured local version; the configured system master still never activates');
 }).catch(error => { console.error(error.stack || error); process.exitCode = 1; });

@@ -120,7 +120,9 @@ function createRuntime(deps) {
       }
     }
     const template = enabled() ? await localTemplate(values.clinic_id, transaction) : null;
-    const permitted = !!template && rawTime(template.trigger_config.enabled_after) <= +now();
+    const permitted = !!template && rawTime(template.trigger_config.enabled_after) <= +now()
+      && rawTime(values.occurred_at || now()) >= rawTime(template.trigger_config.enabled_after)
+      && (!deps.deliveryReady || await deps.deliveryReady(values.clinic_id, transaction));
     const request = await events.create({ ...values, event_type: C.REQUEST, metadata: { ...values.metadata,
       schema_version: C.SCHEMA, phone: C.phone(values.metadata.phone), state: 'pending', delivery_enabled: permitted,
       reply_token: randomBytes(18).toString('hex'),
@@ -192,6 +194,7 @@ function createRuntime(deps) {
     if (!enabled() || request.metadata.delivery_enabled !== true || !C.timeout(request.metadata.response_timeout_minutes)
       || !patient || !await current(request, patient) || !snapshot.current || snapshot.state !== 'pending'
       || snapshot.provenance === 'manual_review') return { suppressed: true };
+    if (deps.deliveryReady && !await deps.deliveryReady(request.clinic_id)) throw fail('mobile_verification_communication_blocked');
     await communicationAllowed(request);
     const candidates = await db.Conversation.findAll({ where: { clinic_id: request.clinic_id, channel: 'whatsapp',
       contact_id: { [Op.in]: require('../lib/phone').getPhoneIdentityCandidates(request.metadata.phone) } }, limit: 3 });
@@ -225,6 +228,7 @@ function createRuntime(deps) {
     if (!request || Number(request.id) !== requestId || request.metadata.delivery_enabled !== true
       || message.automation_delivery_key !== `mobile-verification:${requestId}:outbound`
       || C.phone(to) !== C.phone(request.metadata.phone) || !useTemplate) return deny('mobile_verification_recipient_mismatch');
+    if (deps.deliveryReady && !await deps.deliveryReady(request.clinic_id)) return deny('mobile_verification_delivery_unavailable');
     const patient = await db.Paciente.findByPk(request.patient_id), snapshot = await state(request);
     if (!patient || !await current(request, patient) || !snapshot.current || snapshot.state !== 'pending'
       || snapshot.provenance === 'manual_review') return deny('mobile_verification_superseded');
@@ -505,6 +509,8 @@ function createRuntime(deps) {
 }
 function originRuntime(db) {
   return createRuntime({ db,
+    deliveryReady: (clinicId, transaction) => require('./patientMobileVerificationLifecycle.service').current()
+      .inspect(clinicId, { transaction }).then(state => state.ready && state.status === 'active'),
     enqueueJob: (...args) => require('./jobRequests.service').enqueueUniqueJobRequest(...args),
     wake: (execution, transaction) => wakeNativeJob(db, execution, transaction),
     notificationUpdated: notification => require('./notificationsRealtime.service').emitNotificationUpdated(notification),
@@ -549,6 +555,8 @@ function current() {
   if (!runtime) {
     const db = require('../../models');
     runtime = createRuntime({ db, engine: require('./flowEngineV2.service'), stop: require('../lib/automation-runtime-stop'),
+      deliveryReady: (clinicId, transaction) => require('./patientMobileVerificationLifecycle.service').current()
+        .inspect(clinicId, { transaction }).then(state => state.ready && state.status === 'active'),
       enqueueJob: require('./jobRequests.service').enqueueUniqueJobRequest,
       wake: (execution, transaction) => wakeNativeJob(db, execution, transaction),
       communicationAllowed: require('./marketingOptOut.service').assertAutomationCommunicationAllowed,

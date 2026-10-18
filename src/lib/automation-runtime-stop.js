@@ -200,7 +200,7 @@ async function stopExecution(execution) {
   return execution;
 }
 
-async function setActive(template, active) {
+async function setActive(template, active, { mobilePolicyActor } = {}) {
   if (active && template.trigger_type === 'patient.mobile_verification_requested'
     && (process.env.PATIENT_MOBILE_VERIFICATION_ENABLED !== 'true'
       || template.is_system || !template.clinic_id || !template.published_at
@@ -211,9 +211,18 @@ async function setActive(template, active) {
   const db = models();
   const updatedStates = [];
   const summary = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+    if (template.trigger_type === 'patient.mobile_verification_requested' && template.clinic_id && mobilePolicyActor != null) {
+      const clinic = await db.Clinica.findByPk(template.clinic_id, { transaction, lock: transaction.LOCK.UPDATE });
+      await clinic.update({ configuracion: { ...clinic.configuracion, patient_mobile_verification: {
+        enabled: active === true, updated_by: mobilePolicyActor, updated_at: new Date().toISOString() } } }, { transaction });
+    }
     const rows = await familyRows(template, transaction);
     const current = rows.find(row => Number(row.id) === Number(template.id));
     if (!current) throw Error('template_version_not_found');
+    if (mobilePolicyActor != null && template.trigger_type === 'patient.mobile_verification_requested'
+      && Number(latestPublished(rows)?.id) !== Number(current.id)) {
+      throw Object.assign(Error('mobile_verification_version_changed'), { statusCode: 409 });
+    }
     await current.update({ is_active: active === true }, { transaction });
     const latest = latestPublished(rows);
     const summary = { cancelled_executions: 0, cancelled_jobs: 0, cancelled_messages: 0, cancelled_emails: 0 };

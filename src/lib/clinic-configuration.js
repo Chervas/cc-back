@@ -178,6 +178,9 @@ function mergeClinicConfiguration(currentValue, patchValue) {
 
   const current = parseConfiguration(currentValue);
   const patch = { ...patchValue };
+  // The automation switch owns this policy. A stale settings form must not
+  // undo an explicit stop while saving unrelated clinic configuration.
+  delete patch.patient_mobile_verification;
 
   if (Object.prototype.hasOwnProperty.call(patch, 'patient_intake')) {
     if (!isPlainObject(patch.patient_intake)) {

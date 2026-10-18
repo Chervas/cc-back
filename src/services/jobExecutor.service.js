@@ -590,6 +590,7 @@ const JOB_HANDLERS = {
   ),
   automations_v2_execute: async (payload = {}, job, claim) => runAutomationFlowV2Job(payload, job, claim),
   patient_mobile_verification_dispatch: async payload => require('./patientMobileVerification.service').current().dispatch(payload),
+  patient_mobile_verification_reconcile: async payload => require('./patientMobileVerificationLifecycle.service').current().run(payload),
   appointment_visit_dispatch: async (payload = {}, job, claim) => require('./appointmentVisitManaged.service').current().runDispatch(payload, job, claim),
   automation_whatsapp_quiet_send: async (payload = {}) => flowEngineV2Service.runScheduledWhatsappSendJob(payload),
   whatsapp_authorized_dispatch_retry: async (payload, job, claim) => require('./whatsappDispatchWait.service').run(payload, job, claim),
