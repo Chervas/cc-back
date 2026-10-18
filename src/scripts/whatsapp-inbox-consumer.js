@@ -8,6 +8,7 @@ const scoped=require('../lib/whatsappInboxScopes');
 const health=require('../lib/whatsappInboxHealth');
 const {isIP}=require('node:net');
 const {buildDatabaseTlsOptions}=require('../lib/databaseTlsConfig');
+const {createInboxDatabaseSession}=require('../lib/whatsappInboxDatabaseSession');
 function databaseConfiguration(env=process.env){
   const host=env.DB_HOST,port=env.DB_PORT===undefined||env.DB_PORT===''?3306:Number(env.DB_PORT);
   if(typeof host!=='string'||host.length>253
@@ -28,10 +29,12 @@ const pollError=(code,stage,status)=>Object.assign(Error(code),{code,pollStage:s
 // The importer still rechecks that snapshot before every clinical transaction.
 async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requiresScoped,
   isStopping=()=>false, loadConfiguration=()=>scoped.configuration(env),
+  assertDatabaseOwnership=async()=>{},
   importScoped=scoped.importScopedLease, publish=health.publish,
   resumeReviews=(...args)=>require('../lib/whatsappInboxRoutingReview').resumeResolved(...args)}) {
   const scopes=loadConfiguration();
   if(requiresScoped && !scopes)throw Error('inbox_consumer_configuration_invalid');
+  await assertDatabaseOwnership();
   let listed;
   try{listed=await client.request('GET','/pending');}
   catch{throw pollError('inbox_pending_transport_unavailable','pending');}
@@ -45,6 +48,7 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
   for(const item of listed.data.receipts){
     if(isStopping())break;let raw;let lease;
     try{
+      await assertDatabaseOwnership();
       const result=await client.request('POST','/lease',{receipt:item.receipt});
       if(result.status!==200)continue;lease=result.data;
       if(lease.receipt!==item.receipt || typeof lease.rawBase64!=='string' || lease.rawBase64.length>4*1024*1024)throw Error();
@@ -53,12 +57,14 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
         || env.WHATSAPP_INBOX_RECOVERY_HOLD==='true'
         || !Number.isFinite(lease.receivedAt) || lease.receivedAt < Date.now()-120000
         || !!recoveryNotBefore && lease.receivedAt < Date.parse(recoveryNotBefore);
+      await assertDatabaseOwnership();
       const imported=scopes
         ? await importScoped(connection,{...lease,raw},scopes,{loadConfiguration,
           accountSyncEnabled:env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED==='true',
           routingReviewEnabled:env.WHATSAPP_INBOX_ROUTING_REVIEW_ENABLED==='true',
           playbackEnabled:env.WHATSAPP_INBOX_PLAYBACK_ENABLED==='true'})
         : await importLease(connection,{...lease,raw},scope);
+      await assertDatabaseOwnership();
       const ack=await client.request('POST','/confirm',{receipt:lease.receipt,lease:lease.lease,importReceipt:imported.importReceipt});
       if(ack.status!==200 || ack.data?.businessProcessed!==true)throw Error();
       settled++;
@@ -68,6 +74,7 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
         const deferred=await client.request('POST','/defer',{receipt:lease.receipt,lease:lease.lease,reason}).catch(()=>null);
         if(deferred?.status===200)settled++;
       }
+      if(error.inboxDatabaseUnavailable)throw error;
       process.stderr.write(JSON.stringify({event:'whatsapp_inbox_item_deferred',reason,
         ...(typeof item.receipt==='string'&&/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(item.receipt)?{receipt:item.receipt}:{}),
         ...(error.reviewDetail==='contact_binding_mismatch'?{detail:error.reviewDetail}:{})})+'\n');
@@ -76,6 +83,7 @@ async function pollOnce(connection, client, {env, scope, recoveryNotBefore, requ
   }
   if (scopes && env.WHATSAPP_INBOX_ROUTING_REVIEW_ENABLED === 'true'
     && listed.data.receipts.length < 20 && !isStopping()) {
+    await assertDatabaseOwnership();
     try { await resumeReviews(connection, client, scopes.scopes); }
     catch { process.stderr.write(JSON.stringify({event:'WHATSAPP_ROUTING_REVIEW_RESUME_UNAVAILABLE'})+'\n'); }
   }
@@ -91,24 +99,24 @@ async function main(env=process.env) {
   const scope={clinicId:19,wabaId:env.WHATSAPP_INBOX_WABA_ID,phoneId:env.WHATSAPP_INBOX_PHONE_ID};
   const recoveryNotBefore=env.WHATSAPP_INBOX_RECOVERY_NOT_BEFORE || null;
   if(recoveryNotBefore && !Number.isFinite(Date.parse(recoveryNotBefore)))throw Error('inbox_recovery_cutoff_invalid');
-  let stopping=false;let timer;let active;let connection;
+  let stopping=false;let timer;let active;let connection;let databaseSession;
   const stop=()=>{stopping=true;clearTimeout(timer);active?.();};process.once('SIGTERM',stop);process.once('SIGINT',stop);
   try{
-    connection=await mysql.createConnection(database);
-    // A dedicated connection lock prevents a second runtime from importing.
-    const [[owner]]=await connection.execute("SELECT GET_LOCK('cc-whatsapp-inbox-staging-v1',0) acquired");
-    if(owner.acquired!==1)throw Error('inbox_consumer_owner_exists');
     const tables = ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys'];
     if(env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED==='true')tables.push('WhatsappInboxAdminSync');
     if(env.WHATSAPP_INBOX_PLAYBACK_ENABLED==='true')tables.push('WhatsappInboxPlaybackImports');
     if(env.WHATSAPP_INBOX_ROUTING_REVIEW_ENABLED==='true')tables.push('WhatsappInboxRoutingReviews','WhatsappInboxRoutingReviewReceipts');
-    for(const table of tables) await connection.query('SELECT 1 FROM '+table+' LIMIT 0');
+    databaseSession=createInboxDatabaseSession({connect:()=>mysql.createConnection(database),tables,isStopping:()=>stopping});
+    connection=await databaseSession.open();
     while(!stopping){
       let nextPollMs=5000;
       try{
-        const listedCount=await pollOnce(connection,client,{env,scope,recoveryNotBefore,requiresScoped:!!scopes,isStopping:()=>stopping});
+        const listedCount=await pollOnce(connection,client,{env,scope,recoveryNotBefore,requiresScoped:!!scopes,isStopping:()=>stopping,
+          assertDatabaseOwnership:()=>databaseSession.assertOwnership()});
+        await databaseSession.assertOwnership();
         if(listedCount===20)nextPollMs=100;
       }catch(error){
+        if(error.inboxDatabaseUnavailable)throw error;
         const code=['inbox_pending_transport_unavailable','inbox_pending_http_error','inbox_pending_invalid_response',
           'inbox_health_publish_failed'].includes(error?.code)?error.code:'inbox_poll_unavailable';
         process.stderr.write(JSON.stringify({event:'WHATSAPP_INBOX_POLL_UNAVAILABLE',code,
@@ -116,7 +124,11 @@ async function main(env=process.env) {
       }
       if(!stopping)await new Promise(resolve=>{timer=setTimeout(resolve,nextPollMs);active=resolve;});
     }
-  }finally{client.close();await connection?.end().catch(()=>{});}
+  }catch(error){if(!stopping){
+    if(error.inboxDatabaseUnavailable)process.stderr.write(JSON.stringify({event:'WHATSAPP_INBOX_DATABASE_UNAVAILABLE',code:error.code})+'\n');
+    throw error;
+  }}
+  finally{client.close();await databaseSession?.close();process.removeListener('SIGTERM',stop);process.removeListener('SIGINT',stop);}
 }
 if(require.main===module)main().catch(()=>{process.stderr.write('WHATSAPP_INBOX_CONSUMER_STOPPED\n');process.exitCode=1;});
 module.exports={main,pollOnce,databaseConfiguration};
