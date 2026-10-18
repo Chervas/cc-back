@@ -11,6 +11,7 @@ const sequelize = new Sequelize(
   {
     host: cfg.host,
     dialect: cfg.dialect,
+    dialectOptions: cfg.dialectOptions,
     logging: false,          // quita o activa si quieres ver SQL por consola
   }
 );
