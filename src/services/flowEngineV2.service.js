@@ -6481,6 +6481,15 @@ async function processNode(node, context, runtime = {}) {
   }
 
   switch (nodeType) {
+    case 'action/request_mobile_verification':
+      if (simulation) return { kind: 'success', output: { simulated: true, no_send: true }, next_node_id: readOutputTarget(node, 'on_success') };
+      return require('./patientMobileVerification.service').current().requestAction({ execution: runtime.execution, node, context });
+    case 'delay/wait_mobile_verification':
+      if (simulation) return { kind: 'success', output: { simulated: true, no_send: true }, next_node_id: readOutputTarget(node, 'on_confirmed') };
+      return require('./patientMobileVerification.service').current().waitAction({ execution: runtime.execution, node, context });
+    case 'action/review_mobile_verification':
+      if (simulation) return { kind: 'success', output: { simulated: true, no_send: true }, next_node_id: readOutputTarget(node, 'on_success') };
+      return require('./patientMobileVerification.service').current().reviewAction({ execution: runtime.execution, node, context });
     case 'action/remind_google_review': {
       if (simulation) return { kind: 'success', output: { status: 'simulated', no_send: true }, next_node_id: readOutputTarget(node, 'on_success') };
       return require('./googleReviewReminder.service').current().action({ execution: runtime.execution, context, node });
@@ -8670,6 +8679,7 @@ module.exports = {
   _resolveAiAnalysisNextNode: resolveAiAnalysisNextNode,
   _handleChangeStatus: handleChangeStatus,
   resolveOperationalSubroleTargets,
+  _resolveTaskAssigneeUserIds: resolveTaskAssigneeUserIds,
   _buildReplyWhatsappConfig: buildReplyWhatsappConfig,
   _resolveLatestResponseMessageId: resolveLatestResponseMessageId,
   _resolveAutomationCommunicationScope: resolveAutomationCommunicationScope,

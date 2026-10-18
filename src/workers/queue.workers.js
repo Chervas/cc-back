@@ -288,7 +288,11 @@ async function buildInboundMessageDescriptor({ msg, clinicId }) {
                 } : null,
             },
         }
-        : {};
+        : rawType === 'button' && msg?.button ? {
+            button: { payload: cleanString(msg.button.payload)?.slice(0, 512) || null,
+                text: cleanString(msg.button.text)?.slice(0, 1024) || null },
+        } : {};
+    if (msg?.context?.id) metadataExtra.context = { id: cleanString(msg.context.id)?.slice(0, 512) || null };
     const mediaPayload = getWhatsAppMediaPayload(msg);
 
     if (mediaPayload) {
@@ -808,6 +812,22 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             resolveScheduled: value => require('../services/flowEngineV2.service').resolveScheduledWhatsappSenderConfig(value),
         });
         const whatsappChannelRole = resolveWhatsappChannelRole(effectiveClinicConfig);
+        if (messageMetadata.kind === 'patient_mobile_verification' || Object.hasOwn(messageMetadata, 'mobile_verification_request_id')) {
+            const check = await require('../services/patientMobileVerification.service').current().authorizeTransport({
+                message: msg, to, useTemplate, sender: effectiveClinicConfig, templateName, templateLanguage, templateComponents,
+            });
+            if (!check.allowed) {
+                msg.status = 'failed'; msg.metadata = { ...msg.metadata, error: check.reason, cancelled: true };
+                await msg.save();
+                return { skipped: true, reason: check.reason };
+            }
+            if (check.deferredUntil) {
+                await require('../services/flowEngineV2.service').enqueueQuietHoursWhatsappJob({
+                    messageId: msg.id, conversationId, scheduledAt: check.deferredUntil,
+                });
+                return { deferred: true, reason: 'quiet_hours' };
+            }
+        }
         if (messageMetadata.google_review_link_event_id) {
             const check = await require('../services/googleReviewReminder.service').current().authorizeTransport({
                 message: msg, to, useTemplate, sender: effectiveClinicConfig,

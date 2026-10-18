@@ -135,7 +135,7 @@ async function apply({ db, patientId, clinicId, actorId, authorizedPrimaryClinic
   // This is a durable handoff to the separately owned verification automation,
   // NOT a WhatsApp send or a grant of messaging/marketing permission.
   if (patch.telefono_movil && !equivalent('telefono_movil', patient.telefono_movil, patch.telefono_movil)) {
-    await db.PatientOperationalEvent.create({ patient_id: patientId, clinic_id: clinicId, actor_user_id: actorId,
+    await require('./patientMobileVerification.service').recordRequest({ db, patient_id: patientId, clinic_id: clinicId, actor_user_id: actorId,
       event_type: 'patient.mobile_verification_requested', source: 'privacy_profile_review', channel: 'internal', metadata: {
         schema_version: 'patient-mobile-verification/v1', document_id: current.document.id,
         snapshot_hash: current.document.snapshot_hash, previous_phone: currentValue(patient, 'telefono_movil'),
@@ -219,4 +219,4 @@ async function autofillEmptyFromDocument({ db, documentId, actorId = null, trans
 }
 
 module.exports = { view, apply, patientVersion, checkContactCollisions, emptyCandidates,
-  lockAutofillAnchors, autofillEmptyFromDocument };
+  lockAutofillAnchors, autofillEmptyFromDocument, groupClinicIds };

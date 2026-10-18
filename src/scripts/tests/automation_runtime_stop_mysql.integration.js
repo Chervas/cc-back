@@ -156,6 +156,10 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     whatsappAuthorizedBroker: { send: async () => { fakePosts++; return { messages: [{ id: 'fictitious-wamid' }] }; } },
   };
   vm.runInNewContext('this.service = new (class {\n' + waSource.slice(dispatchStart, dispatchEnd) + '\n})()', sandbox);
+  // These independent recipient/privacy gates now run before the stop check.
+  // This fixture isolates stop semantics; their native contracts have own suites.
+  Object.assign(sandbox.service, { assertRecipientCanReceive: async () => {},
+    assertClinicNonOperationalAllowed: async () => {}, assertPrivacyCommercialAllowed: async () => {} });
   const config = { phoneNumberId: '123', wabaId: '456', clinicId: 35, originId: 1,
     authorizedBroker: { phoneId: '123', wabaId: '456' } };
   await assert.rejects(sandbox.service.dispatchMessage({ type: 'text' }, config, { messageId: queued.id }), { code: stop.STOP_REASON });
@@ -311,6 +315,10 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const unmarkedMessage = await makeMessage(unmarkedExecution);
   await stop.assertMessageCanDispatch(unmarkedMessage.id);
   report.checks.push('actual MySQL QA marker added after enqueue rejects WhatsApp/email preparation; accepted/unknown evidence and clinical fields survive, simulation cannot dispatch, normal traffic stays eligible');
+  const mobile = await models.AutomationFlowTemplateV2.create(require('../../lib/patient-mobile-verification').definition(35));
+  await assert.rejects(stop.setActive(mobile, true), { code: 'mobile_verification_activation_not_ready' });
+  await mobile.reload(); assert.equal(mobile.is_active, false);
+  report.checks.push('prepared mobile verification cannot be activated through the native toggle while its global gate/deadline remain unconfigured');
   report.coverage = { repeatedInterleavings: runs, networkProviderCalls: 0, realPatientsTouched: 0,
     actualMysql: true, actualToggleController: true, actualEngine: true, syntheticFinalDispatchGuards: true, graphOrPromptEdits: false };
 }).catch(error => { console.error(error.stack); process.exitCode = 1; });

@@ -11,6 +11,7 @@ function details(message) {
   }
   if(kind==='reaction') result.reaction={emoji:clean(value?.emoji,32)||'',message_id:clean(value?.message_id,512)};
   if(message?.context?.id) result.context={id:clean(message.context.id,512)};
+  if(kind==='button' && value) result.button={payload:clean(value.payload,512),text:clean(value.text,1024)};
   if(kind==='interactive') result.interactive=Object.fromEntries(['type','button_reply','list_reply'].filter(k=>value?.[k]).map(k=>[k,typeof value[k]==='string'?clean(value[k],32):{id:clean(value[k].id,512),title:clean(value[k].title,1024)}]));
   return result;
 }

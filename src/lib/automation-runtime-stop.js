@@ -72,6 +72,11 @@ async function assertTemplateActive(template, transaction, { terminalExecution }
   // Typed GBP acceptance may disable its one-shot template atomically. Only its
   // audited, side-effect-free end may finish; manual stops still cancel the row.
   if (!latest || !latest.is_active && !await acceptedSelfDeactivatedEnd(terminalExecution, latest, transaction)) throw stopped();
+  if (latest.trigger_type === 'patient.mobile_verification_requested') {
+    const contract = require('./patient-mobile-verification');
+    if (process.env.PATIENT_MOBILE_VERIFICATION_ENABLED !== 'true' || latest.is_system || !latest.clinic_id
+      || !contract.configValid(latest.trigger_config) || !contract.graphValid(latest.nodes)) throw stopped();
+  }
   return latest;
 }
 
@@ -196,6 +201,13 @@ async function stopExecution(execution) {
 }
 
 async function setActive(template, active) {
+  if (active && template.trigger_type === 'patient.mobile_verification_requested'
+    && (process.env.PATIENT_MOBILE_VERIFICATION_ENABLED !== 'true'
+      || template.is_system || !template.clinic_id || !template.published_at
+      || !require('./patient-mobile-verification').configValid(template.trigger_config)
+      || !require('./patient-mobile-verification').graphValid(template.nodes))) {
+    throw Object.assign(new Error('mobile_verification_activation_not_ready'), { code: 'mobile_verification_activation_not_ready', statusCode: 409 });
+  }
   const db = models();
   const updatedStates = [];
   const summary = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {

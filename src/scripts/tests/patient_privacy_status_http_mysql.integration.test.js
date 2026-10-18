@@ -21,7 +21,8 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
 }, async () => withIsolatedCampaignMysql(async owned => {
   owned.models.EconomicBudgetSignatureRequest = require('../../../models/economicbudgetsignaturerequest')(owned.sql, S.DataTypes);
   await owned.models.EconomicBudgetSignatureRequest.sync();
-  const f = await createOwnedVisitAuthAclFixture({ ...owned, includeConsentRoutes: true, nativeFinalHandler: true });
+  const f = await createOwnedVisitAuthAclFixture({ ...owned, includeConsentRoutes: true,
+    includePatientMobileVerificationRoutes: true, nativeFinalHandler: true });
   const { db, ids, request } = f;
   for (const name of ['PatientCustomField', 'PatientConsentExternalAttestation']) {
     db[name] = require(`../../../models/${name.toLowerCase()}`)(owned.sql, S.DataTypes); await db[name].sync();
@@ -297,6 +298,23 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
       await expect('POST', reviewPath, phoneBody, reception, 409);
       assert.equal(await db.PatientOperationalEvent.count({ where: { patient_id: patientId,
         event_type: 'patient.mobile_verification_requested' } }), 1, 'Exactly one pending verification event, no automatic send');
+      const verificationPath = `/api/pacientes/pac_privacy_http_${patientId}/mobile-verification`;
+      const verification = await expect('GET', `${verificationPath}?clinic_id=72`, undefined, reception, 200);
+      assert.equal(verification.items[0].state, 'pending'); assert.equal(verification.items[0].delivery_enabled, false);
+      assert(!JSON.stringify(verification).includes('reply_token'));
+      await expect('GET', `${verificationPath}?clinic_id=72`, undefined, undefined, 401);
+      await expect('GET', `${verificationPath}?clinic_id=72`, undefined, outsider, 403);
+      await expect('GET', `${verificationPath}?clinic_id=72&phone=forged`, undefined, reception, 400);
+      const verificationBody = { clinic_id: 72, action: 'confirm', request_event_id: verification.items[0].request_event_id,
+        revision: verification.items[0].revision };
+      await expect('POST', verificationPath, verificationBody, outsider, 403);
+      await expect('POST', verificationPath, verificationBody, reception, 200);
+      await expect('POST', verificationPath, verificationBody, reception, 409);
+      const verified = await expect('GET', `${verificationPath}?clinic_id=72`, undefined, reception, 200);
+      assert.equal(verified.items[0].state, 'confirmed'); assert.equal(verified.items[0].actor_user_id, ids.reception);
+      assert.equal(verified.items[0].provenance, 'manual_review'); assert(verified.items[0].resolved_at);
+      assert.equal((await master.reload()).telefono_movil, '34000000009');
+      owned.report.checks.push('Native JWT/MFA/ACL patient-mobile routes: explicit reception acceptance produces an inactive request, scoped/token-free GET, forbidden and stale POST rejected, audited manual confirmation without sending');
       assert.deepEqual((await docs[0].reload()).toJSON(), frozenDoc, 'Explicit safe contact copy never changes the signed source snapshot');
       const refused = await require('../../lib/bs-privacy-commercial-preferences').commercialRefusals({ db,
         clinicIds: [72], patientIds: [patientId] });

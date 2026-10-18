@@ -53,7 +53,8 @@ const DOMAIN_TABLES = [
 
 async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registerOwnedLoopbackServer,
   includeConsentRoutes = false, includeProgramLedger = false, includeAvailabilityRoutes = false,
-  includeInstallationRoutes = false, includePatientCommunicationRoutes = false, includePatientIntakeSettingsRoutes = false, nativeFinalHandler = false }) {
+  includeInstallationRoutes = false, includePatientCommunicationRoutes = false, includePatientMobileVerificationRoutes = false,
+  includePatientIntakeSettingsRoutes = false, nativeFinalHandler = false }) {
   assert(sql.options.dialectOptions?.socketPath?.startsWith('/tmp/cc-campaign-opt-mysql-'));
   const [[owned]] = await sql.query('SELECT @@skip_networking AS isolated, DATABASE() AS name');
   assert.equal(Number(owned.isolated), 1); assert.equal(owned.name, 'campaign_optimization_qa');
@@ -218,6 +219,13 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
     router.use(require('../../../routes/auth.middleware'));
     router.get('/:id/communication-preferences', controller.get);
     router.post('/:id/communication-preferences', controller.set);
+    app.use('/api/pacientes', router);
+  }
+  if (includePatientMobileVerificationRoutes) {
+    const router = require('express').Router(), controller = require('../../../controllers/patientMobileVerification.controller');
+    router.use(require('../../../routes/auth.middleware'));
+    router.get('/:id/mobile-verification', controller.get);
+    router.post('/:id/mobile-verification', controller.resolve);
     app.use('/api/pacientes', router);
   }
   // Native error-contract acceptance must reach each real router's own

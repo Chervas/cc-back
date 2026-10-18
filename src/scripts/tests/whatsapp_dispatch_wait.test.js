@@ -3,7 +3,7 @@ const test = require('node:test'); const assert = require('node:assert/strict');
 const { createJobClaim } = require('../../services/jobClaim.service');
 const W = require('../../lib/whatsapp-dispatch-wait');
 const service = require('../../services/whatsappDispatchWait.service');
-function fixture(t, { receipt = 'absent', expired = false, disabled = false, blocked = false, brokerDown = false, testSend = false, outsideHours = false, receiptLimited = false, reviewAllowed = true } = {}) {
+function fixture(t, { receipt = 'absent', expired = false, disabled = false, blocked = false, brokerDown = false, testSend = false, outsideHours = false, receiptLimited = false, reviewAllowed = true, mobileDecision = null } = {}) {
   const original = Module._load; const now = Date.now(); const sent = [], queued = new Map();
   const intent = { messageId: '91', clinicId: 2, assetId: 3, expectedBinding: { phoneId: '123', wabaId: '456' },
     message: { messaging_product: 'whatsapp', to: '34000000123', type: 'text', text: { body: 'FICTITIOUS_ONLY' } } };
@@ -34,6 +34,9 @@ function fixture(t, { receipt = 'absent', expired = false, disabled = false, blo
     [require.resolve('../../services/marketingOptOut.service'), { assertAutomationCommunicationAllowed: async () => {} }],
     [require.resolve('../../services/marketingBulkSends.service'), { deferredDispatchAllowedAt: async () => outsideHours ? new Date(Date.now() + 3600000) : null }],
     [require.resolve('../../services/socket.service'), { getIO: () => null }],
+    [require.resolve('../../services/patientMobileVerification.service'), { current: () => ({
+      authorizeTransport: async args => { message.mobileChecked = args; return mobileDecision || { allowed: true }; },
+    }) }],
     [require.resolve('../../services/googleReviewReminder.service'), { current: () => ({
       authorizeTransport: async () => { if (!reviewAllowed) await message.update({ status: 'failed', metadata: { ...message.metadata, google_review_reminder_skipped: true } });
         return { allowed: reviewAllowed, reason: reviewAllowed ? null : 'whatsapp_window_not_proven' }; },
@@ -124,4 +127,28 @@ test('an already accepted review reminder still reconciles after its service win
 test('a newly accepted deferred Google link schedules its future follow-up, without replaying the link', async t => {
   const f = fixture(t); Object.assign(f.message.metadata, { google_publication_reminder_enabled: true, kind: 'review_google_link_followup' });
   await f.defer(); await f.run(); await f.run(); assert.equal(f.sent.length, 1); assert.equal(f.message.reminderScheduled, true);
+});
+test('mobile verification revalidates a durable retry before POST and never resends a superseded request', async t => {
+  const f = fixture(t, { mobileDecision: { allowed: false, reason: 'mobile_verification_superseded' } });
+  f.message.metadata.mobile_verification_request_id = 17;
+  await f.defer(); const result = await f.run();
+  assert.equal(result.result.skipped, true); assert.equal(f.sent.length, 0);
+  assert.equal(f.message.metadata.error, 'mobile_verification_superseded'); assert.equal(f.message.status, 'failed');
+  assert.equal(f.message.mobileChecked.to, f.intent.message.to);
+  assert.equal(f.message.mobileChecked.sender.phoneNumberId, '123');
+});
+test('mobile verification respects quiet hours during durable retries without marking delivery failed', async t => {
+  const until = new Date(Date.now() + 3600000);
+  const f = fixture(t, { mobileDecision: { allowed: true, deferredUntil: until } });
+  f.message.metadata.mobile_verification_request_id = 17;
+  await f.defer(); const result = await f.run();
+  assert.equal(result.status, 'waiting'); assert.equal(+result.nextAllowedAt, +until);
+  assert.equal(f.sent.length, 0); assert.equal(f.message.status, 'pending');
+});
+test('mobile verification reconciles a lost accepted receipt even if the source later changed; no second POST', async t => {
+  const f = fixture(t, { receipt: 'accepted', mobileDecision: { allowed: false, reason: 'mobile_verification_superseded' } });
+  f.message.metadata.mobile_verification_request_id = 17;
+  await f.defer(true); const result = await f.run();
+  assert.equal(result.result.provider_accepted, true); assert.equal(f.sent.length, 0);
+  assert.equal(f.message.metadata.wamid, 'wamid.FICTITIOUS');
 });

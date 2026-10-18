@@ -110,6 +110,18 @@ async function run(payload, _job, claim) {
       const binding = wait.intent.expectedBinding;
       const config = { clinicId: wait.intent.clinicId, originId: wait.intent.assetId,
         phoneNumberId: binding.phoneId, wabaId: binding.wabaId, authorizedBroker: binding };
+      if (message.metadata.kind === 'patient_mobile_verification' || Object.hasOwn(message.metadata, 'mobile_verification_request_id')) {
+        const check = await require('./patientMobileVerification.service').current().authorizeTransport({
+          message, to: wait.intent.message.to, useTemplate: wait.intent.message.type === 'template', sender: config,
+          templateName: wait.intent.message.template?.name, templateLanguage: wait.intent.message.template?.language?.code,
+          templateComponents: wait.intent.message.template?.components,
+        });
+        if (!check.allowed) {
+          await terminal(message, claim, 'review', check.reason);
+          return { status: 'completed', result: { skipped: true, reason: check.reason } };
+        }
+        if (check.deferredUntil) return { ...waiting(message, 'quiet_hours'), nextAllowedAt: check.deferredUntil };
+      }
       if (message.metadata.google_review_link_event_id) {
         const check = await require('./googleReviewReminder.service').current().authorizeTransport({
           message, to: wait.intent.message.to, useTemplate: wait.intent.message.type === 'template', sender: config,

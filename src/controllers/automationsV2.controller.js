@@ -932,6 +932,13 @@ const TRIGGER_TYPES_V2 = [
   { value: 'scheduled_once', label: 'Una fecha programada' },
   { value: 'manual', label: 'Manual' },
   { value: 'review_google_link_sent', label: 'Enlace de reseña Google enviado' },
+  { value: 'patient.mobile_verification_requested', label: 'Verificación de cambio de móvil',
+    description: 'Sólo tras la aceptación expresa de recepción. No confirma citas ni autoriza publicidad.',
+    default_config: { response_timeout_minutes: null, enabled_after: null },
+    config_schema: [
+      { key: 'response_timeout_minutes', label: 'Plazo sin respuesta (minutos, desde envío aceptado)', input_type: 'number', required: false },
+      { key: 'enabled_after', label: 'Sólo nuevas solicitudes desde (ISO UTC)', input_type: 'string', required: false },
+    ] },
 ];
 const TRIGGER_NODE_PREFIX = 'trigger/';
 const TRIGGER_NODE_TYPES_V2 = TRIGGER_TYPES_V2.map((trigger) => ({
@@ -1002,16 +1009,26 @@ function normalizeDomain(raw) {
   const value = cleanString(raw);
   if (!value) return null;
   const normalized = value.toLowerCase();
-  return ['appointment', 'marketing'].includes(normalized) ? normalized : null;
+  return ['appointment', 'marketing', 'patient'].includes(normalized) ? normalized : null;
 }
 
 function resolveDomainFromTriggerType(triggerType) {
+  if (triggerType === 'patient.mobile_verification_requested') return 'patient';
   if (APPOINTMENT_TRIGGER_TYPES.has(triggerType)) return 'appointment';
   return 'marketing';
 }
 
 const NODE_TYPES_V2 = [
   ...TRIGGER_NODE_TYPES_V2,
+  { type: 'action/request_mobile_verification', category: 'action', label: 'Solicitar verificación del móvil',
+    description: 'Prepara una sola solicitud Utility al móvil congelado, respetando permisos y bloqueos.',
+    output_keys: ['on_success', 'on_review', 'on_superseded'], runtime_status: 'real', default_config: {}, config_schema: [] },
+  { type: 'delay/wait_mobile_verification', category: 'delay', label: 'Esperar verificación del móvil',
+    description: 'Distingue confirmación, revisión, falta de respuesta y fallo de entrega. El plazo empieza al aceptar el envío.',
+    output_keys: ['on_confirmed', 'on_review', 'on_timeout', 'on_delivery_failed', 'on_superseded'], runtime_status: 'real', default_config: {}, config_schema: [] },
+  { type: 'action/review_mobile_verification', category: 'action', label: 'Solicitar revisión a recepción',
+    description: 'Acción pendiente única en la ficha, sin cambiar citas ni permisos comerciales.',
+    output_keys: ['on_success'], runtime_status: 'real', default_config: {}, config_schema: [] },
   {
     type: 'action/change_status',
     category: 'action',
@@ -1639,6 +1656,19 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
   const normalizedTriggerType = cleanString(triggerType);
   const triggerNode = resolveTriggerNode({ entryNodeId, nodes });
   const rawConfig = isObject(triggerNode?.config) ? triggerNode.config : {};
+
+  if (normalizedTriggerType === 'patient.mobile_verification_requested') {
+    const contract = require('../lib/patient-mobile-verification');
+    const configured = !!contract.timeout(rawConfig.response_timeout_minutes)
+      && typeof rawConfig.enabled_after === 'string' && Number.isFinite(Date.parse(rawConfig.enabled_after));
+    if (rawConfig.response_timeout_minutes != null && !contract.timeout(rawConfig.response_timeout_minutes)
+      || rawConfig.enabled_after != null && (typeof rawConfig.enabled_after !== 'string' || !Number.isFinite(Date.parse(rawConfig.enabled_after)))) {
+      return { ok: false, error: 'mobile_verification_configuration_invalid', message: 'Define un plazo válido (1–10080 minutos) y la fecha de inicio antes de activar.' };
+    }
+    return { ok: true, trigger_config: { managed_feature: 'patient_mobile_verification', configured,
+      response_timeout_minutes: configured ? Number(rawConfig.response_timeout_minutes) : null,
+      enabled_after: configured ? rawConfig.enabled_after : null } };
+  }
 
   if (isTriggerSelectionPendingConfig(rawConfig)) {
     return { ok: true, trigger_config: null };
@@ -3146,6 +3176,11 @@ function buildValidationError(code, message, details = null) {
 
 function validateFlowGraph({ entry_node_id, nodes }) {
   const errors = [];
+  const mobile = require('../lib/patient-mobile-verification');
+  if (Array.isArray(nodes) && nodes.some(node => String(node?.type || '').includes('mobile_verification'))
+    && !mobile.graphValid(nodes)) {
+    errors.push(buildValidationError('mobile_verification_graph_invalid', 'La verificación de móvil usa su activador y sus cinco nodos operativos, sin acciones de citas, publicidad o consentimientos.'));
+  }
 
   if (!Array.isArray(nodes) || nodes.length === 0) {
     errors.push(buildValidationError('nodes_required', 'El flujo debe tener al menos un nodo'));
@@ -5620,7 +5655,7 @@ exports.listTemplates = async (req, res) => {
         return res.status(400).json({
           success: false,
           error: 'invalid_domain',
-          allowed: ['appointment', 'marketing'],
+          allowed: ['appointment', 'marketing', 'patient'],
         });
       }
       if (triggerType) {
@@ -5634,7 +5669,9 @@ exports.listTemplates = async (req, res) => {
       } else if (domain === 'appointment') {
         where.trigger_type = { [Op.in]: Array.from(APPOINTMENT_TRIGGER_TYPES) };
       } else if (domain === 'marketing') {
-        where.trigger_type = { [Op.notIn]: Array.from(APPOINTMENT_TRIGGER_TYPES) };
+        where.trigger_type = { [Op.notIn]: [...APPOINTMENT_TRIGGER_TYPES, 'patient.mobile_verification_requested'] };
+      } else if (domain === 'patient') {
+        where.trigger_type = 'patient.mobile_verification_requested';
       }
     }
 
@@ -5905,7 +5942,7 @@ exports.createTemplateDraft = async (req, res) => {
       description: cleanString(body.description),
       trigger_type: resolvedTriggerType,
       trigger_config: normalizedTriggerConfig,
-      is_active: parseBool(body.is_active, true),
+      is_active: parseBool(body.is_active, resolvedTriggerType !== 'patient.mobile_verification_requested'),
       is_system: !!isSystem,
       clinic_id: clinicId,
       group_id: groupId,
@@ -6423,6 +6460,9 @@ exports.publishTemplateVersion = async (req, res) => {
       });
     }
 
+    const activateOnPublish = triggerResolution.trigger_type !== 'patient.mobile_verification_requested'
+      || process.env.PATIENT_MOBILE_VERIFICATION_ENABLED === 'true' && !row.is_system && !!row.clinic_id
+        && require('../lib/patient-mobile-verification').configValid(triggerConfigResolution.trigger_config);
     await db.sequelize.transaction(async (transaction) => {
       await AutomationFlowTemplateV2.update(
         { is_active: false },
@@ -6447,7 +6487,7 @@ exports.publishTemplateVersion = async (req, res) => {
         trigger_config: triggerConfigResolution.trigger_config,
         published_at: new Date(),
         published_by: access.user_id,
-        is_active: true,
+        is_active: activateOnPublish,
       }, { transaction });
     });
 

@@ -598,6 +598,12 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
   try {
     const clinicId = positiveInt(conversation.clinic_id || claim.clinic_id);
     const channel = normalizeChannel(conversation.channel || claim.channel);
+    const mobileVerification = await require('./patientMobileVerification.service').current().inbound({ message, conversation });
+    if (mobileVerification.handled) {
+      await markClaimCompleted(claim, 'patient_mobile_verification', mobileVerification.request_event_id || null,
+        { verification: mobileVerification.state || 'ignored' });
+      return { status: 'completed', result: { claim_id: claim.id, owner: 'patient_mobile_verification' } };
+    }
     const resumeResult = await automationsV2ResumeService.enqueueInboundResponseResume({
       clinicId,
       conversationId: conversation.id,
@@ -764,6 +770,13 @@ async function reassignBufferedClaimsToWaitingExecution({ claims, conversation, 
 
   for (const message of messages) {
     const claim = claimByMessageId.get(positiveInt(message.id));
+    const mobileVerification = await require('./patientMobileVerification.service').current().inbound({ message, conversation });
+    if (mobileVerification.handled) {
+      await markClaimCompleted(claim, 'patient_mobile_verification', mobileVerification.request_event_id || null,
+        { verification: mobileVerification.state || 'ignored' });
+      reassigned.push(claim);
+      continue;
+    }
     const resumeResult = await automationsV2ResumeService.enqueueInboundResponseResume({
       clinicId,
       conversationId: conversation.id,
