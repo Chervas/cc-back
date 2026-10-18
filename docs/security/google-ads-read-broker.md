@@ -1,364 +1,45 @@
 # Motor de lecturas Google Ads en el broker
 
-Los parrafos iniciales describen la entrega historica del 13/09. No acreditan
-el inventario ni los grants instalados hoy. Los contratos posteriores indican
-su propio estado; la situacion operativa se recoge en los documentos front 19/39.
+> Documento trasladado al manual central. Esta ruta conserva enlaces históricos; no añadir contenido nuevo aquí.
 
-Preparado el 13/09/2026 sobre backend `503b6080f7efd0408b7e9679c29d84c116280408`
-y frontend `672b8ae122410a4839593372aac1d7891867c9fe`. OPS aplazado. Motor y QA
-ficticia; **ninguna cuenta Ads está migrada ni activada en runtime**. El cierre
-legacy de la fase anterior se conserva. Esta entrega no autoriza OAuth, Ads,
-conversiones, mensajes, traslado de secretos ni despliegue real.
-
-Ampliado sobre backend `04ebc703e21cde0690b7ef303883f4ae43402e96` y frontend
-`1f587169db254a52af35d10d905e6025e52fca2f`: ocho lecturas, lector completo backend
-y entrada tipada de los colectores. El registro SQL y la inyección en jobs se
-prepararon después en [la integración backend](google-ads-backend-migration.md).
-La QA HTTPS de este motor usa un autorizador ficticio; la QA SQL se documenta allí.
+[Abrir el documento canónico](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/google/google-ads-read-broker.md).
 
 ## Contrato cerrado
 
-El runtime Google reconoce la cohorte `google-ads-read-v1`, proveedor `google_ads`.
-Cada conexión fija `googleSubject`, `secretArn`, `clientSecretArn`,
-`developerSecretArn` y `googleAdsAccounts`. Cada cuenta contiene exactamente
-`assetRef: ads:<customerId>`, `customerId` y `loginCustomerId` (ID del gestor o null).
-Los IDs son cadenas de diez dígitos sin guiones. Grants por clínica, conexión,
-cuenta y operación; no tenant de grupo ni operación genérica de búsqueda.
-
-| Operación | Payload exacto | Resultado permitido |
-|---|---|---|
-| `google.ads.discovery.read.v1` | `{}` | Resumen de cuenta: ID, nombre, manager, moneda, zona y estado; exactamente una fila |
-| `google.ads.conversion_actions.read.v1` | `{pageToken: null/string}` | Inventario de acciones de conversión y propiedades de aprobación; máximo 5.000, sin snippets |
-| `google.ads.account.read.v1` | `{}` | ID, manager=false, moneda y zona horaria |
-| `google.ads.campaigns.read.v1` | `{pageToken: null/string}` | Campañas y estados, máximo 5.000 |
-| `google.ads.campaign_metrics.read.v1` | `{startDate, endDate, pageToken}` | Métricas por campaña, fecha, red y dispositivo |
-| `google.ads.adgroup_metrics.read.v1` | `{startDate, endDate, pageToken}` | Las mismas dimensiones más grupo de anuncios |
-| `google.ads.publishing_campaigns.read.v1` | `{pageToken}` | Campañas ENABLED/PAUSED, canal, estados, sufijo y ajustes de automatización; máximo 5.000 |
-| `google.ads.landing_pages.read.v1` | `{startDate, endDate, pageToken}` | Campaña, URL final observada y clics; máximo 100.000 |
-| `google.ads.ads.read.v1` | `{campaignId, pageToken}` | Identidad/estado de campaña, grupo y anuncio; URLs, titulares, descripciones RSA y estado de revisión; máximo 200.000 |
-| `google.ads.ad_metrics.read.v1` | `{campaignId, startDate, endDate, pageToken}` | Identidades y métricas diarias de anuncio por fecha/red/dispositivo; máximo 200.000 |
-| `google.ads.campaign_destinations.read.v1` | `{campaignId, section, pageToken}` | Metadatos de destinos de una campaña; secciones cerradas, máximo 2.000 filas por sección; preparado en fuente el 27/09, no publicado |
-| `google.ads.optimization.read.v1` | `{campaignId, section, pageToken}` | Compatibilidad de Optimiza: campaña/presupuesto, grupos y estado de anuncios; máximo 2.000 filas por sección; preparado el 27/09, no publicado |
-| `google.ads.optimization_performance.read.v1` | `{campaignId, section, startDate, endDate, pageToken}` | Evidencia madura: metadata, inventario y clics/coste diarios de campaña y anuncios; preparado el 28/09, no publicado |
-| `google.ads.optimization_budget.read.v1` | `{campaignId, section, startDate, endDate, pageToken}` | Propiedad del presupuesto y coste acumulado del mes por campaña; preparado el 28/09, no publicado |
-| `google.ads.optimization_targets.read.v1` | `{campaignId, section, pageToken}` | Objetivos CPA/ROAS, baseline, conversiones efectivas y recomendaciones; siete secciones, máximo 2.000 por sección; preparado el 28/09, no publicado |
-| `google.ads.asset.revoke.v1` | `{}` | `{revoked: true}` con UUID/replay durable |
-
-Fechas canónicas, ventana máxima inclusiva de 15 días y 100.000 filas por
-consulta de métricas de campaña/grupo. Destinos admite hasta 30 días inclusivos;
-anuncios mantiene 15 días y 200.000 filas. Los límites de bytes pueden rechazar
-una consulta antes de alcanzar su máximo de filas. `campaignId` es null o una
-cadena de 1–20 dígitos, positiva sin ceros iniciales; no amplía el grant de cuenta.
-`pageToken` siempre es null o string y todos los campos de cada payload son
-obligatorios. El broker construye las plantillas GAQL cerradas de cada operación.
-La ampliación [de inventario y estado](google-ads-discovery-migration.md) conecta
-discovery con API/sesión/permisos; account mantiene su proyección anterior.
-El consumidor no envía query, URL, método, cabeceras, cuenta, gestor, campos,
-versión de API ni tokens. La cohorte de lectura no expone escritura o ingesta;
-la cohorte explícita de conversiones se describe en [Data Manager](google-data-manager-broker.md).
-El [escritor de Optimiza](google-ads-optimization-broker.md) se prepara el 28/09
-en otra cohorte, con principal/clave y lista de campañas propios; no modifica
-los permisos del lector ni está instalado o conectado al ejecutor CRM.
-La revocación requiere principal y clave diferentes de todos los lectores;
-rechaza lectores con el mismo material criptográfico bajo otro keyId.
-
-La proyección comprueba cuenta, IDs, fechas, métricas finitas/precisión segura,
-filas duplicadas en cada página, longitud y estructura. Conserva ceros protobuf
-omitidos y excluye campos desconocidos. No entrega respuestas del proveedor
-directamente. El consumidor completo deberá detectar también duplicados o cambios
-entre páginas y conciliar las métricas antes de persistir el snapshot; el lector
-y los colectores tipados descritos abajo ya preparan esas comprobaciones.
-
-La lectura de acciones añadida el 18/09/2026 conserva el propietario real de
-`resourceName`, tipo, categoría, estado, conteo y flags de objetivo. Un booleano
-ausente queda desconocido, no se convierte en `false`. La preparación CRM exige
-acción canónica única, propietario de la cuenta seleccionada, `UPLOAD_CLICKS`,
-categoría del evento, estado activo, `MANY_PER_CLICK` y `primaryForGoal=false`.
-Los campos siguen el recurso oficial de
-[acciones de conversión v24](https://developers.google.com/google-ads/api/fields/v24/conversion_action).
-Se conservan paginación, rechazo de inventarios incompletos y grants explícitos;
-este código no añade permisos a ninguna conexión instalada.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/google/google-ads-read-broker.md#contrato-cerrado).
 
 ### Destinos de campañas: adaptación del 27/09/2026
 
-`campaign_destinations` no es el alta de destinos de Data Manager. Inspecciona
-exclusivamente la configuración de los anuncios: `campaign`, `ad_groups`,
-`campaign_forms`, `account_forms`, `ad_group_forms`, `asset_groups`,
-`asset_group_forms` y `ads`. `campaignId` es obligatorio y no admite null.
-Cuenta/gestor vienen del grant, nunca del payload. Máximo 2.000 filas por
-sección, sin truncar; cursores ligados a sección y campaña incluso para los
-formularios de cuenta cuya GAQL es idéntica entre campañas.
-
-La proyección conserva solo IDs, nombres/titulares de formulario, enlaces
-habilitados, canal, automatización de URL y URLs HTTP/HTTPS sin credenciales.
-No selecciona respuestas, contactos, claves de webhook ni métodos de entrega;
-no visita las URLs. Sigue las referencias oficiales de
-[campaña](https://developers.google.com/google-ads/api/fields/v24/campaign),
-[assets](https://developers.google.com/google-ads/api/fields/v24/asset) y
-[vínculos de campaña](https://developers.google.com/google-ads/api/fields/v24/campaign_asset).
-
-El consumidor `campaignWorkspaceGoogleDestination` conserva el grant opaco
-original y revalida selección, clínica, ACL, lease y autorización antes/después
-de cada página y antes de guardar. No llama al refresco ni al lector legacy
-cuando la cuenta está migrada. El modo legacy previo conserva sus guards para
-cuentas no migradas; no sirve de fallback ante errores del broker.
-
-Preparado y probado offline, sin instalación ni ampliación de grants en AWS.
-Para publicar se necesitan motor y consumidor compatibles y permiso explícito
-de esta operación en el grant de lectura o en `readOperations` del alta.
-Un runtime anterior devuelve un estado de servicio pendiente, no solicita
-repetir OAuth ni recurre a tokens locales. Publicación/activación separadas
-según el runbook vigente. Evidencia y siguiente corte en
-[campaign-workspace-implementation](../campaign-workspace-implementation.md).
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/google/google-ads-read-broker.md#destinos-de-campañas-adaptación-del-27092026).
 
 ### Compatibilidad de Optimiza: adaptación del 27/09/2026
 
-`optimization` admite exclusivamente `campaign`, `ad_groups` y `ads`, con
-`campaignId` positivo obligatorio (no null) y cursor ligado a cuenta, campaña,
-sección y autorización. El nuevo contrato conserva las consultas acotadas del
-inspector existente, no sus tokens. Proyecta estrategia/objetivo actual, moneda,
-propietario y condición compartida del presupuesto, IDs y estado de entrega.
-No consulta ni devuelve contactos, búsquedas, anuncios completos o conversiones.
-Un dato opcional ausente queda ausente: no acredita aprobación de un anuncio
-ni propiedad exclusiva de un presupuesto. Proyección repetida en ambos límites.
-
-El consumidor `campaignWorkspaceOptimizationPreparation` mantiene grant opaco
-original, ACL, selección, clínica, preferencias y lease antes/después de cada
-página y en la transacción final. GET no consulta proveedores; POST solo renueva
-la prueba persistida 24h con `authorized=false`. No modifica mandato ni
-publicidad. Cuentas migradas no recuperan tokens locales ni usan fallback.
-`operation_denied` se presenta como servicio pendiente, no como necesidad de
-repetir OAuth. La revalidación impide conservar verde tras cambios concurrentes.
-
-Requiere motor/consumidor compatibles y permiso exacto en grant o `readOperations`;
-no amplía automáticamente los grants ya instalados. La ejecución de ajustes,
-sus evidencias y los permisos de escritura siguen siendo otro corte pendiente.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/google/google-ads-read-broker.md#compatibilidad-de-optimiza-adaptación-del-27092026).
 
 ### Evidencia de Optimiza: adaptación del 28/09/2026
 
-Dos operaciones de lectura independientes, sin ampliar grants instalados:
-
-- `optimization_performance`: `campaign` (1 fila), `inventory` (2.000),
-  `campaign_daily` (28) y `ad_daily` (56.000). Ventana exactamente de 28 días;
-  el consumidor fija el calendario Europe/Madrid, excluye los dos últimos días
-  completos y valida que no cambie durante la recogida. Incluye anuncios
-  retirados/restringidos para conciliar el gasto, sin hacerlos candidatos a pausa.
-- `optimization_budget`: `campaign` y `month_cost`, máximo 1 fila por sección.
-  La ventana empieza el día 1 y acaba dentro del mismo mes; el consumidor usa
-  el mes corriente Europe/Madrid. Coste sin segmentar, propiedad exclusiva del
-  presupuesto, estados y moneda/zona. No mezcla meses con cierres diferentes.
-
-Todos los campos del payload son obligatorios, incluida la ventana en metadata.
-Los cursores quedan ligados también a esas fechas cuando la GAQL de metadata
-no cambia. Límites específicos por sección comprobados en broker y consumidor;
-las filas no se truncan. No hay query, destinos, contactos, creatividades,
-términos de búsqueda ni recomendaciones de conversión en estos contratos.
-Los campos numéricos requeridos ausentes **no** se proyectan como ceros: son
-evidencia incompleta. La inferencia de días sin gasto solo ocurre en el colector
-tras completar todas las páginas y conciliar anuncios con el total de campaña.
-
-El grant original, selección, clínica, mandato y ACL se revisan durante las
-lecturas y al terminar, sin recuperar tokens en la API general. La atribución
-CRM se calcula localmente y solo conserva recuentos agregados. El cálculo mensual
-incluye todas las campañas seleccionadas, no solo las autorizadas para ajustes.
-Conserva las autoridades opacas hasta la reserva en la misma ejecución; una
-copia serializada no sustituye esos permisos ni admite un binding nuevo.
-
-La compatibilidad y el readback anteriores reutilizan `optimization`; estas dos
-lecturas no autorizan cambios publicitarios. CPA/ROAS necesita aún adaptar su
-lector de objetivos/recomendaciones; exclusiones necesitan su contrato y política
-de relevancia. Ambos se detienen antes de intentar rutas legacy en cuentas
-migradas. El escritor de Optimiza sigue bloqueado. Requiere instalación compatible
-y autorización separada de las operaciones exactas en el grant o `readOperations`.
-No hay cambio de runtime, cohorte, secreto, OAuth, jobs ni permisos en este corte.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/google/google-ads-read-broker.md#evidencia-de-optimiza-adaptación-del-28092026).
 
 ### Objetivos CPA/ROAS: adaptación posterior del 28/09/2026
 
-`optimization_targets` admite solo `campaign`, `ad_groups`, `config`,
-`custom_goal`, `goals`, `actions` y `recommendations`. Payload sin query, owner,
-manager o recurso elegido por el llamante. Todas las lecturas están dirigidas a
-la cuenta del binding; no se cambia de cuenta publicitaria por usar conversiones
-de un administrador. Antes de consultar acciones se obtiene su propietario de
-la configuración Google de la cuenta; el objetivo custom se obtiene además de
-la configuración de la campaña. No se reinterpreta un token ni se buscan permisos
-alternativos. La documentación oficial contempla recuperar objetivos custom de
-la cuenta de conversiones efectiva desde la cuenta publicitaria:
-[objetivos de campaña](https://developers.google.com/google-ads/api/docs/conversions/goals/campaign-goals).
-
-Propietario y custom goal vuelven a comprobarse antes de servir páginas cacheadas;
-su identidad forma parte del cursor junto a campaña y sección. Si cambia, el cursor
-anterior se rechaza. Proyecciones mínimas sin nombres, contactos, snippets o
-credenciales; claves de fila específicas impiden colisiones/duplicados entre
-acciones, categoría-origen y recomendaciones. No se amplían grants instalados.
-
-El consumidor conserva las políticas anteriores: propietario efectivo,
-Search/PMax, EUR/Madrid, presupuesto exclusivo, sin objetivos de grupo ni
-estrategia compartida, relectura de grupos/objetivos/metadata y recomendación
-única RAISE_TARGET_CPA o LOWER_TARGET_ROAS. El multiplicador y objetivo medio
-se conservan sin redondeo prematuro; información de cartera no se convierte en
-recomendación de campaña. Campos contrastados con
-[TargetAdjustmentInfo v24](https://developers.google.com/google-ads/api/reference/rpc/v24/Recommendation.TargetAdjustmentInfo).
-No aplica recomendaciones ni cambia estrategias u objetivos de conversión.
-
-La recogida CPA/ROAS y el lector de baseline tienen pruebas firmadas reales con
-proveedor ficticio. El ejecutor permanece bloqueado antes de escribir: falta su
-contrato de mutación y conectar allí esta baseline. Exclusiones sigue pendiente
-de contrato y política de relevancia. Sin nuevas operaciones activadas en runtime.
-
-Referencias de los campos:
-[campaña v24](https://developers.google.com/google-ads/api/fields/v24/campaign),
-[presupuesto v24](https://developers.google.com/google-ads/api/fields/v24/campaign_budget)
-y [aprobación del anuncio](https://developers.google.com/google-ads/api/reference/rpc/v24/AdGroupAdPolicySummary).
-
-Las nuevas selecciones siguen los recursos oficiales de
-[destinos](https://developers.google.com/google-ads/api/fields/v24/landing_page_view),
-[anuncios y revisión](https://developers.google.com/google-ads/api/fields/v24/ad_group_ad)
-y [automatización de campaña](https://developers.google.com/google-ads/api/reference/rpc/v24/Campaign.AssetAutomationSetting).
-Las URL se tratan únicamente como datos de observación: HTTP/HTTPS, sin usuario
-o contraseña, máximo 4.096 bytes; no se visitan. Listas acotadas a 20 URLs, 15
-titulares y cuatro descripciones RSA, 50 motivos/ajustes y textos de hasta 1.024
-bytes. La proyección de métricas de anuncios excluye las creatividades.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/google/google-ads-read-broker.md#objetivos-cparoas-adaptación-posterior-del-28092026).
 
 ## Transporte, secretos y paginación
 
-El transporte privado solo añade POST
-`https://googleads.googleapis.com/v24/customers/<ID>/googleAds:search`.
-TLS verificado, puerto 443, sin redirecciones, compresión ni cabeceras libres;
-timeout HTTP de ocho segundos. Límite de respuesta Ads 16 MiB, manteniendo los
-límites previos de otros proveedores. OAuth usa el transporte acotado existente.
-
-Google requiere OAuth y `developer-token`; el gestor se selecciona mediante
-`login-customer-id` cuando corresponde. Se fijan en el broker, según el
-[contrato oficial de cabeceras](https://developers.google.com/google-ads/api/rest/auth).
-El secreto de conexión v3 vincula proveedor, referencia, subject y clientId;
-el cliente OAuth conserva su formato v1 y se exige scope `adwords`. El developer
-token usa un tercer secreto JSON con claves exactas:
-`{version: 1, provider: "google-ads-developer", developerToken: "…"}`.
-No se ha creado ni movido ningún secreto real.
-
-Se comprueban ARN/prefijo/cuenta/región, KMS esperado y AWSCURRENT antes de usar
-el developer token. No se recupera de variables legacy ni se devuelve fuera de
-su callback privado. Los buffers temporales se vacían; las respuestas que
-contienen sentinels de las credenciales se rechazan. No se promete que todas las
-copias de cadenas gestionadas por JavaScript desaparezcan de memoria.
-
-[Search pagina hasta 10.000 filas](https://developers.google.com/google-ads/api/docs/reporting/paging),
-por lo que no se envía pageSize. El motor guarda páginas proyectadas en memoria
-y sirve porciones de hasta 250 filas, reducidas si superan el presupuesto de
-780.000 bytes de datos. El resultado completo queda por debajo del límite
-vigente de 1 MiB del cliente del broker. Un provider pageToken nunca se entrega
-al consumidor: el cursor opaco referencia página/offset y autentica principal,
-tenant, conexión, activo, operación y versión de política. También se comprueban
-fechas/query y huella de los tokens usados en esa página.
-
-Caché máxima de 16 páginas y 64 MiB de JSON contabilizado; no es un límite del
-RSS total del proceso. Caducidad de diez minutos, como el cursor. Evicción,
-reinicio, cursor expirado o cambio de token rechazan la continuación. No se
-reinicia silenciosamente desde una página intermedia. Se detectan pageTokens
-repetidos, exceso de filas y tamaños. El adaptador backend deberá abandonar un
-snapshot incompleto y comenzar otro intento acotado. Falta medir memoria,
-latencia y comportamiento con cuentas reales grandes en un canary aprobado.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/google/google-ads-read-broker.md#transporte-secretos-y-paginación).
 
 ## Lector y colectores del backend
 
-`src/services/googleAdsBrokerReader.service.js` exige un cliente y un
-`assertContext` que resuelva una autorización opaca creada por el servidor. Una
-estructura recibida del usuario con tenant/cuenta no es una autorización. El
-autorizador SQL ya está preparado en googleAdsBrokerScope.service.js y se inyecta
-en sync/backfill mediante googleAdsBroker.service.js. No se exporta como una ruta
-pública; su configuración, DDL y activación real siguen pendientes.
-
-El lector no acepta cursores externos. Comprueba el contexto antes/después de
-cada petición y antes de devolver el resultado completo, requestId, forma de
-respuesta, cuenta, duplicados entre páginas y estabilidad de metadatos de campaña,
-grupo y anuncio. Ventana temporal total por consulta de 90 segundos por defecto
-(máximo 450 segundos), hasta 2.000 peticiones, 64 MiB de JSON de filas proyectadas,
-límites de filas anteriores y máximo 30 segundos por llamada. Este presupuesto
-de bytes tampoco representa RSS: las claves de deduplicación, huellas de recursos,
-arrays y copias JavaScript tienen sobrecoste. Errores/cursor inválido/revocación
-descartan lo acumulado; no se entrega un resultado parcial ni se reinicia la
-paginación a mitad de consulta.
-
-`googleCampaignMetricsCache.collectGoogleCampaignMetrics` admite
-`readTyped(family, payload, budget)` para las cuatro lecturas originales. Mantiene
-su conciliación Search/PMax, cobertura de ceros, fingerprint y plazo de 90 segundos.
-`googleAdCache.syncGoogleAdCache` admite esa entrada para inventario y métricas;
-divide los chunks configurados en ventanas de hasta 15 días, conserva creatividades,
-estados, atribución y cobertura. Un fallo del lector tipado no invoca legacy. Los
-imports de lectores legacy son diferidos y no se ejecutan en la rama tipada.
-No se cambia el contrato de persistencia ni se aplica DDL.
-
-La QA por HTTPS local conecta el cliente firmado real, lector, broker y ambos
-colectores, con proveedor/Secrets Manager/autorización y repositorios de escritura
-ficticios. No carga el índice de modelos clínicos. La integración backend posterior inyecta este
-recorrido en sync/backfill y conecta publicación/destinos con sus escritores;
-solo el éxito de todas esas fases permite actualizar lastSyncedAt, con permisos
-revalidados dentro de las transacciones. Continúa pendiente el corte real.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/google/google-ads-read-broker.md#lector-y-colectores-del-backend).
 
 ## Bloqueo y auditoría
 
-La revocación persiste en SQLite y reintenta el mismo UUID. Antes de secretos y
-después de awaits se comprueba conexión/activo. La baja invalida su caché de
-páginas; el bloqueo de conexión y cierre del runtime la limpian también. Tras
-reiniciar, el bloqueo permanece aunque la caché sea nueva. No puede deshacer
-una petición que Google ya haya recibido ni revoca el token OAuth del proveedor.
-
-Auditoría v2 existente: actor de servicio, tenant, referencias, operación,
-resultado y correlación; dos eventos por nueva lectura admitida. Las métricas,
-nombres de campañas, cursores y credenciales no se persisten en el resultado
-SQLite ni en el outbox. El lector de API general todavía debe aportar la captura
-de actor humano y enlazarla con estos eventos. Entrega S3/IAM/retención reales y
-auditoría completa de la plataforma siguen pendientes.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/google/google-ads-read-broker.md#bloqueo-y-auditoría).
 
 ## Pruebas y costes
 
-145 tests del broker correctos (22 de Ads), con Node 24 y red
-bloqueada salvo los servidores HTTPS locales propiedad de las pruebas. Cubren
-ocho lecturas, payloads hostiles, ámbito, 10.001 filas completas con dos
-consultas ficticias, caché/evicción/caducidad, rotación de token, páginas repetidas,
-sentinels, límites de tamaño, transporte, KMS/ARN y runtime HTTPS real con
-desconexión persistente tras reiniciar. La ampliación prueba 100.001 anuncios en
-11 páginas Google ficticias, porciones autenticadas y secuencia completa de IDs.
-Las otras cohortes siguen pasando. Además, 48 tests Node backend comprueban lector,
-paridad de snapshots y regresión de los dos colectores; total 193 correctos.
-Sin nueva DDL, MySQL, UI/build, procesos de aplicación, AWS ni proveedor real.
-
-Evidencia privada `ads-broker-*` bajo
-`/home/ubuntu/qa-evidence/security-migration-20260912/`;
-`ads-broker-final-regression.log` y su JSON acreditan la ejecución final.
-El primer fallo era el nombre de tabla usado por el test de ausencia de datos;
-se conservó ese log y se comprobó después `audit_outbox` real.
-La ejecución final ampliada es `ads-consumers-regression.log/json`. El espejo de
-API tiene prueba final `ads-consumers-api-final-proof.json`; el primer verificador
-eliminaba también un salto de línea y dio un falso negativo, conservado en su
-artefacto inicial. Los cuerpos API previos son idénticos byte a byte.
-
-Por petición del consumidor hay nominalmente seis llamadas Secrets Manager
-(Describe/Get para conexión, cliente y developer token), aun si la página se
-sirve de memoria; refresh solo cuando lo exige el almacén existente. Una página
-de 10.000 filas puede producir 40 o más peticiones pequeñas y sus eventos de
-auditoría. La caché evita repetir esa consulta Google, pero no elimina el coste
-SM/S3/KMS ni la latencia de validación. No se asigna un precio o ahorro ficticio.
-Cost Explorer, etiquetas, Ajustes con gasto verificado y Budget/CloudFormation
-conservan sus pendientes. No se añade infraestructura ni presupuesto.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/google/google-ads-read-broker.md#pruebas-y-costes).
 
 ## Siguiente integración y puerta de activación
 
-Registro independiente, comprobación SQL NULL de tokens, autorización de grupo y
-compartidos, cierre legacy e inyección en sync/backfill se prepararon en
-[el bloque backend](google-ads-backend-migration.md). La cola de
-confirmación y auditoría están preparadas en
-[la baja Ads](google-ads-revocation-migration.md). [OAuth Ads](google-ads-oauth-migration.md)
-queda preparado en broker/API/Ajustes; el corte real sigue pendiente.
-Ads usa assignmentScope/grupoClinicaId y asignaciones explícitas; GrupoClinica no
-tiene una columna de cuenta Ads primaria. Los primarios SC/GA/GBP se comprueban
-en sus recorridos correspondientes.
-También faltan recepción, conversiones, optimización y resto del inventario Ads.
-No convertir el cliente HTTP genérico en un proxy al broker.
-
-Antes del uso real: completar esas dependencias, resolver el lote de IAM/acceso
-exacto a los tres secretos, configurar policy/grants y principals propios, probar
-aislamiento, migrar solo la cohorte aprobada y acreditar que ningún consumidor
-recurre a tokens SQL. El motor implementado no sustituye ese corte.
-OPS permanece aplazado. El push solo publica código y documentación propios;
-no instala configuración, reinicia, mueve secretos ni despliega.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/google/google-ads-read-broker.md#siguiente-integración-y-puerta-de-activación).
