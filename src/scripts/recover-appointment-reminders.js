@@ -36,7 +36,7 @@ function append(file, value) {
 async function main(args) {
   const option = name => args.find(arg => arg.startsWith(name + '='))?.slice(name.length + 1);
   const mode = option('--mode'), day = option('--day'), dir = option('--evidence');
-  if (!['plan', 'apply'].includes(mode) || !/^\d{4}-\d\d-\d\d$/.test(day || '')
+  if (!['plan', 'apply', 'complete'].includes(mode) || !/^\d{4}-\d\d-\d\d$/.test(day || '')
     || C.localDay(Date.now()) !== day || !dir?.startsWith('/home/ubuntu/secure-imports/')
     || !fs.lstatSync(dir).isDirectory() || fs.realpathSync(dir) !== dir || fs.statSync(dir).mode & 0o077) throw Error('recovery_arguments_invalid');
   const planFile = path.join(dir, 'plan.json'), journal = path.join(dir, 'apply.jsonl');
@@ -58,24 +58,59 @@ async function main(args) {
   const plan = JSON.parse(fs.readFileSync(planFile, 'utf8'));
   if (C.hash(plan) !== option('--sha256') || plan.day !== day || plan.version !== 1
     || plan.purpose !== 'explicit_today_missed_day_before_reminders'
-    || Date.now() - Date.parse(plan.createdAt) > 3600000 || fs.existsSync(journal)) throw Error('recovery_plan_invalid');
+    || Date.now() - Date.parse(plan.createdAt) > 3600000
+    || mode === 'apply' && fs.existsSync(journal) || mode === 'complete' && !fs.existsSync(journal)) throw Error('recovery_plan_invalid');
   const sourceHash = require('node:crypto').createHash('sha256')
     .update(fs.readFileSync(path.join(__dirname, '../services/appointmentAutomationV2Runtime.service.js'))).digest('hex');
   if (sourceHash !== plan.nativeSource) throw Error('recovery_native_source_changed');
   const { observedEnvironment } = require('./security-email-login-metadata');
   const observed = observedEnvironment('staging');
   if (observed.root !== path.resolve(__dirname, '../..')) throw Error('recovery_staging_source_required');
-  Object.assign(process.env, observed.env, { JOBS_CRON_LEADER: 'false', JOBS_WORKER_ENABLED: 'false',
-    // This explicit operator alone can revisit the sealed original window.
-    // Neither API configuration nor future scheduled jobs are changed.
-    APPOINTMENT_AUTOMATION_FIRE_GRACE_MS: String(86400000) });
+  Object.assign(process.env, C.runtimeEnvironment(observed.env));
   process.chdir(observed.root);
   const db = require('../../models');
   const runtime = require('../services/appointmentAutomationV2Runtime.service');
   const results = [];
+  const prior = mode === 'complete' ? fs.readFileSync(journal, 'utf8').trim().split('\n').map(JSON.parse)
+    .filter(row => row.executionId) : [];
   append(journal, { event: 'approved_recovery_started', day, planSha256: C.hash(plan), at: new Date().toISOString() });
   for (const item of plan.items) {
     try {
+      const earlier = prior.find(row => row.jobId === item.jobId);
+      if (earlier) {
+        const e = await db.FlowExecutionV2.findByPk(earlier.executionId);
+        if (!e || Number(e.trigger_entity_id) !== item.appointmentId || Number(e.clinic_id) !== item.clinicId) throw Error('recovery_execution_scope_changed');
+        if (['waiting', 'completed'].includes(e.status)) {
+          results.push({ jobId: item.jobId, executionId: e.id, alreadyDispatched: true }); continue;
+        }
+        const messages = await db.Message.findAll({ where: { direction: 'outbound', message_type: 'template',
+          [db.Sequelize.Op.and]: [db.Sequelize.where(db.Sequelize.literal("JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.execution_id'))"), String(e.id))] } });
+        if (messages.length !== 1 || !C.preflightArtifact(messages[0], e)) throw Error('recovery_preflight_requires_review');
+        const artifact = messages[0];
+        const template = await db.AutomationFlowTemplateV2.findByPk(e.template_version_id);
+        if (!template?.is_active || !template.published_at
+          || !template.nodes.some(n => n.id === artifact.metadata.node_id && n.type === 'action/send_whatsapp')) throw Error('recovery_template_changed');
+        await db.sequelize.transaction(async transaction => {
+          await e.reload({ transaction, lock: transaction.LOCK.UPDATE });
+          await artifact.reload({ transaction, lock: transaction.LOCK.UPDATE });
+          if (!C.preflightArtifact(artifact, e)) throw Error('recovery_preflight_changed');
+          append(journal, { event: 'preflight_artifact_preserved', messageId: artifact.id, executionId: e.id,
+            originalDeliveryKey: artifact.automation_delivery_key, metadataDeliveryKey: artifact.metadata.automation_delivery_key });
+          // This row is a local preflight failure, not a transport intent: no
+          // sender, network attempt or provider receipt exists. Preserve it as
+          // evidence while the same native execution builds its first intent.
+          const metadata = { ...artifact.metadata, previous_automation_delivery_key: artifact.metadata.automation_delivery_key,
+            automation_delivery_key: `preflight-artifact:${artifact.id}`, recovered_by: 'explicit_reminder_recovery_20261018' };
+          await artifact.update({ automation_delivery_key: `preflight-artifact:${artifact.id}`, metadata }, { transaction });
+          await e.update({ status: 'running', current_node_id: artifact.metadata.node_id,
+            last_error: null, wait_until: null, waiting_meta: null }, { transaction });
+          await require('../services/jobRequests.service').enqueueUniqueJobRequest({ type: 'automations_v2_execute',
+            payload: { execution_id: e.id }, priority: 'critical', origin: 'explicit_reminder_preflight_recovery',
+            dedupeScope: 'flow_execution:' + e.id }, { transaction });
+        });
+        const entry = { jobId: item.jobId, executionId: e.id, preflightRecovered: true, preservedArtifact: artifact.id };
+        append(journal, entry); results.push(entry); continue;
+      }
       const rows = await capture(day, item.jobId);
       if (rows.length !== 1 || C.validate(rows[0], { day }).sourceDigest !== item.sourceDigest) throw Error('recovery_source_changed');
       // fireScheduledTrigger rechecks effective recipe, current appointment,

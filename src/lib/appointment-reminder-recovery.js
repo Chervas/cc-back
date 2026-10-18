@@ -22,4 +22,22 @@ function validate(row, { day, now = Date.now() }) {
     patientId: row.patient_id, templateId: row.template_id, scheduledFor: row.payload.scheduled_for,
     sourceDigest: hash(row) };
 }
-module.exports = { validate, hash, instant, localDay };
+function runtimeEnvironment(env) {
+  // Do not turn off JOBS_WORKER_ENABLED: it is part of the staging send
+  // authority, even in an operator that never starts the scheduler itself.
+  require('./whatsappBrokerClient').assertStaging(env);
+  return { ...env, JOBS_CRON_LEADER: 'false', APPOINTMENT_AUTOMATION_FIRE_GRACE_MS: String(86400000) };
+}
+function preflightArtifact(message, execution) {
+  const m = message?.metadata || {};
+  const forbidden = ['wamid', 'wa_response', 'provider_message_id', 'providerMessageId', 'provider_acceptance_at',
+    'delivery_unknown', 'outcome_unknown', 'dispatch_wait', 'network_started_at', 'post_acceptance_error',
+    'automation_transport_job_id', 'template_components', 'template_params'];
+  return message?.status === 'failed' && message.direction === 'outbound' && message.message_type === 'template'
+    && execution?.status === 'failed' && execution.last_error === 'whatsapp_broker_runtime_denied'
+    && m.error === execution.last_error && m.failure_source === 'automation_send_whatsapp_preflight'
+    && m.source === 'automations_v2' && Number(m.execution_id) === Number(execution.id)
+    && typeof m.node_id === 'string' && typeof message.automation_delivery_key === 'string'
+    && !message.sent_at && forbidden.every(key => m[key] == null || m[key] === false);
+}
+module.exports = { validate, hash, instant, localDay, runtimeEnvironment, preflightArtifact };
