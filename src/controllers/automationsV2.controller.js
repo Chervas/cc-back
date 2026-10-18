@@ -6517,7 +6517,7 @@ exports.publishTemplateVersion = async (req, res) => {
             trigger_type: row.trigger_type, published_at: { [Op.ne]: null } }, order: [['version', 'DESC'], ['id', 'DESC']], transaction });
           const legacyStop = previous && !previous.is_active && require('../lib/patient-mobile-verification').configValid(previous.trigger_config);
           await clinic.update({ configuracion: { ...clinic.configuracion,
-            patient_mobile_verification: { enabled: !legacyStop, source: 'native_publication' } } }, { transaction });
+            patient_mobile_verification: { enabled: !legacyStop, launched: !!previous?.is_active || !!legacyStop, source: 'native_publication' } } }, { transaction });
         }
         const candidate = { ...row.toJSON(), nodes: normalizedNodes, trigger_config: triggerConfigResolution.trigger_config,
           published_at: new Date(), is_active: true };
@@ -6525,6 +6525,13 @@ exports.publishTemplateVersion = async (req, res) => {
           trigger_type: row.trigger_type, public_id: { [Op.ne]: row.public_id } }, transaction });
         const state = await lifecycle.current().inspect(row.clinic_id, { clinic, rows: [candidate, ...otherFamilies], transaction });
         activateOnPublish = state.ready && require('../lib/patient-mobile-verification').configValid(candidate.trigger_config);
+        if (activateOnPublish && clinic.configuracion?.patient_mobile_verification?.launched !== true) {
+          const cut = new Date().toISOString();
+          triggerConfigResolution.trigger_config.enabled_after = cut;
+          normalizedNodes.find(n => n.type === 'trigger/patient.mobile_verification_requested').config.enabled_after = cut;
+          await clinic.update({ configuracion: { ...clinic.configuracion, patient_mobile_verification: {
+            ...clinic.configuracion?.patient_mobile_verification, launched: true } } }, { transaction });
+        }
       }
       await AutomationFlowTemplateV2.update(
         { is_active: false },

@@ -213,8 +213,11 @@ async function setActive(template, active, { mobilePolicyActor } = {}) {
   const summary = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
     if (template.trigger_type === 'patient.mobile_verification_requested' && template.clinic_id && mobilePolicyActor != null) {
       const clinic = await db.Clinica.findByPk(template.clinic_id, { transaction, lock: transaction.LOCK.UPDATE });
+      const previous = clinic.configuracion?.patient_mobile_verification || {};
       await clinic.update({ configuracion: { ...clinic.configuracion, patient_mobile_verification: {
-        enabled: active === true, updated_by: mobilePolicyActor, updated_at: new Date().toISOString() } } }, { transaction });
+        ...previous, enabled: active === true, launched: previous.launched === true || !!template.is_active
+          || previous.enabled == null && require('./patient-mobile-verification').configValid(template.trigger_config),
+        updated_by: mobilePolicyActor, updated_at: new Date().toISOString() } } }, { transaction });
     }
     const rows = await familyRows(template, transaction);
     const current = rows.find(row => Number(row.id) === Number(template.id));

@@ -99,6 +99,21 @@ withIsolatedCampaignMysql(async scope => {
   for (const id of eight) await lifecycle.reconcile(id);
   assert.deepEqual(await Promise.all(eight.map(snapshot)), beforeEight);
   report.checks.push('eight previously activated clinics keep every stored field, including their original cuts');
+  await db.Clinica.create({ id_clinica: 302, nombre_clinica: 'TESTONLY configured before approval',
+    configuracion: { patient_mobile_verification: { enabled: true, launched: false } } });
+  const prepared = structuredClone(active); delete prepared.id; delete prepared.created_at; delete prepared.updated_at;
+  prepared.trigger_config.enabled_after = '2026-10-01T12:00:00.000Z';
+  prepared.nodes[0].config.enabled_after = prepared.trigger_config.enabled_after;
+  const early = await db.AutomationFlowTemplateV2.create({ ...prepared, clinic_id: 302,
+    public_id: 'flw_TESTONLY_prepared', template_key: 'testonly_prepared', is_active: false });
+  await f.approved.update({ status: 'PENDING' });
+  assert.equal((await lifecycle.reconcile(302)).status, 'pending');
+  await f.approved.update({ status: 'APPROVED' });
+  assert.equal((await lifecycle.reconcile(302)).status, 'active');
+  const launched = await latest(302);
+  assert.notEqual(launched.id, early.id); assert.equal(launched.trigger_config.enabled_after, f.clock.toISOString());
+  assert.equal((await db.Clinica.findByPk(302)).configuracion.patient_mobile_verification.launched, true);
+  report.checks.push('a configured but never launched copy gets a fresh actual-start cut after approval, not its earlier preparation date');
 
   waba = 'TESTONLY-NEW-WABA'; await asset.update({ wabaId: waba });
   assert.equal((await lifecycle.reconcile(73)).reason, 'template_approval_pending');

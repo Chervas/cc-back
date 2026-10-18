@@ -83,11 +83,14 @@ function createService(deps) {
       const rows = await rowsFor(clinicId, transaction);
       const state = await inspect(clinicId, { clinic, rows, transaction });
       if (state.legacyStop) await clinic.update({ configuracion: { ...clinic.configuracion,
-        [POLICY]: { enabled: false, source: 'preserved_legacy_stop' } } }, { transaction });
+        [POLICY]: { enabled: false, launched: true, source: 'preserved_legacy_stop' } } }, { transaction });
+      const policy = clinic.configuracion?.[POLICY] || {};
+      if (state.status === 'active' && policy.launched !== true) await clinic.update({ configuracion: {
+        ...clinic.configuracion, [POLICY]: { ...policy, launched: true } } }, { transaction });
       if (!state.ready || state.status === 'active') return publicState(state);
       const previous = state.template;
       if (!previous) return { status: 'review_required', reason: 'local_copy_missing' };
-      if (C.configValid(previous.trigger_config)) {
+      if (C.configValid(previous.trigger_config) && policy.launched === true) {
         // Explicit re-enable or recovery keeps the original immutable cut/version.
         await previous.update({ is_active: true }, { transaction });
         return { enabled: true, ready: true, status: 'active', reason: null };
@@ -107,6 +110,7 @@ function createService(deps) {
         clinic_id: clinicId, group_id: previous.group_id, is_system: false, is_active: false,
         entry_node_id: previous.entry_node_id, created_by: previous.created_by }, { transaction });
       await deps.publish({ row: copy, transaction, isActive: true });
+      await clinic.update({ configuracion: { ...clinic.configuracion, [POLICY]: { ...policy, launched: true } } }, { transaction });
       return { enabled: true, ready: true, status: 'active', reason: null };
     });
   }
@@ -121,7 +125,7 @@ function createService(deps) {
     await db.sequelize.transaction(async transaction => {
       const clinic = await db.Clinica.findByPk(template.clinic_id, { transaction, lock: transaction.LOCK.UPDATE });
       await clinic.update({ configuracion: { ...clinic.configuracion, [POLICY]: {
-        enabled: true, updated_by: actorId, updated_at: now().toISOString() } } }, { transaction });
+        ...clinic.configuracion?.[POLICY], enabled: true, updated_by: actorId, updated_at: now().toISOString() } } }, { transaction });
     });
     await reconcile(template.clinic_id);
     return {};
