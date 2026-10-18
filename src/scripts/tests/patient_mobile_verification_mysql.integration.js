@@ -272,4 +272,15 @@ withIsolatedCampaignMysql(async scope => {
   const afterCut = await t.source(); assert.equal(afterCut.metadata.delivery_enabled, true);
   assert.equal(afterCut.metadata.response_timeout_minutes, 1440);
   check('prospective activation cut never revives earlier disabled requests; only a new explicit acceptance after the cut becomes deliverable');
+  const acceptedBeforeLoss = await start(); await accept(acceptedBeforeLoss.message);
+  const queuedBeforeLoss = t.queued.size;
+  t.deliveryReady = async () => false; t.restart();
+  const stored = await execution(acceptedBeforeLoss.request);
+  const reused = await engine._processNode(send, stored.context, { execution: stored });
+  assert.equal(reused.kind, 'success');
+  assert.equal(t.queued.size, queuedBeforeLoss);
+  assert.equal(await db.Message.count({ where: { automation_delivery_key: `mobile-verification:${acceptedBeforeLoss.request.id}:outbound` } }), 1);
+  assert.equal((await t.runtime.waitContext({ execution: stored, timeoutMinutes: 1440 })).status, 'awaiting_response');
+  t.deliveryReady = null;
+  check('availability lost after provider acceptance preserves receipt reuse and the existing response wait after restart, without another transport publication');
 }).catch(error => { console.error(error); process.exitCode = 1; });

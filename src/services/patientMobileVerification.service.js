@@ -194,7 +194,14 @@ function createRuntime(deps) {
     if (!enabled() || request.metadata.delivery_enabled !== true || !C.timeout(request.metadata.response_timeout_minutes)
       || !patient || !await current(request, patient) || !snapshot.current || snapshot.state !== 'pending'
       || snapshot.provenance === 'manual_review') return { suppressed: true };
-    if (deps.deliveryReady && !await deps.deliveryReady(request.clinic_id)) throw fail('mobile_verification_communication_blocked');
+    if (deps.deliveryReady && !await deps.deliveryReady(request.clinic_id)) {
+      const accepted = await messageFor(request);
+      // Re-entering N2 after provider acceptance only reuses its receipt. A
+      // later loss of availability must not discard the existing response wait.
+      if (!accepted?.metadata?.wamid || !Number.isFinite(rawTime(accepted.metadata.provider_acceptance_at))) {
+        throw fail('mobile_verification_communication_blocked');
+      }
+    }
     await communicationAllowed(request);
     const candidates = await db.Conversation.findAll({ where: { clinic_id: request.clinic_id, channel: 'whatsapp',
       contact_id: { [Op.in]: require('../lib/phone').getPhoneIdentityCandidates(request.metadata.phone) } }, limit: 3 });
