@@ -184,17 +184,22 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
     const params = { [`${prefix}Start`]: startDate, [`${prefix}End`]: endDate };
     const placeholders = sites.map((p, i) => { params[prefix + i] = p.siteHash; return `UNHEX(:${prefix}${i})`; }).join(',');
     const scope = `p.site_hash IN (${placeholders})`;
-    const days = (Date.parse(endDate) - Date.parse(startDate)) / 86400000 + 1;
-    const [{ covered }] = await query(`SELECT COUNT(*) AS covered FROM ScAnalyticsCoverageDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id WHERE ${scope} AND d.date BETWEEN :${prefix}Start AND :${prefix}End AND d.${totals ? 'totals_complete' : 'detail_complete'}=1`, params);
-    if (Number(covered) !== days * sites.length) C.fail('sc_analytics_incomplete_coverage');
-    if (!totals && !ranking) {
-      // Reject only published monthly periods actually intersecting the request.
-      const archived = await query(`SELECT a.month FROM ScAnalyticsArchiveBatches a JOIN ScAnalyticsProperties p ON p.id=a.property_id WHERE ${scope} AND a.month<=:${prefix}End AND LAST_DAY(a.month)>=:${prefix}Start`, params);
-      for (const row of archived) {
-        const bounds = C.monthRange(row.month.slice(0, 7));
-        if (startDate > bounds.startDate || endDate < bounds.endDate) C.fail('sc_analytics_monthly_partial_range');
+    const validate = async () => {
+      const days = (Date.parse(endDate) - Date.parse(startDate)) / 86400000 + 1;
+      const [{ covered }] = await query(`SELECT COUNT(*) AS covered FROM ScAnalyticsCoverageDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id WHERE ${scope} AND d.date BETWEEN :${prefix}Start AND :${prefix}End AND d.${totals ? 'totals_complete' : 'detail_complete'}=1`, params);
+      if (Number(covered) !== days * sites.length) C.fail('sc_analytics_incomplete_coverage');
+      if (!totals && !ranking) {
+        // Publications are append-only. Repeat this guard after the consumer's
+        // SELECT, before responding, to catch a month published during its read.
+        const archived = await query(`SELECT a.month FROM ScAnalyticsArchiveBatches a JOIN ScAnalyticsProperties p ON p.id=a.property_id WHERE ${scope} AND a.month<=:${prefix}End AND LAST_DAY(a.month)>=:${prefix}Start`, params);
+        for (const row of archived) {
+          const bounds = C.monthRange(row.month.slice(0, 7));
+          if (startDate > bounds.startDate || endDate < bounds.endDate) C.fail('sc_analytics_monthly_partial_range');
+        }
       }
-    }
+      return true;
+    };
+    await validate();
     for (const key of Object.keys(params)) if (Object.hasOwn(replacements, key)) C.fail('sc_analytics_replacement_collision');
     Object.assign(replacements, params);
     const where = `WHERE ${scope} AND d.date BETWEEN :${prefix}Start AND :${prefix}End`;
@@ -209,7 +214,8 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
       source = `SELECT ${common},${dims},${position('d')} AS position,d.position_weighted,d.position_sum,d.position_count FROM ScAnalyticsDaily d ${joins} ${where} AND NOT EXISTS(SELECT 1 FROM ScAnalyticsArchiveBatches a WHERE a.property_id=d.property_id AND a.month=DATE_FORMAT(d.date,'%Y-%m-01'))
         UNION ALL SELECT d.property_id,p.site_url,d.month AS date,d.clicks,d.impressions,${dims},${position('d')} AS position,d.position_weighted,d.position_sum,d.position_count FROM ScAnalyticsMonthly d ${joins} WHERE ${scope} AND d.month BETWEEN :${prefix}Start AND :${prefix}End AND EXISTS(SELECT 1 FROM ScAnalyticsArchiveBatches a WHERE a.property_id=d.property_id AND a.month=d.month)`;
     }
-    return { sqlFrom: `(${source}) AS sc_source`, scopeSql: '', resolution: totals || ranking ? 'daily' : 'daily_or_complete_month', authoritativeTotals: !!totals };
+    return { sqlFrom: `(${source}) AS sc_source`, scopeSql: '', validate,
+      resolution: totals || ranking ? 'daily' : 'daily_or_complete_month', authoritativeTotals: !!totals };
   }
 
   // An external, independent archive adapter is deliberately injected. This

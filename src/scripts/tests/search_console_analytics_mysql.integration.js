@@ -111,6 +111,20 @@ async function main() {
     await assert.rejects(repo.archiveMonth({ siteUrl: raceOptions.siteUrl, month: '2024-03', archiveStore: racingStore, validate }), { code: 'sc_analytics_archive_source_changed' });
     assert.equal(await count('ScAnalyticsArchiveBatches'), 2);
     assert.equal(Number((await rows('SELECT d.clicks FROM ScAnalyticsDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id WHERE p.site_url=:url', { url: raceOptions.siteUrl }))[0].clicks), 2);
+    const publication = { ...old, siteUrl: 'sc-domain:publication.example', startDate: '2024-05-01', endDate: '2024-05-31' };
+    await repo.writeInterval({ ...publication, rows: [{ date: '2024-05-01', query: 'partial', page_url: '', clicks: 1, impressions: 10, position: 2 },
+      { date: '2024-05-31', query: 'partial', page_url: '', clicks: 9, impressions: 90, position: 4 }] });
+    const firstHalfParams = {}, firstHalf = await repo.rawSource({ ...publication, siteUrls: [publication.siteUrl], endDate: '2024-05-15', replacements: firstHalfParams });
+    const lastDaysParams = {}, lastDays = await repo.rawSource({ ...publication, siteUrls: [publication.siteUrl], startDate: '2024-05-02', replacements: lastDaysParams });
+    const fullParams = {}, fullMonth = await repo.rawSource({ ...publication, siteUrls: [publication.siteUrl], replacements: fullParams });
+    await repo.archiveMonth({ siteUrl: publication.siteUrl, month: '2024-05', archiveStore: store, validate });
+    await rows(`SELECT SUM(clicks) FROM ${firstHalf.sqlFrom}`, firstHalfParams);
+    await rows(`SELECT SUM(clicks) FROM ${lastDays.sqlFrom}`, lastDaysParams);
+    await assert.rejects(firstHalf.validate(), { code: 'sc_analytics_monthly_partial_range' });
+    await assert.rejects(lastDays.validate(), { code: 'sc_analytics_monthly_partial_range' });
+    assert.equal(Number((await rows(`SELECT SUM(clicks) AS clicks FROM ${fullMonth.sqlFrom}`, fullParams))[0].clicks), 10);
+    assert.equal(await fullMonth.validate(), true);
+    report.checks.push('publication between rawSource and SELECT is rejected by post-read validation for both partial-month boundaries; full-month result remains exact');
     report.checks.push('reviewed legacy clone backfill, conflicting clones abort, leap-month exact weighted/zero-position rollup, independent archive read-back failure safe, partial monthly range explicit, resumable verified purge, retry idempotence, concurrent ingestion prevents stale archive publication');
     assert.equal(await count('ScAnalyticsStagedRows'), 0); assert.equal(await count('ScAnalyticsStagedTotals'), 0);
   });
