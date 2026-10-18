@@ -170,6 +170,18 @@
       "target_finalization_ddl": "ALTER TABLE cc_dms_pilot.pilot_lob MODIFY COLUMN payload JSON NOT NULL, MODIFY COLUMN document LONGTEXT NOT NULL, ALGORITHM=INPLACE, LOCK=NONE",
       "timing": "Measure after DMS is stopped at the final source fence, with full validation complete; include all 86 affected-table equivalents, trigger restoration, consumer reconnect and abort margin. No metadata-derived generic ALTER is approved for clinical tables.",
       "scale": "Fictional target-only benchmark can generate >=0.535 GiB of table/index footprint on encrypted RDS storage directly, without a large file on the application root. A small pilot proves behavior, not the full-size timing bound."
+    },
+    "adversarial_intertable_cascade": {
+      "purpose": "Route A must demonstrate this exact ordering; official workaround alone is not a passed receipt.",
+      "schedule": [
+        "Create a parent and dependent child with FK cascade/SET NULL in the fictional source.",
+        "Force or instrument loading so the child snapshot includes the old child; commit source parent DELETE/UPDATE while parent snapshot does not yet include the old parent.",
+        "Allow full-load/cached apply under FK checks disabled; inspect the entire fictional target for orphan/missing child state before and after restoring FK checks.",
+        "Repeat both StopTaskCachedChangesApplied and NotApplied candidate schedules if considered. A missing target parent delete cannot cascade an already loaded old child; simply changing stop flags is not proof.",
+        "Run the same source changes during a single consistent native seed, then start CDC-only at its captured file:position with target FK checks active. Route B also needs measured end-to-end proof; it is not accredited by design alone."
+      ],
+      "status": "not_run",
+      "clinical_data_forbidden": true
     }
   },
   "references": {
@@ -186,7 +198,9 @@
     "rds_stop": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html",
     "tls_reload": "https://dev.mysql.com/doc/refman/8.0/en/alter-instance.html",
     "release_notes": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_ReleaseNotes.html",
-    "secrets_endpoint_override": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Advanced.Endpoints.secretsmanager.html"
+    "secrets_endpoint_override": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Advanced.Endpoints.secretsmanager.html",
+    "native_seed": "https://dev.mysql.com/doc/refman/8.0/en/mysqldump.html",
+    "cdc_native_start": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Task.CDC.html"
   },
   "clinical_copy": {
     "status": "blocked_pending_synthetic_rehearsal",
@@ -202,13 +216,23 @@
   "candidate_variants": [
     {
       "name": "dms-full-load-plus-cdc-full-lob",
-      "status": "unproven",
-      "requirement": "Temporary nullable target LOBs, exact native target schema/constraints and generated exclusions, audited cascade phase transition, final NOT NULL restoration before writers."
+      "status": "unproven_intertable_fk_snapshot_risk",
+      "requirement": "Temporary nullable target LOBs, exact native target schema/constraints and generated exclusions. The documented phase transition does not itself establish a consistent cross-table snapshot during full load/cached apply. Reject route A if the adversarial cascade case creates any orphan, lost update, missing row or validation difference; neither cached-stop setting alone establishes safety."
     },
     {
       "name": "native-consistent-seed-plus-dms-cdc-only-full-lob",
-      "status": "hypothesis_only",
-      "requirement": "Synthetic proof that CDC INSERT/UPDATE handles NOT NULL JSON/LOB atomically without temporary NULLs; do not assume FullLOB nullability restrictions disappear in CDC-only mode."
+      "status": "preferred_candidate_for_synthetic_proof_only",
+      "requirement": "Native consistent InnoDB seed with mysqldump --single-transaction --source-data=2, then DMS CDC-only from that exact seed file:position with FK enforcement ON from the first CDC event and BatchApplyEnabled=false. Preserve strict verify-full on both DMS endpoints. This is not yet proven; FullLOB CDC INSERT/UPDATE may still require nullable target LOBs and final NOT NULL restoration.",
+      "phases": [
+        "Only fictional cc_dms_pilot on the owned source instance and its reviewed RDS pilot schema. This plan does not perform a native seed or grant permission for clinical data movement.",
+        "Create one native seed using one mysqldump consistent transaction for all InnoDB tables; --quick streams data. Capture --source-data=2 commented coordinates inside the authenticated encrypted seed receipt. Never substitute SHOW MASTER STATUS collected after the dump or a guessed timestamp.",
+        "Budget and independently watchdog initial FTWRL acquisition/hold. It is global to that source instance and can stall behind long updating statements; a clinical exporter would also briefly affect DEV sharing the real source. Abort on the approved lock budget. Prohibit concurrent ALTER/CREATE/DROP/RENAME/TRUNCATE on dumped tables for the full export.",
+        "Restore native schema/data coherently with audited objects/DEFINER handling and a complete seed receipt. Keep application writers disabled. Read and validate the entire fictional seed before CDC. Restore FK enforcement ON before the first DMS CDC event.",
+        "Create a separate CDC-only task with CdcStartPosition equal to the seed binary-log file:position, TargetTablePrepMode=DO_NOTHING, BatchApplyEnabled=false and full validation. Remove only the FK-check-disabling target ECA while retaining Secrets Manager endpoint override and verify-full. Keep required source binlogs through proof of recovery.",
+        "Use tested remove-column transformations for generated source columns and native recomputation at target. Prove FullLOB CDC nullability with new INSERT and UPDATE during connection loss/resume. If nullable target LOBs are required, keep final NOT NULL timing and exact definitions as blocking criteria.",
+        "Exercise cascades/SET NULL concurrent with the seed and immediately after its coordinate, across reconnect/resume and multi-table transactions. Require complete row/LOB comparison, no orphans, exact guards and no external WhatsApp sends.",
+        "Finalization still needs all source writers fenced/drained, controlled final marker, complete applied transactions and zero differences. Demonstrate NOT NULL/trigger restoration and all consumer reconnects plus abort margin within120s. Existing evidence gates are not reduced or bypassed."
+      ]
     },
     {
       "name": "limited-lob",
@@ -249,7 +273,8 @@
     "generated_columns": "The current selection-only mapping is an infrastructure preview, not a runnable generated-column migration. Before creating/starting the pilot task, precreate exact native target generated columns and add/test explicit remove-column transformations for fictional source generated columns. Keep exact schema scope cc_dms_pilot. Clinical mappings are never substituted into this template.",
     "private_secrets": "Both endpoint ECAs use the regional DNS name extracted from the private Secrets Manager VPCE. PrivateDnsEnabled still requires VPC enableDnsHostnames and enableDnsSupport. Test connection is required.",
     "lob_bounds": "LOB content lengths and actual SQL definitions were not read. Metadata byte footprints are approximate table/index sizes; they do not bound maximum LOB size or establish 120-second DDL completion.",
-    "validation_sensitive_tables": "DMS validation/error/control tables can contain values even when task logging is disabled. Synthetic pilot remains synthetic; clinical validation output requires separate protected evidence/storage review."
+    "validation_sensitive_tables": "DMS validation/error/control tables can contain values even when task logging is disabled. Synthetic pilot remains synthetic; clinical validation output requires separate protected evidence/storage review.",
+    "route_a_full_load_fk": "StopTaskCachedChangesApplied/NotApplied do not themselves prove a cross-table consistent seed. The adversarial parent/child snapshot schedule is mandatory; no runtime/task is approved by this plan."
   },
   "operator_review_sequence": [
     {
