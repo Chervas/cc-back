@@ -94,6 +94,30 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     assert.deepEqual(await client.timeout(3000).emitWithAck('subscribe', [71]), { status: 'ready', clinicIds: [71] });
     guard.deliver('message:created', { ...patient.body, metadata: { provider_token: 'FICTITIOUS_PROVIDER_SECRET' } }, ['clinic:71', 'user:501']); await idle();
     assert.equal(received.length, 1); assert(!JSON.stringify(received).includes('FICTITIOUS_PROVIDER_SECRET'));
+    const mobileNotifications = [];
+    client.on('notification:created', value => mobileNotifications.push(value));
+    client.on('notification:updated', value => mobileNotifications.push(value));
+    const mobileRow = await models.Notification.findByPk(96);
+    await mobileRow.update({ event: 'automation.persistent_alert', data: {
+      trigger_type: 'patient.mobile_verification_requested', request_event_id: 10, patientId: 801,
+      clinicId: 999, displayMode: 'persistent_alert', requiresAcknowledgement: true, resolved: false,
+      quickChatConversationId: 91, reply_token: 'FICTITIOUS_PROVIDER_SECRET',
+    } });
+    const mobileDto = require('../../lib/notification-dto').mapNotificationToDto(mobileRow);
+    guard.deliver('notification:created', mobileDto, ['user:501']); await idle();
+    assert.equal(mobileNotifications.length, 1);
+    assert.equal(mobileNotifications[0].link, '/pacientes/detalle/801/datos-personales?clinic_id=71');
+    assert.equal(mobileNotifications[0].data.request_event_id, 10);
+    assert.equal(mobileNotifications[0].data.requiresAcknowledgement, true);
+    assert(!JSON.stringify(mobileNotifications).includes('FICTITIOUS_PROVIDER_SECRET'));
+    assert(!Object.hasOwn(mobileNotifications[0].data, 'quickChatConversationId'));
+    guard.deliver('notification:created', { ...mobileDto, id: '97' }, ['user:501']); await idle();
+    assert.equal(mobileNotifications.length, 1, 'A different notification owner remains denied');
+    await mobileRow.update({ isRead: true, data: { ...mobileRow.data, resolved: true, requiresAcknowledgement: false } });
+    guard.deliver('notification:updated', require('../../lib/notification-dto').mapNotificationToDto(mobileRow), ['user:501']); await idle();
+    assert.equal(mobileNotifications.length, 2); assert.equal(mobileNotifications[1].read, true);
+    assert.equal(mobileNotifications[1].data.requiresAcknowledgement, false);
+    report.checks.push('actual SQL notification -> DTO -> authenticated audited Socket.IO preserves scoped mobile-review creation/closure, strips secrets/chat context and denies a different owner');
     const availabilityReceived=[];client.on('availability:changed',value=>availabilityReceived.push(value));
     // The actor has access only to clinic 71. A related clinic's appointment is
     // never needed to invalidate 71: neither its ID nor its patient crosses over.

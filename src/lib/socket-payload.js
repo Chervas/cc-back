@@ -44,6 +44,9 @@ function packetFor(event, payload) {
   }
   if (family === 'notification') {
     body.data = project(payload.data, 'quickChatConversationId quickChatMessageId appointmentId leadId');
+    const mobileReview = ['automation.persistent_alert', 'automation.system_notification'].includes(body.event)
+      && payload.data?.trigger_type === 'patient.mobile_verification_requested'
+      && positive(payload.data?.request_event_id) && positive(payload.data?.patientId) && positive(body.clinicaId);
     // Reception's recipient-undeliverable alert uses the existing persistent
     // overlay. Only this proven, closed presentation contract crosses live
     // sockets: never expose execution snapshots, provider errors or arbitrary
@@ -59,8 +62,20 @@ function packetFor(event, payload) {
       body.data.requiresAcknowledgement = true;
       body.data.clinicId = Number(body.clinicaId);
     }
-    // Navigation must remain local; arbitrary URLs can carry credentials or exfiltrate user context.
-    body.link = typeof body.link === 'string' && /^\/(?!\/)[a-zA-Z0-9/_-]*$/.test(body.link) ? body.link : null;
+    if (mobileReview) {
+      // This domain review opens its exact patient, never an inherited chat.
+      // Reconstruct the local URL rather than permitting arbitrary query strings.
+      body.data = {
+        trigger_type: 'patient.mobile_verification_requested', request_event_id: Number(payload.data.request_event_id),
+        patientId: Number(payload.data.patientId), clinicId: Number(body.clinicaId),
+        displayMode: payload.data.displayMode === 'persistent_alert' ? 'persistent_alert' : 'inbox',
+        requiresAcknowledgement: payload.data.requiresAcknowledgement === true, resolved: payload.data.resolved === true,
+      };
+      body.link = `/pacientes/detalle/${body.data.patientId}/datos-personales?clinic_id=${body.data.clinicId}`;
+    } else {
+      // Navigation must remain local; arbitrary URLs can carry credentials or exfiltrate user context.
+      body.link = typeof body.link === 'string' && /^\/(?!\/)[a-zA-Z0-9/_-]*$/.test(body.link) ? body.link : null;
+    }
   }
   if (family === 'message' && !positive(body.id)) return null;
   if (Buffer.byteLength(JSON.stringify(body)) > 49152) throw Error('realtime_payload_invalid');

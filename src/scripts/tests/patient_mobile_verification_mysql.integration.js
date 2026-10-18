@@ -105,6 +105,17 @@ withIsolatedCampaignMysql(async scope => {
   await engine._processNode(notify, (await execution(rejected.request)).context, { execution: await execution(rejected.request) });
   assert.equal((await tasks(rejected.request)).length, 2);
   assert((await tasks(rejected.request)).every(n => n.event === 'automation.persistent_alert' && n.data.request_event_id === rejected.request.id));
+  const notificationDto = require('../../lib/notification-dto').mapNotificationToDto((await tasks(rejected.request))[0]);
+  assert.equal(notificationDto.data.trigger_type, C.REQUEST);
+  assert.equal(notificationDto.link, `/pacientes/detalle/${rejected.request.patient_id}/datos-personales?clinic_id=72`);
+  assert.equal(notificationDto.data.clinicId, 72);
+  assert.equal(notificationDto.data.requiresAcknowledgement, true);
+  report.mobileReviewNotification = notificationDto;
+  const liveNotification = require('../../lib/socket-payload').packetFor('notification:created', notificationDto);
+  assert.equal(liveNotification.body.data.request_event_id, rejected.request.id);
+  assert.equal(liveNotification.body.link, notificationDto.link);
+  assert.equal(liveNotification.body.data.displayMode, 'persistent_alert');
+  report.mobileReviewPacket = liveNotification;
   await manual(rejected.request, 'confirm');
   assert((await tasks(rejected.request)).every(n => n.isRead && n.data.resolved));
   check('concurrent NO replies resolve atomically; generic persistent notification deduplicates per request/recipient');
