@@ -201,7 +201,7 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
     const position = alias => `CASE WHEN ${alias}.impressions>0 THEN ${alias}.position_weighted/${alias}.impressions WHEN ${alias}.position_count>0 THEN ${alias}.position_sum/${alias}.position_count ELSE NULL END`;
     const common = 'd.property_id,p.site_url,d.date,d.clicks,d.impressions';
     let source;
-    if (totals) source = `SELECT ${common},${position('d')} AS position,CASE WHEN d.impressions>0 THEN d.clicks/d.impressions ELSE 0 END AS ctr FROM ScAnalyticsPropertyDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id ${where}`;
+    if (totals) source = `SELECT ${common},${position('d')} AS position,d.position_weighted,d.position_sum,d.position_count,CASE WHEN d.impressions>0 THEN d.clicks/d.impressions ELSE 0 END AS ctr FROM ScAnalyticsPropertyDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id ${where}`;
     else if (ranking) source = `SELECT d.property_id,p.site_url,d.date,d.queries_top3,d.queries_top10 FROM ScAnalyticsRankingDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id ${where}`;
     else {
       const dims = 'q.value_text AS query,u.value_text AS page_url';

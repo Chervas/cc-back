@@ -67,8 +67,8 @@ async function main() {
     assert.equal(Number((await rows('SELECT COUNT(*) AS n FROM ScAnalyticsDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id WHERE p.site_url=:url', { url: old.siteUrl }))[0].n), 4);
     async function* conflicting() { yield { ...historical[0], site_url: old.siteUrl }; yield { ...historical[0], clicks: 99, site_url: old.siteUrl }; }
     await assert.rejects(backfillInterval({ repository: repo, source: conflicting(), ...old, provenanceReviewed: true }), { code: 'sc_analytics_conflicting_duplicate' });
-    let content = '', corrupt = false;
-    const store = { independent: true, async put({ body }) { content = ''; for await (const chunk of body) content += chunk; return { fixture: 'independent-memory-archive' }; }, async read() { return content + (corrupt ? 'corrupt' : ''); } };
+    let corrupt = false; const archivedBodies = new Map();
+    const store = { independent: true, async put({ key, body }) { let content = ''; for await (const chunk of body) content += chunk; archivedBodies.set(key, content); return { key }; }, async read(receipt) { return archivedBodies.get(receipt.key) + (corrupt ? 'corrupt' : ''); } };
     const archiveArgs = { siteUrl: old.siteUrl, month: '2024-02', archiveStore: store, validate };
     corrupt = true; await assert.rejects(repo.archiveMonth(archiveArgs), { code: 'sc_analytics_archive_verification_failed' });
     assert.equal(await count('ScAnalyticsArchiveBatches'), 0); assert.equal(await count('ScAnalyticsMonthly'), 0);
@@ -88,6 +88,20 @@ async function main() {
     assert.deepEqual(await repo.purgeArchivedMonth(archiveArgs), { removed: 0, done: true });
     await assert.rejects(repo.writeInterval({ ...old, rows: historical }), { code: 'sc_analytics_month_already_archived' });
     await assert.rejects(repo.archiveMonth({ ...archiveArgs, month: '2024-10' }), { code: 'sc_analytics_retention_window' });
+    const march = { ...old, startDate: '2024-03-01', endDate: '2024-03-31' }, april = { ...old, startDate: '2024-04-01', endDate: '2024-04-30' };
+    await repo.writeInterval({ ...march, rows: [{ date: '2024-03-01', query: 'zero', page_url: '', clicks: 0, impressions: 0, position: 6 }] });
+    await repo.writeInterval({ ...april, rows: [{ date: '2024-04-01', query: 'zero', page_url: '', clicks: 0, impressions: 0, position: 8 }] });
+    await repo.archiveMonth({ ...archiveArgs, month: '2024-03' });
+    const mixedReplacements = {}, mixed = await repo.rawSource({ siteUrls: [old.siteUrl, old.siteUrl], startDate: old.startDate, endDate: april.endDate, replacements: mixedReplacements });
+    const aggregate = async source => (await rows(`SELECT SUM(impressions) AS impressions,SUM(position_weighted) AS weighted,SUM(position_sum) AS positions,SUM(position_count) AS observations,CASE WHEN SUM(impressions)>0 THEN SUM(position_weighted)/SUM(impressions) ELSE SUM(position_sum)/NULLIF(SUM(position_count),0) END AS position FROM ${source.sqlFrom} WHERE query='zero'`, mixedReplacements))[0];
+    const zero = await aggregate(mixed); assert.equal(Number(zero.impressions), 0); assert.equal(Number(zero.positions), 20); assert.equal(Number(zero.observations), 4); assert.equal(Number(zero.position), 5);
+    await repo.writeTotalsInterval({ ...old, rows: [{ date: '2024-02-01', clicks: 0, impressions: 0, position: 2 }, { date: '2024-02-29', clicks: 0, impressions: 0, position: 4 }] });
+    await repo.writeTotalsInterval({ ...march, rows: [{ date: '2024-03-01', clicks: 0, impressions: 0, position: 6 }] });
+    await repo.writeTotalsInterval({ ...april, rows: [{ date: '2024-04-01', clicks: 0, impressions: 0, position: 8 }] });
+    const totalReplacements = {}, mixedTotals = await repo.rawSource({ siteUrls: [old.siteUrl], startDate: old.startDate, endDate: april.endDate, replacements: totalReplacements, totals: true });
+    const totalZero = (await rows(`SELECT SUM(position_weighted) AS weighted,SUM(position_sum) AS positions,SUM(position_count) AS observations,SUM(position_sum)/SUM(position_count) AS position FROM ${mixedTotals.sqlFrom}`, totalReplacements))[0];
+    assert.equal(Number(totalZero.weighted), 0); assert.equal(Number(totalZero.positions), 20); assert.equal(Number(totalZero.observations), 4); assert.equal(Number(totalZero.position), 5);
+    report.checks.push('two monthly periods plus daily detail preserve zero-impression observation weights; authoritative totals expose the same exact accumulators');
     const raceOptions = { ...old, siteUrl: 'sc-domain:race.example', startDate: '2024-03-01', endDate: '2024-03-31' };
     const raceRow = { date: '2024-03-01', query: 'race', page_url: '', clicks: 1, impressions: 1, position: 1 };
     await repo.writeInterval({ ...raceOptions, rows: [raceRow] });
@@ -95,7 +109,7 @@ async function main() {
     const racingStore = { independent: true, async put({ body }) { racingContent = ''; for await (const chunk of body) racingContent += chunk;
       await repo.writeInterval({ ...raceOptions, rows: [{ ...raceRow, clicks: 2 }] }); return { fixture: 'race' }; }, async read() { return racingContent; } };
     await assert.rejects(repo.archiveMonth({ siteUrl: raceOptions.siteUrl, month: '2024-03', archiveStore: racingStore, validate }), { code: 'sc_analytics_archive_source_changed' });
-    assert.equal(await count('ScAnalyticsArchiveBatches'), 1);
+    assert.equal(await count('ScAnalyticsArchiveBatches'), 2);
     assert.equal(Number((await rows('SELECT d.clicks FROM ScAnalyticsDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id WHERE p.site_url=:url', { url: raceOptions.siteUrl }))[0].clicks), 2);
     report.checks.push('reviewed legacy clone backfill, conflicting clones abort, leap-month exact weighted/zero-position rollup, independent archive read-back failure safe, partial monthly range explicit, resumable verified purge, retry idempotence, concurrent ingestion prevents stale archive publication');
     assert.equal(await count('ScAnalyticsStagedRows'), 0); assert.equal(await count('ScAnalyticsStagedTotals'), 0);
