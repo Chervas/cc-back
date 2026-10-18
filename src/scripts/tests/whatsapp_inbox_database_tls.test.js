@@ -34,7 +34,7 @@ test('existing local transport remains available, without loading production mod
   }
 });
 test('remote database never permits plaintext or malformed configuration',()=>{
-  for(const DB_TLS_REQUIRED of [undefined,'','false'])assert.throws(()=>databaseConfiguration({...base,DB_HOST:'rds.fixture.invalid',DB_TLS_REQUIRED}),/inbox_database_remote_tls_required/);
+  for(const DB_TLS_REQUIRED of [undefined,'','false'])assert.throws(()=>databaseConfiguration({...base,DB_HOST:'rds.fixture.invalid',DB_TLS_REQUIRED}),/database_remote_tls_required/);
   for(const DB_HOST of ['',undefined,'rds.fixture.invalid/path','user@rds.fixture.invalid','-rds.invalid','rds.invalid\n'])assert.throws(()=>databaseConfiguration({...base,DB_HOST}),/inbox_database_configuration_invalid/);
   for(const DB_PORT of ['0','65536','3306junk','3e3','-1'])assert.throws(()=>databaseConfiguration({...base,DB_PORT}),/inbox_database_configuration_invalid/);
   for(const changed of [{DB_USERNAME:''},{DB_PASSWORD:''},{DB_NAME:'other_database'}])assert.throws(()=>databaseConfiguration({...base,...changed}),error=>error.message==='inbox_database_configuration_invalid'&&!error.message.includes('FICTITIOUS_PASSWORD_SENTINEL'));

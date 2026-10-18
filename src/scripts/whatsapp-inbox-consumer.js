@@ -16,10 +16,9 @@ function databaseConfiguration(env=process.env){
     || !Number.isInteger(port)||port<1||port>65535
     || typeof env.DB_USERNAME!=='string'||!env.DB_USERNAME||env.DB_USERNAME.length>128||/[\x00-\x1f]/.test(env.DB_USERNAME)
     || typeof env.DB_PASSWORD!=='string'||!env.DB_PASSWORD||env.DB_NAME!=='clinicaclick') throw Error('inbox_database_configuration_invalid');
-  const tls=buildDatabaseTlsOptions(env);
   // Keep the existing loopback deployment available before the coordinated cut.
-  // Every remote destination must verify both its CA and DB_HOST identity.
-  if(!['127.0.0.1','::1','localhost'].includes(host.toLowerCase())&&!tls.ssl)throw Error('inbox_database_remote_tls_required');
+  // The shared helper rejects remote destinations without verified TLS.
+  const tls=buildDatabaseTlsOptions(env);
   return {host,port,user:env.DB_USERNAME,password:env.DB_PASSWORD,database:env.DB_NAME,
     connectTimeout:3000,timezone:'Z',...tls};
 }
