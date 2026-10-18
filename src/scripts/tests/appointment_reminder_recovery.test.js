@@ -50,5 +50,9 @@ test('only local preflight artifacts with no transport/acceptance evidence can b
     assert.equal(C.preflightArtifact({ ...m, metadata: { ...m.metadata, [key]: 'present' } }, e), false);
   }
   assert.equal(C.preflightArtifact({ ...m, sent_at: '2026-10-18 11:00:00' }, e), false);
+  assert.equal(C.preflightArtifact({ ...m, sent_at: new Date(now), createdAt: new Date(now),
+    metadata: { ...m.metadata, generated_at: new Date(now + 100).toISOString() } }, e), true);
+  assert.equal(C.preflightArtifact({ ...m, sent_at: new Date(now + 5000), createdAt: new Date(now),
+    metadata: { ...m.metadata, generated_at: new Date(now + 100).toISOString() } }, e), false);
   assert.equal(C.preflightArtifact(m, { ...e, last_error: 'provider_unavailable' }), false);
 });

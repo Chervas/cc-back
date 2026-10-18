@@ -32,12 +32,18 @@ function preflightArtifact(message, execution) {
   const m = message?.metadata || {};
   const forbidden = ['wamid', 'wa_response', 'provider_message_id', 'providerMessageId', 'provider_acceptance_at',
     'delivery_unknown', 'outcome_unknown', 'dispatch_wait', 'network_started_at', 'post_acceptance_error',
-    'automation_transport_job_id', 'template_components', 'template_params'];
+    'automation_transport_job_id', 'template_components', 'template_params', 'wa_status', 'wa_status_timestamps'];
+  // The legacy preflight materializer stamps sent_at even though no send was
+  // attempted. Accept that clock only when it matches its diagnostic creation.
+  const diagnosticClock = !message?.sent_at || Number.isFinite(instant(m.generated_at))
+    && Number.isFinite(instant(message.createdAt))
+    && Math.abs(instant(message.sent_at) - instant(message.createdAt)) < 1000
+    && Math.abs(instant(m.generated_at) - instant(message.createdAt)) < 1000;
   return message?.status === 'failed' && message.direction === 'outbound' && message.message_type === 'template'
     && execution?.status === 'failed' && execution.last_error === 'whatsapp_broker_runtime_denied'
     && m.error === execution.last_error && m.failure_source === 'automation_send_whatsapp_preflight'
     && m.source === 'automations_v2' && Number(m.execution_id) === Number(execution.id)
     && typeof m.node_id === 'string' && typeof message.automation_delivery_key === 'string'
-    && !message.sent_at && forbidden.every(key => m[key] == null || m[key] === false);
+    && diagnosticClock && forbidden.every(key => m[key] == null || m[key] === false);
 }
 module.exports = { validate, hash, instant, localDay, runtimeEnvironment, preflightArtifact };
