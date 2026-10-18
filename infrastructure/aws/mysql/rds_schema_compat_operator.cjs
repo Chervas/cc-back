@@ -68,7 +68,18 @@ async function executeCompiled(c,statement) {
   policy.assertApproved(statement);await noClinical(c);
   await query(c,statement.sql);
   const [[row]]=await query(c,'SHOW COUNT(*) WARNINGS');
-  policy.need(Number(Object.values(row)[0])===0,'ddl_warning_requires_review');
+  const count=Number(Object.values(row)[0]);
+  if(count===0)return [];
+  const [warnings]=await query(c,'SHOW WARNINGS');
+  // Observed on the empty 8.4.11 target: accepted legacy integer display
+  // widths warn without changing integer range/storage. No other warning
+  // (including a different 1681 deprecation) is silently accepted.
+  policy.need(Array.isArray(warnings)&&warnings.length===count&&warnings.every(w=>
+    w.Level==='Warning'&&Number(w.Code)===1681&&
+    w.Message==='Integer display width is deprecated and will be removed in a future release.'),
+    'ddl_warning_requires_review');
+  return warnings.map(w=>({kind:statement.kind,name:statement.name,code:Number(w.Code),
+    category:'legacy_integer_display_width_deprecated'}));
 }
 async function runSchemaCompatibility({acknowledgement,capture=captureBounded,targetFactory}={}) {
   policy.need(acknowledgement==='schema-only-no-patient-data','explicit_schema_only_ack_required');
@@ -77,7 +88,7 @@ async function runSchemaCompatibility({acknowledgement,capture=captureBounded,ta
   let op,c;const report={schema:'clinicaclick-rds-schema-compatibility/1',observedAtUtc:new Date().toISOString(),
     targetSchema:policy.TARGET_SCHEMA,sourceDumpSha256:plan.sourceDumpSha256,sourceStdoutBytes:plan.sourceStdoutBytes,
     sourceDdlAtomicSnapshot:false,sourceVersion:plan.sourceVersion,sourceTableCount:plan.tables.length,
-    tablesCreated:[],triggersCreated:[],clinicalDataCopied:false,clinicalDataQueriesPerformed:false,
+    tablesCreated:[],triggersCreated:[],reviewedDeprecations:[],clinicalDataCopied:false,clinicalDataQueriesPerformed:false,
     targetDefinerPolicy:'CURRENT_USER for this schema-only compatibility experiment; dedicated clinical owner not accredited',
     applicationBehaviorValidated:false,triggerBehaviorValidated:false,clinicalMigrationAuthorized:false,status:'not_started'};
   try {
@@ -100,13 +111,13 @@ async function runSchemaCompatibility({acknowledgement,capture=captureBounded,ta
     await query(c,'SET SESSION foreign_key_checks=0');
     for(const table of plan.tables) {
       report.lastAttempted={kind:table.kind,name:table.name};
-      await executeCompiled(c,table);
+      report.reviewedDeprecations.push(...await executeCompiled(c,table));
       report.tablesCreated.push({name:table.name,sourceSha256:table.sourceSha256,targetStatementSha256:table.targetSha256});
     }
     await query(c,'SET SESSION foreign_key_checks=1');
     for(const trigger of plan.triggers) {
       report.lastAttempted={kind:trigger.kind,name:trigger.name};
-      await executeCompiled(c,trigger);report.triggersCreated.push({name:trigger.name,sourceBodySha256:trigger.sourceSha256});
+      report.reviewedDeprecations.push(...await executeCompiled(c,trigger));report.triggersCreated.push({name:trigger.name,sourceBodySha256:trigger.sourceSha256});
     }
     await noClinical(c);
     const [tables]=await query(c,'SELECT TABLE_NAME name,ENGINE engine FROM information_schema.tables WHERE TABLE_SCHEMA=? AND TABLE_TYPE=\'BASE TABLE\' ORDER BY TABLE_NAME',[policy.TARGET_SCHEMA]);

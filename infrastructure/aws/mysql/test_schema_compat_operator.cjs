@@ -33,7 +33,7 @@ function captureFixture(sqlDump=dump()) {
     assert.ok(command.args.includes('--no-data'));return sqlDump;
   };
 }
-function targetFixture({clinicalAt=Infinity,warning=0,errorOnTable=false,trustCreators=1}={}) {
+function targetFixture({clinicalAt=Infinity,warning=0,warningRows=[],errorOnTable=false,trustCreators=1}={}) {
   const queries=[];let clinicalChecks=0;
   const c={connection:{config:{multipleStatements:false}},end:async()=>{},query:async({sql},values)=>{
     queries.push({sql,values});
@@ -42,6 +42,7 @@ function targetFixture({clinicalAt=Infinity,warning=0,errorOnTable=false,trustCr
     if(sql==='SELECT CURRENT_USER() owner')return [[{owner:'ccadmin@%'}]];
     if(sql.startsWith('SELECT @@version version'))return [[{version:'8.4.11',case_names:0,trust_creators:trustCreators,tls_required:1,events:'OFF'}]];
     if(sql==='SHOW COUNT(*) WARNINGS')return [[{warning_count:warning}]];
+    if(sql==='SHOW WARNINGS')return [warningRows];
     if(sql.startsWith('CREATE TABLE')&&errorOnTable)throw Object.assign(new Error('FICTIONAL_SECRET_IN_DRIVER_ERROR'),{code:'ER_FAKE',errno:1000,sql:'FICTIONAL_SECRET_IN_DRIVER_SQL'});
     if(sql.startsWith('SELECT TABLE_NAME'))return [NAMES.map(name=>({name,engine:'InnoDB'}))];
     if(sql.startsWith('SELECT COUNT(*) n FROM `cc_schema_compat_20261018`'))return [[{n:0}]];
@@ -125,5 +126,20 @@ test('clinical creation race warnings and SQL errors stop while preserving parti
     assert.ok(!JSON.stringify(report).includes('FICTIONAL_SECRET'));
     if(options.clinicalAt===1)assert.ok(!target.queries.some(q=>q.sql.startsWith('CREATE')));
     if(options.trustCreators===0)assert.ok(!target.queries.some(q=>q.sql.startsWith('CREATE')));
+  }
+});
+test('only observed integer display-width deprecation is accepted and recorded',async context=>{
+  mockKnownBodyHash(context);
+  const reviewed={Level:'Warning',Code:1681,Message:'Integer display width is deprecated and will be removed in a future release.'};
+  const run=options=>operator.runSchemaCompatibility({acknowledgement:'schema-only-no-patient-data',
+    capture:captureFixture(),targetFactory:targetFixture(options).factory});
+  const report=await run({warning:1,warningRows:[reviewed]});
+  assert.equal(report.status,'schema_only_ddl_accepted');
+  assert.equal(report.reviewedDeprecations.length,307);
+  for(const row of [{...reviewed,Code:1265},{...reviewed,Message:'Unreviewed 1681 deprecation'},
+    {...reviewed,Level:'Note'}]) {
+    const rejected=await run({warning:1,warningRows:[row]});
+    assert.equal(rejected.status,'failed_partial_schema_preserved');
+    assert.equal(rejected.errorCode,'ddl_warning_requires_review');
   }
 });
