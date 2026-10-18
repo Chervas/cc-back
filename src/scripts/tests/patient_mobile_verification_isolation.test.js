@@ -142,6 +142,20 @@ async function confirm(f) {
     context: structuredClone(f.execution.context) });
 }
 
+test('a patient reply after reception leaves pending does not inherit the employee as its resolver', async () => {
+  const f = fixture();
+  f.transitions.push({ id: 30, event_type: C.TRANSITION, patient_id: 1, clinic_id: 2, actor_user_id: 16,
+    metadata: { request_event_id: 10, state: 'pending', provenance: 'manual_pending', actor_user_id: 16,
+      manually_resolved: false } });
+  f.inbound.metadata.button = { payload: `pmv:${f.request.id}:${f.request.metadata.reply_token}:yes` };
+  f.execution.context.mobile_verification.reply_answer = 'yes';
+  const result = await confirm(f);
+  assert.equal(result.output.applied, true);
+  const snapshot = await f.runtime.state(f.request);
+  assert.equal(snapshot.state, 'confirmed'); assert.equal(snapshot.provenance, 'patient_reply');
+  assert.equal(snapshot.actor_user_id, null); assert.equal(snapshot.history[0].actor_user_id, 16);
+});
+
 test('appointment reply ownership excludes the mobile wait without cancelling either execution', async () => {
   const f = fixture();
   const wait = { id: 'W', type: 'delay/wait_response', config: { response_buffer_enabled: false } };
