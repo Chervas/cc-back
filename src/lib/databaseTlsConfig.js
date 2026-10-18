@@ -4,7 +4,12 @@ const path = require('node:path');
 const { X509Certificate } = require('node:crypto');
 function buildDatabaseTlsOptions(env, readFile = file => fs.readFileSync(file)) {
   const required = env.DB_TLS_REQUIRED;
-  if (required === undefined || required === '' || required === 'false') return {};
+  if (required === undefined || required === '' || required === 'false') {
+    if (env.DB_HOST && !['localhost', '127.0.0.1', '::1'].includes(String(env.DB_HOST).toLowerCase())) {
+      throw Error('database_remote_tls_required');
+    }
+    return {};
+  }
   if (required !== 'true') throw Error('database_tls_mode_invalid');
   const file = env.DB_TLS_CA_FILE;
   if (typeof file !== 'string' || !path.isAbsolute(file)) throw Error('database_tls_ca_required');
