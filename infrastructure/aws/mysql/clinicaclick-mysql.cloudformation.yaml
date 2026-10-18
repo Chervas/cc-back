@@ -1,0 +1,223 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Clinicaclick private RDS MySQL 8.4 Multi-AZ candidate. Creates two private
+  subnets and a dedicated route table in an existing VPC; uses an existing
+  Lightsail peering connection. Does not migrate data or deploy applications.
+
+Metadata:
+  ReviewBeforeCreation:
+    - Confirm the VPC CIDR contains both unused /24 subnet CIDRs.
+    - Confirm both selected AZs support db.m6g.large and the chosen MySQL version.
+    - Confirm the existing Lightsail peering is active and return routing works.
+    - No internet, NAT, peering creation, DMS, IAM roles, or patient-data copy.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing default VPC in eu-west-3; confirm its CIDR before creation.
+  PeeringConnectionId:
+    Type: String
+    AllowedPattern: '^pcx-([0-9a-f]{8}|[0-9a-f]{17})$'
+    Description: Existing active VPC peering connection to Lightsail 172.26.0.0/16.
+  AvailabilityZoneA:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: eu-west-3a
+  AvailabilityZoneB:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: eu-west-3b
+  SubnetACidr:
+    Type: String
+    Default: 172.31.64.0/24
+    AllowedPattern: '^172\.31\.(0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.0/24$'
+    Description: Unused /24 within the existing default VPC 172.31.0.0/16.
+  SubnetBCidr:
+    Type: String
+    Default: 172.31.65.0/24
+    AllowedPattern: '^172\.31\.(0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.0/24$'
+    Description: Another unused /24 within the same VPC.
+  EngineVersion:
+    Type: String
+    AllowedPattern: '^8\.4\.[0-9]+$'
+    ConstraintDescription: Select an available RDS MySQL 8.4.x version in eu-west-3.
+    Description: Required exact 8.4.x version verified in the RDS console; no implicit version.
+
+Rules:
+  DifferentAvailabilityZones:
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: AvailabilityZoneA
+                - Ref: AvailabilityZoneB
+        AssertDescription: Multi-AZ requires two different Availability Zones.
+  DifferentSubnetCidrs:
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: SubnetACidr
+                - Ref: SubnetBCidr
+        AssertDescription: The two /24 subnet CIDRs must differ and must be unused.
+
+Resources:
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZone: !Ref AvailabilityZoneA
+      CidrBlock: !Ref SubnetACidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - {Key: component, Value: database}
+        - {Key: project, Value: clinicaclick}
+        - {Key: application, Value: clinicaclick}
+        - {Key: environment, Value: staging}
+        - {Key: owner, Value: architecture}
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZone: !Ref AvailabilityZoneB
+      CidrBlock: !Ref SubnetBCidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - {Key: component, Value: database}
+        - {Key: project, Value: clinicaclick}
+        - {Key: application, Value: clinicaclick}
+        - {Key: environment, Value: staging}
+        - {Key: owner, Value: architecture}
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - {Key: component, Value: database}
+        - {Key: project, Value: clinicaclick}
+        - {Key: application, Value: clinicaclick}
+        - {Key: environment, Value: staging}
+        - {Key: owner, Value: architecture}
+  LightsailRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 172.26.0.0/16
+      VpcPeeringConnectionId: !Ref PeeringConnectionId
+  SubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref SubnetA
+  SubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref SubnetB
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Clinicaclick RDS private subnets in two distinct AZs
+      SubnetIds:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      Tags:
+        - {Key: component, Value: database}
+        - {Key: project, Value: clinicaclick}
+        - {Key: application, Value: clinicaclick}
+        - {Key: environment, Value: staging}
+        - {Key: owner, Value: architecture}
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Private MySQL from the Clinicaclick Lightsail host only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: Clinicaclick application host over existing private peering
+          IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 172.26.0.110/32
+      # An explicit loopback-only rule removes CloudFormation's default allow-all
+      # egress. TCP/9 narrows AWS's documented 127.0.0.1/32 suppression pattern.
+      # Responses to allowed inbound connections remain stateful.
+      SecurityGroupEgress:
+        - Description: Suppress default outbound access; loopback discard only
+          IpProtocol: tcp
+          FromPort: 9
+          ToPort: 9
+          CidrIp: 127.0.0.1/32
+      Tags:
+        - {Key: component, Value: database}
+        - {Key: project, Value: clinicaclick}
+        - {Key: application, Value: clinicaclick}
+        - {Key: environment, Value: staging}
+        - {Key: owner, Value: architecture}
+  DatabaseParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Clinicaclick MySQL 8.4 TLS and inert restoration defaults
+      Family: mysql8.4
+      Parameters:
+        require_secure_transport: 'ON'
+        event_scheduler: 'OFF'
+        character_set_server: utf8mb4
+        collation_server: utf8mb4_0900_ai_ci
+      Tags:
+        - {Key: component, Value: database}
+        - {Key: project, Value: clinicaclick}
+        - {Key: application, Value: clinicaclick}
+        - {Key: environment, Value: staging}
+        - {Key: owner, Value: architecture}
+  Database:
+    Type: AWS::RDS::DBInstance
+    DependsOn:
+      - LightsailRoute
+      - SubnetARouteTableAssociation
+      - SubnetBRouteTableAssociation
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: clinicaclick-mysql
+      Engine: mysql
+      EngineVersion: !Ref EngineVersion
+      EngineLifecycleSupport: open-source-rds-extended-support-disabled
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      DBInstanceClass: db.m6g.large
+      MultiAZ: true
+      AllocatedStorage: '100'
+      MaxAllocatedStorage: 200
+      StorageType: gp3
+      StorageEncrypted: true
+      # Omit KmsKeyId to use RDS's default AWS-managed aws/rds encryption key.
+      ManageMasterUserPassword: true
+      MasterUsername: ccadmin
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DBParameterGroupName: !Ref DatabaseParameterGroup
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSecurityGroup.GroupId
+      Port: '3306'
+      NetworkType: IPV4
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 15
+      CopyTagsToSnapshot: true
+      DeletionProtection: true
+      DatabaseInsightsMode: standard
+      EnablePerformanceInsights: false
+      MonitoringInterval: 0
+      EnableIAMDatabaseAuthentication: false
+      Tags:
+        - {Key: component, Value: database}
+        - {Key: project, Value: clinicaclick}
+        - {Key: application, Value: clinicaclick}
+        - {Key: environment, Value: staging}
+        - {Key: owner, Value: architecture}
+
+Outputs:
+  DatabaseEndpoint:
+    Description: Private RDS DNS name; clients must verify the AWS RDS CA and hostname.
+    Value: !GetAtt Database.Endpoint.Address
+  DatabasePort:
+    Value: !GetAtt Database.Endpoint.Port
+  ManagedMasterSecretArn:
+    Description: RDS-managed administrator secret ARN; never a password value.
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
