@@ -73,6 +73,10 @@ function reviewedWarning(w,statement) {
   if(Number(w.Code)===1831&&statement.kind==='create_table'&&duplicate
     &&duplicate[2]===policy.TARGET_SCHEMA&&duplicate[3]===statement.name)
     return {...base,category:'existing_duplicate_index_deprecated',index:duplicate[1]};
+  if(statement.kind==='create_table'&&statement.name==='SequelizeMeta'&&(
+    Number(w.Code)===1287&&w.Message==="'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead"||
+    Number(w.Code)===3778&&w.Message==="'utf8mb3_unicode_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead."))
+    return {...base,category:'existing_migration_metadata_utf8mb3_deprecated'};
   return null;
 }
 async function executeCompiled(c,statement) {

@@ -153,3 +153,14 @@ test('duplicate-index deprecation must name the exact synthetic table and is nev
     {...warning,Message:warning.Message.replace('ClinicAnalyticsProperties','OtherTable')}])
     assert.equal(operator.reviewedWarning(changed,statement),null);
 });
+test('only the observed SequelizeMeta legacy charset warnings are recorded without changing its charset',()=>{
+  const statement={kind:'create_table',name:'SequelizeMeta'};
+  for(const warning of [
+    {Level:'Warning',Code:1287,Message:"'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead"},
+    {Level:'Warning',Code:3778,Message:"'utf8mb3_unicode_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead."}]) {
+    assert.equal(operator.reviewedWarning(warning,statement).category,'existing_migration_metadata_utf8mb3_deprecated');
+    assert.equal(operator.reviewedWarning(warning,{...statement,name:'Messages'}),null);
+    assert.equal(operator.reviewedWarning({...warning,Message:'Other deprecated charset'},statement),null);
+    assert.equal(operator.reviewedWarning({...warning,Code:1681},statement),null);
+  }
+});
