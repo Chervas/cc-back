@@ -3,18 +3,25 @@
 // Shared pure collector contract. It never reads credentials, models or environment on import.
 const { createHash } = require('node:crypto');
 const METRIC = 'UnblendedCost';
+const VERSION = 2;
+const COMPONENTS = Object.freeze(['application', 'database', 'integrations', 'audit']);
+const ENVIRONMENTS = Object.freeze(['prod', 'staging']);
+const scopeFor = () => ({ components: [...COMPONENTS], application: 'clinicaclick', environments: [...ENVIRONMENTS] });
+const componentCoverage = rows => COMPONENTS.map(component => ({ component,
+  status: rows.some(row => row.component === component) ? 'observed' : 'pending' }));
 function dateKey(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)
     || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value) throw Error('cost_period_invalid');
   return value;
 }
 function filterFor({ accountId, environment }) {
-  if (!/^\d{12}$/.test(accountId) || !['dev', 'staging', 'prod'].includes(environment)) throw Error('cost_scope_invalid');
+  // Reader identity stays prod; covered resource environments are explicit.
+  if (!/^\d{12}$/.test(accountId) || environment !== 'prod') throw Error('cost_scope_invalid');
   return { And: [
     { Dimensions: { Key: 'LINKED_ACCOUNT', Values: [accountId] } },
     { Tags: { Key: 'application', Values: ['clinicaclick'] } },
-    { Tags: { Key: 'component', Values: ['integrations', 'audit'] } },
-    { Tags: { Key: 'environment', Values: [environment] } },
+    { Tags: { Key: 'component', Values: [...COMPONENTS] } },
+    { Tags: { Key: 'environment', Values: [...ENVIRONMENTS] } },
   ] };
 }
 function amountToUnits(value) {
@@ -48,7 +55,7 @@ async function collectCosts({ getCostAndUsage, accountId, environment, from, to,
         const [service, tag] = group.Keys || [];
         const component = typeof tag === 'string' && tag.startsWith('component$') ? tag.slice(10) : '';
         const money = group.Metrics?.[METRIC];
-        if (!['integrations', 'audit'].includes(component) || typeof service !== 'string' || !service || service.length > 200
+        if (!COMPONENTS.includes(component) || typeof service !== 'string' || !service || service.length > 200
           || !/^[A-Z]{3}$/.test(money?.Unit)) throw Error('cost_response_invalid');
         if (currency && money.Unit !== currency) throw Error('cost_currency_mismatch');
         currency = money.Unit;
@@ -65,14 +72,14 @@ async function collectCosts({ getCostAndUsage, accountId, environment, from, to,
   const allDays = [];
   for (let value = Date.parse(from); value < Date.parse(to); value += 86400000) allDays.push(new Date(value).toISOString().slice(0, 10));
   const missingDays = allDays.filter(day => !days.has(day));
-  return { version: 1, source: 'aws_cost_explorer', metric: METRIC, environment,
+  return { version: VERSION, source: 'aws_cost_explorer', metric: METRIC, environment: 'platform',
     period: { from, toExclusive: to }, collectedAt: now().toISOString(),
     status: !currency || missingDays.length ? 'pending' : 'available', currency: currency || null,
     amount: currency && !missingDays.length ? unitsToAmount(total) : null,
     estimated: [...days.values()].some(Boolean), rows: [...groups.values()], missingDays,
-    scope: { components: ['integrations', 'audit'], application: 'clinicaclick', environment },
+    scope: scopeFor(), componentCoverage: componentCoverage([...groups.values()]),
     filterDigest: createHash('sha256').update(JSON.stringify(filter)).digest('hex'), pages,
-    coverage: 'tagged_resources_only', excludesAiEstimates: true,
+    coverage: 'tagged_resources_only', coverageStatus: 'observed_partial', excludesAiEstimates: true,
   };
 }
 function viewCache(record, { now = new Date(), staleAfterMs = 36 * 60 * 60 * 1000 } = {}) {
@@ -83,4 +90,4 @@ function viewCache(record, { now = new Date(), staleAfterMs = 36 * 60 * 60 * 100
   return { status: record.error || !Number.isFinite(age) || age < 0 || age > staleAfterMs ? 'stale' : record.snapshot.status,
     snapshot: record.snapshot, lastAttemptAt: record.lastAttemptAt || null, error: record.error || null };
 }
-module.exports = { collectCosts, filterFor, amountToUnits, unitsToAmount, viewCache };
+module.exports = { VERSION, COMPONENTS, ENVIRONMENTS, scopeFor, componentCoverage, collectCosts, filterFor, amountToUnits, unitsToAmount, viewCache };

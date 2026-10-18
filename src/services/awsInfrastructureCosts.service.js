@@ -6,10 +6,11 @@ const fs = require('node:fs');
 const { execFile } = require('node:child_process');
 const { Op } = require('sequelize');
 const { isGlobalAdmin } = require('../lib/role-helpers');
-const { viewCache, amountToUnits, unitsToAmount } = require('../../services/aws-cost-collector/src/costs');
+const { VERSION, COMPONENTS, ENVIRONMENTS, scopeFor, componentCoverage, viewCache, amountToUnits, unitsToAmount } = require('../../services/aws-cost-collector/src/costs');
 const { ACCOUNT, ROLE, safeError } = require('../../services/aws-cost-collector/src/report');
 const fail = (code, status = 503) => { throw Object.assign(Error(code), { code, status }); };
-const keyFor = month => `aws:integrations:prod:${month}`;
+// A legacy two-component snapshot cannot stand in for the expanded scope.
+const keyFor = month => `aws:infrastructure:v${VERSION}:platform:${month}`;
 const CACHE_CODES = new Set(['cost_migration_required', 'cost_cache_unavailable', 'cost_snapshot_invalid', 'cost_data_pending',
   'cost_tags_unverified', 'cost_identity_invalid', 'cost_aws_unavailable', 'cost_scope_invalid', 'cost_response_invalid',
   'cost_amount_invalid', 'cost_period_invalid', 'cost_currency_mismatch', 'cost_pagination_invalid', 'cost_duplicate_group',
@@ -23,15 +24,19 @@ function projectSnapshot(value, month) {
     && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
   const amount = value => value === null ? null : unitsToAmount(amountToUnits(value));
   const currency = value => value === null || /^[A-Z]{3}$/.test(value) ? value : fail('cost_snapshot_invalid');
-  if (!value || value.version !== 1 || value.source !== 'aws_cost_explorer' || value.metric !== 'UnblendedCost'
-    || value.month !== month || value.environment !== 'prod' || !['pending', 'available'].includes(value.status)
+  if (!value || value.version !== VERSION || value.source !== 'aws_cost_explorer' || value.metric !== 'UnblendedCost'
+    || value.scope?.application !== 'clinicaclick' || !Array.isArray(value.scope?.environments)
+    || value.scope.environments.length !== ENVIRONMENTS.length || ENVIRONMENTS.some(env => !value.scope.environments.includes(env))
+    || !Array.isArray(value.scope.components) || value.scope.components.length !== COMPONENTS.length
+    || COMPONENTS.some(component => !value.scope.components.includes(component)) || value.coverage !== 'tagged_resources_only'
+    || value.month !== month || value.environment !== 'platform' || !['pending', 'available'].includes(value.status)
     || !Number.isFinite(Date.parse(value.collectedAt)) || !validDate(value.period?.from) || !validDate(value.period?.toExclusive)
     || value.period.from !== month + '-01' || value.period.toExclusive < value.period.from
     || Date.parse(value.period.toExclusive) > Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5)), 1)
     || !Array.isArray(value.rows) || value.rows.length > 10000) fail('cost_snapshot_invalid');
   const rows = value.rows.map(row => {
     if (!validDate(row.date) || row.date < value.period.from || row.date >= value.period.toExclusive
-      || !['integrations', 'audit'].includes(row.component) || typeof row.service !== 'string' || row.service.length > 200
+      || !COMPONENTS.includes(row.component) || typeof row.service !== 'string' || row.service.length > 200
       || !row.service || row.amount === null || row.currency === null) fail('cost_snapshot_invalid');
     return { date: row.date, service: row.service, component: row.component, amount: amount(row.amount), currency: currency(row.currency) };
   });
@@ -55,14 +60,15 @@ function projectSnapshot(value, month) {
     if (!validDate(value.forecast.period?.from) || !validDate(value.forecast.period?.toExclusive)) fail('cost_snapshot_invalid');
     forecast.period = { from: value.forecast.period.from, toExclusive: value.forecast.period.toExclusive };
   }
-  return { version: 1, source: 'aws_cost_explorer', metric: 'UnblendedCost', month, environment: 'prod',
+  return { version: VERSION, source: 'aws_cost_explorer', metric: 'UnblendedCost', month, environment: 'platform',
     collectedAt: new Date(value.collectedAt).toISOString(), period: { from: value.period.from, toExclusive: value.period.toExclusive },
     status: value.status, amount: amount(value.amount), currency: currency(value.currency), estimated: value.estimated === true,
     rows, services: [...services.values()].map(({ total, ...rest }) => ({ ...rest, amount: unitsToAmount(total) })),
     forecast: { ...forecast, kind: 'remaining_period' },
     budget: { ...budget, source: 'aws_budgets', scopeMatches: value.budget.scopeMatches === true,
       metricMatches: value.budget.metricMatches === true, hardLimit: false, period: 'monthly', referenceMonth: value.budget.referenceMonth },
-    coverage: 'tagged_resources_only', excludesAiEstimates: true, invoice: false,
+    scope: scopeFor(), componentCoverage: componentCoverage(rows),
+    coverage: 'tagged_resources_only', coverageStatus: 'observed_partial', excludesAiEstimates: true, invoice: false,
     billingTimeZone: 'UTC', scheduleTimeZone: 'Europe/Madrid' };
 }
 function createRepository(model) {
@@ -123,10 +129,12 @@ function createService({ repository, collect, config = () => ({}), now = () => n
       if (record?.snapshot) { try { snapshot = projectSnapshot(record.snapshot, month); } catch { code = 'cost_snapshot_invalid'; } }
       const cache = viewCache({ snapshot, lastAttemptAt: record?.last_attempt_at || null,
         error: code || (record?.last_error_code ? CACHE_CODES.has(record.last_error_code) ? record.last_error_code : 'cost_cache_unavailable' : null) }, { now: time });
-      return { ...cache, version: 1, month, availableMonths, collectionEnabled: settings.enabled === true,
+      return { ...cache, version: VERSION, month, availableMonths, collectionEnabled: settings.enabled === true,
         refreshSchedule: { cron: '40 3 * * *', timeZone: 'Europe/Madrid' },
-        billingTimeZone: 'UTC', coverage: 'tagged_resources_only', comparisonWithAi: 'separate_do_not_add',
-        reportedBudget: { amount: '60', currency: 'USD', source: 'provisioning_manifest_unverified', hardLimit: false } };
+        billingTimeZone: 'UTC', coverage: 'tagged_resources_only', coverageStatus: 'observed_partial', scope: scopeFor(),
+        componentCoverage: componentCoverage(snapshot?.rows || []), comparisonWithAi: 'separate_do_not_add',
+        reportedBudget: { amount: '60', currency: 'USD', source: 'provisioning_manifest_unverified',
+          components: ['integrations', 'audit'], hardLimit: false } };
     },
     async runDaily() {
       const settings = config();
@@ -160,5 +168,5 @@ function defaultService() {
     collect: invokeCollector, config: () => ({ enabled: process.env.AWS_INFRA_COSTS_ENABLED === 'true', nodeBinary: process.env.AWS_INFRA_COSTS_NODE_BINARY }) });
   return instance;
 }
-module.exports = { createService, createRepository, invokeCollector, projectSnapshot, monthsAt,
+module.exports = { createService, createRepository, invokeCollector, projectSnapshot, monthsAt, keyFor,
   getOverview: input => defaultService().getOverview(input), runDaily: () => defaultService().runDaily() };

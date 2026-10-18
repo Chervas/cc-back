@@ -1,6 +1,6 @@
 'use strict';
 
-const { collectCosts, filterFor, amountToUnits, unitsToAmount } = require('./costs');
+const { VERSION, scopeFor, componentCoverage, collectCosts, filterFor, amountToUnits, unitsToAmount } = require('./costs');
 const ACCOUNT = '137819318729';
 const ROLE = `arn:aws:iam::${ACCOUNT}:role/clinicaclick-integrations-prod-cost-reader-role`;
 const BUDGET = 'clinicaclick-integrations-prod-monthly-budget';
@@ -59,11 +59,11 @@ async function collectReport(configInput, api, now = new Date()) {
   const period = periodFor(config.month, now);
   const snapshot = period.from < period.to ? await collectCosts({ ...config, ...period, tagsVerified: true,
     getCostAndUsage: api.usage, now: () => now }) : {
-    version: 1, source: 'aws_cost_explorer', metric: 'UnblendedCost', environment: 'prod',
+    version: VERSION, source: 'aws_cost_explorer', metric: 'UnblendedCost', environment: 'platform',
     period: { from: period.from, toExclusive: period.to }, collectedAt: now.toISOString(), status: 'pending',
     amount: null, currency: null, estimated: true, rows: [], missingDays: [], pages: 0,
-    scope: { components: ['integrations', 'audit'], application: 'clinicaclick', environment: 'prod' },
-    coverage: 'tagged_resources_only', excludesAiEstimates: true,
+    scope: scopeFor(), componentCoverage: componentCoverage([]),
+    coverage: 'tagged_resources_only', coverageStatus: 'observed_partial', excludesAiEstimates: true,
   };
   let forecast = { status: 'not_applicable', amount: null, currency: null };
   if (period.today < period.monthEnd) {

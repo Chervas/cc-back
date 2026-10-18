@@ -2,7 +2,7 @@
 require('../../../services/aws-cost-collector/test/offline-guard.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createService, projectSnapshot, monthsAt, invokeCollector } = require('../../services/awsInfrastructureCosts.service');
+const { createService, projectSnapshot, monthsAt, invokeCollector, keyFor } = require('../../services/awsInfrastructureCosts.service');
 const { snapshot } = require('./fixtures/aws_costs.fixture');
 const now = () => new Date('2026-09-12T04:00:00Z');
 test('child process receives no app environment, uses fixed script and closed stdin, never a shell', async () => {
@@ -89,4 +89,19 @@ test('closed projection removes extra secrets and rejects inconsistent totals, r
   }
   assert.deepEqual(monthsAt(new Date('2027-01-01T00:00:00Z')), ['2027-01', '2026-12']);
   assert.throws(() => invokeCollector({ nodeBinary: '/this-does-not-exist' }, '2026-09'), /cost_collector_unavailable/);
+});
+test('scope v2 isolates its cache and rejects legacy or different coverage',async()=>{
+  const requested=[];const service=createService({now,repository:{read:async key=>{requested.push(key);return null;}}});
+  const overview=await service.getOverview({userId:1});
+  assert.deepEqual(requested,[keyFor('2026-09')]);assert.equal(requested[0],'aws:infrastructure:v2:platform:2026-09');
+  assert.equal(overview.snapshot,null);assert(overview.componentCoverage.every(item=>item.status==='pending'));
+  for(const patch of [{version:1},{scope:{application:'clinicaclick',components:['integrations','audit'],environments:['prod']}},
+    {scope:{...snapshot().scope,environments:['prod']}}, {scope:{...snapshot().scope,application:'other'}}])
+    assert.throws(()=>projectSnapshot(snapshot('2026-09',patch),'2026-09'),/cost_snapshot_invalid/);
+});
+test('observed coverage is derived from rows and never adds a monthly estimate',()=>{
+  const value=projectSnapshot(snapshot('2026-09',{monthlyRdsEstimate:'320',componentCoverage:[{component:'database',status:'observed'}]}),'2026-09');
+  assert.equal(value.amount,'0.2');assert.equal(value.monthlyRdsEstimate,undefined);
+  assert.equal(value.componentCoverage.find(item=>item.component==='database').status,'pending');
+  assert.equal(value.coverageStatus,'observed_partial');
 });

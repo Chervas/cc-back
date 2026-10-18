@@ -41,3 +41,22 @@ test('cache read uses persisted snapshot; errors and stale timestamps remain vis
   assert.equal(viewCache(null).snapshot, null);
   assert.equal(viewCache({ snapshot: { status: 'pending', amount: null, collectedAt: '2026-09-01' }, error: 'cost_data_pending' }).status, 'pending');
 });
+test('platform v2 includes application/database and related tagged services across actual resource environments', async () => {
+  const groups = [['Amazon Lightsail','application','2'], ['Amazon RDS','database','10'],
+    ['AWS Key Management Service','database','0.2'], ['Amazon S3','database','0.1'],
+    ['Amazon EC2','integrations','1'], ['Amazon S3','audit','-0.1']];
+  const response = day('2026-09-01','0');
+  response.Groups = groups.map(([service,component,Amount]) => ({ Keys:[service,'component$'+component], Metrics:{UnblendedCost:{Amount,Unit:'USD'}} }));
+  const result = await collectCosts({ ...config, to:'2026-09-02', getCostAndUsage:async()=>({ResultsByTime:[response]}) });
+  assert.equal(result.version,2);assert.equal(result.amount,'13.2');assert.equal(result.coverageStatus,'observed_partial');
+  assert.deepEqual(result.scope.environments,['prod','staging']);
+  assert(result.componentCoverage.every(item=>item.status==='observed'));
+  const filters=filterFor(config).And.filter(item=>item.Tags).map(item=>item.Tags);
+  assert.deepEqual(filters,[{Key:'application',Values:['clinicaclick']},{Key:'component',Values:['application','database','integrations','audit']},{Key:'environment',Values:['prod','staging']}]);
+  assert(!filters.some(item=>item.Key==='Environment'||item.Key==='project'));
+});
+test('missing components remain pending while an observed zero is preserved',async()=>{
+  const result=await collectCosts({...config,to:'2026-09-02',getCostAndUsage:async()=>({ResultsByTime:[day('2026-09-01','0','audit')]})});
+  assert.equal(result.amount,'0');
+  assert.deepEqual(result.componentCoverage,[{component:'application',status:'pending'},{component:'database',status:'pending'},{component:'integrations',status:'pending'},{component:'audit',status:'observed'}]);
+});
