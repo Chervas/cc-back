@@ -7,19 +7,32 @@ const net = require('node:net');
 const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { Sequelize } = require('sequelize');
+const { ownedMysqlDataLifecycle } = require('./isolated_mysql_data_lifecycle.fixture');
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // This fixture owns its mysqld and Unix socket. TCP is denied unless a test
 // explicitly registers its own live loopback server; host DB/provider sockets remain denied.
-async function withIsolatedCampaignMysql(work, { performanceSchema = false } = {}) {
+async function withIsolatedCampaignMysql(work, { performanceSchema = false, keepData } = {}) {
   if (process.env.CAMPAIGN_OPTIMIZATION_MYSQL_TEST !== '1') throw Error('Explicit CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 is required');
+  assert.equal(typeof work, 'function', 'TESTONLY work must be a function');
   assert.equal(typeof performanceSchema, 'boolean', 'TESTONLY performance-schema option must be a boolean');
+  // Keep successful data explicitly for reproduction; failed runs always keep it.
+  if (keepData === undefined) {
+    const flag = process.env.CAMPAIGN_OPTIMIZATION_MYSQL_KEEP_DATA;
+    assert(flag === undefined || flag === '0' || flag === '1', 'CAMPAIGN_OPTIMIZATION_MYSQL_KEEP_DATA must be 0 or 1');
+    keepData = flag === '1';
+  }
+  assert.equal(typeof keepData, 'boolean', 'TESTONLY keepData option must be a boolean');
+  const modelFile = require.resolve('../../../../models');
+  if (require.cache[modelFile]) throw Error('Production model index must not be loaded before this fixture');
   const root = fs.mkdtempSync('/tmp/cc-campaign-opt-mysql-');
   fs.chmodSync(root, 0o700);
   const data = path.join(root, 'data'); fs.mkdirSync(data, { mode: 0o700 });
   const socketPath = path.join(root, 'mysql.sock');
   const log = path.join(root, 'mysql-error.log');
+  fs.writeFileSync(log, '', { mode: 0o600, flag: 'wx' });
+  const finishData = ownedMysqlDataLifecycle(root, data);
   const originalConnect = net.Socket.prototype.connect;
   require('./campaign_offline_runtime.cjs');
   const rejected = [], ownedServers = new Map(), ownedUnixSockets = new Set(); let ownedHttpConnections = 0;
@@ -50,10 +63,10 @@ async function withIsolatedCampaignMysql(work, { performanceSchema = false } = {
     return originalConnect.apply(this, args);
   };
   const models = {};
-  const modelFile = require.resolve('../../../../models');
-  if (require.cache[modelFile]) throw Error('Production model index must not be loaded before this fixture');
   require.cache[modelFile] = { id: modelFile, filename: modelFile, loaded: true, exports: models };
-  const report = { root, database: 'campaign_optimization_qa', checks: [], rejected, success: false };
+  const report = { root, database: 'campaign_optimization_qa', checks: [], rejected, success: false,
+    startedAtUtc: new Date().toISOString(), dataCleanup: { status: 'retained', reason: 'running' } };
+  fs.writeFileSync(path.join(root, 'result.json'), JSON.stringify(report, null, 2), { mode: 0o600, flag: 'wx' });
   let child; let exited; let admin; let sql;
   try {
     await promisify(execFile)('/usr/sbin/mysqld', ['--no-defaults', '--initialize-insecure', `--datadir=${data}`,
@@ -110,6 +123,15 @@ async function withIsolatedCampaignMysql(work, { performanceSchema = false } = {
     } else if (exited) report.shutdown = await exited;
     if (report.forcedShutdown || report.shutdown?.code !== 0 && child) cleanupErrors.push('Temporary mysqld did not exit cleanly');
     if (cleanupErrors.length) { report.cleanupErrors = cleanupErrors; report.success = false; }
+    try {
+      report.dataCleanup = finishData({ successful: report.success,
+        closedCleanly: Boolean(child && report.shutdown?.code === 0 && !report.forcedShutdown && !cleanupErrors.length), keepData });
+    } catch (error) {
+      cleanupErrors.push(`Owned MySQL data cleanup failed: ${error.message}`);
+      report.dataCleanup = { status: 'failed', error: error.message, code: error.code || null };
+      report.cleanupErrors = cleanupErrors; report.success = false;
+    }
+    report.finishedAtUtc = new Date().toISOString();
     fs.writeFileSync(path.join(root, 'result.json'), JSON.stringify(report, null, 2), { mode: 0o600 });
     console.log(JSON.stringify(report));
     if (cleanupErrors.length && !report.error) throw Error('Isolated MySQL cleanup failed; inspect result.json');
