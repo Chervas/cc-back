@@ -1,299 +1,73 @@
 # Google Data Manager: conversiones server-side
 
-> **Actualización de runtime 2026-07-18:** la escalera distingue `connect_only`, `guided_improvement` y `managed_service`. Mejora comienza en QL y reutiliza el mandato inicial para la transición automática a Schedule; Piloto conserva aprobación operativa.
+> Documento trasladado al manual central. Esta ruta conserva enlaces históricos; no añadir contenido nuevo aquí.
+
+[Abrir el documento canónico](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md).
 
 ## Transporte y contrato
 
-Las conversiones de ClinicaClick se envían mediante `POST https://datamanager.googleapis.com/v1/events:ingest`.
-El destino contiene la cuenta operativa de Google Ads, la cuenta manager usada para acceder y el ID numérico de la acción `UPLOAD_CLICKS`.
-
-Cada evento conserva:
-
-- `gclid`, `gbraid` o `wbraid` como identificador publicitario, cuando existe;
-- `transactionId` estable para deduplicación también en Google;
-- fecha en RFC 3339, valor, moneda y origen;
-- `eventName`;
-- `adUserData` y `adPersonalization` cuando existe una decisión explícita y separada del visitante.
-
-El transporte estándar de conversiones offline no transmite IP, email, teléfono, nombre, dirección, `clientId`, `userId`, propiedades de usuario, URL ni atributos de sesión. Usa únicamente el identificador publicitario permitido y los datos del evento. ClinicaClick conserva en su CRM los datos first-party necesarios.
-
-Existe una capacidad técnica separada para **Conversiones mejoradas**, limitada en código a Propdental, a las cuentas `1851215478` y `5992356722` y a Lead, Contact, Qualified Lead y Schedule. Su uso en estas cuentas se considera autorizado con el alcance descrito en el ticket de soporte de Google aportado por el anunciante, `4-1893000040437`, y con la autorización del propio anunciante. El contrato es estricto: solo normaliza y envía email y teléfono como hashes SHA-256 HEX después de un consentimiento explícito. `adUserData` debe ser `GRANTED`; `adPersonalization` no se fuerza y, cuando existe un envío permitido, refleja la elección real del visitante (`GRANTED` si acepta marketing/todo, `DENIED` si lo rechaza). Un rechazo completo de marketing bloquea la subida y se audita como `consent_not_granted`: no se fabrica un envío únicamente para comunicar `DENIED`. Se excluyen nombre, dirección, URL, clínica, tratamiento, motivo de consulta, cualquier información clínica, Customer Match, listas basadas en conversiones, audiencias y remarketing. Cada cuenta y evento necesita una allowlist y referencias de esa autorización. El audit guarda el digest, las referencias y el estado de consentimiento, nunca la PII cruda.
-
-El aviso frontend v5 (`google_ads_user_data_marketing_v5`, SHA-256 `f3f260f0508bb2dd842e4b7616b45333048ba7b64b831245714ac53a161a8b4a`) presenta `ad_user_data` y `ad_personalization` dentro de una única decisión comprensible de **Marketing**. Esa agrupación de UX no fusiona el contrato del backend: las dos señales se conservan, validan y transmiten por separado, y el uploader sigue exigiendo `ad_user_data=GRANTED` para incluir email o teléfono. V5 está desplegado y el QA público móvil confirmó estado inicial denegado, `Aceptar todo` concediendo ambas señales y desmarcar Marketing dejándolas denegadas.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#transporte-y-contrato).
 
 ### Incidencia de activos efectivos corregida y desplegada
 
-`effectiveMarketingAssets.normalizeGoogleAdsConfig` y los merges de grupo/clínica no preservaban propiedades server-owned Enhanced (`user_data_enabled`, `enhanced_conversions`, `phone_country_code`, `value`, `consent`, `user_properties`) en todos los niveles top-level, evento y destino. Los leads naturales `#7200/#7202/#7203` tuvieron consentimiento y click ID, pero sus intentos quedaron `user_data_policy=blocked_healthcare`, `user_data_sent=false`: Google recibió la conversión offline por GCLID, no los identificadores hasheados.
-
-El fix desplegado preserva esas propiedades durante normalización, herencia y override. `node src/scripts/tests/google_ads_conversion_tracking.test.js` pasa y el readback del config efectivo devuelve `user_data_enabled=true` para ambos destinos. La prueba controlada post-fix `#22`, procesada por `JobRequest #23703` / `SyncLog #65186`, registró `user_data_requested=true`, `user_data_sent=true`, dos identificadores `[email, phone]`, `record_count=1` y cero warnings. Diagnostics terminó `FAILURE/INVALID_GCLID` exclusivamente porque el click ID era sintético. Esto acredita normalización/hash, inclusión, transporte, recepción y procesamiento asíncrono de user data; no acredita una conversión atribuida. No reescribir ni reenviar leads anteriores para fabricar esa atribución.
-
-Esta autorización funcional no equivale a que la característica esté encendida. El interruptor `enhanced_conversions_for_leads_enabled` es de solo lectura en la API de Google Ads y debe estar activado en cada cuenta antes del primer envío real con email o teléfono. Un `validateOnly` correcto o un HTTP 200 solo prueban formato y acceso técnico. Cuando todas las cuentas del scope cumplen los requisitos, el job interno activa únicamente la configuración Enhanced de ClinicaClick; nunca pulsa ni muta ese interruptor en Google. La capacidad independiente de reflejar `adPersonalization` según la elección del visitante no espera a ese gate y se activa en una fase interna separada.
-
-Sin un click ID permitido **y** sin user data expresamente autorizado, el evento se audita como `no_permitted_identifiers` y no sale a Google. Cualquiera de las dos vías puede identificar un evento cuando cumple sus requisitos; la PII exige siempre el consentimiento y la allowlist Enhanced. El dedupe propio usa cuenta, acción, evento y el hash del identificador disponible; ni el click ID ni la PII se guardan en claro.
-
-Si un evento tiene más de un destino configurado, no se envía a todos por defecto. `customer_id` solo puede seleccionar una cuenta que ya figure en la configuración; también puede usarse una asociación configurada de `campaign_id`. Sin un selector inequívoco se devuelve `ambiguous_destination`. El cliente nunca puede indicar ni sustituir `conversion_action`, `conversion_action_id` o `send_to`.
-
-Un HTTP 200 solo deja el intento en `accepted`: Google procesa la petición de forma asíncrona. El job `googleDataManagerDiagnostics` consulta `requestStatus:retrieve` y cierra el intento como `succeeded`, `partial_success` o `failed`.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#incidencia-de-activos-efectivos-corregida-y-desplegada).
 
 ## Requisitos antes del despliegue
 
-1. Habilitar Data Manager API en el proyecto de Google Cloud del OAuth client.
-2. Añadir el scope sensible `https://www.googleapis.com/auth/datamanager` a la pantalla de consentimiento y completar la verificación OAuth requerida para usuarios externos.
-3. Configurar `GOOGLE_OAUTH_SCOPES` con los scopes actuales más `datamanager`.
-4. Configurar `GOOGLE_DATA_MANAGER_QUOTA_PROJECT` con el ID del proyecto Cloud y conceder `serviceusage.services.use` al principal OAuth. Todas las peticiones REST envían ese valor en `x-goog-user-project`.
-5. Reconectar cada asignación Google usada por marketing. Un refresh token previo no adquiere scopes nuevos.
-6. La cuenta de acceso debe tener permiso de escritura sobre la cuenta operativa. Antes de enviar email o teléfono debe constar la autorización aplicable, estar activa la allowlist exacta de cuenta/evento, haber consentimiento explícito del visitante y estar activado en Google Ads el interruptor de Conversiones mejoradas para clientes potenciales.
-7. Ejecutar el endpoint autenticado `POST /api/marketing/google-ads/conversions/data-manager/validate` para cada cuenta/acción. Usa `validateOnly=true` y no ingiere una conversión.
-
-El dry-run usa el placeholder publicitario `GCLID_1` de la documentación oficial, `validateOnly=true` y cero PII. Comprueba formato, scope, acceso, destino y restricciones síncronas; no genera `requestId` utilizable en Diagnostics ni demuestra atribución. La validación completa requiere una conversión consentida con click ID real y su comprobación asíncrona en Diagnostics; el job la consulta en el siguiente ciclo disponible, programado cada 30 minutos.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#requisitos-antes-del-despliegue).
 
 ### Gate de activación de Conversiones mejoradas
 
-`POST /api/marketing/google-ads/conversions/enhanced/activation-gate` se conserva como vía interna de preview/compatibilidad para el `IntakeConfig` del grupo Propdental `5`; nunca crea acciones ni modifica Google Ads. La activación ordinaria no depende de este endpoint ni de un botón Play. `googleDataManagerDiagnostics` mantiene un heartbeat cada 30 minutos para recoger estados asíncronos, pero el plano de control que relee cuentas, capacidades y readiness se ejecuta con cadencia adaptativa: cada seis horas en estado estable y de inmediato, mediante un `JobRequest` durable deduplicado, cuando se guarda/verifica la medición web, se provisionan acciones canónicas o termina el onboarding.
-
-El job separa dos reconciliaciones. La primera es global y no depende del gate ni de Google: pagina todas las `IntakeConfig` por ID y, en una transacción corta con `FOR UPDATE` por fila, materializa `ad_personalization_enabled=true` y `visitor_choice` con audit v2 del scope real. No habilita email/teléfono ni concede consentimiento (`grants_consent=false`), conserva el resto de `locked.config`, acepta el audit v1 sano de Propdental y es idempotente. La segunda reconciliación queda limitada a Propdental y habilita Conversiones mejoradas y sus valores solo cuando todas las cuentas y attestations están listas.
-
-La **reconciliación Enhanced** queda bloqueada, sin cambios parciales en user data, si Data Manager no está listo, falla el acceso al scope, Consent Mode o las attestations y URLs, el proveedor no es Clinicaclick, falta la fuente de consentimiento del visitante, alguna cuenta destino no está mapeada/allowlisted, no ha aceptado los términos de datos o Google aún devuelve `enhanced_conversions_for_leads_enabled=false`. Ese bloqueo no revierte ni impide la capacidad global `visitor_choice`. Antes del update Enhanced se valida cada pareja cuenta/evento y se bloquea la fila de `IntakeConfig` dentro de una transacción. Una clave SHA-256 versionada hace el proceso idempotente; una configuración concurrentemente modificada se deja para el siguiente ciclo. El barrido global se audita aparte en `SyncLog.status_report.visitor_choice_personalization_reconciliation`; Bootstrap solo muestra el estado y nunca escribe.
-
-La caducidad operativa de una attestation ya persistida significa que toca **renovar la observación pública de la web**, no que el visitante haya concedido o retirado consentimiento. Si firma, scope, dominio, hash de configuración y señales persistidas siguen siendo coherentes, readiness devuelve `verification_current=false`, `renewal_required=true` y `runtime_configuration_ready=true`. Una activación Enhanced ya aplicada puede seguir `already_active` durante esa renovación porque su allowlist y autorización son persistentes, pero cada subida continúa exigiendo las señales vivas de ese visitante. Una activación nueva, un destino modificado o cualquier drift no temporal exige una attestation vigente. La renovación se hace con **Comprobar web**; el scheduler no extiende tokens ni inventa una comprobación.
-
-Al superar el gate se habilitan conjuntamente el disclosure y runtime de Conversiones mejoradas, `google_ads.user_data_enabled` y los eventos existentes Lead, Contact, Qualified Lead y Schedule. La capacidad `ad_personalization_enabled=true` con fuente `visitor_choice` se conserva, pero no nace necesariamente en esta fase porque puede haberse materializado antes. Ese `true` no concede consentimiento: permite emitir la elección real del visitante. La allowlist incluye el ticket `4-1893000040437`, la autorización del anunciante y las restricciones de medición: solo email/teléfono, sin Purchase, nombre, dirección, Customer Match, listas ni remarketing. El audit embebido contiene referencias, cuentas, eventos, estado por cuenta, clave de reconciliación y fecha, pero ninguna PII del paciente.
-
-El gate Enhanced v3 también fija `google_ads.phone_country_code=34` en este `IntakeConfig` español. El uploader usa ese valor solo para convertir teléfonos locales a E.164 antes de SHA-256; un teléfono ya internacional conserva su país. Francia no está incluida en las locations de este scope y debe definir un `IntakeConfig` de clínica con su código correcto. Si no existe un país inequívoco, el teléfono se omite y nunca se adivina.
-
-La política de valores es versionada y declarada como peso de reporting/optimización, no ingreso: Lead `0 EUR`, Contact `0 EUR`, Qualified Lead `10 EUR` y Schedule `40 EUR`. Purchase queda fuera de esta activación y solo puede enviar un valor económico real del CRM. El reconciliador no cambia objetivos, acciones primarias, pujas ni campañas en Google.
-
-Tras una activación Enhanced sana, el mismo job llama a `reconcileVerifiedConnectOnlyStrategyActivationReadiness`. Este segundo reconciliador elimina snapshots internos obsoletos de readiness, no activa nada nuevo en el proveedor: vuelve a leer acciones Google y ejecuta Data Manager con `validateOnly` y `createMissing=false`. Solo considera `CampaignRequest` `active` cuyo payload sea `new_patients + connect_only + Google`; vuelve a validar también snapshots previamente verdes cuando cambia la clave, el scope, las cuentas o vence el consentimiento. En el rollout actual, únicamente las clínicas `19`, `35`, `56`, `58` y `59`, declaradas en `groupRecord.config.locations`, pueden usar la configuración web de `propdental.es`; cada evidencia guarda `validated_scope.source=group_web_location`. Francia `36` y Eixample `57` no heredan ese consentimiento y permanecen bloqueadas hasta disponer de un `IntakeConfig` propio válido. El reconciliador exige el customer set exacto del gate, evidencia completa por action/target, fingerprint/CAS de estrategia y configuración, y vuelve a comparar todo bajo locks antes de escribir únicamente `solicitud.activation_readiness`. Conserva el snapshot anterior en `activation_readiness_reconciliation`, tolera ejecuciones concurrentes, es idempotente y se audita en `SyncLog.status_report.connect_only_strategy_readiness_reconciliation`. Devuelve expresamente `external_mutation_performed=false` y `google_ads_mutated=false`; no modifica `Campaign`, acciones, goals, pujas ni Google y no convierte `connect_only` en Piloto automático.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#gate-de-activación-de-conversiones-mejoradas).
 
 ### Evidencia Propdental del 2026-07-12 y cierre live del 2026-07-13
 
-- El OAuth del grupo `5` conserva ocho scopes e incluye `https://www.googleapis.com/auth/datamanager`.
-- Lead, Contact y Schedule devolvieron HTTP 200 con `validateOnly=true` en `1851215478` y `5992356722`: seis validaciones correctas y cero conversiones ficticias ingeridas.
-- Otras seis peticiones `validateOnly=true`, esta vez con email y teléfono **sintéticos**, hasheados en el request de Data Manager, devolvieron HTTP 200 y `requestId` de validación para las mismas combinaciones. Verifican formato, OAuth y aceptación síncrona; no activan la característica ni generan conversiones.
-- Las acciones Purchase de ambas cuentas devolvieron también HTTP 200 y `requestId` con click ID sintético, `validateOnly=true` y cero PII antes de habilitar el hito de tratamiento.
-- El 2026-07-12 ambas cuentas tenían aceptados los términos de datos, pero Google todavía devolvía `enhanced_conversions_for_leads_enabled=false`.
-- El 2026-07-13 se activó el interruptor en Google Ads. Una lectura directa posterior confirmó `enhanced_conversions_for_leads_enabled=true` en `1851215478` y `5992356722`. A las 06:42 UTC el reconciliador dejó el scope en `activated`: disclosure y runtime de user data habilitados, `google_ads.user_data_enabled=true`, eventos/valores aplicados y audit con `all_enabled=true`. La operación interna no mutó Google y no dependió del botón Play.
-- Después de abrir el gate se repitió la ruta completa con una petición `validateOnly=true` por cuenta sobre las acciones Lead `7680195320` (`185...`) y `7540337982` (`599...`). Cada petición llevaba email y teléfono sintéticos, normalizados y hasheados, `adUserData=GRANTED` y `adPersonalization=GRANTED`; Data Manager devolvió aceptación y `requestId` en ambas. No se ingirió ninguna conversión ni se guardaron los hashes. Esta evidencia histórica fue seguida por terminales naturales en `185...`; para `599...` sigue siendo únicamente validación hasta que exista su propio evento terminal.
-- El 2026-07-12 a las 23:31 UTC se crearon `Qualified Lead - ClinicaClick` en `5992356722` (`7682721076`) y `1851215478` (`7682299115`). Ambas son `UPLOAD_CLICKS`, categoría `QUALIFIED_LEAD`, `MANY_PER_CLICK`, habilitadas y secundarias (`primary_for_goal=false`, fuera de la métrica global). El `IntakeConfig` conserva destinos separados y cohortes de 4/15 campañas; repetir `ensure` para las dos cuentas mantiene ambos destinos sin duplicarlos. Google Ads las devuelve por GAQL y Data Manager ya responde HTTP 200 con `validateOnly=true` para ambas. La primera validación encontró `destination_references: Resource not found` mientras propagaban; el reintento posterior pasó sin ingerir conversiones. Las acciones Schedule continúan pasando la misma validación. Google documenta la ventana segura de reintento de acciones recién creadas en <https://developers.google.com/google-ads/api/docs/conversions/troubleshooting>.
-- Chromium mostró el paso 5 listo, sin bloqueos de medición ni errores de API. No se ejecutó el paso, no se pulsó `Play` y no se aplicó ningún custom goal.
-- Los E2E públicos posteriores de formulario, chat/QuickChat y modal telefónico se ejecutaron deliberadamente sin click IDs y con Marketing desmarcado. Los tres conservaron `ad_user_data=DENIED` y `ad_personalization=DENIED`; no generaron `GoogleAdsConversionUploadAttempts` ni llamadas a Data Manager. Esta evidencia valida el cierre fail-closed del consentimiento independientemente del `validateOnly` autorizado anterior.
-- El contacto real `LeadIntake 7180`, atribuido por GCLID a Sant Martí y con `ad_user_data=granted`, había fallado previamente porque Google rechazó `UploadClickConversions` para una integración nueva. El primer reintento por Data Manager destapó una contaminación del destino: el evento `contact` conservaba su ID específico, pero heredaba el resource global de `Lead`, que tenía prioridad al construir la petición.
-- El selector se corrigió para resolver `conversion_action`, `conversion_action_id` y `send_to` como una única alternativa por evento/destino. Hay regresiones para Lead, Contact, Schedule y Purchase en las dos cuentas. En staging resuelven respectivamente a las acciones canónicas esperadas y ya no heredan el resource de Lead.
-- La attestation que entrega la verificación web conserva un TTL corto de 15 minutos para impedir replays como prueba nueva. Una prueba ya aceptada mantiene una vigencia operativa firmada de 24 horas y no se pierde al guardar después: scope, dominio, HMAC, configuración, URLs legales y señales detectadas se siguen comprobando. El frontend usa esta expiración operativa y deja de bloquear la estrategia a los 15 minutos.
-- Tras desplegar la corrección se reenvió el contacto únicamente a `Contact - ClinicaClick` de `1851215478`, con el mismo evento, click ID y consentimiento, sin PII. Diagnostics confirmó el Contact correcto. El envío previo a Lead también llegó a materializarse y se retiró mediante `ConversionAdjustment` con el mismo `transactionId`; Google aceptó la retracción y el audit quedó marcado como `retracted_wrong_action`.
-- El primer lead publicitario natural posterior, `LeadIntake #7193`, entró en Badalona `58` como `paid`, `web/tel_modal`. Su intento Contact `#10`, customer `1851215478`, action `7680195323`, consentimiento `GRANTED` y GCLID, pasó `accepted -> SUCCESS`. Diagnostics devolvió un registro, cero warnings/errores y `attempt_count=1`, sin duplicado. Fue GCLID-only porque se creó antes de corregir la sobrescritura de configuración y no demuestra todavía user data Enhanced.
-- Staging backend `323e4a4` y frontend `a1c875ea` cerraron esa regresión. A las `09:38:42 UTC`, Chromium admin pulsó Verificar: el fingerprint protegido abreviado `a04c971…044b` permaneció idéntico y cambió solo `snippet_verification.verified_at`; Enhanced, user data y personalización siguieron activas; valores `0/0/10/40` y Purchase deshabilitado se conservaron.
-- El reconciliador post-Verificar devolvió `already_active`, `ready=true`, idempotente y `google_ads_mutated=false`. Ambas cuentas mantenían términos/Enhanced activos y Data Manager aceptó `validateOnly`. El GET público no expuso attestations, hash, HMAC, Enhanced, `goal_policy` ni auditorías.
-- La reconciliación global `visitor_choice` examinó 18 configuraciones: 17 `activated`, 1 `already_active`, 0 errores y `grants_consent=false`. Esto materializa capacidad, no consentimiento.
-- Al corte `2026-07-15 15:30 UTC`, los siete intentos naturales Enhanced `#25/#26/#27/#28/#30/#32/#33` ya habían terminado `succeeded/SUCCESS`. Los siete registraron `consent_status=GRANTED`, `explicit_ad_user_data=GRANTED`, una elección explícita de personalización, `user_data_sent=true` y dos identificadores `[email, phone]`. Data Manager recibe los valores normalizados y hasheados con SHA-256; el audit local conserva únicamente presencia/tipos y nunca PII ni hashes reutilizables. Todos pertenecen todavía a Lead en `1851215478`: cierran la evidencia de transporte asíncrono enriquecido natural para esa cuenta, no los hitos Qualified Lead/Schedule ni la cuenta `5992356722`.
-- Dry audit live read-only `2026-07-15 23:42 UTC` sobre el `IntakeConfig #24`: `8/8` destinos de Lead, Contact, Qualified Lead y Schedule pasaron lectura canónica y Data Manager `validateOnly` en las dos cuentas; los ocho IDs configurados coincidieron con los canónicos, `critical_count=0`, Enhanced/allowlist activos y `runtime_ready=true`. El único issue fue `consent_attestation_renewal_required` para `propdental.es`, clasificado como warning y sin concesión de consentimiento. No se persistió `SyncLog`, no se creó ninguna conversión y no hubo mutación Google.
-- Una validación posterior al gate volvió a enviar email y teléfono sintéticos con `validateOnly=true`, consentimiento `GRANTED` y la autorización exacta a las acciones Lead de `185...` y `599...`; ambas cuentas devolvieron aceptación y `requestId`. La prueba no ingirió conversiones ni reutilizó click IDs reales. Detectó además que los teléfonos locales necesitaban país explícito; el gate v3 lo corrigió con `34` para el scope español.
-- Los leads de prueba manuales `7191/7192` eran QuickChat sin click ID, anteriores al gate y sin intento Google. Se eliminaron con guardas exactas junto con sus conversaciones, mensajes de resumen, lecturas y dos page views de la sesión de test. `7193` y el intento natural `#10` quedaron intactos.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#evidencia-propdental-del-2026-07-12-y-cierre-live-del-2026-07-13).
 
 ### Lectura live read-only de acciones y no mutación (2026-07-13 21:23-21:24 UTC)
 
-| Customer | Evento | Acción ClinicaClick | ID |
-|---|---|---|---:|
-| `1851215478` | Lead | `Lead - ClinicaClick` | `7680195320` |
-| `1851215478` | Contact | `Contact - ClinicaClick` | `7680195323` |
-| `1851215478` | Qualified Lead | `Qualified Lead - ClinicaClick` | `7682299115` |
-| `1851215478` | Schedule | `Schedule - ClinicaClick` | `7680638785` |
-| `5992356722` | Lead | `Lead - ClinicaClick` | `7540337982` |
-| `5992356722` | Contact | `Contact - ClinicaClick` | `7540337985` |
-| `5992356722` | Qualified Lead | `Qualified Lead - ClinicaClick` | `7682721076` |
-| `5992356722` | Schedule | `Schedule - ClinicaClick` | `7540337988` |
-
-GAQL devolvió las ocho `ENABLED`, `UPLOAD_CLICKS`, `MANY_PER_CLICK`, `primary_for_goal=false`, fuera de `include_in_conversions_metric`, con valor predeterminado `0` y `always_use_default_value=false`. El `0` externo no contradice la policy de payload `Lead/Contact/Qualified Lead/Schedule = 0/0/10/40`: el uploader envía esos pesos por evento y no los rotula como ingresos. Al permanecer secundarias y fuera del goal, todavía no gobiernan Smart Bidding. Purchase queda fuera de estas ocho y de los eventos Enhanced habilitados; su config existe deshabilitada y no forma parte del rollout.
-
-La auditoría live del 2026-07-16 confirma la frontera de producto: las campañas existentes siguen heredando acciones legacy primarias y sus valores históricos. En `185...` hay gaps de fuerza/quality score y asset groups PMax `AVERAGE`/limitados; en `599...` las cuatro Smart continúan con `TARGET_SPEND` y objetivos antiguos. Data Manager puede enriquecer la atribución sin que las acciones canónicas entren en puja. Corregir goals o campañas requiere un Piloto aprobado y no forma parte del reconciliador Enhanced.
-
-La misma auditoría no encontró custom goals de ClinicaClick, `CampaignOptimizationPolicies` activas ni `ChangeEvent` de hoy sobre las 19 campañas/recursos revisados. Todas las estrategias Propdental siguen `connect_only`; el único `ManagedCampaign` permanece `draft + observe`, sin aprobar. Por tanto, la medición no cambió campañas, goals, pujas, presupuesto o estado. En aquel corte histórico, el intento `#20` continuaba `accepted/provider_processing` por su carril asíncrono y no alteraba esta prueba de no mutación; la evidencia Enhanced vigente son los siete terminales naturales posteriores de `185...` descritos más abajo.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#lectura-live-read-only-de-acciones-y-no-mutación-2026-07-13-2123-2124-utc).
 
 ## Hitos offline del CRM
 
-- `Qualified Lead` y `Schedule` no fijan un valor en el payload del hito. El uploader hereda el valor configurado para el evento; la política del gate usa respectivamente `10 EUR` y `40 EUR`.
-- Esos `10/40` son pesos relativos de reporting y optimización, no ingresos, precio, margen ni ROAS. Tampoco activan ni autorizan un cambio automático a `Maximize Conversion Value`; mientras se optimiza por estos hitos, la estrategia prevista sigue siendo `Maximize Conversions`.
-- `Schedule` se genera cuando una cita vinculada a un lead se agenda. No significa por sí solo que la cita esté confirmada, completada o que el paciente haya asistido.
-- Una cita completada sin tratamiento actualiza el lead a `acudio_cita`; no se reutiliza una acción de Google con semántica incorrecta.
-- Una cita completada con `tratamiento_id`, o de tipo `primera_con_trat`, actualiza el lead a `convertido` y genera `Purchase - ClinicaClick` con ID idempotente `appointment-{id}-treatment-completed`.
-- La implementación actual de Purchase usa `Tratamientos.precio_base` válido o `0 EUR`. Ese valor de catálogo no demuestra precio aceptado, importe cobrado ni margen y, por tanto, **no cumple** el contrato de valor real exigido para puja.
-- Purchase está deshabilitado en Propdental. No debe habilitarse, incorporarse a un goal ni usarse con `Maximize Conversion Value` hasta que el CRM persista el importe/margen económico autoritativo y se cumplan los umbrales de cobertura. No envía el nombre ni el tipo de tratamiento ni ningún dato clínico como parámetro.
-- Lead, Contact y formulario bruto continúan como señales secundarias. `Qualified Lead` es la primera señal de puja para las cohortes autorizadas de Mejora y Piloto; `Schedule` solo la sustituye después de la evidencia del lifecycle y `Purchase` permanece deshabilitado hasta disponer de valor real.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#hitos-offline-del-crm).
 
 ## Escalera de optimización y autoridad por modo
 
-Conectar Google Ads y medir conversiones no autoriza a cambiar los objetivos de las campañas. La UI actual de Propdental no ofrece ni necesita un botón `Play` en `connect_only`; los badges `Activa` de las campañas externas tampoco son botones. La reconciliación de readiness descrita arriba puede corregir el snapshot histórico de `CampaignRequest`, pero no cambia `Campaign` ni representa una transición comercial. El executor solo obtiene autoridad mediante el mandato inicial de una estrategia `guided_improvement` o mediante el gate admin de una `ManagedCampaign` en Piloto automático.
-
-La escalera segura es `Qualified Lead → Schedule → Purchase`:
-
-1. **Qualified Lead.** Las policies actuales de `guided_improvement` y `managed_service` comienzan directamente en esta etapa después de sus gates respectivos. El lifecycle abstracto conserva un posible `measurement → qualified_lead` con 14 días, 30 leads válidos en 30 días, 10 por campaña, éxito de carga igual o superior al 95 % y duplicados estrictamente por debajo del 1 %, pero el agregador actual no fabrica el desglose por campaña que no existe en los intentos y bloquearía esa promoción con `CAMPAIGN_BREAKDOWN_UNAVAILABLE`.
-2. **Schedule.** Se habilita con al menos 30 citas agendadas y vinculadas atribuibles en 30 días, cuatro semanas consecutivas con un mínimo de 5 por semana, éxito de carga igual o superior al 95 % y un cooldown mínimo de 14 días desde el último cambio de objetivo.
-3. **Purchase.** Se habilita después de cuatro semanas en Schedule, con al menos 30 tratamientos en 30 días, valor económico real en al menos el 90 % de los eventos y valor de respaldo en un máximo del 5 %. El precio de catálogo o un importe ficticio no cuentan como valor real.
-
-Los dos modos de optimización requieren **dos evaluaciones consecutivas** separadas al menos 24 horas para los cambios posteriores a Qualified Lead. Si una evaluación intermedia falla, la secuencia vuelve a empezar. El evaluador puro nunca muta Google Ads: en Mejora una decisión `ready` se delega a un job durable que reutiliza el mandato inicial; en Piloto queda pendiente de aprobación operativa.
-
-El servicio puro `campaignOptimizationLifecycle.service.js` materializa este contrato. No consulta ni modifica modelos, jobs, controladores o proveedores, y devuelve siempre `provider_mutation=null`. Los executors separados conservan preview, digest, actor autorizador, `validateOnly` y readback antes de confirmar una mutación.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#escalera-de-optimización-y-autoridad-por-modo).
 
 ### Cómo encaja con los tres modos
 
-- **Mide y entiende** (`connect_only`): conecta cuentas, importa/unifica leads, atribuye y audita señales; envía a las cuentas configuradas las conversiones consentidas que correspondan y mejora la calidad de medición, pero no provisiona `CampaignOptimizationPolicy`, no ejecuta el lifecycle de umbrales ni cambia campañas, goals, pujas o presupuesto. Puede mostrar diagnósticos/recomendaciones/readiness.
-- **Mejora** (`guided_improvement`): activar una estrategia Google Search/PMax con el mandato v1 aceptado y readiness válido crea la policy directamente en `qualified_lead` y encola su apply. Después, la evaluación diaria construye la serie Schedule con `CitasPacientes.inicio`; cuando una evaluación queda `ready`, sin blockers y con digest válido, el reconciliador encola la transición por `evaluation_id`. El worker reutiliza la autorización inicial del cliente, aplica por cuenta y solo avanza la etapa con readback saludable. No requiere otro clic ni operador y no concede pujas, presupuesto, estados o creación de campañas.
-- **Piloto automático** (`managed_service`): al entrar en `launching/active` provisiona idempotentemente una policy por ManagedCampaign y el goal v4 de QL. El executor actúa por una sola cuenta/cohorte, fuera de transacciones DB, y el status solo avanza con readback healthy. Las promociones posteriores exigen aprobación de un **operador de ClinicaClick** y las dos evaluaciones del contrato; el evaluador nunca muta Google silenciosamente.
-
-La reevaluación periódica descubre policies activas una vez al día. Schedule construye 12 semanas completas con la fecha efectiva de la cita; si un `event_id` no resuelve `CitasPacientes.inicio`, añade `SCHEDULE_EFFECTIVE_DATE_COVERAGE_INCOMPLETE` y falla cerrado. El writer/orquestador automático existe únicamente para `guided_improvement`; `managed_service` conserva la aprobación operativa separada.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#cómo-encaja-con-los-tres-modos).
 
 ## Provisioning de acciones
 
-La creación de acciones continúa en Google Ads API porque Data Manager es el transporte de eventos, no el gestor de acciones de conversión. El provisioning:
-
-- solo reutiliza nombres canónicos exactos de ClinicaClick (`Lead - ClinicaClick`, `Contact - ClinicaClick`, `Qualified Lead - ClinicaClick`, `Schedule - ClinicaClick` y `Purchase - ClinicaClick`);
-- requiere `create_missing=true` y `confirm_external_mutation=true`;
-- crea únicamente las acciones canónicas ausentes, las deja como secundarias (`primaryForGoal=false`) y usa `MANY_PER_CLICK`, necesario para admitir `gbraid`/`wbraid` en Data Manager;
-- no actualiza, desactiva ni elimina acciones preexistentes del cliente.
-
-La promoción posterior a acción primaria o su incorporación a un objetivo personalizado no forma parte de **este flujo de provisioning**. Las excepciones implementadas son los executors de goal policy de Mejora y Piloto automático: después de su mandato/gate correspondiente, preview, digest, `validateOnly` y readback, pueden incorporar la acción secundaria de la etapa al custom goal exclusivo de una cohorte sin cambiar su estado global. Fuera de esos contratos, cualquier mutación sigue siendo separada, explícita y auditada; nunca se degradan ni desactivan automáticamente las acciones del cliente. Si ya existe una acción con el nombre canónico exacto, se reutiliza sin duplicarla ni cambiar su estado o prioridad.
-
-Mientras continúan como `primaryForGoal=false` y fuera de `include_in_conversions_metric`, las acciones de ClinicaClick se consultan en **Todas las conversiones / All conversions**. Sus eventos enriquecen atribución y diagnóstico, pero no incrementan la columna `Conversions` ni gobiernan la puja de campañas existentes. `connect_only` no cambia esa condición. Solo una cohorte cubierta por un mandato Mejora o un Piloto automático aprobado puede incorporarlas a su custom goal sin volverlas primarias globales ni alterar el histórico del anunciante.
-
-Una acción canónica preexistente con `ONE_PER_CLICK` también se reutiliza sin modificarla. Los eventos con `gclid` pueden seguir procesándose, pero Google puede rechazar sus eventos `gbraid`/`wbraid` con `PROCESSING_ERROR_REASON_ONE_PER_CLICK_CONVERSION_ACTION_NOT_PERMITTED_WITH_BRAID`. Corregir esa acción requiere una decisión y mutación explícitas; Diagnostics conserva el motivo para que no se confunda con una conversión correcta.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#provisioning-de-acciones).
 
 ## Llamadas: contrato separado
 
-La retirada anunciada por Google afecta a los anuncios exclusivamente de llamada (`call-only ads`): no pueden crearse desde febrero de 2026 y dejarán de recibir impresiones en febrero de 2027. No se retiran los recursos de llamada ni la medición telefónica.
-
-- `AD_CALL` mide una llamada real desde un anuncio o recurso de llamada mediante un número de desvío de Google y un umbral de duración.
-- `WEBSITE_CALL` mide una llamada real desde la web sustituyendo dinámicamente el teléfono tras un clic publicitario.
-- `CLICK_TO_CALL` y algunas acciones `GOOGLE_HOSTED` miden un clic o una estimación, no demuestran una conversación.
-- `UPLOAD_CALLS` permite importar desde CRM/centralita el resultado y valor de una llamada que pasó por un número de desvío de Google. Sigue usando Google Ads API; la migración a Data Manager descrita aquí corresponde a conversiones derivadas de clic.
-
-El plugin no ve llamadas directas desde el anuncio porque el usuario no visita la web. Aun así, en Propdental el anunciante ha priorizado mostrar su número directo y evitar prefijos ajenos: `call_reporting_enabled=false` en ambas cuentas. No se borraron los recursos ni los teléfonos, pero Google deja de asignar el número de desvío y de ofrecer duración y `call_view`; por coherencia, `AD_CALL` queda fuera del custom goal.
-
-Evidencia de Propdental al 2026-07-12:
-
-- `1851215478` ya tenía el reporting de llamadas desactivado. Sus acciones históricas `AD_CALL` no se borraron, pero no entran en la nueva política de puja.
-- En `5992356722` se cambió el ajuste de cuenta de `true` a `false` mediante Google Ads API v24 y se releyó el valor. Se conservaron `callConversionReportingEnabled`, los call assets y los números reales. El cambio puede tardar hasta 24 horas en reflejarse en todos los anuncios.
-- En esa cuenta afecta a las Smart activas `Dentista en Hospitatet`, `Clinica Dental Badalona`, `Clinica Dental en Badalona` y `Buenos Dentistas y Personal`. Google declara obligatorio el GFN para Smart nuevas con teléfono en países compatibles; la mutación fue aceptada para las campañas existentes.
-- Las acciones de clic telefónico observadas no deben convertirse en señal principal como sustituto de una llamada real.
-- Una consulta live read-only forzada a Google Ads API v24 devolvió correctamente los campos usados y la mutación de cuenta se validó y aplicó con esa versión. El transporte de conversiones de clic usa Data Manager; el resto del cliente general de Google Ads debe seguir su promoción a v24 con regresiones independientes.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#llamadas-contrato-separado).
 
 ## Monitorización
 
-- Diagnostics de cargas Data Manager: heartbeat cada 30 minutos. El selector toma únicamente intentos `accepted` cuyo `updated_at` tenga al menos 30 minutos; un estado terminal no vuelve a consultarse. Este sondeo no se retrasa aunque el plano de control todavía no venza.
-- Plano de control de medición: cada seis horas por defecto (`GOOGLE_DATA_MANAGER_CONTROL_PLANE_INTERVAL_MINUTES` permite un override positivo). Incluye la materialización de capacidad `visitor_choice`, la lectura de ajustes Enhanced de las cuentas y la reconciliación de readiness. Un fallo se reintenta por la cola durable; una fila de heartbeat con fases `adaptive_cadence_not_due` no mueve el reloj del último barrido completo.
-- Los cambios relevantes no esperan seis horas. Guardar/verificar la configuración web, añadir un dominio, crear/normalizar acciones canónicas o completar el onboarding encola un `google_data_manager_diagnostics` con `force_control_plane=true`, timestamp de la mutación y scope de dedupe `google_data_manager_control_plane`. Si ya hay uno pendiente, las escrituras se consolidan; si hay uno ejecutándose, se conserva un único pase posterior para no perder el cambio concurrente.
-- La guía oficial de [Diagnostics de Data Manager](https://developers.google.com/data-manager/api/devguides/diagnostics) recomienda esperar 30 minutos antes del primer sondeo, multiplicar el backoff por `1.3`, limitarlo a 60 minutos y admitir hasta 24 horas de procesamiento. En QA no se debe forzar `RetrieveRequestStatus` cada diez minutos: un `PROCESSING` queda al scheduler durable.
-- Implementación actual: `node-cron` en el líder **solo encola** un `JobRequest` de tipo `google_data_manager_diagnostics`. El worker común lo reclama por `payload.__runtime_namespace`, ejecuta `executeGoogleDataManagerDiagnostics`, enlaza inmediatamente su `SyncLog` mediante `sync_log_id` y persiste el reporte en `result_summary`.
-- Los disparos cron o manuales no crean otro Diagnostics mientras exista uno `pending`, `queued`, `running` o `waiting` en el mismo runtime y alcance (`payload.__dedupe_scope`). La selección/creación se serializa; los estados terminales sí permiten el siguiente ciclo.
-- Los fallos técnicos se reprograman con backoff exponencial y respetan `max_attempts`. Tras un reinicio, un job `running` con intentos disponibles vuelve a `waiting`; si ya los agotó queda `failed`. Esto evita depender del siguiente cron y conserva la trazabilidad del intento interrumpido.
-- El arranque espera a que esa recuperación termine antes de reclamar. Si la BD aún no está disponible, permanece no-ready y reintenta con backoff acotado; no instala timers hasta recuperar y `stop()` cancela la espera. Diagnostics no usa un timeout externo con `Promise.race`, porque no cancelaría la llamada original y un retry podría solapar dos barridos; las llamadas de proveedor usan timeouts HTTP cancelables. Tanto el settlement normal como su recuperación usan compare-and-set sobre `status=running`: un conflicto de cero filas no pisa el estado más nuevo. Un fallo real al asentar el estado se propaga y queda visible; nunca se vuelve a ejecutar un handler ya finalizado solo para reparar su escritura.
-- El catálogo canónico está en `src/config/scheduledJobCatalog.js`: la misma regla durable se aplica actualmente a **34 tareas periódicas**. Estas y **14 integraciones dirigidas** forman **48 tipos background** y comparten un único carril global secuencial separado del CRM; `jobExecutor.service.js` registra **64 handlers**. Entre las dirigidas están los backfills, refresco de competencia, refresco persistente de informes de Marketing, visibilidad IA, borradores IA de contenido, apply de goals de Mejora, apply/rollback de destinos, creación/activación/rollback gestionados de Google Search y resync diferido de plantillas. Un backfill largo puede retrasar Diagnostics y revisiones; esta decisión prioriza que los syncs mutables no se solapen. El carril usa además `GET_LOCK` como defensa entre procesos, pero la topología soportada sigue siendo exactamente un worker `JobRequest` por `JOB_RUNTIME_NAMESPACE`. BullMQ continúa como segunda capa para transportes inmediatos; ningún callback cron ejecuta negocio directamente y los delays de horario silencioso/resync de plantillas permanecen en `JobRequests`.
-- Una pausa por cuota/uso de Google Ads no escribe `waiting` en `SyncLogs` (ese enum no existe): cierra el intento con un estado válido y un `status_report` explícito de espera, mientras `JobRequest.waiting + next_run_at` conserva la reanudación durable.
-- Cuando vence o se fuerza el plano de control se reconcilia la activación interna de Conversiones mejoradas. La operación es idempotente, transaccional y auditada en `SyncLog`; todas las consultas a Google son de solo lectura y el resultado declara expresamente `google_ads_mutated=false`. El barrido global comprobado cerró 18 filas como 17 `activated`, 1 `already_active`, 0 errores y siempre `grants_consent=false`.
-- Después del gate Enhanced, ese ciclo también reconcilia snapshots `activation_readiness` obsoletos de las estrategias Propdental `connect_only`; solo escribe el JSON de `CampaignRequest` bajo lock y lo registra en `connect_only_strategy_readiness_reconciliation`. No crea una policy ni activa Piloto automático.
-- Auditoría read-only diaria a las 02:17: conserva la policy de custom goal/campañas opt-in y añade la configuración de medición efectiva de cada estrategia activa `connect_only + new_patients + Google`. Una configuración de grupo cubre sus `locations` una sola vez y evita repetir sus overrides de clínica. En `connect_only_measurement` relee acciones, detecta drift entre el ID configurado en cada destino y la acción canónica observada, comprueba estado/counting/secundaria, scopes/quota, ejecuta Data Manager `validateOnly`, valida allowlist Enhanced y clasifica consentimiento. `goal_policy_target_count` y `connect_only_measurement_target_count` se guardan por separado y su suma forma `target_count`; por eso Mide y entiende ya no puede producir `target_count=0` solo por no tener Piloto automático.
-- Ese mismo target incluye `campaign_quality`: audita la unión deduplicada por `customer_id + campaign_id` de las campañas Google vinculadas a la estrategia y de los `campaign_ids` autorizados por sus destinos canónicos de medición. Así una campaña usada realmente para enrutar conversiones no desaparece del diagnóstico porque el snapshot de `external_targets` haya quedado desfasado, y una campaña histórica de estrategia tampoco se oculta porque ya no forme parte del selector de medición. Los destinos de medición proceden del gate scoped; cada cuenta ha pasado por `resolveScopedGoogleAdsRuntime` y el auditor comprueba que el runtime, nuevo o reutilizado desde la caché del mismo ciclo, corresponde a esa cuenta. La unión no amplía clínicas, grupos ni cuentas. Después consulta mediante GAQL de solo lectura, en lotes de hasta 200 IDs por cuenta. Persiste estado/canal/puja/presupuesto/estado primario, métricas agregadas de los últimos 30 días, `optimization_score` cuando Google lo admite y la configuración de goal por campaña. Si una campaña no aparece en la consulta con métricas, hace una lectura de existencia sin métricas; si `optimization_score` no está soportado, repite sin ese campo. Una prueba de 201 campañas confirma dos lotes de calidad + dos de goals y 201/201 observadas. Otra regresión con las cuentas conceptuales `185...`/`599...` cubre campañas solo de medición, solo de estrategia y repetidas, conserva las etiquetas de estrategia, no cruza cuentas y mantiene cero mutaciones. Detecta campañas ausentes, pausadas/eliminadas, limitaciones, score bajo, gasto sin conversiones y goals no alineados, y emite recomendaciones sin aplicarlas. La ausencia de mapping en una campaña pausada es warning.
-- Una allowlist elimina tokens y claves no previstas antes de guardar el `status_report`; el contrato fuerza siempre `autorepair=false`, `external_mutation_count=0` y `google_ads_mutated=false`. Los issues de calidad se encapsulan en `campaign_quality`: no cambian `runtime_ready` ni hacen fallar por sí solos la auditoría de medición. Un error técnico de calidad se eleva como warning exterior; los críticos del gate de medición/Enhanced siguen siendo autoritativos.
-- Evidencia live read-only del 2026-07-16: 3 targets Mide y entiende y 0 goal-policy. El grupo Propdental (`IntakeConfig #24`) quedó con medición saludable y `runtime_ready=true`: 8/8 destinos `validateOnly`, 0 críticos y un warning de renovación de attestation. El primer corte observó 30/30 campañas del snapshot de estrategia. Tras corregir la unión, el segundo corte ejecutado con el código nuevo observó **35/35** referencias únicas —17/17 en `185...` y 18/18 en `599...`—, incluyó las cuatro Smart, incluida `Buenos Dentistas y Personal`, y devolvió 0 críticos y 92 incidencias/recomendaciones consultivas. `ChangeEvent` fue 0 en ambas cuentas, no se creó `SyncLog` y el contrato siguió declarando `autorepair=false`, `external_mutation_count=0` y `google_ads_mutated=false`. Las campañas activas todavía heredan goals legacy de cuenta. Francia mostró 4/10 observables porque `599...` no está asignada a ese scope, y Eixample 0/4 porque ninguna cuenta está asignada a esa clínica. La auditoría no amplía permisos ni repara/muta Google.
-- La auditoría no autorepara ni hace mutaciones externas; cualquier cambio exige preview, digest vigente y confirmación explícita.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#monitorización).
 
 ### Coste, cuota y evidencia de la cadencia adaptativa (2026-07-17)
 
-La lectura read-only de `JobRequests` contó 30, 46, 43, 48 y 16 ejecuciones de `google_data_manager_diagnostics` entre el 13 y el 17 de julio (el día 17 solo hasta las 07:30 UTC). Los `SyncLogs` registraron respectivamente 45, 35, 28, 16 y 1 consultas de estado de peticiones; la caída es esperable porque solo se vuelven a consultar intentos `accepted`, no terminales. En el corte había 27 intentos `succeeded`, 2 `failed`, 11 `skipped` y ninguno `accepted`, de modo que la mayoría de heartbeats recientes no llamaba a `requestStatus:retrieve`, pero sí repetía el plano de control sobre 17 configuraciones y dos cuentas Ads.
-
-La lectura de `customer.conversion_tracking_setting` realiza una consulta GAQL por cuenta en cada barrido completo. Con dos cuentas y 48 ciclos/día, la cadencia anterior podía hacer 96 lecturas diarias de esos ajustes y recorrer 816 filas de configuración, aun cuando las 17 capacidades ya estaban activas. En estado estable, seis horas reducen ese mínimo a 8 lecturas GAQL y 68 filas recorridas al día (un 91,7 % menos), sin retrasar Diagnostics ni una configuración recién cambiada.
-
-Google publica para Data Manager 100.000 peticiones diarias de `IngestionService` y 300/minuto, y 50.000 peticiones diarias combinadas para el resto de servicios —incluido `RequestStatusService`— con 300/minuto: <https://developers.google.com/data-manager/api/devguides/limits>. El volumen observado está muy por debajo. Google no publica en esta documentación una tarifa monetaria por cada `events:ingest` o `requestStatus:retrieve`, y el esquema local no expone un contador de facturación; por ello no se debe inventar un coste en euros. El beneficio medible de la cadencia es menor cuota, latencia, carga de BD y ruido operativo.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#coste-cuota-y-evidencia-de-la-cadencia-adaptativa-2026-07-17).
 
 ### Alta automática de Mide y entiende y cobertura de hitos
 
-Después de OAuth, selección de cuenta/destinos, medición web y consentimiento válidos, el stepper lista las acciones de todas las cuentas requeridas. Si falta o es incompatible una acción canónica de ClinicaClick, llama automáticamente al `ensure` idempotente con confirmación server-owned, crea o normaliza solo las acciones de ClinicaClick, relee Google y ejecuta `validateOnly`. Las conversiones históricas del cliente no se adoptan ni se modifican. El botón visible queda únicamente como recuperación de un fallo, con el texto «Reintentar configuración automática».
-
-Un onboarding nuevo habilita por defecto Lead, Contact, Qualified Lead y Schedule; Purchase continúa opt-in y exige valor económico real. Esto cierra el hueco por el que el CRM emitía `qualified_lead` pero una configuración recién creada no provisionaba ni validaba su acción. Un evento marcado explícitamente `enabled=false` sigue respetándose.
-
-Los hitos posteriores (`qualified_lead`, `schedule`, `purchase`) resuelven primero el `IntakeConfig` efectivo del lead. Una configuración de grupo solo puede usarse si `config.locations` contiene expresamente la clínica; en caso contrario se exige el config de clínica. Así una sede fuera de la web compartida no puede enviar su conversión offline a la cuenta publicitaria del grupo por el mero hecho de compartir `grupo_clinica_id`.
-
-La auditoría read-only desde el 12 de julio confirmó que los leads publicitarios con identificador permitido recorren el uploader independientemente del punto de contacto: `chatbot` 24/24, `tel_modal` 5/5 y `web_form` 4/4 tenían intento Google. Email y teléfono se normalizan antes de SHA-256 y solo se incluyen con `ad_user_data=GRANTED`; los eventos sin esa autorización permanecen bloqueados. La apertura del modal telefónico por sí sola no es una conversión cualificada: el Contact nace cuando el usuario deja datos. Los hitos CRM posteriores conservan click ID, atribución y user data permitida del mismo lead, no de otro visitante.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#alta-automática-de-mide-y-entiende-y-cobertura-de-hitos).
 
 ### Evidencia controlada y runbook de atribución real
 
-La evidencia técnica de Enhanced ya está cerrada de forma controlada: el intento Lead `#22`, action `7680195320`, destino `propdental_parallel_185` y `provider_request_id=82561176-073e-40f5-a659-ed8fd4ef24d7`, llevó dos hashes y Google devolvió un registro sin warnings antes del terminal `INVALID_GCLID` esperado por el click ID sintético. Usa el mismo mapping que el intento Lead natural `#7`, enlazado a `LeadIntake #7184`, que terminó `SUCCESS` con `record_count=1`. El intento Contact natural `#10`, enlazado a `LeadIntake #7193`, usó action `7680195323` en el mismo destino y también terminó `SUCCESS` con un registro. `#19/#21` cerraron con el mismo error sintético esperado. Los leads `#7207/#7209/#7210` se limpiaron con `dry-run -> simulate -> apply`, reconocimiento explícito de que el borrado local no retracta eventos externos y postcheck cero; los naturales `#7184/#7193/#7194` permanecieron intactos.
-
-En la lectura histórica `JobRequest #23801` / `SyncLog #65272`, el intento `#20` (`provider_request_id=6b1d7941-d6d2-4668-8b15-8e93be8748de`) seguía `accepted/provider_processing`: destino `PROCESSING`, `checked=1`, `processing=1`, `record_count=0`, sin errors/warnings. Envió un identificador `[email]`; el teléfono QA empezaba por `00` y quedó correctamente excluido al normalizarse a siete dígitos. En ese momento el cero no era definitivo y no se debía forzar un terminal o limpiar `LeadIntake #7208`. Esta fotografía ya no define el estado Enhanced global: los siete terminales naturales posteriores de `185...` cerraron esa evidencia; siguen pendientes un terminal natural en `599...` y los hitos Qualified Lead/Schedule.
-
-El QA público postdeploy del outbox QuickChat (`LeadIntake #7213`) rechazó Marketing, no llevó click IDs y generó dos audits/jobs internos, una conversación y un único resumen. La guarda de consentimiento produjo cero `GoogleAdsConversionUploadAttempts`; después `dry-run -> simulate -> apply` eliminó únicamente el marcador sintético con postcheck cero. La recuperación por JobRequest de los chats reales `#7185/#7195/#7196` tampoco disparó proveedores: sus intentos preexistentes permanecieron exactamente `3 -> 3`. Esta prueba acredita aislamiento del handler, no una conversión Enhanced atribuida.
-
-La evidencia natural Enhanced de Lead ya quedó cerrada con los siete terminales `#25/#26/#27/#28/#30/#32/#33` descritos arriba. Sigue pendiente una evidencia natural equivalente para `qualified_lead` y `schedule`: se observará cuando el equipo verifique interés real o vincule una cita en CRM/Agenda, sin promover artificialmente un lead de prueba. Tampoco se debe extrapolar la evidencia de `1851215478` a `5992356722` hasta que esa cuenta tenga su propio terminal real. No se reutiliza un click ID, PII o evento de otro visitante.
-
-Regresión QA de este corte: pasaron con `node src/scripts/tests/<nombre>.test.js` las suites `google_data_manager_conversion`, `enhanced_conversion_activation_gate`, `google_ads_conversion_tracking`, `intake_config_write_merge`, `visitor_choice_personalization_reconciliation`, `google_ads_clinicaclick_goal_policy`, `cleanup_intake_e2e_run`, `google_lead_lifecycle_conversion`, `appointment_lead_milestone_conversion`, `campaign_conversion_readiness`, `campaign_optimization_lifecycle` —12 casos—, `managed_campaign_optimization_policy`, `scheduled_jobs_orchestration`, `intake_lead_consent`, `intake_form_clinic_location`, `intake_page_clinic`, `intake_snippet_runtime`, `intake_quickchat_summary`, `intake_quickchat_outbox`, `lead_attribution_view`, `google_ads_campaign_attribution_suffix` e `intake_legacy_chat_detector`. Esto cubre en código transporte, gates, ownership, consentimiento, routing de clínica/página/formulario, labels de `tel_modal`/chat, sufijo de atribución de campaña, detección de chat legacy, runtime del snippet, resumen QuickChat durable, rollback/limpieza de su outbox, generación/dedupe de hitos, readiness, lifecycle de optimización y orquestación. El outbox no invoca Meta/Google. Un `chatbot` nuevo continúa después por el tracking publicitario habitual; si deduplica, responde con el outcome del outbox antes de proveedores para no repetir la conversión. La cobertura de `qualified_lead`/`schedule` no sustituye sus terminales naturales pendientes en Data Manager.
-
-1. **Localizar el lead sin exponer PII ni click IDs.** En la vista CRM confirmar sede, canal, fecha y origen. Para diagnóstico DB puede usarse una consulta de presencia, nunca seleccionar el valor crudo:
-
-   ```sql
-   SELECT id, clinica_id, grupo_clinica_id, source, source_detail,
-          google_ads_customer_id, google_ads_campaign_id,
-          (gclid IS NOT NULL OR gbraid IS NOT NULL OR wbraid IS NOT NULL) AS has_click_id,
-          JSON_UNQUOTE(JSON_EXTRACT(consentimiento_canal, '$.ad_user_data')) AS ad_user_data,
-          JSON_UNQUOTE(JSON_EXTRACT(consentimiento_canal, '$.ad_personalization')) AS ad_personalization,
-          event_id, created_at
-   FROM LeadIntakes
-   WHERE grupo_clinica_id = 5
-     AND (gclid IS NOT NULL OR gbraid IS NOT NULL OR wbraid IS NOT NULL
-          OR google_ads_customer_id IS NOT NULL OR google_ads_campaign_id IS NOT NULL)
-   ORDER BY id DESC
-   LIMIT 20;
-   ```
-
-2. **Validar intake/routing.** La sede debe ser una de las configuradas y coincidir con la selección del visitante. Deben existir `event_id`, destino/campaña inequívocos y al menos un identificador permitido. Para la vía Enhanced, `ad_user_data` debe ser `granted`; si Marketing fue rechazado, no se espera PII y el cierre fail-closed es correcto.
-
-3. **Seguir cada intento por `event_id`, sin leer hashes o PII:**
-
-   ```sql
-   SELECT id, event_name, destination_key, customer_id, conversion_action,
-          consent_status, status, reason, provider_request_id,
-          attempted_at, completed_at,
-          JSON_UNQUOTE(JSON_EXTRACT(response_metadata, '$.processing_status')) AS processing_status,
-          JSON_UNQUOTE(JSON_EXTRACT(response_metadata, '$.diagnostics_checked_at')) AS diagnostics_checked_at
-   FROM GoogleAdsConversionUploadAttempts
-   WHERE event_id = :event_id
-   ORDER BY id ASC;
-   ```
-
-4. **Interpretar el estado:**
-   - `pending`: intento local aún no enviado; si persiste, revisar logs del request antes de reintentar;
-   - `accepted` con `provider_request_id`: Data Manager lo recibió y sigue procesándolo; no es todavía atribución final;
-   - `succeeded`: Diagnostics confirmó ingesta terminal del destino;
-   - `partial_success`: revisar `response_metadata.destinations`, corregir solo el destino fallido y conservar la aceptación sana;
-   - `failed`: revisar `reason`, `last_error_code` y el error saneado; no marcar la medición como correcta;
-   - `skipped` o ausencia de fila: comprobar consentimiento, identificador permitido, selección de customer y evento habilitado. Un rechazo de Marketing debe permanecer bloqueado y no se «soluciona» forzando consentimiento.
-
-5. **Esperar el scheduler de Diagnostics.** El job corre cada 30 minutos y deja el resumen en `SyncLog.status_report`. No lanzar sondeos manuales cada diez minutos: Google recomienda primer control a los 30 minutos, backoff `1.3` hasta 60 minutos y una ventana total de hasta 24 horas. Verificar que no aparezcan errores globales, que la activación Enhanced continúe sana y que el intento pase a terminal. `succeeded` demuestra ingesta; la atribución/conversión visible en Google Ads se contrasta después con el reporting de la cuenta y puede tardar más.
-
-6. **Escalar con propietario claro.** Intake/routing/consentimiento corresponde al equipo web/CRM; `accepted` estancado o diagnóstico de destino a integración Google; discrepancia tras `succeeded` a operación Ads con customer, acción, transaction/event ID y `provider_request_id`, nunca con PII cruda.
-
-La UI todavía no expone un bloque único con toda esta cadena. Hasta que exista, la evidencia canónica es CRM + `GoogleAdsConversionUploadAttempts` + `SyncLog` + reporting Google. No se debe presentar el estado verde de instalación o el HTTP 200 inicial como prueba de conversión atribuida.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#evidencia-controlada-y-runbook-de-atribución-real).
 
 ## Invariante de configuración y prueba de no regresión
 
-Verificar o guardar la web, añadir dominios y provisionar acciones no pueden degradar la capacidad Enhanced ya activada. `IntakeConfig.config` tiene ownership mixto y cualquier writer read-modify-write debe bloquear la fila y aplicar un patch estrecho sobre el JSON raw más reciente.
-
-Antes y después de una comprobación live comparar, sin imprimir PII:
-
-- `features.ad_personalization_*` y `features.google_ads_user_data_*`;
-- `google_ads.user_data_enabled`, `enhanced_conversions.activation_audit` y su reconciliation key;
-- `google_ads.goal_policy` si existe;
-- `events.*.user_data_enabled`, valores, `value_is_revenue`, destinos y Qualified Lead;
-- dominios, HMAC-presente y `snippet_verification`.
-
-Solo `snippet_verification` debe cambiar al pulsar Verificar. Después ejecutar Diagnostics: el gate debe responder `already_active`, no reactivar una configuración que el editor haya borrado. La regresión automatizada es `node src/scripts/tests/intake_config_write_merge.test.js`; Diagnostics sigue siendo red de seguridad y no justifica un writer destructivo.
-
-Prueba live cerrada el 2026-07-13 `09:38:42 UTC`: sobre staging backend `323e4a4` / frontend `a1c875ea`, el fingerprint protegido abreviado `a04c971…044b` fue idéntico antes/después y solo cambió `verified_at`. El gate devolvió `already_active`, `ready=true`, fue idempotente y no mutó Google. La proyección pública no contenía attestations, hash, HMAC, Enhanced, `goal_policy` ni auditorías.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#invariante-de-configuración-y-prueba-de-no-regresión).
 
 ## Referencias oficiales
 
-- https://developers.google.com/data-manager/api/devguides/events/google-ads/offline/upgrade
-- https://developers.google.com/data-manager/api/devguides/events/google-ads/offline/upgrade/field-mappings
-- https://developers.google.com/data-manager/api/devguides/events/send-events
-- https://developers.google.com/data-manager/api/devguides/diagnostics
-- https://developers.google.com/data-manager/api/devguides/quickstart/set-up-access
-- https://developers.google.com/google-ads/api/docs/conversions/goals/overview
-- https://support.google.com/google-ads/answer/7475709
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/marketing/google-data-manager-conversions.md#referencias-oficiales).
