@@ -88,9 +88,25 @@ test('only a single native coordinate comment can bind the seed',()=>{
   const seed=h.parseSeed(dump(),run.runId);assert.equal(seed.coordinate.cdcStartPosition,'pilot-bin.000007:371');
   const quoted="INSERT INTO x VALUES ('-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE=\\'pilot-bin.000999\\', SOURCE_LOG_POS=4;');\n";
   assert.equal(h.seedCoordinate(quoted+dump()).file,'pilot-bin.000007');
-  for(const coordinate of ['',"-- CHANGE MASTER TO MASTER_LOG_FILE='pilot-bin.000007', MASTER_LOG_POS=371;", "-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='mysql-bin.000007', SOURCE_LOG_POS=371;","-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='pilot-bin.000007', SOURCE_LOG_POS=3;"])
+  for(const coordinate of ['',"-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='mysql-bin.000007', SOURCE_LOG_POS=371;","-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='pilot-bin.000007', SOURCE_LOG_POS=3;"])
     assert.throws(()=>h.parseSeed(dump({coordinate}),run.runId),/b_seed_coordinate/);
   assert.throws(()=>h.parseSeed(dump()+dump(),run.runId),/b_seed_coordinate_missing_or_duplicate/);
+});
+test('actual8.0.42 native MASTER coordinate is accepted only as a complete separate dialect',()=>{
+  const coordinate="-- CHANGE MASTER TO MASTER_LOG_FILE='pilot-bin.000001', MASTER_LOG_POS=4662134;";
+  const seed=h.parseSeed(dump({coordinate}),run.runId);
+  assert.deepEqual(seed.coordinate,{file:'pilot-bin.000001',position:4662134,cdcStartPosition:'pilot-bin.000001:4662134'});
+  for(const mixed of [
+    "-- CHANGE MASTER TO SOURCE_LOG_FILE='pilot-bin.000001', MASTER_LOG_POS=4662134;",
+    "-- CHANGE MASTER TO MASTER_LOG_FILE='pilot-bin.000001', SOURCE_LOG_POS=4662134;",
+    "-- CHANGE REPLICATION SOURCE TO MASTER_LOG_FILE='pilot-bin.000001', SOURCE_LOG_POS=4662134;",
+    "-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='pilot-bin.000001', MASTER_LOG_POS=4662134;",
+    "-- CHANGE MASTER TO MASTER_LOG_FILE='pilot-bin.000001', MASTER_LOG_POS=4294967296;",
+    "-- CHANGE MASTER TO MASTER_LOG_FILE='mysql-bin.000001', MASTER_LOG_POS=4662134;",
+  ])assert.throws(()=>h.parseSeed(dump({coordinate:mixed}),run.runId),/b_seed_coordinate_invalid/);
+  assert.throws(()=>h.parseSeed(dump({coordinate})+'\n'+dump(),run.runId),/b_seed_coordinate_missing_or_duplicate/);
+  const quoted="INSERT INTO x VALUES ('-- CHANGE MASTER TO MASTER_LOG_FILE=\\'pilot-bin.000999\\', MASTER_LOG_POS=4;');\n";
+  assert.equal(h.seedCoordinate(quoted+dump({coordinate})).cdcStartPosition,'pilot-bin.000001:4662134');
 });
 test('seed parser admits native fixture data and rejects cross-schema, DML and expression escapes',()=>{
   const allowed="INSERT INTO `b_lob` (`id`,`payload`,`document`,`nullable_document`,`revision`) VALUES (3,'{\"synthetic\":true}','🦷',NULL,0);";

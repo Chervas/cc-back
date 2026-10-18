@@ -69,7 +69,8 @@ function seedCoordinate(text) {
     if(text[i]==='#'||text.slice(i,i+2)==='--'&&/\s/.test(text[i+2]||'')) {
       const end=text.indexOf('\n',i);const line=text.slice(i,end<0?text.length:end).replace(/^--\s*/, '');
       if(/^CHANGE\s+(?:REPLICATION\s+SOURCE|MASTER)\s+TO\b/i.test(line)) {
-        const match=/^CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='(pilot-bin\.[0-9]{6})',\s*SOURCE_LOG_POS=([0-9]+);\s*$/.exec(line);
+        const match=/^CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='(pilot-bin\.[0-9]{6})',\s*SOURCE_LOG_POS=([0-9]+);\s*$/.exec(line)
+          ||/^CHANGE MASTER TO MASTER_LOG_FILE='(pilot-bin\.[0-9]{6})',\s*MASTER_LOG_POS=([0-9]+);\s*$/.exec(line);
         need(match&&Number.isSafeInteger(Number(match[2]))&&Number(match[2])>=4&&Number(match[2])<=4294967295,'b_seed_coordinate_invalid');found.push({file:match[1],position:Number(match[2])});
       }
       i=end<0?text.length:end;continue;
