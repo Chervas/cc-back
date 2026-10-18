@@ -115,6 +115,7 @@ function createAppointmentReminderSequenceService({ db, now = () => new Date(), 
       try { return JSON.parse(value); } catch { return value; }
     };
     for (const row of rows) {
+      if (row.trigger_type !== 'appointment_reminder_window') continue;
       const capturedTimeout = json(row.appointment_timeout);
       // Initial messages freeze false before the execution later times out.
       // Keep that immutable receipt; only missing old metadata may fall back
@@ -216,6 +217,61 @@ function createAppointmentReminderSequenceService({ db, now = () => new Date(), 
     return true;
   }
 
+  // Explicit operator repair only; never run by a timer or during dispatch.
+  // Remove an adopted booking receipt only with its original scoped evidence.
+  async function reconcileBookingHistory({ appointment, apply = false, transaction = null }) {
+    return transact(transaction, async tx => {
+      const context = await inspectAppointment({ appointment, transaction: tx });
+      if (!context.sequence) return { changed: false };
+      const sequence = await db.AppointmentReminderSequence.findByPk(context.sequence.id, { transaction: tx, lock: tx.LOCK.UPDATE });
+      const before = { claims: c.claims(sequence.claims), response_message_id: sequence.response_message_id,
+        response_received_at: sequence.response_received_at };
+      const claims = c.claims(before.claims), removed = [];
+      for (const [stage, claim] of Object.entries(claims)) {
+        const owner = plain(await db.FlowExecutionV2.findByPk(claim.execution_id, { transaction: tx }));
+        if (!owner || !['appointment_created', 'appointment_rescheduled'].includes(owner.trigger_type)) continue;
+        const captured = c.object(owner.context).appointment;
+        const message = plain(await db.Message.findByPk(claim.message_id, { transaction: tx }));
+        const conversation = message && plain(await db.Conversation.findByPk(message.conversation_id, { transaction: tx }));
+        if (!claim.adopted_history || !message || message.direction !== 'outbound'
+          || c.id(c.object(message.metadata).execution_id) !== c.id(owner.id)
+          || owner.trigger_entity_type !== 'appointment' || c.id(owner.trigger_entity_id) !== claim.appointment_id
+          || c.id(owner.clinic_id) !== context.scope.clinic_id || c.id(captured?.paciente_id) !== context.scope.patient_id
+          || calendar.formatDateLocal(new Date(c.instant(captured?.inicio)), context.scope.time_zone) !== context.scope.local_date
+          || c.id(conversation?.clinic_id) !== context.scope.clinic_id || c.id(conversation?.patient_id) !== context.scope.patient_id) c.fail('history_requires_review');
+        removed.push({ stage, claim, owner }); delete claims[stage];
+      }
+      if (!removed.length) return { changed: false };
+      let responseId = before.response_message_id, responseAt = before.response_received_at;
+      if (responseId) {
+        const references = row => {
+          const context = c.object(row.context);
+          return [context.last_response_context?.response_message_id, context.last_response_context?.inbound_message_id,
+            ...Object.values(c.object(context.outputs)).map(o => o?.response_message_id)].map(c.id).filter(Boolean);
+        };
+        const history = await priorHistory(context, tx);
+        const reminders = await db.FlowExecutionV2.findAll({ where: { id: { [Op.in]: [...new Set(history.map(h => h.execution_id))] } },
+          attributes: ['id', 'context'], transaction: tx, raw: true });
+        const reply = plain(await db.Message.findByPk(responseId, { transaction: tx }));
+        const conversation = reply && plain(await db.Conversation.findByPk(reply.conversation_id, { transaction: tx }));
+        const attempted = history.filter(c.everAttempted);
+        const sends = attempted.length ? await db.Message.findAll({ where: { id: { [Op.in]: attempted.map(h => h.message_id) } },
+          attributes: ['id', 'createdAt'], transaction: tx, raw: true }) : [];
+        const times = sends.map(m => m.createdAt instanceof Date ? +m.createdAt : NaN);
+        if (removed.some(r => references(r.owner).includes(c.id(responseId)))
+          && !reminders.some(r => references(r).includes(c.id(responseId)))
+          && reply?.direction === 'inbound' && c.id(conversation?.clinic_id) === context.scope.clinic_id
+          && c.id(conversation?.patient_id) === context.scope.patient_id && reply.createdAt instanceof Date
+          && times.length === attempted.length && times.length && times.every(Number.isFinite)
+          && +reply.createdAt + 120000 < Math.min(...times)) { responseId = null; responseAt = null; }
+      }
+      const after = { claims, response_message_id: responseId, response_received_at: responseAt };
+      if (apply) await sequence.update(after, txOptions(tx));
+      return { changed: true, applied: apply, sequence_id: sequence.id, before, after,
+        excluded: removed.map(r => ({ stage: r.stage, execution_id: r.owner.id, message_id: r.claim.message_id })) };
+    });
+  }
+
   async function claim(context, execution, stage, transaction) {
     c.stageKey(stage);
     const sequence = await lockSequence(context, transaction);
@@ -288,7 +344,7 @@ function createAppointmentReminderSequenceService({ db, now = () => new Date(), 
     } catch (error) { if (unavailable(error)) c.fail('unavailable'); throw error; }
   }
 
-  return Object.freeze({ inspectAppointment, claimExecution, authorizeMessage });
+  return Object.freeze({ inspectAppointment, claimExecution, authorizeMessage, reconcileBookingHistory });
 }
 let singleton;
 function current() {

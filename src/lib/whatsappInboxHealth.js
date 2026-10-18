@@ -58,7 +58,7 @@ function read() {
     return JSON.parse(fs.readFileSync(FILE, 'utf8'));
   } catch { return null; }
 }
-function state(snapshot, clinicId, now = Date.now(), { contactKeys = null, verifiedPhoneContact = false } = {}) {
+function state(snapshot, clinicId, now = Date.now(), { contactKeys = null, verifiedPhoneContact = false, questionNotBefore = null } = {}) {
   if (!snapshot || snapshot.version !== 1 || !Number.isFinite(snapshot.observedAt)
     || now - snapshot.observedAt > 90000 || snapshot.observedAt > now + 5000
     || !Array.isArray(snapshot.clinics)) return { healthy: false, reason: 'inbox_health_unavailable' };
@@ -77,7 +77,16 @@ function state(snapshot, clinicId, now = Date.now(), { contactKeys = null, verif
       const summary = summaryOf(clinic);
       const count = summary?.filter(item => item.category === 'user_identity_unresolved')
         .reduce((total, item) => total + item.count, 0) || 0;
-      if (count <= clinic.unscopedBlockingReview) identityReview = count;
+      if (count <= clinic.unscopedBlockingReview) {
+        identityReview = count;
+        const old = Number.isSafeInteger(questionNotBefore) && questionNotBefore > 0 && questionNotBefore <= now
+          ? (summary || []).filter(item => item.category === 'user_identity_unresolved'
+            && Number.isSafeInteger(item.oldestAt) && item.oldestAt > 0
+            && Number.isSafeInteger(item.newestAt) && item.newestAt >= item.oldestAt
+            && item.newestAt + 120000 < questionNotBefore).reduce((total, item) => total + item.count, 0) : 0;
+        blockingReview -= old;
+        identityReview -= old;
+      }
     }
   }
   const readyForReplies = !snapshot.recoveryHold && blockingReview - identityReview === 0;
@@ -133,7 +142,32 @@ function issues(snapshot, clinicIds, now = Date.now()) {
     };
   });
 }
-async function forConversation(snapshot, conversation, bindings, query, { transaction, now = Date.now() } = {}) {
+async function questionNotBefore(execution, conversation, loadMessage, { now = Date.now() } = {}) {
+  if (!Number.isSafeInteger(Number(execution?.id)) || Number(execution.id) <= 0
+    || Number(execution.clinic_id) !== Number(conversation?.clinic_id)) return null;
+  const outputs = Object.values(execution.context?.outputs || {});
+  if (!outputs.length || outputs.length > 100) return null;
+  const sources = outputs.filter(o => o && Number(o.conversation_id || o.chat_conversation_id) === Number(conversation.id)
+    && Number.isSafeInteger(Number(o.message_id)) && Number(o.message_id) > 0);
+  if (!sources.length) return null;
+  let earliest = Infinity;
+  try {
+    for (const source of sources) {
+      const row = await loadMessage(Number(source.message_id));
+      const m = typeof row?.metadata === 'string' ? JSON.parse(row.metadata) : row?.metadata;
+      const at = row?.createdAt instanceof Date ? +row.createdAt
+        : typeof row?.createdAt === 'string' && /(?:Z|[+-]\d\d:\d\d)$/.test(row.createdAt) ? Date.parse(row.createdAt) : NaN;
+      if (!row || Number(row.id) !== Number(source.message_id) || row.direction !== 'outbound'
+        || Number(row.conversation_id) !== Number(conversation.id) || Number(m?.execution_id) !== Number(execution.id)
+        || !['sent', 'delivered', 'read'].includes(row.status) || !Number.isSafeInteger(at) || at <= 0 || at > now) return null;
+      earliest = Math.min(earliest, at);
+    }
+  } catch { return null; }
+  // Earliest durable outbound creation is conservative: never use a planned
+  // send, a rescheduled timer or a later retry as the beginning of the question.
+  return Number.isFinite(earliest) ? earliest : null;
+}
+async function forConversation(snapshot, conversation, bindings, query, { transaction, now = Date.now(), questionNotBefore = null } = {}) {
   const clinicId = Number(conversation?.clinic_id);
   const fallback = () => state(snapshot, clinicId, now);
   const base = fallback();
@@ -156,6 +190,6 @@ async function forConversation(snapshot, conversation, bindings, query, { transa
       keys.push(...bound.map(row => row.contact_key));
     } catch { return fallback(); }
   }
-  return state(snapshot, clinicId, now, { contactKeys: keys, verifiedPhoneContact: true });
+  return state(snapshot, clinicId, now, { contactKeys: keys, verifiedPhoneContact: true, questionNotBefore });
 }
-module.exports = { FILE, read, state, publish, issues, forConversation, summaryOf };
+module.exports = { FILE, read, state, publish, issues, forConversation, summaryOf, questionNotBefore };

@@ -28,6 +28,41 @@ function fixture(overrides = {}) {
     ...overrides });
   return { state, client, calls, counters };
 }
+test('final broker revalidates question-scoped identity reviews and blocks a new event before transport', async () => {
+  const H = require('../../lib/whatsappInboxHealth'), now = Date.now(), start = new Date(now + 10800000).toISOString();
+  for (const lateEvent of [false, true]) {
+    let checks = 0;
+    const source = { id: 122, conversation_id: 71, direction: 'outbound', status: 'delivered',
+      createdAt: new Date(now - 7200000), metadata: { execution_id: 19 } };
+    const loadMessage = async id => Number(id) === 122 ? source : { id, conversation_id: 71, direction: 'outbound',
+      status: 'pending', createdAt: new Date(now), metadata: { execution_id: 19, appointment_timeout: true } };
+    const f = fixture({ loadMessage,
+      loadConversation: async id => ({ id, clinic_id: 123, patient_id: 7, channel: 'whatsapp', contact_id: '19995550101' }),
+      patientHeld: async () => false,
+      loadExecution: async () => ({ id: 19, clinic_id: 123, trigger_type: 'appointment_reminder_window',
+        trigger_entity_type: 'appointment', trigger_entity_id: 9, status: 'running',
+        context: { appointment: { inicio: start }, outputs: { first: { conversation_id: 71, message_id: 122 } } } }),
+      loadAppointment: async () => ({ id_cita: 9, clinica_id: 123, paciente_id: 7, estado: 'info_enviada', inicio: start }),
+      authorizeReminderMessage: async () => ({ allowed: true }),
+      loadReceptionState: async (conversation, bindings, execution) => {
+        assert.equal(execution.id, 19); checks++;
+        const at = lateEvent && checks > 1 ? now : now - 86400000;
+        const snapshot = { version: 1, observedAt: now, clinics: [{ clinicId: 123, oldestPendingAt: null,
+          blockingReview: 2, unscopedBlockingReview: 2, blockingContactKeys: [],
+          reviewSummary: [{ category: 'user_identity_unresolved', count: 2, oldestAt: at, newestAt: at, errorCodes: [] }] }] };
+        return H.forConversation(snapshot, conversation, bindings, async () => [[]], {
+          now, questionNotBefore: await H.questionNotBefore(execution, conversation, loadMessage, { now }),
+        });
+      },
+    });
+    if (lateEvent) {
+      await assert.rejects(f.client.send(input()), e => e.code === 'whatsapp_authorized_message_ineligible'
+        && e.details.reason_code === 'whatsapp_inbox_reception_delayed');
+      assert.equal(f.calls.length, 0);
+    } else { await f.client.send(input()); assert.equal(f.calls.length, 1); }
+    assert.equal(checks, 2);
+  }
+});
 test('current appointment and patient import holds are checked before every provider dispatch', async () => {
   let reads = 0;
   const f = fixture({

@@ -5,7 +5,7 @@ const policy=require('../../lib/whatsappAppointmentTimeout');
 const text=fs.readFileSync(require.resolve('../../services/flowEngineV2.service'),'utf8');
 const source=text.slice(text.indexOf('async function resumeWaitingNode('),text.indexOf('\nfunction findClassifyIntentOutput('));
 const notifySource=text.slice(text.indexOf('async function notifyRecoveredReply('),text.indexOf('\nasync function resumeWaitingNode('));
-function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,affected=false,pending=false,recovered=false,alertFails=false,next=true,undeliverable=false,unknown=false}={}) {
+function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,affected=false,pending=false,recovered=false,alertFails=false,next=true,undeliverable=false,unknown=false,identityAge=null}={}) {
  const now=Date.now(),start=new Date(now+3600000).toISOString();
  const context={appointment:{id_cita:1,clinica_id:2,inicio:start,estado:'info_enviada'}};
  const execution={id:4,clinic_id:2,trigger_entity_type:'appointment',trigger_entity_id:1,status:'running',current_node_id:'wait',
@@ -14,6 +14,9 @@ function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,
  const snapshot={version:1,observedAt:now,clinics:[{clinicId:2,oldestPendingAt:null,blockingReview:0}]};
  const alerts=[],reviews=[];
  if(review)Object.assign(snapshot.clinics[0],{blockingReview:4,unscopedBlockingReview:0,blockingContactKeys:['a'.repeat(64)]});
+ if(identityAge!==null){Object.assign(snapshot.clinics[0],{blockingReview:2,unscopedBlockingReview:2,blockingContactKeys:[],
+  reviewSummary:[{category:'user_identity_unresolved',count:2,oldestAt:now-identityAge-1000,newestAt:now-identityAge,errorCodes:[]}]});
+  context.outputs={first:{conversation_id:3,message_id:7}};}
  const c={Date,require:name=>{
    if(name==='../lib/whatsappAppointmentTimeout')return policy;
    if(name==='../lib/whatsappPendingReply')return {pendingReply:async()=>recovered?{kind:'recovered',messageId:8}:pending?8:null};
@@ -22,10 +25,12 @@ function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,
    if(name==='../lib/automation-response-only-recovery')return require('../../lib/automation-response-only-recovery');
    if(name==='./appointmentWhatsappDeliveryAlert.service')return {reconcileAppointmentWhatsappDelivery:async()=>{alerts.push('undeliverable');}};
    throw Error('unexpected dependency: '+name);
- },cleanString:v=>v||null,readOutputTarget:(n,k)=>n.outputs[k],whatsappAuthorizedBroker:{bindingsForClinic:()=>[{sendEnabled:true,clinicId:2,phoneId:'123'}]},
- resolveWaitResponseAnchor:()=>({listened_output:{conversation_id:3,...(undeliverable?{message_id:7}:{})}}),toIntOrNull:Number,parseDateValueOrNull:v=>new Date(v),
+ },isMobileVerificationProtocol:()=>false,cleanString:v=>v||null,readOutputTarget:(n,k)=>n.outputs[k],whatsappAuthorizedBroker:{bindingsForClinic:()=>[{sendEnabled:true,clinicId:2,phoneId:'123'}]},
+ resolveWaitResponseAnchor:()=>({listened_output:{conversation_id:3,...(undeliverable||identityAge!==null?{message_id:7}:{})}}),toIntOrNull:Number,parseDateValueOrNull:v=>new Date(v),
  CitaPaciente:{findByPk:async()=>context.appointment},Conversation:{findByPk:async()=>({id:3,clinic_id:2,channel:'whatsapp',contact_id:'19995550101'})},
- Message:{findOne:async()=>reply?{id:8}:null,findByPk:async()=>({id:7,conversation_id:3,status:'failed',metadata:{execution_id:4,wa_error:[{code:131026}],delivery_unknown:unknown}})},Op:{gte:Symbol('gte')},
+ Message:{findOne:async()=>reply?{id:8}:null,findByPk:async()=>identityAge!==null
+  ?{id:7,conversation_id:3,direction:'outbound',status:'delivered',createdAt:new Date(now-7200000),metadata:{execution_id:4}}
+  :({id:7,conversation_id:3,status:'failed',metadata:{execution_id:4,wa_error:[{code:131026}],delivery_unknown:unknown}})},Op:{gte:Symbol('gte')},
  notifyRecoveredReply:async(...args)=>{alerts.push(args);if(alertFails)throw Error('synthetic_alert_failure');},
  conversationAutomationState:{setState:async patch=>reviews.push(patch)},
  db:{sequelize:{query:async sql=>sql.includes('k.contact_key')?[affected?[{contact_key:'a'.repeat(64)}]:[]]:[asked?[{sent_at:new Date(),appointment_start:start}]:[]]}},
@@ -63,6 +68,11 @@ test('normal flow retains its next node and marks text followups for final trans
 test('real timeout engine isolates another contact review while retaining the affected alias barrier',async()=>{
  const other=fixture({review:true});await other.run();assert.equal(other.execution.current_node_id,'send');
  const own=fixture({review:true,affected:true});await own.run();assert.equal(own.execution.status,'waiting');assert.equal(own.execution.current_node_id,'wait');
+});
+test('real wait engine ignores identity events older than its persisted question but holds newer events',async()=>{
+ const old=fixture({identityAge:86400000});await old.run();assert.equal(old.execution.current_node_id,'send');
+ const recent=fixture({identityAge:3600000});await recent.run();assert.equal(recent.execution.status,'waiting');
+ assert.equal(recent.execution.last_error,'inbox_user_identity_pending');
 });
 
 test('a durable reply awaiting native dispatch preserves both a followup wait and a terminal wait',async()=>{

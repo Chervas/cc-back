@@ -65,6 +65,7 @@ function executionStage(execution) {
   return ['week_before', 'day_before', 'same_day'].includes(moment) ? moment : null;
 }
 function messageStage({ execution, message, stageKey: supplied } = {}) {
+  if (execution?.trigger_type !== 'appointment_reminder_window') return null;
   const m = object(message?.metadata);
   const timeout = m.appointment_timeout === true || m.appointment_timeout === 1
     || m.appointment_timeout == null && object(execution?.context).whatsapp_no_response_timeout === true;

@@ -25,7 +25,7 @@ test('patient/clinic/day claims survive native SQL concurrency, pending jobs, hi
       db.AppointmentReminderSequence = require('../../../models/appointmentremindersequence')(sql, D);
       assert((await sql.getQueryInterface().showIndex('AppointmentReminderSequences')).find(index => index.name === 'ars_patient_clinic_day').unique);
       await db.Clinica.bulkCreate([{ id_clinica: 100, configuracion: { timezone: 'Europe/Madrid' } }, { id_clinica: 101 }]);
-      await db.Paciente.bulkCreate(Array.from({ length: 9 }, (_, i) => ({ id_paciente: i + 1 })));
+      await db.Paciente.bulkCreate(Array.from({ length: 10 }, (_, i) => ({ id_paciente: i + 1 })));
       const service = createAppointmentReminderSequenceService({ db, now: () => new Date('2030-01-01T08:00:00Z') });
       const appointment = async (id_cita, patient = 1, patch = {}) => db.CitaPaciente.create({ id_cita,
         clinica_id: 100, paciente_id: patient, inicio: '2030-01-03T09:00:00Z', fin: '2030-01-03T09:30:00Z',
@@ -111,6 +111,53 @@ test('patient/clinic/day claims survive native SQL concurrency, pending jobs, hi
       assert.equal(responseLedger.response_message_id, inbound.id);
       report.checks.push('real scoped inbound response receipt durably suppresses sequence followup; initial status confirmation is not required to recognize a patient reply');
 
+      const bookingTarget = await appointment(101, 10), bookingExec = await execution(bookingTarget, 'day_before', { trigger_type: 'appointment_created' });
+      const bookingTargetBefore = (await bookingTarget.reload()).toJSON();
+      const bookingMessage = await message(bookingTarget, bookingExec, 'no_response', { status: 'delivered', createdAt: new Date('2030-01-01T07:00:00Z') });
+      const bookingReply = await db.Message.create({ conversation_id: bookingMessage.conversation_id, direction: 'inbound',
+        message_type: 'text', status: 'read', content: 'TESTONLY booking answer', createdAt: new Date('2030-01-01T07:01:00Z') });
+      await bookingExec.update({ status: 'completed', context: { ...bookingExec.context,
+        last_response_context: { response_message_id: bookingReply.id }, whatsapp_no_response_timeout: true } });
+      const reminderExec = await execution(bookingTarget);
+      const reminder = await message(bookingTarget, reminderExec, 'day_before', { status: 'delivered', createdAt: new Date('2030-01-01T07:30:00Z') });
+      const oldClaim = { execution_id: bookingExec.id, appointment_id: bookingTarget.id_cita,
+        claimed_at: '2030-01-01T07:00:00Z', message_id: bookingMessage.id, attempted: true, adopted_history: true };
+      const poisoned = await db.AppointmentReminderSequence.create({ id: require('node:crypto').randomUUID(), clinic_id: 100, patient_id: 10,
+        local_date: '2030-01-03', time_zone: 'Europe/Madrid', anchor_appointment_id: bookingTarget.id_cita,
+        arrival_at: bookingTarget.inicio, claims: { no_response: oldClaim }, response_message_id: bookingReply.id,
+        response_received_at: new Date('2030-01-01T07:31:00Z') });
+      let poisonedBefore = (await poisoned.reload()).toJSON();
+      assert.equal((await service.authorizeMessage({ appointment: bookingTarget, execution: bookingExec, messageId: bookingMessage.id })).skipped, true);
+      assert.deepEqual((await poisoned.reload()).toJSON(), poisonedBefore);
+      const dry = await service.reconcileBookingHistory({ appointment: bookingTarget });
+      assert.equal(dry.changed, true); assert.equal(dry.after.response_message_id, null);
+      assert.deepEqual(dry.after.claims, {}); assert.deepEqual((await poisoned.reload()).toJSON(), poisonedBefore);
+      await poisoned.update({ claims: { no_response: { ...oldClaim, adopted_history: false } } });
+      const unproven = (await poisoned.reload()).toJSON();
+      await assert.rejects(service.reconcileBookingHistory({ appointment: bookingTarget, apply: true }), /history_requires_review/);
+      assert.deepEqual((await poisoned.reload()).toJSON(), unproven);
+      await poisoned.update({ claims: poisonedBefore.claims });
+      poisonedBefore = (await poisoned.reload()).toJSON();
+      await assert.rejects(sql.transaction(async transaction => {
+        await service.reconcileBookingHistory({ appointment: bookingTarget, apply: true, transaction });
+        throw Error('TESTONLY_REPAIR_ROLLBACK');
+      }), /TESTONLY_REPAIR_ROLLBACK/);
+      assert.deepEqual((await poisoned.reload()).toJSON(), poisonedBefore);
+      await reminderExec.update({ context: { ...reminderExec.context, last_response_context: { response_message_id: bookingReply.id } } });
+      assert.equal((await service.reconcileBookingHistory({ appointment: bookingTarget })).after.response_message_id, bookingReply.id);
+      await reminderExec.update({ context: { ...reminderExec.context, last_response_context: null } });
+      const repaired = await service.reconcileBookingHistory({ appointment: bookingTarget, apply: true });
+      assert.equal(repaired.applied, true); assert.equal(repaired.before.claims.no_response.message_id, bookingMessage.id);
+      assert.equal((await service.reconcileBookingHistory({ appointment: bookingTarget, apply: true })).changed, false);
+      const reminderFollowup = await message(bookingTarget, reminderExec, 'no_response');
+      assert.equal((await service.authorizeMessage({ appointment: bookingTarget, execution: reminderExec, messageId: reminderFollowup.id })).allowed, true);
+      const duplicateFollowup = await message(bookingTarget, reminderExec, 'no_response');
+      assert.equal((await service.authorizeMessage({ appointment: bookingTarget, execution: reminderExec, messageId: duplicateFollowup.id })).allowed, false);
+      assert.equal((await db.Message.findByPk(bookingMessage.id)).status, 'delivered');
+      assert.equal((await db.Message.findByPk(reminder.id)).status, 'delivered');
+      assert.deepEqual((await bookingTarget.reload()).toJSON(), bookingTargetBefore);
+      report.checks.push('booking timeout does not own reminder rights; evidence-based repair preserves messages, shared replies and rollback, is idempotent and still allows only one reminder followup');
+
       const timeoutTarget = await appointment(81, 8), timeoutExec = await execution(timeoutTarget);
       await timeoutExec.update({ context: { ...timeoutExec.context, whatsapp_no_response_timeout: true } });
       const strippedTimeout = await message(timeoutTarget, timeoutExec, 'no_response', {
@@ -173,7 +220,7 @@ test('patient/clinic/day claims survive native SQL concurrency, pending jobs, hi
       }), /OWNED_SEQUENCE_ROLLBACK/);
       assert.equal(await db.AppointmentReminderSequence.count({ where: { patient_id: 6 } }), 0);
       await assert.rejects(migration.down(sql.getQueryInterface()), /durable delivery rights/);
-      assert.equal(await db.CitaPaciente.count(), 13);
+      assert.equal(await db.CitaPaciente.count(), 14);
       assert.deepEqual((await second.reload()).toJSON(), original[1]);
       assert.equal(await db.CitaPaciente.count({ where: { paciente_id: 1 } }), 2);
       assert.equal((await sql.query('SHOW TABLES LIKE \'AppointmentVisit%\''))[0].length, 0);

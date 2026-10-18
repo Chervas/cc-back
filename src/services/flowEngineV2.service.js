@@ -4505,6 +4505,7 @@ async function handleSendWhatsapp(node, context, runtime) {
   senderData = await getSenderData();
 
   const dailyStage = require('../lib/appointment-reminder-sequence').messageStage({
+    execution,
     message: { metadata: { template_name: template?.name || null,
       fallback_template_name: fallbackTriggeredReason ? template?.name || null : null,
       appointment_timeout: context.whatsapp_no_response_timeout === true } } });
@@ -7723,8 +7724,13 @@ async function resumeWaitingNode(execution, node, context, {
         const conversation = conversationId ? await Conversation.findByPk(conversationId, { raw: true,
           attributes: ['id', 'clinic_id', 'channel', 'contact_id'] }) : null;
         if (Number(conversation?.clinic_id) === Number(execution.clinic_id)) {
+          const questionNotBefore = Array.isArray(clinicHealth.reviewSummary)
+            && clinicHealth.reviewSummary.some(s => s.category === 'user_identity_unresolved')
+            ? await health.questionNotBefore(execution, conversation, id => Message.findByPk(id, {
+              raw: true, attributes: ['id', 'conversation_id', 'direction', 'status', 'metadata', 'createdAt'],
+            })) : null;
           receptionState = await health.forConversation(snapshot, conversation, whatsappAuthorizedBroker.bindingsForClinic(Number(execution.clinic_id)),
-            (...args) => db.sequelize.query(...args));
+            (...args) => db.sequelize.query(...args), { questionNotBefore });
         }
       }
       const decision = await policy.decide({ execution, context, nextNode: next, snapshot, receptionState,

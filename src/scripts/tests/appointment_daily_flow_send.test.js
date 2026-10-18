@@ -15,7 +15,7 @@ assert.ok(from > 0 && to > from);
 const code = `(async () => { ${source.slice(from, to)} return { continued: true }; })()`;
 
 async function run({ name = 'clinicaclick_recordatorio_mismo_dia_es', timeout = false,
-  follower = false, confirmed = false, allowed = true } = {}) {
+  follower = false, confirmed = false, allowed = true, triggerType = 'appointment_reminder_window' } = {}) {
   const calls = [];
   const appointment = { id_cita: 10 };
   const sequence = {
@@ -39,7 +39,7 @@ async function run({ name = 'clinicaclick_recordatorio_mismo_dia_es', timeout = 
     },
     template: { name }, fallbackTriggeredReason: null,
     context: { whatsapp_no_response_timeout: timeout },
-    execution: { id: 20, trigger_entity_type: 'appointment', trigger_entity_id: 10 },
+    execution: { id: 20, trigger_type: triggerType, trigger_entity_type: 'appointment', trigger_entity_id: 10 },
     CitaPaciente: { findByPk: async id => { assert.equal(id, 10); return appointment; } },
   });
   return { result, calls };
@@ -72,6 +72,13 @@ test('no-response followers and a confirmed day exit before send; unconfirmed ow
 test('reply acknowledgements and independent clinical templates do not acquire reminder rights', async () => {
   for (const name of ['clinicaclick_cita_confirmada_es', 'clinicaclick_cita_cancelada_es', 'clinicaclick_consentimiento_es']) {
     const { result, calls } = await run({ name });
+    assert.equal(result.continued, true); assert.deepEqual(calls, []);
+  }
+});
+
+test('booking followup timeout never enters the daily reminder ledger even with a reminder-looking template', async () => {
+  for (const triggerType of ['appointment_created', 'appointment_rescheduled']) {
+    const { result, calls } = await run({ triggerType, timeout: true, follower: true });
     assert.equal(result.continued, true); assert.deepEqual(calls, []);
   }
 });

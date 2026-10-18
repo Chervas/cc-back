@@ -196,7 +196,7 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
   if (appointmentPatientHeld && !released) fail('whatsapp_patient_import_held');
   if (confirmationTimeout) {
     const health = require('./whatsappInboxHealth');
-    const receptionState = getReceptionState ? await getReceptionState() : health.state(health.read(), conversation.clinic_id);
+    const receptionState = getReceptionState ? await getReceptionState(execution) : health.state(health.read(), conversation.clinic_id);
     if (!receptionState.readyForTimeout) fail('whatsapp_inbox_reception_delayed');
   }
   return assertAppointmentEligibility({ appointment, execution, clinicId: conversation.clinic_id, patientId,

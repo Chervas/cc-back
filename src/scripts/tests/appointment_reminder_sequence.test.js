@@ -72,6 +72,14 @@ test('accepted/read receipts with null sent_at and unknown sending attempts rema
   assert.equal(c.everAttempted({ status: 'failed', metadata: { provider_acceptance_at: '2030-01-02T08:00:00Z' } }), true);
 });
 
+test('reservation and other non-reminder circuits cannot acquire the shared silence slot', () => {
+  for (const trigger_type of ['appointment_created', 'appointment_rescheduled', 'consent_required', undefined]) {
+    const execution = { trigger_type, context: { whatsapp_no_response_timeout: true } };
+    assert.equal(c.messageStage({ execution, message: { metadata: { appointment_timeout: true,
+      template_name: 'clinicaclick_recordatorio_dia_antes_v2' } }, stageKey: 'no_response' }), null);
+  }
+});
+
 test('claim evidence validates stage identity and clones without relaxing malformed records', () => {
   const input = { day_before: { execution_id: 7, appointment_id: 11, claimed_at: '2030-01-01T10:00:00Z', message_id: 6, attempted: true } };
   const normalized = c.claims(input);

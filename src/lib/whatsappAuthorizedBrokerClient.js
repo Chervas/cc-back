@@ -146,9 +146,12 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
     return require('./whatsappImportedAppointmentOperations').permitsNativeReplyAcknowledgement(input.appointment,
       { ...input, db });
   },
-  loadReceptionState = (conversation, bindings) => {
+  loadReceptionState = async (conversation, bindings, execution) => {
     const health = require('./whatsappInboxHealth');
-    return health.forConversation(health.read(), conversation, bindings, (...args) => models().sequelize.query(...args));
+    const snapshot = health.read(), summary = snapshot?.clinics?.find(c => c.clinicId === Number(conversation.clinic_id))?.reviewSummary;
+    const questionNotBefore = Array.isArray(summary) && summary.some(s => s.category === 'user_identity_unresolved')
+      ? await health.questionNotBefore(execution, conversation, loadMessage) : null;
+    return health.forConversation(snapshot, conversation, bindings, (...args) => models().sequelize.query(...args), { questionNotBefore });
   },
   isBlocked = clinicId => require('../services/metaScopeBlock.service').blocked({ assignmentScope: 'clinic', clinicId }, { purpose: 'whatsapp' }),
   createTransport = configuredTransport } = {}) {
@@ -219,7 +222,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       await require('./whatsappAppointmentEligibility').assertAutomatedMessageEligibility({ message, conversation,
         payload: intent.message, loadExecution, loadAppointment, patientHeld,
         loadNativeReplyAcknowledgement,
-        getReceptionState: () => loadReceptionState(conversation, config.bindings) });
+        getReceptionState: execution => loadReceptionState(conversation, config.bindings, execution) });
       const metadata = message.metadata || {};
       if (Number.isSafeInteger(Number(metadata.execution_id)) && Number(metadata.execution_id) > 0) {
         const execution = await loadExecution(Number(metadata.execution_id));
