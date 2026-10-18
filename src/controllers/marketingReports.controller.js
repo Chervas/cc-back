@@ -1779,7 +1779,38 @@ function seoMovementRow(current, previous, dimension) {
   };
 }
 
-async function fetchSeoDimensionRows(scope, range, marketingState, dimension, limit, keyPrefix) {
+function searchConsolePositionSql() {
+  return process.env.SC_ANALYTICS_READ_ENABLED === 'true'
+    ? require('../lib/searchConsoleReadSource').positionAggregateSql()
+    : 'CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END';
+}
+
+async function currentSearchConsoleSiteUrls(scope, marketingState) {
+  const mappings = scope?.isAll
+    ? await ClinicWebAsset.findAll({ attributes: ['id', 'clinicaId', 'googleConnectionId', 'siteUrl', 'isActive'],
+      where: { isActive: true }, raw: true, logging: false })
+    : effectiveGoogleProperties(marketingState).searchConsole.map(row => ({
+      id: row.mapping_id, clinicaId: row.clinic_id, googleConnectionId: row.connection_id,
+      siteUrl: row.site_url, isActive: true
+    }));
+  for (const mapping of mappings) {
+    try { await require('../services/searchConsoleBroker.service').prepare(mapping); }
+    catch { throw Object.assign(Error('search_console_scope_forbidden'), { code: 'search_console_scope_forbidden', status: 403 }); }
+  }
+  return normalizedUniqueStrings(mappings.map(mapping => mapping.siteUrl));
+}
+
+async function searchConsoleReportSource(scope, marketingState, range, replacements, prefix, options = {}) {
+  if (process.env.SC_ANALYTICS_READ_ENABLED !== 'true') return {
+    sqlFrom: 'WebScQueryDaily', scopeSql: searchConsoleRawScopeSql(scope, marketingState, replacements, prefix)
+  };
+  const source = require('../lib/searchConsoleReadSource');
+  const siteUrls = await currentSearchConsoleSiteUrls(scope, marketingState);
+  return source.propertySource({ storage: require('../services/searchConsoleAnalytics.service'), siteUrls,
+    range, replacements, prefix, ...options });
+}
+
+async function fetchSeoDimensionRows(scope, range, marketingState, dimension, limit, keyPrefix, sourceChecks = []) {
   if (!WebScQueryDaily) return [];
   const startKey = `${keyPrefix}Start`;
   const endKey = `${keyPrefix}End`;
@@ -1789,7 +1820,9 @@ async function fetchSeoDimensionRows(scope, range, marketingState, dimension, li
     [endKey]: range.endLabel,
     [limitKey]: limit,
   };
-  const scopeSql = searchConsoleRawScopeSql(scope, marketingState, replacements, keyPrefix);
+  const source = await searchConsoleReportSource(scope, marketingState, range, replacements, keyPrefix);
+  if (source.validate) sourceChecks.push(source.validate);
+  const scopeSql = source.scopeSql;
   const dimensionSql = dimension === 'page'
     ? "COALESCE(NULLIF(page_url, ''), 'Sin página')"
     : "COALESCE(NULLIF(query, ''), 'Sin query')";
@@ -1798,9 +1831,9 @@ async function fetchSeoDimensionRows(scope, range, marketingState, dimension, li
     `SELECT ${dimensionSql} AS value,
             SUM(clicks) AS clicks,
             SUM(impressions) AS impressions,
-            CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position,
+            ${searchConsolePositionSql()} AS position,
             MAX(date) AS lastDate
-       FROM WebScQueryDaily
+       FROM ${source.sqlFrom}
       WHERE date BETWEEN :${startKey} AND :${endKey} ${scopeSql}
       GROUP BY ${dimensionSql}
      HAVING SUM(clicks) > 0 OR SUM(impressions) > 0
@@ -1809,6 +1842,7 @@ async function fetchSeoDimensionRows(scope, range, marketingState, dimension, li
     { replacements, type: QueryTypes.SELECT }
   );
 
+  if (source.validate) await source.validate();
   return rows.map((row) => ({
     value: row.value || (dimension === 'page' ? 'Sin página' : 'Sin query'),
     clicks: toNumber(row.clicks),
@@ -1818,7 +1852,7 @@ async function fetchSeoDimensionRows(scope, range, marketingState, dimension, li
   }));
 }
 
-async function fetchSeoQueryPageRows(scope, range, marketingState, limit = 250, keyPrefix = 'seoQueryPage') {
+async function fetchSeoQueryPageRows(scope, range, marketingState, limit = 250, keyPrefix = 'seoQueryPage', sourceChecks = []) {
   if (!WebScQueryDaily) return [];
   const startKey = `${keyPrefix}Start`;
   const endKey = `${keyPrefix}End`;
@@ -1828,7 +1862,9 @@ async function fetchSeoQueryPageRows(scope, range, marketingState, limit = 250, 
     [endKey]: range.endLabel,
     [limitKey]: limit,
   };
-  const scopeSql = searchConsoleRawScopeSql(scope, marketingState, replacements, keyPrefix);
+  const source = await searchConsoleReportSource(scope, marketingState, range, replacements, keyPrefix);
+  if (source.validate) sourceChecks.push(source.validate);
+  const scopeSql = source.scopeSql;
   const querySql = "COALESCE(NULLIF(query, ''), 'Sin query')";
   const pageSql = "COALESCE(NULLIF(page_url, ''), 'Sin página')";
 
@@ -1837,9 +1873,9 @@ async function fetchSeoQueryPageRows(scope, range, marketingState, limit = 250, 
             ${pageSql} AS page,
             SUM(clicks) AS clicks,
             SUM(impressions) AS impressions,
-            CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position,
+            ${searchConsolePositionSql()} AS position,
             MAX(date) AS lastDate
-       FROM WebScQueryDaily
+       FROM ${source.sqlFrom}
       WHERE date BETWEEN :${startKey} AND :${endKey} ${scopeSql}
       GROUP BY ${querySql}, ${pageSql}
      HAVING SUM(clicks) > 0 OR SUM(impressions) > 0
@@ -1848,6 +1884,7 @@ async function fetchSeoQueryPageRows(scope, range, marketingState, limit = 250, 
     { replacements, type: QueryTypes.SELECT }
   );
 
+  if (source.validate) await source.validate();
   return rows.map((row) => ({
     query: row.query || 'Sin query',
     page: row.page || 'Sin página',
@@ -1860,7 +1897,7 @@ async function fetchSeoQueryPageRows(scope, range, marketingState, limit = 250, 
   }));
 }
 
-async function fetchSeoQueryTrends(scope, range, marketingState, queries = [], keyPrefix = 'seoQueryTrend') {
+async function fetchSeoQueryTrends(scope, range, marketingState, queries = [], keyPrefix = 'seoQueryTrend', sourceChecks = []) {
   if (!WebScQueryDaily || !queries.length) return [];
   const normalizedQueries = queries
     .map((query) => String(query || '').trim())
@@ -1876,14 +1913,16 @@ async function fetchSeoQueryTrends(scope, range, marketingState, queries = [], k
     [endKey]: range.endLabel,
     [queryKey]: normalizedQueries,
   };
-  const scopeSql = searchConsoleRawScopeSql(scope, marketingState, replacements, keyPrefix);
+  const source = await searchConsoleReportSource(scope, marketingState, range, replacements, keyPrefix);
+  if (source.validate) sourceChecks.push(source.validate);
+  const scopeSql = source.scopeSql;
   const rows = await sequelize.query(
     `SELECT date,
             query,
             SUM(clicks) AS clicks,
             SUM(impressions) AS impressions,
-            CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position
-       FROM WebScQueryDaily
+            ${searchConsolePositionSql()} AS position
+       FROM ${source.sqlFrom}
       WHERE date BETWEEN :${startKey} AND :${endKey}
         AND query IN (:${queryKey})
         ${scopeSql}
@@ -1892,6 +1931,7 @@ async function fetchSeoQueryTrends(scope, range, marketingState, queries = [], k
     { replacements, type: QueryTypes.SELECT }
   );
 
+  if (source.validate) await source.validate();
   const pointsByQuery = new Map(normalizedQueries.map((query) => [query, []]));
   rows.forEach((row) => {
     const query = row.query || '';
@@ -2097,7 +2137,7 @@ function buildSeoOpportunities({ searchConsoleConnected, summary, queryMovements
   return opportunities.slice(0, 6);
 }
 
-async function aggregateSeo(scope, range, marketingState = null) {
+async function aggregateSeo(scope, range, marketingState = null, sourceChecks = []) {
   const empty = buildSeoEmpty();
   if (!WebScDaily || !WebScQueryDaily) return empty;
   const previousRange = range.previous || range;
@@ -2108,25 +2148,39 @@ async function aggregateSeo(scope, range, marketingState = null) {
     ...buildDateOnlyWhere('date', range),
   };
 
-  const [summaryRow] = await WebScDaily.findAll({
-    attributes: [
-      [fn('SUM', col('clicks')), 'clicks'],
-      [fn('SUM', col('impressions')), 'impressions'],
-      [literal('CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END'), 'position'],
-      [fn('MAX', col('date')), 'lastDate'],
-    ],
-    where,
-    raw: true,
-  });
+  let summaryRow;
+  const propertyReadEnabled = process.env.SC_ANALYTICS_READ_ENABLED === 'true';
+  if (propertyReadEnabled) {
+    const params = { start: range.startLabel, end: range.endLabel };
+    const source = await searchConsoleReportSource(scope, marketingState, range, params, 'seoTotals', { totals: true });
+    if (source.validate) sourceChecks.push(source.validate);
+    [summaryRow] = await sequelize.query(`SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions,
+      ${searchConsolePositionSql()} AS position,
+      MAX(date) AS lastDate FROM ${source.sqlFrom} WHERE date BETWEEN :start AND :end ${source.scopeSql}`,
+    { replacements: params, type: QueryTypes.SELECT });
+  } else {
+    [summaryRow] = await WebScDaily.findAll({
+      attributes: [
+        [fn('SUM', col('clicks')), 'clicks'],
+        [fn('SUM', col('impressions')), 'impressions'],
+        [literal('CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END'), 'position'],
+        [fn('MAX', col('date')), 'lastDate'],
+      ],
+      where,
+      raw: true,
+    });
+  }
 
   const replacements = { start: range.startLabel, end: range.endLabel, limit: 8 };
-  const seoScopeSql = searchConsoleRawScopeSql(scope, marketingState, replacements, 'seo');
+  const seoSource = await searchConsoleReportSource(scope, marketingState, range, replacements, 'seo');
+  if (seoSource.validate) sourceChecks.push(seoSource.validate);
+  const seoScopeSql = seoSource.scopeSql;
   const queryRows = await sequelize.query(
     `SELECT query,
             SUM(clicks) AS clicks,
             SUM(impressions) AS impressions,
-            CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position
-       FROM WebScQueryDaily
+            ${searchConsolePositionSql()} AS position
+       FROM ${seoSource.sqlFrom}
       WHERE date BETWEEN :start AND :end ${seoScopeSql}
       GROUP BY query
       ORDER BY SUM(clicks) DESC
@@ -2138,8 +2192,8 @@ async function aggregateSeo(scope, range, marketingState = null) {
     `SELECT COALESCE(NULLIF(page_url, ''), 'Sin página') AS page,
             SUM(clicks) AS clicks,
             SUM(impressions) AS impressions,
-            CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position
-       FROM WebScQueryDaily
+            ${searchConsolePositionSql()} AS position
+       FROM ${seoSource.sqlFrom}
       WHERE date BETWEEN :start AND :end ${seoScopeSql}
       GROUP BY COALESCE(NULLIF(page_url, ''), 'Sin página')
       ORDER BY SUM(clicks) DESC
@@ -2153,12 +2207,20 @@ async function aggregateSeo(scope, range, marketingState = null) {
     .slice(0, 8);
 
   const [currentQueryRows, previousQueryRows, currentPageRows, previousPageRows, aggRows, technical, queryPageRows, queryTrendRows] = await Promise.all([
-    fetchSeoDimensionRows(scope, range, marketingState, 'query', 80, 'seoCurrentQuery'),
-    fetchSeoDimensionRows(scope, previousRange, marketingState, 'query', 80, 'seoPreviousQuery'),
-    fetchSeoDimensionRows(scope, range, marketingState, 'page', 40, 'seoCurrentPage'),
-    fetchSeoDimensionRows(scope, previousRange, marketingState, 'page', 40, 'seoPreviousPage'),
-    WebScDailyAgg
-      ? WebScDailyAgg.findAll({
+    fetchSeoDimensionRows(scope, range, marketingState, 'query', 80, 'seoCurrentQuery', sourceChecks),
+    fetchSeoDimensionRows(scope, previousRange, marketingState, 'query', 80, 'seoPreviousQuery', sourceChecks),
+    fetchSeoDimensionRows(scope, range, marketingState, 'page', 40, 'seoCurrentPage', sourceChecks),
+    fetchSeoDimensionRows(scope, previousRange, marketingState, 'page', 40, 'seoPreviousPage', sourceChecks),
+    propertyReadEnabled
+      ? (async () => {
+        const params = { start: range.startLabel, end: range.endLabel };
+        const source = await searchConsoleReportSource(scope, marketingState, range, params, 'seoRanks', { ranking: true });
+        if (source.validate) sourceChecks.push(source.validate);
+        return sequelize.query(`SELECT date,SUM(queries_top3) AS top3,SUM(queries_top10) AS top10
+          FROM ${source.sqlFrom} WHERE date BETWEEN :start AND :end ${source.scopeSql}
+          GROUP BY date ORDER BY date ASC`, { replacements: params, type: QueryTypes.SELECT });
+      })()
+      : WebScDailyAgg ? WebScDailyAgg.findAll({
         attributes: [
           'date',
           [fn('SUM', col('queries_top3')), 'top3'],
@@ -2171,8 +2233,8 @@ async function aggregateSeo(scope, range, marketingState = null) {
       })
       : Promise.resolve([]),
     aggregateSeoTechnical(scope, marketingState),
-    fetchSeoQueryPageRows(scope, range, marketingState, 250, 'seoQueryPage'),
-    fetchSeoQueryTrends(scope, range, marketingState, topTrendQueries, 'seoQueryTrend'),
+    fetchSeoQueryPageRows(scope, range, marketingState, 250, 'seoQueryPage', sourceChecks),
+    fetchSeoQueryTrends(scope, range, marketingState, topTrendQueries, 'seoQueryTrend', sourceChecks),
   ]);
 
   const clicks = toNumber(summaryRow?.clicks);
@@ -2200,7 +2262,9 @@ async function aggregateSeo(scope, range, marketingState = null) {
     return acc;
   }, { top3: 0, top10: 0 });
 
+  for (const validate of sourceChecks) await validate();
   return {
+    ...(propertyReadEnabled ? { dataResolution: seoSource.resolution } : {}),
     summary,
     brandSplit,
     queries: queryRows.map((row) => ({
@@ -3745,7 +3809,7 @@ function buildRecommendations({
     .map(({ priority: _priority, ...recommendation }) => recommendation);
 }
 
-async function buildOverviewPayload({ scope, range }) {
+async function buildOverviewPayload({ scope, range, sourceChecks = [] }) {
   const marketingState = await resolveReportMarketingState(scope);
   const paidAttributionCoverage = await resolvePaidAttributionCoverage(scope);
   const paidCoverageSummary = buildPaidAttributionCoverageSummary(range, paidAttributionCoverage);
@@ -3786,7 +3850,7 @@ async function buildOverviewPayload({ scope, range }) {
     aggregateMetaAds(scope, range, marketingState, paidAttributionCoverage.start),
     aggregateMetaAds(scope, range.previous, marketingState, paidAttributionCoverage.start),
     aggregateGa(scope, range, marketingState),
-    aggregateSeo(scope, range, marketingState),
+    aggregateSeo(scope, range, marketingState, sourceChecks),
     aggregateSocialOrganic(scope, range, marketingState),
     aggregateBusinessProfile(scope, range, marketingState),
     webEventsService.getFirstPartySummary(scope, range),
@@ -3923,6 +3987,7 @@ async function buildOverviewPayload({ scope, range }) {
     paidCoverageSummary,
   });
 
+  for (const validate of sourceChecks) await validate();
   return {
     success: true,
     mode: 'real_v1',
@@ -3943,6 +4008,7 @@ async function buildOverviewPayload({ scope, range }) {
     webSummary,
     webPages,
     seoSummary: seo.summary,
+    ...(seo.dataResolution ? { seoDataResolution: seo.dataResolution } : {}),
     seoQueries: seo.queries,
     seoPages: seo.pages,
     seoQueryPages: seo.queryPages,
@@ -3990,8 +4056,34 @@ exports.getOverview = async (req, res) => {
       throw error;
     }
     const range = buildRange(req.query.startDate, req.query.endDate, 30);
+    const sourceMode = process.env.SC_ANALYTICS_READ_ENABLED === 'true';
+    if (sourceMode) {
+      const reads = require('../lib/searchConsoleReadSource');
+      const sourceChecks = [];
+      const response = await reads.readWithCurrentScope({
+        readEnabled: () => process.env.SC_ANALYTICS_READ_ENABLED === 'true',
+        allowed: async () => {
+          let claims;
+          try {
+            const sessions = require('../services/accessSession.service');
+            claims = await sessions.verify(sessions.bearer(req.headers?.authorization));
+          } catch { claims = null; }
+          if (!claims || claims.sessionVersion !== 1 || !claims.jti || Number(claims.userId) !== userId) {
+            throw Object.assign(Error('search_console_session_required'), { code: 'search_console_session_required', status: 401 });
+          }
+          return scope.isAll ? isGlobalAdmin(userId)
+            : hasMarketingClinicScopeAccess({ userId, clinicIds: scope.clinicIds || [], access: 'read' });
+        },
+        capture: async () => currentSearchConsoleSiteUrls(scope, await resolveReportMarketingState(scope)),
+        generate: () => buildOverviewPayload({ scope, range, sourceChecks }),
+        validate: async () => { for (const validate of sourceChecks) await validate(); }
+      });
+      return res.json(response);
+    }
     if (!overviewCache) {
-      return res.json(await buildOverviewPayload({ scope, range }));
+      const response = await buildOverviewPayload({ scope, range });
+      if ((process.env.SC_ANALYTICS_READ_ENABLED === 'true') !== sourceMode) throw Object.assign(Error('sc_analytics_configuration_changed'), { code: 'sc_analytics_configuration_changed' });
+      return res.json(response);
     }
 
     const identity = buildOverviewCacheIdentity({ scope, range });
@@ -4001,8 +4093,11 @@ exports.getOverview = async (req, res) => {
       staleWhileRefresh: true,
       generate: () => buildOverviewPayload({ scope, range }),
     });
+    if ((process.env.SC_ANALYTICS_READ_ENABLED === 'true') !== sourceMode) throw Object.assign(Error('sc_analytics_configuration_changed'), { code: 'sc_analytics_configuration_changed' });
     return res.json(response);
   } catch (error) {
+    const storageFailure = require('../lib/searchConsoleReadSource').storageError(error);
+    if (storageFailure) return res.status(storageFailure.status).json({ success: false, error: storageFailure.code, code: storageFailure.code });
     const status = error.status || 500;
     if (status >= 500) {
       console.error('❌ marketing reports overview error:', error);
@@ -4057,6 +4152,9 @@ exports.__testing = {
   buildSourceSyncState,
   resolveMetaAttributionStatus,
   normalizeSocialFollowerDeltas,
+  currentSearchConsoleSiteUrls,
+  searchConsoleReportSource,
+  aggregateSeo,
   buildSeoRankingBuckets,
   buildSeoBrandSplit,
   buildSeoMovements,

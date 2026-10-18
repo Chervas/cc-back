@@ -8,6 +8,7 @@ function fixture() {
   const mappings = [{ id: 91, clinicaId: 71, googleConnectionId: 81, siteUrl: 'https://fictitious.invalid/', propertyName: 'properties/123' }];
   const persist = async values => { persisted.push(values); };
   const models = {
+    sequelize: { transaction: async work => work({}) },
     SyncLog: { create: async () => ({ update: async value => updates.push(value) }) },
     ClinicWebAsset: { findAll: async () => mappings }, ClinicAnalyticsProperty: { findAll: async () => mappings },
     WebScDaily: { findOrCreate: async ({ defaults }) => { await persist(defaults); return [null, true]; } },

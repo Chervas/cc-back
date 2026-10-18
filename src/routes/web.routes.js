@@ -135,6 +135,21 @@ async function getClinicSiteMappings(clinicaId, {
   return mappings;
 }
 
+async function storedSearchConsoleSource(req, range, replacements, prefix, options = {}) {
+  const mappings = await getClinicSiteMappings(req.webClinicId, { allowEmpty: true });
+  const validate = async () => {
+    if (process.env.SC_ANALYTICS_READ_ENABLED !== 'true') throw Object.assign(Error('sc_analytics_configuration_changed'), { code: 'sc_analytics_configuration_changed' });
+    await assertWebBrokerScope(req, mappings);
+    for (const mapping of mappings) await searchConsoleBroker.prepare(mapping);
+  };
+  await validate();
+  const siteUrls = [...new Set(mappings.map(mapping => mapping.siteUrl))];
+  const source = await require('../lib/searchConsoleReadSource').propertySource({
+    storage: require('../services/searchConsoleAnalytics.service'), siteUrls, range, replacements, prefix, ...options
+  });
+  return { ...source, validate: async () => { await source.validate?.(); await validate(); } };
+}
+
 function selectPrimarySiteMapping(mappings) {
   const rows = Array.isArray(mappings) ? mappings : [];
   return rows.find((row) => String(row.siteUrl || '').startsWith('http')) || rows[0] || null;
@@ -285,20 +300,36 @@ router.get('/clinica/:clinicaId/seo/summary', async (req, res) => {
     const prevStart = previous.start;
     const prevEnd = previous.end;
     const { Op } = require('sequelize');
-    const rows = await WebScDaily.findAll({ where: { clinica_id: clinicaId, date: { [Op.between]: [start, end] } }, raw: true });
-    const prevRows = await WebScDaily.findAll({ where: { clinica_id: clinicaId, date: { [Op.between]: [prevStart, prevEnd] } }, raw: true });
+    const propertyReadEnabled = process.env.SC_ANALYTICS_READ_ENABLED === 'true';
+    const sources = [];
+    const storedRows = async (window, prefix, options) => {
+      const params = { start: window.start, end: window.end };
+      const source = await storedSearchConsoleSource(req, window, params, prefix, options);
+      sources.push(source);
+      const values = await sequelize.query(`SELECT * FROM ${source.sqlFrom}
+        WHERE date BETWEEN :start AND :end ${source.scopeSql}`, { replacements: params, type: db.Sequelize.QueryTypes.SELECT });
+      return values.map(value => ({ ...value, clicks: Number(value.clicks || 0), impressions: Number(value.impressions || 0),
+        queries_top3: Number(value.queries_top3 || 0), queries_top10: Number(value.queries_top10 || 0) }));
+    };
+    const rows = propertyReadEnabled ? await storedRows({ start, end }, 'webSummary', { totals: true })
+      : await WebScDaily.findAll({ where: { clinica_id: clinicaId, date: { [Op.between]: [start, end] } }, raw: true });
+    const prevRows = propertyReadEnabled ? await storedRows(previous, 'webPrevSummary', { totals: true })
+      : await WebScDaily.findAll({ where: { clinica_id: clinicaId, date: { [Op.between]: [prevStart, prevEnd] } }, raw: true });
     const clicks = rows.reduce((acc, row) => acc + (row.clicks || 0), 0);
     const impressions = rows.reduce((acc, row) => acc + (row.impressions || 0), 0);
     const prevClicks = prevRows.reduce((acc, row) => acc + (row.clicks || 0), 0);
     const prevImpressions = prevRows.reduce((acc, row) => acc + (row.impressions || 0), 0);
-    const agg = await WebScDailyAgg.findAll({ where: { clinica_id: clinicaId, date: { [Op.between]: [start, end] } }, raw: true });
-    const prevAgg = await WebScDailyAgg.findAll({ where: { clinica_id: clinicaId, date: { [Op.between]: [prevStart, prevEnd] } }, raw: true });
+    const agg = propertyReadEnabled ? await storedRows({ start, end }, 'webRanks', { ranking: true })
+      : await WebScDailyAgg.findAll({ where: { clinica_id: clinicaId, date: { [Op.between]: [start, end] } }, raw: true });
+    const prevAgg = propertyReadEnabled ? await storedRows(previous, 'webPrevRanks', { ranking: true })
+      : await WebScDailyAgg.findAll({ where: { clinica_id: clinicaId, date: { [Op.between]: [prevStart, prevEnd] } }, raw: true });
     const sumAgg = (collection, field) => collection.reduce((acc, row) => acc + (row[field] || 0), 0);
     const top10 = sumAgg(agg, 'queries_top10');
     const top3 = sumAgg(agg, 'queries_top3');
     const prevTop10 = sumAgg(prevAgg, 'queries_top10');
     const prevTop3 = sumAgg(prevAgg, 'queries_top3');
     const lastDate = rows.length ? rows.map((r) => r.date).sort().slice(-1)[0] : null;
+    for (const source of sources) await source.validate();
     return res.json({
       success: true,
       period: { start, end },
@@ -320,6 +351,11 @@ router.get('/clinica/:clinicaId/seo/summary', async (req, res) => {
       }
     });
   } catch (e) {
+    if (typeof e?.code === 'string' && e.code.startsWith('sc_analytics_')) {
+      const failure = require('../lib/searchConsoleReadSource').storageError(e);
+      if (failure) return res.status(failure.status).json({ success: false, error: failure.code, code: failure.code });
+    }
+    if (e.httpStatus === 401 || e.httpStatus === 403) return res.status(e.httpStatus).json({ success: false, error: authorizationReason(e) });
     console.error('❌ /web/seo/summary:', e.response?.data || e.message);
     return res.status(500).json({ success: false, error: 'Error obteniendo resumen SEO' });
   }
@@ -499,23 +535,31 @@ router.get('/clinica/:clinicaId/sc/queries', async (req, res) => {
     const end = endDate || new Date().toISOString().slice(0, 10);
     const max = Math.max(1, Math.min(Number(limit) || 10, 100));
 
+    const replacements = { clinicaId, start, end, limit: max };
+    const source = process.env.SC_ANALYTICS_READ_ENABLED === 'true'
+      ? await storedSearchConsoleSource(req, { start, end }, replacements, 'webQueries') : null;
+    const sqlFrom = source?.sqlFrom || 'WebScQueryDaily';
+    const scopeSql = source ? source.scopeSql : 'AND clinica_id = :clinicaId';
+    const positionSql = source ? require('../lib/searchConsoleReadSource').positionAggregateSql()
+      : 'CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END';
     const topQueries = await sequelize.query(
       `SELECT query,
               SUM(clicks) AS clicks,
               SUM(impressions) AS impressions,
-              CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position
-       FROM WebScQueryDaily
-       WHERE clinica_id = :clinicaId AND date BETWEEN :start AND :end
+              ${positionSql} AS position
+       FROM ${sqlFrom}
+       WHERE date BETWEEN :start AND :end ${scopeSql}
        GROUP BY query
        ORDER BY SUM(clicks) DESC
        LIMIT :limit;`,
       {
-        replacements: { clinicaId, start, end, limit: max },
+        replacements,
         type: db.Sequelize.QueryTypes.SELECT
       }
     );
 
     if (!topQueries.length) {
+      if (source) await source.validate();
       return res.json({ success: true, items: [], total: 0, period: { start, end } });
     }
 
@@ -525,12 +569,12 @@ router.get('/clinica/:clinicaId/sc/queries', async (req, res) => {
               COALESCE(page_url, '') AS page_url,
               SUM(clicks) AS clicks,
               SUM(impressions) AS impressions,
-              CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) ELSE AVG(position) END AS position
-       FROM WebScQueryDaily
-       WHERE clinica_id = :clinicaId AND date BETWEEN :start AND :end AND query IN (:queries)
+              ${positionSql} AS position
+       FROM ${sqlFrom}
+       WHERE date BETWEEN :start AND :end ${scopeSql} AND query IN (:queries)
        GROUP BY query, page_url;`,
       {
-        replacements: { clinicaId, start, end, queries: queryNames },
+        replacements: { ...replacements, queries: queryNames },
         type: db.Sequelize.QueryTypes.SELECT
       }
     );
@@ -569,8 +613,15 @@ router.get('/clinica/:clinicaId/sc/queries', async (req, res) => {
       };
     });
 
-    return res.json({ success: true, items, total: items.length, period: { start, end } });
+    if (source) await source.validate();
+    return res.json({ success: true, items, total: items.length, period: { start, end },
+      ...(source ? { dataResolution: source.resolution } : {}) });
   } catch (e) {
+    if (typeof e?.code === 'string' && e.code.startsWith('sc_analytics_')) {
+      const failure = require('../lib/searchConsoleReadSource').storageError(e);
+      if (failure) return res.status(failure.status).json({ success: false, error: failure.code, code: failure.code });
+    }
+    if (e.httpStatus === 401 || e.httpStatus === 403) return res.status(e.httpStatus).json({ success: false, error: authorizationReason(e) });
     console.error('❌ /web/sc/queries:', e.message);
     return res.status(500).json({ success: false, error: 'Error consultando queries' });
   }

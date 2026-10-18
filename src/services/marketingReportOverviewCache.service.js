@@ -109,11 +109,15 @@ function payloadFromRow(row) {
   return typeof value === 'object' && !Array.isArray(value) ? value : null;
 }
 
+function currentReportVersion() {
+  return OVERVIEW_CACHE_VERSION + (process.env.SC_ANALYTICS_READ_ENABLED === 'true' ? '-sc-property-v1' : '');
+}
+
 function buildOverviewCacheIdentity({
   scope,
   range,
   section = 'overview',
-  reportVersion = OVERVIEW_CACHE_VERSION,
+  reportVersion = currentReportVersion(),
 }) {
   const normalizedScope = normalizeScope(scope);
   const normalized = {
@@ -238,6 +242,7 @@ function createOverviewCacheCoordinator({
   now = () => new Date(),
   randomToken = () => crypto.randomUUID(),
   scheduleRefresh = null,
+  validateIdentity = null,
   logger = console,
 } = {}) {
   if (!model) throw new Error('MarketingReportOverviewCache model is required');
@@ -338,7 +343,9 @@ function createOverviewCacheCoordinator({
 
   async function generateAndPersist(identity, token, generate) {
     try {
+      await validateIdentity?.(identity);
       const payload = await generate();
+      await validateIdentity?.(identity);
       const stored = await persist(identity, payload, token);
       return withOverviewCacheMetadata(payloadFromRow(stored), stored, { now: now() });
     } catch (error) {
@@ -447,6 +454,11 @@ function createOverviewCacheCoordinator({
 const overviewCache = MarketingReportOverviewCache
   ? createOverviewCacheCoordinator({
     model: MarketingReportOverviewCache,
+    validateIdentity: identity => {
+      if (identity.report_version !== limitedString(currentReportVersion(), 96)) {
+        throw Object.assign(Error('sc_analytics_configuration_changed'), { code: 'sc_analytics_configuration_changed' });
+      }
+    },
     scheduleRefresh: async ({ identity, token }) => jobRequestsService.enqueueUniqueJobRequest({
       type: OVERVIEW_REFRESH_JOB_TYPE,
       priority: 'low',
@@ -528,6 +540,12 @@ async function refreshOverviewSnapshots({
       }
       if (requestedIdentity.cache_key !== cacheKey) {
         return { status: 'failed', retryable: false, error_message: 'La identidad del snapshot de informe ha cambiado' };
+      }
+      // An enqueued refresh may outlive a source switch or its rollback. Never
+      // write data from the new source into a cache identity for the old one.
+      if (requestedIdentity.report_version !== limitedString(currentReportVersion(), 96)) {
+        if (refreshToken) await overviewCache.release(requestedIdentity, refreshToken);
+        return { status: 'completed', processed: 0, skipped: true, reason: 'cache_source_version_changed' };
       }
       const range = buildRange(requestedIdentity.period_start, requestedIdentity.period_end, 30);
       const scope = requestedIdentity.scope_payload || rowValue(requestedIdentity, 'scope_payload') || {};

@@ -71,6 +71,7 @@ const businessProfileBroker = require('../services/businessProfileBroker.service
 const businessProfileCache = require('../services/businessProfileCache.service');
 const googleLegacyCredentials = require('../services/googleLegacyCredentials.service');
 const searchConsoleBroker = require('../services/searchConsoleBroker.service');
+const scIngest = require('../lib/searchConsoleIngest');
 const analyticsBroker = require('../services/analyticsBroker.service');
 const jobRequestsService = require('../services/jobRequests.service');
 const systemNotificationsService = require('../services/systemNotifications.service');
@@ -203,16 +204,6 @@ function resolveSearchConsoleBulkChunkSize() {
   return Number.isInteger(configured) && configured > 0
     ? configured
     : DEFAULT_SEARCH_CONSOLE_BULK_CHUNK_SIZE;
-}
-
-async function bulkCreateInChunks(model, rows, options = {}, chunkSize = resolveSearchConsoleBulkChunkSize()) {
-  if (!Array.isArray(rows) || rows.length === 0) {
-    return;
-  }
-
-  for (let index = 0; index < rows.length; index += chunkSize) {
-    await model.bulkCreate(rows.slice(index, index + chunkSize), options);
-  }
 }
 
 function parseDateInput(value, label) {
@@ -1469,7 +1460,15 @@ class MetaSyncJobs {
         clinics: byClinic.size,
         processed: 0,
         errors: [],
-        rowLimits: []
+        rowLimits: [],
+        ingestion: {
+          downloads: 0, reusedDownloads: 0, completedIntervals: 0, failedIntervals: 0,
+          received: 0, inserted: 0, updated: 0, unchanged: 0, written: 0,
+          candidateWritesBefore: 0, actualWritesAfter: 0, compactCoverage: [],
+          storageWriteEnabled: process.env.SC_ANALYTICS_WRITE_ENABLED === 'true',
+          recentDays: this.config.web.recentDays,
+          initialCoverageVerified: process.env.WEB_BACKFILL_INITIAL_COVERAGE_VERIFIED === 'true'
+        }
       };
       const end = new Date(); end.setHours(0,0,0,0);
       const start = new Date(end); start.setDate(start.getDate() - (this.config.web.recentDays-1));
@@ -1497,6 +1496,15 @@ class MetaSyncJobs {
           throw error;
         }
       };
+      const readSearchConsole = scIngest.createDownloadReader({
+        read: (...args) => this._readSearchConsole(...args),
+        validate: (...args) => this._assertSearchConsoleMapping(...args),
+        onDownload: () => { report.ingestion.downloads++; },
+        onReuse: () => { report.ingestion.reusedDownloads++; }
+      });
+      const analyticsStore = report.ingestion.storageWriteEnabled
+        ? require('../services/searchConsoleAnalytics.service') : null;
+      const finalRangeByMapping = new Map();
       for (const [clinicaId, arr] of byClinic.entries()) {
         try {
           const authorizedMappings = [];
@@ -1520,7 +1528,7 @@ class MetaSyncJobs {
           // Timeseries por siteUrl (guardar por clínica+site+fecha)
           for (const { asset: a, credentials } of authorizedMappings) {
             try {
-              const resp = await this._readSearchConsole(a, credentials, 'timeseries', { startDate: fmt(start), endDate: fmt(end) });
+              const resp = await readSearchConsole(a, credentials, 'timeseries', { startDate: fmt(start), endDate: fmt(end) });
               clinicSucceeded = true;
               const rows = resp.data?.rows || [];
               for (const r of rows) {
@@ -1535,7 +1543,25 @@ class MetaSyncJobs {
                   position: r.position||null
                 };
                 const [rec, created] = await WebScDaily.findOrCreate({ where: { clinica_id: clinicaId, site_url: a.siteUrl, date }, defaults: payload });
-                if (!created) await rec.update(payload);
+                if (!created && !scIngest.metricsEqual(rec, payload)) await rec.update(payload);
+              }
+              if (analyticsStore) {
+                // A successful final-data request through today is not evidence
+                // that today's data exists. No returned date means no new
+                // coverage; never replace an existing interval with assumed zero.
+                const observed = rows.map(row => row.keys?.[0]).filter(date =>
+                  typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) && date >= fmt(start) && date <= fmt(end)).sort();
+                const firstFinalDate = observed[0];
+                const lastFinalDate = observed.at(-1);
+                if (lastFinalDate) {
+                  await analyticsStore.writeTotalsInterval({ mapping: a, siteUrl: a.siteUrl,
+                    startDate: firstFinalDate, endDate: lastFinalDate,
+                    rows: rows.filter(row => row.keys?.[0] >= firstFinalDate && row.keys?.[0] <= lastFinalDate), complete: true, rowLimitReached: false,
+                    validate: () => this._assertSearchConsoleMapping(a, credentials) });
+                  finalRangeByMapping.set(a.id, { start: firstFinalDate, end: lastFinalDate });
+                }
+                report.ingestion.compactCoverage.push({ siteUrl: a.siteUrl, start: fmt(start),
+                  requestedEnd: fmt(end), firstObservedFinalDate: firstFinalDate || null, lastObservedFinalDate: lastFinalDate || null });
               }
             } catch (error) {
               report.errors.push({
@@ -1547,114 +1573,76 @@ class MetaSyncJobs {
             }
           }
 
-          // Aggregado por día: nº queries Top10/Top3 con chunk mensual si rango > 2 meses
-          const queryDailyMap = new Map();
-          const topByDate = new Map(); // date => { set10:Set, set3:Set }
-          function* monthChunks(s, e) {
-            const d1 = new Date(s); d1.setHours(0,0,0,0);
-            const d2 = new Date(e); d2.setHours(0,0,0,0);
-            let cur = new Date(d1);
-            while (cur <= d2) {
-              const mStart = new Date(cur.getFullYear(), cur.getMonth(), 1);
-              const mEnd = new Date(cur.getFullYear(), cur.getMonth()+1, 0);
-              const startC = mStart < d1 ? d1 : mStart;
-              const endC = mEnd > d2 ? d2 : mEnd;
-              yield { s: fmt(startC), e: fmt(endC) };
-              cur = new Date(cur.getFullYear(), cur.getMonth()+1, 1);
-            }
-          }
-          const daysWindow = Math.round((end - start) / 86400000) + 1;
-          const useChunks = daysWindow > 62;
-          for (const { asset: a, credentials } of authorizedMappings) {
-            try {
-              const ranges = useChunks ? Array.from(monthChunks(start, end)) : [{ s: fmt(start), e: fmt(end) }];
-              for (const rg of ranges) {
-                const respQ = await this._readSearchConsole(a, credentials, 'queries', { startDate: rg.s, endDate: rg.e });
-                if (respQ.data?.rowLimitReached) report.rowLimits.push({ clinicaId, siteUrl: a.siteUrl, start: rg.s, end: rg.e, limit: 25000 });
-                clinicSucceeded = true;
+          // Finish downloading every property in a bounded month before publishing
+          // the legacy clinic aggregate. A failed/truncated property must not
+          // overwrite a complete aggregate with a partial one.
+          for (const rg of scIngest.monthRanges(fmt(start), fmt(end))) {
+            const queryDailyMap = new Map();
+            const topByDate = new Map();
+            let intervalComplete = authorizedMappings.length === arr.length;
+            for (const { asset: a, credentials } of authorizedMappings) {
+              try {
+                const respQ = await readSearchConsole(a, credentials, 'queries', { startDate: rg.s, endDate: rg.e });
                 const rowsQ = respQ.data?.rows || [];
-                for (const r of rowsQ) {
-                const date = r.keys?.[0];
-                const query = r.keys?.[1];
-                const pageUrl = r.keys?.[2] || null;
-                if (!date || !query) continue;
-                const clicks = r.clicks || 0;
-                const impressions = r.impressions || 0;
-                const position = r.position || 0;
-
-                let topEntry = topByDate.get(date);
-                if (!topEntry) { topEntry = { set10: new Set(), set3: new Set() }; topByDate.set(date, topEntry); }
-                if (position <= 10) topEntry.set10.add(query);
-                if (position <= 3) topEntry.set3.add(query);
-
-                const queryHash = crypto.createHash('sha256').update(query).digest('hex');
-                const pageHash = crypto.createHash('sha256').update(pageUrl || '').digest('hex');
-                const key = `${clinicaId}|${date}|${queryHash}|${pageHash}`;
-                let agg = queryDailyMap.get(key);
-                if (!agg) {
-                  agg = {
-                    clinica_id: clinicaId,
-                    site_url: a.siteUrl,
-                    date,
-                    query,
-                    query_hash: queryHash,
-                    page_url: pageUrl,
-                    page_url_hash: pageHash,
-                    clicks: 0,
-                    impressions: 0,
-                    positionWeighted: 0,
-                    lastPosition: position
-                  };
-                  queryDailyMap.set(key, agg);
+                const truncated = respQ.data?.rowLimitReached === true
+                  || (!credentials.brokerContext && rowsQ.length >= 25000);
+                if (truncated) {
+                  report.rowLimits.push({ clinicaId, siteUrl: a.siteUrl, start: rg.s, end: rg.e, limit: 25000 });
+                  throw Object.assign(Error('search_console_interval_truncated'), { code: 'search_console_interval_truncated' });
                 }
-                agg.clicks += clicks;
-                agg.impressions += impressions;
-                agg.positionWeighted += position * (impressions || 1);
-                agg.lastPosition = position;
+                scIngest.mergeQueryRows({ rows: rowsQ, clinicId: clinicaId, siteUrl: a.siteUrl,
+                  queryDailyMap, topByDate, range: rg });
+                if (analyticsStore) {
+                  const finalRange = finalRangeByMapping.get(a.id);
+                  if (finalRange && rg.s <= finalRange.end && rg.e >= finalRange.start) {
+                    const compactEnd = rg.e < finalRange.end ? rg.e : finalRange.end;
+                    const compactStart = rg.s > finalRange.start ? rg.s : finalRange.start;
+                    await analyticsStore.writeInterval({ mapping: a, siteUrl: a.siteUrl, startDate: compactStart, endDate: compactEnd,
+                      rows: rowsQ.filter(row => row.keys?.[0] >= compactStart && row.keys?.[0] <= compactEnd), complete: true, rowLimitReached: false,
+                      validate: () => this._assertSearchConsoleMapping(a, credentials) });
+                  }
+                }
+              } catch (error) {
+                intervalComplete = false;
+                report.errors.push({ clinicaId, siteUrl: a.siteUrl, phase: 'queries', start: rg.s, end: rg.e,
+                  message: error?.code === 'search_console_interval_truncated'
+                    ? 'search_console_interval_truncated' : googleLegacyCredentials.safe(error) });
+              }
+            }
+            if (!intervalComplete) { report.ingestion.failedIntervals++; continue; }
+            const bulkPayload = scIngest.queryPayload(queryDailyMap);
+            // One transaction covers all write batches and the Top3/Top10
+            // summary. A retry therefore sees either the old or complete range.
+            const publish = async transaction => {
+              for (const { asset, credentials } of authorizedMappings) await this._assertSearchConsoleMapping(asset, credentials);
+              const stats = bulkPayload.length ? await scIngest.persistChangedRows({
+                model: WebScQueryDaily, rows: bulkPayload, transaction,
+                keyFields: ['clinica_id', 'date', 'query_hash', 'page_url_hash'],
+                chunkSize: resolveSearchConsoleBulkChunkSize()
+              }) : { received: 0, inserted: 0, updated: 0, unchanged: 0, written: 0 };
+              for (const [date, sets] of topByDate.entries()) {
+                const defaults = { clinica_id: clinicaId, date, queries_top10: sets.set10.size, queries_top3: sets.set3.size };
+                const [agg, created] = await WebScDailyAgg.findOrCreate({
+                  where: { clinica_id: clinicaId, date }, defaults, transaction
+                });
+                if (!created && !scIngest.metricsEqual(agg, defaults, { queries_top10: 0, queries_top3: 0 })) {
+                  await agg.update(defaults, { transaction });
                 }
               }
+              for (const { asset, credentials } of authorizedMappings) await this._assertSearchConsoleMapping(asset, credentials);
+              return stats;
+            };
+            try {
+              const stats = await require('../../models').sequelize.transaction(publish);
+              for (const key of ['received', 'inserted', 'updated', 'unchanged', 'written']) report.ingestion[key] += stats[key];
+              report.ingestion.candidateWritesBefore += stats.received;
+              report.ingestion.actualWritesAfter += stats.written;
+              report.ingestion.completedIntervals++;
+              clinicSucceeded = true;
             } catch (error) {
-              report.errors.push({
-                clinicaId,
-                siteUrl: a.siteUrl,
-                phase: 'queries',
-                message: googleLegacyCredentials.safe(error)
-              });
+              report.ingestion.failedIntervals++;
+              report.errors.push({ clinicaId, phase: 'publish', start: rg.s, end: rg.e, message: googleLegacyCredentials.safe(error) });
             }
-          }
-
-          if (queryDailyMap.size) {
-            const bulkPayload = Array.from(queryDailyMap.values()).map((entry) => {
-              const impressions = entry.impressions || 0;
-              const ctr = impressions ? entry.clicks / impressions : 0;
-              const position = impressions ? (entry.positionWeighted / impressions) : entry.lastPosition || null;
-              return {
-                clinica_id: entry.clinica_id,
-                site_url: entry.site_url,
-                date: entry.date,
-                query: entry.query,
-                query_hash: entry.query_hash,
-                page_url: entry.page_url,
-                page_url_hash: entry.page_url_hash,
-                clicks: entry.clicks,
-                impressions,
-                ctr,
-                position
-              };
-            });
-            if (bulkPayload.length) {
-              await bulkCreateInChunks(
-                WebScQueryDaily,
-                bulkPayload,
-                { updateOnDuplicate: ['clicks', 'impressions', 'ctr', 'position', 'updated_at'] }
-              );
-            }
-          }
-
-          for (const [date, sets] of topByDate.entries()) {
-            const defaults = { clinica_id: clinicaId, date, queries_top10: sets.set10.size, queries_top3: sets.set3.size };
-            const [agg, created] = await WebScDailyAgg.findOrCreate({ where: { clinica_id: clinicaId, date }, defaults });
-            if (!created) await agg.update(defaults);
           }
 
           // PSI + checks técnicos persistidos (solo si habilitado, no backfill, y con API key)
@@ -1725,12 +1713,12 @@ class MetaSyncJobs {
           report.errors.push({ clinicaId, message: googleLegacyCredentials.safe(err) });
         }
       }
-      const totalFailure = assets.length > 0 && processed === 0 && report.errors.length > 0;
+      const totalFailure = report.errors.length > 0;
       await syncLog.update({
         status: totalFailure ? 'failed' : 'completed',
         end_time:new Date(),
         records_processed: processed,
-        error_message: totalFailure ? 'Fallaron todos los mappings web elegibles' : null,
+        error_message: totalFailure ? 'Hay mappings o intervalos web incompletos; reintentar' : null,
         status_report: report
       });
       console.log('✅ webSync completado:', processed);
@@ -1751,7 +1739,7 @@ class MetaSyncJobs {
   async executeWebBackfill() {
     const prev = this.config.web.recentDays;
     const prevMode = this._webBackfillMode;
-    this.config.web.recentDays = this.config.web.backfillDays;
+    this.config.web.recentDays = scIngest.backfillDays(this.config.web, process.env);
     this._webBackfillMode = true;
     try {
       return await this.executeWebSync();
@@ -3221,10 +3209,15 @@ class MetaSyncJobs {
     return Number.isFinite(numeric) ? numeric : 0;
   }
 
-  async _readSearchConsole(asset, credentials, family, payload) {
-    // Check the independent registry even for a token prepared earlier in this job.
+  async _assertSearchConsoleMapping(asset, credentials) {
     const fresh = await searchConsoleBroker.prepare(asset);
     if (!!fresh !== !!credentials.brokerContext) throw Object.assign(new Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
+    if (!credentials.brokerContext) await googleLegacyCredentials.assert(credentials.connection);
+  }
+
+  async _readSearchConsole(asset, credentials, family, payload) {
+    // Revalidate the independent registry even for a previously prepared token.
+    await this._assertSearchConsoleMapping(asset, credentials);
     if (credentials.brokerContext) return searchConsoleBroker.read(asset, credentials.brokerContext, family, payload);
     return googleLegacyCredentials.request(credentials.connection, () => {
       if (family === 'inspection') {
@@ -3403,7 +3396,7 @@ class MetaSyncJobs {
     }
     const prev = this.config.web.recentDays;
     const prevMode = this._webBackfillMode;
-    this.config.web.recentDays = this.config.web.backfillDays;
+    this.config.web.recentDays = scIngest.backfillDays(this.config.web, process.env);
     this._webBackfillMode = true;
     try {
       return await this.executeWebSync({ siteMappings });

@@ -73,7 +73,8 @@ test('actual web jobs and targeted backfills use the broker for all SC query fam
     const f = searchConsoleFixture(); const rows = []; const updates = [];
     const models = { ClinicWebAsset: { findAll: async () => [f.mapping] }, SyncLog: { create: async () => ({ update: async value => updates.push(value) }) },
       WebScDaily: { findOrCreate: async ({ defaults }) => { rows.push(defaults); return [null, true]; } },
-      WebScQueryDaily: { bulkCreate: async values => rows.push(...values) }, WebScDailyAgg: { findOrCreate: async ({ defaults }) => { rows.push(defaults); return [null, true]; } } };
+      sequelize: { transaction: async work => work({}) },
+      WebScQueryDaily: { findAll: async () => [], bulkCreate: async values => rows.push(...values) }, WebScDailyAgg: { findOrCreate: async ({ defaults }) => { rows.push(defaults); return [null, true]; } } };
     const jobs = loadBusinessProfileJobs({ models, searchConsole: f.service, credentials: { safe: () => 'unexpected_test_error',
       load: () => assert.fail('Managed jobs cannot load tokens'), request: () => assert.fail('Managed jobs cannot call Google') },
       legacyHttp: new Proxy({}, { get: () => () => assert.fail('Managed jobs cannot call legacy HTTP') }), logs: f.state.logs,

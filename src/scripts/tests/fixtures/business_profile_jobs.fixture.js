@@ -7,6 +7,7 @@ function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credent
   const fail = () => { throw Error('UNEXPECTED_DEPENDENCY_IN_GBP_QA'); };
   const dependencies = {
     '../../models': models, sequelize: require('sequelize'), crypto: require('node:crypto'),
+    '../lib/searchConsoleIngest': require('../../../lib/searchConsoleIngest'),
     'node-cron': { schedule: fail }, axios: { create: () => legacyHttp, post: fail },
     '../services/businessProfileBroker.service': broker,
     '../services/businessProfileCache.service': require('../../../services/businessProfileCache.service')
