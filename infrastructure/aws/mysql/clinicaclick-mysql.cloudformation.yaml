@@ -159,6 +159,10 @@ Resources:
       Parameters:
         require_secure_transport: 'ON'
         event_scheduler: 'OFF'
+        # RDS administrators lack SUPER; recreating the two existing guard
+        # triggers requires this dynamic setting when binary logging is on.
+        # Runtime SQL principals must not receive CREATE ROUTINE/TRIGGER.
+        log_bin_trust_function_creators: '1'
         character_set_server: utf8mb4
         collation_server: utf8mb4_0900_ai_ci
       Tags:
