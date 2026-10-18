@@ -1022,7 +1022,24 @@ async function withExecutionJobClaim(execution, work) {
 }
 
 async function updateExecutionAndEmit(execution, patch, eventName = 'flow_execution:updated', extra = {}) {
-  await withExecutionJobClaim(execution, transaction => execution.update(patch, { transaction }));
+  await withExecutionJobClaim(execution, async transaction => {
+    if (patch.context && require('../lib/patient-mobile-verification').isFlow(execution)) {
+      const fresh = await FlowExecutionV2.findByPk(execution.id, { transaction });
+      const reply = fresh.context?.mobile_verification;
+      // Inbound correlation can commit while a node is running. Preserve that
+      // evidence instead of replacing it with the engine's earlier snapshot.
+      if (reply?.response_message_id && reply.response_version !== patch.context.mobile_verification?.response_version) {
+        patch.context = { ...patch.context, mobile_verification: { ...patch.context.mobile_verification, ...reply } };
+        if (patch.status === 'waiting') patch.wait_until = new Date(reply.response_buffer_until || Date.now());
+        if (patch.status === 'completed') {
+          patch.status = 'waiting'; patch.current_node_id = reply.wait_node_id;
+          patch.wait_until = new Date(reply.response_buffer_until || Date.now());
+          patch.waiting_meta = { type: 'delay/wait_response', resume_mode: 'retry_current_node', runtime_namespace: CURRENT_RUNTIME_NAMESPACE };
+        }
+      }
+    }
+    return execution.update(patch, { transaction });
+  });
   emitExecutionEvent(execution, eventName, extra);
 }
 
@@ -3391,6 +3408,15 @@ async function enqueueAutomationWhatsappTransport({
     clinicId: toIntOrNull(conversation?.clinic_id),
   }, transportJobOptions);
 
+  if (metadata.mobile_verification_request_id) {
+    // Publication already succeeded. A bookkeeping failure cannot undo it or
+    // replace a fast worker's provider receipt with the producer's snapshot.
+    await db.sequelize.transaction(async transaction => {
+      const fresh = await Message.findByPk(msg.id, { transaction, lock: transaction.LOCK.UPDATE });
+      await fresh.update({ metadata: { ...fresh.metadata, mobile_verification_transport_queued_at: new Date().toISOString() } }, { transaction });
+    }).catch(() => {});
+  }
+
   return {
     transportJob,
     transportJobId: String(transportJob?.id || transportJobId),
@@ -3785,6 +3811,12 @@ async function reuseExistingAutomationWhatsappMessage({ existingMessage, node })
     ? existingMessage.metadata
     : {};
   const storedSelection = readStoredWhatsappReplaySelection(existingMetadata);
+  const mobileProtocol = !!existingMetadata.mobile_verification_request_id;
+  if (mobileProtocol && (existingMetadata.delivery_unknown || existingMetadata.wamid
+    || existingMessage.status === 'failed' && !existingMetadata.enqueue_error || existingMetadata.cancelled)) {
+    return { kind: 'success', output: { message_id: existingMessage.id, conversation_id: existingMessage.conversation_id,
+      message_preview: existingMessage.content, replay_reused: true }, next_node_id: readOutputTarget(node, 'on_success') };
+  }
   const dispatchWait = require('../lib/whatsapp-dispatch-wait');
   if (!dispatchWait.accepted(existingMessage)) {
     const waiting = dispatchWait.flowWait(existingMessage);
@@ -3835,13 +3867,13 @@ async function reuseExistingAutomationWhatsappMessage({ existingMessage, node })
       }
 
       const usesDurableTransport = existingMetadata.access_guidance_variant_requested === true
-        || queuedByQuietHours;
+        || queuedByQuietHours || mobileProtocol;
       if (!usesDurableTransport && !transportJobId) {
         // En el transporte sin outbox un pending no demuestra si el POST a
         // Meta llego a ejecutarse. No se reenvia a ciegas: evita duplicados.
         throw new Error('whatsapp_previous_delivery_state_unknown');
       }
-      if (!transportJobId || enqueuePreviouslyFailed) {
+      if (!transportJobId || enqueuePreviouslyFailed || mobileProtocol && !existingMetadata.mobile_verification_transport_queued_at) {
         const dispatch = await enqueueAutomationWhatsappTransport({
           msg: existingMessage,
           conversation,
@@ -3930,12 +3962,17 @@ async function handleSendWhatsapp(node, context, runtime) {
   if (require('../lib/appointment-reschedule-reason').isSilentReschedule(context, runtime?.execution)) {
     return { kind: 'success', output: { status: 'skipped_administrative_reschedule' }, next_node_id: readOutputTarget(node, 'on_success') };
   }
-  const config = node?.config && typeof node.config === 'object' ? node.config : {};
+  const configured = node?.config && typeof node.config === 'object' ? node.config : {};
   const execution = runtime?.execution || null;
+  const mobileProtocol = isMobileVerificationProtocol(node, execution);
+  const mobile = mobileProtocol ? await require('./patientMobileVerification.service').current().sendPreflight({ execution }) : null;
+  if (mobile?.suppressed) return { kind: 'success', output: { suppressed: true, no_send: true }, next_node_id: null };
+  const config = mobile ? { ...configured, recipient_mode: 'manual_number', recipient_to: mobile.recipient,
+    communication_scope: 'care', quiet_hours_enabled: true, outside_send_window_policy: 'schedule_next_window', suppress_flow_event: true } : configured;
   const managedService = require('./appointmentVisitManaged.service').current();
   const managedContext = execution?.context?.appointment_visit
     ? await managedService.sendContext(execution, node, runtime?.jobClaim) : null;
-  const automationDeliveryKey = managedContext?.delivery_key || buildAutomationWhatsappDeliveryKey(execution, node);
+  const automationDeliveryKey = mobile?.delivery_key || managedContext?.delivery_key || buildAutomationWhatsappDeliveryKey(execution, node);
   if (automationDeliveryKey) {
     const existingMessage = await findAutomationWhatsappMessageByDeliveryKey({
       deliveryKey: automationDeliveryKey,
@@ -4058,7 +4095,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     fallback_reason: null,
   };
   let senderData = null;
-  let useDurableAccessGuidanceTransport = false;
+  let useDurableAccessGuidanceTransport = mobileProtocol;
   const getSenderData = async () => {
     if (!senderData) {
       senderData = await resolveWhatsAppSenderConfig({ config, context: templateContext, clinicId });
@@ -4159,7 +4196,7 @@ async function handleSendWhatsapp(node, context, runtime) {
         template = accessFallbackTemplate;
         selectedTemplateConfig = fallbackConfig;
       }
-      useDurableAccessGuidanceTransport = accessGuidanceDecision.variant_requested;
+      useDurableAccessGuidanceTransport = accessGuidanceDecision.variant_requested || mobileProtocol;
     } else {
       const baseTemplate = await loadConfiguredWhatsappTemplate(contentConfig, templateContext, {
         templateIdKey: 'template_id',
@@ -4490,6 +4527,13 @@ async function handleSendWhatsapp(node, context, runtime) {
     attributes: ['id_clinica', 'nombre_clinica'],
     raw: true,
   });
+  const mobileEnvelope = mobile ? await require('./patientMobileVerification.service').current().sendEnvelope({
+    request: mobile.request, template, templateParams, sender: senderData.clinic_config, conversation, recipient: recipientData.recipient,
+  }) : null;
+  if (mobileEnvelope) {
+    templateComponents = mobileEnvelope.template_components;
+    useDurableAccessGuidanceTransport = true;
+  }
 
   let recipientPatientId = toIntOrNull(conversation?.patient_id) || targetPatientId;
   let recipientPatientName = null;
@@ -4595,6 +4639,7 @@ async function handleSendWhatsapp(node, context, runtime) {
   const metadata = {
     source: 'automations_v2',
     kind: 'flow_send_whatsapp',
+    ...(mobileEnvelope?.metadata || {}),
     execution_id: execution?.id || null,
     appointment_timeout: context.whatsapp_no_response_timeout === true,
     node_id: cleanString(node?.id),
@@ -4720,7 +4765,15 @@ async function handleSendWhatsapp(node, context, runtime) {
       });
     } catch (enqueueErr) {
       const enqueueError = enqueueErr?.message || 'enqueue_failed';
-      await msg.update({
+      if (mobileProtocol) {
+        const accepted = await db.sequelize.transaction(async transaction => {
+          const fresh = await Message.findByPk(msg.id, { transaction, lock: transaction.LOCK.UPDATE });
+          if (fresh.metadata?.wamid || fresh.metadata?.provider_acceptance_at) return true;
+          await fresh.update({ status: 'failed', metadata: { ...fresh.metadata, enqueue_error: enqueueError } }, { transaction });
+          return false;
+        });
+        if (accepted) { await msg.reload(); return reuseExistingAutomationWhatsappMessage({ existingMessage: msg, node }); }
+      } else await msg.update({
         status: 'failed',
         metadata: {
           ...(msg.metadata || {}),
@@ -5519,6 +5572,16 @@ async function handleCreateTask(node, context, runtime) {
 }
 
 async function handleSendSystemNotification(node, context, runtime) {
+  if (isMobileVerificationProtocol(node, runtime?.execution) && !runtime.mobileVerificationNotification) {
+    return require('./patientMobileVerification.service').current().withNotification({ execution: runtime.execution, node }, scope =>
+      handleSendSystemNotification(node, mergeContextPatch(context, { mobile_verification: {
+        reason: scope.snapshot.reason, reason_text: scope.snapshot.reason_text,
+      } }), { ...runtime, mobileVerificationNotification: scope }));
+  }
+  const mobileScope = runtime?.mobileVerificationNotification;
+  const notificationOptions = mobileScope ? { transaction: mobileScope.transaction } : {};
+  const emitCreated = notification => mobileScope ? mobileScope.transaction.afterCommit(() => emitNotificationCreated(notification)) : emitNotificationCreated(notification);
+  const emitUpdated = notification => mobileScope ? mobileScope.transaction.afterCommit(() => emitNotificationUpdated(notification)) : emitNotificationUpdated(notification);
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   let targets = resolveRuntimeTargets(runtime?.execution, context);
   targets = await backfillRuntimeTargets(runtime?.execution, targets);
@@ -5581,7 +5644,9 @@ async function handleSendSystemNotification(node, context, runtime) {
   const patientDetailLink = cleanString(getByPath(notificationContext, 'system.patient_detail_link'));
   const quickChatConversationId = toIntOrNull(getByPath(notificationContext, 'conversation.id')) || null;
   const quickChatResponseMessageId = resolveLatestResponseMessageId(notificationContext) || null;
-  const primaryLink = conversationLink || patientDetailLink || null;
+  const primaryLink = mobileScope
+    ? `/pacientes/detalle/${mobileScope.request.patient_id}/datos-personales?clinic_id=${mobileScope.request.clinic_id}`
+    : conversationLink || patientDetailLink || null;
   const createdNotifications = [];
   const resolvedNotifications = [];
   const displayMode = cleanString(resolveTemplateValue(config?.display_mode, notificationContext)) === 'persistent_alert'
@@ -5602,7 +5667,7 @@ async function handleSendSystemNotification(node, context, runtime) {
     ? conversationActionValue
     : null;
 
-  const humanReply = quickChatConversationId && quickChatResponseMessageId
+  const humanReply = !mobileScope && quickChatConversationId && quickChatResponseMessageId
     ? await findHumanReplyAfterMessage(quickChatConversationId, quickChatResponseMessageId)
     : null;
   if (humanReply) {
@@ -5626,12 +5691,13 @@ async function handleSendSystemNotification(node, context, runtime) {
   }
 
   for (const userId of userIds) {
-    const dedupeKey = runtime?.execution?.id
+    const dedupeKey = mobileScope ? `patient-mobile-verification:${mobileScope.request.id}:${userId}` : runtime?.execution?.id
       ? `automation:${runtime.execution.id}:${cleanString(node?.id)}:${userId}`
       : null;
     let notificationsSuperseded = 0;
     if (replacePreviousPersistentAlerts && dedupeKey) {
       const previousAlerts = await Notification.findAll({
+        ...notificationOptions,
         where: {
           userId,
           event: 'automation.persistent_alert',
@@ -5653,8 +5719,8 @@ async function handleSendSystemNotification(node, context, runtime) {
             superseded_by_node_id: cleanString(node?.id),
             superseded_at: supersededAt.toISOString(),
           },
-        });
-        emitNotificationUpdated(previousAlert);
+        }, notificationOptions);
+        emitUpdated(previousAlert);
         notificationsSuperseded += 1;
       }
     }
@@ -5691,6 +5757,8 @@ async function handleSendSystemNotification(node, context, runtime) {
         presentationPreferenceKey,
         conversationAction,
         requiresAcknowledgement: displayMode === 'persistent_alert',
+        ...(mobileScope ? { request_event_id: Number(mobileScope.request.id), patientId: Number(mobileScope.request.patient_id),
+          reason: mobileScope.snapshot.reason, resolved: false } : {}),
       },
       clinicaId: clinicId,
     };
@@ -5700,12 +5768,18 @@ async function handleSendSystemNotification(node, context, runtime) {
       [notification, created] = await Notification.findOrCreate({
         where: { dedupeKey },
         defaults: payload,
+        ...notificationOptions,
       });
     } else {
-      notification = await Notification.create(payload);
+      notification = await Notification.create(payload, notificationOptions);
+    }
+    if (!created && mobileScope && notification.data?.reason !== mobileScope.snapshot.reason) {
+      await notification.update({ message, isRead: false, readAt: null,
+        data: { ...notification.data, ...payload.data } }, notificationOptions);
+      emitUpdated(notification);
     }
     if (created) {
-      emitNotificationCreated(notification);
+      emitCreated(notification);
       createdNotifications.push(notification);
     }
     resolvedNotifications.push(notification);
@@ -6464,6 +6538,35 @@ async function handleSendEmail(node, context, runtime = {}) {
   };
 }
 
+function isMobileVerificationProtocol(node, execution) {
+  return require('../lib/patient-mobile-verification').isFlow(execution);
+}
+
+async function processMobileVerificationWait(node, context, runtime) {
+  const anchor = resolveWaitResponseAnchor(context, node.config);
+  const outcome = await require('./patientMobileVerification.service').current().waitContext({ execution: runtime.execution,
+    timeoutMinutes: resolveTemplateValue(node.config?.timeout_duration, context) });
+  const { status, reply, wait_until: waitUntil, accepted_at: acceptedAt, deadline_at: deadlineAt, delivery_status: deliveryStatus } = outcome;
+  const mobile = { ...(context.mobile_verification || {}), ...(reply || {}), wait_node_id: node.id, runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
+    ...(status === 'timed_out' ? { reason: 'no_response' } : status === 'delivery_failed' ? { reason: 'delivery_failed' } : {}) };
+  const output = { status, listens_to_node_id: anchor.listens_to_node_id, accepted_at: acceptedAt || null,
+    timeout_at: deadlineAt || null, delivery_status: deliveryStatus || null,
+    reason: mobile.reason || null, response_message_id: reply?.response_message_id || null, response_text: reply?.response_text || null };
+  const contextPatch = { mobile_verification: mobile };
+  if (status === 'responded') {
+    contextPatch.last_response = reply.response_text;
+    contextPatch.last_prompt = anchor.listened_output?.message_preview || null;
+    contextPatch.last_response_context = { response_text: reply.response_text, response_message_id: reply.response_message_id,
+      wait_node_id: node.id, listens_to_node_id: anchor.listens_to_node_id, listened_message_preview: contextPatch.last_prompt };
+  }
+  if (waitUntil) return { kind: 'waiting', output, context_patch: contextPatch, wait_until: waitUntil,
+    waiting_meta: { type: 'delay/wait_response', resume_mode: 'retry_current_node', runtime_namespace: CURRENT_RUNTIME_NAMESPACE,
+      mobile_verification_protocol: true, listens_to_node_id: anchor.listens_to_node_id,
+      reason: status, response_buffer_enabled: node.config.response_buffer_enabled !== false } };
+  const edge = status === 'responded' ? 'on_response' : status === 'timed_out' ? 'on_timeout' : status === 'delivery_failed' ? 'on_fail' : null;
+  return { kind: 'success', output, context_patch: contextPatch, next_node_id: edge ? readOutputTarget(node, edge) : null };
+}
+
 async function processNode(node, context, runtime = {}) {
   const nodeType = cleanString(node?.type) || 'unknown';
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
@@ -6481,15 +6584,10 @@ async function processNode(node, context, runtime = {}) {
   }
 
   switch (nodeType) {
-    case 'action/request_mobile_verification':
+    case 'action/resolve_mobile_verification':
+      if (!require('../lib/patient-mobile-verification').isFlow(runtime.execution)) throw new Error('mobile_verification_execution_scope');
       if (simulation) return { kind: 'success', output: { simulated: true, no_send: true }, next_node_id: readOutputTarget(node, 'on_success') };
-      return require('./patientMobileVerification.service').current().requestAction({ execution: runtime.execution, node, context });
-    case 'delay/wait_mobile_verification':
-      if (simulation) return { kind: 'success', output: { simulated: true, no_send: true }, next_node_id: readOutputTarget(node, 'on_confirmed') };
-      return require('./patientMobileVerification.service').current().waitAction({ execution: runtime.execution, node, context });
-    case 'action/review_mobile_verification':
-      if (simulation) return { kind: 'success', output: { simulated: true, no_send: true }, next_node_id: readOutputTarget(node, 'on_success') };
-      return require('./patientMobileVerification.service').current().reviewAction({ execution: runtime.execution, node, context });
+      return require('./patientMobileVerification.service').current().resolveAction({ execution: runtime.execution, node, context });
     case 'action/remind_google_review': {
       if (simulation) return { kind: 'success', output: { status: 'simulated', no_send: true }, next_node_id: readOutputTarget(node, 'on_success') };
       return require('./googleReviewReminder.service').current().action({ execution: runtime.execution, context, node });
@@ -7079,6 +7177,7 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'delay/wait_response': {
+      if (isMobileVerificationProtocol(node, runtime.execution) && !simulation) return processMobileVerificationWait(node, context, runtime);
       const timeoutMs = resolveDurationMs(config?.timeout_duration ?? 60, config?.timeout_unit || 'minutes');
       const waitAnchor = resolveWaitResponseAnchor(context, config);
       const waitStartAt = waitAnchor.anchor_at || new Date();
@@ -7235,6 +7334,11 @@ async function processNode(node, context, runtime = {}) {
       if (!normalizedOutputFields.length) {
         throw new Error('ai_analysis_output_fields_required');
       }
+      const mobileAnalysis = require('../lib/patient-mobile-verification').isFlow(runtime.execution)
+        && presetKey === require('../lib/patient-mobile-verification').AI_PRESET;
+      const mobileAnalysisVersion = mobileAnalysis && !simulation
+        ? await require('./patientMobileVerification.service').current().attestAnalysis({ execution: runtime.execution, context: aiContext, sourceEntries, resolvedSources })
+        : null;
 
       const deterministicPresetOutput = presetKey === 'review_response_classifier' && !simulation
         ? await reviewResponseClassification.classifyReviewResponse({
@@ -7370,6 +7474,15 @@ async function processNode(node, context, runtime = {}) {
         });
       }
       aiOutput = normalizeConfiguredAiOutput(aiOutput, normalizedOutputFields);
+      if (mobileAnalysis) {
+        const evidence = typeof aiOutput.evidence === 'string' ? aiOutput.evidence.trim() : '';
+        if (!mobileAnalysisVersion || !evidence || !String(context.mobile_verification?.response_text || '').includes(evidence)
+          || typeof aiOutput.confidence !== 'number' || aiOutput.confidence < 0.9 || aiOutput.confidence > 1 || aiOutput.unequivocal !== true) {
+          aiOutput = { ...aiOutput, intent: 'unclear', unequivocal: false };
+        }
+        aiOutput._mobile_verification_message_id = context.mobile_verification?.response_message_id || null;
+        aiOutput._mobile_verification_response_version = mobileAnalysisVersion;
+      }
       if (presetKey === 'classify_intent') {
         await persistClassifyIntentState(runtime?.execution, runtimeTargets, aiOutput);
       }
@@ -7516,6 +7629,14 @@ async function resumeWaitingNode(execution, node, context, {
   const nodeType = cleanString(node?.type) || '';
 
   if (nodeType === 'delay/wait_response') {
+    if (isMobileVerificationProtocol(node, execution)) {
+      const result = await processMobileVerificationWait(node, context, { execution });
+      const nextContext = mergeNodeOutput(mergeContextPatch(context, result.context_patch), node.id, result.output);
+      await updateExecutionAndEmit(execution, { status: result.kind === 'waiting' ? 'waiting' : 'running', context: nextContext,
+        current_node_id: result.kind === 'waiting' ? node.id : result.next_node_id,
+        wait_until: result.wait_until || null, waiting_meta: result.waiting_meta || null, last_error: null });
+      return { resumed: result.kind !== 'waiting', context: nextContext };
+    }
     const useResponse = mode === 'response';
     const responseOnlyExpiry = !useResponse
       && require('../lib/automation-response-only-recovery').isResponseOnlyRecoveryWait(execution, node);
@@ -8419,6 +8540,9 @@ async function runExecution(executionId, options = {}) {
       }
 
       if (result.kind === 'waiting') {
+        if (require('../lib/patient-mobile-verification').isFlow(execution) && result.context_patch) {
+          context = mergeContextPatch(context, result.context_patch);
+        }
         context = mergeNodeOutput(context, currentNodeId, {
           ...(result.output || {}),
           status: 'waiting',
@@ -8522,7 +8646,7 @@ async function runExecution(executionId, options = {}) {
         throw error;
       }
       const onFailNode = readOutputTarget(node, 'on_fail');
-      if (cleanString(node?.type) === 'action/send_whatsapp') {
+      if (cleanString(node?.type) === 'action/send_whatsapp' && !require('../lib/patient-mobile-verification').isFlow(execution)) {
         await materializeFailedAutomationWhatsappMessage({
           node,
           context,

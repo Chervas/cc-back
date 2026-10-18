@@ -55,7 +55,7 @@ function createRuntime(deps) {
   }
   async function closeTasks(request, transaction, reason) {
     const notifications = await db.Notification.findAll({ where: { clinicaId: request.clinic_id,
-      event: 'patient.mobile_verification_review',
+      event: { [Op.in]: ['patient.mobile_verification_review', 'automation.persistent_alert', 'automation.system_notification'] },
       [Op.and]: db.Sequelize.where(db.Sequelize.literal("JSON_UNQUOTE(JSON_EXTRACT(data,'$.request_event_id'))"), String(request.id)) }, transaction });
     for (const notification of notifications) {
       await notification.update({ isRead: true, readAt: now(),
@@ -63,34 +63,26 @@ function createRuntime(deps) {
       if (deps.notificationUpdated) transaction.afterCommit(() => deps.notificationUpdated(notification));
     }
   }
-  async function wake(request, transaction) {
+  async function wake(request, transaction, dueAt = now()) {
     const execution = await db.FlowExecutionV2.findOne({ where: { idempotency_key: requestKey(request) }, transaction });
     if (!execution || execution.status !== 'waiting') return;
-    await execution.update({ wait_until: now() }, { transaction });
+    await execution.update({ wait_until: dueAt }, { transaction });
     if (deps.wake) await deps.wake(execution, transaction);
+    if (deps.enqueueJob) await deps.enqueueJob({ type: 'automations_v2_execute',
+      payload: { execution_id: execution.id, __runtime_namespace: execution.waiting_meta?.runtime_namespace
+        || execution.context?.mobile_verification?.runtime_namespace }, priority: 'high', status: 'pending', origin: 'patient_mobile_verification',
+      nextRunAt: dueAt, dedupeScope: `flow_execution:${execution.id}`, requestedBy: request.actor_user_id, requestedByRole: 'system' }, { transaction });
   }
-  async function notify(request, snapshot, transaction, patient) {
-    let recipients = await deps.assignees(request.clinic_id, transaction);
-    if (!recipients.length) recipients = [request.actor_user_id];
-    for (const userId of [...new Set(recipients.map(C.id).filter(Boolean))]) {
-      const dedupeKey = `patient-mobile-verification:${request.id}:${userId}`;
-      const patientName = [patient?.nombre, patient?.apellidos].filter(Boolean).join(' ').trim() || `Paciente #${request.patient_id}`;
-      const message = C.reasons[snapshot.reason] || 'Verificación del móvil pendiente';
-      const [notification, created] = await db.Notification.findOrCreate({ where: { dedupeKey }, defaults: {
-        userId, clinicaId: request.clinic_id, category: 'general', event: 'patient.mobile_verification_review',
-        title: `Revisar móvil: ${patientName}`.slice(0, 255), message,
-        level: 'warning', icon: 'heroicons_outline:device-phone-mobile', dedupeKey,
-        data: { source: 'automations_v2', patientId: request.patient_id, clinicId: request.clinic_id,
-          request_event_id: Number(request.id), reason: snapshot.reason, displayMode: 'persistent_alert', requiresAcknowledgement: true,
-          link: `/pacientes/detalle/${request.patient_id}/datos-personales?clinic_id=${request.clinic_id}`, resolved: false },
-      }, transaction });
-      if (created && deps.notificationCreated) transaction.afterCommit(() => deps.notificationCreated(notification));
-      if (!created && notification.data?.reason !== snapshot.reason) {
-        await notification.update({ message, isRead: false, readAt: null,
-          data: { ...notification.data, reason: snapshot.reason } }, { transaction });
-        if (deps.notificationUpdated) transaction.afterCommit(() => deps.notificationUpdated(notification));
+  async function withNotification({ execution, node }, createNotification) {
+    const request = await fromExecution(execution);
+    return db.sequelize.transaction(async transaction => {
+      const patient = await lockPatient(request, transaction), snapshot = await state(request, transaction);
+      if (!await current(request, patient, transaction) || !snapshot.current || snapshot.state !== 'review_required'
+        || snapshot.manually_resolved || snapshot.provenance === 'manual_review') {
+        return { kind: 'success', output: { status: 'review_not_required', notifications_created: 0 }, next_node_id: node.outputs?.on_success || null };
       }
-    }
+      return createNotification({ request, snapshot, transaction });
+    });
   }
   async function localTemplate(clinicId, transaction) {
     const rows = await db.AutomationFlowTemplateV2.findAll({ where: { clinic_id: clinicId, trigger_type: C.REQUEST,
@@ -179,74 +171,32 @@ function createRuntime(deps) {
   async function messageFor(request) {
     return db.Message.findOne({ where: { automation_delivery_key: `mobile-verification:${request.id}:outbound` } });
   }
-  async function requestAction({ execution, node, context }) {
-    const done = (key, output) => ({ kind: 'success', output, next_node_id: node.outputs?.[key] || null });
-    if (context?.__simulation) return done('on_success', { simulated: true, no_send: true });
+  async function sendPreflight({ execution }) {
     const request = await fromExecution(execution), patient = await db.Paciente.findByPk(request.patient_id);
-    if (!patient || !await current(request, patient)) return done('on_superseded', { reason: 'source_changed' });
     const snapshot = await state(request);
-    if (!snapshot.current || snapshot.state === 'confirmed') return done('on_superseded', { reason: 'already_resolved' });
-    if (snapshot.state === 'review_required') return done('on_review', { reason: snapshot.reason });
-    if (!enabled() || request.metadata.delivery_enabled !== true || !C.timeout(request.metadata.response_timeout_minutes)) {
-      return done('on_superseded', { reason: 'delivery_disabled' });
+    if (!enabled() || request.metadata.delivery_enabled !== true || !C.timeout(request.metadata.response_timeout_minutes)
+      || !patient || !await current(request, patient) || !snapshot.current || snapshot.state !== 'pending'
+      || snapshot.provenance === 'manual_review') return { suppressed: true };
+    await communicationAllowed(request);
+    const candidates = await db.Conversation.findAll({ where: { clinic_id: request.clinic_id, channel: 'whatsapp',
+      contact_id: { [Op.in]: require('../lib/phone').getPhoneIdentityCandidates(request.metadata.phone) } }, limit: 3 });
+    if (candidates.length > 1 || candidates.some(c => Number(c.patient_id) !== Number(request.patient_id) || c.lead_id)) {
+      throw fail('mobile_verification_conversation_conflict');
     }
-    const quiet = deps.engine.computeQuietHoursDelayMs({ now: now(), enabled: true });
-    if (quiet.delayMs > 0) return { kind: 'waiting', wait_until: quiet.scheduledAt,
-      waiting_meta: { type: node.type, resume_mode: 'retry_current_node', reason: 'quiet_hours' } };
-    let sender;
-    try { await communicationAllowed(request); sender = await deps.engine.resolveScheduledWhatsappSenderConfig({
-      metadata: {}, clinicId: request.clinic_id }); }
-    catch { return done('on_review', { reason: 'communication_blocked' }); }
-    const templates = await db.WhatsappTemplate.findAll({ where: { waba_id: String(sender.wabaId), status: 'APPROVED', is_active: true,
-      name: { [Op.like]: `${C.TEMPLATE}%` } }, limit: 20, order: [['id', 'DESC']] });
-    const template = templates.find(C.templateValid);
-    if (!template) return done('on_review', { reason: 'template_unavailable' });
-    let conversation;
-    await db.sequelize.transaction(async transaction => {
-      const locked = await lockPatient(request, transaction);
-      if (!await current(request, locked, transaction)) return;
-      const candidates = await db.Conversation.findAll({ where: { clinic_id: request.clinic_id, channel: 'whatsapp',
-        contact_id: { [Op.in]: require('../lib/phone').getPhoneIdentityCandidates(request.metadata.phone) } }, limit: 3, transaction });
-      if (candidates.length > 1 || candidates.some(c => Number(c.patient_id) !== Number(request.patient_id) || c.lead_id)) return;
-      conversation = candidates[0] || await db.Conversation.create({ clinic_id: request.clinic_id, channel: 'whatsapp',
-        patient_id: request.patient_id, contact_id: request.metadata.phone, unread_count: 0 }, { transaction });
-    });
-    if (!conversation) return done('on_review', { reason: 'conversation_conflict' });
-    const clinic = await db.Clinica.findByPk(request.clinic_id, { attributes: ['nombre_clinica'] });
+    return { request, delivery_key: `mobile-verification:${request.id}`, recipient: C.phone(request.metadata.phone) };
+  }
+  async function sendEnvelope({ request, template, templateParams, sender, conversation, recipient }) {
+    const storedTemplate = template?.id ? await db.WhatsappTemplate.findByPk(template.id) : null;
+    if (!C.templateValid(storedTemplate) || String(storedTemplate.waba_id) !== String(sender.wabaId)) throw fail('mobile_verification_template_unavailable');
+    if (Number(conversation?.clinic_id) !== Number(request.clinic_id) || Number(conversation?.patient_id) !== Number(request.patient_id)
+      || conversation?.lead_id || C.phone(conversation?.contact_id) !== C.phone(request.metadata.phone)
+      || C.phone(recipient) !== C.phone(request.metadata.phone)) throw fail('mobile_verification_recipient_mismatch');
     const token = request.metadata.reply_token;
-    if (!/^[a-f0-9]{36}$/.test(token || '')) return done('on_review', { reason: 'source_changed' });
-    const templateComponents = [{ type: 'body', parameters: [{ type: 'text', text: clinic.nombre_clinica }] },
-      ...['yes', 'no'].map((answer, index) => ({ type: 'button', sub_type: 'quick_reply', index: String(index),
-        parameters: [{ type: 'payload', payload: `pmv:${request.id}:${token}:${answer}` }] }))];
-    const { message, created } = await deps.engine.findOrCreateAutomationWhatsappMessage({ deliveryKey: `mobile-verification:${request.id}`,
-      messageType: 'template', values: { conversation_id: conversation.id, direction: 'outbound', sender_id: null,
-        content: C.BODY.replace('{{1}}', clinic.nombre_clinica), message_type: 'template', status: 'pending', metadata: {
-          source: 'automations_v2', kind: 'patient_mobile_verification', communication_scope: 'care',
-          mobile_verification_request_id: Number(request.id), execution_id: execution.id, node_id: node.id,
-          recipient_patient_id: request.patient_id, recipient: request.metadata.phone,
-          sender_origin_id: sender.originId, phoneNumberId: sender.phoneNumberId, wabaId: sender.wabaId,
-          template_id: template.id, template_name: template.name, template_language: template.language,
-          template_params: { 1: clinic.nombre_clinica }, template_components: templateComponents,
-          template_buttons: C.BUTTONS.map(text => ({ type: 'QUICK_REPLY', text })),
-        } } });
-    if (!message.metadata?.wamid && !message.metadata?.delivery_unknown && !message.metadata?.dispatch_wait
-      && (created || message.status === 'pending' && !message.metadata?.mobile_verification_transport_queued_at)) {
-      try {
-        await deps.engine.enqueueAutomationWhatsappTransport({ msg: message, conversation, recipient: request.metadata.phone,
-          dispatchKind: 'patient_mobile_verification', retryOnFailure: true });
-        await db.sequelize.transaction(async transaction => {
-          const fresh = await db.Message.findByPk(message.id, { transaction, lock: transaction.LOCK.UPDATE });
-          await fresh.update({ metadata: { ...fresh.metadata, mobile_verification_transport_queued_at: now().toISOString() } }, { transaction });
-        });
-      } catch {
-        // Queue publication can fail after storing its deterministic ID. Retry
-        // the same Message, never assume that ID proves a successful handoff.
-        if (+now() - rawTime(message.createdAt || message.created_at) >= 86400000) return done('on_review', { reason: 'delivery_failed' });
-        return { kind: 'waiting', wait_until: new Date(+now() + 60000),
-          waiting_meta: { type: node.type, resume_mode: 'retry_current_node', reason: 'transport_handoff' } };
-      }
-    }
-    return done('on_success', { message_id: message.id, conversation_id: conversation.id, request_event_id: Number(request.id) });
+    if (!/^[a-f0-9]{36}$/.test(token || '')) throw fail('mobile_verification_source_changed');
+    return { metadata: { kind: 'patient_mobile_verification', mobile_verification_request_id: Number(request.id) },
+      template_components: [{ type: 'body', parameters: [{ type: 'text', text: String(templateParams[1] || '') }] },
+        ...['yes', 'no'].map((answer, index) => ({ type: 'button', sub_type: 'quick_reply', index: String(index),
+          parameters: [{ type: 'payload', payload: `pmv:${request.id}:${token}:${answer}` }] }))] };
   }
   async function authorizeTransport({ message, to, sender, useTemplate, templateName, templateLanguage, templateComponents }) {
     const requestId = C.id(message.metadata?.mobile_verification_request_id);
@@ -261,7 +211,8 @@ function createRuntime(deps) {
       || message.automation_delivery_key !== `mobile-verification:${requestId}:outbound`
       || C.phone(to) !== C.phone(request.metadata.phone) || !useTemplate) return deny('mobile_verification_recipient_mismatch');
     const patient = await db.Paciente.findByPk(request.patient_id), snapshot = await state(request);
-    if (!patient || !await current(request, patient) || !snapshot.current || snapshot.state !== 'pending') return deny('mobile_verification_superseded');
+    if (!patient || !await current(request, patient) || !snapshot.current || snapshot.state !== 'pending'
+      || snapshot.provenance === 'manual_review') return deny('mobile_verification_superseded');
     const conversation = await db.Conversation.findByPk(message.conversation_id);
     if (!conversation || Number(conversation.clinic_id) !== Number(request.clinic_id)
       || Number(conversation.patient_id) !== Number(request.patient_id) || C.phone(conversation.contact_id) !== C.phone(to)
@@ -276,45 +227,154 @@ function createRuntime(deps) {
     if (quiet.delayMs > 0) return { allowed: true, deferredUntil: quiet.scheduledAt };
     return { allowed: true };
   }
-  async function waitAction({ execution, node, context }) {
-    const done = (key, reason) => ({ kind: 'success', output: { reason }, next_node_id: node.outputs?.[key] || null });
-    if (context?.__simulation) return done('on_confirmed', 'simulated');
+  async function delivery(request) {
+    const message = await messageFor(request), m = message?.metadata || {};
+    const acceptedAt = rawTime(m.provider_acceptance_at);
+    const held = m.provider_acceptance_status === 'held_for_quality_assessment' && !['sent', 'delivered', 'read'].includes(message?.status);
+    const expired = +now() - rawTime(message?.createdAt || message?.created_at) >= 86400000;
+    if (!message || message.status === 'failed' || m.cancelled || expired && (!Number.isFinite(acceptedAt) || !m.wamid || held)) {
+      return { status: 'delivery_failed', delivery_status: m.delivery_unknown ? 'unknown' : held ? 'held' : 'not_sent', message };
+    }
+    if (!Number.isFinite(acceptedAt) || !m.wamid || held) return { status: 'awaiting_transport', message };
+    const deadline = new Date(acceptedAt + C.timeout(request.metadata.response_timeout_minutes) * 60000);
+    return { status: +now() >= +deadline ? 'timed_out' : 'awaiting_response', delivery_status: 'accepted', message,
+      accepted_at: new Date(acceptedAt).toISOString(), deadline_at: deadline.toISOString() };
+  }
+  async function waitContext({ execution, timeoutMinutes }) {
     const request = await fromExecution(execution), patient = await db.Paciente.findByPk(request.patient_id);
     const snapshot = await state(request);
-    if (!patient || !await current(request, patient) || !snapshot.current) return done('on_superseded', 'source_changed');
-    if (snapshot.state === 'confirmed') return done('on_confirmed', 'confirmed');
-    if (snapshot.state === 'review_required') return done('on_review', snapshot.reason);
-    const message = await messageFor(request), m = message?.metadata || {};
-    if (!message || message.status === 'failed' || m.cancelled) return done('on_delivery_failed', 'delivery_failed');
-    const acceptedAt = rawTime(m.provider_acceptance_at);
-    const timeoutMs = C.timeout(request.metadata.response_timeout_minutes) * 60000;
-    if (!timeoutMs) return done('on_delivery_failed', 'source_changed');
-    if (!Number.isFinite(acceptedAt) || !m.wamid
-      || m.provider_acceptance_status === 'held_for_quality_assessment' && !['sent', 'delivered', 'read'].includes(message.status)) {
-      if (+now() - rawTime(message.createdAt || message.created_at) >= 86400000) return done('on_delivery_failed', m.delivery_unknown ? 'delivery_unknown' : 'delivery_failed');
-      return { kind: 'waiting', wait_until: new Date(+now() + 60000), waiting_meta: { type: node.type, resume_mode: 'retry_current_node', reason: 'awaiting_transport' } };
+    if (!patient || !await current(request, patient) || !snapshot.current || snapshot.manually_resolved
+      || snapshot.provenance === 'manual_review' || snapshot.state === 'confirmed'
+      || snapshot.state === 'review_required' && snapshot.reason !== 'no_response') return { status: 'superseded' };
+    if (C.timeout(timeoutMinutes) !== C.timeout(request.metadata.response_timeout_minutes) || !C.timeout(timeoutMinutes)) {
+      throw fail('mobile_verification_timeout_invalid');
     }
-    const dueAt = new Date(acceptedAt + timeoutMs);
-    if (+now() >= +dueAt) return done('on_timeout', 'no_response');
-    return { kind: 'waiting', output: { accepted_at: new Date(acceptedAt).toISOString(), deadline_at: dueAt.toISOString() },
-      wait_until: dueAt, waiting_meta: { type: node.type, resume_mode: 'retry_current_node', reason: 'awaiting_mobile_verification' } };
+    const fresh = await db.FlowExecutionV2.findByPk(execution.id);
+    const reply = fresh?.context?.mobile_verification || {};
+    if (reply.response_message_id && !snapshot.history.some(e => e.inbound_message_id === Number(reply.response_message_id))) {
+      if (rawTime(reply.response_buffer_until) > +now()) return { status: 'buffering', reply, wait_until: new Date(reply.response_buffer_until) };
+      return { status: 'responded', reply };
+    }
+    const transport = await delivery(request);
+    return { ...transport, wait_until: transport.status === 'awaiting_transport' ? new Date(+now() + 60000)
+      : transport.status === 'awaiting_response' ? new Date(transport.deadline_at) : null };
   }
-  async function reviewAction({ execution, node, context }) {
-    if (!context?.__simulation) {
-      const request = await fromExecution(execution);
-      await db.sequelize.transaction(async transaction => {
-        const patient = await lockPatient(request, transaction), previous = await state(request, transaction);
-        if (!await current(request, patient, transaction) || !previous.current || previous.state === 'confirmed' || previous.manually_resolved) return;
-        const reason = Object.values(context?.outputs || {}).map(v => v?.reason).filter(v => C.reasons[v]).at(-1) || 'delivery_failed';
-        const message = await messageFor(request);
-        const updated = previous.state === 'review_required' ? previous : await transition(request, previous,
-          { state: 'review_required', reason, provenance: 'automation', resolved_at: now().toISOString(),
-            accepted_at: message?.metadata?.provider_acceptance_at || null,
-            delivery_status: reason === 'no_response' ? 'accepted' : reason === 'delivery_unknown' ? 'unknown' : 'not_sent' }, transaction, true);
-        await notify(request, updated, transaction, patient);
-      });
+  async function replyProof(request, outbound, message, conversation) {
+    const m = message?.metadata || {}, payload = m.button?.payload || m.interactive?.button_reply?.id || '';
+    const match = /^pmv:([1-9]\d*):([a-f0-9]{36}):(yes|no)$/.exec(payload);
+    const inboundAt = rawTime(message?.sent_at || message?.createdAt);
+    if (!message || message.direction !== 'inbound' || conversation?.channel !== 'whatsapp'
+      || Number(message.conversation_id) !== Number(conversation.id)
+      || Number(conversation.clinic_id) !== Number(request.clinic_id) || Number(conversation.patient_id) !== Number(request.patient_id)
+      || conversation.lead_id || C.phone(conversation.contact_id) !== C.phone(request.metadata.phone)
+      || m.historical !== false || m.recovery_without_automation === true || m.media_recovered_without_automation === true
+      || m.automatic_actions_allowed !== true || !m.inbox_receipt || !m.fresh_inbound_dispatched_at
+      || !outbound || outbound.automation_delivery_key !== `mobile-verification:${request.id}:outbound`
+      || Number(outbound.metadata?.mobile_verification_request_id) !== Number(request.id)
+      || Number(outbound.conversation_id) !== Number(conversation.id) || !outbound.metadata?.wamid
+      || String(m.phone_number_id || m.phoneNumberId || '') !== String(outbound.metadata.phoneNumberId)
+      || String(m.waba_id || m.wabaId || '') !== String(outbound.metadata.wabaId)
+      || !Number.isFinite(rawTime(outbound.metadata.provider_acceptance_at)) || !Number.isFinite(inboundAt)
+      || inboundAt > +now() + 60000 || inboundAt < rawTime(outbound.metadata.provider_acceptance_at)
+      || m.context?.id && m.context.id !== outbound.metadata.wamid
+      || payload.startsWith('pmv:') && (!match || Number(match[1]) !== Number(request.id) || match[2] !== request.metadata.reply_token)) return null;
+    if (!m.context?.id && !match) {
+      const last = await db.Message.findOne({ where: { conversation_id: conversation.id, direction: 'outbound', message_type: { [Op.ne]: 'event' } }, order: [['id', 'DESC']] });
+      if (Number(last?.id) !== Number(outbound.id)) return null;
     }
-    return { kind: 'success', output: { reception_review: true }, next_node_id: node.outputs?.on_success || null };
+    return { reply_answer: match?.[3] || null, response_text: String(message.content || ''), response_message_id: Number(message.id) };
+  }
+  async function replyBatch(request, outbound, ids, conversation, transaction) {
+    const rows = await db.Message.findAll({ where: { id: { [Op.in]: ids }, conversation_id: conversation.id, direction: 'inbound' },
+      order: [['sent_at', 'ASC'], ['createdAt', 'ASC'], ['id', 'ASC']], transaction });
+    if (rows.length !== ids.length) return null;
+    const proofs = [];
+    for (const message of rows) {
+      if (require('../lib/automation-conversation-context').isRevokedMessage(message)) return null;
+      const proof = await replyProof(request, outbound, message, conversation);
+      if (!proof) return null;
+      proofs.push(proof);
+    }
+    const last = proofs.at(-1), answer = proofs[0]?.reply_answer;
+    const messageIds = proofs.map(p => p.response_message_id);
+    return { ...last, reply_answer: answer && proofs.every(p => p.reply_answer === answer) ? answer : null,
+      response_text: proofs.map(p => p.response_text).join('\n'), response_message_ids: messageIds,
+      response_version: messageIds.join(':') };
+  }
+  async function resolveAction({ execution, node, context = {} }) {
+    const done = (key, output) => ({ kind: 'success', output, context_patch: { mobile_verification: output }, next_node_id: node.outputs?.[key] || null });
+    const result = node.config?.result, reason = node.config?.reason || null;
+    if (!['confirmed', 'review_required'].includes(result) || result === 'confirmed' && reason
+      || result === 'review_required' && !['patient_rejected', 'response_unclear', 'no_response', 'delivery_failed'].includes(reason)) throw fail('mobile_verification_result_invalid');
+    if (context.__simulation) return done('on_success', { simulated: true, no_send: true });
+    const request = await fromExecution(execution);
+    return db.sequelize.transaction(async transaction => {
+      const patient = await lockPatient(request, transaction), previous = await state(request, transaction);
+      if (!await current(request, patient, transaction) || !previous.current || previous.manually_resolved
+        || previous.provenance === 'manual_review' || previous.state === 'confirmed' && result !== 'confirmed'
+        || previous.state === 'review_required' && previous.reason !== 'no_response' && (result !== previous.state || reason !== previous.reason)) {
+        return done('on_fail', { applied: false, reason: 'source_changed' });
+      }
+      const fresh = await db.FlowExecutionV2.findByPk(execution.id, { transaction, lock: transaction.LOCK.UPDATE });
+      const reply = fresh.context?.mobile_verification || {};
+      const retryReply = () => ({ kind: 'success', output: { applied: false, reason: 'response_changed' },
+        next_node_id: reply.wait_node_id || node.outputs?.on_fail || null });
+      if (C.id(context.mobile_verification?.response_message_id) !== C.id(reply.response_message_id)
+        || context.mobile_verification?.response_version !== reply.response_version) {
+        return retryReply();
+      }
+      if (rawTime(reply.response_buffer_until) > +now()) return retryReply();
+      if (previous.state === result && previous.reason === reason) return done('on_success', { applied: false, result, reason, reason_text: C.reasons[reason] || null });
+      const transport = await delivery(request);
+      let proof;
+      if (result === 'confirmed' || ['patient_rejected', 'response_unclear'].includes(reason)) {
+        const message = reply.response_message_id ? await db.Message.findByPk(reply.response_message_id, { transaction }) : null;
+        const conversation = message ? await db.Conversation.findByPk(message.conversation_id, { transaction }) : null;
+        proof = conversation ? await replyBatch(request, transport.message, reply.response_message_ids || [], conversation, transaction) : null;
+        if (!proof || proof.response_text !== reply.response_text || proof.reply_answer !== reply.reply_answer) return done('on_fail', { applied: false, reason: 'reply_not_correlated' });
+        const intent = result === 'confirmed' ? 'correct' : 'incorrect';
+        const aiProof = (execution.templateVersion?.nodes || (await db.AutomationFlowTemplateV2.findByPk(execution.template_version_id, { transaction })).nodes)
+          .filter(n => n.type === 'condition/ai_analysis' && n.config?.preset_key === C.AI_PRESET)
+          .some(n => {
+            const output = context.outputs?.[n.id], evidence = typeof output?.evidence === 'string' ? output.evidence.trim() : '';
+            return output?._mobile_verification_response_version === proof.response_version && output.intent === intent
+              && typeof output.confidence === 'number' && output.confidence >= 0.9 && output.confidence <= 1
+              && output.unequivocal === true && !!evidence && proof.response_text.includes(evidence);
+          });
+        if (reason !== 'response_unclear' && !(proof.reply_answer === (intent === 'correct' ? 'yes' : 'no') || !proof.reply_answer && aiProof)) {
+          return done('on_fail', { applied: false, reason: 'reply_proof_required' });
+        }
+      } else if (reason === 'no_response') {
+        if (reply.response_message_id) return retryReply();
+        if (transport.status !== 'timed_out') return done('on_fail', { applied: false, reason: 'deadline_not_elapsed' });
+      } else {
+        const template = execution.templateVersion || await db.AutomationFlowTemplateV2.findByPk(execution.template_version_id, { transaction });
+        const sendIds = template.nodes.filter(n => n.type === 'action/send_whatsapp').map(n => n.id);
+        const failedSend = await db.FlowExecutionLogV2.findOne({ where: { flow_execution_id: execution.id, node_id: { [Op.in]: sendIds }, status: 'error' }, transaction });
+        if (transport.status !== 'delivery_failed' || !transport.message && !failedSend) return done('on_fail', { applied: false, reason: 'delivery_failure_required' });
+      }
+      const updated = await transition(request, previous, { state: result, reason, provenance: proof ? 'patient_reply' : 'automation',
+        inbound_message_id: proof?.response_message_id || null, resolved_at: now().toISOString(),
+        accepted_at: transport.message?.metadata?.provider_acceptance_at || null, delivery_status: transport.delivery_status || 'accepted' }, transaction, true);
+      if (result === 'confirmed') await closeTasks(request, transaction, 'patient_confirmed');
+      return done('on_success', { applied: true, result, reason, reason_text: C.reasons[reason] || null, revision: updated.revision });
+    });
+  }
+
+  async function attestAnalysis({ execution, context, sourceEntries, resolvedSources }) {
+    const request = await fromExecution(execution), outbound = await messageFor(request);
+    const fresh = await db.FlowExecutionV2.findByPk(execution.id), reply = fresh?.context?.mobile_verification;
+    const paths = sourceEntries.map(s => typeof s.path === 'string' ? s.path.replace(/\s+/g, '') : '');
+    if (!outbound || !reply?.response_version || context.mobile_verification?.response_version !== reply.response_version
+      || sourceEntries.length !== 2 || resolvedSources.length !== 2
+      || !paths.includes('{{last_prompt}}') || !paths.includes('{{mobile_verification.response_text}}')) return null;
+    const question = resolvedSources[paths.indexOf('{{last_prompt}}')]?.value;
+    const response = resolvedSources[paths.indexOf('{{mobile_verification.response_text}}')]?.value;
+    const conversation = await db.Conversation.findByPk(outbound.conversation_id);
+    const batch = await replyBatch(request, outbound, reply.response_message_ids || [], conversation);
+    if (!batch || question !== outbound.content || response !== batch.response_text || response !== reply.response_text
+      || batch.response_version !== reply.response_version) return null;
+    return reply.response_version;
   }
 
   async function inbound({ message, conversation }) {
@@ -339,37 +399,44 @@ function createRuntime(deps) {
       if (!snapshot.current || snapshot.manually_resolved || snapshot.state === 'confirmed'
         || snapshot.state === 'review_required' && snapshot.reason !== 'no_response') return { handled: false };
     }
-    if (!requestId || message.direction !== 'inbound' || conversation.channel !== 'whatsapp'
-      || m.historical !== false || m.recovery_without_automation === true || m.media_recovered_without_automation === true
-      || m.automatic_actions_allowed !== true || !m.inbox_receipt || !m.fresh_inbound_dispatched_at) return ignored('untrusted_or_historical');
-    if (!request || request.metadata?.delivery_enabled !== true || Number(request.clinic_id) !== Number(conversation.clinic_id)
-      || Number(request.patient_id) !== Number(conversation.patient_id)
-      || C.phone(conversation.contact_id) !== C.phone(request.metadata?.phone)) return ignored('scope_mismatch');
+    if (!request || request.metadata?.delivery_enabled !== true) return ignored('scope_mismatch');
     outbound = outbound || await messageFor(request);
-    const inboundAt = rawTime(message.sent_at || message.createdAt);
-    if (!outbound || Number(outbound.metadata?.mobile_verification_request_id) !== requestId
-      || outbound.automation_delivery_key !== `mobile-verification:${requestId}:outbound`
-      || Number(outbound.conversation_id) !== Number(conversation.id) || !outbound.metadata?.wamid
-      || String(m.phone_number_id || m.phoneNumberId || '') !== String(outbound.metadata.phoneNumberId)
-      || String(m.waba_id || m.wabaId || '') !== String(outbound.metadata.wabaId)
-      || match && match[2] !== request.metadata.reply_token
-      || !Number.isFinite(rawTime(outbound.metadata.provider_acceptance_at))
-      || !Number.isFinite(inboundAt) || inboundAt > +now() + 60000
-      || inboundAt < rawTime(outbound.metadata.provider_acceptance_at)) return ignored('reply_not_correlated');
+    const proof = await replyProof(request, outbound, message, conversation);
+    if (!proof) return ignored('reply_not_correlated');
     return db.sequelize.transaction(async transaction => {
       const patient = await lockPatient(request, transaction), previous = await state(request, transaction);
-      if (!await current(request, patient, transaction) || !previous.current || previous.manually_resolved || previous.state === 'confirmed') return ignored('resolved_or_superseded');
-      const answer = match?.[3];
+      if (!await current(request, patient, transaction) || !previous.current || previous.manually_resolved
+        || previous.provenance === 'manual_review' || previous.state === 'confirmed') return ignored('resolved_or_superseded');
       if (previous.history.some(e => e.inbound_message_id === Number(message.id))) return ignored('duplicate');
       if (previous.state === 'review_required' && previous.reason !== 'no_response') return ignored('review_already_requested');
-      const updated = await transition(request, previous, { state: answer === 'yes' ? 'confirmed' : 'review_required',
-        reason: answer === 'yes' ? null : answer === 'no' ? 'patient_rejected' : 'response_unclear',
-        provenance: 'patient_reply', inbound_message_id: message.id, resolved_at: now().toISOString(),
-        delivery_status: 'accepted', accepted_at: outbound.metadata.provider_acceptance_at }, transaction, true);
-      if (answer === 'yes') await closeTasks(request, transaction, 'patient_confirmed');
-      else await notify(request, updated, transaction, patient);
-      await wake(request, transaction);
-      return { handled: true, request_event_id: requestId, state: updated.state };
+      const execution = await db.FlowExecutionV2.findOne({ where: { idempotency_key: requestKey(request) }, transaction, lock: transaction.LOCK.UPDATE });
+      if (!execution || ['cancelled', 'failed'].includes(execution.status)) return ignored('execution_not_available');
+      const template = await db.AutomationFlowTemplateV2.findByPk(execution.template_version_id, { transaction });
+      const waits = template.nodes.filter(n => n.type === 'delay/wait_response'
+        && (n.id === execution.context?.mobile_verification?.wait_node_id || n.config.listens_to_node_id === outbound.metadata.node_id));
+      const wait = waits.find(n => n.id === execution.context?.mobile_verification?.wait_node_id) || (waits.length === 1 ? waits[0] : null);
+      if (!wait) return ignored('wait_not_available');
+      const previousReply = execution.context?.mobile_verification || {};
+      const seen = previousReply.response_message_ids || [];
+      if (seen.includes(Number(message.id))) return ignored('duplicate');
+      const batch = await replyBatch(request, outbound, [...seen, Number(message.id)], conversation, transaction);
+      if (!batch) return ignored('reply_batch_invalid');
+      const firstAt = rawTime(previousReply.first_response_at) || +now();
+      const delayMs = Number(wait.config.response_buffer_delay_ms ?? Number(wait.config.response_buffer_delay_seconds ?? 90) * 1000);
+      const bufferUntil = wait.config.response_buffer_enabled !== false && !batch.reply_answer
+        ? new Date(Math.min(+now() + (Number.isFinite(delayMs) && delayMs >= 0 ? delayMs : 90000), firstAt + 300000)) : now();
+      const context = { ...execution.context, mobile_verification: { ...previousReply, ...batch,
+        first_response_at: new Date(firstAt).toISOString(), response_buffer_until: bufferUntil.toISOString(),
+        request_event_id: requestId, wait_node_id: wait.id,
+        reason: null, reason_text: null } };
+      // A late reply re-enters its native wait; only graph traversal may resolve it.
+      const rearm = execution.status === 'completed' || execution.status === 'waiting';
+      await execution.update({ context, ...(rearm ? { status: 'waiting', current_node_id: wait.id, wait_until: bufferUntil,
+        waiting_meta: { type: 'delay/wait_response', resume_mode: 'retry_current_node', mobile_verification_protocol: true,
+          runtime_namespace: execution.waiting_meta?.runtime_namespace || previousReply.runtime_namespace,
+          listens_to_node_id: wait.config.listens_to_node_id } } : {}) }, { transaction });
+      await wake(request, transaction, bufferUntil);
+      return { handled: true, request_event_id: requestId, correlated: true };
     });
   }
   async function view({ patientId, clinicId, transaction }) {
@@ -416,13 +483,15 @@ function createRuntime(deps) {
     await wake(request, transaction);
     return { confirmed: payload.action === 'confirm', pending: payload.action === 'pending' };
   }
-  return { recordRequest, dispatch, requestAction, waitAction, reviewAction, authorizeTransport, inbound, view, manual, state, current };
+  return { recordRequest, dispatch, sendPreflight, sendEnvelope, waitContext, resolveAction, attestAnalysis, withNotification,
+    authorizeTransport, inbound, view, manual, state, current };
 }
 
 let runtime;
 async function wakeNativeJob(db, execution, transaction) {
-  await db.sequelize.query("UPDATE JobRequests SET next_run_at=UTC_TIMESTAMP() WHERE type='automations_v2_execute' AND status IN ('pending','waiting') AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.execution_id'))=:execution AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.__runtime_namespace'))=:namespace", {
-    replacements: { execution: String(execution.id), namespace: require('./jobRequests.service').getCurrentRuntimeNamespace() }, transaction });
+  await db.sequelize.query("UPDATE JobRequests SET next_run_at=:dueAt WHERE type='automations_v2_execute' AND status IN ('pending','waiting') AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.execution_id'))=:execution AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.__runtime_namespace'))=:namespace", {
+    replacements: { execution: String(execution.id), dueAt: execution.wait_until || new Date(), namespace: execution.waiting_meta?.runtime_namespace
+      || execution.context?.mobile_verification?.runtime_namespace || require('./jobRequests.service').getCurrentRuntimeNamespace() }, transaction });
 }
 function current() {
   if (!runtime) {

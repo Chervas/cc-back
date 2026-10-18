@@ -1020,15 +1020,14 @@ function resolveDomainFromTriggerType(triggerType) {
 
 const NODE_TYPES_V2 = [
   ...TRIGGER_NODE_TYPES_V2,
-  { type: 'action/request_mobile_verification', category: 'action', label: 'Solicitar verificación del móvil',
-    description: 'Prepara una sola solicitud Utility al móvil congelado, respetando permisos y bloqueos.',
-    output_keys: ['on_success', 'on_review', 'on_superseded'], runtime_status: 'real', default_config: {}, config_schema: [] },
-  { type: 'delay/wait_mobile_verification', category: 'delay', label: 'Esperar verificación del móvil',
-    description: 'Distingue confirmación, revisión, falta de respuesta y fallo de entrega. El plazo empieza al aceptar el envío.',
-    output_keys: ['on_confirmed', 'on_review', 'on_timeout', 'on_delivery_failed', 'on_superseded'], runtime_status: 'real', default_config: {}, config_schema: [] },
-  { type: 'action/review_mobile_verification', category: 'action', label: 'Solicitar revisión a recepción',
-    description: 'Acción pendiente única en la ficha, sin cambiar citas ni permisos comerciales.',
-    output_keys: ['on_success'], runtime_status: 'real', default_config: {}, config_schema: [] },
+  { type: 'action/resolve_mobile_verification', category: 'action', label: 'Registrar verificación del móvil',
+    description: 'Registra un resultado auditado de la solicitud vigente. No envía mensajes, espera respuestas ni crea avisos.',
+    output_keys: ['on_success', 'on_fail'], runtime_status: 'real',
+    default_config: { result: 'review_required', reason: 'response_unclear' }, config_schema: [
+      { key: 'result', label: 'Resultado', input_type: 'select', required: true, options: ['confirmed', 'review_required'] },
+      { key: 'reason', label: 'Motivo de revisión', input_type: 'select', required: false,
+        options: ['', 'patient_rejected', 'response_unclear', 'no_response', 'delivery_failed'] },
+    ] },
   {
     type: 'action/change_status',
     category: 'action',
@@ -1425,7 +1424,7 @@ const NODE_TYPES_V2 = [
     category: 'delay',
     label: 'Esperar respuesta',
     description: 'Espera una respuesta y continúa cuando se cumple el tiempo de espera o llega respuesta.',
-    output_keys: ['on_response', 'on_timeout'],
+    output_keys: ['on_response', 'on_timeout', 'on_fail'],
     runtime_status: 'real',
     default_config: {
       timeout_duration: 1,
@@ -3179,7 +3178,7 @@ function validateFlowGraph({ entry_node_id, nodes }) {
   const mobile = require('../lib/patient-mobile-verification');
   if (Array.isArray(nodes) && nodes.some(node => String(node?.type || '').includes('mobile_verification'))
     && !mobile.graphValid(nodes)) {
-    errors.push(buildValidationError('mobile_verification_graph_invalid', 'La verificación de móvil usa su activador y sus cinco nodos operativos, sin acciones de citas, publicidad o consentimientos.'));
+    errors.push(buildValidationError('mobile_verification_graph_invalid', 'La verificación de móvil se compone con nodos reutilizables del dominio paciente, sin acciones de citas, publicidad o consentimientos.'));
   }
 
   if (!Array.isArray(nodes) || nodes.length === 0) {
@@ -3328,6 +3327,15 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
 
   if (!meta) {
     return errors;
+  }
+
+  if (nodeType === 'action/resolve_mobile_verification'
+    && (!Array.from(nodeMap.values()).some(n => n.type === 'trigger/patient.mobile_verification_requested')
+      || !['confirmed', 'review_required'].includes(config.result)
+      || (config.result === 'confirmed' ? !!config.reason
+        : !['patient_rejected', 'response_unclear', 'no_response', 'delivery_failed'].includes(config.reason)))) {
+    errors.push(buildValidationError('mobile_verification_result_invalid',
+      `El nodo ${nodeId} sólo registra resultados de una solicitud de verificación de móvil vigente.`));
   }
 
   const schema = Array.isArray(meta.config_schema) ? meta.config_schema : [];
@@ -4159,10 +4167,12 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
 
   if (nodeType === 'delay/wait_response') {
     const timeoutDuration = Number(config.timeout_duration);
+    const mobileTimeout = config.timeout_duration === '{{trigger.data.response_timeout_minutes}}'
+      && Array.from(nodeMap.values()).some(n => n.type === 'trigger/patient.mobile_verification_requested');
     const timeoutUnit = cleanString(config.timeout_unit);
     const listensTo = cleanString(config.listens_to_node_id);
     const listenedNode = listensTo ? nodeMap.get(listensTo) : null;
-    if (!Number.isFinite(timeoutDuration) || timeoutDuration <= 0) {
+    if (!mobileTimeout && (!Number.isFinite(timeoutDuration) || timeoutDuration <= 0)) {
       errors.push(
         buildValidationError(
           'node_config_invalid',

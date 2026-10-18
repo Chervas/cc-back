@@ -1,312 +1,229 @@
 'use strict';
+
 const assert = require('node:assert/strict');
 const S = require('sequelize');
-const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
-const { loadSource } = require('./fixtures/business_profile_flow_runtime.fixture');
 const C = require('../../lib/patient-mobile-verification');
-const { createRuntime } = require('../../services/patientMobileVerification.service');
+const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
+const createFixture = require('./fixtures/patient_mobile_verification_modular_runtime.fixture');
+const { loadSource } = require('./fixtures/business_profile_flow_runtime.fixture');
 
-withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
-  db.Sequelize = S;
-  const D = S.DataTypes, pk = { type: D.INTEGER, primaryKey: true, autoIncrement: true };
-  const simple = (name, fields, table = name + 's') => sql.define(name, fields, { tableName: table, timestamps: false });
-  for (const [name, file] of Object.entries({ PatientOperationalEvent: 'patientoperationalevent',
-    AutomationFlowTemplateV2: 'automationflowtemplatev2', FlowExecutionV2: 'flowexecutionv2', FlowExecutionLogV2: 'flowexecutionlogv2', Message: 'message',
-    Notification: 'notification', AutomationFlowCatalog: 'automationflowcatalog', WhatsappTemplateCatalog: 'whatsapptemplatecatalog' })) {
-    db[name] = require('../../../models/' + file)(sql, D);
-  }
-  db.Clinica = simple('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, nombre_clinica: D.STRING }, 'Clinicas');
-  db.Paciente = simple('Paciente', { id_paciente: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER, telefono_movil: D.STRING }, 'Pacientes');
-  db.PacienteClinica = simple('PacienteClinica', { id: pk, paciente_id: D.INTEGER, clinica_id: D.INTEGER });
-  db.PatientConsentDocument = simple('PatientConsentDocument', { id: pk, paciente_id: D.INTEGER, clinica_id: D.INTEGER,
-    status: D.STRING, revoked_at: D.DATE, snapshot_hash: D.STRING });
-  db.Conversation = simple('Conversation', { id: pk, clinic_id: D.INTEGER, patient_id: D.INTEGER, lead_id: D.INTEGER,
-    channel: D.STRING, contact_id: D.STRING, unread_count: D.INTEGER });
-  db.WhatsappTemplate = simple('WhatsappTemplate', { id: pk, waba_id: D.STRING, name: D.STRING, language: D.STRING,
-    status: D.STRING, category: D.STRING, is_active: D.BOOLEAN, components: D.JSON });
-  db.JobRequest = require('../../../models/jobrequest')(sql, D);
-  db.PatientOperationalEvent.options.indexes.forEach((index, i) => { index.name = `qa_mobile_verification_${i}`; });
-  db.FlowExecutionV2.belongsTo(db.AutomationFlowTemplateV2, { foreignKey: 'template_version_id', as: 'templateVersion' });
-  await sql.sync();
-  await sql.getQueryInterface().addIndex('AutomationFlowTemplatesV2', ['public_id', 'version'], { unique: true });
-  await sql.getQueryInterface().addIndex('FlowExecutionsV2', ['idempotency_key'], { unique: true });
+withIsolatedCampaignMysql(async scope => {
+  const t = await createFixture(scope), { sql, report } = scope, { db, engine } = t;
   const check = text => report.checks.push(text);
+  const byType = (type, predicate = () => true) => t.template.nodes.find(n => n.type === type && predicate(n));
+  const send = byType('action/send_whatsapp'), wait = byType('delay/wait_response'), notify = byType('action/send_system_notification');
+  const resultNode = (result, reason = '') => byType(C.RESULT_ACTION, n => n.config.result === result && (n.config.reason || '') === reason);
+  const execution = request => db.FlowExecutionV2.findOne({ where: { trigger_entity_id: request.id, trigger_type: C.REQUEST } });
+  const outbound = request => db.Message.findOne({ where: { automation_delivery_key: `mobile-verification:${request.id}:outbound` } });
+  const tasks = request => db.Notification.findAll({ where: { dedupeKey: { [S.Op.like]: `patient-mobile-verification:${request.id}:%` } } });
+  async function run(exec, mode) {
+    const fresh = await db.FlowExecutionV2.findByPk(exec.id);
+    return engine.runExecution(exec.id, { ...(fresh.status === 'waiting' ? { resumeMode: mode || 'retry_current_node' } : {}) });
+  }
+  async function start(request = null) {
+    request ||= await t.source();
+    const dispatch = await t.runtime.dispatch({ request_event_id: request.id, clinic_id: request.clinic_id });
+    assert(dispatch.result.execution_id, JSON.stringify(dispatch));
+    const exec = await db.FlowExecutionV2.findByPk(dispatch.result.execution_id);
+    const persisted = await run(exec);
+    if (persisted.last_error && persisted.status !== 'waiting') throw Error(persisted.last_error);
+    const message = await outbound(request);
+    if (!message || persisted.status !== 'waiting') {
+      const errors = await db.FlowExecutionLogV2.findAll({ where: { flow_execution_id: exec.id, status: 'error' }, raw: true });
+      throw Error('TESTONLY_SEND_NOT_REACHED:' + errors.map(e => e.error_message).join(','));
+    }
+    return { request, exec: persisted, message };
+  }
+  async function accept(message, at = t.clock, status = 'accepted') {
+    await message.reload();
+    await message.update({ metadata: { ...message.metadata, wamid: 'wamid.TESTONLY.' + message.id,
+      provider_acceptance_at: at.toISOString(), provider_acceptance_status: status } });
+  }
+  async function reply(item, answer, text = 'TESTONLY free text', extra = {}) {
+    await item.message.reload();
+    const message = await db.Message.create({ conversation_id: item.message.conversation_id, direction: 'inbound',
+      content: text, message_type: 'text', status: 'delivered', sent_at: t.clock, metadata: { historical: false,
+        automatic_actions_allowed: true, inbox_receipt: 'TESTONLY', fresh_inbound_dispatched_at: t.clock.toISOString(),
+        phone_number_id: t.sender.phoneNumberId, waba_id: t.sender.wabaId, context: { id: item.message.metadata.wamid },
+        ...(answer ? { button: { payload: `pmv:${item.request.id}:${item.request.metadata.reply_token}:${answer}` } } : {}), ...extra } });
+    const conversation = await db.Conversation.findByPk(message.conversation_id);
+    return { message, conversation, result: await t.runtime.inbound({ message, conversation }) };
+  }
+  async function manual(request, action, extra = {}) {
+    const state = await t.runtime.state(request);
+    return sql.transaction(transaction => t.runtime.manual({ patientId: request.patient_id, clinicId: request.clinic_id,
+      actorId: 16, transaction, authorizeCurrent: async () => {}, payload: { request_event_id: request.id, revision: state.revision, action, ...extra } }));
+  }
+  async function resolve(item, node, context) {
+    const exec = await db.FlowExecutionV2.findByPk(item.exec.id);
+    return engine._processNode(node, context || exec.context, { execution: exec });
+  }
   const migration = require('../../../migrations/20261018100000-prepare-patient-mobile-verification-v2');
   await migration.up(sql.getQueryInterface()); await migration.up(sql.getQueryInterface());
-  assert.equal(await db.AutomationFlowTemplateV2.count(), 1);
+  await t.approved.update({ catalog_template_id: (await db.WhatsappTemplateCatalog.findOne({ where: { name: C.TEMPLATE } })).id });
+  assert.equal(await db.AutomationFlowTemplateV2.count({ where: { is_system: true } }), 1);
   assert.equal(await db.AutomationFlowCatalog.count({ where: { is_active: false } }), 1);
   assert.equal(await db.WhatsappTemplateCatalog.count({ where: { is_active: false } }), 1);
   assert.equal(await db.JobRequest.count() + await db.Message.count(), 0);
-  check('data-only migration is repeatable and prepares inactive catalogues without jobs/provider calls');
-  let clock = new Date('2026-10-20T12:00:00Z'), enabled = false, blocked = false, held = false, handoffFailures = 0;
-  const queued = [], sender = { originId: 30, phoneNumberId: 'TESTONLY-PHONE', wabaId: 'TESTONLY-WABA' };
-  const engine = loadSource('flowEngineV2.service', { '../../models': db,
-    './jobRequests.service': { getCurrentRuntimeNamespace: () => 'TESTONLY' } }, {}, 10000);
-  const requests = loadSource('jobRequests.service', { '../../models': db }, { JOB_RUNTIME_NAMESPACE: 'TESTONLY' });
-  const enqueueJob = requests.enqueueUniqueJobRequest;
-  const deps = { db, now: () => clock, enabled: () => enabled, enqueueJob,
-    assignees: async () => [15, 15, 16], authorizeActor: async () => { if (blocked) throw Error('access_denied'); },
-    patientHeld: async () => held, communicationAllowed: async () => { if (blocked) throw Error('blocked'); },
-    checkCorrection: async () => { if (blocked) throw Error('collision'); }, groupClinicIds: async () => [72, 73],
-    stop: { createExecution: v => db.FlowExecutionV2.create(v), isStop: () => false },
-    engine: { computeQuietHoursDelayMs: engine.computeQuietHoursDelayMs,
-      findOrCreateAutomationWhatsappMessage: args => engine.findOrCreateAutomationWhatsappMessage({ ...args,
-        values: { ...args.values, createdAt: clock } }),
-      resolveScheduledWhatsappSenderConfig: async () => sender,
-      enqueueAutomationWhatsappTransport: async ({ msg, recipient }) => {
-        await msg.update({ metadata: { ...msg.metadata, automation_transport_job_id: 'TESTONLY-' + msg.id } });
-        if (handoffFailures-- > 0) throw Error('TESTONLY queue unavailable after ID persisted');
-        queued.push({ id: msg.id, recipient });
-      } }, wake: async () => {} };
-  let runtime = createRuntime(deps);
-  await db.Clinica.bulkCreate([{ id_clinica: 72, nombre_clinica: 'TESTONLY Medical' }, { id_clinica: 73, nombre_clinica: 'TESTONLY Capilar' }]);
-  const local = await db.AutomationFlowTemplateV2.create({ ...C.definition(72), is_active: true, published_at: clock,
-    trigger_config: { configured: true, enabled_after: '2026-10-20T11:00:00Z', response_timeout_minutes: 60 } });
-  const approved = await db.WhatsappTemplate.create({ ...sender, waba_id: sender.wabaId, name: C.TEMPLATE, language: 'es_ES',
-    category: 'UTILITY', status: 'APPROVED', is_active: true,
-    components: [{ type: 'BODY', text: C.BODY }, { type: 'BUTTONS', buttons: C.BUTTONS.map(text => ({ type: 'QUICK_REPLY', text })) }] });
-  let patientSeq = 100;
-  async function source({ clinic = 72, phone, permitted } = {}) {
-    const patientId = ++patientSeq, number = phone || '34600' + String(patientId).padStart(6, '0');
-    await db.Paciente.create({ id_paciente: patientId, clinica_id: clinic, telefono_movil: number });
-    const doc = await db.PatientConsentDocument.create({ paciente_id: patientId, clinica_id: clinic,
-      status: 'signed', snapshot_hash: 'TESTONLY-' + patientId });
-    const request = await sql.transaction(async transaction => runtime.recordRequest({ patient_id: patientId, clinic_id: clinic,
-      actor_user_id: 15, source: 'privacy_profile_review', channel: 'internal', occurred_at: clock,
-      metadata: { document_id: doc.id, snapshot_hash: doc.snapshot_hash, previous_phone: '34699000000', phone: number } }, { transaction }));
-    if (permitted !== undefined) assert.equal(request.metadata.delivery_enabled, permitted);
-    return request;
-  }
-  async function execution(request) {
-    const r = await runtime.dispatch({ request_event_id: request.id, clinic_id: request.clinic_id });
-    return r.result.execution_id ? db.FlowExecutionV2.findByPk(r.result.execution_id) : null;
-  }
-  const nodes = local.nodes, send = nodes[1], wait = nodes[2], review = nodes[3];
-  const processEngine = loadSource('flowEngineV2.service', { '../../models': db,
-    './patientMobileVerification.service': { current: () => runtime },
-    './jobRequests.service': { getCurrentRuntimeNamespace: () => 'TESTONLY' } }, {}, 10000);
-  const process = (node, exec, context = exec.context) => processEngine._processNode(node, context, { execution: exec });
-  const transportArgs = message => ({ message, to: message.metadata.recipient, sender, useTemplate: true,
-    templateName: message.metadata.template_name, templateLanguage: message.metadata.template_language,
-    templateComponents: message.metadata.template_components });
-  async function sent(request) {
-    const exec = await execution(request), result = await process(send, exec);
-    assert.equal(result.next_node_id, 'N3');
-    const message = await db.Message.findByPk(result.output.message_id);
-    return { exec, message };
-  }
-  async function accept(message, at = clock) {
-    await message.update({ metadata: { ...message.metadata, wamid: 'wamid.TESTONLY.' + message.id,
-      provider_acceptance_at: at.toISOString(), provider_acceptance_status: 'accepted' } });
-  }
-  async function reply(request, message, answer, extra = {}) {
-    const inbound = await db.Message.create({ conversation_id: message.conversation_id, direction: 'inbound', content: answer || 'TESTONLY free text',
-      message_type: 'text', status: 'delivered', sent_at: clock, metadata: { automatic_actions_allowed: true,
-        historical: false, inbox_receipt: 'TESTONLY', fresh_inbound_dispatched_at: clock.toISOString(),
-        phone_number_id: sender.phoneNumberId, waba_id: sender.wabaId, context: { id: message.metadata.wamid },
-        ...(answer ? { button: { payload: `pmv:${request.id}:${request.metadata.reply_token}:${answer}` } } : {}), ...extra } });
-    const conversation = await db.Conversation.findByPk(message.conversation_id);
-    return { inbound, conversation, result: await runtime.inbound({ message: inbound, conversation }) };
-  }
-  async function task(exec, reason) { return process(review, exec, { ...exec.context, outputs: { result: { reason } } }); }
-  async function manual(request, action, rest = {}) {
-    const s = await runtime.state(request);
-    return sql.transaction(transaction => runtime.manual({ patientId: request.patient_id, clinicId: request.clinic_id,
-      actorId: 16, transaction, authorizeCurrent: async () => {}, payload: { request_event_id: request.id, revision: s.revision, action, ...rest } }));
-  }
+  const disabled = await t.source(); assert.equal(disabled.metadata.delivery_enabled, false);
+  assert.equal((await t.runtime.dispatch({ request_event_id: disabled.id, clinic_id: 72 })).result.skipped, true);
+  t.enabled = true;
+  assert.equal((await t.runtime.dispatch({ request_event_id: disabled.id, clinic_id: 72 })).result.skipped, true);
+  const missingScope = await t.source({ clinic: 73 }); assert.equal(missingScope.metadata.delivery_enabled, false);
+  check('repeatable preparation stays inactive; flag-off, historical disabled and missing scoped requests cannot dispatch');
 
-  const disabled = await source({ permitted: false });
-  assert.equal(await execution(disabled), null); assert.equal(await db.JobRequest.count(), 0);
-  enabled = true;
-  assert.equal(await execution(disabled), null);
-  const missingScope = await source({ clinic: 73, permitted: false }); assert.equal(await execution(missingScope), null);
-  check('global switch off, missing scoped activation and historical disabled requests never dispatch');
-  const first = await source({ permitted: true });
-  const dispatches = await Promise.all(Array.from({ length: 12 }, () => runtime.dispatch({ request_event_id: first.id, clinic_id: 72 })));
+  const request = await t.source();
+  const dispatches = await Promise.all(Array.from({ length: 12 }, () => t.runtime.dispatch({ request_event_id: request.id, clinic_id: 72 })));
   assert.equal(new Set(dispatches.map(r => r.result.execution_id)).size, 1);
-  assert.equal(await db.FlowExecutionV2.count(), 1);
   assert.equal(await db.JobRequest.count({ where: { type: 'automations_v2_execute' } }), 1);
-  const firstSent = await sent(first);
-  await process(send, firstSent.exec);
-  runtime = createRuntime(deps); await process(send, firstSent.exec);
-  assert.equal(queued.length, 1); assert.equal(queued[0].recipient, first.metadata.phone);
-  assert.equal(firstSent.exec.trigger_entity_type, 'patient_operational_event');
-  assert.equal((await runtime.authorizeTransport(transportArgs(firstSent.message))).allowed, true);
-  check('12 concurrent dispatches and repeated native V2 actions/restart use one execution/job/message/transport and frozen recipient');
-  const yesWait = await process(wait, firstSent.exec); assert.equal(yesWait.waiting_meta.reason, 'awaiting_transport');
-  clock = new Date(+clock + 2 * 3600000); await accept(firstSent.message);
-  const timed = await process(wait, firstSent.exec); assert.equal(+timed.wait_until, +clock + 3600000);
-  check('response clock starts at provider acceptance, not at request creation or queue publication');
-  const yes = await reply(first, firstSent.message, 'yes');
-  assert.equal(yes.result.state, 'confirmed'); assert.equal((await process(wait, firstSent.exec)).next_node_id, 'N5');
-  assert.equal((await runtime.inbound({ message: yes.inbound, conversation: yes.conversation })).ignored, true);
-  assert.equal((await runtime.state(first)).history.length, 1);
+  const first = await start(request);
+  assert.equal(first.exec.status, 'waiting'); assert.equal(first.exec.current_node_id, wait.id);
+  assert.equal(first.message.metadata.kind, 'patient_mobile_verification');
+  assert(first.message.metadata.template_components[1].parameters[0].payload.startsWith(`pmv:${request.id}:`));
+  assert.equal([...t.queued.values()][0].to, request.metadata.phone);
+  const count = t.queued.size;
+  await engine._processNode(send, first.exec.context, { execution: first.exec });
+  t.restart(); await engine._processNode(send, first.exec.context, { execution: first.exec });
+  assert.equal(t.queued.size, count); assert.equal(await db.Message.count(), 1);
+  t.clock = new Date(+t.clock + 2 * 3600000); await accept(first.message);
+  await run(first.exec, 'timeout');
+  const deadline = await db.FlowExecutionV2.findByPk(first.exec.id);
+  assert.equal(+deadline.wait_until, +t.clock + 3600000);
+  const yes = await reply(first, 'yes', 'Yes');
+  assert(yes.result.correlated); assert.equal((await t.runtime.state(request)).state, 'pending');
   assert.equal(await db.Notification.count(), 0);
-  const laterChat = await db.Message.create({ conversation_id: firstSent.message.conversation_id, direction: 'inbound',
-    message_type: 'text', content: 'TESTONLY unrelated conversation', sent_at: clock, metadata: {} });
-  assert.equal((await runtime.inbound({ message: laterChat, conversation: yes.conversation })).handled, false);
-  check('correlated positive reply verifies only the number; duplicate is harmless and no reception task is created');
-  const rejected = await source(), rejectedSent = await sent(rejected); await accept(rejectedSent.message);
-  await Promise.all([reply(rejected, rejectedSent.message, 'no'), reply(rejected, rejectedSent.message, 'no')]);
-  const rejectedState = await runtime.state(rejected);
-  assert.equal(rejectedState.reason, 'patient_rejected'); assert.equal(rejectedState.history.length, 1);
-  assert.equal(await db.Notification.count(), 2);
-  assert.equal((await db.Paciente.findByPk(rejected.patient_id)).telefono_movil, rejected.metadata.phone);
-  await task(rejectedSent.exec, 'no_response'); assert.equal(await db.Notification.count(), 2);
-  check('negative concurrent replies create one result and one task per reception employee; phone and commercial preferences are untouched');
-  const timeout = await source(), timeoutSent = await sent(timeout); await accept(timeoutSent.message);
-  clock = new Date(+clock + 61 * 60000);
-  assert.equal((await process(wait, timeoutSent.exec)).next_node_id, 'N4');
-  await task(timeoutSent.exec, 'no_response'); await task(timeoutSent.exec, 'no_response');
-  assert.equal((await runtime.state(timeout)).reason, 'no_response');
-  const late = await reply(timeout, timeoutSent.message, 'yes'); assert.equal(late.result.state, 'confirmed');
-  const lateTasks = await db.Notification.findAll({ where: { dedupeKey: { [S.Op.like]: `patient-mobile-verification:${timeout.id}:%` } } });
-  assert(lateTasks.every(n => n.isRead && n.data.resolved));
-  const lateNoRequest = await source(), lateNoSent = await sent(lateNoRequest); await accept(lateNoSent.message);
-  await task(lateNoSent.exec, 'no_response'); await reply(lateNoRequest, lateNoSent.message, 'no');
-  const lateNoTasks = await db.Notification.findAll({ where: { dedupeKey: { [S.Op.like]: `patient-mobile-verification:${lateNoRequest.id}:%` } } });
-  assert.equal(lateNoTasks.length, 2);
-  assert(lateNoTasks.every(n => n.message === C.reasons.patient_rejected && n.data.reason === 'patient_rejected' && !n.isRead));
-  check('no-response review is deduplicated; a current late yes closes all tasks without updating appointments');
-  const manualReq = await source(), manualSent = await sent(manualReq); await accept(manualSent.message);
-  await task(manualSent.exec, 'no_response'); await manual(manualReq, 'pending');
-  assert.equal((await runtime.state(manualReq)).state, 'review_required');
-  const beforeManual = (await runtime.state(manualReq)).revision;
-  await manual(manualReq, 'confirm');
-  const manualState = await runtime.state(manualReq);
-  assert.equal(manualState.state, 'confirmed'); assert.equal(manualState.actor_user_id, 16); assert(manualState.manually_resolved);
-  assert(manualState.resolved_at);
-  assert.equal((await reply(manualReq, manualSent.message, 'no')).result.ignored, true);
-  await assert.rejects(sql.transaction(transaction => runtime.manual({ patientId: manualReq.patient_id, clinicId: 72, actorId: 16,
-    transaction, authorizeCurrent: async () => {}, payload: { request_event_id: manualReq.id, revision: beforeManual, action: 'pending' } })), /mobile_verification_changed/);
-  check('manual confirm/keep-pending preserve employee/time/history, close tasks and reject stale revisions and later contradictory replies');
-  const corrected = await source(), correctedSent = await sent(corrected); await accept(correctedSent.message);
-  const nextPhone = '34601000199';
-  const correction = await manual(corrected, 'correct', { phone: nextPhone, acknowledged: true });
+  await run(first.exec);
+  assert.equal((await t.runtime.state(request)).state, 'confirmed'); assert.equal(t.aiCalls.length, 0);
+  assert.equal((await t.runtime.inbound({ message: yes.message, conversation: yes.conversation })).ignored, true);
+  assert.equal((await t.runtime.state(request)).history.length, 1);
+  check('real handleSendWhatsapp/native wait restart use one frozen-recipient message; acceptance starts clock; button YES traverses comparator/result without AI');
+
+  const rejected = await start(); await accept(rejected.message);
+  await Promise.all([reply(rejected, 'no', 'No'), reply(rejected, 'no', 'No')]);
+  assert.equal((await t.runtime.state(rejected.request)).state, 'pending'); await run(rejected.exec);
+  assert.equal((await t.runtime.state(rejected.request)).reason, 'patient_rejected'); assert.equal((await tasks(rejected.request)).length, 2);
+  await engine._processNode(notify, (await execution(rejected.request)).context, { execution: await execution(rejected.request) });
+  assert.equal((await tasks(rejected.request)).length, 2);
+  assert((await tasks(rejected.request)).every(n => n.event === 'automation.persistent_alert' && n.data.request_event_id === rejected.request.id));
+  await manual(rejected.request, 'confirm');
+  assert((await tasks(rejected.request)).every(n => n.isRead && n.data.resolved));
+  check('concurrent NO replies resolve atomically; generic persistent notification deduplicates per request/recipient');
+
+  const timedOut = await start(); await accept(timedOut.message);
+  assert.equal((await resolve(timedOut, resultNode('review_required', 'no_response'))).output.applied, false);
+  t.clock = new Date(+t.clock + 61 * 60000); await run(timedOut.exec);
+  assert.equal((await t.runtime.state(timedOut.request)).reason, 'no_response'); assert.equal((await tasks(timedOut.request)).length, 2);
+  await db.JobRequest.update({ status: 'completed' }, { where: { type: 'automations_v2_execute' } });
+  await reply(timedOut, 'yes', 'Yes'); assert.equal((await execution(timedOut.request)).status, 'waiting');
+  assert.equal((await t.runtime.state(timedOut.request)).reason, 'no_response'); t.restart(); await run(timedOut.exec);
+  assert.equal((await t.runtime.state(timedOut.request)).state, 'confirmed'); assert((await tasks(timedOut.request)).every(n => n.isRead && n.data.resolved));
+  const lateNo = await start(); await accept(lateNo.message); t.clock = new Date(+t.clock + 61 * 60000); await run(lateNo.exec);
+  await reply(lateNo, 'no', 'No'); await run(lateNo.exec); assert.equal((await tasks(lateNo.request)).length, 2);
+  assert((await tasks(lateNo.request)).every(n => n.data.reason === 'patient_rejected' && !n.isRead));
+  check('elapsed accepted deadline required; late YES/NO reopen native waits/jobs, close or update the same generic tasks');
+
+  const manualPending = await start(); await accept(manualPending.message); await manual(manualPending.request, 'pending');
+  assert.equal((await t.runtime.authorizeTransport({ message: manualPending.message, to: manualPending.request.metadata.phone,
+    sender: t.sender, useTemplate: true, templateName: manualPending.message.metadata.template_name,
+    templateLanguage: manualPending.message.metadata.template_language, templateComponents: manualPending.message.metadata.template_components })).allowed, false);
+  assert.equal((await reply(manualPending, 'yes')).result.ignored, true); const revision = (await t.runtime.state(manualPending.request)).revision;
+  await manual(manualPending.request, 'confirm'); assert.equal((await reply(manualPending, 'no')).result.ignored, true);
+  assert((await t.runtime.state(manualPending.request)).manually_resolved);
+  await assert.rejects(sql.transaction(transaction => t.runtime.manual({ patientId: manualPending.request.patient_id, clinicId: 72, actorId: 16,
+    transaction, authorizeCurrent: async () => {}, payload: { action: 'pending', request_event_id: manualPending.request.id, revision } })), /mobile_verification_changed/);
+  const corrected = await start(); await accept(corrected.message);
+  const correction = await manual(corrected.request, 'correct', { phone: '34601000199', acknowledged: true });
   const next = await db.PatientOperationalEvent.findByPk(correction.request_event_id);
-  assert.equal(next.metadata.phone, nextPhone); assert.equal(next.source, 'reception_mobile_verification');
-  assert.equal((await runtime.state(corrected)).current, false);
-  assert.equal((await reply(corrected, correctedSent.message, 'yes')).result.ignored, true);
-  assert.equal((await runtime.authorizeTransport(transportArgs(correctedSent.message))).allowed, false);
-  const backToA = await manual(next, 'correct', { phone: corrected.metadata.phone, acknowledged: true });
-  assert(backToA.request_event_id > correction.request_event_id);
-  assert.equal((await reply(corrected, correctedSent.message, 'yes')).result.ignored, true);
-  check('reception correction makes a new request; ABA phone changes invalidate old transport and old replies by request ID');
-  const failed = await source(), failedSent = await sent(failed);
-  await failedSent.message.update({ status: 'failed' });
-  assert.equal((await process(wait, failedSent.exec)).output.reason, 'delivery_failed');
-  await task(failedSent.exec, 'delivery_failed');
-  assert.equal((await runtime.state(failed)).reason, 'delivery_failed');
-  check('failed delivery becomes an explicit reception delivery task, never a no-response result');
-  const handoff = await source(), handoffExec = await execution(handoff); handoffFailures = 1;
-  const unpublished = await process(send, handoffExec);
-  assert.equal(unpublished.kind, 'waiting'); assert.equal(unpublished.waiting_meta.reason, 'transport_handoff');
-  runtime = createRuntime(deps);
-  const recoveredHandoff = await process(send, handoffExec);
-  assert.equal(recoveredHandoff.next_node_id, 'N3');
-  assert.equal(await db.Message.count({ where: { automation_delivery_key: `mobile-verification:${handoff.id}:outbound` } }), 1);
-  check('a queue failure after persisting its job ID waits and resumes after restart using the same Message; no phantom successful publication');
-  const uncertain = await source(), uncertainSent = await sent(uncertain);
-  await uncertainSent.message.update({ metadata: { ...uncertainSent.message.metadata, delivery_unknown: true } });
-  assert.equal((await process(wait, uncertainSent.exec)).waiting_meta.reason, 'awaiting_transport');
-  const queuedBefore = queued.length; await process(send, uncertainSent.exec); assert.equal(queued.length, queuedBefore);
-  await sql.query('UPDATE Messages SET createdAt=:at WHERE id=:id', {
-    replacements: { at: new Date(+clock - 86401000), id: uncertainSent.message.id } });
-  assert.equal((await process(wait, uncertainSent.exec)).output.reason, 'delivery_unknown');
-  const quality = await source(), qualitySent = await sent(quality); await accept(qualitySent.message);
-  await qualitySent.message.update({ metadata: { ...qualitySent.message.metadata, provider_acceptance_status: 'held_for_quality_assessment' } });
-  assert.equal((await process(wait, qualitySent.exec)).waiting_meta.reason, 'awaiting_transport');
-  await qualitySent.message.update({ status: 'delivered' });
-  assert.equal((await process(wait, qualitySent.exec)).waiting_meta.reason, 'awaiting_mobile_verification');
-  check('uncertain acceptance is reconciled without a second POST; quality-held delivery is not mistaken for silence');
-  const blockedReq = await source(); blocked = true;
-  const blockedExec = await execution(blockedReq);
-  assert.equal((await process(send, blockedExec)).output.reason, 'communication_blocked'); blocked = false;
-  held = true; assert.equal((await process(send, blockedExec)).output.reason, 'communication_blocked'); held = false;
-  await approved.update({ status: 'PENDING' });
-  assert.equal((await process(send, blockedExec)).output.reason, 'template_unavailable');
-  await approved.update({ status: 'APPROVED' });
-  check('existing access/communication restrictions, imported HOLDs and unavailable Utility templates stop only this flow');
-  const secure = await source(), secureSent = await sent(secure); await accept(secureSent.message);
-  const args = transportArgs(secureSent.message);
-  for (const patch of [{ to: '34600000999' }, { useTemplate: false }, { sender: { ...sender, phoneNumberId: 'OTHER' } },
-    { templateName: 'OTHER' }, { templateComponents: [] }]) assert.equal((await runtime.authorizeTransport({ ...args, ...patch })).allowed, false);
-  blocked = true; assert.equal((await runtime.authorizeTransport(args)).allowed, false); blocked = false;
-  held = true; assert.equal((await runtime.authorizeTransport(args)).allowed, false); held = false;
-  for (const extra of [{ historical: true }, { automatic_actions_allowed: false }, { inbox_receipt: null },
-    { recovery_without_automation: true }, { phone_number_id: 'OTHER' }, { waba_id: 'OTHER' },
-    { button: { payload: `pmv:${secure.id}:${'a'.repeat(36)}:yes` } }]) {
-    assert.equal((await reply(secure, secureSent.message, 'yes', extra)).result.ignored, true);
+  assert.equal(next.metadata.phone, '34601000199'); assert.equal((await t.runtime.state(corrected.request)).current, false);
+  assert.equal((await reply(corrected, 'yes')).result.ignored, true);
+  await manual(next, 'correct', { phone: corrected.request.metadata.phone, acknowledged: true });
+  assert.equal((await reply(corrected, 'yes')).result.ignored, true);
+  check('manual pending/confirmation and correction override automation; stale revisions, superseded requests and ABA phones cannot resolve');
+
+  const transportArgs = message => ({ message, to: message.metadata.recipient, sender: t.sender, useTemplate: true,
+    templateName: message.metadata.template_name, templateLanguage: message.metadata.template_language, templateComponents: message.metadata.template_components });
+  const secure = await start(); await accept(secure.message);
+  for (const patch of [{ to: '34600000999' }, { useTemplate: false }, { sender: { ...t.sender, phoneNumberId: 'OTHER' } }, { templateName: 'OTHER' }, { templateComponents: [] }]) {
+    assert.equal((await t.runtime.authorizeTransport({ ...transportArgs(secure.message), ...patch })).allowed, false);
   }
-  assert.equal((await runtime.state(secure)).state, 'pending');
-  const wrongConversation = { ...(await db.Conversation.findByPk(secureSent.message.conversation_id)).toJSON(), clinic_id: 73 };
-  const syntheticReply = (await reply(secure, secureSent.message, null)).inbound;
-  assert.equal((await runtime.inbound({ message: syntheticReply, conversation: wrongConversation })).ignored, true);
-  assert.equal((await runtime.state(secure)).reason, 'response_unclear');
-  check('dispatch and inbound revalidate recipient/sender/template/clinic/patient/fresh signed receipt; free text stays with reception, not appointment AI');
-  const deferred = await source(), deferredSent = await sent(deferred);
-  const nightReq = await source(), nightExec = await execution(nightReq);
-  clock = new Date('2026-10-20T21:00:00Z');
-  const night = await process(send, nightExec); assert.equal(night.kind, 'waiting');
-  assert.equal(night.waiting_meta.reason, 'quiet_hours');
-  assert.equal(await db.Message.count({ where: { automation_delivery_key: `mobile-verification:${nightReq.id}:outbound` } }), 0);
-  const nightGuard = await runtime.authorizeTransport(transportArgs(secureSent.message));
-  assert.equal(nightGuard.allowed, false); // Previously answered requests cannot resurrect at night.
-  const deferredGuard = await runtime.authorizeTransport(transportArgs(deferredSent.message));
-  assert.equal(deferredGuard.allowed, true); assert(deferredGuard.deferredUntil > clock);
-  check('night-time request remains a native V2 wait without a message, timeout or extra queue');
+  for (const extra of [{ historical: true }, { automatic_actions_allowed: false }, { inbox_receipt: null }, { recovery_without_automation: true },
+    { media_recovered_without_automation: true }, { phone_number_id: 'OTHER' }, { waba_id: 'OTHER' },
+    { button: { payload: `pmv:${secure.request.id}:${'a'.repeat(36)}:yes` } }, { button: { payload: 'pmv:malformed' } }]) {
+    assert.equal((await reply(secure, 'yes', 'Yes', extra)).result.ignored, true);
+  }
+  assert.equal((await t.runtime.state(secure.request)).state, 'pending');
+  for (const key of ['blocked', 'held']) { t[key] = true; assert.equal((await t.runtime.authorizeTransport(transportArgs(secure.message))).allowed, false); t[key] = false; }
+  t.enabled = false; assert.equal((await t.runtime.authorizeTransport(transportArgs(secure.message))).allowed, false); t.enabled = true;
+  check('transport/inbound revalidate template, frozen recipient, sender, signed receipt, freshness and request identity with closed feature guard');
+
+  for (const kind of ['failed', 'unknown', 'held']) {
+    const item = await start();
+    if (kind === 'failed') await item.message.update({ status: 'failed' });
+    if (kind === 'unknown') await item.message.update({ metadata: { ...item.message.metadata, delivery_unknown: true } });
+    if (kind === 'held') await accept(item.message, t.clock, 'held_for_quality_assessment');
+    if (kind !== 'failed') {
+      await run(item.exec); assert.equal((await t.runtime.state(item.request)).state, 'pending');
+      await sql.query('UPDATE Messages SET createdAt=:at WHERE id=:id', { replacements: { at: new Date(+t.clock - 86401000), id: item.message.id } });
+    }
+    await db.FlowExecutionV2.update({ wait_until: new Date(0) }, { where: { id: item.exec.id } }); await run(item.exec);
+    assert.equal((await t.runtime.state(item.request)).reason, 'delivery_failed', kind); assert.notEqual((await t.runtime.state(item.request)).delivery_status, 'accepted');
+  }
+  check('failed, unknown and quality-held delivery never become silence; bounded transport waits use explicit failure edge');
+
+  const unavailable = await t.source(); await t.approved.update({ status: 'PENDING' });
+  const unavailableDispatch = await t.runtime.dispatch({ request_event_id: unavailable.id, clinic_id: 72 }); await engine.runExecution(unavailableDispatch.result.execution_id);
+  assert.equal((await t.runtime.state(unavailable)).reason, 'delivery_failed'); await t.approved.update({ status: 'APPROVED' });
+  const blocked = await t.source(); t.blocked = true;
+  const blockedDispatch = await t.runtime.dispatch({ request_event_id: blocked.id, clinic_id: 72 }); await engine.runExecution(blockedDispatch.result.execution_id); t.blocked = false;
+  assert.equal((await t.runtime.state(blocked)).reason, 'delivery_failed');
+  check('access/template preflight errors traverse explicit result and notification without sending');
+
+  t.queueFailures = 1;
+  const handoff = await start(); assert.equal(handoff.exec.current_node_id, send.id); assert.equal(handoff.exec.status, 'waiting');
+  t.clock = new Date(+t.clock + 61000); t.restart(); await run(handoff.exec);
+  assert.equal(await db.Message.count({ where: { automation_delivery_key: `mobile-verification:${handoff.request.id}:outbound` } }), 1);
+  assert.equal((await execution(handoff.request)).current_node_id, wait.id);
+  t.acceptOnPublication = true; t.markerFailure = true; const fastWorker = await start(); t.acceptOnPublication = false; await fastWorker.message.reload();
+  assert(fastWorker.message.metadata.wamid); assert(fastWorker.message.metadata.provider_acceptance_at); assert.notEqual(fastWorker.message.status, 'failed');
+  const beforeReplay = t.queued.size; await engine._processNode(send, fastWorker.exec.context, { execution: fastWorker.exec }); assert.equal(t.queued.size, beforeReplay);
+  check('handoff retry uses one message; marker write failure after fast acceptance never erases provider receipt or resends');
+
+  const day = t.clock; t.clock = new Date('2026-10-21T21:00:00Z');
+  const nightCount = t.queued.size, night = await start();
+  assert.equal(t.queued.size, nightCount); assert.equal(night.exec.status, 'waiting');
+  assert(night.message.metadata.queued_by_quiet_hours);
+  const nightGuard = await t.runtime.authorizeTransport(transportArgs(night.message));
+  assert(nightGuard.allowed && nightGuard.deferredUntil > t.clock);
+  assert.equal((await t.runtime.state(night.request)).accepted_at, null);
+  t.clock = day;
+  check('generic quiet-hours scheduling creates only durable local work; provider dispatch and response clock stay deferred');
+
+  await require('./patient_mobile_verification_modular_runtime.test')({ t, sql, db, engine, byType, resultNode, start, run, accept, reply, resolve, execution, tasks, check });
   const controller = loadSource('../controllers/patientMobileVerification.controller', { '../../models': db,
     '../lib/access-policy': { assertUserCanAccessFeature: async ({ actorId, clinicId, featureKey }) => {
-      if (actorId !== 15 || clinicId !== 72 || featureKey === 'patients.edit' && blocked) throw Object.assign(Error('access_denied'), { statusCode: 403 });
-    } },
-    '../services/patientPrivacyStatus.service': { patientForPrivacyClinic: async ({ identifier, clinicId }) => {
+      if (actorId !== 15 || clinicId !== 72 || featureKey === 'patients.edit' && t.blocked) throw Object.assign(Error('access_denied'), { statusCode: 403 });
+    } }, '../services/patientPrivacyStatus.service': { patientForPrivacyClinic: async ({ identifier, clinicId }) => {
       const patient = await db.Paciente.findByPk(Number(identifier));
       if (!patient || patient.clinica_id !== clinicId) throw Object.assign(Error('not_found'), { statusCode: 404 });
       return patient;
-    } }, '../services/patientMobileVerification.service': { current: () => runtime } });
-  const response = () => ({ statusCode: 200, status(code) { this.statusCode = code; return this; }, json(value) { this.body = value; return this; } });
-  const invoke = async (handler, req) => { const res = response(); await controller[handler](req, res, e => { throw e; }); return res; };
-  const readReq = { userData: { userId: 15 }, params: { id: String(manualReq.patient_id) }, query: { clinic_id: 72 } };
+    } }, '../services/patientMobileVerification.service': { current: () => t.runtime } });
+  const invoke = async (handler, req) => {
+    const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(value) { this.body = value; return this; } };
+    await controller[handler](req, res, e => { throw e; }); return res;
+  };
+  const readReq = { userData: { userId: 15 }, params: { id: String(manualPending.request.patient_id) }, query: { clinic_id: 72 } };
   assert.equal((await invoke('get', readReq)).body.items[0].state, 'confirmed');
   assert.equal((await invoke('get', { ...readReq, userData: {} })).statusCode, 401);
   assert.equal((await invoke('get', { ...readReq, userData: { userId: 99 } })).statusCode, 403);
   assert.equal((await invoke('get', { ...readReq, query: { clinic_id: 73 } })).statusCode, 403);
   assert.equal((await invoke('get', { ...readReq, query: { clinic_id: 72, phone: 'forged' } })).statusCode, 400);
-  blocked = true;
-  assert.equal((await invoke('resolve', { ...readReq, body: { clinic_id: 72, action: 'confirm' } })).statusCode, 403); blocked = false;
-  assert.equal((await invoke('resolve', { ...readReq, body: { clinic_id: 72, action: 'confirm', request_event_id: rejected.id, revision: rejectedState.revision } })).statusCode, 404);
-  check('actual controller rejects unauthenticated, unauthorized, foreign-clinic, forged-query and wrong-patient mutations before writes');
-  clock = new Date();
-  await local.update({ trigger_config: { ...local.trigger_config, enabled_after: '2026-10-01T00:00:00Z' } });
-  const nativeEngine = loadSource('flowEngineV2.service', { '../../models': db,
-    './socket.service': { getIO: () => null }, './patientMobileVerification.service': { current: () => runtime },
-    '../lib/automation-runtime-stop': { assertExecutionActive: async () => {}, isStop: () => false },
-    './jobRequests.service': { getCurrentRuntimeNamespace: () => 'TESTONLY' } }, {}, 10000);
-  const native = await source(), nativeExec = await execution(native);
-  let persisted = await nativeEngine.runExecution(nativeExec.id);
-  assert.equal(persisted.status, 'waiting'); assert.equal(persisted.current_node_id, 'N3');
-  assert.equal(persisted.waiting_meta.resume_mode, 'retry_current_node');
-  runtime = createRuntime(deps);
-  const nativeMessage = await db.Message.findOne({ where: { automation_delivery_key: `mobile-verification:${native.id}:outbound` } });
-  await accept(nativeMessage); await reply(native, nativeMessage, 'yes');
-  persisted = await nativeEngine.runExecution(nativeExec.id, { resumeMode: 'retry_current_node' });
-  assert.equal(persisted.status, 'completed'); assert.equal(persisted.last_error, null);
-  assert.equal(await db.Message.count({ where: { automation_delivery_key: `mobile-verification:${native.id}:outbound` } }), 1);
-  assert.equal(await db.FlowExecutionLogV2.count({ where: { flow_execution_id: nativeExec.id, status: 'error' } }), 0);
-  const nativeTimeout = await source(), nativeTimeoutExec = await execution(nativeTimeout);
-  await nativeEngine.runExecution(nativeTimeoutExec.id);
-  const timeoutMessage = await db.Message.findOne({ where: { automation_delivery_key: `mobile-verification:${nativeTimeout.id}:outbound` } });
-  await accept(timeoutMessage); clock = new Date(+clock + 61 * 60000);
-  await db.FlowExecutionV2.update({ wait_until: new Date(0) }, { where: { id: nativeTimeoutExec.id } });
-  persisted = await nativeEngine.runExecution(nativeTimeoutExec.id, { resumeMode: 'retry_current_node' });
-  assert.equal(persisted.status, 'completed'); assert.equal((await runtime.state(nativeTimeout)).reason, 'no_response');
-  check('actual V2 runExecution persists and resumes N3 after restart, reaches end on yes or timeout and records native logs without extra transport');
-  const visible = await runtime.view({ patientId: manualReq.patient_id, clinicId: 72 });
-  assert.equal(visible.items[0].state, 'confirmed'); assert(visible.items[0].history.length >= 3);
-  assert.equal((await runtime.view({ patientId: manualReq.patient_id, clinicId: 73 })).items.length, 0);
-  assert(!JSON.stringify(visible).includes('reply_token'));
-  await assert.rejects(manual(corrected, 'correct', { phone: '34600000998', acknowledged: false }));
-  await assert.rejects(first.update({ metadata: {} }), /append-only/);
+  t.blocked = true; assert.equal((await invoke('resolve', { ...readReq, body: { clinic_id: 72, action: 'confirm' } })).statusCode, 403); t.blocked = false;
+  assert.equal((await invoke('resolve', { ...readReq, body: { clinic_id: 72, action: 'confirm', request_event_id: rejected.request.id, revision: 1 } })).statusCode, 404);
+  check('actual controller still rejects unauthenticated, unauthorized, foreign-clinic, forged-query and wrong-patient mutations');
+  const visible = await t.runtime.view({ patientId: manualPending.request.patient_id, clinicId: 72 });
+  assert.equal(visible.items[0].state, 'confirmed'); assert(visible.items[0].history.length >= 2);
+  assert.equal((await t.runtime.view({ patientId: manualPending.request.patient_id, clinicId: 73 })).items.length, 0);
+  assert(!JSON.stringify(visible).includes('reply_token')); await assert.rejects(request.update({ metadata: {} }), /append-only/);
   assert.equal(await db.AutomationFlowTemplateV2.count({ where: { is_system: true, is_active: true } }), 0);
-  check('patient view is clinic-scoped and token-free, immutable evidence cannot be overwritten, system catalogue remains inactive');
+  check('clinic-scoped projection hides tokens and preserves immutable history; prepared system catalogue remains inactive');
 }).catch(error => { console.error(error); process.exitCode = 1; });

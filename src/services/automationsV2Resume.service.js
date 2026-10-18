@@ -493,6 +493,7 @@ async function recoverLateTimedOutResponseMatches({
   const candidates = await FlowExecutionV2.findAll({
     where: {
       status: 'completed',
+      trigger_type: { [Op.ne]: require('../lib/patient-mobile-verification').REQUEST },
       clinic_id: normalizedClinicId,
       updated_at: { [Op.gte]: since },
     },
@@ -507,6 +508,7 @@ async function recoverLateTimedOutResponseMatches({
 
   const recovered = [];
   for (const execution of candidates) {
+    if (require('../lib/patient-mobile-verification').isFlow(execution)) continue;
     if (!matchesExecutionTarget(execution, {
       conversationId: normalizedConversationId,
       patientId,
@@ -955,6 +957,7 @@ async function enqueueInboundResponseResume({
     where: {
       status: 'waiting',
       clinic_id: normalizedClinicId,
+      trigger_type: { [Op.ne]: require('../lib/patient-mobile-verification').REQUEST },
     },
     include: [{
       model: AutomationFlowTemplateV2,
@@ -966,6 +969,7 @@ async function enqueueInboundResponseResume({
   });
 
   const matched = candidates.filter((execution) => {
+    if (require('../lib/patient-mobile-verification').isFlow(execution)) return false;
     if (requiresMediaSupport && IS_GATEWAY_RUNTIME
       && !mediaResponseRuntimes.has(getExecutionRuntimeNamespace(execution))) return false;
     if (!getWaitResponseNode(execution)) return false;
