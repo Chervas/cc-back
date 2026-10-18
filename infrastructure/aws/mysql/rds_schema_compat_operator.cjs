@@ -64,6 +64,17 @@ async function noClinical(c) {
   const [[row]]=await query(c,"SELECT COUNT(*) n FROM information_schema.schemata WHERE schema_name='clinicaclick'");
   policy.need(Number(row.n)===0,'clinical_target_schema_present');
 }
+function reviewedWarning(w,statement) {
+  if(w.Level!=='Warning')return null;
+  const base={kind:statement.kind,name:statement.name,code:Number(w.Code)};
+  if(Number(w.Code)===1681&&w.Message==='Integer display width is deprecated and will be removed in a future release.')
+    return {...base,category:'legacy_integer_display_width_deprecated'};
+  const duplicate=/^Duplicate index '([A-Za-z_][A-Za-z0-9_$]*)' defined on the table '([A-Za-z0-9_]+)\.([A-Za-z0-9_$]+)'\. This is deprecated and will be disallowed in a future release\.$/.exec(w.Message||'');
+  if(Number(w.Code)===1831&&statement.kind==='create_table'&&duplicate
+    &&duplicate[2]===policy.TARGET_SCHEMA&&duplicate[3]===statement.name)
+    return {...base,category:'existing_duplicate_index_deprecated',index:duplicate[1]};
+  return null;
+}
 async function executeCompiled(c,statement) {
   policy.assertApproved(statement);await noClinical(c);
   await query(c,statement.sql);
@@ -72,14 +83,13 @@ async function executeCompiled(c,statement) {
   if(count===0)return [];
   const [warnings]=await query(c,'SHOW WARNINGS');
   // Observed on the empty 8.4.11 target: accepted legacy integer display
-  // widths warn without changing integer range/storage. No other warning
-  // (including a different 1681 deprecation) is silently accepted.
-  policy.need(Array.isArray(warnings)&&warnings.length===count&&warnings.every(w=>
-    w.Level==='Warning'&&Number(w.Code)===1681&&
-    w.Message==='Integer display width is deprecated and will be removed in a future release.'),
-    'ddl_warning_requires_review');
-  return warnings.map(w=>({kind:statement.kind,name:statement.name,code:Number(w.Code),
-    category:'legacy_integer_display_width_deprecated'}));
+  // widths warn without changing integer range/storage. Existing duplicate
+  // indexes are preserved and recorded for later plan review, never dropped.
+  // Other warnings (including other 1681 deprecations) remain a hard stop.
+  policy.need(Array.isArray(warnings)&&warnings.length===count,'ddl_warning_requires_review');
+  const reviewed=warnings.map(w=>reviewedWarning(w,statement));
+  policy.need(reviewed.every(Boolean),'ddl_warning_requires_review');
+  return reviewed;
 }
 async function runSchemaCompatibility({acknowledgement,capture=captureBounded,targetFactory}={}) {
   policy.need(acknowledgement==='schema-only-no-patient-data','explicit_schema_only_ack_required');
@@ -168,4 +178,4 @@ async function main() {
 }
 if(require.main===module)main().catch(()=>{console.log(JSON.stringify({errorCode:'schema_compatibility_operator_refused',clinicalDataCopied:false}));process.exitCode=2;});
 module.exports={sourceCommand,sourcePlan,captureBounded,runSchemaCompatibility,MAX_STDOUT,
-  SOURCE_META_SQL,SOURCE_TABLES_SQL,SOURCE_TRIGGERS_SQL};
+  SOURCE_META_SQL,SOURCE_TABLES_SQL,SOURCE_TRIGGERS_SQL,reviewedWarning};

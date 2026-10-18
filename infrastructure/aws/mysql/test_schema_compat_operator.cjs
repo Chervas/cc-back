@@ -143,3 +143,13 @@ test('only observed integer display-width deprecation is accepted and recorded',
     assert.equal(rejected.errorCode,'ddl_warning_requires_review');
   }
 });
+test('duplicate-index deprecation must name the exact synthetic table and is never a removal instruction',()=>{
+  const statement={kind:'create_table',name:'ClinicAnalyticsProperties'};
+  const warning={Level:'Warning',Code:1831,Message:"Duplicate index 'existing_idx' defined on the table 'cc_schema_compat_20261018.ClinicAnalyticsProperties'. This is deprecated and will be disallowed in a future release."};
+  assert.deepEqual(operator.reviewedWarning(warning,statement),{kind:'create_table',name:statement.name,
+    code:1831,category:'existing_duplicate_index_deprecated',index:'existing_idx'});
+  for(const changed of [{...warning,Code:1832},{...warning,Level:'Error'},
+    {...warning,Message:warning.Message.replace('cc_schema_compat_20261018','clinicaclick')},
+    {...warning,Message:warning.Message.replace('ClinicAnalyticsProperties','OtherTable')}])
+    assert.equal(operator.reviewedWarning(changed,statement),null);
+});
