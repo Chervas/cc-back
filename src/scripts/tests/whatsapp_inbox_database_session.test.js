@@ -73,6 +73,35 @@ test('unresponsive ownership checks and shutdown are bounded and destroy only th
   closing.connection.end = () => new Promise(() => {}); await closing.session.close(); assert.equal(closing.destroyed, 1);
 });
 
+test('successful driver end still closes its owned transport, without touching another connection', async () => {
+  const f = fixture(), order = [], other = { destroyed: false };
+  const stream = { destroyed: false, destroy() { order.push('transport'); this.destroyed = true; } };
+  f.connection.connection.stream = stream;
+  f.connection.end = async () => { order.push('end'); };
+  f.connection.destroy = () => { order.push('driver'); f.connection.connection.stream = other; };
+  await f.session.open(); await Promise.all([f.session.close(), f.session.close()]);
+  assert.deepEqual(order, ['end', 'driver', 'transport']);
+  assert.equal(stream.destroyed, true); assert.equal(other.destroyed, false);
+});
+
+test('throwing driver cleanup cannot bypass owned transport destruction', async () => {
+  const f = fixture(); let destroyed = 0;
+  f.connection.connection.stream = { destroy() { destroyed++; } };
+  f.connection.end = () => { throw Error('PRIVATE END ERROR'); };
+  f.connection.destroy = () => { throw Error('PRIVATE DESTROY ERROR'); };
+  await f.session.open(); await f.session.close(); assert.equal(destroyed, 1);
+});
+
+test('a timed out ownership check destroys its owned transport without retry or successful ownership', async () => {
+  const f = fixture({ checkTimeoutMs: 5 }); let transports = 0, checks = 0;
+  f.connection.connection.stream = { destroy() { transports++; } };
+  await f.session.open();
+  f.connection.execute = () => { checks++; return new Promise(() => {}); };
+  await assert.rejects(f.session.assertOwnership(), { code: 'inbox_database_session_unavailable' });
+  assert.equal(transports, 1); assert.equal(checks, 1); assert.equal(f.connects, 1);
+  await f.session.close(); assert.equal(transports, 2);
+});
+
 test('ownership is checked before pending, lease, clinical import and ACK; no uncertain import is replayed', async () => {
   for (const failureAt of [1, 2, 3, 4]) {
     const calls = []; let guards = 0, imports = 0;
@@ -91,6 +120,27 @@ test('ownership is checked before pending, lease, clinical import and ACK; no un
     assert.equal(imports, failureAt === 4 ? 1 : 0);
     assert.equal(calls.filter(route => route === '/defer').length, failureAt >= 3 ? 1 : 0);
   }
+});
+
+test('an uncertain import is never ACKed or retried when its database session is lost', async () => {
+  const f = fixture(); let imports = 0, transports = 0;
+  f.connection.connection.stream = { destroy() { transports++; } }; await f.session.open();
+  const routes = [];
+  const client = { request: async (_method, route) => {
+    routes.push(route);
+    if (route === '/pending') return { status: 200, data: { automaticActionsAllowed: false, receipts: [{ receipt: 'fictitious' }] } };
+    if (route === '/lease') return { status: 200, data: { receipt: 'fictitious', lease: 'fictitious', rawBase64: Buffer.from('FICTITIOUS').toString('base64') } };
+    return { status: 200, data: { businessProcessed: true } };
+  } };
+  await assert.rejects(pollOnce(f.connection, client, { env: {}, requiresScoped: true, loadConfiguration: () => ({ scopes: [] }), publish: () => {},
+    assertDatabaseOwnership: () => f.session.assertOwnership(), importScoped: async () => {
+      imports++; f.connection.connection.emit('error', Error('FICTITIOUS_DISCONNECT'));
+      throw Object.assign(Error('inbox_database_session_unavailable'), { code: 'inbox_database_session_unavailable', inboxDatabaseUnavailable: true });
+    },
+  }), { code: 'inbox_database_session_unavailable' });
+  await assert.rejects(f.session.assertOwnership(), { code: 'inbox_database_session_unavailable' }); await f.session.close();
+  assert.equal(imports, 1); assert.equal(f.connects, 1); assert.equal(transports, 1);
+  assert.equal(routes.includes('/confirm'), false); assert.equal(routes.filter(route => route === '/defer').length, 1);
 });
 
 function mainFixture() {

@@ -4,6 +4,15 @@ const OWNER_LOCK = 'cc-whatsapp-inbox-staging-v1';
 const unavailable = code => Object.assign(Error(code), { code, inboxDatabaseUnavailable: true });
 const zero = value => value === 0 || value === '0';
 
+function destroyOwnedConnection(current) {
+  // mysql2.destroy() currently calls stream.end(), which can leave a failed
+  // peer half-open and prevent the supervisor from observing process exit.
+  // Capture only this dedicated connection's transport before driver cleanup.
+  const stream = (current?.connection || current)?.stream;
+  try { current?.destroy?.(); } catch {}
+  try { stream?.destroy?.(); } catch {}
+}
+
 // A lost session is never replaced while a poll/transaction is in progress.
 // The existing supervisor restarts the consumer, which reacquires ownership
 // before reconciling durable receipts. No SQL statement is retried here.
@@ -15,7 +24,7 @@ function createInboxDatabaseSession({ connect, tables, isStopping = () => false,
   const bounded = async operation => {
     let timer;
     try { return await Promise.race([Promise.resolve().then(operation), new Promise((_, reject) => {
-      timer = setTimeout(() => { try { connection?.destroy?.(); } catch {} reject(unavailable('inbox_database_session_unavailable')); }, checkTimeoutMs);
+      timer = setTimeout(() => { destroyOwnedConnection(connection); reject(unavailable('inbox_database_session_unavailable')); }, checkTimeoutMs);
     })]); } finally { clearTimeout(timer); }
   };
   const state = async () => {
@@ -43,8 +52,8 @@ function createInboxDatabaseSession({ connect, tables, isStopping = () => false,
     let timer;
     try {
       await Promise.race([Promise.resolve().then(() => current.end()).catch(() => {}),
-        new Promise(resolve => { timer = setTimeout(() => { try { current.destroy?.(); } catch {} resolve(); }, closeTimeoutMs); })]);
-    } finally { clearTimeout(timer); }
+        new Promise(resolve => { timer = setTimeout(resolve, closeTimeoutMs); })]);
+    } finally { clearTimeout(timer); destroyOwnedConnection(current); }
   })();
   const open = () => {
     if (closed || isStopping()) return Promise.reject(unavailable('inbox_database_stopped'));
