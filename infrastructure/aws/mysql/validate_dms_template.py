@@ -30,6 +30,8 @@ def validate(template, plan):
             and instance.get('PubliclyAccessible') is False, 'private_bounded_single_az_required')
     require(instance.get('ReplicationSubnetGroupIdentifier') == ref('DmsSubnetGroup')
             and p('DmsSubnetGroup').get('SubnetIds') == ref('PrivateSubnetIds'), 'existing_private_subnets_required')
+    require('DmsVpcRole' in r.get('DmsSubnetGroup', {}).get('DependsOn', []),
+            'subnet_group_must_wait_for_vpc_role')
     require('KmsKeyId' not in instance, 'default_aws_dms_encryption_key_expected')
     role = p('DmsVpcRole')
     require(role.get('RoleName') == 'dms-vpc-role'

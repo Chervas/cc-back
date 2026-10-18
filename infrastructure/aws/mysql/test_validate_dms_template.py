@@ -37,6 +37,7 @@ class TemplateTests(unittest.TestCase):
             lambda r: r['DmsToSource']['Properties'].update(CidrIp='0.0.0.0/0'),
             lambda r: r['DmsSecretAccessRole']['Properties']['Policies'][0]['PolicyDocument']['Statement'][0].update(Resource='*'),
             lambda r: r['DmsVpcRole'].update(DeletionPolicy='Delete'),
+            lambda r: r['DmsSubnetGroup'].pop('DependsOn'),
             lambda r: r['PilotSourceSecret']['Properties'].update(SecretString='fixture-only'),
             lambda r: r['PilotSourceSecret']['Properties']['GenerateSecretString'].update(PasswordLength=8),
             lambda r: r['SourceEndpoint']['Properties'].update(SslMode='none'),

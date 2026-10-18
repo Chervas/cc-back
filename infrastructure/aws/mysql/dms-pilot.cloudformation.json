@@ -560,6 +560,9 @@
     },
     "DmsSubnetGroup": {
       "Type": "AWS::DMS::ReplicationSubnetGroup",
+      "DependsOn": [
+        "DmsVpcRole"
+      ],
       "Properties": {
         "ReplicationSubnetGroupDescription": "Existing two private RDS subnets only; no Internet/NAT routes created.",
         "SubnetIds": {
