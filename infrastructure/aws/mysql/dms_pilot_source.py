@@ -25,6 +25,7 @@ TLS_DIR = Path('/home/ubuntu/qa-evidence/architecture-diagnostic-20261018-c3CWBj
 CA_SHA256 = 'e0fb55e67ffa25bb6eacaf8b54e861dfedc6e36f252919c00b539a2d94b85729'
 MYSQLD = '/usr/sbin/mysqld'
 MYSQL = '/usr/bin/mysql'
+RUNTIME_TLS_FILES = ('ca.pem', 'server.pem', 'server.key')
 
 
 class Refusal(Exception):
@@ -168,11 +169,12 @@ def bootstrap_sql(secret, ips, run_id):
 
 
 def mysqld_command(root):
+    tls = root / 'tls' / 'original'
     return [MYSQLD, '--no-defaults', '--persisted-globals-load=OFF', '--datadir=' + str(root / 'data'), '--socket=' + str(root / 'mysql.sock'),
             '--pid-file=' + str(root / 'mysqld.pid'), '--bind-address=' + HOST, '--port=' + str(PORT),
             '--mysqlx=OFF', '--skip-name-resolve', '--require-secure-transport=ON',
-            '--ssl-ca=' + str(TLS_DIR / 'ca.pem'), '--ssl-cert=' + str(TLS_DIR / 'server.pem'),
-            '--ssl-key=' + str(TLS_DIR / 'server.key'), '--tls-version=TLSv1.2',
+            '--ssl-ca=' + str(tls / 'ca.pem'), '--ssl-cert=' + str(tls / 'server.pem'),
+            '--ssl-key=' + str(tls / 'server.key'), '--tls-version=TLSv1.2',
             '--server-id=' + str(SERVER_ID), '--log-bin=' + str(root / 'data' / 'pilot-bin'),
             '--binlog-format=ROW', '--binlog-row-image=FULL', '--binlog-row-value-options=',
             '--binlog-transaction-compression=OFF', '--binlog-expire-logs-seconds=172800',
@@ -219,10 +221,47 @@ def owned_directory(path):
     return {'device': info.st_dev, 'inode': info.st_ino}
 
 
-def cleanup_data(root, root_identity, data_identity):
+def copy_runtime_tls(root):
+    """Only the leaf private key and public certificates enter the owned run."""
+    require(root.parent == Path('/tmp') and root.name.startswith('cc-dms-pilot-source-'), 'tls_copy_root_not_owned_namespace')
+    owned_directory(root)
+    owned_directory(TLS_DIR)
+    tls, original = root / 'tls', root / 'tls' / 'original'
+    tls.mkdir(mode=0o700)
+    original.mkdir(mode=0o700)
+    identity = {'tls': owned_directory(tls), 'original': owned_directory(original)}
+    def unchanged(a, b):
+        return all(getattr(a, field) == getattr(b, field) for field in
+                   ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+    for name in RUNTIME_TLS_FILES:
+        source = TLS_DIR / name
+        expected = secure_file(source)
+        require(0 < expected.st_size <= 65536, 'tls_source_size_invalid')
+        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'rb') as incoming:
+            observed = os.fstat(incoming.fileno())
+            require(unchanged(observed, expected), 'tls_source_changed_before_copy')
+            contents = incoming.read(65537)
+            require(len(contents) == observed.st_size, 'tls_source_changed_during_copy')
+            output_fd = os.open(original / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(output_fd, 'wb') as output:
+                output.write(contents)
+            require(unchanged(os.fstat(incoming.fileno()), observed) and unchanged(source.lstat(), observed),
+                    'tls_source_changed_during_copy')
+        secure_file(original / name)
+    return identity
+
+
+def cleanup_data(root, root_identity, data_identity, tls_identity=None):
     require(root.parent == Path('/tmp') and root.name.startswith('cc-dms-pilot-source-'), 'cleanup_root_not_owned_namespace')
     require(owned_directory(root) == root_identity and owned_directory(root / 'data') == data_identity, 'cleanup_identity_mismatch')
     require(shutil.rmtree.avoids_symlink_attacks, 'safe_directory_removal_unavailable')
+    tls = root / 'tls'
+    if tls.exists() or tls.is_symlink():
+        require(tls_identity is not None and owned_directory(tls) == tls_identity['tls']
+                and owned_directory(tls / 'original') == tls_identity['original'], 'cleanup_tls_identity_mismatch')
+        tree_bytes(tls)  # Reject links before removing the owned TLS tree, including the leaf key.
+        shutil.rmtree(tls)
     shutil.rmtree(root / 'data')
 
 
@@ -256,24 +295,30 @@ def sql_socket(root, sql):
 
 
 def verify_owned_socket(root):
-    fields = sql_socket(root, 'SELECT @@datadir,@@socket,@@port,@@bind_address,@@server_id,@@require_secure_transport,@@binlog_format,@@binlog_row_image,@@log_bin,@@gtid_mode;').strip().split('\t')
-    expected = [str(root/'data'), str(root/'mysql.sock'), str(PORT), HOST, str(SERVER_ID), '1', 'ROW', 'FULL', '1', 'OFF']
+    fields = sql_socket(root, 'SELECT @@datadir,@@socket,@@port,@@bind_address,@@server_id,@@require_secure_transport,@@binlog_format,@@binlog_row_image,@@log_bin,@@gtid_mode,@@have_ssl,@@ssl_ca,@@ssl_cert,@@ssl_key;').strip().split('\t')
+    tls = root / 'tls' / 'original'
+    expected = [str(root/'data'), str(root/'mysql.sock'), str(PORT), HOST, str(SERVER_ID), '1', 'ROW', 'FULL', '1', 'OFF',
+                'YES', str(tls/'ca.pem'), str(tls/'server.pem'), str(tls/'server.key')]
     require(len(fields) == len(expected) and fields[0].rstrip('/') == expected[0]
             and fields[1:] == expected[1:], 'owned_effective_configuration_mismatch_before_writes')
+
+
+def verify_tls_certificates(directory, config):
+    owned_directory(directory)
+    for name in RUNTIME_TLS_FILES:
+        secure_file(directory / name)
+    require(hashlib.sha256((directory / 'ca.pem').read_bytes()).hexdigest() == CA_SHA256, 'pilot_ca_fingerprint_mismatch')
+    for args in [['verify', '-CAfile', str(directory / 'ca.pem'), '-verify_ip', HOST, str(directory / 'server.pem')],
+                 ['x509', '-in', str(directory / 'server.pem'), '-noout', '-checkend', str(config['runtime_seconds'])]]:
+        result = subprocess.run(['openssl', *args], capture_output=True, timeout=10, env=isolated_process_env())
+        require(result.returncode == 0, 'pilot_certificate_invalid_or_expiring')
 
 
 def preflight(config):
     require(os.geteuid() != 0, 'run_as_unprivileged_ubuntu_required')
     for path in [TLS_DIR, TLS_DIR.parent]:
         require(not path.is_symlink() and path.is_dir(), 'tls_directory_unsafe')
-    owned_directory(TLS_DIR)
-    for name in ['ca.pem', 'server.pem', 'server.key']:
-        secure_file(TLS_DIR / name)
-    require(hashlib.sha256((TLS_DIR / 'ca.pem').read_bytes()).hexdigest() == CA_SHA256, 'pilot_ca_fingerprint_mismatch')
-    for args in [['verify', '-CAfile', str(TLS_DIR / 'ca.pem'), '-verify_ip', HOST, str(TLS_DIR / 'server.pem')],
-                 ['x509', '-in', str(TLS_DIR / 'server.pem'), '-noout', '-checkend', str(config['runtime_seconds'])]]:
-        result = subprocess.run(['openssl', *args], capture_output=True, timeout=10, env=isolated_process_env())
-        require(result.returncode == 0, 'pilot_certificate_invalid_or_expiring')
+    verify_tls_certificates(TLS_DIR, config)
     version = subprocess.run([MYSQLD, '--no-defaults', '--persisted-globals-load=OFF', '--version'], capture_output=True, text=True, timeout=10,
                              env=isolated_process_env())
     require(version.returncode == 0 and re.search(r'\b8\.0\.[0-9]+\b', version.stdout), 'mysql80_binary_required')
@@ -299,8 +344,7 @@ def run(config, keep_data=False):
     ownership = {'schema': 'clinicaclick-dms-source-ownership/1', 'run_id': run_id, 'uid': os.geteuid(),
                  'root': str(root), 'root_identity': root_identity, 'data_identity': data_identity,
                  'source_host': HOST, 'source_port': PORT, 'database': SCHEMA, 'synthetic_only': True}
-    write_private(root / 'ownership.json', ownership)
-    child = identity = None; error = None; stop_requested = []
+    child = identity = tls_identity = None; error = None; stop_requested = []
     prior = {sig: signal.signal(sig, lambda signum, frame: stop_requested.append(signum))
              for sig in (signal.SIGTERM, signal.SIGINT)}
     started = time.monotonic(); ready = False; clean = False; reason = 'startup_failure'
@@ -308,6 +352,10 @@ def run(config, keep_data=False):
     review_seconds = (utc(config['firewall_review']['expires_at_utc']) - dt.datetime.now(dt.timezone.utc)).total_seconds()
     active_seconds = min(config['runtime_seconds'], review_seconds) - 70
     try:
+        tls_identity = copy_runtime_tls(root)
+        verify_tls_certificates(root / 'tls' / 'original', config)
+        ownership['tls_identity'] = tls_identity
+        write_private(root / 'ownership.json', ownership)
         with (root / 'initialize.log').open('xb') as log:
             initialized = subprocess.run([MYSQLD, '--no-defaults', '--persisted-globals-load=OFF', '--initialize-insecure', '--datadir=' + str(data),
                                           '--mysqlx=OFF'], stdout=log, stderr=log, timeout=90,
@@ -369,7 +417,7 @@ def run(config, keep_data=False):
         removed = False
         if ready and clean and error is None and not keep_data:
             try:
-                cleanup_data(root, root_identity, data_identity); removed = True
+                cleanup_data(root, root_identity, data_identity, tls_identity); removed = True
             except (Refusal, OSError):
                 error = 'owned_cleanup_failed_data_preserved'
         result = {'status': 'closed_success' if ready and clean and error is None else 'closed_failure',

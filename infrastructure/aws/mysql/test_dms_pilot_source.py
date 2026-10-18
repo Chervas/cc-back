@@ -1,6 +1,7 @@
 import copy
 import datetime as dt
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -39,6 +40,15 @@ def aws_responses():
                                   {'Key': 'application', 'Value': 'clinicaclick'},
                                   {'Key': 'aws:cloudformation:stack-id', 'Value': STACK}]},
             {'ARN': ARN, 'VersionStages': ['AWSCURRENT'], 'SecretString': json.dumps(secret())}]
+
+
+def fictional_tls(directory):
+    directory = Path(directory)
+    for name in (*source.RUNTIME_TLS_FILES, 'ca.key'):
+        path = directory / name
+        path.write_bytes(('FICTIONAL-NOT-A-CERTIFICATE-' + name).encode())
+        path.chmod(0o600)
+    return directory
 
 
 class SourceOperatorTests(unittest.TestCase):
@@ -109,6 +119,86 @@ class SourceOperatorTests(unittest.TestCase):
             self.assertIn(required, cmd)
         self.assertNotIn(PASSWORD, ' '.join(cmd))
         self.assertNotIn('/var/lib/mysql', ' '.join(cmd))
+        tls = root/'tls'/'original'
+        self.assertIn('--ssl-ca='+str(tls/'ca.pem'), cmd)
+        self.assertIn('--ssl-cert='+str(tls/'server.pem'), cmd)
+        self.assertIn('--ssl-key='+str(tls/'server.key'), cmd)
+        self.assertNotIn(str(source.TLS_DIR), ' '.join(cmd))
+        self.assertNotIn('ca.key', ' '.join(cmd))
+
+    def test_runtime_tls_copies_only_three_files_to_private_owned_tree(self):
+        with tempfile.TemporaryDirectory(prefix='cc-dms-pilot-source-', dir='/tmp') as name, \
+             tempfile.TemporaryDirectory(prefix='fictional-tls-unit-', dir='/tmp') as original:
+            root = Path(name); tls = fictional_tls(original)
+            with patch.object(source, 'TLS_DIR', tls):
+                identity = source.copy_runtime_tls(root)
+            copied = root/'tls'/'original'
+            self.assertEqual(set(p.name for p in copied.iterdir()), {'ca.pem','server.pem','server.key'})
+            self.assertFalse((copied/'ca.key').exists())
+            for path in [root/'tls',copied]: self.assertEqual(path.stat().st_mode & 0o777,0o700)
+            for path in copied.iterdir():
+                self.assertEqual(path.read_bytes(),(tls/path.name).read_bytes())
+                self.assertEqual(path.stat().st_mode & 0o777,0o600)
+            self.assertEqual(identity['tls'], source.owned_directory(root/'tls'))
+            self.assertEqual(identity['original'], source.owned_directory(copied))
+            with patch.object(source, 'TLS_DIR', tls), self.assertRaises(FileExistsError):
+                source.copy_runtime_tls(root)
+
+    def test_runtime_tls_refuses_symlink_insecure_oversized_and_changed_source(self):
+        for mutation in ('symlink','insecure','oversized','changed'):
+            with self.subTest(mutation=mutation), \
+                 tempfile.TemporaryDirectory(prefix='cc-dms-pilot-source-', dir='/tmp') as name, \
+                 tempfile.TemporaryDirectory(prefix='fictional-tls-unit-', dir='/tmp') as original:
+                root = Path(name); tls = fictional_tls(original); key=tls/'server.key'
+                if mutation=='symlink': key.unlink(); key.symlink_to(tls/'ca.key')
+                if mutation=='insecure': key.chmod(0o644)
+                if mutation=='oversized': key.write_bytes(b'F'*65537)
+                secure = source.secure_file
+                def inspect(path, mode_limit=0o600):
+                    result = secure(path, mode_limit)
+                    if mutation=='changed' and path==key:
+                        key.rename(tls/'old-server.key');key.write_bytes(b'FICTIONAL-REPLACEMENT');key.chmod(0o600)
+                    return result
+                with patch.object(source, 'TLS_DIR', tls), patch.object(source, 'secure_file', side_effect=inspect):
+                    with self.assertRaises(source.Refusal): source.copy_runtime_tls(root)
+
+    def test_runtime_public_certificates_revalidated_without_executing_openssl(self):
+        with tempfile.TemporaryDirectory(prefix='fictional-tls-unit-',dir='/tmp') as name:
+            tls=fictional_tls(name);fingerprint=hashlib.sha256((tls/'ca.pem').read_bytes()).hexdigest()
+            with patch.object(source,'CA_SHA256',fingerprint), \
+                 patch.object(source.subprocess,'run',return_value=Mock(returncode=0)) as command:
+                source.verify_tls_certificates(tls,config())
+            self.assertEqual(command.call_count,2)
+            verify=command.call_args_list[0].args[0]
+            self.assertEqual(verify,['openssl','verify','-CAfile',str(tls/'ca.pem'),'-verify_ip',source.HOST,str(tls/'server.pem')])
+            self.assertNotIn('ca.key',' '.join(verify))
+            with patch.object(source,'CA_SHA256','0'*64), patch.object(source.subprocess,'run') as command:
+                with self.assertRaisesRegex(source.Refusal,'pilot_ca_fingerprint_mismatch'):source.verify_tls_certificates(tls,config())
+            command.assert_not_called()
+            with patch.object(source,'CA_SHA256',fingerprint), patch.object(source.subprocess,'run',return_value=Mock(returncode=1,stderr=PASSWORD)):
+                with self.assertRaisesRegex(source.Refusal,'pilot_certificate_invalid_or_expiring') as error:source.verify_tls_certificates(tls,config())
+            self.assertNotIn(PASSWORD,str(error.exception))
+
+    def test_cleanup_tls_requires_original_inode_and_removes_leaf_key_not_reports(self):
+        with tempfile.TemporaryDirectory(prefix='cc-dms-pilot-source-', dir='/tmp') as name, \
+             tempfile.TemporaryDirectory(prefix='fictional-tls-unit-', dir='/tmp') as original:
+            root=Path(name);data=root/'data';data.mkdir(mode=0o700);(root/'result.json').write_text('{}')
+            with patch.object(source,'TLS_DIR',fictional_tls(original)): identity=source.copy_runtime_tls(root)
+            rid,did=source.owned_directory(root),source.owned_directory(data)
+            wrong=copy.deepcopy(identity);wrong['original']['inode']+=1
+            with self.assertRaises(source.Refusal):source.cleanup_data(root,rid,did,wrong)
+            self.assertTrue((root/'tls'/'original'/'server.key').exists());self.assertTrue(data.exists())
+            source.cleanup_data(root,rid,did,identity)
+            self.assertFalse((root/'tls').exists());self.assertFalse(data.exists());self.assertTrue((root/'result.json').exists())
+
+    def test_cleanup_tls_symlink_refused_before_removing_data(self):
+        with tempfile.TemporaryDirectory(prefix='cc-dms-pilot-source-',dir='/tmp') as name, \
+             tempfile.TemporaryDirectory(prefix='fictional-tls-unit-',dir='/tmp') as original:
+            root=Path(name);data=root/'data';data.mkdir(mode=0o700)
+            with patch.object(source,'TLS_DIR',fictional_tls(original)): identity=source.copy_runtime_tls(root)
+            (root/'tls'/'outside').symlink_to(original,target_is_directory=True)
+            with self.assertRaises(source.Refusal):source.cleanup_data(root,source.owned_directory(root),source.owned_directory(data),identity)
+            self.assertTrue(data.exists());self.assertTrue((root/'tls'/'original'/'server.key').exists())
 
     def test_sql_password_uses_stdin_never_argv_or_inherited_login(self):
         with tempfile.TemporaryDirectory(prefix='cc-dms-pilot-source-', dir='/tmp') as name:
@@ -161,22 +251,30 @@ class SourceOperatorTests(unittest.TestCase):
 
     def test_supervisor_cleanup_and_failure_preservation_without_starting_a_process(self):
         # Mock every external operation; only private temporary metadata/files are real.
-        for fail_bootstrap in (False, True):
+        for fail_bootstrap, have_ssl, keep_data in [(False,'YES',False),(True,'YES',False),(False,'DISABLED',False),(False,'YES',True)]:
             captured = {}; child = Mock(pid=999999); child.poll.return_value = None
             def fake_popen(command, **kwargs):
                 captured['command'] = command
                 root = Path(next(arg.split('=', 1)[1] for arg in command if arg.startswith('--datadir='))).parent
                 captured['root'] = root; (root/'mysql.sock').touch()
+                self.assertTrue((root/'tls'/'original'/'server.key').is_file())
+                self.assertFalse((root/'tls'/'original'/'ca.key').exists())
+                verify_certs.assert_called_once_with(root/'tls'/'original',config())
                 self.assertTrue(callable(kwargs['preexec_fn']))
                 self.assertEqual(kwargs['env'], source.isolated_process_env())
                 return child
             def fake_sql(root, sql):
+                captured.setdefault('sql', []).append(sql)
                 if sql.startswith('SET SESSION') and fail_bootstrap:
                     raise source.Refusal('owned_socket_sql_failed')
                 if sql.startswith('SELECT @@datadir'):
-                    return str(root/'data')+'/\t'+str(root/'mysql.sock')+'\t23306\t172.26.0.110\t183306\t1\tROW\tFULL\t1\tOFF\n'
+                    tls=root/'tls'/'original'
+                    return str(root/'data')+'/\t'+str(root/'mysql.sock')+'\t23306\t172.26.0.110\t183306\t1\tROW\tFULL\t1\tOFF\t'+have_ssl+'\t'+str(tls/'ca.pem')+'\t'+str(tls/'server.pem')+'\t'+str(tls/'server.key')+'\n'
                 return '1\n'
-            with self.subTest(fail_bootstrap=fail_bootstrap), \
+            with self.subTest(fail_bootstrap=fail_bootstrap,have_ssl=have_ssl,keep_data=keep_data), \
+                 tempfile.TemporaryDirectory(prefix='fictional-tls-unit-',dir='/tmp') as original, \
+                 patch.object(source,'TLS_DIR',fictional_tls(original)), \
+                 patch.object(source,'verify_tls_certificates') as verify_certs, \
                  patch.object(source, 'preflight'), patch.object(source, 'validate_config'), \
                  patch.object(source, 'source_credentials', return_value=secret()), \
                  patch.object(source.subprocess, 'run', return_value=Mock(returncode=0)), \
@@ -186,13 +284,18 @@ class SourceOperatorTests(unittest.TestCase):
                  patch.object(source, 'stop_owned', return_value=True), \
                  patch.object(source.signal, 'signal'), patch.object(source.time, 'monotonic', side_effect=[0,0,90000,90000]), \
                  patch('sys.stdout'):
-                status = source.run(config())
+                status = source.run(config(),keep_data=keep_data)
             root = captured['root']
             try:
                 result = json.loads((root/'result.json').read_text())
-                self.assertEqual(status, 2 if fail_bootstrap else 0)
-                self.assertEqual((root/'data').exists(), fail_bootstrap)
-                self.assertEqual(result['data_removed'], not fail_bootstrap)
+                failed=fail_bootstrap or have_ssl!='YES';retained=failed or keep_data
+                self.assertEqual(status, 2 if failed else 0)
+                self.assertEqual((root/'data').exists(), retained)
+                self.assertEqual((root/'tls'/'original'/'server.key').exists(), retained)
+                self.assertEqual(result['data_removed'], not retained)
+                verify_certs.assert_called_once_with(root/'tls'/'original',config())
+                self.assertEqual((root/'ready.json').exists(),not failed)
+                if have_ssl!='YES':self.assertFalse(any(q.startswith('SET SESSION') for q in captured['sql']))
                 self.assertTrue((root/'initialize.log').exists())
                 self.assertTrue((root/'supervisor.log').exists())
                 self.assertNotIn(PASSWORD, (root/'result.json').read_text())
@@ -203,8 +306,10 @@ class SourceOperatorTests(unittest.TestCase):
 
     def test_actual_socket_identity_must_match_before_bootstrap(self):
         root=Path('/tmp/cc-dms-pilot-source-fictional')
-        expected=[str(root/'data'),str(root/'mysql.sock'),'23306','172.26.0.110','183306','1','ROW','FULL','1','OFF']
-        for index, wrong in [(0,'/var/lib/mysql'),(1,'/var/run/mysqld/mysqld.sock'),(2,'3306'),(5,'0'),(8,'0')]:
+        tls=root/'tls'/'original'
+        expected=[str(root/'data'),str(root/'mysql.sock'),'23306','172.26.0.110','183306','1','ROW','FULL','1','OFF','YES',str(tls/'ca.pem'),str(tls/'server.pem'),str(tls/'server.key')]
+        with patch.object(source,'sql_socket',return_value='\t'.join(expected)):source.verify_owned_socket(root)
+        for index, wrong in [(0,'/var/lib/mysql'),(1,'/var/run/mysqld/mysqld.sock'),(2,'3306'),(5,'0'),(8,'0'),(10,'DISABLED'),(10,'NO'),(11,str(source.TLS_DIR/'ca.pem')),(13,str(source.TLS_DIR/'ca.key'))]:
             actual=list(expected);actual[index]=wrong
             with self.subTest(index=index), patch.object(source,'sql_socket',return_value='\t'.join(actual)):
                 with self.assertRaises(source.Refusal):source.verify_owned_socket(root)
