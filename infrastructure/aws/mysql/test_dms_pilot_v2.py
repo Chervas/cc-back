@@ -104,6 +104,25 @@ class V2Tests(unittest.TestCase):
             with self.subTest(config_path=config_path, key=key, folder=folder, runtime=runtime), self.assertRaises(v2.source.Refusal):
                 v2.source_launch_plan(c, config_path, key, folder, now=NOW)
 
+    def test_source_plan_explicit_service_path_does_not_use_shell_or_global_environment(self):
+        import os
+        original_path = os.environ.get('PATH')
+        nonce = 'c' * 32
+        evidence = '/home/ubuntu/qa-evidence/dms-pilot-v2-' + nonce
+        c = config(); c['runtime_seconds'] = 3600
+        with patch.object(v2.source.subprocess, 'run', side_effect=AssertionError('NO SYSTEMD/AWS/SQL')):
+            plan = v2.source_launch_plan(c, evidence + '/source.config.json', nonce, evidence, now=NOW)
+        command = plan['commandForRootReview']
+        self.assertEqual([arg for arg in command if arg.startswith('--property=Environment=')],
+                         ['--property=Environment=PATH=/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'])
+        self.assertEqual(os.environ.get('PATH'), original_path)
+        self.assertEqual(command[-7:], ['/usr/bin/python3', '-B',
+                         '/home/ubuntu/wt/back-dev/infrastructure/aws/mysql/dms_pilot_source.py',
+                         'run', '--config', evidence + '/source.config.json', '--ack-isolated-synthetic-source'])
+        self.assertFalse(any(arg.startswith(('--setenv=', '--property=EnvironmentFile=', '--property=PassEnvironment=')) for arg in command))
+        self.assertNotIn('/bin/sh', command)
+        self.assertNotIn('/bin/bash', command)
+
 
 if __name__ == '__main__':
     unittest.main()

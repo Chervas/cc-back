@@ -20,6 +20,7 @@ RESOURCE_NAMES = {'PilotSourceSecret','PilotTargetSecret','DmsSecretAccessRole',
  'PilotSourceCertificate','RdsTargetCertificate','SourceEndpoint','TargetEndpoint','PilotTask',
  'PilotLogGroup','DmsCloudWatchLogsRole'}
 GROUP_ARN = 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:dms-tasks-${PilotV2Identifier}'
+SOURCE_SERVICE_PATH = '/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
 
 def logs_policy():
@@ -135,7 +136,8 @@ def source_launch_plan(config, config_path, nonce, evidence_dir, now=None):
     source.require(Path(config_path)==evidence/'source.config.json','v2_config_path_invalid')
     unit='cc-dms-pilot-source-v2-'+nonce+'.service'
     script='/home/ubuntu/wt/back-dev/infrastructure/aws/mysql/dms_pilot_source.py'
-    properties=['Type=exec','User=ubuntu','Group=ubuntu','UMask=0077','Restart=no','KillMode=mixed','SendSIGKILL=yes',
+    properties=['Type=exec','User=ubuntu','Group=ubuntu','Environment=PATH='+SOURCE_SERVICE_PATH,
+      'UMask=0077','Restart=no','KillMode=mixed','SendSIGKILL=yes',
       'RuntimeMaxSec='+str(config['runtime_seconds']+600),'TimeoutStopSec=90','NoNewPrivileges=yes','PrivateTmp=no',
       'WorkingDirectory=/home/ubuntu','StandardInput=null','StandardOutput=append:'+str(evidence/'supervisor-stdout.jsonl'),
       'StandardError=append:'+str(evidence/'supervisor-stderr.log')]
