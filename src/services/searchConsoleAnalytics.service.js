@@ -176,6 +176,35 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
   }
   const writeTotalsInterval = options => writeInterval({ ...options, kind: 'totals' });
 
+  async function availability({ siteUrls, startDate, endDate } = {}) {
+    if (!isReadEnabled(env)) C.fail('sc_analytics_read_disabled');
+    C.date(startDate); C.date(endDate);
+    if (startDate > endDate || !Array.isArray(siteUrls) || siteUrls.length > 200) C.fail('sc_analytics_invalid_scope');
+    const sites = [...new Map(siteUrls.map(C.property).map(p => [p.siteHash, p])).values()];
+    if (!sites.length) return { properties: [] };
+    const params = { start: startDate, end: endDate };
+    const hashes = sites.map((p, i) => { params['h' + i] = p.siteHash; return `UNHEX(:h${i})`; }).join(',');
+    // This scans only the small coverage ledger, never query/page facts.
+    const rows = await query(`SELECT HEX(p.site_hash) AS site_hash,p.site_url,
+      MIN(CASE WHEN d.totals_complete=1 THEN d.date END) AS totals_from,
+      MAX(CASE WHEN d.totals_complete=1 THEN d.date END) AS totals_through,
+      MIN(CASE WHEN d.detail_complete=1 THEN d.date END) AS detail_from,
+      MAX(CASE WHEN d.detail_complete=1 THEN d.date END) AS detail_through
+      FROM ScAnalyticsProperties p LEFT JOIN ScAnalyticsCoverageDaily d ON d.property_id=p.id
+      WHERE p.site_hash IN (${hashes}) GROUP BY p.id,p.site_hash,p.site_url`, params);
+    const archived = await query(`SELECT HEX(p.site_hash) AS site_hash,a.month FROM ScAnalyticsArchiveBatches a
+      JOIN ScAnalyticsProperties p ON p.id=a.property_id WHERE p.site_hash IN (${hashes})
+      AND a.month<=:end AND LAST_DAY(a.month)>=:start ORDER BY a.month`, params);
+    const byHash = new Map(rows.map(row => [String(row.site_hash).toLowerCase(), row]));
+    return { properties: sites.map(site => {
+      const row = byHash.get(site.siteHash);
+      if (row && row.site_url !== site.siteUrl) C.fail('sc_analytics_hash_collision');
+      return { siteUrl: site.siteUrl, totalsFrom: row?.totals_from || null, totalsThrough: row?.totals_through || null,
+        detailFrom: row?.detail_from || null, detailThrough: row?.detail_through || null,
+        monthlyPeriods: archived.filter(item => String(item.site_hash).toLowerCase() === site.siteHash).map(item => item.month.slice(0, 7)) };
+    }) };
+  }
+
   async function rawSource({ siteUrls, startDate, endDate, replacements, prefix = 'sca', totals = false, ranking = false } = {}) {
     if (!isReadEnabled(env)) C.fail('sc_analytics_read_disabled');
     C.range(startDate, endDate);
@@ -298,7 +327,7 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
     });
     return { removed, done };
   }
-  return { beginInterval, stageRows, commitInterval, abortInterval, writeInterval, writeTotalsInterval, rawSource, archiveMonth, purgeArchivedMonth,
+  return { beginInterval, stageRows, commitInterval, abortInterval, writeInterval, writeTotalsInterval, availability, rawSource, archiveMonth, purgeArchivedMonth,
     isWriteEnabled: () => isWriteEnabled(env), isReadEnabled: () => isReadEnabled(env), retentionCutoff: () => C.cutoff(now()) };
 }
 
@@ -308,9 +337,9 @@ const runtimeRepo = () => {
   return runtime;
 };
 const exported = { createSearchConsoleAnalytics, storageEnabled: isWriteEnabled, isWriteEnabled, isReadEnabled };
-for (const method of ['beginInterval', 'stageRows', 'commitInterval', 'abortInterval', 'writeInterval', 'writeTotalsInterval', 'rawSource', 'archiveMonth', 'purgeArchivedMonth']) {
+for (const method of ['beginInterval', 'stageRows', 'commitInterval', 'abortInterval', 'writeInterval', 'writeTotalsInterval', 'availability', 'rawSource', 'archiveMonth', 'purgeArchivedMonth']) {
   exported[method] = (...args) => {
-    const enabled = method === 'rawSource' ? isReadEnabled() : isWriteEnabled();
+    const enabled = ['rawSource', 'availability'].includes(method) ? isReadEnabled() : isWriteEnabled();
     if (!enabled) return method.startsWith('write') ? Promise.resolve({ skipped: true, reason: 'sc_analytics_write_disabled' }) : Promise.reject(Object.assign(Error('sc_analytics_disabled'), { code: 'sc_analytics_disabled' }));
     return runtimeRepo()[method](...args);
   };

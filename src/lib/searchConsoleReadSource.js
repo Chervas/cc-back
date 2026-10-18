@@ -52,4 +52,30 @@ async function propertySource({ storage, siteUrls, range, replacements, prefix, 
     endDate: range.endLabel ?? range.end, replacements, prefix: prefix + 'Src', totals, ranking });
 }
 
-module.exports = { authorizedSiteUrls, propertySource, positionAggregateSql, storageError, canonicalSiteUrls, readWithCurrentScope };
+function comparablePeriods(range, availability) {
+  const current = { start: range.startLabel ?? range.start, end: range.endLabel ?? range.end };
+  const previous = { start: range.previous?.startLabel ?? range.previous?.start,
+    end: range.previous?.endLabel ?? range.previous?.end };
+  const properties = availability.properties || [];
+  const coverage = { source: 'property', requested: { current, previous }, properties,
+    effective: { current: null, previous: null }, pendingDays: 0, pendingLeadingDays: 0, comparable: false,
+    summary: { status: 'pending' }, detail: { status: 'pending' }, comparison: { status: 'pending' } };
+  if (!properties.length) { coverage.summary.status = 'unmapped'; return coverage; }
+  if (properties.some(p => !p.totalsThrough || !p.totalsFrom)) return coverage;
+  const end = [current.end, ...properties.map(p => p.totalsThrough)].sort()[0];
+  const start = [current.start, ...properties.map(p => p.totalsFrom)].sort().at(-1);
+  if (end < start) return coverage;
+  const lag = Math.round((Date.parse(current.end) - Date.parse(end)) / 86400000);
+  const leading = Math.round((Date.parse(start) - Date.parse(current.start)) / 86400000);
+  coverage.pendingDays = lag;
+  coverage.pendingLeadingDays = leading;
+  coverage.effective.current = { start, end };
+  if (previous.start && previous.end) {
+    const previousEnd = new Date(Date.parse(previous.end) - lag * 86400000).toISOString().slice(0, 10);
+    const previousStart = new Date(Date.parse(previous.start) + leading * 86400000).toISOString().slice(0, 10);
+    if (previousEnd >= previousStart && previousStart >= '2000-01-01') coverage.effective.previous = { start: previousStart, end: previousEnd };
+  }
+  return coverage;
+}
+
+module.exports = { authorizedSiteUrls, propertySource, positionAggregateSql, storageError, canonicalSiteUrls, readWithCurrentScope, comparablePeriods };

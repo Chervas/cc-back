@@ -139,8 +139,8 @@ async function storedSearchConsoleSource(req, range, replacements, prefix, optio
   const mappings = await getClinicSiteMappings(req.webClinicId, { allowEmpty: true });
   const validate = async () => {
     if (process.env.SC_ANALYTICS_READ_ENABLED !== 'true') throw Object.assign(Error('sc_analytics_configuration_changed'), { code: 'sc_analytics_configuration_changed' });
-    await assertWebBrokerScope(req, mappings);
     for (const mapping of mappings) await searchConsoleBroker.prepare(mapping);
+    await assertWebBrokerScope(req, mappings, true);
   };
   await validate();
   const siteUrls = [...new Set(mappings.map(mapping => mapping.siteUrl))];
@@ -150,12 +150,101 @@ async function storedSearchConsoleSource(req, range, replacements, prefix, optio
   return { ...source, validate: async () => { await source.validate?.(); await validate(); } };
 }
 
+async function storedSearchConsoleCoverage(req, range) {
+  const mappings = await getClinicSiteMappings(req.webClinicId, { allowEmpty: true });
+  const validate = async () => {
+    if (process.env.SC_ANALYTICS_READ_ENABLED !== 'true') throw Object.assign(Error('sc_analytics_configuration_changed'), { code: 'sc_analytics_configuration_changed' });
+    for (const mapping of mappings) await searchConsoleBroker.prepare(mapping);
+    await assertWebBrokerScope(req, mappings, true);
+  };
+  await validate();
+  const siteUrls = [...new Set(mappings.map(mapping => mapping.siteUrl))];
+  const metadata = await require('../services/searchConsoleAnalytics.service').availability({ siteUrls,
+    startDate: [range.previous?.start || range.start, '2000-01-01'].sort().at(-1), endDate: range.end });
+  const coverage = require('../lib/searchConsoleReadSource').comparablePeriods(range, metadata);
+  return { coverage, validate };
+}
+
+async function storedWebSummary(req, range) {
+  const { coverage, validate } = await storedSearchConsoleCoverage(req, range);
+  const empty = () => ({ clicks: null, impressions: null, ctr: null, avgPosition: null, top3: null, top10: null });
+  const response = { success: true, period: { start: range.start, end: range.end },
+    comparison: range.previous, kpis: empty(), previous: empty(), coverage, lastUpdate: null };
+  const checks = [];
+  const failure = (state, error) => {
+    const known = require('../lib/searchConsoleReadSource').storageError(error);
+    if (!known || error.code === 'sc_analytics_configuration_changed') throw error;
+    state.status = error.code === 'sc_analytics_monthly_partial_range' ? 'monthly_range_required' : 'pending'; state.code = error.code;
+  };
+  const load = async (period, target, state, prefix) => {
+    if (!period) return;
+    try {
+      const params = { start: period.start, end: period.end };
+      const source = await storedSearchConsoleSource(req, period, params, prefix, { totals: true });
+      const rows = await sequelize.query(`SELECT * FROM ${source.sqlFrom} WHERE date BETWEEN :start AND :end ${source.scopeSql}`,
+        { replacements: params, type: db.Sequelize.QueryTypes.SELECT });
+      const check = async () => { try { await source.validate(); } catch (error) { failure(state, error); Object.assign(target, empty()); coverage.comparable = false; } };
+      checks.push(check); await check();
+      if (state.code) return;
+      target.clicks = rows.reduce((sum, row) => sum + Number(row.clicks || 0), 0);
+      target.impressions = rows.reduce((sum, row) => sum + Number(row.impressions || 0), 0);
+      target.ctr = target.impressions ? target.clicks / target.impressions : 0;
+      const weighted = rows.reduce((sum, row) => sum + Number(row.position_weighted || 0), 0);
+      const positionSum = rows.reduce((sum, row) => sum + Number(row.position_sum || 0), 0);
+      const positionCount = rows.reduce((sum, row) => sum + Number(row.position_count || 0), 0);
+      target.avgPosition = target.impressions ? weighted / target.impressions : positionCount ? positionSum / positionCount : null;
+      state.status = 'ready';
+      if (target === response.kpis) response.lastUpdate = rows.map(row => row.date).sort().at(-1) || null;
+      try {
+        const rankParams = { start: period.start, end: period.end };
+        const ranks = await storedSearchConsoleSource(req, period, rankParams, prefix + 'Rank', { ranking: true });
+        const values = await sequelize.query(`SELECT * FROM ${ranks.sqlFrom} WHERE date BETWEEN :start AND :end ${ranks.scopeSql}`,
+          { replacements: rankParams, type: db.Sequelize.QueryTypes.SELECT });
+        checks.push(async () => { try { await ranks.validate(); } catch (error) { failure(coverage.detail, error); target.top3 = null; target.top10 = null; } });
+        target.top3 = values.reduce((sum, row) => sum + Number(row.queries_top3 || 0), 0);
+        target.top10 = values.reduce((sum, row) => sum + Number(row.queries_top10 || 0), 0);
+        coverage.detail.status = 'ready';
+      } catch (error) { failure(coverage.detail, error); }
+    } catch (error) { failure(state, error); }
+  };
+  await load(coverage.effective.current, response.kpis, coverage.summary, 'webSummary');
+  await load(coverage.effective.previous, response.previous, coverage.comparison, 'webPrevious');
+  coverage.comparable = coverage.summary.status === 'ready' && coverage.comparison.status === 'ready';
+  for (const check of checks) await check();
+  await validate();
+  return response;
+}
+
+async function storedWebRows(req, range, { pages = false, limit = 100, offset = 0 } = {}) {
+  const { coverage, validate } = await storedSearchConsoleCoverage(req, range);
+  const result = { success: true, period: { start: range.start, end: range.end }, coverage,
+    ...(pages ? { items: [], total: null } : { series: [] }) };
+  const period = coverage.effective.current;
+  if (!period) { await validate(); return result; }
+  const params = { start: period.start, end: period.end, limit: Math.max(1, Math.min(Number(limit) || 100, 100)), offset: Math.max(0, Math.floor(Number(offset) || 0)) };
+  const source = await storedSearchConsoleSource(req, period, params, pages ? 'webPages' : 'webSeries', { totals: !pages });
+  const dimension = pages ? 'page_url' : 'date';
+  const rows = await sequelize.query(`SELECT ${dimension},SUM(clicks) AS clicks,SUM(impressions) AS impressions,
+    ${require('../lib/searchConsoleReadSource').positionAggregateSql()} AS position FROM ${source.sqlFrom}
+    WHERE date BETWEEN :start AND :end ${source.scopeSql} GROUP BY ${dimension}
+    ORDER BY ${pages ? 'SUM(clicks) DESC,page_url ASC LIMIT :limit OFFSET :offset' : 'date ASC'}`,
+  { replacements: params, type: db.Sequelize.QueryTypes.SELECT });
+  const items = rows.map(row => ({ [pages ? 'page' : 'date']: row[dimension], clicks: Number(row.clicks || 0),
+    impressions: Number(row.impressions || 0), ctr: Number(row.impressions) ? Number(row.clicks || 0) / Number(row.impressions) : 0,
+    position: row.position == null ? null : Number(row.position) }));
+  await source.validate();
+  if (pages) { result.items = items; result.total = items.length; coverage.detail.status = 'ready'; }
+  else { result.series = items; coverage.summary.status = 'ready'; }
+  await validate();
+  return result;
+}
+
 function selectPrimarySiteMapping(mappings) {
   const rows = Array.isArray(mappings) ? mappings : [];
   return rows.find((row) => String(row.siteUrl || '').startsWith('http')) || rows[0] || null;
 }
 
-async function assertWebBrokerScope(req, mappings) {
+async function assertWebBrokerScope(req, mappings, exact = false) {
   let claims;
   try { claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { claims = null; }
   if (!claims || claims.sessionVersion !== 1 || !claims.jti || Number(claims.userId) !== Number(req.webClinicUserId)) {
@@ -164,7 +253,7 @@ async function assertWebBrokerScope(req, mappings) {
   const access = req.method === 'GET' ? 'read' : 'write';
   const allowed = await hasMarketingClinicScopeAccess({ userId: claims.userId, clinicIds: [req.webClinicId], access });
   const current = allowed ? await getClinicSiteMappings(req.webClinicId, { allowEmpty: true }) : [];
-  if (!allowed || mappings.some(mapping => !current.some(row => Number(row.id) === Number(mapping.id)
+  if (!allowed || (exact && current.length !== mappings.length) || mappings.some(mapping => !current.some(row => Number(row.id) === Number(mapping.id)
     && row.siteUrl === mapping.siteUrl && Number(row.googleConnectionId) === Number(mapping.googleConnectionId)
     && Number(row.clinicaId) === Number(mapping.clinicaId)))) {
     throw Object.assign(Error('search_console_scope_forbidden'), { code: 'search_console_scope_forbidden', httpStatus: 403 });
@@ -297,6 +386,7 @@ router.get('/clinica/:clinicaId/seo/summary', async (req, res) => {
       return res.status(400).json({ success: false, error: err.message });
     }
     const { start, end, previous } = range;
+    if (process.env.SC_ANALYTICS_READ_ENABLED === 'true') return res.json(await storedWebSummary(req, range));
     const prevStart = previous.start;
     const prevEnd = previous.end;
     const { Op } = require('sequelize');
@@ -531,10 +621,20 @@ router.get('/clinica/:clinicaId/sc/queries', async (req, res) => {
   try {
     const { clinicaId } = req.params;
     const { startDate, endDate, limit = 100 } = req.query;
-    const start = startDate || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const end = endDate || new Date().toISOString().slice(0, 10);
+    let start = startDate || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    let end = endDate || new Date().toISOString().slice(0, 10);
     const max = Math.max(1, Math.min(Number(limit) || 10, 100));
 
+    let coverageContext = null;
+    if (process.env.SC_ANALYTICS_READ_ENABLED === 'true') {
+      coverageContext = await storedSearchConsoleCoverage(req, resolveDateRange(start, end, 30));
+      const period = coverageContext.coverage.effective.current;
+      if (!period) {
+        await coverageContext.validate();
+        return res.json({ success: true, items: [], total: null, period: { start, end }, coverage: coverageContext.coverage });
+      }
+      start = period.start; end = period.end;
+    }
     const replacements = { clinicaId, start, end, limit: max };
     const source = process.env.SC_ANALYTICS_READ_ENABLED === 'true'
       ? await storedSearchConsoleSource(req, { start, end }, replacements, 'webQueries') : null;
@@ -560,7 +660,8 @@ router.get('/clinica/:clinicaId/sc/queries', async (req, res) => {
 
     if (!topQueries.length) {
       if (source) await source.validate();
-      return res.json({ success: true, items: [], total: 0, period: { start, end } });
+      if (coverageContext) { coverageContext.coverage.detail.status = 'ready'; await coverageContext.validate(); }
+      return res.json({ success: true, items: [], total: 0, period: { start, end }, ...(coverageContext ? { coverage: coverageContext.coverage } : {}) });
     }
 
     const queryNames = topQueries.map((q) => q.query);
@@ -614,8 +715,9 @@ router.get('/clinica/:clinicaId/sc/queries', async (req, res) => {
     });
 
     if (source) await source.validate();
+    if (coverageContext) { coverageContext.coverage.detail.status = 'ready'; await coverageContext.validate(); }
     return res.json({ success: true, items, total: items.length, period: { start, end },
-      ...(source ? { dataResolution: source.resolution } : {}) });
+      ...(source ? { dataResolution: source.resolution, coverage: coverageContext?.coverage } : {}) });
   } catch (e) {
     if (typeof e?.code === 'string' && e.code.startsWith('sc_analytics_')) {
       const failure = require('../lib/searchConsoleReadSource').storageError(e);
@@ -631,6 +733,7 @@ router.get('/clinica/:clinicaId/sc/queries', async (req, res) => {
 router.get('/clinica/:clinicaId/sc/pages', async (req, res) => {
   try {
     const { clinicaId } = req.params; const { startDate, endDate, limit=100, offset=0 } = req.query;
+    if (process.env.SC_ANALYTICS_READ_ENABLED === 'true') return res.json(await storedWebRows(req, resolveDateRange(startDate, endDate, 30), { pages: true, limit, offset }));
     const start = startDate || new Date(Date.now()-30*86400000).toISOString().slice(0,10);
     const end = endDate || new Date().toISOString().slice(0,10);
     const mappings = await getClinicSiteMappings(clinicaId);
@@ -678,6 +781,9 @@ router.get('/clinica/:clinicaId/sc/pages', async (req, res) => {
       authorization_errors: authorizationErrors
     });
   } catch (e) {
+    const failure = typeof e?.code === 'string' && e.code.startsWith('sc_analytics_')
+      ? require('../lib/searchConsoleReadSource').storageError(e) : null;
+    if (failure) return res.status(failure.status).json({ success: false, error: failure.code, code: failure.code });
     if (e.httpStatus === 401 || e.httpStatus === 403) return res.status(e.httpStatus).json({ success: false, error: authorizationReason(e) });
     console.error('❌ /web/sc/pages:', googleLegacyCredentials.safe(e));
     return res.status(500).json({ success:false, error:'Error consultando páginas' });
@@ -817,6 +923,7 @@ router.post('/clinica/:clinicaId/psi/refresh', async (req, res) => {
 router.get('/clinica/:clinicaId/seo/timeseries', async (req, res) => {
   try {
     const { clinicaId } = req.params; const { startDate, endDate } = req.query;
+    if (process.env.SC_ANALYTICS_READ_ENABLED === 'true') return res.json(await storedWebRows(req, resolveDateRange(startDate, endDate, 30)));
     const start = startDate || new Date(Date.now()-30*86400000).toISOString().slice(0,10);
     const end = endDate || new Date().toISOString().slice(0,10);
     const { Op } = require('sequelize');
@@ -842,6 +949,10 @@ router.get('/clinica/:clinicaId/seo/timeseries', async (req, res) => {
     }));
     return res.json({ success:true, period:{ start, end }, series });
   } catch (e) {
+    const failure = typeof e?.code === 'string' && e.code.startsWith('sc_analytics_')
+      ? require('../lib/searchConsoleReadSource').storageError(e) : null;
+    if (failure) return res.status(failure.status).json({ success: false, error: failure.code, code: failure.code });
+    if (e.httpStatus === 401 || e.httpStatus === 403) return res.status(e.httpStatus).json({ success: false, error: authorizationReason(e) });
     console.error('❌ /web/seo/timeseries:', e.response?.data || e.message);
     return res.status(500).json({ success:false, error:'Error obteniendo serie diaria' });
   }
@@ -877,18 +988,27 @@ router.get('/clinica/:clinicaId/seo/health', async (req, res) => {
       return { clicks, impressions, avgPos };
     }
 
-    const cur = await aggregateRangeDB(start, end);
-    const prev = await aggregateRangeDB(fmt(prevStart), fmt(prevEnd));
+    let stored = null, scopeCheck = null;
+    if (process.env.SC_ANALYTICS_READ_ENABLED === 'true') {
+      scopeCheck = await storedSearchConsoleCoverage(req, resolveDateRange(start, end, 30));
+      stored = await storedWebSummary(req, resolveDateRange(start, end, 30));
+    }
+    const cur = stored ? { clicks: stored.kpis.clicks, avgPos: stored.kpis.avgPosition } : await aggregateRangeDB(start, end);
+    const prev = stored ? { clicks: stored.previous.clicks, avgPos: stored.previous.avgPosition } : await aggregateRangeDB(fmt(prevStart), fmt(prevEnd));
 
     const rules = [];
     // Tráfico: caída >=30%
-    if (prev.clicks>0 && cur.clicks < 0.7*prev.clicks) {
+    if (stored && !stored.coverage.comparable) {
+      rules.push({ id:'traffic_drop_30', status:'unknown', message:'Comparación de Search Console pendiente', details:{} });
+    } else if (prev.clicks>0 && cur.clicks < 0.7*prev.clicks) {
       rules.push({ id:'traffic_drop_30', status:'warning', message:'Caída ≥30% de clicks vs período previo', details:{ cur: cur.clicks, prev: prev.clicks } });
     } else {
       rules.push({ id:'traffic_drop_30', status:'ok', message:'Tráfico estable', details:{ cur: cur.clicks, prev: prev.clicks } });
     }
     // Posición media: empeora ≥30%
-    if (prev.avgPos && cur.avgPos && cur.avgPos > 1.3*prev.avgPos) {
+    if (stored && (!stored.coverage.comparable || cur.avgPos == null || prev.avgPos == null)) {
+      rules.push({ id:'position_drop_30', status:'unknown', message:'Comparación de posición pendiente', details:{} });
+    } else if (prev.avgPos && cur.avgPos && cur.avgPos > 1.3*prev.avgPos) {
       rules.push({ id:'position_drop_30', status:'warning', message:'Empeora ≥30% posición media', details:{ cur: cur.avgPos, prev: prev.avgPos } });
     } else {
       rules.push({ id:'position_drop_30', status:'ok', message:'Posición estable', details:{ cur: cur.avgPos, prev: prev.avgPos } });
@@ -925,8 +1045,14 @@ router.get('/clinica/:clinicaId/seo/health', async (req, res) => {
       rules.push({ id:'sitemap_presence', status: found ? 'ok' : 'warning', message:'Sitemap accesible', details:{ url: urlOk, status: code } });
     } catch { rules.push({ id:'sitemap_presence', status:'unknown', message:'Sitemap accesible', details:{} }); }
 
-    return res.json({ success:true, period:{ start, end, prevStart: fmt(prevStart), prevEnd: fmt(prevEnd) }, rules });
+    if (scopeCheck) await scopeCheck.validate();
+    return res.json({ success:true, period:{ start, end, prevStart: fmt(prevStart), prevEnd: fmt(prevEnd) }, rules,
+      ...(stored ? { coverage: stored.coverage } : {}) });
   } catch (e) {
+    const failure = typeof e?.code === 'string' && e.code.startsWith('sc_analytics_')
+      ? require('../lib/searchConsoleReadSource').storageError(e) : null;
+    if (failure) return res.status(failure.status).json({ success: false, error: failure.code, code: failure.code });
+    if (e.httpStatus === 401 || e.httpStatus === 403) return res.status(e.httpStatus).json({ success: false, error: authorizationReason(e) });
     console.error('❌ /web/seo/health:', e.response?.data || e.message);
     return res.status(500).json({ success:false, error:'Error obteniendo health SEO' });
   }

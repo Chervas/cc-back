@@ -6,6 +6,7 @@ const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysq
 const migration = require('../../../migrations/20261018150000-create-search-console-analytics');
 const { createSearchConsoleAnalytics } = require('../../services/searchConsoleAnalytics.service');
 const { backfillInterval } = require('../search_console_analytics.operator');
+const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.fixture');
 let ownedRoot;
 async function main() {
   await withIsolatedCampaignMysql(async ({ sql, report }) => {
@@ -37,6 +38,38 @@ async function main() {
     assert.equal(Number((await read({ totals: true }))[0].clicks), 100);
     assert.equal(Number((await read({ ranking: true }))[0].queries_top10), 1);
     assert.equal(Number((await read({ ranking: true }))[0].queries_top3), 0);
+    const horizon = await repo.availability({ siteUrls: [options.siteUrl, options.siteUrl, 'sc-domain:missing.example'], startDate: '2026-09-01', endDate: '2026-09-10' });
+    assert.equal(horizon.properties.length, 2);
+    assert.equal(horizon.properties[0].totalsFrom, '2026-09-01');
+    assert.equal(horizon.properties[0].totalsThrough, '2026-09-03');
+    assert.equal(horizon.properties[0].detailThrough, '2026-09-03');
+    assert.equal(horizon.properties[1].totalsThrough, null);
+    report.checks.push('coverage metadata deduplicates authorized properties, preserves missing-property null and separates totals/detail horizons');
+    const handlers = new Map();
+    loadDiscoverySource('routes/web.routes.js', {
+      express: { Router: () => ({ use() {}, get: (route, handler) => handlers.set(route, handler), post() {} }) },
+      '../../models': { Sequelize: require('sequelize'), sequelize: sql }, './auth.middleware': () => {},
+      '../lib/searchConsoleReadSource': require('../../lib/searchConsoleReadSource'),
+      '../services/searchConsoleAnalytics.service': repo,
+      '../services/googleLegacyCredentials.service': { safe: () => 'fixture_unavailable' },
+      '../services/searchConsoleBroker.service': { prepare: async () => null },
+      '../services/accessSession.service': { bearer: token => token, verify: async () => ({ userId: 501, sessionVersion: 1, jti: 'fixture-session' }) },
+      '../lib/marketingScopeAccess': { hasMarketingClinicScopeAccess: async () => true },
+      '../services/effectiveMarketingAssets.service': { resolveEffectiveMarketingAssetInventory: async () => ({ google: { available_assets: { search_console:
+        [71, 72, 73, 74].map(clinic_id => ({ mapping_id: clinic_id, clinic_id, connection_id: 81, site_url: options.siteUrl })) } } }) },
+    }, { env: { SC_ANALYTICS_READ_ENABLED: 'true' } });
+    const request = async route => {
+      const response = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+      await handlers.get(route)({ params: { clinicaId: '72' }, query: { startDate: options.startDate, endDate: options.endDate },
+        headers: { authorization: 'fictitious-local-session' }, webClinicId: 72, webClinicUserId: 501, method: 'GET' }, response);
+      assert.equal(response.statusCode, 200); return response.body;
+    };
+    const panelPages = await request('/clinica/:clinicaId/sc/pages');
+    assert.equal(panelPages.items.length, 2); assert.equal(panelPages.items.reduce((sum, page) => sum + page.clicks, 0), 3);
+    const panelSeries = await request('/clinica/:clinicaId/seo/timeseries');
+    assert.equal(panelSeries.series.length, 1); assert.equal(panelSeries.series[0].clicks, 100);
+    report.checks.push('actual panel pages SQL and authoritative daily series execute against compact store without multiplying four mappings or inventing absent date rows');
+
     await assert.rejects(read({ endDate: '2026-09-04' }), { code: 'sc_analytics_incomplete_coverage' });
     await repo.writeInterval({ ...options, rows: detail, totalsRows: [] });
     assert.equal((await read({ totals: true })).length, 0); // Complete empty totals replace old nonzero totals.
@@ -102,6 +135,11 @@ async function main() {
     const totalZero = (await rows(`SELECT SUM(position_weighted) AS weighted,SUM(position_sum) AS positions,SUM(position_count) AS observations,SUM(position_sum)/SUM(position_count) AS position FROM ${mixedTotals.sqlFrom}`, totalReplacements))[0];
     assert.equal(Number(totalZero.weighted), 0); assert.equal(Number(totalZero.positions), 20); assert.equal(Number(totalZero.observations), 4); assert.equal(Number(totalZero.position), 5);
     report.checks.push('two monthly periods plus daily detail preserve zero-impression observation weights; authoritative totals expose the same exact accumulators');
+    const historicalHorizon = await repo.availability({ siteUrls: [old.siteUrl], startDate: old.startDate, endDate: april.endDate });
+    assert.deepEqual(historicalHorizon.properties[0].monthlyPeriods, ['2024-02', '2024-03']);
+    assert.equal(historicalHorizon.properties[0].totalsThrough, '2024-04-30');
+    report.checks.push('availability exposes only actually published monthly periods and authoritative ledger horizons');
+
     const raceOptions = { ...old, siteUrl: 'sc-domain:race.example', startDate: '2024-03-01', endDate: '2024-03-31' };
     const raceRow = { date: '2024-03-01', query: 'race', page_url: '', clicks: 1, impressions: 1, position: 1 };
     await repo.writeInterval({ ...raceOptions, rows: [raceRow] });

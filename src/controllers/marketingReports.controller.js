@@ -1897,7 +1897,7 @@ async function fetchSeoQueryPageRows(scope, range, marketingState, limit = 250, 
   }));
 }
 
-async function fetchSeoQueryTrends(scope, range, marketingState, queries = [], keyPrefix = 'seoQueryTrend', sourceChecks = []) {
+async function fetchSeoQueryTrends(scope, range, marketingState, queries = [], keyPrefix = 'seoQueryTrend', sourceChecks = [], monthly = false) {
   if (!WebScQueryDaily || !queries.length) return [];
   const normalizedQueries = queries
     .map((query) => String(query || '').trim())
@@ -1916,8 +1916,9 @@ async function fetchSeoQueryTrends(scope, range, marketingState, queries = [], k
   const source = await searchConsoleReportSource(scope, marketingState, range, replacements, keyPrefix);
   if (source.validate) sourceChecks.push(source.validate);
   const scopeSql = source.scopeSql;
+  const dateSql = monthly ? "DATE_FORMAT(date, '%Y-%m-01')" : 'date';
   const rows = await sequelize.query(
-    `SELECT date,
+    `SELECT ${dateSql}${monthly ? ' AS date' : ''},
             query,
             SUM(clicks) AS clicks,
             SUM(impressions) AS impressions,
@@ -1926,7 +1927,7 @@ async function fetchSeoQueryTrends(scope, range, marketingState, queries = [], k
       WHERE date BETWEEN :${startKey} AND :${endKey}
         AND query IN (:${queryKey})
         ${scopeSql}
-      GROUP BY date, query
+      GROUP BY ${dateSql}, query
       ORDER BY date ASC`,
     { replacements, type: QueryTypes.SELECT }
   );
@@ -2137,7 +2138,119 @@ function buildSeoOpportunities({ searchConsoleConnected, summary, queryMovements
   return opportunities.slice(0, 6);
 }
 
+async function aggregateSeoProperty(scope, range, marketingState, sourceChecks) {
+  const reads = require('../lib/searchConsoleReadSource');
+  const storage = require('../services/searchConsoleAnalytics.service');
+  const sites = await currentSearchConsoleSiteUrls(scope, marketingState);
+  const result = buildSeoEmpty();
+  const nullSummary = () => ({ clicks: null, impressions: null, ctr: null, avgPosition: null });
+  Object.assign(result.summary, nullSummary());
+  result.previousSummary = nullSummary();
+  result.coverage = reads.comparablePeriods(range, { properties: sites.map(siteUrl => ({ siteUrl })) });
+  result.dataResolution = 'daily_or_complete_month';
+  result.technical = await aggregateSeoTechnical(scope, marketingState);
+  const fail = (section, error) => {
+    if (error?.status === 401 || error?.status === 403 || error?.httpStatus === 401 || error?.httpStatus === 403
+      || error?.code === 'sc_analytics_configuration_changed') throw error;
+    section.status = error?.code === 'sc_analytics_monthly_partial_range' ? 'monthly_range_required' : 'pending';
+    section.code = reads.storageError(error)?.code || 'sc_analytics_unavailable';
+  };
+  try {
+    const metadata = await storage.availability({ siteUrls: sites,
+      startDate: [range.previous?.startLabel || range.startLabel, '2000-01-01'].sort().at(-1), endDate: range.endLabel });
+    result.coverage = reads.comparablePeriods(range, metadata);
+  } catch (error) { fail(result.coverage.summary, error); return result; }
+  const coverage = result.coverage;
+  if (!coverage.effective.current) return result;
+  const window = period => ({ startLabel: period.start, endLabel: period.end });
+  const currentRange = window(coverage.effective.current);
+  const previousRange = coverage.effective.previous && window(coverage.effective.previous);
+  // Each section owns its validators. A coverage change hides that section,
+  // while permission/session failures still reject the entire disclosure.
+  async function section(state, work, invalidate) {
+    const checks = [];
+    const validate = async () => {
+      try { for (const check of checks) await check(); }
+      catch (error) { fail(state, error); invalidate(); }
+    };
+    try { await work(checks); await validate(); }
+    catch (error) { fail(state, error); invalidate(); return; }
+    sourceChecks.push(validate);
+  }
+  async function summary(period, target, state, prefix) {
+    await section(state, async checks => {
+      const params = { start: period.startLabel, end: period.endLabel };
+      const source = await searchConsoleReportSource(scope, marketingState, period, params, prefix, { totals: true });
+      if (source.validate) checks.push(source.validate);
+      const [row] = await sequelize.query(`SELECT SUM(clicks) AS clicks,SUM(impressions) AS impressions,
+        ${searchConsolePositionSql()} AS position,MAX(date) AS lastDate
+        FROM ${source.sqlFrom} WHERE date BETWEEN :start AND :end ${source.scopeSql}`,
+      { replacements: params, type: QueryTypes.SELECT });
+      const clicks = toNumber(row?.clicks), impressions = toNumber(row?.impressions);
+      Object.assign(target, { clicks, impressions, ctr: ratioPct(clicks, impressions, 2), avgPosition: row?.position == null ? null : round(row.position, 1) });
+      state.status = 'ready';
+      if (target === result.summary) { result.lastSync = row?.lastDate || null; result.connected = true; }
+    }, () => { Object.assign(target, nullSummary()); if (target === result.summary) result.connected = false; coverage.comparable = false; result.queryMovements.length = 0; result.pageMovements.length = 0; });
+  }
+  await summary(currentRange, result.summary, coverage.summary, 'seoAvailable');
+  if (previousRange) await summary(previousRange, result.previousSummary, coverage.comparison, 'seoComparison');
+  coverage.comparable = coverage.summary.status === 'ready' && coverage.comparison.status === 'ready';
+  if (coverage.summary.status !== 'ready') return result;
+  const clearDetails = () => {
+    for (const field of ['queries', 'pages', 'queryPages', 'queryTrends', 'rankingBuckets', 'queryMovements', 'pageMovements']) result[field].length = 0;
+    result.dailyAggregates.points.length = 0;
+    result.dailyAggregates.top3 = null; result.dailyAggregates.top10 = null;
+    for (const bucket of [result.brandSplit.brand, result.brandSplit.nonBrand]) Object.assign(bucket, { clicks: null, impressions: null, queries: null, share: null });
+  };
+  await section(coverage.detail, async checks => {
+    const [queries, pages, pairs] = await Promise.all([
+      fetchSeoDimensionRows(scope, currentRange, marketingState, 'query', 80, 'seoCurrentQuery', checks),
+      fetchSeoDimensionRows(scope, currentRange, marketingState, 'page', 40, 'seoCurrentPage', checks),
+      fetchSeoQueryPageRows(scope, currentRange, marketingState, 250, 'seoQueryPage', checks),
+    ]);
+    result.queries = queries.slice(0, 8).map(row => ({ query: row.value, clicks: row.clicks, impressions: row.impressions,
+      ctr: ratioPct(row.clicks, row.impressions, 2), position: row.position }));
+    result.pages = pages.slice(0, 5).map(row => ({ page: row.value, shortName: shortUrl(row.value),
+      clicks: row.clicks, impressions: row.impressions, ctr: ratioPct(row.clicks, row.impressions, 2), position: row.position }));
+    result.queryPages = pairs;
+    const monthly = coverage.properties.some(property => (property.monthlyPeriods || []).some(month =>
+      month + '-01' <= currentRange.endLabel && new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10) >= currentRange.startLabel));
+    coverage.detail.resolution = monthly ? 'month' : 'day';
+    result.queryTrends = await fetchSeoQueryTrends(scope, currentRange, marketingState, result.queries.map(row => row.query), 'seoQueryTrend', checks, monthly);
+    result.rankingBuckets = buildSeoRankingBuckets(queries);
+    result.brandSplit = buildSeoBrandSplit(queries, marketingState);
+    const params = { start: currentRange.startLabel, end: currentRange.endLabel };
+    const source = await searchConsoleReportSource(scope, marketingState, currentRange, params, 'seoRanks', { ranking: true });
+    if (source.validate) checks.push(source.validate);
+    const ranks = await sequelize.query(`SELECT date,SUM(queries_top3) AS top3,SUM(queries_top10) AS top10
+      FROM ${source.sqlFrom} WHERE date BETWEEN :start AND :end ${source.scopeSql} GROUP BY date ORDER BY date`,
+    { replacements: params, type: QueryTypes.SELECT });
+    result.dailyAggregates.points = ranks.map(row => ({ date: row.date, top3: toNumber(row.top3), top10: toNumber(row.top10) }));
+    result.dailyAggregates.top3 = ranks.reduce((sum, row) => sum + toNumber(row.top3), 0);
+    result.dailyAggregates.top10 = ranks.reduce((sum, row) => sum + toNumber(row.top10), 0);
+    coverage.detail.status = 'ready';
+    if (coverage.comparable) {
+      // Historical query detail may require complete calendar months even while
+      // the independent authoritative daily totals remain comparable.
+      const comparisonDetail = { status: 'pending' };
+      coverage.comparison.detail = comparisonDetail;
+      await section(comparisonDetail, async comparisonChecks => {
+        const [priorQueries, priorPages] = await Promise.all([
+          fetchSeoDimensionRows(scope, previousRange, marketingState, 'query', 80, 'seoPreviousQuery', comparisonChecks),
+          fetchSeoDimensionRows(scope, previousRange, marketingState, 'page', 40, 'seoPreviousPage', comparisonChecks),
+        ]);
+        result.queryMovements = buildSeoMovements(queries, priorQueries, 'query', 8);
+        result.pageMovements = buildSeoMovements(pages, priorPages, 'page', 8);
+        comparisonDetail.status = 'ready';
+      }, () => { result.queryMovements.length = 0; result.pageMovements.length = 0; });
+
+    }
+  }, clearDetails);
+  return result;
+}
+
 async function aggregateSeo(scope, range, marketingState = null, sourceChecks = []) {
+  if (process.env.SC_ANALYTICS_READ_ENABLED === 'true') return aggregateSeoProperty(scope, range, marketingState, sourceChecks);
   const empty = buildSeoEmpty();
   if (!WebScDaily || !WebScQueryDaily) return empty;
   const previousRange = range.previous || range;
@@ -4008,6 +4121,7 @@ async function buildOverviewPayload({ scope, range, sourceChecks = [] }) {
     webSummary,
     webPages,
     seoSummary: seo.summary,
+    ...(seo.coverage ? { seoCoverage: seo.coverage, seoPreviousSummary: seo.previousSummary } : {}),
     ...(seo.dataResolution ? { seoDataResolution: seo.dataResolution } : {}),
     seoQueries: seo.queries,
     seoPages: seo.pages,
