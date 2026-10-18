@@ -1515,3 +1515,41 @@
 ### 05/10/2026 — Recuperar superposición ordinaria con aviso, sin doble permiso
 
 [Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/13-backend.md#05102026--recuperar-superposición-ordinaria-con-aviso-sin-doble-permiso).
+
+## Compatibilidad de enlaces históricos
+
+<a id="11-envios-masivos-por-listas"></a>
+
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/13-backend.md#11-envios-masivos-por-listas).
+
+<a id="12-automatizaciones-basadas-en-listas"></a>
+
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/13-backend.md#12-automatizaciones-basadas-en-listas).
+
+<a id="13092026--alta-de-cuentas-ads-motor-del-broker-preparado"></a>
+
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/13-backend.md#13092026--alta-de-cuentas-ads-motor-del-broker-preparado).
+
+<a id="busqueda-y-trazabilidad-de-contacto-con-pacientes-2026-07-31"></a>
+
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/13-backend.md#busqueda-y-trazabilidad-de-contacto-con-pacientes-2026-07-31).
+
+<a id="cierre-de-revisión-sin-cambiar-una-cita-confirmada-2026-09-04"></a>
+
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/13-backend.md#cierre-de-revisión-sin-cambiar-una-cita-confirmada-2026-09-04).
+
+<a id="cierre-tras-aplicar-una-acción-de-cita-2026-09-04"></a>
+
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/13-backend.md#cierre-tras-aplicar-una-acción-de-cita-2026-09-04).
+
+<a id="qa-ampliada-del-piloto-2026-09-04"></a>
+
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/13-backend.md#qa-ampliada-del-piloto-2026-09-04).
+
+<a id="referencia-operativa-borrador-día-anterior-v10-2026-09-05"></a>
+
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/13-backend.md#referencia-operativa-borrador-día-anterior-v10-2026-09-05).
+
+<a id="resultado-de-cita-visible-y-clasificación-sin-atajos-2026-09-03"></a>
+
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/13-backend.md#resultado-de-cita-visible-y-clasificación-sin-atajos-2026-09-03).
