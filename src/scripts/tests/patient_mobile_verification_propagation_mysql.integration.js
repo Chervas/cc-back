@@ -54,4 +54,40 @@ withIsolatedCampaignMysql(async scope => {
   assert.equal((await rows(74)).length, 1); assert.equal(Number((await rows(74))[0].is_active), 0);
   assert.equal(await db.JobRequest.count() + await db.Message.count(), 0);
   report.checks.push('eight concurrent propagations serialize on the clinic and create exactly one inactive copy');
+
+  const controller = loadSource('../controllers/automationsV2.controller', { '../../models': db,
+    '../services/leadAutoReply.service': { validateFlowActivation: async () => ({ managed: false, ready: true }) },
+  }, { PATIENT_MOBILE_VERIFICATION_ENABLED: 'false' }, 10000);
+  const invoke = async (handler, params, body, subject = controller) => {
+    const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(value) { this.body = value; return this; } };
+    await subject[handler]({ userData: { userId: 1 }, params, body }, res);
+    assert(res.statusCode < 400, JSON.stringify(res.body)); return res.body.data;
+  };
+  await db.Clinica.create({ id_clinica: 75, nombre_clinica: 'TESTONLY controller' });
+  const definition = C.definition(75), cutoff = '2026-10-20T12:00:00.000Z';
+  definition.nodes[0].config = { response_timeout_minutes: 1440, enabled_after: cutoff };
+  const draft = await invoke('createTemplateDraft', {}, definition);
+  const stored = await db.AutomationFlowTemplateV2.findByPk(draft.id);
+  assert.equal(stored.nodes[0].config.response_timeout_minutes, 1440);
+  assert.equal(stored.nodes[0].config.enabled_after, cutoff);
+  assert(C.configValid(stored.trigger_config));
+  await invoke('updateTemplateDraft', { template_ref: draft.public_id, version: draft.version }, { nodes: stored.nodes });
+  await stored.reload(); assert.equal(stored.nodes[0].config.enabled_after, cutoff);
+  const published = await invoke('publishTemplateVersion', { template_ref: draft.public_id, version: draft.version }, {});
+  await stored.reload(); assert.equal(stored.nodes[0].config.response_timeout_minutes, 1440);
+  assert.equal(stored.nodes[0].config.enabled_after, cutoff); assert(C.configValid(stored.trigger_config));
+  assert.equal(published.is_active, false); assert.equal(stored.is_active, false);
+  report.checks.push('native create, repeated save and publish preserve 1440 minutes and the exact activation cut in both trigger node and derived config; closed gate publishes inactive');
+
+  const enabledController = loadSource('../controllers/automationsV2.controller', { '../../models': db,
+    '../services/leadAutoReply.service': { validateFlowActivation: async () => ({ managed: false, ready: true }) },
+  }, { PATIENT_MOBILE_VERIFICATION_ENABLED: 'true' }, 10000);
+  const next = await invoke('createTemplateDraft', {}, definition, enabledController);
+  const active = await invoke('publishTemplateVersion', { template_ref: next.public_id, version: next.version }, {}, enabledController);
+  assert.equal(active.is_active, true); assert.equal(await db.AutomationFlowTemplateV2.count({ where: { clinic_id: 75, is_active: true } }), 1);
+  const master = { ...C.definition(), template_key: 'testonly_publication_master', nodes: definition.nodes };
+  const masterDraft = await invoke('createTemplateDraft', {}, master, enabledController);
+  const publishedMaster = await invoke('publishTemplateVersion', { template_ref: masterDraft.public_id, version: masterDraft.version }, {}, enabledController);
+  assert.equal(publishedMaster.is_active, false);
+  report.checks.push('enabled gate activates exactly the configured local version; the configured system master still never activates');
 }).catch(error => { console.error(error.stack || error); process.exitCode = 1; });

@@ -2125,6 +2125,11 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
     && cleanString(triggerConfig.managed_feature) === 'lead_auto_reply'
   ) {
     sanitizedTriggerConfig = { ...triggerConfig };
+  } else if (normalizedTriggerType === 'patient.mobile_verification_requested' && isObject(triggerConfig)) {
+    sanitizedTriggerConfig = {
+      response_timeout_minutes: triggerConfig.response_timeout_minutes ?? null,
+      enabled_after: triggerConfig.enabled_after ?? null,
+    };
   } else if (normalizedTriggerType === 'scheduled_once' && isObject(triggerConfig)) {
     sanitizedTriggerConfig = { ...triggerConfig };
   }

@@ -241,6 +241,15 @@ withIsolatedCampaignMysql(async scope => {
   assert.equal(await db.AutomationFlowTemplateV2.count({ where: { is_system: true, is_active: true } }), 0);
   check('clinic-scoped projection hides tokens and preserves immutable history; prepared system catalogue remains inactive');
 
+  const versionedNodes = structuredClone(t.template.nodes);
+  versionedNodes.find(n => n.type === 'action/send_whatsapp').config.catalog_template_id = t.approved.catalog_template_id;
+  await t.template.update({ nodes: versionedNodes });
+  await t.approved.update({ name: C.TEMPLATE + '_v2', language: 'es' });
+  const versioned = await start();
+  assert.equal(versioned.message.metadata.template_name, C.TEMPLATE + '_v2');
+  assert.equal(versioned.message.metadata.template_language, 'es');
+  check('native catalog binding resolves an approved technical _v2/es instance without changing the modular family name or patient destination');
+
   const originalConfig = t.template.trigger_config;
   await t.template.update({ trigger_config: { ...originalConfig, response_timeout_minutes: 1440 } });
   const fullDay = await start();
