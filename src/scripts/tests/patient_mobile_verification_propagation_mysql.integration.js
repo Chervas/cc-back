@@ -63,6 +63,13 @@ withIsolatedCampaignMysql(async scope => {
     await subject[handler]({ userData: { userId: 1 }, params, body }, res);
     assert(res.statusCode < 400, JSON.stringify(res.body)); return res.body.data;
   };
+  const [distributed] = await rows(74);
+  const scopedDraft = await invoke('createTemplateDraft', {}, { ...distributed, id: undefined });
+  assert.equal(scopedDraft.public_id, distributed.public_id);
+  assert.equal(scopedDraft.template_key, distributed.template_key);
+  assert.equal(scopedDraft.version, 2);
+  assert.equal(await db.AutomationFlowTemplateV2.count({ where: { clinic_id: 74, is_active: true } }), 0);
+  report.checks.push('native new-draft editing preserves the propagated double-underscore clinic family, public identity and next version rather than creating a second flow');
   await db.Clinica.create({ id_clinica: 75, nombre_clinica: 'TESTONLY controller' });
   const definition = C.definition(75), cutoff = '2026-10-20T12:00:00.000Z';
   definition.nodes[0].config = { response_timeout_minutes: 1440, enabled_after: cutoff };

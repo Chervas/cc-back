@@ -5894,7 +5894,7 @@ exports.createTemplateDraft = async (req, res) => {
       triggerConfig: normalizedTriggerConfig,
     });
 
-    const explicitTemplateKey = sanitizeTemplateKey(body.template_key);
+    let explicitTemplateKey = sanitizeTemplateKey(body.template_key);
     let templateKey = buildTemplateKey({ templateKey: body.template_key, name });
     if (!explicitTemplateKey) {
       templateKey = await ensureUniqueTemplateKey(templateKey);
@@ -5918,6 +5918,18 @@ exports.createTemplateDraft = async (req, res) => {
 
     if (!assertCreateScopeAllowed(access, { clinic_id: clinicId, group_id: groupId, is_system: isSystem })) {
       return res.status(403).json({ success: false, error: 'forbidden_scope' });
+    }
+
+    // Propagated mobile families contain a double-underscore scope suffix.
+    // Reopening that exact scoped family must not sanitize it into a new flow.
+    const exactMobileKey = cleanString(body.template_key);
+    if (resolvedTriggerType === 'patient.mobile_verification_requested' && clinicId && !isSystem
+      && /^[a-z0-9_]{1,120}$/.test(exactMobileKey || '')) {
+      const scopedFamily = await AutomationFlowTemplateV2.findOne({ where: {
+        template_key: exactMobileKey, clinic_id: clinicId, group_id: groupId, is_system: false,
+        trigger_type: resolvedTriggerType,
+      }, attributes: ['id'], raw: true });
+      if (scopedFamily) templateKey = explicitTemplateKey = exactMobileKey;
     }
 
     const latest = await AutomationFlowTemplateV2.findOne({
