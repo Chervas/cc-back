@@ -128,11 +128,10 @@ async function main() {
     report.checks.push('reviewed legacy clone backfill, conflicting clones abort, leap-month exact weighted/zero-position rollup, independent archive read-back failure safe, partial monthly range explicit, resumable verified purge, retry idempotence, concurrent ingestion prevents stale archive publication');
     assert.equal(await count('ScAnalyticsStagedRows'), 0); assert.equal(await count('ScAnalyticsStagedTotals'), 0);
   });
-  // Only our successfully closed fixture datadir; preserve report and error log.
+  // The fixture owns cleanup and honors explicit data retention for reproduction.
   const reportFile = path.join(ownedRoot, 'result.json'); const report = JSON.parse(fs.readFileSync(reportFile));
   assert.equal(report.success, true); assert.equal(report.shutdown.code, 0);
-  fs.rmSync(path.join(ownedRoot, 'data'), { recursive: true, force: true });
-  report.ownDatadirRemoved = true; fs.writeFileSync(reportFile, JSON.stringify(report, null, 2), { mode: 0o600 });
-  console.log(JSON.stringify({ report: reportFile, ownDatadirRemoved: true }));
+  assert.equal(report.dataCleanup.status, process.env.CAMPAIGN_OPTIMIZATION_MYSQL_KEEP_DATA === '1' ? 'retained' : 'removed');
+  console.log(JSON.stringify({ report: reportFile, dataCleanup: report.dataCleanup.status }));
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
