@@ -507,6 +507,36 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     return { status: 'failed', reason: 'linked_template_not_found' };
   }
 
+  if (linkedTemplate.trigger_type === 'patient.mobile_verification_requested') {
+    // Distribution is not activation. Serialize by clinic, and never replace
+    // a locally configured family (including renamed or unpublished copies).
+    return db.sequelize.transaction(async (transaction) => {
+      await Clinica.findOne({ where: { id_clinica: clinicScope.clinic_id },
+        transaction, lock: transaction.LOCK.UPDATE });
+      const existing = await AutomationFlowTemplateV2.findAll({
+        where: { clinic_id: clinicScope.clinic_id, trigger_type: linkedTemplate.trigger_type },
+        order: [['version', 'DESC'], ['id', 'DESC']], transaction, lock: transaction.LOCK.UPDATE,
+      });
+      if (existing.length) {
+        return { status: 'unchanged', reason: 'mobile_verification_local_configuration_preserved',
+          template_key: existing[0].template_key, version: existing[0].version, scheduled_backfill: null };
+      }
+      const row = await AutomationFlowTemplateV2.create({
+        public_id: await generateUniquePublicId(),
+        template_key: buildCatalogTemplateKey(catalogFlow.id, linkedTemplate.template_key, clinicId),
+        version: 1, engine_version: 'v2',
+        name: catalogFlow.display_name || linkedTemplate.name,
+        description: catalogFlow.description || linkedTemplate.description || null,
+        trigger_type: linkedTemplate.trigger_type, trigger_config: cloneJson(linkedTemplate.trigger_config),
+        is_active: false, is_system: false, clinic_id: clinicScope.clinic_id, group_id: clinicScope.group_id,
+        entry_node_id: linkedTemplate.entry_node_id, nodes: cloneJson(linkedTemplate.nodes),
+        created_by: actorUserId || linkedTemplate.created_by || 1,
+      }, { transaction });
+      await publishClinicTemplateVersion({ row, actorUserId, transaction, isActive: false });
+      return { status: 'created', template_key: row.template_key, version: row.version, scheduled_backfill: null };
+    });
+  }
+
   const templateKey = buildCatalogTemplateKey(catalogFlow.id, linkedTemplate.template_key, clinicId);
   await repairClinicDraftFamily({
     clinicId: clinicScope.clinic_id,

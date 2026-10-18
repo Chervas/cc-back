@@ -240,4 +240,27 @@ withIsolatedCampaignMysql(async scope => {
   assert(!JSON.stringify(visible).includes('reply_token')); await assert.rejects(request.update({ metadata: {} }), /append-only/);
   assert.equal(await db.AutomationFlowTemplateV2.count({ where: { is_system: true, is_active: true } }), 0);
   check('clinic-scoped projection hides tokens and preserves immutable history; prepared system catalogue remains inactive');
+
+  const originalConfig = t.template.trigger_config;
+  await t.template.update({ trigger_config: { ...originalConfig, response_timeout_minutes: 1440 } });
+  const fullDay = await start();
+  t.clock = new Date(+t.clock + 7200000); await accept(fullDay.message);
+  const acceptedAt = +t.clock;
+  t.restart(); await run(fullDay.exec, 'timeout');
+  assert.equal(+(await execution(fullDay.request)).wait_until, acceptedAt + 86400000);
+  t.clock = new Date(acceptedAt + 86399000); await run(fullDay.exec, 'timeout');
+  assert.equal((await t.runtime.state(fullDay.request)).state, 'pending');
+  t.clock = new Date(acceptedAt + 86401000); t.restart(); await run(fullDay.exec, 'timeout');
+  assert.equal((await t.runtime.state(fullDay.request)).reason, 'no_response');
+  assert.equal(await db.Message.count({ where: { automation_delivery_key: `mobile-verification:${fullDay.request.id}:outbound` } }), 1);
+  check('authorized 1440-minute timeout starts at delayed provider acceptance, survives restart, and reviews silence only after the full 24 hours');
+
+  await t.template.update({ trigger_config: { ...originalConfig, response_timeout_minutes: 1440,
+    enabled_after: new Date(+t.clock + 60000).toISOString() } });
+  const beforeCut = await t.source(); assert.equal(beforeCut.metadata.delivery_enabled, false);
+  t.clock = new Date(+t.clock + 61000);
+  assert.equal((await t.runtime.dispatch({ request_event_id: beforeCut.id, clinic_id: 72 })).result.reason, 'delivery_disabled');
+  const afterCut = await t.source(); assert.equal(afterCut.metadata.delivery_enabled, true);
+  assert.equal(afterCut.metadata.response_timeout_minutes, 1440);
+  check('prospective activation cut never revives earlier disabled requests; only a new explicit acceptance after the cut becomes deliverable');
 }).catch(error => { console.error(error); process.exitCode = 1; });
