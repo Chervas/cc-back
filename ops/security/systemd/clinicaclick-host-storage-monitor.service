@@ -1,0 +1,21 @@
+[Unit]
+Description=ClinicaClick CRM/DEV disk capacity email monitor
+After=mysql.service network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/wt/back-staging
+RuntimeDirectory=clinicaclick-host-storage-monitor
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+ExecStart=/usr/bin/flock -n /run/clinicaclick-host-storage-monitor/check.lock /usr/bin/node /home/ubuntu/wt/back-staging/src/scripts/host-storage-monitor.js
+TimeoutStartSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/clinicaclick-host-storage-monitor
+

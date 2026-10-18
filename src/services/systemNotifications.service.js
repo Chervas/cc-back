@@ -28,6 +28,26 @@ const WHATSAPP_PROVIDER_STATUSES = new Set(['sent', 'delivered', 'read', 'failed
 
 const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
   {
+    key: 'system.host_storage_warning', category: 'system', severity: 'warning',
+    label: 'Servidor: disco al 80%',
+    description: 'El disco compartido de CRM, DEV y MySQL ha alcanzado el 80% de uso.',
+    minimumThrottleMinutes: 1440,
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
+    key: 'system.host_storage_critical', category: 'system', severity: 'critical',
+    label: 'Servidor: disco al 90% o mas',
+    description: 'El espacio disponible puede comprometer las escrituras y automatizaciones.',
+    minimumThrottleMinutes: 60,
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
+    key: 'system.host_storage_recovered', category: 'system', severity: 'info',
+    label: 'Servidor: espacio de disco recuperado',
+    description: 'El uso del disco ha bajado del 75%; no se reenvian comunicaciones.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
     key: 'security.activity_detected', category: 'security', severity: 'warning',
     label: 'Seguridad: actividad que requiere revisión',
     description: 'Umbrales de actividad, envíos, creación de plantillas o consumo de IA. El aviso no detiene la clínica.',

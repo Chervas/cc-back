@@ -1,0 +1,11 @@
+[Unit]
+Description=Check ClinicaClick shared root disk every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=10s
+Unit=clinicaclick-host-storage-monitor.service
+
+[Install]
+WantedBy=timers.target
