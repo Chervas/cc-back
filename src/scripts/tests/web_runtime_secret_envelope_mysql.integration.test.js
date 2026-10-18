@@ -1,8 +1,11 @@
 'use strict';
 
+const { ownedMysqlTestEntry } = require('./fixtures/owned_mysql_test_entry.fixture');
+const runOwnedFixture = ownedMysqlTestEntry(process.env, { allowSkip: true });
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const Sequelize = require('sequelize');
+const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 
 const {
   decryptRuntimeSecret,
@@ -19,25 +22,6 @@ const ROW_ID = '11111111-1111-4111-8111-111111111111';
 
 function quoteIdentifier(value) {
   return `\`${String(value).replace(/`/g, '``')}\``;
-}
-
-function sourceConnection(url) {
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch (cause) {
-    const error = new Error('WEB_EDITOR_TEST_MYSQL_URL debe ser una URL MySQL valida');
-    error.cause = cause;
-    throw error;
-  }
-  if (!['mysql:', 'mysql2:'].includes(parsed.protocol)) {
-    throw new Error('WEB_EDITOR_TEST_MYSQL_URL debe usar el protocolo mysql');
-  }
-  const database = decodeURIComponent(parsed.pathname.replace(/^\//u, '')).trim();
-  if (!database || /(?:^|_)(?:prod|production)(?:_|$)/iu.test(database)) {
-    throw new Error('La integracion MySQL rechaza una conexion de produccion');
-  }
-  return { parsed, database };
 }
 
 function context(slot) {
@@ -90,20 +74,7 @@ async function assertFenceRejectsEveryMutation(sequelize, table) {
   );
 }
 
-async function main() {
-  const sourceUrl = String(process.env.WEB_EDITOR_TEST_MYSQL_URL || '').trim();
-  if (!sourceUrl) {
-    console.log('web runtime secret envelope mysql integration: SKIP (WEB_EDITOR_TEST_MYSQL_URL no configurada)');
-    return;
-  }
-
-  const source = sourceConnection(sourceUrl);
-  const useExistingDatabase = String(
-    process.env.WEB_RUNTIME_TEST_MYSQL_USE_EXISTING_DATABASE || ''
-  ).trim().toLowerCase() === 'true';
-  const database = useExistingDatabase
-    ? source.database
-    : `clinicaclick_runtime_envelope_${process.pid}_${Date.now()}_test`;
+async function exerciseEnvelope(isolated, report) {
   const suffix = `${process.pid}_${Date.now()}`;
   const runtimeTable = `cc_runtime_envelope_${suffix}`;
   const intakeTable = `cc_intake_config_${suffix}`;
@@ -120,30 +91,14 @@ async function main() {
   process.env.MARKETING_WEB_RUNTIME_ENVELOPE_KEY_ID = 'mysql-envelope-contract-v1';
   process.env.MARKETING_WEB_RUNTIME_SECRET_MIGRATION_QUIESCED = 'true';
 
-  const admin = useExistingDatabase ? null : new Sequelize.Sequelize(sourceUrl, {
-    logging: false,
-    pool: { max: 1, min: 0 },
-  });
-  let isolated = null;
   let writer = null;
   let writerTransaction = null;
   try {
-    if (admin) {
-      await admin.authenticate();
-      await admin.query(
-        `CREATE DATABASE ${quoteIdentifier(database)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
-      );
-    }
-    source.parsed.pathname = `/${database}`;
-    isolated = new Sequelize.Sequelize(source.parsed.toString(), {
-      logging: false,
-      pool: { max: 3, min: 0 },
-    });
-    writer = new Sequelize.Sequelize(source.parsed.toString(), {
-      logging: false,
+    writer = new Sequelize.Sequelize(report.database, 'root', '', {
+      dialect: 'mysql', host: 'localhost', logging: false,
+      dialectOptions: { socketPath: isolated.options.dialectOptions.socketPath },
       pool: { max: 1, min: 0 },
     });
-    await isolated.authenticate();
     await writer.authenticate();
     if ((await triggerRows(isolated)).length) {
       throw new Error('El preflight no se ejecuta mientras exista otro fence de runtime');
@@ -249,6 +204,7 @@ async function main() {
       decryptRuntimeSecret(row.target_hmac_envelope, context('target')),
       TARGET_SECRET
     );
+    report.checks.push('runtime envelope fence, failed migration, recovery and decrypt on owned MySQL');
     console.log('web runtime secret envelope mysql integration: ok');
   } finally {
     const cleanupErrors = [];
@@ -260,19 +216,8 @@ async function main() {
       await writer.close().catch((error) => cleanupErrors.push(error));
       writer = null;
     }
-    if (isolated) {
-      await isolated.query(`DROP TABLE IF EXISTS ${runtimeTableSql}`)
-        .catch((error) => cleanupErrors.push(error));
-      await isolated.query(`DROP TABLE IF EXISTS ${intakeTableSql}`)
-        .catch((error) => cleanupErrors.push(error));
-      await isolated.close().catch((error) => cleanupErrors.push(error));
-      isolated = null;
-    }
-    if (admin) {
-      await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
-        .catch((error) => cleanupErrors.push(error));
-      await admin.close().catch((error) => cleanupErrors.push(error));
-    }
+    // The owning fixture closes isolated and removes successful data. On a
+    // failure it retains tables/triggers for diagnosis, together with its log.
     for (const name of envNames) {
       if (previousEnv[name] === undefined) delete process.env[name];
       else process.env[name] = previousEnv[name];
@@ -281,6 +226,14 @@ async function main() {
       throw new AggregateError(cleanupErrors, 'web runtime envelope mysql scratch cleanup failed');
     }
   }
+}
+
+async function main() {
+  if (!runOwnedFixture) {
+    console.log('web runtime secret envelope mysql integration: SKIP (owned MySQL fixture opt-in required)');
+    return;
+  }
+  await withIsolatedCampaignMysql(({ sql, report }) => exerciseEnvelope(sql, report));
 }
 
 main().catch((error) => {
