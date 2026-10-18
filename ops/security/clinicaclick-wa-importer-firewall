@@ -1,6 +1,15 @@
 #!/bin/sh
 set -eu
 [ "$(id -u cc-wa-importer)" = "997" ] || exit 1
+# Explicit opt-in only; malformed or writable marker refuses BEFORE any rule change.
+rds_enabled=false
+rds_opt_in=/etc/clinicaclick-database/wa-importer-rds-egress.enabled
+if [ -e "$rds_opt_in" ] || [ -L "$rds_opt_in" ]; then
+ [ -f "$rds_opt_in" ] && [ ! -L "$rds_opt_in" ] || exit 1
+ [ "$(stat -c '%u:%g:%a:%h:%s' "$rds_opt_in")" = "0:0:644:1:39" ] || exit 1
+ printf '%s\n' 'clinicaclick-wa-importer-rds-egress-v1' | /usr/bin/cmp -s - "$rds_opt_in" || exit 1
+ rds_enabled=true
+fi
 for tool in /usr/sbin/iptables /usr/sbin/ip6tables; do
  "$tool" -w -I OUTPUT 1 -m owner --uid-owner 997 -j REJECT
  "$tool" -w -N CC_WA_IMPORT_V1 2>/dev/null || true
@@ -9,6 +18,12 @@ for tool in /usr/sbin/iptables /usr/sbin/ip6tables; do
  if [ "$tool" = /usr/sbin/iptables ]; then
   "$tool" -w -A CC_WA_IMPORT_V1 -p tcp -d 127.0.0.1 --dport 3306 -j RETURN
   "$tool" -w -A CC_WA_IMPORT_V1 -p tcp -d 13.39.100.55 --dport 8445 -j RETURN
+  if [ "$rds_enabled" = true ]; then
+   "$tool" -w -A CC_WA_IMPORT_V1 -m owner --uid-owner 997 -p udp -d 127.0.0.53/32 --dport 53 -m comment --comment CC_WA_RDS_V1_DNS_UDP -j RETURN
+   "$tool" -w -A CC_WA_IMPORT_V1 -m owner --uid-owner 997 -p tcp -d 127.0.0.53/32 --dport 53 -m comment --comment CC_WA_RDS_V1_DNS_TCP -j RETURN
+   "$tool" -w -A CC_WA_IMPORT_V1 -m owner --uid-owner 997 -p tcp -d 172.31.64.0/24 --dport 3306 -m comment --comment CC_WA_RDS_V1_SUBNET_A -j RETURN
+   "$tool" -w -A CC_WA_IMPORT_V1 -m owner --uid-owner 997 -p tcp -d 172.31.65.0/24 --dport 3306 -m comment --comment CC_WA_RDS_V1_SUBNET_B -j RETURN
+  fi
  fi
  "$tool" -w -A CC_WA_IMPORT_V1 -j REJECT
  "$tool" -w -C OUTPUT -m owner --uid-owner 997 -j CC_WA_IMPORT_V1 2>/dev/null || "$tool" -w -I OUTPUT 1 -m owner --uid-owner 997 -j CC_WA_IMPORT_V1
