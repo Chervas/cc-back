@@ -1,0 +1,919 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "REVIEW ONLY: 24-hour synthetic MySQL DMS pilot. Creates no database users, no source listener and never starts replication. Needs CAPABILITY_NAMED_IAM for the previously absent dms-vpc-role.",
+  "Metadata": {
+    "Scope": "Only cc_dms_pilot fictional data. Clinical/DEV accounts and schemas prohibited.",
+    "CostBudget": "Review estimate USD10-15/24h; no automatic deletion/budget enforcement. Stop/delete pilot promptly.",
+    "RequiredPreflight": [
+      "Check dms-vpc-role is still absent before creating this stack; never replace an existing role.",
+      "Existing subnets must be private, in this VPC, distinct AZs, with peering route to 172.26.0.0/16.",
+      "Create fictional source/target users later from these generated secrets in memory, restricted to cc_dms_pilot.",
+      "Source certificate must verify 172.26.0.110 as an IP SAN; prove wrong-CA and wrong-name rejection.",
+      "Endpoint schema mappings, generated-column exclusions, cascades and LOB handling must be rehearsed before a clinical plan.",
+      "Retained secrets and shared VPC role require explicit cleanup after confirming no consumers; no secret values are outputs."
+    ],
+    "PublicRdsCaSource": "https://truststore.pki.rds.amazonaws.com/eu-west-3/eu-west-3-bundle.pem",
+    "PublicRdsCaSha256": "6f2e2f0cabeed0e40f7cc432e47be1ff7a4b6faa28318fb2a9e060afdee5bc26"
+  },
+  "Parameters": {
+    "VpcId": {
+      "Type": "AWS::EC2::VPC::Id"
+    },
+    "PrivateSubnetIds": {
+      "Type": "List<AWS::EC2::Subnet::Id>",
+      "Description": "Exactly the existing private RDS subnets across at least two AZs."
+    },
+    "TargetRdsSecurityGroupId": {
+      "Type": "AWS::EC2::SecurityGroup::Id"
+    },
+    "TargetRdsHostname": {
+      "Type": "String",
+      "AllowedPattern": "^[a-zA-Z0-9.-]+\\.eu-west-3\\.rds\\.amazonaws\\.com$",
+      "Description": "Exact RDS DNS endpoint for hostname verification; never its IP."
+    },
+    "DmsEngineVersion": {
+      "Type": "String",
+      "AllowedPattern": "^3\\.(5\\.([4-9]|[1-9][0-9]+)|([6-9]|[1-9][0-9]+)\\.[0-9]+)$",
+      "Description": "3.6.1 recommended after regional orderability check; exact version >=3.5.4 is still explicit.",
+      "Default": "3.6.1"
+    },
+    "PilotSourceCaPem": {
+      "Type": "String",
+      "MinLength": 256,
+      "MaxLength": 4096,
+      "AllowedPattern": "(?s)^-----BEGIN CERTIFICATE-----\\s+[A-Za-z0-9+/=\\r\\n]+-----END CERTIFICATE-----\\s*$",
+      "Description": "PUBLIC pilot CA PEM only, not a private key or clinical credentials."
+    },
+    "CreatePilotTask": {
+      "Type": "String",
+      "AllowedValues": [
+        "false",
+        "true"
+      ],
+      "Default": "false",
+      "Description": "Creates an idle task only; leave false until synthetic users/TLS/connections are verified."
+    },
+    "PilotIdentityConfirmed": {
+      "Type": "String",
+      "AllowedValues": [
+        "no",
+        "synthetic-only-confirmed"
+      ],
+      "Default": "no"
+    }
+  },
+  "Conditions": {
+    "CreateTask": {
+      "Fn::Equals": [
+        {
+          "Ref": "CreatePilotTask"
+        },
+        "true"
+      ]
+    }
+  },
+  "Rules": {
+    "TaskRequiresSyntheticIdentity": {
+      "RuleCondition": {
+        "Fn::Equals": [
+          {
+            "Ref": "CreatePilotTask"
+          },
+          "true"
+        ]
+      },
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Equals": [
+              {
+                "Ref": "PilotIdentityConfirmed"
+              },
+              "synthetic-only-confirmed"
+            ]
+          },
+          "AssertDescription": "Only the independently verified isolated fictional source and target may be selected."
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "DmsVpcRole": {
+      "Type": "AWS::IAM::Role",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "RoleName": "dms-vpc-role",
+        "Description": "Created only after an explicit absence check; retain until no DMS consumer depends on it.",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "dms.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonDMSVPCManagementRole"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ]
+      }
+    },
+    "PilotSourceSecret": {
+      "Type": "AWS::SecretsManager::Secret",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "Synthetic MySQL endpoint account only; not the RDS administrator.",
+        "GenerateSecretString": {
+          "SecretStringTemplate": "{\"username\":\"cc_dms_pilot\",\"host\":\"172.26.0.110\",\"port\":23306,\"dbname\":\"cc_dms_pilot\"}",
+          "GenerateStringKey": "password",
+          "PasswordLength": 32,
+          "ExcludePunctuation": true
+        },
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ]
+      }
+    },
+    "PilotTargetSecret": {
+      "Type": "AWS::SecretsManager::Secret",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "Synthetic MySQL endpoint account only; not the RDS administrator.",
+        "GenerateSecretString": {
+          "SecretStringTemplate": {
+            "Fn::Sub": "{\"username\":\"cc_dms_pilot\",\"host\":\"${TargetRdsHostname}\",\"port\":3306,\"dbname\":\"cc_dms_pilot\"}"
+          },
+          "GenerateStringKey": "password",
+          "PasswordLength": 32,
+          "ExcludePunctuation": true
+        },
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ]
+      }
+    },
+    "DmsSecretAccessRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "Description": "Read only this stack synthetic endpoint secrets using the documented regional DMS principal.",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": {
+                  "Fn::Sub": "dms.${AWS::Region}.amazonaws.com"
+                }
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ReadOwnPilotSecrets",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": [
+                    {
+                      "Ref": "PilotSourceSecret"
+                    },
+                    {
+                      "Ref": "PilotTargetSecret"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ]
+      }
+    },
+    "DmsSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "GroupDescription": "Private synthetic DMS only",
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 9,
+            "ToPort": 9,
+            "CidrIp": "127.0.0.1/32",
+            "Description": "Suppress default allow-all outbound; loopback discard only"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ]
+      }
+    },
+    "SecretsEndpointSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "GroupDescription": "Private Secrets Manager endpoint only",
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 9,
+            "ToPort": 9,
+            "CidrIp": "127.0.0.1/32",
+            "Description": "Suppress default allow-all outbound; loopback discard only"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ]
+      }
+    },
+    "DmsToSource": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Properties": {
+        "GroupId": {
+          "Fn::GetAtt": [
+            "DmsSecurityGroup",
+            "GroupId"
+          ]
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 23306,
+        "ToPort": 23306,
+        "CidrIp": "172.26.0.110/32",
+        "Description": "Dedicated fictional mysqld passthrough only; never clinical port 13306/3306"
+      }
+    },
+    "DmsToTarget": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Properties": {
+        "GroupId": {
+          "Fn::GetAtt": [
+            "DmsSecurityGroup",
+            "GroupId"
+          ]
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 3306,
+        "ToPort": 3306,
+        "DestinationSecurityGroupId": {
+          "Ref": "TargetRdsSecurityGroupId"
+        }
+      }
+    },
+    "TargetFromDms": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "TargetRdsSecurityGroupId"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 3306,
+        "ToPort": 3306,
+        "SourceSecurityGroupId": {
+          "Fn::GetAtt": [
+            "DmsSecurityGroup",
+            "GroupId"
+          ]
+        },
+        "Description": "Temporary synthetic DMS account and schema only"
+      }
+    },
+    "DmsToSecretsEndpoint": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Properties": {
+        "GroupId": {
+          "Fn::GetAtt": [
+            "DmsSecurityGroup",
+            "GroupId"
+          ]
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 443,
+        "ToPort": 443,
+        "DestinationSecurityGroupId": {
+          "Fn::GetAtt": [
+            "SecretsEndpointSecurityGroup",
+            "GroupId"
+          ]
+        }
+      }
+    },
+    "SecretsEndpointFromDms": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Fn::GetAtt": [
+            "SecretsEndpointSecurityGroup",
+            "GroupId"
+          ]
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 443,
+        "ToPort": 443,
+        "SourceSecurityGroupId": {
+          "Fn::GetAtt": [
+            "DmsSecurityGroup",
+            "GroupId"
+          ]
+        }
+      }
+    },
+    "SecretsManagerVpcEndpoint": {
+      "Type": "AWS::EC2::VPCEndpoint",
+      "Properties": {
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "VpcEndpointType": "Interface",
+        "ServiceName": {
+          "Fn::Sub": "com.amazonaws.${AWS::Region}.secretsmanager"
+        },
+        "PrivateDnsEnabled": true,
+        "SubnetIds": {
+          "Ref": "PrivateSubnetIds"
+        },
+        "SecurityGroupIds": [
+          {
+            "Fn::GetAtt": [
+              "SecretsEndpointSecurityGroup",
+              "GroupId"
+            ]
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "DmsSecretAccessRole",
+                    "Arn"
+                  ]
+                }
+              },
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": [
+                {
+                  "Ref": "PilotSourceSecret"
+                },
+                {
+                  "Ref": "PilotTargetSecret"
+                }
+              ]
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ]
+      }
+    },
+    "DmsSubnetGroup": {
+      "Type": "AWS::DMS::ReplicationSubnetGroup",
+      "Properties": {
+        "ReplicationSubnetGroupDescription": "Existing two private RDS subnets only; no Internet/NAT routes created.",
+        "SubnetIds": {
+          "Ref": "PrivateSubnetIds"
+        },
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ]
+      }
+    },
+    "ReplicationInstance": {
+      "Type": "AWS::DMS::ReplicationInstance",
+      "DependsOn": [
+        "DmsVpcRole",
+        "SecretsManagerVpcEndpoint",
+        "DmsToSource",
+        "DmsToTarget",
+        "TargetFromDms",
+        "DmsToSecretsEndpoint",
+        "SecretsEndpointFromDms"
+      ],
+      "Properties": {
+        "ReplicationInstanceClass": "dms.r6i.large",
+        "AllocatedStorage": 50,
+        "MultiAZ": false,
+        "PubliclyAccessible": false,
+        "AutoMinorVersionUpgrade": true,
+        "AllowMajorVersionUpgrade": false,
+        "EngineVersion": {
+          "Ref": "DmsEngineVersion"
+        },
+        "ReplicationSubnetGroupIdentifier": {
+          "Ref": "DmsSubnetGroup"
+        },
+        "VpcSecurityGroupIds": [
+          {
+            "Fn::GetAtt": [
+              "DmsSecurityGroup",
+              "GroupId"
+            ]
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ]
+      }
+    },
+    "PilotSourceCertificate": {
+      "Type": "AWS::DMS::Certificate",
+      "Properties": {
+        "CertificatePem": {
+          "Ref": "PilotSourceCaPem"
+        }
+      }
+    },
+    "RdsTargetCertificate": {
+      "Type": "AWS::DMS::Certificate",
+      "Properties": {
+        "CertificatePem": "-----BEGIN CERTIFICATE-----\nMIICrjCCAjOgAwIBAgIQJvkWUcYLbnxtuwnyjMmntDAKBggqhkjOPQQDAzCBljEL\nMAkGA1UEBhMCVVMxIjAgBgNVBAoMGUFtYXpvbiBXZWIgU2VydmljZXMsIEluYy4x\nEzARBgNVBAsMCkFtYXpvbiBSRFMxCzAJBgNVBAgMAldBMS8wLQYDVQQDDCZBbWF6\nb24gUkRTIGV1LXdlc3QtMyBSb290IENBIEVDQzM4NCBHMTEQMA4GA1UEBwwHU2Vh\ndHRsZTAgFw0yMTA1MjUyMjI2MTJaGA8yMTIxMDUyNTIzMjYxMlowgZYxCzAJBgNV\nBAYTAlVTMSIwIAYDVQQKDBlBbWF6b24gV2ViIFNlcnZpY2VzLCBJbmMuMRMwEQYD\nVQQLDApBbWF6b24gUkRTMQswCQYDVQQIDAJXQTEvMC0GA1UEAwwmQW1hem9uIFJE\nUyBldS13ZXN0LTMgUm9vdCBDQSBFQ0MzODQgRzExEDAOBgNVBAcMB1NlYXR0bGUw\ndjAQBgcqhkjOPQIBBgUrgQQAIgNiAARENn8uHCyjn1dFax4OeXxvbV861qsXFD9G\nDshumTmFzWWHN/69WN/AOsxy9XN5S7Cgad4gQgeYYYgZ5taw+tFo/jQvCLY//uR5\nuihcLuLJ78opvRPvD9kbWZ6oXfBtFkWjQjBAMA8GA1UdEwEB/wQFMAMBAf8wHQYD\nVR0OBBYEFKiK3LpoF+gDnqPldGSwChBPCYciMA4GA1UdDwEB/wQEAwIBhjAKBggq\nhkjOPQQDAwNpADBmAjEA+7qfvRlnvF1Aosyp9HzxxCbN7VKu+QXXPhLEBWa5oeWW\nUOcifunf/IVLC4/FGCsLAjEAte1AYp+iJyOHDB8UYkhBE/1sxnFaTiEPbvQBU0wZ\nSuwWVLhu2wWDuSW+K7tTuL8p\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nMIID/zCCAuegAwIBAgIRAKeDpqX5WFCGNo94M4v69sUwDQYJKoZIhvcNAQELBQAw\ngZcxCzAJBgNVBAYTAlVTMSIwIAYDVQQKDBlBbWF6b24gV2ViIFNlcnZpY2VzLCBJ\nbmMuMRMwEQYDVQQLDApBbWF6b24gUkRTMQswCQYDVQQIDAJXQTEwMC4GA1UEAwwn\nQW1hem9uIFJEUyBldS13ZXN0LTMgUm9vdCBDQSBSU0EyMDQ4IEcxMRAwDgYDVQQH\nDAdTZWF0dGxlMCAXDTIxMDUyNTIyMTgzM1oYDzIwNjEwNTI1MjMxODMzWjCBlzEL\nMAkGA1UEBhMCVVMxIjAgBgNVBAoMGUFtYXpvbiBXZWIgU2VydmljZXMsIEluYy4x\nEzARBgNVBAsMCkFtYXpvbiBSRFMxCzAJBgNVBAgMAldBMTAwLgYDVQQDDCdBbWF6\nb24gUkRTIGV1LXdlc3QtMyBSb290IENBIFJTQTIwNDggRzExEDAOBgNVBAcMB1Nl\nYXR0bGUwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCcKOTEMTfzvs4H\nWtJR8gI7GXN6xesulWtZPv21oT+fLGwJ+9Bv8ADCGDDrDxfeH/HxJmzG9hgVAzVn\n4g97Bn7q07tGZM5pVi96/aNp11velZT7spOJKfJDZTlGns6DPdHmx48whpdO+dOb\n6+eR0VwCIv+Vl1fWXgoACXYCoKjhxJs+R+fwY//0JJ1YG8yjZ+ghLCJmvlkOJmE1\nTCPUyIENaEONd6T+FHGLVYRRxC2cPO65Jc4yQjsXvvQypoGgx7FwD5voNJnFMdyY\n754JGPOOe/SZdepN7Tz7UEq8kn7NQSbhmCsgA/Hkjkchz96qN/YJ+H/okiQUTNB0\neG9ogiVFAgMBAAGjQjBAMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFFjayw9Y\nMjbxfF14XAhMM2VPl0PfMA4GA1UdDwEB/wQEAwIBhjANBgkqhkiG9w0BAQsFAAOC\nAQEAAtmx6d9+9CWlMoU0JCirtp4dSS41bBfb9Oor6GQ8WIr2LdfZLL6uES/ubJPE\n1Sh5Vu/Zon5/MbqLMVrfniv3UpQIof37jKXsjZJFE1JVD/qQfRzG8AlBkYgHNEiS\nVtD4lFxERmaCkY1tjKB4Dbd5hfhdrDy29618ZjbSP7NwAfnwb96jobCmMKgxVGiH\nUqsLSiEBZ33b2hI7PJ6iTJnYBWGuiDnsWzKRmheA4nxwbmcQSfjbrNwa93w3caL2\nv/4u54Kcasvcu3yFsUwJygt8z43jsGAemNZsS7GWESxVVlW93MJRn6M+MMakkl9L\ntWaXdHZ+KUV7LhfYLb0ajvb40w==\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nMIIF/jCCA+agAwIBAgIQGZH12Q7x41qIh9vDu9ikTjANBgkqhkiG9w0BAQwFADCB\nlzELMAkGA1UEBhMCVVMxIjAgBgNVBAoMGUFtYXpvbiBXZWIgU2VydmljZXMsIElu\nYy4xEzARBgNVBAsMCkFtYXpvbiBSRFMxCzAJBgNVBAgMAldBMTAwLgYDVQQDDCdB\nbWF6b24gUkRTIGV1LXdlc3QtMyBSb290IENBIFJTQTQwOTYgRzExEDAOBgNVBAcM\nB1NlYXR0bGUwIBcNMjEwNTI1MjIyMjMzWhgPMjEyMTA1MjUyMzIyMzNaMIGXMQsw\nCQYDVQQGEwJVUzEiMCAGA1UECgwZQW1hem9uIFdlYiBTZXJ2aWNlcywgSW5jLjET\nMBEGA1UECwwKQW1hem9uIFJEUzELMAkGA1UECAwCV0ExMDAuBgNVBAMMJ0FtYXpv\nbiBSRFMgZXUtd2VzdC0zIFJvb3QgQ0EgUlNBNDA5NiBHMTEQMA4GA1UEBwwHU2Vh\ndHRsZTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAMqE47sHXWzdpuqj\nJHb+6jM9tDbQLDFnYjDWpq4VpLPZhb7xPNh9gnYYTPKG4avG421EblAHqzy9D2pN\n1z90yKbIfUb/Sy2MhQbmZomsObhONEra06fJ0Dydyjswf1iYRp2kwpx5AgkVoNo7\n3dlws73zFjD7ImKvUx2C7B75bhnw2pJWkFnGcswl8fZt9B5Yt95sFOKEz2MSJE91\nkZlHtya19OUxZ/cSGci4MlOySzqzbGwUqGxEIDlY8I39VMwXaYQ8uXUN4G780VcL\nu46FeyRGxZGz2n3hMc805WAA1V5uir87vuirTvoSVREET97HVRGVVNJJ/FM6GXr1\nVKtptybbo81nefYJg9KBysxAa2Ao2x2ry/2ZxwhS6VZ6v1+90bpZA1BIYFEDXXn/\ndW07HSCFnYSlgPtSc+Muh15mdr94LspYeDqNIierK9i4tB6ep7llJAnq0BU91fM2\nJPeqyoTtc3m06QhLf68ccSxO4l8Hmq9kLSHO7UXgtdjfRVaffngopTNk8qK7bIb7\nLrgkqhiQw/PRCZjUdyXL153/fUcsj9nFNe25gM4vcFYwH6c5trd2tUl31NTi1MfG\nMgp3d2dqxQBIYANkEjtBDMy3SqQLIo9EymqmVP8xx2A/gCBgaxvMAsI6FSWRoC7+\nhqJ8XH4mFnXSHKtYMe6WPY+/XZgtAgMBAAGjQjBAMA8GA1UdEwEB/wQFMAMBAf8w\nHQYDVR0OBBYEFIkXqTnllT/VJnI2NqipA4XV8rh1MA4GA1UdDwEB/wQEAwIBhjAN\nBgkqhkiG9w0BAQwFAAOCAgEAKjSle8eenGeHgT8pltWCw/HzWyQruVKhfYIBfKJd\nMhV4EnH5BK7LxBIvpXGsFUrb0ThzSw0fn0zoA9jBs3i/Sj6KyeZ9qUF6b8ycDXd+\nwHonmJiQ7nk7UuMefaYAfs06vosgl1rI7eBHC0itexIQmKh0aX+821l4GEgEoSMf\nloMFTLXv2w36fPHHCsZ67ODldgcZbKNnpCTX0YrCwEYO3Pz/L398btiRcWGrewrK\njdxAAyietra8DRno1Zl87685tfqc6HsL9v8rVw58clAo9XAQvT+fmSOFw/PogRZ7\nOMHUat3gu/uQ1M5S64nkLLFsKu7jzudBuoNmcJysPlzIbqJ7vYc82OUGe9ucF3wi\n3tbKQ983hdJiTExVRBLX/fYjPsGbG3JtPTv89eg2tjWHlPhCDMMxyRKl6isu2RTq\n6VT489Z2zQrC33MYF8ZqO1NKjtyMAMIZwxVu4cGLkVsqFmEV2ScDHa5RadDyD3Ok\nm+mqybhvEVm5tPgY6p0ILPMN3yvJsMSPSvuBXhO/X5ppNnpw9gnxpwbjQKNhkFaG\nM5pkADZ14uRguOLM4VthSwUSEAr5VQYCFZhEwK+UOyJAGiB/nJz6IxL5XBNUXmRM\nHl8Xvz4riq48LMQbjcVQj0XvH941yPh+P8xOi00SGaQRaWp55Vyr4YKGbV0mEDz1\nr1o=\n-----END CERTIFICATE-----\n"
+      }
+    },
+    "SourceEndpoint": {
+      "Type": "AWS::DMS::Endpoint",
+      "DependsOn": [
+        "SecretsManagerVpcEndpoint"
+      ],
+      "Properties": {
+        "EndpointType": "source",
+        "EngineName": "mysql",
+        "SslMode": "verify-full",
+        "CertificateArn": {
+          "Ref": "PilotSourceCertificate"
+        },
+        "MySqlSettings": {
+          "SecretsManagerSecretId": {
+            "Ref": "PilotSourceSecret"
+          },
+          "SecretsManagerAccessRoleArn": {
+            "Fn::GetAtt": [
+              "DmsSecretAccessRole",
+              "Arn"
+            ]
+          }
+        },
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ],
+        "ExtraConnectionAttributes": {
+          "Fn::Sub": [
+            "secretsManagerEndpointOverride=${SecretsManagerEndpointDns};",
+            {
+              "SecretsManagerEndpointDns": {
+                "Fn::Select": [
+                  1,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::Select": [
+                          0,
+                          {
+                            "Fn::GetAtt": [
+                              "SecretsManagerVpcEndpoint",
+                              "DnsEntries"
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "TargetEndpoint": {
+      "Type": "AWS::DMS::Endpoint",
+      "DependsOn": [
+        "SecretsManagerVpcEndpoint"
+      ],
+      "Properties": {
+        "EndpointType": "target",
+        "EngineName": "mysql",
+        "SslMode": "verify-full",
+        "CertificateArn": {
+          "Ref": "RdsTargetCertificate"
+        },
+        "MySqlSettings": {
+          "SecretsManagerSecretId": {
+            "Ref": "PilotTargetSecret"
+          },
+          "SecretsManagerAccessRoleArn": {
+            "Fn::GetAtt": [
+              "DmsSecretAccessRole",
+              "Arn"
+            ]
+          }
+        },
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ],
+        "ExtraConnectionAttributes": {
+          "Fn::Sub": [
+            "Initstmt=SET FOREIGN_KEY_CHECKS=0;secretsManagerEndpointOverride=${SecretsManagerEndpointDns};",
+            {
+              "SecretsManagerEndpointDns": {
+                "Fn::Select": [
+                  1,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::Select": [
+                          0,
+                          {
+                            "Fn::GetAtt": [
+                              "SecretsManagerVpcEndpoint",
+                              "DnsEntries"
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "PilotTask": {
+      "Type": "AWS::DMS::ReplicationTask",
+      "Condition": "CreateTask",
+      "Properties": {
+        "MigrationType": "full-load-and-cdc",
+        "ReplicationInstanceArn": {
+          "Ref": "ReplicationInstance"
+        },
+        "SourceEndpointArn": {
+          "Ref": "SourceEndpoint"
+        },
+        "TargetEndpointArn": {
+          "Ref": "TargetEndpoint"
+        },
+        "TableMappings": "{\"rules\":[{\"rule-type\":\"selection\",\"rule-id\":\"1\",\"rule-name\":\"synthetic-only\",\"object-locator\":{\"schema-name\":\"cc_dms_pilot\",\"table-name\":\"%\"},\"rule-action\":\"include\"}]}",
+        "ReplicationTaskSettings": "{\"TargetMetadata\":{\"TargetSchema\":\"\",\"SupportLobs\":true,\"FullLobMode\":true,\"LobChunkSize\":64,\"LimitedSizeLobMode\":false,\"InlineLobMaxSize\":0,\"BatchApplyEnabled\":false},\"FullLoadSettings\":{\"TargetTablePrepMode\":\"DO_NOTHING\",\"CreatePkAfterFullLoad\":false,\"MaxFullLoadSubTasks\":2,\"CommitRate\":1000,\"TransactionConsistencyTimeout\":60,\"StopTaskCachedChangesApplied\":true,\"StopTaskCachedChangesNotApplied\":false},\"ValidationSettings\":{\"EnableValidation\":true,\"ValidationOnly\":false,\"ThreadCount\":2,\"SkipLobColumns\":false,\"ValidationPartialLobSize\":0},\"ErrorBehavior\":{\"DataErrorPolicy\":\"STOP_TASK\",\"DataTruncationErrorPolicy\":\"STOP_TASK\",\"DataErrorEscalationPolicy\":\"STOP_TASK\",\"TableErrorPolicy\":\"STOP_TASK\",\"ApplyErrorDeletePolicy\":\"STOP_TASK\",\"ApplyErrorInsertPolicy\":\"STOP_TASK\",\"ApplyErrorUpdatePolicy\":\"STOP_TASK\",\"ApplyErrorEscalationPolicy\":\"STOP_TASK\",\"FullLoadIgnoreConflicts\":false,\"FailOnNoTablesCaptured\":true,\"FailOnTransactionConsistencyBreached\":true},\"Logging\":{\"EnableLogging\":false}}",
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "project",
+            "Value": "clinicaclick"
+          },
+          {
+            "Key": "component",
+            "Value": "database"
+          },
+          {
+            "Key": "environment",
+            "Value": "staging"
+          },
+          {
+            "Key": "owner",
+            "Value": "architecture"
+          },
+          {
+            "Key": "purpose",
+            "Value": "mysql-synthetic-pilot"
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "ReplicationInstanceArn": {
+      "Value": {
+        "Ref": "ReplicationInstance"
+      }
+    },
+    "PilotSourceSecretArn": {
+      "Value": {
+        "Ref": "PilotSourceSecret"
+      }
+    },
+    "PilotTargetSecretArn": {
+      "Value": {
+        "Ref": "PilotTargetSecret"
+      }
+    },
+    "SourceEndpointArn": {
+      "Value": {
+        "Ref": "SourceEndpoint"
+      }
+    },
+    "TargetEndpointArn": {
+      "Value": {
+        "Ref": "TargetEndpoint"
+      }
+    },
+    "SecretsManagerVpcEndpointId": {
+      "Value": {
+        "Ref": "SecretsManagerVpcEndpoint"
+      }
+    },
+    "DmsSecurityGroupId": {
+      "Value": {
+        "Fn::GetAtt": [
+          "DmsSecurityGroup",
+          "GroupId"
+        ]
+      }
+    },
+    "PilotTaskArn": {
+      "Condition": "CreateTask",
+      "Value": {
+        "Ref": "PilotTask"
+      }
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "schema": "clinicaclick-dms-pilot-receipt/1",
+  "purpose": "Unexecuted synthetic pilot receipt template. Do not replace statuses with passed without real independently reviewed evidence.",
+  "observed_at_utc": null,
+  "metadata_sha256": null,
+  "plan_sha256": null,
+  "data_classification": "synthetic_only",
+  "fenced_finalization_seconds": null,
+  "checks": {
+    "tls_both_endpoints_verify_full": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "tls_wrong_ca_rejected": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "tls_wrong_hostname_rejected": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "tls_12_and_authentication_plugin_supported": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "source_forward_isolated_no_plaintext_remote_hop": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "target_local_infile_and_dedicated_user_grants": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "full_lob_json_text_roundtrip_and_full_validation": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "lob_nullability_restore_timed_under_cdc_fence": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "fk_cascades_and_set_null_during_full_load_cached_and_cdc": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "generated_columns_omitted_and_target_recomputed": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "whatsapp_catalog_triggers_restore_and_reject_invalid_writes": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "whatsapp_queue_inflight_ack_and_replay_without_external_sends": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "native_schema_indexes_enum_precision_defaults_preserved": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "connection_loss_restart_and_resume_without_gap_or_duplicates": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "final_marker_applied_after_all_source_writers_fenced": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "rollback_before_target_writers_enabled": {
+      "status": "not_run",
+      "evidence_sha256": null
+    },
+    "forward_recovery_after_target_writers_enabled": {
+      "status": "not_run",
+      "evidence_sha256": null
+    }
+  }
+}

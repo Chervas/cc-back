@@ -1,0 +1,296 @@
+{
+  "schema": "clinicaclick-dms-pilot/1",
+  "purpose": "Reviewable synthetic pilot only; not an AWS deployment or a patient-data migration authorization",
+  "region": "eu-west-3",
+  "pilot": {
+    "source_schema": "cc_dms_pilot",
+    "target_schema": "cc_dms_pilot",
+    "source_port": 23306,
+    "isolated_mysqld_required": true,
+    "existing_crm_or_dev_database_forbidden": true,
+    "real_patient_data_forbidden": true,
+    "duration_budget_hours": 24,
+    "replication_instance_class": "dms.r6i.large",
+    "publicly_accessible": false,
+    "multi_az": false,
+    "allocated_storage_gib": 50,
+    "storage_encryption_required": true,
+    "automatic_start": false,
+    "recommended_engine_version": "3.6.1"
+  },
+  "endpoints": {
+    "source": {
+      "EngineName": "mysql",
+      "SslMode": "verify-full",
+      "ServerName": "172.26.0.110",
+      "Port": 23306,
+      "CertificateArn": null,
+      "SecretsManagerSecretId": null,
+      "SecretsManagerAccessRoleArn": null
+    },
+    "target": {
+      "EngineName": "mysql",
+      "SslMode": "verify-full",
+      "ServerName": null,
+      "Port": 3306,
+      "CertificateArn": null,
+      "SecretsManagerSecretId": null,
+      "SecretsManagerAccessRoleArn": null,
+      "ExtraConnectionAttributes": "Initstmt=SET FOREIGN_KEY_CHECKS=0;"
+    }
+  },
+  "table_mappings": {
+    "rules": [
+      {
+        "rule-type": "selection",
+        "rule-id": "1",
+        "rule-name": "synthetic-only",
+        "object-locator": {
+          "schema-name": "cc_dms_pilot",
+          "table-name": "%"
+        },
+        "rule-action": "include"
+      }
+    ]
+  },
+  "task_settings": {
+    "TargetMetadata": {
+      "TargetSchema": "",
+      "SupportLobs": true,
+      "FullLobMode": true,
+      "LobChunkSize": 64,
+      "LimitedSizeLobMode": false,
+      "InlineLobMaxSize": 0,
+      "BatchApplyEnabled": false
+    },
+    "FullLoadSettings": {
+      "TargetTablePrepMode": "DO_NOTHING",
+      "CreatePkAfterFullLoad": false,
+      "MaxFullLoadSubTasks": 2,
+      "CommitRate": 1000,
+      "TransactionConsistencyTimeout": 60,
+      "StopTaskCachedChangesApplied": true,
+      "StopTaskCachedChangesNotApplied": false
+    },
+    "ValidationSettings": {
+      "EnableValidation": true,
+      "ValidationOnly": false,
+      "ThreadCount": 2,
+      "SkipLobColumns": false,
+      "ValidationPartialLobSize": 0
+    },
+    "ErrorBehavior": {
+      "DataErrorPolicy": "STOP_TASK",
+      "DataTruncationErrorPolicy": "STOP_TASK",
+      "DataErrorEscalationPolicy": "STOP_TASK",
+      "TableErrorPolicy": "STOP_TASK",
+      "ApplyErrorDeletePolicy": "STOP_TASK",
+      "ApplyErrorInsertPolicy": "STOP_TASK",
+      "ApplyErrorUpdatePolicy": "STOP_TASK",
+      "ApplyErrorEscalationPolicy": "STOP_TASK",
+      "FullLoadIgnoreConflicts": false,
+      "FailOnNoTablesCaptured": true,
+      "FailOnTransactionConsistencyBreached": true
+    },
+    "Logging": {
+      "EnableLogging": false
+    }
+  },
+  "required_pilot_checks": [
+    "tls_both_endpoints_verify_full",
+    "tls_wrong_ca_rejected",
+    "tls_wrong_hostname_rejected",
+    "tls_12_and_authentication_plugin_supported",
+    "source_forward_isolated_no_plaintext_remote_hop",
+    "target_local_infile_and_dedicated_user_grants",
+    "full_lob_json_text_roundtrip_and_full_validation",
+    "lob_nullability_restore_timed_under_cdc_fence",
+    "fk_cascades_and_set_null_during_full_load_cached_and_cdc",
+    "generated_columns_omitted_and_target_recomputed",
+    "whatsapp_catalog_triggers_restore_and_reject_invalid_writes",
+    "whatsapp_queue_inflight_ack_and_replay_without_external_sends",
+    "native_schema_indexes_enum_precision_defaults_preserved",
+    "connection_loss_restart_and_resume_without_gap_or_duplicates",
+    "final_marker_applied_after_all_source_writers_fenced",
+    "rollback_before_target_writers_enabled",
+    "forward_recovery_after_target_writers_enabled"
+  ],
+  "synthetic_feature_matrix": {
+    "lob_bytes": [
+      0,
+      32769,
+      65535,
+      65536,
+      65537,
+      1048576,
+      1048577
+    ],
+    "lob_shapes": [
+      "four-byte UTF-8 JSON",
+      "escaped JSON",
+      "nullable and NOT NULL JSON",
+      "NOT NULL MEDIUMTEXT and LONGTEXT"
+    ],
+    "foreign_key_actions": [
+      "DELETE CASCADE",
+      "UPDATE CASCADE",
+      "DELETE SET NULL",
+      "UPDATE SET NULL"
+    ],
+    "generated": [
+      "nullable normalized text with unique index",
+      "DATETIME(3) expression",
+      "conditional nullable phone identifier"
+    ],
+    "whatsapp": [
+      "invalid catalog INSERT rejected",
+      "invalid catalog UPDATE rejected",
+      "valid writes after trigger restoration",
+      "queue ownership and in-flight acknowledgement replay without duplicates",
+      "no external providers or real telephone numbers"
+    ],
+    "concurrency": [
+      "transactions spanning table full-load boundaries",
+      "cascades during cached apply",
+      "new LOB updates during CDC",
+      "rollback and multi-table transaction",
+      "network failure and task resume"
+    ],
+    "finalization": [
+      "restore NOT NULL",
+      "restore audited target triggers/DEFINER",
+      "verify complete data and FK integrity",
+      "switch all consumers",
+      "reconnect and abort margin"
+    ],
+    "lob_notnull_timing_example": {
+      "scope": "Examples only; run solely in the independently verified fictional source/target. No SQL has been executed.",
+      "source_ddl": "CREATE TABLE cc_dms_pilot.pilot_lob (id INT PRIMARY KEY, payload JSON NOT NULL, document LONGTEXT NOT NULL) ENGINE=InnoDB",
+      "target_loading_ddl": "CREATE TABLE cc_dms_pilot.pilot_lob (id INT PRIMARY KEY, payload JSON NULL, document LONGTEXT NULL) ENGINE=InnoDB",
+      "target_finalization_ddl": "ALTER TABLE cc_dms_pilot.pilot_lob MODIFY COLUMN payload JSON NOT NULL, MODIFY COLUMN document LONGTEXT NOT NULL, ALGORITHM=INPLACE, LOCK=NONE",
+      "timing": "Measure after DMS is stopped at the final source fence, with full validation complete; include all 86 affected-table equivalents, trigger restoration, consumer reconnect and abort margin. No metadata-derived generic ALTER is approved for clinical tables.",
+      "scale": "Fictional target-only benchmark can generate >=0.535 GiB of table/index footprint on encrypted RDS storage directly, without a large file on the application root. A small pilot proves behavior, not the full-size timing bound."
+    }
+  },
+  "references": {
+    "tls": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Security.SSL.html",
+    "source": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Source.MySQL.html",
+    "target": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Target.MySQL.html",
+    "lob": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.LOBSupport.html",
+    "lob_nullability": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.AssessmentReport.Assessments.All.html",
+    "cascade_phase_transition": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Troubleshooting.html",
+    "validation": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TaskSettings.DataValidation.html",
+    "error_handling": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TaskSettings.ErrorHandling.html",
+    "private_secrets": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_VPC_Endpoints.html",
+    "secret_principal": "https://docs.aws.amazon.com/dms/latest/userguide/security_iam_secretsmanager.html",
+    "rds_stop": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html",
+    "tls_reload": "https://dev.mysql.com/doc/refman/8.0/en/alter-instance.html",
+    "release_notes": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_ReleaseNotes.html",
+    "secrets_endpoint_override": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Advanced.Endpoints.secretsmanager.html"
+  },
+  "clinical_copy": {
+    "status": "blocked_pending_synthetic_rehearsal",
+    "source_schema": "clinicaclick",
+    "source_port": 13306,
+    "start_authorized": false,
+    "cutover_authorized": false,
+    "new_consistent_backup_and_restore_required": true,
+    "fresh_source_target_metadata_comparison_required": true,
+    "original_schema_defaults_and_definers_must_be_audited": true,
+    "rollback_boundary": "Before destination writers are enabled, return to the fenced source only after proving no destination-only application writes. After that point retain the source fenced and recover forward on MySQL 8.4; no blind rollback to 8.0."
+  },
+  "candidate_variants": [
+    {
+      "name": "dms-full-load-plus-cdc-full-lob",
+      "status": "unproven",
+      "requirement": "Temporary nullable target LOBs, exact native target schema/constraints and generated exclusions, audited cascade phase transition, final NOT NULL restoration before writers."
+    },
+    {
+      "name": "native-consistent-seed-plus-dms-cdc-only-full-lob",
+      "status": "hypothesis_only",
+      "requirement": "Synthetic proof that CDC INSERT/UPDATE handles NOT NULL JSON/LOB atomically without temporary NULLs; do not assume FullLOB nullability restrictions disappear in CDC-only mode."
+    },
+    {
+      "name": "limited-lob",
+      "status": "not_approved",
+      "requirement": "A measured present maximum does not bound future writes. Demonstrate oversized LOB STOP_TASK and complete validation, plus NOT NULL behavior, before reconsidering. Never accept truncation or partial validation."
+    }
+  ],
+  "cost_preview": {
+    "currency": "USD",
+    "region": "eu-west-3",
+    "price_list_published_at": "2026-09-11T12:45:38Z",
+    "official_price_list": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AWSDatabaseMigrationSvc/current/eu-west-3/index.json",
+    "r6i_large_single_az_per_hour": "0.3000000000",
+    "compute_24h": "7.20",
+    "gp2_storage_per_gib_month": "0.1200000000",
+    "notes": "USD10-15 is a review envelope for 24h including storage, private endpoint, secrets and modest network use, not a binding quotation or measured runtime. No taxes, source synthetic host or extra RDS instance included. Do not provision a second RDS instance automatically."
+  },
+  "lifecycle": {
+    "pilot": "No auto-start. CreatePilotTask=false until source/target identities, users, TLS and network are independently verified. Manually stop/delete DMS by the approved 24h deadline. CloudFormation does not enforce the time/cost cap.",
+    "retained_resources": "Two generated secrets and dms-vpc-role are Retain. Clean up secrets explicitly and remove the role only after confirming no DMS consumers depend on it.",
+    "empty_rds_candidate": "If no data movement is ready, root can review stopping the standalone Multi-AZ MySQL instance temporarily. It auto-starts after at most seven days; storage, backups and secrets still incur charges. No stop action is performed by this plan."
+  },
+  "trigger_contract": {
+    "source_names": [
+      "guard_whatsapp_catalog_insert",
+      "guard_whatsapp_catalog_update"
+    ],
+    "source_action_statement_sha256": "4d73f93344d76cb2c8375605bad8a74d56870d9ecbc6e023c054d4bfa5f68dc8",
+    "hash_evidence": "Provided by root from source metadata hashing; this agent did not read trigger bodies.",
+    "target_owner": "Dedicated RDS object owner; never copy source maintainer identity/password/grants.",
+    "install_timing": "After full load and validation, before enabling any application writer. Test valid historical fictional rows and rejection behavior; do not assume safe to enable before full load.",
+    "actual_definitions_and_privileges_review_pending": true,
+    "target_restore_or_execution_performed": false
+  },
+  "runtime_limits": {
+    "cloudformation_validation": "Only public resource specification/static checks have run. No AWS ValidateTemplate, change set, endpoint TestConnection or DMS task settings runtime acceptance has been run by this agent.",
+    "source_transaction_consistency": "FailOnTransactionConsistencyBreached applies to Oracle, not MySQL. Its presence does not provide a MySQL fail-closed guarantee. Inspect source transaction ages before an approved run; rehearse transactions spanning full-load boundaries and timeout, then require complete data validation and explicit source fence.",
+    "generated_columns": "The current selection-only mapping is an infrastructure preview, not a runnable generated-column migration. Before creating/starting the pilot task, precreate exact native target generated columns and add/test explicit remove-column transformations for fictional source generated columns. Keep exact schema scope cc_dms_pilot. Clinical mappings are never substituted into this template.",
+    "private_secrets": "Both endpoint ECAs use the regional DNS name extracted from the private Secrets Manager VPCE. PrivateDnsEnabled still requires VPC enableDnsHostnames and enableDnsSupport. Test connection is required.",
+    "lob_bounds": "LOB content lengths and actual SQL definitions were not read. Metadata byte footprints are approximate table/index sizes; they do not bound maximum LOB size or establish 120-second DDL completion.",
+    "validation_sensitive_tables": "DMS validation/error/control tables can contain values even when task logging is disabled. Synthetic pilot remains synthetic; clinical validation output requires separate protected evidence/storage review."
+  },
+  "operator_review_sequence": [
+    {
+      "step": 1,
+      "action": "Review CFN and cost/lifecycle. Verify account/region, RDS available, exact private subnets >=2 AZ, VPC DNS flags, NACLs/peering/routes and no existing Secrets Manager VPCE/private DNS conflict. Recheck dms-vpc-role absent immediately before stack creation; abort on conflict. No stack is deployed by this plan."
+    },
+    {
+      "step": 2,
+      "action": "Use AWS ValidateTemplate/change-set review including CAPABILITY_NAMED_IAM. Confirm deployer GetRole/PassRole for own secret role and DescribeSecret for own secrets. Create infrastructure with CreatePilotTask=false only after explicit operator authorization; do not start tasks."
+    },
+    {
+      "step": 3,
+      "action": "Prepare independently identifiable isolated source mysqld with fictional data only, its own binlogs ROW/FULL and user cc_dms_pilot. No .env/CRM/DEV connections. Source account SELECT on cc_dms_pilot only plus documented global REPLICATION CLIENT/SLAVE and separate operator bootstrap privileges; no INSERT/UPDATE to clinical schemas. Forward private23306 only to this isolated mysqld, never local3306; require TLS, valid source leaf IP SAN and host firewall restricted to DMS private addresses."
+    },
+    {
+      "step": 4,
+      "action": "Read each generated secret into operator memory without terminal output/files/arguments, create the dedicated source/target pilot accounts with schema-only data privileges. A separate object owner precreates cc_dms_pilot target schema/indexes/FK/generated columns. No RDS master credentials in DMS. Verify target local_infile and exact granted privileges; abort if global/clinical data grants are found."
+    },
+    {
+      "step": 5,
+      "action": "Complete generated-column transformations and exact target schema review first. Resolve manifest references from outputs, run both validators and independently check no patient schema selected. Test both endpoint connections, wrong CA and wrong identity; IP SAN verification must be demonstrated. No clinical data is needed."
+    },
+    {
+      "step": 6,
+      "action": "Create idle task only after all identities are confirmed, then explicitly start the synthetic full-load+CDC pilot. With native precreated FK/indexes and target FK checks disabled, task stops after cached changes applied. Follow official cascade transition: remove only FK-check disabling ECA while preserving private Secrets Manager override, reconnect/resume with FK checks active. Exercise CASCADE and SET NULL during full load, cached changes and CDC; compare complete fictional state and reject any mismatch. DO_NOTHING can still create missing tables, so missing/changed native target tables must fail the preflight."
+    },
+    {
+      "step": 7,
+      "action": "Test all required negative/failure cases including unsupported grants, oversized LOB variant, connection loss, queued/in-flight WhatsApp replay without providers. For finalization, fence ALL source writers (API/web/importers/jobs/services/cron and identity/lease writes), drain transactions, write a controlled final marker, prove target marker and complete transaction application plus zero validation differences. Lag=0 alone is insufficient."
+    },
+    {
+      "step": 8,
+      "action": "Stop CDC at final source fence. Time target-only NOT NULL restoration at representative >=0.535 GiB footprint and 86-table equivalent, audited trigger restore and synthetic guard checks, reconnection and abort margin <=120 seconds. Preserve complete native definitions; no generic metadata-generated ALTER of clinical tables. If timing/correctness fails, reject this route; do not extend clinical cutoff silently."
+    },
+    {
+      "step": 9,
+      "action": "Before enabling target application writers, rollback may select the unchanged source only after proving no destination-only application writes. After target writers (including login/session/leases) start, retain old source fenced and recover forward using 8.4/Multi-AZ/PITR; never enable independent writes on both or switch blindly back to 8.0."
+    },
+    {
+      "step": 10,
+      "action": "Write protected synthetic receipt with real evidence hashes and measured duration. Assessor only marks eligibility for operator review, never deployment/patient copy/cut authorization. Stop/delete DMS at approved deadline, remove temporary target SG rule/VPCE/forward/users and fictional schema after evidence retention review. Inspect retained secrets/role dependencies before explicit cleanup; no deletion runs from this plan."
+    }
+  ]
+}
