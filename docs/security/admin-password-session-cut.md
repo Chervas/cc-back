@@ -1,321 +1,49 @@
 # Administradores: rotación y cierre de sesiones desplegados
 
-Estado final del 13/09/2026 22:25:03 UTC: la rotación solicitada y el corte de código
-que invalida los JWT administrativos antiguos están aplicados. La recuperación
-frontend está publicada. El MFA por correo sigue pendiente de activación pública.
-WhatsApp permanece fuera de este corte. Versiones, evidencia y relevo:
-[acta del despliegue aprobado](admin-session-deployment-20260913.md).
+> Documento trasladado al manual central. Esta ruta conserva enlaces históricos; no añadir contenido nuevo aquí.
+
+[Abrir el documento canónico](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md).
 
 ## Operación real autorizada
 
-A las 21:10:33 UTC (23:10:33 Europe/Madrid) se sustituyeron las contraseñas de
-los dos administradores globales canónicos, IDs 1 y 44. La transacción verificó
-las identidades inventariadas, el motor InnoDB y ambos cambios antes del COMMIT.
-Cada reemplazo usa 48 bytes aleatorios y bcrypt con coste 12. No se conserva ni
-entrega la contraseña aleatoria; el titular debe recuperar acceso desde su buzón.
-No se modificaron cuentas de propietarios de clínicas. La revocación de enlaces
-pendientes formó parte de la misma transacción: no había ninguno pendiente.
-
-Recibo privado `admin-password-rotation-receipt.json`, operación
-`7244fdc1-b4ed-49c1-89b3-2b688b724f6b`, en el directorio de evidencias de seguridad.
-Solo contiene IDs, fecha, resultado y contadores. El script se niega a repetir
-una operación con ese recibo, incluso ante COMMIT dudoso. No ejecutarlo de nuevo.
-La contraseña nueva de recuperación que elija el titular no debe recopilarse.
-
-**El código público anterior no vinculaba el JWT al hash de contraseña. Por eso
-la rotación por sí sola no cerraba las sesiones antiguas.** El corte aprobado ya
-instalado añade esa comprobación. El recibo de rotación conserva su estado
-histórico; no se presenta la contención completa ni el MFA como terminados.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md#operación-real-autorizada).
 
 ## Corte pequeño de código instalado
 
-`adminCredentialSession` añade a los JWT legacy de administración global un
-HMAC, con dominio separado, de ID/hash de contraseña/email y una versión de
-contrato. Se comprueba la firma HS256, el vencimiento, la cuenta activa y sus
-credenciales actuales. No se expone el hash de contraseña. Los JWT anteriores
-sin prueba se rechazan antes de SQL; un fallo de SQL no concede acceso.
-Renovar exige que la prueba siga correspondiendo al usuario recién leído, para
-que una recuperación concurrente no se convierta en una sesión nueva mediante
-un JWT viejo. Los usuarios sin administración global conservan compatibilidad.
-
-Los candidatos cubren login, desbloqueo, renovación, invitación, middleware,
-el verificador propio de clínicas y Socket.IO. Los sockets se comprueban en
-conexión, cada paquete y cada cinco segundos; el vencimiento o la pérdida de
-credenciales cierra también las salas de salida. En el camino público legacy
-se elimina además `password_usuario` de la respuesta de login. El código DEV
-ya usa una proyección cerrada de usuario.
-
-| Destino | Base exacta del candidato | Artefacto |
-| --- | --- | --- |
-| API/worker staging | `ac1b1dd84231083fc8003fffbe5d507ac255a1b3` | [Parche staging](cuts/admin-session-staging.patch) |
-| Gateway | `4cf8e23eadfaf9c96b816e6eb0dd9361a11dc51d` | [Parche gateway](cuts/admin-session-gateway.patch) |
-| DEV | Commit propio de esta entrega, sobre `34806d1a62614afd0b42b1a1da0a3dc61f1db42e` | Helper y `accessSession.service`; no promover toda DEV al público. |
-
-Cada parche recoge ocho archivos: siete cambios y la copia del hotfix ya
-existente. SHA256 del hotfix:
-`0d14de2cb70b183e35e88f4561a48e190fc164c8bcb0628021e727f48770b8c5`.
-Los parches pasan `git apply --check` contra los worktrees públicos actuales
-excluyendo `src/controllers/socialstats.controller.js`, cuyos bytes se conservan.
-No aplicar un parche sobre otra base sin reconciliarla. Estos dos parches no
-incluyen cambios de campañas, DDL, frontend, claves, variables, colas ni permisos Meta.
-
-El complemento de recuperación frontend está preparado sobre la base pública
-`341103cfb79f86655cb25a611971a95aa313a4e5`, en el candidato privado
-`security-admin-session-front-20260913`. Su parche versionado es
-`front-dev/src/Documentacion/cuts/password-reset-public.patch`: solo modifica
-`app.routes.ts`, `auth.service.ts` y `reset-password.component.ts`. Permite abrir
-el enlace de recuperación aunque el navegador conserve una sesión y, tras una
-respuesta correcta, borra la sesión local y reemplaza la URL por `/sign-in`.
-El token de un solo uso sigue validándose en el backend. Los errores permanecen
-en el formulario. No incorpora el frontend completo de DEV ni activa MFA.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md#corte-pequeño-de-código-instalado).
 
 ## Lote operativo aprobado y ejecutado
 
-El siguiente procedimiento fue autorizado expresamente y ejecutado; los SHAs
-instalados y resultados están en el acta enlazada arriba. No constituye una
-autorización reutilizable para otro corte de MFA o integraciones.
-
-1. Comprobar de nuevo HEAD/diff y guardar copias privadas solo de los siete
-   archivos sustituidos; registrar también hashes de configuración y overrides
-   sin sus valores. Mantener el hotfix. Revisar todo `origin/dev..HEAD` antes del
-   push propio; el push no instala el código.
-2. Instalar únicamente los parches revisados en staging/gateway, excluyendo el
-   hotfix tras comprobar su hash. El servicio DEV necesita cargar también su
-   nuevo verificador: dejar una API DEV accesible con el código anterior no
-   cierra el acceso de los JWT robados a la BD compartida.
-3. Reinicios acotados de `pm2-back-dev`, `pm2-back-staging` y `pm2-gateway`,
-   conservando la configuración efectiva. No usar `--update-env` ni habilitar
-   jobs/cron en DEV o gateway. Staging conserva sus workers autorizados. La
-   ventana implica reconexión de sockets e interrupción breve de las peticiones;
-   no se ha medido una duración real. No se invocan proveedores ni trabajos de
-   negocio para comprobarla. No reiniciar servicios ajenos.
-4. Publicar el build del complemento frontend, guardando antes una copia privada
-   del build público y su manifiesto de hashes. Revalidar las tres rutas del
-   parche sobre la base pública; el build de QA no autoriza copiar toda DEV.
-   No requiere reinicio de Nginx ni cambio de proxy. Verificar carga de assets,
-   formulario de recuperación y navegación con datos ficticios. Si falla, puede
-   restaurarse solo el build frontend anterior; esto no revierte el cierre de
-   JWT del backend. El formulario anterior no garantiza la redirección corregida.
-5. Verificar configuración, listeners y rechazos de un JWT sintético sin prueba
-   en cada entrada; sin reutilizar JWT reales antiguos. El usuario recupera la
-   contraseña y prueba su acceso. Ningún paso autoriza Meta, WhatsApp ni Ads.
-6. Si falla el canary, mantener cerrado el acceso administrativo y reparar sobre
-   el candidato seguro, o detener el proceso afectado. No restaurar un verificador
-   que vuelva a aceptar JWT antiguos. Conservar las contraseñas rotadas y los
-   recibos; no hay rollback hacia contraseñas anteriores. Registrar cualquier
-   interrupción y estado de las colas antes de continuar.
-
-Coste del corte pequeño: no crea infraestructura ni envía correo por sí mismo;
-añade una lectura de usuario por validación administrativa. No reemplaza el MFA,
-la separación de claves/usuarios de sistema/SQL, ni la migración de credenciales
-Meta. Una copia compartida de la clave de firma y de la BD sigue siendo un riesgo
-que debe resolverse antes de declarar la reconexión segura.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md#lote-operativo-aprobado-y-ejecutado).
 
 ## Recuperación solicitada por el usuario
 
-La cuenta elegida para la prueba es `carlos@clinicaclick.com`. Está en la lista
-de destinatarios permitidos de staging; la otra cuenta administrativa no está
-en esa lista y necesita un lote de configuración antes de recuperar por correo.
-No se amplió la lista ni se enviaron correos desde las herramientas del agente.
-
-La primera solicitud del usuario, 21:29:05 UTC, creó EmailMessage 162 / job 85544
-en namespace `dev`: quedó pendiente porque sus workers están pausados.
-La segunda, desde `https://crm.clinicaclick.com/forgot-password`, creó
-EmailMessage 163 / job 85550 en `staging` a las 21:36:07 UTC. Se registraron
-envío y entrega SES a las 21:36:26 UTC, con destinatario comprobado por hash y
-respuesta SMTP `250 2.0.0 Ok`. Remitente `no-contestar@clinicaclick.com`.
-El usuario confirmó recepción y el enlace quedó consumido a las 21:46:18 UTC
-(23:46:18 Europe/Madrid). No se recopilaron su contraseña nueva ni el token.
-Al solicitar el segundo enlace se revocó el primero. El aviso de cola atascada
-correspondía precisamente a ese primer intento: se cancelaron únicamente
-EmailMessage 162 y job 85544 en una transacción, tras comprobar que el enlace
-estaba revocado y que el posterior se había usado. Recibo privado
-`cancel-superseded-reset-162.json`; se conserva el historial. No se movió el job
-DEV ni se reactivaron sus consumidores. Esta recuperación completada no prueba
-un login con doble factor, que sigue sin desplegar.
-
-La URL del correo se verificó en memoria: origen CRM y ruta `/reset-password`
-correctos. La causa exacta de la primera pantalla observada por el usuario no
-quedó demostrada; su segundo intento funcionó sin despliegue. La ruta estaba
-dentro de `NoAuthGuard`, lo que sí podía desviar una recuperación con sesión
-guardada. El complemento descrito arriba elimina esa dependencia y cumple su
-petición de volver al login tras el cambio. Quedó publicado en este corte.
-
-Nginx observado: `crm.clinicaclick.com/api/` apunta a staging 3001;
-`app.clinicaclick.com/api/` y autenticación externa a gateway 3000.
-El gateway observado tiene el fallback de URL de recuperación localhost y no
-debe usarse para este canary sin revisar su configuración. DEV usa su proxy 3004.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md#recuperación-solicitada-por-el-usuario).
 
 ## Conservación al promover DEV a staging
 
-DEV es la fuente versionada de esta entrega. El helper administrativo y su
-integración en `accessSession.service`, la recuperación y las pruebas se
-publican en los respectivos `origin/dev`. Los parches legacy públicos son una
-adaptación a sus bases anteriores, documentada en ese mismo commit; no una
-corrección que exista únicamente en staging. El corte público quedó también
-registrado en commits de staging y de la rama explícita del gateway,
-preservando el hotfix y anotando los SHAs realmente desplegados en el acta.
-
-Antes de cada promoción que afecte a autenticación:
-
-1. Comparar el candidato con el último manifiesto público aprobado, conservar
-   las correcciones de seguridad y revisar el diff completo. Resolver conflictos
-   por comportamiento, sin sobrescribir staging con todos los archivos de DEV.
-2. Ejecutar `npm run test:security:auth-cut` en backend y frontend. El contrato
-   comprueba rechazo de JWT administrativos antiguos, cambio de contraseña,
-   renovación concurrente, MFA y recuperación/navegación. Para cambios de esquema
-   o del verificador, repetir además los MySQL aislados y el canary del candidato
-   aplicables al corte. Estos comandos quedan disponibles en `package.json`;
-   no se afirma que una protección remota de rama los ejecute automáticamente.
-3. Conciliar por separado las DDL aprobadas y la configuración de MFA, sesiones,
-   auditoría y correo. Una copia de código no instala migraciones ni configura
-   claves. No degradar modos activos para hacer pasar un despliegue.
-4. Conservar los roles de ejecución: staging opera sus workers autorizados,
-   gateway solo las entradas externas y DEV sus pausas. Las credenciales y los
-   permisos operativos no se trasladan a DEV al promover o sincronizar código.
-
-La configuración compartida observada más abajo sigue siendo un pendiente real;
-estos controles de promoción no sustituyen el aislamiento de identidades.
-
-<a id="preparación-del-mfa-completo-y-pendientes-reales"></a>
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md#conservación-al-promover-dev-a-staging).
 
 ## Preparación y mantenimiento del corte MFA
 
-Los candidatos privados se preparan como
-`security-email-login-{back,gateway,front}-candidate-20260914`, desde los HEAD
-públicos actuales y con su manifiesto/parches exactos. Incorporan la corrección
-DEV de `role.interceptor`: `/api/auth/me` debe llegar al backend, sin respuesta
-de usuario ficticio. La preparación anterior del día 13 queda como evidencia,
-no como base para sobrescribir un entorno que haya avanzado. No contienen `.env` y
-sus dependencias enlazadas son únicamente para QA. Inspeccionar por socket local
-las tablas `AuthSessions`, `AuthEmailChallenges`, `PlatformAuditEvents` y
-`PlatformAuditDeliveryStates` antes de aplicar o reanudar las migraciones.
-Las cinco migraciones del candidato son:
-
-- `20260912210000-create-platform-audit-events.js`.
-- `20260912213000-create-platform-audit-delivery-states.js`.
-- `20260912220000-create-auth-sessions.js`.
-- `20260913003000-add-platform-audit-result-part.js`.
-- `20260913130000-create-auth-email-challenges.js` (DDL múltiple no atómica).
-
-La opción de dispositivo de confianza requiere además
-`20260914220000-create-auth-trusted-devices.js`: crea `AuthTrustedDevices` y
-amplía `AuthSessions` con la referencia y el método `password_trusted_device`.
-Aplicar esas dos sentencias exactas antes del código; respaldar el esquema y
-mantener su diario de aplicación. No ejecutar el resto de migraciones DEV.
-Reutiliza la clave MFA privada; la cookie exige HTTPS del mismo origen y no se
-comparte entre hosts. Su contrato y revocación están en
-[04](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/04-autenticacion-jwt.md#dispositivo-de-confianza-durante-60-días).
-
-Verificar primero las migraciones existentes de correo/reset y JobRequests.
-`EMAIL_AUTHENTICATION_RECIPIENT_POLICY=registered-account` permite cubrir
-código/reset de cuentas activas fuera de la lista general, con prueba vigente en
-BD y contenido cerrado. Contrato en
-[33](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/33-sistema-email.md#correo-de-autenticación-para-cuentas-registradas).
-Exigir clave MFA privada y entrega/conciliación externa de auditoría: sin vaciado,
-el límite de una hora cerraría la emisión de sesiones. El estado aplicado y la
-aceptación humana se mantienen en [19](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/19-estado-actual.md#seguridad-de-acceso-e-integraciones);
-acta en [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-mfa-publico-2026-09-14).
-
-<a id="dependencia-aws-que-impide-activar-el-candidato"></a>
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md#preparación-y-mantenimiento-del-corte-mfa).
 
 ### Transporte AWS requerido
 
-La identidad IMDSv2 del host de aplicación pertenece a `468355432137` y usa
-`AmazonLightsailInstanceRole`; la infraestructura de seguridad pertenece a
-`137819318729`. El modo local de `platformAudit.delivery.js` no puede utilizar esa
-identidad como origen de auditoría. Configurar `PLATFORM_AUDIT_WRITER_TRANSPORT=https`
-con CA fijada y clave Ed25519 propia; los roles AWS permanecen en la instancia de
-seguridad. Una sesión SSO sirve para administrar, nunca como credencial permanente
-del runtime. Instalación y recuperación en el
-[runbook de migración](../security-integrations-audit-migration.md#writer-https-en-la-instancia-de-seguridad).
-
-Antes del corte, verificar el runtime de seguridad ya aprovisionado, su canal de
-instalación y los trusts efectivos; completar el transporte autenticado desde
-staging y la conciliación de recibos. Probar escritura/lectura ficticia y vaciado
-de outbox antes de exigir MFA. No copiar claves SES, aceptar el rol general de
-Lightsail ni desactivar el límite de backlog para sortear esta dependencia.
-Evidencia y solicitud de acceso en
-[99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-correo-mfa-2026-09-14).
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md#transporte-aws-requerido).
 
 ### Secuencia del corte público
 
-1. Revalidar HEAD/manifiesto del candidato contra staging, gateway y frontend
-   publicados; conservar el hotfix Meta y los cambios ajenos ya publicados.
-   Capturar referencias de rollback, configuración privada y metadata del
-   esquema; verificar un respaldo recuperable antes de las cinco DDL indicadas.
-   Comprobar ausencia/estado exacto de tablas y `SequelizeMeta`; no ejecutar un
-   `db:migrate` general ni continuar automáticamente tras una DDL parcial.
-2. Cerrar la dependencia AWS anterior. Aplicar solo ese lote aditivo con sus
-   postchecks de columnas, índices y metadatos. Conservar las tablas en rollback.
-   DEV comparte BD, pero mantiene sus gates y consumidores apagados.
-3. Instalar el candidato y preparar clave MFA privada de 32 bytes, fichero 0600,
-   configurada únicamente en los runtimes públicos necesarios. Conciliar claves
-   del flujo, `EMAIL_PUBLIC_APP_URL=https://crm.clinicaclick.com`, sesiones,
-   auditoría y política `registered-account`. Mantener la lista general de correo,
-   marketing apagado y los workers de gateway apagados; solo staging consume.
-4. Verificar entrega/conciliación externa y su monitor antes de activar
-   `AUTH_SESSION_MODE=enforce` y `AUTH_EMAIL_MFA_MODE=enforce` en las dos API
-   públicas. El frontend debe estar publicado previamente con soporte del
-   desafío. La ventana coordinada requiere volver a iniciar sesión para los JWT
-   legacy; durante el reinicio puede haber una interrupción breve del acceso.
-5. Prueba humana en CRM: recuperación → login → código recibido → sesión;
-   comprobar además expiración/reenvío, rechazo sin código, cierre administrativo
-   conservado y un único `email_send` de staging por mensaje. Gateway también
-   expone autenticación y debe exigir la misma prueba. Mantener Meta/WhatsApp y
-   sus colas pausados; el piloto de clínica será otro corte.
-
-Si falla el postcheck tras activar MFA, conservar tablas, outbox, revocaciones y
-el requisito de código. Reparar configuración o código compatible; si no puede
-funcionar, detener los procesos públicos afectados. No volver automáticamente
-al middleware anterior ni a flags off/legacy. No borrar evidencia ni reponer
-contraseñas o tokens revocados. Los respaldos permiten contrastar y recuperar
-archivos, pero no autorizan degradar la política de acceso.
-
-La configuración observada de DEV y staging comparte UID, identidad de BD,
-JWT_SECRET y clave de cifrado de correo. La comprobación compara valores en
-memoria y solo guarda booleanos; combina `.env` actual y entorno de arranque,
-sin afirmar que sea un volcado de configuración efectiva dentro de Node.
-El aislamiento no queda demostrado por cambiar nombres de namespaces.
-
-QA del corte pequeño: seis pruebas del contrato, pruebas HTTP/Socket.IO de
-ambos candidatos y seis grupos de comprobaciones con MySQL propio para rotación
-atómica, rollback y COMMIT incierto. Regresión backend: 51 pruebas correctas.
-Recuperación frontend: 11 pruebas correctas, build de producción correcto y
-Chromium sobre el Angular compilado, con API interceptada y sesión ficticia:
-dos recuperaciones correctas, redirección al login y cuatro capturas de
-escritorio/móvil. El build conserva avisos de tamaño, temas Material y CommonJS.
-El candidato MFA tiene además MySQL propios de código/sesiones/auditoría,
-14 pruebas del writer, siete de frontend, build Angular y 18 capturas Chromium
-escritorio/móvil. Los proveedores de QA son ficticios. El envío del usuario
-descrito arriba es evidencia real independiente y no valida todavía el MFA.
-Los resultados fechados de la actualización del candidato, la compilación y la
-QA se mantienen en [99](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/99-bitacora-operativa.md#seguridad-reanudacion-2026-09-14).
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md#secuencia-del-corte-público).
 
 ### Prueba en DEV antes de staging
 
-El DEV habitual comparte BD con staging: no instalar allí las tablas de seguridad
-como si fuera una base desechable. El primer ensayo usa MySQL temporal con las
-DDL de acceso y confianza, cuentas/claves ficticias, HTTP local y correo/auditoría de prueba. El
-runner elimina su propio servidor al terminar; no arranca la API ni los workers
-de ClinicaClick. El contrato HTTP ejercita login, código incorrecto/caducado,
-reenvío, consumo concurrente, recuperación y revocación de sesiones.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md#prueba-en-dev-antes-de-staging).
 
-```bash
-npm run test:security:auth-cut
-CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/auth_email_challenges_mysql.integration.js
-CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/auth_trusted_devices_mysql.integration.js
-CAMPAIGN_OPTIMIZATION_MYSQL_TEST=1 node src/scripts/tests/auth_email_delivery_mysql.integration.js
-```
+<a id="preparación-del-mfa-completo-y-pendientes-reales"></a>
 
-La suite de acceso precarga `security_offline_runtime.cjs`: impide cargar `.env`,
-usa una clave JWT ficticia y bloquea sockets salvo el servidor propio de test.
-Esto también se aplica al ejecutar directamente `platform_audit_auth.test.js`.
-El frontend incluye la regresión de `/auth/me` en su comando de acceso.
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md#preparación-del-mfa-completo-y-pendientes-reales).
 
-La prueba humana con correo real requiere un entorno QA aislado y su entrega
-de correo/auditoría configurada, o un corte explícito del esquema compartido.
-Presentar ese alcance antes de habilitarlo. No está disponible por publicar estos
-tests en DEV ni por generar capturas con transporte ficticio. Tras esa prueba se
-promueve el candidato exacto a staging/gateway, conservando pausas y el cierre
-administrativo. No copiar credenciales operativas a DEV para facilitar el ensayo.
+<a id="dependencia-aws-que-impide-activar-el-candidato"></a>
+
+[Consultar esta sección](https://github.com/Chervas/cc-front/blob/dev/src/Documentacion/runbooks/seguridad/acceso/admin-password-session-cut.md#dependencia-aws-que-impide-activar-el-candidato).
