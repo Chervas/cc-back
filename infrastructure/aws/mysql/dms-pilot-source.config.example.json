@@ -1,0 +1,31 @@
+{
+  "schema": "clinicaclick-dms-pilot-source-config/1",
+  "aws_profile": "clinicaclick-prov-temp",
+  "expected_account_id": null,
+  "stack_id": null,
+  "pilot_source_secret_arn": null,
+  "dms_private_ipv4": [],
+  "runtime_seconds": 86400,
+  "max_owned_bytes": 1073741824,
+  "firewall_review": {
+    "reviewed_by": null,
+    "observed_at_utc": null,
+    "expires_at_utc": null,
+    "source_address": "172.26.0.110",
+    "source_port": 23306,
+    "allowed_dms_ipv4": [],
+    "unlisted_sources_denied": false,
+    "evidence_sha256": null
+  },
+  "execution_status": "not_started",
+  "recipe": [
+    "This example is deliberately incomplete. Do not use real CRM/DEV credentials, source port 3306, clinical data or the RDS administrator.",
+    "After CFN infrastructure is ready, root independently reviews firewall rules limiting 172.26.0.110:23306 to the actual DMS private IPv4 addresses, then supplies reviewed metadata and generated source-secret ARN from the dedicated pilot stack.",
+    "Run as ubuntu in a supervised operator session: python3 infrastructure/aws/mysql/dms_pilot_source.py check-config --config /protected/reviewed-source-config.json",
+    "Only after approval: python3 infrastructure/aws/mysql/dms_pilot_source.py run --config /protected/reviewed-source-config.json --ack-isolated-synthetic-source",
+    "Keep the supervisor alive; it stops its own mysqld after at most 24 h and on SIGTERM/SIGINT. Linux parent-death signaling also terminates the child if the supervisor dies. For an independent hard deadline root may use a separately reviewed transient systemd unit with RuntimeMaxSec=24h, KillMode=control-group and UMask=0077; this script does not install units.",
+    "The bootstrap creates only pilot_identity and pilot_probe in cc_dms_pilot. Feature/WhatsApp fixtures and target native DDL remain a separately reviewed step, and no DMS task is started.",
+    "Record the emitted run-directory metadata only. Its socket is local, root account has no remote grant, dedicated DMS users are restricted by exact host IPv4 and REQUIRE SSL.",
+    "On clean supervised shutdown the owned datadir is removed; logs/result/ownership metadata remain. Failure, unproven ownership or forced shutdown preserves data for explicit review. --keep-data is opt-in. Do not manually delete unrelated temporary directories."
+  ]
+}
