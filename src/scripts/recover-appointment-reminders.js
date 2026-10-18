@@ -33,10 +33,76 @@ function append(file, value) {
   try { fs.writeSync(fd, JSON.stringify(value) + '\n'); fs.fsyncSync(fd); }
   finally { fs.closeSync(fd); }
 }
+async function reconcileOwnedPreflight(db, item, earlier, journal) {
+  const e = await db.FlowExecutionV2.findByPk(earlier.executionId);
+  if (!e || Number(e.trigger_entity_id) !== item.appointmentId || Number(e.clinic_id) !== item.clinicId) throw Error('recovery_execution_scope_changed');
+  if (['waiting', 'completed', 'running'].includes(e.status)) return { jobId: item.jobId, executionId: e.id, alreadyDispatched: true };
+  if (e.status !== 'failed' || e.last_error !== 'whatsapp_send_failed:whatsapp_authorized_message_ineligible') throw Error('recovery_failure_not_owned');
+  const messages = await db.Message.findAll({ where: { direction: 'outbound', message_type: 'template',
+    [db.Sequelize.Op.and]: [db.Sequelize.where(db.Sequelize.literal("JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.execution_id'))"), String(e.id))] } });
+  const artifact = messages.find(m => m.metadata.recovered_by === 'explicit_reminder_recovery_20261018');
+  const message = messages.find(m => m.id !== artifact?.id);
+  if (messages.length !== 2 || !artifact || !message || message.status !== 'failed'
+    || message.metadata.technical_failure_reason_code !== 'whatsapp_appointment_daily_sequence_owned'
+    || message.metadata.error !== 'whatsapp_authorized_message_ineligible') throw Error('recovery_ownership_requires_review');
+  const W = require('../lib/whatsapp-dispatch-wait');
+  if (messages.some(W.accepted) || messages.some(m => m.metadata.delivery_unknown || m.metadata.outcome_unknown
+    || m.metadata.network_started_at || m.metadata.dispatch_wait)) throw Error('recovery_transport_evidence_present');
+  const sender = await require('../services/flowEngineV2.service').resolveScheduledWhatsappSenderConfig({
+    metadata: message.metadata, clinicId: item.clinicId });
+  if (!sender?.authorizedBroker?.sendEnabled) throw Error('recovery_sender_unavailable');
+  const whatsapp = require('../services/whatsapp.service'), m = message.metadata;
+  const components = whatsapp.buildTemplateComponents({ templateParams: m.template_params, templateComponents: m.template_components });
+  const payload = { messaging_product: 'whatsapp', to: m.recipient, type: 'template',
+    template: { name: m.template_name, language: { code: m.template_language }, ...(components ? { components } : {}) } };
+  const intent = { messageId: String(message.id), clinicId: item.clinicId, assetId: Number(m.sender_origin_id),
+    expectedBinding: sender.authorizedBroker, message: payload };
+  const send = { authorizationId: sender.authorizedBroker.authorizationId, phoneId: sender.phoneNumberId, message: payload };
+  const receipt = await require('../lib/whatsappAuthorizedBrokerClient').sendReceipt(intent, send);
+  if (receipt.state !== 'absent') throw Error('recovery_ledger_not_absent');
+  const a = await db.CitaPaciente.findByPk(item.appointmentId, { raw: true });
+  const sequence = await db.AppointmentReminderSequence.findOne({ where: { clinic_id: item.clinicId,
+    patient_id: item.patientId, local_date: C.localDay(C.instant(a.inicio)) } });
+  if (!sequence || Number(sequence.claims?.day_before?.execution_id) !== e.id
+    || Number(sequence.claims?.day_before?.message_id) !== artifact.id || !sequence.claims.day_before.adopted_history) throw Error('recovery_ownership_changed');
+  await db.sequelize.transaction(async transaction => {
+    await e.reload({ transaction, lock: transaction.LOCK.UPDATE });
+    await sequence.reload({ transaction, lock: transaction.LOCK.UPDATE });
+    await artifact.reload({ transaction, lock: transaction.LOCK.UPDATE });
+    await message.reload({ transaction, lock: transaction.LOCK.UPDATE });
+    if (e.status !== 'failed' || message.status !== 'failed' || messages.some(W.accepted)
+      || Number(sequence.claims?.day_before?.execution_id) !== e.id
+      || Number(sequence.claims?.day_before?.message_id) !== artifact.id) throw Error('recovery_ownership_changed');
+    append(journal, { event: 'diagnostic_ownership_corrected', executionId: e.id, messageId: message.id,
+      artifactId: artifact.id, priorClaims: sequence.claims,
+      diagnosticSentAt: artifact.sent_at, messageDiagnosticSentAt: message.sent_at, ledgerState: receipt.state });
+    await artifact.update({ sent_at: null, metadata: { ...artifact.metadata,
+      diagnostic_sent_at: artifact.sent_at, diagnostic_timestamp_only: true } }, { transaction });
+    const claims = structuredClone(sequence.claims);
+    claims.day_before = { execution_id: e.id, appointment_id: item.appointmentId,
+      claimed_at: claims.day_before.claimed_at, message_id: message.id, attempted: false };
+    await sequence.update({ claims }, { transaction, hooks: false });
+    const metadata = { ...message.metadata, recovery_original_error: message.metadata.error,
+      recovery_original_sent_at: message.sent_at, recovery_ledger_absent_at: new Date().toISOString() };
+    for (const key of ['error', 'flow_error', 'technical_failure_reason_code', 'fresh_realtime_status',
+      'fresh_delivery_reconciled_status', 'fresh_delivery_reconciled_at']) delete metadata[key];
+    await message.update({ status: 'pending', sent_at: null, metadata }, { transaction });
+    await require('../services/whatsappDispatchWait.service').defer({ dispatchDeferred: true,
+      code: 'explicit_preflight_recovery', dispatchIntent: intent, dispatchPayload: send }, { transaction });
+    await message.reload({ transaction });
+    const waiting = W.flowWait(message);
+    await e.update({ status: 'waiting', current_node_id: m.node_id, last_error: null,
+      wait_until: waiting.wait_until, waiting_meta: waiting.waiting_meta }, { transaction });
+    await require('../services/jobRequests.service').enqueueUniqueJobRequest({ type: 'automations_v2_execute',
+      payload: { execution_id: e.id }, priority: 'high', status: 'waiting', nextRunAt: waiting.wait_until,
+      origin: 'explicit_reminder_preflight_recovery', dedupeScope: 'flow_execution:' + e.id }, { transaction });
+  });
+  return { jobId: item.jobId, executionId: e.id, sameMessageRecovered: message.id, ledgerState: 'absent' };
+}
 async function main(args) {
   const option = name => args.find(arg => arg.startsWith(name + '='))?.slice(name.length + 1);
   const mode = option('--mode'), day = option('--day'), dir = option('--evidence');
-  if (!['plan', 'apply', 'complete'].includes(mode) || !/^\d{4}-\d\d-\d\d$/.test(day || '')
+  if (!['plan', 'apply', 'complete', 'reconcile'].includes(mode) || !/^\d{4}-\d\d-\d\d$/.test(day || '')
     || C.localDay(Date.now()) !== day || !dir?.startsWith('/home/ubuntu/secure-imports/')
     || !fs.lstatSync(dir).isDirectory() || fs.realpathSync(dir) !== dir || fs.statSync(dir).mode & 0o077) throw Error('recovery_arguments_invalid');
   const planFile = path.join(dir, 'plan.json'), journal = path.join(dir, 'apply.jsonl');
@@ -59,7 +125,7 @@ async function main(args) {
   if (C.hash(plan) !== option('--sha256') || plan.day !== day || plan.version !== 1
     || plan.purpose !== 'explicit_today_missed_day_before_reminders'
     || Date.now() - Date.parse(plan.createdAt) > 3600000
-    || mode === 'apply' && fs.existsSync(journal) || mode === 'complete' && !fs.existsSync(journal)) throw Error('recovery_plan_invalid');
+    || mode === 'apply' && fs.existsSync(journal) || ['complete', 'reconcile'].includes(mode) && !fs.existsSync(journal)) throw Error('recovery_plan_invalid');
   const sourceHash = require('node:crypto').createHash('sha256')
     .update(fs.readFileSync(path.join(__dirname, '../services/appointmentAutomationV2Runtime.service.js'))).digest('hex');
   if (sourceHash !== plan.nativeSource) throw Error('recovery_native_source_changed');
@@ -71,12 +137,17 @@ async function main(args) {
   const db = require('../../models');
   const runtime = require('../services/appointmentAutomationV2Runtime.service');
   const results = [];
-  const prior = mode === 'complete' ? fs.readFileSync(journal, 'utf8').trim().split('\n').map(JSON.parse)
+  const prior = ['complete', 'reconcile'].includes(mode) ? fs.readFileSync(journal, 'utf8').trim().split('\n').map(JSON.parse)
     .filter(row => row.executionId) : [];
   append(journal, { event: 'approved_recovery_started', day, planSha256: C.hash(plan), at: new Date().toISOString() });
   for (const item of plan.items) {
     try {
       const earlier = prior.find(row => row.jobId === item.jobId);
+      if (mode === 'reconcile') {
+        if (!earlier) throw Error('recovery_execution_not_recorded');
+        const entry = await reconcileOwnedPreflight(db, item, earlier, journal);
+        append(journal, entry); results.push(entry); continue;
+      }
       if (earlier) {
         const e = await db.FlowExecutionV2.findByPk(earlier.executionId);
         if (!e || Number(e.trigger_entity_id) !== item.appointmentId || Number(e.clinic_id) !== item.clinicId) throw Error('recovery_execution_scope_changed');
