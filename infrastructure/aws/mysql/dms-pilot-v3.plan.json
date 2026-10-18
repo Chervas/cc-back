@@ -1,0 +1,152 @@
+{
+  "schema": "clinicaclick-synthetic-dms-v3-preparation/1",
+  "status": "PREPARED_OFFLINE_NOT_DEPLOYED_NOT_STARTED",
+  "scope": "Only12 fictional tables and fresh owned resources. No clinical source scan/copy, production readiness, app or DEV activation.",
+  "artifacts": {
+    "template": "dms-pilot-v3.cloudformation.json",
+    "validator_and_planner": "dms_pilot_v3.py",
+    "tests": "test_dms_pilot_v3.py",
+    "frozen_baseline_sha256": {
+      "dms-pilot-v2.cloudformation.json": "3bda98943599787f6e7067270b0a16227b72400797d716bb7c5670d824afb6aa",
+      "dms_pilot_v2.py": "52d7d25b2b14ae8de653782a6ac9782bfe897e1bb519f2ceb3fd00e1b3feb2ce",
+      "dms_pilot_source.py": "4f3e9550718957abd53ad101c5313deabfc2f03d5d5d77457c0027cfe82d13e2",
+      "dms_pilot_b_harness.cjs": "37aa39e698c5f295700285737069a7198d9b50fd14cc9375e0cb5b70e7b77d8e",
+      "dms_pilot_b_fixture.cjs": "c4a8165d5cd1973be7b5e1d9c7e2f08f171daa03e6b4bf783d9c915abaf2b97e",
+      "dms_task_start_preflight.py": "a0d375f389442abd6f4805c9d4d6abee0d0985eeea4c9b019d1bd4bfcdb26853"
+    }
+  },
+  "names": {
+    "identifier_pattern": "^cc-mysql-v3-[0-9a-f]{8}$",
+    "source_purpose_unchanged": "mysql-synthetic-pilot",
+    "pilot_version": "v3",
+    "source_target_schema_user": "cc_dms_pilot",
+    "new_secret_paths": "clinicaclick/mysql-pilot-v3/<fresh-id>/{source,target}",
+    "reuse_v1_v2_run_or_seed": false
+  },
+  "readiness": {
+    "CreatePilotTask_default": false,
+    "automatically_start_task": false,
+    "allInheritedGatesPassed": false,
+    "clinicalCopyAuthorized": false,
+    "CFN_parameters_are_attestations_not_fresh_inventory": true
+  },
+  "lob": {
+    "mode": "LIMITED_SYNTHETIC_ONLY",
+    "L_KiB": 2048,
+    "L_bytes": 2097152,
+    "full_lob_mode": false,
+    "inline_bytes": 0,
+    "validationPartialLobSize_KiB": 2048,
+    "batch_apply": false,
+    "native_NOTNULL_FK1_17mappings_preserved": true,
+    "real_maximum_lob_claimed": false,
+    "clinical_source_full_scan": false,
+    "partial_DMS_validation_is_not_full_hash_proof": true,
+    "boundary_protocol": {
+      "operations": [
+        "INSERT",
+        "UPDATE"
+      ],
+      "encodings": [
+        "ASCII",
+        "UTF8_multibyte"
+      ],
+      "source_observed_sizes_bytes": [
+        2097151,
+        2097152,
+        2097153
+      ],
+      "columns": [
+        "b_lob.document",
+        "b_lob.payload"
+      ],
+      "independent_source_actual_octet_length_required": true,
+      "json_boundary_note": "JSON serialization/escaping may change byte length. Determine and record actual synthetic source serialized bytes; do not infer it from JS characters or assume input JSON bytes equal DB representation.",
+      "before_each_step": "Fresh exact source/target/task/run binding, TASK_MANAGER events and task/table/validation health; no mutation if missing.",
+      "positive_at_or_below_L": "Full source/target canonical hashes and actual byte counts, including nullable/empty/unicode data, must match. DMS partial validation alone cannot pass.",
+      "negative_above_L": "Run last, isolated per insert/update/encoding/column; require explicit task rejection/STOP and independent full before/after target snapshot equality: INSERT remains absent, UPDATE retains its prior full value. Any truncation, mismatch, silent application or missing evidence aborts FAIL; never label truncation as a successful negative or resume it as positive.",
+      "restart_after_negative": "Preserve each receipt. A stopped/failed/dirty task never continues automatically: root reviews fresh owned reset/new seed/task binding; do not alter the previous seed or retry an ambiguous DML.",
+      "full_12_table_hashes_required": true,
+      "negative_stop_causality_required": "STOP alone is not a LOB rejection. Require an unambiguous real CloudWatch task event attributable to LOB limit L for the exact expected task/run/seed/case/table/column/row and operation, preserved with event timestamp/group/stream/raw-event SHA. Exclude manual stop and concurrent network/auth/SecretsManager/unrelated failures; absent or ambiguous causality is INCONCLUSIVE/FAIL, never EXPECTED_OVERSIZE_REJECTION. The future operator must review the real event format; normalized flags are not independent evidence by themselves.",
+      "expected_binding": "Caller passes fresh expected taskArn/sourceRunId/seedSha256; observed receipts and causal event must match it. boundary_cases assigns own b_lob row IDs1000..1023, no existing fixture/module changes."
+    }
+  },
+  "network": {
+    "dedicated_logs_VPCE_privateDNS": true,
+    "only_DMS_own_endpoint_SG_443": true,
+    "NAT_IGW_public_egress_created": false,
+    "endpoint_policy": "Only own dms-cloudwatch-logs-role; exact own group/streams. DescribeLogGroups Resource* is the sole documented read-only API exception, still bound to that role.",
+    "required_before_deploy": "Fresh complete DescribeVpcEndpoints, DescribeInstances and DescribeNetworkInterfaces for selected VPC, exact known RDS ENIs allowlisted. No preexisting Logs private DNS endpoint or foreign/unreviewed EC2 consumer; incomplete/access-denied inventory blocks. Also inspect existing Secrets Manager private DNS endpoints; do not adopt/replace them.",
+    "private_DNS_impact_scope": "VPC-wide; SG restriction does not constrain DNS selection for other VPC consumers.",
+    "hypothesis_only": "Missing Logs VPCE was not established as V2 hang cause. A new endpoint is an experiment, not proof of root cause."
+  },
+  "iam": {
+    "operator_permissions_changed": false,
+    "new_absent_only_named_roles": [
+      "dms-vpc-role",
+      "dms-cloudwatch-logs-role"
+    ],
+    "trust": "dms.amazonaws.com with aws:SourceAccount=AWS::AccountId, supported DMS>=3.4.7",
+    "vpc_managed_policy": "arn:aws:iam::aws:policy/service-role/AmazonDMSVPCManagementRole",
+    "no_existing_role_adoption_or_update": true,
+    "vpc_role_retained_for_safe_explicit_cleanup": "After own engine/task gone, root verifies RoleId/created/tags/attachments/no consumers before deleting this retained standard-name role; unknown scope blocks automatic removal."
+  },
+  "protocol": [
+    {
+      "phase": "P0_preflight",
+      "requires": "Both previous pilots gone; fresh no listeners/roles/endpoints/foreign consumers proof and exact account137819318729/eu-west-3/private routes/orderability. No permissions expanded on denial."
+    },
+    {
+      "phase": "P1_infra_only",
+      "requires": "New8hex ID, fresh secrets, CreatePilotTask=false; CFN CREATE_COMPLETE and instance available. Root captures resource IDs and proposed teardown deadline before paid creation."
+    },
+    {
+      "phase": "P2_source_and_seed",
+      "requires": "Unchanged source Python with a new own systemd unit/run and strict TLS identity. Fresh empty target and exact12-fixture native seed; prove restored positives and negatives; NOTNULL unchanged, FK1, generated exclusions exact. Interleaving is separate and remains unproven unless independently demonstrated."
+    },
+    {
+      "phase": "P3_task_idle_then_explicit_start",
+      "requires": "Root reviews limited-LOB task settings and new seed binding. Wait UPDATE_COMPLETE; execute existing fresh dms_task_start_preflight immediately before root-only VNC start. Do not start on ready during CFN update."
+    },
+    {
+      "phase": "P4_diagnostics_before_mutation",
+      "requires": "Actual fresh TASK_MANAGER CloudWatch log event from exact new task, read-only positive endpoints and two stable running reads; no events means stop/no post-seed CDC fixture mutation. Initial fictional fixture creation/seed precedes task creation."
+    },
+    {
+      "phase": "P5_CDC_and_bounds",
+      "requires": "Base harness stages, independent12table full hashes, checkpoint progression and controlled resume; then all below/at/above L insert/update ASCII/UTF8 tests. STOP and preserve negative results; truncation or unknowns forbid PASS."
+    },
+    {
+      "phase": "P6_fence_and_cleanup",
+      "requires": "Explicit writer fence, final equality and checkpoint evidence; preserve logs. Stop own source/task, prove no listener, remove own firewall. Delete own paid resources/group/roles as scoped, schedule retained secrets cleanup and identity-check retained VPC role cleanup. No production or DEV changes."
+    }
+  ],
+  "runtime_and_paid_review": {
+    "state": "PROPOSED_NOT_STARTED",
+    "proposed_source_runtime_seconds": 3600,
+    "maximum_source_runtime_seconds": 7200,
+    "source_service_max_active_seconds": "runtime+600",
+    "source_service_stop_hardcap_seconds": 90,
+    "proposed_paid_teardown_review_at_utc": null,
+    "required_before_any_deploy": "Root sets a fresh future UTC teardown review, owner and follow-up before creation; no past deadline is reused. Source RuntimeMaxSec is not AWS resource TTL.",
+    "paid_resources_auto_delete": false
+  },
+  "limits": [
+    "No AWS validation/account reads or writes, SQL, source launch, openssl or engines executed by this preparation.",
+    "No actual limited-LOB boundary, log delivery, CDC or interleaving acceptance exists yet.",
+    "No maximum clinical LOB,86table timing,50clinic load or120second clinical cutover claim.",
+    "Testing may expose truncation despite STOP policies. Any such result is FAIL and prohibits using this mode for clinical migration."
+  ],
+  "offline_commands": [
+    "python3 -B dms_pilot_v3.py check-template",
+    "python3 -B -m unittest -v test_dms_pilot_v3.py"
+  ],
+  "primary_references": {
+    "limited_lob": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.LOBSupport.html",
+    "validation": "https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TaskSettings.DataValidation.html",
+    "logs_endpoint": "https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/cloudwatch-logs-and-interface-VPC.html",
+    "DMS_private_example": "https://aws.amazon.com/blogs/database/fail-back-from-amazon-rds-for-db2-to-on-premises-aix-db2-using-dms/",
+    "roles": "https://docs.aws.amazon.com/dms/latest/userguide/security-iam.html#CHAP_Security.APIRole",
+    "trust": "https://docs.aws.amazon.com/dms/latest/userguide/cross-service-confused-deputy-prevention.html"
+  }
+}
