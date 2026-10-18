@@ -199,6 +199,8 @@ Resources:
       NetworkType: IPV4
       PubliclyAccessible: false
       BackupRetentionPeriod: 15
+      PreferredBackupWindow: '01:00-01:30'
+      PreferredMaintenanceWindow: 'sun:02:30-sun:03:00'
       CopyTagsToSnapshot: true
       DeletionProtection: true
       DatabaseInsightsMode: standard
@@ -221,3 +223,11 @@ Outputs:
   ManagedMasterSecretArn:
     Description: RDS-managed administrator secret ARN; never a password value.
     Value: !GetAtt Database.MasterUserSecret.SecretArn
+  SubnetAId:
+    Value: !Ref SubnetA
+  SubnetBId:
+    Value: !Ref SubnetB
+  DatabaseSecurityGroupId:
+    Value: !GetAtt DatabaseSecurityGroup.GroupId
+  PrivateRouteTableId:
+    Value: !Ref PrivateRouteTable
