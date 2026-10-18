@@ -6,6 +6,23 @@ const {createInboxClient,clientFiles}=require('../lib/whatsappInboxClient');
 const {importLease}=require('../lib/whatsappInboxImport');
 const scoped=require('../lib/whatsappInboxScopes');
 const health=require('../lib/whatsappInboxHealth');
+const {isIP}=require('node:net');
+const {buildDatabaseTlsOptions}=require('../lib/databaseTlsConfig');
+function databaseConfiguration(env=process.env){
+  const host=env.DB_HOST,port=env.DB_PORT===undefined||env.DB_PORT===''?3306:Number(env.DB_PORT);
+  if(typeof host!=='string'||host.length>253
+    || !(isIP(host)||/^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/.test(host))
+    || env.DB_PORT!==undefined&&env.DB_PORT!==''&&!/^[1-9][0-9]{0,4}$/.test(String(env.DB_PORT))
+    || !Number.isInteger(port)||port<1||port>65535
+    || typeof env.DB_USERNAME!=='string'||!env.DB_USERNAME||env.DB_USERNAME.length>128||/[\x00-\x1f]/.test(env.DB_USERNAME)
+    || typeof env.DB_PASSWORD!=='string'||!env.DB_PASSWORD||env.DB_NAME!=='clinicaclick') throw Error('inbox_database_configuration_invalid');
+  const tls=buildDatabaseTlsOptions(env);
+  // Keep the existing loopback deployment available before the coordinated cut.
+  // Every remote destination must verify both its CA and DB_HOST identity.
+  if(!['127.0.0.1','::1','localhost'].includes(host.toLowerCase())&&!tls.ssl)throw Error('inbox_database_remote_tls_required');
+  return {host,port,user:env.DB_USERNAME,password:env.DB_PASSWORD,database:env.DB_NAME,
+    connectTimeout:3000,timezone:'Z',...tls};
+}
 const pollError=(code,stage,status)=>Object.assign(Error(code),{code,pollStage:stage,
   ...(Number.isInteger(status)&&status>=100&&status<=599?{httpStatus:status}:{})});
 // Each poll takes a fresh snapshot so activation does not require a restart.
@@ -70,6 +87,7 @@ async function main(env=process.env) {
   if(env.RUNTIME_NAMESPACE!=='staging' || env.WHATSAPP_INBOX_CONSUMER_ENABLED!=='true'
     || (!scopes && (env.WHATSAPP_INBOX_CLINIC_ID!=='19' || env.WHATSAPP_INBOX_WABA_ID!=='1024525056749708'
       || env.WHATSAPP_INBOX_PHONE_ID!=='1272578249265908')) || env.DB_NAME!=='clinicaclick') throw Error('inbox_consumer_configuration_invalid');
+  const database=databaseConfiguration(env);
   const client=createInboxClient(clientFiles(env,'staging')); const mysql=require('mysql2/promise');
   const scope={clinicId:19,wabaId:env.WHATSAPP_INBOX_WABA_ID,phoneId:env.WHATSAPP_INBOX_PHONE_ID};
   const recoveryNotBefore=env.WHATSAPP_INBOX_RECOVERY_NOT_BEFORE || null;
@@ -77,7 +95,7 @@ async function main(env=process.env) {
   let stopping=false;let timer;let active;let connection;
   const stop=()=>{stopping=true;clearTimeout(timer);active?.();};process.once('SIGTERM',stop);process.once('SIGINT',stop);
   try{
-    connection=await mysql.createConnection({host:env.DB_HOST,user:env.DB_USERNAME,password:env.DB_PASSWORD,database:env.DB_NAME,connectTimeout:3000,timezone:'Z'});
+    connection=await mysql.createConnection(database);
     // A dedicated connection lock prevents a second runtime from importing.
     const [[owner]]=await connection.execute("SELECT GET_LOCK('cc-whatsapp-inbox-staging-v1',0) acquired");
     if(owner.acquired!==1)throw Error('inbox_consumer_owner_exists');
@@ -102,4 +120,4 @@ async function main(env=process.env) {
   }finally{client.close();await connection?.end().catch(()=>{});}
 }
 if(require.main===module)main().catch(()=>{process.stderr.write('WHATSAPP_INBOX_CONSUMER_STOPPED\n');process.exitCode=1;});
-module.exports={main,pollOnce};
+module.exports={main,pollOnce,databaseConfiguration};
