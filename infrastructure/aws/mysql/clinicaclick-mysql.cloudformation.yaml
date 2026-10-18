@@ -158,6 +158,7 @@ Resources:
       Family: mysql8.4
       Parameters:
         require_secure_transport: 'ON'
+        performance_schema: '1'
         event_scheduler: 'OFF'
         # RDS administrators lack SUPER; recreating the two existing guard
         # triggers requires this dynamic setting when binary logging is on.
