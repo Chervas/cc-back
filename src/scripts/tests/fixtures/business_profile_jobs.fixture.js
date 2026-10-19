@@ -2,7 +2,7 @@
 const fs = require('node:fs'); const vm = require('node:vm');
 // Loads actual job source with an explicit dependency boundary. Importing a
 // legacy service, model index, cron, Redis or provider bootstrap is impossible.
-function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credentials, searchConsole, analytics, logs = [], env = {}, overrides = {} }) {
+function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credentials, searchConsole, analytics, logs = [], env = {}, overrides = {}, clockDate = Date }) {
   const filename = require.resolve('../../../jobs/sync.jobs');
   const fail = () => { throw Error('UNEXPECTED_DEPENDENCY_IN_GBP_QA'); };
   const dependencies = {
@@ -20,7 +20,7 @@ function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credent
   };
   const module = { exports: {} };
   const blocked = new Proxy({}, { get: () => fail });
-  const sandbox = { module, exports: module.exports, Buffer, URL, URLSearchParams, Date, setTimeout, clearTimeout, setInterval: fail,
+  const sandbox = { module, exports: module.exports, Buffer, URL, URLSearchParams, Date: clockDate, setTimeout, clearTimeout, setInterval: fail,
     process: { env: { RUNTIME_ROLE: 'gateway', JOBS_AUTO_START: 'false', LOCAL_SYNC_RECENT_DAYS: '1', LOCAL_SYNC_BETWEEN_LOCATIONS_SLEEP_MS: '0', ...env } },
     console: Object.fromEntries(['log', 'warn', 'error'].map(k => [k, (...args) => logs.push(args)])),
     require: name => Object.hasOwn(dependencies, name) ? dependencies[name] : blocked };

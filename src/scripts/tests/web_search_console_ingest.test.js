@@ -6,6 +6,13 @@ const { Op } = require('sequelize');
 const ingest = require('../../lib/searchConsoleIngest');
 const { loadBusinessProfileJobs } = require('./fixtures/business_profile_jobs.fixture');
 
+const NativeDate = Date;
+const FIXTURE_NOW = NativeDate.parse('2026-10-18T12:00:00.000Z');
+class FixtureClockDate extends NativeDate {
+  constructor(...args) { super(...(args.length ? args : [FIXTURE_NOW])); }
+  static now() { return FIXTURE_NOW; }
+}
+
 const keys = ['clinica_id', 'date', 'query_hash', 'page_url_hash'];
 const key = (row, fields = keys) => JSON.stringify(fields.map(field => String(row[field] ?? '')));
 const row = (index, patch = {}) => ({ clinica_id: 71, date: '2026-10-18', query_hash: 'q' + index,
@@ -76,6 +83,8 @@ test('a later write-batch failure rolls back the entire interval and permits an 
 });
 
 test('month windows retain leap days and configured backfill remains full until initial coverage is explicitly verified', () => {
+  assert.equal(new FixtureClockDate().toISOString(), '2026-10-18T12:00:00.000Z');
+  assert.equal(new FixtureClockDate('2024-02-29T00:00:00.000Z').toISOString(), '2024-02-29T00:00:00.000Z');
   assert.deepEqual([...ingest.monthRanges('2024-02-28', '2024-03-02')], [
     { s: '2024-02-28', e: '2024-02-29' }, { s: '2024-03-01', e: '2024-03-02' }]);
   const config = { backfillDays: 480 };
@@ -116,7 +125,7 @@ function jobsFixture({ count = 1, sites = 1, env = {}, storage } = {}) {
   f.models.SyncLog = { create: async () => ({ update: async value => f.state.reports.push(value) }) };
   const credentials = { assert: async () => { if (!f.state.active) throw Error('REVOKED'); },
     request: async (_connection, send) => send(), safe: () => 'google_credentials_unavailable' };
-  const jobs = loadBusinessProfileJobs({ models: f.models, credentials,
+  const jobs = loadBusinessProfileJobs({ models: f.models, credentials, clockDate: FixtureClockDate,
     searchConsole: { prepare: async () => { if (!f.state.active) throw Error('REVOKED'); return null; } },
     legacyHttp: { post: async (url, payload) => {
       f.state.calls.push({ url, payload });
