@@ -65,6 +65,10 @@ function buildSingleNoticeFlow(template) {
   }
   const previous = policyFor(template);
   if (!Object.keys(retired).length && !previous?.retired_nodes) throw Error('single_notice_no_known_followup');
+  const referencesRetired = value => Array.isArray(value) ? value.some(referencesRetired)
+    : value && typeof value === 'object' ? Object.entries(value).some(([key,item]) => key !== POLICY && referencesRetired(item))
+      : typeof value === 'string' && Object.keys(retired).some(id => value === id || value.includes(`outputs.${id}.`) || value.includes(`outputs.${id}}`));
+  if (nodes.some(node => !retired[node.id] && referencesRetired(node.config))) throw Error('single_notice_reference_requires_review');
   return { entry_node_id: template.entry_node_id, trigger_type: template.trigger_type,
     trigger_config: { ...structuredClone(template.trigger_config || {}), [POLICY]: previous || { revision: 1, retired_nodes: retired } },
     nodes: nodes.filter(node => !retired[node.id]) };

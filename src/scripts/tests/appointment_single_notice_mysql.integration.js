@@ -104,7 +104,7 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   const native={};const cleanString=v=>String(v??'').trim()||null;
   const sanitizeTemplateKey=v=>String(v||'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');
   const context={exports:native,console:{error(){}},structuredClone,db,Op:D.Op,AutomationFlowTemplateV2:db.AutomationFlowTemplateV2,
-    Clinica:{findOne:async()=>null},cleanString,sanitizeTemplateKey,buildTemplateKey:({templateKey})=>sanitizeTemplateKey(templateKey),
+    Clinica:{findOne:async()=>({grupoClinicaId:99})},cleanString,sanitizeTemplateKey,buildTemplateKey:({templateKey})=>sanitizeTemplateKey(templateKey),
     parseIntOrNull:v=>Number(v)||null,parseBool:(v,fallback)=>v??fallback,
     resolveAccess:async()=>({is_admin:true,user_id:1}),hasScopeAccess:()=>true,assertCreateScopeAllowed:()=>true,
     normalizeNodesInput:()=>assert.fail('Single-notice publication must not rewrite old comparators'),
@@ -149,6 +149,7 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   await foreign.reload();assert.equal(foreign.is_active,true);
   const installed=await db.AutomationFlowTemplateV2.findOne({where:{template_key:source.template_key,version:2}});
   assert.deepEqual(installed.trigger_config,source.trigger_config);assert.equal(publication.hash(installed.nodes),publication.hash(entry.body.nodes));
+  assert.equal(installed.group_id,null,'An old clinic family must not inherit its newly assigned group during versioning');
   assert.equal((await publication.publishEntry(entry,request)).skipped,true);assert.equal(writes,2);
   const tampered=structuredClone(entry.body);tampered.nodes.find(node=>node.type==='condition/ai_analysis').config.instruction='TESTONLY forbidden change';
   assert.throws(()=>publication.preservedNodes(source.toJSON(),tampered),{code:'single_notice_candidate_changed'});

@@ -41,6 +41,8 @@ test('same-day 08:00, other families and incompatible customizations cannot be r
   assert.throws(() => buildSingleNoticeFlow({ ...fixture(), template_key: 'recordatorio_mismo_dia_a_las_8_sabes_llegar' }), /out_of_scope/);
   const source = fixture(); source.nodes.find(n => n.id === 'late').outputs.on_timeout = 'review';
   assert.throws(() => buildSingleNoticeFlow(source), /incompatible/);
+  const hardcoded=fixture();hardcoded.nodes.find(n=>n.id==='ai2').config.context_sources=[{path:'{{outputs.second.message_preview}}'}];
+  assert.throws(()=>buildSingleNoticeFlow(hardcoded),/reference_requires_review/);
 });
 test('cutover redirects only the retired delivery; already accepted follow-up keeps real correlation', () => {
   const source = fixture(), latest = { ...source, ...buildSingleNoticeFlow(source) };

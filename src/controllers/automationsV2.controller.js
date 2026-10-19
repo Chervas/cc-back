@@ -5918,9 +5918,10 @@ exports.createTemplateDraft = async (req, res) => {
     let clinicId = parseIntOrNull(body.clinic_id);
     let groupId = parseIntOrNull(body.group_id);
     const isSystem = access.is_admin ? parseBool(body.is_system, false) : false;
+    if (singleNoticeSource) templateKey = explicitTemplateKey = singleNoticeSource.template_key;
 
     // Si se crea en scope clínica y no viene group_id, inferir el grupo de la clínica.
-    if (clinicId && !groupId) {
+    if (clinicId && !groupId && !singleNoticeSource) {
       const clinic = await Clinica.findOne({
         where: { id_clinica: clinicId },
         attributes: ['grupoClinicaId'],
