@@ -194,7 +194,7 @@ async function run(payload, _job, claim) {
   } catch (error) {
     if (error.code === 'job_claim_lost') throw error;
     if (stop.isStop(error)) {
-      await stop.cancelMessage(message.id);
+      await stop.cancelMessage(message.id, error.code);
       return { status: 'completed', result: { cancelled: true, reason: error.code } };
     }
     if (W.deferred(error)) { await defer(error); await message.reload(); return waiting(message, error.code); }

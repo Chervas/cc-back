@@ -5830,10 +5830,18 @@ exports.createTemplateDraft = async (req, res) => {
     }
 
     const body = req.body || {};
+    let singleNoticeSource = null;
+    if (body.single_notice_source_id != null) {
+      if (!Number.isSafeInteger(body.single_notice_source_id) || body.single_notice_source_id <= 0) return res.status(400).json({ success:false,error:'single_notice_source_invalid' });
+      singleNoticeSource = await AutomationFlowTemplateV2.findByPk(body.single_notice_source_id);
+      if (!singleNoticeSource || !hasScopeAccess(access,singleNoticeSource)) return res.status(404).json({success:false,error:'template_version_not_found'});
+    }
     const name = cleanString(body.name);
     const triggerType = cleanString(body.trigger_type);
     const entryNodeId = cleanString(body.entry_node_id);
-    const nodes = Array.isArray(body.nodes) ? normalizeNodesInput(body.nodes) : null;
+    const nodes = singleNoticeSource
+      ? require('../lib/appointment-single-notice-publication').preservedNodes(singleNoticeSource.toJSON(),body)
+      : Array.isArray(body.nodes) ? normalizeNodesInput(body.nodes) : null;
 
     if (!name || !entryNodeId || !nodes) {
       return res.status(400).json({
@@ -5894,8 +5902,8 @@ exports.createTemplateDraft = async (req, res) => {
         details: triggerConfigResolution.details,
       });
     }
-    const normalizedTriggerConfig = triggerConfigResolution.trigger_config;
-    const nodesWithTriggerConfig = applyTriggerConfigToNodes({
+    const normalizedTriggerConfig = singleNoticeSource ? structuredClone(singleNoticeSource.trigger_config) : triggerConfigResolution.trigger_config;
+    const nodesWithTriggerConfig = singleNoticeSource ? nodes : applyTriggerConfigToNodes({
       triggerType: resolvedTriggerType,
       entryNodeId,
       nodes,
@@ -5928,20 +5936,20 @@ exports.createTemplateDraft = async (req, res) => {
       return res.status(403).json({ success: false, error: 'forbidden_scope' });
     }
 
-    // Propagated mobile families contain a double-underscore scope suffix.
+    // Propagated families contain a double-underscore scope suffix.
     // Reopening that exact scoped family must not sanitize it into a new flow.
-    const exactMobileKey = cleanString(body.template_key);
-    if (resolvedTriggerType === 'patient.mobile_verification_requested' && clinicId && !isSystem
-      && /^[a-z0-9_]{1,120}$/.test(exactMobileKey || '')) {
+    const exactScopedKey = cleanString(body.template_key);
+    if (clinicId && !isSystem
+      && /^[a-z0-9_]{1,120}$/.test(exactScopedKey || '')) {
       const scopedFamily = await AutomationFlowTemplateV2.findOne({ where: {
-        template_key: exactMobileKey, clinic_id: clinicId, group_id: groupId, is_system: false,
+        template_key: exactScopedKey, clinic_id: clinicId, group_id: groupId, is_system: false,
         trigger_type: resolvedTriggerType,
       }, attributes: ['id'], raw: true });
-      if (scopedFamily) templateKey = explicitTemplateKey = exactMobileKey;
+      if (scopedFamily) templateKey = explicitTemplateKey = exactScopedKey;
     }
 
     const latest = await AutomationFlowTemplateV2.findOne({
-      where: { template_key: templateKey },
+      where: { template_key: templateKey, ...(singleNoticeSource ? {clinic_id:clinicId,group_id:groupId} : {}) },
       attributes: ['version', 'public_id'],
       order: [['version', 'DESC']],
       raw: true,
@@ -5952,6 +5960,7 @@ exports.createTemplateDraft = async (req, res) => {
           where: {
             template_key: templateKey,
             published_at: null,
+            ...(singleNoticeSource ? {clinic_id:clinicId,group_id:groupId} : {}),
           },
           order: [['version', 'DESC']],
         })
@@ -5996,7 +6005,7 @@ exports.createTemplateDraft = async (req, res) => {
     });
   } catch (err) {
     console.error('Error createTemplateDraft v2', err);
-    return res.status(500).json({ success: false, error: 'create_failed', message: err.message });
+    return res.status(err.statusCode || 500).json({ success: false, error: err.code || 'create_failed', message: err.message });
   }
 };
 
@@ -6381,7 +6390,19 @@ exports.updateTemplateDraft = async (req, res) => {
 exports.publishTemplateVersion = async (req, res) => {
   try {
     const access = await resolveAccess(req);
-    const familyWhere = await resolveTemplateFamilyWhere(req.params?.template_ref || req.params?.template_key);
+    let familyWhere = await resolveTemplateFamilyWhere(req.params?.template_ref || req.params?.template_key);
+    let singleNoticeSource = null;
+    if (req.body?.single_notice_source_id != null) {
+      const id=req.body.single_notice_source_id;
+      if (!Number.isSafeInteger(id)||id<=0) return res.status(400).json({success:false,error:'single_notice_source_invalid'});
+      singleNoticeSource=await AutomationFlowTemplateV2.findByPk(id);
+      if (!singleNoticeSource||!hasScopeAccess(access,singleNoticeSource)
+        ||![singleNoticeSource.public_id,singleNoticeSource.template_key].includes(req.params?.template_ref || req.params?.template_key)
+        ||req.body.preserve_activation!==true||Number(req.body.expected_published_version)!==Number(singleNoticeSource.version)) {
+        return res.status(409).json({success:false,error:'single_notice_source_changed'});
+      }
+      familyWhere={...require('../lib/automation-runtime-stop').familyWhere(singleNoticeSource),template_key:singleNoticeSource.template_key};
+    }
     const version = parseIntOrNull(req.params?.version);
 
     if (!familyWhere || !version) {
@@ -6400,7 +6421,9 @@ exports.publishTemplateVersion = async (req, res) => {
       return res.status(409).json({ success: false, error: 'already_published' });
     }
 
-    const normalizedNodes = normalizeNodesInput(Array.isArray(row.nodes) ? row.nodes : []);
+    const normalizedNodes = singleNoticeSource
+      ? require('../lib/appointment-single-notice-publication').preservedNodes(singleNoticeSource.toJSON(),row.toJSON())
+      : normalizeNodesInput(Array.isArray(row.nodes) ? row.nodes : []);
     const graphValidation = validateFlowGraph({
       entry_node_id: row.entry_node_id,
       nodes: normalizedNodes,
@@ -6509,6 +6532,18 @@ exports.publishTemplateVersion = async (req, res) => {
 
     let activateOnPublish = triggerResolution.trigger_type !== 'patient.mobile_verification_requested';
     await db.sequelize.transaction(async (transaction) => {
+      if (singleNoticeSource) {
+        const rows=await AutomationFlowTemplateV2.findAll({where:familyWhere,order:[['id','ASC']],transaction,lock:transaction.LOCK.UPDATE});
+        const source=rows.find(value=>Number(value.id)===Number(singleNoticeSource.id));
+        const current=rows.find(value=>Number(value.id)===Number(row.id));
+        if (!source||!current||current.published_at||Number(require('../lib/automation-runtime-stop').latestPublished(rows)?.id)!==Number(source.id)) {
+          throw Object.assign(Error('single_notice_source_changed'),{code:'single_notice_source_changed',statusCode:409});
+        }
+        const publication=require('../lib/appointment-single-notice-publication');
+        const checked=publication.preservedNodes(source.toJSON(),current.toJSON());
+        if (publication.hash(checked)!==publication.hash(normalizedNodes)) throw Object.assign(Error('single_notice_candidate_changed'),{code:'single_notice_candidate_changed',statusCode:409});
+      }
+      activateOnPublish = await require('../lib/automation-runtime-stop').publicationActivation(row, req.body, transaction);
       if (row.trigger_type === 'patient.mobile_verification_requested' && row.clinic_id && !row.is_system) {
         const lifecycle = require('../services/patientMobileVerificationLifecycle.service');
         const clinic = await db.Clinica.findByPk(row.clinic_id, { transaction, lock: transaction.LOCK.UPDATE });
@@ -6538,6 +6573,7 @@ exports.publishTemplateVersion = async (req, res) => {
         {
           where: {
             ...(cleanString(row.public_id) ? { public_id: cleanString(row.public_id) } : { template_key: row.template_key }),
+            ...(singleNoticeSource ? {template_key:row.template_key,clinic_id:row.clinic_id,group_id:row.group_id} : {}),
             published_at: { [Op.ne]: null },
             id: { [Op.ne]: row.id },
           },
@@ -6546,14 +6582,14 @@ exports.publishTemplateVersion = async (req, res) => {
       );
 
       await row.update({
-        nodes: applyTriggerConfigToNodes({
+        nodes: singleNoticeSource ? normalizedNodes : applyTriggerConfigToNodes({
           triggerType: triggerResolution.trigger_type,
           entryNodeId: row.entry_node_id,
           nodes: normalizedNodes,
           triggerConfig: triggerConfigResolution.trigger_config,
         }),
         trigger_type: triggerResolution.trigger_type,
-        trigger_config: triggerConfigResolution.trigger_config,
+        trigger_config: singleNoticeSource ? structuredClone(singleNoticeSource.trigger_config) : triggerConfigResolution.trigger_config,
         published_at: new Date(),
         published_by: access.user_id,
         is_active: activateOnPublish,
@@ -6578,7 +6614,7 @@ exports.publishTemplateVersion = async (req, res) => {
     });
   } catch (err) {
     console.error('Error publishTemplateVersion v2', err);
-    return res.status(500).json({ success: false, error: 'publish_failed', message: err.message });
+    return res.status(err.statusCode || 500).json({ success: false, error: err.code || 'publish_failed', message: err.message });
   }
 };
 

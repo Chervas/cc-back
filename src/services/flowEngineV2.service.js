@@ -3453,8 +3453,8 @@ async function runScheduledWhatsappSendJob(payload = {}) {
   try { await require('../lib/automation-runtime-stop').assertMessageCanDispatch(msg.id); }
   catch (error) {
     if (!require('../lib/automation-runtime-stop').isStop(error)) throw error;
-    await require('../lib/automation-runtime-stop').cancelMessage(msg.id);
-    return { status: 'completed', result: { skipped: true, reason: 'automation_deactivated', message_id: messageId } };
+    await require('../lib/automation-runtime-stop').cancelMessage(msg.id, error.code);
+    return { status: 'completed', result: { skipped: true, reason: error.code || 'automation_deactivated', message_id: messageId } };
   }
 
   const metadata = msg.metadata && typeof msg.metadata === 'object' ? msg.metadata : {};
@@ -6302,7 +6302,7 @@ function evaluateResponseExists(config, context) {
 }
 
 function cleanReviewInlineFeedbackReason(value) {
-  return cleanString(value || '')
+  return (cleanString(value || '') || '')
     .replace(/^[\s.,;:!¡¿?\-–—]+/, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -6793,6 +6793,9 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'action/send_whatsapp': {
+      if (!simulation && runtime.execution) {
+        await require('../lib/automation-runtime-stop').assertSilenceMessageAllowed(runtime.execution, { node_id: node.id });
+      }
       if (simulation) {
         const pendingResponseSuppression = getPendingResponseSuppression(config, context);
         if (pendingResponseSuppression) {
@@ -8313,6 +8316,25 @@ async function syncConversationAutomationStateAfterExecution(execution) {
   });
 }
 
+async function resolveSingleNoticeRuntime(execution, template, latest) {
+  const policy = require('../lib/appointment-single-notice-flow');
+  const initial = policy.runtimeSingleNoticeFlow(template, latest, execution.context);
+  const context = clone(execution.context) || {};
+  context.outputs ||= {};
+  for (const sendId of Object.keys(initial.redirected)) {
+    const output = context.outputs[sendId];
+    if (!output?.message_id) continue;
+    const message = await Message.findByPk(output.message_id);
+    if (!message || Number(message.metadata?.execution_id) !== Number(execution.id)
+      || message.metadata?.node_id !== sendId || Number(message.conversation_id) !== Number(output.conversation_id || output.chat_conversation_id)) {
+      throw Object.assign(Error('single_notice_message_requires_review'), { preserveFlowState: true });
+    }
+    context.outputs[sendId] = { ...output, provider_accepted: require('../lib/whatsapp-dispatch-wait').accepted(message),
+      delivery_unknown: !!message.metadata?.delivery_unknown, outcome_unknown: !!message.metadata?.outcome_unknown };
+  }
+  return policy.runtimeSingleNoticeFlow(template, latest, context);
+}
+
 async function runExecution(executionId, options = {}) {
   const maxSteps = Number.isInteger(options.maxSteps) ? options.maxSteps : 100;
   const resumeMode = cleanString(options.resumeMode) || null;
@@ -8374,7 +8396,16 @@ async function runExecution(executionId, options = {}) {
 
   await require('../lib/automation-runtime-stop').assertExecutionActive(execution, undefined, { allowSelfDeactivatedEnd: true });
 
-  const nodes = Array.isArray(template.nodes) ? template.nodes : [];
+  const singleNotice = require('../lib/appointment-single-notice-flow');
+  const latestForNotice = singleNotice.scoped(template)
+    ? await require('../lib/automation-runtime-stop').assertTemplateActive(template) : null;
+  const noticeRuntime = await resolveSingleNoticeRuntime(execution, template, latestForNotice);
+  const nodes = Array.isArray(noticeRuntime.nodes) ? noticeRuntime.nodes : [];
+  const noticePatch = singleNotice.waitingCutoverPatch(execution, noticeRuntime);
+  if (noticePatch) {
+    if (noticePatch.waiting_meta) noticePatch.waiting_meta.runtime_namespace = CURRENT_RUNTIME_NAMESPACE;
+    await withExecutionJobClaim(execution, transaction => execution.update(noticePatch, { transaction }));
+  }
   const nodeMap = new Map(nodes.map((node) => [cleanString(node?.id), node]));
 
   let context = clone(execution.context) || {};
@@ -8632,6 +8663,21 @@ async function runExecution(executionId, options = {}) {
         last_error: null,
       }, 'flow_execution:updated');
     } catch (error) {
+      if (error.code === 'automation_silence_followup_retired' && singleNotice.scoped(template)) {
+        // A publication committed while this worker was already running. Keep
+        // its original response path instead of cancelling the whole execution.
+        const latest = await require('../lib/automation-runtime-stop').assertTemplateActive(template);
+        const runtime = await resolveSingleNoticeRuntime(execution, template, latest);
+        if (runtime.redirected[currentNodeId]) {
+          await log.update({ status: 'error', finished_at: new Date(), error_message: error.code });
+          nodeMap.clear();
+          for (const updatedNode of runtime.nodes) nodeMap.set(updatedNode.id, updatedNode);
+          currentNodeId = runtime.redirected[currentNodeId].wait_node_id;
+          await updateExecutionAndEmit(execution, { status: 'running', current_node_id: currentNodeId,
+            context, waiting_meta: null, wait_until: null, last_error: null }, 'flow_execution:updated');
+          continue;
+        }
+      }
       if (require('../lib/automation-runtime-stop').isStop(error)) {
         await FlowExecutionLogV2.update({ status: 'error', finished_at: new Date(), error_message: error.code },
           { where: { id: log.id, status: 'running' } });

@@ -72,7 +72,7 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
       if (bindings.length === 1) storedRole = bindings[0].role;
     }
     if ((storedRole || 'primary') !== channelRole) C.fail('whatsapp_authorization_conflict', 409);
-    const activations = await db().WhatsappPhoneActivation.findAll({ where: { asset_id: asset.id, state: 'active' }, limit: 2, ...options });
+    const activations = await db().WhatsappPhoneActivation.findAll({ where: { asset_id: asset.id, state: { [Op.in]: ['active', 'archived'] } }, limit: 2, ...options });
     let authorizationId = null;
     if (C.uuid(asset.whatsappAuthorizationId)) {
       if (activations.length !== 1) C.fail('whatsapp_authorization_conflict', 409);

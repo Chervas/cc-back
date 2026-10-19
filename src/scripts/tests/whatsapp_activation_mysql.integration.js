@@ -155,4 +155,28 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   assert.equal((await asset.reload()).additionalData.whatsapp_channel_role,'primary','an inherited primary cannot be silently demoted');
   report.checks.push('Group secondary is atomic and idempotent, preserves existing and absent primaries, routes only selected purposes, rejects primary conflict and missing member permission, audit failure rolls back');
   report.checks.push('Atomic clinic route selects group over own, keeps own asset available, explicit secondary removal, unselected new group does not send; rollback on audit failure, scope/session/duplicate rejection');
+  if(process.env.WHATSAPP_ROUTING_ONLY_TEST!=='true'){
+    models.WhatsappAccountHealthEvent=require('../../../models/whatsappaccounthealthevent')(sql,D);await models.WhatsappAccountHealthEvent.sync();
+    const old=await models.WhatsappPhoneActivation.findByPk(asset.whatsappAuthorizationId);
+    context.requestId=old.authorization_id;context.scope={type:'group',id:9};context.clinicIds=[71,72];delete context.replacement;
+    Object.assign(remote,{flowId:old.authorization_id,connectionRef:old.connection_ref,scopeKey:'group:9',clinicIds:[71,72],
+      phoneId:old.phone_id,wabaId:old.waba_id,assetId:asset.id,state:'active',profile:old.profile});
+    const disconnect=require('../../services/whatsappPhoneDisconnect.service').createService({models,audit:injectedAudit,
+      sessions:{verifyReference:async()=>{}},broker:{binding:async clinicId=>({clinicId,assetId:asset.id,authorizationId:old.authorization_id,
+        connectionRef:old.connection_ref,phoneId:old.phone_id,wabaId:old.waba_id,sendEnabled:true})},
+      control:{available:()=>true,execute:async command=>({requestId:command.requestId,data:{revoked:true}})}});
+    const preview=await disconnect.preview({assetId:asset.id,clinicId:71},actor);
+    await disconnect.disconnect({assetId:asset.id,clinicId:71,scopeToken:preview.scopeToken},actor);
+    await disconnect.archive({assetId:asset.id,clinicId:71,scopeToken:preview.scopeToken},actor);
+    assert.equal((await old.reload()).state,'archived');assert.equal((await asset.reload()).isActive,false);
+    assert.equal(await models.WhatsappAccountHealthEvent.count({where:{event_type:'connection_archived'}}),1);
+    assert.equal(await models.WhatsappChannelBinding.count({where:{asset_id:asset.id,is_active:true}}),0);
+    const before=activations;await assert.rejects(make().complete({...actor,requestId:context.requestId}),/cancelled/);assert.equal(activations,before);
+    context.requestId=randomUUID();Object.assign(remote,{flowId:context.requestId,connectionRef:A.connectionRef(context.requestId),assetId:null,state:'prepared'});
+    const connected=await make().complete({...actor,requestId:context.requestId});assert.equal(connected.assetId,asset.id);
+    await asset.reload();assert.equal(asset.additionalData.whatsappArchive,undefined);assert.equal(asset.additionalData.whatsappManualDisconnect,undefined);
+    assert.equal((await old.reload()).state,'superseded');assert.equal(published.connections.filter(row=>row.assetId===asset.id).length,1);
+    assert.equal(published.connections.find(row=>row.assetId===asset.id).messageNotBefore,new Date(old.message_not_before).toISOString());
+    report.checks.push('Archive uses native permission/session scope, routing audit and health history; retires all scoped bindings without deleting history; old authorization cannot revive it, fresh authorization preserves asset and cutoff without duplicate catalog entries');
+  }
 }).catch(error=>{console.error(error.stack||error.message);process.exitCode=1});

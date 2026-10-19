@@ -1,0 +1,102 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+function sourceFunction(file,name,dependencies){
+  const source=fs.readFileSync(require.resolve(file),'utf8'),assignment=source.indexOf('exports.'+name+' =');
+  const start=assignment>=0?source.indexOf('async ',assignment):source.indexOf('async function '+name+'(');
+  assert(start>=0,'Native function must exist');
+  const boundaries=(assignment>=0?['\nexports.']:['\nasync function ','\nfunction ']).map(marker=>source.indexOf(marker,start+10)).filter(index=>index>=0);
+  const code=source.slice(start,Math.min(...boundaries)).trim().replace(/;$/,'');
+  return vm.runInNewContext('('+code+')',{console:{error(){},warn(){}},structuredClone,Map,Set,Date,...dependencies});
+}
+function response(){return {statusCode:200,status(v){this.statusCode=v;return this;},json(v){this.body=v;return this;}};}
+const ownership=require('../../lib/whatsapp-template-ownership');
+test('native all-sender listing identifies both roles/WABAs, merges same-WABA copies, filters owner and inactive catalog without provider calls',async()=>{
+  const assets=[{id:1,phoneNumberId:'first',wabaId:'waba1',metaAssetName:'TESTONLY 1',isActive:true},
+    {id:2,phoneNumberId:'second',wabaId:'waba2',metaAssetName:'TESTONLY 2',isActive:true}];
+  const templates=[{id:10,waba_id:'waba1',origin:'custom',name:'TESTONLY',created_by_user_id:1},
+    {id:11,waba_id:'waba2',origin:'custom',name:'TESTONLY',created_by_user_id:1},
+    {id:12,waba_id:'waba2',origin:'custom',created_by_user_id:2},
+    {id:13,waba_id:'waba2',origin:'catalog',catalog_template_id:1,catalog:{is_active:false}}];
+  let authorized=0,scopeAllowed=true;
+  const list=sourceFunction('../../controllers/whatsapp.controller','listTemplatesForClinic',{
+    ...ownership,isWhatsappGlobalAdmin:()=>false,assertWhatsappTemplateClinicAccess:async()=>{if(!scopeAllowed)throw Object.assign(Error('scope'),{code:'whatsapp_template_clinic_scope_forbidden'});},
+    whatsappService:{resolvePhoneAssetByClinic:async()=>assets[0]},ClinicMetaAsset:{findByPk:async id=>assets.find(a=>a.id===id)},
+    whatsappChannelBindingsService:{listClinicBindings:async()=>[{asset_id:1,role:'primary'},{asset_id:2,role:'secondary'}],applyBindingToAsset:(a,b)=>({...a,role:b.role})},
+    resolveWabaFromContext:async({phoneNumberId})=>{authorized++;return assets.find(a=>a.phoneNumberId===phoneNumberId);},
+    WhatsappTemplate:{findAll:async({where})=>templates.filter(t=>t.waba_id===where.waba_id)},WhatsappTemplateCatalog:{},
+    buildWhatsappTemplateUsageMap:async()=>new Map(),resolveWhatsappRouting:a=>({role:a.role||'primary'}),
+    buildWhatsappTemplateVariableContract:()=>[],getWhatsappTemplateUsages:()=>[],isReviewWorkflowWhatsappTemplate:()=>false,
+    require:name=>{assert.equal(name,'../lib/whatsappManualDisconnect');return {current:()=>null};},
+  });
+  const req={query:{clinic_id:'1',all_senders:'1'},userData:{userId:1}},res=response();await list(req,res);
+  assert.equal(res.statusCode,200);assert.equal(authorized,2);assert.deepEqual([...res.body.map(t=>t.id)],[10,11]);
+  assert.equal(res.body[1].senders[0].role,'secondary');assert.equal(res.body[1].effective_phone_number_id,'second');
+  assets[1].wabaId='waba1';const merged=response();await list(req,merged);
+  assert.equal(merged.body.length,1);assert.equal(merged.body[0].senders.length,2);
+  scopeAllowed=false;const denied=response();await list(req,denied);assert.equal(denied.statusCode,403);
+});
+test('native custom controller authorizes each exact predecessor and reports partial replica results instead of claiming complete submission',async()=>{
+  const assets=[{wabaId:'101',phoneNumberId:'first',waAccessToken:'TESTONLY'},{wabaId:'102',phoneNumberId:'second',waAccessToken:'TESTONLY'}];
+  let foreign=false;const inputs=[];
+  const create=sourceFunction('../../controllers/whatsapp.controller','createCustomTemplate',{
+    assertWhatsappTemplateClinicAccess:async()=>{},isWhatsappGlobalAdmin:()=>false,
+    resolveWabaFromContext:async({phoneNumberId})=>assets.find(a=>a.phoneNumberId===phoneNumberId),
+    WhatsappTemplate:{findByPk:async id=>({id,created_by_user_id:foreign?2:1,clinic_id:1,waba_id:id===11?'101':'102'})},
+    buildWhatsappTemplateVariableContract:()=>[],getWhatsappTemplateUsages:()=>[],
+    require:name=>{assert.equal(name,'../services/whatsappTemplates.service');return {createCustomTemplateForClinic:async input=>{
+      inputs.push(input);if(input.wabaId==='102')throw Object.assign(Error('TESTONLY timeout'),{code:'outcome_unknown'});
+      return {submitted:true,row:{id:21,name:'TESTONLY pinned',language:'es',status:'PENDING'}};
+    }};},
+  });
+  const req={query:{},userData:{userId:1},body:{clinic_id:1,display_name:'TESTONLY',body_text:'TESTONLY hello',
+    phone_number_ids:['first','second'],replace_template_ids:[11,12],request_id:'TESTONLY-request'}};
+  const res=response();await create(req,res);assert.equal(res.statusCode,201);assert.equal(res.body.submitted,false);
+  assert.equal(res.body.replicas.length,2);assert.equal(res.body.replicas[1].submitted,false);
+  assert.equal(inputs[0].replaceTemplateId,11);assert.equal(inputs[1].replaceTemplateId,12);
+  assert.deepEqual([...inputs[0].replacementTemplateIds],[11,12]);
+  assert.equal(inputs[1].technicalName,'TESTONLY pinned');
+  foreign=true;const denied=response();await create(req,denied);assert.equal(denied.statusCode,403);assert.equal(inputs.length,2);
+});
+test('new custom templates default to configured active phones, excluding a manually disconnected predecessor',async()=>{
+  const assets=[{id:1,wabaId:'101',phoneNumberId:'first',isActive:true,waAccessToken:'TESTONLY'},
+    {id:2,wabaId:'102',phoneNumberId:'second',isActive:true,waAccessToken:'TESTONLY'},
+    {id:3,wabaId:'103',phoneNumberId:'retired',isActive:true,manual:true}];const targets=[];
+  const create=sourceFunction('../../controllers/whatsapp.controller','createCustomTemplate',{
+    assertWhatsappTemplateClinicAccess:async()=>{},isWhatsappGlobalAdmin:()=>false,
+    whatsappChannelBindingsService:{listClinicBindings:async()=>assets.map(a=>({asset_id:a.id}))},
+    ClinicMetaAsset:{findByPk:async id=>assets.find(a=>a.id===id)},
+    resolveWabaFromContext:async({phoneNumberId})=>assets.find(a=>a.phoneNumberId===phoneNumberId),
+    buildWhatsappTemplateVariableContract:()=>[],getWhatsappTemplateUsages:()=>[],
+    require:name=>name==='../lib/whatsappManualDisconnect'?{current:asset=>asset.manual}:name==='../services/whatsappTemplates.service'
+      ?{createCustomTemplateForClinic:async input=>{targets.push(input.wabaId);return {submitted:true,row:{id:targets.length,name:'TESTONLY shared'}};}}:assert.fail(name),
+  });
+  const res=response();await create({query:{},userData:{userId:76},body:{clinic_id:1,display_name:'TESTONLY',body_text:'TESTONLY test'}},res);
+  assert.equal(res.statusCode,201);assert.deepEqual(targets,['101','102']);assert.equal(res.body.submitted,true);
+});
+test('native catalog provisioning checkpoints before POST, never repeats unknown result, continues other names and resumes only proven not-started work',async()=>{
+  const rows=[],events=[],templates=[{id:1,name:'TESTONLY_a'},{id:2,name:'TESTONLY_b'}];let calls=0,failJob=false;
+  const create=sourceFunction('../../services/whatsappTemplates.service','createTemplatesFromCatalogWithLease',{
+    CATALOG_SUBMISSION_UNCONFIRMED:'unknown',CATALOG_SUBMISSION_NOT_STARTED:'not_started',
+    WHATSAPP_TEMPLATE_STATUS:{LOCAL_PENDING:'PENDING_LOCAL',PENDING:'PENDING',REJECTED:'REJECTED'},
+    resolveDisciplines:async()=>[],selectCatalogTemplatesByDisciplines:async()=>templates,
+    resolveTargetClinicIdsForTemplateProvisioning:async()=>[1],loadTemplateFamilyRows:async({template})=>rows.filter(r=>r.id===template.id),
+    findSameContractRemoteTemplate:({familyRows})=>familyRows.find(r=>r.metaTemplateId),
+    findPreparedCatalogSubmission:({familyRows})=>familyRows.find(r=>['unknown','not_started'].includes(r.rejection_reason)),
+    getCatalogTechnicalFamilyName:t=>t.name,getCatalogTemplateLanguage:()=> 'es',resolveNextTechnicalTemplateName:n=>n+'_v2',
+    prepareTemplateImageHeaderForMeta:async({template})=>({template}),buildTemplateForTechnicalName:(t,n)=>({...t,name:n}),getImageHeaderSampleIssue:()=>null,
+    upsertConnectedTemplateForWaba:async({template,technicalName,rejectionReason,metaTemplateId})=>{
+      let row=rows.find(r=>r.id===template.id);if(!row){row={id:template.id,catalog_template_id:template.id};rows.push(row);}
+      Object.assign(row,{name:technicalName,rejection_reason:rejectionReason,metaTemplateId});events.push(rejectionReason||'accepted');
+    },
+    enqueueSyncTemplatesJob:async()=>{if(failJob)throw Error('TESTONLY job failed');events.push('job');},
+    createTemplateInMeta:async({template})=>{calls++;assert.deepEqual(events.slice(-3),['not_started','job','unknown']);
+      if(template.id===1)throw Object.assign(Error('timeout'),{code:'provider_timeout'});return {id:'TESTONLY_meta'};},
+    upsertClinicOverrideTemplateForClinic:async()=>{},mapRemoteStatusToLocalStatus:v=>v,
+    templateSyncState:{blockedCode:()=>null},isRetryableMetaError:()=>true,
+  });
+  const input={wabaId:'101',clinicId:1,assignmentScope:'clinic',asset:{}};
+  const first=await create(input);assert.equal(first.submitted,1);assert.equal(first.localPending,1);assert.equal(calls,2);
+  const retry=await create(input);assert.equal(retry.submitted,0);assert.equal(calls,2);
+  rows[0].rejection_reason='not_started';failJob=true;await assert.rejects(create({...input,catalogTemplateIds:[1]}),/job failed/);assert.equal(calls,2);
+  failJob=false;await create({...input,catalogTemplateIds:[1]});assert.equal(calls,3);assert.equal(rows[0].name,'TESTONLY_a');
+});

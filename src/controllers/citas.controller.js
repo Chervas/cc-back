@@ -3415,6 +3415,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
 
     let previousStatus = cita.estado;
     let previousSchedule = { inicio: cita.inicio, fin: cita.fin, estado: cita.estado, reschedule_reason: cita.reschedule_reason };
+    const rescheduleNotice = { actorId: Number(req.userData?.userId), decision: req.body?.notice_decision };
     const rescheduleReason = String(req.body?.reschedule_reason || 'clinic_schedule').trim().toLowerCase();
     if (require('../lib/program-appointment-context').hasProgramAppointmentReference(cita) && !require('../lib/program-booking').programBookingEnabled()) {
         return res.status(409).json({ code: 'program_booking_disabled', message: 'Esta cita requiere el entorno compatible con programas.' });
@@ -3516,6 +3517,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             ...(nextDoctorIdRaw !== undefined ? { doctor_id: nextDoctorId } : {}),
             ...(nextInstalacionIdRaw !== undefined ? { instalacion_id: nextInstalacionId } : {}),
         }, { additionalStaffIds, selections: req.body?.booking_selection || {},
+            rescheduleNotice,
             expectedPlanSha256: req.body?.booking_plan_sha256,
             priorityAcknowledged: req.body?.booking_priority_acknowledged === true, force: wantsForce,
             restrictionConfirmation: { actorId: Number(req.userData?.userId), acknowledgement: req.body?.booking_restriction_acknowledgement },
@@ -3535,6 +3537,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             restrictionConfirmation: { actorId: Number(req.userData?.userId), acknowledgement: req.body?.booking_restriction_acknowledgement },
             reschedulePatientOverlap: { actorId: Number(req.userData?.userId),
                 acknowledgement: req.body?.patient_overlap_acknowledgement },
+            rescheduleNotice,
             persist: async ({ values, existing, transaction }) => {
                 previousStatus = existing.estado;
                 previousSchedule = { inicio: existing.inicio, fin: existing.fin };
@@ -3557,6 +3560,14 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             previousSchedule = { inicio: locked.inicio, fin: locked.fin };
             changes.estado = statusForReschedule(rescheduleReason, estadoRaw, previousStatus);
             Object.assign(changes, preserveUnchangedReservation(locked, changes));
+            const clinic = await Clinica.findByPk(locked.clinica_id, { transaction });
+            const receipt = await require('../lib/appointment-reschedule-notice').checkRescheduleNotice({
+                db, previous: locked, values: { ...locked.toJSON(), ...changes }, clinic,
+                actorId: rescheduleNotice.actorId, decision: rescheduleNotice.decision, transaction,
+            });
+            const metadata = { ...(locked.import_metadata || {}) }; delete metadata.reschedule_notice;
+            if (receipt) metadata.reschedule_notice = receipt;
+            changes.import_metadata = metadata;
             await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, previous: locked,
                 appointment: { ...locked.toJSON(), ...changes }, transaction });
             return updateLockedAppointmentWithVisit(locked, changes, transaction);
@@ -3596,7 +3607,7 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
             reason: 'appointment_rescheduled',
         });
         const noticeOwner = linkedMove ? linkedMove.rows.find(row => Number(row.id_cita) === linkedMove.ownerId) : cita;
-        await appointmentAutomationV2Runtime.enqueueExecutionForCita(noticeOwner, {
+        if (!require('../lib/appointment-reschedule-notice').suppressRescheduleNotice(cita)) await appointmentAutomationV2Runtime.enqueueExecutionForCita(noticeOwner, {
             event_name: 'appointment_rescheduled',
             trigger_data: { reschedule_reason: rescheduleReason },
             user_id: req.userData?.userId || null,

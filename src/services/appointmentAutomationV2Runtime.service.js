@@ -1162,6 +1162,9 @@ async function reminderOrLinkedFollower(cita, eventName) {
 
 async function enqueueExecutionForTemplate(cita, template, options = {}) {
   const eventName = normalizeEventName(options.event_name) || cleanString(template?.trigger_type) || mapEstadoToEvent(cita?.estado) || 'appointment_created';
+  if (eventName === 'appointment_rescheduled' && require('../lib/appointment-reschedule-notice').suppressRescheduleNotice(cita)) {
+    return { success: true, skipped: true, reason: 'reschedule_notice_declined_by_operator' };
+  }
   if (!require('../lib/appointment-care').allowsAppointmentAutomation(cita, eventName)) {
     return { success: true, skipped: true, reason: 'appointment_care_stage_ineligible' };
   }

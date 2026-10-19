@@ -16,8 +16,12 @@ function fixture({ group=false, memberships=[123,124], denied=false, failed=fals
   const service = createService({models:{sequelize:{transaction:async work=>work({LOCK:{UPDATE:'update'}})},
     ClinicMetaAsset:{findByPk:async id=>{assert.equal(id,456);return asset;}},
     Clinica:{findAll:async ()=> (group?[123,124]:[123]).map(id=>({id_clinica:id}))},
-    UsuarioClinica:{findAll:async ()=>memberships.map(id=>({id_clinica:id}))}},
+    UsuarioClinica:{findAll:async ()=>memberships.map(id=>({id_clinica:id}))},
+    WhatsappChannelBinding:{findAll:async()=>[{id:1,clinic_id:123}],update:async(values,options)=>{writes.push({routing:values,options});}},
+    WhatsappPhoneActivation:{update:async(values,options)=>{writes.push({activation:values,options});}},
+    WhatsappAccountHealthEvent:{findOrCreate:async()=>{writes.push({healthEvent:true});}}},
     sessions:{verifyReference:async()=>{if(denied)throw Object.assign(Error('denied'),{httpStatus:403});}},
+    audit:{health:async()=>({pending:0,oldestAgeSeconds:0}),append:async()=>{writes.push({audit:true});}},
     broker:{binding:async id=>binding(id)},
     control:{available:()=>true,execute:async command=>{calls.push(structuredClone(command));if(failed)throw Error('unknown');return {requestId:command.requestId,data:{revoked:true},replayed:false};}},
     now:()=>new Date('2026-10-01T15:00:00Z')});
@@ -58,6 +62,21 @@ test('wrong clinic, changed confirmation and expired session cannot write or rev
   await assert.rejects(f.service.disconnect({assetId:456,clinicId:123,scopeToken:'stale'},actor),{httpStatus:409});
   const denied=fixture({denied:true});await assert.rejects(denied.service.preview({assetId:456,clinicId:123},actor));
   assert.equal(f.writes.length,0);assert.equal(f.calls.length,0);assert.equal(denied.calls.length,0);
+});
+test('archive requires a confirmed disconnection, explicit scope and preserves conversations and other phones',async()=>{
+  const f=fixture({group:true}); const preview=await f.service.preview({assetId:456,clinicId:123},actor);
+  await assert.rejects(f.service.archive({assetId:456,clinicId:123,scopeToken:preview.scopeToken},actor),{httpStatus:409});
+  assert.equal(f.writes.length,0);
+  await f.service.disconnect({assetId:456,clinicId:123,scopeToken:preview.scopeToken},actor);
+  const providerCalls=f.calls.length;
+  const result=await f.service.archive({assetId:456,clinicId:123,scopeToken:preview.scopeToken},actor);
+  assert.equal(result.archived,true); assert.equal(f.asset.isActive,false); assert.equal(f.calls.length,providerCalls);
+  assert.equal(f.asset.additionalData.whatsappManualDisconnect.state,'disconnected');
+  assert.deepEqual(f.asset.additionalData.whatsappArchive.clinicIds,[123,124]);
+  assert.equal(f.writes.find(write=>write.routing).options.where.asset_id,456);
+  assert.equal(f.writes.find(write=>write.activation).options.where.asset_id,456);
+  assert.equal((await f.service.archive({assetId:456,clinicId:123,scopeToken:preview.scopeToken},actor)).archived,true);
+  assert.equal(f.calls.length,providerCalls);
 });
 
 test('a corrupted stored receipt cannot revoke a different tenant',async()=>{

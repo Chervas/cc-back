@@ -1348,6 +1348,7 @@ exports.getPacienteActivity = async (req, res) => {
         include: [
           { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'telefono_movil'], required: false },
           { model: Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false },
+          { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'configuracion'], required: false },
           {
             model: LeadIntake,
             as: 'lead',
@@ -1397,6 +1398,7 @@ exports.getPacienteActivity = async (req, res) => {
       : [];
 
     const usuariosById = new Map(usuarios.map((usuario) => [Number(usuario.id_usuario), usuario]));
+    const appointmentsById = new Map(citas.map(cita => [Number(cita.id_cita), cita]));
     const items = [];
     const appointmentsWithStatusHistory = new Set(
       operationalEvents
@@ -1435,6 +1437,8 @@ exports.getPacienteActivity = async (req, res) => {
         items.push(serializeAppointmentStatusActivity(event, {
           patientId: pacienteId,
           actorName: buildActorLabel(actor),
+          appointment: appointmentsById.get(Number(event.metadata?.appointment_id)) || null,
+          timezone: require('../lib/availability-calendar').resolveClinicTimezone(appointmentsById.get(Number(event.metadata?.appointment_id))?.clinica),
         }));
         continue;
       }

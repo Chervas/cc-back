@@ -222,7 +222,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
   allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false,
   additionalStaffIds = undefined, supportOnly = false, expectedRange = null, importEquipmentAssignment = null,
   trustedProgramSeries = null, reschedulePatientOverlap = null, durationSelection, expectedPlanSha256,
-  visitBirth = null, restrictionConfirmation = null, administrativeRestore = false }) {
+  visitBirth = null, restrictionConfirmation = null, administrativeRestore = false, rescheduleNotice = null }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
   durationSelection = normalizeDurationSelection(durationSelection);
   // Internal documentary reconciliation only, never forwarded from an HTTP
@@ -406,6 +406,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     if (previousMetadata.patient_overlap_confirmation) importMetadata.patient_overlap_confirmation = previousMetadata.patient_overlap_confirmation;
     delete importMetadata.booking_restriction_confirmation;
     if (previousMetadata.booking_restriction_confirmation) importMetadata.booking_restriction_confirmation = previousMetadata.booking_restriction_confirmation;
+    delete importMetadata.reschedule_notice;
+    if (previousMetadata.reschedule_notice) importMetadata.reschedule_notice = previousMetadata.reschedule_notice;
     if (values.estado === 'cancelada' && previousStaff) {
       if (requestedStaff !== undefined && JSON.stringify(requestedStaff) !== JSON.stringify(previousStaff.ids)) {
         throw bookingError('booking_additional_staff_invalid', 'Reabre la cita para cambiar su personal de apoyo.', null, 400);
@@ -632,6 +634,15 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     require('../lib/appointment-care').assertCareStatusChange(previous, values, new Date(), {
       additionalStaffIds: requestedStaff, restoreExistingArrival: administrativeRestore });
     if (solution) require('../lib/booking-plan-receipt').assertBookingPlanReceipt(expectedPlanSha256, profile, solution, { doctorOnly });
+    if (rescheduleNotice && existing && !stateOnly && !supportOnly && !administrativeRestore) {
+      const receipt = await require('../lib/appointment-reschedule-notice').checkRescheduleNotice({
+        db, previous, values, clinic, actorId: Number(rescheduleNotice.actorId), decision: rescheduleNotice.decision, transaction: tx,
+      });
+      const metadata = { ...(values.import_metadata || {}) };
+      delete metadata.reschedule_notice;
+      if (receipt) metadata.reschedule_notice = receipt;
+      values.import_metadata = metadata;
+    }
     const appointment = visitBirth
       ? await require('./appointmentVisitManaged.service').current().persistBirth(visitBirth, {
         values, transaction: tx,

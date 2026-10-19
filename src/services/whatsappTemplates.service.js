@@ -260,6 +260,15 @@ function hasApprovedReviewReplacement(template, catalog, items, managedMetaIds) 
 }
 
 const REVIEW_SUBMISSION_UNCONFIRMED = 'review_catalog_submission_unconfirmed';
+const CATALOG_SUBMISSION_UNCONFIRMED = 'catalog_submission_unconfirmed';
+const CATALOG_SUBMISSION_NOT_STARTED = 'catalog_submission_not_started';
+function findPreparedCatalogSubmission({ familyRows, wabaId, template }) {
+  return familyRows.find(row => String(row.waba_id || '') === String(wabaId)
+    && row.origin === 'catalog' && row.is_active && !row.meta_template_id
+    && [CATALOG_SUBMISSION_UNCONFIRMED, CATALOG_SUBMISSION_NOT_STARTED, REVIEW_SUBMISSION_UNCONFIRMED].includes(row.rejection_reason)
+    && normalizeWhatsappLocale(row.language) === normalizeWhatsappLocale(getCatalogTemplateLanguage(template))
+    && hasSameProviderAcceptedContent(template, row)) || null;
+}
 function findPreparedReviewSubmission({ familyRows, wabaId, template }) {
   if (!isReviewRequestTemplateFamily(template) || isReviewReminderTemplateFamily(template)) return null;
   return familyRows.find(row => String(row.waba_id || '') === String(wabaId)
@@ -330,11 +339,14 @@ function buildVariableContractFromBody(bodyText, rawVariables = []) {
   const variables = [];
   const seen = new Map();
   const replacedBody = cleanString(bodyText).replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_match, rawKey) => {
-    const key = normalizeTemplateKey(rawKey);
+    const raw = normalizeTemplateKey(rawKey);
+    const positional = /^\d+$/.test(raw) ? explicit.find(variable => Number(variable.index || variable.position) === Number(raw))
+      || explicit[Number(raw) - 1] : null;
+    const key = normalizeTemplateKey(positional?.key || positional?.name || raw);
     if (!key) return '';
     if (!seen.has(key)) {
       seen.set(key, seen.size + 1);
-      const source = explicitByKey.get(key) || {};
+      const source = positional || explicitByKey.get(key) || {};
       variables.push({
         index: seen.get(key),
         position: seen.get(key),
@@ -2166,7 +2178,7 @@ function buildTemplateSnapshot(template) {
   };
 }
 
-async function replaceTemplateInEditableBulkSends({ oldTemplateId, newTemplate }) {
+async function replaceTemplateInEditableBulkSends({ oldTemplateId, newTemplate, transaction = null }) {
   const oldId = Number(oldTemplateId || 0);
   if (!oldId || !MarketingPatientList || !newTemplate) return true;
 
@@ -2189,6 +2201,8 @@ async function replaceTemplateInEditableBulkSends({ oldTemplateId, newTemplate }
         ),
       ],
     },
+    transaction,
+    ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}),
   });
 
   for (const list of lists) {
@@ -2202,63 +2216,50 @@ async function replaceTemplateInEditableBulkSends({ oldTemplateId, newTemplate }
         ...(list.safety_gates || {}),
         approved_template: false,
       },
-    });
+    }, { transaction });
   }
   return true;
 }
 
-async function deactivateReplacedTemplateFamily({
-  wabaId,
-  clinicId,
-  displayName,
-  keepTemplateId,
-  replacedTemplateId,
-  createdByUserId,
-}) {
-  const safeWabaId = cleanString(wabaId);
-  const safeClinicId = Number(clinicId || 0) || null;
-  const safeDisplayName = cleanString(displayName);
-  const safeKeepTemplateId = Number(keepTemplateId || 0);
-  const safeReplacedTemplateId = Number(replacedTemplateId || 0);
-  const safeCreatedByUserId = Number(createdByUserId || 0);
-  if (
-    !safeWabaId
-    || !safeKeepTemplateId
-    || !safeReplacedTemplateId
-    || !Number.isInteger(safeCreatedByUserId)
-    || safeCreatedByUserId <= 0
-  ) return;
-
-  // El id elegido debe retirarse aunque sea una fila WABA compartida
-  // (`clinic_id=NULL`) y la edición se haya iniciado desde una clínica. El
-  // barrido adicional por nombre sí queda limitado a esa clínica para no
-  // retirar por accidente plantillas homónimas de otras sedes.
-  const replacedFamily = [{ id: safeReplacedTemplateId }];
-  if (safeDisplayName) {
-    replacedFamily.push({
-      display_name: safeDisplayName,
-      ...(safeClinicId ? { clinic_id: safeClinicId } : {}),
-    });
-  }
-
-  await WhatsappTemplate.update(
-    {
-      is_active: false,
-      superseded_by_template_id: safeKeepTemplateId,
-    },
-    {
-      where: {
-        waba_id: safeWabaId,
-        created_by_user_id: safeCreatedByUserId,
-        is_active: true,
-        id: { [Op.ne]: safeKeepTemplateId },
-        [Op.or]: replacedFamily,
-      },
-    }
-  );
+async function enqueueCustomSubmissionSync(row, input) {
+  return enqueueSyncTemplatesJob({ wabaId: row.waba_id,
+    customSubmissionId: Number(row.id),
+    customReplacement: input.replaceTemplateId ? { oldTemplateId: Number(input.replaceTemplateId),
+      newTemplateId: Number(row.id), createdByUserId: Number(input.createdByUserId), clinicId: Number(input.clinicId) || null } : null,
+  }, { delayMs: 15 * 60 * 1000 });
 }
 
-async function createCustomTemplateForClinic({
+async function reconcileCustomReplacement(row, input) {
+  if (!input.replaceTemplateId || !row.meta_template_id || ['REJECTED', 'DISAPPROVED'].includes(String(row.status).toUpperCase())) return;
+  await db.sequelize.transaction(async transaction => {
+    const rows=await WhatsappTemplate.findAll({where:{id:{[Op.in]:[Number(input.replaceTemplateId),Number(row.id)]}},
+      order:[['id','ASC']],transaction,lock:transaction.LOCK.UPDATE});
+    const current=rows.find(value=>Number(value.id)===Number(row.id)),previous=rows.find(value=>Number(value.id)===Number(input.replaceTemplateId));
+    // An older follow-up job must never restore a version replaced meanwhile.
+    if (current && (current.is_active === false || current.is_active === 0 || current.superseded_by_template_id || current.retired_at)) return;
+    if (!current || !previous || Number(previous.created_by_user_id)!==Number(input.createdByUserId)
+      || Number(current.created_by_user_id)!==Number(input.createdByUserId) || String(previous.waba_id)!==String(current.waba_id)
+      || String(current.waba_id)!==String(row.waba_id) || Number(current.clinic_id||0)!==Number(input.clinicId||0)
+      || previous.clinic_id!=null && Number(previous.clinic_id)!==Number(input.clinicId)
+      || previous.superseded_by_template_id && Number(previous.superseded_by_template_id)!==Number(current.id)) throw Error('template_replacement_scope_changed');
+    await replaceTemplateInEditableBulkSends({ oldTemplateId: previous.id, newTemplate: current, transaction });
+    await WhatsappTemplate.update({ is_active: false, superseded_by_template_id: current.id }, {
+      where: { id: previous.id, waba_id: current.waba_id, created_by_user_id: input.createdByUserId }, transaction,
+    });
+  });
+}
+
+async function createCustomTemplateForClinic(input) {
+  return require('../lib/whatsapp-custom-submission').runCustomSubmission(input, {
+    acquire: wabaId => acquireWabaCatalogCreationLease(wabaId, { sequelizeInstance: db.sequelize, waitSeconds: 0 }),
+    find: where => WhatsappTemplate.findOne({ where }),
+    create: createCustomTemplateWithLease,
+    reconcile: reconcileCustomReplacement,
+    enqueue: enqueueCustomSubmissionSync,
+  });
+}
+
+async function createCustomTemplateWithLease({
   clinicId,
   wabaId,
   accessToken,
@@ -2272,6 +2273,7 @@ async function createCustomTemplateForClinic({
   replaceTemplateId = null,
   createdByUserId = null,
   technicalName = null,
+  existingRow = null,
 }) {
   const safeClinicId = Number(clinicId || 0) || null;
   const safeWabaId = cleanString(wabaId);
@@ -2368,6 +2370,19 @@ async function createCustomTemplateForClinic({
   }
   const template = preparedTemplate.template;
 
+  const row = existingRow || await WhatsappTemplate.create({
+    waba_id: safeWabaId, clinic_id: safeClinicId, name: safeTechnicalName,
+    display_name: safeDisplayName, language, category: safeCategory,
+    status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, components: template.components,
+    variables: annotateTemplateVariables(contract.variables, safeTemplateUsage),
+    created_by_user_id: safeCreatedByUserId, origin: 'custom',
+    rejection_reason: 'custom_submission_not_started', is_active: true,
+  });
+  const submission = { replaceTemplateId: safeReplaceTemplateId, createdByUserId: safeCreatedByUserId, clinicId: safeClinicId };
+  // Persist the recovery job before contacting the provider. An interrupted
+  // request is reconciled by its existing name, never by creating another name.
+  await enqueueCustomSubmissionSync(row, submission);
+  await row.update({ rejection_reason: 'custom_submission_outcome_unknown' });
   let metaTemplateId = null;
   try {
     const metaResp = await createTemplateInMeta({
@@ -2377,37 +2392,19 @@ async function createCustomTemplateForClinic({
       language,
     });
     metaTemplateId = metaResp?.id || null;
+    if (!metaTemplateId) return { row, submitted: false, outcome_unknown: true };
   } catch (err) {
     const parsed = parseMetaError(err);
     if (Number(parsed?.code) === 100 || /invalid parameter/i.test(String(parsed?.message || ''))) {
+      await row.update({ status: WHATSAPP_TEMPLATE_STATUS.REJECTED, rejection_reason: String(parsed?.message || 'Parámetros rechazados por Meta.') });
       throw createMetaTemplateSubmissionError(parsed);
     }
-    const row = await WhatsappTemplate.create({
-      waba_id: safeWabaId,
-      clinic_id: safeClinicId,
-      name: safeTechnicalName,
-      display_name: safeDisplayName,
-      language,
-      category: safeCategory,
-      status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING,
-      components: template.components,
-      variables: annotateTemplateVariables(contract.variables, safeTemplateUsage),
-      created_by_user_id: safeCreatedByUserId,
-      origin: 'custom',
-      rejection_reason: buildLocalPendingReasonFromMetaError(err),
-      is_active: true,
-    });
+    await row.update({ rejection_reason: buildLocalPendingReasonFromMetaError(err) });
     row.meta_submission_error = parsed;
     return { row, submitted: false, error: parsed || err.message };
   }
 
-  const row = await WhatsappTemplate.create({
-    waba_id: safeWabaId,
-    clinic_id: safeClinicId,
-    name: safeTechnicalName,
-    display_name: safeDisplayName,
-    language,
-    category: safeCategory,
+  await row.update({
     status: WHATSAPP_TEMPLATE_STATUS.PENDING,
     components: template.components,
     variables: annotateTemplateVariables(contract.variables, safeTemplateUsage),
@@ -2418,35 +2415,7 @@ async function createCustomTemplateForClinic({
     is_active: true,
   });
 
-  if (safeReplaceTemplateId) {
-    const replaced = await replaceTemplateInEditableBulkSends({
-      oldTemplateId: safeReplaceTemplateId,
-      newTemplate: row,
-    }).catch((err) => {
-      console.error('Error actualizando borradores con nueva plantilla WhatsApp', {
-        oldTemplateId: safeReplaceTemplateId,
-        newTemplateId: row.id,
-        error: err?.message || err,
-      });
-      return false;
-    });
-
-    if (replaced) {
-      await deactivateReplacedTemplateFamily({
-        wabaId: safeWabaId,
-        clinicId: safeClinicId,
-        displayName: replacedTemplate?.display_name || safeDisplayName,
-        keepTemplateId: row.id,
-        replacedTemplateId: safeReplaceTemplateId,
-        createdByUserId: safeCreatedByUserId,
-      });
-    }
-  }
-
-  await enqueueSyncTemplatesJob({
-    wabaId: safeWabaId,
-    accessToken: safeAccessToken,
-  }, { delayMs: 15 * 60 * 1000 }).catch(() => null);
+  await reconcileCustomReplacement(row, submission);
 
   return { row, submitted: true, meta_template_id: metaTemplateId };
 }
@@ -2560,7 +2529,15 @@ async function createTemplatesFromCatalogWithLease({
 
     const familyName = getCatalogTechnicalFamilyName(template);
     const language = getCatalogTemplateLanguage(template);
-    const preparedSubmission = findPreparedReviewSubmission({ familyRows, wabaId, template });
+    const preparedSubmission = findPreparedCatalogSubmission({ familyRows, wabaId, template });
+    if (preparedSubmission && preparedSubmission.rejection_reason !== CATALOG_SUBMISSION_NOT_STARTED) {
+      // The initial sync above has not yet found the pinned name. Absence is
+      // not proof of a failed create: keep this attempt and continue the rest
+      // of the catalog, rather than posting again or blocking all other names.
+      await enqueueSyncTemplatesJob({ wabaId }, { delayMs: 15 * 60 * 1000 });
+      result.localPending += 1;
+      continue;
+    }
     const technicalName = preparedSubmission?.name || (familyRows.length
       ? resolveNextTechnicalTemplateName(familyName, familyRows)
       : familyName);
@@ -2600,18 +2577,21 @@ async function createTemplatesFromCatalogWithLease({
       continue;
     }
 
+    await upsertConnectedTemplateForWaba({ wabaId, template, technicalName,
+      status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, metaTemplateId: null,
+      rejectionReason: CATALOG_SUBMISSION_NOT_STARTED });
+    await enqueueSyncTemplatesJob({ wabaId }, { delayMs: 15 * 60 * 1000 });
+    await upsertConnectedTemplateForWaba({ wabaId, template, technicalName,
+      status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, metaTemplateId: null,
+      rejectionReason: CATALOG_SUBMISSION_UNCONFIRMED });
     try {
-      if (isReviewRequestTemplateFamily(template) && !isReviewReminderTemplateFamily(template)) {
-        await upsertConnectedTemplateForWaba({ wabaId, template, technicalName,
-          status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, metaTemplateId: null,
-          rejectionReason: REVIEW_SUBMISSION_UNCONFIRMED });
-      }
       const metaResp = await createTemplateInMeta({
         wabaId,
         accessToken: asset.waAccessToken,
         template: metaTemplate,
         language,
       });
+      if (!metaResp?.id) { result.localPending += 1; continue; }
 
       await upsertConnectedTemplateForWaba({
         wabaId,
@@ -2634,9 +2614,20 @@ async function createTemplatesFromCatalogWithLease({
       }
       result.submitted += 1;
     } catch (err) {
-      if (isRetryableMetaError(err)) {
+      if (err?.code === 'rate_limited' || err?.response?.status === 429 || templateSyncState.blockedCode(err)) {
+        await upsertConnectedTemplateForWaba({ wabaId, template, technicalName,
+          status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, metaTemplateId: null,
+          rejectionReason: CATALOG_SUBMISSION_NOT_STARTED });
         throw err;
       }
+      const providerStatus = Number(err?.response?.status);
+      if (isRetryableMetaError(err) || !Number.isFinite(providerStatus) || providerStatus < 400 || providerStatus >= 500) {
+        result.localPending += 1;
+        continue;
+      }
+      await upsertConnectedTemplateForWaba({ wabaId, template, technicalName,
+        status: WHATSAPP_TEMPLATE_STATUS.REJECTED, metaTemplateId: null,
+        rejectionReason: buildLocalPendingReasonFromMetaError(err) });
       for (const targetClinicId of targetClinicIds) {
         try {
           await upsertClinicOverrideTemplateForClinic({
@@ -3390,13 +3381,14 @@ async function enqueueSyncTemplatesJob(data, options = {}) {
       origin: 'whatsapp_template_followup',
       maxAttempts: 5,
       nextRunAt,
-      dedupeScope: jobId || `waba:${wabaId}:sync`,
+      dedupeScope: data.customSubmissionId ? `custom-submission:${Number(data.customSubmissionId)}` : jobId || `waba:${wabaId}:sync`,
       // Nunca persistir accessToken en JobRequests: el handler resuelve el
       // asset activo y sus credenciales justo antes de consultar Meta.
       payload: {
         wabaId,
         trigger: String(data?.trigger || 'template_followup').trim() || 'template_followup',
         scheduled_for: nextRunAt.toISOString(),
+        ...(data.customSubmissionId ? { customSubmissionId: Number(data.customSubmissionId), customReplacement: data.customReplacement || null } : {}),
       },
     });
     return job;
@@ -3431,6 +3423,14 @@ async function runDelayedSyncTemplatesJob(payload = {}) {
       throw Object.assign(new Error('whatsapp_template_connection_unavailable'), { code: 'whatsapp_template_connection_unavailable' });
     }
     await syncTemplatesForWaba({ wabaId, accessToken: asset.waAccessToken });
+    if (payload.customReplacement) {
+      const replacement = payload.customReplacement;
+      const row = await WhatsappTemplate.findByPk(Number(replacement.newTemplateId));
+      if (!row || String(row.waba_id) !== wabaId || row.origin !== 'custom'
+        || Number(row.created_by_user_id) !== Number(replacement.createdByUserId)) throw Error('template_replacement_scope_changed');
+      await reconcileCustomReplacement(row, { replaceTemplateId: replacement.oldTemplateId,
+        createdByUserId: replacement.createdByUserId, clinicId: replacement.clinicId });
+    }
   } catch (error) {
     const code = templateSyncState.blockedCode(error);
     if (!code) throw error;
@@ -3570,11 +3570,17 @@ module.exports = {
   enqueueSyncForAllWabas,
   upsertClinicOverrideTemplateForClinic,
   _test: {
+    buildVariableContractFromBody,
+    reconcileCustomReplacement,
+    replaceTemplateInEditableBulkSends,
     findSameContractRemoteTemplate,
     isStaleReviewRequestTemplate,
     hasApprovedReviewReplacement,
     findApprovedReviewReplacement,
     findPreparedReviewSubmission,
+    findPreparedCatalogSubmission,
+    CATALOG_SUBMISSION_UNCONFIRMED,
+    CATALOG_SUBMISSION_NOT_STARTED,
     isRetryableMetaError,
     REVIEW_SUBMISSION_UNCONFIRMED,
     isDuplicateTemplateNameError,

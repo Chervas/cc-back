@@ -8,7 +8,7 @@ const models = () => require('../../models');
 const stopped = code => Object.assign(Error(code || STOP_REASON), {
   code: code || STOP_REASON, retryable: false, preserveFlowState: true,
 });
-const isStop = error => [STOP_REASON, 'automation_execution_stopped', 'synthetic_communication_forbidden'].includes(error?.code);
+const isStop = error => [STOP_REASON, 'automation_execution_stopped', 'synthetic_communication_forbidden', 'automation_silence_followup_retired'].includes(error?.code);
 const simulation = execution => execution?.context?.__simulation === true;
 
 async function assertExecutionNotSynthetic(execution, transaction) {
@@ -41,6 +41,18 @@ async function familyRows(template, transaction) {
 
 function latestPublished(rows) {
   return rows.filter(row => row.published_at).sort((a, b) => Number(b.version) - Number(a.version) || Number(b.id) - Number(a.id))[0];
+}
+
+async function publicationActivation(template, body, transaction) {
+  if (template.trigger_type === 'patient.mobile_verification_requested') return false;
+  if (body?.preserve_activation !== true) return true;
+  const previous = latestPublished(await familyRows(template, transaction));
+  if (body.expected_published_version != null && Number(body.expected_published_version) !== Number(previous?.version || 0)) {
+    throw Object.assign(Error('La familia ha cambiado. Revisa la versión antes de publicar.'), {
+      statusCode: 409, code: 'automation_publication_conflict',
+    });
+  }
+  return previous?.is_active === true || previous?.is_active === 1;
 }
 
 async function acceptedSelfDeactivatedEnd(execution, template, transaction) {
@@ -146,9 +158,22 @@ async function assertMessageCanDispatch(messageId) {
   require('./appointment-synthetic-guard').assertNoSyntheticDispatch(execution);
   const current = await assertExecutionActive(execution, undefined, { allowCompleted: true });
   await assertExecutionNotSynthetic(current);
+  await assertSilenceMessageAllowed(execution, metadata);
 }
 
-async function cancelMessage(messageId) {
+async function assertSilenceMessageAllowed(execution, metadata, transaction) {
+  const template = execution.templateVersion || await models().AutomationFlowTemplateV2.findByPk(execution.template_version_id, { transaction });
+  const policy = require('./appointment-single-notice-flow');
+  if (!policy.scoped(template)) return;
+  const latest = await assertTemplateActive(template, transaction);
+  const retired = policy.runtimeSingleNoticeFlow(template, latest).redirected;
+  if (retired[metadata.node_id]) {
+    throw stopped('automation_silence_followup_retired');
+  }
+}
+
+async function cancelMessage(messageId, reason = STOP_REASON) {
+  if (![STOP_REASON, 'automation_silence_followup_retired'].includes(reason)) reason = STOP_REASON;
   await models().sequelize.query(`UPDATE Messages SET status='failed',
     metadata=JSON_SET(COALESCE(metadata, JSON_OBJECT()), '$.cancelled', true,
       '$.cancelled_at', :now, '$.cancellation_reason', :reason, '$.error', :reason)
@@ -156,7 +181,7 @@ async function cancelMessage(messageId) {
     AND JSON_EXTRACT(metadata, '$.wamid') IS NULL AND JSON_EXTRACT(metadata, '$.provider_acceptance_at') IS NULL
     AND JSON_EXTRACT(metadata, '$.wa_response') IS NULL AND JSON_EXTRACT(metadata, '$.delivery_unknown') IS NULL
     AND JSON_EXTRACT(metadata, '$.outcome_unknown') IS NULL`,
-  { replacements: { id: messageId, now: new Date(), reason: STOP_REASON } });
+  { replacements: { id: messageId, now: new Date(), reason } });
 }
 
 async function prepareMessageForDispatch(message, patch) {
@@ -169,6 +194,7 @@ async function prepareMessageForDispatch(message, patch) {
       require('./appointment-synthetic-guard').assertNoSyntheticDispatch(execution);
       const currentExecution = await assertExecutionActive(execution, transaction, { allowCompleted: true });
       await assertExecutionNotSynthetic(currentExecution, transaction);
+      await assertSilenceMessageAllowed(execution, metadata, transaction);
     }
     const current = await db.Message.findByPk(message.id, { transaction, lock: transaction.LOCK.UPDATE });
     require('./appointment-synthetic-guard').assertNoSyntheticDispatch(current);
@@ -176,7 +202,7 @@ async function prepareMessageForDispatch(message, patch) {
     await current.update({ ...patch, metadata: { ...(current.metadata || {}), ...(patch.metadata || {}) } }, { transaction });
     await message.reload({ transaction });
   }).catch(async error => {
-    if (isStop(error)) await cancelMessage(message.id);
+    if (isStop(error)) await cancelMessage(message.id, error.code);
     throw error;
   });
 }
@@ -328,5 +354,6 @@ async function setActive(template, active, { mobilePolicyActor } = {}) {
 }
 
 module.exports = { STOP_REASON, isStop, stopped, familyWhere, latestPublished,
+  publicationActivation, assertSilenceMessageAllowed,
   assertExecutionActive, assertTemplateActive, createExecution, setActive, stopExecution,
   updateExecution, cancelMessage, prepareMessageForDispatch, assertMessageCanDispatch, assertEmailCanDispatch };

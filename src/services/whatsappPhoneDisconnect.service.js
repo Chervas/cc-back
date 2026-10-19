@@ -5,7 +5,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const S = require('./whatsappAuthorizationState.contract');
 const { isGlobalAdmin, MARKETING_WRITE_ROLES } = require('../lib/role-helpers');
 const manual = require('../lib/whatsappManualDisconnect');
-function createService({ models, sessions, broker = require('../lib/whatsappAuthorizedBrokerClient'),
+function createService({ models, sessions, audit, broker = require('../lib/whatsappAuthorizedBrokerClient'),
   control = require('./whatsappDisconnectControl.service'), now = () => new Date() } = {}) {
   const db = () => models || require('../../models');
   async function locked(raw, actor, commit) {
@@ -31,6 +31,13 @@ function createService({ models, sessions, broker = require('../lib/whatsappAuth
           [Op.or]: [{ estado_invitacion: 'aceptada' }, { estado_invitacion: null }] }, attributes: ['id_clinica'], raw: true });
         if (clinicIds.some(id => !memberships.some(m => Number(m.id_clinica) === id))) S.fail('whatsapp_authorization_forbidden', 403);
       }
+      const archived = asset.additionalData?.whatsappArchive;
+      if (commit === 'archive' && archived?.archivedAt) {
+        if (archived.scopeToken !== raw.scopeToken || JSON.stringify(archived.scope) !== JSON.stringify(scope)
+          || JSON.stringify(archived.clinicIds) !== JSON.stringify(clinicIds)
+          || manual.current(asset)?.state !== 'disconnected') S.fail('whatsapp_authorization_conflict', 409);
+        return { success: true, archived: true, assetId: asset.id, clinicCount: clinicIds.length };
+      }
       const bindings = [];
       for (const clinicId of clinicIds) {
         const binding = await broker.binding(clinicId, raw.assetId, asset);
@@ -51,6 +58,31 @@ function createService({ models, sessions, broker = require('../lib/whatsappAuth
           || !S.uuid(receipt.requestId) || typeof receipt.confirmed !== 'boolean')
         || new Set(previous.receipts.map(receipt => receipt.requestId)).size !== clinicIds.length)) S.fail('whatsapp_authorization_conflict', 409);
       if (commit && raw.scopeToken !== scopeToken) S.fail('whatsapp_authorization_conflict', 409);
+      if (commit === 'archive') {
+        if (previous?.state !== 'disconnected') S.fail('whatsapp_archive_requires_disconnect', 409);
+        const routing = await db().WhatsappChannelBinding.findAll({ ...options,
+          where: { asset_id: asset.id, is_active: true }, attributes: ['id', 'clinic_id'], raw: true });
+        if (routing.some(binding => !clinicIds.includes(Number(binding.clinic_id)))) S.fail('whatsapp_authorization_conflict', 409);
+        await db().WhatsappChannelBinding.update({ is_active: false, updated_by: actor.userId }, {
+          where: { asset_id: asset.id, clinic_id: { [Op.in]: clinicIds }, is_active: true }, transaction,
+        });
+        await db().WhatsappPhoneActivation.update({ state: 'archived', updated_by: actor.userId }, {
+          where: { asset_id: asset.id, authorization_id: asset.whatsappAuthorizationId, state: 'active' }, transaction,
+        });
+        await asset.update({ isActive: false, additionalData: { ...(asset.additionalData || {}),
+          routing_disabled: true, requireClinicSelection: true,
+          whatsappArchive: { version: 1, archivedAt: now().toISOString(), actorId: actor.userId, scopeToken, scope, clinicIds },
+        } }, { transaction });
+        await require('./whatsappConnectionAudit').append({ db: db(), audit, actor, scope, requestId: randomUUID(),
+          assetIds: [asset.id], action: 'integration.whatsapp.routing', reason: 'routing_saved', transaction, now: now() });
+        await db().WhatsappAccountHealthEvent.findOrCreate({ where: { dedupe_key: createHash('sha256').update(`archive:${asset.id}:${scopeToken}`).digest('hex') },
+          defaults: { asset_id: asset.id, clinic_id: scope.type === 'clinic' ? scope.id : null,
+            group_id: scope.type === 'group' ? scope.id : null, waba_id: asset.wabaId, phone_number_id: asset.phoneNumberId,
+            event_type: 'connection_archived', source: 'clinicaclick_manual_archive', previous_state: 'disconnected',
+            state: 'disconnected', severity: 'info', can_send: false, reason_code: 'clinicaclick_manual_disconnect',
+            details: { actor_id: actor.userId, scope, clinic_ids: clinicIds, scope_token: scopeToken }, observed_at: now() }, transaction });
+        return { success: true, archived: true, assetId: asset.id, clinicCount: clinicIds.length };
+      }
       let intent = previous;
       if (commit && !intent) {
         intent = { version: 1, ...identity, scopeToken, state: 'pending', actorId: actor.userId,
@@ -89,6 +121,7 @@ function createService({ models, sessions, broker = require('../lib/whatsappAuth
     const latest = await locked({ assetId: raw.assetId, clinicId: raw.clinicId }, actor, false);
     return { ...latest, success: true, sendingStopped: true };
   }
-  return { preview: (raw, actor) => locked(raw, actor, false), disconnect };
+  return { preview: (raw, actor) => locked(raw, actor, false), disconnect,
+    archive: (raw, actor) => locked(raw, actor, 'archive') };
 }
 module.exports = { createService, ...createService() };

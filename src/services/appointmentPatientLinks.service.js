@@ -327,6 +327,7 @@ async function mutateTogether(db, selectedId, changes, options, restoring = fals
         ...(Number(row.id_cita) === Number(selectedId) ? { ...(!manual ? { selections: options.selections || {} } : {}),
           expectedPlanSha256: options.expectedPlanSha256, additionalStaffIds: options.additionalStaffIds } : {}),
         reschedulePatientOverlap: options.reschedulePatientOverlap,
+        ...(Number(row.id_cita) === Number(selectedId) ? { rescheduleNotice: options.rescheduleNotice } : {}),
         persist: ({ values, existing }) => existing.update(values, { transaction }) });
       result.push(updated); moved.add(Number(row.id_cita));
       if (!restoring) await require('./appointmentActivity.service').recordAppointmentStatusChange({ appointment: updated, previousStatus: row.estado,

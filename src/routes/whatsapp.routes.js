@@ -20,7 +20,7 @@ router.use((req, res, next) => {
     || (req.method === 'PUT' && /^\/template-catalog\/[1-9][0-9]*\/toggle$/.test(path))
     || (req.method === 'POST' && /^\/template-catalog\/[1-9][0-9]*\/(duplicate|translations|disciplines|propagate)$/.test(path));
   const authorizedProfileRefresh = req.method === 'POST' && /^\/phones\/[1-9][0-9]*\/refresh$/.test(path);
-  const authorizedDisconnect = req.method === 'POST' && path === '/phones/disconnect';
+  const authorizedDisconnect = req.method === 'POST' && ['/phones/disconnect', '/phones/archive'].includes(path);
   if (templateRoute || authorizedProfileRefresh || authorizedDisconnect || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
   return authMiddleware(req, res, () => metaQuarantine.middleware(req, res));
 });
@@ -73,6 +73,20 @@ router.post('/phones/disconnect', authMiddleware, async (req, res) => {
     const status = [400, 403, 409].includes(error?.httpStatus) ? error.httpStatus : 503;
     res.status(status).json({ error: status === 403 ? 'whatsapp_disconnect_forbidden'
       : status === 409 ? 'whatsapp_disconnect_changed' : status === 400 ? 'whatsapp_disconnect_invalid' : 'whatsapp_disconnect_unavailable' });
+  }
+});
+router.post('/phones/archive', authMiddleware, async (req, res) => {
+  try {
+    const { confirm, ...input } = req.body || {};
+    if (typeof confirm !== 'boolean') return res.status(400).json({ error: 'whatsapp_archive_invalid' });
+    const service = require('../services/whatsappPhoneDisconnect.service');
+    const actor = { userId: req.userData?.userId, sessionRef: req.authSession?.id, sessionExpiresAt: req.authSession?.expiresAt };
+    const result = await service[confirm ? 'archive' : 'preview'](input, actor);
+    if (!confirm && result.state !== 'disconnected') return res.status(409).json({ error: 'whatsapp_archive_requires_disconnect' });
+    res.json(result);
+  } catch (error) {
+    const status = [400, 403, 409].includes(error?.httpStatus) ? error.httpStatus : 503;
+    res.status(status).json({ error: status === 409 ? 'whatsapp_archive_changed' : status === 403 ? 'whatsapp_archive_forbidden' : 'whatsapp_archive_unavailable' });
   }
 });
 for(const [path,method] of [['/routing','save'],['/routing/secondary','saveSecondary']])router.put(path,authMiddleware,async(req,res)=>{

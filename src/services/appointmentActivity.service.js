@@ -94,14 +94,32 @@ function appointmentStatusSourceLabel(event) {
   return 'Clinicaclick';
 }
 
-function buildAppointmentStatusDescription(event) {
+function appointmentReference(metadata, appointment, timezone) {
+  const start = metadata.appointment_start || appointment?.inicio;
+  const raw = typeof start === 'string' && /^\d{4}-\d{2}-\d{2} \d/.test(start) ? `${start.replace(' ', 'T')}Z` : start;
+  const date = new Date(raw || '');
+  const appointmentId = toPositiveInt(metadata.appointment_id);
+  if (!Number.isFinite(date.getTime())) return appointmentId ? `Cita #${appointmentId}` : null;
+  let formatter;
+  try {
+    formatter = new Intl.DateTimeFormat('es-ES', { timeZone: metadata.appointment_timezone || timezone,
+      day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  } catch {
+    formatter = new Intl.DateTimeFormat('es-ES', { timeZone: 'Europe/Madrid',
+      day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  }
+  return `Cita ${formatter.format(date)}${appointmentId ? ` · #${appointmentId}` : ''}`;
+}
+
+function buildAppointmentStatusDescription(event, { appointment = null, timezone = 'Europe/Madrid' } = {}) {
   const metadata = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
   const previousLabel = appointmentStatusLabel(historicalStatus(metadata.previous_status, metadata));
   const nextLabel = appointmentStatusLabel(historicalStatus(metadata.new_status, metadata));
   const transition = previousLabel && nextLabel
     ? `${previousLabel} → ${nextLabel}`
     : (nextLabel || 'Estado actualizado');
-  return `${appointmentStatusSourceLabel(event)} · ${transition}.`;
+  const reference = appointmentReference(metadata, appointment, timezone);
+  return `${appointmentStatusSourceLabel(event)} · ${transition}.${reference ? `\n${reference}` : ''}`;
 }
 
 function historicalStatus(status, metadata) {
@@ -109,7 +127,7 @@ function historicalStatus(status, metadata) {
   return normalized === 'completada' && Number(metadata.care_lifecycle_version) !== 2 ? 'ha_acudido' : normalized;
 }
 
-function serializeAppointmentStatusActivity(event, { patientId = null, leadId = null, actorName = 'Sistema' } = {}) {
+function serializeAppointmentStatusActivity(event, { patientId = null, leadId = null, actorName = 'Sistema', appointment = null, timezone = 'Europe/Madrid' } = {}) {
   const metadata = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
   if (event.event_type === APPOINTMENT_COMPONENT_EVENT_TYPE) return {
     id: `appointment-component-event-${event.id}`, citaId: String(metadata.component_appointment_id), fecha: event.occurred_at || event.created_at,
@@ -178,7 +196,7 @@ function serializeAppointmentStatusActivity(event, { patientId = null, leadId = 
     fecha: event.occurred_at || event.created_at,
     tipo: typeByStatus[newStatus] || 'appointment_status_changed',
     titulo: appointmentStatusTitle(newStatus),
-    descripcion: buildAppointmentStatusDescription(event),
+    descripcion: buildAppointmentStatusDescription(event, { appointment, timezone }),
     icono: appointmentStatusIcon(newStatus),
     color: appointmentStatusColor(newStatus),
     ...(appointmentId ? { citaId: String(appointmentId) } : {}),
@@ -229,6 +247,8 @@ async function recordAppointmentStatusChange({
       ...metadata,
       care_lifecycle_version: 2,
       appointment_id: appointmentId,
+      appointment_start: appointment.inicio || null,
+      appointment_timezone: appointment.clinica ? require('../lib/availability-calendar').resolveClinicTimezone(appointment.clinica) : null,
       previous_status: previous,
       new_status: next,
     },

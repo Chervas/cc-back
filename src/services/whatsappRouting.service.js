@@ -32,6 +32,10 @@ function createService({models,sessions,audit,broker=require('../lib/whatsappAut
         {assignmentScope:'group',groupId:raw.scope.id},{models:db(),transaction,purpose:'whatsapp'}))S.fail('whatsapp_authorization_forbidden',403);
       const selected=[raw.primaryAssetId,raw.secondaryAssetId].filter(Boolean);
       const assets=await db().ClinicMetaAsset.findAll({...locked,where:{id:{[Op.in]:selected}},order:[['id','ASC']]});
+      if(selected.length===2){
+        const digits=assets.map(a=>require('../lib/phone').normalizePhoneDigits(a.metaAssetName));
+        if(digits.length===2&&digits[0]&&digits[0]===digits[1])S.fail('whatsapp_authorization_conflict',409);
+      }
       for(const id of selected){
         const a=assets.find(a=>a.id===id);
         const own=a&&a.assetType==='whatsapp_phone_number'&&(raw.scope.type==='group'?

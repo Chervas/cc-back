@@ -1526,7 +1526,40 @@ exports.listTemplatesForClinic = async (req, res) => {
 
     let templates = [];
     let selectedAsset = null;
-    if (phoneNumberId) {
+    const templateSenders = new Map();
+    if (!phoneNumberId && clinicId && req.query.all_senders === '1') {
+      await assertWhatsappTemplateClinicAccess({ clinicId, userId });
+      const sources = new Map();
+      for (const purpose of [null, 'bulk_campaigns', 'review_requests', 'lead_first_contact']) {
+        const asset = await whatsappService.resolvePhoneAssetByClinic(clinicId, { purpose });
+        if (asset?.wabaId && asset.phoneNumberId && !require('../lib/whatsappManualDisconnect').current(asset)
+          && !asset.additionalData?.whatsappArchive?.archivedAt) sources.set(Number(asset.id), asset);
+      }
+      for (const binding of await whatsappChannelBindingsService.listClinicBindings(clinicId)) {
+        const asset = await ClinicMetaAsset.findByPk(binding.asset_id);
+        if (asset?.isActive && !require('../lib/whatsappManualDisconnect').current(asset)
+          && !asset.additionalData?.whatsappArchive?.archivedAt) {
+          sources.set(Number(asset.id), whatsappChannelBindingsService.applyBindingToAsset(asset, binding));
+        }
+      }
+      const rowsById = new Map();
+      for (const candidate of sources.values()) {
+        const asset = await resolveWabaFromContext({ clinicId, phoneNumberId: candidate.phoneNumberId, userId });
+        if (!asset?.wabaId) continue;
+        const rows = await WhatsappTemplate.findAll({ where: { waba_id: asset.wabaId, is_active: true },
+          include: [{ model: WhatsappTemplateCatalog, as: 'catalog', attributes: ['id', 'name', 'family_key', 'locale', 'display_name', 'category', 'body_text', 'variables', 'is_active'] }],
+          order: [['name', 'ASC']] });
+        for (const row of rows) {
+          rowsById.set(Number(row.id), row);
+          const senders = templateSenders.get(Number(row.id)) || [];
+          senders.push({ asset_id: Number(asset.id), phone_number_id: asset.phoneNumberId,
+            phone_number: asset.metaAssetName || null, role: resolveWhatsappRouting(candidate).role,
+            waba_id: asset.wabaId, assignment_scope: asset.assignmentScope, group_id: asset.grupoClinicaId || null });
+          templateSenders.set(Number(row.id), senders);
+        }
+      }
+      templates = [...rowsById.values()];
+    } else if (phoneNumberId) {
       selectedAsset = await resolveWabaFromContext({ clinicId, phoneNumberId, userId });
       if (!selectedAsset || !selectedAsset.wabaId) {
         return res.json([]);
@@ -1576,6 +1609,13 @@ exports.listTemplatesForClinic = async (req, res) => {
           const isLegacyUnassigned = isLegacyUnassignedWhatsappTemplate(json);
           return {
             ...publicJson,
+            senders: templateSenders.get(Number(json.id)) || [],
+            ...(templateSenders.get(Number(json.id))?.[0] ? {
+              effective_phone_number_id: templateSenders.get(Number(json.id))[0].phone_number_id,
+              effective_waba_id: templateSenders.get(Number(json.id))[0].waba_id,
+              effective_assignment_scope: templateSenders.get(Number(json.id))[0].assignment_scope,
+              effective_waba_shared: templateSenders.get(Number(json.id))[0].assignment_scope === 'group',
+            } : {}),
             ...(selectedAsset ? {
               effective_assignment_scope: selectedAsset.assignmentScope || null,
               effective_group_id: selectedAsset.grupoClinicaId || null,
@@ -1624,7 +1664,7 @@ exports.listTemplatesForClinic = async (req, res) => {
     return res.json(
       includeAllForAdmin
         ? contextPayload
-        : contextPayload.filter((item) => canUserSelectWhatsappTemplate(item, userId))
+        : contextPayload.filter((item) => item.can_send_by_current_user === true)
     );
   } catch (err) {
     if (err?.code === 'whatsapp_template_clinic_scope_forbidden') {
@@ -1882,6 +1922,16 @@ exports.createCustomTemplate = async (req, res) => {
       if (reviewPhoneNumberId) requestedPhoneNumberIds = [reviewPhoneNumberId];
     }
 
+    if (clinicId && !requestedPhoneNumberIds.length && !req.body?.replace_template_id && !req.body?.replaceTemplateId
+      && !req.body?.replace_template_ids?.length && !['solicitud_resena','resena','review_request','reviews'].includes(templateUsage)) {
+      for (const binding of await whatsappChannelBindingsService.listClinicBindings(clinicId)) {
+        const asset=await ClinicMetaAsset.findByPk(binding.asset_id);
+        if (asset?.isActive && asset.phoneNumberId && !require('../lib/whatsappManualDisconnect').current(asset)
+          && !asset.additionalData?.whatsappArchive?.archivedAt) requestedPhoneNumberIds.push(String(asset.phoneNumberId));
+      }
+      requestedPhoneNumberIds=[...new Set(requestedPhoneNumberIds)].slice(0,4);
+    }
+
     const assets = [];
     if (requestedPhoneNumberIds.length) {
       for (const targetPhoneNumberId of requestedPhoneNumberIds) {
@@ -1902,6 +1952,22 @@ exports.createCustomTemplate = async (req, res) => {
     }
 
     const { createCustomTemplateForClinic } = require('../services/whatsappTemplates.service');
+    const replacementIds = [...new Set([
+      ...(Array.isArray(req.body?.replace_template_ids) ? req.body.replace_template_ids : []),
+      req.body?.replace_template_id || req.body?.replaceTemplateId,
+    ].filter(value => value != null).map(Number))];
+    if (replacementIds.length > 4 || replacementIds.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+      return res.status(400).json({ error: 'template_replacements_invalid' });
+    }
+    const replacements = new Map();
+    for (const id of replacementIds) {
+      const previous = await WhatsappTemplate.findByPk(id);
+      if (!previous || Number(previous.created_by_user_id) !== Number(userId)
+        || Number(previous.clinic_id || clinicId) !== Number(clinicId)
+        || !assets.some(asset => String(asset.wabaId) === String(previous.waba_id))
+        || replacements.has(String(previous.waba_id))) return res.status(403).json({ error: 'template_owner_forbidden' });
+      replacements.set(String(previous.waba_id), id);
+    }
     const results = [];
     let sharedTechnicalName = null;
     for (const asset of assets) {
@@ -1917,11 +1983,12 @@ exports.createCustomTemplate = async (req, res) => {
           language: req.body?.language || 'es',
           variables: req.body?.variables || [],
           templateUsage: templateUsage || null,
-          replaceTemplateId: assets.length === 1
-            ? (req.body?.replace_template_id || req.body?.replaceTemplateId || null)
-            : null,
+          replaceTemplateId: replacements.get(String(asset.wabaId)) || null,
           createdByUserId: userId,
           technicalName: sharedTechnicalName,
+          requestId: req.body?.request_id || null,
+          targetWabaIds: assets.map(item => String(item.wabaId)),
+          replacementTemplateIds: [...replacements.values()].sort((a, b) => a - b),
         });
         const raw = result.row.get ? result.row.get({ plain: true }) : result.row;
         sharedTechnicalName = sharedTechnicalName || raw.name;
@@ -1935,11 +2002,12 @@ exports.createCustomTemplate = async (req, res) => {
       throw results[0]?.error || new Error('template_submission_failed');
     }
     const result = successful[0].result;
+    const allSubmitted = results.every(item => item.success && item.result.submitted === true);
     const rawJson = successful[0].raw;
     const { created_by_user_id: _createdByUserId, ...json } = rawJson;
     return res.status(201).json({
       success: true,
-      submitted: result.submitted,
+      submitted: allSubmitted,
       template: {
         ...json,
         variables: buildWhatsappTemplateVariableContract(json),
@@ -1951,11 +2019,11 @@ exports.createCustomTemplate = async (req, res) => {
         can_send_by_current_user: true,
         can_manage_by_current_user: true,
       },
-      message: result.submitted
+      message: allSubmitted
         ? (assets.length > 1
           ? 'Plantilla enviada a los números configurados. Meta suele aprobarla en unos 15 minutos.'
           : 'Plantilla enviada a WhatsApp. Meta suele aprobarla en unos 15 minutos.')
-        : 'Plantilla guardada localmente, pero no se pudo enviar a Meta. Revisa la conexión WhatsApp.',
+        : 'No se ha confirmado el envío de todas las copias. Consulta el estado de cada número; no repitas el envío.',
       ...(result.error ? { error: result.error } : {}),
       replicas: results.map((item) => ({
         success: item.success,
@@ -2132,11 +2200,20 @@ exports.listPhones = async (req, res) => {
     });
     const payload = [];
 
+    const authorizedBroker = require('../lib/whatsappAuthorizedBrokerClient');
+    const configuredBindings = authorizedBroker.configuration()?.bindings || [];
     for (const p of phones) {
-      const managementClinicId = routingScopeClinicId || clinicIdFilter || Number(p.clinicaId);
+      if (p.additionalData?.whatsappArchive?.archivedAt) continue;
+      const managementClinicId = routingScopeClinicId || clinicIdFilter || Number(p.clinicaId)
+        || configuredBindings.find(binding => Number(binding.assetId) === Number(p.id)
+          && (isAggregateAllowed || clinicIds.map(Number).includes(Number(binding.clinicId))))?.clinicId || null;
       let managementBinding = null;
       try { if (managementClinicId) managementBinding = await require('../lib/whatsappAuthorizedBrokerClient').binding(managementClinicId, Number(p.id), p); } catch { /* Keep unverified capabilities closed. */ }
       const manualDisconnect = require('../lib/whatsappManualDisconnect').current(p, managementBinding);
+      if (managementClinicId && !permissionStatuses.has(Number(p.id))) {
+        const checked = await whatsappPermissionInventoryService.read({ clinicId: managementClinicId, phones: [p] });
+        if (checked.has(Number(p.id))) permissionStatuses.set(Number(p.id), checked.get(Number(p.id)));
+      }
       const clinica = p.clinica || {};
       const grupoDirecto = p.grupoClinica || {};
       const grupoClinica = clinica.grupoClinica || {};
@@ -2183,11 +2260,14 @@ exports.listPhones = async (req, res) => {
         whatsapp_channel_role: channelRouting.role,
         authorization_id: p.whatsappAuthorizationId || null,
         can_refresh: !!managementBinding,
+        management_clinic_id: managementClinicId,
+        can_archive: !!managementBinding && manualDisconnect?.state === 'disconnected',
         can_disconnect: !!managementBinding && !manualDisconnect
           && require('../services/whatsappDisconnectControl.service').available(),
         disconnect_state: manualDisconnect?.state || null,
         profile_observed_at: additionalData.authorizedProfileObservedAt || null,
-        sending_enabled: p.whatsappAuthorizationId ? !!p.isActive && !manualDisconnect : undefined,
+        sending_enabled: p.whatsappAuthorizationId ? !!p.isActive && !!managementBinding?.sendEnabled
+          && !manualDisconnect && permissionStatuses.get(Number(p.id)) !== 'disconnected' : undefined,
         permission_status: manualDisconnect ? 'disconnected' : permissionStatuses.get(Number(p.id)) || undefined,
         requires_clinic_selection: additionalData.requireClinicSelection === true,
         routing_disabled: additionalData.routing_disabled === true,
@@ -3748,6 +3828,14 @@ exports.refreshPhoneStatus = async (req, res) => {
   } catch (err) {
     if (err?.statusCode === 403 || err?.code === 'whatsapp_template_clinic_scope_forbidden') {
       return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+    if (['connection_blocked', 'scope_denied', 'whatsapp_authorized_scope_blocked'].includes(err?.code)) {
+      return res.status(409).json({ success: false, error: 'whatsapp_refresh_broker_denied',
+        message: 'El broker de Clinicaclick no autoriza esta conexión. No se ha podido consultar Meta; este resultado no confirma un bloqueo de Meta.' });
+    }
+    if (['provider_timeout', 'provider_failed', 'whatsapp_authorized_binding_changed'].includes(err?.code)) {
+      return res.status(503).json({ success: false, error: 'whatsapp_refresh_unconfirmed',
+        message: 'No se ha podido confirmar el estado actual. Se conserva la última observación; no se han reactivado envíos.' });
     }
     console.error('Error refreshPhoneStatus', err);
     return res.status(500).json({ success: false, error: 'refresh_failed' });
