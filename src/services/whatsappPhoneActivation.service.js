@@ -1,5 +1,6 @@
 'use strict';
 const {randomUUID}=require('node:crypto');
+const {Op}=require('sequelize');
 const S=require('./whatsappAuthorizationState.contract');
 const catalog=require('../lib/whatsappActivationCatalog');
 const {configuredClient,assertGateway}=require('../lib/whatsappOnboardingBrokerClient');
@@ -20,7 +21,7 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
       if(Number(rows[0]?.held)!==1)S.fail('whatsapp_authorization_busy',409);held=true;
       const result=await work();
       const rowsAll=(await db().WhatsappPhoneActivation.findAll({order:[['authorization_id','ASC']],raw:true}))
-        .filter(row=>row.state!=='superseded');
+        .filter(row=>!['superseded','archived'].includes(row.state));
       publish({version:1,connections:rowsAll.map(row=>({authorizationId:row.authorization_id,connectionRef:row.connection_ref,
         assetId:row.asset_id,phoneId:row.phone_id,wabaId:row.waba_id,scopeType:row.scope_type,scopeId:row.scope_id,
         clinicIds:row.clinic_ids,sendEnabled:row.state==='active',messageNotBefore:new Date(row.message_not_before).toISOString()}))});
@@ -56,6 +57,7 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
     return locked(()=>db().sequelize.transaction(async transaction=>{
       const options={transaction,lock:transaction.LOCK.UPDATE};
       const existing=await db().WhatsappPhoneActivation.findByPk(context.requestId,options);
+      if(existing?.state==='archived')S.fail('whatsapp_authorization_cancelled',409);
       let asset,previous=null,rotated=false,replacing=false,previousWabaId=null;
       if(existing){
         if(existing.phone_id!==remote.phoneId||existing.waba_id!==remote.wabaId||existing.scope_type!==context.scope.type
@@ -68,7 +70,7 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
         if(!asset||asset.assetType!=='whatsapp_phone_number'||(asset.whatsappAuthorizationId||null)!==context.replacement.authorizationId
           ||asset.assignmentScope!==context.scope.type||Number(context.scope.type==='group'?asset.grupoClinicaId:asset.clinicaId)!==context.scope.id
           ||(await channelRoleFor(asset,context,options))!==remote.channelRole)S.fail('whatsapp_authorization_conflict',409);
-        const active=await db().WhatsappPhoneActivation.findAll({where:{asset_id:asset.id,state:'active'},limit:2,
+        const active=await db().WhatsappPhoneActivation.findAll({where:{asset_id:asset.id,state:{[Op.in]:['active','archived']}},limit:2,
           transaction,lock:transaction.LOCK.UPDATE});
         replacing=true;previousWabaId=asset.wabaId;
         let oldProfile;
@@ -102,7 +104,7 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
           asset=assets[0];
           if(asset.wabaId!==remote.wabaId||asset.assignmentScope!==context.scope.type
             ||Number(context.scope.type==='group'?asset.grupoClinicaId:asset.clinicaId)!==context.scope.id)S.fail('whatsapp_authorization_conflict',409);
-          const active=await db().WhatsappPhoneActivation.findAll({where:{asset_id:asset.id,state:'active'},limit:2,
+          const active=await db().WhatsappPhoneActivation.findAll({where:{asset_id:asset.id,state:{[Op.in]:['active','archived']}},limit:2,
             transaction,lock:transaction.LOCK.UPDATE});
           if(active.length!==1)S.fail('whatsapp_authorization_conflict',409);
           previous=active[0];
@@ -123,6 +125,12 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
       // The broker reply cannot reassign a previously created local identity.
       const state=existing?.state==='active'?'active':remote.state;
       const additionalData={...(asset.additionalData||{}),...metadata({...remote,state})};
+      // A new, committed active authorization is the only way to clear a
+      // manual disconnect. Re-reading the old active receipt must not undo it.
+      if (state === 'active' && replacing && context.requestId !== asset.whatsappAuthorizationId) {
+        delete additionalData.whatsappManualDisconnect;
+        delete additionalData.whatsappArchive;
+      }
       // Keep user-selected role and policies after the first successful activation.
       if(existing?.state==='active'||replacing)for(const key of ['routing','whatsapp_channel_role'])if(asset.additionalData?.[key])additionalData[key]=asset.additionalData[key];
       await asset.update({metaAssetName:remote.profile.displayPhoneNumber,waVerifiedName:remote.profile.verifiedName,

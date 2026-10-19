@@ -102,10 +102,10 @@ function createService({ models, sessions, broker = configuredClient(), config =
         attributes:ATTRIBUTES,order:[['created_at','DESC'],['request_id','DESC']],limit:50,raw:true });
       if (rows.length >= 50) incomplete = true;
       const activationRows = !rows.length ? [] : await db().WhatsappPhoneActivation.findAll({
-        where:{authorization_id:{[Op.in]:rows.map(row=>row.request_id)},state:{[Op.in]:['active','superseded']}},
+        where:{authorization_id:{[Op.in]:rows.map(row=>row.request_id)},state:{[Op.in]:['active','superseded','archived']}},
         attributes:['authorization_id','asset_id','state'],raw:true,
       });
-      const retired = new Set(activationRows.filter(row=>row.state==='superseded').map(row=>row.authorization_id));
+      const retired = new Set(activationRows.filter(row=>['superseded','archived'].includes(row.state)).map(row=>row.authorization_id));
       const active = new Map(activationRows.filter(row=>row.state==='active').map(row=>[row.authorization_id,row]));
       const rowById = new Map(rows.map(row=>[row.request_id,row]));
       const completedThrough = new Map();
