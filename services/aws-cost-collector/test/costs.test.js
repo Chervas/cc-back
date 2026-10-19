@@ -60,3 +60,21 @@ test('missing components remain pending while an observed zero is preserved',asy
   assert.equal(result.amount,'0');
   assert.deepEqual(result.componentCoverage,[{component:'application',status:'pending'},{component:'database',status:'pending'},{component:'integrations',status:'pending'},{component:'audit',status:'observed'}]);
 });
+
+test('scope digest covers resource environments and database, with no arbitrary caller filter', async () => {
+  const { createHash } = require('node:crypto'); const { filterDigestFor } = require('../src/costs');
+  const expected = createHash('sha256').update(JSON.stringify(filterFor(config))).digest('hex');
+  const legacy = { And: [
+    { Dimensions: { Key: 'LINKED_ACCOUNT', Values: [config.accountId] } },
+    { Tags: { Key: 'application', Values: ['clinicaclick'] } },
+    { Tags: { Key: 'component', Values: ['integrations', 'audit'] } },
+    { Tags: { Key: 'environment', Values: ['prod'] } },
+  ] };
+  assert.notEqual(expected, createHash('sha256').update(JSON.stringify(legacy)).digest('hex'));
+  assert.equal(filterDigestFor(config), expected);
+  for (const environment of ['dev', 'staging', 'platform']) assert.throws(() => filterDigestFor({ ...config, environment }), /cost_scope_invalid/);
+  let request;
+  const result = await collectCosts({ ...config, to: '2026-09-02', getCostAndUsage: async input => { request = input; return { ResultsByTime: [day('2026-09-01', '10', 'database')] }; } });
+  assert.equal(result.filterDigest, expected); assert.deepEqual(request.Filter, filterFor(config));
+  assert.deepEqual(request.GroupBy, [{ Type: 'DIMENSION', Key: 'SERVICE' }, { Type: 'TAG', Key: 'component' }]);
+});

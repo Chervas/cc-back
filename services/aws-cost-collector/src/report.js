@@ -1,6 +1,6 @@
 'use strict';
 
-const { VERSION, scopeFor, componentCoverage, collectCosts, filterFor, amountToUnits, unitsToAmount } = require('./costs');
+const { VERSION, scopeFor, componentCoverage, filterDigestFor, collectCosts, filterFor, amountToUnits, unitsToAmount } = require('./costs');
 const ACCOUNT = '137819318729';
 const ROLE = `arn:aws:iam::${ACCOUNT}:role/clinicaclick-integrations-prod-cost-reader-role`;
 const BUDGET = 'clinicaclick-integrations-prod-monthly-budget';
@@ -62,7 +62,7 @@ async function collectReport(configInput, api, now = new Date()) {
     version: VERSION, source: 'aws_cost_explorer', metric: 'UnblendedCost', environment: 'platform',
     period: { from: period.from, toExclusive: period.to }, collectedAt: now.toISOString(), status: 'pending',
     amount: null, currency: null, estimated: true, rows: [], missingDays: [], pages: 0,
-    scope: scopeFor(), componentCoverage: componentCoverage([]),
+    scope: scopeFor(), componentCoverage: componentCoverage([]), filterDigest: filterDigestFor(config),
     coverage: 'tagged_resources_only', coverageStatus: 'observed_partial', excludesAiEstimates: true,
   };
   let forecast = { status: 'not_applicable', amount: null, currency: null };

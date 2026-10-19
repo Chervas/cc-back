@@ -93,7 +93,7 @@ test('closed projection removes extra secrets and rejects inconsistent totals, r
 test('scope v2 isolates its cache and rejects legacy or different coverage',async()=>{
   const requested=[];const service=createService({now,repository:{read:async key=>{requested.push(key);return null;}}});
   const overview=await service.getOverview({userId:1});
-  assert.deepEqual(requested,[keyFor('2026-09')]);assert.equal(requested[0],'aws:infrastructure:v2:platform:2026-09');
+  assert.deepEqual(requested,[keyFor('2026-09')]);assert.match(requested[0],/^aws:infrastructure:v2:[a-f0-9]{64}:2026-09$/);assert(requested[0].length<=96);
   assert.equal(overview.snapshot,null);assert(overview.componentCoverage.every(item=>item.status==='pending'));
   for(const patch of [{version:1},{scope:{application:'clinicaclick',components:['integrations','audit'],environments:['prod']}},
     {scope:{...snapshot().scope,environments:['prod']}}, {scope:{...snapshot().scope,application:'other'}}])
@@ -104,4 +104,63 @@ test('observed coverage is derived from rows and never adds a monthly estimate',
   assert.equal(value.amount,'0.2');assert.equal(value.monthlyRdsEstimate,undefined);
   assert.equal(value.componentCoverage.find(item=>item.component==='database').status,'pending');
   assert.equal(value.coverageStatus,'observed_partial');
+});
+
+test('full fixed filter digest is required and preserved; metadata cannot invent another scope', () => {
+  const { createHash } = require('node:crypto');
+  const filter = { And: [
+    { Dimensions: { Key: 'LINKED_ACCOUNT', Values: ['137819318729'] } },
+    { Tags: { Key: 'application', Values: ['clinicaclick'] } },
+    { Tags: { Key: 'component', Values: ['application', 'database', 'integrations', 'audit'] } },
+    { Tags: { Key: 'environment', Values: ['prod', 'staging'] } },
+  ] };
+  const expected = createHash('sha256').update(JSON.stringify(filter)).digest('hex');
+  assert.equal(projectSnapshot(snapshot(), '2026-09').filterDigest, expected);
+  for (const filterDigest of [undefined, '', '0'.repeat(64), expected.slice(0, 63), 'G'.repeat(64)]) {
+    assert.throws(() => projectSnapshot(snapshot('2026-09', { filterDigest }), '2026-09'), /cost_snapshot_invalid/);
+  }
+  assert.throws(() => projectSnapshot(snapshot('2026-09', { scope: { ...snapshot().scope, exclude: 'database' } }), '2026-09'), /cost_snapshot_invalid/);
+});
+test('legacy caches are not read or overwritten and bad digest cannot populate the new cache', async () => {
+  const legacy = new Map([
+    ['aws:integrations:prod:2026-09', { snapshot: snapshot() }],
+    ['aws:infrastructure:v2:platform:2026-09', { snapshot: snapshot() }],
+  ]);
+  const original = JSON.stringify([...legacy]); const reads = []; const writes = [];
+  const service = createService({ now, config: () => ({ enabled: true }),
+    collect: async (_config, month) => snapshot(month, { filterDigest: '0'.repeat(64) }),
+    repository: { read: async key => { reads.push(key); return legacy.get(key) || null; }, acquire: async () => 'lease',
+      finish: async (key, _lease, value) => { writes.push([key, value]); return true; } } });
+  assert.equal((await service.getOverview({ userId: 1 })).snapshot, null);
+  const result = await service.runDaily(); assert.equal(result.status, 'failed');
+  assert.equal(writes.length, 2); assert(writes.every(([key, value]) => key === keyFor(key.slice(-7)) && value === null));
+  assert.equal(JSON.stringify([...legacy]), original); assert(reads.every(key => !legacy.has(key)));
+  const corruptRead = createService({ now, repository: { read: async () => ({ snapshot: snapshot('2026-09', { filterDigest: '0'.repeat(64) }) }) } });
+  const rejected = await corruptRead.getOverview({ userId: 1 });
+  assert.equal(rejected.status, 'pending'); assert.equal(rejected.snapshot, null); assert.equal(rejected.error, 'cost_snapshot_invalid');
+});
+test('RDS actual charge appears once and DMS service credits partition the same total exactly', () => {
+  const rows = [
+    { date: '2026-09-01', service: 'Amazon Relational Database Service', component: 'database', amount: '100', currency: 'USD' },
+    { date: '2026-09-01', service: 'AWS Database Migration Service', component: 'database', amount: '5.000000000000000001', currency: 'USD' },
+    { date: '2026-09-02', service: 'AWS Database Migration Service', component: 'database', amount: '-0.1', currency: 'USD' },
+    { date: '2026-09-01', service: 'Amazon Virtual Private Cloud', component: 'database', amount: '2', currency: 'USD' },
+  ];
+  const value = projectSnapshot(snapshot('2026-09', { rows, amount: '106.900000000000000001', multiAzFactor: 2,
+    costBreakdown: [{ costClass: 'dms_temporary', amount: '999999', currency: 'USD' }] }), '2026-09');
+  assert.equal(value.amount, '106.900000000000000001'); assert.equal(value.multiAzFactor, undefined);
+  assert.equal(value.services.find(row => row.service === 'Amazon Relational Database Service').amount, '100');
+  assert.deepEqual(value.costBreakdown, [
+    { costClass: 'other_reported', currency: 'USD', amount: '102' },
+    { costClass: 'dms_temporary', currency: 'USD', amount: '4.900000000000000001' },
+  ]);
+  const { amountToUnits } = require('../../../services/aws-cost-collector/src/costs');
+  assert.equal(value.costBreakdown.reduce((total, row) => total + amountToUnits(row.amount), 0n), amountToUnits(value.amount));
+  assert.equal(value.services.find(row => row.service === 'Amazon Virtual Private Cloud').costClass, 'other_reported');
+});
+test('unknown services and absent DMS are not invented temporal charges or confirmed zeros', () => {
+  const value = projectSnapshot(snapshot(), '2026-09');
+  assert.equal(value.costBreakdown.some(row => row.costClass === 'dms_temporary'), false);
+  const pending = projectSnapshot(snapshot('2026-09', { status: 'pending', amount: null, rows: [] }), '2026-09');
+  assert.deepEqual(pending.costBreakdown, []); assert.equal(pending.amount, null);
 });

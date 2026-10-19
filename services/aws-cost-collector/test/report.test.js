@@ -71,3 +71,10 @@ test('only canonical matching Budget expression and metric qualify for compariso
   const result = await collectReport(config, api, new Date('2026-09-03'));
   assert.equal(result.budget.scopeMatches, true); assert.equal(result.budget.metricMatches, true);
 });
+
+test('pending first day has the identical filter digest to ordinary reports', async () => {
+  const { api } = fixture(); const { filterDigestFor } = require('../src/costs');
+  const pending = await collectReport(config, api, new Date('2026-09-01'));
+  const available = await collectReport(config, api, new Date('2026-09-03'));
+  assert.equal(pending.filterDigest, filterDigestFor(config)); assert.equal(available.filterDigest, pending.filterDigest);
+});

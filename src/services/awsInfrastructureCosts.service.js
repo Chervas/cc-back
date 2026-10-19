@@ -6,11 +6,12 @@ const fs = require('node:fs');
 const { execFile } = require('node:child_process');
 const { Op } = require('sequelize');
 const { isGlobalAdmin } = require('../lib/role-helpers');
-const { VERSION, COMPONENTS, ENVIRONMENTS, scopeFor, componentCoverage, viewCache, amountToUnits, unitsToAmount } = require('../../services/aws-cost-collector/src/costs');
+const { VERSION, COMPONENTS, ENVIRONMENTS, scopeFor, componentCoverage, filterDigestFor, costClassFor, costBreakdownFor, viewCache, amountToUnits, unitsToAmount } = require('../../services/aws-cost-collector/src/costs');
 const { ACCOUNT, ROLE, safeError } = require('../../services/aws-cost-collector/src/report');
 const fail = (code, status = 503) => { throw Object.assign(Error(code), { code, status }); };
-// A legacy two-component snapshot cannot stand in for the expanded scope.
-const keyFor = month => `aws:infrastructure:v${VERSION}:platform:${month}`;
+// Keep both legacy scopes and pre-digest v2 snapshots isolated; full digest still fits STRING(96).
+const FILTER_DIGEST = filterDigestFor({ accountId: ACCOUNT, environment: 'prod' });
+const keyFor = month => `aws:infrastructure:v${VERSION}:${FILTER_DIGEST}:${month}`;
 const CACHE_CODES = new Set(['cost_migration_required', 'cost_cache_unavailable', 'cost_snapshot_invalid', 'cost_data_pending',
   'cost_tags_unverified', 'cost_identity_invalid', 'cost_aws_unavailable', 'cost_scope_invalid', 'cost_response_invalid',
   'cost_amount_invalid', 'cost_period_invalid', 'cost_currency_mismatch', 'cost_pagination_invalid', 'cost_duplicate_group',
@@ -25,6 +26,7 @@ function projectSnapshot(value, month) {
   const amount = value => value === null ? null : unitsToAmount(amountToUnits(value));
   const currency = value => value === null || /^[A-Z]{3}$/.test(value) ? value : fail('cost_snapshot_invalid');
   if (!value || value.version !== VERSION || value.source !== 'aws_cost_explorer' || value.metric !== 'UnblendedCost'
+    || value.filterDigest !== FILTER_DIGEST || Object.keys(value.scope || {}).sort().join(',') !== 'application,components,environments'
     || value.scope?.application !== 'clinicaclick' || !Array.isArray(value.scope?.environments)
     || value.scope.environments.length !== ENVIRONMENTS.length || ENVIRONMENTS.some(env => !value.scope.environments.includes(env))
     || !Array.isArray(value.scope.components) || value.scope.components.length !== COMPONENTS.length
@@ -63,7 +65,8 @@ function projectSnapshot(value, month) {
   return { version: VERSION, source: 'aws_cost_explorer', metric: 'UnblendedCost', month, environment: 'platform',
     collectedAt: new Date(value.collectedAt).toISOString(), period: { from: value.period.from, toExclusive: value.period.toExclusive },
     status: value.status, amount: amount(value.amount), currency: currency(value.currency), estimated: value.estimated === true,
-    rows, services: [...services.values()].map(({ total, ...rest }) => ({ ...rest, amount: unitsToAmount(total) })),
+    rows, services: [...services.values()].map(({ total, ...rest }) => ({ ...rest, amount: unitsToAmount(total), costClass: costClassFor(rest) })),
+    filterDigest: FILTER_DIGEST, costBreakdown: costBreakdownFor(rows),
     forecast: { ...forecast, kind: 'remaining_period' },
     budget: { ...budget, source: 'aws_budgets', scopeMatches: value.budget.scopeMatches === true,
       metricMatches: value.budget.metricMatches === true, hardLimit: false, period: 'monthly', referenceMonth: value.budget.referenceMonth },

@@ -24,6 +24,25 @@ function filterFor({ accountId, environment }) {
     { Tags: { Key: 'environment', Values: [...ENVIRONMENTS] } },
   ] };
 }
+// Contract hash identifies the exact fixed CE filter, not proof that AWS returned every charge.
+function filterDigestFor(config) {
+  return createHash('sha256').update(JSON.stringify(filterFor(config))).digest('hex');
+}
+// This partitions the already-reported total; it never estimates or adds another charge.
+// Other migration services (VPCE, Secrets, Logs, transfer) cannot be attributed by SERVICE alone.
+function costClassFor(row) {
+  return row.component === 'database' && row.service === 'AWS Database Migration Service'
+    ? 'dms_temporary' : 'other_reported';
+}
+function costBreakdownFor(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const costClass = costClassFor(row); const key = JSON.stringify([costClass, row.currency]);
+    const group = groups.get(key) || { costClass, currency: row.currency, total: 0n };
+    group.total += amountToUnits(row.amount); groups.set(key, group);
+  }
+  return [...groups.values()].map(({ total, ...row }) => ({ ...row, amount: unitsToAmount(total) }));
+}
 function amountToUnits(value) {
   if (typeof value !== 'string' || !/^-?\d{1,16}(?:\.\d{1,18})?$/.test(value)) throw Error('cost_amount_invalid');
   const [whole, fraction = ''] = value.replace(/^-/, '').split('.');
@@ -78,7 +97,7 @@ async function collectCosts({ getCostAndUsage, accountId, environment, from, to,
     amount: currency && !missingDays.length ? unitsToAmount(total) : null,
     estimated: [...days.values()].some(Boolean), rows: [...groups.values()], missingDays,
     scope: scopeFor(), componentCoverage: componentCoverage([...groups.values()]),
-    filterDigest: createHash('sha256').update(JSON.stringify(filter)).digest('hex'), pages,
+    filterDigest: filterDigestFor({ accountId, environment }), pages,
     coverage: 'tagged_resources_only', coverageStatus: 'observed_partial', excludesAiEstimates: true,
   };
 }
@@ -90,4 +109,4 @@ function viewCache(record, { now = new Date(), staleAfterMs = 36 * 60 * 60 * 100
   return { status: record.error || !Number.isFinite(age) || age < 0 || age > staleAfterMs ? 'stale' : record.snapshot.status,
     snapshot: record.snapshot, lastAttemptAt: record.lastAttemptAt || null, error: record.error || null };
 }
-module.exports = { VERSION, COMPONENTS, ENVIRONMENTS, scopeFor, componentCoverage, collectCosts, filterFor, amountToUnits, unitsToAmount, viewCache };
+module.exports = { VERSION, COMPONENTS, ENVIRONMENTS, scopeFor, componentCoverage, filterDigestFor, costClassFor, costBreakdownFor, collectCosts, filterFor, amountToUnits, unitsToAmount, viewCache };
