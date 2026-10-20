@@ -8,6 +8,7 @@ router.use(authMiddleware);
 router.get('/', controller.list);
 router.post('/', controller.create);
 router.get('/from-appointment/:appointmentId', controller.getForSourceAppointment);
+router.get('/from-episode/:episodeId', controller.getForSourceEpisode);
 router.get('/:id/appointment-candidates', controller.appointmentCandidates);
 router.get('/:id', controller.get);
 router.patch('/:id', controller.update);

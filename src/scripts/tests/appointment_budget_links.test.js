@@ -43,11 +43,30 @@ test('rejects stale budget, wrong treatment, cancelled appointment and unaccepte
     [{ budget:{ status:'partially_accepted' } },{},'budget_appointment_treatment'],
   ]) { const f=fixture(overrides); await assert.rejects(f.service.link({ ...f.args,...args }),{ code }); assert.equal(f.writes.length,0); }
 });
-test('performed association requires a final report or a legacy completed appointment, never just arrival', async () => {
-  const f=fixture({ appointment:{ arrived_at:new Date(), care_started_at:new Date() } });
+test('a final narrative never marks unfinished care as performed', async () => {
+  const f=fixture({ report:{ id:3,status:'final' }, appointment:{ arrived_at:new Date(), care_started_at:new Date() } });
+  const before=JSON.stringify(f.appointment);
   await assert.rejects(f.service.link({ ...f.args,association:'performed' }),{ code:'budget_appointment_not_completed' });
-  const ready=fixture({ report:{ id:3,status:'final' }, appointment:{ care_started_at:new Date() } });
-  await ready.service.link({ ...ready.args,association:'performed' }); assert.equal(ready.appointment.estado,'info_confirmada');
+  const plan=await f.service.plan('budget');
+  assert.equal(plan.appointments[0].performed,false);
+  assert.equal(f.writes.length,0); assert.equal(JSON.stringify(f.appointment),before);
+  await f.service.link(f.args); assert.equal(f.writes[0].metadata.association,'scheduled');
+});
+test('performed association requires completed care for the exact reservation and preserves it on replay', async () => {
+  const start='2026-10-01T09:00:00Z';
+  const completed={ inicio:start,care_schedule_start:start,estado:'completada',arrived_at:start,
+    care_started_at:'2026-10-01T09:01:00Z',care_completed_at:'2026-10-01T09:30:00Z' };
+  for (const patch of [{ care_legacy_attendance:true },{ care_schedule_start:'2026-10-02T09:00:00Z' },
+    { care_completed_at:null },{ care_started_at:null },{ arrived_at:null },{ estado:'en_atencion' }]) {
+    const invalid=fixture({ report:{ id:3,status:'final' },appointment:{ ...completed,...patch } });
+    await assert.rejects(invalid.service.link({ ...invalid.args,association:'performed' }),{ code:'budget_appointment_not_completed' });
+    assert.equal(invalid.writes.length,0);
+    assert.equal((await invalid.service.plan('budget')).appointments[0].performed,false);
+  }
+  const ready=fixture({ appointment:completed }), before=JSON.stringify(ready.appointment);
+  assert.equal((await ready.service.link({ ...ready.args,association:'performed' })).replayed,false);
+  assert.equal((await ready.service.link({ ...ready.args,association:'performed' })).replayed,true);
+  assert.equal(ready.writes.length,1); assert.equal(JSON.stringify(ready.appointment),before);
   const plan=await ready.service.plan('budget'); assert.equal(plan.appointments[0].performed,true);
 });
 test('a competing budget or a full concept cannot double-book the same entitlement', async () => {

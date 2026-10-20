@@ -1,0 +1,34 @@
+'use strict';
+const assert=require('node:assert/strict'),Sequelize=require('sequelize');
+const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fixture');
+withIsolatedCampaignMysql(async({sql,models:db,report})=>{
+  const D=Sequelize.DataTypes;
+  db.Paciente=sql.define('Paciente',{id_paciente:{type:D.INTEGER,primaryKey:true},public_id:D.STRING,clinica_id:D.INTEGER,nombre:D.STRING,apellidos:D.STRING},{timestamps:false});
+  db.PacienteClinica=sql.define('PacienteClinica',{id:{type:D.INTEGER,primaryKey:true},paciente_id:D.INTEGER,clinica_id:D.INTEGER},{timestamps:false});
+  db.CitaPaciente=sql.define('CitaPaciente',{id_cita:{type:D.INTEGER,primaryKey:true},paciente_id:D.INTEGER,clinica_id:D.INTEGER,estado:D.STRING,inicio:D.DATE,fin:D.DATE,titulo:D.STRING,tratamiento_id:D.INTEGER,es_provisional:D.BOOLEAN},{timestamps:false});
+  db.Tratamiento=sql.define('Tratamiento',{id_tratamiento:{type:D.INTEGER,primaryKey:true},nombre:D.STRING,clinica_id:D.INTEGER},{timestamps:false});
+  for(const file of ['appointmentclinicalreport','clinicalepisodeappointment','patientfollowup','patientfollowuprevision']){const model=require('../../../models/'+file)(sql,D);db[model.name]=model;}
+  await sql.sync();await db.Paciente.bulkCreate([{id_paciente:9,public_id:'OWNED-ONE',clinica_id:72,nombre:'Paciente',apellidos:'Ficticio'},{id_paciente:10,public_id:'OWNED-TWO',clinica_id:72,nombre:'Otro',apellidos:'Ficticio'}]);
+  await db.CitaPaciente.create({id_cita:100,paciente_id:9,clinica_id:72,estado:'pendiente',inicio:'2030-01-07T10:00:00Z',fin:'2030-01-07T10:30:00Z',titulo:'Consulta ficticia'});
+  const independent=await db.AppointmentClinicalReport.create({public_id:'00000000-0000-4000-8000-000000000081',clinic_id:72,patient_id:9,appointment_id:null,status:'final',summary:'Registro ficticio final'});
+  const legacy=await db.AppointmentClinicalReport.create({public_id:'00000000-0000-4000-8000-000000000080',clinic_id:72,patient_id:9,appointment_id:100,status:'final',summary:'Registro ficticio de cita'});
+  const service=require('../../services/patientFollowUps.service').createPatientFollowUpService({db});
+  const create=payload=>service.create({clinicId:72,patientIdentifier:'OWNED-ONE',actorId:7,includeClinical:true,payload:{operational_reason:'Revisión ficticia',clinical_target_date:'2030-02-07',...payload}});
+  const before=JSON.stringify(await db.CitaPaciente.findAll({raw:true}));
+  const results=await Promise.all([create({source_episode_id:independent.public_id}),create({source_episode_id:independent.public_id})]);
+  assert.equal(results[0].item.id,results[1].item.id);assert.equal(results.filter(item=>item.created).length,1);
+  let row=await db.PatientFollowUp.findOne({where:{public_id:results[0].item.id}});assert.equal(Number(row.source_report_id),Number(independent.id));assert.equal(row.source_appointment_id,null);
+  assert.equal(await db.PatientFollowUpRevision.count(),1);
+  const mixed=await Promise.all([create({source_appointment_id:100}),create({source_episode_id:legacy.public_id})]);
+  assert.equal(mixed[0].item.id,mixed[1].item.id);assert.equal(await db.PatientFollowUp.count(),2);assert.equal(await db.PatientFollowUpRevision.count(),2);
+  assert.equal((await service.getForSourceEpisode({clinicId:72,episodeId:legacy.public_id})).item.id,mixed[0].item.id);
+  assert.equal((await service.getForSourceAppointment({clinicId:72,appointmentId:100})).item.id,mixed[0].item.id);
+  await assert.rejects(service.create({clinicId:72,patientIdentifier:'OWNED-TWO',actorId:7,includeClinical:true,payload:{operational_reason:'Otro',source_episode_id:independent.public_id}}),{code:'follow_up_episode_not_found'});
+  const revisionCreate=db.PatientFollowUpRevision.create;
+  db.PatientFollowUpRevision.create=async()=>{throw Error('OWNED_REVISION_FAILURE');};
+  await assert.rejects(service.update({clinicId:72,id:row.public_id,actorId:7,includeClinical:true,payload:{expected_version:1,operational_reason:'Must roll back'}}),/OWNED_REVISION_FAILURE/);
+  db.PatientFollowUpRevision.create=revisionCreate;row=await row.reload();assert.equal(row.version_number,1);assert.equal(row.operational_reason,'Revisión ficticia');
+  await assert.rejects(service.update({clinicId:72,id:row.public_id,actorId:7,payload:{expected_version:2,operational_reason:'Stale'}}),{code:'follow_up_version_conflict'});
+  assert.equal(JSON.stringify(await db.CitaPaciente.findAll({raw:true})),before);assert.equal((await independent.reload()).status,'final');
+  report.checks.push('Actual follow-up service/models in owned MySQL: independent final episode provenance persists; simultaneous same-episode and mixed legacy-appointment/episode requests create one reminder/revision; current reads preserve replay after a waited report lock; foreign patient rejected; revision failure rolls back; stale version rejected; appointments and final narrative unchanged. No DEV DB or external providers.');
+}).catch(error=>{console.error(error);process.exitCode=1;});

@@ -1,9 +1,13 @@
 'use strict';
 
-const { clinicalReportHandler: asyncHandler } = require('../lib/clinical-report-version');
+const { clinicalReportHandler } = require('../lib/clinical-report-version');
 const db = require('../../models');
 const reports = require('../services/appointmentClinicalReports.service');
 const { canUserAccessFeature } = require('../lib/access-policy');
+const asyncHandler = action => clinicalReportHandler(async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  return action(req, res);
+});
 
 function actorId(req) {
   const value = Number.parseInt(String(req.userData?.userId ?? ''), 10);
@@ -18,12 +22,10 @@ async function appointmentAccess(req, featureKey) {
     attributes: ['clinica_id'],
   });
   if (!appointment) throw reports.domainError(404, 'appointment_not_found', 'Cita no encontrada.');
-  const allowed = await canUserAccessFeature({
-    actorId: actorId(req),
-    featureKey,
-    clinicId: Number(appointment.clinica_id),
-  });
-  if (!allowed) throw reports.domainError(403, 'access_policy_forbidden', 'No tienes permisos para este informe.');
+  const actor = actorId(req), clinicId = Number(appointment.clinica_id);
+  const allowed = await Promise.all(['patients.view', 'patients.sensitive.view', featureKey]
+    .map(feature => canUserAccessFeature({ actorId: actor, featureKey: feature, clinicId })));
+  if (allowed.some(value => !value)) throw reports.domainError(403, 'access_policy_forbidden', 'No tienes permisos para este informe.');
 }
 
 async function patientAccess(req, featureKey) {
@@ -31,12 +33,10 @@ async function patientAccess(req, featureKey) {
   if (!Number.isInteger(clinicId) || clinicId <= 0) {
     throw reports.domainError(400, 'clinic_scope_required', 'Selecciona una clínica.');
   }
-  const allowed = await canUserAccessFeature({
-    actorId: actorId(req),
-    featureKey,
-    clinicId,
-  });
-  if (!allowed) throw reports.domainError(403, 'access_policy_forbidden', 'No tienes permisos para estos informes.');
+  const actor = actorId(req);
+  const allowed = await Promise.all(['patients.view', 'patients.sensitive.view', featureKey]
+    .map(feature => canUserAccessFeature({ actorId: actor, featureKey: feature, clinicId })));
+  if (allowed.some(value => !value)) throw reports.domainError(403, 'access_policy_forbidden', 'No tienes permisos para estos informes.');
   return clinicId;
 }
 

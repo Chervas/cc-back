@@ -18,6 +18,7 @@ router.post('/:id/recuperar', authMiddleware, citasController.restoreAppointment
 router.get('/:id/activity', authMiddleware, citasController.getAppointmentHubActivity);
 router.post('/:id/care/:action', authMiddleware, citasController.recordAppointmentCare);
 router.get('/:id/clinical-report', authMiddleware, clinicalReportsController.getByAppointment);
+router.get('/:id/clinical-episode', authMiddleware, require('../controllers/clinicalEpisodes.controller').getForAppointment);
 router.put('/:id/clinical-report', authMiddleware, clinicalReportsController.save);
 router.post('/:id/clinical-report/finalize', authMiddleware, clinicalReportsController.finalize);
 router.patch('/:id/estado', authMiddleware, citasController.updateCitaEstado);

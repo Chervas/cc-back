@@ -3349,6 +3349,10 @@ exports.deleteCita = asyncHandler(async (req, res) => {
         return res.status(404).json({ message: 'Cita no encontrada' });
     }
     if (await denyAppointmentManageAccessIfNeeded(req, res, cita.clinica_id)) return;
+    const { hasAppointmentClinicalHistory, clinicalHistoryPreservedError, PRESERVED_CODE, PRESERVED_MESSAGE } = require('../lib/appointment-clinical-history');
+    if (await hasAppointmentClinicalHistory(db, citaId)) return res.status(409).json({
+        code: PRESERVED_CODE, message: PRESERVED_MESSAGE,
+    });
     if (db.AppointmentVisitMember && db.AppointmentVisit
         && await require('../services/appointmentVisitManaged.service').current().managedVisit(cita)) {
         return res.status(409).json({ code: 'appointment_visit_history_preserved',
@@ -3364,19 +3368,16 @@ exports.deleteCita = asyncHandler(async (req, res) => {
 
     const deletedPayload = cita.toJSON ? cita.toJSON() : { ...cita };
 
-    try {
-        await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {
-            reason: 'appointment_deleted_cancelled_active_flow',
-            preserve_current_visit_revision: false,
-        });
-        await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(cita.id_cita, {
-            reason: 'appointment_deleted',
-        });
-    } catch (automationErr) {
-        console.error('⚠️ [deleteCita] Error cerrando automation v2:', automationErr.message);
-    }
-
-    await db.sequelize.transaction(async (transaction) => {
+    try { await db.sequelize.transaction(async (transaction) => {
+        // Report creation/association serializes on this same reservation.
+        // Repeat the history check after locking so a concurrent first save
+        // cannot be removed by the report's legacy ON DELETE CASCADE.
+        const locked = await CitaPaciente.findByPk(citaId, { transaction, lock: transaction.LOCK.UPDATE });
+        if (!locked) throw Object.assign(new Error('Cita no encontrada'), { statusCode: 404 });
+        if (String(locked.estado || '').trim().toLowerCase() !== 'cancelada') {
+            throw Object.assign(new Error('Solo se pueden eliminar citas canceladas'), { statusCode: 409 });
+        }
+        if (await hasAppointmentClinicalHistory(db, citaId, transaction)) throw clinicalHistoryPreservedError();
         if (db.ConsentSignaturePackage) {
             await db.ConsentSignaturePackage.update(
                 { cita_id: null },
@@ -3390,7 +3391,26 @@ exports.deleteCita = asyncHandler(async (req, res) => {
             );
         }
         await CitaPaciente.destroy({ where: { id_cita: citaId }, transaction });
-    });
+    }); } catch (error) {
+        if (error.code === PRESERVED_CODE || error.statusCode === 404 || error.statusCode === 409) {
+            return res.status(error.statusCode).json({ ...(error.code ? { code: error.code } : {}), message: error.message });
+        }
+        throw error;
+    }
+
+    // Cleanup uses the retained reservation identity only after deletion commits.
+    // A rejected race or SQL rollback must not cancel otherwise preserved work.
+    try {
+        await appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(cita, {
+            reason: 'appointment_deleted_cancelled_active_flow',
+            preserve_current_visit_revision: false,
+        });
+        await appointmentNotificationCleanup.markAutomationNotificationsReadForAppointment(cita.id_cita, {
+            reason: 'appointment_deleted',
+        });
+    } catch (automationErr) {
+        console.error('⚠️ [deleteCita] Error cerrando automation v2:', automationErr.message);
+    }
 
     await syncLeadStatusFromAppointments(cita.lead_intake_id);
     emitAppointmentSocketEvent('appointment:deleted', deletedPayload);

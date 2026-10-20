@@ -1,0 +1,10 @@
+'use strict';
+const router = require('express').Router();
+const controller = require('../controllers/clinicalEpisodes.controller');
+router.use(require('./auth.middleware'));
+router.get('/:id', controller.get);
+router.patch('/:id', controller.save);
+router.post('/:id/finalize', controller.finalize);
+router.post('/:id/reopen', controller.reopen);
+router.get('/:id/revisions', controller.revisions);
+module.exports = router;

@@ -47,6 +47,11 @@ function fixture() {
       { id_cita: 105, clinica_id: 10, paciente_id: 1, estado: 'reprogramada', inicio: new Date('2026-11-01T08:00:00Z'), fin: new Date('2026-11-01T09:00:00Z'), es_provisional: false },
     ],
     treatments: [{ id_tratamiento: 5, nombre: 'Tratamiento ficticio', clinica_id: 10, origen: 'clinica' }, { id_tratamiento: 6, clinica_id: 20, origen: 'clinica' }],
+    reports: [
+      {id:80,public_id:'00000000-0000-4000-8000-000000000080',clinic_id:10,patient_id:1,appointment_id:100},
+      {id:81,public_id:'00000000-0000-4000-8000-000000000081',clinic_id:10,patient_id:1,appointment_id:null},
+      {id:82,public_id:'00000000-0000-4000-8000-000000000082',clinic_id:20,patient_id:2,appointment_id:null},
+    ],
   };
   const record = (value) => {
     const result = { ...value };
@@ -97,7 +102,8 @@ function fixture() {
       findAll: async ({ where }) => state.treatments.filter((row) => matches(row, where)),
     },
     Clinica: { findOne: async () => null },
-    AppointmentClinicalReport: { findOne: async ({ where }) => where.appointment_id === 100 ? { id: 80 } : null },
+    AppointmentClinicalReport: { findOne: async ({ where }) => state.reports.find(row=>matches(row,where))||null },
+    ClinicalEpisodeAppointment: {findOne:async({where})=>matches({appointment_id:105,report_id:81,clinic_id:10,patient_id:1},where)?{appointment_id:105,report_id:81}:null},
   };
   const service = createPatientFollowUpService({ db, now: () => new Date('2026-09-06T23:30:00Z') });
   const create = (payload = {}, rest = {}) => service.create({ clinicId: 10, patientIdentifier: 'pac_one', actorId: 7,
@@ -266,6 +272,38 @@ test('report context reopens same source and changed linked appointment is a liv
   }
 });
 
+test('independent episode follow-up preserves the canonical report provenance and reopens idempotently',async()=>{
+  const {create,service,state}=fixture();const episode='00000000-0000-4000-8000-000000000081';
+  assert.equal((await service.getForSourceEpisode({clinicId:10,episodeId:episode})).item,null);
+  const result=await create({source_episode_id:episode,clinical_target_date:'2027-03-31'});
+  assert.equal(state.rows[0].source_report_id,81);assert.equal(state.rows[0].source_appointment_id,null);
+  assert.equal(state.rows[0].source_kind,'clinical_report');assert.equal(state.appointments.length,6);
+  assert.equal((await create({source_episode_id:episode,clinical_target_date:'2027-03-31'})).item.id,result.item.id);
+  assert.equal(state.rows.length,1);assert.equal(state.revisions.length,1);
+  assert.equal((await service.getForSourceEpisode({clinicId:10,episodeId:episode})).item.id,result.item.id);
+  await assert.rejects(create({source_episode_id:episode,operational_reason:'Changed'}),{code:'follow_up_already_exists'});
+  await assert.rejects(create({source_episode_id:'00000000-0000-4000-8000-000000000082'}),{code:'follow_up_episode_not_found'});
+  await assert.rejects(create({source_episode_id:episode},{patientIdentifier:'pac_shared'}),{code:'follow_up_episode_not_found'});
+  await assert.rejects(service.getForSourceEpisode({clinicId:20,episodeId:episode}),{code:'follow_up_episode_not_found'});
+  await assert.rejects(service.update({clinicId:10,id:result.item.id,actorId:7,payload:{expected_version:1,source_episode_id:episode}}),{code:'follow_up_immutable_source'});
+});
+
+test('legacy appointment and shared episode origins recover the same follow-up instead of duplicating it',async()=>{
+  for(const legacyFirst of [true,false]){
+    const {create,service,state}=fixture();const episode='00000000-0000-4000-8000-000000000080';
+    const first=await create(legacyFirst?{source_appointment_id:100}:{source_episode_id:episode});
+    const second=await create(legacyFirst?{source_episode_id:episode}:{source_appointment_id:100});
+    assert.equal(first.item.id,second.item.id);assert.equal(second.created,false);assert.equal(state.rows.length,1);
+    assert.equal((await service.getForSourceEpisode({clinicId:10,episodeId:episode})).item.id,first.item.id);
+    assert.equal((await service.getForSourceAppointment({clinicId:10,appointmentId:100})).item.id,first.item.id);
+  }
+  const {create,service,state}=fixture();const episode='00000000-0000-4000-8000-000000000081';
+  await assert.rejects(create({source_episode_id:episode,source_appointment_id:100}),{code:'follow_up_episode_appointment_mismatch'});
+  const shared=await create({source_episode_id:episode,source_appointment_id:105});assert.equal(state.rows[0].source_report_id,81);
+  assert.equal((await service.getForSourceAppointment({clinicId:10,appointmentId:105})).item.id,shared.item.id);
+  assert.equal((await create({source_appointment_id:105})).item.id,shared.item.id);assert.equal(state.rows.length,1);
+});
+
 async function call(handler, req) {
   let result;
   const res = { set: () => res, status: () => res, json: (value) => { result = value; } };
@@ -284,6 +322,9 @@ test('HTTP controller enforces sensitive scope and report permissions before any
   assert.ok(checks.some((entry) => entry.featureKey === 'appointments.view'));
   const reportController = createPatientFollowUpsController({ followUps, canAccess: async ({ featureKey }) => featureKey !== 'clinical.reports.manage' });
   await assert.rejects(call(reportController.create, { ...req, method: 'POST', body: { clinic_id: 10, patient_id: 1, source_appointment_id: 100 } }), { statusCode: 403 });
+  await assert.rejects(call(reportController.create, { ...req, method: 'POST', body: { clinic_id: 10, patient_id: 1, source_episode_id:'00000000-0000-4000-8000-000000000081' } }), { statusCode: 403 });
+  const episodeController=createPatientFollowUpsController({followUps,canAccess:async({featureKey})=>featureKey!=='clinical.reports.view'});
+  await assert.rejects(call(episodeController.getForSourceEpisode,{...req,params:{episodeId:'00000000-0000-4000-8000-000000000081'}}),{statusCode:403});
 });
 
 test('new domain has no jobs/messages and routes require auth, migration refuses deleting clinical history', async () => {

@@ -22,6 +22,14 @@ router.post('/:id/communication-preferences', require('../controllers/patientCom
 router.get('/:id/clinical-attachments', patientClinicalAttachmentsController.listPatientClinicalAttachments);
 router.post('/:id/clinical-attachments', patientClinicalAttachmentsController.createPatientClinicalAttachment);
 router.get('/:id/clinical-attachments/:attachmentId', patientClinicalAttachmentsController.getPatientClinicalAttachment);
+router.get('/:id/clinical-attachments/:attachmentId/preview', patientClinicalAttachmentsController.previewPatientClinicalAttachment);
+router.get('/:id/clinical-episodes', require('../controllers/clinicalEpisodes.controller').list);
+router.post('/:id/clinical-episodes', require('../controllers/clinicalEpisodes.controller').create);
+router.get('/:id/clinical-drawings', require('../controllers/clinicalDrawings.controller').list);
+router.post('/:id/clinical-drawings', require('../controllers/clinicalDrawings.controller').create);
+router.get('/:id/clinical-drawings/:drawingId', require('../controllers/clinicalDrawings.controller').get);
+router.patch('/:id/clinical-drawings/:drawingId', require('../controllers/clinicalDrawings.controller').save);
+router.get('/:id/clinical-drawings/:drawingId/revisions', require('../controllers/clinicalDrawings.controller').revisions);
 router.get('/:id/nutrition-workspace', nutritionWorkspaceController.getPatientNutritionWorkspace);
 router.post('/:id/nutrition-measurements', nutritionWorkspaceController.createPatientNutritionMeasurement);
 router.get('/:id/nutrition-measurements/:measurementId/photos', nutritionWorkspaceController.listPatientNutritionMeasurementPhotos);

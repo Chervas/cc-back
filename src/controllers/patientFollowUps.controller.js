@@ -11,7 +11,7 @@ function createPatientFollowUpsController({ followUps = service, canAccess = can
     const clinicId = followUps.positiveInteger(req.query.clinic_id ?? (req.method === 'POST' ? req.body?.clinic_id : null), 'clinic_id');
     // A reason for follow-up is health data, even when labelled operational.
     const required = [writing ? 'appointments.manage' : 'appointments.view', 'patients.view', 'patients.sensitive.view'];
-    if (sourceReport) required.push('clinical.reports.manage');
+    if (sourceReport) required.push(writing ? 'clinical.reports.manage' : 'clinical.reports.view');
     const checks = await Promise.all(required.map((featureKey) => canAccess({ actorId, clinicId, featureKey })));
     if (checks.some((allowed) => !allowed)) throw followUps.domainError(403, 'access_policy_forbidden', 'No tienes permisos para estos seguimientos.');
     const includeClinical = await canAccess({ actorId, clinicId, featureKey: writing ? 'clinical.reports.manage' : 'clinical.reports.view' });
@@ -34,8 +34,13 @@ function createPatientFollowUpsController({ followUps = service, canAccess = can
       res.set('Cache-Control', 'no-store');
       res.json(await followUps.getForSourceAppointment({ ...ctx, appointmentId: req.params.appointmentId }));
     }),
+    getForSourceEpisode: asyncHandler(async (req, res) => {
+      const ctx = await context(req, { sourceReport: true });
+      res.set('Cache-Control', 'no-store');
+      res.json(await followUps.getForSourceEpisode({ ...ctx, episodeId: req.params.episodeId }));
+    }),
     create: asyncHandler(async (req, res) => {
-      const ctx = await context(req, { writing: true, sourceReport: req.body?.source_appointment_id != null || req.body?.source_kind === 'clinical_report' });
+      const ctx = await context(req, { writing: true, sourceReport: req.body?.source_episode_id != null || req.body?.source_appointment_id != null || req.body?.source_kind === 'clinical_report' });
       const result = await followUps.create({ ...ctx, patientIdentifier: req.body?.patient_id, payload: req.body });
       res.set('Cache-Control', 'no-store');
       res.status(result.created ? 201 : 200).json(result);

@@ -140,9 +140,31 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
     if (['source_namespace', 'source_reference', 'source_key', 'source_date', 'source_date_semantics', 'source_report_id'].some((key) => Object.hasOwn(payload, key))) {
       throw domainError(400, 'follow_up_source_reserved', 'La procedencia se calcula en backend.');
     }
+    if (payload.source_episode_id != null) {
+      const publicId = boundedText(payload.source_episode_id, 'source_episode_id', 36, true);
+      const report = await db.AppointmentClinicalReport.findOne({ where: { public_id: publicId, clinic_id: clinicId, patient_id: patientId },
+        attributes: ['id', 'public_id', 'appointment_id'], transaction, lock: transaction.LOCK.UPDATE });
+      if (!report) throw domainError(404, 'follow_up_episode_not_found', 'Episodio no encontrado en este paciente y clínica.');
+      if (payload.source_appointment_id != null && Number(payload.source_appointment_id) !== Number(report.appointment_id)) {
+        const relation = db.ClinicalEpisodeAppointment && await db.ClinicalEpisodeAppointment.findOne({ where: {
+          appointment_id: positiveInteger(payload.source_appointment_id, 'source_appointment_id'), report_id: report.id,
+          clinic_id: clinicId, patient_id: patientId }, attributes: ['appointment_id'], transaction });
+        if (!relation) throw domainError(409, 'follow_up_episode_appointment_mismatch', 'La cita no pertenece a este episodio.');
+      }
+      return { source_kind: 'clinical_report', source_namespace: 'clinicaclick', source_reference: `episode:${report.public_id}`,
+        source_key: sourceKey('clinical_report', 'clinicaclick', `episode:${report.public_id}`),
+        source_report_id: report.id, source_appointment_id: payload.source_appointment_id ? Number(payload.source_appointment_id) : report.appointment_id || null,
+        source_date_semantics: payload.clinical_target_date ? 'clinical_target' : 'unknown' };
+    }
     if (payload.source_appointment_id != null) {
       const appointment = await appointmentInContext(payload.source_appointment_id, clinicId, patientId, transaction);
-      const report = await db.AppointmentClinicalReport.findOne({ where: { appointment_id: appointment.id_cita, clinic_id: clinicId, patient_id: patientId }, attributes: ['id'], transaction });
+      let report = await db.AppointmentClinicalReport.findOne({ where: { appointment_id: appointment.id_cita, clinic_id: clinicId, patient_id: patientId }, attributes: ['id'], transaction, lock: transaction.LOCK.UPDATE });
+      if (!report && db.ClinicalEpisodeAppointment) {
+        const relation = await db.ClinicalEpisodeAppointment.findOne({ where: { appointment_id: appointment.id_cita,
+          clinic_id: clinicId, patient_id: patientId }, attributes: ['report_id'], transaction });
+        if (relation) report = await db.AppointmentClinicalReport.findOne({ where: { id: relation.report_id, clinic_id: clinicId,
+          patient_id: patientId }, attributes: ['id'], transaction, lock: transaction.LOCK.UPDATE });
+      }
       const reference = `appointment:${appointment.id_cita}`;
       return {
         source_kind: 'clinical_report', source_namespace: 'clinicaclick', source_reference: reference,
@@ -169,7 +191,13 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
         if (source.source_date_semantics === 'clinical_target' && !Object.hasOwn(payload, 'clinical_target_date')) values.clinical_target_date = source.source_date;
       }
       if (source.source_key) {
-        const existing = await PatientFollowUp.findOne({ where: { source_key: source.source_key }, transaction: tx });
+        // The report lock serializes episode and legacy appointment origins.
+        // Use a current read after waiting; a prior patient lookup may already
+        // have established a repeatable-read snapshot before the winner committed.
+        const sourceRead = { transaction: tx, ...(source.source_report_id ? { lock: tx.LOCK.UPDATE } : {}) };
+        const existing = await PatientFollowUp.findOne({ where: { source_key: source.source_key }, ...sourceRead })
+          || (source.source_report_id ? await PatientFollowUp.findOne({ where: { clinic_id: clinicId,
+            patient_id: patient.id_paciente, source_report_id: source.source_report_id }, ...sourceRead }) : null);
         if (existing) {
           if (Number(existing.clinic_id) !== clinicId || Number(existing.patient_id) !== Number(patient.id_paciente)) {
             throw domainError(409, 'follow_up_source_conflict', 'El origen ya está vinculado a otro contexto; requiere conciliación.');
@@ -210,7 +238,7 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
     clinicId = positiveInteger(clinicId, 'clinic_id');
     const expectedVersion = positiveInteger(payload.expected_version, 'expected_version');
     if (!includeClinical && Object.hasOwn(payload, 'clinical_notes')) throw domainError(403, 'follow_up_clinical_forbidden', 'No tienes permisos para modificar notas clínicas.');
-    const immutable = ['clinic_id', 'patient_id', 'source_kind', 'source_namespace', 'source_reference', 'source_key', 'source_appointment_id', 'source_report_id', 'source_date', 'source_date_semantics', 'idempotency_key'];
+    const immutable = ['clinic_id', 'patient_id', 'source_kind', 'source_namespace', 'source_reference', 'source_key', 'source_appointment_id', 'source_report_id', 'source_episode_id', 'source_date', 'source_date_semantics', 'idempotency_key'];
     if (immutable.some((key) => Object.hasOwn(payload, key))) throw domainError(400, 'follow_up_immutable_source', 'No se puede cambiar paciente, clínica ni procedencia de un seguimiento.');
     const patch = normalizeValues(payload);
     if (!Object.keys(patch).length) throw domainError(400, 'follow_up_empty_patch', 'No hay cambios para guardar.');
@@ -299,10 +327,29 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
     const appointment = await CitaPaciente.findOne({ where: { id_cita: positiveInteger(appointmentId, 'appointment_id'), clinica_id: clinicId }, attributes: ['id_cita', 'paciente_id'] });
     if (!appointment) throw domainError(404, 'follow_up_appointment_not_found', 'Cita no encontrada en esta clínica.');
     await patientInClinic(String(appointment.paciente_id), clinicId);
+    let report = await db.AppointmentClinicalReport.findOne({ where: { appointment_id: appointment.id_cita,
+      clinic_id: clinicId, patient_id: appointment.paciente_id }, attributes: ['id'] });
+    if (!report && db.ClinicalEpisodeAppointment) {
+      const relation = await db.ClinicalEpisodeAppointment.findOne({ where: { appointment_id: appointment.id_cita,
+        clinic_id: clinicId, patient_id: appointment.paciente_id }, attributes: ['report_id'] });
+      if (relation) report = await db.AppointmentClinicalReport.findOne({ where: { id: relation.report_id,
+        clinic_id: clinicId, patient_id: appointment.paciente_id }, attributes: ['id'] });
+    }
     const row = await PatientFollowUp.findOne({ where: {
       clinic_id: clinicId, patient_id: appointment.paciente_id,
-      source_key: sourceKey('clinical_report', 'clinicaclick', `appointment:${appointment.id_cita}`),
+      [Op.or]: [{ source_key: sourceKey('clinical_report', 'clinicaclick', `appointment:${appointment.id_cita}`) },
+        ...(report ? [{ source_report_id: report.id }] : [])],
     } });
+    return { item: row ? (await hydrate([row], { includeClinical }))[0] : null };
+  }
+
+  async function getForSourceEpisode({ episodeId, clinicId, includeClinical = false }) {
+    clinicId = positiveInteger(clinicId, 'clinic_id');
+    const report = await db.AppointmentClinicalReport.findOne({ where: {
+      public_id: boundedText(episodeId, 'source_episode_id', 36, true), clinic_id: clinicId }, attributes: ['id', 'patient_id'] });
+    if (!report) throw domainError(404, 'follow_up_episode_not_found', 'Episodio no encontrado en esta clínica.');
+    await patientInClinic(String(report.patient_id), clinicId);
+    const row = await PatientFollowUp.findOne({ where: { clinic_id: clinicId, patient_id: report.patient_id, source_report_id: report.id } });
     return { item: row ? (await hydrate([row], { includeClinical }))[0] : null };
   }
 
@@ -325,12 +372,12 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
     next_cursor: appointments.length > limit ? makeCursor(page[page.length - 1].id_cita, filters.scope) : null };
   }
 
-  return { create, update, list, get, getForSourceAppointment, appointmentCandidates, serialize };
+  return { create, update, list, get, getForSourceAppointment, getForSourceEpisode, appointmentCandidates, serialize };
 }
 
 let defaultService;
 const getDefault = () => defaultService || (defaultService = createPatientFollowUpService({ db: require('../../models') }));
 module.exports = { createPatientFollowUpService, ...contract };
-for (const method of ['create', 'update', 'list', 'get', 'getForSourceAppointment', 'appointmentCandidates']) {
+for (const method of ['create', 'update', 'list', 'get', 'getForSourceAppointment', 'getForSourceEpisode', 'appointmentCandidates']) {
   module.exports[method] = (...args) => getDefault()[method](...args);
 }

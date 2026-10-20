@@ -5,7 +5,7 @@ const patientClinicalAttachmentsService = require('../services/patientClinicalAt
 
 function actorIdFromRequest(req) {
   const actorId = Number(req.userData?.userId);
-  if (!Number.isFinite(actorId)) {
+  if (!Number.isSafeInteger(actorId) || actorId <= 0) {
     const error = new Error('auth_failed');
     error.status = 401;
     throw error;
@@ -64,6 +64,9 @@ function sendClinicalAttachmentReadError(error, res) {
     || ['patient_not_found', 'clinical_attachment_not_found', 'clinical_private_asset_not_found', 'clinical_private_asset_not_active'].includes(error?.message)) {
     return res.status(404).json({ message: 'Adjunto clinico no encontrado', code: 'clinical_attachment_not_found' });
   }
+  if ([400, 413].includes(error?.statusCode) && typeof error.code === 'string' && error.code.startsWith('clinical_attachment_preview_')) {
+    return res.status(error.statusCode).json({ message: error.message, code: error.code });
+  }
   const status = error?.status === 503 || error?.statusCode === 503 ? 503 : 500;
   return res.status(status).json({ message: 'No se pudo acceder al adjunto clinico. Intentalo de nuevo mas tarde.', code: 'clinical_attachment_unavailable' });
 }
@@ -95,6 +98,23 @@ exports.getPatientClinicalAttachment = asyncHandler(async (req, res) => {
   } catch (error) {
     return sendClinicalAttachmentReadError(error, res);
   }
+});
+
+exports.previewPatientClinicalAttachment = asyncHandler(async (req, res) => {
+  setClinicalReadHeaders(res);
+  try {
+    const actorId = actorIdFromRequest(req);
+    const file = await patientClinicalAttachmentsService.readPatientClinicalAttachment(req.params.id, req.params.attachmentId, actorId);
+    const preview = await require('../services/clinicalAttachmentPreview.service').createClinicalAttachmentPreview({
+      buffer: file.buffer, contentType: file.contentType, page: req.query.page,
+    });
+    res.setHeader('Content-Type', preview.contentType);
+    res.setHeader('Content-Disposition', 'inline; filename="vista-previa.png"');
+    res.setHeader('Content-Length', preview.buffer.length);
+    res.setHeader('X-Clinical-Page-Count', String(preview.pageCount));
+    res.setHeader('X-Clinical-Page', String(preview.page));
+    return res.send(preview.buffer);
+  } catch (error) { return sendClinicalAttachmentReadError(error, res); }
 });
 
 exports.createPatientClinicalAttachment = asyncHandler(async (req, res) => {

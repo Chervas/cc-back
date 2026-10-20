@@ -317,7 +317,17 @@ async function createPatientClinicalAttachment(patientIdentifier, actorId, paylo
     throw error;
   }
 
-  const clinicId = Number(patient.clinica_id);
+  // A shared patient can receive care in another actual member clinic. Scope
+  // the upload explicitly; a caller hint never creates that membership.
+  const requestedClinic = payload.clinic_id !== undefined ? payload.clinic_id
+    : payload.clinicId !== undefined ? payload.clinicId : patient.clinica_id;
+  const clinicId = Number(requestedClinic);
+  if (!Number.isSafeInteger(clinicId) || clinicId <= 0) {
+    const error = new Error('clinical_attachment_clinic_invalid');
+    error.status = 400;
+    throw error;
+  }
+  if (!(await patientClinicIds(patient)).includes(clinicId)) forbiddenAttachment();
   const canEdit = await canUserAccessFeature({ actorId, featureKey: 'patients.edit', clinicId });
   if (!canEdit) {
     const error = new Error('access_policy_forbidden');

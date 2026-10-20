@@ -121,14 +121,34 @@ test('limit200 remains bounded; query scope applies before limit and unauthorize
   assert.equal(result.items.length, 200); assert(result.items.every(row => row.clinic_id === 66));
   assert.equal(f.calls.queries[0].limit, 200);
 });
-test('upload still requires primary patients.edit and cannot use secondary read/edit to expand creation scope', async () => {
+test('upload uses the explicitly selected member clinic and its own write permission', async () => {
   const payload = { filename: 'fictitious.pdf', content_type: 'application/pdf', data_base64: Buffer.from('FICTITIOUS').toString('base64'), clinic_id: 72 };
   const secondary = fixture({ grants: { 72: ['patients.edit', 'patients.sensitive.view'] } });
-  await assert.rejects(secondary.service.createPatientClinicalAttachment('10', 9, payload), error => error.status === 403
-    && error.details.feature_key === 'patients.edit' && error.details.clinic_id === 66);
-  assert.equal(secondary.calls.writes.length, 0); assert.equal(secondary.calls.memberships.length, 0);
+  const shared = await secondary.service.createPatientClinicalAttachment('10', 9, payload);
+  assert.equal(shared.clinic_id, 72); assert.equal(secondary.calls.writes[0].clinicId, 72);
+  assert.equal(secondary.calls.writes[0].patientId, 10);
   const primary = fixture({ grants: { 66: ['patients.edit'] } });
-  const created = await primary.service.createPatientClinicalAttachment('10', 9, payload);
+  await assert.rejects(primary.service.createPatientClinicalAttachment('10', 9, payload), error => error.status === 403
+    && error.details.feature_key === 'patients.edit' && error.details.clinic_id === 72);
+  assert.equal(primary.calls.writes.length, 0, 'Primary permissions do not authorize another clinic');
+  const { clinic_id: ignored, ...legacyPayload } = payload;
+  const created = await primary.service.createPatientClinicalAttachment('10', 9, legacyPayload);
   assert.equal(created.clinic_id, 66); assert.equal(primary.calls.writes[0].clinicId, 66);
-  assert.equal(primary.calls.writes[0].patientId, 10); assert.equal(primary.calls.memberships.length, 0);
+  assert.equal(primary.calls.writes[0].patientId, 10);
+});
+test('upload cannot create scope from an actor grant or a common group', async () => {
+  const f = fixture({ memberships: [{ paciente_id: 999, clinica_id: 82 }], grants: { 82: ['patients.edit'] } });
+  await assert.rejects(f.service.createPatientClinicalAttachment('10', 9, { clinic_id: 82 }), error => error.status === 403);
+  assert.equal(f.calls.writes.length, 0);
+  assert.equal(f.calls.acl.length, 0, 'Membership is established before evaluating the selected clinic grant');
+});
+test('upload rejects malformed selected clinic and appointments belonging to another clinic', async () => {
+  const f = fixture({ grants: { 72: ['patients.edit'] } });
+  for (const clinic_id of [0, -1, '72garbage', 72.5, null, '']) {
+    await assert.rejects(f.service.createPatientClinicalAttachment('10', 9, { clinic_id }), error => error.status === 400);
+  }
+  await assert.rejects(f.service.createPatientClinicalAttachment('10', 9, {
+    clinic_id: 72, appointment_id: 1, filename: 'test.pdf', content_type: 'application/pdf', data_base64: 'VEVTVA==',
+  }), error => error.status === 404 && error.message === 'appointment_not_found');
+  assert.equal(f.calls.writes.length, 0);
 });

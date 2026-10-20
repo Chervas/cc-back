@@ -1,5 +1,6 @@
 'use strict';
 const { Op } = require('sequelize');
+const { hasCompletedAppointmentCare } = require('../lib/appointment-care');
 const EVENT = 'appointment_linked';
 const object = value => { if (typeof value !== 'string') return value || {}; try { return JSON.parse(value); } catch (_) { return {}; } };
 const fail = (code, message, statusCode = 409) => { throw Object.assign(new Error(message), { code, statusCode }); };
@@ -44,8 +45,6 @@ function createService({ db = require('../../models') } = {}) {
     const appointments = await db.CitaPaciente.findAll({ where: { paciente_id: ctx.budget.patient_id, clinica_id: ctx.budget.clinic_id },
       attributes: ['id_cita', 'inicio', 'fin', 'estado', 'tratamiento_id', 'es_provisional', 'voucher_id', 'arrived_at', 'care_started_at', 'care_completed_at', 'care_schedule_start', 'care_legacy_attendance', 'updated_at'],
       order: [['inicio', 'DESC'], ['id_cita', 'DESC']], limit: 150 });
-    const reports = appointments.length && db.AppointmentClinicalReport ? await db.AppointmentClinicalReport.findAll({ where: {
-      appointment_id: { [Op.in]:appointments.map(row => row.id_cita) }, clinic_id:ctx.budget.clinic_id, patient_id:ctx.budget.patient_id, status:'final' }, attributes:['appointment_id'], raw:true }) : [];
     const linkedRows = ctx.links.length ? await db.CitaPaciente.findAll({ where:{ id_cita:{ [Op.in]:ctx.links.map(link => link.appointment_id) },
       clinica_id:ctx.budget.clinic_id, paciente_id:ctx.budget.patient_id }, attributes:['id_cita','estado','es_provisional'], raw:true }) : [];
     return { budget_id: publicId, version: Number(ctx.budget.current_version), lines: ctx.lines.filter(line => line.accepted !== false).map(line => ({
@@ -55,7 +54,7 @@ function createService({ db = require('../../models') } = {}) {
         && link.version === Number(ctx.budget.current_version) && linkedRows.some(row => Number(row.id_cita) === link.appointment_id && usable(row))).length),
     })), links: ctx.links, appointments: appointments.filter(usable).map(row => ({
       id: Number(row.id_cita), start: row.inicio, end: row.fin, status: row.estado,
-      performed: reports.some(report => Number(report.appointment_id) === Number(row.id_cita)) || require('../lib/appointment-care').hasCompletedAppointmentCare(row),
+      performed: hasCompletedAppointmentCare(row),
       treatment_id: Number(row.tratamiento_id), already_linked: ctx.links.some(link => link.appointment_id === Number(row.id_cita)),
     })) };
   }
@@ -69,9 +68,9 @@ function createService({ db = require('../../models') } = {}) {
       const line = ctx.lines.find(item => item.key === lineKey);
       if (!allowedLine(line, appointment)) fail('budget_appointment_treatment', 'El tratamiento de la cita no coincide con este concepto del presupuesto.');
       if (association === 'performed') {
-        const finalReport = db.AppointmentClinicalReport && await db.AppointmentClinicalReport.findOne({ where:{ appointment_id:appointment.id_cita,
-          clinic_id:ctx.budget.clinic_id, patient_id:ctx.budget.patient_id, status:'final' }, attributes:['id'], transaction });
-        if (!finalReport && !require('../lib/appointment-care').hasCompletedAppointmentCare(appointment)) fail('budget_appointment_not_completed', 'No hay una atención finalizada para esta cita. Vincúlala como cita existente; no se dará por realizada desde el presupuesto.');
+        // A closed narrative documents an encounter; it does not prove that
+        // the reservation's canonical clinical care was completed.
+        if (!hasCompletedAppointmentCare(appointment)) fail('budget_appointment_not_completed', 'No hay una atención finalizada para esta cita. Vincúlala como cita existente; no se dará por realizada desde el presupuesto.');
       }
       const existing = ctx.links.find(item => item.appointment_id === Number(appointmentId));
       if (existing) {
