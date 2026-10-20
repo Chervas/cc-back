@@ -25,7 +25,8 @@ function fixture({healthy=true,reply=false,stale=false,asked=false,review=false,
    if(name==='../lib/automation-response-only-recovery')return require('../../lib/automation-response-only-recovery');
    if(name==='./appointmentWhatsappDeliveryAlert.service')return {reconcileAppointmentWhatsappDelivery:async()=>{alerts.push('undeliverable');}};
    throw Error('unexpected dependency: '+name);
- },isMobileVerificationProtocol:()=>false,cleanString:v=>v||null,readOutputTarget:(n,k)=>n.outputs[k],whatsappAuthorizedBroker:{bindingsForClinic:()=>[{sendEnabled:true,clinicId:2,phoneId:'123'}]},
+ },isMobileVerificationProtocol:()=>false,isProgramBookingProtocol:execution=>require('../../lib/patient-program-booking-confirmation').isFlow(execution),
+ cleanString:v=>v||null,readOutputTarget:(n,k)=>n.outputs[k],whatsappAuthorizedBroker:{bindingsForClinic:()=>[{sendEnabled:true,clinicId:2,phoneId:'123'}]},
  resolveWaitResponseAnchor:()=>({listened_output:{conversation_id:3,...(undeliverable||identityAge!==null?{message_id:7}:{})}}),toIntOrNull:Number,parseDateValueOrNull:v=>new Date(v),
  CitaPaciente:{findByPk:async()=>context.appointment},Conversation:{findByPk:async()=>({id:3,clinic_id:2,channel:'whatsapp',contact_id:'19995550101'})},
  Message:{findOne:async()=>reply?{id:8}:null,findByPk:async()=>identityAge!==null
