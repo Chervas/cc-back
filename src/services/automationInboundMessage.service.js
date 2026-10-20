@@ -598,6 +598,12 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
   try {
     const clinicId = positiveInt(conversation.clinic_id || claim.clinic_id);
     const channel = normalizeChannel(conversation.channel || claim.channel);
+    const programConfirmation = await require('./patientProgramBookingNotice.service').current().inbound({ message, conversation });
+    if (programConfirmation.handled) {
+      await markClaimCompleted(claim, 'patient_program_booking_notice', programConfirmation.request_event_id || null,
+        { confirmation: programConfirmation.ignored ? 'ignored' : 'correlated' });
+      return { status: 'completed', result: { claim_id: claim.id, owner: 'patient_program_booking_notice' } };
+    }
     const mobileVerification = await require('./patientMobileVerification.service').current().inbound({ message, conversation });
     if (mobileVerification.handled) {
       await markClaimCompleted(claim, 'patient_mobile_verification', mobileVerification.request_event_id || null,
@@ -770,6 +776,12 @@ async function reassignBufferedClaimsToWaitingExecution({ claims, conversation, 
 
   for (const message of messages) {
     const claim = claimByMessageId.get(positiveInt(message.id));
+    const programConfirmation = await require('./patientProgramBookingNotice.service').current().inbound({ message, conversation });
+    if (programConfirmation.handled) {
+      await markClaimCompleted(claim, 'patient_program_booking_notice', programConfirmation.request_event_id || null,
+        { confirmation: programConfirmation.ignored ? 'ignored' : 'correlated' });
+      reassigned.push(claim); continue;
+    }
     const mobileVerification = await require('./patientMobileVerification.service').current().inbound({ message, conversation });
     if (mobileVerification.handled) {
       await markClaimCompleted(claim, 'patient_mobile_verification', mobileVerification.request_event_id || null,

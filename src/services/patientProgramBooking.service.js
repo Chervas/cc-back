@@ -18,6 +18,7 @@ const { isFree } = require('../lib/booking-profile-solver');
 const { attentionVisitOrigin } = require('../lib/booking-attention-origin');
 const { cloneProgramContext, programScheduleContext, programScheduleAssessment, programScheduleBatchReceipt,
   programScheduleReceiptMatches } = require('../lib/program-schedule-confirmation');
+const { rescheduleInput, rescheduleSessions, shiftedChoices, assertCivilShift, rescheduleDto } = require('../lib/program-reschedule');
 const json = value => typeof value === 'string' ? JSON.parse(value) : value;
 const fail = (code, message, details, status = 409) => { throw domainError(status, code, message, details); };
 
@@ -256,6 +257,42 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
   async function propose(options) {
     const plan = await load(options); assertSchedulable(plan);
     const payload = options.payload || {};
+    const reschedule = rescheduleInput(payload);
+    if (reschedule) {
+      assertRevision(plan, reschedule.expected_plan_revision);
+      const selected = rescheduleSessions(plan, reschedule, now()); assertRelativeSessions(selected);
+      if (payload.fixed_sessions?.length || payload.session_keys != null && (!Array.isArray(payload.session_keys)
+        || payload.session_keys.length !== selected.length || selected.some(row => !payload.session_keys.includes(row.key)))) {
+        fail('program_reschedule_incomplete', 'Mueve sólo las reservas futuras del tramo elegido; las sesiones sin fecha se conservan pendientes.');
+      }
+      const choices = shiftedChoices(plan, selected, reschedule, payload.reschedule_start_local, payload.manual_sessions || []);
+      const normalized = bookingRequest({ request_key: 'program-reschedule-preview', snapshot_sha256: plan.snapshot.sha256, sessions: choices }).sessions;
+      const explicit = selected.map(session => {
+        const choice = normalized.find(row => row.key === session.key), start = new Date(choice.start_at);
+        if (start <= now() || start - now() > 366 * 86400000) fail('program_booking_date_invalid', 'Reserva citas futuras, dentro del próximo año.');
+        if (Object.keys(choice.selections).some(key => !session.booking_profile.phases.some(phase => phase.key === key))) fail('program_selection_invalid', 'La fase elegida no pertenece a esta cita.');
+        return { ...session, choice, start_at: start.toISOString(), end_at: new Date(start.getTime() + session.duration_minutes * 60000).toISOString() };
+      });
+      const series = plan.sessions.map(row => explicit.find(item => item.key === row.key) || row);
+      const orderIssues = seriesIssues(series, plan.snapshot.cadence, plan.timeZone);
+      const context = await contextFor(plan, explicit, new Date(Math.min(...explicit.map(row => new Date(row.start_at).getTime()))),
+        new Date(Math.max(...explicit.map(row => new Date(row.end_at).getTime()))), null, false, selected.map(row => Number(row.appointment.id_cita)));
+      const proposals = explicit.map(session => {
+        let solution = orderIssues.length ? null : solveBookingProfile({ profile: session.booking_profile, ...context, start: new Date(session.start_at), selections: session.choice.selections });
+        const exception = !orderIssues.length && !solution ? scheduleAssessment(plan, session, context, options.actorId) : null;
+        if (exception) solution = exception.solution;
+        const available = solution && supportAvailable(context, solution, supportIds(session))
+          && !context.patientBusy.some(busy => new Date(busy.start) < new Date(session.end_at) && new Date(busy.end) > new Date(session.start_at));
+        if (available) addVirtualBusy(context, solution, supportIds(session), session.booking_profile);
+        return { key: session.key, label: session.label, solution: available ? solution : null, previous_appointment: previousAppointment(session),
+          requested_start_at: session.start_at, requested_start_local: choices.find(row => row.key === session.key).start_local,
+          selections: session.choice.selections, priority_acknowledged: session.choice.priority_acknowledged,
+          reason_code: available ? null : orderIssues.length ? 'program_cadence_conflict' : 'program_booking_unavailable',
+          reason: available ? null : orderIssues.length ? 'Las fechas no respetan el orden o la pauta del programa.' : 'Este horario no está disponible. Elige otro inicio; no se desplazarán fechas automáticamente.',
+          ...(available && exception ? { requires_schedule_confirmation: true, schedule_restrictions: exception.restrictions } : {}) };
+      });
+      return { ...dto(plan), proposals, unproposed_count: 0, reschedule: rescheduleDto(reschedule, selected, payload.reschedule_start_local) };
+    }
     const resume = resumeInput(payload);
     if (resume) assertRevision(plan, resume.expected_plan_revision);
     else if (schedulingMode(plan.snapshot) !== 'manual' && resumeInfo(plan, now())) fail('program_resume_required', 'Retoma el programa para revisar juntas las sesiones pendientes y sus fechas.');
@@ -382,11 +419,13 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
       }
       assertSchedulable(plan);
       if (request.snapshot_sha256 !== plan.snapshot.sha256) fail('program_snapshot_changed', 'El programa ha cambiado. Actualiza el plan.');
+      const reschedule = request.mode === 'reschedule';
       const resume = request.mode === 'resume';
-      if (resume) assertRevision(plan, request.expected_plan_revision);
+      if (resume || reschedule) assertRevision(plan, request.expected_plan_revision);
       else if (schedulingMode(plan.snapshot) !== 'manual' && resumeInfo(plan, now())) fail('program_resume_required', 'Retoma el programa para revisar juntas las sesiones pendientes y sus fechas.');
-      const eligible = resume ? resumeSessions(plan, request.replan_from_key, now()) : plan.sessions.filter(row => row.scheduling_status === 'pending'
+      const eligible = reschedule ? rescheduleSessions(plan, request, now()) : resume ? resumeSessions(plan, request.replan_from_key, now()) : plan.sessions.filter(row => row.scheduling_status === 'pending'
         || schedulingMode(plan.snapshot) === 'manual' && row.scheduling_status === 'missed');
+      if (reschedule) assertCivilShift(plan, eligible, request);
       if (resume && (request.sessions.length !== eligible.length || eligible.some(row => !request.sessions.some(item => item.key === row.key)))) fail('program_resume_incomplete', 'Confirma todas las sesiones de la propuesta para conservar el orden y la pauta.');
       const selected = request.sessions.map(row => {
         const pendingSession = eligible.find(item => item.key === row.key);
@@ -482,8 +521,20 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
       }
       const result = { voucher_id: plan.voucher.public_id, sessions: created, reminders_enabled: false, replayed: false,
         ...(scheduleExceptions.size ? { schedule_exception_confirmed: true } : {}) };
-      await db.PatientProgramBookingRequest.create({ voucher_id: plan.voucher.id, request_key: request.request_key,
+      const receipt = await db.PatientProgramBookingRequest.create({ voucher_id: plan.voucher.id, request_key: request.request_key,
         request_sha256: request.request_sha256, result, created_by: options.actorId }, { transaction });
+      const communication = await require('./patientProgramBookingNotice.service').recordBookingReceipt({ db, receipt,
+        voucher: plan.voucher, snapshot: plan.snapshot, clinic: plan.clinic, actorId: options.actorId, transaction, now: now() });
+      // A closed gate remains completely inert and keeps historical DTOs. The
+      // active outbox projection is persisted in this same transaction so an
+      // exact booking/reschedule replay returns it without another event/job.
+      if (communication.reason !== 'runtime_disabled') {
+        // Do not mutate the JSON object retained by Sequelize's initial
+        // previousDataValues: that would look unchanged and skip the UPDATE.
+        const completeResult = { ...result, communication };
+        await receipt.update({ result: completeResult }, { transaction });
+        return completeResult;
+      }
       return result;
     });
   }

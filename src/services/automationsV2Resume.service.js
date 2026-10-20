@@ -493,7 +493,8 @@ async function recoverLateTimedOutResponseMatches({
   const candidates = await FlowExecutionV2.findAll({
     where: {
       status: 'completed',
-      trigger_type: { [Op.ne]: require('../lib/patient-mobile-verification').REQUEST },
+      trigger_type: { [Op.notIn]: [require('../lib/patient-mobile-verification').REQUEST,
+        require('../lib/patient-program-booking-confirmation').REQUEST] },
       clinic_id: normalizedClinicId,
       updated_at: { [Op.gte]: since },
     },
@@ -970,6 +971,7 @@ async function enqueueInboundResponseResume({
 
   const matched = candidates.filter((execution) => {
     if (require('../lib/patient-mobile-verification').isFlow(execution)) return false;
+    if (require('../lib/patient-program-booking-confirmation').isFlow(execution)) return false;
     if (requiresMediaSupport && IS_GATEWAY_RUNTIME
       && !mediaResponseRuntimes.has(getExecutionRuntimeNamespace(execution))) return false;
     if (!getWaitResponseNode(execution)) return false;

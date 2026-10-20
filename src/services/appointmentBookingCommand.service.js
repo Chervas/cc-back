@@ -322,6 +322,10 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       }
       if (session.consumption_movement_id && values.estado !== previous.estado) throw bookingError('program_session_completed', 'La sesión ya se ha consumido. Revisa su corrección desde el historial antes de cambiarla.');
       if (session.consumption_movement_id && (new Date(values.inicio).getTime() !== new Date(previous.inicio).getTime() || new Date(values.fin).getTime() !== new Date(previous.fin).getTime())) throw bookingError('program_session_completed', 'La fecha de una sesión consumida forma parte de su historial.');
+      // Program date mutations require the already verified in-process series
+      // capability. Ordinary HTTP writers (including Personal) cannot bypass
+      // the scope review, atomic receipt and aggregate communication origin.
+      require('../lib/program-reschedule').assertCoordinatedScheduleChange(previous, values, !!preparedSeries);
       if (!require('../lib/program-booking').programBookingEnabled()) throw bookingError('program_booking_disabled', 'Esta cita necesita el entorno compatible con programas.');
       if (values.estado !== 'cancelada') {
         let series=preparedSeries?.series, timeZone=preparedSeries?.timeZone;

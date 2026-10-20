@@ -35,6 +35,15 @@ test('a linked individual appointment retains its original ClinicCloud source wh
   assert.equal(row.source_system, 'cliniccloud'); assert.equal(row.program_context.status, 'linked');
   assert.equal(db.calls.length, 2);
 });
+test('verified scoped reservation exposes only its public plan identity and canonical session key for rescheduling', async () => {
+  const row = appointment(), publicId = 'e8567ea0-0ae4-4daa-af49-16990051035d';
+  await attachAppointmentProgramContexts(database([session()], [{ ...voucher(), public_id: publicId }]), row);
+  assert.equal(row.program_context.voucher_id, publicId); assert.equal(row.program_context.session_key, 's10');
+  assert.doesNotMatch(JSON.stringify(row.program_context), /942|sold_amount|budget_id|patient_id|clinic_id/);
+  const foreign = appointment();
+  await attachAppointmentProgramContexts(database([session()], [{ ...voucher(), public_id: publicId, clinic_id: 999 }]), foreign);
+  assert.deepEqual(foreign.program_context, { kind: 'program', status: 'unavailable' });
+});
 test('missing, ambiguous and cross-patient/clinic/purchase relations fail closed', async () => {
   const scenarios = [
     { sessions: [] }, { sessions: [session(), session()] },
@@ -108,7 +117,9 @@ test('calendar DTO preserves backend program context, privacy guard removes it a
   assert.equal(context.module.exports.protectAppointmentPayload(mapped, { patientSensitive: true }).program_context.name, 'Programa comprado');
 });
 test('all full appointment readers attach context; lightweight summary does not load program purchases', () => {
-  assert.equal((source.match(/await attachAppointmentProgramContexts\(db,/g) || []).length, 4);
+  // Native create/restore also return the canonical context now; protect each
+  // real reader instead of freezing a stale count of four textual calls.
+  for (const target of ['citaCreada', 'page', 'citas', 'cita', 'restored']) assert(source.includes(`await attachAppointmentProgramContexts(db, ${target})`));
   const summary = code('    const summaryOnly =', '\n    const citas = await CitaPaciente.findAll({');
   assert.doesNotMatch(summary, /attachAppointmentProgramContexts/);
 });

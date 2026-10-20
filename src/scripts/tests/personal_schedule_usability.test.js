@@ -29,7 +29,7 @@ function matches(value, where = {}) {
     return actual === wanted || String(actual) === String(wanted);
   });
 }
-function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard = false, emitUndoReceipt = false } = {}) {
+function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard = false, emitUndoReceipt = false, sensitiveClinics = [10, 20] } = {}) {
   let state = {
     links: [{ id: 201, doctor_id: 2, clinica_id: 10, activo: true, recibe_citas: true },
       { id: 202, doctor_id: 2, clinica_id: 20, activo: true, recibe_citas: true },
@@ -121,8 +121,9 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
       ROLES_CLINICA: ['doctor', 'propietario'], SUBROLES_CLINICA: ['doctor'], ESTADO_CUENTA: ['activa'], ESTADO_INVITACION: ['aceptada'],
       isGlobalAdmin: id => Number(id) === 1, isStaffRole: () => true, isAdminRole: () => true, canManagePersonal: () => true },
     '../lib/access-policy': { canUserAccessFeature: async ({ clinicId }) => Number(clinicId) !== deniedClinic,
-      getAccessibleClinicIdsForFeature: async () => [10, 20] },
+      getAccessibleClinicIdsForFeature: async ({ featureKey } = {}) => featureKey === 'patients.sensitive.view' ? sensitiveClinics : [10, 20] },
     '../services/personalPresence.service': {},
+    '../services/personalScheduleProgramRead.service': require('../../services/personalScheduleProgramRead.service'),
     '../services/appointmentCalendarMutation.service': { withCalendarMutation,
       sendCalendarMutationError: (error, res) => { if (!/^booking_calendar_/.test(error?.code || '')) return false;
         res.status(error.status || 409).json({ code: error.code, message: error.message }); return true; } },
@@ -265,6 +266,35 @@ test('row deletion preview reviews future resource phases beyond the visible wee
   assert.equal(result.statusCode, 200, JSON.stringify(result)); assert.equal(result.body.scope, 'row'); assert.equal(result.body.affected_count, 1);
   assert.equal(result.body.appointments[0].duration_minutes, 60); assert.equal(result.body.appointments[0].affected_phases[0].doctor_id, 2);
   assert.equal(result.body.clinic_timezone, 'Europe/Madrid');
+});
+test('impact endpoint includes verified program public identity, while schedule-only access redacts it', async () => {
+  for (const sensitive of [true, false]) {
+    const f = fixture({ sensitiveClinics: sensitive ? [10, 20] : [] }); appointment(f);
+    Object.assign(f.state().appointments[0], { paciente_id: 11, voucher_id: 12, source_system: 'treatment_program',
+      import_metadata: { program_session: { session_id: 13, key: 's1' } } });
+    f.models.PatientProgramSession = { findAll: async () => [{ id: 13, appointment_id: 500, voucher_id: 12, session_key: 's1', position: 0 }] };
+    f.models.PatientVoucher = { findAll: async () => [{ id: 12, public_id: 'e8567ea0-0ae4-4daa-af49-16990051035d',
+      clinic_id: 10, patient_id: 11, name: 'Programa ficticio', total_units: 3, source_system: 'treatment_program' }] };
+    const result = await f.call('previewHorarioImpact', { action: 'delete_row' }, { id: '2', clinicaId: '10' });
+    assert.equal(result.statusCode, 200, JSON.stringify(result));
+    assert.equal(result.body.appointments[0].source_system, 'treatment_program');
+    assert.equal(result.body.appointments[0].program_context.status, sensitive ? 'linked' : 'unavailable');
+    assert.equal(result.body.appointments[0].program_context.voucher_id, sensitive ? 'e8567ea0-0ae4-4daa-af49-16990051035d' : undefined);
+  }
+});
+test('impact preview rejects stale original ranges, removed occurrences and deleted schedule IDs instead of returning an empty success', async () => {
+  const f = fixture(), params = { id: '2', clinicaId: '10' };
+  const body = { action: 'delete_shift', horario_id: 100, fecha: '2027-01-04', original_start: '09:00', original_end: '13:00' };
+  assert.equal((await f.call('previewHorarioImpact', body, params)).statusCode, 200);
+  f.state().schedules[0].hora_inicio = '10:00';
+  let result = await f.call('previewHorarioImpact', body, params);
+  assert.equal(result.statusCode, 409); assert.equal(result.body.code, 'personal_schedule_preview_stale');
+  result = await f.call('previewHorarioImpact', { ...body, fecha: '2027-01-18' }, params);
+  assert.equal(result.statusCode, 409);
+  result = await f.call('previewHorarioImpact', { ...body, fecha: '2027-02-01', original_start: '10:00', original_end: '12:00' }, params);
+  assert.equal(result.statusCode, 200, JSON.stringify(result));
+  f.state().schedules = [];
+  assert.equal((await f.call('previewHorarioImpact', body, params)).statusCode, 404);
 });
 test('row deletion preview rejects more than 2000 rows with bounded review instead of truncating', async () => {
   const f = fixture({ bookingEnabled: false }); f.state().appointments = Array.from({ length: 2001 }, (_, i) => ({ id_cita: i + 1, clinica_id: 10, doctor_id: 2,

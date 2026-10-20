@@ -507,7 +507,7 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
     return { status: 'failed', reason: 'linked_template_not_found' };
   }
 
-  if (linkedTemplate.trigger_type === 'patient.mobile_verification_requested') {
+  if (['patient.mobile_verification_requested', 'patient.program_appointments_booked'].includes(linkedTemplate.trigger_type)) {
     // Distribution is not activation. Serialize by clinic, and never replace
     // a locally configured family (including renamed or unpublished copies).
     return db.sequelize.transaction(async (transaction) => {
@@ -518,7 +518,8 @@ async function ensureCatalogTemplateForClinic({ clinicId, catalogFlow, actorUser
         order: [['version', 'DESC'], ['id', 'DESC']], transaction, lock: transaction.LOCK.UPDATE,
       });
       if (existing.length) {
-        return { status: 'unchanged', reason: 'mobile_verification_local_configuration_preserved',
+        return { status: 'unchanged', reason: linkedTemplate.trigger_type === 'patient.program_appointments_booked'
+          ? 'program_booking_local_configuration_preserved' : 'mobile_verification_local_configuration_preserved',
           template_key: existing[0].template_key, version: existing[0].version, scheduled_backfill: null };
       }
       const row = await AutomationFlowTemplateV2.create({

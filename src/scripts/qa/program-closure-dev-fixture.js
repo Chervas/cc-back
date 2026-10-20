@@ -90,9 +90,18 @@ async function inspect() {
   } finally { await c.end(); }
 }
 
-async function prepare({ gateValue = process.env.QA_PROGRAM_CLOSURE_DEV_WRITES, direct = false } = {}) {
-  assert.equal(gateValue, MARKER, 'EXPLICIT_SYNTHETIC_DEV_WRITE_AUTHORIZATION_REQUIRED');
+function catalogIdentity({ direct = false, video = false } = {}) {
   assert.equal(typeof direct, 'boolean', 'EXPLICIT_DIRECT_PROGRAM_MODE_REQUIRED');
+  assert.equal(typeof video, 'boolean', 'EXPLICIT_VIDEO_PROGRAM_MODE_REQUIRED');
+  assert(!video || direct, 'VIDEO_REQUIRES_CLINICAL_PROGRAM_WITHOUT_BUDGET');
+  return video ? { marker: MARKER + '-video', name: 'Demostración · Programa de tres citas' }
+    : direct ? { marker: MARKER + '-direct', name: 'QA · Programa directo sin presupuesto · 20/10' }
+      : { marker: MARKER, name: 'QA · Programa de 3 citas · Cierre 20/10' };
+}
+
+async function prepare({ gateValue = process.env.QA_PROGRAM_CLOSURE_DEV_WRITES, direct = false, video = false } = {}) {
+  assert.equal(gateValue, MARKER, 'EXPLICIT_SYNTHETIC_DEV_WRITE_AUTHORIZATION_REQUIRED');
+  const identity = catalogIdentity({ direct, video });
   assert.equal(process.cwd(), '/home/ubuntu/wt/back-dev', 'CURRENT_DEV_WORKTREE_REQUIRED');
   const preflight = await inspect(); validateScope(preflight);
   // Use the configured DEV application models/services; never borrow CRM env
@@ -123,9 +132,9 @@ async function prepare({ gateValue = process.env.QA_PROGRAM_CLOSURE_DEV_WRITES, 
       treatmentIds.push(Number(treatment.id_tratamiento));
     }
     const programs = require('../../services/treatmentPrograms.service');
-    const program = await programs.create({ clinicId: CLINIC, actorId: 1, payload: { idempotency_key: direct ? MARKER + '-direct' : MARKER,
-      name: direct ? 'QA · Programa directo sin presupuesto · 20/10' : 'QA · Programa de 3 citas · Cierre 20/10', kind: 'program', status: 'active', total_price: 150, price_profile: profile,
-      notes: `${MARKER}${direct ? '-direct. Catálogo ficticio para asignar desde Agenda sin presupuesto' : '. Compra ficticia de QA'}: no facturar, enviar ni aplicar a pacientes reales.`,
+    const program = await programs.create({ clinicId: CLINIC, actorId: 1, payload: { idempotency_key: identity.marker,
+      name: identity.name, kind: 'program', status: 'active', total_price: 150, price_profile: profile,
+      notes: `${identity.marker}${direct ? '. Catálogo ficticio para asignar desde Agenda sin presupuesto' : '. Compra ficticia de QA'}: no facturar, enviar ni aplicar a pacientes reales.`,
       appointments: [0, 15, 30].map((offset_days, index) => ({ key: `qa_${index + 1}`, label: `Cita ficticia ${index + 1}`,
         offset_days, treatment_ids: treatmentIds })) } });
     if (direct) {
@@ -133,7 +142,7 @@ async function prepare({ gateValue = process.env.QA_PROGRAM_CLOSURE_DEV_WRITES, 
       assert.equal(hash(after.rooms), hash(preflight.rooms), 'EXISTING_ROOMS_CHANGED');
       assert.equal(hash(after.doctors), hash(preflight.doctors), 'EXISTING_DOCTORS_CHANGED');
       assert.equal(hash(after.existing_budgets), hash(preflight.existing_budgets), 'EXISTING_BUDGETS_CHANGED');
-      return { marker: MARKER + '-direct', target: 'dev_isolated', synthetic_only: true, clinic_id: CLINIC, patient_id: PATIENT,
+      return { marker: identity.marker, target: 'dev_isolated', synthetic_only: true, clinic_id: CLINIC, patient_id: PATIENT,
         patient_public_id: PATIENT_PUBLIC, program_id: program.item.id, program_version: program.item.version,
         session_count: program.item.appointments.length, budget_created: false, voucher_created: false,
         appointments_created_by_prepare: 0, real_sends: 0, existing_resources_unchanged: true };
@@ -168,8 +177,8 @@ async function prepare({ gateValue = process.env.QA_PROGRAM_CLOSURE_DEV_WRITES, 
 }
 
 async function main() {
-  assert(['--inspect', '--prepare', '--prepare-direct'].includes(process.argv[2]), 'EXPLICIT_INSPECT_OR_PREPARE_MODE_REQUIRED');
-  console.log(JSON.stringify(process.argv[2] === '--inspect' ? await inspect() : await prepare({ direct: process.argv[2] === '--prepare-direct' }), null, 2));
+  assert(['--inspect', '--prepare', '--prepare-direct', '--prepare-video'].includes(process.argv[2]), 'EXPLICIT_INSPECT_OR_PREPARE_MODE_REQUIRED');
+  console.log(JSON.stringify(process.argv[2] === '--inspect' ? await inspect() : await prepare({ direct: ['--prepare-direct', '--prepare-video'].includes(process.argv[2]), video: process.argv[2] === '--prepare-video' }), null, 2));
 }
 if (require.main === module) main().catch(error => { console.error(JSON.stringify({ code: error.code || error.name, message: error.message })); process.exitCode = 1; });
-module.exports = { MARKER, CLINIC, PATIENT, PATIENT_PUBLIC, ROOM_IDS, DOCTOR_IDS, assertRuntimeGates, applyObservedRuntimeGates, validateScope, inspect, prepare };
+module.exports = { MARKER, CLINIC, PATIENT, PATIENT_PUBLIC, ROOM_IDS, DOCTOR_IDS, assertRuntimeGates, applyObservedRuntimeGates, validateScope, catalogIdentity, inspect, prepare };

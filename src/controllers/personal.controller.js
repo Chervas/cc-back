@@ -2972,6 +2972,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
     const scheduleTimezoneMap = await buildClinicTimezoneMap(scheduleClinicIds);
     const overlapEditableIds = new Set(await getAccessibleClinicIdsForFeature({ actorId, featureKey: 'clinic.settings.edit' }));
     const scheduleAppointmentRows = await loadAppointmentsForScheduleRange({
+        actorId,
         doctorId: targetUserId,
         clinicIds: scheduleClinicIds,
         from: scheduleRange.from,
@@ -3128,7 +3129,7 @@ exports.previewHorarioImpact = async (req, res) => {
 
         if (['delete_row', 'delete-row'].includes(req.body?.action)) {
             const clinicTimezone = await getClinicTimezoneById(clinicaId);
-            const appointments = await findFutureAppointmentsForRowImpact({ doctorId: targetUserId, clinicaId,
+            const appointments = await findFutureAppointmentsForRowImpact({ actorId, doctorId: targetUserId, clinicaId,
                 timeZone: clinicTimezone });
             return res.json({ scope: 'row', clinic_timezone: clinicTimezone, intervals: [],
                 has_affected_appointments: appointments.length > 0, affected_count: appointments.length, appointments });
@@ -3140,6 +3141,7 @@ exports.previewHorarioImpact = async (req, res) => {
             const existing = await DoctorHorario.findOne({
                 where: { id: horarioId },
                 include: [
+                    { model: DoctorHorarioExcepcion, as: 'excepciones' },
                     {
                         model: DoctorClinica,
                         as: 'doctorClinica',
@@ -3156,6 +3158,19 @@ exports.previewHorarioImpact = async (req, res) => {
                 original_start: existing.hora_inicio,
                 original_end: existing.hora_fin,
             };
+            const sourceDate = normalizeDateOnly(req.body?.source_fecha || req.body?.fecha || req.body?.date);
+            if (sourceDate && ['delete_shift', 'update_shift', 'resize_shift', 'move_shift'].includes(req.body?.action)) {
+                const [occurrence] = expandHorariosForDate([existing], sourceDate,
+                    buildHorarioExceptionMap(existing.excepciones || []));
+                const requestedStart = normalizeHm(req.body?.original_start || req.body?.hora_inicio_original);
+                const requestedEnd = normalizeHm(req.body?.original_end || req.body?.hora_fin_original);
+                if (!occurrence || requestedStart && requestedStart !== normalizeHm(occurrence.hora_inicio)
+                    || requestedEnd && requestedEnd !== normalizeHm(occurrence.hora_fin)) {
+                    return res.status(409).json({ code: 'personal_schedule_preview_stale',
+                        message: 'El horario ha cambiado. Actualiza la vista antes de continuar.' });
+                }
+                fallback = { original_start: occurrence.hora_inicio, original_end: occurrence.hora_fin };
+            }
         }
 
         const clinicTimezone = await getClinicTimezoneById(clinicaId);
@@ -3180,8 +3195,9 @@ exports.previewHorarioImpact = async (req, res) => {
 
         const appointments = ['block', 'create_block', 'update_block'].includes(req.body?.action)
             && ['daily', 'weekly', 'monthly'].includes(req.body?.recurrente)
-            ? await findAppointmentsForRecurringBlockImpact({ doctorId: targetUserId, clinicaId, body: req.body, timeZone: clinicTimezone })
+            ? await findAppointmentsForRecurringBlockImpact({ actorId, doctorId: targetUserId, clinicaId, body: req.body, timeZone: clinicTimezone })
             : await findAppointmentsForImpact({
+            actorId,
             doctorId: targetUserId,
             clinicaId,
             intervals,
@@ -3315,6 +3331,9 @@ function serializeScheduleAppointment(row, timeZone = DEFAULT_TIMEZONE) {
         instalacion_nombre: instalacion?.nombre || null,
         tratamiento_id: plain.tratamiento_id != null ? Number(plain.tratamiento_id) : null,
         tratamiento_nombre: tratamiento?.nombre || null,
+        ...(plain.source_system ? { source_system: plain.source_system } : {}),
+        ...(plain.program_context ? { program_context: plain.program_context } : {}),
+        ...(plain.booking_segments?.length ? { booking_segments: plain.booking_segments } : {}),
     };
 }
 
@@ -3326,7 +3345,7 @@ function appointmentInclude() {
     ].filter(Boolean);
 }
 
-async function loadAppointmentsForScheduleRange({ doctorId, clinicIds, from, to }) {
+async function loadAppointmentsForScheduleRange({ actorId, doctorId, clinicIds, from, to }) {
     const ids = (clinicIds || [])
         .map((id) => Number(id))
         .filter((id) => Number.isFinite(id));
@@ -3350,6 +3369,8 @@ async function loadAppointmentsForScheduleRange({ doctorId, clinicIds, from, to 
         include: appointmentInclude(),
         order: [['inicio', 'ASC']],
     });
+    await require('../services/personalScheduleProgramRead.service').attach({ db: require('../../models'), appointments, actorId,
+        accessibleClinics: getAccessibleClinicIdsForFeature });
     // Preserve the whole clinical appointment for rescheduling. Its resource
     // phases determine impact, but must never shorten a 60-minute appointment
     // into the 20-minute phase occupied by this professional.
@@ -3378,7 +3399,7 @@ async function findPersonalBlockAppointmentConflict({ doctorId, clinicaId, start
     return null;
 }
 
-async function findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZone = DEFAULT_TIMEZONE, now = new Date(), earliestStart = null, latestEnd = null }) {
+async function findFutureAppointmentsForRowImpact({ actorId, doctorId, clinicaId, timeZone = DEFAULT_TIMEZONE, now = new Date(), earliestStart = null, latestEnd = null }) {
     const lowerBound = new Date(Math.max(new Date(now).getTime(), earliestStart ? new Date(earliestStart).getTime() : 0));
     const db = require('../../models');
     const enabled = require('../services/treatmentBookingProfile.service').bookingCapabilities().simple;
@@ -3409,6 +3430,8 @@ async function findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZon
     if (!ids.length) return [];
     const appointments = await CitaPaciente.findAll({ where: { id_cita: { [Op.in]: ids }, clinica_id: Number(clinicaId),
         ...ACTIVE_APPOINTMENT_WHERE }, include: appointmentInclude(), order: [['inicio', 'ASC']], limit: 2001 });
+    await require('../services/personalScheduleProgramRead.service').attach({ db, appointments, actorId,
+        accessibleClinics: getAccessibleClinicIdsForFeature });
     return appointments.map(appointment => {
         const plain = appointment.toJSON ? appointment.toJSON() : appointment;
         const affected = phases.filter(phase => Number(phase.id_cita) === Number(plain.id_cita))
@@ -3417,14 +3440,14 @@ async function findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZon
     });
 }
 
-async function findAppointmentsForRecurringBlockImpact({ doctorId, clinicaId, body, timeZone }) {
+async function findAppointmentsForRecurringBlockImpact({ actorId, doctorId, clinicaId, body, timeZone }) {
     const range = buildPersonalBlockRange(body, timeZone);
     if (!range?.start || !range?.end || range.start >= range.end) return [];
     const block = { id: -1, doctor_id: doctorId, clinica_id: clinicaId, fecha_inicio: range.start,
         fecha_fin: range.end, recurrente: body.recurrente, recurrente_hasta: normalizeDateOnly(body.recurrente_hasta), excepciones: [] };
     const spanDays = Math.round((new Date(`${toDay(range.end, timeZone)}T12:00:00Z`) - new Date(`${toDay(range.start, timeZone)}T12:00:00Z`)) / 86400000);
     const latestEnd = block.recurrente_hasta ? localDateTimeToUtc(addDays(block.recurrente_hasta, spanDays), toHm(range.end, timeZone), timeZone) : null;
-    const appointments = await findFutureAppointmentsForRowImpact({ doctorId, clinicaId, timeZone, earliestStart: range.start, latestEnd });
+    const appointments = await findFutureAppointmentsForRowImpact({ actorId, doctorId, clinicaId, timeZone, earliestStart: range.start, latestEnd });
     return appointments.map(appointment => {
         const phases = (appointment.affected_phases || []).filter(phase => {
             const last = toDay(phase.fin, timeZone);
@@ -3515,7 +3538,7 @@ function buildImpactIntervalsFromBody(body = {}, fallback = {}, timeZone = DEFAU
     return intervals.filter((it) => it.start && it.end && it.start < it.end);
 }
 
-async function findAppointmentsForImpact({ doctorId, clinicaId, intervals, timeZone = DEFAULT_TIMEZONE }) {
+async function findAppointmentsForImpact({ actorId, doctorId, clinicaId, intervals, timeZone = DEFAULT_TIMEZONE }) {
     const validIntervals = (intervals || []).filter((it) => it?.fecha && it?.start && it?.end && it.start < it.end);
     if (!Number.isFinite(Number(doctorId)) || !Number.isFinite(Number(clinicaId)) || !validIntervals.length) {
         return [];
@@ -3524,6 +3547,7 @@ async function findAppointmentsForImpact({ doctorId, clinicaId, intervals, timeZ
     const minDay = validIntervals.map((it) => it.fecha).sort()[0];
     const maxDay = validIntervals.map((it) => it.fecha).sort().slice(-1)[0];
     const rows = await loadAppointmentsForScheduleRange({
+        actorId,
         doctorId,
         clinicIds: [clinicaId],
         from: minDay,

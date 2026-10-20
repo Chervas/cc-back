@@ -43,7 +43,7 @@ function latestPublished(rows) {
 }
 
 async function publicationActivation(template, body, transaction) {
-  if (template.trigger_type === 'patient.mobile_verification_requested') return false;
+  if (['patient.mobile_verification_requested', 'patient.program_appointments_booked'].includes(template.trigger_type)) return false;
   if (body?.preserve_activation !== true) return true;
   const previous = latestPublished(await familyRows(template, transaction));
   if (body.expected_published_version != null && Number(body.expected_published_version) !== Number(previous?.version || 0)) {
@@ -87,6 +87,11 @@ async function assertTemplateActive(template, transaction, { terminalExecution }
     const contract = require('./patient-mobile-verification');
     if (process.env.PATIENT_MOBILE_VERIFICATION_ENABLED !== 'true' || latest.is_system || !latest.clinic_id
       || !contract.configValid(latest.trigger_config) || !contract.graphValid(latest.nodes)) throw stopped();
+  }
+  if (latest.trigger_type === 'patient.program_appointments_booked') {
+    const C = require('./patient-program-booking-confirmation');
+    if (process.env.PATIENT_PROGRAM_BOOKING_NOTICE_ENABLED !== 'true' || latest.is_system || !latest.clinic_id
+      || !C.configValid(latest.trigger_config) || !C.graphValid(latest.nodes)) throw stopped();
   }
   return latest;
 }
@@ -226,6 +231,12 @@ async function stopExecution(execution) {
 }
 
 async function setActive(template, active, { mobilePolicyActor } = {}) {
+  if (active && template.trigger_type === 'patient.program_appointments_booked'
+    && (process.env.PATIENT_PROGRAM_BOOKING_NOTICE_ENABLED !== 'true' || template.is_system || !template.clinic_id || !template.published_at
+      || !require('./patient-program-booking-confirmation').configValid(template.trigger_config)
+      || !require('./patient-program-booking-confirmation').graphValid(template.nodes))) {
+    throw Object.assign(Error('program_details_activation_not_ready'), { code: 'program_details_activation_not_ready', statusCode: 409 });
+  }
   if (active && template.trigger_type === 'patient.mobile_verification_requested'
     && (process.env.PATIENT_MOBILE_VERIFICATION_ENABLED !== 'true'
       || template.is_system || !template.clinic_id || !template.published_at

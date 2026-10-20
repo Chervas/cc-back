@@ -47,6 +47,7 @@ module.exports = async function modularRuntime({ sql, models: db }) {
     './phone': require('../../../lib/phone'),
     '../services/temporaryPatientDirection.service': { observeConversation: async c => c } }, {});
   const stop = { isStop: e => e.code === 'TESTONLY_STOP', createExecution: v => db.FlowExecutionV2.create(v),
+    assertSilenceMessageAllowed: async () => {},
     assertExecutionActive: async execution => {
       const template = await db.AutomationFlowTemplateV2.findByPk(execution.template_version_id);
       if (!t.enabled || !template.is_active) throw Object.assign(Error('TESTONLY_STOP'), { code: 'TESTONLY_STOP' });
@@ -110,7 +111,7 @@ module.exports = async function modularRuntime({ sql, models: db }) {
     category: 'UTILITY', status: 'APPROVED', is_active: true,
     components: [{ type: 'BODY', text: C.BODY }, { type: 'BUTTONS', buttons: C.BUTTONS.map(text => ({ type: 'QUICK_REPLY', text })) }] });
   let seq = 100;
-  return Object.assign(t, { db, engine, requests, template, approved, sender, get runtime() { return runtime; },
+  return Object.assign(t, { db, engine, requests, template, approved, sender, dependencies, Clock, get runtime() { return runtime; },
     restart() { runtime = createRuntime(deps); t.runtime = runtime; },
     async source({ clinic = 72, phone, patientId } = {}) {
       const patient = patientId ? await db.Paciente.findByPk(patientId) : await db.Paciente.create({ id_paciente: ++seq,

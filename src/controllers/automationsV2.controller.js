@@ -939,6 +939,13 @@ const TRIGGER_TYPES_V2 = [
       { key: 'response_timeout_minutes', label: 'Plazo sin respuesta (minutos, desde envío aceptado)', input_type: 'number', required: false },
       { key: 'enabled_after', label: 'Sólo nuevas solicitudes desde (ISO UTC)', input_type: 'string', required: false },
     ] },
+  { value: 'patient.program_appointments_booked', label: 'Citas de programa reservadas o reprogramadas',
+    description: 'Un resumen de todas las fechas futuras del programa; confirma datos, nunca asistencia.',
+    default_config: { summary_policy: 'each_booking', response_timeout_minutes: null, enabled_after: null },
+    config_schema: [
+      { key: 'response_timeout_minutes', label: 'Plazo sin respuesta (minutos, desde envío aceptado)', input_type: 'number', required: false },
+      { key: 'enabled_after', label: 'Sólo nuevas reservas desde (ISO UTC)', input_type: 'string', required: false },
+    ] },
 ];
 const TRIGGER_NODE_PREFIX = 'trigger/';
 const TRIGGER_NODE_TYPES_V2 = TRIGGER_TYPES_V2.map((trigger) => ({
@@ -1013,13 +1020,19 @@ function normalizeDomain(raw) {
 }
 
 function resolveDomainFromTriggerType(triggerType) {
-  if (triggerType === 'patient.mobile_verification_requested') return 'patient';
+  if (['patient.mobile_verification_requested', 'patient.program_appointments_booked'].includes(triggerType)) return 'patient';
   if (APPOINTMENT_TRIGGER_TYPES.has(triggerType)) return 'appointment';
   return 'marketing';
 }
 
 const NODE_TYPES_V2 = [
   ...TRIGGER_NODE_TYPES_V2,
+  { type: 'action/resolve_program_appointment_details', category: 'action', label: 'Registrar datos de las citas del programa',
+    description: 'Registra atómicamente la respuesta del resumen vigente. Sólo confirma datos; no asistencia, pagos ni consentimientos.',
+    output_keys: ['on_success', 'on_fail'], runtime_status: 'real', default_config: { result: 'review_required', reason: 'response_unclear' },
+    config_schema: [{ key: 'result', label: 'Resultado', input_type: 'select', required: true, options: ['confirmed', 'review_required'] },
+      { key: 'reason', label: 'Motivo de revisión', input_type: 'select', required: false,
+        options: ['', 'patient_requested_changes', 'response_unclear', 'no_response', 'delivery_failed'] }] },
   { type: 'action/resolve_mobile_verification', category: 'action', label: 'Registrar verificación del móvil',
     description: 'Registra un resultado auditado de la solicitud vigente. No envía mensajes, espera respuestas ni crea avisos.',
     output_keys: ['on_success', 'on_fail'], runtime_status: 'real',
@@ -1655,6 +1668,20 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
   const normalizedTriggerType = cleanString(triggerType);
   const triggerNode = resolveTriggerNode({ entryNodeId, nodes });
   const rawConfig = isObject(triggerNode?.config) ? triggerNode.config : {};
+  if (normalizedTriggerType === 'patient.program_appointments_booked') {
+    const C = require('../lib/patient-program-booking-confirmation');
+    const candidate = { configured: true, summary_policy: rawConfig.summary_policy || 'each_booking',
+      response_timeout_minutes: rawConfig.response_timeout_minutes == null ? null : Number(rawConfig.response_timeout_minutes),
+      enabled_after: rawConfig.enabled_after ?? null };
+    if (candidate.summary_policy !== 'each_booking' || rawConfig.response_timeout_minutes != null
+      && (!Number.isInteger(candidate.response_timeout_minutes) || candidate.response_timeout_minutes < 1 || candidate.response_timeout_minutes > 10080)
+      || rawConfig.enabled_after != null && (typeof rawConfig.enabled_after !== 'string' || !Number.isFinite(Date.parse(rawConfig.enabled_after)))) {
+      return { ok: false, error: 'program_details_configuration_invalid', message: 'Revisa el plazo y el corte UTC de las nuevas reservas.' };
+    }
+    const configured = C.configValid(candidate);
+    return { ok: true, trigger_config: { managed_feature: 'patient_program_booking_notice', ...candidate, configured,
+      ...(configured ? {} : { response_timeout_minutes: null, enabled_after: null }) } };
+  }
 
   if (normalizedTriggerType === 'patient.mobile_verification_requested') {
     const contract = require('../lib/patient-mobile-verification');
@@ -2125,8 +2152,9 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
     && cleanString(triggerConfig.managed_feature) === 'lead_auto_reply'
   ) {
     sanitizedTriggerConfig = { ...triggerConfig };
-  } else if (normalizedTriggerType === 'patient.mobile_verification_requested' && isObject(triggerConfig)) {
+  } else if (['patient.mobile_verification_requested', 'patient.program_appointments_booked'].includes(normalizedTriggerType) && isObject(triggerConfig)) {
     sanitizedTriggerConfig = {
+      ...(normalizedTriggerType === 'patient.program_appointments_booked' ? { summary_policy: 'each_booking' } : {}),
       response_timeout_minutes: triggerConfig.response_timeout_minutes ?? null,
       enabled_after: triggerConfig.enabled_after ?? null,
     };
@@ -3197,6 +3225,11 @@ function validateFlowGraph({ entry_node_id, nodes }) {
     && !mobile.graphValid(nodes)) {
     errors.push(buildValidationError('mobile_verification_graph_invalid', 'La verificación de móvil se compone con nodos reutilizables del dominio paciente, sin acciones de citas, publicidad o consentimientos.'));
   }
+  const programDetails = require('../lib/patient-program-booking-confirmation');
+  if (Array.isArray(nodes) && nodes.some(node => node?.type === `trigger/${programDetails.REQUEST}` || node?.type === programDetails.ACTION)
+    && !programDetails.graphValid(nodes)) {
+    errors.push(buildValidationError('program_details_graph_invalid', 'El resumen de programa sólo admite nodos reutilizables de su dominio; no acciones de asistencia, publicidad ni consentimientos.'));
+  }
 
   if (!Array.isArray(nodes) || nodes.length === 0) {
     errors.push(buildValidationError('nodes_required', 'El flujo debe tener al menos un nodo'));
@@ -3353,6 +3386,12 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
         : !['patient_rejected', 'response_unclear', 'no_response', 'delivery_failed'].includes(config.reason)))) {
     errors.push(buildValidationError('mobile_verification_result_invalid',
       `El nodo ${nodeId} sólo registra resultados de una solicitud de verificación de móvil vigente.`));
+  }
+  if (nodeType === 'action/resolve_program_appointment_details'
+    && (!Array.from(nodeMap.values()).some(n => n.type === 'trigger/patient.program_appointments_booked')
+      || !['confirmed', 'review_required'].includes(config.result)
+      || (config.result === 'confirmed' ? !!config.reason : !['patient_requested_changes', 'response_unclear', 'no_response', 'delivery_failed'].includes(config.reason)))) {
+    errors.push(buildValidationError('program_details_result_invalid', `El nodo ${nodeId} sólo registra datos del resumen de programa vigente.`));
   }
 
   const schema = Array.isArray(meta.config_schema) ? meta.config_schema : [];
@@ -4185,7 +4224,7 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
   if (nodeType === 'delay/wait_response') {
     const timeoutDuration = Number(config.timeout_duration);
     const mobileTimeout = config.timeout_duration === '{{trigger.data.response_timeout_minutes}}'
-      && Array.from(nodeMap.values()).some(n => n.type === 'trigger/patient.mobile_verification_requested');
+      && Array.from(nodeMap.values()).some(n => ['trigger/patient.mobile_verification_requested', 'trigger/patient.program_appointments_booked'].includes(n.type));
     const timeoutUnit = cleanString(config.timeout_unit);
     const listensTo = cleanString(config.listens_to_node_id);
     const listenedNode = listensTo ? nodeMap.get(listensTo) : null;
@@ -5696,9 +5735,9 @@ exports.listTemplates = async (req, res) => {
       } else if (domain === 'appointment') {
         where.trigger_type = { [Op.in]: Array.from(APPOINTMENT_TRIGGER_TYPES) };
       } else if (domain === 'marketing') {
-        where.trigger_type = { [Op.notIn]: [...APPOINTMENT_TRIGGER_TYPES, 'patient.mobile_verification_requested'] };
+        where.trigger_type = { [Op.notIn]: [...APPOINTMENT_TRIGGER_TYPES, 'patient.mobile_verification_requested', 'patient.program_appointments_booked'] };
       } else if (domain === 'patient') {
-        where.trigger_type = 'patient.mobile_verification_requested';
+        where.trigger_type = { [Op.in]: ['patient.mobile_verification_requested', 'patient.program_appointments_booked'] };
       }
     }
 
@@ -6006,7 +6045,7 @@ exports.createTemplateDraft = async (req, res) => {
       description: cleanString(body.description),
       trigger_type: resolvedTriggerType,
       trigger_config: normalizedTriggerConfig,
-      is_active: parseBool(body.is_active, resolvedTriggerType !== 'patient.mobile_verification_requested'),
+      is_active: parseBool(body.is_active, !['patient.mobile_verification_requested', 'patient.program_appointments_booked'].includes(resolvedTriggerType)),
       is_system: !!isSystem,
       clinic_id: clinicId,
       group_id: groupId,
@@ -6559,7 +6598,7 @@ exports.publishTemplateVersion = async (req, res) => {
       });
     }
 
-    let activateOnPublish = triggerResolution.trigger_type !== 'patient.mobile_verification_requested';
+    let activateOnPublish = !['patient.mobile_verification_requested', 'patient.program_appointments_booked'].includes(triggerResolution.trigger_type);
     await db.sequelize.transaction(async (transaction) => {
       if (singleNoticeSource) {
         const rows=await AutomationFlowTemplateV2.findAll({where:familyWhere,order:[['id','ASC']],transaction,lock:transaction.LOCK.UPDATE});

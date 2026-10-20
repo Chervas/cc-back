@@ -26,6 +26,7 @@ const CATALOG_TRIGGER_TYPES = [
   'treatment_completed',
   'birthday',
   'patient.mobile_verification_requested',
+  'patient.program_appointments_booked',
 ];
 
 const CATALOG_TRIGGER_TYPE_SET = new Set(CATALOG_TRIGGER_TYPES);

@@ -44,7 +44,15 @@ test('direct fixture branch returns a separate catalog only before any budget/en
   assert(branch.includes('budget_created: false, voucher_created: false'));
   assert(branch.includes('EXISTING_BUDGETS_CHANGED'));
   assert.doesNotMatch(branch, /\.create\(|\.assign\(|\.book\(|transitionBudget|createBudget/);
-  assert(code.includes("idempotency_key: direct ? MARKER + '-direct' : MARKER"));
+  assert(code.includes('idempotency_key: identity.marker'));
+});
+test('video receives its own catalogue identity, never resets the prior QA programme or creates a purchase', () => {
+  const video = fixture.catalogIdentity({ direct: true, video: true }), clinical = fixture.catalogIdentity({ direct: true });
+  assert.notEqual(video.marker, clinical.marker); assert.notEqual(video.marker, fixture.catalogIdentity().marker);
+  assert.equal(video.marker, fixture.catalogIdentity({ direct: true, video: true }).marker);
+  assert.equal(video.name, 'Demostración · Programa de tres citas');
+  assert.throws(() => fixture.catalogIdentity({ video: true }), /VIDEO_REQUIRES_CLINICAL_PROGRAM_WITHOUT_BUDGET/);
+  assert.throws(() => fixture.catalogIdentity({ direct: true, video: 'true' }), /EXPLICIT_VIDEO_PROGRAM_MODE_REQUIRED/);
 });
 test('operator inherits only validated live DEV runtime gates, never hardcodes enablement or copies credentials', () => {
   const flags = { ...valid().runtime_gates, BOOKING_PHASE_OFFSETS_ENABLED: 'false', DB_PASSWORD: 'must-not-copy', DELIVERY_ENABLED: 'true' };

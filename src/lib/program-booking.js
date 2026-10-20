@@ -176,7 +176,7 @@ function bookingRequest(payload) {
     return { key: row.key, start_at: new Date(row.start_at).toISOString(), selections: normalized, priority_acknowledged: row.priority_acknowledged === true,
       ...durationChoice(row) };
   }).sort((a, b) => a.key.localeCompare(b.key));
-  const resume = require('./program-replan').resumeInput(payload);
+  const resume = payload.mode === 'reschedule' ? require('./program-reschedule').rescheduleInput(payload) : require('./program-replan').resumeInput(payload);
   const contents = { snapshot_sha256: payload.snapshot_sha256, sessions, ...(resume || {}) };
   return { request_key: payload.request_key, ...contents, request_sha256: hash(contents),
     ...(payload.schedule_acknowledgement != null ? { schedule_acknowledgement: payload.schedule_acknowledgement } : {}) };

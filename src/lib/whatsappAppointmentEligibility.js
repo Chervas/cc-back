@@ -145,7 +145,7 @@ function assertAppointmentEligibility({ appointment: a, execution: e, clinicId, 
   return true;
 }
 async function assertAutomatedMessageEligibility({ message, conversation, payload, loadExecution, loadAppointment, patientHeld, getReceptionState,
-  loadNativeReplyAcknowledgement }) {
+  loadNativeReplyAcknowledgement, authorizeProgramBatch }) {
   const { assertNoSyntheticDispatch } = require('./appointment-synthetic-guard');
   assertNoSyntheticDispatch(message, conversation);
   const m = object(message.metadata), executionId = Number(m.execution_id);
@@ -165,6 +165,13 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
   assertNoSyntheticDispatch(execution);
   if (!execution || Number(execution.clinic_id) !== Number(conversation.clinic_id)) fail('whatsapp_automation_scope_changed');
   assertClinicCommunicationAllowed(conversation.clinic_id, { metadata: m, payload }, execution);
+  if (execution.trigger_type === 'patient.program_appointments_booked') {
+    // One purpose-specific, current native batch authorization. It cannot
+    // authorize a manual message, imported history or consent/review traffic.
+    if (protectedCommunication({ metadata: m, payload }) || typeof authorizeProgramBatch !== 'function'
+      || await authorizeProgramBatch({ message, conversation, payload, execution }) !== true) fail('whatsapp_program_batch_ineligible');
+    return true;
+  }
   if (execution.trigger_entity_type !== 'appointment') {
     if (held) fail('whatsapp_patient_import_held');
     return true;

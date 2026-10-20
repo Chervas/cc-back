@@ -22,7 +22,7 @@ function selectCatalogSourceCandidates(templates) {
 
   // Managed masters stay inactive because configuration and activation are local.
   return rows.filter((template) => isReviewAutomation(template) || isManagedLeadAutomation(template)
-    || template?.trigger_type === 'patient.mobile_verification_requested'
+    || ['patient.mobile_verification_requested', 'patient.program_appointments_booked'].includes(template?.trigger_type)
       && (template.is_system === true || Number(template.is_system) === 1)
       && !template.clinic_id && !template.group_id);
 }

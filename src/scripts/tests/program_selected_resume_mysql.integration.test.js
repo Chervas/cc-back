@@ -18,9 +18,20 @@ test('selected resume: owned SQL suffix, immutable prefix, fixed capacity, canon
       assert.equal(initial.sessions.length, 2);
       const completed = await f.appointment('s0'), oldFuture = await f.appointment('s3');
       // New program payloads require :00 seconds. Existing appointment history
-      // can carry seconds: seed that through the actual canonical edit writer,
-      // including its snapshots/occupancies, before the historical completion.
-      await f.move(completed.id_cita, '2030-01-07T09:03:07.000Z', '2030-01-07T09:48:07.000Z');
+      // can carry seconds. This is an explicit historical seed in the owned
+      // synthetic SQL fixture, not an authorized new date edit: ordinary
+      // program writers now correctly require the reschedule coordinator.
+      // Shift persisted clock evidence together so the history stays valid.
+      const shiftClocks = value => Array.isArray(value) ? value.map(shiftClocks)
+        : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, nested]) => [key,
+          ['start_at', 'end_at'].includes(key) && typeof nested === 'string' ? new Date(new Date(nested).getTime() + 7000).toISOString() : shiftClocks(nested)])) : value;
+      await sql.transaction(async transaction => {
+        await completed.update({ inicio: '2030-01-07T09:03:07.000Z', fin: '2030-01-07T09:48:07.000Z',
+          import_metadata: shiftClocks(completed.import_metadata) }, { transaction });
+        for (const occupancy of await db.AppointmentBookingOccupancy.findAll({ where: { appointment_id: completed.id_cita }, transaction })) {
+          await occupancy.update({ start_at: new Date(+new Date(occupancy.start_at) + 7000), end_at: new Date(+new Date(occupancy.end_at) + 7000) }, { transaction });
+        }
+      });
       await completed.reload();
       // Explicit historical fixture seed, not a tested new completion or charge.
       const movement = await db.PatientVoucherMovement.create({ voucher_id: f.voucher.id, movement_type: 'consumption', units: -1,

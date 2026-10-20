@@ -224,7 +224,9 @@ test('post-publication marker failure cannot overwrite a provider acceptance wit
     stored = { id: 1000, createdAt: new Date(NOW).toISOString(), ...structuredClone(defaults) };
     producer = row(stored); return [producer, true];
   };
-  const stop = { prepareMessageForDispatch: async (message, patch) => message.update({ status: patch.status,
+  // Mobile verification is not an appointment-silence send. Keep the native
+  // pre-send gate in this fixture so the producer race still reaches transport.
+  const stop = { assertSilenceMessageAllowed: async () => {}, prepareMessageForDispatch: async (message, patch) => message.update({ status: patch.status,
     metadata: { ...message.metadata, ...patch.metadata } }), assertMessageCanDispatch: async () => {}, isStop: () => false };
   const engine = loadNative('flowEngineV2.service', { ...f.dependencies,
     '../lib/automation-runtime-stop': stop,

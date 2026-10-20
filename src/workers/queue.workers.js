@@ -812,6 +812,19 @@ createBusinessWorker('outbound_whatsapp', async (job) => {
             resolveScheduled: value => require('../services/flowEngineV2.service').resolveScheduledWhatsappSenderConfig(value),
         });
         const whatsappChannelRole = resolveWhatsappChannelRole(effectiveClinicConfig);
+        if (messageMetadata.kind === 'patient_program_booking_notice' || Object.hasOwn(messageMetadata, 'program_booking_request_event_id')) {
+            const check = await require('../services/patientProgramBookingNotice.service').current().authorizeTransport({
+                message: msg, to, useTemplate, sender: effectiveClinicConfig, templateName, templateLanguage, templateComponents,
+            });
+            if (!check.allowed) {
+                msg.status = 'failed'; msg.metadata = { ...msg.metadata, error: check.reason, cancelled: true };
+                await msg.save(); return { skipped: true, reason: check.reason };
+            }
+            if (check.deferredUntil) {
+                await require('../services/flowEngineV2.service').enqueueQuietHoursWhatsappJob({ messageId: msg.id, conversationId, scheduledAt: check.deferredUntil });
+                return { deferred: true, reason: 'quiet_hours' };
+            }
+        }
         if (messageMetadata.kind === 'patient_mobile_verification' || Object.hasOwn(messageMetadata, 'mobile_verification_request_id')) {
             const check = await require('../services/patientMobileVerification.service').current().authorizeTransport({
                 message: msg, to, useTemplate, sender: effectiveClinicConfig, templateName, templateLanguage, templateComponents,

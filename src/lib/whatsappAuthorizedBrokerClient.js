@@ -222,6 +222,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       await require('./whatsappAppointmentEligibility').assertAutomatedMessageEligibility({ message, conversation,
         payload: intent.message, loadExecution, loadAppointment, patientHeld,
         loadNativeReplyAcknowledgement,
+        authorizeProgramBatch: args => require('../services/patientProgramBookingNotice.service').current().authorizeEligibility(args),
         getReceptionState: execution => loadReceptionState(conversation, config.bindings, execution) });
       const metadata = message.metadata || {};
       if (Number.isSafeInteger(Number(metadata.execution_id)) && Number(metadata.execution_id) > 0) {

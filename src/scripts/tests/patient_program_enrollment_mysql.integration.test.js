@@ -24,7 +24,7 @@ test('owned SQL + HTTP: clinical enrollment without economic/outbound writes, im
       db.Conversation = sql.define('Conversation', { id: { type: S.INTEGER, primaryKey: true } }, { tableName: 'Conversations', timestamps: false });
       for (const file of ['treatmentprogram', 'treatmentprogramrevision', 'economicbudget', 'economicbudgetversion', 'economicbudgetevent', 'economicpayment',
         'patientvoucher', 'patientvouchermovement', 'patientprogramsession', 'patientprogrambookingrequest', 'patientoperationalevent', 'patientfiscaldocument',
-        'patientconsentdocument', 'consentsignaturepackage', 'consentdeliveryevent', 'jobrequest', 'flowexecutionv2', 'message']) {
+        'patientconsentdocument', 'consentsignaturepackage', 'consentdeliveryevent', 'jobrequest', 'flowexecutionv2', 'automationflowtemplatev2', 'message']) {
         const model = require('../../../models/' + file)(sql, S.DataTypes); db[model.name] = model;
       }
       for (const model of Object.values(sql.models)) (model.options.indexes || []).forEach((index, i) => {
@@ -153,10 +153,31 @@ test('owned SQL + HTTP: clinical enrollment without economic/outbound writes, im
         assert.equal((await send('GET', url + '/program-plan?clinic_id=100')).body.pending_count, 0);
         assert.deepEqual(await counts(), zero); assert.equal(Number((await assigned.reload()).available_units), 3);
         assert.equal(await db.PatientVoucher.count(), 2);
+        // Source hook integration, not just a hand-built domain fixture: enable
+        // only this private process, with NO published automation or sender.
+        // The complete reschedule must persist one disabled notice alongside
+        // its receipt, never create jobs/messages or claim anything was sent.
+        process.env.PATIENT_PROGRAM_BOOKING_NOTICE_ENABLED = 'true';
+        const current = await send('GET', url + '/program-plan?clinic_id=100');
+        const shift = { mode: 'reschedule', reschedule_scope: 'following', replan_from_key: 's0', expected_plan_revision: current.body.plan_revision };
+        const shiftPreview = await send('POST', url + '/program-proposals', { ...shift, reschedule_start_local: '2030-02-11T09:00' });
+        assert.equal(shiftPreview.status, 200, JSON.stringify(shiftPreview.body)); assert(shiftPreview.body.proposals.every(row => row.solution));
+        const shiftedRequest = { ...shift, request_key: 'owned-direct-shift-notice', snapshot_sha256: current.body.snapshot_sha256,
+          sessions: shiftPreview.body.proposals.map(row => ({ key: row.key, start_at: row.solution.start_at, selections: row.selections, priority_acknowledged: row.priority_acknowledged })) };
+        const shiftResult = await send('POST', url + '/program-appointments', shiftedRequest);
+        assert.equal(shiftResult.status, 201, JSON.stringify(shiftResult.body)); assert.equal(shiftResult.body.communication.sent, false);
+        assert.equal(shiftResult.body.communication.status, 'not_available');
+        assert.equal(await db.PatientOperationalEvent.count({ where: { event_type: 'patient.program_appointments_booked' } }), 1);
+        const shiftReplay = await send('POST', url + '/program-appointments', shiftedRequest);
+        assert.equal(shiftReplay.body.replayed, true); assert.deepEqual(shiftReplay.body.communication, shiftResult.body.communication);
+        assert.equal(await db.PatientOperationalEvent.count({ where: { event_type: 'patient.program_appointments_booked' } }), 1);
+        assert.deepEqual(await counts(), zero); assert.equal(await db.CitaPaciente.count({ where: { voucher_id: assigned.id } }), 3);
+        delete process.env.PATIENT_PROGRAM_BOOKING_NOTICE_ENABLED;
         await assert.rejects(assigned.update({ program_snapshot: null }), error => error.code === 'PROGRAM_ENROLLMENT_SNAPSHOT_IMMUTABLE');
         await assigned.reload();
         report.checks.push('Native HTTP guards require patient edit/sensitive + agenda manage, never billing; real scoped catalog resolution freezes snapshot; concurrent enrollment creates once; replay, duplicate-active and actor checks preserve zero financial/outbound rows');
         report.checks.push('Real proposals + canonical atomic booking create three appointments/phase occupancies from clinical enrollment with no budget; HOLD/suppressions remain; receipt retry duplicates nothing; no movements, jobs, flows, messages, consents, payments or economic documents');
+        report.checks.push('Actual booking hook with owned-only notice gate enabled records one disabled aggregate event atomically with reschedule/receipt; replay returns its persisted communication without another event, and inactive/unconfigured sending creates zero jobs/flows/messages');
         // The budget-backed path remains strict, never reinterpreted as a
         // clinical enrollment even if somebody injects its JSON directly.
         const budget = await db.EconomicBudget.create({ public_id: 'owned-budget-still-pending', clinic_id: 100, patient_id: 2, number: 'QA', status: 'presented' });

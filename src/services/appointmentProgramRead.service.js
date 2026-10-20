@@ -30,7 +30,7 @@ async function attachAppointmentProgramContexts(db, appointments) {
     if (!voucherIds.length) continue;
     const vouchers = (await db.PatientVoucher.findAll({
       where: { id: { [Op.in]: voucherIds } },
-      attributes: ['id', 'clinic_id', 'patient_id', 'name', 'total_units', 'source_system'], raw: true,
+      attributes: ['id', 'public_id', 'clinic_id', 'patient_id', 'name', 'total_units', 'source_system'], raw: true,
     })).map(plain);
     const byVoucher = new Map(vouchers.map(row => [Number(row.id), row]));
     const byAppointment = new Map();
@@ -60,6 +60,8 @@ async function attachAppointmentProgramContexts(db, appointments) {
         && rawIds.every(id => positiveId(id)) ? [...new Set(rawIds.map(Number))] : null;
       setContext(row, { kind: 'program', status: 'linked', name: voucher.name.trim().slice(0, 180),
         session_number: position + 1, session_count: count,
+        ...(typeof voucher.public_id === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(voucher.public_id)
+          ? { voucher_id: voucher.public_id, session_key: session.session_key } : {}),
         ...(treatmentIds ? { treatment_ids: treatmentIds } : {}) });
     }
   }

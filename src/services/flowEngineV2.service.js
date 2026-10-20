@@ -536,11 +536,22 @@ function computeQuietHoursDelayMs({
   enabled = true,
   startHour = 22,
   endHour = 7,
+  timeZone = 'Europe/Madrid',
 }) {
   if (!enabled) {
     return { delayMs: 0, scheduledAt: null };
   }
 
+  if (timeZone !== 'Europe/Madrid') {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', hourCycle: 'h23' }).formatToParts(now).filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+    const hour = Number(parts.hour);
+    if (!isHourWithinQuietWindow(hour, startHour, endHour)) return { delayMs: 0, scheduledAt: null };
+    const day = `${parts.year}-${parts.month}-${parts.day}`;
+    const date = hour >= startHour ? require('../lib/personal-schedule-recurring').addDays(day, 1) : day;
+    const scheduledAt = require('../lib/voucher-schedule-calendar').resolveLocalInstant(date, `${String(endHour).padStart(2, '0')}:00:00`, timeZone);
+    return { delayMs: Math.max(0, +scheduledAt - +now), scheduledAt };
+  }
   const madridNow = getMadridDateParts(now);
   const inQuietWindow = isHourWithinQuietWindow(madridNow.hour, startHour, endHour);
   if (!inQuietWindow) {
@@ -1023,6 +1034,22 @@ async function withExecutionJobClaim(execution, work) {
 
 async function updateExecutionAndEmit(execution, patch, eventName = 'flow_execution:updated', extra = {}) {
   await withExecutionJobClaim(execution, async transaction => {
+    if (patch.context && isProgramBookingProtocol(execution)) {
+      // withExecutionJobClaim already owns this row; keep the current read
+      // explicit here as well so correlation and patch cannot lose an inbound.
+      const fresh = await FlowExecutionV2.findByPk(execution.id, { transaction, lock: transaction.LOCK.UPDATE });
+      const reply = fresh.context?.program_confirmation;
+      if (reply?.response_message_id && reply.response_version !== patch.context.program_confirmation?.response_version) {
+        patch.context = { ...patch.context, program_confirmation: { ...patch.context.program_confirmation, ...reply } };
+        if (patch.status === 'waiting') patch.wait_until = new Date(reply.response_buffer_until || Date.now());
+        if (patch.status === 'completed') {
+          patch.status = 'waiting'; patch.current_node_id = reply.wait_node_id;
+          patch.wait_until = new Date(reply.response_buffer_until || Date.now());
+          patch.waiting_meta = { type: 'delay/wait_response', resume_mode: 'retry_current_node', program_booking_protocol: true,
+            runtime_namespace: CURRENT_RUNTIME_NAMESPACE };
+        }
+      }
+    }
     if (patch.context && require('../lib/patient-mobile-verification').isFlow(execution)) {
       const fresh = await FlowExecutionV2.findByPk(execution.id, { transaction });
       const reply = fresh.context?.mobile_verification;
@@ -3408,12 +3435,13 @@ async function enqueueAutomationWhatsappTransport({
     clinicId: toIntOrNull(conversation?.clinic_id),
   }, transportJobOptions);
 
-  if (metadata.mobile_verification_request_id) {
+  if (metadata.mobile_verification_request_id || metadata.program_booking_request_event_id) {
     // Publication already succeeded. A bookkeeping failure cannot undo it or
     // replace a fast worker's provider receipt with the producer's snapshot.
     await db.sequelize.transaction(async transaction => {
       const fresh = await Message.findByPk(msg.id, { transaction, lock: transaction.LOCK.UPDATE });
-      await fresh.update({ metadata: { ...fresh.metadata, mobile_verification_transport_queued_at: new Date().toISOString() } }, { transaction });
+      const marker = metadata.program_booking_request_event_id ? 'program_booking_transport_queued_at' : 'mobile_verification_transport_queued_at';
+      await fresh.update({ metadata: { ...fresh.metadata, [marker]: new Date().toISOString() } }, { transaction });
     }).catch(() => {});
   }
 
@@ -3811,7 +3839,8 @@ async function reuseExistingAutomationWhatsappMessage({ existingMessage, node })
     ? existingMessage.metadata
     : {};
   const storedSelection = readStoredWhatsappReplaySelection(existingMetadata);
-  const mobileProtocol = !!existingMetadata.mobile_verification_request_id;
+  const mobileProtocol = !!(existingMetadata.mobile_verification_request_id || existingMetadata.program_booking_request_event_id);
+  const publicationMarker = existingMetadata.program_booking_request_event_id ? 'program_booking_transport_queued_at' : 'mobile_verification_transport_queued_at';
   if (mobileProtocol && (existingMetadata.delivery_unknown || existingMetadata.wamid
     || existingMessage.status === 'failed' && !existingMetadata.enqueue_error || existingMetadata.cancelled)) {
     return { kind: 'success', output: { message_id: existingMessage.id, conversation_id: existingMessage.conversation_id,
@@ -3873,7 +3902,7 @@ async function reuseExistingAutomationWhatsappMessage({ existingMessage, node })
         // Meta llego a ejecutarse. No se reenvia a ciegas: evita duplicados.
         throw new Error('whatsapp_previous_delivery_state_unknown');
       }
-      if (!transportJobId || enqueuePreviouslyFailed || mobileProtocol && !existingMetadata.mobile_verification_transport_queued_at) {
+      if (!transportJobId || enqueuePreviouslyFailed || mobileProtocol && !existingMetadata[publicationMarker]) {
         const dispatch = await enqueueAutomationWhatsappTransport({
           msg: existingMessage,
           conversation,
@@ -3966,13 +3995,15 @@ async function handleSendWhatsapp(node, context, runtime) {
   const execution = runtime?.execution || null;
   const mobileProtocol = isMobileVerificationProtocol(node, execution);
   const mobile = mobileProtocol ? await require('./patientMobileVerification.service').current().sendPreflight({ execution }) : null;
-  if (mobile?.suppressed) return { kind: 'success', output: { suppressed: true, no_send: true }, next_node_id: null };
-  const config = mobile ? { ...configured, recipient_mode: 'manual_number', recipient_to: mobile.recipient,
+  const program = isProgramBookingProtocol(execution) ? await require('./patientProgramBookingNotice.service').current().sendPreflight({ execution }) : null;
+  const operational = mobile || program;
+  if (operational?.suppressed) return { kind: 'success', output: { suppressed: true, no_send: true }, next_node_id: null };
+  const config = operational ? { ...configured, recipient_mode: 'manual_number', recipient_to: operational.recipient,
     communication_scope: 'care', quiet_hours_enabled: true, outside_send_window_policy: 'schedule_next_window', suppress_flow_event: true } : configured;
   const managedService = require('./appointmentVisitManaged.service').current();
   const managedContext = execution?.context?.appointment_visit
     ? await managedService.sendContext(execution, node, runtime?.jobClaim) : null;
-  const automationDeliveryKey = mobile?.delivery_key || managedContext?.delivery_key || buildAutomationWhatsappDeliveryKey(execution, node);
+  const automationDeliveryKey = operational?.delivery_key || managedContext?.delivery_key || buildAutomationWhatsappDeliveryKey(execution, node);
   if (automationDeliveryKey) {
     const existingMessage = await findAutomationWhatsappMessageByDeliveryKey({
       deliveryKey: automationDeliveryKey,
@@ -4038,6 +4069,7 @@ async function handleSendWhatsapp(node, context, runtime) {
   );
   const quietWindow = computeQuietHoursDelayMs({
     now: new Date(),
+    ...(program ? { timeZone: program.request.metadata.notice.time_zone } : {}),
     enabled: quietHoursEnabled,
     startHour: 22,
     endHour: 7,
@@ -4302,7 +4334,8 @@ async function handleSendWhatsapp(node, context, runtime) {
       }
     }
 
-    templateParams = resolveTemplateVariables(selectedTemplateConfig, templateContext, template);
+    templateParams = program ? { ...program.template_params }
+      : resolveTemplateVariables(selectedTemplateConfig, templateContext, template);
     const expectedTemplateParamIndexes = extractWhatsappTemplatePlaceholderIndexes(template);
     const missingTemplateParamIndexes = expectedTemplateParamIndexes.filter((paramIdx) => {
       const value = cleanString(templateParams?.[paramIdx]);
@@ -4405,7 +4438,7 @@ async function handleSendWhatsapp(node, context, runtime) {
 
   conversation = await findCanonicalWhatsappConversation({
     requireExactContact: true,
-    isolatePatientContact: mobileProtocol,
+    isolatePatientContact: !!operational,
     clinicId,
     contactId: recipientData.recipient,
     patientId: targetPatientId,
@@ -4450,7 +4483,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     }
     conversation = await findCanonicalWhatsappConversation({
       requireExactContact: true,
-      isolatePatientContact: mobileProtocol,
+      isolatePatientContact: !!operational,
       clinicId,
       contactId: recipientData.recipient,
       patientId: targetPatientId,
@@ -4533,8 +4566,12 @@ async function handleSendWhatsapp(node, context, runtime) {
   const mobileEnvelope = mobile ? await require('./patientMobileVerification.service').current().sendEnvelope({
     request: mobile.request, template, templateParams, sender: senderData.clinic_config, conversation, recipient: recipientData.recipient,
   }) : null;
-  if (mobileEnvelope) {
-    templateComponents = mobileEnvelope.template_components;
+  const programEnvelope = program ? await require('./patientProgramBookingNotice.service').current().sendEnvelope({
+    request: program.request, template, templateParams, sender: senderData.clinic_config, conversation, recipient: recipientData.recipient,
+  }) : null;
+  const operationalEnvelope = mobileEnvelope || programEnvelope;
+  if (operationalEnvelope) {
+    templateComponents = operationalEnvelope.template_components;
     useDurableAccessGuidanceTransport = true;
   }
 
@@ -4642,7 +4679,7 @@ async function handleSendWhatsapp(node, context, runtime) {
   const metadata = {
     source: 'automations_v2',
     kind: 'flow_send_whatsapp',
-    ...(mobileEnvelope?.metadata || {}),
+    ...(operationalEnvelope?.metadata || {}),
     execution_id: execution?.id || null,
     appointment_timeout: context.whatsapp_no_response_timeout === true,
     node_id: cleanString(node?.id),
@@ -4768,7 +4805,7 @@ async function handleSendWhatsapp(node, context, runtime) {
       });
     } catch (enqueueErr) {
       const enqueueError = enqueueErr?.message || 'enqueue_failed';
-      if (mobileProtocol) {
+      if (operational) {
         const accepted = await db.sequelize.transaction(async transaction => {
           const fresh = await Message.findByPk(msg.id, { transaction, lock: transaction.LOCK.UPDATE });
           if (fresh.metadata?.wamid || fresh.metadata?.provider_acceptance_at) return true;
@@ -5575,6 +5612,12 @@ async function handleCreateTask(node, context, runtime) {
 }
 
 async function handleSendSystemNotification(node, context, runtime) {
+  if (isProgramBookingProtocol(runtime?.execution) && !runtime.programBookingNotification) {
+    return require('./patientProgramBookingNotice.service').current().withNotification({ execution: runtime.execution, node }, scope =>
+      handleSendSystemNotification(node, mergeContextPatch(context, { program_confirmation: {
+        reason: scope.snapshot.reason, reason_text: scope.snapshot.reason_text,
+      } }), { ...runtime, programBookingNotification: scope }));
+  }
   if (isMobileVerificationProtocol(node, runtime?.execution) && !runtime.mobileVerificationNotification) {
     return require('./patientMobileVerification.service').current().withNotification({ execution: runtime.execution, node }, scope =>
       handleSendSystemNotification(node, mergeContextPatch(context, { mobile_verification: {
@@ -6552,6 +6595,26 @@ async function handleSendEmail(node, context, runtime = {}) {
 function isMobileVerificationProtocol(node, execution) {
   return require('../lib/patient-mobile-verification').isFlow(execution);
 }
+function isProgramBookingProtocol(execution) {
+  return require('../lib/patient-program-booking-confirmation').isFlow(execution);
+}
+async function processProgramBookingWait(node, context, runtime) {
+  const anchor = resolveWaitResponseAnchor(context, node.config);
+  const outcome = await require('./patientProgramBookingNotice.service').current().waitContext({ execution: runtime.execution });
+  const reply = outcome.reply || {}, patch = { program_confirmation: { ...(context.program_confirmation || {}), ...reply,
+    wait_node_id: node.id, runtime_namespace: CURRENT_RUNTIME_NAMESPACE } };
+  if (outcome.status === 'responded') {
+    patch.last_response = reply.response_text; patch.last_prompt = anchor.listened_output?.message_preview || null;
+    patch.last_response_context = { response_text: reply.response_text, response_message_id: reply.response_message_id,
+      wait_node_id: node.id, listens_to_node_id: anchor.listens_to_node_id, listened_message_preview: patch.last_prompt };
+  }
+  const output = { status: outcome.status, accepted_at: outcome.accepted_at || null, timeout_at: outcome.deadline_at || null };
+  if (outcome.wait_until) return { kind: 'waiting', output, context_patch: patch, wait_until: outcome.wait_until,
+    waiting_meta: { type: 'delay/wait_response', resume_mode: 'retry_current_node', program_booking_protocol: true,
+      runtime_namespace: CURRENT_RUNTIME_NAMESPACE, listens_to_node_id: anchor.listens_to_node_id } };
+  const edge = outcome.status === 'responded' ? 'on_response' : outcome.status === 'timed_out' ? 'on_timeout' : outcome.status === 'delivery_failed' ? 'on_fail' : null;
+  return { kind: 'success', output, context_patch: patch, next_node_id: edge ? readOutputTarget(node, edge) : null };
+}
 
 async function processMobileVerificationWait(node, context, runtime) {
   const anchor = resolveWaitResponseAnchor(context, node.config);
@@ -6595,6 +6658,10 @@ async function processNode(node, context, runtime = {}) {
   }
 
   switch (nodeType) {
+    case 'action/resolve_program_appointment_details':
+      if (!isProgramBookingProtocol(runtime.execution)) throw new Error('program_details_execution_scope');
+      if (simulation) return { kind: 'success', output: { simulated: true, no_send: true }, next_node_id: readOutputTarget(node, 'on_success') };
+      return require('./patientProgramBookingNotice.service').current().resolveAction({ execution: runtime.execution, node, context });
     case 'action/resolve_mobile_verification':
       if (!require('../lib/patient-mobile-verification').isFlow(runtime.execution)) throw new Error('mobile_verification_execution_scope');
       if (simulation) return { kind: 'success', output: { simulated: true, no_send: true }, next_node_id: readOutputTarget(node, 'on_success') };
@@ -7191,6 +7258,7 @@ async function processNode(node, context, runtime = {}) {
     }
 
     case 'delay/wait_response': {
+      if (isProgramBookingProtocol(runtime.execution) && !simulation) return processProgramBookingWait(node, context, runtime);
       if (isMobileVerificationProtocol(node, runtime.execution) && !simulation) return processMobileVerificationWait(node, context, runtime);
       const timeoutMs = resolveDurationMs(config?.timeout_duration ?? 60, config?.timeout_unit || 'minutes');
       const waitAnchor = resolveWaitResponseAnchor(context, config);
@@ -7353,6 +7421,9 @@ async function processNode(node, context, runtime = {}) {
       const mobileAnalysisVersion = mobileAnalysis && !simulation
         ? await require('./patientMobileVerification.service').current().attestAnalysis({ execution: runtime.execution, context: aiContext, sourceEntries, resolvedSources })
         : null;
+      const programAnalysis = isProgramBookingProtocol(runtime.execution) && presetKey === 'custom';
+      const programAnalysisVersion = programAnalysis && !simulation
+        ? await require('./patientProgramBookingNotice.service').current().attestAnalysis({ execution: runtime.execution, context: aiContext, sourceEntries, resolvedSources }) : null;
 
       const deterministicPresetOutput = presetKey === 'review_response_classifier' && !simulation
         ? await reviewResponseClassification.classifyReviewResponse({
@@ -7488,6 +7559,14 @@ async function processNode(node, context, runtime = {}) {
         });
       }
       aiOutput = normalizeConfiguredAiOutput(aiOutput, normalizedOutputFields);
+      if (programAnalysis) {
+        const evidence = typeof aiOutput.evidence === 'string' ? aiOutput.evidence.trim() : '';
+        if (!programAnalysisVersion || !evidence || !String(context.program_confirmation?.response_text || '').includes(evidence)
+          || typeof aiOutput.confidence !== 'number' || aiOutput.confidence < 0.9 || aiOutput.confidence > 1 || aiOutput.unequivocal !== true) {
+          aiOutput = { ...aiOutput, intent: 'unclear', unequivocal: false };
+        }
+        aiOutput._program_confirmation_response_version = programAnalysisVersion;
+      }
       if (mobileAnalysis) {
         const evidence = typeof aiOutput.evidence === 'string' ? aiOutput.evidence.trim() : '';
         if (!mobileAnalysisVersion || !evidence || !String(context.mobile_verification?.response_text || '').includes(evidence)
@@ -7643,6 +7722,14 @@ async function resumeWaitingNode(execution, node, context, {
   const nodeType = cleanString(node?.type) || '';
 
   if (nodeType === 'delay/wait_response') {
+    if (isProgramBookingProtocol(execution)) {
+      const result = await processProgramBookingWait(node, context, { execution });
+      const nextContext = mergeNodeOutput(mergeContextPatch(context, result.context_patch), node.id, result.output);
+      await updateExecutionAndEmit(execution, { status: result.kind === 'waiting' ? 'waiting' : 'running', context: nextContext,
+        current_node_id: result.kind === 'waiting' ? node.id : result.next_node_id, wait_until: result.wait_until || null,
+        waiting_meta: result.waiting_meta || null, last_error: null });
+      return { resumed: result.kind !== 'waiting', context: nextContext };
+    }
     if (isMobileVerificationProtocol(node, execution)) {
       const result = await processMobileVerificationWait(node, context, { execution });
       const nextContext = mergeNodeOutput(mergeContextPatch(context, result.context_patch), node.id, result.output);
@@ -8587,7 +8674,7 @@ async function runExecution(executionId, options = {}) {
       }
 
       if (result.kind === 'waiting') {
-        if (require('../lib/patient-mobile-verification').isFlow(execution) && result.context_patch) {
+        if ((require('../lib/patient-mobile-verification').isFlow(execution) || isProgramBookingProtocol(execution)) && result.context_patch) {
           context = mergeContextPatch(context, result.context_patch);
         }
         context = mergeNodeOutput(context, currentNodeId, {
@@ -8708,7 +8795,8 @@ async function runExecution(executionId, options = {}) {
         throw error;
       }
       const onFailNode = readOutputTarget(node, 'on_fail');
-      if (cleanString(node?.type) === 'action/send_whatsapp' && !require('../lib/patient-mobile-verification').isFlow(execution)) {
+      if (cleanString(node?.type) === 'action/send_whatsapp' && !require('../lib/patient-mobile-verification').isFlow(execution)
+        && !isProgramBookingProtocol(execution)) {
         await materializeFailedAutomationWhatsappMessage({
           node,
           context,
