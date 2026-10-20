@@ -20,14 +20,20 @@ function createActions(page) {
     const handle = await page.evaluateHandle(({ selector, text }) => [...document.querySelectorAll(selector)]
       .find(node => node.getClientRects().length && !node.disabled && (!text || node.textContent.includes(text))), { selector, text });
     const element = handle.asElement(); assert(element, `VISIBLE_NATIVE_CONTROL_REQUIRED:${selector}:${text || ''}`);
-    await element.evaluate(node => node.scrollIntoView({ block: 'center' })); await element.click(); await handle.dispose();
+    // DOM activation of the visible native control avoids Chromium's hidden
+    // tab IntersectionObserver wait. This is still the real Angular handler,
+    // not a component method/debug hook or a substituted HTTP response.
+    await element.evaluate(node => {
+      node.scrollIntoView({ block: 'center' });
+      (node.matches('mat-checkbox') ? node.querySelector('input[type="checkbox"]') : node).click();
+    }); await handle.dispose();
   };
   const input = async (selector, value) => {
     await page.waitForSelector(selector, { visible: true }); await page.focus(selector);
     await page.$eval(selector, (node, value) => { node.value = value; node.dispatchEvent(new Event('input', { bubbles: true })); }, value);
   };
   const idle = async () => { await page.waitForFunction(selector => !document.querySelector(selector + ' mat-progress-bar'), { timeout: 45000 }, selectors.planner); };
-  const waitPlanner = async () => { await page.waitForSelector(selectors.planner, { visible: true }); await idle(); };
+  const waitPlanner = async () => { await page.waitForSelector(selectors.planner + ' h2', { visible: true }); await idle(); };
   const setType = async label => { await click(selectors.type); await click('mat-option', label); };
   async function openPatientDrawer(patientLabel) {
     if (!await visible(selectors.drawer)) await click(selectors.newAppointment);
@@ -43,7 +49,7 @@ function createActions(page) {
     await input(selectors.programSearch, programName);
     await page.waitForFunction(name => [...document.querySelectorAll('mat-option')].some(node => node.getClientRects().length && node.textContent.includes(name)), { timeout: 30000 }, programName);
     await click('mat-option', programName); await click(selectors.assign);
-    await page.waitForSelector(selectors.enrollment, { visible: true });
+    await page.waitForSelector(selectors.confirmEnrollment, { visible: true });
   }
   async function cancelEnrollment() { await click(selectors.enrollment + ' button', 'Cancelar'); await page.waitForFunction(selector => !document.querySelector(selector), {}, selectors.enrollment); }
   async function assignProgram() { await click(selectors.confirmEnrollment); await waitPlanner(); }
@@ -61,7 +67,13 @@ function createActions(page) {
     if (await page.$eval(selector + ' input', node => node.checked) !== selected) await click(selector);
   }
   async function confirmDates() { await click(selectors.confirmBooking); await idle(); await page.waitForSelector(selectors.viewAppointment, { visible: true, timeout: 30000 }); }
-  async function closePlanner() { await click(selectors.planner + ' button[aria-label="Cerrar planificador"]'); await page.waitForFunction(selector => !document.querySelector(selector), {}, selectors.planner); }
+  async function closePlanner() {
+    await click(selectors.planner + ' button[aria-label="Cerrar planificador"]');
+    await page.waitForFunction(selector => !document.querySelector(selector), {}, selectors.planner);
+    // afterClosed refreshes/closes the parent drawer after Material finishes
+    // detaching the overlay. Let that native animation settle before a new FAB.
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
   return { click, input, visible, idle, waitPlanner, setType, openPatientDrawer, chooseProgram, cancelEnrollment, assignProgram,
     openExistingProgram, proposeDates, selectSession, confirmDates, closePlanner, selectors };
 }
