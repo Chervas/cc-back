@@ -3632,6 +3632,7 @@ function serializeVoucher(voucher, movements) {
     sold_amount: enrollment ? null : numberValue(voucher.sold_amount),
     ...(enrollment ? { commercial_status: 'not_contracted', origin: 'program_enrollment',
       catalog_reference_amount: enrollment.catalog_total_price, program_id: enrollment.program_id, program_version: enrollment.program_version } : {}),
+    ...(enrollment?.enrollment?.start_from_position > 1 ? require('../lib/patient-program-enrollment').enrollmentProgress(voucher, enrollment) : {}),
     activation_rule: voucher.activation_rule,
     status: voucher.status,
     expires_at: voucher.expires_at,

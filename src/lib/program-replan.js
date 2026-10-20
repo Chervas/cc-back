@@ -61,7 +61,7 @@ function resumeInfo(plan, now = new Date()) {
   const interrupted = plan.sessions.some(row => row.scheduling_status === 'missed'
     || row.scheduling_status === 'pending' && row.appointment?.estado === 'cancelada');
   if (!interrupted) return null;
-  const origin=plan.sessions.filter(row=>!completed(row)).sort((a,b)=>a.position-b.position)[0];
+  const origin=plan.sessions.filter(row=>!completed(row) && ['pending','missed','reserved'].includes(row.scheduling_status)).sort((a,b)=>a.position-b.position)[0];
   return origin ? resumeSelectionInfo(plan,origin.key,now) : null;
 }
 function resumeSessions(plan, fromKey, now) {

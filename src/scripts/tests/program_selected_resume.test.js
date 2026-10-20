@@ -195,6 +195,15 @@ test('bounded suffixes can be selected without claiming that earlier pending uni
   assert.equal(resumeSelectionInfo(p, 's2', now).affected_count, 30);
   assert.equal(resumeSelectionInfo(p, 's2', now).earlier_pending_count, 2);
 });
+test('an unrecorded external prefix cannot hide an interrupted managed session or become a resume origin', () => {
+  const p = purePlan(['unrecorded', 'missed', 'pending']);
+  p.sessions[0].record=null; p.sessions[0].appointment=null; p.sessions[0].start_at=null;
+  assert.equal(resumeSelectionInfo(p,'s0',now),null);
+  assert.equal(resumeInfo(p,now).from_key,'s1');
+  assert.deepEqual(resumeInfo(p,now).affected_keys,['s1','s2']);
+  assert.equal(resumeInfo(p,now).earlier_pending_count,0);
+  assert.deepEqual(resumeOptions(p,now).map(row=>row.from_key),['s1','s2']);
+});
 test('manual and ordinary pending DTOs expose selectable origins without requiring a resume or inventing dates', async () => {
   for (const manual of [true, false]) {
     const f = fixture({ manual }), plan = await f.read();
@@ -359,7 +368,15 @@ test('relative gates and inactive purchases still block selected resume without 
   const off = fixture({ capabilities: { simple: true, multi: true, relativeSteps: false } }), plan = await off.read();
   assert.equal(plan.can_resume, false); assert.equal(plan.can_schedule, false);
   await assert.rejects(off.propose({ ...await resumePayload(off, 's2'), from_date: '2030-02-04', days: 1 }), { code: 'booking_profile_runtime_unavailable' });
+  await assert.rejects(off.propose({from_date:'2030-02-04',days:1,draft_strategy:{action:'initial'}}),{code:'booking_profile_runtime_unavailable'});
   const inactive = fixture(); inactive.state.voucher.status = 'pending';
   await assert.rejects(inactive.book([session('s3', '2030-02-04')], await resumePayload(inactive, 's3')), { code: 'program_purchase_not_schedulable' });
+  await assert.rejects(inactive.propose({from_date:'2030-02-04',days:1,draft_strategy:{action:'initial'}}),{code:'program_purchase_not_schedulable'});
   assert.equal(inactive.state.appointments.length, 0); assert.equal(inactive.state.voucher.status, 'pending');
+});
+test('the provisional draft cannot bypass an existing interrupted-program resume review',async()=>{
+  const f=fixture({manual:false});await f.book([session('s0','2030-01-07')]);
+  f.advance('2030-01-08T00:00:00Z');f.appointment('s0').estado='no_asistio';
+  await assert.rejects(f.propose({from_date:'2030-02-04',days:1,draft_strategy:{action:'initial'}}),{code:'program_resume_required'});
+  assert.equal(f.state.appointments.length,1);assert.equal(f.state.requests.length,1);
 });

@@ -111,7 +111,9 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
       const record = records.find(row => row.session_key === definition.key);
       const appointment = appointments.find(row => Number(row.id_cita) === Number(record?.appointment_id));
       if (record?.appointment_id && !appointment) fail('program_session_inconsistent', 'Falta una cita del historial del programa.');
-      const status = schedulingState(record, appointment);
+      const unrecorded = origin === 'program_enrollment' && position < (snapshot.enrollment?.start_from_position || 1) - 1;
+      if (unrecorded && record) fail('program_session_inconsistent', 'Una sesión anterior al registro no puede tener una cita o consumo asociado.');
+      const status = unrecorded ? 'unrecorded' : schedulingState(record, appointment);
       const scheduled = appointment && ['reserved', 'completed'].includes(status);
       const bookedSnapshot = json(record?.snapshot || {});
       const durationSnapshot = definition.duration_minutes == null && bookedSnapshot.duration_selection
@@ -156,7 +158,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     // Purchased history stays readable while the relative-step writer is off.
     // This marker cannot turn an incomplete attention plan into a bookable one.
     let bookingRestriction = null;
-    try { assertRelativeSessions(plan.sessions); } catch (error) {
+    try { assertRelativeSessions(plan.sessions.filter(row => row.scheduling_status !== 'unrecorded')); } catch (error) {
       if (!['booking_profile_runtime_unavailable', 'pending_attention_requirements', 'booking_profile_attention_ambiguous'].includes(error.code)) throw error;
       bookingRestriction = { code: error.code, message: error.message };
     }
@@ -164,10 +166,12 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
       program_id: plan.snapshot.program_id, program_version: plan.snapshot.program_version, origin: plan.origin,
       commercial_status: plan.origin === 'program_enrollment' ? 'not_contracted' : plan.operationallyAuthorized ? 'budget_accepted' : 'budget_pending',
       catalog_reference_amount: plan.snapshot.catalog_total_price,
+      ...(plan.origin === 'program_enrollment' && plan.snapshot.enrollment?.start_from_position > 1
+        ? require('../lib/patient-program-enrollment').enrollmentProgress(plan.voucher, plan.snapshot) : {}),
       snapshot_sha256: plan.snapshot.sha256, timezone: plan.timeZone, cadence: plan.snapshot.cadence,
       resource_options: plan.resourceOptions,
       plan_revision: planRevision(plan), scheduling_mode: mode,
-      automatic_scheduling_available: !bookingRestriction && mode !== 'manual' && plan.sessions.every(session => session.duration_minutes != null),
+      automatic_scheduling_available: !bookingRestriction && mode !== 'manual' && plan.sessions.filter(row => row.scheduling_status !== 'unrecorded').every(session => session.duration_minutes != null),
       resume, resume_options: resumeChoices, can_resume: !bookingRestriction && resumeChoices.some(option => !option.blocked_reason) && active,
       pending_count: pending, can_schedule: !bookingRestriction && pending > 0 && active && !legacyResume,
       ...(bookingRestriction ? { booking_restriction: bookingRestriction } : {}),
@@ -257,6 +261,13 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
   async function propose(options) {
     const plan = await load(options); assertSchedulable(plan);
     const payload = options.payload || {};
+    if (payload.draft_strategy != null) {
+      if (schedulingMode(plan.snapshot) !== 'manual' && resumeInfo(plan, now())) fail('program_resume_required', 'Retoma el programa para revisar juntas las sesiones pendientes y sus fechas.');
+      assertRelativeSessions(plan.sessions.filter(row=>row.scheduling_status==='pending'));
+      return require('./patientProgramDraftPreview.service').preview({ plan, payload,
+        actorId: options.actorId, now: now(), contextFor, dto, solve: solveBookingProfile, slots: solutionsForCalendar,
+        addVirtualBusy, supportIds, supportAvailable, assessment: scheduleAssessment });
+    }
     const reschedule = rescheduleInput(payload);
     if (reschedule) {
       assertRevision(plan, reschedule.expected_plan_revision);
@@ -375,7 +386,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     checkFixedSessions(context, fixedRows, plan, options.actorId);
     const first = series.find(row => row.start_at);
     const anchor = first ? formatDateLocal(new Date(first.start_at), plan.timeZone) : date;
-    const anchorOffset = first?.offset_days ?? 0;
+    const anchorOffset = first?.offset_days ?? selected[0]?.offset_days ?? 0;
     for (const session of selected) {
       const staff = supportIds(session);
       const sessionContext = staff.length ? { ...context, installations: new Map([...context.installations].map(([id, room]) => [id,
@@ -436,6 +447,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
         if (start <= now() || end - now() > 366 * 86400000) fail('program_booking_date_invalid', 'Reserva citas futuras, dentro del próximo año.');
         return { ...session, choice: row, start_at: start.toISOString(), end_at: end.toISOString() };
       }).sort((a, b) => a.position - b.position);
+      require('../lib/program-booking-preferences').assertAllowed(request.booking_preferences, selected, plan.timeZone);
       const reserved = plan.sessions.filter(row => row.scheduling_status === 'reserved' && !selected.some(item => item.key === row.key)).length;
       if (selected.length + reserved > Number(plan.voucher.available_units)) fail('program_units_insufficient', 'No quedan suficientes sesiones sin reservar.');
       const series = plan.sessions.map(row => selected.find(item => item.key === row.key) || row).map(row => ({ key: row.key, offset_days: row.offset_days, start_at: row.start_at, end_at: row.end_at }));
@@ -520,6 +532,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
           start_at: solution.start_at, end_at: solution.end_at, phases: solution.phases });
       }
       const result = { voucher_id: plan.voucher.public_id, sessions: created, reminders_enabled: false, replayed: false,
+        ...(request.booking_preferences ? { booking_preferences: request.booking_preferences } : {}),
         ...(scheduleExceptions.size ? { schedule_exception_confirmed: true } : {}) };
       const receipt = await db.PatientProgramBookingRequest.create({ voucher_id: plan.voucher.id, request_key: request.request_key,
         request_sha256: request.request_sha256, result, created_by: options.actorId }, { transaction });
@@ -634,6 +647,12 @@ async function consumeProgramSession({ db, appointment, voucher, transaction, ac
   if (!programBookingEnabled()) return { consumed: false, reason: 'program_booking_disabled' };
   const session = await db.PatientProgramSession.findOne({ where: { voucher_id: voucher.id, appointment_id: appointment.id_cita }, transaction, lock: transaction.LOCK.UPDATE });
   if (!session || Number(appointment.clinica_id) !== Number(voucher.clinic_id) || Number(appointment.paciente_id) !== Number(voucher.patient_id)) fail('program_session_not_found', 'La cita no corresponde a una sesión de este programa.');
+  if (voucher.budget_id == null) {
+    const entry = require('../lib/patient-program-enrollment').readProgramEnrollment(voucher, { required: true });
+    const position = entry.appointments.findIndex(row=>row.key===session.session_key);
+    if (position < 0 || Number(session.position)!==position || session.snapshot_sha256!==entry.sha256) fail('program_session_inconsistent', 'La sesión no coincide con la composición registrada del programa.');
+    if (position < (entry.enrollment?.start_from_position || 1) - 1) fail('program_session_unrecorded', 'No se puede consumir una sesión anterior al registro del programa.');
+  }
   if (session.consumption_movement_id) return { consumed: false, already_consumed: true, movement_id: String(session.consumption_movement_id) };
   if (!require('../lib/appointment-care').hasCompletedAppointmentCare(appointment) || voucher.status !== 'active' || Number(voucher.available_units) < 1) return { consumed: false, reason: 'program_session_not_consumable' };
   const movement = await db.PatientVoucherMovement.create({ voucher_id: voucher.id, movement_type: 'consumption', units: -1,

@@ -178,6 +178,104 @@ test('owned SQL + HTTP: clinical enrollment without economic/outbound writes, im
         report.checks.push('Native HTTP guards require patient edit/sensitive + agenda manage, never billing; real scoped catalog resolution freezes snapshot; concurrent enrollment creates once; replay, duplicate-active and actor checks preserve zero financial/outbound rows');
         report.checks.push('Real proposals + canonical atomic booking create three appointments/phase occupancies from clinical enrollment with no budget; HOLD/suppressions remain; receipt retry duplicates nothing; no movements, jobs, flows, messages, consents, payments or economic documents');
         report.checks.push('Actual booking hook with owned-only notice gate enabled records one disabled aggregate event atomically with reschedule/receipt; replay returns its persisted communication without another event, and inactive/unconfigured sending creates zero jobs/flows/messages');
+        // A program begun outside Clinicaclick manages only its suffix. The
+        // prefix has no historical appointment, attendance or consumption.
+        const externalBody = { ...body, program_version: 2, request_key: 'owned-external-program-entry', start_from_position: 2 };
+        const invalidEntry = await send('POST', '/patients/2/program-enrollments', { ...externalBody, start_from_position: 4 });
+        assert.equal(invalidEntry.status, 400); assert.equal(await db.PatientVoucher.count(), 2);
+        const [entryOne, entryTwo] = await Promise.all([send('POST', '/patients/2/program-enrollments', externalBody), send('POST', '/patients/2/program-enrollments', externalBody)]);
+        assert.deepEqual([entryOne.status, entryTwo.status].sort(), [200, 201]);
+        assert.equal(entryOne.body.voucher_id, entryTwo.body.voucher_id);
+        assert.equal(entryOne.body.start_from_position, 2); assert.equal(entryOne.body.unrecorded_units, 1);
+        assert.equal(entryOne.body.managed_units, 2); assert.equal(entryOne.body.consumed_units, 0);
+        assert.equal(entryOne.body.sold_amount, null); assert.equal(entryOne.body.catalog_reference_amount, 180);
+        const externalVoucher = await db.PatientVoucher.findOne({ where: { public_id: entryOne.body.voucher_id } });
+        assert.equal(Number(externalVoucher.total_units), 3); assert.equal(Number(externalVoucher.available_units), 2);
+        assert.equal(externalVoucher.program_snapshot.enrollment.prior_sessions, 'unrecorded');
+        const externalUrl = '/vouchers/' + externalVoucher.public_id;
+        const externalPlan = await send('GET', externalUrl + '/program-plan?clinic_id=100');
+        assert.equal(externalPlan.status, 200, JSON.stringify(externalPlan.body));
+        assert.deepEqual(externalPlan.body.sessions.map(row => [row.key, row.position, row.scheduling_status]), [['s0', 0, 'unrecorded'], ['s1', 1, 'pending'], ['s2', 2, 'pending']]);
+        assert.equal(externalPlan.body.pending_count, 2); assert.equal(externalPlan.body.consumed_units, 0);
+        // The HTTP guard derives the authoritative clinic from the voucher,
+        // never a client query; the service still rejects a wrong scoped ID.
+        await assert.rejects(booking.read({ publicId: externalVoucher.public_id, clinicId: 200 }), error => error.code === 'program_purchase_not_found');
+        deniedFeatures.add('patients.view');
+        assert.equal((await send('GET', externalUrl + '/program-plan?clinic_id=200')).status, 403); deniedFeatures.clear();
+        assert.equal((await send('POST', '/patients/2/program-enrollments', { ...externalBody, start_from_position: 3 })).body.code, 'program_enrollment_request_conflict');
+        assert.equal((await send('POST', '/patients/2/program-enrollments', { ...externalBody, request_key: 'owned-external-another-uuid' })).body.code, 'program_enrollment_already_active');
+        const beforePreview = await physical.counts();
+        const draft = await send('POST', externalUrl + '/program-proposals', { from_date: '2030-03-01', days: 45, draft_strategy: { action: 'initial' } });
+        assert.equal(draft.status, 200, JSON.stringify(draft.body));
+        assert.deepEqual(draft.body.proposals.map(row => row.key), ['s1', 's2']);
+        assert.equal(draft.body.proposals[0].solution.start_local.slice(0, 10), '2030-03-01');
+        const preferredDraft=await send('POST',externalUrl+'/program-proposals',{from_date:'2030-03-01',days:45,
+          draft_strategy:{action:'initial',start_local:'2030-03-01T09:00',preferences:{exclude_weekdays:[5],prefer_after_minutes:960,keep_professional:true}}});
+        assert.equal(preferredDraft.status,200,JSON.stringify(preferredDraft.body));
+        assert.equal(preferredDraft.body.proposals[0].solution.start_local,'2030-03-04T16:00');
+        const draftRows = draft.body.proposals.map(row => ({ key: row.key, placed: true, start_at: row.solution.start_at,
+          selections: Object.fromEntries(row.solution.phases.map(phase => [phase.key, { installation_id: phase.installation_id, doctor_id: phase.doctor_ids[0] }])) }));
+        const cascade = await send('POST', externalUrl + '/program-proposals', { from_date: '2030-03-01', days: 45,
+          draft_strategy: { action: 'cascade', pivot_key: 's1', start_local: '2030-03-25T10:00', sessions: draftRows } });
+        assert.equal(cascade.status, 200, JSON.stringify(cascade.body)); assert(cascade.body.proposals.every(row => row.solution));
+        assert.equal(cascade.body.proposals[0].solution.start_local, '2030-03-25T10:00');
+        assert.equal(cascade.body.proposals[1].solution.start_local.slice(11), '10:00');
+        const occupiedDraft = await send('POST', externalUrl + '/program-proposals', { from_date: '2030-03-01', days: 45,
+          draft_strategy: { action: 'cascade', pivot_key: 's1', start_local: '2030-02-11T09:00', sessions: draftRows } });
+        assert.equal(occupiedDraft.status, 200, JSON.stringify(occupiedDraft.body));
+        assert.equal(occupiedDraft.body.proposals[0].solution, null);
+        assert.equal(occupiedDraft.body.proposals[0].requires_schedule_confirmation, undefined);
+        const badResource = clone(draftRows); badResource[0].selections[Object.keys(badResource[0].selections)[0]].doctor_id = 999;
+        assert.equal((await send('POST', externalUrl + '/program-proposals', { from_date: '2030-03-01', days: 45,
+          draft_strategy: { action: 'reset', sessions: badResource } })).body.code, 'program_selection_invalid');
+        assert.equal((await send('POST', externalUrl + '/program-proposals', { from_date: '2030-03-01', days: 45,
+          draft_strategy: { action: 'cascade', pivot_key: 's1', start_local: '2030-03-31T02:30', sessions: draftRows } })).body.code, 'voucher_schedule_dst_conflict');
+        assert.deepEqual(await physical.counts(), beforePreview); assert.deepEqual(await counts(), zero);
+        assert.equal(await db.PatientProgramSession.count({ where: { voucher_id: externalVoucher.id } }), 0);
+        assert.equal(await db.PatientProgramBookingRequest.count({ where: { voucher_id: externalVoucher.id } }), 0);
+        // Even a corrupted prefix record cannot turn the unrecorded interval
+        // into historical care or reduce its managed balance. All corruption
+        // is rolled back inside this owned test transaction.
+        const corrupt = await sql.transaction();
+        try {
+          await db.PatientProgramSession.create({ voucher_id: externalVoucher.id, session_key: 's0', position: 0,
+            snapshot_sha256: externalVoucher.program_snapshot.sha256, snapshot: externalVoucher.program_snapshot.appointments[0], appointment_id: 999999 }, { transaction: corrupt });
+          await assert.rejects(booking.read({ publicId: externalVoucher.public_id, clinicId: 100, transaction: corrupt }), error => error.code === 'program_session_inconsistent');
+          await assert.rejects(require('../../services/patientProgramBooking.service').consumeProgramSession({ db,
+            appointment: { id_cita: 999999, clinica_id: 100, paciente_id: 2 }, voucher: externalVoucher, transaction: corrupt, actorId: 1 }),
+          error => error.code === 'program_session_unrecorded');
+        } finally { await corrupt.rollback(); }
+        const externalReservation = { request_key: 'owned-external-suffix-booking', snapshot_sha256: externalPlan.body.snapshot_sha256,
+          booking_preferences:{exclude_weekdays:[5],prefer_after_minutes:960,keep_professional:true},
+          sessions: cascade.body.proposals.map(row => ({ key: row.key, start_at: row.solution.start_at, selections: row.selections })) };
+        const excludedFriday=await send('POST',externalUrl+'/program-appointments',{...externalReservation,request_key:'owned-friday-local-rejected',
+          sessions:[{...externalReservation.sessions[0],start_at:'2030-03-14T23:30:00Z'}]});
+        assert.equal(excludedFriday.body.code,'program_booking_preference_conflict');assert.deepEqual(await physical.counts(),beforePreview);
+        const prefixAttempt = await send('POST', externalUrl + '/program-appointments', { ...externalReservation,
+          request_key: 'owned-external-prefix-rejected', sessions: [{ ...externalReservation.sessions[0], key: 's0' }] });
+        assert.equal(prefixAttempt.body.code, 'program_session_not_pending'); assert.deepEqual(await physical.counts(), beforePreview);
+        const externalBooked = await send('POST', externalUrl + '/program-appointments', externalReservation);
+        assert.equal(externalBooked.status, 201, JSON.stringify(externalBooked.body)); assert.equal(externalBooked.body.sessions.length, 2);
+        const externalReplay = await send('POST', externalUrl + '/program-appointments', externalReservation);
+        assert.equal(externalReplay.body.replayed, true);
+        assert.deepEqual(externalReplay.body.booking_preferences,externalReservation.booking_preferences);
+        const changedPreference={...externalReservation,booking_preferences:{exclude_weekdays:[6]}};
+        assert.equal((await send('POST',externalUrl+'/program-appointments',changedPreference)).body.code,'program_booking_request_conflict');
+        assert.deepEqual((await db.PatientProgramBookingRequest.findOne({where:{voucher_id:externalVoucher.id}})).result.booking_preferences,externalReservation.booking_preferences);
+        const afterExternal = await send('GET', externalUrl + '/program-plan?clinic_id=100');
+        assert.equal(afterExternal.body.pending_count, 0); assert.equal(afterExternal.body.unrecorded_units, 1);
+        assert.equal(afterExternal.body.consumed_units, 0); assert.equal(afterExternal.body.managed_units, 2);
+        assert.equal(Number((await externalVoucher.reload()).available_units), 2);
+        assert.equal(await db.PatientProgramSession.count({ where: { voucher_id: externalVoucher.id } }), 2);
+        assert.equal(await db.PatientProgramSession.count({ where: { voucher_id: externalVoucher.id, session_key: 's0' } }), 0);
+        assert.deepEqual(await counts(), zero);
+        for (const row of externalBooked.body.sessions) {
+          const appointment = await db.CitaPaciente.findByPk(row.appointment_id);
+          assert.equal(appointment.import_metadata.automation_policy, 'hold');
+          for (const field of ['appointment_details', 'day_before', 'same_day']) assert.equal(appointment.import_metadata.notification_suppression[field], true);
+        }
+        report.checks.push('External entry N=2 seals full three-session composition with one unrecorded prefix, two managed units and zero actual consumption; concurrent/replay/duplicate/scope/forged-prefix checks fail closed; original keys and positions remain intact');
+        report.checks.push('Real HTTP draft initial anchors session N directly at chosen day; civil cascade across DST retains phase resources, rejects DST gaps/foreign staff, writes no provisional appointments/occupancies/receipts; final native booking reserves only two managed sessions with HOLD and no economic/outbound/unit movements');
         // The budget-backed path remains strict, never reinterpreted as a
         // clinical enrollment even if somebody injects its JSON directly.
         const budget = await db.EconomicBudget.create({ public_id: 'owned-budget-still-pending', clinic_id: 100, patient_id: 2, number: 'QA', status: 'presented' });

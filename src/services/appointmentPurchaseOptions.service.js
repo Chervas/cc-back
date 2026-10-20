@@ -25,12 +25,15 @@ function createAppointmentPurchaseOptions({ db = require('../../models'), econom
           items.push({ id: voucher.public_id, name: plan.name, kind: plan.kind === 'voucher' ? 'voucher' : 'program', scheduler: 'program', pending_count: plan.pending_count,
             source_system: 'treatment_program', program_id: plan.program_id, program_version: plan.program_version,
             commercial_status: plan.commercial_status, catalog_reference_amount: plan.catalog_reference_amount,
+            ...(plan.unrecorded_units > 0 ? { start_from_position: plan.start_from_position, unrecorded_units: plan.unrecorded_units,
+              managed_units: plan.managed_units, consumed_units: plan.consumed_units } : {}),
             available_units: Number(voucher.available_units), unit_label: voucher.unit_label,
+            can_resume: plan.can_resume === true, requires_resume: !!plan.resume || plan.sessions.some(row=>row.scheduling_status==='missed'),
             can_schedule: plan.can_schedule || plan.can_resume, next_session: plan.sessions.find(row => ['pending', 'missed'].includes(row.scheduling_status))?.label || null,
             reason: plan.can_schedule || plan.can_resume ? null : plan.resume?.blocked_reason || 'No hay sesiones disponibles para citar.' });
         } catch (error) {
           if (![409, 503].includes(error.statusCode)) throw error;
-          items.push({ id: voucher.public_id, name: voucher.name, kind: 'program', scheduler: 'program', can_schedule: false, reason: error.message, pending_count: null });
+          items.push({ id: voucher.public_id, name: voucher.name, kind: 'program', scheduler: 'program', can_schedule: false, can_resume: false, requires_resume: false, reason: error.message, pending_count: null });
         }
         continue;
       }

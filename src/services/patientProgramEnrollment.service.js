@@ -51,13 +51,15 @@ function createPatientProgramEnrollmentService({ db, programs = require('./treat
       }
       const voucher = await db.PatientVoucher.create({ public_id: newId(), clinic_id: clinicId, patient_id: patient.id_paciente,
         budget_id: null, budget_line_key: null, program_snapshot: sealed, treatment_id: null, name: sealed.name.slice(0, 180),
-        unit_label: 'citas', total_units: sealed.appointments.length, available_units: sealed.appointments.length,
+        unit_label: 'citas', total_units: sealed.appointments.length, available_units: sealed.appointments.length - (request.start_from_position || 1) + 1,
         sold_amount: 0, activation_rule: 'manual', status: 'active', expires_at: null,
         source_system: 'treatment_program', source_reference: request.source_reference, created_by: actorId }, { transaction });
       await db.PatientOperationalEvent.create({ patient_id: patient.id_paciente, clinic_id: clinicId, actor_user_id: actorId,
         event_type: 'program.enrolled', source: 'agenda', channel: null, occurred_at: now(),
         metadata: { origin: 'program_enrollment', voucher_id: voucher.public_id, program_id: sealed.program_id,
-          program_version: sealed.program_version, snapshot_sha256: sealed.sha256, initial_units: sealed.appointments.length,
+          program_version: sealed.program_version, snapshot_sha256: sealed.sha256, initial_units: Number(voucher.available_units),
+          ...(request.start_from_position > 1 ? { start_from_position: request.start_from_position, unrecorded_units: request.start_from_position - 1,
+            managed_units: Number(voucher.available_units), prior_sessions: 'unrecorded' } : {}),
           request_key: request.request_key, request_sha256: request.request_sha256, budget_created: false, payment_created: false } }, { transaction });
       // No budget, economic acceptance, money/unit movement, signature package
       // or sender hook is called. Care completion owns future unit consumption.

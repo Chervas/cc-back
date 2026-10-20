@@ -9,7 +9,10 @@ const REQUEST = N.EVENT, TRANSITION = 'patient.program_appointment_details_resol
 const SCHEMA = 'patient-program-appointment-details/v1', FAMILY = N.FAMILY, TEMPLATE = N.TEMPLATE;
 const ACTION = 'action/resolve_program_appointment_details';
 const BUTTONS = Object.freeze(['Confirmar datos', 'Pedir cambios']);
-const BODY = 'Hola, somos {{1}}. Hemos reservado estas citas de {{2}}: {{3}}. Quedan {{4}} citas por asignar; las programaremos después. Son citas a futuro: alguna fecha podría cambiar por necesidades de agenda. ¿Confirmas estos datos?';
+// One exact Utility contract covers both a new reservation and a replan. It
+// states the current reservations, rather than falsely saying every date has
+// just been created/moved; the immutable receipt retains the actual operation.
+const BODY = 'Hola, somos {{1}}. Estas son las citas reservadas actualmente de tu programa {{2}}: {{3}}. Quedan {{4}} citas por asignar; las programaremos después. Son citas a futuro: alguna fecha podría cambiar por necesidades de agenda. ¿Confirmas estos datos?';
 const AI_INSTRUCTION = 'Analiza únicamente la respuesta nueva del paciente al resumen de fechas y horas provisionales de su programa. '
   + 'Confirmar significa confirmar DATOS de las citas incluidas, nunca asistencia, llegada, consentimiento, pago ni publicidad. '
   + 'Devuelve intent="correct" sólo si acepta inequívocamente todos esos datos; "changes" si solicita revisar o modificar alguna fecha; '
@@ -62,9 +65,21 @@ function projection({ receipt, voucher, snapshot, clinic, sessions, appointments
   const records = sessions.map(plain), rows = appointments.map(plain), occurred = new Date(occurredAt).toISOString();
   if (!Array.isArray(snapshot.appointments) || records.some(record => Number(record.voucher_id) !== Number(voucher.id)
     || record.snapshot_sha256 !== snapshot.sha256) || new Set(records.map(record => record.session_key)).size !== records.length) fail('program_details_membership_invalid');
+  const enrollment = object(snapshot.enrollment), externalStart = enrollment.start_from_position;
+  if (externalStart != null && (!Number.isSafeInteger(externalStart) || externalStart <= 1
+    || externalStart > snapshot.appointments.length || enrollment.prior_sessions !== 'unrecorded')
+    || externalStart == null && enrollment.prior_sessions != null) fail('program_details_entry_invalid');
+  const unrecorded = externalStart == null ? 0 : externalStart - 1;
   const future = [], membership = []; let pending = 0, completed = 0, overdue = 0;
   for (const [position, definition] of snapshot.appointments.entries()) {
     const record = records.find(value => value.session_key === definition.key);
+    // A sealed external entry is not fabricated clinical history. Its prefix
+    // has no session record, booking or consumption; it is neither pending nor
+    // completed and must never enter a patient's summary/confirmation batch.
+    if (position < unrecorded) {
+      if (record) fail('program_details_unrecorded_prefix_has_history');
+      continue;
+    }
     if (record && Number(record.position) !== position) fail('program_details_membership_invalid');
     const row = rows.find(value => Number(value.id_cita) === Number(record?.appointment_id));
     if (record?.appointment_id && !row) fail('program_details_membership_invalid');
@@ -102,6 +117,7 @@ function projection({ receipt, voucher, snapshot, clinic, sessions, appointments
     patient_id: base.patient_id, clinic_id: base.clinic_id, actor_user_id: actorId, occurred_at: occurred, time_zone: base.timezone,
     summary_policy: 'each_booking', language: base.language, clinic_name: base.clinic_name, program_name: name,
     appointment_count: future.length, pending_count: pending, completed_count: completed, overdue_count: overdue,
+    ...(unrecorded ? { unrecorded_count: unrecorded } : {}),
     appointments: base.appointments, membership, parameters, body };
   result.snapshot_sha256 = hash(result); return result;
 }
@@ -126,7 +142,7 @@ function definition(clinicId = null) {
   const result = (id, outcome, reason, next, x) => node(id, ACTION, { result: outcome, reason }, { on_success: next, on_fail: 'N12' }, x, 1400);
   return { public_id: clinicId ? `flw_program_details_${clinicId}` : 'flw_program_details_system',
     template_key: clinicId ? `${FAMILY}__clinic_${clinicId}` : FAMILY, name: 'Confirmación de datos de las citas del programa',
-    version: 1, engine_version: 'v2', description: 'Resumen único de fechas provisionales y citas pendientes. Confirma datos, nunca asistencia. Preparada e inactiva.',
+    version: 1, engine_version: 'v2', description: 'Reserva o reprogramación: resumen vigente de todas las citas futuras del programa y las pendientes por asignar. Confirma datos, nunca asistencia. Inactiva; requiere plazo, corte UTC y Utility aprobada por emisor.',
     trigger_type: REQUEST, trigger_config: { managed_feature: 'patient_program_booking_notice', configured: false,
       summary_policy: 'each_booking', response_timeout_minutes: null, enabled_after: null }, clinic_id: clinicId, group_id: null,
     is_system: !clinicId, is_active: false, entry_node_id: 'N1', published_at: null, created_by: 1,
@@ -163,9 +179,15 @@ function definition(clinicId = null) {
     ] };
 }
 function catalogPreparation() {
-  return { flow: definition(), whatsapp: { name: TEMPLATE, display_name: 'Datos de las citas del programa', family_key: TEMPLATE,
-    locale: 'es_ES', category: 'UTILITY', is_active: false, body_text: BODY,
-    variables: [1, 2, 3, 4].map(position => ({ position, name: ['clinica', 'programa', 'fechas', 'pendientes'][position - 1] })),
+  return { flow: definition(), whatsapp: { name: TEMPLATE, display_name: 'Citas de programa · Reserva y reprogramación', family_key: TEMPLATE,
+    // Catalogues use es/ca/en; a technical Meta instance uses es_ES.
+    locale: 'es', category: 'UTILITY', is_active: false, body_text: BODY,
+    variables: [
+      { position: 1, name: 'clinica', example: 'Clínica de ejemplo', description: 'Clínica del programa; se conserva su zona horaria.' },
+      { position: 2, name: 'programa', example: 'Programa corporal', description: 'Nombre del programa contratado o asignado.' },
+      { position: 3, name: 'fechas', example: '1) 04/11/26 09:00; 2) 19/11/26 09:00', description: 'Todas las citas futuras reservadas: posición original, dd/mm/aa HH:mm; lista íntegra en una sola línea.' },
+      { position: 4, name: 'pendientes', example: '3', description: 'Citas aún pendientes de asignar; excluye las realizadas.' },
+    ],
     components: [{ type: 'BODY', text: BODY, example: { body_text: [['Clínica de ejemplo', 'Programa corporal', '1) 04/11/26 09:00; 2) 19/11/26 09:00', '3']] } },
       { type: 'BUTTONS', buttons: BUTTONS.map(text => ({ type: 'QUICK_REPLY', text })) }] } };
 }

@@ -177,7 +177,8 @@ function bookingRequest(payload) {
       ...durationChoice(row) };
   }).sort((a, b) => a.key.localeCompare(b.key));
   const resume = payload.mode === 'reschedule' ? require('./program-reschedule').rescheduleInput(payload) : require('./program-replan').resumeInput(payload);
-  const contents = { snapshot_sha256: payload.snapshot_sha256, sessions, ...(resume || {}) };
+  const preferences = require('./program-booking-preferences').normalizePreferences(payload.booking_preferences);
+  const contents = { snapshot_sha256: payload.snapshot_sha256, sessions, ...(resume || {}), ...(preferences ? { booking_preferences: preferences } : {}) };
   return { request_key: payload.request_key, ...contents, request_sha256: hash(contents),
     ...(payload.schedule_acknowledgement != null ? { schedule_acknowledgement: payload.schedule_acknowledgement } : {}) };
 }

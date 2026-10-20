@@ -24,7 +24,7 @@ test('summary includes every future reservation, not just the latest receipt, an
   const before = clone(input), result = C.projection(input);
   assert.deepEqual(input, before); assert.equal(result.appointment_count, 2); assert.equal(result.pending_count, 2); assert.equal(result.completed_count, 1);
   assert.deepEqual(result.appointments.map(row => row.number), [2, 5]);
-  assert.match(result.body, /Hemos reservado estas citas/); assert.match(result.body, /podría cambiar por necesidades de agenda/);
+  assert.match(result.body, /citas reservadas actualmente/); assert.match(result.body, /podría cambiar por necesidades de agenda/);
   assert.match(result.body, /Quedan 2 citas por asignar/);
   assert.match(result.parameters[2], /^2\) 11\/01\/27 10:00; 5\)/); assert.equal(result.summary_policy, 'each_booking');
 });
@@ -34,6 +34,48 @@ test('receipt business hash ignores only communication projection, not its dates
   assert.deepEqual(C.projection(input), first);
   input.receipt.result.sessions[0].start_at = '2027-02-04T09:00:00.000Z';
   assert.notEqual(C.projection(input).snapshot_sha256, first.snapshot_sha256);
+});
+test('new booking and reprogramming share the exact current-summary Utility but keep distinct immutable receipt proofs', () => {
+  const initial = fixture(), booked = C.projection(initial), moved = clone(initial);
+  moved.receipt.id++; moved.receipt.request_key = 'replan-request-2';
+  moved.receipt.request_sha256 = 'c'.repeat(64);
+  moved.receipt.result.sessions[0].action = 'rescheduled';
+  const replanned = C.projection(moved);
+  assert.equal(replanned.body, booked.body);
+  assert.deepEqual(replanned.parameters, booked.parameters);
+  assert.notEqual(replanned.receipt_id, booked.receipt_id);
+  assert.notEqual(replanned.receipt_result_sha256, booked.receipt_result_sha256);
+  assert.notEqual(replanned.snapshot_sha256, booked.snapshot_sha256);
+  assert.match(replanned.body, /¿Confirmas estos datos\?$/);
+  assert.doesNotMatch(replanned.body, /asistencia|acude|publicidad|reseña|consentimiento/i);
+});
+test('sealed external entry excludes unrecorded prefix from pending/completed/reserved counts without renumbering later appointments', () => {
+  const input = fixture(); input.snapshot.enrollment = { start_from_position: 3, prior_sessions: 'unrecorded' };
+  input.sessions.splice(0, 2); input.appointments.splice(0, 2);
+  input.sessions[1].appointment_id = null; input.appointments.splice(1, 1);
+  const result = C.projection(input);
+  assert.equal(result.unrecorded_count, 2); assert.equal(result.pending_count, 1);
+  assert.equal(result.completed_count, 0); assert.equal(result.appointment_count, 2);
+  assert.deepEqual(result.appointments.map(row => row.number), [3, 5]);
+  assert.match(result.parameters[2], /^3\)/); assert.match(result.body, /Quedan 1 citas por asignar/);
+  for (const state of [null, 'pendiente', 'completada']) {
+    const corrupt = clone(input), old = fixture();
+    corrupt.sessions.push(old.sessions[0]);
+    if (state) { corrupt.appointments.push({ ...old.appointments[0], estado: state }); }
+    if (state === 'completada') corrupt.sessions.at(-1).consumption_movement_id = 999;
+    assert.throws(() => C.projection(corrupt), /program_details_unrecorded_prefix_has_history/);
+  }
+});
+test('external entry must be the sealed unrecorded form; legacy/no-entry summaries stay unchanged', () => {
+  const original = fixture(), before = C.projection(original), legacy = clone(original);
+  legacy.snapshot.enrollment = { schema_version: 1, source: 'program_enrollment' };
+  assert.deepEqual(C.projection(legacy), before);
+  for (const enrollment of [{ start_from_position: 3 }, { start_from_position: '3', prior_sessions: 'unrecorded' },
+    { start_from_position: 0, prior_sessions: 'unrecorded' }, { start_from_position: 6, prior_sessions: 'unrecorded' },
+    { prior_sessions: 'unrecorded' }, { start_from_position: 3, prior_sessions: 'completed' }]) {
+    const invalid = fixture(); invalid.snapshot.enrollment = enrollment;
+    assert.throws(() => C.projection(invalid), /program_details_entry_invalid/);
+  }
 });
 test('details/reminder states do not invalidate dates; moving, adding, replacing or changing the receipt does', () => {
   const input = fixture(), before = C.projection(input);

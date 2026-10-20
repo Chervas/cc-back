@@ -51,6 +51,26 @@ test('clinical assignment freezes complete server snapshot, no budget/acceptance
   assert.deepEqual(sealed.appointments[0].booking_profile.phases[0].installation_ids, [101]);
   assert.equal(f.events[0].event_type, 'program.enrolled'); assert.equal(f.events[0].metadata.budget_created, false); assert.deepEqual(f.calls, []);
 });
+test('external continuation allocates only the managed suffix without claiming prior consumption; legacy omitted/one hashes are identical', async () => {
+  const identity = { clinicId: 100, patientId: 1, actorId: 1 };
+  assert.deepEqual(enrollmentRequest(payload(), identity), enrollmentRequest(payload('enrollment-test-0001', { start_from_position: 1 }), identity));
+  const f = fixture(), result = await f.assign(payload('enrollment-test-0001', { start_from_position: 2 }));
+  assert.equal(f.rows[0].total_units, 3); assert.equal(f.rows[0].available_units, 2);
+  assert.equal(result.unrecorded_units, 1); assert.equal(result.managed_units, 2); assert.equal(result.consumed_units, 0);
+  assert.equal(result.start_from_position, 2); assert.equal(result.sold_amount, null);
+  assert.equal(readProgramEnrollment(f.rows[0]).enrollment.prior_sessions, 'unrecorded');
+  assert.equal((await f.assign(payload('enrollment-test-0001', { start_from_position: 2 }))).replayed, true);
+  await assert.rejects(f.assign(payload()), { code: 'program_enrollment_request_conflict' });
+  await assert.rejects(f.assign(payload('different-uuid-0001', { start_from_position: 3 })), { code: 'program_enrollment_already_active' });
+  assert.equal(f.rows.length, 1); assert.equal(f.events.length, 1); assert.deepEqual(f.calls, []);
+  for (const start_from_position of [0, -1, 1.5, '2', 121]) {
+    assert.throws(() => enrollmentRequest(payload('enrollment-test-0001', { start_from_position }), identity));
+  }
+  const invalid = fixture(); await assert.rejects(invalid.assign(payload('enrollment-test-0001', { start_from_position: 4 })), { code: 'program_enrollment_start_invalid' });
+  assert.equal(invalid.rows.length, 0);
+  const last=fixture(),lastResult=await last.assign(payload('enrollment-test-last', {start_from_position:3}));
+  assert.equal(last.rows[0].available_units,1);assert.equal(lastResult.unrecorded_units,2);assert.equal(lastResult.consumed_units,0);
+});
 test('exact replay survives catalog version changes; actor/intent mismatch and duplicate active enrollment reject', async () => {
   const f = fixture(); await f.assign(); f.state.catalog.version = 2; f.state.catalog.status = 'draft';
   assert.equal((await f.assign()).replayed, true); assert.equal(f.events.length, 1);
@@ -116,6 +136,12 @@ test('workspace serializer distinguishes clinical assignment from a free or paid
   assert.equal(result.catalog_reference_amount, 150); assert.equal(result.origin, 'program_enrollment');
   const normal = context.serialize({ ...row, source_system: 'clinicaclick', program_snapshot: null, sold_amount: 80 }, []);
   assert.equal(normal.sold_amount, 80); assert.equal(normal.commercial_status, undefined);
+  const externalRequest = enrollmentRequest({ ...payload(), start_from_position: 2 }, { clinicId: 100, patientId: 1, actorId: 1 });
+  const external = { ...row, available_units: 2, program_snapshot: freezeProgramEnrollment(program(), externalRequest, new Date('2030-01-01Z')) };
+  const externalDto = context.serialize(external, []);
+  assert.equal(externalDto.total_units, 3); assert.equal(externalDto.unrecorded_units, 1);
+  assert.equal(externalDto.managed_units, 2); assert.equal(externalDto.consumed_units, 0);
+  assert.equal(context.serialize({ ...external, available_units: 1 }, []).consumed_units, 1);
 });
 test('release preflight requires JSON NULL snapshot and exact migration without inventing legacy table attributes', () => {
   const fs = require('node:fs'), crypto = require('node:crypto');
