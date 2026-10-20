@@ -5980,7 +5980,12 @@ exports.createTemplateDraft = async (req, res) => {
       });
     }
 
-    const version = latest?.version ? Number(latest.version) + 1 : 1;
+    // Version uniqueness is global to template_key, even when a legacy key is
+    // shared by several scopes. Identity still comes from the scoped family.
+    const latestVersion = singleNoticeSource ? await AutomationFlowTemplateV2.findOne({
+      where: {template_key:templateKey}, attributes: ['version'], order: [['version','DESC']], raw: true,
+    }) : latest;
+    const version = latestVersion?.version ? Number(latestVersion.version) + 1 : 1;
     const publicId = cleanString(latest?.public_id) || await generateUniqueTemplatePublicId();
 
     const created = await AutomationFlowTemplateV2.create({

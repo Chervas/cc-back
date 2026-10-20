@@ -140,6 +140,8 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     entry_node_id:'N1',nodes:validNodes,clinic_id:7,is_active:false,trigger_config:{TESTONLY_original:true}});
   const foreign=await db.AutomationFlowTemplateV2.create({...values,public_id:source.public_id,clinic_id:8,
     template_key:'env_o_de_datos_de_la_cita_tras_agendar__clinic_8',entry_node_id:'N1',nodes:validNodes,is_active:true});
+  const globalVersionHolder=await db.AutomationFlowTemplateV2.create({...values,public_id:'TESTONLY_other_scoped_ref',clinic_id:8,
+    template_key:source.template_key,version:9,entry_node_id:'N1',nodes:validNodes,is_active:true});
   const publication=require('../../lib/appointment-single-notice-publication'),entry=publication.planEntry(source.toJSON());
   function displayProjection(row){
     const stored_graph_hash=publication.hash({entry_node_id:row.entry_node_id,trigger_type:row.trigger_type,nodes:row.nodes});
@@ -155,9 +157,10 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     assert.equal(status,url.endsWith('/publish')?200:201,JSON.stringify(result));return result;
   }
   activationConflict=true;
-  const published=await publication.publishEntry(entry,request);assert.equal(published.is_active,false);assert.equal(published.version,2);
+  const published=await publication.publishEntry(entry,request);assert.equal(published.is_active,false);assert.equal(published.version,10);
   await foreign.reload();assert.equal(foreign.is_active,true);
-  const installed=await db.AutomationFlowTemplateV2.findOne({where:{template_key:source.template_key,version:2}});
+  const installed=await db.AutomationFlowTemplateV2.findOne({where:{template_key:source.template_key,version:10}});
+  await globalVersionHolder.reload();assert.equal(globalVersionHolder.is_active,true);assert.equal(installed.public_id,source.public_id);
   assert.deepEqual(installed.trigger_config,source.trigger_config);assert.equal(publication.hash(installed.nodes),publication.hash(entry.body.nodes));
   assert.equal(installed.group_id,null,'An old clinic family must not inherit its newly assigned group during versioning');
   assert.equal((await publication.publishEntry(entry,request)).skipped,true);assert.equal(writes,2);

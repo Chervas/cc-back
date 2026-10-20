@@ -31,8 +31,11 @@ async function main() {
     && file.startsWith('/home/ubuntu/secure-imports/'))) fail('private_corpus_required');
   const casesBytes = fs.readFileSync(casesFile), corpus = JSON.parse(casesBytes);
   const expectations = read(expectationsFile), plan = read(planFile);
-  const storedInferences = !fresh && arg('--inference-report')
-    ? new Map(read(arg('--inference-report')).results.map(item => [item.id, item.inference?.raw])) : null;
+  const storedResults = !fresh && arg('--inference-report') ? read(arg('--inference-report')).results : null;
+  if (storedResults?.some(item => !item.expectedSafetyHold && (!item.inference || item.inference.raw == null))) {
+    fail('historical_raw_inference_missing');
+  }
+  const storedInferences = storedResults ? new Map(storedResults.map(item => [item.id, item.inference?.raw])) : null;
   if (!fresh && !storedInferences) fail('offline_drill_requires_stored_raw_inference_report');
   assert.equal(plan.read_only, true);
   assert.equal(expectations.reviewedBeforeInference, true);
@@ -275,7 +278,7 @@ async function main() {
           || afterRoute.actions.some(action => action.type === 'action/send_system_notification');
         Object.assign(result, { inputHash: hash(inferenceRequest), states, review, route: afterRoute.visits,
           providerCalls: providerTrace.length - traceStart, providerTrace: providerTrace.slice(traceStart),
-          output: after.output, sameAnalysisRequest: true, sameResponseActions: true });
+          output: after.output, inference:{raw:structuredClone(cached)},sameAnalysisRequest: true, sameResponseActions: true });
         assert(states.every(state => expected.allowedStates.includes(state)), 'human_expected_state_violated');
         assert(!expected.requiredStates?.some(state => !states.includes(state)), 'human_required_confirmation_missing');
         assert(!expected.requiresDecisionOrReview || states.length || review, 'decision_lost_without_review');
