@@ -1975,8 +1975,8 @@ function getSpecificAppointmentTreatmentIds(triggerConfig) {
 }
 
 function isSameAutomationScope(a, b) {
-  return (parseIntOrNull(a?.clinic_id) || null) === (parseIntOrNull(b?.clinic_id) || null)
-    && (parseIntOrNull(a?.group_id) || null) === (parseIntOrNull(b?.group_id) || null)
+  return require('../lib/appointment-template-scope').automationScopeKey(a)
+      === require('../lib/appointment-template-scope').automationScopeKey(b)
     && Boolean(a?.is_system) === Boolean(b?.is_system);
 }
 
@@ -5957,14 +5957,14 @@ exports.createTemplateDraft = async (req, res) => {
     if (clinicId && !isSystem
       && /^[a-z0-9_]{1,120}$/.test(exactScopedKey || '')) {
       const scopedFamily = await AutomationFlowTemplateV2.findOne({ where: {
-        template_key: exactScopedKey, clinic_id: clinicId, group_id: groupId, is_system: false,
+        template_key: exactScopedKey, clinic_id: clinicId, is_system: false,
         trigger_type: resolvedTriggerType,
       }, attributes: ['id'], raw: true });
       if (scopedFamily) templateKey = explicitTemplateKey = exactScopedKey;
     }
 
     const latest = await AutomationFlowTemplateV2.findOne({
-      where: { template_key: templateKey, ...(singleNoticeSource ? {clinic_id:clinicId,group_id:groupId} : {}) },
+      where: { template_key: templateKey, ...(singleNoticeSource ? require('../lib/appointment-template-scope').automationScopeWhere(singleNoticeSource) : {}) },
       attributes: ['version', 'public_id'],
       order: [['version', 'DESC']],
       raw: true,
@@ -5975,7 +5975,7 @@ exports.createTemplateDraft = async (req, res) => {
           where: {
             template_key: templateKey,
             published_at: null,
-            ...(singleNoticeSource ? {clinic_id:clinicId,group_id:groupId} : {}),
+            ...(singleNoticeSource ? require('../lib/appointment-template-scope').automationScopeWhere(singleNoticeSource) : {}),
           },
           order: [['version', 'DESC']],
         })
@@ -6603,7 +6603,7 @@ exports.publishTemplateVersion = async (req, res) => {
         {
           where: {
             ...(cleanString(row.public_id) ? { public_id: cleanString(row.public_id) } : { template_key: row.template_key }),
-            ...(singleNoticeSource ? {template_key:row.template_key,clinic_id:row.clinic_id,group_id:row.group_id} : {}),
+            ...(singleNoticeSource ? {template_key:row.template_key,...require('../lib/appointment-template-scope').automationScopeWhere(row)} : {}),
             published_at: { [Op.ne]: null },
             id: { [Op.ne]: row.id },
           },
@@ -6647,6 +6647,23 @@ exports.publishTemplateVersion = async (req, res) => {
   } catch (err) {
     console.error('Error publishTemplateVersion v2', err);
     return res.status(err.statusCode || 500).json({ success: false, error: err.code || 'publish_failed', message: err.message });
+  }
+};
+
+exports.reconcileClinicTemplateScope = async (req, res) => {
+  try {
+    const access = await resolveAccess(req);
+    if (!access.user_id) return res.status(401).json({ success: false, error: 'auth_required' });
+    if (!access.is_admin) return res.status(403).json({ success: false, error: 'admin_required' });
+    const result = await require('../lib/appointment-scope-reconciliation').reconcileClinicScope({
+      db, actorId: access.user_id, ref: req.params.template_ref, body: req.body,
+    });
+    // Repair changes future selection only. No backfill, historical replay or
+    // direct dispatch is permitted in this operation.
+    return res.json({ success: true, ...result, row: undefined,
+      data: result.row ? { id: result.row.id, version: result.row.version, is_active: result.row.is_active } : undefined });
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({ success: false, error: err.code || 'scope_reconciliation_failed', message: err.message });
   }
 };
 

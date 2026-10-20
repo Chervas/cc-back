@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { templateFamilyKey } = require('./appointment-template-scope');
+const { templateFamilyKey, automationScopeWhere } = require('./appointment-template-scope');
 const STOP_REASON = 'automation_deactivated';
 const OPEN_STATUSES = ['running', 'waiting', 'paused'];
 const models = () => require('../../models');
@@ -27,8 +27,7 @@ async function assertExecutionNotSynthetic(execution, transaction) {
 function familyWhere(template) {
   return {
     ...(template.public_id ? { public_id: template.public_id } : { template_key: template.template_key }),
-    clinic_id: template.clinic_id ?? null,
-    group_id: template.group_id ?? null,
+    ...automationScopeWhere(template),
   };
 }
 

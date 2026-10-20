@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { selectEffectiveAppointmentTemplates, belongsToAppointmentScope } = require('../../lib/appointment-template-scope');
+const { selectEffectiveAppointmentTemplates, belongsToAppointmentScope, automationScopeWhere, automationScopeKey } = require('../../lib/appointment-template-scope');
 const base = { id: 1, template_key: 'system_cancel_unconfirmed', version: 7,
   clinic_id: null, group_id: null, is_system: true, is_active: true,
   published_at: new Date('2026-09-06T23:04:34Z') };
@@ -22,6 +22,16 @@ test('an inactive clinic instance suppresses the active master but not a customi
 test('an older active version cannot bypass a newer disabled published version', () => {
   assert.deepEqual(selectEffectiveAppointmentTemplates([base, { ...base, id: 5, version: 8, is_active: false }], 35, 5), []);
   assert.deepEqual(selectEffectiveAppointmentTemplates([base, { ...base, id: 6, version: 8, is_active: false, published_at: null }], 35, 5), [base]);
+});
+
+test('clinic scope is identical with or without redundant group metadata, including manual stops', () => {
+  const local = { ...base, clinic_id: 35, group_id: 5, is_system: false };
+  const stopped = { ...local, id: 99, version: 8, group_id: null, is_active: false };
+  assert.deepEqual(automationScopeWhere(local), { clinic_id: 35 });
+  assert.equal(automationScopeKey(local), automationScopeKey(stopped));
+  assert.deepEqual(selectEffectiveAppointmentTemplates([local, stopped], 35, 5), []);
+  assert.notEqual(automationScopeKey(local), automationScopeKey({ ...local, clinic_id: null }));
+  assert.deepEqual(automationScopeWhere({ clinic_id: null, group_id: 5 }), { clinic_id: null, group_id: 5 });
 });
 
 test('real group automations stay available only in their group; clinic scope wins', () => {

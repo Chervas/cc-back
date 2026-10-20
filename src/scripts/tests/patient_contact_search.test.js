@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const fs = require('node:fs');
 const db = require('../../../models');
 const {
   buildFastPatientSearchWhere,
@@ -52,6 +53,11 @@ test('el origen de auditoría falla a un valor canónico', () => {
   assert.equal(normalizeOperationalSource('header_search'), 'header_search');
   assert.equal(normalizeOperationalSource('QUICK CHAT'), 'quick_chat');
   assert.equal(normalizeOperationalSource('untrusted-source'), 'patient_modal');
+});
+
+test('the native QuickChat entrypoint imports its canonical audit-source normalizer', () => {
+  const controller = fs.readFileSync(require.resolve('../../controllers/conversation.controller'), 'utf8');
+  assert.match(controller, /const\s*\{[^}]*startPatientWhatsappConversation,[^}]*normalizeOperationalSource,[^}]*\}\s*=\s*require\('\.\.\/services\/patientContact\.service'\)/);
 });
 
 test('NHC digits use exact identifiers while a full phone remains searchable', () => {

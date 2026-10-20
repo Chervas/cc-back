@@ -23,6 +23,7 @@ router.get('/v2/forms/recent', automationsV2Controller.getRecentFormMatches);
 router.post('/v2/validate', automationsV2Controller.validateTemplateGraph);
 router.get('/v2/templates', automationsV2Controller.listTemplates);
 router.post('/v2/templates', automationsV2Controller.createTemplateDraft);
+router.post('/v2/templates/:template_ref/reconcile-clinic-scope', automationsV2Controller.reconcileClinicTemplateScope);
 router.delete('/v2/templates/:template_ref', automationsV2Controller.deleteTemplate);
 router.get('/v2/templates/:template_ref', automationsV2Controller.getTemplateLatestPublished);
 router.get('/v2/templates/:template_ref/versions', automationsV2Controller.listTemplateVersions);

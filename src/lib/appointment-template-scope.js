@@ -1,5 +1,16 @@
 'use strict';
 
+// A clinic's group is routing metadata, not another local automation scope.
+function automationScopeWhere(template) {
+  return template.clinic_id != null ? { clinic_id: template.clinic_id }
+    : { clinic_id: null, group_id: template.group_id ?? null };
+}
+
+function automationScopeKey(template) {
+  return template.clinic_id != null ? `clinic:${template.clinic_id}`
+    : template.group_id != null ? `group:${template.group_id}` : 'system';
+}
+
 function belongsToAppointmentScope(template, clinicId, groupId) {
   if (template?.clinic_id != null) return Number(template.clinic_id) === Number(clinicId);
   if (template?.group_id != null) return !!groupId && Number(template.group_id) === Number(groupId);
@@ -16,7 +27,7 @@ function selectEffectiveAppointmentTemplates(rows, clinicId, groupId) {
     if (!row.published_at || !belongsToAppointmentScope(row, clinicId, groupId)) continue;
     const key = String(row.template_key || '').trim();
     if (!key) continue;
-    const scopeKey = `${row.clinic_id != null ? `clinic:${row.clinic_id}` : row.group_id != null ? `group:${row.group_id}` : 'system'}:${key}`;
+    const scopeKey = `${automationScopeKey(row)}:${key}`;
     const previous = latestByKey.get(scopeKey);
     if (!previous || Number(row.version) > Number(previous.version)
       || (Number(row.version) === Number(previous.version) && Number(row.id) > Number(previous.id))) {
@@ -38,4 +49,4 @@ function selectEffectiveAppointmentTemplates(rows, clinicId, groupId) {
   });
 }
 
-module.exports = { belongsToAppointmentScope, templateFamilyKey, selectEffectiveAppointmentTemplates };
+module.exports = { automationScopeWhere, automationScopeKey, belongsToAppointmentScope, templateFamilyKey, selectEffectiveAppointmentTemplates };

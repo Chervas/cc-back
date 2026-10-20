@@ -125,6 +125,7 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     require:name=>{if(name==='../lib/automation-runtime-stop')return stop;
       if(name==='../lib/appointment-single-notice-publication')return require('../../lib/appointment-single-notice-publication');
       if(name==='../lib/appointment-copy-publication')return require('../../lib/appointment-copy-publication');
+      if(name==='../lib/appointment-template-scope')return require('../../lib/appointment-template-scope');
       if(name==='../lib/patient-mobile-verification')return require('../../lib/patient-mobile-verification');
       assert.fail('Unexpected native publication dependency '+name);},
   };

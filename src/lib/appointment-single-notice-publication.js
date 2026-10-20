@@ -1,13 +1,14 @@
 'use strict';
 const {createHash}=require('node:crypto');
 const {scoped,buildSingleNoticeFlow,policyFor}=require('./appointment-single-notice-flow');
+const {automationScopeKey}=require('./appointment-template-scope');
 const stable=value=>Array.isArray(value)?value.map(stable):value&&typeof value==='object'
   ?Object.fromEntries(Object.keys(value).sort().filter(key=>value[key]!==undefined).map(key=>[key,stable(value[key])])):value;
 const hash=value=>createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
 const graph=row=>({entry_node_id:row.entry_node_id,trigger_type:row.trigger_type,nodes:row.nodes});
 const storedGraphHash=row=>row.stored_graph_hash||hash(graph(row));
 const sameFamily=(a,b)=>a.public_id===b.public_id&&a.template_key===b.template_key
-  &&Number(a.clinic_id||0)===Number(b.clinic_id||0)&&Number(a.group_id||0)===Number(b.group_id||0);
+  &&automationScopeKey(a)===automationScopeKey(b);
 
 function planEntry(source){
   if(!scoped(source)||!source.published_at||!Number.isSafeInteger(Number(source.id))||Number(source.id)<=0)throw Error('single_notice_source_invalid');
@@ -69,7 +70,7 @@ async function publishEntry(entry,request,planner=planEntry,sourceField='single_
   const versions=(result.data||[]).filter(row=>sameFamily(row,source));
   const latest=versions.filter(row=>row.published_at).sort((a,b)=>Number(b.version)-Number(a.version))[0];
   if(!latest||!sameFamily(latest,source))throw Error('single_notice_family_changed');
-  if(storedGraphHash(latest)===entry.graph_hash)return {skipped:true,version:latest.version};
+  if(storedGraphHash(latest)===entry.graph_hash&&!!latest.is_active===!!source.is_active)return {skipped:true,version:latest.version};
   if(Number(latest.version)!==Number(source.version)||storedGraphHash(latest)!==entry.source_hash||!!latest.is_active!==!!source.is_active)throw Error('single_notice_source_changed');
   const drafts=versions.filter(row=>!row.published_at);
   if(drafts.length>1||drafts.length&&storedGraphHash(drafts[0])!==entry.graph_hash)throw Error('single_notice_draft_requires_review');

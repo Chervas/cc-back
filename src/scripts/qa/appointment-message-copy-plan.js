@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { planEntry, hash } = require('../../lib/appointment-copy-publication');
 const { updateAppointmentCatalog } = require('../../lib/appointment-message-copy');
+const { automationScopeKey } = require('../../lib/appointment-template-scope');
 
 async function main() {
   const [target, out] = process.argv.slice(2);
@@ -16,7 +17,7 @@ async function main() {
     const latest = new Map();
     for (const row of flows) {
       for (const key of ['nodes', 'trigger_config']) if (typeof row[key] === 'string') row[key] = JSON.parse(row[key]);
-      const key = JSON.stringify([row.public_id, row.template_key, row.clinic_id, row.group_id]);
+      const key = JSON.stringify([row.public_id, row.template_key, automationScopeKey(row)]);
       if (!latest.has(key)) latest.set(key, { ...row, is_system: !!row.is_system, is_active: !!row.is_active });
     }
     const entries = [...latest.values()].map(planEntry).filter(Boolean);
