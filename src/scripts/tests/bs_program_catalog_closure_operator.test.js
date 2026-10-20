@@ -94,6 +94,16 @@ test('full-row CAS tolerates SQL versus Sequelize timestamp representation but n
   assert.doesNotThrow(() => operator.assertFullRow(before, current));
   current.request_payload_hash = 'c'.repeat(64); assert.throws(() => operator.assertFullRow(before, current), /FULL_ROW_CAS_CONFLICT/);
 });
+test('Sequelize Date evidence is JSON-normalized before sealing, so persisted preview hashes remain identical', () => {
+  const raw = { current: { created_at: new Date('2026-09-27T00:00:00Z'), updated_at: new Date('2026-10-20T15:00:00Z') },
+    item: { created_at: null, appointments: [{ treatment: { version: 1 } }] } };
+  const sealed = operator.sealPreview(raw), roundtrip = JSON.parse(JSON.stringify(sealed));
+  assert.equal(hash(sealed), hash(roundtrip)); assert.equal(sealed.current.created_at, '2026-09-27T00:00:00.000Z');
+  assert.notEqual(hash(raw), hash(sealed));
+  const f = fixture(); f.bundle.previews[0].current = sealed.current;
+  f.bundle.previews_sha256 = hash(f.bundle.previews);
+  assert.doesNotThrow(() => operator.assertBundle(JSON.parse(JSON.stringify(f.bundle)), null));
+});
 test('SQL guard admits only selects in preparation and only canonical programme/revision writes after locked CAS', () => {
   const operation = { program_id: 22 }, write = { writable: true, operation, casVerified: true };
   assert.equal(operator.sqlAllowed('SELECT * FROM TreatmentPrograms', { writable: false }), true);

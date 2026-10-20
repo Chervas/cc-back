@@ -15,6 +15,9 @@ const GATES = Object.freeze(['BOOKING_PROFILES_ENABLED', 'BOOKING_MULTI_RESOURCE
   'BOOKING_EQUIPMENT_ENABLED', 'TREATMENT_PROGRAM_BOOKING_ENABLED', 'TREATMENT_PROGRAM_ECONOMICS_ENABLED']);
 const fail = code => { throw Error(code); };
 const copy = value => JSON.parse(JSON.stringify(value));
+// Sequelize DTO dates are Date objects. Seal the durable JSON representation,
+// not Date's empty enumerable-key representation in the stable object hasher.
+const sealPreview = preview => copy(preview);
 
 function privateJson(filename) {
   const root = fs.realpathSync('/home/ubuntu/secure-imports'), parent = fs.realpathSync(path.dirname(filename));
@@ -151,8 +154,8 @@ async function prepare({ decision, privateOutput }) {
       const current = (await context.service.get({ id: operation.public_id, clinicId: operation.clinic_id })).item;
       if (current.version !== operation.expected_version || hash(replies.canonicalApiValues(current)) !== hash(replies.values(row))) fail('BS_CLOSURE_CURRENT_API_DIFFERS');
       const item = (await context.service.preview({ clinicId: operation.clinic_id, payload: { ...operation.after, status: 'active' } })).item;
-      previews.push({ program_id: operation.program_id, expected_version: operation.expected_version, before_sha256: operation.before_sha256,
-        checked_at: new Date().toISOString(), mode: 'published_canonical_service_select_only_not_http', current, item });
+      previews.push(sealPreview({ program_id: operation.program_id, expected_version: operation.expected_version, before_sha256: operation.before_sha256,
+        checked_at: new Date().toISOString(), mode: 'published_canonical_service_select_only_not_http', current, item }));
     }
     const after = await context.capture(), unchanged = hash(context.stableSnapshot(snapshot)) === hash(context.stableSnapshot(after));
     if (!unchanged) fail('BS_CLOSURE_CHANGED_DURING_PREVIEW');
@@ -235,4 +238,4 @@ async function run(argv) {
 if (require.main === module) run(process.argv.slice(2)).then(result => console.log(JSON.stringify(result))).catch(error => {
   console.error(/^BS_CLOSURE_/.test(error.message) ? error.message : 'BS_CLOSURE_OPERATION_FAILED'); process.exitCode = 1;
 });
-module.exports = { PUBLISHED_ROOT, IDS, sqlAllowed, canonicalFullRow, assertFullRow, assertBundle, applyBundle, prepare, run };
+module.exports = { PUBLISHED_ROOT, IDS, sqlAllowed, canonicalFullRow, assertFullRow, assertBundle, applyBundle, prepare, sealPreview, run };
