@@ -15,6 +15,7 @@ function responseRecorder() {
   return {
     statusCode: 200,
     body: null,
+    set() { return this; },
     status(code) {
       this.statusCode = code;
       return this;
@@ -107,8 +108,11 @@ async function testLeadAndPatientScopes() {
     membershipFindAll: db.UsuarioClinica.findAll,
     membershipFindOne: db.UsuarioClinica.findOne,
     overrideFindAll: db.AccessPolicyOverride.findAll,
+    directorProfileFindOne: db.PatientDirectionProfile.findOne,
+    optOutFindAll: db.MarketingContactOptOut.findAll,
     patientFindOne: db.Paciente.findOne,
     appointmentFindOne: db.CitaPaciente.findOne,
+    appointmentCount: db.CitaPaciente.count,
   };
 
   const membershipFor = (actorId, clinicId) => {
@@ -138,6 +142,8 @@ async function testLeadAndPatientScopes() {
   };
   db.UsuarioClinica.findOne = async ({ where }) => membershipFor(where.id_usuario, where.id_clinica);
   db.AccessPolicyOverride.findAll = async () => [];
+  db.PatientDirectionProfile.findOne = async () => null;
+  db.MarketingContactOptOut.findAll = async () => [];
   db.Paciente.findOne = async () => ({
     id_paciente: 42,
     public_id: 'pat_acl_contract',
@@ -155,6 +161,7 @@ async function testLeadAndPatientScopes() {
     appointmentReads += 1;
     return null;
   };
+  db.CitaPaciente.count = async () => 0;
 
   try {
     const { canAccessTargetPersonal } = personalController.__personalSecurityContract;
@@ -214,8 +221,11 @@ async function testLeadAndPatientScopes() {
     db.UsuarioClinica.findAll = originals.membershipFindAll;
     db.UsuarioClinica.findOne = originals.membershipFindOne;
     db.AccessPolicyOverride.findAll = originals.overrideFindAll;
+    db.PatientDirectionProfile.findOne = originals.directorProfileFindOne;
+    db.MarketingContactOptOut.findAll = originals.optOutFindAll;
     db.Paciente.findOne = originals.patientFindOne;
     db.CitaPaciente.findOne = originals.appointmentFindOne;
+    db.CitaPaciente.count = originals.appointmentCount;
   }
 }
 
